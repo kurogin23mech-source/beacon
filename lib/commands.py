@@ -279,6 +279,17 @@ def cmd_task_list():
         print(f"  {icon} [{entry['id']}] ({etype}) {entry['description']}")
 
 
+def cmd_summary():
+    text = os.environ.get("BEACON_SUMMARY_TEXT", "")
+    data = load_project()
+    if text:
+        data["summary"] = text
+        save_project(data)
+        print(f"Summary updated.")
+    else:
+        print(data.get("summary", "(未設定)"))
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     commands = {
@@ -292,6 +303,7 @@ if __name__ == "__main__":
         "task_add": cmd_task_add,
         "task_done": cmd_task_done,
         "task_list": cmd_task_list,
+        "summary": cmd_summary,
     }
     fn = commands.get(cmd)
     if fn:

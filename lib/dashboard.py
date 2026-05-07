@@ -82,6 +82,16 @@ def render(project, term_width, term_height):
         obj = obj[max_obj_w:]
     lines.append("")
 
+    # Session summary
+    summary = project.get("summary", "")
+    if summary:
+        lines.append(f"  {C.BOLD}{C.YELLOW}▶ 現状{C.RESET}")
+        max_sum_w = w - 6
+        while summary:
+            lines.append(f"    {C.WHITE}{truncate(summary, max_sum_w)}{C.RESET}")
+            summary = summary[max_sum_w:]
+        lines.append("")
+
     # Milestones summary
     milestones = project.get("milestones", [])
     done_count = sum(1 for m in milestones if m.get("status") == "done")

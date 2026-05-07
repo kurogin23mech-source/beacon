@@ -134,6 +134,12 @@ cmd_sync() {
     python3 "$COMMANDS_PY" sync
 }
 
+cmd_summary() {
+    ensure_project
+    local text="${*:-}"
+    BEACON_SUMMARY_TEXT="$text" python3 "$COMMANDS_PY" summary
+}
+
 cmd_task_add() {
     ensure_project
     local ms_id=""
@@ -267,6 +273,10 @@ case "${1:-}" in
         ;;
     sync)
         cmd_sync
+        ;;
+    summary)
+        shift
+        cmd_summary "$@"
         ;;
     task)
         case "${2:-}" in
