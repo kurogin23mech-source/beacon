@@ -37,6 +37,21 @@ def display_width(text):
     return sum(char_width(ch) for ch in text)
 
 
+def truncate_to_width(text, max_width):
+    """Truncate text to fit within max_width display columns."""
+    if not text:
+        return ""
+    width = 0
+    result = []
+    for ch in text:
+        cw = char_width(ch)
+        if width + cw > max_width:
+            break
+        result.append(ch)
+        width += cw
+    return "".join(result)
+
+
 def wrap_line(text, max_width, cont_indent=None):
     """Wrap a line to fit within max_width, returning a list of strings.
 
@@ -160,11 +175,13 @@ class Dashboard:
             connector = "└─" if is_last else "├─"
             child_prefix = "   " if is_last else "│  "
 
-            # Milestone title line
+            # Milestone title line - fixed-width columns
             marker = " ◀ ACTIVE" if is_active else ""
             expand_hint = " [−]" if is_expanded else " [+]" if ms.get("entries") else ""
 
-            ms_line = f"  {connector} {icon} {ms_id} {title}{marker}{expand_hint}"
+            # Fixed column: ID padded to 6 chars
+            id_col = f"{ms_id:<6}"
+            ms_line = f"  {connector} {icon} {id_col} {title}{marker}{expand_hint}"
 
             if is_selected:
                 style = "selected_active" if is_active else "selected"
@@ -176,11 +193,12 @@ class Dashboard:
                 style = "todo"
             lines.append((ms_line, style))
 
-            # Progress bar
-            p_bar_w = min(15, width - 20)
+            # Progress bar - fixed width
+            p_bar_w = min(15, max(5, width - 20))
             p_filled = int(p_bar_w * progress / 100)
             date_info = f"  目標: {target}" if target else ""
-            p_line = f"  {child_prefix}  {'█' * p_filled}{'░' * (p_bar_w - p_filled)} {progress}%{date_info}"
+            pct_col = f"{progress:>3}%"
+            p_line = f"  {child_prefix}  {'█' * p_filled}{'░' * (p_bar_w - p_filled)} {pct_col}{date_info}"
             lines.append((p_line, "progress" if progress > 0 else curses.A_NORMAL))
 
             # Entries (if expanded)
@@ -204,11 +222,13 @@ class Dashboard:
                     if e_type == "commit":
                         meta = entry.get("meta", {})
                         e_hash = meta.get("hash", "")[:7]
-                        e_line = f"  {child_prefix}  {e_connector} {e_hash} {e_desc}{date_str}"
+                        hash_col = f"{e_hash:<7}"
+                        e_line = f"  {child_prefix}  {e_connector} {hash_col}  {e_desc}{date_str}"
                         lines.append((e_line, "commit"))
                     else:
                         s_mark = "●" if e_status == "done" else "○"
-                        e_line = f"  {child_prefix}  {e_connector} {s_mark} [{e_type}] {e_desc}{date_str}"
+                        type_col = f"[{e_type:<6}]"
+                        e_line = f"  {child_prefix}  {e_connector} {s_mark} {type_col} {e_desc}{date_str}"
                         lines.append((e_line, "task" if e_status == "done" else curses.A_NORMAL))
             elif entries and not is_expanded:
                 lines.append((f"  {child_prefix}  {len(entries)} entries", curses.A_NORMAL))
@@ -313,7 +333,8 @@ class Dashboard:
                         attr = style_map.get(style, curses.A_NORMAL)
                     else:
                         attr = style
-                    stdscr.addstr(row, 0, text if text else "", attr)
+                    safe = truncate_to_width(text, width - 1) if text else ""
+                    stdscr.addstr(row, 0, safe, attr)
                 except curses.error:
                     pass
 
@@ -328,7 +349,8 @@ class Dashboard:
                         attr = style_map.get(style, curses.A_NORMAL)
                     else:
                         attr = style
-                    stdscr.addstr(row, 0, text if text else "", attr)
+                    safe = truncate_to_width(text, width - 1) if text else ""
+                    stdscr.addstr(row, 0, safe, attr)
                 except curses.error:
                     pass
 
