@@ -44,7 +44,7 @@ def cmd_milestone_add():
         {
             "id": f"ms-{ms_id}",
             "title": title,
-            "status": "planned",
+            "status": "todo",
             "target_date": target_date,
             "commits": [],
         }
@@ -55,7 +55,7 @@ def cmd_milestone_add():
 
 def cmd_milestone_list():
     data = load_project()
-    icons = {"done": "\u25cf", "in_progress": "\u25d0", "planned": "\u25cb", "todo": "\u25cb"}
+    icons = {"done": "\u25cf", "in_progress": "\u25d0", "todo": "\u25cb", "waiting": "\u25cc", "in_review": "\u25d1"}
     for ms in data["milestones"]:
         icon = icons.get(ms["status"], "?")
         active = " \u25c0 ACTIVE" if ms["status"] == "in_progress" else ""
@@ -69,7 +69,7 @@ def cmd_milestone_start():
     found = False
     for ms in data["milestones"]:
         if ms["status"] == "in_progress":
-            ms["status"] = "planned"
+            ms["status"] = "todo"
         if ms["id"] == ms_id:
             ms["status"] = "in_progress"
             found = True
@@ -129,13 +129,26 @@ def next_entry_id(data):
 
 
 def update_progress(target, progress_str):
-    """Update milestone progress if specified."""
+    """Update milestone progress if specified. Auto-transitions status."""
     if progress_str:
         try:
             p = int(progress_str)
             target["progress"] = max(0, min(100, p))
             print(f"  Progress: {target['progress']}%")
         except ValueError:
+            return
+
+    # Auto-transition: todo → in_progress when progress > 0
+    p = target.get("progress", 0)
+    if p > 0 and target.get("status") == "todo":
+        target["status"] = "in_progress"
+    # waiting → in_progress requires user confirmation
+    elif p > 0 and target.get("status") == "waiting":
+        try:
+            answer = input(f"  '{target['title']}' is waiting. Move to in_progress? [y/N]: ").strip().lower()
+            if answer in ("y", "yes"):
+                target["status"] = "in_progress"
+        except (EOFError, KeyboardInterrupt):
             pass
 
 

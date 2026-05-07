@@ -44,7 +44,7 @@
       "id": "ms-3",
       "title": "マイルストーン進捗を可視化できるようにする",
       "status": "in_progress",
-      "progress": 85,
+      "progress": 95,
       "target_date": null,
       "entries": [
         {
@@ -79,13 +79,24 @@
             "hash": "739757d",
             "message": "Add session summary display and beacon summary command"
           }
+        },
+        {
+          "id": "e-8",
+          "type": "commit",
+          "description": "curses化ダッシュボード実装",
+          "date": "2026-05-07",
+          "status": "done",
+          "meta": {
+            "hash": "151c477",
+            "message": "Rewrite dashboard with curses: interactive navigation and text wrapping"
+          }
         }
       ]
     },
     {
       "id": "ms-4",
       "title": "細かいUXを調整して使いやすくする・フェイズ0",
-      "status": "planned",
+      "status": "in_progress",
       "progress": 30,
       "target_date": "2026-05-08",
       "entries": [

@@ -134,7 +134,7 @@ class Dashboard:
         # Milestones
         for i, ms in enumerate(milestones):
             is_last = i == len(milestones) - 1
-            status = ms.get("status", "planned")
+            status = ms.get("status", "todo")
             title = ms.get("title", "(無題)")
             ms_id = ms.get("id", "?")
             progress = ms.get("progress", 0)
@@ -144,7 +144,7 @@ class Dashboard:
             is_expanded = i in self.expanded
 
             # Status icon
-            icon_map = {"done": "●", "in_progress": "◐", "planned": "○",
+            icon_map = {"done": "●", "in_progress": "◐",
                         "todo": "○", "waiting": "◌", "in_review": "◑"}
             icon = icon_map.get(status, "?")
 
@@ -165,7 +165,7 @@ class Dashboard:
             elif status == "done":
                 style = "done"
             else:
-                style = "planned"
+                style = "todo"
             lines.append((ms_line, style))
 
             # Progress bar
@@ -259,7 +259,7 @@ class Dashboard:
             "section_yellow": curses.color_pair(2) | curses.A_BOLD,
             "active": curses.color_pair(2) | curses.A_BOLD,
             "done": curses.color_pair(3),
-            "planned": curses.A_DIM,
+            "todo": curses.A_DIM,
             "progress": curses.color_pair(3),
             "commit": curses.color_pair(5),
             "task": curses.color_pair(9),
