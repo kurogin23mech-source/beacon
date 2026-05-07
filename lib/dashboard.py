@@ -185,14 +185,22 @@ class Dashboard:
                     e_desc = entry.get("description", "")
                     e_status = entry.get("status", "todo")
 
+                    created = entry.get("created_at", entry.get("date", ""))
+                    done = entry.get("done_at", "")
+                    date_str = f" ({created}" if created else ""
+                    if done and done != created:
+                        date_str += f"→{done})"
+                    elif date_str:
+                        date_str += ")"
+
                     if e_type == "commit":
                         meta = entry.get("meta", {})
                         e_hash = meta.get("hash", "")[:7]
-                        e_line = f"  {child_prefix}  {e_connector} {e_hash} {e_desc}"
+                        e_line = f"  {child_prefix}  {e_connector} {e_hash} {e_desc}{date_str}"
                         lines.append((e_line, "commit"))
                     else:
                         s_mark = "●" if e_status == "done" else "○"
-                        e_line = f"  {child_prefix}  {e_connector} {s_mark} [{e_type}] {e_desc}"
+                        e_line = f"  {child_prefix}  {e_connector} {s_mark} [{e_type}] {e_desc}{date_str}"
                         lines.append((e_line, "task" if e_status == "done" else curses.A_NORMAL))
             elif entries and not is_expanded:
                 lines.append((f"  {child_prefix}  {len(entries)} entries", curses.A_NORMAL))

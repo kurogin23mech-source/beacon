@@ -1,7 +1,7 @@
 {
   "name": "Beacon",
   "objective": "AI駆動開発においてマイルストーンベースのプロジェクト進捗を常時可視化し、開発者が方向性を見失わずに実装を進められるツールを構築する",
-  "summary": "実行中: ms-4(細かいUXを調整して使いやすくする・フェイズ0, 50%)。直近: summary自動更新・配色修正",
+  "summary": "実行中: ms-4(細かいUXを調整して使いやすくする・フェイズ0, 55%)。直近: エントリにcreated_at/done_atタイムスタンプ追加",
   "milestones": [
     {
       "id": "ms-1",
@@ -108,7 +108,7 @@
       "id": "ms-4",
       "title": "細かいUXを調整して使いやすくする・フェイズ0",
       "status": "in_progress",
-      "progress": 50,
+      "progress": 55,
       "target_date": "2026-05-08",
       "entries": [
         {
@@ -172,6 +172,19 @@
           "done_at": "2026-05-07",
           "status": "done",
           "meta": {}
+        },
+        {
+          "id": "e-14",
+          "type": "commit",
+          "description": "エントリにcreated_at/done_atタイムスタンプ追加",
+          "date": "2026-05-07",
+          "created_at": "2026-05-07",
+          "done_at": "2026-05-07",
+          "status": "done",
+          "meta": {
+            "hash": "02f0487",
+            "message": "Add created_at/done_at timestamps to entries"
+          }
         }
       ]
     }
