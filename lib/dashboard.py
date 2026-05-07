@@ -39,9 +39,11 @@ def load_project(path):
 
 def status_icon(status):
     icons = {
-        "done": f"{C.GREEN}●{C.RESET}",
+        "todo": f"{C.GRAY}○{C.RESET}",
+        "waiting": f"{C.GRAY}◌{C.RESET}",
         "in_progress": f"{C.YELLOW}◐{C.RESET}",
-        "planned": f"{C.GRAY}○{C.RESET}",
+        "in_review": f"{C.CYAN}◑{C.RESET}",
+        "done": f"{C.GREEN}●{C.RESET}",
     }
     return icons.get(status, f"{C.GRAY}?{C.RESET}")
 
