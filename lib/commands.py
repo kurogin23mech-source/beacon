@@ -55,11 +55,12 @@ def cmd_milestone_add():
 
 def cmd_milestone_list():
     data = load_project()
-    icons = {"done": "\u25cf", "in_progress": "\u25d0", "planned": "\u25cb"}
+    icons = {"done": "\u25cf", "in_progress": "\u25d0", "planned": "\u25cb", "todo": "\u25cb"}
     for ms in data["milestones"]:
         icon = icons.get(ms["status"], "?")
         active = " \u25c0 ACTIVE" if ms["status"] == "in_progress" else ""
-        print(f"  {icon} [{ms['id']}] {ms['title']} ({ms.get('target_date', '?')}){active}")
+        progress = ms.get("progress", 0)
+        print(f"  {icon} [{ms['id']}] {ms['title']} ({progress}%){active}")
 
 
 def cmd_milestone_start():
@@ -127,12 +128,24 @@ def next_entry_id(data):
     return f"e-{max_id + 1}"
 
 
+def update_progress(target, progress_str):
+    """Update milestone progress if specified."""
+    if progress_str:
+        try:
+            p = int(progress_str)
+            target["progress"] = max(0, min(100, p))
+            print(f"  Progress: {target['progress']}%")
+        except ValueError:
+            pass
+
+
 def cmd_log():
     summary = os.environ.get("BEACON_SUMMARY", "")
     commit_hash = os.environ.get("BEACON_HASH", "")
     message = os.environ.get("BEACON_MESSAGE", "")
     date = os.environ.get("BEACON_DATE", "")
     ms_id = os.environ.get("BEACON_MS_ID", "")
+    progress = os.environ.get("BEACON_PROGRESS", "")
 
     data = load_project()
     target = find_target_milestone(data, ms_id)
@@ -141,6 +154,10 @@ def cmd_log():
     for entry in entries:
         if entry.get("type") == "commit" and entry.get("meta", {}).get("hash", "").startswith(commit_hash):
             print(f"Already logged: {commit_hash}")
+            # Still allow progress update even if already logged
+            if progress:
+                update_progress(target, progress)
+                save_project(data)
             return
 
     entries.append({
@@ -151,6 +168,7 @@ def cmd_log():
         "status": "done",
         "meta": {"hash": commit_hash, "message": message},
     })
+    update_progress(target, progress)
     save_project(data)
     print(f"Logged {commit_hash} to {target['title']}")
 
@@ -225,6 +243,7 @@ def cmd_task_add():
 
 def cmd_task_done():
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
+    progress = os.environ.get("BEACON_PROGRESS", "")
     data = load_project()
 
     for ms in data["milestones"]:
@@ -234,8 +253,9 @@ def cmd_task_done():
                 if not entry.get("date"):
                     import datetime
                     entry["date"] = datetime.date.today().isoformat()
-                save_project(data)
                 print(f"Done: [{entry_id}] {entry['description']}")
+                update_progress(ms, progress)
+                save_project(data)
                 return
 
     print(f"Entry not found: {entry_id}")

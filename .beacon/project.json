@@ -6,6 +6,7 @@
       "id": "ms-1",
       "title": "MVP: tmux分割ダッシュボード + CLI基本機能",
       "status": "done",
+      "progress": 100,
       "target_date": "2026-05-07",
       "entries": [
         {
@@ -24,7 +25,8 @@
     {
       "id": "ms-2",
       "title": "マイルストーンの進捗エビデンス構造を決められるようにする",
-      "status": "in_progress",
+      "status": "done",
+      "progress": 100,
       "target_date": null,
       "entries": [
         {
@@ -40,14 +42,28 @@
     {
       "id": "ms-3",
       "title": "マイルストーン進捗を可視化できるようにする",
-      "status": "todo",
+      "status": "in_progress",
+      "progress": 40,
       "target_date": null,
-      "entries": []
+      "entries": [
+        {
+          "id": "e-5",
+          "type": "commit",
+          "description": "進捗率表示実装",
+          "date": "2026-05-07",
+          "status": "done",
+          "meta": {
+            "hash": "ca1593e",
+            "message": "Introduce entries model: unified log entries replacing commits"
+          }
+        }
+      ]
     },
     {
       "id": "ms-4",
       "title": "細かいUXを調整して使いやすくする・フェイズ0",
-      "status": "in_progress",
+      "status": "planned",
+      "progress": 30,
       "target_date": "2026-05-08",
       "entries": [
         {

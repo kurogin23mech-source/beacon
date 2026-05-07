@@ -110,24 +110,27 @@ def render(project, term_width, term_height):
         else:
             marker = ""
 
-        # Milestone line
-        title_display = truncate(ms_title, w - 20)
+        # Milestone line with ID
+        ms_id = ms.get("id", "?")
+        title_display = truncate(ms_title, w - 25)
         if is_active:
             lines.append(
-                f"  {connector} {ms_icon} {C.BOLD}{C.WHITE}{title_display}{C.RESET}{marker}"
+                f"  {connector} {ms_icon} {C.DIM}{ms_id}{C.RESET} {C.BOLD}{C.WHITE}{title_display}{C.RESET}{marker}"
             )
         else:
             title_color = C.WHITE if ms_status == "done" else C.GRAY
             lines.append(
-                f"  {connector} {ms_icon} {title_color}{title_display}{C.RESET}"
+                f"  {connector} {ms_icon} {C.DIM}{ms_id}{C.RESET} {title_color}{title_display}{C.RESET}"
             )
 
-        # Target date
-        if target:
-            date_color = C.YELLOW if is_active else C.DIM
-            lines.append(
-                f"  {child_prefix}  {date_color}目標: {target}{C.RESET}"
-            )
+        # Progress bar + target date
+        ms_progress = ms.get("progress", 0)
+        progress_w = min(15, w - 20)
+        ms_bar = progress_bar(ms_progress, 100, progress_w)
+        date_info = f"  {C.DIM}目標: {target}{C.RESET}" if target else ""
+        lines.append(
+            f"  {child_prefix}  {ms_bar} {ms_progress}%{date_info}"
+        )
 
         # Entries under this milestone
         entries = ms.get("entries", [])

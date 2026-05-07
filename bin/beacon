@@ -94,12 +94,17 @@ cmd_log() {
 
     local ms_id=""
     local custom_summary=""
+    local progress=""
 
-    # Parse -m <ms-id> option
+    # Parse options
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -m)
                 ms_id="${2:-}"
+                shift 2
+                ;;
+            -p)
+                progress="${2:-}"
                 shift 2
                 ;;
             *)
@@ -116,6 +121,7 @@ cmd_log() {
 
     BEACON_HASH="$hash" BEACON_MESSAGE="$message" BEACON_DATE="$date_str" \
         BEACON_SUMMARY="$custom_summary" BEACON_MS_ID="$ms_id" \
+        BEACON_PROGRESS="$progress" \
         python3 "$COMMANDS_PY" log
 }
 
@@ -161,12 +167,28 @@ cmd_task_add() {
 
 cmd_task_done() {
     ensure_project
-    local entry_id="${1:-}"
+    local entry_id=""
+    local progress=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -p)
+                progress="${2:-}"
+                shift 2
+                ;;
+            *)
+                entry_id="$1"
+                shift
+                ;;
+        esac
+    done
+
     if [ -z "$entry_id" ]; then
-        echo "Usage: beacon task done <entry-id>"
+        echo "Usage: beacon task done <entry-id> [-p <progress>]"
         exit 1
     fi
-    BEACON_ENTRY_ID="$entry_id" python3 "$COMMANDS_PY" task_done
+    BEACON_ENTRY_ID="$entry_id" BEACON_PROGRESS="$progress" \
+        python3 "$COMMANDS_PY" task_done
 }
 
 cmd_task_list() {
