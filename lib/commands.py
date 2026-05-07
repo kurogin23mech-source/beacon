@@ -115,17 +115,48 @@ def find_target_milestone(data, ms_id):
 
 
 def next_entry_id(data):
-    """Generate next entry id across all milestones."""
+    """Generate next entry id across all milestones (including nested)."""
     max_id = 0
     for ms in data["milestones"]:
         for entry in ms.get("entries", []):
-            eid = entry.get("id", "")
-            if eid.startswith("e-"):
-                try:
-                    max_id = max(max_id, int(eid[2:]))
-                except ValueError:
-                    pass
+            max_id = _max_entry_id(entry, max_id)
     return f"e-{max_id + 1}"
+
+
+def _max_entry_id(entry, current_max):
+    """Recursively find max entry id."""
+    eid = entry.get("id", "")
+    if eid.startswith("e-"):
+        try:
+            current_max = max(current_max, int(eid[2:]))
+        except ValueError:
+            pass
+    for child in entry.get("entries", []):
+        current_max = _max_entry_id(child, current_max)
+    return current_max
+
+
+def find_entry(data, entry_id):
+    """Find an entry by ID across all milestones (including nested).
+    Returns (milestone, parent_entries_list, entry, index) or None."""
+    for ms in data["milestones"]:
+        result = _find_entry_in(ms.get("entries", []), entry_id, ms)
+        if result:
+            return result
+    return None
+
+
+def _find_entry_in(entries, entry_id, ms):
+    """Recursively find entry. Returns (ms, parent_list, entry, index)."""
+    for i, entry in enumerate(entries):
+        if entry.get("id") == entry_id:
+            return (ms, entries, entry, i)
+        # Search in nested entries
+        children = entry.get("entries", [])
+        result = _find_entry_in(children, entry_id, ms)
+        if result:
+            return result
+    return None
 
 
 def update_progress(target, progress_str):
@@ -312,6 +343,45 @@ def cmd_task_list():
         print(f"  {icon} [{entry['id']}] ({etype}) {entry['description']}")
 
 
+def cmd_entry_move():
+    """Move an entry under a task entry (grouping)."""
+    entry_id = os.environ.get("BEACON_ENTRY_ID", "")
+    task_id = os.environ.get("BEACON_TASK_ID", "")
+
+    if not entry_id or not task_id:
+        print("Usage: beacon entry move <entry-id> -t <task-id>")
+        sys.exit(1)
+
+    data = load_project()
+
+    # Find the entry to move
+    src = find_entry(data, entry_id)
+    if not src:
+        print(f"Entry not found: {entry_id}")
+        sys.exit(1)
+    _, src_list, entry, src_idx = src
+
+    # Find the target task
+    dst = find_entry(data, task_id)
+    if not dst:
+        print(f"Task not found: {task_id}")
+        sys.exit(1)
+    _, _, task_entry, _ = dst
+
+    if task_entry.get("id") == entry_id:
+        print("Cannot move entry under itself")
+        sys.exit(1)
+
+    # Remove from source
+    src_list.pop(src_idx)
+
+    # Add to target task's entries
+    task_entry.setdefault("entries", []).append(entry)
+
+    save_project(data)
+    print(f"Moved [{entry_id}] under [{task_id}] {task_entry.get('description', '')}")
+
+
 def cmd_summary():
     text = os.environ.get("BEACON_SUMMARY_TEXT", "")
     data = load_project()
@@ -336,6 +406,7 @@ if __name__ == "__main__":
         "task_add": cmd_task_add,
         "task_done": cmd_task_done,
         "task_list": cmd_task_list,
+        "entry_move": cmd_entry_move,
         "summary": cmd_summary,
     }
     fn = commands.get(cmd)

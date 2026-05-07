@@ -1,7 +1,7 @@
 {
   "name": "Beacon",
   "objective": "AI駆動開発においてマイルストーンベースのプロジェクト進捗を常時可視化し、開発者が方向性を見失わずに実装を進められるツールを構築する",
-  "summary": "実行中: ms-4(細かいUXを調整して使いやすくする・フェイズ0, 60%)。直近: 画面残像のバグ修正 (erase→clear)",
+  "summary": "実行中: ms-4(細かいUXを調整して使いやすくする・フェイズ0, 60%)。直近: ヘッダー非表示修正(endwin/refresh)、プログレスバースケーリング、Ambiguous幅対応",
   "milestones": [
     {
       "id": "ms-1",
@@ -26,7 +26,7 @@
     {
       "id": "ms-2",
       "title": "マイルストーンの進捗エビデンス構造を決められるようにする",
-      "status": "done",
+      "status": "in_progress",
       "progress": 100,
       "target_date": null,
       "entries": [
@@ -107,7 +107,7 @@
     {
       "id": "ms-4",
       "title": "細かいUXを調整して使いやすくする・フェイズ0",
-      "status": "in_progress",
+      "status": "todo",
       "progress": 60,
       "target_date": "2026-05-08",
       "entries": [
@@ -164,66 +164,103 @@
           "meta": {}
         },
         {
-          "id": "e-13",
+          "id": "e-19",
           "type": "task",
-          "description": "日付フィールドのテスト",
+          "description": "ダッシュボード表示修正",
           "date": "2026-05-07",
           "created_at": "2026-05-07",
-          "done_at": "2026-05-07",
-          "status": "done",
-          "meta": {}
+          "done_at": null,
+          "status": "todo",
+          "meta": {},
+          "entries": [
+            {
+              "id": "e-16",
+              "type": "commit",
+              "description": "ダッシュボードの見切れ修正・カラム幅固定化",
+              "date": "2026-05-07",
+              "created_at": "2026-05-07",
+              "done_at": "2026-05-07",
+              "status": "done",
+              "meta": {
+                "hash": "602a9a9",
+                "message": "Fix text cutoff and align column widths in dashboard"
+              }
+            },
+            {
+              "id": "e-17",
+              "type": "commit",
+              "description": "画面残像のバグ修正 (erase→clear)",
+              "date": "2026-05-07",
+              "created_at": "2026-05-07",
+              "done_at": "2026-05-07",
+              "status": "done",
+              "meta": {
+                "hash": "8433cbc",
+                "message": "Fix stale line artifacts by using clear() instead of erase()"
+              }
+            },
+            {
+              "id": "e-18",
+              "type": "commit",
+              "description": "ヘッダー非表示修正(endwin/refresh)、プログレスバースケーリング、Ambiguous幅対応",
+              "date": "2026-05-07",
+              "created_at": "2026-05-07",
+              "done_at": "2026-05-07",
+              "status": "done",
+              "meta": {
+                "hash": "61c3062",
+                "message": "Update project.json: add recent commit entries to ms-4"
+              }
+            }
+          ]
         },
         {
-          "id": "e-14",
-          "type": "commit",
-          "description": "エントリにcreated_at/done_atタイムスタンプ追加",
+          "id": "e-20",
+          "type": "task",
+          "description": "エントリ日付フィールド対応",
           "date": "2026-05-07",
           "created_at": "2026-05-07",
-          "done_at": "2026-05-07",
-          "status": "done",
-          "meta": {
-            "hash": "02f0487",
-            "message": "Add created_at/done_at timestamps to entries"
-          }
-        },
-        {
-          "id": "e-15",
-          "type": "commit",
-          "description": "ダッシュボードにエントリ日付表示",
-          "date": "2026-05-07",
-          "created_at": "2026-05-07",
-          "done_at": "2026-05-07",
-          "status": "done",
-          "meta": {
-            "hash": "8108523",
-            "message": "Display created_at/done_at dates on dashboard entries"
-          }
-        },
-        {
-          "id": "e-16",
-          "type": "commit",
-          "description": "ダッシュボードの見切れ修正・カラム幅固定化",
-          "date": "2026-05-07",
-          "created_at": "2026-05-07",
-          "done_at": "2026-05-07",
-          "status": "done",
-          "meta": {
-            "hash": "602a9a9",
-            "message": "Fix text cutoff and align column widths in dashboard"
-          }
-        },
-        {
-          "id": "e-17",
-          "type": "commit",
-          "description": "画面残像のバグ修正 (erase→clear)",
-          "date": "2026-05-07",
-          "created_at": "2026-05-07",
-          "done_at": "2026-05-07",
-          "status": "done",
-          "meta": {
-            "hash": "8433cbc",
-            "message": "Fix stale line artifacts by using clear() instead of erase()"
-          }
+          "done_at": null,
+          "status": "todo",
+          "meta": {},
+          "entries": [
+            {
+              "id": "e-14",
+              "type": "commit",
+              "description": "エントリにcreated_at/done_atタイムスタンプ追加",
+              "date": "2026-05-07",
+              "created_at": "2026-05-07",
+              "done_at": "2026-05-07",
+              "status": "done",
+              "meta": {
+                "hash": "02f0487",
+                "message": "Add created_at/done_at timestamps to entries"
+              }
+            },
+            {
+              "id": "e-15",
+              "type": "commit",
+              "description": "ダッシュボードにエントリ日付表示",
+              "date": "2026-05-07",
+              "created_at": "2026-05-07",
+              "done_at": "2026-05-07",
+              "status": "done",
+              "meta": {
+                "hash": "8108523",
+                "message": "Display created_at/done_at dates on dashboard entries"
+              }
+            },
+            {
+              "id": "e-13",
+              "type": "task",
+              "description": "日付フィールドのテスト",
+              "date": "2026-05-07",
+              "created_at": "2026-05-07",
+              "done_at": "2026-05-07",
+              "status": "done",
+              "meta": {}
+            }
+          ]
         }
       ]
     }

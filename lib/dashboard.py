@@ -213,34 +213,10 @@ class Dashboard:
             # Entries (if expanded)
             entries = ms.get("entries", [])
             if is_expanded and entries:
-                for j, entry in enumerate(entries):
-                    is_last_e = j == len(entries) - 1
-                    e_connector = "└─" if is_last_e else "├─"
-                    e_type = entry.get("type", "?")
-                    e_desc = entry.get("description", "")
-                    e_status = entry.get("status", "todo")
-
-                    created = entry.get("created_at", entry.get("date", ""))
-                    done = entry.get("done_at", "")
-                    date_str = f" ({created}" if created else ""
-                    if done and done != created:
-                        date_str += f"→{done})"
-                    elif date_str:
-                        date_str += ")"
-
-                    if e_type == "commit":
-                        meta = entry.get("meta", {})
-                        e_hash = meta.get("hash", "")[:7]
-                        hash_col = f"{e_hash:<7}"
-                        e_line = f"  {child_prefix}  {e_connector} {hash_col}  {e_desc}{date_str}"
-                        lines.append((e_line, "commit"))
-                    else:
-                        s_mark = "●" if e_status == "done" else "○"
-                        type_col = f"[{e_type:<6}]"
-                        e_line = f"  {child_prefix}  {e_connector} {s_mark} {type_col} {e_desc}{date_str}"
-                        lines.append((e_line, "task" if e_status == "done" else curses.A_NORMAL))
+                self._render_entries(lines, entries, f"  {child_prefix}  ")
             elif entries and not is_expanded:
-                lines.append((f"  {child_prefix}  {len(entries)} entries", curses.A_NORMAL))
+                total = self._count_entries(entries)
+                lines.append((f"  {child_prefix}  {total} entries", curses.A_NORMAL))
 
             # Spacing
             if not is_last:
@@ -259,6 +235,51 @@ class Dashboard:
                 wrapped.append((wl, style))
 
         self.lines = wrapped
+
+    def _render_entries(self, lines, entries, prefix, depth=0):
+        """Render entries recursively, supporting nested task→commit grouping."""
+        for j, entry in enumerate(entries):
+            is_last_e = j == len(entries) - 1
+            e_connector = "└─" if is_last_e else "├─"
+            e_type = entry.get("type", "?")
+            e_desc = entry.get("description", "")
+            e_status = entry.get("status", "todo")
+
+            created = entry.get("created_at", entry.get("date", ""))
+            done = entry.get("done_at", "")
+            date_str = f" ({created}" if created else ""
+            if done and done != created:
+                date_str += f"→{done})"
+            elif date_str:
+                date_str += ")"
+
+            if e_type == "commit":
+                meta = entry.get("meta", {})
+                e_hash = meta.get("hash", "")[:7]
+                hash_col = f"{e_hash:<7}"
+                e_line = f"{prefix}{e_connector} {hash_col}  {e_desc}{date_str}"
+                lines.append((e_line, "commit"))
+            else:
+                s_mark = "●" if e_status == "done" else "○"
+                children = entry.get("entries", [])
+                child_hint = f" ({len(children)})" if children else ""
+                type_col = f"[{e_type:<6}]"
+                e_line = f"{prefix}{e_connector} {s_mark} {type_col} {e_desc}{child_hint}{date_str}"
+                lines.append((e_line, "task" if e_status == "done" else curses.A_NORMAL))
+
+                # Render nested entries under this task
+                if children:
+                    nest_prefix = prefix + ("   " if is_last_e else "│  ")
+                    self._render_entries(lines, children, nest_prefix, depth + 1)
+
+    @staticmethod
+    def _count_entries(entries):
+        """Count total entries including nested."""
+        total = 0
+        for e in entries:
+            total += 1
+            total += Dashboard._count_entries(e.get("entries", []))
+        return total
 
     def handle_key(self, key):
         """Handle keyboard input. Returns False to quit."""
