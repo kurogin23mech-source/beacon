@@ -92,14 +92,30 @@ cmd_log() {
         exit 1
     fi
 
-    local custom_summary="${1:-}"
+    local ms_id=""
+    local custom_summary=""
+
+    # Parse -m <ms-id> option
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -m)
+                ms_id="${2:-}"
+                shift 2
+                ;;
+            *)
+                custom_summary="$1"
+                shift
+                ;;
+        esac
+    done
+
     local hash message date_str
     hash=$(git rev-parse --short HEAD)
     message=$(git log -1 --pretty=%s)
     date_str=$(git log -1 --pretty=%ci | cut -d' ' -f1)
 
     BEACON_HASH="$hash" BEACON_MESSAGE="$message" BEACON_DATE="$date_str" \
-        BEACON_SUMMARY="$custom_summary" \
+        BEACON_SUMMARY="$custom_summary" BEACON_MS_ID="$ms_id" \
         python3 "$COMMANDS_PY" log
 }
 
@@ -165,7 +181,7 @@ case "${1:-}" in
         ;;
     log)
         shift
-        cmd_log "${*:-}"
+        cmd_log "$@"
         ;;
     sync)
         cmd_sync

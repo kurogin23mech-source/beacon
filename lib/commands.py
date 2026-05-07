@@ -97,27 +97,42 @@ def cmd_log():
     commit_hash = os.environ.get("BEACON_HASH", "")
     message = os.environ.get("BEACON_MESSAGE", "")
     date = os.environ.get("BEACON_DATE", "")
+    ms_id = os.environ.get("BEACON_MS_ID", "")
 
     data = load_project()
-    active = None
-    for ms in data["milestones"]:
-        if ms["status"] == "in_progress":
-            active = ms
-            break
-    if not active:
-        print("No active milestone. Run: beacon milestone start <ms-id>")
-        sys.exit(1)
 
-    for c in active["commits"]:
+    # Find target milestone
+    if ms_id:
+        target = None
+        for ms in data["milestones"]:
+            if ms["id"] == ms_id:
+                target = ms
+                break
+        if not target:
+            print(f"Milestone not found: {ms_id}")
+            sys.exit(1)
+    else:
+        active_list = [ms for ms in data["milestones"] if ms["status"] == "in_progress"]
+        if len(active_list) == 0:
+            print("No active milestone. Run: beacon milestone start <ms-id>")
+            sys.exit(1)
+        elif len(active_list) > 1:
+            print("Multiple active milestones. Specify with -m <ms-id>:")
+            for ms in active_list:
+                print(f"  {ms['id']}: {ms['title']}")
+            sys.exit(1)
+        target = active_list[0]
+
+    for c in target["commits"]:
         if c.get("hash", "").startswith(commit_hash):
             print(f"Already logged: {commit_hash}")
             return
 
-    active["commits"].append(
+    target["commits"].append(
         {"hash": commit_hash, "message": message, "date": date, "summary": summary}
     )
     save_project(data)
-    print(f"Logged {commit_hash} to {active['title']}")
+    print(f"Logged {commit_hash} to {target['title']}")
 
 
 def cmd_sync():

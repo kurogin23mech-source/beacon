@@ -37,7 +37,14 @@
       "title": "細かいUXを調整して使いやすくする・フェイズ0",
       "status": "in_progress",
       "target_date": "2026-05-08",
-      "commits": [],
+      "commits": [
+        {
+          "hash": "f7a68b4",
+          "message": "Add project spec and set ms-4 target date (2026-05-08)",
+          "date": "2026-05-07",
+          "summary": "仕様書作成、起動フロー注意事項を記載"
+        }
+      ],
       "logs": []
     }
   ]
