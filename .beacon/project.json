@@ -1,7 +1,7 @@
 {
   "name": "Beacon",
   "objective": "AI駆動開発においてマイルストーンベースのプロジェクト進捗を常時可視化し、開発者が方向性を見失わずに実装を進められるツールを構築する",
-  "summary": "実行中: ms-4(細かいUXを調整して使いやすくする・フェイズ0, 60%)。直近: ダッシュボードにエントリ日付表示",
+  "summary": "実行中: ms-4(細かいUXを調整して使いやすくする・フェイズ0, 60%)。直近: 画面残像のバグ修正 (erase→clear)",
   "milestones": [
     {
       "id": "ms-1",
@@ -197,6 +197,32 @@
           "meta": {
             "hash": "8108523",
             "message": "Display created_at/done_at dates on dashboard entries"
+          }
+        },
+        {
+          "id": "e-16",
+          "type": "commit",
+          "description": "ダッシュボードの見切れ修正・カラム幅固定化",
+          "date": "2026-05-07",
+          "created_at": "2026-05-07",
+          "done_at": "2026-05-07",
+          "status": "done",
+          "meta": {
+            "hash": "602a9a9",
+            "message": "Fix text cutoff and align column widths in dashboard"
+          }
+        },
+        {
+          "id": "e-17",
+          "type": "commit",
+          "description": "画面残像のバグ修正 (erase→clear)",
+          "date": "2026-05-07",
+          "created_at": "2026-05-07",
+          "done_at": "2026-05-07",
+          "status": "done",
+          "meta": {
+            "hash": "8433cbc",
+            "message": "Fix stale line artifacts by using clear() instead of erase()"
           }
         }
       ]
