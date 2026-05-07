@@ -1,7 +1,7 @@
 {
   "name": "Beacon",
   "objective": "AI駆動開発においてマイルストーンベースのプロジェクト進捗を常時可視化し、開発者が方向性を見失わずに実装を進められるツールを構築する",
-  "summary": "ms-3(進捗可視化)実装中。サマリー表示機能を追加した。残: SPEC更新、tmux実機確認。次はms-4(UX調整)。",
+  "summary": "実行中: ms-4(細かいUXを調整して使いやすくする・フェイズ0, 50%)。直近: summary自動更新・配色修正",
   "milestones": [
     {
       "id": "ms-1",
@@ -43,7 +43,7 @@
     {
       "id": "ms-3",
       "title": "マイルストーン進捗を可視化できるようにする",
-      "status": "in_progress",
+      "status": "done",
       "progress": 95,
       "target_date": null,
       "entries": [
@@ -90,6 +90,17 @@
             "hash": "151c477",
             "message": "Rewrite dashboard with curses: interactive navigation and text wrapping"
           }
+        },
+        {
+          "id": "e-9",
+          "type": "commit",
+          "description": "ステータス統一・自動遷移実装",
+          "date": "2026-05-07",
+          "status": "done",
+          "meta": {
+            "hash": "0132d65",
+            "message": "Replace planned status with official 5 statuses and add auto-transition"
+          }
         }
       ]
     },
@@ -97,7 +108,7 @@
       "id": "ms-4",
       "title": "細かいUXを調整して使いやすくする・フェイズ0",
       "status": "in_progress",
-      "progress": 30,
+      "progress": 50,
       "target_date": "2026-05-08",
       "entries": [
         {
@@ -120,6 +131,28 @@
           "meta": {
             "hash": "28d32a7",
             "message": "Update SPEC.md: document beacon log -m option"
+          }
+        },
+        {
+          "id": "e-10",
+          "type": "commit",
+          "description": "リサイズ対応・ペイン比率維持",
+          "date": "2026-05-07",
+          "status": "done",
+          "meta": {
+            "hash": "6bf2c34",
+            "message": "Fix resize artifacts and maintain dashboard pane ratio"
+          }
+        },
+        {
+          "id": "e-11",
+          "type": "commit",
+          "description": "summary自動更新・配色修正",
+          "date": "2026-05-07",
+          "status": "done",
+          "meta": {
+            "hash": "e67b3af",
+            "message": "Auto-update summary on log and remove dim styling from dashboard"
           }
         }
       ]
