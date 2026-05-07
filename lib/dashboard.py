@@ -129,28 +129,32 @@ def render(project, term_width, term_height):
                 f"  {child_prefix}  {date_color}目標: {target}{C.RESET}"
             )
 
-        # Commits under this milestone
-        commits = ms.get("commits", [])
-        if commits and (is_active or ms_status == "done"):
-            for j, commit in enumerate(commits):
-                is_last_c = j == len(commits) - 1
-                c_connector = "└─" if is_last_c else "├─"
-                c_hash = commit.get("hash", "???????")[:7]
-                c_msg = truncate(commit.get("message", ""), w - 25)
-                c_date = commit.get("date", "")
+        # Entries under this milestone
+        entries = ms.get("entries", [])
+        if entries and (is_active or ms_status == "done"):
+            for j, entry in enumerate(entries):
+                is_last_e = j == len(entries) - 1
+                e_connector = "└─" if is_last_e else "├─"
+                e_type = entry.get("type", "?")
+                e_desc = truncate(entry.get("description", ""), w - 28)
+                e_status = entry.get("status", "todo")
 
-                lines.append(
-                    f"  {child_prefix}  {c_connector} {C.MAGENTA}{c_hash}{C.RESET} {C.DIM}{c_msg}{C.RESET}"
-                )
-                if commit.get("summary"):
-                    summary = truncate(commit["summary"], w - 28)
-                    c_child = "   " if is_last_c else "│  "
+                # Type-specific icon and color
+                if e_type == "commit":
+                    meta = entry.get("meta", {})
+                    e_hash = meta.get("hash", "")[:7]
                     lines.append(
-                        f"  {child_prefix}  {c_child} {C.DIM}{summary}{C.RESET}"
+                        f"  {child_prefix}  {e_connector} {C.MAGENTA}{e_hash}{C.RESET} {C.DIM}{e_desc}{C.RESET}"
                     )
-        elif commits:
+                else:
+                    status_mark = f"{C.GREEN}●{C.RESET}" if e_status == "done" else f"{C.GRAY}○{C.RESET}"
+                    type_color = C.CYAN if e_type == "decision" else C.BLUE
+                    lines.append(
+                        f"  {child_prefix}  {e_connector} {status_mark} {type_color}[{e_type}]{C.RESET} {C.DIM}{e_desc}{C.RESET}"
+                    )
+        elif entries:
             lines.append(
-                f"  {child_prefix}  {C.DIM}{len(commits)} commits{C.RESET}"
+                f"  {child_prefix}  {C.DIM}{len(entries)} entries{C.RESET}"
             )
 
         # Spacing between milestones

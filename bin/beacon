@@ -128,6 +128,66 @@ cmd_sync() {
     python3 "$COMMANDS_PY" sync
 }
 
+cmd_task_add() {
+    ensure_project
+    local ms_id=""
+    local entry_type="task"
+    local description=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -m)
+                ms_id="${2:-}"
+                shift 2
+                ;;
+            -t)
+                entry_type="${2:-}"
+                shift 2
+                ;;
+            *)
+                description="$1"
+                shift
+                ;;
+        esac
+    done
+
+    local date_str
+    date_str=$(date +%Y-%m-%d)
+
+    BEACON_DESCRIPTION="$description" BEACON_MS_ID="$ms_id" \
+        BEACON_TYPE="$entry_type" BEACON_DATE="$date_str" \
+        python3 "$COMMANDS_PY" task_add
+}
+
+cmd_task_done() {
+    ensure_project
+    local entry_id="${1:-}"
+    if [ -z "$entry_id" ]; then
+        echo "Usage: beacon task done <entry-id>"
+        exit 1
+    fi
+    BEACON_ENTRY_ID="$entry_id" python3 "$COMMANDS_PY" task_done
+}
+
+cmd_task_list() {
+    ensure_project
+    local ms_id=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -m)
+                ms_id="${2:-}"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    BEACON_MS_ID="$ms_id" python3 "$COMMANDS_PY" task_list
+}
+
 cmd_status() {
     ensure_project
     python3 "$COMMANDS_PY" milestone_list
@@ -185,6 +245,24 @@ case "${1:-}" in
         ;;
     sync)
         cmd_sync
+        ;;
+    task)
+        case "${2:-}" in
+            add)
+                shift 2
+                cmd_task_add "$@"
+                ;;
+            done)
+                cmd_task_done "${3:-}"
+                ;;
+            list|ls)
+                shift 2
+                cmd_task_list "$@"
+                ;;
+            *)
+                echo "Usage: beacon task [add|done|list] [-m <ms-id>] [-t <type>] [description]"
+                ;;
+        esac
         ;;
     help|-h|--help)
         usage

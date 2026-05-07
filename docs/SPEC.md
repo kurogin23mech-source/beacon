@@ -39,6 +39,9 @@ Claude Code 内からステータスを確認したい場合は `! beacon status
 | `beacon milestone done <id>` | マイルストーンを完了に設定 |
 | `beacon log [-m <ms-id>] [message]` | 現在の HEAD コミットをマイルストーンに記録。複数 in_progress 時は -m 必須 |
 | `beacon sync` | 直近 git コミットをアクティブマイルストーンに自動同期 |
+| `beacon task add [-m <ms-id>] [-t <type>] "説明"` | エントリを追加（デフォルトtype: task） |
+| `beacon task done <entry-id>` | エントリを完了にする |
+| `beacon task list [-m <ms-id>]` | マイルストーンのエントリ一覧 |
 
 ## データモデル (.beacon/project.json)
 
@@ -52,26 +55,45 @@ Claude Code 内からステータスを確認したい場合は `! beacon status
       "title": "マイルストーンタイトル",
       "status": "todo | in_progress | done",
       "target_date": "YYYY-MM-DD | null",
-      "commits": [
+      "entries": [
         {
-          "hash": "7文字短縮ハッシュ",
-          "message": "コミットメッセージ",
+          "id": "e-1",
+          "type": "commit | task | decision | meeting | ...",
+          "description": "エントリの説明",
           "date": "YYYY-MM-DD",
-          "summary": "任意の補足説明"
+          "status": "todo | done",
+          "meta": {
+            "hash": "(commit時) 7文字短縮ハッシュ",
+            "message": "(commit時) コミットメッセージ"
+          }
         }
-      ],
-      "logs": []
+      ]
     }
   ]
 }
 ```
 
+### エントリ type 一覧
+
+| type | 用途 | 例 |
+|------|------|---|
+| `commit` | コード変更 | beacon log で自動追加 |
+| `task` | コミットに紐づかない作業 | ドキュメント更新、設定変更 |
+| `decision` | 意思決定 | 設計方針の決定、技術選定 |
+| `meeting` | ミーティング | チーム合意、レビュー |
+
+type は自由に追加可能。上記は組み込みの推奨値。
+
 ### ステータスライフサイクル
 
+マイルストーン:
 ```
 todo → in_progress → done
-         ↑
-    waiting / in_review (将来拡張)
+```
+
+エントリ:
+```
+todo → done
 ```
 
 ## ダッシュボード (lib/dashboard.py)
@@ -79,7 +101,8 @@ todo → in_progress → done
 - tmux 左ペインで常時表示
 - `project.json` のファイルハッシュを 2 秒間隔でポーリング
 - 変更検出時に自動再描画
-- ツリー形式でマイルストーンとコミット履歴を表示
+- ツリー形式でマイルストーンとエントリを表示
+- エントリは type 別にアイコン・色を変えて表示
 
 ## tmux セッション構成
 

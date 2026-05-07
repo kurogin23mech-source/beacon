@@ -7,12 +7,17 @@
       "title": "MVP: tmux分割ダッシュボード + CLI基本機能",
       "status": "done",
       "target_date": "2026-05-07",
-      "commits": [
+      "entries": [
         {
-          "hash": "7e9c814",
-          "message": "Initial commit: beacon project dashboard tool",
+          "id": "e-1",
+          "type": "commit",
+          "description": "ダッシュボード描画、CLI(init/milestone/log/sync)、tmux起動",
           "date": "2026-05-07",
-          "summary": "ダッシュボード描画、CLI(init/milestone/log/sync)、tmux起動"
+          "status": "done",
+          "meta": {
+            "hash": "7e9c814",
+            "message": "Initial commit: beacon project dashboard tool"
+          }
         }
       ]
     },
@@ -21,31 +26,53 @@
       "title": "マイルストーンの進捗エビデンス構造を決められるようにする",
       "status": "in_progress",
       "target_date": null,
-      "commits": [],
-      "logs": []
+      "entries": [
+        {
+          "id": "e-4",
+          "type": "task",
+          "description": "entries構造の設計と実装",
+          "date": "2026-05-07",
+          "status": "done",
+          "meta": {}
+        }
+      ]
     },
     {
       "id": "ms-3",
       "title": "マイルストーン進捗を可視化できるようにする",
       "status": "todo",
       "target_date": null,
-      "commits": [],
-      "logs": []
+      "entries": []
     },
     {
       "id": "ms-4",
       "title": "細かいUXを調整して使いやすくする・フェイズ0",
       "status": "in_progress",
       "target_date": "2026-05-08",
-      "commits": [
+      "entries": [
         {
-          "hash": "f7a68b4",
-          "message": "Add project spec and set ms-4 target date (2026-05-08)",
+          "id": "e-2",
+          "type": "commit",
+          "description": "仕様書作成、起動フロー注意事項を記載",
           "date": "2026-05-07",
-          "summary": "仕様書作成、起動フロー注意事項を記載"
+          "status": "done",
+          "meta": {
+            "hash": "f7a68b4",
+            "message": "Add project spec and set ms-4 target date (2026-05-08)"
+          }
+        },
+        {
+          "id": "e-3",
+          "type": "commit",
+          "description": "beacon log -m オプション追加、SPEC更新",
+          "date": "2026-05-07",
+          "status": "done",
+          "meta": {
+            "hash": "28d32a7",
+            "message": "Update SPEC.md: document beacon log -m option"
+          }
         }
-      ],
-      "logs": []
+      ]
     }
   ]
 }

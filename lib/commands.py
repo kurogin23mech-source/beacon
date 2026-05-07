@@ -92,25 +92,14 @@ def cmd_milestone_done():
     sys.exit(1)
 
 
-def cmd_log():
-    summary = os.environ.get("BEACON_SUMMARY", "")
-    commit_hash = os.environ.get("BEACON_HASH", "")
-    message = os.environ.get("BEACON_MESSAGE", "")
-    date = os.environ.get("BEACON_DATE", "")
-    ms_id = os.environ.get("BEACON_MS_ID", "")
-
-    data = load_project()
-
-    # Find target milestone
+def find_target_milestone(data, ms_id):
+    """Find target milestone by id or auto-select if only one is active."""
     if ms_id:
-        target = None
         for ms in data["milestones"]:
             if ms["id"] == ms_id:
-                target = ms
-                break
-        if not target:
-            print(f"Milestone not found: {ms_id}")
-            sys.exit(1)
+                return ms
+        print(f"Milestone not found: {ms_id}")
+        sys.exit(1)
     else:
         active_list = [ms for ms in data["milestones"] if ms["status"] == "in_progress"]
         if len(active_list) == 0:
@@ -121,32 +110,63 @@ def cmd_log():
             for ms in active_list:
                 print(f"  {ms['id']}: {ms['title']}")
             sys.exit(1)
-        target = active_list[0]
+        return active_list[0]
 
-    for c in target["commits"]:
-        if c.get("hash", "").startswith(commit_hash):
+
+def next_entry_id(data):
+    """Generate next entry id across all milestones."""
+    max_id = 0
+    for ms in data["milestones"]:
+        for entry in ms.get("entries", []):
+            eid = entry.get("id", "")
+            if eid.startswith("e-"):
+                try:
+                    max_id = max(max_id, int(eid[2:]))
+                except ValueError:
+                    pass
+    return f"e-{max_id + 1}"
+
+
+def cmd_log():
+    summary = os.environ.get("BEACON_SUMMARY", "")
+    commit_hash = os.environ.get("BEACON_HASH", "")
+    message = os.environ.get("BEACON_MESSAGE", "")
+    date = os.environ.get("BEACON_DATE", "")
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+
+    data = load_project()
+    target = find_target_milestone(data, ms_id)
+
+    entries = target.setdefault("entries", [])
+    for entry in entries:
+        if entry.get("type") == "commit" and entry.get("meta", {}).get("hash", "").startswith(commit_hash):
             print(f"Already logged: {commit_hash}")
             return
 
-    target["commits"].append(
-        {"hash": commit_hash, "message": message, "date": date, "summary": summary}
-    )
+    entries.append({
+        "id": next_entry_id(data),
+        "type": "commit",
+        "description": summary or message,
+        "date": date,
+        "status": "done",
+        "meta": {"hash": commit_hash, "message": message},
+    })
     save_project(data)
     print(f"Logged {commit_hash} to {target['title']}")
 
 
 def cmd_sync():
+    ms_id = os.environ.get("BEACON_MS_ID", "")
     data = load_project()
-    active = None
-    for ms in data["milestones"]:
-        if ms["status"] == "in_progress":
-            active = ms
-            break
-    if not active:
-        print("No active milestone.")
-        sys.exit(1)
+    target = find_target_milestone(data, ms_id)
 
-    existing_hashes = {c["hash"][:7] for c in active.get("commits", [])}
+    entries = target.setdefault("entries", [])
+    existing_hashes = set()
+    for entry in entries:
+        if entry.get("type") == "commit":
+            h = entry.get("meta", {}).get("hash", "")
+            if h:
+                existing_hashes.add(h[:7])
 
     result = subprocess.run(
         ["git", "log", "--oneline", "-20", "--pretty=format:%h|%s|%ci"],
@@ -163,22 +183,80 @@ def cmd_sync():
             continue
         h, msg, date_str = parts
         if h not in existing_hashes:
-            active["commits"].insert(
-                0,
-                {
-                    "hash": h,
-                    "message": msg,
-                    "date": date_str.split(" ")[0],
-                    "summary": "",
-                },
-            )
+            entries.insert(0, {
+                "id": next_entry_id(data),
+                "type": "commit",
+                "description": msg,
+                "date": date_str.split(" ")[0],
+                "status": "done",
+                "meta": {"hash": h, "message": msg},
+            })
             added += 1
 
     if added:
         save_project(data)
-        print(f"Synced {added} new commits to: {active['title']}")
+        print(f"Synced {added} new commits to: {target['title']}")
     else:
         print("No new commits to sync.")
+
+
+def cmd_task_add():
+    description = os.environ.get("BEACON_DESCRIPTION", "")
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    entry_type = os.environ.get("BEACON_TYPE", "task")
+    date = os.environ.get("BEACON_DATE", "")
+
+    data = load_project()
+    target = find_target_milestone(data, ms_id)
+
+    entries = target.setdefault("entries", [])
+    eid = next_entry_id(data)
+    entries.append({
+        "id": eid,
+        "type": entry_type,
+        "description": description,
+        "date": date,
+        "status": "todo",
+        "meta": {},
+    })
+    save_project(data)
+    print(f"Added {entry_type} [{eid}] to {target['title']}: {description}")
+
+
+def cmd_task_done():
+    entry_id = os.environ.get("BEACON_ENTRY_ID", "")
+    data = load_project()
+
+    for ms in data["milestones"]:
+        for entry in ms.get("entries", []):
+            if entry["id"] == entry_id:
+                entry["status"] = "done"
+                if not entry.get("date"):
+                    import datetime
+                    entry["date"] = datetime.date.today().isoformat()
+                save_project(data)
+                print(f"Done: [{entry_id}] {entry['description']}")
+                return
+
+    print(f"Entry not found: {entry_id}")
+    sys.exit(1)
+
+
+def cmd_task_list():
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    data = load_project()
+    target = find_target_milestone(data, ms_id)
+
+    entries = target.get("entries", [])
+    if not entries:
+        print(f"No entries in {target['title']}")
+        return
+
+    icons = {"done": "\u25cf", "todo": "\u25cb"}
+    for entry in entries:
+        icon = icons.get(entry.get("status", "todo"), "?")
+        etype = entry.get("type", "?")
+        print(f"  {icon} [{entry['id']}] ({etype}) {entry['description']}")
 
 
 if __name__ == "__main__":
@@ -191,6 +269,9 @@ if __name__ == "__main__":
         "milestone_done": cmd_milestone_done,
         "log": cmd_log,
         "sync": cmd_sync,
+        "task_add": cmd_task_add,
+        "task_done": cmd_task_done,
+        "task_list": cmd_task_list,
     }
     fn = commands.get(cmd)
     if fn:
