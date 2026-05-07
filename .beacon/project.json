@@ -154,6 +154,24 @@
             "hash": "e67b3af",
             "message": "Auto-update summary on log and remove dim styling from dashboard"
           }
+        },
+        {
+          "id": "e-12",
+          "type": "task",
+          "description": "beaconの名称の意味を確認",
+          "date": "2026-05-07",
+          "status": "done",
+          "meta": {}
+        },
+        {
+          "id": "e-13",
+          "type": "task",
+          "description": "日付フィールドのテスト",
+          "date": "2026-05-07",
+          "created_at": "2026-05-07",
+          "done_at": "2026-05-07",
+          "status": "done",
+          "meta": {}
         }
       ]
     }

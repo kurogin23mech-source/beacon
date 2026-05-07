@@ -188,6 +188,8 @@ def cmd_log():
         "type": "commit",
         "description": summary or message,
         "date": date,
+        "created_at": date,
+        "done_at": date,
         "status": "done",
         "meta": {"hash": commit_hash, "message": message},
     })
@@ -225,11 +227,14 @@ def cmd_sync():
             continue
         h, msg, date_str = parts
         if h not in existing_hashes:
+            commit_date = date_str.split(" ")[0]
             entries.insert(0, {
                 "id": next_entry_id(data),
                 "type": "commit",
                 "description": msg,
-                "date": date_str.split(" ")[0],
+                "date": commit_date,
+                "created_at": commit_date,
+                "done_at": commit_date,
                 "status": "done",
                 "meta": {"hash": h, "message": msg},
             })
@@ -258,6 +263,8 @@ def cmd_task_add():
         "type": entry_type,
         "description": description,
         "date": date,
+        "created_at": date,
+        "done_at": None,
         "status": "todo",
         "meta": {},
     })
@@ -273,10 +280,12 @@ def cmd_task_done():
     for ms in data["milestones"]:
         for entry in ms.get("entries", []):
             if entry["id"] == entry_id:
+                import datetime
+                today = datetime.date.today().isoformat()
                 entry["status"] = "done"
+                entry["done_at"] = today
                 if not entry.get("date"):
-                    import datetime
-                    entry["date"] = datetime.date.today().isoformat()
+                    entry["date"] = today
                 print(f"Done: [{entry_id}] {entry['description']}")
                 update_progress(ms, progress)
                 save_project(data)
