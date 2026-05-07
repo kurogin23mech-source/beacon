@@ -321,8 +321,8 @@ class Dashboard:
             # Adjust scroll to keep cursor visible within body area
             self._adjust_scroll(body_height)
 
-            # Render
-            stdscr.erase()
+            # Render - clear() forces full repaint to avoid stale line artifacts
+            stdscr.clear()
 
             # Draw fixed header
             for row, (text, style) in enumerate(self.header_lines):
