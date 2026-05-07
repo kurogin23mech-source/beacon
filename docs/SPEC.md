@@ -37,7 +37,7 @@ Claude Code 内からステータスを確認したい場合は `! beacon status
 | `beacon milestone list` | マイルストーン一覧 |
 | `beacon milestone start <id>` | マイルストーンをアクティブに設定 |
 | `beacon milestone done <id>` | マイルストーンを完了に設定 |
-| `beacon log [message]` | 現在の HEAD コミットをアクティブマイルストーンに記録 |
+| `beacon log [-m <ms-id>] [message]` | 現在の HEAD コミットをマイルストーンに記録。複数 in_progress 時は -m 必須 |
 | `beacon sync` | 直近 git コミットをアクティブマイルストーンに自動同期 |
 
 ## データモデル (.beacon/project.json)
