@@ -235,16 +235,18 @@ cmd_launch() {
     # Kill existing session if any
     tmux kill-session -t "$session_name" 2>/dev/null || true
 
-    # Create new tmux session with dashboard on the left
-    tmux new-session -d -s "$session_name" -c "$work_dir" \
+    # Create session with working shell, then split-left for dashboard.
+    # Dashboard starts in the split pane which already has the correct size.
+    tmux new-session -d -s "$session_name" -c "$work_dir"
+
+    # Create dashboard pane to the LEFT of the shell pane
+    tmux split-window -hbd -t "$session_name" -c "$work_dir" \
+        -l "${dashboard_pct}%" \
         "python3 '$DASHBOARD_PY' '$abs_project'"
 
-    # Split: right pane is the working shell
-    tmux split-window -h -t "$session_name" -c "$work_dir" -l "${work_pct}%"
-
-    # Re-apply ratio on window resize
+    # Re-apply ratio on window resize (no quotes around % value for tmux to parse it)
     tmux set-hook -t "$session_name" after-resize-window \
-        "resize-pane -t '$session_name:.0' -x '${dashboard_pct}%'"
+        "resize-pane -t ${session_name}:.0 -x ${dashboard_pct}%"
 
     # Focus on the right (working) pane
     tmux select-pane -t "$session_name:.1"

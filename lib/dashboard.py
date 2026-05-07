@@ -27,9 +27,13 @@ def file_hash(path):
 
 
 def char_width(ch):
-    """Return display width of a character (2 for fullwidth/wide, 1 otherwise)."""
+    """Return display width of a character.
+
+    Ambiguous-width chars (box drawing, bullets, block elements etc.)
+    render as width 2 on ja_JP terminals, matching F/W.
+    """
     eaw = unicodedata.east_asian_width(ch)
-    return 2 if eaw in ('F', 'W') else 1
+    return 2 if eaw in ('F', 'W', 'A') else 1
 
 
 def display_width(text):
@@ -144,11 +148,13 @@ class Dashboard:
         milestones = self.project.get("milestones", [])
         done_count = sum(1 for m in milestones if m.get("status") == "done")
         total_count = len(milestones)
-        bar_w = min(width - 20, 30)
-        filled = int(bar_w * done_count / total_count) if total_count > 0 else 0
-        bar_str = f"  {'█' * filled}{'░' * (bar_w - filled)}  {done_count}/{total_count} MS"
+        bar_suffix = f"  {done_count}/{total_count} MS"
+        bar_cols = max(4, width - 2 - display_width(bar_suffix) - 1)
+        bar_count = bar_cols // 2  # █/░ are 2 display-cols each
+        filled = int(bar_count * done_count / total_count) if total_count > 0 else 0
+        bar_str = f"  {'█' * filled}{'░' * (bar_count - filled)}{bar_suffix}"
         header_lines.append((bar_str, "progress"))
-        header_lines.append(("  " + "─" * (width - 4), curses.A_NORMAL))
+        header_lines.append(("  " + "─" * ((width - 4) // 2), curses.A_NORMAL))
         header_lines.append(("", 0))
 
         self.header_lines = header_lines
@@ -193,12 +199,15 @@ class Dashboard:
                 style = "todo"
             lines.append((ms_line, style))
 
-            # Progress bar - fixed width
-            p_bar_w = min(15, max(5, width - 20))
-            p_filled = int(p_bar_w * progress / 100)
+            # Progress bar - scales with terminal width
             date_info = f"  目標: {target}" if target else ""
             pct_col = f"{progress:>3}%"
-            p_line = f"  {child_prefix}  {'█' * p_filled}{'░' * (p_bar_w - p_filled)} {pct_col}{date_info}"
+            p_prefix = f"  {child_prefix}  "
+            p_suffix = f" {pct_col}{date_info}"
+            p_bar_cols = max(4, width - display_width(p_prefix) - display_width(p_suffix) - 1)
+            p_bar_count = p_bar_cols // 2  # █/░ are 2 display-cols each
+            p_filled = int(p_bar_count * progress / 100)
+            p_line = f"{p_prefix}{'█' * p_filled}{'░' * (p_bar_count - p_filled)}{p_suffix}"
             lines.append((p_line, "progress" if progress > 0 else curses.A_NORMAL))
 
             # Entries (if expanded)
@@ -239,7 +248,7 @@ class Dashboard:
 
         # Footer hint
         lines.append(("", 0))
-        lines.append(("  " + "─" * (width - 4), curses.A_NORMAL))
+        lines.append(("  " + "─" * ((width - 4) // 2), curses.A_NORMAL))
         now = time.strftime("%H:%M:%S")
         lines.append((f"  {now}  |  ↑↓:move  Enter:expand  q:quit", curses.A_NORMAL))
 
@@ -303,7 +312,14 @@ class Dashboard:
             "selected_active": curses.color_pair(7) | curses.A_BOLD,
         }
 
+        _last_size = None
+
         while True:
+            # Force curses to re-sync with actual terminal state
+            # This replicates what fullscreen toggle does internally
+            curses.endwin()
+            stdscr.refresh()
+
             height, width = stdscr.getmaxyx()
 
             # Reload project data
@@ -359,7 +375,8 @@ class Dashboard:
             # Handle input
             key = stdscr.getch()
             if key == curses.KEY_RESIZE:
-                stdscr.clear()
+                curses.endwin()
+                stdscr.refresh()
                 continue
             elif key != -1:
                 if not self.handle_key(key):
