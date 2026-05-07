@@ -229,6 +229,8 @@ cmd_launch() {
     abs_project="$(cd "$(dirname "$BEACON_PROJECT_FILE")" && pwd)/$(basename "$BEACON_PROJECT_FILE")"
     local work_dir
     work_dir="$(pwd)"
+    local dashboard_pct="${BEACON_DASHBOARD_WIDTH:-33}"
+    local work_pct=$((100 - dashboard_pct))
 
     # Kill existing session if any
     tmux kill-session -t "$session_name" 2>/dev/null || true
@@ -237,8 +239,12 @@ cmd_launch() {
     tmux new-session -d -s "$session_name" -c "$work_dir" \
         "python3 '$DASHBOARD_PY' '$abs_project'"
 
-    # Split: right pane is the working shell (70% width)
-    tmux split-window -h -t "$session_name" -c "$work_dir" -l "70%"
+    # Split: right pane is the working shell
+    tmux split-window -h -t "$session_name" -c "$work_dir" -l "${work_pct}%"
+
+    # Re-apply ratio on window resize
+    tmux set-hook -t "$session_name" after-resize-window \
+        "select-layout -t '$session_name' main-vertical ; resize-pane -t '$session_name:.0' -x '${dashboard_pct}%'"
 
     # Focus on the right (working) pane
     tmux select-pane -t "$session_name:.1"

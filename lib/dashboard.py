@@ -299,7 +299,10 @@ class Dashboard:
 
             # Handle input
             key = stdscr.getch()
-            if key != -1:
+            if key == curses.KEY_RESIZE:
+                stdscr.clear()
+                continue
+            elif key != -1:
                 if not self.handle_key(key):
                     break
 
