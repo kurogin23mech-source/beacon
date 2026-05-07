@@ -1,31 +1,12 @@
 #!/usr/bin/env python3
-"""Beacon Dashboard - Tree view of project milestones and commits."""
+"""Beacon Dashboard - Curses-based interactive project milestone viewer."""
 
+import curses
 import json
-import os
+import hashlib
 import sys
 import time
-import shutil
-import hashlib
-
-# ANSI color codes
-class C:
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    # Colors
-    WHITE = "\033[97m"
-    GRAY = "\033[90m"
-    GREEN = "\033[32m"
-    YELLOW = "\033[33m"
-    BLUE = "\033[34m"
-    CYAN = "\033[36m"
-    MAGENTA = "\033[35m"
-    RED = "\033[31m"
-    # Backgrounds
-    BG_BLUE = "\033[44m"
-    BG_GREEN = "\033[42m"
-    BG_YELLOW = "\033[43m"
+import unicodedata
 
 
 def load_project(path):
@@ -37,160 +18,6 @@ def load_project(path):
         return None
 
 
-def status_icon(status):
-    icons = {
-        "todo": f"{C.GRAY}○{C.RESET}",
-        "waiting": f"{C.GRAY}◌{C.RESET}",
-        "in_progress": f"{C.YELLOW}◐{C.RESET}",
-        "in_review": f"{C.CYAN}◑{C.RESET}",
-        "done": f"{C.GREEN}●{C.RESET}",
-    }
-    return icons.get(status, f"{C.GRAY}?{C.RESET}")
-
-
-def progress_bar(done, total, width=20):
-    if total == 0:
-        return f"{C.GRAY}{'░' * width}{C.RESET}"
-    filled = int(width * done / total)
-    bar = f"{C.GREEN}{'█' * filled}{C.RESET}{C.GRAY}{'░' * (width - filled)}{C.RESET}"
-    return bar
-
-
-def truncate(text, max_len):
-    if len(text) <= max_len:
-        return text
-    return text[: max_len - 1] + "…"
-
-
-def render(project, term_width, term_height):
-    """Render the dashboard to a list of lines."""
-    lines = []
-    w = term_width
-
-    # Header
-    header = f" BEACON "
-    lines.append(f"{C.BOLD}{C.BG_BLUE}{C.WHITE}{header:^{w}}{C.RESET}")
-    lines.append("")
-
-    # Project objective
-    obj = project.get("objective", "(未設定)")
-    lines.append(f"  {C.BOLD}{C.CYAN}◆ 大目的{C.RESET}")
-    # Word wrap objective
-    max_obj_w = w - 6
-    while obj:
-        lines.append(f"    {C.WHITE}{truncate(obj, max_obj_w)}{C.RESET}")
-        obj = obj[max_obj_w:]
-    lines.append("")
-
-    # Session summary
-    summary = project.get("summary", "")
-    if summary:
-        lines.append(f"  {C.BOLD}{C.YELLOW}▶ 現状{C.RESET}")
-        max_sum_w = w - 6
-        while summary:
-            lines.append(f"    {C.WHITE}{truncate(summary, max_sum_w)}{C.RESET}")
-            summary = summary[max_sum_w:]
-        lines.append("")
-
-    # Milestones summary
-    milestones = project.get("milestones", [])
-    done_count = sum(1 for m in milestones if m.get("status") == "done")
-    total_count = len(milestones)
-    bar = progress_bar(done_count, total_count, min(w - 20, 30))
-    lines.append(f"  {bar}  {done_count}/{total_count} MS")
-    lines.append(f"  {C.DIM}{'─' * (w - 4)}{C.RESET}")
-    lines.append("")
-
-    # Milestone tree
-    for i, ms in enumerate(milestones):
-        is_last_ms = i == len(milestones) - 1
-        ms_status = ms.get("status", "planned")
-        ms_icon = status_icon(ms_status)
-        ms_title = ms.get("title", "(無題)")
-        target = ms.get("target_date", "")
-        is_active = ms_status == "in_progress"
-
-        # Tree connector
-        connector = "└─" if is_last_ms else "├─"
-        child_prefix = "   " if is_last_ms else "│  "
-
-        # Active milestone highlight
-        if is_active:
-            marker = f" {C.BOLD}{C.YELLOW}◀ ACTIVE{C.RESET}"
-        else:
-            marker = ""
-
-        # Milestone line with ID
-        ms_id = ms.get("id", "?")
-        title_display = truncate(ms_title, w - 25)
-        if is_active:
-            lines.append(
-                f"  {connector} {ms_icon} {C.DIM}{ms_id}{C.RESET} {C.BOLD}{C.WHITE}{title_display}{C.RESET}{marker}"
-            )
-        else:
-            title_color = C.WHITE if ms_status == "done" else C.GRAY
-            lines.append(
-                f"  {connector} {ms_icon} {C.DIM}{ms_id}{C.RESET} {title_color}{title_display}{C.RESET}"
-            )
-
-        # Progress bar + target date
-        ms_progress = ms.get("progress", 0)
-        progress_w = min(15, w - 20)
-        ms_bar = progress_bar(ms_progress, 100, progress_w)
-        date_info = f"  {C.DIM}目標: {target}{C.RESET}" if target else ""
-        lines.append(
-            f"  {child_prefix}  {ms_bar} {ms_progress}%{date_info}"
-        )
-
-        # Entries under this milestone
-        entries = ms.get("entries", [])
-        if entries and (is_active or ms_status == "done"):
-            for j, entry in enumerate(entries):
-                is_last_e = j == len(entries) - 1
-                e_connector = "└─" if is_last_e else "├─"
-                e_type = entry.get("type", "?")
-                e_desc = truncate(entry.get("description", ""), w - 28)
-                e_status = entry.get("status", "todo")
-
-                # Type-specific icon and color
-                if e_type == "commit":
-                    meta = entry.get("meta", {})
-                    e_hash = meta.get("hash", "")[:7]
-                    lines.append(
-                        f"  {child_prefix}  {e_connector} {C.MAGENTA}{e_hash}{C.RESET} {C.DIM}{e_desc}{C.RESET}"
-                    )
-                else:
-                    status_mark = f"{C.GREEN}●{C.RESET}" if e_status == "done" else f"{C.GRAY}○{C.RESET}"
-                    type_color = C.CYAN if e_type == "decision" else C.BLUE
-                    lines.append(
-                        f"  {child_prefix}  {e_connector} {status_mark} {type_color}[{e_type}]{C.RESET} {C.DIM}{e_desc}{C.RESET}"
-                    )
-        elif entries:
-            lines.append(
-                f"  {child_prefix}  {C.DIM}{len(entries)} entries{C.RESET}"
-            )
-
-        # Spacing between milestones
-        if not is_last_ms:
-            lines.append(f"  {child_prefix}")
-
-    # Footer
-    remaining_lines = term_height - len(lines) - 2
-    if remaining_lines > 0:
-        lines.extend([""] * remaining_lines)
-
-    now = time.strftime("%H:%M:%S")
-    lines.append(f"  {C.DIM}{'─' * (w - 4)}{C.RESET}")
-    lines.append(f"  {C.DIM}Updated: {now}  |  beacon help{C.RESET}")
-
-    return lines
-
-
-def clear_screen():
-    sys.stdout.write("\033[2J\033[H")
-    sys.stdout.flush()
-
-
 def file_hash(path):
     try:
         with open(path, "rb") as f:
@@ -199,43 +26,319 @@ def file_hash(path):
         return None
 
 
+def char_width(ch):
+    """Return display width of a character (2 for fullwidth/wide, 1 otherwise)."""
+    eaw = unicodedata.east_asian_width(ch)
+    return 2 if eaw in ('F', 'W') else 1
+
+
+def display_width(text):
+    """Return the display width of a string, accounting for wide characters."""
+    return sum(char_width(ch) for ch in text)
+
+
+def wrap_line(text, max_width, cont_indent=None):
+    """Wrap a line to fit within max_width, returning a list of strings.
+
+    cont_indent: number of spaces for continuation lines.
+                 If None, auto-detects from leading whitespace + 2.
+    """
+    if not text or display_width(text) <= max_width:
+        return [text]
+
+    if cont_indent is None:
+        stripped = text.lstrip()
+        cont_indent = len(text) - len(stripped) + 2
+
+    result = []
+    current = ""
+    current_width = 0
+
+    for ch in text:
+        cw = char_width(ch)
+        if current_width + cw > max_width:
+            result.append(current)
+            current = " " * cont_indent + ch
+            current_width = cont_indent + cw
+        else:
+            current += ch
+            current_width += cw
+
+    if current:
+        result.append(current)
+
+    return result if result else [""]
+
+
+class Dashboard:
+    def __init__(self, project_path):
+        self.project_path = project_path
+        self.project = None
+        self.last_hash = None
+        self.scroll_offset = 0
+        self.cursor_pos = 0  # Which milestone is selected
+        self.expanded = set()  # Set of milestone indices that are expanded
+        self.lines = []  # Rendered lines buffer
+
+    def reload_if_changed(self):
+        """Reload project data if file changed."""
+        current_hash = file_hash(self.project_path)
+        if current_hash != self.last_hash:
+            self.project = load_project(self.project_path)
+            self.last_hash = current_hash
+            # Auto-expand active milestone
+            if self.project:
+                for i, ms in enumerate(self.project.get("milestones", [])):
+                    if ms.get("status") == "in_progress":
+                        self.expanded.add(i)
+            return True
+        return False
+
+    def build_lines(self, width):
+        """Build the display lines from project data."""
+        lines = []
+        if not self.project:
+            lines.append(("  Waiting for project...", curses.A_DIM))
+            lines.append(("  Run: beacon init", curses.A_DIM))
+            self.lines = lines
+            return
+
+        # Header
+        lines.append((" BEACON ", "header"))
+        lines.append(("", 0))
+
+        # Objective
+        obj = self.project.get("objective", "(未設定)")
+        lines.append(("  ◆ 大目的", "section"))
+        lines.append(("    " + obj, curses.A_NORMAL))
+        lines.append(("", 0))
+
+        # Summary
+        summary = self.project.get("summary", "")
+        if summary:
+            lines.append(("  ▶ 現状", "section_yellow"))
+            lines.append(("    " + summary, curses.A_NORMAL))
+            lines.append(("", 0))
+
+        # Overall progress
+        milestones = self.project.get("milestones", [])
+        done_count = sum(1 for m in milestones if m.get("status") == "done")
+        total_count = len(milestones)
+        bar_w = min(width - 20, 30)
+        filled = int(bar_w * done_count / total_count) if total_count > 0 else 0
+        bar_str = f"  {'█' * filled}{'░' * (bar_w - filled)}  {done_count}/{total_count} MS"
+        lines.append((bar_str, "progress"))
+        lines.append(("  " + "─" * (width - 4), curses.A_DIM))
+        lines.append(("", 0))
+
+        # Milestones
+        for i, ms in enumerate(milestones):
+            is_last = i == len(milestones) - 1
+            status = ms.get("status", "planned")
+            title = ms.get("title", "(無題)")
+            ms_id = ms.get("id", "?")
+            progress = ms.get("progress", 0)
+            target = ms.get("target_date", "")
+            is_active = status == "in_progress"
+            is_selected = i == self.cursor_pos
+            is_expanded = i in self.expanded
+
+            # Status icon
+            icon_map = {"done": "●", "in_progress": "◐", "planned": "○",
+                        "todo": "○", "waiting": "◌", "in_review": "◑"}
+            icon = icon_map.get(status, "?")
+
+            # Tree connector
+            connector = "└─" if is_last else "├─"
+            child_prefix = "   " if is_last else "│  "
+
+            # Milestone title line
+            marker = " ◀ ACTIVE" if is_active else ""
+            expand_hint = " [−]" if is_expanded else " [+]" if ms.get("entries") else ""
+
+            ms_line = f"  {connector} {icon} {ms_id} {title}{marker}{expand_hint}"
+
+            if is_selected:
+                style = "selected_active" if is_active else "selected"
+            elif is_active:
+                style = "active"
+            elif status == "done":
+                style = "done"
+            else:
+                style = "planned"
+            lines.append((ms_line, style))
+
+            # Progress bar
+            p_bar_w = min(15, width - 20)
+            p_filled = int(p_bar_w * progress / 100)
+            date_info = f"  目標: {target}" if target else ""
+            p_line = f"  {child_prefix}  {'█' * p_filled}{'░' * (p_bar_w - p_filled)} {progress}%{date_info}"
+            lines.append((p_line, "progress" if progress > 0 else curses.A_DIM))
+
+            # Entries (if expanded)
+            entries = ms.get("entries", [])
+            if is_expanded and entries:
+                for j, entry in enumerate(entries):
+                    is_last_e = j == len(entries) - 1
+                    e_connector = "└─" if is_last_e else "├─"
+                    e_type = entry.get("type", "?")
+                    e_desc = entry.get("description", "")
+                    e_status = entry.get("status", "todo")
+
+                    if e_type == "commit":
+                        meta = entry.get("meta", {})
+                        e_hash = meta.get("hash", "")[:7]
+                        e_line = f"  {child_prefix}  {e_connector} {e_hash} {e_desc}"
+                        lines.append((e_line, "commit"))
+                    else:
+                        s_mark = "●" if e_status == "done" else "○"
+                        e_line = f"  {child_prefix}  {e_connector} {s_mark} [{e_type}] {e_desc}"
+                        lines.append((e_line, "task" if e_status == "done" else curses.A_DIM))
+            elif entries and not is_expanded:
+                lines.append((f"  {child_prefix}  {len(entries)} entries", curses.A_DIM))
+
+            # Spacing
+            if not is_last:
+                lines.append((f"  {child_prefix}", 0))
+
+        # Footer hint
+        lines.append(("", 0))
+        lines.append(("  " + "─" * (width - 4), curses.A_DIM))
+        now = time.strftime("%H:%M:%S")
+        lines.append((f"  {now}  |  ↑↓:move  Enter:expand  q:quit", curses.A_DIM))
+
+        # Wrap all lines to fit terminal width
+        wrapped = []
+        for text, style in lines:
+            for wl in wrap_line(text, width - 1):
+                wrapped.append((wl, style))
+
+        self.lines = wrapped
+
+    def handle_key(self, key):
+        """Handle keyboard input. Returns False to quit."""
+        milestones = self.project.get("milestones", []) if self.project else []
+        ms_count = len(milestones)
+
+        if key in (ord('q'), ord('Q')):
+            return False
+        elif key in (curses.KEY_UP, ord('k')):
+            if self.cursor_pos > 0:
+                self.cursor_pos -= 1
+        elif key in (curses.KEY_DOWN, ord('j')):
+            if self.cursor_pos < ms_count - 1:
+                self.cursor_pos += 1
+        elif key in (curses.KEY_ENTER, 10, 13, ord(' ')):
+            if self.cursor_pos in self.expanded:
+                self.expanded.discard(self.cursor_pos)
+            else:
+                self.expanded.add(self.cursor_pos)
+        return True
+
+    def draw(self, stdscr):
+        """Main draw loop."""
+        curses.curs_set(0)
+        stdscr.timeout(500)  # 500ms non-blocking getch for auto-refresh
+
+        # Init color pairs
+        curses.start_color()
+        curses.use_default_colors()
+        curses.init_pair(1, curses.COLOR_CYAN, -1)      # section
+        curses.init_pair(2, curses.COLOR_YELLOW, -1)    # section_yellow / active
+        curses.init_pair(3, curses.COLOR_GREEN, -1)     # done / progress
+        curses.init_pair(4, curses.COLOR_WHITE, -1)     # normal
+        curses.init_pair(5, curses.COLOR_MAGENTA, -1)   # commit
+        curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_WHITE)  # selected
+        curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_YELLOW) # selected_active
+        curses.init_pair(8, curses.COLOR_WHITE, curses.COLOR_BLUE)   # header
+        curses.init_pair(9, curses.COLOR_BLUE, -1)      # task
+
+        style_map = {
+            "header": curses.color_pair(8) | curses.A_BOLD,
+            "section": curses.color_pair(1) | curses.A_BOLD,
+            "section_yellow": curses.color_pair(2) | curses.A_BOLD,
+            "active": curses.color_pair(2) | curses.A_BOLD,
+            "done": curses.color_pair(3),
+            "planned": curses.A_DIM,
+            "progress": curses.color_pair(3),
+            "commit": curses.color_pair(5),
+            "task": curses.color_pair(9),
+            "selected": curses.color_pair(6),
+            "selected_active": curses.color_pair(7) | curses.A_BOLD,
+        }
+
+        while True:
+            height, width = stdscr.getmaxyx()
+
+            # Reload project data
+            self.reload_if_changed()
+
+            # Build display
+            self.build_lines(width)
+
+            # Adjust scroll to keep cursor visible
+            # Find which line the cursor milestone starts at
+            self._adjust_scroll(height)
+
+            # Render
+            stdscr.erase()
+            visible_lines = self.lines[self.scroll_offset:self.scroll_offset + height]
+            for row, (text, style) in enumerate(visible_lines):
+                if row >= height:
+                    break
+                try:
+                    if isinstance(style, str):
+                        attr = style_map.get(style, curses.A_NORMAL)
+                    else:
+                        attr = style
+                    stdscr.addstr(row, 0, text if text else "", attr)
+                except curses.error:
+                    pass
+
+            stdscr.refresh()
+
+            # Handle input
+            key = stdscr.getch()
+            if key != -1:
+                if not self.handle_key(key):
+                    break
+
+    def _adjust_scroll(self, height):
+        """Ensure the selected milestone is visible."""
+        # Find approximate line of current cursor milestone in the lines buffer
+        # Simple heuristic: scan for the milestone line
+        milestones = self.project.get("milestones", []) if self.project else []
+        if not milestones:
+            return
+
+        target_id = milestones[self.cursor_pos].get("id", "")
+        target_line = 0
+        for i, (text, _) in enumerate(self.lines):
+            if target_id and target_id in text:
+                target_line = i
+                break
+
+        # Adjust scroll so target is visible (with some margin)
+        margin = 3
+        if target_line < self.scroll_offset + margin:
+            self.scroll_offset = max(0, target_line - margin)
+        elif target_line > self.scroll_offset + height - margin - 1:
+            self.scroll_offset = target_line - height + margin + 1
+
+        # Clamp
+        max_scroll = max(0, len(self.lines) - height)
+        self.scroll_offset = min(self.scroll_offset, max_scroll)
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: dashboard.py <path-to-project.json>")
         sys.exit(1)
 
     project_path = sys.argv[1]
-    last_hash = None
+    dashboard = Dashboard(project_path)
 
-    # Initial render
-    clear_screen()
-
-    while True:
-        try:
-            current_hash = file_hash(project_path)
-            term_size = shutil.get_terminal_size((40, 24))
-            w = term_size.columns
-            h = term_size.lines
-
-            if current_hash != last_hash or current_hash is None:
-                project = load_project(project_path)
-                if project is None:
-                    clear_screen()
-                    print(f"\n  {C.YELLOW}Waiting for project...{C.RESET}")
-                    print(f"  {C.DIM}Run: beacon init{C.RESET}")
-                else:
-                    lines = render(project, w, h)
-                    clear_screen()
-                    for line in lines[:h]:
-                        print(line)
-
-                last_hash = current_hash
-
-            time.sleep(2)
-
-        except KeyboardInterrupt:
-            clear_screen()
-            sys.exit(0)
+    curses.wrapper(dashboard.draw)
 
 
 if __name__ == "__main__":

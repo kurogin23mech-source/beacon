@@ -44,7 +44,7 @@
       "id": "ms-3",
       "title": "マイルストーン進捗を可視化できるようにする",
       "status": "in_progress",
-      "progress": 70,
+      "progress": 85,
       "target_date": null,
       "entries": [
         {
@@ -67,6 +67,17 @@
           "meta": {
             "hash": "c76e193",
             "message": "Add progress tracking and milestone ID display"
+          }
+        },
+        {
+          "id": "e-7",
+          "type": "commit",
+          "description": "サマリー表示機能実装",
+          "date": "2026-05-07",
+          "status": "done",
+          "meta": {
+            "hash": "739757d",
+            "message": "Add session summary display and beacon summary command"
           }
         }
       ]
