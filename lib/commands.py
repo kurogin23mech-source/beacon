@@ -152,6 +152,16 @@ def update_progress(target, progress_str):
             pass
 
 
+def update_summary(data, target, last_action):
+    """Auto-update project summary based on current state."""
+    active = [ms for ms in data["milestones"] if ms["status"] == "in_progress"]
+    parts = []
+    for ms in active:
+        parts.append(f"{ms['id']}({ms['title']}, {ms.get('progress', 0)}%)")
+    status_part = "実行中: " + ", ".join(parts) if parts else "アクティブMSなし"
+    data["summary"] = f"{status_part}。直近: {last_action}"
+
+
 def cmd_log():
     summary = os.environ.get("BEACON_SUMMARY", "")
     commit_hash = os.environ.get("BEACON_HASH", "")
@@ -182,6 +192,7 @@ def cmd_log():
         "meta": {"hash": commit_hash, "message": message},
     })
     update_progress(target, progress)
+    update_summary(data, target, summary or message)
     save_project(data)
     print(f"Logged {commit_hash} to {target['title']}")
 

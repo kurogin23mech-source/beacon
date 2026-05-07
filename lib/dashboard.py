@@ -98,8 +98,8 @@ class Dashboard:
         """Build the display lines from project data."""
         lines = []
         if not self.project:
-            lines.append(("  Waiting for project...", curses.A_DIM))
-            lines.append(("  Run: beacon init", curses.A_DIM))
+            lines.append(("  Waiting for project...", curses.A_NORMAL))
+            lines.append(("  Run: beacon init", curses.A_NORMAL))
             self.lines = lines
             return
 
@@ -128,7 +128,7 @@ class Dashboard:
         filled = int(bar_w * done_count / total_count) if total_count > 0 else 0
         bar_str = f"  {'█' * filled}{'░' * (bar_w - filled)}  {done_count}/{total_count} MS"
         lines.append((bar_str, "progress"))
-        lines.append(("  " + "─" * (width - 4), curses.A_DIM))
+        lines.append(("  " + "─" * (width - 4), curses.A_NORMAL))
         lines.append(("", 0))
 
         # Milestones
@@ -173,7 +173,7 @@ class Dashboard:
             p_filled = int(p_bar_w * progress / 100)
             date_info = f"  目標: {target}" if target else ""
             p_line = f"  {child_prefix}  {'█' * p_filled}{'░' * (p_bar_w - p_filled)} {progress}%{date_info}"
-            lines.append((p_line, "progress" if progress > 0 else curses.A_DIM))
+            lines.append((p_line, "progress" if progress > 0 else curses.A_NORMAL))
 
             # Entries (if expanded)
             entries = ms.get("entries", [])
@@ -193,9 +193,9 @@ class Dashboard:
                     else:
                         s_mark = "●" if e_status == "done" else "○"
                         e_line = f"  {child_prefix}  {e_connector} {s_mark} [{e_type}] {e_desc}"
-                        lines.append((e_line, "task" if e_status == "done" else curses.A_DIM))
+                        lines.append((e_line, "task" if e_status == "done" else curses.A_NORMAL))
             elif entries and not is_expanded:
-                lines.append((f"  {child_prefix}  {len(entries)} entries", curses.A_DIM))
+                lines.append((f"  {child_prefix}  {len(entries)} entries", curses.A_NORMAL))
 
             # Spacing
             if not is_last:
@@ -203,9 +203,9 @@ class Dashboard:
 
         # Footer hint
         lines.append(("", 0))
-        lines.append(("  " + "─" * (width - 4), curses.A_DIM))
+        lines.append(("  " + "─" * (width - 4), curses.A_NORMAL))
         now = time.strftime("%H:%M:%S")
-        lines.append((f"  {now}  |  ↑↓:move  Enter:expand  q:quit", curses.A_DIM))
+        lines.append((f"  {now}  |  ↑↓:move  Enter:expand  q:quit", curses.A_NORMAL))
 
         # Wrap all lines to fit terminal width
         wrapped = []
@@ -257,12 +257,12 @@ class Dashboard:
             "header": curses.color_pair(8) | curses.A_BOLD,
             "section": curses.color_pair(1) | curses.A_BOLD,
             "section_yellow": curses.color_pair(2) | curses.A_BOLD,
-            "active": curses.color_pair(2) | curses.A_BOLD,
-            "done": curses.color_pair(3),
-            "todo": curses.A_DIM,
-            "progress": curses.color_pair(3),
-            "commit": curses.color_pair(5),
-            "task": curses.color_pair(9),
+            "active": curses.A_BOLD,
+            "done": curses.A_NORMAL,
+            "todo": curses.A_NORMAL,
+            "progress": curses.A_NORMAL,
+            "commit": curses.A_NORMAL,
+            "task": curses.A_NORMAL,
             "selected": curses.color_pair(6),
             "selected_active": curses.color_pair(7) | curses.A_BOLD,
         }
