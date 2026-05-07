@@ -244,7 +244,7 @@ cmd_launch() {
 
     # Re-apply ratio on window resize
     tmux set-hook -t "$session_name" after-resize-window \
-        "select-layout -t '$session_name' main-vertical ; resize-pane -t '$session_name:.0' -x '${dashboard_pct}%'"
+        "resize-pane -t '$session_name:.0' -x '${dashboard_pct}%'"
 
     # Focus on the right (working) pane
     tmux select-pane -t "$session_name:.1"

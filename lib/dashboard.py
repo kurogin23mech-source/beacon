@@ -78,7 +78,8 @@ class Dashboard:
         self.scroll_offset = 0
         self.cursor_pos = 0  # Which milestone is selected
         self.expanded = set()  # Set of milestone indices that are expanded
-        self.lines = []  # Rendered lines buffer
+        self.header_lines = []  # Fixed header lines
+        self.lines = []  # Scrollable body lines
 
     def reload_if_changed(self):
         """Reload project data if file changed."""
@@ -96,29 +97,33 @@ class Dashboard:
 
     def build_lines(self, width):
         """Build the display lines from project data."""
-        lines = []
+        header_lines = []
+        body_lines = []
         if not self.project:
-            lines.append(("  Waiting for project...", curses.A_NORMAL))
-            lines.append(("  Run: beacon init", curses.A_NORMAL))
-            self.lines = lines
+            header_lines.append(("  Waiting for project...", curses.A_NORMAL))
+            header_lines.append(("  Run: beacon init", curses.A_NORMAL))
+            self.header_lines = header_lines
+            self.lines = body_lines
             return
 
-        # Header
-        lines.append((" BEACON ", "header"))
-        lines.append(("", 0))
+        # Header (fixed at top)
+        header_lines.append((" BEACON ", "header"))
+        header_lines.append(("", 0))
 
         # Objective
         obj = self.project.get("objective", "(未設定)")
-        lines.append(("  ◆ 大目的", "section"))
-        lines.append(("    " + obj, curses.A_NORMAL))
-        lines.append(("", 0))
+        header_lines.append(("  ◆ 大目的", "section"))
+        for wl in wrap_line("    " + obj, width - 1):
+            header_lines.append((wl, curses.A_NORMAL))
+        header_lines.append(("", 0))
 
         # Summary
         summary = self.project.get("summary", "")
         if summary:
-            lines.append(("  ▶ 現状", "section_yellow"))
-            lines.append(("    " + summary, curses.A_NORMAL))
-            lines.append(("", 0))
+            header_lines.append(("  ▶ 現状", "section_yellow"))
+            for wl in wrap_line("    " + summary, width - 1):
+                header_lines.append((wl, curses.A_NORMAL))
+            header_lines.append(("", 0))
 
         # Overall progress
         milestones = self.project.get("milestones", [])
@@ -127,9 +132,12 @@ class Dashboard:
         bar_w = min(width - 20, 30)
         filled = int(bar_w * done_count / total_count) if total_count > 0 else 0
         bar_str = f"  {'█' * filled}{'░' * (bar_w - filled)}  {done_count}/{total_count} MS"
-        lines.append((bar_str, "progress"))
-        lines.append(("  " + "─" * (width - 4), curses.A_NORMAL))
-        lines.append(("", 0))
+        header_lines.append((bar_str, "progress"))
+        header_lines.append(("  " + "─" * (width - 4), curses.A_NORMAL))
+        header_lines.append(("", 0))
+
+        self.header_lines = header_lines
+        lines = body_lines
 
         # Milestones
         for i, ms in enumerate(milestones):
@@ -215,7 +223,7 @@ class Dashboard:
         now = time.strftime("%H:%M:%S")
         lines.append((f"  {now}  |  ↑↓:move  Enter:expand  q:quit", curses.A_NORMAL))
 
-        # Wrap all lines to fit terminal width
+        # Wrap body lines to fit terminal width
         wrapped = []
         for text, style in lines:
             for wl in wrap_line(text, width - 1):
@@ -265,12 +273,12 @@ class Dashboard:
             "header": curses.color_pair(8) | curses.A_BOLD,
             "section": curses.color_pair(1) | curses.A_BOLD,
             "section_yellow": curses.color_pair(2) | curses.A_BOLD,
-            "active": curses.A_BOLD,
-            "done": curses.A_NORMAL,
-            "todo": curses.A_NORMAL,
-            "progress": curses.A_NORMAL,
-            "commit": curses.A_NORMAL,
-            "task": curses.A_NORMAL,
+            "active": curses.color_pair(2) | curses.A_BOLD,
+            "done": curses.color_pair(3),
+            "todo": curses.color_pair(4),
+            "progress": curses.color_pair(3),
+            "commit": curses.color_pair(5),
+            "task": curses.color_pair(9),
             "selected": curses.color_pair(6),
             "selected_active": curses.color_pair(7) | curses.A_BOLD,
         }
@@ -284,14 +292,35 @@ class Dashboard:
             # Build display
             self.build_lines(width)
 
-            # Adjust scroll to keep cursor visible
-            # Find which line the cursor milestone starts at
-            self._adjust_scroll(height)
+            # Calculate layout: fixed header + scrollable body
+            header_count = len(getattr(self, 'header_lines', []))
+            body_height = height - header_count
+            if body_height < 1:
+                body_height = 1
+
+            # Adjust scroll to keep cursor visible within body area
+            self._adjust_scroll(body_height)
 
             # Render
             stdscr.erase()
-            visible_lines = self.lines[self.scroll_offset:self.scroll_offset + height]
-            for row, (text, style) in enumerate(visible_lines):
+
+            # Draw fixed header
+            for row, (text, style) in enumerate(self.header_lines):
+                if row >= height:
+                    break
+                try:
+                    if isinstance(style, str):
+                        attr = style_map.get(style, curses.A_NORMAL)
+                    else:
+                        attr = style
+                    stdscr.addstr(row, 0, text if text else "", attr)
+                except curses.error:
+                    pass
+
+            # Draw scrollable body
+            visible_lines = self.lines[self.scroll_offset:self.scroll_offset + body_height]
+            for i, (text, style) in enumerate(visible_lines):
+                row = header_count + i
                 if row >= height:
                     break
                 try:
