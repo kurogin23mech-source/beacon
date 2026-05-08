@@ -143,7 +143,30 @@ def cmd_milestone_add():
 
 
 def cmd_milestone_list():
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
     data = load_project()
+
+    if json_mode:
+        output = {
+            "name": data.get("name", ""),
+            "summary": data.get("summary", ""),
+            "milestones": [],
+        }
+        for ms in data["milestones"]:
+            entries = ms.get("entries", [])
+            total_tasks, done_tasks = _count_task_status_flat(entries)
+            output["milestones"].append({
+                "id": ms["id"],
+                "title": ms.get("title", ""),
+                "status": ms.get("status", "todo"),
+                "progress": ms.get("progress", 0),
+                "target_date": ms.get("target_date", ""),
+                "total_tasks": total_tasks,
+                "done_tasks": done_tasks,
+            })
+        print(json.dumps(output, ensure_ascii=False))
+        return
+
     icons = {"done": "\u25cf", "in_progress": "\u25d0", "todo": "\u25cb", "waiting": "\u25cc", "in_review": "\u25d1"}
     for ms in data["milestones"]:
         icon = icons.get(ms["status"], "?")
@@ -180,6 +203,44 @@ def cmd_milestone_done():
             return
     print(f"Milestone not found: {ms_id}")
     sys.exit(1)
+
+
+def _entries_to_json(entries):
+    """Convert entries to a JSON-serializable list (recursive)."""
+    result = []
+    for e in entries:
+        item = {
+            "id": e.get("id", ""),
+            "type": e.get("type", ""),
+            "description": e.get("description", ""),
+            "status": e.get("status", "todo"),
+            "created_at": e.get("created_at", e.get("date", "")),
+            "done_at": e.get("done_at"),
+        }
+        if e.get("type") == "commit":
+            item["meta"] = e.get("meta", {})
+        if e.get("detail"):
+            item["detail"] = e["detail"]
+        children = e.get("entries", [])
+        if children:
+            item["entries"] = _entries_to_json(children)
+        result.append(item)
+    return result
+
+
+def _count_task_status_flat(entries):
+    """Count total and done tasks recursively."""
+    total = 0
+    done = 0
+    for e in entries:
+        if e.get("type") == "task":
+            total += 1
+            if e.get("status") == "done":
+                done += 1
+        t, d = _count_task_status_flat(e.get("entries", []))
+        total += t
+        done += d
+    return total, done
 
 
 def find_target_milestone(data, ms_id):
@@ -525,10 +586,21 @@ def cmd_task_done():
 
 def cmd_task_list():
     ms_id = os.environ.get("BEACON_MS_ID", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
     data = load_project()
     target = find_target_milestone(data, ms_id)
 
     entries = target.get("entries", [])
+
+    if json_mode:
+        output = {
+            "milestone_id": target["id"],
+            "milestone_title": target.get("title", ""),
+            "entries": _entries_to_json(entries),
+        }
+        print(json.dumps(output, ensure_ascii=False))
+        return
+
     if not entries:
         print(f"No entries in {target['title']}")
         return
@@ -620,11 +692,14 @@ def cmd_entry_move():
 
 def cmd_summary():
     text = os.environ.get("BEACON_SUMMARY_TEXT", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
     data = load_project()
     if text:
         data["summary"] = text
         save_project(data)
         print(f"Summary updated.")
+    elif json_mode:
+        print(json.dumps({"summary": data.get("summary", "")}, ensure_ascii=False))
     else:
         print(data.get("summary", "(未設定)"))
 

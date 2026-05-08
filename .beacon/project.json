@@ -1,7 +1,7 @@
 {
   "name": "Beacon",
   "objective": "AI駆動開発においてマイルストーンベースのプロジェクト進捗を常時可視化し、開発者が方向性を見失わずに実装を進められるツールを構築する",
-  "summary": "profile-extractorでの運用中にスキーマ不一致・誤コミット紐づけが発覚。ms-5で安定化に着手し、バリデーション・dirty時ブロック・タスク詳細・ダッシュボード操作拡張を実装済み。サマリー自体の役割も見直し、定性的な現在地説明に変更した",
+  "summary": "Skill化方針が確定。beacon CLI を CRUD整備（--json対応、update/delete追加、論理削除）→ Skill（session-start/log/task/session-end）で Claude Code の操作を固定化する方向。beacon-session-start Skill v0.3 と CLI --json 出力は実装済み。ms-5の既存タスクはms-8に引き継ぎつつ残置。進捗率・summary自動更新もSkillのワークフローに組み込む設計。",
   "milestones": [
     {
       "id": "ms-1",
@@ -26,7 +26,7 @@
     {
       "id": "ms-2",
       "title": "マイルストーンの進捗エビデンス構造を決められるようにする",
-      "status": "todo",
+      "status": "done",
       "progress": 100,
       "target_date": null,
       "entries": [
@@ -182,8 +182,8 @@
           "description": "ダッシュボード表示修正",
           "date": "2026-05-07",
           "created_at": "2026-05-07",
-          "done_at": null,
-          "status": "todo",
+          "done_at": "2026-05-09",
+          "status": "done",
           "meta": {},
           "entries": [
             {
@@ -233,8 +233,8 @@
           "description": "エントリ日付フィールド対応",
           "date": "2026-05-07",
           "created_at": "2026-05-07",
-          "done_at": null,
-          "status": "todo",
+          "done_at": "2026-05-09",
+          "status": "done",
           "meta": {},
           "entries": [
             {
@@ -280,7 +280,7 @@
     {
       "id": "ms-5",
       "title": "全体的な挙動の安定化・ブラッシュアップ",
-      "status": "in_progress",
+      "status": "todo",
       "target_date": "",
       "commits": [],
       "entries": [
@@ -290,8 +290,8 @@
           "description": "beacon log/task doneがコミット前でも実行でき、誤ったコミットに紐づく問題",
           "date": "2026-05-08",
           "created_at": "2026-05-08",
-          "done_at": null,
-          "status": "todo",
+          "done_at": "2026-05-09",
+          "status": "done",
           "meta": {},
           "detail": "## 再現手順\n1. コード修正を行う（git addもcommitもしない）\n2. `beacon task done e-X` → タスクが完了になる\n3. `beacon log \"修正内容\"` → 直前のコミット（修正と無関係）にログが紐づく\n4. その後コミットしても、beaconログとの紐づけがずれたまま\n\n## 期待動作\n- `beacon log`: ワーキングツリーにuncommittedな変更がある場合、警告を出す\n  - 例: \"Warning: uncommitted changes detected. Log may be tied to wrong commit.\"\n- `beacon task done`: タスク完了時に、関連する変更がコミットされているか検証する（オプション）\n  - あるいは、コミットハッシュ紐づけを任意にする\n\n## 影響\nprofile-extractorで実際に発生。3件のバグ修正のbeaconログが修正前のコミット4d99cbfに紐づいてしまった。\nコミット後に再度logを実行して正しいコミット9a44312に紐づけ直す手間が発生。",
           "entries": [
@@ -307,8 +307,197 @@
                 "hash": "8d36b85",
                 "message": "Add schema validation, task detail, and dashboard entry navigation"
               }
+            },
+            {
+              "id": "e-24",
+              "type": "commit",
+              "description": "tmuxセッション管理修正、自動サマリー、コミット自動紐づけ、ダッシュボード操作改善",
+              "date": "2026-05-08",
+              "created_at": "2026-05-08",
+              "done_at": "2026-05-08",
+              "status": "done",
+              "meta": {
+                "hash": "1f7b830",
+                "message": "Fix tmux session management, add auto-summary and commit-task association"
+              }
             }
           ]
+        },
+        {
+          "id": "e-25",
+          "type": "task",
+          "description": "マイルストーン・タスクIDの命名規則を設計・実装する",
+          "date": "2026-05-09",
+          "created_at": "2026-05-09",
+          "done_at": null,
+          "status": "todo",
+          "meta": {}
+        },
+        {
+          "id": "e-26",
+          "type": "task",
+          "description": "ダッシュボードおよびCLI出力にタスクIDを表示する",
+          "date": "2026-05-09",
+          "created_at": "2026-05-09",
+          "done_at": null,
+          "status": "todo",
+          "meta": {}
+        },
+        {
+          "id": "e-27",
+          "type": "task",
+          "description": "完了タスクを非表示にするオプションを追加する",
+          "date": "2026-05-09",
+          "created_at": "2026-05-09",
+          "done_at": null,
+          "status": "todo",
+          "meta": {}
+        },
+        {
+          "id": "e-28",
+          "type": "task",
+          "description": "進捗率の自動更新が動作していない問題を修正する",
+          "date": "2026-05-09",
+          "created_at": "2026-05-09",
+          "done_at": null,
+          "status": "todo",
+          "meta": {}
+        },
+        {
+          "id": "e-29",
+          "type": "task",
+          "description": "CLIの引数パース統一（long option対応）",
+          "date": "2026-05-09",
+          "created_at": "2026-05-09",
+          "done_at": null,
+          "status": "todo",
+          "meta": {}
+        },
+        {
+          "id": "e-30",
+          "type": "task",
+          "description": "日本語入力の変換の不安定さを解消する",
+          "date": "2026-05-09",
+          "created_at": "2026-05-09",
+          "done_at": null,
+          "status": "todo",
+          "meta": {}
+        },
+        {
+          "id": "e-31",
+          "type": "task",
+          "description": "beacon操作のMCPツール/Skill化を設計する",
+          "date": "2026-05-09",
+          "created_at": "2026-05-09",
+          "done_at": null,
+          "status": "todo",
+          "meta": {}
+        }
+      ],
+      "progress": 40
+    },
+    {
+      "id": "ms-6",
+      "title": "マルチユーザー対応（PR駆動・マイルストーンオーナー制）",
+      "status": "todo",
+      "target_date": "",
+      "commits": []
+    },
+    {
+      "id": "ms-7",
+      "title": "週次振り返りを自動化する",
+      "status": "todo",
+      "target_date": "",
+      "commits": []
+    },
+    {
+      "id": "ms-8",
+      "title": "beacon CLI CRUD整備・Skill化",
+      "status": "in_progress",
+      "target_date": "",
+      "commits": [],
+      "entries": [
+        {
+          "id": "e-32",
+          "type": "task",
+          "description": "CLI CRUD サブコマンド整備（milestone update/delete, task update/delete, 全コマンド --json対応）",
+          "date": "2026-05-09",
+          "created_at": "2026-05-09",
+          "done_at": null,
+          "status": "todo",
+          "meta": {},
+          "detail": "## 対象サブコマンド\n### milestone\n- show <id> [--json]: 単一MS詳細\n- update <id> [--progress N] [--title T] [--target-date D] [--json]: 任意フィールド更新\n- delete <id> [--json]: 論理削除（status→cancelled）\n\n### task\n- update <id> [--status S] [--description D] [--json]: 任意フィールド更新\n- delete <id> [--json]: 論理削除（status→cancelled）\n\n### 既存コマンドの--json対応追加\n- task show --json\n- log --json\n\n### 2段階呼び出し（--prepare / --finalize）\n- beacon log --prepare: コミット情報+MS状態+タスク消化率をJSONで出力（書き込みしない）\n- beacon log --finalize --progress N --summary 'text': Claude生成結果を受けて書き込み\n- 同様に beacon summary --prepare / --finalize も検討\n\n### 全コマンド共通\n- --json フラグで構造化出力\n- long option 対応（--ms, --progress, --type, --detail 等）"
+        },
+        {
+          "id": "e-33",
+          "type": "task",
+          "description": "cancelled 論理削除の実装（status追加、listデフォルト非表示 + --all で表示）",
+          "date": "2026-05-09",
+          "created_at": "2026-05-09",
+          "done_at": null,
+          "status": "todo",
+          "meta": {}
+        },
+        {
+          "id": "e-34",
+          "type": "task",
+          "description": "ID命名規則バリデーション（ms-{連番}, e-{連番}を強制）",
+          "date": "2026-05-09",
+          "created_at": "2026-05-09",
+          "done_at": null,
+          "status": "todo",
+          "meta": {}
+        },
+        {
+          "id": "e-35",
+          "type": "task",
+          "description": "beacon-session-start Skill の検証・調整",
+          "date": "2026-05-09",
+          "created_at": "2026-05-09",
+          "done_at": null,
+          "status": "todo",
+          "meta": {}
+        },
+        {
+          "id": "e-36",
+          "type": "task",
+          "description": "beacon-log Skill の作成",
+          "date": "2026-05-09",
+          "created_at": "2026-05-09",
+          "done_at": null,
+          "status": "todo",
+          "meta": {},
+          "detail": "## 設計方針: ツール主導・Claude生成組み込み\n\nbeacon log の2段階呼び出しをラップする薄いSkill。\n\n### ワークフロー\n1. beacon log --prepare を Bash で実行 → 判断材料JSON取得\n   - コミット情報、MS状態、タスク消化率、直近エントリ\n2. JSON をもとに Claude が以下を生成:\n   - 進捗率（0-100）: MSの目標に対する定性評価\n   - サマリー: 次セッションで知るべき背景・経緯・判断\n3. beacon log --finalize --progress N --summary 'text' を Bash で実行\n\n### Skill の責務\n- prepare の実行と finalize への橋渡しのみ\n- 判断ロジックはツール（prepare が何を出すか）とプロンプト（固定テンプレ）に委譲\n- Skill 自体にビジネスロジックを持たない"
+        },
+        {
+          "id": "e-37",
+          "type": "task",
+          "description": "beacon-task Skill の作成",
+          "date": "2026-05-09",
+          "created_at": "2026-05-09",
+          "done_at": null,
+          "status": "todo",
+          "meta": {}
+        },
+        {
+          "id": "e-38",
+          "type": "task",
+          "description": "beacon-session-end Skill の作成",
+          "date": "2026-05-09",
+          "created_at": "2026-05-09",
+          "done_at": null,
+          "status": "todo",
+          "meta": {}
+        },
+        {
+          "id": "e-39",
+          "type": "task",
+          "description": "CLAUDE.md の beacon セクション縮小（Skill移行後）",
+          "date": "2026-05-09",
+          "created_at": "2026-05-09",
+          "done_at": null,
+          "status": "todo",
+          "meta": {}
         }
       ]
     }
