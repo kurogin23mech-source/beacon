@@ -114,6 +114,14 @@ cmd_log() {
         esac
     done
 
+    # Block if there are uncommitted changes (staged or unstaged)
+    if ! git diff --quiet HEAD 2>/dev/null; then
+        echo "Error: uncommitted changes detected."
+        echo "Commit your changes first, then run beacon log."
+        echo "  (To record a note without a commit, use: beacon task add \"description\")"
+        exit 1
+    fi
+
     local hash message date_str
     hash=$(git rev-parse --short HEAD)
     message=$(git log -1 --pretty=%s)
@@ -145,6 +153,7 @@ cmd_task_add() {
     local ms_id=""
     local entry_type="task"
     local description=""
+    local detail=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -154,6 +163,10 @@ cmd_task_add() {
                 ;;
             -t)
                 entry_type="${2:-}"
+                shift 2
+                ;;
+            -d)
+                detail="${2:-}"
                 shift 2
                 ;;
             *)
@@ -168,7 +181,30 @@ cmd_task_add() {
 
     BEACON_DESCRIPTION="$description" BEACON_MS_ID="$ms_id" \
         BEACON_TYPE="$entry_type" BEACON_DATE="$date_str" \
+        BEACON_DETAIL="$detail" \
         python3 "$COMMANDS_PY" task_add
+}
+
+cmd_task_show() {
+    ensure_project
+    local entry_id="${1:-}"
+    if [ -z "$entry_id" ]; then
+        echo "Usage: beacon task show <entry-id>"
+        exit 1
+    fi
+    BEACON_ENTRY_ID="$entry_id" python3 "$COMMANDS_PY" task_show
+}
+
+cmd_task_detail() {
+    ensure_project
+    local entry_id="${1:-}"
+    local detail="${2:-}"
+    if [ -z "$entry_id" ]; then
+        echo "Usage: beacon task detail <entry-id> [detail-text]"
+        exit 1
+    fi
+    BEACON_ENTRY_ID="$entry_id" BEACON_DETAIL="$detail" \
+        python3 "$COMMANDS_PY" task_detail
 }
 
 cmd_task_done() {
@@ -261,6 +297,10 @@ cmd_launch() {
     # Dashboard starts in the split pane which already has the correct size.
     tmux new-session -d -s "$session_name" -c "$work_dir"
 
+    # Enable mouse scroll and increase scrollback buffer
+    tmux set-option -t "$session_name" -g mouse on
+    tmux set-option -t "$session_name" -g history-limit 10000
+
     # Create dashboard pane to the LEFT of the shell pane
     tmux split-window -hbd -t "$session_name" -c "$work_dir" \
         -l "${dashboard_pct}%" \
@@ -321,8 +361,15 @@ case "${1:-}" in
                 shift 2
                 cmd_task_list "$@"
                 ;;
+            show)
+                cmd_task_show "${3:-}"
+                ;;
+            detail)
+                shift 2
+                cmd_task_detail "$@"
+                ;;
             *)
-                echo "Usage: beacon task [add|done|list] [-m <ms-id>] [-t <type>] [description]"
+                echo "Usage: beacon task [add|done|list|show|detail] [-m <ms-id>] [-t <type>] [-d <detail>] [description]"
                 ;;
         esac
         ;;

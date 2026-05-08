@@ -7,19 +7,103 @@ import subprocess
 import sys
 
 
+VALID_STATUSES = {"todo", "in_progress", "in_review", "waiting", "done"}
+VALID_ENTRY_TYPES = {"commit", "task", "note"}
+
+
 def get_project_file():
     return os.environ.get("BEACON_PROJECT_FILE", ".beacon/project.json")
 
 
+def validate_project(data):
+    """Validate project.json schema. Raises ValueError on invalid data."""
+    if not isinstance(data, dict):
+        raise ValueError("project.json must be a JSON object")
+    for key in ("name", "milestones"):
+        if key not in data:
+            raise ValueError(f"Missing required field: {key}")
+    if not isinstance(data["milestones"], list):
+        raise ValueError("milestones must be an array")
+
+    for ms in data["milestones"]:
+        if "tasks" in ms:
+            raise ValueError(
+                f"Milestone '{ms.get('id', '?')}' uses 'tasks' field. "
+                "Use 'entries' instead. Do NOT edit project.json directly — use beacon CLI."
+            )
+        if ms.get("status") and ms["status"] not in VALID_STATUSES:
+            raise ValueError(
+                f"Milestone '{ms.get('id', '?')}' has invalid status '{ms['status']}'. "
+                f"Valid: {', '.join(sorted(VALID_STATUSES))}"
+            )
+        for entry in ms.get("entries", []):
+            _validate_entry(entry, ms.get("id", "?"))
+
+
+def _validate_entry(entry, ms_id):
+    """Recursively validate an entry and its children."""
+    if entry.get("type") and entry["type"] not in VALID_ENTRY_TYPES:
+        raise ValueError(
+            f"Entry '{entry.get('id', '?')}' in {ms_id} has invalid type '{entry['type']}'. "
+            f"Valid: {', '.join(sorted(VALID_ENTRY_TYPES))}"
+        )
+    if entry.get("status") and entry["status"] not in VALID_STATUSES:
+        raise ValueError(
+            f"Entry '{entry.get('id', '?')}' in {ms_id} has invalid status '{entry['status']}'. "
+            f"Valid: {', '.join(sorted(VALID_STATUSES))}"
+        )
+    for child in entry.get("entries", []):
+        _validate_entry(child, ms_id)
+
+
 def load_project():
     with open(get_project_file(), "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    validate_project(data)
+    return data
 
 
 def save_project(data):
+    validate_project(data)
     with open(get_project_file(), "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")
+
+
+CLAUDE_MD_BEACON_SECTION = """\
+
+## Beacon プロジェクト管理
+
+プロジェクト進捗は `.beacon/project.json` を参照。セッション開始時やコミット時に確認すること。
+
+- **`.beacon/project.json` を直接編集してはいけない。必ず beacon CLI コマンドを使うこと**
+  - マイルストーン追加: `beacon milestone add`
+  - タスク追加: `beacon task add "説明" -m <ms-id>`
+  - タスク完了: `beacon task done <entry-id>`
+  - 進捗記録: `beacon log "概要"`
+  - 同期: `beacon sync`
+- 実装を開始する前に、必ず `.beacon/project.json` のマイルストーン一覧を確認し、「この作業はどのマイルストーンに向かうものか」をユーザーに確認すること
+- コミット後は `beacon log "概要"` でアクティブマイルストーンに記録する
+- 同じ課題に2回以上コミットが発生したら、タスクにまとめることを提案する
+- マイルストーンの追加・完了は `beacon milestone` コマンドで管理する
+"""
+
+
+def _append_claude_md():
+    """Append beacon section to CLAUDE.md if not already present."""
+    claude_md = "CLAUDE.md"
+    marker = "## Beacon プロジェクト管理"
+
+    content = ""
+    if os.path.exists(claude_md):
+        with open(claude_md, "r", encoding="utf-8") as f:
+            content = f.read()
+        if marker in content:
+            return  # Already present
+
+    with open(claude_md, "a", encoding="utf-8") as f:
+        f.write(CLAUDE_MD_BEACON_SECTION)
+    print(f"Updated {claude_md} with beacon rules")
 
 
 def cmd_init():
@@ -31,6 +115,7 @@ def cmd_init():
     with open(pf, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")
+    _append_claude_md()
     print(f"Created {pf}")
     print("Next: beacon milestone add")
 
@@ -283,13 +368,14 @@ def cmd_task_add():
     ms_id = os.environ.get("BEACON_MS_ID", "")
     entry_type = os.environ.get("BEACON_TYPE", "task")
     date = os.environ.get("BEACON_DATE", "")
+    detail = os.environ.get("BEACON_DETAIL", "")
 
     data = load_project()
     target = find_target_milestone(data, ms_id)
 
     entries = target.setdefault("entries", [])
     eid = next_entry_id(data)
-    entries.append({
+    entry = {
         "id": eid,
         "type": entry_type,
         "description": description,
@@ -298,7 +384,10 @@ def cmd_task_add():
         "done_at": None,
         "status": "todo",
         "meta": {},
-    })
+    }
+    if detail:
+        entry["detail"] = detail
+    entries.append(entry)
     save_project(data)
     print(f"Added {entry_type} [{eid}] to {target['title']}: {description}")
 
@@ -341,6 +430,45 @@ def cmd_task_list():
         icon = icons.get(entry.get("status", "todo"), "?")
         etype = entry.get("type", "?")
         print(f"  {icon} [{entry['id']}] ({etype}) {entry['description']}")
+
+
+def cmd_task_show():
+    entry_id = os.environ.get("BEACON_ENTRY_ID", "")
+    data = load_project()
+    result = find_entry(data, entry_id)
+    if not result:
+        print(f"Entry not found: {entry_id}")
+        sys.exit(1)
+    ms, _, entry, _ = result
+    icons = {"done": "\u25cf", "todo": "\u25cb", "in_progress": "\u25d0",
+             "waiting": "\u25cc", "in_review": "\u25d1"}
+    icon = icons.get(entry.get("status", "todo"), "?")
+    print(f"{icon} [{entry['id']}] {entry.get('description', '')}")
+    print(f"  Milestone: [{ms['id']}] {ms['title']}")
+    print(f"  Type: {entry.get('type', '?')}  Status: {entry.get('status', '?')}")
+    print(f"  Created: {entry.get('created_at', '-')}  Done: {entry.get('done_at', '-')}")
+    detail = entry.get("detail", "")
+    if detail:
+        print(f"\n{detail}")
+    else:
+        print("\n(no detail)")
+
+
+def cmd_task_detail():
+    entry_id = os.environ.get("BEACON_ENTRY_ID", "")
+    detail = os.environ.get("BEACON_DETAIL", "")
+    data = load_project()
+    result = find_entry(data, entry_id)
+    if not result:
+        print(f"Entry not found: {entry_id}")
+        sys.exit(1)
+    _, _, entry, _ = result
+    if detail:
+        entry["detail"] = detail
+        save_project(data)
+        print(f"Updated detail for [{entry_id}] {entry.get('description', '')}")
+    else:
+        print(entry.get("detail", "(no detail)"))
 
 
 def cmd_entry_move():
@@ -406,6 +534,8 @@ if __name__ == "__main__":
         "task_add": cmd_task_add,
         "task_done": cmd_task_done,
         "task_list": cmd_task_list,
+        "task_show": cmd_task_show,
+        "task_detail": cmd_task_detail,
         "entry_move": cmd_entry_move,
         "summary": cmd_summary,
     }

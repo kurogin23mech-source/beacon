@@ -95,10 +95,13 @@ class Dashboard:
         self.project = None
         self.last_hash = None
         self.scroll_offset = 0
-        self.cursor_pos = 0  # Which milestone is selected
+        self.cursor_pos = 0  # Index into self.selectable
         self.expanded = set()  # Set of milestone indices that are expanded
+        self.expanded_entries = set()  # Set of entry IDs whose detail is shown
         self.header_lines = []  # Fixed header lines
         self.lines = []  # Scrollable body lines
+        self.selectable = []  # List of (line_index, kind, key) for navigable rows
+        # kind: "milestone" (key=ms_index) or "entry" (key=entry_id)
 
     def reload_if_changed(self):
         """Reload project data if file changed."""
@@ -114,10 +117,18 @@ class Dashboard:
             return True
         return False
 
+    def _add_line(self, lines, text, style, selectable_kind=None, selectable_key=None):
+        """Append a line and optionally register it as selectable."""
+        line_index = len(lines)
+        lines.append((text, style))
+        if selectable_kind is not None:
+            self.selectable.append((line_index, selectable_kind, selectable_key))
+
     def build_lines(self, width):
         """Build the display lines from project data."""
         header_lines = []
         body_lines = []
+        self.selectable = []
         if not self.project:
             header_lines.append(("  Waiting for project...", curses.A_NORMAL))
             header_lines.append(("  Run: beacon init", curses.A_NORMAL))
@@ -169,7 +180,6 @@ class Dashboard:
             progress = ms.get("progress", 0)
             target = ms.get("target_date", "")
             is_active = status == "in_progress"
-            is_selected = i == self.cursor_pos
             is_expanded = i in self.expanded
 
             # Status icon
@@ -189,15 +199,14 @@ class Dashboard:
             id_col = f"{ms_id:<6}"
             ms_line = f"  {connector} {icon} {id_col} {title}{marker}{expand_hint}"
 
-            if is_selected:
-                style = "selected_active" if is_active else "selected"
-            elif is_active:
+            # Style - determined during draw based on cursor position
+            if is_active:
                 style = "active"
             elif status == "done":
                 style = "done"
             else:
                 style = "todo"
-            lines.append((ms_line, style))
+            self._add_line(lines, ms_line, style, "milestone", i)
 
             # Progress bar - scales with terminal width
             date_info = f"  目標: {target}" if target else ""
@@ -213,7 +222,7 @@ class Dashboard:
             # Entries (if expanded)
             entries = ms.get("entries", [])
             if is_expanded and entries:
-                self._render_entries(lines, entries, f"  {child_prefix}  ")
+                self._render_entries(lines, entries, f"  {child_prefix}  ", width)
             elif entries and not is_expanded:
                 total = self._count_entries(entries)
                 lines.append((f"  {child_prefix}  {total} entries", curses.A_NORMAL))
@@ -228,15 +237,33 @@ class Dashboard:
         now = time.strftime("%H:%M:%S")
         lines.append((f"  {now}  |  ↑↓:move  Enter:expand  q:quit", curses.A_NORMAL))
 
+        # Clamp cursor_pos to valid range
+        if self.selectable:
+            self.cursor_pos = max(0, min(self.cursor_pos, len(self.selectable) - 1))
+
+        # Apply cursor highlight to the selected line
+        if self.selectable:
+            sel_line_idx, sel_kind, sel_key = self.selectable[self.cursor_pos]
+            text, base_style = lines[sel_line_idx]
+            if sel_kind == "milestone":
+                ms_status = milestones[sel_key].get("status", "todo")
+                is_active = ms_status == "in_progress"
+                lines[sel_line_idx] = (text, "selected_active" if is_active else "selected")
+            else:
+                lines[sel_line_idx] = (text, "selected")
+
         # Wrap body lines to fit terminal width
+        # Track which pre-wrap line index maps to which wrapped line index
         wrapped = []
-        for text, style in lines:
+        self._line_index_map = {}  # pre-wrap index -> first wrapped index
+        for orig_idx, (text, style) in enumerate(lines):
+            self._line_index_map[orig_idx] = len(wrapped)
             for wl in wrap_line(text, width - 1):
                 wrapped.append((wl, style))
 
         self.lines = wrapped
 
-    def _render_entries(self, lines, entries, prefix, depth=0):
+    def _render_entries(self, lines, entries, prefix, width, depth=0):
         """Render entries recursively, supporting nested task→commit grouping."""
         for j, entry in enumerate(entries):
             is_last_e = j == len(entries) - 1
@@ -244,6 +271,9 @@ class Dashboard:
             e_type = entry.get("type", "?")
             e_desc = entry.get("description", "")
             e_status = entry.get("status", "todo")
+            e_id = entry.get("id", "")
+            has_detail = bool(entry.get("detail", ""))
+            detail_expanded = e_id in self.expanded_entries
 
             created = entry.get("created_at", entry.get("date", ""))
             done = entry.get("done_at", "")
@@ -253,24 +283,41 @@ class Dashboard:
             elif date_str:
                 date_str += ")"
 
+            detail_hint = " [▼]" if detail_expanded else " [▶]" if has_detail else ""
+
             if e_type == "commit":
                 meta = entry.get("meta", {})
                 e_hash = meta.get("hash", "")[:7]
                 hash_col = f"{e_hash:<7}"
-                e_line = f"{prefix}{e_connector} {hash_col}  {e_desc}{date_str}"
-                lines.append((e_line, "commit"))
+                e_line = f"{prefix}{e_connector} {hash_col}  {e_desc}{detail_hint}{date_str}"
+                if has_detail:
+                    self._add_line(lines, e_line, "commit", "entry", e_id)
+                else:
+                    lines.append((e_line, "commit"))
             else:
                 s_mark = "●" if e_status == "done" else "○"
                 children = entry.get("entries", [])
                 child_hint = f" ({len(children)})" if children else ""
                 type_col = f"[{e_type:<6}]"
-                e_line = f"{prefix}{e_connector} {s_mark} {type_col} {e_desc}{child_hint}{date_str}"
-                lines.append((e_line, "task" if e_status == "done" else curses.A_NORMAL))
+                e_line = f"{prefix}{e_connector} {s_mark} {type_col} {e_desc}{child_hint}{detail_hint}{date_str}"
+                style = "task" if e_status == "done" else curses.A_NORMAL
+                if has_detail:
+                    self._add_line(lines, e_line, style, "entry", e_id)
+                else:
+                    lines.append((e_line, style))
 
                 # Render nested entries under this task
                 if children:
                     nest_prefix = prefix + ("   " if is_last_e else "│  ")
-                    self._render_entries(lines, children, nest_prefix, depth + 1)
+                    self._render_entries(lines, children, nest_prefix, width, depth + 1)
+
+            # Render detail block if expanded
+            if detail_expanded and has_detail:
+                detail_text = entry.get("detail", "")
+                detail_prefix = prefix + ("   " if is_last_e else "│  ")
+                for detail_line in detail_text.split("\n"):
+                    for wl in wrap_line(f"{detail_prefix}  {detail_line}", width - 1):
+                        lines.append((wl, "detail"))
 
     @staticmethod
     def _count_entries(entries):
@@ -283,8 +330,12 @@ class Dashboard:
 
     def handle_key(self, key):
         """Handle keyboard input. Returns False to quit."""
-        milestones = self.project.get("milestones", []) if self.project else []
-        ms_count = len(milestones)
+        if not self.selectable:
+            if key in (ord('q'), ord('Q')):
+                return False
+            return True
+
+        sel_count = len(self.selectable)
 
         if key in (ord('q'), ord('Q')):
             return False
@@ -292,13 +343,20 @@ class Dashboard:
             if self.cursor_pos > 0:
                 self.cursor_pos -= 1
         elif key in (curses.KEY_DOWN, ord('j')):
-            if self.cursor_pos < ms_count - 1:
+            if self.cursor_pos < sel_count - 1:
                 self.cursor_pos += 1
         elif key in (curses.KEY_ENTER, 10, 13, ord(' ')):
-            if self.cursor_pos in self.expanded:
-                self.expanded.discard(self.cursor_pos)
-            else:
-                self.expanded.add(self.cursor_pos)
+            _, kind, sel_key = self.selectable[self.cursor_pos]
+            if kind == "milestone":
+                if sel_key in self.expanded:
+                    self.expanded.discard(sel_key)
+                else:
+                    self.expanded.add(sel_key)
+            elif kind == "entry":
+                if sel_key in self.expanded_entries:
+                    self.expanded_entries.discard(sel_key)
+                else:
+                    self.expanded_entries.add(sel_key)
         return True
 
     def draw(self, stdscr):
@@ -318,6 +376,7 @@ class Dashboard:
         curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_YELLOW) # selected_active
         curses.init_pair(8, curses.COLOR_WHITE, curses.COLOR_BLUE)   # header
         curses.init_pair(9, curses.COLOR_BLUE, -1)      # task
+        curses.init_pair(10, curses.COLOR_CYAN, -1)    # detail
 
         style_map = {
             "header": curses.color_pair(8) | curses.A_BOLD,
@@ -329,6 +388,7 @@ class Dashboard:
             "progress": curses.color_pair(3),
             "commit": curses.color_pair(5),
             "task": curses.color_pair(9),
+            "detail": curses.color_pair(10),
             "selected": curses.color_pair(6),
             "selected_active": curses.color_pair(7) | curses.A_BOLD,
         }
@@ -404,19 +464,13 @@ class Dashboard:
                     break
 
     def _adjust_scroll(self, height):
-        """Ensure the selected milestone is visible."""
-        # Find approximate line of current cursor milestone in the lines buffer
-        # Simple heuristic: scan for the milestone line
-        milestones = self.project.get("milestones", []) if self.project else []
-        if not milestones:
+        """Ensure the selected item is visible."""
+        if not self.selectable:
             return
 
-        target_id = milestones[self.cursor_pos].get("id", "")
-        target_line = 0
-        for i, (text, _) in enumerate(self.lines):
-            if target_id and target_id in text:
-                target_line = i
-                break
+        # Find the wrapped line index of the selected item
+        sel_line_idx, _, _ = self.selectable[self.cursor_pos]
+        target_line = self._line_index_map.get(sel_line_idx, 0)
 
         # Adjust scroll so target is visible (with some margin)
         margin = 3

@@ -1,7 +1,7 @@
 {
   "name": "Beacon",
   "objective": "AI駆動開発においてマイルストーンベースのプロジェクト進捗を常時可視化し、開発者が方向性を見失わずに実装を進められるツールを構築する",
-  "summary": "実行中: ms-4(細かいUXを調整して使いやすくする・フェイズ0, 60%)。直近: ヘッダー非表示修正(endwin/refresh)、プログレスバースケーリング、Ambiguous幅対応",
+  "summary": "実行中: ms-2(マイルストーンの進捗エビデンス構造を決められるようにする, 100%)。直近: エントリのネストグルーピング機能（task下にcommit/taskをぶら下げ）",
   "milestones": [
     {
       "id": "ms-1",
@@ -26,7 +26,7 @@
     {
       "id": "ms-2",
       "title": "マイルストーンの進捗エビデンス構造を決められるようにする",
-      "status": "in_progress",
+      "status": "todo",
       "progress": 100,
       "target_date": null,
       "entries": [
@@ -37,6 +37,19 @@
           "date": "2026-05-07",
           "status": "done",
           "meta": {}
+        },
+        {
+          "id": "e-21",
+          "type": "commit",
+          "description": "エントリのネストグルーピング機能（task下にcommit/taskをぶら下げ）",
+          "date": "2026-05-07",
+          "created_at": "2026-05-07",
+          "done_at": "2026-05-07",
+          "status": "done",
+          "meta": {
+            "hash": "fb3c8b2",
+            "message": "Add nested entry grouping: tasks can contain child entries"
+          }
         }
       ]
     },
@@ -261,6 +274,26 @@
               "meta": {}
             }
           ]
+        }
+      ]
+    },
+    {
+      "id": "ms-5",
+      "title": "全体的な挙動の安定化・ブラッシュアップ",
+      "status": "in_progress",
+      "target_date": "",
+      "commits": [],
+      "entries": [
+        {
+          "id": "e-22",
+          "type": "task",
+          "description": "beacon log/task doneがコミット前でも実行でき、誤ったコミットに紐づく問題",
+          "date": "2026-05-08",
+          "created_at": "2026-05-08",
+          "done_at": null,
+          "status": "todo",
+          "meta": {},
+          "detail": "## 再現手順\n1. コード修正を行う（git addもcommitもしない）\n2. `beacon task done e-X` → タスクが完了になる\n3. `beacon log \"修正内容\"` → 直前のコミット（修正と無関係）にログが紐づく\n4. その後コミットしても、beaconログとの紐づけがずれたまま\n\n## 期待動作\n- `beacon log`: ワーキングツリーにuncommittedな変更がある場合、警告を出す\n  - 例: \"Warning: uncommitted changes detected. Log may be tied to wrong commit.\"\n- `beacon task done`: タスク完了時に、関連する変更がコミットされているか検証する（オプション）\n  - あるいは、コミットハッシュ紐づけを任意にする\n\n## 影響\nprofile-extractorで実際に発生。3件のバグ修正のbeaconログが修正前のコミット4d99cbfに紐づいてしまった。\nコミット後に再度logを実行して正しいコミット9a44312に紐づけ直す手間が発生。"
         }
       ]
     }
