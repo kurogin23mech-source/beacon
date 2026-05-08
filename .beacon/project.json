@@ -1,7 +1,7 @@
 {
   "name": "Beacon",
   "objective": "AI駆動開発においてマイルストーンベースのプロジェクト進捗を常時可視化し、開発者が方向性を見失わずに実装を進められるツールを構築する",
-  "summary": "Skill化方針が確定。beacon CLI を CRUD整備（--json対応、update/delete追加、論理削除）→ Skill（session-start/log/task/session-end）で Claude Code の操作を固定化する方向。beacon-session-start Skill v0.3 と CLI --json 出力は実装済み。ms-5の既存タスクはms-8に引き継ぎつつ残置。進捗率・summary自動更新もSkillのワークフローに組み込む設計。",
+  "summary": "直近の流れ: beacon-log Skill の作成 → beacon-task Skill の作成 → beacon-session-end Skill の作成 → CLAUDE.md の beacon セクション縮小（Skill移行後） → CLI --json出力、long option対応、ms-8 Skill化アーキテクチャ設計",
   "milestones": [
     {
       "id": "ms-1",
@@ -426,7 +426,22 @@
           "done_at": null,
           "status": "todo",
           "meta": {},
-          "detail": "## 対象サブコマンド\n### milestone\n- show <id> [--json]: 単一MS詳細\n- update <id> [--progress N] [--title T] [--target-date D] [--json]: 任意フィールド更新\n- delete <id> [--json]: 論理削除（status→cancelled）\n\n### task\n- update <id> [--status S] [--description D] [--json]: 任意フィールド更新\n- delete <id> [--json]: 論理削除（status→cancelled）\n\n### 既存コマンドの--json対応追加\n- task show --json\n- log --json\n\n### 2段階呼び出し（--prepare / --finalize）\n- beacon log --prepare: コミット情報+MS状態+タスク消化率をJSONで出力（書き込みしない）\n- beacon log --finalize --progress N --summary 'text': Claude生成結果を受けて書き込み\n- 同様に beacon summary --prepare / --finalize も検討\n\n### 全コマンド共通\n- --json フラグで構造化出力\n- long option 対応（--ms, --progress, --type, --detail 等）"
+          "detail": "## 対象サブコマンド\n### milestone\n- show <id> [--json]: 単一MS詳細\n- update <id> [--progress N] [--title T] [--target-date D] [--json]: 任意フィールド更新\n- delete <id> [--json]: 論理削除（status→cancelled）\n\n### task\n- update <id> [--status S] [--description D] [--json]: 任意フィールド更新\n- delete <id> [--json]: 論理削除（status→cancelled）\n\n### 既存コマンドの--json対応追加\n- task show --json\n- log --json\n\n### 2段階呼び出し（--prepare / --finalize）\n- beacon log --prepare: コミット情報+MS状態+タスク消化率をJSONで出力（書き込みしない）\n- beacon log --finalize --progress N --summary 'text': Claude生成結果を受けて書き込み\n- 同様に beacon summary --prepare / --finalize も検討\n\n### 全コマンド共通\n- --json フラグで構造化出力\n- long option 対応（--ms, --progress, --type, --detail 等）",
+          "entries": [
+            {
+              "id": "e-40",
+              "type": "commit",
+              "description": "CLI --json出力、long option対応、ms-8 Skill化アーキテクチャ設計",
+              "date": "2026-05-09",
+              "created_at": "2026-05-09",
+              "done_at": "2026-05-09",
+              "status": "done",
+              "meta": {
+                "hash": "0e52de8",
+                "message": "Add --json output to CLI, long option support, and plan ms-8 Skill architecture"
+              }
+            }
+          ]
         },
         {
           "id": "e-33",
@@ -499,7 +514,8 @@
           "status": "todo",
           "meta": {}
         }
-      ]
+      ],
+      "progress": 15
     }
   ]
 }
