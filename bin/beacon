@@ -39,11 +39,16 @@ cmd_init() {
         exit 1
     fi
 
-    echo "Beacon - Project Initialization"
-    echo "================================"
-    echo ""
-    read -rp "Project name: " name
-    read -rp "Project objective: " objective
+    local name="${1:-}"
+    local objective="${2:-}"
+
+    if [ -z "$name" ]; then
+        echo "Beacon - Project Initialization"
+        echo "================================"
+        echo ""
+        read -rp "Project name: " name
+        read -rp "Project objective: " objective
+    fi
 
     BEACON_NAME="$name" BEACON_OBJECTIVE="$objective" \
         python3 "$COMMANDS_PY" init
@@ -51,10 +56,30 @@ cmd_init() {
 
 cmd_milestone_add() {
     ensure_project
-    echo "Add Milestone"
-    echo "============="
-    read -rp "Title: " title
-    read -rp "Target date (YYYY-MM-DD): " target_date
+    local title=""
+    local target_date=""
+
+    # Parse arguments: beacon milestone add "title" [-d target_date]
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -d)
+                target_date="${2:-}"
+                shift 2
+                ;;
+            *)
+                title="$1"
+                shift
+                ;;
+        esac
+    done
+
+    # Fall back to interactive if no title given
+    if [ -z "$title" ]; then
+        echo "Add Milestone"
+        echo "============="
+        read -rp "Title: " title
+        read -rp "Target date (YYYY-MM-DD): " target_date
+    fi
 
     BEACON_TITLE="$title" BEACON_TARGET_DATE="$target_date" \
         python3 "$COMMANDS_PY" milestone_add
@@ -282,39 +307,77 @@ cmd_status() {
 cmd_launch() {
     ensure_project
 
-    local session_name="beacon-$(basename "$(pwd)")"
     local abs_project
     abs_project="$(cd "$(dirname "$BEACON_PROJECT_FILE")" && pwd)/$(basename "$BEACON_PROJECT_FILE")"
     local work_dir
     work_dir="$(pwd)"
+    # Use full path hash to avoid name collisions between dirs with same basename
+    local dir_hash
+    dir_hash=$(echo -n "$work_dir" | md5 -q 2>/dev/null || echo -n "$work_dir" | md5sum | cut -d' ' -f1)
+    local session_name="beacon-${dir_hash:0:8}"
     local dashboard_pct="${BEACON_DASHBOARD_WIDTH:-33}"
-    local work_pct=$((100 - dashboard_pct))
 
-    # Kill existing session if any
-    tmux kill-session -t "$session_name" 2>/dev/null || true
+    # If already inside this beacon session, restart dashboard pane if needed
+    if [ "${TMUX:-}" ]; then
+        local current_session
+        current_session=$(tmux display-message -p '#{session_name}' 2>/dev/null)
+        if [ "$current_session" = "$session_name" ]; then
+            # Already inside this session — check if dashboard pane exists
+            local pane_count
+            pane_count=$(tmux list-panes -t "$session_name" 2>/dev/null | wc -l | tr -d ' ')
+            if [ "$pane_count" -lt 2 ]; then
+                echo "Restarting dashboard pane..."
+                tmux split-window -hbd -t "$session_name" -c "$work_dir" \
+                    -l "${dashboard_pct}%" \
+                    "python3 '$DASHBOARD_PY' '$abs_project'"
+                tmux select-pane -t "$session_name:.1"
+            else
+                echo "Beacon is already running."
+            fi
+            return 0
+        fi
+    fi
 
-    # Create session with working shell, then split-left for dashboard.
-    # Dashboard starts in the split pane which already has the correct size.
+    # If session already exists, just re-attach
+    if tmux has-session -t "$session_name" 2>/dev/null; then
+        echo "Re-attaching to existing beacon session."
+        if [ "${TMUX:-}" ]; then
+            tmux switch-client -t "$session_name"
+        else
+            tmux attach-session -t "$session_name"
+        fi
+        return 0
+    fi
+
+    # Create new session
     tmux new-session -d -s "$session_name" -c "$work_dir"
 
-    # Enable mouse scroll and increase scrollback buffer
-    tmux set-option -t "$session_name" -g mouse on
-    tmux set-option -t "$session_name" -g history-limit 10000
+    # Session-specific settings (no -g flag to avoid polluting other sessions)
+    tmux set-option -t "$session_name" history-limit 10000
 
     # Create dashboard pane to the LEFT of the shell pane
+    # When dashboard exits (q), kill the entire session to clean up
     tmux split-window -hbd -t "$session_name" -c "$work_dir" \
         -l "${dashboard_pct}%" \
-        "python3 '$DASHBOARD_PY' '$abs_project'"
+        "python3 '$DASHBOARD_PY' '$abs_project'; tmux kill-session -t '$session_name' 2>/dev/null"
 
     # Re-apply ratio on window resize (no quotes around % value for tmux to parse it)
     tmux set-hook -t "$session_name" after-resize-window \
         "resize-pane -t ${session_name}:.0 -x ${dashboard_pct}%"
 
+    # When shell pane exits (exit/ctrl-d), also kill session
+    tmux set-hook -t "$session_name" pane-exited \
+        "kill-session"
+
     # Focus on the right (working) pane
     tmux select-pane -t "$session_name:.1"
 
-    # Attach
-    tmux attach-session -t "$session_name"
+    # Attach (use switch-client if already inside tmux)
+    if [ "${TMUX:-}" ]; then
+        tmux switch-client -t "$session_name"
+    else
+        tmux attach-session -t "$session_name"
+    fi
 }
 
 # --- Main dispatch ---
@@ -323,14 +386,15 @@ case "${1:-}" in
         cmd_launch
         ;;
     init)
-        cmd_init
+        shift
+        cmd_init "$@"
         ;;
     status)
         cmd_status
         ;;
     milestone|ms)
         case "${2:-}" in
-            add)    cmd_milestone_add ;;
+            add)    shift 2; cmd_milestone_add "$@" ;;
             list|ls) cmd_milestone_list ;;
             start)  cmd_milestone_start "${3:-}" ;;
             done)   cmd_milestone_done "${3:-}" ;;

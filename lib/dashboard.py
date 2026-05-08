@@ -137,7 +137,9 @@ class Dashboard:
             return
 
         # Header (fixed at top)
-        header_lines.append((" BEACON ", "header"))
+        name = self.project.get("name", "")
+        header_title = f" BEACON | {name} " if name else " BEACON "
+        header_lines.append((header_title, "header"))
         header_lines.append(("", 0))
 
         # Objective
@@ -273,7 +275,9 @@ class Dashboard:
             e_status = entry.get("status", "todo")
             e_id = entry.get("id", "")
             has_detail = bool(entry.get("detail", ""))
-            detail_expanded = e_id in self.expanded_entries
+            children = entry.get("entries", []) if e_type != "commit" else []
+            is_expandable = has_detail or bool(children)
+            entry_expanded = e_id in self.expanded_entries
 
             created = entry.get("created_at", entry.get("date", ""))
             done = entry.get("done_at", "")
@@ -283,36 +287,35 @@ class Dashboard:
             elif date_str:
                 date_str += ")"
 
-            detail_hint = " [▼]" if detail_expanded else " [▶]" if has_detail else ""
+            expand_hint = ""
+            if is_expandable:
+                expand_hint = " [−]" if entry_expanded else " [+]"
 
             if e_type == "commit":
                 meta = entry.get("meta", {})
                 e_hash = meta.get("hash", "")[:7]
                 hash_col = f"{e_hash:<7}"
-                e_line = f"{prefix}{e_connector} {hash_col}  {e_desc}{detail_hint}{date_str}"
-                if has_detail:
+                e_line = f"{prefix}{e_connector} {hash_col}  {e_desc}{expand_hint}{date_str}"
+                if is_expandable:
                     self._add_line(lines, e_line, "commit", "entry", e_id)
                 else:
                     lines.append((e_line, "commit"))
             else:
                 s_mark = "●" if e_status == "done" else "○"
-                children = entry.get("entries", [])
-                child_hint = f" ({len(children)})" if children else ""
+                child_count = f" ({len(children)})" if children else ""
                 type_col = f"[{e_type:<6}]"
-                e_line = f"{prefix}{e_connector} {s_mark} {type_col} {e_desc}{child_hint}{detail_hint}{date_str}"
+                e_line = f"{prefix}{e_connector} {s_mark} {type_col} {e_desc}{child_count}{expand_hint}{date_str}"
                 style = "task" if e_status == "done" else curses.A_NORMAL
-                if has_detail:
-                    self._add_line(lines, e_line, style, "entry", e_id)
-                else:
-                    lines.append((e_line, style))
+                # All task entries are selectable (expandable ones toggle, others just highlight)
+                self._add_line(lines, e_line, style, "entry", e_id)
 
-                # Render nested entries under this task
-                if children:
+                # Render nested entries under this task (only when expanded)
+                if children and entry_expanded:
                     nest_prefix = prefix + ("   " if is_last_e else "│  ")
                     self._render_entries(lines, children, nest_prefix, width, depth + 1)
 
             # Render detail block if expanded
-            if detail_expanded and has_detail:
+            if entry_expanded and has_detail:
                 detail_text = entry.get("detail", "")
                 detail_prefix = prefix + ("   " if is_last_e else "│  ")
                 for detail_line in detail_text.split("\n"):

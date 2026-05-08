@@ -77,15 +77,19 @@ CLAUDE_MD_BEACON_SECTION = """\
 プロジェクト進捗は `.beacon/project.json` を参照。セッション開始時やコミット時に確認すること。
 
 - **`.beacon/project.json` を直接編集してはいけない。必ず beacon CLI コマンドを使うこと**
-  - マイルストーン追加: `beacon milestone add`
+  - マイルストーン追加: `beacon milestone add "タイトル" [-d 目標日]`
   - タスク追加: `beacon task add "説明" -m <ms-id>`
   - タスク完了: `beacon task done <entry-id>`
   - 進捗記録: `beacon log "概要"`
   - 同期: `beacon sync`
 - 実装を開始する前に、必ず `.beacon/project.json` のマイルストーン一覧を確認し、「この作業はどのマイルストーンに向かうものか」をユーザーに確認すること
-- コミット後は `beacon log "概要"` でアクティブマイルストーンに記録する
+- コミット後は `beacon log "概要" -p <進捗率>` でアクティブマイルストーンに記録する
+  - 進捗率は必ず付ける。タスク消化率ではなく、マイルストーンの目標に対してどれくらい進んだかを定性的に評価して0-100で指定する
 - 同じ課題に2回以上コミットが発生したら、タスクにまとめることを提案する
 - マイルストーンの追加・完了は `beacon milestone` コマンドで管理する
+- セッション終了時や方向性が変わった時は `beacon summary "テキスト"` で現在地を更新する
+  - タスクリストを見ればわかる情報は書かない（進捗率やアクティブMS名など）
+  - 書くべきこと: なぜ今のタスクに取り組んでいるのか、どういう経緯でこうなったか、次セッションで知っておくべき背景や判断
 """
 
 
@@ -268,14 +272,109 @@ def update_progress(target, progress_str):
             pass
 
 
-def update_summary(data, target, last_action):
-    """Auto-update project summary based on current state."""
-    active = [ms for ms in data["milestones"] if ms["status"] == "in_progress"]
-    parts = []
-    for ms in active:
-        parts.append(f"{ms['id']}({ms['title']}, {ms.get('progress', 0)}%)")
-    status_part = "実行中: " + ", ".join(parts) if parts else "アクティブMSなし"
-    data["summary"] = f"{status_part}。直近: {last_action}"
+def _collect_entries_flat(entries):
+    """Recursively collect all entries with timestamps into a flat list."""
+    result = []
+    for entry in entries:
+        created = entry.get("created_at") or entry.get("date") or ""
+        eid = entry.get("id", "e-0")
+        # Extract numeric part of ID for sorting (e-1 → 1, e-22 → 22)
+        try:
+            id_num = int(eid.split("-", 1)[1]) if "-" in eid else 0
+        except (ValueError, IndexError):
+            id_num = 0
+        if created:
+            result.append((created, id_num, entry.get("description", "")))
+        result.extend(_collect_entries_flat(entry.get("entries", [])))
+    return result
+
+
+def auto_update_summary(data, max_entries=5):
+    """Auto-update summary with recent work trail across all milestones."""
+    all_entries = []
+    for ms in data.get("milestones", []):
+        all_entries.extend(_collect_entries_flat(ms.get("entries", [])))
+
+    # Sort by (date, entry_id) descending, take recent N
+    all_entries.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    recent = all_entries[:max_entries]
+
+    if not recent:
+        return
+
+    # Build trail in chronological order (oldest → newest)
+    recent.reverse()
+    trail = " → ".join(desc for _, _, desc in recent)
+    data["summary"] = f"直近の流れ: {trail}"
+
+
+def _tokenize(text):
+    """Split text into comparable tokens for Japanese and English."""
+    import re
+    # English words (2+ chars)
+    en_words = re.findall(r'[a-zA-Z_]{2,}', text.lower())
+    # Japanese: split on particles/punctuation, keep chunks of 2+ chars
+    ja_text = re.sub(r'[a-zA-Z0-9_\s]+', ' ', text)
+    ja_chunks = re.split(r'[のをにはがでとからまでもへや、。・\s]+', ja_text)
+    ja_tokens = [c for c in ja_chunks if len(c) >= 2]
+    return set(en_words + ja_tokens)
+
+
+def _find_matching_task(entries, commit_text):
+    """Find the best matching task for a commit based on content.
+    Returns the task entry or None."""
+    import re
+
+    # 1. Explicit entry ID reference (e.g., "e-22" in commit text)
+    id_matches = re.findall(r'e-\d+', commit_text)
+    if id_matches:
+        for entry in entries:
+            if entry.get("id") in id_matches and entry.get("type") == "task":
+                return entry
+
+    # 2. Word overlap scoring against non-done tasks
+    commit_tokens = _tokenize(commit_text)
+    if not commit_tokens:
+        return None
+
+    candidates = []
+    for entry in entries:
+        if entry.get("type") != "task":
+            continue
+        if entry.get("status") == "done":
+            continue
+        task_text = entry.get("description", "") + " " + entry.get("detail", "")
+        task_tokens = _tokenize(task_text)
+        if not task_tokens:
+            continue
+        overlap = len(commit_tokens & task_tokens)
+        if overlap > 0:
+            score = overlap / min(len(commit_tokens), len(task_tokens))
+            candidates.append((score, overlap, entry))
+
+    if not candidates:
+        # If only one non-done task exists, use it as default
+        active_tasks = [e for e in entries if e.get("type") == "task" and e.get("status") != "done"]
+        if len(active_tasks) == 1:
+            return active_tasks[0]
+        return None
+
+    candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    best_score, best_overlap, best_entry = candidates[0]
+    # Require at least some meaningful overlap
+    if best_overlap >= 1:
+        return best_entry
+    return None
+
+
+def _check_duplicate_commit(entries, commit_hash):
+    """Check if commit hash already exists in entries (including nested)."""
+    for entry in entries:
+        if entry.get("type") == "commit" and entry.get("meta", {}).get("hash", "").startswith(commit_hash):
+            return True
+        if _check_duplicate_commit(entry.get("entries", []), commit_hash):
+            return True
+    return False
 
 
 def cmd_log():
@@ -290,16 +389,14 @@ def cmd_log():
     target = find_target_milestone(data, ms_id)
 
     entries = target.setdefault("entries", [])
-    for entry in entries:
-        if entry.get("type") == "commit" and entry.get("meta", {}).get("hash", "").startswith(commit_hash):
-            print(f"Already logged: {commit_hash}")
-            # Still allow progress update even if already logged
-            if progress:
-                update_progress(target, progress)
-                save_project(data)
-            return
+    if _check_duplicate_commit(entries, commit_hash):
+        print(f"Already logged: {commit_hash}")
+        if progress:
+            update_progress(target, progress)
+            save_project(data)
+        return
 
-    entries.append({
+    commit_entry = {
         "id": next_entry_id(data),
         "type": "commit",
         "description": summary or message,
@@ -308,11 +405,22 @@ def cmd_log():
         "done_at": date,
         "status": "done",
         "meta": {"hash": commit_hash, "message": message},
-    })
+    }
+
+    # Try to auto-associate with a task
+    commit_text = (summary or "") + " " + (message or "")
+    matched_task = _find_matching_task(entries, commit_text)
+
+    if matched_task:
+        matched_task.setdefault("entries", []).append(commit_entry)
+        print(f"Logged {commit_hash} → [{matched_task['id']}] {matched_task.get('description', '')}")
+    else:
+        entries.append(commit_entry)
+        print(f"Logged {commit_hash} to {target['title']}")
+
     update_progress(target, progress)
-    update_summary(data, target, summary or message)
+    auto_update_summary(data)
     save_project(data)
-    print(f"Logged {commit_hash} to {target['title']}")
 
 
 def cmd_sync():
