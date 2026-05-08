@@ -138,7 +138,7 @@ class Dashboard:
 
         # Header (fixed at top)
         name = self.project.get("name", "")
-        header_title = f" BEACON | {name} " if name else " BEACON "
+        header_title = f" BEACON: Where humans and AI are bound together. | {name} " if name else " BEACON: Where humans and AI are bound together. "
         header_lines.append((header_title, "header"))
         header_lines.append(("", 0))
 
