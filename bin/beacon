@@ -110,6 +110,74 @@ cmd_milestone_done() {
     BEACON_MS_ID="$ms_id" python3 "$COMMANDS_PY" milestone_done
 }
 
+cmd_milestone_show() {
+    ensure_project
+    local ms_id=""
+    local json_flag=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_flag="1"; shift ;;
+            *)      ms_id="$1"; shift ;;
+        esac
+    done
+
+    if [ -z "$ms_id" ]; then
+        echo "Usage: beacon milestone show <ms-id> [--json]"
+        exit 1
+    fi
+    BEACON_MS_ID="$ms_id" BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" milestone_show
+}
+
+cmd_milestone_update() {
+    ensure_project
+    local ms_id=""
+    local json_flag=""
+    local title=""
+    local progress=""
+    local target_date=""
+    local status=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json)         json_flag="1"; shift ;;
+            --title)        title="${2:-}"; shift 2 ;;
+            -p|--progress)  progress="${2:-}"; shift 2 ;;
+            --target-date)  target_date="${2:-}"; shift 2 ;;
+            --status)       status="${2:-}"; shift 2 ;;
+            *)              ms_id="$1"; shift ;;
+        esac
+    done
+
+    if [ -z "$ms_id" ]; then
+        echo "Usage: beacon milestone update <ms-id> [--title T] [--progress N] [--target-date D] [--status S] [--json]"
+        exit 1
+    fi
+    BEACON_MS_ID="$ms_id" BEACON_JSON="$json_flag" BEACON_TITLE="$title" \
+        BEACON_PROGRESS="$progress" BEACON_TARGET_DATE="$target_date" \
+        BEACON_STATUS="$status" \
+        python3 "$COMMANDS_PY" milestone_update
+}
+
+cmd_milestone_delete() {
+    ensure_project
+    local ms_id=""
+    local json_flag=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_flag="1"; shift ;;
+            *)      ms_id="$1"; shift ;;
+        esac
+    done
+
+    if [ -z "$ms_id" ]; then
+        echo "Usage: beacon milestone delete <ms-id> [--json]"
+        exit 1
+    fi
+    BEACON_MS_ID="$ms_id" BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" milestone_delete
+}
+
 cmd_log() {
     ensure_project
     if ! git rev-parse --is-inside-work-tree &>/dev/null; then
@@ -120,6 +188,8 @@ cmd_log() {
     local ms_id=""
     local custom_summary=""
     local progress=""
+    local json_flag=""
+    local mode="normal"
 
     # Parse options
     while [[ $# -gt 0 ]]; do
@@ -132,6 +202,22 @@ cmd_log() {
                 progress="${2:-}"
                 shift 2
                 ;;
+            --json)
+                json_flag="1"
+                shift
+                ;;
+            --prepare)
+                mode="prepare"
+                shift
+                ;;
+            --finalize)
+                mode="finalize"
+                shift
+                ;;
+            --summary)
+                custom_summary="${2:-}"
+                shift 2
+                ;;
             *)
                 custom_summary="$1"
                 shift
@@ -140,7 +226,8 @@ cmd_log() {
     done
 
     # Block if there are uncommitted changes (staged or unstaged)
-    if ! git diff --quiet HEAD 2>/dev/null; then
+    # --prepare is read-only, so skip this check
+    if [ "$mode" != "prepare" ] && ! git diff --quiet HEAD 2>/dev/null; then
         echo "Error: uncommitted changes detected."
         echo "Commit your changes first, then run beacon log."
         echo "  (To record a note without a commit, use: beacon task add \"description\")"
@@ -152,10 +239,27 @@ cmd_log() {
     message=$(git log -1 --pretty=%s)
     date_str=$(git log -1 --pretty=%ci | cut -d' ' -f1)
 
-    BEACON_HASH="$hash" BEACON_MESSAGE="$message" BEACON_DATE="$date_str" \
-        BEACON_SUMMARY="$custom_summary" BEACON_MS_ID="$ms_id" \
-        BEACON_PROGRESS="$progress" \
-        python3 "$COMMANDS_PY" log
+    case "$mode" in
+        prepare)
+            BEACON_HASH="$hash" BEACON_MESSAGE="$message" BEACON_DATE="$date_str" \
+                BEACON_SUMMARY="$custom_summary" BEACON_MS_ID="$ms_id" \
+                python3 "$COMMANDS_PY" log_prepare
+            ;;
+        finalize)
+            BEACON_HASH="$hash" BEACON_MESSAGE="$message" BEACON_DATE="$date_str" \
+                BEACON_SUMMARY="$custom_summary" BEACON_MS_ID="$ms_id" \
+                BEACON_PROGRESS="$progress" \
+                BEACON_NEW_SUMMARY="${BEACON_NEW_SUMMARY:-$custom_summary}" \
+                BEACON_JSON="$json_flag" \
+                python3 "$COMMANDS_PY" log_finalize
+            ;;
+        normal)
+            BEACON_HASH="$hash" BEACON_MESSAGE="$message" BEACON_DATE="$date_str" \
+                BEACON_SUMMARY="$custom_summary" BEACON_MS_ID="$ms_id" \
+                BEACON_PROGRESS="$progress" BEACON_JSON="$json_flag" \
+                python3 "$COMMANDS_PY" log
+            ;;
+    esac
 }
 
 cmd_sync() {
@@ -231,12 +335,68 @@ cmd_task_add() {
 
 cmd_task_show() {
     ensure_project
-    local entry_id="${1:-}"
+    local entry_id=""
+    local json_flag=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_flag="1"; shift ;;
+            *)      entry_id="$1"; shift ;;
+        esac
+    done
+
     if [ -z "$entry_id" ]; then
-        echo "Usage: beacon task show <entry-id>"
+        echo "Usage: beacon task show <entry-id> [--json]"
         exit 1
     fi
-    BEACON_ENTRY_ID="$entry_id" python3 "$COMMANDS_PY" task_show
+    BEACON_ENTRY_ID="$entry_id" BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" task_show
+}
+
+cmd_task_update() {
+    ensure_project
+    local entry_id=""
+    local json_flag=""
+    local description=""
+    local status=""
+    local detail=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json)         json_flag="1"; shift ;;
+            --description)  description="${2:-}"; shift 2 ;;
+            --status)       status="${2:-}"; shift 2 ;;
+            -d|--detail)    detail="${2:-}"; shift 2 ;;
+            *)              entry_id="$1"; shift ;;
+        esac
+    done
+
+    if [ -z "$entry_id" ]; then
+        echo "Usage: beacon task update <entry-id> [--description D] [--status S] [--detail D] [--json]"
+        exit 1
+    fi
+    BEACON_ENTRY_ID="$entry_id" BEACON_JSON="$json_flag" \
+        BEACON_DESCRIPTION="$description" BEACON_STATUS="$status" \
+        BEACON_DETAIL="$detail" \
+        python3 "$COMMANDS_PY" task_update
+}
+
+cmd_task_delete() {
+    ensure_project
+    local entry_id=""
+    local json_flag=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_flag="1"; shift ;;
+            *)      entry_id="$1"; shift ;;
+        esac
+    done
+
+    if [ -z "$entry_id" ]; then
+        echo "Usage: beacon task delete <entry-id> [--json]"
+        exit 1
+    fi
+    BEACON_ENTRY_ID="$entry_id" BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" task_delete
 }
 
 cmd_task_detail() {
@@ -430,7 +590,10 @@ case "${1:-}" in
             list|ls) cmd_milestone_list ;;
             start)  cmd_milestone_start "${3:-}" ;;
             done)   cmd_milestone_done "${3:-}" ;;
-            *)      echo "Usage: beacon milestone [add|list|start|done]" ;;
+            show)   shift 2; cmd_milestone_show "$@" ;;
+            update) shift 2; cmd_milestone_update "$@" ;;
+            delete|cancel) shift 2; cmd_milestone_delete "$@" ;;
+            *)      echo "Usage: beacon milestone [add|list|start|done|show|update|delete]" ;;
         esac
         ;;
     log)
@@ -458,14 +621,23 @@ case "${1:-}" in
                 cmd_task_list "$@"
                 ;;
             show)
-                cmd_task_show "${3:-}"
+                shift 2
+                cmd_task_show "$@"
                 ;;
             detail)
                 shift 2
                 cmd_task_detail "$@"
                 ;;
+            update)
+                shift 2
+                cmd_task_update "$@"
+                ;;
+            delete|cancel)
+                shift 2
+                cmd_task_delete "$@"
+                ;;
             *)
-                echo "Usage: beacon task [add|done|list|show|detail] [-m <ms-id>] [-t <type>] [-d <detail>] [description]"
+                echo "Usage: beacon task [add|done|list|show|detail|update|delete] [-m <ms-id>] [-t <type>] [-d <detail>] [description]"
                 ;;
         esac
         ;;

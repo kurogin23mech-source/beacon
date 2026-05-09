@@ -7,7 +7,7 @@ import subprocess
 import sys
 
 
-VALID_STATUSES = {"todo", "in_progress", "in_review", "waiting", "done"}
+VALID_STATUSES = {"todo", "in_progress", "in_review", "waiting", "done", "cancelled"}
 VALID_ENTRY_TYPES = {"commit", "task", "note"}
 
 
@@ -201,6 +201,100 @@ def cmd_milestone_done():
             print(f"Completed: {ms['title']}")
             save_project(data)
             return
+    print(f"Milestone not found: {ms_id}")
+    sys.exit(1)
+
+
+def cmd_milestone_show():
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+
+    for ms in data["milestones"]:
+        if ms["id"] == ms_id:
+            entries = ms.get("entries", [])
+            total_tasks, done_tasks = _count_task_status_flat(entries)
+            if json_mode:
+                output = {
+                    "id": ms["id"],
+                    "title": ms.get("title", ""),
+                    "status": ms.get("status", "todo"),
+                    "progress": ms.get("progress", 0),
+                    "target_date": ms.get("target_date", ""),
+                    "total_tasks": total_tasks,
+                    "done_tasks": done_tasks,
+                    "entries": _entries_to_json(entries),
+                }
+                print(json.dumps(output, ensure_ascii=False))
+            else:
+                icons = {"done": "\u25cf", "in_progress": "\u25d0", "todo": "\u25cb",
+                         "waiting": "\u25cc", "in_review": "\u25d1", "cancelled": "\u2718"}
+                icon = icons.get(ms["status"], "?")
+                print(f"{icon} [{ms['id']}] {ms['title']}")
+                print(f"  Status: {ms['status']}  Progress: {ms.get('progress', 0)}%")
+                print(f"  Target: {ms.get('target_date') or '-'}")
+                print(f"  Tasks: {done_tasks}/{total_tasks} done")
+            return
+
+    print(f"Milestone not found: {ms_id}")
+    sys.exit(1)
+
+
+def cmd_milestone_update():
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+
+    for ms in data["milestones"]:
+        if ms["id"] == ms_id:
+            title = os.environ.get("BEACON_TITLE", "")
+            progress = os.environ.get("BEACON_PROGRESS", "")
+            target_date = os.environ.get("BEACON_TARGET_DATE", "")
+            status = os.environ.get("BEACON_STATUS", "")
+
+            if title:
+                ms["title"] = title
+            if progress:
+                try:
+                    ms["progress"] = max(0, min(100, int(progress)))
+                except ValueError:
+                    pass
+            if target_date:
+                ms["target_date"] = target_date
+            if status:
+                if status not in VALID_STATUSES:
+                    print(f"Invalid status: {status}. Valid: {', '.join(sorted(VALID_STATUSES))}")
+                    sys.exit(1)
+                ms["status"] = status
+
+            save_project(data)
+            if json_mode:
+                print(json.dumps({"id": ms["id"], "title": ms["title"],
+                                  "status": ms["status"], "progress": ms.get("progress", 0)},
+                                 ensure_ascii=False))
+            else:
+                print(f"Updated: [{ms['id']}] {ms['title']}")
+            return
+
+    print(f"Milestone not found: {ms_id}")
+    sys.exit(1)
+
+
+def cmd_milestone_delete():
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+
+    for ms in data["milestones"]:
+        if ms["id"] == ms_id:
+            ms["status"] = "cancelled"
+            save_project(data)
+            if json_mode:
+                print(json.dumps({"id": ms["id"], "status": "cancelled"}, ensure_ascii=False))
+            else:
+                print(f"Cancelled: [{ms['id']}] {ms['title']}")
+            return
+
     print(f"Milestone not found: {ms_id}")
     sys.exit(1)
 
@@ -445,13 +539,17 @@ def cmd_log():
     date = os.environ.get("BEACON_DATE", "")
     ms_id = os.environ.get("BEACON_MS_ID", "")
     progress = os.environ.get("BEACON_PROGRESS", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     data = load_project()
     target = find_target_milestone(data, ms_id)
 
     entries = target.setdefault("entries", [])
     if _check_duplicate_commit(entries, commit_hash):
-        print(f"Already logged: {commit_hash}")
+        if json_mode:
+            print(json.dumps({"status": "duplicate", "hash": commit_hash}, ensure_ascii=False))
+        else:
+            print(f"Already logged: {commit_hash}")
         if progress:
             update_progress(target, progress)
             save_project(data)
@@ -474,14 +572,144 @@ def cmd_log():
 
     if matched_task:
         matched_task.setdefault("entries", []).append(commit_entry)
-        print(f"Logged {commit_hash} → [{matched_task['id']}] {matched_task.get('description', '')}")
+        if json_mode:
+            print(json.dumps({"status": "logged", "hash": commit_hash,
+                              "entry_id": commit_entry["id"],
+                              "matched_task": matched_task["id"]}, ensure_ascii=False))
+        else:
+            print(f"Logged {commit_hash} → [{matched_task['id']}] {matched_task.get('description', '')}")
     else:
         entries.append(commit_entry)
-        print(f"Logged {commit_hash} to {target['title']}")
+        if json_mode:
+            print(json.dumps({"status": "logged", "hash": commit_hash,
+                              "entry_id": commit_entry["id"],
+                              "milestone": target["id"]}, ensure_ascii=False))
+        else:
+            print(f"Logged {commit_hash} to {target['title']}")
 
     update_progress(target, progress)
     auto_update_summary(data)
     save_project(data)
+
+
+def cmd_log_prepare():
+    """Output context for AI-driven progress evaluation. No writes."""
+    commit_hash = os.environ.get("BEACON_HASH", "")
+    message = os.environ.get("BEACON_MESSAGE", "")
+    date = os.environ.get("BEACON_DATE", "")
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    summary_text = os.environ.get("BEACON_SUMMARY", "")
+
+    data = load_project()
+    target = find_target_milestone(data, ms_id)
+    entries = target.get("entries", [])
+    total_tasks, done_tasks = _count_task_status_flat(entries)
+
+    # Collect recent entries (last 5)
+    all_flat = _collect_entries_flat(entries)
+    all_flat.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    recent = [{"date": d, "description": desc} for d, _, desc in all_flat[:5]]
+
+    # Pending tasks
+    pending_tasks = []
+    for e in entries:
+        if e.get("type") == "task" and e.get("status") not in ("done", "cancelled"):
+            pending_tasks.append({"id": e["id"], "description": e.get("description", "")})
+
+    output = {
+        "commit": {"hash": commit_hash, "message": message, "date": date, "summary": summary_text},
+        "milestone": {
+            "id": target["id"],
+            "title": target.get("title", ""),
+            "status": target.get("status", ""),
+            "progress": target.get("progress", 0),
+            "total_tasks": total_tasks,
+            "done_tasks": done_tasks,
+        },
+        "pending_tasks": pending_tasks,
+        "recent_entries": recent,
+        "current_summary": data.get("summary", ""),
+    }
+    print(json.dumps(output, ensure_ascii=False))
+
+
+def cmd_log_finalize():
+    """Write progress and summary from AI evaluation. Called after prepare."""
+    commit_hash = os.environ.get("BEACON_HASH", "")
+    message = os.environ.get("BEACON_MESSAGE", "")
+    date = os.environ.get("BEACON_DATE", "")
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    summary_text = os.environ.get("BEACON_SUMMARY", "")
+    progress = os.environ.get("BEACON_PROGRESS", "")
+    new_summary = os.environ.get("BEACON_NEW_SUMMARY", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    data = load_project()
+    target = find_target_milestone(data, ms_id)
+
+    # Record commit
+    entries = target.setdefault("entries", [])
+    if _check_duplicate_commit(entries, commit_hash):
+        # Still update progress and summary even for duplicate
+        if progress:
+            update_progress(target, progress)
+        if new_summary:
+            data["summary"] = new_summary
+        save_project(data)
+        if json_mode:
+            print(json.dumps({"status": "duplicate", "hash": commit_hash,
+                              "progress": target.get("progress", 0)}, ensure_ascii=False))
+        else:
+            print(f"Already logged: {commit_hash} (updated progress/summary)")
+        return
+
+    commit_entry = {
+        "id": next_entry_id(data),
+        "type": "commit",
+        "description": summary_text or message,
+        "date": date,
+        "created_at": date,
+        "done_at": date,
+        "status": "done",
+        "meta": {"hash": commit_hash, "message": message},
+    }
+
+    commit_text = (summary_text or "") + " " + (message or "")
+    matched_task = _find_matching_task(entries, commit_text)
+
+    if matched_task:
+        matched_task.setdefault("entries", []).append(commit_entry)
+    else:
+        entries.append(commit_entry)
+
+    if progress:
+        update_progress(target, progress)
+    if new_summary:
+        data["summary"] = new_summary
+
+    save_project(data)
+
+    result = {
+        "status": "logged",
+        "hash": commit_hash,
+        "entry_id": commit_entry["id"],
+        "progress": target.get("progress", 0),
+        "summary_updated": bool(new_summary),
+    }
+    if matched_task:
+        result["matched_task"] = matched_task["id"]
+    else:
+        result["milestone"] = target["id"]
+
+    if json_mode:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        loc = f"[{matched_task['id']}]" if matched_task else target["title"]
+        print(f"Logged {commit_hash} → {loc}")
+        if progress:
+            print(f"  Progress: {target.get('progress', 0)}%")
+        if new_summary:
+            print(f"  Summary updated.")
 
 
 def cmd_sync():
@@ -614,14 +842,27 @@ def cmd_task_list():
 
 def cmd_task_show():
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
     data = load_project()
     result = find_entry(data, entry_id)
     if not result:
         print(f"Entry not found: {entry_id}")
         sys.exit(1)
     ms, _, entry, _ = result
+
+    if json_mode:
+        output = {
+            "milestone_id": ms["id"],
+            "milestone_title": ms.get("title", ""),
+        }
+        # Reuse _entries_to_json for single entry
+        entry_json = _entries_to_json([entry])[0]
+        output.update(entry_json)
+        print(json.dumps(output, ensure_ascii=False))
+        return
+
     icons = {"done": "\u25cf", "todo": "\u25cb", "in_progress": "\u25d0",
-             "waiting": "\u25cc", "in_review": "\u25d1"}
+             "waiting": "\u25cc", "in_review": "\u25d1", "cancelled": "\u2718"}
     icon = icons.get(entry.get("status", "todo"), "?")
     print(f"{icon} [{entry['id']}] {entry.get('description', '')}")
     print(f"  Milestone: [{ms['id']}] {ms['title']}")
@@ -649,6 +890,58 @@ def cmd_task_detail():
         print(f"Updated detail for [{entry_id}] {entry.get('description', '')}")
     else:
         print(entry.get("detail", "(no detail)"))
+
+
+def cmd_task_update():
+    entry_id = os.environ.get("BEACON_ENTRY_ID", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    result = find_entry(data, entry_id)
+    if not result:
+        print(f"Entry not found: {entry_id}")
+        sys.exit(1)
+    ms, _, entry, _ = result
+
+    description = os.environ.get("BEACON_DESCRIPTION", "")
+    status = os.environ.get("BEACON_STATUS", "")
+    detail = os.environ.get("BEACON_DETAIL", "")
+
+    if description:
+        entry["description"] = description
+    if status:
+        if status not in VALID_STATUSES:
+            print(f"Invalid status: {status}. Valid: {', '.join(sorted(VALID_STATUSES))}")
+            sys.exit(1)
+        entry["status"] = status
+        if status == "done" and not entry.get("done_at"):
+            import datetime
+            entry["done_at"] = datetime.date.today().isoformat()
+    if detail:
+        entry["detail"] = detail
+
+    save_project(data)
+    if json_mode:
+        print(json.dumps(_entries_to_json([entry])[0], ensure_ascii=False))
+    else:
+        print(f"Updated: [{entry_id}] {entry.get('description', '')}")
+
+
+def cmd_task_delete():
+    entry_id = os.environ.get("BEACON_ENTRY_ID", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    result = find_entry(data, entry_id)
+    if not result:
+        print(f"Entry not found: {entry_id}")
+        sys.exit(1)
+    _, _, entry, _ = result
+
+    entry["status"] = "cancelled"
+    save_project(data)
+    if json_mode:
+        print(json.dumps({"id": entry_id, "status": "cancelled"}, ensure_ascii=False))
+    else:
+        print(f"Cancelled: [{entry_id}] {entry.get('description', '')}")
 
 
 def cmd_entry_move():
@@ -712,13 +1005,20 @@ if __name__ == "__main__":
         "milestone_list": cmd_milestone_list,
         "milestone_start": cmd_milestone_start,
         "milestone_done": cmd_milestone_done,
+        "milestone_show": cmd_milestone_show,
+        "milestone_update": cmd_milestone_update,
+        "milestone_delete": cmd_milestone_delete,
         "log": cmd_log,
+        "log_prepare": cmd_log_prepare,
+        "log_finalize": cmd_log_finalize,
         "sync": cmd_sync,
         "task_add": cmd_task_add,
         "task_done": cmd_task_done,
         "task_list": cmd_task_list,
         "task_show": cmd_task_show,
         "task_detail": cmd_task_detail,
+        "task_update": cmd_task_update,
+        "task_delete": cmd_task_delete,
         "entry_move": cmd_entry_move,
         "summary": cmd_summary,
     }
