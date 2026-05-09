@@ -587,8 +587,8 @@
           "description": "CLAUDE.md の beacon セクション縮小（Skill移行後）",
           "date": "2026-05-09",
           "created_at": "2026-05-09",
-          "done_at": null,
-          "status": "todo",
+          "done_at": "2026-05-09",
+          "status": "done",
           "meta": {}
         }
       ],
