@@ -1,7 +1,7 @@
 {
   "name": "Beacon",
   "objective": "AI駆動開発においてマイルストーンベースのプロジェクト進捗を常時可視化し、開発者が方向性を見失わずに実装を進められるツールを構築する",
-  "summary": "Claude Codeの操作を安定化するため、プロンプト指示ではなくツール主導の設計を採用。CLI にCRUD全コマンド・--json出力・prepare/finalize 2段階ワークフローを実装し、4つのSkill（session-start/log/task/session-end）を作成した。残りはSkillの実運用検証とCLAUDE.mdからの移行。",
+  "summary": "ms-8のCLI CRUD整備とSkill化が概ね完了。beacon-session-start/log/task/session-endの4 Skillを作成し、prepare/finalizeの2段階ワークフローでClaude Codeの操作を固定化した。全Skillの動作検証を実施し問題なし。残りはe-35（Skill検証の正式完了）とe-39（CLAUDE.md縮小）。次セッションではCLAUDE.mdのbeaconセクションをSkill参照に置き換え、他プロジェクトでの運用検証に進む。",
   "milestones": [
     {
       "id": "ms-1",
