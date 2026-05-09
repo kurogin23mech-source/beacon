@@ -121,6 +121,36 @@ class Dashboard:
             return True
         return False
 
+    def _check_retro_needed(self):
+        """Check if a weekly retro is due. Returns warning message or None."""
+        import datetime
+        import glob as g
+
+        today = datetime.date.today()
+        # Only show from Friday onwards (weekday 4=Fri, 5=Sat, 6=Sun)
+        if today.weekday() < 4:
+            return None
+
+        year, week, _ = today.isocalendar()
+        current_week = f"{year}-W{week:02d}"
+
+        project_dir = os.path.dirname(self.project_path)
+        retro_dir = os.path.join(project_dir, "retro")
+        files = sorted(g.glob(os.path.join(retro_dir, "*.md")))
+
+        # Check reviewed marker
+        project_dir = os.path.dirname(self.project_path)
+        reviewed_path = os.path.join(project_dir, "retro", ".reviewed")
+        try:
+            with open(reviewed_path, "r") as f:
+                reviewed_week = f.read().strip()
+            if reviewed_week >= current_week:
+                return None
+        except (FileNotFoundError, IOError):
+            pass
+
+        return f"  \u26a0 \u4eca\u9031\u306e\u632f\u308a\u8fd4\u308a\u304c\u307e\u3060\u3067\u3059\uff08{current_week}\uff09  /beacon-retro \u3067\u958b\u59cb"
+
     def _get_latest_retro(self):
         """Find the latest retro file in .beacon/retro/."""
         import glob as g
@@ -210,6 +240,12 @@ class Dashboard:
             header_lines.append(("  ▶ 現状", "section_yellow"))
             for wl in wrap_line("    " + summary, width - 1):
                 header_lines.append((wl, curses.A_NORMAL))
+            header_lines.append(("", 0))
+
+        # Retro reminder
+        retro_warning = self._check_retro_needed()
+        if retro_warning:
+            header_lines.append((retro_warning, "warning"))
             header_lines.append(("", 0))
 
         # Overall progress
@@ -455,6 +491,7 @@ class Dashboard:
         curses.init_pair(8, curses.COLOR_WHITE, curses.COLOR_BLUE)   # header
         curses.init_pair(9, curses.COLOR_BLUE, -1)      # task
         curses.init_pair(10, curses.COLOR_CYAN, -1)    # detail
+        curses.init_pair(11, curses.COLOR_RED, -1)     # warning
 
         style_map = {
             "header": curses.color_pair(8) | curses.A_BOLD,
@@ -467,6 +504,7 @@ class Dashboard:
             "commit": curses.color_pair(5),
             "task": curses.color_pair(9),
             "detail": curses.color_pair(10),
+            "warning": curses.color_pair(11) | curses.A_BOLD,
             "selected": curses.color_pair(6),
             "selected_active": curses.color_pair(7) | curses.A_BOLD,
         }

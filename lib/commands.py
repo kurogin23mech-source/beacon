@@ -1107,6 +1107,22 @@ def _collect_retro_entries_recursive(entries, since, until):
     return result
 
 
+def cmd_retro_done():
+    """Mark current week's retro as reviewed."""
+    import datetime
+    today = datetime.date.today()
+    year, week, _ = today.isocalendar()
+    current_week = f"{year}-W{week:02d}"
+
+    project_dir = os.path.dirname(get_project_file())
+    retro_dir = os.path.join(project_dir, "retro")
+    os.makedirs(retro_dir, exist_ok=True)
+    reviewed_path = os.path.join(retro_dir, ".reviewed")
+    with open(reviewed_path, "w") as f:
+        f.write(current_week + "\n")
+    print(f"Retro reviewed: {current_week}")
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     commands = {
@@ -1132,6 +1148,7 @@ if __name__ == "__main__":
         "entry_move": cmd_entry_move,
         "summary": cmd_summary,
         "retro_prepare": cmd_retro_prepare,
+        "retro_done": cmd_retro_done,
     }
     fn = commands.get(cmd)
     if fn:

@@ -1,7 +1,7 @@
 {
   "name": "Beacon",
   "objective": "AI駆動開発においてマイルストーンベースのプロジェクト進捗を常時可視化し、開発者が方向性を見失わずに実装を進められるツールを構築する",
-  "summary": "ms-8クローズ後、ms-5の残タスクを一括対応。ダッシュボードにエントリID表示・完了タスク非表示トグル・cancelledフィルタを追加し、beacon-task Skillにtask done時の進捗率自動定性評価を組み込んだ。ms-5もクローズ可能な状態。",
+  "summary": "retroレビューを通じてマイルストーンのライフサイクルを再考。「done」ではなく「observing（経過観察）」の概念を導入し、progress 100%強制を廃止。ダッシュボードのコミット表示もタスクと統一フォーマットに改善。ms-4/ms-5をobservingに移行済み。",
   "milestones": [
     {
       "id": "ms-1",
@@ -434,7 +434,7 @@
       "status": "in_progress",
       "target_date": "",
       "commits": [],
-      "progress": 0,
+      "progress": 70,
       "entries": [
         {
           "id": "e-49",
@@ -470,6 +470,31 @@
           "id": "e-52",
           "type": "task",
           "description": "scheduled trigger で指定曜日に自動生成",
+          "date": "2026-05-09",
+          "created_at": "2026-05-09",
+          "done_at": null,
+          "status": "todo",
+          "meta": {},
+          "entries": [
+            {
+              "id": "e-53",
+              "type": "commit",
+              "description": "Add observing status, milestone close/observe commands, and improve commit display",
+              "date": "2026-05-09",
+              "created_at": "2026-05-09",
+              "done_at": "2026-05-09",
+              "status": "done",
+              "meta": {
+                "hash": "52f0853",
+                "message": "Add observing status, milestone close/observe commands, and improve commit display"
+              }
+            }
+          ]
+        },
+        {
+          "id": "e-54",
+          "type": "task",
+          "description": "scheduled triggerでretro自動生成の動作検証（月曜に実行テスト）",
           "date": "2026-05-09",
           "created_at": "2026-05-09",
           "done_at": null,

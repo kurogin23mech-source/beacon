@@ -704,7 +704,14 @@ case "${1:-}" in
         ;;
     retro)
         shift
-        cmd_retro "$@"
+        case "${1:-}" in
+            done)
+                python3 "$COMMANDS_PY" retro_done
+                ;;
+            *)
+                cmd_retro "$@"
+                ;;
+        esac
         ;;
     help|-h|--help)
         usage
