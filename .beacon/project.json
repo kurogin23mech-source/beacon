@@ -349,8 +349,8 @@
           "description": "ダッシュボードおよびCLI出力にタスクIDを表示する",
           "date": "2026-05-09",
           "created_at": "2026-05-09",
-          "done_at": null,
-          "status": "todo",
+          "done_at": "2026-05-09",
+          "status": "done",
           "meta": {}
         },
         {
@@ -359,8 +359,8 @@
           "description": "完了タスクを非表示にするオプションを追加する",
           "date": "2026-05-09",
           "created_at": "2026-05-09",
-          "done_at": null,
-          "status": "todo",
+          "done_at": "2026-05-09",
+          "status": "done",
           "meta": {}
         },
         {
@@ -369,8 +369,8 @@
           "description": "進捗率の自動更新が動作していない問題を修正する",
           "date": "2026-05-09",
           "created_at": "2026-05-09",
-          "done_at": null,
-          "status": "todo",
+          "done_at": "2026-05-09",
+          "status": "done",
           "meta": {}
         },
         {
@@ -404,7 +404,7 @@
           "meta": {}
         }
       ],
-      "progress": 40
+      "progress": 100
     },
     {
       "id": "ms-6",
