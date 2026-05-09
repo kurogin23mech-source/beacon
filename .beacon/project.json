@@ -1,7 +1,7 @@
 {
   "name": "Beacon",
   "objective": "AI駆動開発においてマイルストーンベースのプロジェクト進捗を常時可視化し、開発者が方向性を見失わずに実装を進められるツールを構築する",
-  "summary": "直近の流れ: CLAUDE.md の beacon セクション縮小（Skill移行後） → CLI --json出力、long option対応、ms-8 Skill化アーキテクチャ設計 → SPEC.md更新: CLI CRUD設計、Skillアーキテクチャ、データモデル整理 → ダッシュボードのマウススクロール対応を検討・実装する → CLI CRUD全コマンド実装（milestone/task show/update/delete、log --prepare/--finalize）",
+  "summary": "直近の流れ: CLI --json出力、long option対応、ms-8 Skill化アーキテクチャ設計 → SPEC.md更新: CLI CRUD設計、Skillアーキテクチャ、データモデル整理 → ダッシュボードのマウススクロール対応を検討・実装する → CLI CRUD全コマンド実装（milestone/task show/update/delete、log --prepare/--finalize） → cancelled非表示（--all対応）、ID命名規則バリデーション実装",
   "milestones": [
     {
       "id": "ms-1",
@@ -433,8 +433,8 @@
           "description": "CLI CRUD サブコマンド整備（milestone update/delete, task update/delete, 全コマンド --json対応）",
           "date": "2026-05-09",
           "created_at": "2026-05-09",
-          "done_at": null,
-          "status": "todo",
+          "done_at": "2026-05-09",
+          "status": "done",
           "meta": {},
           "detail": "## 対象サブコマンド\n### milestone\n- show <id> [--json]: 単一MS詳細\n- update <id> [--progress N] [--title T] [--target-date D] [--json]: 任意フィールド更新\n- delete <id> [--json]: 論理削除（status→cancelled）\n\n### task\n- update <id> [--status S] [--description D] [--json]: 任意フィールド更新\n- delete <id> [--json]: 論理削除（status→cancelled）\n\n### 既存コマンドの--json対応追加\n- task show --json\n- log --json\n\n### 2段階呼び出し（--prepare / --finalize）\n- beacon log --prepare: コミット情報+MS状態+タスク消化率をJSONで出力（書き込みしない）\n- beacon log --finalize --progress N --summary 'text': Claude生成結果を受けて書き込み\n- 同様に beacon summary --prepare / --finalize も検討\n\n### 全コマンド共通\n- --json フラグで構造化出力\n- long option 対応（--ms, --progress, --type, --detail 等）",
           "entries": [
@@ -476,6 +476,19 @@
                 "hash": "047d81b",
                 "message": "Update project.json: record SPEC.md commit to ms-8"
               }
+            },
+            {
+              "id": "e-44",
+              "type": "commit",
+              "description": "cancelled非表示（--all対応）、ID命名規則バリデーション実装",
+              "date": "2026-05-09",
+              "created_at": "2026-05-09",
+              "done_at": "2026-05-09",
+              "status": "done",
+              "meta": {
+                "hash": "929fa38",
+                "message": "Add cancelled filtering, --all flag, and ID format validation"
+              }
             }
           ]
         },
@@ -485,8 +498,8 @@
           "description": "cancelled 論理削除の実装（status追加、listデフォルト非表示 + --all で表示）",
           "date": "2026-05-09",
           "created_at": "2026-05-09",
-          "done_at": null,
-          "status": "todo",
+          "done_at": "2026-05-09",
+          "status": "done",
           "meta": {}
         },
         {
@@ -495,8 +508,8 @@
           "description": "ID命名規則バリデーション（ms-{連番}, e-{連番}を強制）",
           "date": "2026-05-09",
           "created_at": "2026-05-09",
-          "done_at": null,
-          "status": "todo",
+          "done_at": "2026-05-09",
+          "status": "done",
           "meta": {}
         },
         {
@@ -551,7 +564,7 @@
           "meta": {}
         }
       ],
-      "progress": 40
+      "progress": 50
     }
   ]
 }
