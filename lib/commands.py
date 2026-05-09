@@ -1162,8 +1162,87 @@ def cmd_trigger_fire():
         f.write("\n")
 
 
+DAY_NAMES = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
+             "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+             "friday": 4, "saturday": 5, "sunday": 6}
+
+
+def _get_retro_day():
+    """Get configured retro day (weekday number 0=Mon). Default: Friday(4)."""
+    try:
+        data = load_project()
+        day_str = data.get("retro_day", "friday").lower()
+        return DAY_NAMES.get(day_str, 4)
+    except Exception:
+        return 4
+
+
+def _auto_fire_retro_trigger():
+    """Auto-fire retro trigger on retro_day if not reviewed."""
+    import datetime
+    today = datetime.date.today()
+    retro_day = _get_retro_day()
+
+    # Only fire on the configured day
+    if today.weekday() != retro_day:
+        return
+
+    year, week, _ = today.isocalendar()
+    current_week = f"{year}-W{week:02d}"
+
+    project_dir = os.path.dirname(get_project_file())
+
+    # Check reviewed marker
+    reviewed_path = os.path.join(project_dir, "retro", ".reviewed")
+    try:
+        with open(reviewed_path, "r") as f:
+            if f.read().strip() >= current_week:
+                return
+    except (FileNotFoundError, IOError):
+        pass
+
+    # Fire trigger if not already pending
+    triggers_dir = os.path.join(project_dir, "triggers")
+    trigger_path = os.path.join(triggers_dir, "retro.json")
+    if os.path.exists(trigger_path):
+        return
+
+    os.makedirs(triggers_dir, exist_ok=True)
+    data = {
+        "name": "retro",
+        "message": f"今週の振り返りがまだです（{current_week}）。/beacon-retro で開始しますか？",
+        "created_at": today.isoformat(),
+    }
+    with open(trigger_path, "w") as f:
+        json.dump(data, f, ensure_ascii=False)
+        f.write("\n")
+
+
+def _cleanup_stale_triggers():
+    """Remove retro trigger if retro_day has passed."""
+    import datetime
+    today = datetime.date.today()
+    triggers_dir = _get_triggers_dir()
+    retro_path = os.path.join(triggers_dir, "retro.json")
+
+    if not os.path.exists(retro_path):
+        return
+
+    try:
+        with open(retro_path, "r") as f:
+            trigger = json.load(f)
+        created = datetime.date.fromisoformat(trigger["created_at"][:10])
+        if today > created:
+            os.remove(retro_path)
+    except (json.JSONDecodeError, KeyError, ValueError, IOError):
+        pass
+
+
 def cmd_trigger_check():
-    """Check for pending triggers. Returns JSON list."""
+    """Check for pending triggers. Auto-evaluates trigger conditions first."""
+    _auto_fire_retro_trigger()
+    _cleanup_stale_triggers()
+
     triggers_dir = _get_triggers_dir()
     if not os.path.isdir(triggers_dir):
         print("[]")

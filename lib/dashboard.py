@@ -121,14 +121,23 @@ class Dashboard:
             return True
         return False
 
+    def _get_retro_day(self):
+        """Get configured retro day (weekday number 0=Mon). Default: Friday(4)."""
+        if not self.project:
+            return 4
+        day_names = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
+                     "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+                     "friday": 4, "saturday": 5, "sunday": 6}
+        day_str = self.project.get("retro_day", "friday").lower()
+        return day_names.get(day_str, 4)
+
     def _check_retro_needed(self):
         """Check if a weekly retro is due. Returns warning message or None."""
         import datetime
-        import glob as g
 
         today = datetime.date.today()
-        # Only show from Friday onwards (weekday 4=Fri, 5=Sat, 6=Sun)
-        if today.weekday() < 4:
+        # Only show on the configured retro day
+        if today.weekday() != self._get_retro_day():
             return None
 
         year, week, _ = today.isocalendar()
