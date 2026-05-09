@@ -1,7 +1,7 @@
 {
   "name": "Beacon",
   "objective": "AI駆動開発においてマイルストーンベースのプロジェクト進捗を常時可視化し、開発者が方向性を見失わずに実装を進められるツールを構築する",
-  "summary": "ms-8のCLI CRUD整備とSkill化が概ね完了。beacon-session-start/log/task/session-endの4 Skillを作成し、prepare/finalizeの2段階ワークフローでClaude Codeの操作を固定化した。全Skillの動作検証を実施し問題なし。残りはe-35（Skill検証の正式完了）とe-39（CLAUDE.md縮小）。次セッションではCLAUDE.mdのbeaconセクションをSkill参照に置き換え、他プロジェクトでの運用検証に進む。",
+  "summary": "ダッシュボードのendwin/refreshフリッカーとIMEクラッシュを修正（サイズ変化時のみ呼び出しに限定）。ms-8のSkill化自体は完了済みだが、Skillの実運用はこのセッションから開始。session-start Skillの検証→CLAUDE.md縮小でms-8を閉じる。",
   "milestones": [
     {
       "id": "ms-1",
@@ -518,8 +518,8 @@
           "description": "beacon-session-start Skill の検証・調整",
           "date": "2026-05-09",
           "created_at": "2026-05-09",
-          "done_at": null,
-          "status": "todo",
+          "done_at": "2026-05-09",
+          "status": "done",
           "meta": {},
           "entries": [
             {
@@ -533,6 +533,19 @@
               "meta": {
                 "hash": "3c46d5f",
                 "message": "Add beacon-log, beacon-task, beacon-session-end Skills and polish CLI"
+              }
+            },
+            {
+              "id": "e-46",
+              "type": "commit",
+              "description": "ダッシュボードのendwin/refreshフリッカーとIMEクラッシュを修正（サイズ変化時のみ呼び出しに限定）。ms-8のSkill化自体は完了済みだが、Skillの実運用はこのセッションから開始。session-start Skillの検証→CLAUDE.md縮小でms-8を閉じる。",
+              "date": "2026-05-09",
+              "created_at": "2026-05-09",
+              "done_at": "2026-05-09",
+              "status": "done",
+              "meta": {
+                "hash": "665faa3",
+                "message": "Fix dashboard flicker and IME crash in tmux"
               }
             }
           ]
