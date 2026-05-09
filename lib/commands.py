@@ -3,12 +3,15 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
 
 
 VALID_STATUSES = {"todo", "in_progress", "in_review", "waiting", "done", "cancelled"}
 VALID_ENTRY_TYPES = {"commit", "task", "note"}
+MS_ID_RE = re.compile(r"^ms-\d+$")
+ENTRY_ID_RE = re.compile(r"^e-\d+$")
 
 
 def get_project_file():
@@ -26,9 +29,15 @@ def validate_project(data):
         raise ValueError("milestones must be an array")
 
     for ms in data["milestones"]:
+        ms_id = ms.get("id", "")
+        if ms_id and not MS_ID_RE.match(ms_id):
+            raise ValueError(
+                f"Milestone ID '{ms_id}' does not match required format 'ms-{{N}}'. "
+                "IDs must be ms-1, ms-2, etc."
+            )
         if "tasks" in ms:
             raise ValueError(
-                f"Milestone '{ms.get('id', '?')}' uses 'tasks' field. "
+                f"Milestone '{ms_id or '?'}' uses 'tasks' field. "
                 "Use 'entries' instead. Do NOT edit project.json directly — use beacon CLI."
             )
         if ms.get("status") and ms["status"] not in VALID_STATUSES:
@@ -42,6 +51,12 @@ def validate_project(data):
 
 def _validate_entry(entry, ms_id):
     """Recursively validate an entry and its children."""
+    eid = entry.get("id", "")
+    if eid and not ENTRY_ID_RE.match(eid):
+        raise ValueError(
+            f"Entry ID '{eid}' in {ms_id} does not match required format 'e-{{N}}'. "
+            "IDs must be e-1, e-2, etc."
+        )
     if entry.get("type") and entry["type"] not in VALID_ENTRY_TYPES:
         raise ValueError(
             f"Entry '{entry.get('id', '?')}' in {ms_id} has invalid type '{entry['type']}'. "
@@ -144,7 +159,12 @@ def cmd_milestone_add():
 
 def cmd_milestone_list():
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    show_all = os.environ.get("BEACON_ALL", "") == "1"
     data = load_project()
+
+    milestones = data["milestones"]
+    if not show_all:
+        milestones = [ms for ms in milestones if ms.get("status") != "cancelled"]
 
     if json_mode:
         output = {
@@ -152,7 +172,7 @@ def cmd_milestone_list():
             "summary": data.get("summary", ""),
             "milestones": [],
         }
-        for ms in data["milestones"]:
+        for ms in milestones:
             entries = ms.get("entries", [])
             total_tasks, done_tasks = _count_task_status_flat(entries)
             output["milestones"].append({
@@ -167,8 +187,9 @@ def cmd_milestone_list():
         print(json.dumps(output, ensure_ascii=False))
         return
 
-    icons = {"done": "\u25cf", "in_progress": "\u25d0", "todo": "\u25cb", "waiting": "\u25cc", "in_review": "\u25d1"}
-    for ms in data["milestones"]:
+    icons = {"done": "\u25cf", "in_progress": "\u25d0", "todo": "\u25cb",
+             "waiting": "\u25cc", "in_review": "\u25d1", "cancelled": "\u2718"}
+    for ms in milestones:
         icon = icons.get(ms["status"], "?")
         active = " \u25c0 ACTIVE" if ms["status"] == "in_progress" else ""
         progress = ms.get("progress", 0)
@@ -812,13 +833,30 @@ def cmd_task_done():
     sys.exit(1)
 
 
+def _filter_cancelled(entries, show_all):
+    """Filter out cancelled entries recursively."""
+    if show_all:
+        return entries
+    result = []
+    for e in entries:
+        if e.get("status") == "cancelled":
+            continue
+        filtered = dict(e)
+        children = e.get("entries", [])
+        if children:
+            filtered["entries"] = _filter_cancelled(children, show_all)
+        result.append(filtered)
+    return result
+
+
 def cmd_task_list():
     ms_id = os.environ.get("BEACON_MS_ID", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    show_all = os.environ.get("BEACON_ALL", "") == "1"
     data = load_project()
     target = find_target_milestone(data, ms_id)
 
-    entries = target.get("entries", [])
+    entries = _filter_cancelled(target.get("entries", []), show_all)
 
     if json_mode:
         output = {
@@ -833,7 +871,7 @@ def cmd_task_list():
         print(f"No entries in {target['title']}")
         return
 
-    icons = {"done": "\u25cf", "todo": "\u25cb"}
+    icons = {"done": "\u25cf", "todo": "\u25cb", "cancelled": "\u2718"}
     for entry in entries:
         icon = icons.get(entry.get("status", "todo"), "?")
         etype = entry.get("type", "?")

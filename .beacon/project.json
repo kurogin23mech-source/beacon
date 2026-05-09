@@ -1,7 +1,7 @@
 {
   "name": "Beacon",
   "objective": "AI駆動開発においてマイルストーンベースのプロジェクト進捗を常時可視化し、開発者が方向性を見失わずに実装を進められるツールを構築する",
-  "summary": "直近の流れ: beacon-task Skill の作成 → beacon-session-end Skill の作成 → CLAUDE.md の beacon セクション縮小（Skill移行後） → CLI --json出力、long option対応、ms-8 Skill化アーキテクチャ設計 → SPEC.md更新: CLI CRUD設計、Skillアーキテクチャ、データモデル整理",
+  "summary": "直近の流れ: CLAUDE.md の beacon セクション縮小（Skill移行後） → CLI --json出力、long option対応、ms-8 Skill化アーキテクチャ設計 → SPEC.md更新: CLI CRUD設計、Skillアーキテクチャ、データモデル整理 → ダッシュボードのマウススクロール対応を検討・実装する → CLI CRUD全コマンド実装（milestone/task show/update/delete、log --prepare/--finalize）",
   "milestones": [
     {
       "id": "ms-1",
@@ -463,6 +463,19 @@
                 "hash": "45c81d3",
                 "message": "Update project.json: record CLI --json commit to ms-8"
               }
+            },
+            {
+              "id": "e-43",
+              "type": "commit",
+              "description": "CLI CRUD全コマンド実装（milestone/task show/update/delete、log --prepare/--finalize）",
+              "date": "2026-05-09",
+              "created_at": "2026-05-09",
+              "done_at": "2026-05-09",
+              "status": "done",
+              "meta": {
+                "hash": "047d81b",
+                "message": "Update project.json: record SPEC.md commit to ms-8"
+              }
             }
           ]
         },
@@ -538,7 +551,7 @@
           "meta": {}
         }
       ],
-      "progress": 20
+      "progress": 40
     }
   ]
 }

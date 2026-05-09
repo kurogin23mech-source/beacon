@@ -441,6 +441,7 @@ cmd_task_list() {
     ensure_project
     local ms_id=""
     local json_flag=""
+    local all_flag=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -452,13 +453,17 @@ cmd_task_list() {
                 json_flag="1"
                 shift
                 ;;
+            --all|-a)
+                all_flag="1"
+                shift
+                ;;
             *)
                 shift
                 ;;
         esac
     done
 
-    BEACON_MS_ID="$ms_id" BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" task_list
+    BEACON_MS_ID="$ms_id" BEACON_JSON="$json_flag" BEACON_ALL="$all_flag" python3 "$COMMANDS_PY" task_list
 }
 
 cmd_entry_move() {
@@ -486,13 +491,15 @@ cmd_entry_move() {
 cmd_status() {
     ensure_project
     local json_flag=""
+    local all_flag=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json_flag="1"; shift ;;
+            --all|-a) all_flag="1"; shift ;;
             *) shift ;;
         esac
     done
-    BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" milestone_list
+    BEACON_JSON="$json_flag" BEACON_ALL="$all_flag" python3 "$COMMANDS_PY" milestone_list
 }
 
 cmd_launch() {
