@@ -1,7 +1,7 @@
 {
   "name": "Beacon",
   "objective": "AI駆動開発においてマイルストーンベースのプロジェクト進捗を常時可視化し、開発者が方向性を見失わずに実装を進められるツールを構築する",
-  "summary": "直近の流れ: CLI --json出力、long option対応、ms-8 Skill化アーキテクチャ設計 → SPEC.md更新: CLI CRUD設計、Skillアーキテクチャ、データモデル整理 → ダッシュボードのマウススクロール対応を検討・実装する → CLI CRUD全コマンド実装（milestone/task show/update/delete、log --prepare/--finalize） → cancelled非表示（--all対応）、ID命名規則バリデーション実装",
+  "summary": "Claude Codeの操作を安定化するため、プロンプト指示ではなくツール主導の設計を採用。CLI にCRUD全コマンド・--json出力・prepare/finalize 2段階ワークフローを実装し、4つのSkill（session-start/log/task/session-end）を作成した。残りはSkillの実運用検証とCLAUDE.mdからの移行。",
   "milestones": [
     {
       "id": "ms-1",
@@ -520,7 +520,22 @@
           "created_at": "2026-05-09",
           "done_at": null,
           "status": "todo",
-          "meta": {}
+          "meta": {},
+          "entries": [
+            {
+              "id": "e-45",
+              "type": "commit",
+              "description": "Claude Codeの操作を安定化するため、プロンプト指示ではなくツール主導の設計を採用。CLI にCRUD全コマンド・--json出力・prepare/finalize 2段階ワークフローを実装し、4つのSkill（session-start/log/task/session-end）を作成した。残りはSkillの実運用検証とCLAUDE.mdからの移行。",
+              "date": "2026-05-09",
+              "created_at": "2026-05-09",
+              "done_at": "2026-05-09",
+              "status": "done",
+              "meta": {
+                "hash": "3c46d5f",
+                "message": "Add beacon-log, beacon-task, beacon-session-end Skills and polish CLI"
+              }
+            }
+          ]
         },
         {
           "id": "e-36",
@@ -564,7 +579,7 @@
           "meta": {}
         }
       ],
-      "progress": 50
+      "progress": 80
     }
   ]
 }
