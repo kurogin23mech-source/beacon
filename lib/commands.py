@@ -1120,7 +1120,82 @@ def cmd_retro_done():
     reviewed_path = os.path.join(retro_dir, ".reviewed")
     with open(reviewed_path, "w") as f:
         f.write(current_week + "\n")
+
+    # Clear retro trigger if exists
+    triggers_dir = os.path.join(project_dir, "triggers")
+    retro_trigger = os.path.join(triggers_dir, "retro.json")
+    if os.path.exists(retro_trigger):
+        os.remove(retro_trigger)
+
     print(f"Retro reviewed: {current_week}")
+
+
+def _get_triggers_dir():
+    project_dir = os.path.dirname(get_project_file())
+    return os.path.join(project_dir, "triggers")
+
+
+def cmd_trigger_fire():
+    """Write a trigger file. Called by dashboard."""
+    trigger_name = os.environ.get("BEACON_TRIGGER_NAME", "")
+    trigger_message = os.environ.get("BEACON_TRIGGER_MESSAGE", "")
+    if not trigger_name:
+        print("Error: trigger name required")
+        sys.exit(1)
+
+    triggers_dir = _get_triggers_dir()
+    os.makedirs(triggers_dir, exist_ok=True)
+    trigger_path = os.path.join(triggers_dir, f"{trigger_name}.json")
+
+    # Don't overwrite existing trigger (already pending)
+    if os.path.exists(trigger_path):
+        return
+
+    import datetime
+    trigger_data = {
+        "name": trigger_name,
+        "message": trigger_message,
+        "created_at": datetime.datetime.now().isoformat(),
+    }
+    with open(trigger_path, "w") as f:
+        json.dump(trigger_data, f, ensure_ascii=False)
+        f.write("\n")
+
+
+def cmd_trigger_check():
+    """Check for pending triggers. Returns JSON list."""
+    triggers_dir = _get_triggers_dir()
+    if not os.path.isdir(triggers_dir):
+        print("[]")
+        return
+
+    triggers = []
+    for fname in sorted(os.listdir(triggers_dir)):
+        if not fname.endswith(".json"):
+            continue
+        fpath = os.path.join(triggers_dir, fname)
+        try:
+            with open(fpath, "r") as f:
+                triggers.append(json.load(f))
+        except (json.JSONDecodeError, IOError):
+            pass
+    print(json.dumps(triggers, ensure_ascii=False))
+
+
+def cmd_trigger_clear():
+    """Clear a specific trigger."""
+    trigger_name = os.environ.get("BEACON_TRIGGER_NAME", "")
+    if not trigger_name:
+        print("Error: trigger name required")
+        sys.exit(1)
+
+    triggers_dir = _get_triggers_dir()
+    trigger_path = os.path.join(triggers_dir, f"{trigger_name}.json")
+    if os.path.exists(trigger_path):
+        os.remove(trigger_path)
+        print(f"Cleared trigger: {trigger_name}")
+    else:
+        print(f"No trigger: {trigger_name}")
 
 
 if __name__ == "__main__":
@@ -1149,6 +1224,9 @@ if __name__ == "__main__":
         "summary": cmd_summary,
         "retro_prepare": cmd_retro_prepare,
         "retro_done": cmd_retro_done,
+        "trigger_fire": cmd_trigger_fire,
+        "trigger_check": cmd_trigger_check,
+        "trigger_clear": cmd_trigger_clear,
     }
     fn = commands.get(cmd)
     if fn:

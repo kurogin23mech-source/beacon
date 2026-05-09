@@ -1,7 +1,7 @@
 {
   "name": "Beacon",
   "objective": "AI駆動開発においてマイルストーンベースのプロジェクト進捗を常時可視化し、開発者が方向性を見失わずに実装を進められるツールを構築する",
-  "summary": "retroレビューを通じてマイルストーンのライフサイクルを再考。「done」ではなく「observing（経過観察）」の概念を導入し、progress 100%強制を廃止。ダッシュボードのコミット表示もタスクと統一フォーマットに改善。ms-4/ms-5をobservingに移行済み。",
+  "summary": "retroの自動化ループをダッシュボード警告+beacon retro doneで実現。scheduled triggerではなくローカル完結の方針に転換。e-52は検証後にクローズ判断。retroレビュー→retro done→警告消灯の一連フローが稼働可能な状態。",
   "milestones": [
     {
       "id": "ms-1",
@@ -434,7 +434,7 @@
       "status": "in_progress",
       "target_date": "",
       "commits": [],
-      "progress": 70,
+      "progress": 85,
       "entries": [
         {
           "id": "e-49",
@@ -499,7 +499,22 @@
           "created_at": "2026-05-09",
           "done_at": null,
           "status": "todo",
-          "meta": {}
+          "meta": {},
+          "entries": [
+            {
+              "id": "e-55",
+              "type": "commit",
+              "description": "Add retro reminder to dashboard and beacon retro done command",
+              "date": "2026-05-09",
+              "created_at": "2026-05-09",
+              "done_at": "2026-05-09",
+              "status": "done",
+              "meta": {
+                "hash": "61577f8",
+                "message": "Add retro reminder to dashboard and beacon retro done command"
+              }
+            }
+          ]
         }
       ]
     },

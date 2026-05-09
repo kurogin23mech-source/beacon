@@ -713,6 +713,23 @@ case "${1:-}" in
                 ;;
         esac
         ;;
+    trigger)
+        case "${2:-}" in
+            fire)
+                BEACON_TRIGGER_NAME="${3:-}" BEACON_TRIGGER_MESSAGE="${4:-}" \
+                    python3 "$COMMANDS_PY" trigger_fire
+                ;;
+            check)
+                python3 "$COMMANDS_PY" trigger_check
+                ;;
+            clear)
+                BEACON_TRIGGER_NAME="${3:-}" python3 "$COMMANDS_PY" trigger_clear
+                ;;
+            *)
+                echo "Usage: beacon trigger [fire|check|clear] <name> [message]"
+                ;;
+        esac
+        ;;
     help|-h|--help)
         usage
         ;;

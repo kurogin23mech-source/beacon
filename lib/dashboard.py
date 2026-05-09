@@ -149,7 +149,28 @@ class Dashboard:
         except (FileNotFoundError, IOError):
             pass
 
+        # Fire trigger for Claude Code to pick up
+        self._fire_retro_trigger(current_week)
+
         return f"  \u26a0 \u4eca\u9031\u306e\u632f\u308a\u8fd4\u308a\u304c\u307e\u3060\u3067\u3059\uff08{current_week}\uff09  /beacon-retro \u3067\u958b\u59cb"
+
+    def _fire_retro_trigger(self, week):
+        """Write retro trigger file if not already pending."""
+        project_dir = os.path.dirname(self.project_path)
+        triggers_dir = os.path.join(project_dir, "triggers")
+        trigger_path = os.path.join(triggers_dir, "retro.json")
+        if os.path.exists(trigger_path):
+            return
+        import json as j
+        os.makedirs(triggers_dir, exist_ok=True)
+        data = {
+            "name": "retro",
+            "message": f"\u4eca\u9031\u306e\u632f\u308a\u8fd4\u308a\u304c\u307e\u3060\u3067\u3059\uff08{week}\uff09\u3002/beacon-retro \u3067\u958b\u59cb\u3057\u307e\u3059\u304b\uff1f",
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        with open(trigger_path, "w") as f:
+            j.dump(data, f, ensure_ascii=False)
+            f.write("\n")
 
     def _get_latest_retro(self):
         """Find the latest retro file in .beacon/retro/."""
