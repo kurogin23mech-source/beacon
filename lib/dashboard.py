@@ -98,6 +98,7 @@ class Dashboard:
         self.cursor_pos = 0  # Index into self.selectable
         self.expanded = set()  # Set of milestone indices that are expanded
         self.expanded_entries = set()  # Set of entry IDs whose detail is shown
+        self.hide_done = False  # Toggle to hide done entries
         self.header_lines = []  # Fixed header lines
         self.lines = []  # Scrollable body lines
         self.selectable = []  # List of (line_index, kind, key) for navigable rows
@@ -237,7 +238,8 @@ class Dashboard:
         lines.append(("", 0))
         lines.append(("  " + "─" * ((width - 4) // 2), curses.A_NORMAL))
         now = time.strftime("%H:%M:%S")
-        lines.append((f"  {now}  |  ↑↓:move  Enter:expand  q:quit", curses.A_NORMAL))
+        done_hint = "d:show done" if self.hide_done else "d:hide done"
+        lines.append((f"  {now}  |  ↑↓:move  Enter:expand  {done_hint}  q:quit", curses.A_NORMAL))
 
         # Clamp cursor_pos to valid range
         if self.selectable:
@@ -267,8 +269,11 @@ class Dashboard:
 
     def _render_entries(self, lines, entries, prefix, width, depth=0):
         """Render entries recursively, supporting nested task→commit grouping."""
-        for j, entry in enumerate(entries):
-            is_last_e = j == len(entries) - 1
+        visible = [e for e in entries if e.get("status") != "cancelled"]
+        if self.hide_done:
+            visible = [e for e in visible if e.get("status") != "done"]
+        for j, entry in enumerate(visible):
+            is_last_e = j == len(visible) - 1
             e_connector = "└─" if is_last_e else "├─"
             e_type = entry.get("type", "?")
             e_desc = entry.get("description", "")
@@ -303,8 +308,8 @@ class Dashboard:
             else:
                 s_mark = "●" if e_status == "done" else "○"
                 child_count = f" ({len(children)})" if children else ""
-                type_col = f"[{e_type:<6}]"
-                e_line = f"{prefix}{e_connector} {s_mark} {type_col} {e_desc}{child_count}{expand_hint}{date_str}"
+                id_col = f"[{e_id}]" if e_id else f"[{e_type:<6}]"
+                e_line = f"{prefix}{e_connector} {s_mark} {id_col} {e_desc}{child_count}{expand_hint}{date_str}"
                 style = "task" if e_status == "done" else curses.A_NORMAL
                 # All task entries are selectable (expandable ones toggle, others just highlight)
                 self._add_line(lines, e_line, style, "entry", e_id)
@@ -360,6 +365,8 @@ class Dashboard:
                     self.expanded_entries.discard(sel_key)
                 else:
                     self.expanded_entries.add(sel_key)
+        elif key == ord('d'):
+            self.hide_done = not self.hide_done
         return True
 
     def draw(self, stdscr):
