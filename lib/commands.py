@@ -1035,6 +1035,76 @@ def cmd_summary():
         print(data.get("summary", "(未設定)"))
 
 
+def cmd_retro_prepare():
+    """Collect weekly data for retrospective. Read-only."""
+    since = os.environ.get("BEACON_SINCE", "")
+    until = os.environ.get("BEACON_UNTIL", "")
+
+    data = load_project()
+
+    # Collect entries from all milestones within the date range
+    weekly_milestones = []
+    for ms in data.get("milestones", []):
+        ms_entries = []
+        for entry in _collect_retro_entries_recursive(ms.get("entries", []), since, until):
+            ms_entries.append(entry)
+        if ms_entries:
+            weekly_milestones.append({
+                "id": ms["id"],
+                "title": ms.get("title", ""),
+                "status": ms.get("status", ""),
+                "progress": ms.get("progress", 0),
+                "entries": ms_entries,
+            })
+
+    output = {
+        "project": data.get("name", ""),
+        "period": {"since": since, "until": until},
+        "summary": data.get("summary", ""),
+        "milestones": weekly_milestones,
+    }
+    print(json.dumps(output, ensure_ascii=False))
+
+
+def _collect_retro_entries_recursive(entries, since, until):
+    """Recursively collect entries within date range."""
+    result = []
+    for entry in entries:
+        date = entry.get("created_at") or entry.get("date") or ""
+        status = entry.get("status", "")
+        if status == "cancelled":
+            continue
+        in_range = True
+        if since and date < since:
+            in_range = False
+        if until and date > until:
+            in_range = False
+
+        children = entry.get("entries", [])
+        child_results = _collect_retro_entries_recursive(children, since, until) if children else []
+
+        if in_range or child_results:
+            item = {
+                "id": entry.get("id", ""),
+                "type": entry.get("type", ""),
+                "description": entry.get("description", ""),
+                "status": status,
+                "date": date,
+            }
+            if entry.get("detail"):
+                item["detail"] = entry["detail"]
+            if entry.get("meta"):
+                item["meta"] = entry["meta"]
+            if entry.get("done_at"):
+                item["done_at"] = entry["done_at"]
+            if child_results:
+                item["entries"] = child_results
+            if in_range:
+                result.append(item)
+
+    return result
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     commands = {
@@ -1059,6 +1129,7 @@ if __name__ == "__main__":
         "task_delete": cmd_task_delete,
         "entry_move": cmd_entry_move,
         "summary": cmd_summary,
+        "retro_prepare": cmd_retro_prepare,
     }
     fn = commands.get(cmd)
     if fn:

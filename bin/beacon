@@ -488,6 +488,37 @@ cmd_entry_move() {
         python3 "$COMMANDS_PY" entry_move
 }
 
+cmd_retro() {
+    ensure_project
+    local since="" until=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --since) since="${2:-}"; shift 2 ;;
+            --until) until="${2:-}"; shift 2 ;;
+            --prepare) shift ;;
+            *) shift ;;
+        esac
+    done
+
+    # Default: current week (Monday to today)
+    if [ -z "$since" ]; then
+        local dow
+        dow=$(date +%u)  # 1=Mon, 7=Sun
+        if [[ "$(uname)" == "Darwin" ]]; then
+            since=$(date -v-"$((dow - 1))"d +%Y-%m-%d)
+        else
+            since=$(date -d "last monday" +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)
+        fi
+    fi
+    if [ -z "$until" ]; then
+        until=$(date +%Y-%m-%d)
+    fi
+
+    BEACON_SINCE="$since" BEACON_UNTIL="$until" \
+        python3 "$COMMANDS_PY" retro_prepare
+}
+
 cmd_status() {
     ensure_project
     local json_flag=""
@@ -658,6 +689,10 @@ case "${1:-}" in
                 echo "Usage: beacon entry move <entry-id> -t <task-id>"
                 ;;
         esac
+        ;;
+    retro)
+        shift
+        cmd_retro "$@"
         ;;
     help|-h|--help)
         usage

@@ -1,7 +1,7 @@
 {
   "name": "Beacon",
   "objective": "AI駆動開発においてマイルストーンベースのプロジェクト進捗を常時可視化し、開発者が方向性を見失わずに実装を進められるツールを構築する",
-  "summary": "Skill4つの実運用検証を経て、CLAUDE.mdのbeaconセクションをSkill参照に縮小。ms-8の目標であるCLI CRUD整備とSkill化は完了。次はms-8をクローズし、ms-4/ms-5等の残タスクや他プロジェクトでの運用検証に進む段階。",
+  "summary": "ms-8クローズ後、ms-5の残タスクを一括対応。ダッシュボードにエントリID表示・完了タスク非表示トグル・cancelledフィルタを追加し、beacon-task Skillにtask done時の進捗率自動定性評価を組み込んだ。ms-5もクローズ可能な状態。",
   "milestones": [
     {
       "id": "ms-1",
@@ -282,7 +282,7 @@
           "date": "2026-05-09",
           "created_at": "2026-05-09",
           "done_at": null,
-          "status": "todo",
+          "status": "cancelled",
           "meta": {}
         }
       ]
@@ -290,7 +290,7 @@
     {
       "id": "ms-5",
       "title": "全体的な挙動の安定化・ブラッシュアップ",
-      "status": "in_progress",
+      "status": "done",
       "target_date": "",
       "commits": [],
       "entries": [
@@ -341,7 +341,22 @@
           "created_at": "2026-05-09",
           "done_at": "2026-05-09",
           "status": "done",
-          "meta": {}
+          "meta": {},
+          "entries": [
+            {
+              "id": "e-48",
+              "type": "commit",
+              "description": "ms-8クローズ後、ms-5の残タスクを一括対応。ダッシュボードにエントリID表示・完了タスク非表示トグル・cancelledフィルタを追加し、beacon-task Skillにtask done時の進捗率自動定性評価を組み込んだ。ms-5もクローズ可能な状態。",
+              "date": "2026-05-09",
+              "created_at": "2026-05-09",
+              "done_at": "2026-05-09",
+              "status": "done",
+              "meta": {
+                "hash": "085a683",
+                "message": "Mark ms-5 tasks done: e-26, e-27, e-28, e-25, e-29, e-30, e-31 (100%)"
+              }
+            }
+          ]
         },
         {
           "id": "e-26",
@@ -416,9 +431,52 @@
     {
       "id": "ms-7",
       "title": "週次振り返りを自動化する",
-      "status": "todo",
+      "status": "in_progress",
       "target_date": "",
-      "commits": []
+      "commits": [],
+      "progress": 0,
+      "entries": [
+        {
+          "id": "e-49",
+          "type": "task",
+          "description": "beacon retro --generate コマンド実装（週次データ収集＋ドキュメント生成）",
+          "date": "2026-05-09",
+          "created_at": "2026-05-09",
+          "done_at": null,
+          "status": "todo",
+          "meta": {}
+        },
+        {
+          "id": "e-50",
+          "type": "task",
+          "description": "beacon-retro Skill作成（AI による課題→判断→結果の再構成）",
+          "date": "2026-05-09",
+          "created_at": "2026-05-09",
+          "done_at": null,
+          "status": "todo",
+          "meta": {}
+        },
+        {
+          "id": "e-51",
+          "type": "task",
+          "description": "session-start Skillに未レビューretro検知を追加",
+          "date": "2026-05-09",
+          "created_at": "2026-05-09",
+          "done_at": null,
+          "status": "todo",
+          "meta": {}
+        },
+        {
+          "id": "e-52",
+          "type": "task",
+          "description": "scheduled trigger で指定曜日に自動生成",
+          "date": "2026-05-09",
+          "created_at": "2026-05-09",
+          "done_at": null,
+          "status": "todo",
+          "meta": {}
+        }
+      ]
     },
     {
       "id": "ms-8",
