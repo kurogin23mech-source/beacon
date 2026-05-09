@@ -1,7 +1,7 @@
 {
   "name": "Beacon",
   "objective": "AI駆動開発においてマイルストーンベースのプロジェクト進捗を常時可視化し、開発者が方向性を見失わずに実装を進められるツールを構築する",
-  "summary": "直近の流れ: beacon-log Skill の作成 → beacon-task Skill の作成 → beacon-session-end Skill の作成 → CLAUDE.md の beacon セクション縮小（Skill移行後） → CLI --json出力、long option対応、ms-8 Skill化アーキテクチャ設計",
+  "summary": "直近の流れ: beacon-task Skill の作成 → beacon-session-end Skill の作成 → CLAUDE.md の beacon セクション縮小（Skill移行後） → CLI --json出力、long option対応、ms-8 Skill化アーキテクチャ設計 → SPEC.md更新: CLI CRUD設計、Skillアーキテクチャ、データモデル整理",
   "milestones": [
     {
       "id": "ms-1",
@@ -274,6 +274,16 @@
               "meta": {}
             }
           ]
+        },
+        {
+          "id": "e-42",
+          "type": "task",
+          "description": "ダッシュボードのマウススクロール対応を検討・実装する",
+          "date": "2026-05-09",
+          "created_at": "2026-05-09",
+          "done_at": null,
+          "status": "todo",
+          "meta": {}
         }
       ]
     },
@@ -440,6 +450,19 @@
                 "hash": "0e52de8",
                 "message": "Add --json output to CLI, long option support, and plan ms-8 Skill architecture"
               }
+            },
+            {
+              "id": "e-41",
+              "type": "commit",
+              "description": "SPEC.md更新: CLI CRUD設計、Skillアーキテクチャ、データモデル整理",
+              "date": "2026-05-09",
+              "created_at": "2026-05-09",
+              "done_at": "2026-05-09",
+              "status": "done",
+              "meta": {
+                "hash": "45c81d3",
+                "message": "Update project.json: record CLI --json commit to ms-8"
+              }
             }
           ]
         },
@@ -515,7 +538,7 @@
           "meta": {}
         }
       ],
-      "progress": 15
+      "progress": 20
     }
   ]
 }
