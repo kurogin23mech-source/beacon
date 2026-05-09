@@ -4,6 +4,7 @@
 import curses
 import json
 import hashlib
+import os
 import sys
 import time
 import unicodedata
@@ -99,6 +100,8 @@ class Dashboard:
         self.expanded = set()  # Set of milestone indices that are expanded
         self.expanded_entries = set()  # Set of entry IDs whose detail is shown
         self.hide_done = False  # Toggle to hide done entries
+        self.view_mode = "project"  # "project" or "retro"
+        self.retro_scroll = 0  # Scroll offset for retro view
         self.header_lines = []  # Fixed header lines
         self.lines = []  # Scrollable body lines
         self.selectable = []  # List of (line_index, kind, key) for navigable rows
@@ -117,6 +120,57 @@ class Dashboard:
                         self.expanded.add(i)
             return True
         return False
+
+    def _get_latest_retro(self):
+        """Find the latest retro file in .beacon/retro/."""
+        import glob as g
+        project_dir = os.path.dirname(self.project_path)
+        retro_dir = os.path.join(project_dir, "retro")
+        files = sorted(g.glob(os.path.join(retro_dir, "*.md")))
+        if not files:
+            return None, None
+        path = files[-1]
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return os.path.basename(path), f.read()
+        except (FileNotFoundError, IOError):
+            return None, None
+
+    def build_retro_lines(self, width):
+        """Build display lines for retro view."""
+        self.header_lines = []
+        self.selectable = []
+
+        name, content = self._get_latest_retro()
+        if not content:
+            self.header_lines = [(" BEACON RETRO | No retro files found ", "header")]
+            self.lines = [("  Run /beacon-retro to generate one.", curses.A_NORMAL)]
+            return
+
+        self.header_lines = [
+            (f" BEACON RETRO | {name}  (r: back to project) ", "header"),
+            ("", 0),
+        ]
+
+        lines = []
+        for raw_line in content.splitlines():
+            # Simple markdown styling
+            stripped = raw_line.rstrip()
+            if stripped.startswith("# "):
+                style = "section"
+            elif stripped.startswith("## "):
+                style = "section_yellow"
+            elif stripped.startswith("### "):
+                style = "active"
+            elif stripped.startswith("- **"):
+                style = curses.A_NORMAL
+            else:
+                style = curses.A_NORMAL
+
+            for wl in wrap_line("  " + stripped, width - 1):
+                lines.append((wl, style))
+
+        self.lines = lines
 
     def _add_line(self, lines, text, style, selectable_kind=None, selectable_key=None):
         """Append a line and optionally register it as selectable."""
@@ -239,7 +293,7 @@ class Dashboard:
         lines.append(("  " + "─" * ((width - 4) // 2), curses.A_NORMAL))
         now = time.strftime("%H:%M:%S")
         done_hint = "d:show done" if self.hide_done else "d:hide done"
-        lines.append((f"  {now}  |  ↑↓:move  Enter:expand  {done_hint}  q:quit", curses.A_NORMAL))
+        lines.append((f"  {now}  |  ↑↓:move  Enter:expand  {done_hint}  r:retro  q:quit", curses.A_NORMAL))
 
         # Clamp cursor_pos to valid range
         if self.selectable:
@@ -338,9 +392,22 @@ class Dashboard:
 
     def handle_key(self, key):
         """Handle keyboard input. Returns False to quit."""
+        if key in (ord('q'), ord('Q')):
+            return False
+        if key == ord('r'):
+            if self.view_mode == "project":
+                self.view_mode = "retro"
+                self.retro_scroll = 0
+            else:
+                self.view_mode = "project"
+            return True
+        if self.view_mode == "retro":
+            if key in (curses.KEY_UP, ord('k')):
+                self.retro_scroll = max(0, self.retro_scroll - 1)
+            elif key in (curses.KEY_DOWN, ord('j')):
+                self.retro_scroll += 1
+            return True
         if not self.selectable:
-            if key in (ord('q'), ord('Q')):
-                return False
             return True
 
         sel_count = len(self.selectable)
@@ -437,7 +504,10 @@ class Dashboard:
             _needs_redraw = False
 
             # Build display
-            self.build_lines(width)
+            if self.view_mode == "retro":
+                self.build_retro_lines(width)
+            else:
+                self.build_lines(width)
 
             # Calculate layout: fixed header + scrollable body
             header_count = len(getattr(self, 'header_lines', []))
@@ -446,7 +516,12 @@ class Dashboard:
                 body_height = 1
 
             # Adjust scroll to keep cursor visible within body area
-            self._adjust_scroll(body_height)
+            if self.view_mode == "retro":
+                max_scroll = max(0, len(self.lines) - body_height)
+                self.retro_scroll = min(self.retro_scroll, max_scroll)
+                self.scroll_offset = self.retro_scroll
+            else:
+                self._adjust_scroll(body_height)
 
             # Render
             stdscr.clear()
