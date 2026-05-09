@@ -214,7 +214,7 @@ class Dashboard:
 
         # Overall progress
         milestones = self.project.get("milestones", [])
-        done_count = sum(1 for m in milestones if m.get("status") == "done")
+        done_count = sum(1 for m in milestones if m.get("status") in ("done", "observing"))
         total_count = len(milestones)
         bar_suffix = f"  {done_count}/{total_count} MS"
         bar_cols = max(4, width - 2 - display_width(bar_suffix) - 1)
@@ -241,7 +241,8 @@ class Dashboard:
 
             # Status icon
             icon_map = {"done": "●", "in_progress": "◐",
-                        "todo": "○", "waiting": "◌", "in_review": "◑"}
+                        "todo": "○", "waiting": "◌", "in_review": "◑",
+                        "observing": "◔"}
             icon = icon_map.get(status, "?")
 
             # Tree connector
@@ -259,7 +260,7 @@ class Dashboard:
             # Style - determined during draw based on cursor position
             if is_active:
                 style = "active"
-            elif status == "done":
+            elif status in ("done", "observing"):
                 style = "done"
             else:
                 style = "todo"
@@ -353,8 +354,8 @@ class Dashboard:
             if e_type == "commit":
                 meta = entry.get("meta", {})
                 e_hash = meta.get("hash", "")[:7]
-                hash_col = f"{e_hash:<7}"
-                e_line = f"{prefix}{e_connector} {hash_col}  {e_desc}{expand_hint}{date_str}"
+                id_col = f"[{e_id}]" if e_id else "[commit]"
+                e_line = f"{prefix}{e_connector} {id_col} {e_desc} ({e_hash}){expand_hint}{date_str}"
                 if is_expandable:
                     self._add_line(lines, e_line, "commit", "entry", e_id)
                 else:

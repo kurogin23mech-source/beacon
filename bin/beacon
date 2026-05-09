@@ -18,7 +18,8 @@ Usage:
   beacon milestone add    Add a new milestone (interactive)
   beacon milestone list   List milestones
   beacon milestone start <id>  Set milestone as active
-  beacon milestone done <id>   Mark milestone as done
+  beacon milestone close <id>  Close milestone (keeps current progress)
+  beacon milestone observe <id> Set milestone to observing (watching)
   beacon log [message]    Record current HEAD commit to active milestone
   beacon sync             Auto-sync recent git commits to active milestone
   beacon help             Show this help
@@ -104,10 +105,20 @@ cmd_milestone_done() {
     ensure_project
     local ms_id="${1:-}"
     if [ -z "$ms_id" ]; then
-        echo "Usage: beacon milestone done <ms-id>"
+        echo "Usage: beacon milestone close <ms-id>"
         exit 1
     fi
     BEACON_MS_ID="$ms_id" python3 "$COMMANDS_PY" milestone_done
+}
+
+cmd_milestone_observe() {
+    ensure_project
+    local ms_id="${1:-}"
+    if [ -z "$ms_id" ]; then
+        echo "Usage: beacon milestone observe <ms-id>"
+        exit 1
+    fi
+    BEACON_MS_ID="$ms_id" BEACON_STATUS="observing" python3 "$COMMANDS_PY" milestone_update
 }
 
 cmd_milestone_show() {
@@ -627,11 +638,12 @@ case "${1:-}" in
             add)    shift 2; cmd_milestone_add "$@" ;;
             list|ls) cmd_milestone_list ;;
             start)  cmd_milestone_start "${3:-}" ;;
-            done)   cmd_milestone_done "${3:-}" ;;
+            done|close) cmd_milestone_done "${3:-}" ;;
+            observe)    cmd_milestone_observe "${3:-}" ;;
             show)   shift 2; cmd_milestone_show "$@" ;;
             update) shift 2; cmd_milestone_update "$@" ;;
             delete|cancel) shift 2; cmd_milestone_delete "$@" ;;
-            *)      echo "Usage: beacon milestone [add|list|start|done|show|update|delete]" ;;
+            *)      echo "Usage: beacon milestone [add|list|start|close|observe|done|show|update|delete]" ;;
         esac
         ;;
     log)

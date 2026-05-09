@@ -8,7 +8,7 @@ import subprocess
 import sys
 
 
-VALID_STATUSES = {"todo", "in_progress", "in_review", "waiting", "done", "cancelled"}
+VALID_STATUSES = {"todo", "in_progress", "in_review", "waiting", "done", "observing", "cancelled"}
 VALID_ENTRY_TYPES = {"commit", "task", "note"}
 MS_ID_RE = re.compile(r"^ms-\d+$")
 ENTRY_ID_RE = re.compile(r"^e-\d+$")
@@ -188,7 +188,8 @@ def cmd_milestone_list():
         return
 
     icons = {"done": "\u25cf", "in_progress": "\u25d0", "todo": "\u25cb",
-             "waiting": "\u25cc", "in_review": "\u25d1", "cancelled": "\u2718"}
+             "waiting": "\u25cc", "in_review": "\u25d1", "observing": "\u25d4",
+             "cancelled": "\u2718"}
     for ms in milestones:
         icon = icons.get(ms["status"], "?")
         active = " \u25c0 ACTIVE" if ms["status"] == "in_progress" else ""
@@ -900,7 +901,8 @@ def cmd_task_show():
         return
 
     icons = {"done": "\u25cf", "todo": "\u25cb", "in_progress": "\u25d0",
-             "waiting": "\u25cc", "in_review": "\u25d1", "cancelled": "\u2718"}
+             "waiting": "\u25cc", "in_review": "\u25d1", "observing": "\u25d4",
+             "cancelled": "\u2718"}
     icon = icons.get(entry.get("status", "todo"), "?")
     print(f"{icon} [{entry['id']}] {entry.get('description', '')}")
     print(f"  Milestone: [{ms['id']}] {ms['title']}")

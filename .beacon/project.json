@@ -120,7 +120,7 @@
     {
       "id": "ms-4",
       "title": "細かいUXを調整して使いやすくする・フェイズ0",
-      "status": "todo",
+      "status": "observing",
       "progress": 60,
       "target_date": "2026-05-08",
       "entries": [
@@ -290,7 +290,7 @@
     {
       "id": "ms-5",
       "title": "全体的な挙動の安定化・ブラッシュアップ",
-      "status": "done",
+      "status": "observing",
       "target_date": "",
       "commits": [],
       "entries": [
@@ -442,8 +442,8 @@
           "description": "beacon retro --generate コマンド実装（週次データ収集＋ドキュメント生成）",
           "date": "2026-05-09",
           "created_at": "2026-05-09",
-          "done_at": null,
-          "status": "todo",
+          "done_at": "2026-05-09",
+          "status": "done",
           "meta": {}
         },
         {
@@ -452,8 +452,8 @@
           "description": "beacon-retro Skill作成（AI による課題→判断→結果の再構成）",
           "date": "2026-05-09",
           "created_at": "2026-05-09",
-          "done_at": null,
-          "status": "todo",
+          "done_at": "2026-05-09",
+          "status": "done",
           "meta": {}
         },
         {
@@ -462,8 +462,8 @@
           "description": "session-start Skillに未レビューretro検知を追加",
           "date": "2026-05-09",
           "created_at": "2026-05-09",
-          "done_at": null,
-          "status": "todo",
+          "done_at": "2026-05-09",
+          "status": "done",
           "meta": {}
         },
         {
