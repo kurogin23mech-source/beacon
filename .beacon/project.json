@@ -57,7 +57,7 @@
       "id": "ms-3",
       "title": "マイルストーン進捗を可視化できるようにする",
       "status": "done",
-      "progress": 95,
+      "progress": 100,
       "target_date": null,
       "entries": [
         {
@@ -528,8 +528,8 @@
           "description": "beacon-log Skill の作成",
           "date": "2026-05-09",
           "created_at": "2026-05-09",
-          "done_at": null,
-          "status": "todo",
+          "done_at": "2026-05-09",
+          "status": "done",
           "meta": {},
           "detail": "## 設計方針: ツール主導・Claude生成組み込み\n\nbeacon log の2段階呼び出しをラップする薄いSkill。\n\n### ワークフロー\n1. beacon log --prepare を Bash で実行 → 判断材料JSON取得\n   - コミット情報、MS状態、タスク消化率、直近エントリ\n2. JSON をもとに Claude が以下を生成:\n   - 進捗率（0-100）: MSの目標に対する定性評価\n   - サマリー: 次セッションで知るべき背景・経緯・判断\n3. beacon log --finalize --progress N --summary 'text' を Bash で実行\n\n### Skill の責務\n- prepare の実行と finalize への橋渡しのみ\n- 判断ロジックはツール（prepare が何を出すか）とプロンプト（固定テンプレ）に委譲\n- Skill 自体にビジネスロジックを持たない"
         },
@@ -539,8 +539,8 @@
           "description": "beacon-task Skill の作成",
           "date": "2026-05-09",
           "created_at": "2026-05-09",
-          "done_at": null,
-          "status": "todo",
+          "done_at": "2026-05-09",
+          "status": "done",
           "meta": {}
         },
         {
@@ -549,8 +549,8 @@
           "description": "beacon-session-end Skill の作成",
           "date": "2026-05-09",
           "created_at": "2026-05-09",
-          "done_at": null,
-          "status": "todo",
+          "done_at": "2026-05-09",
+          "status": "done",
           "meta": {}
         },
         {
