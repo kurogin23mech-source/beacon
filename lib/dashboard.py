@@ -396,18 +396,38 @@ class Dashboard:
             "selected_active": curses.color_pair(7) | curses.A_BOLD,
         }
 
-        _last_size = None
+        _last_size = (0, 0)  # Force size mismatch on first iteration
+        _needs_redraw = True
 
         while True:
-            # Force curses to re-sync with actual terminal state
-            # This replicates what fullscreen toggle does internally
-            curses.endwin()
-            stdscr.refresh()
-
             height, width = stdscr.getmaxyx()
 
-            # Reload project data
-            self.reload_if_changed()
+            # Size changed: endwin/refresh to fully re-initialize stdscr.
+            # resizeterm() alone doesn't rebuild the internal buffer,
+            # so addstr beyond the original dimensions silently fails.
+            # This only fires on actual size changes (not every loop).
+            if (height, width) != _last_size:
+                curses.endwin()
+                stdscr.refresh()
+                height, width = stdscr.getmaxyx()
+                _last_size = (height, width)
+                _needs_redraw = True
+
+            # Reload project data (triggers redraw if file changed)
+            if self.reload_if_changed():
+                _needs_redraw = True
+
+            if not _needs_redraw:
+                key = stdscr.getch()
+                if key == curses.KEY_RESIZE:
+                    _needs_redraw = True
+                elif key != -1:
+                    if not self.handle_key(key):
+                        break
+                    _needs_redraw = True
+                continue
+
+            _needs_redraw = False
 
             # Build display
             self.build_lines(width)
@@ -421,7 +441,7 @@ class Dashboard:
             # Adjust scroll to keep cursor visible within body area
             self._adjust_scroll(body_height)
 
-            # Render - clear() forces full repaint to avoid stale line artifacts
+            # Render
             stdscr.clear()
 
             # Draw fixed header
@@ -456,15 +476,14 @@ class Dashboard:
 
             stdscr.refresh()
 
-            # Handle input
+            # Handle input after draw
             key = stdscr.getch()
             if key == curses.KEY_RESIZE:
-                curses.endwin()
-                stdscr.refresh()
-                continue
+                _needs_redraw = True
             elif key != -1:
                 if not self.handle_key(key):
                     break
+                _needs_redraw = True
 
     def _adjust_scroll(self, height):
         """Ensure the selected item is visible."""
