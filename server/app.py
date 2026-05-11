@@ -52,12 +52,14 @@ class ProjectCreate(BaseModel):
 class MilestoneCreate(BaseModel):
     title: str
     target_date: str = ""
+    description: str = ""
 
 class MilestoneUpdate(BaseModel):
     title: str = ""
     progress: str = ""
     target_date: str = ""
     status: str = ""
+    description: str = ""
 
 class EntryCreate(BaseModel):
     description: str
@@ -126,7 +128,8 @@ def put_project(project_id: str, body: dict):
 @app.post("/api/projects/{project_id}/milestones")
 def create_milestone(project_id: str, body: MilestoneCreate):
     data = _load(project_id)
-    ms_id = core.milestone_add(data, body.title, body.target_date)
+    ms_id = core.milestone_add(data, body.title, body.target_date,
+                               description=body.description)
     _save(project_id, data)
     return {"ms_id": ms_id, "title": body.title}
 
@@ -155,6 +158,7 @@ def update_milestone(project_id: str, ms_id: str, body: MilestoneUpdate):
             data, ms_id,
             title=body.title, progress=body.progress,
             target_date=body.target_date, status=body.status,
+            description=body.description,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

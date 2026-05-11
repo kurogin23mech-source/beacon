@@ -182,8 +182,9 @@ def cmd_init():
 def cmd_milestone_add():
     title = os.environ.get("BEACON_TITLE", "")
     target_date = os.environ.get("BEACON_TARGET_DATE", "")
+    description = os.environ.get("BEACON_DESCRIPTION", "")
     data = load_project()
-    ms_id = core.milestone_add(data, title, target_date)
+    ms_id = core.milestone_add(data, title, target_date, description=description)
     save_project(data)
     print(f"Added milestone {ms_id}: {title}")
 
@@ -257,6 +258,7 @@ def cmd_milestone_show():
                 output = {
                     "id": ms["id"],
                     "title": ms.get("title", ""),
+                    "description": ms.get("description", ""),
                     "status": ms.get("status", "todo"),
                     "progress": ms.get("progress", 0),
                     "target_date": ms.get("target_date", ""),
@@ -270,6 +272,8 @@ def cmd_milestone_show():
                          "waiting": "\u25cc", "in_review": "\u25d5", "cancelled": "\u2718"}
                 icon = icons.get(ms["status"], "?")
                 print(f"{icon} [{ms['id']}] {ms['title']}")
+                if ms.get("description"):
+                    print(f"  {ms['description']}")
                 print(f"  Status: {ms['status']}  Progress: {ms.get('progress', 0)}%")
                 print(f"  Target: {ms.get('target_date') or '-'}")
                 print(f"  Tasks: {done_tasks}/{total_tasks} done")
@@ -290,6 +294,7 @@ def cmd_milestone_update():
             progress=os.environ.get("BEACON_PROGRESS", ""),
             target_date=os.environ.get("BEACON_TARGET_DATE", ""),
             status=os.environ.get("BEACON_STATUS", ""),
+            description=os.environ.get("BEACON_DESCRIPTION", ""),
         )
     except ValueError as e:
         print(str(e))

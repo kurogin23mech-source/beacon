@@ -142,6 +142,15 @@ def test_create_milestone():
     assert len(_store[PROJECT_ID]["milestones"]) == 3
 
 
+def test_create_milestone_with_description():
+    r = client.post(f"/api/projects/{PROJECT_ID}/milestones",
+                    json={"title": "Desc MS", "description": "A goal"})
+    assert r.status_code == 200
+    ms_id = r.json()["ms_id"]
+    ms = next(m for m in _store[PROJECT_ID]["milestones"] if m["id"] == ms_id)
+    assert ms["description"] == "A goal"
+
+
 def test_get_milestone():
     r = client.get(f"/api/projects/{PROJECT_ID}/milestones/ms-1")
     assert r.status_code == 200
@@ -160,6 +169,14 @@ def test_update_milestone():
     assert r.status_code == 200
     assert r.json()["title"] == "Updated title"
     assert r.json()["progress"] == 50
+
+
+def test_update_milestone_description():
+    r = client.patch(f"/api/projects/{PROJECT_ID}/milestones/ms-1",
+                     json={"description": "Updated desc"})
+    assert r.status_code == 200
+    ms = _store[PROJECT_ID]["milestones"][0]
+    assert ms["description"] == "Updated desc"
 
 
 def test_update_milestone_invalid_status():

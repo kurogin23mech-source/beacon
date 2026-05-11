@@ -150,6 +150,18 @@ class TestMilestones:
         assert len(data["milestones"]) == 1
         assert data["milestones"][0]["title"] == "New MS"
         assert data["milestones"][0]["target_date"] == "2026-12-31"
+        assert "description" not in data["milestones"][0]
+
+    def test_add_with_description(self):
+        data = make_project()
+        ms_id = core.milestone_add(data, "New MS", description="A detailed goal")
+        assert ms_id == "ms-1"
+        assert data["milestones"][0]["description"] == "A detailed goal"
+
+    def test_add_without_description_omits_key(self):
+        data = make_project()
+        core.milestone_add(data, "No desc MS")
+        assert "description" not in data["milestones"][0]
 
     def test_start(self):
         data = make_project(milestones=[
@@ -175,6 +187,17 @@ class TestMilestones:
         ms = core.milestone_update(data, "ms-1", title="Updated", progress="50")
         assert ms["title"] == "Updated"
         assert ms["progress"] == 50
+
+    def test_update_description(self):
+        data = make_project(milestones=[make_ms(ms_id="ms-1")])
+        ms = core.milestone_update(data, "ms-1", description="New desc")
+        assert ms["description"] == "New desc"
+
+    def test_update_empty_description_no_change(self):
+        data = make_project(milestones=[make_ms(ms_id="ms-1")])
+        data["milestones"][0]["description"] = "Original"
+        ms = core.milestone_update(data, "ms-1", description="")
+        assert ms["description"] == "Original"
 
     def test_update_invalid_status(self):
         data = make_project(milestones=[make_ms()])

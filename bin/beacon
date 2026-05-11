@@ -98,12 +98,17 @@ cmd_milestone_add() {
     ensure_project
     local title=""
     local target_date=""
+    local description=""
 
-    # Parse arguments: beacon milestone add "title" [-d target_date]
+    # Parse arguments: beacon milestone add "title" [-d target_date] [--description "desc"]
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -d)
                 target_date="${2:-}"
+                shift 2
+                ;;
+            --description|--desc)
+                description="${2:-}"
                 shift 2
                 ;;
             *)
@@ -119,9 +124,11 @@ cmd_milestone_add() {
         echo "============="
         read -rp "Title: " title
         read -rp "Target date (YYYY-MM-DD): " target_date
+        read -rp "Description: " description
     fi
 
     BEACON_TITLE="$title" BEACON_TARGET_DATE="$target_date" \
+        BEACON_DESCRIPTION="$description" \
         python3 "$COMMANDS_PY" milestone_add
 }
 
@@ -187,6 +194,7 @@ cmd_milestone_update() {
     local progress=""
     local target_date=""
     local status=""
+    local description=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -195,17 +203,18 @@ cmd_milestone_update() {
             -p|--progress)  progress="${2:-}"; shift 2 ;;
             --target-date)  target_date="${2:-}"; shift 2 ;;
             --status)       status="${2:-}"; shift 2 ;;
+            --description|--desc) description="${2:-}"; shift 2 ;;
             *)              ms_id="$1"; shift ;;
         esac
     done
 
     if [ -z "$ms_id" ]; then
-        echo "Usage: beacon milestone update <ms-id> [--title T] [--progress N] [--target-date D] [--status S] [--json]"
+        echo "Usage: beacon milestone update <ms-id> [--title T] [--progress N] [--target-date D] [--status S] [--description D] [--json]"
         exit 1
     fi
     BEACON_MS_ID="$ms_id" BEACON_JSON="$json_flag" BEACON_TITLE="$title" \
         BEACON_PROGRESS="$progress" BEACON_TARGET_DATE="$target_date" \
-        BEACON_STATUS="$status" \
+        BEACON_STATUS="$status" BEACON_DESCRIPTION="$description" \
         python3 "$COMMANDS_PY" milestone_update
 }
 

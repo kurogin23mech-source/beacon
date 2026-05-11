@@ -144,17 +144,21 @@ def _find_entry_in(entries: list, entry_id: str, ms: dict):
 # Milestone operations
 # ---------------------------------------------------------------------------
 
-def milestone_add(data: dict, title: str, target_date: str = "") -> str:
+def milestone_add(data: dict, title: str, target_date: str = "",
+                   description: str = "") -> str:
     """Add a milestone. Returns the new ms_id."""
     ms_id_num = len(data["milestones"]) + 1
     ms_id = f"ms-{ms_id_num}"
-    data["milestones"].append({
+    ms = {
         "id": ms_id,
         "title": title,
         "status": "todo",
         "target_date": target_date,
         "commits": [],
-    })
+    }
+    if description:
+        ms["description"] = description
+    data["milestones"].append(ms)
     return ms_id
 
 
@@ -183,12 +187,15 @@ def milestone_done(data: dict, ms_id: str) -> dict:
 
 def milestone_update(data: dict, ms_id: str, *,
                      title: str = "", progress: str = "",
-                     target_date: str = "", status: str = "") -> dict:
+                     target_date: str = "", status: str = "",
+                     description: str = "") -> dict:
     """Update milestone fields. Returns the milestone."""
     for ms in data["milestones"]:
         if ms["id"] == ms_id:
             if title:
                 ms["title"] = title
+            if description is not None and description != "":
+                ms["description"] = description
             if progress:
                 try:
                     ms["progress"] = max(0, min(100, int(progress)))
