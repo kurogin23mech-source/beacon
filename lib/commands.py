@@ -136,6 +136,41 @@ def _append_claude_md():
     print(f"Updated {claude_md} with beacon rules")
 
 
+POST_COMMIT_HOOK = """\
+#!/usr/bin/env bash
+# Beacon: auto-log commits to the active milestone
+if [ -f ".beacon/project.json" ] && command -v beacon &>/dev/null; then
+    beacon log 2>/dev/null || true
+fi
+"""
+
+BEACON_HOOK_MARKER = "# Beacon: auto-log commits"
+
+
+def _install_git_hook():
+    """Install post-commit hook to auto-log commits."""
+    hook_dir = os.path.join(".git", "hooks")
+    if not os.path.isdir(hook_dir):
+        return  # Not a git repo
+
+    hook_path = os.path.join(hook_dir, "post-commit")
+
+    if os.path.exists(hook_path):
+        with open(hook_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        if BEACON_HOOK_MARKER in content:
+            return  # Already installed
+        # Append to existing hook
+        with open(hook_path, "a", encoding="utf-8") as f:
+            f.write("\n" + POST_COMMIT_HOOK)
+    else:
+        with open(hook_path, "w", encoding="utf-8") as f:
+            f.write(POST_COMMIT_HOOK)
+
+    os.chmod(hook_path, 0o755)
+    print(f"Installed git post-commit hook")
+
+
 def cmd_init():
     name = os.environ.get("BEACON_NAME", "")
     objective = os.environ.get("BEACON_OBJECTIVE", "")
@@ -147,6 +182,7 @@ def cmd_init():
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")
     _append_claude_md()
+    _install_git_hook()
     print(f"Created {pf}")
     print("Next: beacon milestone add")
 
