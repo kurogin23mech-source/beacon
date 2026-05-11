@@ -98,8 +98,8 @@ This project uses [Beacon](https://github.com/r-kida2/beacon) for milestone-driv
   `.beacon/project.json` を直接編集しない。必ず beacon CLI を使うこと。
 - Before starting work, check milestones (`beacon status`) and confirm which milestone the work targets.
   実装開始前にマイルストーンを確認し、どのマイルストーンに向かう作業かユーザーに確認すること。
-- After committing, record progress: `beacon log "summary" -p <progress>`
-  コミット後は進捗を記録する。進捗率はMSの目標に対する定性評価（0-100）。
+- After committing, the PostToolUse hook will auto-trigger `/beacon-log` Skill for AI-evaluated progress recording.
+  コミット後はPostToolUse hookが自動で `/beacon-log` Skillを起動し、AI評価付きで進捗を記録する。
 - If 2+ commits address the same issue, suggest grouping them into a task.
   同じ課題に2回以上コミットが発生したら、タスクにまとめることを提案する。
 - Update the project summary when direction changes: `beacon summary "text"`
@@ -114,7 +114,7 @@ This project uses [Beacon](https://github.com/r-kida2/beacon) for milestone-driv
 | `beacon milestone start <id>` | Activate milestone / MS開始 |
 | `beacon task add "desc" -m <ms-id>` | Add task / タスク追加 |
 | `beacon task done <id>` | Complete task / タスク完了 |
-| `beacon log "summary" -p <N>` | Record commit / コミット記録 |
+| `beacon log "summary"` | Record commit (auto via hook) / コミット記録（hook経由で自動） |
 | `beacon summary "text"` | Update summary / サマリー更新 |
 """
 
@@ -172,7 +172,57 @@ def _install_git_hook():
             f.write(POST_COMMIT_HOOK)
 
     os.chmod(hook_path, 0o755)
-    print(f"Installed git post-commit hook")
+    print("Installed git post-commit hook")
+
+
+CLAUDE_HOOK_COMMAND = (
+    "CMD=$(jq -r '.tool_input.command'); "
+    "if echo \"$CMD\" | grep -qE 'git commit ' && [ -f .beacon/project.json ]; then "
+    "PREPARE=$(beacon log --prepare 2>/dev/null) || true; "
+    "if [ -n \"$PREPARE\" ]; then "
+    "printf '{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\","
+    "\"additionalContext\":\"BEACON: Commit detected. "
+    "You MUST now run /beacon-log Skill to record this commit with AI-evaluated progress and summary.\\n"
+    "Prepare context:\\n%s\"}}' \"$PREPARE\"; "
+    "fi; fi"
+)
+
+
+def _install_claude_hook():
+    """Install Claude Code PostToolUse hook for commit detection."""
+    settings_path = os.path.expanduser("~/.claude/settings.json")
+    settings_dir = os.path.dirname(settings_path)
+    os.makedirs(settings_dir, exist_ok=True)
+
+    settings = {}
+    if os.path.exists(settings_path):
+        with open(settings_path, "r", encoding="utf-8") as f:
+            settings = json.load(f)
+
+    hooks = settings.setdefault("hooks", {})
+    post_tool_use = hooks.setdefault("PostToolUse", [])
+
+    # Check if beacon hook already exists
+    for entry in post_tool_use:
+        if entry.get("matcher") == "Bash":
+            for h in entry.get("hooks", []):
+                if "beacon log --prepare" in h.get("command", ""):
+                    return  # Already installed
+
+    post_tool_use.append({
+        "matcher": "Bash",
+        "hooks": [{
+            "type": "command",
+            "command": CLAUDE_HOOK_COMMAND,
+            "timeout": 10,
+            "statusMessage": "Beacon: checking commit...",
+        }],
+    })
+
+    with open(settings_path, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    print("Installed Claude Code PostToolUse hook")
 
 
 def cmd_init():
@@ -187,6 +237,7 @@ def cmd_init():
         f.write("\n")
     _append_claude_md()
     _install_git_hook()
+    _install_claude_hook()
     print(f"Created {pf}")
     print("Next: beacon milestone add")
 
