@@ -532,9 +532,10 @@ class Dashboard:
 
             # Build footer lines
             done_hint = "d:show done" if self.hide_done else "d:hide done"
+            mode_label = "☁ Cloud" if self.store.is_cloud() else "💾 Local"
             footer_lines = [
                 ("  " + "─" * ((width - 4) // 2), curses.A_NORMAL),
-                (f"  ↑↓:move  Enter:expand  {done_hint}  r:retro  q:quit", curses.A_NORMAL),
+                (f"  {mode_label}  ↑↓:move  Enter:expand  {done_hint}  r:retro  q:quit", curses.A_NORMAL),
             ]
 
             # Calculate layout: fixed header + scrollable body + fixed footer

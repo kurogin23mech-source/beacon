@@ -592,11 +592,16 @@ cmd_cloud_launch() {
         fi
     fi
 
-    # Ensure .beacon dir and cloud.json exist
+    # Ensure .beacon dir, cloud.json, and config.json exist
     mkdir -p .beacon
     cat > .beacon/cloud.json <<EOJSON
 {
   "project_id": "$project_id"
+}
+EOJSON
+    cat > .beacon/config.json <<EOJSON
+{
+  "mode": "cloud"
 }
 EOJSON
 
@@ -633,9 +638,11 @@ cmd_launch() {
             pane_count=$(tmux list-panes -t "$session_name" 2>/dev/null | wc -l | tr -d ' ')
             if [ "$pane_count" -lt 2 ]; then
                 echo "Restarting dashboard pane..."
+                local env_prefix=""
+                [ "${BEACON_CLOUD:-}" = "1" ] && env_prefix="BEACON_CLOUD=1 "
                 tmux split-window -hbd -t "$session_name" -c "$work_dir" \
                     -l "${dashboard_pct}%" \
-                    "python3 '$DASHBOARD_PY' '$abs_project'"
+                    "${env_prefix}python3 '$DASHBOARD_PY' '$abs_project'"
                 tmux select-pane -t "$session_name:.1"
             else
                 echo "Beacon is already running."
@@ -661,16 +668,18 @@ cmd_launch() {
     # Session-specific settings (no -g flag to avoid polluting other sessions)
     tmux set-option -t "$session_name" history-limit 10000
 
-    # Pass cloud mode to all panes in this session
+    # Build env prefix for cloud mode
+    local env_prefix=""
     if [ "${BEACON_CLOUD:-}" = "1" ]; then
         tmux set-environment -t "$session_name" BEACON_CLOUD 1
+        env_prefix="BEACON_CLOUD=1 "
     fi
 
     # Create dashboard pane to the LEFT of the shell pane
     # When dashboard exits (q), kill the entire session to clean up
     tmux split-window -hbd -t "$session_name" -c "$work_dir" \
         -l "${dashboard_pct}%" \
-        "python3 '$DASHBOARD_PY' '$abs_project'"
+        "${env_prefix}python3 '$DASHBOARD_PY' '$abs_project'"
 
     # Re-apply ratio on window resize (no quotes around % value for tmux to parse it)
     tmux set-hook -t "$session_name" after-resize-window \
@@ -807,6 +816,14 @@ case "${1:-}" in
             pull)   ensure_project; python3 "$COMMANDS_PY" cloud_pull ;;
             status) ensure_project; python3 "$COMMANDS_PY" cloud_status ;;
             list)   python3 "$COMMANDS_PY" cloud_list ;;
+            off)
+                if [ -f .beacon/config.json ]; then
+                    echo '{"mode": "local"}' > .beacon/config.json
+                    echo "Switched to local mode."
+                else
+                    echo "No .beacon/config.json found."
+                fi
+                ;;
             "")     cmd_cloud_launch ;;
             *)      cmd_cloud_launch "$2" ;;
         esac
