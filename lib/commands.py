@@ -758,7 +758,7 @@ def cmd_log_prepare():
             print(f"Milestone not found: {ms_id}")
             sys.exit(1)
     else:
-        targets = [ms for ms in data["milestones"] if ms["status"] == "in_progress"]
+        targets = [ms for ms in data["milestones"] if ms["status"] in ("in_progress", "observing")]
         if not targets:
             print("No active milestone. Run: beacon milestone start <ms-id>")
             sys.exit(1)
@@ -1106,12 +1106,13 @@ def cmd_task_delete():
 
 
 def cmd_entry_move():
-    """Move an entry under a task entry (grouping)."""
+    """Move an entry under a task entry or to another milestone's top level."""
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
     task_id = os.environ.get("BEACON_TASK_ID", "")
+    ms_id = os.environ.get("BEACON_MS_ID", "")
 
-    if not entry_id or not task_id:
-        print("Usage: beacon entry move <entry-id> -t <task-id>")
+    if not entry_id or (not task_id and not ms_id):
+        print("Usage: beacon entry move <entry-id> -t <task-id> | -m <ms-id>")
         sys.exit(1)
 
     data = load_project()
@@ -1123,25 +1124,45 @@ def cmd_entry_move():
         sys.exit(1)
     _, src_list, entry, src_idx = src
 
-    # Find the target task
-    dst = find_entry(data, task_id)
-    if not dst:
-        print(f"Task not found: {task_id}")
-        sys.exit(1)
-    _, _, task_entry, _ = dst
+    if ms_id:
+        # Move to another milestone's top-level entries
+        target_ms = None
+        for ms in data["milestones"]:
+            if ms["id"] == ms_id:
+                target_ms = ms
+                break
+        if not target_ms:
+            print(f"Milestone not found: {ms_id}")
+            sys.exit(1)
 
-    if task_entry.get("id") == entry_id:
-        print("Cannot move entry under itself")
-        sys.exit(1)
+        # Remove from source
+        src_list.pop(src_idx)
 
-    # Remove from source
-    src_list.pop(src_idx)
+        # Add to target milestone
+        target_ms.setdefault("entries", []).append(entry)
 
-    # Add to target task's entries
-    task_entry.setdefault("entries", []).append(entry)
+        save_project(data)
+        print(f"Moved [{entry_id}] to {ms_id} ({target_ms.get('title', '')})")
+    else:
+        # Move under a task entry
+        dst = find_entry(data, task_id)
+        if not dst:
+            print(f"Task not found: {task_id}")
+            sys.exit(1)
+        _, _, task_entry, _ = dst
 
-    save_project(data)
-    print(f"Moved [{entry_id}] under [{task_id}] {task_entry.get('description', '')}")
+        if task_entry.get("id") == entry_id:
+            print("Cannot move entry under itself")
+            sys.exit(1)
+
+        # Remove from source
+        src_list.pop(src_idx)
+
+        # Add to target task's entries
+        task_entry.setdefault("entries", []).append(entry)
+
+        save_project(data)
+        print(f"Moved [{entry_id}] under [{task_id}] {task_entry.get('description', '')}")
 
 
 def cmd_summary():

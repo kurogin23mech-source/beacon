@@ -498,11 +498,16 @@ cmd_entry_move() {
     ensure_project
     local entry_id=""
     local task_id=""
+    local ms_id=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -t|--task)
                 task_id="${2:-}"
+                shift 2
+                ;;
+            -m|--ms)
+                ms_id="${2:-}"
                 shift 2
                 ;;
             *)
@@ -512,7 +517,7 @@ cmd_entry_move() {
         esac
     done
 
-    BEACON_ENTRY_ID="$entry_id" BEACON_TASK_ID="$task_id" \
+    BEACON_ENTRY_ID="$entry_id" BEACON_TASK_ID="$task_id" BEACON_MS_ID="$ms_id" \
         python3 "$COMMANDS_PY" entry_move
 }
 
@@ -715,7 +720,7 @@ case "${1:-}" in
                 cmd_entry_move "$@"
                 ;;
             *)
-                echo "Usage: beacon entry move <entry-id> -t <task-id>"
+                echo "Usage: beacon entry move <entry-id> -t <task-id> | -m <ms-id>"
                 ;;
         esac
         ;;
