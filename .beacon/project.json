@@ -1,7 +1,7 @@
 {
   "name": "Beacon",
   "objective": "AI駆動開発においてマイルストーンベースのプロジェクト進捗を常時可視化し、開発者が方向性を見失わずに実装を進められるツールを構築する",
-  "summary": "ダッシュボードからClaude Codeへの非同期トリガーキュー（.beacon/triggers/）を実装。retro警告→トリガー発火→Skillがチェック→ユーザーに提案の一連フローが完成。scheduled triggerはローカルトリガーで代替する方針に転換。e-52/e-54はこの方針変更を反映してクローズ判断待ち。",
+  "summary": "振り返りの自動化ループが完成。retro_day設定（現在monday）に基づきダッシュボード警告+トリガーキュー発火→Skillが提案→retro done消灯→翌日自動期限切れ。月曜に実際の動作検証を行い、e-52/e-54をクローズ判断する。",
   "milestones": [
     {
       "id": "ms-1",
@@ -120,7 +120,7 @@
     {
       "id": "ms-4",
       "title": "細かいUXを調整して使いやすくする・フェイズ0",
-      "status": "observing",
+      "status": "in_progress",
       "progress": 60,
       "target_date": "2026-05-08",
       "entries": [
@@ -284,6 +284,16 @@
           "done_at": null,
           "status": "cancelled",
           "meta": {}
+        },
+        {
+          "id": "e-58",
+          "type": "task",
+          "description": "ダッシュボード色分け: in_progressマイルストーンと進捗バーを青に変更",
+          "date": "2026-05-11",
+          "created_at": "2026-05-11",
+          "done_at": "2026-05-11",
+          "status": "done",
+          "meta": {}
         }
       ]
     },
@@ -431,7 +441,7 @@
     {
       "id": "ms-7",
       "title": "週次振り返りを自動化する",
-      "status": "in_progress",
+      "status": "done",
       "target_date": "",
       "commits": [],
       "progress": 95,
@@ -472,8 +482,8 @@
           "description": "scheduled trigger で指定曜日に自動生成",
           "date": "2026-05-09",
           "created_at": "2026-05-09",
-          "done_at": null,
-          "status": "todo",
+          "done_at": "2026-05-11",
+          "status": "done",
           "meta": {},
           "entries": [
             {
@@ -510,8 +520,8 @@
           "description": "scheduled triggerでretro自動生成の動作検証（月曜に実行テスト）",
           "date": "2026-05-09",
           "created_at": "2026-05-09",
-          "done_at": null,
-          "status": "todo",
+          "done_at": "2026-05-11",
+          "status": "done",
           "meta": {},
           "entries": [
             {
@@ -525,6 +535,19 @@
               "meta": {
                 "hash": "61577f8",
                 "message": "Add retro reminder to dashboard and beacon retro done command"
+              }
+            },
+            {
+              "id": "e-57",
+              "type": "commit",
+              "description": "Make retro trigger day configurable and auto-expire stale triggers",
+              "date": "2026-05-09",
+              "created_at": "2026-05-09",
+              "done_at": "2026-05-09",
+              "status": "done",
+              "meta": {
+                "hash": "2b68718",
+                "message": "Make retro trigger day configurable and auto-expire stale triggers"
               }
             }
           ]

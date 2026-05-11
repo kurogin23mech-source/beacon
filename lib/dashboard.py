@@ -305,7 +305,8 @@ class Dashboard:
             p_bar_count = p_bar_cols // 2  # █/░ are 2 display-cols each
             p_filled = int(p_bar_count * progress / 100)
             p_line = f"{p_prefix}{'█' * p_filled}{'░' * (p_bar_count - p_filled)}{p_suffix}"
-            lines.append((p_line, "progress" if progress > 0 else curses.A_NORMAL))
+            p_style = "progress_active" if is_active else ("progress" if progress > 0 else curses.A_NORMAL)
+            lines.append((p_line, p_style))
 
             # Entries (if expanded)
             entries = ms.get("entries", [])
@@ -476,25 +477,27 @@ class Dashboard:
         curses.start_color()
         curses.use_default_colors()
         curses.init_pair(1, curses.COLOR_CYAN, -1)      # section
-        curses.init_pair(2, curses.COLOR_YELLOW, -1)    # section_yellow / active
+        curses.init_pair(2, curses.COLOR_YELLOW, -1)    # section_yellow
+        curses.init_pair(12, curses.COLOR_BLUE, -1)    # active (in_progress)
         curses.init_pair(3, curses.COLOR_GREEN, -1)     # done / progress
         curses.init_pair(4, curses.COLOR_WHITE, -1)     # normal
         curses.init_pair(5, curses.COLOR_MAGENTA, -1)   # commit
         curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_WHITE)  # selected
-        curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_YELLOW) # selected_active
+        curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_BLUE) # selected_active
         curses.init_pair(8, curses.COLOR_WHITE, curses.COLOR_BLUE)   # header
         curses.init_pair(9, curses.COLOR_BLUE, -1)      # task
         curses.init_pair(10, curses.COLOR_CYAN, -1)    # detail
-        curses.init_pair(11, curses.COLOR_RED, -1)     # warning
+        curses.init_pair(11, curses.COLOR_WHITE, curses.COLOR_RED)  # warning
 
         style_map = {
             "header": curses.color_pair(8) | curses.A_BOLD,
             "section": curses.color_pair(1) | curses.A_BOLD,
             "section_yellow": curses.color_pair(2) | curses.A_BOLD,
-            "active": curses.color_pair(2) | curses.A_BOLD,
+            "active": curses.color_pair(12) | curses.A_BOLD,
             "done": curses.color_pair(3),
             "todo": curses.color_pair(4),
             "progress": curses.color_pair(3),
+            "progress_active": curses.color_pair(12),
             "commit": curses.color_pair(5),
             "task": curses.color_pair(9),
             "detail": curses.color_pair(10),
