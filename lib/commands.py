@@ -104,6 +104,8 @@ This project uses [Beacon](https://github.com/r-kida2/beacon) for milestone-driv
   同じ課題に2回以上コミットが発生したら、タスクにまとめることを提案する。
 - Update the project summary when direction changes: `beacon summary "text"`
   方向性が変わった時はサマリーを更新する。書くべきは経緯・判断・背景であり、進捗率やMS名ではない。
+- When the user hints at ending the session, or before you suggest splitting/ending the session yourself, run `/beacon-session-end` Skill first.
+  ユーザーがセッション終了を仄めかしたとき、または自分自身がセッション分割・終了を提案する前に、必ず `/beacon-session-end` Skill を実行する。
 
 ### CLI Quick Reference
 
@@ -122,7 +124,7 @@ This project uses [Beacon](https://github.com/r-kida2/beacon) for milestone-driv
 def _append_claude_md():
     """Append beacon section to CLAUDE.md if not already present."""
     claude_md = "CLAUDE.md"
-    marker = "## Beacon プロジェクト管理"
+    marker = "## Beacon Project Management"
 
     content = ""
     if os.path.exists(claude_md):
