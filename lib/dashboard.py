@@ -320,12 +320,8 @@ class Dashboard:
             if not is_last:
                 lines.append((f"  {child_prefix}", 0))
 
-        # Footer hint
-        lines.append(("", 0))
-        lines.append(("  " + "─" * ((width - 4) // 2), curses.A_NORMAL))
-        now = time.strftime("%H:%M:%S")
-        done_hint = "d:show done" if self.hide_done else "d:hide done"
-        lines.append((f"  {now}  |  ↑↓:move  Enter:expand  {done_hint}  r:retro  q:quit", curses.A_NORMAL))
+        # Footer (fixed at bottom, built during draw)
+        self.footer_lines = []
 
         # Clamp cursor_pos to valid range
         if self.selectable:
@@ -545,9 +541,18 @@ class Dashboard:
             else:
                 self.build_lines(width)
 
-            # Calculate layout: fixed header + scrollable body
+            # Build footer lines (time-sensitive, rebuild each frame)
+            now = time.strftime("%H:%M:%S")
+            done_hint = "d:show done" if self.hide_done else "d:hide done"
+            footer_lines = [
+                ("  " + "─" * ((width - 4) // 2), curses.A_NORMAL),
+                (f"  {now}  |  ↑↓:move  Enter:expand  {done_hint}  r:retro  q:quit", curses.A_NORMAL),
+            ]
+
+            # Calculate layout: fixed header + scrollable body + fixed footer
             header_count = len(getattr(self, 'header_lines', []))
-            body_height = height - header_count
+            footer_count = len(footer_lines)
+            body_height = height - header_count - footer_count
             if body_height < 1:
                 body_height = 1
 
@@ -582,6 +587,21 @@ class Dashboard:
                 row = header_count + i
                 if row >= height:
                     break
+                try:
+                    if isinstance(style, str):
+                        attr = style_map.get(style, curses.A_NORMAL)
+                    else:
+                        attr = style
+                    safe = truncate_to_width(text, width - 1) if text else ""
+                    stdscr.addstr(row, 0, safe, attr)
+                except curses.error:
+                    pass
+
+            # Draw fixed footer
+            for i, (text, style) in enumerate(footer_lines):
+                row = height - footer_count + i
+                if row < header_count:
+                    continue  # Skip if terminal too small
                 try:
                     if isinstance(style, str):
                         attr = style_map.get(style, curses.A_NORMAL)
