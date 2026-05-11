@@ -1,141 +1,145 @@
-# Beacon 仕様書
+# Beacon Specification
 
-## 概要
+## Overview
 
-Beacon は、AI駆動開発においてマイルストーンベースのプロジェクト進捗を常時可視化し、開発者が方向性を見失わずに実装を進められるツール。
+Beacon is a tool for keeping milestone-based project progress always visible during AI-assisted development, so developers never lose sight of their direction.
 
-### 設計思想
+### Design Principles
 
-- **監査可能性**: AI間のセッション引き継ぎを透明にし、人間が進捗を追跡・監査できる
-- **マイルストーン駆動**: 全ての作業はマイルストーンに紐づき、進捗が一目でわかる
-- **ツール主導**: Claude Code の操作はプロンプト指示ではなく、固定化されたツール（CLI）経由で行う。判断が必要なステップのみ Claude に生成を委譲する
+- **Auditability**: Make AI session handoffs transparent so humans can track and audit progress
+- **Milestone-driven**: All work is tied to milestones, making progress visible at a glance
+- **Tool-first**: AI operations go through deterministic CLI commands, not free-form prompt instructions. Only steps requiring judgment are delegated to the AI
 
-## アーキテクチャ
+## Architecture
 
 ```
-beacon (bin/beacon)                   - CLI エントリポイント (bash)
-lib/commands.py                       - サブコマンド実装 (Python)
-lib/dashboard.py                      - tmux左ペイン用リアルタイムダッシュボード (Python/curses)
-.beacon/project.json                  - プロジェクト状態ファイル (JSON)
-~/.claude/skills/beacon-*/SKILL.md    - Claude Code 用 Skill 定義
+beacon (bin/beacon)                   - CLI entrypoint (bash)
+lib/commands.py                       - Subcommand implementation (Python)
+lib/dashboard.py                      - Real-time tmux dashboard (Python/curses)
+.beacon/project.json                  - Project state file (JSON)
+~/.claude/skills/beacon-*/SKILL.md    - Claude Code Skill definitions
 ```
 
-### レイヤー構成
+### Layer Structure
 
 ```
 ┌─────────────────────────────────────────┐
-│  Skill（最外層・薄いラッパー）            │
-│  beacon-session-start / beacon-log /     │
-│  beacon-task / beacon-session-end        │
+│  Skill (outermost layer, thin wrapper)  │
+│  beacon-session-start / beacon-log /    │
+│  beacon-task / beacon-session-end       │
 ├─────────────────────────────────────────┤
-│  beacon CLI（ワークフロー制御）           │
-│  bin/beacon + lib/commands.py            │
-│  - CRUD操作（確定的処理）                │
-│  - --prepare: 判断材料をJSON出力          │
-│  - --finalize: 生成結果を受けて書き込み   │
+│  beacon CLI (workflow control)          │
+│  bin/beacon + lib/commands.py           │
+│  - CRUD operations (deterministic)      │
+│  - --prepare: output context as JSON    │
+│  - --finalize: write AI-generated input │
 ├─────────────────────────────────────────┤
-│  .beacon/project.json（データ層）         │
-│  将来的にバックエンドAPI に差し替え可能    │
+│  .beacon/project.json (data layer)      │
+│  Replaceable with a backend API         │
 └─────────────────────────────────────────┘
 ```
 
-**原則**: Skill は prepare の実行と finalize への橋渡しのみを行う。ビジネスロジックはツール側が持つ。
+**Principle**: Skills only bridge `--prepare` output to `--finalize` input. Business logic lives in the CLI.
 
-## 起動フロー
+## Launch Flow
 
-### 重要: Claude Code との併用
+### Important: Using with Claude Code
 
-Beacon の tmux ダッシュボードと Claude Code を同時に使う場合、以下の順序で起動する:
+When using Beacon's tmux dashboard alongside Claude Code, launch in this order:
 
-1. ターミナルで `beacon` を実行 → tmux セッションが起動（左: ダッシュボード、右: シェル）
-2. 右ペイン（作業用シェル）で `claude` を起動
+1. Run `beacon` in the terminal — tmux session starts (left: dashboard, right: shell)
+2. Run `claude` in the right pane (working shell)
 
-**注意**: Claude Code 内から `! beacon`（引数なし）を実行してはならない。`tmux attach-session` が Claude Code のプロセスを破壊する。
+**Warning**: Do not run `! beacon` (no arguments) from inside Claude Code. `tmux attach-session` will crash the Claude Code process.
 
-Claude Code 内からステータスを確認したい場合は `! beacon status` を使う。
+To check status from within Claude Code, use `! beacon status`.
 
-## CLI コマンド
+## CLI Commands
 
-### milestone サブコマンド
+### Milestone Subcommands
 
-| コマンド | 説明 | --json |
-|---------|------|--------|
-| `beacon milestone add "タイトル" [-d 目標日]` | マイルストーンを追加 | - |
-| `beacon milestone list` | マイルストーン一覧 | - |
-| `beacon milestone start <id>` | マイルストーンをアクティブに設定 | - |
-| `beacon milestone done <id>` | マイルストーンを完了に設定 | - |
-| `beacon milestone show <id>` | 単一マイルストーンの詳細 | 予定 |
-| `beacon milestone update <id> [opts]` | 任意フィールドを更新 | 予定 |
-| `beacon milestone delete <id>` | 論理削除（cancelled） | 予定 |
+| Command | Description | --json |
+|---------|-------------|--------|
+| `beacon milestone add "title" [-d date]` | Add a milestone | - |
+| `beacon milestone list` | List milestones | - |
+| `beacon milestone start <id>` | Set milestone as active | - |
+| `beacon milestone done <id>` | Set milestone as done | - |
+| `beacon milestone close <id>` | Close milestone (keeps progress) | - |
+| `beacon milestone observe <id>` | Set milestone to observing | - |
+| `beacon milestone show <id>` | Show milestone details | Yes |
+| `beacon milestone update <id> [opts]` | Update fields | Yes |
+| `beacon milestone delete <id>` | Logical delete (cancelled) | Yes |
 
-### task サブコマンド
+### Task Subcommands
 
-| コマンド | 説明 | --json |
-|---------|------|--------|
-| `beacon task add "説明" [-m ms-id] [-t type] [-d detail]` | エントリを追加 | - |
-| `beacon task done <entry-id> [-p progress]` | エントリを完了に設定 | - |
-| `beacon task list [-m ms-id]` | エントリ一覧 | 対応済 |
-| `beacon task show <entry-id>` | エントリ詳細 | 予定 |
-| `beacon task detail <entry-id> [text]` | detailの表示/更新 | - |
-| `beacon task update <id> [opts]` | 任意フィールドを更新 | 予定 |
-| `beacon task delete <id>` | 論理削除（cancelled） | 予定 |
+| Command | Description | --json |
+|---------|-------------|--------|
+| `beacon task add "desc" [-m ms-id] [-t type] [-d detail]` | Add an entry | - |
+| `beacon task done <entry-id> [-p progress]` | Mark entry as done | - |
+| `beacon task list [-m ms-id]` | List entries | Yes |
+| `beacon task show <entry-id>` | Show entry details | Yes |
+| `beacon task detail <entry-id> [text]` | View/update detail | - |
+| `beacon task update <id> [opts]` | Update fields | Yes |
+| `beacon task delete <id>` | Logical delete (cancelled) | Yes |
 
-### その他コマンド
+### Other Commands
 
-| コマンド | 説明 | --json |
-|---------|------|--------|
-| `beacon` | tmux ダッシュボード + シェルを起動 | - |
-| `beacon init` | `.beacon/` をカレントディレクトリに初期化 | - |
-| `beacon status` | プロジェクト全体の状態 | 対応済 |
-| `beacon log [message] [-m ms-id] [-p progress]` | HEAD コミットを記録 | 予定 |
-| `beacon log --prepare` | 進捗評価用の判断材料をJSON出力（書き込みしない） | 予定 |
-| `beacon log --finalize [--progress N] [--summary text]` | 評価結果を受けて書き込み | 予定 |
-| `beacon sync` | 直近 git コミットをアクティブMSに同期 | - |
-| `beacon summary [text]` | サマリーの表示/更新 | 対応済 |
-| `beacon entry move <entry-id> -t <task-id>` | エントリをタスク配下に移動 | - |
+| Command | Description | --json |
+|---------|-------------|--------|
+| `beacon` | Launch tmux dashboard + shell | - |
+| `beacon init` | Initialize `.beacon/` in current directory | - |
+| `beacon status` | Show project status | Yes |
+| `beacon log [message] [-m ms-id] [-p progress]` | Record HEAD commit | Yes |
+| `beacon log --prepare` | Output evaluation context as JSON (read-only) | Yes |
+| `beacon log --finalize [--progress N] [--summary text]` | Write evaluation results | Yes |
+| `beacon sync` | Auto-sync recent git commits to active milestone | - |
+| `beacon summary [text]` | View/update project summary | Yes |
+| `beacon entry move <entry-id> -t <task-id>` | Move entry under a task | - |
+| `beacon retro [--since DATE] [--until DATE]` | Generate weekly retro data | - |
+| `beacon retro done` | Mark current retro as reviewed | - |
 
-### 共通オプション
+### Common Options
 
-| オプション | 短縮形 | 説明 |
-|-----------|--------|------|
-| `--json` | - | JSON形式で出力 |
-| `--ms <id>` | `-m` | 対象マイルストーンを指定 |
-| `--progress <N>` | `-p` | 進捗率（0-100） |
-| `--type <type>` | `-t` | エントリタイプ |
-| `--detail <text>` | `-d` | 詳細テキスト |
-| `--task <id>` | `-t` | 移動先タスクID（entry move） |
-| `--all` | - | cancelledを含む全件表示（予定） |
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--json` | - | Output in JSON format |
+| `--ms <id>` | `-m` | Target milestone |
+| `--progress <N>` | `-p` | Progress percentage (0-100) |
+| `--type <type>` | `-t` | Entry type |
+| `--detail <text>` | `-d` | Detail text |
+| `--task <id>` | `-t` | Target task ID (entry move) |
+| `--all` | `-a` | Show all including cancelled |
 
-## データモデル (.beacon/project.json)
+## Data Model (.beacon/project.json)
 
 ```json
 {
-  "name": "プロジェクト名",
-  "objective": "大目的",
-  "summary": "現在の状況（定性的な背景・経緯・判断）",
+  "name": "Project name",
+  "objective": "High-level goal",
+  "summary": "Current context (background, decisions, direction)",
   "milestones": [
     {
       "id": "ms-1",
-      "title": "マイルストーンタイトル",
-      "status": "todo | in_progress | in_review | waiting | done | cancelled",
+      "title": "Milestone title",
+      "status": "todo | in_progress | in_review | waiting | done | observing | cancelled",
       "progress": 0,
       "target_date": "YYYY-MM-DD | null",
       "entries": [
         {
           "id": "e-1",
           "type": "commit | task | note",
-          "description": "エントリの説明",
+          "description": "Entry description",
           "date": "YYYY-MM-DD",
           "created_at": "YYYY-MM-DD",
           "done_at": "YYYY-MM-DD | null",
           "status": "todo | in_progress | done | cancelled",
-          "detail": "詳細テキスト（任意）",
+          "detail": "Detail text (optional)",
           "meta": {
-            "hash": "(commit時) 7文字短縮ハッシュ",
-            "message": "(commit時) コミットメッセージ"
+            "hash": "(for commits) 7-char short hash",
+            "message": "(for commits) Commit message"
           },
           "entries": [
-            "(ネストされた子エントリ。タスク配下のコミット等)"
+            "(Nested child entries, e.g., commits under a task)"
           ]
         }
       ]
@@ -144,102 +148,99 @@ Claude Code 内からステータスを確認したい場合は `! beacon status
 }
 ```
 
-### ID命名規則
+### ID Naming Convention
 
-| 対象 | 形式 | 例 |
-|------|------|---|
-| マイルストーン | `ms-{連番}` | ms-1, ms-2, ms-8 |
-| エントリ | `e-{連番}` | e-1, e-22, e-39 |
+| Target | Format | Examples |
+|--------|--------|----------|
+| Milestone | `ms-{N}` | ms-1, ms-2, ms-8 |
+| Entry | `e-{N}` | e-1, e-22, e-39 |
 
-連番はプロジェクト内でグローバルにユニーク。マイルストーン追加時に既存の最大値+1、エントリ追加時に全MS横断で最大値+1を採番する。
+IDs are globally unique within a project. Milestone IDs increment from the current max, entry IDs increment across all milestones.
 
-### ステータスライフサイクル
+### Status Lifecycle
 
-マイルストーン:
+Milestone:
 ```
 todo → in_progress → done
-                  ↘ cancelled（論理削除）
+     ↘ observing     ↗
+                   ↘ cancelled (logical delete)
 ```
 
-エントリ:
+Entry:
 ```
 todo → in_progress → done
-                  ↘ cancelled（論理削除）
+                   ↘ cancelled (logical delete)
 ```
 
-cancelled のエントリ/マイルストーンは `list` のデフォルト表示から除外される。`--all` フラグで表示可能。
+Cancelled entries/milestones are hidden from `list` by default. Use `--all` to include them.
 
-### summary の役割
+### Summary Guidelines
 
-`summary` はタスクリストを見ればわかる情報（進捗率、アクティブMS名など）を書かない。
+The `summary` field should NOT contain information derivable from the task list (progress %, active milestone name, etc.).
 
-記載すべきこと:
-- なぜ今のタスクに取り組んでいるのか
-- どういう経緯でこうなったか
-- 次セッションで知っておくべき背景や判断
+It should contain:
+- Why the current tasks are being worked on
+- How the project arrived at this point
+- Background and decisions the next session needs to know
 
-## Skill（Claude Code 統合）
+## Skills (Claude Code Integration)
 
-### 概要
+### Overview
 
-beacon の Skill は Claude Code が beacon を操作するためのインターフェース。グローバル（`~/.claude/skills/`）に配置し、`.beacon/project.json` の有無で発火を制御する。
+Beacon Skills are the interface for Claude Code to operate beacon. They are installed globally (`~/.claude/skills/`) and triggered by the presence of `.beacon/project.json`.
 
-### ツール主導・Claude生成組み込みアーキテクチャ
+### Tool-first, AI-generation-embedded Architecture
 
 ```
-従来: Skill のプロンプト → Claude が判断 → CLI を叩く（ブレやすい）
-採用: CLI がワークフロー制御 → 特定ステップで Claude に生成を要求 → 結果を書き込み
+Traditional: Skill prompt → AI decides → calls CLI (fragile, drifts)
+Beacon:      CLI controls workflow → specific steps request AI generation → writes result
 ```
 
-**2段階呼び出し**:
-1. `beacon log --prepare`: 判断材料（MS状態、タスク消化率、直近エントリ等）をJSONで出力。書き込みしない。
-2. Skill が Claude に固定テンプレートで「進捗率とサマリーを生成せよ」と指示。
-3. `beacon log --finalize --progress N --summary "text"`: 生成結果を受けて project.json に書き込み。
+**Two-phase invocation**:
+1. `beacon log --prepare`: Outputs milestone state, task completion rates, and recent entries as JSON. No writes.
+2. The Skill prompts Claude with a fixed template to generate progress evaluation and summary.
+3. `beacon log --finalize --progress N --summary "text"`: Writes the generated result to project.json.
 
-これにより、CLAUDE.md のプロンプト指示がスルーされる問題が構造的に解消される。
+This structurally eliminates the problem of AI ignoring CLAUDE.md prompt instructions.
 
-### Skill 一覧
+### Skill List
 
-| Skill | トリガー | 責務 | 書き込み |
-|-------|---------|------|---------|
-| `beacon-session-start` | セッション開始, `/beacon-start` | 現状把握・提示 | なし（読み取り専用） |
-| `beacon-log` | `/beacon-log` | コミット記録+進捗評価+summary更新 | あり（finalize経由） |
-| `beacon-task` | `/beacon-task` | タスク操作（add/done/update/delete） | あり |
-| `beacon-session-end` | `/beacon-end` | summary更新+未完了整理 | あり |
+| Skill | Trigger | Responsibility | Writes |
+|-------|---------|----------------|--------|
+| `beacon-session-start` | Session start, `/beacon-start` | Load and present current state | No (read-only) |
+| `beacon-log` | `/beacon-log` | Record commit + evaluate progress + update summary | Yes (via finalize) |
+| `beacon-task` | `/beacon-task` | Task CRUD (add/done/update/delete) | Yes |
+| `beacon-session-end` | `/beacon-end` | Update summary + organize open tasks | Yes |
 
-### Skill の制約
+### Skill Constraints
 
-- データ取得は必ず `beacon` CLI の `--json` 出力を使う。`.beacon/project.json` を Read ツールで直接読まない。
-- これにより、将来バックエンドAPI に差し替えた際に Skill の変更が不要になる。
+- Data must be fetched via `beacon` CLI `--json` output. Never read `.beacon/project.json` directly with a file read tool.
+- This ensures Skills remain unchanged if the data layer is replaced with a backend API.
 
-## ダッシュボード (lib/dashboard.py)
+## Dashboard (lib/dashboard.py)
 
-- tmux 左ペインで常時表示
-- `project.json` のファイルハッシュを 2 秒間隔でポーリング
-- 変更検出時に自動再描画
-- ツリー形式でマイルストーンとエントリを表示
-- キーボード操作: ↑↓移動、Enter展開/折りたたみ、q終了
+- Runs in the left tmux pane, always visible
+- Polls `project.json` file hash every 2 seconds
+- Auto-redraws on change detection
+- Tree-style display of milestones and entries
+- Keyboard: j/k or arrows to navigate, Enter to expand/collapse, d to toggle done, q to quit
 
-## tmux セッション構成
+## tmux Session Layout
 
 ```
 +------------------+----------------------------------------+
 | Dashboard (33%)  |  Working Shell (67%)                   |
-| (dashboard.py)   |  ← ここで claude を起動               |
+| (dashboard.py)   |  Run `claude` here                     |
 +------------------+----------------------------------------+
 ```
 
-セッション名: `beacon-<ディレクトリパスハッシュ先頭8文字>`
+Session name: `beacon-<first 8 chars of directory path hash>`
 
-## 将来計画
+## Future Plans
 
-### マルチユーザー対応（ms-6）
+### Multi-user Support (ms-6)
 
-- マイルストーンごとにオーナーを設定
-- PR駆動: PRのライフサイクル（作成→in_review→マージ→done）をエントリステータスにマッピング
-- データ分割: マイルストーンごとに独立したファイル/APIリソース
-- バックエンド: project.json をAPIに差し替え。CLI がデータアクセス層を抽象化。
-
-### 週次振り返り自動化（ms-7）
-
-- 週単位でのマイルストーン進捗サマリー自動生成
+- Per-milestone ownership
+- PR-driven: Map PR lifecycle (create → in_review → merge → done) to entry status
+- Data partitioning: Independent files/API resources per milestone
+- Backend: Replace project.json with an API; CLI abstracts the data access layer

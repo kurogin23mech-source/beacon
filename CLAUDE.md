@@ -1,11 +1,15 @@
 # Beacon Project
 
-## Skill連携
-- **セッション開始時**: `/beacon-session-start` Skill を使ってプロジェクト状態を取得・提示すること（手動で project.json を読まない）
-- **コミット後**: `/beacon-log` Skill を使って進捗を記録すること
-- **タスク操作**: `/beacon-task` Skill を使うこと
-- **セッション終了時**: `/beacon-session-end` Skill を使うこと
+This is the Beacon tool itself. For using Beacon in your own project, run `beacon init` — it will add instructions to your CLAUDE.md automatically.
 
-## 開発ルール（Skillでカバーされないもの）
-- マイルストーンの追加・完了は `beacon milestone` コマンドで直接管理する（Skill未対応）
-- 同じ課題に2回以上コミットが発生したら、タスクにまとめることをユーザーに提案する
+## Skill Integration (for Beacon development)
+
+- **Session start**: Use `/beacon-session-start` Skill to restore project context (do not read project.json directly)
+- **After commit**: Use `/beacon-log` Skill to record progress
+- **Task operations**: Use `/beacon-task` Skill
+- **Session end**: Use `/beacon-session-end` Skill
+
+## Development Rules (not covered by Skills)
+
+- Manage milestones with `beacon milestone` commands directly (no Skill for this yet)
+- If 2+ commits address the same issue, suggest grouping them into a task

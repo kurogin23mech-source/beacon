@@ -87,24 +87,35 @@ def save_project(data):
 
 CLAUDE_MD_BEACON_SECTION = """\
 
-## Beacon プロジェクト管理
+## Beacon Project Management
 
-プロジェクト進捗は `.beacon/project.json` を参照。セッション開始時やコミット時に確認すること。
+This project uses [Beacon](https://github.com/r-kida2/beacon) for milestone-driven progress tracking.
+このプロジェクトは Beacon でマイルストーンベースの進捗管理を行っています。
 
-- **`.beacon/project.json` を直接編集してはいけない。必ず beacon CLI コマンドを使うこと**
-  - マイルストーン追加: `beacon milestone add "タイトル" [-d 目標日]`
-  - タスク追加: `beacon task add "説明" -m <ms-id>`
-  - タスク完了: `beacon task done <entry-id>`
-  - 進捗記録: `beacon log "概要"`
-  - 同期: `beacon sync`
-- 実装を開始する前に、必ず `.beacon/project.json` のマイルストーン一覧を確認し、「この作業はどのマイルストーンに向かうものか」をユーザーに確認すること
-- コミット後は `beacon log "概要" -p <進捗率>` でアクティブマイルストーンに記録する
-  - 進捗率は必ず付ける。タスク消化率ではなく、マイルストーンの目標に対してどれくらい進んだかを定性的に評価して0-100で指定する
-- 同じ課題に2回以上コミットが発生したら、タスクにまとめることを提案する
-- マイルストーンの追加・完了は `beacon milestone` コマンドで管理する
-- セッション終了時や方向性が変わった時は `beacon summary "テキスト"` で現在地を更新する
-  - タスクリストを見ればわかる情報は書かない（進捗率やアクティブMS名など）
-  - 書くべきこと: なぜ今のタスクに取り組んでいるのか、どういう経緯でこうなったか、次セッションで知っておくべき背景や判断
+### Rules / ルール
+
+- **Never edit `.beacon/project.json` directly. Always use beacon CLI commands.**
+  `.beacon/project.json` を直接編集しない。必ず beacon CLI を使うこと。
+- Before starting work, check milestones (`beacon status`) and confirm which milestone the work targets.
+  実装開始前にマイルストーンを確認し、どのマイルストーンに向かう作業かユーザーに確認すること。
+- After committing, record progress: `beacon log "summary" -p <progress>`
+  コミット後は進捗を記録する。進捗率はMSの目標に対する定性評価（0-100）。
+- If 2+ commits address the same issue, suggest grouping them into a task.
+  同じ課題に2回以上コミットが発生したら、タスクにまとめることを提案する。
+- Update the project summary when direction changes: `beacon summary "text"`
+  方向性が変わった時はサマリーを更新する。書くべきは経緯・判断・背景であり、進捗率やMS名ではない。
+
+### CLI Quick Reference
+
+| Command | Description |
+|---------|-------------|
+| `beacon status` | Show project status / ステータス表示 |
+| `beacon milestone add "title"` | Add milestone / MS追加 |
+| `beacon milestone start <id>` | Activate milestone / MS開始 |
+| `beacon task add "desc" -m <ms-id>` | Add task / タスク追加 |
+| `beacon task done <id>` | Complete task / タスク完了 |
+| `beacon log "summary" -p <N>` | Record commit / コミット記録 |
+| `beacon summary "text"` | Update summary / サマリー更新 |
 """
 
 

@@ -1,7 +1,7 @@
 {
   "name": "Beacon",
   "objective": "AI駆動開発においてマイルストーンベースのプロジェクト進捗を常時可視化し、開発者が方向性を見失わずに実装を進められるツールを構築する",
-  "summary": "振り返りの自動化ループが完成。retro_day設定（現在monday）に基づきダッシュボード警告+トリガーキュー発火→Skillが提案→retro done消灯→翌日自動期限切れ。月曜に実際の動作検証を行い、e-52/e-54をクローズ判断する。",
+  "summary": "直近の流れ: Add retro reminder to dashboard and beacon retro done command → Add trigger queue: dashboard-to-Claude Code async messaging → Make retro trigger day configurable and auto-expire stale triggers → ダッシュボード色分け: in_progressマイルストーンと進捗バーを青に変更 → ダッシュボード色分け(青)実装、retro W20レビュー済み、ms-7完了マーク",
   "milestones": [
     {
       "id": "ms-1",
@@ -120,7 +120,7 @@
     {
       "id": "ms-4",
       "title": "細かいUXを調整して使いやすくする・フェイズ0",
-      "status": "in_progress",
+      "status": "todo",
       "progress": 60,
       "target_date": "2026-05-08",
       "entries": [
@@ -551,6 +551,19 @@
               }
             }
           ]
+        },
+        {
+          "id": "e-59",
+          "type": "commit",
+          "description": "ダッシュボード色分け(青)実装、retro W20レビュー済み、ms-7完了マーク",
+          "date": "2026-05-11",
+          "created_at": "2026-05-11",
+          "done_at": "2026-05-11",
+          "status": "done",
+          "meta": {
+            "hash": "5531a26",
+            "message": "Dashboard reads trigger files instead of own retro logic"
+          }
         }
       ]
     },
@@ -740,6 +753,65 @@
         }
       ],
       "progress": 100
+    },
+    {
+      "id": "ms-9",
+      "title": "公開準備: ドキュメント整備",
+      "status": "in_progress",
+      "target_date": "2026-05-11",
+      "commits": [],
+      "entries": [
+        {
+          "id": "e-60",
+          "type": "task",
+          "description": "README.md作成（概要・インストール・クイックスタート・CLI一覧・Skill連携）",
+          "date": "2026-05-11",
+          "created_at": "2026-05-11",
+          "done_at": "2026-05-11",
+          "status": "done",
+          "meta": {}
+        },
+        {
+          "id": "e-61",
+          "type": "task",
+          "description": "LICENSE選定・追加",
+          "date": "2026-05-11",
+          "created_at": "2026-05-11",
+          "done_at": "2026-05-11",
+          "status": "done",
+          "meta": {}
+        },
+        {
+          "id": "e-62",
+          "type": "task",
+          "description": ".gitignore追加",
+          "date": "2026-05-11",
+          "created_at": "2026-05-11",
+          "done_at": "2026-05-11",
+          "status": "done",
+          "meta": {}
+        },
+        {
+          "id": "e-63",
+          "type": "task",
+          "description": "CLAUDE.mdを公開リポジトリ向けに調整",
+          "date": "2026-05-11",
+          "created_at": "2026-05-11",
+          "done_at": "2026-05-11",
+          "status": "done",
+          "meta": {}
+        },
+        {
+          "id": "e-64",
+          "type": "task",
+          "description": "docs/SPEC.mdの言語方針決定・調整",
+          "date": "2026-05-11",
+          "created_at": "2026-05-11",
+          "done_at": "2026-05-11",
+          "status": "done",
+          "meta": {}
+        }
+      ]
     }
   ],
   "retro_day": "monday"
