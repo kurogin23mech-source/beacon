@@ -928,6 +928,14 @@ def cmd_cloud_push():
     store.save_project(data)
     print(f"Pushed to Firestore: projects/{project_id}")
 
+    # Auto-switch to cloud mode
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    config_path = os.path.join(beacon_dir, "config.json")
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump({"mode": "cloud"}, f, indent=2)
+        f.write("\n")
+    print("Switched to cloud mode.")
+
 
 def cmd_cloud_pull():
     from auth import load_credentials

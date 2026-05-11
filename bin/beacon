@@ -75,11 +75,23 @@ cmd_init() {
             7) retro_day="sunday" ;;
             *) retro_day="monday" ;;
         esac
+
+        echo ""
+        echo "Storage: 1=Local, 2=Cloud"
+        read -rp "Storage [1]: " storage_choice
+        storage_choice="${storage_choice:-1}"
     fi
 
     BEACON_NAME="$name" BEACON_OBJECTIVE="$objective" \
         BEACON_RETRO_DAY="${retro_day:-monday}" \
         python3 "$COMMANDS_PY" init
+
+    # Cloud setup if selected
+    if [ "${storage_choice:-1}" = "2" ]; then
+        python3 "$COMMANDS_PY" cloud_push
+        echo '{"mode": "cloud"}' > .beacon/config.json
+        echo "Cloud mode enabled."
+    fi
 }
 
 cmd_milestone_add() {
