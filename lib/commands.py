@@ -717,6 +717,32 @@ def cmd_log():
     save_project(data)
 
 
+def _milestone_prepare_info(ms):
+    """Build prepare info dict for a single milestone."""
+    entries = ms.get("entries", [])
+    total_tasks, done_tasks = _count_task_status_flat(entries)
+
+    all_flat = _collect_entries_flat(entries)
+    all_flat.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    recent = [{"date": d, "description": desc} for d, _, desc in all_flat[:5]]
+
+    pending_tasks = []
+    for e in entries:
+        if e.get("type") == "task" and e.get("status") not in ("done", "cancelled"):
+            pending_tasks.append({"id": e["id"], "description": e.get("description", "")})
+
+    return {
+        "id": ms["id"],
+        "title": ms.get("title", ""),
+        "status": ms.get("status", ""),
+        "progress": ms.get("progress", 0),
+        "total_tasks": total_tasks,
+        "done_tasks": done_tasks,
+        "pending_tasks": pending_tasks,
+        "recent_entries": recent,
+    }
+
+
 def cmd_log_prepare():
     """Output context for AI-driven progress evaluation. No writes."""
     commit_hash = os.environ.get("BEACON_HASH", "")
@@ -726,35 +752,31 @@ def cmd_log_prepare():
     summary_text = os.environ.get("BEACON_SUMMARY", "")
 
     data = load_project()
-    target = find_target_milestone(data, ms_id)
-    entries = target.get("entries", [])
-    total_tasks, done_tasks = _count_task_status_flat(entries)
 
-    # Collect recent entries (last 5)
-    all_flat = _collect_entries_flat(entries)
-    all_flat.sort(key=lambda x: (x[0], x[1]), reverse=True)
-    recent = [{"date": d, "description": desc} for d, _, desc in all_flat[:5]]
-
-    # Pending tasks
-    pending_tasks = []
-    for e in entries:
-        if e.get("type") == "task" and e.get("status") not in ("done", "cancelled"):
-            pending_tasks.append({"id": e["id"], "description": e.get("description", "")})
+    if ms_id:
+        for ms in data["milestones"]:
+            if ms["id"] == ms_id:
+                targets = [ms]
+                break
+        else:
+            print(f"Milestone not found: {ms_id}")
+            sys.exit(1)
+    else:
+        targets = [ms for ms in data["milestones"] if ms["status"] == "in_progress"]
+        if not targets:
+            print("No active milestone. Run: beacon milestone start <ms-id>")
+            sys.exit(1)
 
     output = {
         "commit": {"hash": commit_hash, "message": message, "date": date, "summary": summary_text},
-        "milestone": {
-            "id": target["id"],
-            "title": target.get("title", ""),
-            "status": target.get("status", ""),
-            "progress": target.get("progress", 0),
-            "total_tasks": total_tasks,
-            "done_tasks": done_tasks,
-        },
-        "pending_tasks": pending_tasks,
-        "recent_entries": recent,
         "current_summary": data.get("summary", ""),
     }
+
+    if len(targets) == 1:
+        output["milestone"] = _milestone_prepare_info(targets[0])
+    else:
+        output["candidates"] = [_milestone_prepare_info(ms) for ms in targets]
+
     print(json.dumps(output, ensure_ascii=False))
 
 
