@@ -90,7 +90,10 @@ def get_project(project_id: str):
 
 @app.put("/api/projects/{project_id}")
 def put_project(project_id: str, body: dict):
-    core.validate_project(body)
+    try:
+        core.validate_project(body)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     db.save_project(project_id, body)
     return {"status": "ok", "project_id": project_id}
 
