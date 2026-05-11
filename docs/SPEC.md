@@ -2,7 +2,7 @@
 
 ## Overview
 
-Beacon is a tool for keeping milestone-based project progress always visible during AI-assisted development, so developers never lose sight of their direction.
+Beacon is a tool that keeps milestone-based project progress always visible during AI-assisted development, so developers never lose sight of their direction.
 
 ### Design Principles
 
