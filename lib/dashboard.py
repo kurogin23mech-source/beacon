@@ -631,15 +631,23 @@ class Dashboard:
             return
 
         # Find the wrapped line index of the selected item
-        sel_line_idx, _, _ = self.selectable[self.cursor_pos]
+        sel_idx = self.cursor_pos
+        sel_line_idx, _, _ = self.selectable[sel_idx]
         target_line = self._line_index_map.get(sel_line_idx, 0)
 
-        # Adjust scroll so target is visible (with some margin)
-        margin = 3
+        # Find the end of this entry (start of next selectable, or end of lines)
+        if sel_idx + 1 < len(self.selectable):
+            next_line_idx, _, _ = self.selectable[sel_idx + 1]
+            target_end = self._line_index_map.get(next_line_idx, len(self.lines)) - 1
+        else:
+            target_end = len(self.lines) - 1
+
+        # Adjust scroll so both the start and end of the entry are visible
+        margin = 2
+        if target_end > self.scroll_offset + height - 1:
+            self.scroll_offset = target_end - height + 1
         if target_line < self.scroll_offset + margin:
             self.scroll_offset = max(0, target_line - margin)
-        elif target_line > self.scroll_offset + height - margin - 1:
-            self.scroll_offset = target_line - height + margin + 1
 
         # Clamp
         max_scroll = max(0, len(self.lines) - height)
