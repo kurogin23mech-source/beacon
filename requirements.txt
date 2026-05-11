@@ -1,0 +1,7 @@
+# Core (no dependencies for local-only mode)
+
+# Cloud storage (optional - required for beacon auth/cloud commands)
+# pip install google-cloud-firestore google-auth-oauthlib
+google-cloud-firestore>=2.16.0
+google-auth-oauthlib>=1.2.0
+google-auth>=2.29.0

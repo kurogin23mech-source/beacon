@@ -1451,6 +1451,9 @@ if __name__ == "__main__":
         "trigger_fire": cmd_trigger_fire,
         "trigger_check": cmd_trigger_check,
         "trigger_clear": cmd_trigger_clear,
+        "auth_login": lambda: __import__("auth").login(),
+        "auth_logout": lambda: __import__("auth").logout(),
+        "auth_status": lambda: __import__("auth").status(),
         "version": lambda: print(f"beacon {__version__}"),
     }
     fn = commands.get(cmd)
