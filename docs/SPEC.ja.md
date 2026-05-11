@@ -97,6 +97,9 @@ Claude Code 内からステータスを確認したい場合は `! beacon status
 | `beacon entry move <entry-id> -t <task-id>` | エントリをタスク配下に移動 | - |
 | `beacon retro [--since DATE] [--until DATE]` | 週次振り返りデータ生成 | - |
 | `beacon retro done` | 振り返りをレビュー済みにする | - |
+| `beacon trigger fire <name> [message]` | トリガーを発火（ダッシュボードから使用） | - |
+| `beacon trigger check` | 未処理トリガーを確認 | 対応済 |
+| `beacon trigger clear <name>` | トリガーを消化 | - |
 
 ### 共通オプション
 
@@ -208,9 +211,9 @@ beacon の Skill は Claude Code が beacon を操作するためのインター
 | Skill | トリガー | 責務 | 書き込み |
 |-------|---------|------|---------|
 | `beacon-session-start` | セッション開始, `/beacon-start` | 現状把握・提示 | なし（読み取り専用） |
-| `beacon-log` | `/beacon-log` | コミット記録+進捗評価+summary更新 | あり（finalize経由） |
+| `beacon-log` | PostToolUse hook（コミット時自動）, `/beacon-log` | コミット記録+進捗評価+summary更新 | あり（finalize経由） |
 | `beacon-task` | `/beacon-task` | タスク操作（add/done/update/delete） | あり |
-| `beacon-session-end` | `/beacon-end` | summary更新+未完了整理 | あり |
+| `beacon-session-end` | ユーザーの終了シグナル, Claude自身の提案前, `/beacon-end` | summary更新+未完了整理 | あり |
 
 ### Skill の制約
 
@@ -223,7 +226,7 @@ beacon の Skill は Claude Code が beacon を操作するためのインター
 - `project.json` のファイルハッシュを 2 秒間隔でポーリング
 - 変更検出時に自動再描画
 - ツリー形式でマイルストーンとエントリを表示
-- キーボード操作: j/k or ↑↓移動、Enter展開/折りたたみ、d完了トグル、q終了
+- キーボード操作: j/k or ↑↓移動、Enter/Space展開/折りたたみ、d完了トグル、r振り返り表示切替、q終了
 
 ## tmux セッション構成
 

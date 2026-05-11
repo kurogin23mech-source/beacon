@@ -97,6 +97,9 @@ To check status from within Claude Code, use `! beacon status`.
 | `beacon entry move <entry-id> -t <task-id>` | Move entry under a task | - |
 | `beacon retro [--since DATE] [--until DATE]` | Generate weekly retro data | - |
 | `beacon retro done` | Mark current retro as reviewed | - |
+| `beacon trigger fire <name> [message]` | Fire a trigger (used by dashboard) | - |
+| `beacon trigger check` | Check pending triggers | Yes |
+| `beacon trigger clear <name>` | Clear a specific trigger | - |
 
 ### Common Options
 
@@ -208,9 +211,9 @@ This structurally eliminates the problem of AI ignoring CLAUDE.md prompt instruc
 | Skill | Trigger | Responsibility | Writes |
 |-------|---------|----------------|--------|
 | `beacon-session-start` | Session start, `/beacon-start` | Load and present current state | No (read-only) |
-| `beacon-log` | `/beacon-log` | Record commit + evaluate progress + update summary | Yes (via finalize) |
+| `beacon-log` | PostToolUse hook (auto on commit), `/beacon-log` | Record commit + evaluate progress + update summary | Yes (via finalize) |
 | `beacon-task` | `/beacon-task` | Task CRUD (add/done/update/delete) | Yes |
-| `beacon-session-end` | `/beacon-end` | Update summary + organize open tasks | Yes |
+| `beacon-session-end` | User end-of-session cues, Claude self-proposal, `/beacon-end` | Update summary + organize open tasks | Yes |
 
 ### Skill Constraints
 
@@ -223,7 +226,7 @@ This structurally eliminates the problem of AI ignoring CLAUDE.md prompt instruc
 - Polls `project.json` file hash every 2 seconds
 - Auto-redraws on change detection
 - Tree-style display of milestones and entries
-- Keyboard: j/k or arrows to navigate, Enter to expand/collapse, d to toggle done, q to quit
+- Keyboard: j/k or arrows to navigate, Enter/Space to expand/collapse, d to toggle done, r to toggle retro view, q to quit
 
 ## tmux Session Layout
 

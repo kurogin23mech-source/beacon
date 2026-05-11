@@ -177,16 +177,9 @@ def _install_git_hook():
     print("Installed git post-commit hook")
 
 
-CLAUDE_HOOK_COMMAND = (
-    "CMD=$(jq -r '.tool_input.command'); "
-    "if echo \"$CMD\" | grep -qE 'git commit ' && [ -f .beacon/project.json ]; then "
-    "PREPARE=$(beacon log --prepare 2>/dev/null) || true; "
-    "if [ -n \"$PREPARE\" ]; then "
-    "printf '{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\","
-    "\"additionalContext\":\"BEACON: Commit detected. "
-    "You MUST now run /beacon-log Skill to record this commit with AI-evaluated progress and summary.\\n"
-    "Prepare context:\\n%s\"}}' \"$PREPARE\"; "
-    "fi; fi"
+CLAUDE_HOOK_SCRIPT = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "bin", "beacon-post-commit-hook.sh"
 )
 
 
@@ -208,14 +201,15 @@ def _install_claude_hook():
     for entry in post_tool_use:
         if entry.get("matcher") == "Bash":
             for h in entry.get("hooks", []):
-                if "beacon log --prepare" in h.get("command", ""):
+                cmd = h.get("command", "")
+                if "beacon-post-commit-hook" in cmd or "beacon log --prepare" in cmd:
                     return  # Already installed
 
     post_tool_use.append({
         "matcher": "Bash",
         "hooks": [{
             "type": "command",
-            "command": CLAUDE_HOOK_COMMAND,
+            "command": CLAUDE_HOOK_SCRIPT,
             "timeout": 10,
             "statusMessage": "Beacon: checking commit...",
         }],

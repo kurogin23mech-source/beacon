@@ -102,10 +102,11 @@ This opens a tmux session with the dashboard on the left (33%) and your working 
 
 | Command | Description |
 |---------|-------------|
-| `beacon task add "desc" [-m ms-id]` | Add task to milestone / タスク追加 |
+| `beacon task add "desc" [-m ms-id] [-t type] [-d detail]` | Add task to milestone / タスク追加 |
 | `beacon task done <id> [-p progress]` | Mark as done / 完了 |
 | `beacon task list [-m ms-id] [--json]` | List tasks / 一覧 |
 | `beacon task show <id> [--json]` | Show details / 詳細 |
+| `beacon task detail <id> [text]` | View/update detail / 詳細テキスト表示・更新 |
 | `beacon task update <id> [options]` | Update fields / 更新 |
 | `beacon task delete <id>` | Logical delete / 論理削除 |
 | `beacon entry move <id> -t <task-id>` | Move entry under a task / タスク配下に移動 |
