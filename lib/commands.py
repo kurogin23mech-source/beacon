@@ -873,6 +873,41 @@ def _ensure_cloud_config():
     return config
 
 
+def cmd_cloud_list():
+    """List cloud projects for selection."""
+    from store_firestore import FirestoreStore
+    from auth import load_credentials
+    creds = load_credentials()
+    if creds is None:
+        print("Not logged in. Run: beacon auth login")
+        sys.exit(1)
+
+    from google.cloud import firestore
+    db = firestore.Client(project="beacon-cloud-96f5f", credentials=creds)
+    docs = db.collection("projects").stream()
+    projects = []
+    for doc in docs:
+        data = doc.to_dict()
+        projects.append({
+            "project_id": doc.id,
+            "name": data.get("name", ""),
+            "objective": data.get("objective", ""),
+        })
+
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if json_mode:
+        print(json.dumps(projects, ensure_ascii=False))
+    else:
+        if not projects:
+            print("No cloud projects found.")
+            print("Run 'beacon cloud push' to upload a project.")
+            return
+        for i, p in enumerate(projects, 1):
+            print(f"  {i}. {p['project_id']}: {p['name']}")
+            if p['objective']:
+                print(f"     {p['objective'][:60]}")
+
+
 def cmd_cloud_push():
     from auth import load_credentials
     creds = load_credentials()
@@ -978,6 +1013,7 @@ if __name__ == "__main__":
         "trigger_fire": cmd_trigger_fire,
         "trigger_check": cmd_trigger_check,
         "trigger_clear": cmd_trigger_clear,
+        "cloud_list": cmd_cloud_list,
         "cloud_push": cmd_cloud_push,
         "cloud_pull": cmd_cloud_pull,
         "cloud_status": cmd_cloud_status,

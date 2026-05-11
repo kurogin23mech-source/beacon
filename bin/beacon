@@ -22,9 +22,12 @@ Usage:
   beacon milestone observe <id> Set milestone to observing (watching)
   beacon log [message]    Record current HEAD commit to active milestone
   beacon sync             Auto-sync recent git commits to active milestone
-  beacon cloud push       Push project to Firestore
-  beacon cloud pull       Pull project from Firestore
-  beacon cloud status     Show cloud config status
+  beacon cloud             Open cloud project (interactive select)
+  beacon cloud <id>        Open cloud project by ID
+  beacon cloud list        List cloud projects
+  beacon cloud push        Push local project to Firestore
+  beacon cloud pull        Pull project from Firestore
+  beacon cloud status      Show cloud config status
   beacon auth login       Sign in with Google
   beacon auth logout      Remove cached credentials
   beacon auth status      Show login status
@@ -573,6 +576,40 @@ cmd_status() {
     BEACON_JSON="$json_flag" BEACON_ALL="$all_flag" python3 "$COMMANDS_PY" milestone_list
 }
 
+cmd_cloud_launch() {
+    local project_id="${1:-}"
+
+    # If no project_id, show list and let user pick
+    if [ -z "$project_id" ]; then
+        echo "Cloud projects:"
+        echo ""
+        python3 "$COMMANDS_PY" cloud_list
+        echo ""
+        read -rp "Project ID to open: " project_id
+        if [ -z "$project_id" ]; then
+            echo "Cancelled."
+            return 1
+        fi
+    fi
+
+    # Ensure .beacon dir and cloud.json exist
+    mkdir -p .beacon
+    cat > .beacon/cloud.json <<EOJSON
+{
+  "project_id": "$project_id"
+}
+EOJSON
+
+    # Create a minimal project.json if it doesn't exist (cloud mode will override reads)
+    if [ ! -f "$BEACON_PROJECT_FILE" ]; then
+        echo '{"name":"cloud","milestones":[]}' > "$BEACON_PROJECT_FILE"
+    fi
+
+    # Launch with BEACON_CLOUD=1
+    export BEACON_CLOUD=1
+    cmd_launch
+}
+
 cmd_launch() {
     ensure_project
 
@@ -623,6 +660,11 @@ cmd_launch() {
 
     # Session-specific settings (no -g flag to avoid polluting other sessions)
     tmux set-option -t "$session_name" history-limit 10000
+
+    # Pass cloud mode to all panes in this session
+    if [ "${BEACON_CLOUD:-}" = "1" ]; then
+        tmux set-environment -t "$session_name" BEACON_CLOUD 1
+    fi
 
     # Create dashboard pane to the LEFT of the shell pane
     # When dashboard exits (q), kill the entire session to clean up
@@ -760,12 +802,13 @@ case "${1:-}" in
         esac
         ;;
     cloud)
-        ensure_project
         case "${2:-}" in
-            push)   python3 "$COMMANDS_PY" cloud_push ;;
-            pull)   python3 "$COMMANDS_PY" cloud_pull ;;
-            status) python3 "$COMMANDS_PY" cloud_status ;;
-            *)      echo "Usage: beacon cloud [push|pull|status]" ;;
+            push)   ensure_project; python3 "$COMMANDS_PY" cloud_push ;;
+            pull)   ensure_project; python3 "$COMMANDS_PY" cloud_pull ;;
+            status) ensure_project; python3 "$COMMANDS_PY" cloud_status ;;
+            list)   python3 "$COMMANDS_PY" cloud_list ;;
+            "")     cmd_cloud_launch ;;
+            *)      cmd_cloud_launch "$2" ;;
         esac
         ;;
     auth)
