@@ -143,8 +143,9 @@ The curses-based dashboard runs in the left tmux pane and auto-refreshes when `.
 |-----|--------|
 | `j` / `↓` | Move down / 下移動 |
 | `k` / `↑` | Move up / 上移動 |
-| `Enter` | Expand/collapse milestone / 展開・折りたたみ |
+| `Enter` / `Space` | Expand/collapse milestone / 展開・折りたたみ |
 | `d` | Toggle done entries / 完了エントリの表示切替 |
+| `r` | Toggle retro view / 振り返り表示の切替 |
 | `q` | Quit (closes tmux session) / 終了 |
 
 ## Claude Code Integration
