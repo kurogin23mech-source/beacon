@@ -8,7 +8,7 @@ Beacon is a tool that keeps milestone-based project progress always visible duri
 
 - **Auditability**: Make AI session handoffs transparent so humans can track and audit progress
 - **Milestone-driven**: All work is tied to milestones, making progress visible at a glance
-- **Tool-first**: AI operations go through deterministic CLI commands, not free-form prompt instructions. Only steps requiring judgment are delegated to the AI
+- **Tool-first**: AI operations go through deterministic CLI commands, not free-form prompt instructions — only steps requiring judgment are delegated to the AI
 
 ## Architecture
 
