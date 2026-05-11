@@ -9,6 +9,8 @@ import re
 import subprocess
 import sys
 
+from store import get_store
+
 
 VALID_STATUSES = {"todo", "in_progress", "in_review", "waiting", "done", "observing", "cancelled"}
 VALID_ENTRY_TYPES = {"commit", "task", "note"}
@@ -74,17 +76,16 @@ def _validate_entry(entry, ms_id):
 
 
 def load_project():
-    with open(get_project_file(), "r", encoding="utf-8") as f:
-        data = json.load(f)
+    store = get_store()
+    data = store.load_project()
     validate_project(data)
     return data
 
 
 def save_project(data):
     validate_project(data)
-    with open(get_project_file(), "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    store = get_store()
+    store.save_project(data)
 
 
 CLAUDE_MD_BEACON_SECTION = """\

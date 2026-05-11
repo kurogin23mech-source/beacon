@@ -622,7 +622,7 @@ cmd_launch() {
     # When dashboard exits (q), kill the entire session to clean up
     tmux split-window -hbd -t "$session_name" -c "$work_dir" \
         -l "${dashboard_pct}%" \
-        "python3 '$DASHBOARD_PY' '$abs_project'; tmux kill-session -t '$session_name' 2>/dev/null"
+        "python3 '$DASHBOARD_PY' '$abs_project'"
 
     # Re-apply ratio on window resize (no quotes around % value for tmux to parse it)
     tmux set-hook -t "$session_name" after-resize-window \

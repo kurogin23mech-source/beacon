@@ -2,30 +2,13 @@
 """Beacon Dashboard - Curses-based interactive project milestone viewer."""
 
 from commands import __version__ as BEACON_VERSION
+from store_local import LocalStore
 
 import curses
 import json
-import hashlib
 import os
 import sys
 import unicodedata
-
-
-def load_project(path):
-    """Load project.json, return None on error."""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return None
-
-
-def file_hash(path):
-    try:
-        with open(path, "rb") as f:
-            return hashlib.md5(f.read()).hexdigest()
-    except FileNotFoundError:
-        return None
 
 
 def char_width(ch):
@@ -94,8 +77,8 @@ def wrap_line(text, max_width, cont_indent=None):
 class Dashboard:
     def __init__(self, project_path):
         self.project_path = project_path
+        self.store = LocalStore(project_path)
         self.project = None
-        self.last_hash = None
         self.scroll_offset = 0
         self.cursor_pos = 0  # Index into self.selectable
         self.expanded = set()  # Set of milestone IDs that are expanded
@@ -109,18 +92,19 @@ class Dashboard:
         # kind: "milestone" (key=ms_index) or "entry" (key=entry_id)
 
     def reload_if_changed(self):
-        """Reload project data if file changed."""
-        current_hash = file_hash(self.project_path)
-        if current_hash != self.last_hash:
-            self.project = load_project(self.project_path)
-            self.last_hash = current_hash
-            # Auto-expand active milestone
-            if self.project:
-                for ms in self.project.get("milestones", []):
-                    if ms.get("status") == "in_progress":
-                        self.expanded.add(ms.get("id", ""))
-            return True
-        return False
+        """Reload project data if store detects changes."""
+        if not self.store.has_changed():
+            return False
+        try:
+            self.project = self.store.load_project()
+        except (FileNotFoundError, json.JSONDecodeError):
+            self.project = None
+        # Auto-expand active milestone
+        if self.project:
+            for ms in self.project.get("milestones", []):
+                if ms.get("status") == "in_progress":
+                    self.expanded.add(ms.get("id", ""))
+        return True
 
     def _get_pending_triggers(self):
         """Read pending triggers from .beacon/triggers/. Returns list of warning messages."""
