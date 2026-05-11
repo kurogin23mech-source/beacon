@@ -1422,6 +1422,113 @@ def cmd_trigger_clear():
         print(f"No trigger: {trigger_name}")
 
 
+def _get_cloud_config_path():
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    return os.path.join(beacon_dir, "cloud.json")
+
+
+def _ensure_cloud_config():
+    """Ensure cloud.json exists. Creates it on first push with a generated project_id."""
+    config_path = _get_cloud_config_path()
+    if os.path.exists(config_path):
+        with open(config_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    # Generate project_id from project name
+    data = load_project()
+    name = data.get("name", "project")
+    # Sanitize: lowercase, replace non-alnum with dash
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "project"
+    # Add short hash to avoid collisions
+    import hashlib
+    h = hashlib.md5(os.path.abspath(get_project_file()).encode()).hexdigest()[:6]
+    project_id = f"{slug}-{h}"
+
+    config = {"project_id": project_id}
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    print(f"Created {config_path} (project_id: {project_id})")
+    return config
+
+
+def cmd_cloud_push():
+    """Push local project.json to Firestore."""
+    from auth import load_credentials
+    creds = load_credentials()
+    if creds is None:
+        print("Not logged in. Run: beacon auth login")
+        sys.exit(1)
+
+    config = _ensure_cloud_config()
+    project_id = config["project_id"]
+
+    # Always read from local file, not from get_store() which may return FirestoreStore
+    from store_local import LocalStore
+    local = LocalStore(get_project_file())
+    data = local.load_project()
+    validate_project(data)
+
+    from store_firestore import FirestoreStore
+    store = FirestoreStore(project_id)
+    store.save_project(data)
+    print(f"Pushed to Firestore: projects/{project_id}")
+
+
+def cmd_cloud_pull():
+    """Pull project data from Firestore to local."""
+    from auth import load_credentials
+    creds = load_credentials()
+    if creds is None:
+        print("Not logged in. Run: beacon auth login")
+        sys.exit(1)
+
+    config_path = _get_cloud_config_path()
+    if not os.path.exists(config_path):
+        print("No cloud.json found. Run 'beacon cloud push' first.")
+        sys.exit(1)
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+    project_id = config["project_id"]
+
+    from store_firestore import FirestoreStore
+    store = FirestoreStore(project_id)
+    try:
+        data = store.load_project()
+    except FileNotFoundError:
+        print(f"Project '{project_id}' not found in Firestore.")
+        print("Run 'beacon cloud push' to upload first.")
+        sys.exit(1)
+
+    validate_project(data)
+
+    # Save to local
+    from store_local import LocalStore
+    local = LocalStore(get_project_file())
+    local.save_project(data)
+    print(f"Pulled from Firestore: projects/{project_id}")
+
+
+def cmd_cloud_status():
+    """Show cloud sync status."""
+    config_path = _get_cloud_config_path()
+    if not os.path.exists(config_path):
+        print("Cloud: not configured")
+        print("Run 'beacon cloud push' to set up.")
+        return
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+
+    from auth import load_credentials
+    creds = load_credentials()
+    logged_in = creds is not None
+
+    print(f"Cloud: {config['project_id']}")
+    print(f"Auth: {'logged in' if logged_in else 'not logged in'}")
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     commands = {
@@ -1451,6 +1558,9 @@ if __name__ == "__main__":
         "trigger_fire": cmd_trigger_fire,
         "trigger_check": cmd_trigger_check,
         "trigger_clear": cmd_trigger_clear,
+        "cloud_push": cmd_cloud_push,
+        "cloud_pull": cmd_cloud_pull,
+        "cloud_status": cmd_cloud_status,
         "auth_login": lambda: __import__("auth").login(),
         "auth_logout": lambda: __import__("auth").logout(),
         "auth_status": lambda: __import__("auth").status(),

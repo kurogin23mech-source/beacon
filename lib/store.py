@@ -47,7 +47,7 @@ def get_store(project_file: str | None = None) -> Store:
     beacon_dir = os.path.dirname(project_file) or ".beacon"
     cloud_config = os.path.join(beacon_dir, "cloud.json")
 
-    if os.path.exists(cloud_config):
+    if os.environ.get("BEACON_CLOUD") == "1" and os.path.exists(cloud_config):
         import json
         with open(cloud_config, "r", encoding="utf-8") as f:
             cloud_data = json.load(f)

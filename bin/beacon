@@ -22,6 +22,9 @@ Usage:
   beacon milestone observe <id> Set milestone to observing (watching)
   beacon log [message]    Record current HEAD commit to active milestone
   beacon sync             Auto-sync recent git commits to active milestone
+  beacon cloud push       Push project to Firestore
+  beacon cloud pull       Pull project from Firestore
+  beacon cloud status     Show cloud config status
   beacon auth login       Sign in with Google
   beacon auth logout      Remove cached credentials
   beacon auth status      Show login status
@@ -754,6 +757,15 @@ case "${1:-}" in
             *)
                 echo "Usage: beacon trigger [fire|check|clear] <name> [message]"
                 ;;
+        esac
+        ;;
+    cloud)
+        ensure_project
+        case "${2:-}" in
+            push)   python3 "$COMMANDS_PY" cloud_push ;;
+            pull)   python3 "$COMMANDS_PY" cloud_pull ;;
+            status) python3 "$COMMANDS_PY" cloud_status ;;
+            *)      echo "Usage: beacon cloud [push|pull|status]" ;;
         esac
         ;;
     auth)
