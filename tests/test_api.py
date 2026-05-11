@@ -23,8 +23,16 @@ def mock_save_project(project_id: str, data: dict):
     _store[project_id] = copy.deepcopy(data)
 
 
+def mock_list_projects():
+    return [
+        {"project_id": pid, "name": data.get("name", ""), "objective": data.get("objective", "")}
+        for pid, data in _store.items()
+    ]
+
+
 firestore_client.get_project = mock_get_project
 firestore_client.save_project = mock_save_project
+firestore_client.list_projects = mock_list_projects
 
 from fastapi.testclient import TestClient
 from app import app
@@ -75,6 +83,28 @@ def test_health():
 # ---------------------------------------------------------------------------
 # Project
 # ---------------------------------------------------------------------------
+
+def test_list_projects():
+    r = client.get("/api/projects")
+    assert r.status_code == 200
+    projects = r.json()
+    assert len(projects) == 1
+    assert projects[0]["project_id"] == PROJECT_ID
+
+
+def test_create_project():
+    r = client.post("/api/projects/new-project",
+                    json={"name": "New Project", "objective": "Test"})
+    assert r.status_code == 200
+    assert r.json()["status"] == "created"
+    assert "new-project" in _store
+
+
+def test_create_project_duplicate():
+    r = client.post(f"/api/projects/{PROJECT_ID}",
+                    json={"name": "Dupe"})
+    assert r.status_code == 409
+
 
 def test_get_project():
     r = client.get(f"/api/projects/{PROJECT_ID}")

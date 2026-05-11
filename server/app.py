@@ -45,6 +45,10 @@ def _save(project_id: str, data: dict) -> None:
 # Request models
 # ---------------------------------------------------------------------------
 
+class ProjectCreate(BaseModel):
+    name: str
+    objective: str = ""
+
 class MilestoneCreate(BaseModel):
     title: str
     target_date: str = ""
@@ -82,6 +86,23 @@ class SummaryUpdate(BaseModel):
 # ---------------------------------------------------------------------------
 # Project
 # ---------------------------------------------------------------------------
+
+@app.get("/api/projects")
+def list_projects():
+    """List all projects."""
+    return db.list_projects()
+
+
+@app.post("/api/projects/{project_id}")
+def create_project(project_id: str, body: ProjectCreate):
+    """Create a new project (like beacon init)."""
+    existing = db.get_project(project_id)
+    if existing is not None:
+        raise HTTPException(status_code=409, detail=f"Project '{project_id}' already exists")
+    data = {"name": body.name, "objective": body.objective, "milestones": []}
+    _save(project_id, data)
+    return {"status": "created", "project_id": project_id}
+
 
 @app.get("/api/projects/{project_id}")
 def get_project(project_id: str):
