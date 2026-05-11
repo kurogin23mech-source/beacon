@@ -1,7 +1,7 @@
 {
   "name": "Beacon",
   "objective": "AI駆動開発においてマイルストーンベースのプロジェクト進捗を常時可視化し、開発者が方向性を見失わずに実装を進められるツールを構築する",
-  "summary": "直近の流れ: LICENSE選定・追加 → .gitignore追加 → CLAUDE.mdを公開リポジトリ向けに調整 → docs/SPEC.mdの言語方針決定・調整 → beacon initに週次振り返り曜日選択を追加",
+  "summary": "直近の流れ: CLAUDE.mdを公開リポジトリ向けに調整 → docs/SPEC.mdの言語方針決定・調整 → beacon initに週次振り返り曜日選択を追加 → [改善] beacon log --hash <commit> 対応: HEADだけでなく任意のcommit hashを指定してログ可能にする。コミット直後にlog忘れた場合の救済手段。 → Claude Code PostToolUse hookによるコミット自動検知・AI判断ログ",
   "milestones": [
     {
       "id": "ms-1",
@@ -832,6 +832,19 @@
           "meta": {
             "hash": "d26bf36",
             "message": "Add retro day selection to beacon init"
+          }
+        },
+        {
+          "id": "e-67",
+          "type": "commit",
+          "description": "Claude Code PostToolUse hookによるコミット自動検知・AI判断ログ",
+          "date": "2026-05-11",
+          "created_at": "2026-05-11",
+          "done_at": "2026-05-11",
+          "status": "done",
+          "meta": {
+            "hash": "c30bbb4",
+            "message": "Update project.json: record ms-9 documentation tasks and hook feature"
           }
         }
       ]

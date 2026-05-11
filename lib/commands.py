@@ -239,8 +239,8 @@ def cmd_milestone_list():
         print(json.dumps(output, ensure_ascii=False))
         return
 
-    icons = {"done": "\u25cf", "in_progress": "\u25d0", "todo": "\u25cb",
-             "waiting": "\u25cc", "in_review": "\u25d1", "observing": "\u25d4",
+    icons = {"done": "\u25cf", "in_progress": "\u25d1", "todo": "\u25cb",
+             "waiting": "\u25cc", "in_review": "\u25d5", "observing": "\u25d5",
              "cancelled": "\u2718"}
     for ms in milestones:
         icon = icons.get(ms["status"], "?")
@@ -301,8 +301,8 @@ def cmd_milestone_show():
                 }
                 print(json.dumps(output, ensure_ascii=False))
             else:
-                icons = {"done": "\u25cf", "in_progress": "\u25d0", "todo": "\u25cb",
-                         "waiting": "\u25cc", "in_review": "\u25d1", "cancelled": "\u2718"}
+                icons = {"done": "\u25cf", "in_progress": "\u25d1", "todo": "\u25cb",
+                         "waiting": "\u25cc", "in_review": "\u25d5", "cancelled": "\u2718"}
                 icon = icons.get(ms["status"], "?")
                 print(f"{icon} [{ms['id']}] {ms['title']}")
                 print(f"  Status: {ms['status']}  Progress: {ms.get('progress', 0)}%")
@@ -952,8 +952,8 @@ def cmd_task_show():
         print(json.dumps(output, ensure_ascii=False))
         return
 
-    icons = {"done": "\u25cf", "todo": "\u25cb", "in_progress": "\u25d0",
-             "waiting": "\u25cc", "in_review": "\u25d1", "observing": "\u25d4",
+    icons = {"done": "\u25cf", "todo": "\u25cb", "in_progress": "\u25d1",
+             "waiting": "\u25cc", "in_review": "\u25d5", "observing": "\u25d5",
              "cancelled": "\u2718"}
     icon = icons.get(entry.get("status", "todo"), "?")
     print(f"{icon} [{entry['id']}] {entry.get('description', '')}")

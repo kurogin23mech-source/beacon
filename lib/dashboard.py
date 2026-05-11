@@ -270,9 +270,9 @@ class Dashboard:
             is_expanded = i in self.expanded
 
             # Status icon
-            icon_map = {"done": "●", "in_progress": "◐",
-                        "todo": "○", "waiting": "◌", "in_review": "◑",
-                        "observing": "◔"}
+            icon_map = {"done": "●", "in_progress": "◑",
+                        "todo": "○", "waiting": "◌", "in_review": "◕",
+                        "observing": "◕"}
             icon = icon_map.get(status, "?")
 
             # Tree connector
