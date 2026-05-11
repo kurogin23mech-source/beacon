@@ -91,6 +91,7 @@ This opens a tmux session with the dashboard on the left (33%) and your working 
 | `beacon milestone add "title" [-d date]` | Add milestone / 追加 |
 | `beacon milestone list` | List milestones / 一覧 |
 | `beacon milestone start <id>` | Set as active (in_progress) / アクティブ化 |
+| `beacon milestone done <id>` | Mark as done / 完了 |
 | `beacon milestone close <id>` | Close milestone / クローズ |
 | `beacon milestone observe <id>` | Set to observing / 監視中に設定 |
 | `beacon milestone show <id> [--json]` | Show details / 詳細表示 |
