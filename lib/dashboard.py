@@ -8,7 +8,6 @@ import json
 import hashlib
 import os
 import sys
-import time
 import unicodedata
 
 
@@ -547,12 +546,11 @@ class Dashboard:
             else:
                 self.build_lines(width)
 
-            # Build footer lines (time-sensitive, rebuild each frame)
-            now = time.strftime("%H:%M:%S")
+            # Build footer lines
             done_hint = "d:show done" if self.hide_done else "d:hide done"
             footer_lines = [
                 ("  " + "─" * ((width - 4) // 2), curses.A_NORMAL),
-                (f"  {now}  |  ↑↓:move  Enter:expand  {done_hint}  r:retro  q:quit", curses.A_NORMAL),
+                (f"  ↑↓:move  Enter:expand  {done_hint}  r:retro  q:quit", curses.A_NORMAL),
             ]
 
             # Calculate layout: fixed header + scrollable body + fixed footer
