@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Beacon CLI commands - called from beacon shell script with env vars."""
 
+__version__ = "0.1.0"
+
 import json
 import os
 import re
@@ -1448,6 +1450,7 @@ if __name__ == "__main__":
         "trigger_fire": cmd_trigger_fire,
         "trigger_check": cmd_trigger_check,
         "trigger_clear": cmd_trigger_clear,
+        "version": lambda: print(f"beacon {__version__}"),
     }
     fn = commands.get(cmd)
     if fn:

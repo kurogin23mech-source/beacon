@@ -23,6 +23,7 @@ Usage:
   beacon log [message]    Record current HEAD commit to active milestone
   beacon sync             Auto-sync recent git commits to active milestone
   beacon help             Show this help
+  beacon --version        Show version
 EOF
 }
 
@@ -754,6 +755,9 @@ case "${1:-}" in
         ;;
     help|-h|--help)
         usage
+        ;;
+    --version|-V)
+        python3 "$COMMANDS_PY" version
         ;;
     *)
         echo "Unknown command: $1"
