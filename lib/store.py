@@ -48,10 +48,14 @@ def get_store(project_file: str | None = None) -> Store:
     cloud_config = os.path.join(beacon_dir, "cloud.json")
 
     if os.path.exists(cloud_config):
-        raise NotImplementedError(
-            "Cloud storage not yet implemented. "
-            "Remove .beacon/cloud.json to use local storage."
-        )
+        import json
+        with open(cloud_config, "r", encoding="utf-8") as f:
+            cloud_data = json.load(f)
+        project_id = cloud_data.get("project_id")
+        if not project_id:
+            raise ValueError("cloud.json must contain 'project_id'")
+        from store_firestore import FirestoreStore
+        return FirestoreStore(project_id)
 
     from store_local import LocalStore
     return LocalStore(project_file)

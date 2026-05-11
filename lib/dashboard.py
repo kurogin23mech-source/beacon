@@ -2,7 +2,7 @@
 """Beacon Dashboard - Curses-based interactive project milestone viewer."""
 
 from commands import __version__ as BEACON_VERSION
-from store_local import LocalStore
+from store import get_store
 
 import curses
 import json
@@ -77,7 +77,7 @@ def wrap_line(text, max_width, cont_indent=None):
 class Dashboard:
     def __init__(self, project_path):
         self.project_path = project_path
-        self.store = LocalStore(project_path)
+        self.store = get_store(project_path)
         self.project = None
         self.scroll_offset = 0
         self.cursor_pos = 0  # Index into self.selectable

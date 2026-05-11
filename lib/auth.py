@@ -13,7 +13,8 @@ CREDENTIALS_PATH = BEACON_HOME / "credentials.json"
 FIREBASE_CONFIG_PATH = Path(__file__).parent / "firebase_config.json"
 
 SCOPES = [
-    "https://www.googleapis.com/auth/cloud-firestore",
+    "https://www.googleapis.com/auth/datastore",
+    "openid",
     "https://www.googleapis.com/auth/userinfo.email",
 ]
 
@@ -43,6 +44,8 @@ def _load_firebase_config() -> dict:
 def login():
     """Run Google OAuth flow and save credentials."""
     _ensure_deps()
+    # Allow Google to return fewer scopes than requested (e.g. Firestore API not yet enabled)
+    os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
     from google_auth_oauthlib.flow import InstalledAppFlow
 
     config = _load_firebase_config()
