@@ -97,7 +97,7 @@ class Dashboard:
         self.last_hash = None
         self.scroll_offset = 0
         self.cursor_pos = 0  # Index into self.selectable
-        self.expanded = set()  # Set of milestone indices that are expanded
+        self.expanded = set()  # Set of milestone IDs that are expanded
         self.expanded_entries = set()  # Set of entry IDs whose detail is shown
         self.hide_done = False  # Toggle to hide done entries
         self.view_mode = "project"  # "project" or "retro"
@@ -115,9 +115,9 @@ class Dashboard:
             self.last_hash = current_hash
             # Auto-expand active milestone
             if self.project:
-                for i, ms in enumerate(self.project.get("milestones", [])):
+                for ms in self.project.get("milestones", []):
                     if ms.get("status") == "in_progress":
-                        self.expanded.add(i)
+                        self.expanded.add(ms.get("id", ""))
             return True
         return False
 
@@ -258,7 +258,10 @@ class Dashboard:
         self.header_lines = header_lines
         lines = body_lines
 
-        # Milestones
+        # Milestones - filter done when hide_done is active
+        if self.hide_done:
+            milestones = [m for m in milestones if m.get("status") != "done"]
+
         for i, ms in enumerate(milestones):
             is_last = i == len(milestones) - 1
             status = ms.get("status", "todo")
@@ -267,7 +270,7 @@ class Dashboard:
             progress = ms.get("progress", 0)
             target = ms.get("target_date", "")
             is_active = status == "in_progress"
-            is_expanded = i in self.expanded
+            is_expanded = ms_id in self.expanded
 
             # Status icon
             icon_map = {"done": "●", "in_progress": "◑",
@@ -294,7 +297,7 @@ class Dashboard:
                 style = "done"
             else:
                 style = "todo"
-            self._add_line(lines, ms_line, style, "milestone", i)
+            self._add_line(lines, ms_line, style, "milestone", ms_id)
 
             # Progress bar - scales with terminal width
             date_info = f"  目標: {target}" if target else ""
@@ -332,7 +335,8 @@ class Dashboard:
             sel_line_idx, sel_kind, sel_key = self.selectable[self.cursor_pos]
             text, base_style = lines[sel_line_idx]
             if sel_kind == "milestone":
-                ms_status = milestones[sel_key].get("status", "todo")
+                ms_obj = next((m for m in milestones if m.get("id") == sel_key), {})
+                ms_status = ms_obj.get("status", "todo")
                 is_active = ms_status == "in_progress"
                 lines[sel_line_idx] = (text, "selected_active" if is_active else "selected")
             else:
