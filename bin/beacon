@@ -43,15 +43,32 @@ cmd_init() {
     local name="${1:-}"
     local objective="${2:-}"
 
+    local retro_day=""
+
     if [ -z "$name" ]; then
         echo "Beacon - Project Initialization"
         echo "================================"
         echo ""
         read -rp "Project name: " name
         read -rp "Project objective: " objective
+        echo ""
+        echo "Weekly retro day (1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat, 7=Sun)"
+        read -rp "Retro day [1]: " retro_choice
+        retro_choice="${retro_choice:-1}"
+        case "$retro_choice" in
+            1) retro_day="monday" ;;
+            2) retro_day="tuesday" ;;
+            3) retro_day="wednesday" ;;
+            4) retro_day="thursday" ;;
+            5) retro_day="friday" ;;
+            6) retro_day="saturday" ;;
+            7) retro_day="sunday" ;;
+            *) retro_day="monday" ;;
+        esac
     fi
 
     BEACON_NAME="$name" BEACON_OBJECTIVE="$objective" \
+        BEACON_RETRO_DAY="${retro_day:-monday}" \
         python3 "$COMMANDS_PY" init
 }
 

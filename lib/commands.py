@@ -141,7 +141,8 @@ def cmd_init():
     objective = os.environ.get("BEACON_OBJECTIVE", "")
     pf = get_project_file()
     os.makedirs(os.path.dirname(pf), exist_ok=True)
-    data = {"name": name, "objective": objective, "milestones": []}
+    retro_day = os.environ.get("BEACON_RETRO_DAY", "monday")
+    data = {"name": name, "objective": objective, "milestones": [], "retro_day": retro_day}
     with open(pf, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")
