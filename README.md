@@ -126,6 +126,14 @@ This opens a tmux session with the dashboard on the left (33%) and your working 
 | `beacon retro [--since DATE] [--until DATE]` | Generate weekly retro data / 週次振り返りデータ生成 |
 | `beacon retro done` | Mark current retro as reviewed / 振り返りレビュー済み |
 
+### Triggers
+
+| Command | Description |
+|---------|-------------|
+| `beacon trigger fire <name> [message]` | Fire a trigger (used by dashboard) / トリガー発火 |
+| `beacon trigger check` | Check pending triggers (JSON) / 未処理トリガー確認 |
+| `beacon trigger clear <name>` | Clear a specific trigger / トリガー消化 |
+
 ## Dashboard
 
 The curses-based dashboard runs in the left tmux pane and auto-refreshes when `.beacon/project.json` changes.
