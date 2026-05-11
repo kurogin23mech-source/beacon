@@ -139,6 +139,10 @@ def _append_claude_md():
 POST_COMMIT_HOOK = """\
 #!/usr/bin/env bash
 # Beacon: auto-log commits to the active milestone
+# Skip in Claude Code — AI handles logging with milestone/task judgment
+if [ -n "$BEACON_CLAUDE_CODE" ]; then
+    exit 0
+fi
 if [ -f ".beacon/project.json" ] && command -v beacon &>/dev/null; then
     beacon log 2>/dev/null || true
 fi
