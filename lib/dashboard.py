@@ -121,65 +121,27 @@ class Dashboard:
             return True
         return False
 
-    def _get_retro_day(self):
-        """Get configured retro day (weekday number 0=Mon). Default: Friday(4)."""
-        if not self.project:
-            return 4
-        day_names = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
-                     "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
-                     "friday": 4, "saturday": 5, "sunday": 6}
-        day_str = self.project.get("retro_day", "friday").lower()
-        return day_names.get(day_str, 4)
-
-    def _check_retro_needed(self):
-        """Check if a weekly retro is due. Returns warning message or None."""
-        import datetime
-
-        today = datetime.date.today()
-        # Only show on the configured retro day
-        if today.weekday() != self._get_retro_day():
-            return None
-
-        year, week, _ = today.isocalendar()
-        current_week = f"{year}-W{week:02d}"
-
-        project_dir = os.path.dirname(self.project_path)
-        retro_dir = os.path.join(project_dir, "retro")
-        files = sorted(g.glob(os.path.join(retro_dir, "*.md")))
-
-        # Check reviewed marker
-        project_dir = os.path.dirname(self.project_path)
-        reviewed_path = os.path.join(project_dir, "retro", ".reviewed")
-        try:
-            with open(reviewed_path, "r") as f:
-                reviewed_week = f.read().strip()
-            if reviewed_week >= current_week:
-                return None
-        except (FileNotFoundError, IOError):
-            pass
-
-        # Fire trigger for Claude Code to pick up
-        self._fire_retro_trigger(current_week)
-
-        return f"  \u26a0 \u4eca\u9031\u306e\u632f\u308a\u8fd4\u308a\u304c\u307e\u3060\u3067\u3059\uff08{current_week}\uff09  /beacon-retro \u3067\u958b\u59cb"
-
-    def _fire_retro_trigger(self, week):
-        """Write retro trigger file if not already pending."""
+    def _get_pending_triggers(self):
+        """Read pending triggers from .beacon/triggers/. Returns list of warning messages."""
+        import json as j
         project_dir = os.path.dirname(self.project_path)
         triggers_dir = os.path.join(project_dir, "triggers")
-        trigger_path = os.path.join(triggers_dir, "retro.json")
-        if os.path.exists(trigger_path):
-            return
-        import json as j
-        os.makedirs(triggers_dir, exist_ok=True)
-        data = {
-            "name": "retro",
-            "message": f"\u4eca\u9031\u306e\u632f\u308a\u8fd4\u308a\u304c\u307e\u3060\u3067\u3059\uff08{week}\uff09\u3002/beacon-retro \u3067\u958b\u59cb\u3057\u307e\u3059\u304b\uff1f",
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        }
-        with open(trigger_path, "w") as f:
-            j.dump(data, f, ensure_ascii=False)
-            f.write("\n")
+        if not os.path.isdir(triggers_dir):
+            return []
+
+        warnings = []
+        for fname in sorted(os.listdir(triggers_dir)):
+            if not fname.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(triggers_dir, fname), "r") as f:
+                    data = j.load(f)
+                msg = data.get("message", "")
+                if msg:
+                    warnings.append(f"  \u26a0 {msg}")
+            except (j.JSONDecodeError, IOError):
+                pass
+        return warnings
 
     def _get_latest_retro(self):
         """Find the latest retro file in .beacon/retro/."""
@@ -273,9 +235,11 @@ class Dashboard:
             header_lines.append(("", 0))
 
         # Retro reminder
-        retro_warning = self._check_retro_needed()
-        if retro_warning:
-            header_lines.append((retro_warning, "warning"))
+        # Pending triggers (from .beacon/triggers/)
+        triggers = self._get_pending_triggers()
+        for warning in triggers:
+            header_lines.append((warning, "warning"))
+        if triggers:
             header_lines.append(("", 0))
 
         # Overall progress
