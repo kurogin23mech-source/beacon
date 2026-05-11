@@ -6,6 +6,7 @@ BEACON_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DASHBOARD_PY="$BEACON_DIR/lib/dashboard.py"
 COMMANDS_PY="$BEACON_DIR/lib/commands.py"
 export BEACON_PROJECT_FILE=".beacon/project.json"
+export PYTHONUTF8=1
 
 usage() {
     cat <<'EOF'
@@ -69,6 +70,7 @@ cmd_init() {
 
     BEACON_NAME="$name" BEACON_OBJECTIVE="$objective" \
         BEACON_RETRO_DAY="${retro_day:-monday}" \
+        BEACON_BIN="$BEACON_DIR/bin/beacon" \
         python3 "$COMMANDS_PY" init
 }
 
@@ -591,7 +593,7 @@ cmd_launch() {
                 echo "Restarting dashboard pane..."
                 tmux split-window -hbd -t "$session_name" -c "$work_dir" \
                     -l "${dashboard_pct}%" \
-                    "python3 '$DASHBOARD_PY' '$abs_project'"
+                    "stty raw -echo 2>/dev/null; PYTHONUTF8=1 python3 -u '$DASHBOARD_PY' '$abs_project'; stty sane 2>/dev/null"
                 tmux select-pane -t "$session_name:.1"
             else
                 echo "Beacon is already running."
@@ -621,7 +623,7 @@ cmd_launch() {
     # When dashboard exits (q), kill the entire session to clean up
     tmux split-window -hbd -t "$session_name" -c "$work_dir" \
         -l "${dashboard_pct}%" \
-        "python3 '$DASHBOARD_PY' '$abs_project'; tmux kill-session -t '$session_name' 2>/dev/null"
+        "stty raw -echo 2>/dev/null; PYTHONUTF8=1 python3 -u '$DASHBOARD_PY' '$abs_project'; stty sane 2>/dev/null; tmux kill-session -t '$session_name' 2>/dev/null"
 
     # Re-apply ratio on window resize (no quotes around % value for tmux to parse it)
     tmux set-hook -t "$session_name" after-resize-window \

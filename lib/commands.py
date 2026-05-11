@@ -7,6 +7,11 @@ import re
 import subprocess
 import sys
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+except Exception:
+    pass
+
 
 VALID_STATUSES = {"todo", "in_progress", "in_review", "waiting", "done", "observing", "cancelled"}
 VALID_ENTRY_TYPES = {"commit", "task", "note"}
@@ -138,17 +143,27 @@ def _append_claude_md():
     print(f"Updated {claude_md} with beacon rules")
 
 
-POST_COMMIT_HOOK = """\
+def _make_post_commit_hook():
+    beacon_bin = os.environ.get("BEACON_BIN", "")
+    if beacon_bin:
+        run_line = f'"{beacon_bin}" log 2>/dev/null || true'
+        check = f'[ -x "{beacon_bin}" ]'
+    else:
+        run_line = "beacon log 2>/dev/null || true"
+        check = "command -v beacon &>/dev/null"
+    return f"""\
 #!/usr/bin/env bash
 # Beacon: auto-log commits to the active milestone
 # Skip in Claude Code — AI handles logging with milestone/task judgment
 if [ -n "$BEACON_CLAUDE_CODE" ]; then
     exit 0
 fi
-if [ -f ".beacon/project.json" ] && command -v beacon &>/dev/null; then
-    beacon log 2>/dev/null || true
+if [ -f ".beacon/project.json" ] && {check}; then
+    {run_line}
 fi
 """
+
+POST_COMMIT_HOOK = _make_post_commit_hook()
 
 BEACON_HOOK_MARKER = "# Beacon: auto-log commits"
 
@@ -161,6 +176,7 @@ def _install_git_hook():
 
     hook_path = os.path.join(hook_dir, "post-commit")
 
+    hook_content = _make_post_commit_hook()
     if os.path.exists(hook_path):
         with open(hook_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -168,10 +184,10 @@ def _install_git_hook():
             return  # Already installed
         # Append to existing hook
         with open(hook_path, "a", encoding="utf-8") as f:
-            f.write("\n" + POST_COMMIT_HOOK)
+            f.write("\n" + hook_content)
     else:
         with open(hook_path, "w", encoding="utf-8") as f:
-            f.write(POST_COMMIT_HOOK)
+            f.write(hook_content)
 
     os.chmod(hook_path, 0o755)
     print("Installed git post-commit hook")

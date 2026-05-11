@@ -646,15 +646,280 @@ class Dashboard:
         self.scroll_offset = min(self.scroll_offset, max_scroll)
 
 
+def run_text_fallback(project_path):
+    """Plain-text auto-refreshing dashboard for environments where curses is unavailable (e.g. tmux on Windows)."""
+
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+    except Exception:
+        pass
+
+    ICON = {"done": "[x]", "in_progress": "[>]", "todo": "[ ]", "waiting": "[?]",
+            "in_review": "[~]", "observing": "[o]"}
+
+    last_hash = None
+
+    def clear():
+        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.flush()
+
+    def render(project):
+        clear()
+        name = project.get("name", "")
+        obj = project.get("objective", "")
+        summary = project.get("summary", "")
+        milestones = project.get("milestones", [])
+        done_count = sum(1 for m in milestones if m.get("status") in ("done", "observing"))
+        total_count = len(milestones)
+
+        width = 60
+        print(f" BEACON | {name} ")
+        print("=" * width)
+        if obj:
+            print(f" ◆ 目的: {obj}")
+        if summary:
+            print(f" ▶ 現状: {summary}")
+        filled = int(20 * done_count / total_count) if total_count else 0
+        print(f" {'#' * filled}{'-' * (20 - filled)}  {done_count}/{total_count} MS")
+        print("-" * width)
+
+        for ms in milestones:
+            status = ms.get("status", "todo")
+            icon = ICON.get(status, "?")
+            ms_id = ms.get("id", "?")
+            title = ms.get("title", "")
+            progress = ms.get("progress", 0)
+            target = ms.get("target_date", "")
+            active = " << ACTIVE" if status == "in_progress" else ""
+            date_str = f"  due:{target}" if target else ""
+            print(f"  {icon} {ms_id:<6} {title}{active}")
+            bar_filled = int(20 * progress / 100)
+            print(f"         {'#' * bar_filled}{'-' * (20 - bar_filled)} {progress:>3}%{date_str}")
+
+            entries = [e for e in ms.get("entries", []) if e.get("status") != "cancelled"]
+            if entries and status == "in_progress":
+                for e in entries:
+                    e_type = e.get("type", "?")
+                    e_desc = e.get("description", "")
+                    e_status = e.get("status", "todo")
+                    e_id = e.get("id", "")
+                    if e_type == "commit":
+                        e_hash = e.get("meta", {}).get("hash", "")[:7]
+                        id_col = f"[{e_id}]" if e_id else "[commit]"
+                        hash_str = f" ({e_hash})" if e_hash else ""
+                        print(f"           {id_col} {e_desc}{hash_str}")
+                    else:
+                        mark = "#" if e_status == "done" else "-"
+                        id_col = f"[{e_id}]" if e_id else f"[{e_type}]"
+                        print(f"           {mark} {id_col} {e_desc}")
+            elif entries:
+                print(f"         ({len(entries)} entries)")
+            print()
+
+        now = time.strftime("%H:%M:%S")
+        print(f" {now}  |  Ctrl-C: quit")
+
+    print("Beacon dashboard (text mode - curses unavailable in this terminal)")
+    print("Press Ctrl-C to quit")
+
+    project = None
+    try:
+        while True:
+            current_hash = file_hash(project_path)
+            if current_hash != last_hash:
+                last_hash = current_hash
+                loaded = load_project(project_path)
+                if loaded:
+                    project = loaded
+            if project:
+                render(project)
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+
+
+
+def run_rich_dashboard(project_path):
+    """Display-only rich dashboard. No keyboard input needed - use CLI from right pane."""
+    try:
+        from rich.console import Console
+        from rich.live import Live
+        from rich.text import Text
+        try:
+            from rich.console import Group
+        except ImportError:
+            from rich.console import RenderGroup as Group
+    except ImportError as e:
+        sys.stderr.write(f"[beacon] rich not available ({e}), falling back to text mode\n")
+        run_text_fallback(project_path)
+        return
+
+    console = Console()
+    last_hash = [None]
+    project = [None]
+
+    def reload_if_changed():
+        h = file_hash(project_path)
+        if h != last_hash[0]:
+            last_hash[0] = h
+            p = load_project(project_path)
+            if p:
+                project[0] = p
+
+    def get_pending_triggers():
+        project_dir = os.path.dirname(project_path)
+        triggers_dir = os.path.join(project_dir, "triggers")
+        if not os.path.isdir(triggers_dir):
+            return []
+        warnings = []
+        for fname in sorted(os.listdir(triggers_dir)):
+            if not fname.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(triggers_dir, fname), "r") as f:
+                    data = json.load(f)
+                msg = data.get("message", "")
+                if msg:
+                    warnings.append(msg)
+            except (json.JSONDecodeError, IOError):
+                pass
+        return warnings
+
+    def build_display():
+        p = project[0]
+        lines = []
+
+        if not p:
+            lines.append(Text("  Waiting for project...", style="dim"))
+            return Group(*lines)
+
+        name = p.get("name", "")
+        title = f" BEACON: Where humans and AI are bound together. | {name} " if name else " BEACON "
+        lines.append(Text(title, style="bold white on blue"))
+        lines.append(Text(""))
+
+        obj = p.get("objective", "")
+        if obj:
+            lines.append(Text("  ◆ 大目的", style="bold cyan"))
+            lines.append(Text(f"    {obj}"))
+            lines.append(Text(""))
+
+        summary = p.get("summary", "")
+        if summary:
+            lines.append(Text("  ▶ 現状", style="bold yellow"))
+            lines.append(Text(f"    {summary}"))
+            lines.append(Text(""))
+
+        for msg in get_pending_triggers():
+            lines.append(Text(f"  ⚠ {msg}", style="bold white on red"))
+        if get_pending_triggers():
+            lines.append(Text(""))
+
+        milestones = p.get("milestones", [])
+        done_count = sum(1 for m in milestones if m.get("status") in ("done", "observing"))
+        total_count = len(milestones)
+        bar_w = 20
+        filled = int(bar_w * done_count / total_count) if total_count else 0
+        bar = Text()
+        bar.append("  ")
+        bar.append("█" * filled, style="green")
+        bar.append("░" * (bar_w - filled), style="dim")
+        bar.append(f"  {done_count}/{total_count} MS", style="green")
+        lines.append(bar)
+        lines.append(Text("  " + "─" * 40, style="dim"))
+        lines.append(Text(""))
+
+        ICON = {"done": "●", "in_progress": "◐", "todo": "○",
+                "waiting": "◌", "in_review": "◑", "observing": "◔"}
+        STYLE = {"done": "green", "in_progress": "bold blue",
+                 "todo": "", "waiting": "dim", "in_review": "yellow", "observing": "cyan"}
+
+        for i, ms in enumerate(milestones):
+            is_last = i == len(milestones) - 1
+            status = ms.get("status", "todo")
+            ms_title = ms.get("title", "")
+            ms_id = ms.get("id", "?")
+            progress = ms.get("progress", 0)
+            target = ms.get("target_date", "")
+            is_active = status == "in_progress"
+
+            icon = ICON.get(status, "?")
+            style = STYLE.get(status, "")
+            connector = "└─" if is_last else "├─"
+            child_pfx = "   " if is_last else "│  "
+
+            marker = " ◀ ACTIVE" if is_active else ""
+            ms_line = Text()
+            ms_line.append(f"  {connector} {icon} {ms_id:<6} ")
+            ms_line.append(ms_title + marker, style=style)
+            lines.append(ms_line)
+
+            # Progress bar
+            bar_count = 20
+            p_filled = int(bar_count * progress / 100)
+            p_style = "bold blue" if is_active else ("green" if progress > 0 else "dim")
+            p_line = Text()
+            p_line.append(f"  {child_pfx}  ")
+            p_line.append("█" * p_filled, style=p_style)
+            p_line.append("░" * (bar_count - p_filled), style="dim")
+            date_str = f"  目標:{target}" if target else ""
+            p_line.append(f" {progress:>3}%{date_str}", style=p_style)
+            lines.append(p_line)
+
+            # Show entries for active milestone
+            entries = ms.get("entries", [])
+            if is_active and entries:
+                visible = [e for e in entries if e.get("status") != "cancelled"]
+                for j, entry in enumerate(visible):
+                    is_last_e = j == len(visible) - 1
+                    e_conn = "└─" if is_last_e else "├─"
+                    e_type = entry.get("type", "?")
+                    e_desc = entry.get("description", "")
+                    e_status = entry.get("status", "todo")
+                    e_id = entry.get("id", "")
+
+                    e_line = Text()
+                    e_line.append(f"  {child_pfx}  {e_conn} ")
+
+                    if e_type == "commit":
+                        e_hash = entry.get("meta", {}).get("hash", "")[:7]
+                        id_col = f"[{e_id}]" if e_id else "[commit]"
+                        e_line.append(f"{id_col} {e_desc}", style="magenta")
+                        if e_hash:
+                            e_line.append(f" ({e_hash})", style="dim")
+                    else:
+                        mark = "●" if e_status == "done" else "○"
+                        id_col = f"[{e_id}]" if e_id else f"[{e_type}]"
+                        e_style = "green" if e_status == "done" else ""
+                        e_line.append(f"{mark} {id_col} {e_desc}", style=e_style)
+
+                    lines.append(e_line)
+
+            if not is_last:
+                lines.append(Text(f"  {child_pfx}"))
+
+        lines.append(Text(""))
+        lines.append(Text("  " + "─" * 40, style="dim"))
+        now = time.strftime("%H:%M:%S")
+        lines.append(Text(f"  {now}  |  Ctrl-C: quit", style="dim"))
+
+        return Group(*lines)
+
+    try:
+        with Live(build_display(), console=console, refresh_per_second=2) as live:
+            while True:
+                reload_if_changed()
+                live.update(build_display())
+                time.sleep(0.5)
+    except KeyboardInterrupt:
+        pass
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: dashboard.py <path-to-project.json>")
         sys.exit(1)
-
     project_path = sys.argv[1]
-    dashboard = Dashboard(project_path)
-
-    curses.wrapper(dashboard.draw)
+    run_rich_dashboard(project_path)
 
 
 if __name__ == "__main__":
