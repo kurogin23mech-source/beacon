@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Beacon Dashboard - Curses-based interactive project milestone viewer."""
 
+from commands import __version__ as BEACON_VERSION
+
 import curses
 import json
 import hashlib
@@ -215,8 +217,10 @@ class Dashboard:
 
         # Header (fixed at top)
         name = self.project.get("name", "")
-        header_title = f" BEACON: Where humans and AI are bound together. | {name} " if name else " BEACON: Where humans and AI are bound together. "
+        header_title = f" BEACON v{BEACON_VERSION}: Where humans and AI are bound together. "
         header_lines.append((header_title, "header"))
+        if name:
+            header_lines.append((f"  {name}", curses.A_BOLD))
         header_lines.append(("", 0))
 
         # Objective
