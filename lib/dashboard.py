@@ -356,8 +356,6 @@ class Dashboard:
     def _render_entries(self, lines, entries, prefix, width, depth=0):
         """Render entries recursively, supporting nested task→commit grouping."""
         visible = [e for e in entries if e.get("status") != "cancelled"]
-        if self.hide_done:
-            visible = [e for e in visible if e.get("status") != "done"]
         for j, entry in enumerate(visible):
             is_last_e = j == len(visible) - 1
             e_connector = "└─" if is_last_e else "├─"
