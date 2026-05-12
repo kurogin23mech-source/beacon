@@ -322,6 +322,15 @@ body::after {
   color: var(--text-secondary);
 }
 
+.project-info-item.review-due .project-info-label {
+  color: var(--warning);
+}
+
+.project-info-item.review-due .project-info-value {
+  color: var(--warning);
+  font-weight: 500;
+}
+
 /* ---- Summary Block ---- */
 
 .summary-block {
@@ -341,7 +350,6 @@ body::after {
   color: var(--text-secondary);
   font-size: 0.9rem;
   line-height: 1.7;
-  max-width: 72ch;
 }
 
 /* ---- Filter Bar ---- */
@@ -1378,11 +1386,12 @@ function nextRetroDate(retroDay) {
   if (target === undefined) return null;
   const now = new Date();
   const current = now.getDay();
+  if (current === target) return { date: now.toISOString().slice(0, 10), isToday: true };
   let diff = target - current;
   if (diff <= 0) diff += 7;
   const next = new Date(now);
   next.setDate(now.getDate() + diff);
-  return next.toISOString().slice(0, 10);
+  return { date: next.toISOString().slice(0, 10), isToday: false };
 }
 
 // ---- Render ----
@@ -1407,7 +1416,7 @@ function render() {
   const filtered = filterMilestones(sorted);
   const activeCount = (p.milestones || []).filter(m => m.status === 'in_progress').length;
   const doneCount = (p.milestones || []).filter(m => m.status === 'done').length;
-  const retroDate = nextRetroDate(p.retro_day);
+  const retro = nextRetroDate(p.retro_day);
 
   app.innerHTML = `
     <header class="header fade-in">
@@ -1424,10 +1433,10 @@ function render() {
       </div>
     </header>
 
-    ${(p.objective || retroDate) ? `
+    ${(p.objective || retro) ? `
     <div class="project-info fade-in stagger-1">
       ${p.objective ? `<div class="project-info-item"><span class="project-info-label">Objective</span><span class="project-info-value">${esc(p.objective)}</span></div>` : ''}
-      ${retroDate ? `<div class="project-info-item"><span class="project-info-label">Next Retro</span><span class="project-info-value">${retroDate} (${esc(p.retro_day || 'friday')})</span></div>` : ''}
+      ${retro ? `<div class="project-info-item${retro.isToday ? ' review-due' : ''}"><span class="project-info-label">${retro.isToday ? '\u26a0 Review Due Today' : 'Next Review'}</span><span class="project-info-value">${retro.date} (${esc(p.retro_day || 'friday')})</span></div>` : ''}
     </div>
     ` : ''}
 
