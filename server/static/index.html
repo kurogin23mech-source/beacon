@@ -9,7 +9,7 @@
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
 /* ================================================================
-   BEACON — Terminal Noir Dashboard v3
+   BEACON — Terminal Noir Milestones v3
    ================================================================ */
 
 :root {
@@ -195,12 +195,12 @@ body::after {
 .menu-panel {
   position: fixed;
   top: 0;
-  right: 0;
+  left: 0;
   width: 300px;
   max-width: 80vw;
   height: 100vh;
   background: var(--bg-surface);
-  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
   z-index: 1001;
   padding: 24px;
   overflow-y: auto;
@@ -208,7 +208,7 @@ body::after {
 }
 
 @keyframes slide-in {
-  from { transform: translateX(100%); }
+  from { transform: translateX(-100%); }
   to { transform: translateX(0); }
 }
 
@@ -564,6 +564,16 @@ body::after {
   font-variant-numeric: tabular-nums;
 }
 
+.ms-expand-hint {
+  font-size: 0.65rem;
+  color: var(--text-dim);
+  transition: transform 0.2s;
+}
+
+.ms-card.expanded .ms-expand-hint {
+  transform: rotate(180deg);
+}
+
 .ms-tasks-text {
   font-size: 0.75rem;
   color: var(--text-dim);
@@ -673,7 +683,7 @@ body::after {
 }
 
 .entry-desc {
-  color: var(--text-primary);
+  color: #f4f4f5;
   line-height: 1.6;
 }
 
@@ -719,12 +729,20 @@ body::after {
   content: '\u25BC ';
   font-size: 0.6rem;
   color: var(--text-dim);
-  transition: transform 0.2s;
   display: inline-block;
 }
 
 .entry-toggle.collapsed .entry-desc::before {
   content: '\u25B6 ';
+}
+
+.entry-child-count {
+  font-size: 0.6rem;
+  color: var(--text-dim);
+  margin-left: 6px;
+  padding: 0 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 2px;
 }
 
 /* ---- Entry Detail ---- */
@@ -756,7 +774,7 @@ body::after {
   padding: 3px 0;
 }
 
-/* ---- Tabs (Dashboard / Retros) ---- */
+/* ---- Tabs (Milestones / Reviews) ---- */
 
 .tab-bar {
   display: flex;
@@ -1072,7 +1090,7 @@ body::after {
 
 <script>
 // ================================================================
-// Beacon Dashboard v3
+// Beacon Milestones v3
 // ================================================================
 
 const API_BASE = window.location.origin;
@@ -1090,8 +1108,8 @@ let state = {
   retroContent: null,
   // Filter: hidden statuses (empty = show all)
   hiddenStatuses: new Set(),
-  // Entry done filter
-  hideEntryDone: false,
+  // Entry done filter (per milestone)
+  hideEntryDone: new Set(),
   // Collapsed nested entries
   collapsedEntries: new Set(),
   // Sort
@@ -1270,14 +1288,17 @@ function entryStatusText(entry) {
   return `<span class="entry-status-text ${entry.status}">${label}</span>`;
 }
 
+let _currentMsId = null; // set during milestone card render
+
 function renderEntry(entry) {
-  if (state.hideEntryDone && entry.status === 'done') return '';
+  if (_currentMsId && state.hideEntryDone.has(_currentMsId) && entry.status === 'done') return '';
 
   const statusClass = entry.status === 'done' ? ' done' : '';
   const hash = entry.meta?.hash ? `<span class="entry-hash">${entry.meta.hash.slice(0, 7)}</span>` : '';
   const detail = entry.detail ? `<div class="entry-detail">${esc(entry.detail)}</div>` : '';
   const statusText = entryStatusText(entry);
   const hasChildren = entry.entries?.length > 0;
+  const childCount = hasChildren ? entry.entries.length : 0;
   const isCollapsed = state.collapsedEntries.has(entry.id);
   const toggleClass = hasChildren ? ` entry-toggle${isCollapsed ? ' collapsed' : ''}` : '';
 
@@ -1288,11 +1309,13 @@ function renderEntry(entry) {
     children = `<div class="entry-children${hiddenClass}">${filteredChildren}</div>`;
   }
 
+  const childBadge = hasChildren && isCollapsed ? `<span class="entry-child-count">${childCount}</span>` : '';
+
   return `
     <div class="entry${statusClass}${toggleClass}" ${hasChildren ? `onclick="toggleEntry('${entry.id}', event)"` : ''}>
       ${entryTypeBadge(entry.type)}
       <span class="entry-id">${entry.id}</span>
-      <span class="entry-desc">${esc(entry.description)}${hash}${statusText}</span>
+      <span class="entry-desc">${esc(entry.description)}${hash}${statusText}${childBadge}</span>
       <span class="entry-date">${entry.created_at || ''}</span>
       ${detail}
       ${children}
@@ -1416,8 +1439,8 @@ function render() {
     ` : ''}
 
     <div class="tab-bar fade-in stagger-2">
-      <button class="tab-btn ${state.activeTab === 'dashboard' ? 'active' : ''}" onclick="switchTab('dashboard')">Dashboard</button>
-      <button class="tab-btn ${state.activeTab === 'retros' ? 'active' : ''}" onclick="switchTab('retros')">Retros</button>
+      <button class="tab-btn ${state.activeTab === 'dashboard' ? 'active' : ''}" onclick="switchTab('dashboard')">Milestones</button>
+      <button class="tab-btn ${state.activeTab === 'retros' ? 'active' : ''}" onclick="switchTab('retros')">Reviews</button>
     </div>
 
     ${state.activeTab === 'dashboard' ? `
@@ -1427,7 +1450,7 @@ function render() {
         <span class="milestones-count">${activeCount} active \u00b7 ${doneCount}/${(p.milestones||[]).length} done</span>
       </div>
       <div class="filter-bar">
-        <button class="filter-btn f-all" onclick="showAllStatuses()">all</button>
+        <button class="filter-btn f-all ${state.hiddenStatuses.size === 0 ? 'on' : 'off'}" onclick="showAllStatuses()">all</button>
         ${FILTER_ORDER.map(s => {
           const isOn = !state.hiddenStatuses.has(s);
           return `<button class="filter-btn ${isOn ? 'on' : 'off'} ${FILTER_CSS_CLASS[s] || ''}" onclick="toggleStatusFilter('${s}')">${STATUS_LABELS[s] || s}</button>`;
@@ -1487,14 +1510,17 @@ function renderMilestoneCard(ms, index) {
 
   let bodyHtml = '';
   if (isExpanded && (entries.length > 0 || ms.description)) {
+    _currentMsId = ms.id;
     const renderedEntries = entries.map(renderEntry).join('');
+    _currentMsId = null;
     const hasDone = entries.some(e => e.status === 'done' || (e.entries || []).some(c => c.status === 'done'));
+    const msHideDone = state.hideEntryDone.has(ms.id);
     bodyHtml = `
       <div class="ms-entries">
         ${hasDone ? `
         <div class="ms-entries-toolbar">
-          <button class="entry-filter-btn ${state.hideEntryDone ? 'active' : ''}" onclick="toggleHideEntryDone(event)">
-            ${state.hideEntryDone ? 'show done' : 'hide done'}
+          <button class="entry-filter-btn ${msHideDone ? 'active' : ''}" onclick="toggleHideEntryDone('${ms.id}', event)">
+            ${msHideDone ? 'show done' : 'hide done'}
           </button>
         </div>
         ` : ''}
@@ -1518,6 +1544,7 @@ function renderMilestoneCard(ms, index) {
             <div class="ms-progress-fill ${ms.status}" style="width: ${ms.progress || 0}%"></div>
           </div>
           <span class="ms-progress-text">${ms.progress || 0}%</span>
+          ${entries.length > 0 ? `<span class="ms-expand-hint">\u25BE</span>` : ''}
         </div>
       </div>
       <div class="ms-body">${bodyHtml}</div>
@@ -1623,7 +1650,7 @@ async function menuSelectProject(projectId) {
     state.project = null;
     state.expanded.clear();
     state.hiddenStatuses.clear();
-    state.hideEntryDone = false;
+    state.hideEntryDone.clear();
     state.collapsedEntries.clear();
     state.activeTab = 'dashboard';
     state.retros = [];
@@ -1679,9 +1706,10 @@ function toggleEntry(entryId, event) {
   render();
 }
 
-function toggleHideEntryDone(event) {
+function toggleHideEntryDone(msId, event) {
   event.stopPropagation();
-  state.hideEntryDone = !state.hideEntryDone;
+  if (state.hideEntryDone.has(msId)) state.hideEntryDone.delete(msId);
+  else state.hideEntryDone.add(msId);
   render();
 }
 
