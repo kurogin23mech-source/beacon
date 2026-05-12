@@ -32,7 +32,7 @@ class StoreApi:
         """Check if the project has changed since last load/save."""
         try:
             data = self._client.get_project(self._project_id)
-        except RuntimeError:
+        except (RuntimeError, ConnectionError):
             return False
         current_hash = self._hash(data)
         if self._last_hash is None:

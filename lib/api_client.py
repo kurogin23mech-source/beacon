@@ -27,7 +27,7 @@ class ApiClient:
             req.add_header("Authorization", f"Bearer {self._token}")
 
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=30) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8", errors="replace")
@@ -36,6 +36,14 @@ class ApiClient:
             except (json.JSONDecodeError, AttributeError):
                 detail = error_body
             raise RuntimeError(f"API error {e.code}: {detail}") from e
+        except urllib.error.URLError as e:
+            raise ConnectionError(
+                f"Cannot connect to API ({self._base_url}): {e.reason}"
+            ) from e
+        except OSError as e:
+            raise ConnectionError(
+                f"Network error ({self._base_url}): {e}"
+            ) from e
 
     def get(self, path: str) -> dict:
         return self._request("GET", path)

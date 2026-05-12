@@ -139,3 +139,19 @@ class TestStoreApi:
     def test_is_cloud(self):
         store = StoreApi(_base_url, "test")
         assert store.is_cloud() is True
+
+
+# ---------------------------------------------------------------------------
+# Connection error tests
+# ---------------------------------------------------------------------------
+
+class TestConnectionError:
+    def test_api_client_connection_refused(self):
+        client = ApiClient("http://127.0.0.1:1")  # nothing listening
+        with pytest.raises(ConnectionError):
+            client.get("/api/projects")
+
+    def test_store_api_has_changed_offline(self):
+        store = StoreApi("http://127.0.0.1:1", "test")
+        # Should not crash, just return False
+        assert store.has_changed() is False

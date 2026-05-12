@@ -97,7 +97,8 @@ class Dashboard:
             return False
         try:
             self.project = self.store.load_project()
-        except (FileNotFoundError, json.JSONDecodeError):
+        except (FileNotFoundError, json.JSONDecodeError,
+                RuntimeError, ConnectionError):
             self.project = None
         # Auto-expand active milestone
         if self.project:
