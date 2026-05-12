@@ -348,6 +348,13 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/api/auth/config")
+def auth_config():
+    """Return OAuth client ID for Web UI login (no auth required)."""
+    client_id = os.environ.get("BEACON_OAUTH_CLIENT_ID", "")
+    return {"client_id": client_id}
+
+
 # ---------------------------------------------------------------------------
 # Static files (Web UI)
 # ---------------------------------------------------------------------------

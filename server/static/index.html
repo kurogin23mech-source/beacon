@@ -6,6 +6,7 @@
 <title>Beacon</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
 /* ================================================================
    BEACON — Terminal Noir Dashboard
@@ -548,6 +549,79 @@ body::after {
   margin-top: 2px;
 }
 
+/* ---- Login Screen ---- */
+
+.login-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 80vh;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.login-logo {
+  font-family: var(--font-mono);
+  font-size: 1.8rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+
+.login-tagline {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-top: -16px;
+}
+
+.login-divider {
+  width: 60px;
+  height: 1px;
+  background: var(--border);
+  position: relative;
+}
+
+.login-divider::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 20px;
+  height: 1px;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+}
+
+#g_id_signin {
+  margin-top: 8px;
+}
+
+.login-note {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  max-width: 280px;
+  text-align: center;
+  line-height: 1.6;
+}
+
+/* ---- User Info ---- */
+
+.user-info {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  transition: border-color 0.2s;
+}
+
+.user-info:hover {
+  border-color: var(--border);
+}
+
 </style>
 </head>
 <body>
@@ -576,12 +650,94 @@ let state = {
   lastUpdate: null,
   connected: false,
   error: null,
+  auth: {
+    token: localStorage.getItem('beacon_token'),
+    email: localStorage.getItem('beacon_email'),
+    clientId: null, // loaded from server config
+  },
 };
+
+// ---- Auth ----
+
+async function loadAuthConfig() {
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/config`);
+    if (res.ok) {
+      const config = await res.json();
+      state.auth.clientId = config.client_id;
+    }
+  } catch (e) {
+    // fallback: no config endpoint
+  }
+}
+
+function handleCredentialResponse(response) {
+  const token = response.credential;
+  // Decode JWT payload to get email
+  const payload = JSON.parse(atob(token.split('.')[1]));
+  state.auth.token = token;
+  state.auth.email = payload.email || '';
+  localStorage.setItem('beacon_token', token);
+  localStorage.setItem('beacon_email', state.auth.email);
+  init();
+}
+
+function renderLogin() {
+  const app = document.getElementById('app');
+  app.innerHTML = `
+    <div class="login-screen fade-in">
+      <div class="login-logo">Beacon</div>
+      <div class="login-tagline">Project Monitor</div>
+      <div class="login-divider"></div>
+      <div id="g_id_signin"></div>
+      <div class="login-note">Sign in to view project telemetry</div>
+    </div>
+  `;
+
+  if (state.auth.clientId && window.google?.accounts) {
+    google.accounts.id.initialize({
+      client_id: state.auth.clientId,
+      callback: handleCredentialResponse,
+    });
+    google.accounts.id.renderButton(
+      document.getElementById('g_id_signin'),
+      { theme: 'filled_black', size: 'large', shape: 'rectangular', text: 'signin_with' }
+    );
+  }
+}
+
+function logout() {
+  state.auth.token = null;
+  state.auth.email = null;
+  localStorage.removeItem('beacon_token');
+  localStorage.removeItem('beacon_email');
+  if (pollTimer) clearInterval(pollTimer);
+  renderLogin();
+}
+
+function isAuthenticated() {
+  if (!state.auth.token) return false;
+  // Check JWT expiry
+  try {
+    const payload = JSON.parse(atob(state.auth.token.split('.')[1]));
+    return payload.exp * 1000 > Date.now();
+  } catch {
+    return false;
+  }
+}
 
 // ---- API ----
 
 async function api(path) {
-  const res = await fetch(`${API_BASE}${path}`);
+  const headers = {};
+  if (state.auth.token) {
+    headers['Authorization'] = `Bearer ${state.auth.token}`;
+  }
+  const res = await fetch(`${API_BASE}${path}`, { headers });
+  if (res.status === 401) {
+    logout();
+    throw new Error('Session expired');
+  }
   if (!res.ok) throw new Error(`${res.status}: ${res.statusText}`);
   return res.json();
 }
@@ -714,6 +870,7 @@ function render() {
           <div class="status-dot ${state.connected ? '' : 'offline'}"></div>
           <span>${state.connected ? 'live' : 'offline'}</span>
         </div>
+        ${state.auth.email ? `<span class="user-info" onclick="logout()" title="Click to sign out">${esc(state.auth.email)}</span>` : ''}
       </div>
     </header>
 
@@ -877,6 +1034,21 @@ function getProjectIdFromUrl() {
 // ---- Init ----
 
 async function init() {
+  await loadAuthConfig();
+
+  if (!isAuthenticated()) {
+    // Wait for GIS script to load, then render login
+    function waitForGsi() {
+      if (window.google?.accounts) {
+        renderLogin();
+      } else {
+        setTimeout(waitForGsi, 100);
+      }
+    }
+    waitForGsi();
+    return;
+  }
+
   const urlProjectId = getProjectIdFromUrl();
 
   if (urlProjectId) {
