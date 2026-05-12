@@ -9,8 +9,7 @@
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
 /* ================================================================
-   BEACON — Terminal Noir Dashboard
-   A control room window into an AI-driven project.
+   BEACON — Terminal Noir Dashboard v2
    ================================================================ */
 
 :root {
@@ -20,9 +19,9 @@
   --bg-hover: #1f1f24;
   --border: #2a2a30;
   --border-subtle: #1e1e24;
-  --text-primary: #d4d4d8;
-  --text-secondary: #71717a;
-  --text-dim: #52525b;
+  --text-primary: #e4e4e8;
+  --text-secondary: #a1a1aa;
+  --text-dim: #71717a;
   --accent: #4ade80;
   --accent-dim: #166534;
   --accent-glow: rgba(74, 222, 128, 0.08);
@@ -31,7 +30,8 @@
   --done: #4ade80;
   --in-progress: #60a5fa;
   --observing: #a78bfa;
-  --todo: #52525b;
+  --todo: #71717a;
+  --waiting: #f97316;
   --cancelled: #ef4444;
   --font-mono: 'JetBrains Mono', 'IBM Plex Mono', monospace;
   --font-body: 'IBM Plex Mono', monospace;
@@ -41,7 +41,7 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 html {
-  font-size: 13px;
+  font-size: 15px;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -113,6 +113,22 @@ body::after {
   color: var(--text-primary);
 }
 
+.project-back {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  transition: border-color 0.2s, color 0.2s;
+  text-decoration: none;
+}
+
+.project-back:hover {
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
+
 .header-tag {
   font-size: 0.75rem;
   color: var(--text-dim);
@@ -157,7 +173,7 @@ body::after {
 }
 
 .summary-label {
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   color: var(--text-dim);
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -166,9 +182,41 @@ body::after {
 
 .summary-text {
   color: var(--text-secondary);
-  font-size: 0.85rem;
+  font-size: 0.9rem;
   line-height: 1.7;
   max-width: 72ch;
+}
+
+/* ---- Filter Bar ---- */
+
+.filter-bar {
+  display: flex;
+  gap: 6px;
+  padding: 16px 0 0;
+  flex-wrap: wrap;
+}
+
+.filter-btn {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  padding: 4px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s, background 0.2s;
+}
+
+.filter-btn:hover {
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
+
+.filter-btn.active {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+  background: var(--accent-glow);
 }
 
 /* ---- Milestone List ---- */
@@ -185,14 +233,14 @@ body::after {
 }
 
 .milestones-title {
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   color: var(--text-dim);
   letter-spacing: 0.1em;
   text-transform: uppercase;
 }
 
 .milestones-count {
-  font-size: 0.75rem;
+  font-size: 0.8rem;
   color: var(--text-dim);
 }
 
@@ -226,6 +274,13 @@ body::after {
   align-items: center;
 }
 
+.ms-status-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
 .ms-status-icon {
   width: 10px;
   height: 10px;
@@ -237,7 +292,22 @@ body::after {
 .ms-status-icon.in_progress { background: var(--in-progress); box-shadow: 0 0 4px rgba(96, 165, 250, 0.3); animation: pulse-dot 2s ease-in-out infinite; }
 .ms-status-icon.observing { background: var(--observing); box-shadow: 0 0 4px rgba(167, 139, 250, 0.3); }
 .ms-status-icon.todo { background: var(--todo); }
+.ms-status-icon.waiting { background: var(--waiting); }
 .ms-status-icon.cancelled { background: var(--cancelled); }
+
+.ms-status-text {
+  font-size: 0.65rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  font-weight: 500;
+}
+
+.ms-status-text.done { color: var(--done); }
+.ms-status-text.in_progress { color: var(--in-progress); }
+.ms-status-text.observing { color: var(--observing); }
+.ms-status-text.todo { color: var(--todo); }
+.ms-status-text.waiting { color: var(--waiting); }
+.ms-status-text.cancelled { color: var(--cancelled); }
 
 .ms-title-row {
   display: flex;
@@ -247,13 +317,13 @@ body::after {
 }
 
 .ms-id {
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   color: var(--text-dim);
   flex-shrink: 0;
 }
 
 .ms-title {
-  font-size: 0.85rem;
+  font-size: 0.9rem;
   color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
@@ -287,7 +357,7 @@ body::after {
 .ms-progress-fill.todo { background: var(--todo); }
 
 .ms-progress-text {
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   color: var(--text-dim);
   min-width: 32px;
   text-align: right;
@@ -295,7 +365,7 @@ body::after {
 }
 
 .ms-tasks-text {
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
 }
@@ -309,7 +379,7 @@ body::after {
 }
 
 .ms-card.expanded .ms-body {
-  max-height: 2000px;
+  max-height: 4000px;
 }
 
 .ms-entries {
@@ -320,7 +390,7 @@ body::after {
 .ms-description {
   padding: 8px 0 4px;
   color: var(--text-secondary);
-  font-size: 0.8rem;
+  font-size: 0.85rem;
   font-style: italic;
 }
 
@@ -328,34 +398,46 @@ body::after {
 
 .entry {
   display: grid;
-  grid-template-columns: 18px auto 1fr auto;
+  grid-template-columns: auto auto 1fr auto;
   gap: 8px;
   padding: 6px 0;
   align-items: start;
   border-bottom: 1px solid var(--border-subtle);
-  font-size: 0.8rem;
-  animation: entry-in 0.3s ease both;
+  font-size: 0.85rem;
 }
 
 .entry:last-child { border-bottom: none; }
 
-@keyframes entry-in {
-  from { opacity: 0; transform: translateX(-8px); }
-  to { opacity: 1; transform: translateX(0); }
-}
-
-.entry-type-icon {
+.entry-type-badge {
   font-size: 0.65rem;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  padding: 1px 5px;
+  border-radius: 2px;
   line-height: 1.8;
-  text-align: center;
+  white-space: nowrap;
 }
 
-.entry-type-icon.commit { color: var(--accent); }
-.entry-type-icon.task { color: var(--info); }
-.entry-type-icon.note { color: var(--warning); }
+.entry-type-badge.commit {
+  color: var(--accent);
+  background: rgba(74, 222, 128, 0.1);
+  border: 1px solid rgba(74, 222, 128, 0.15);
+}
+
+.entry-type-badge.task {
+  color: var(--info);
+  background: rgba(96, 165, 250, 0.1);
+  border: 1px solid rgba(96, 165, 250, 0.15);
+}
+
+.entry-type-badge.note {
+  color: var(--warning);
+  background: rgba(251, 191, 36, 0.1);
+  border: 1px solid rgba(251, 191, 36, 0.15);
+}
 
 .entry-id {
-  font-size: 0.65rem;
+  font-size: 0.7rem;
   color: var(--text-dim);
   line-height: 1.8;
 }
@@ -371,15 +453,27 @@ body::after {
   text-decoration-color: var(--border);
 }
 
+.entry-status-text {
+  font-size: 0.6rem;
+  color: var(--text-dim);
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  margin-left: 4px;
+}
+
+.entry-status-text.done { color: var(--done); }
+.entry-status-text.todo { color: var(--todo); }
+.entry-status-text.in_progress { color: var(--in-progress); }
+
 .entry-date {
-  font-size: 0.65rem;
+  font-size: 0.7rem;
   color: var(--text-dim);
   line-height: 1.8;
   white-space: nowrap;
 }
 
 .entry-hash {
-  font-size: 0.65rem;
+  font-size: 0.7rem;
   color: var(--accent-dim);
   margin-left: 4px;
 }
@@ -388,7 +482,7 @@ body::after {
 
 .entry-detail {
   grid-column: 3 / -1;
-  font-size: 0.75rem;
+  font-size: 0.8rem;
   color: var(--text-dim);
   padding: 4px 0 2px;
   line-height: 1.5;
@@ -409,6 +503,106 @@ body::after {
   padding: 3px 0;
 }
 
+/* ---- Tabs (Dashboard / Retros) ---- */
+
+.tab-bar {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.tab-btn {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  padding: 10px 20px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 0.2s, border-color 0.2s;
+}
+
+.tab-btn:hover {
+  color: var(--text-secondary);
+}
+
+.tab-btn.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent);
+}
+
+/* ---- Retro Viewer ---- */
+
+.retro-section {
+  padding: 24px 0;
+}
+
+.retro-list {
+  list-style: none;
+}
+
+.retro-item {
+  padding: 10px 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  background: var(--bg-surface);
+  transition: border-color 0.2s, background 0.2s;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.retro-item:hover {
+  border-color: var(--border);
+  background: var(--bg-raised);
+}
+
+.retro-item-week {
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+
+.retro-item-date {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
+.retro-content {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 20px;
+  white-space: pre-wrap;
+  font-size: 0.85rem;
+  line-height: 1.7;
+  color: var(--text-secondary);
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.retro-back {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  cursor: pointer;
+  margin-bottom: 12px;
+  display: inline-block;
+  transition: color 0.2s;
+}
+
+.retro-back:hover {
+  color: var(--text-secondary);
+}
+
+.retro-empty {
+  text-align: center;
+  padding: 40px 0;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
 /* ---- Footer ---- */
 
 .footer {
@@ -420,17 +614,20 @@ body::after {
 }
 
 .footer-left {
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   color: var(--text-dim);
   letter-spacing: 0.05em;
 }
 
-.footer-right {
+.footer-tagline {
   font-size: 0.7rem;
   color: var(--text-dim);
+  font-style: italic;
+  letter-spacing: 0.03em;
 }
 
-.updated-time {
+.footer-right {
+  font-size: 0.75rem;
   color: var(--text-dim);
 }
 
@@ -469,7 +666,7 @@ body::after {
 }
 
 .loading-text {
-  font-size: 0.75rem;
+  font-size: 0.8rem;
   color: var(--text-dim);
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -481,7 +678,7 @@ body::after {
   text-align: center;
   padding: 80px 0;
   color: var(--text-dim);
-  font-size: 0.85rem;
+  font-size: 0.9rem;
 }
 
 .error-state .error-icon {
@@ -539,12 +736,12 @@ body::after {
 }
 
 .project-item-name {
-  font-size: 0.9rem;
+  font-size: 0.95rem;
   color: var(--text-primary);
 }
 
 .project-item-id {
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   color: var(--text-dim);
   margin-top: 2px;
 }
@@ -562,17 +759,17 @@ body::after {
 
 .login-logo {
   font-family: var(--font-mono);
-  font-size: 1.8rem;
+  font-size: 2rem;
   font-weight: 700;
   color: var(--text-primary);
   letter-spacing: -0.02em;
 }
 
 .login-tagline {
-  font-size: 0.75rem;
+  font-size: 0.8rem;
   color: var(--text-dim);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-style: italic;
   margin-top: -16px;
 }
 
@@ -599,7 +796,7 @@ body::after {
 }
 
 .login-note {
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   color: var(--text-dim);
   max-width: 280px;
   text-align: center;
@@ -609,7 +806,7 @@ body::after {
 /* ---- User Info ---- */
 
 .user-info {
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   color: var(--text-dim);
   cursor: pointer;
   padding: 2px 8px;
@@ -635,27 +832,34 @@ body::after {
 
 <script>
 // ================================================================
-// Beacon Dashboard — Read-only monitoring UI
+// Beacon Dashboard v2 — WebSocket + UI improvements
 // ================================================================
 
 const API_BASE = window.location.origin;
-const POLL_INTERVAL = 5000;
 
 let state = {
   projects: [],
   projectId: null,
   project: null,
-  milestones: {},   // ms_id -> expanded detail
+  milestones: {},   // ms_id -> expanded detail (enriched data from WS includes this)
   expanded: new Set(),
   lastUpdate: null,
   connected: false,
   error: null,
+  activeTab: 'dashboard', // 'dashboard' | 'retros'
+  retros: [],
+  retroContent: null,  // { week, content }
+  statusFilter: new Set(), // empty = show all; otherwise only show these statuses
   auth: {
     token: localStorage.getItem('beacon_token'),
     email: localStorage.getItem('beacon_email'),
-    clientId: null, // loaded from server config
+    clientId: null,
   },
 };
+
+let ws = null;
+let wsReconnectTimer = null;
+let lastProjectJson = null; // for diff-based rendering
 
 // ---- Auth ----
 
@@ -666,14 +870,11 @@ async function loadAuthConfig() {
       const config = await res.json();
       state.auth.clientId = config.client_id;
     }
-  } catch (e) {
-    // fallback: no config endpoint
-  }
+  } catch (e) {}
 }
 
 function handleCredentialResponse(response) {
   const token = response.credential;
-  // Decode JWT payload to get email
   const payload = JSON.parse(atob(token.split('.')[1]));
   state.auth.token = token;
   state.auth.email = payload.email || '';
@@ -687,7 +888,7 @@ function renderLogin() {
   app.innerHTML = `
     <div class="login-screen fade-in">
       <div class="login-logo">Beacon</div>
-      <div class="login-tagline">Project Monitor</div>
+      <div class="login-tagline">Where humans and AI are bound together.</div>
       <div class="login-divider"></div>
       <div id="g_id_signin"></div>
       <div class="login-note">Sign in to view project telemetry</div>
@@ -711,13 +912,12 @@ function logout() {
   state.auth.email = null;
   localStorage.removeItem('beacon_token');
   localStorage.removeItem('beacon_email');
-  if (pollTimer) clearInterval(pollTimer);
+  closeWebSocket();
   renderLogin();
 }
 
 function isAuthenticated() {
   if (!state.auth.token) return false;
-  // Check JWT expiry
   try {
     const payload = JSON.parse(atob(state.auth.token.split('.')[1]));
     return payload.exp * 1000 > Date.now();
@@ -753,43 +953,123 @@ async function loadProjects() {
   }
 }
 
-async function loadProject(projectId) {
-  try {
-    state.project = await api(`/api/projects/${projectId}`);
-    state.projectId = projectId;
-    state.lastUpdate = new Date();
+// ---- WebSocket ----
+
+function connectWebSocket(projectId) {
+  closeWebSocket();
+
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const host = window.location.host;
+  const tokenParam = state.auth.token ? `?token=${encodeURIComponent(state.auth.token)}` : '';
+  const url = `${protocol}//${host}/ws/projects/${projectId}${tokenParam}`;
+
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
     state.connected = true;
     state.error = null;
-  } catch (e) {
+    updateConnectionStatus();
+  };
+
+  ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+    if (msg.type === 'project') {
+      const newJson = JSON.stringify(msg.data);
+      if (newJson !== lastProjectJson) {
+        lastProjectJson = newJson;
+        state.project = msg.data;
+        state.lastUpdate = new Date();
+        state.connected = true;
+        render();
+      }
+    }
+  };
+
+  ws.onclose = () => {
     state.connected = false;
-    state.error = e.message;
+    updateConnectionStatus();
+    // Reconnect after 3 seconds
+    wsReconnectTimer = setTimeout(() => {
+      if (state.projectId === projectId) {
+        connectWebSocket(projectId);
+      }
+    }, 3000);
+  };
+
+  ws.onerror = () => {
+    state.connected = false;
+    updateConnectionStatus();
+  };
+
+  // Ping every 30s to keep connection alive
+  const pingInterval = setInterval(() => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send('ping');
+    } else {
+      clearInterval(pingInterval);
+    }
+  }, 30000);
+}
+
+function closeWebSocket() {
+  if (ws) {
+    ws.onclose = null; // prevent reconnect
+    ws.close();
+    ws = null;
+  }
+  if (wsReconnectTimer) {
+    clearTimeout(wsReconnectTimer);
+    wsReconnectTimer = null;
   }
 }
 
-async function loadMilestone(projectId, msId) {
-  try {
-    const data = await api(`/api/projects/${projectId}/milestones/${msId}`);
-    state.milestones[msId] = data;
-  } catch (e) {
-    // silent fail for milestone detail
+function updateConnectionStatus() {
+  const dot = document.querySelector('.status-dot');
+  const label = document.querySelector('.connection-label');
+  if (dot) {
+    dot.className = `status-dot ${state.connected ? '' : 'offline'}`;
+  }
+  if (label) {
+    label.textContent = state.connected ? 'live' : 'reconnecting';
   }
 }
 
 // ---- Render Helpers ----
 
-function statusIcon(status) {
-  return `<div class="ms-status-icon ${status}"></div>`;
+const STATUS_LABELS = {
+  done: 'done',
+  in_progress: 'active',
+  observing: 'observing',
+  todo: 'todo',
+  waiting: 'waiting',
+  cancelled: 'cancelled',
+};
+
+function statusBadge(status) {
+  const label = STATUS_LABELS[status] || status;
+  return `
+    <div class="ms-status-badge">
+      <div class="ms-status-icon ${status}"></div>
+      <span class="ms-status-text ${status}">${label}</span>
+    </div>`;
 }
 
-function entryTypeIcon(type) {
-  const icons = { commit: '\u25cb', task: '\u25a1', note: '\u25c7' };
-  return `<span class="entry-type-icon ${type}">${icons[type] || '\u00b7'}</span>`;
+function entryTypeBadge(type) {
+  const labels = { commit: 'commit', task: 'task', note: 'note' };
+  return `<span class="entry-type-badge ${type}">${labels[type] || type}</span>`;
+}
+
+function entryStatusText(entry) {
+  if (entry.type === 'commit') return '';
+  const label = STATUS_LABELS[entry.status] || entry.status;
+  return `<span class="entry-status-text ${entry.status}">${label}</span>`;
 }
 
 function renderEntry(entry) {
   const statusClass = entry.status === 'done' ? ' done' : '';
   const hash = entry.meta?.hash ? `<span class="entry-hash">${entry.meta.hash.slice(0, 7)}</span>` : '';
   const detail = entry.detail ? `<div class="entry-detail">${esc(entry.detail)}</div>` : '';
+  const statusText = entryStatusText(entry);
 
   let children = '';
   if (entry.entries?.length) {
@@ -798,9 +1078,9 @@ function renderEntry(entry) {
 
   return `
     <div class="entry${statusClass}">
-      ${entryTypeIcon(entry.type)}
+      ${entryTypeBadge(entry.type)}
       <span class="entry-id">${entry.id}</span>
-      <span class="entry-desc">${esc(entry.description)}${hash}</span>
+      <span class="entry-desc">${esc(entry.description)}${hash}${statusText}</span>
       <span class="entry-date">${entry.created_at || ''}</span>
       ${detail}
       ${children}
@@ -823,13 +1103,37 @@ function formatTime(date) {
 // ---- Sort milestones ----
 
 function sortMilestones(milestones) {
-  const order = { in_progress: 0, observing: 1, todo: 2, done: 3, cancelled: 4 };
+  const order = { in_progress: 0, observing: 1, todo: 2, waiting: 3, done: 4, cancelled: 5 };
   return [...milestones].sort((a, b) => {
-    const oa = order[a.status] ?? 5;
-    const ob = order[b.status] ?? 5;
-    if (oa !== ob) return oa - ob;
-    return 0;
+    const oa = order[a.status] ?? 6;
+    const ob = order[b.status] ?? 6;
+    return oa - ob;
   });
+}
+
+// ---- Filter ----
+
+function toggleFilter(status) {
+  if (state.statusFilter.has(status)) {
+    state.statusFilter.delete(status);
+  } else {
+    state.statusFilter.add(status);
+  }
+  render();
+}
+
+function filterMilestones(milestones) {
+  if (state.statusFilter.size === 0) return milestones;
+  return milestones.filter(ms => state.statusFilter.has(ms.status));
+}
+
+function getAvailableStatuses(milestones) {
+  const statuses = new Set();
+  for (const ms of milestones) {
+    statuses.add(ms.status);
+  }
+  const order = ['in_progress', 'observing', 'todo', 'waiting', 'done', 'cancelled'];
+  return order.filter(s => statuses.has(s));
 }
 
 // ---- Render ----
@@ -858,17 +1162,20 @@ function render() {
 
   const p = state.project;
   const sorted = sortMilestones(p.milestones || []);
+  const availableStatuses = getAvailableStatuses(sorted);
+  const filtered = filterMilestones(sorted);
   const activeCount = sorted.filter(m => m.status === 'in_progress').length;
   const doneCount = sorted.filter(m => m.status === 'done').length;
 
   app.innerHTML = `
     <header class="header fade-in">
       <div class="header-top">
+        <span class="project-back" onclick="goBack()">\u2190 projects</span>
         <span class="project-name">${esc(p.name)}</span>
         <span class="header-tag">beacon</span>
         <div class="connection-status">
           <div class="status-dot ${state.connected ? '' : 'offline'}"></div>
-          <span>${state.connected ? 'live' : 'offline'}</span>
+          <span class="connection-label">${state.connected ? 'live' : 'reconnecting'}</span>
         </div>
         ${state.auth.email ? `<span class="user-info" onclick="logout()" title="Click to sign out">${esc(state.auth.email)}</span>` : ''}
       </div>
@@ -881,23 +1188,43 @@ function render() {
     </section>
     ` : ''}
 
-    <section class="milestones fade-in stagger-2">
+    <div class="tab-bar fade-in stagger-2">
+      <button class="tab-btn ${state.activeTab === 'dashboard' ? 'active' : ''}" onclick="switchTab('dashboard')">Dashboard</button>
+      <button class="tab-btn ${state.activeTab === 'retros' ? 'active' : ''}" onclick="switchTab('retros')">Retros</button>
+    </div>
+
+    ${state.activeTab === 'dashboard' ? `
+    <section class="milestones fade-in">
       <div class="milestones-header">
         <span class="milestones-title">Milestones</span>
         <span class="milestones-count">${activeCount} active \u00b7 ${doneCount}/${sorted.length} done</span>
       </div>
-      ${sorted.map((ms, i) => renderMilestoneCard(ms, i)).join('')}
+      ${availableStatuses.length > 1 ? `
+      <div class="filter-bar">
+        ${availableStatuses.map(s => `
+          <button class="filter-btn ${state.statusFilter.has(s) ? 'active' : ''}" onclick="toggleFilter('${s}')">${STATUS_LABELS[s] || s}</button>
+        `).join('')}
+        ${state.statusFilter.size > 0 ? `<button class="filter-btn" onclick="clearFilters()">clear</button>` : ''}
+      </div>
+      ` : ''}
+      ${filtered.map((ms, i) => renderMilestoneCard(ms, i)).join('')}
     </section>
+    ` : ''}
+
+    ${state.activeTab === 'retros' ? renderRetroSection() : ''}
 
     <footer class="footer fade-in stagger-4">
-      <div class="footer-left">${esc(state.projectId)}</div>
+      <div class="footer-left">
+        <div>${esc(state.projectId)}</div>
+        <div class="footer-tagline">Where humans and AI are bound together.</div>
+      </div>
       <div class="footer-right">
-        <span class="updated-time">${state.lastUpdate ? formatTime(state.lastUpdate) : ''}</span>
+        <span>${state.lastUpdate ? formatTime(state.lastUpdate) : ''}</span>
       </div>
     </footer>
   `;
 
-  // Attach click handlers
+  // Attach click handlers for milestone headers
   document.querySelectorAll('.ms-card-header').forEach(el => {
     el.addEventListener('click', () => toggleMilestone(el.dataset.msId));
   });
@@ -906,6 +1233,9 @@ function render() {
 function renderProjectSelector(app) {
   app.innerHTML = `
     <div class="project-selector fade-in">
+      <div class="login-logo">Beacon</div>
+      <div class="login-tagline">Where humans and AI are bound together.</div>
+      <div style="height: 24px"></div>
       <div class="summary-label">Select Project</div>
       <ul class="project-list">
         ${state.projects.map(p => `
@@ -925,8 +1255,8 @@ function renderProjectSelector(app) {
 
 function renderMilestoneCard(ms, index) {
   const isExpanded = state.expanded.has(ms.id);
-  const detail = state.milestones[ms.id];
-  const entries = detail?.entries || [];
+  // WebSocket data already includes enriched entries
+  const entries = ms.entries || [];
   const activeClass = ms.status === 'in_progress' ? ' active' : '';
   const expandedClass = isExpanded ? ' expanded' : '';
 
@@ -953,7 +1283,7 @@ function renderMilestoneCard(ms, index) {
   return `
     <div class="ms-card${activeClass}${expandedClass}">
       <div class="ms-card-header" data-ms-id="${ms.id}">
-        ${statusIcon(ms.status)}
+        ${statusBadge(ms.status)}
         <div class="ms-title-row">
           <span class="ms-id">${ms.id}</span>
           <span class="ms-title">${esc(ms.title)}</span>
@@ -973,55 +1303,138 @@ function renderMilestoneCard(ms, index) {
   `;
 }
 
+// ---- Retro ----
+
+function renderRetroSection() {
+  if (state.retroContent) {
+    return `
+      <section class="retro-section fade-in">
+        <span class="retro-back" onclick="closeRetro()">\u2190 back to list</span>
+        <h3 style="font-size: 1rem; color: var(--text-primary); margin: 8px 0 16px;">${esc(state.retroContent.week)}</h3>
+        <div class="retro-content">${esc(state.retroContent.content)}</div>
+      </section>
+    `;
+  }
+
+  if (state.retros.length === 0) {
+    return `
+      <section class="retro-section fade-in">
+        <div class="retro-empty">No retrospective documents yet.</div>
+      </section>
+    `;
+  }
+
+  return `
+    <section class="retro-section fade-in">
+      <ul class="retro-list">
+        ${state.retros.map(r => `
+          <li class="retro-item" onclick="openRetro('${esc(r.week)}')">
+            <span class="retro-item-week">${esc(r.week)}</span>
+            <span class="retro-item-date">${r.updated_at ? r.updated_at.slice(0, 10) : ''}</span>
+          </li>
+        `).join('')}
+      </ul>
+    </section>
+  `;
+}
+
+async function switchTab(tab) {
+  state.activeTab = tab;
+  state.retroContent = null;
+  if (tab === 'retros' && state.retros.length === 0) {
+    try {
+      state.retros = await api(`/api/projects/${state.projectId}/retros`);
+    } catch (e) {
+      state.retros = [];
+    }
+  }
+  render();
+}
+
+async function openRetro(week) {
+  try {
+    const data = await api(`/api/projects/${state.projectId}/retros/${week}`);
+    state.retroContent = data;
+  } catch (e) {
+    state.retroContent = { week, content: 'Failed to load retro document.' };
+  }
+  render();
+}
+
+function closeRetro() {
+  state.retroContent = null;
+  render();
+}
+
 // ---- Interactions ----
 
 async function selectProject(projectId) {
+  state.projectId = projectId;
+  state.activeTab = 'dashboard';
+  state.retros = [];
+  state.retroContent = null;
+  state.statusFilter.clear();
+  lastProjectJson = null;
+
   document.getElementById('app').innerHTML = `
     <div class="loading">
       <div class="loading-bar"></div>
       <div class="loading-text">Loading</div>
     </div>
   `;
-  await loadProject(projectId);
-  // Auto-expand in_progress milestones
-  if (state.project) {
-    for (const ms of state.project.milestones || []) {
-      if (ms.status === 'in_progress') {
-        state.expanded.add(ms.id);
-        await loadMilestone(projectId, ms.id);
+
+  // Try WebSocket first
+  connectWebSocket(projectId);
+
+  // Also do an initial API fetch as fallback
+  try {
+    const data = await api(`/api/projects/${projectId}`);
+    // Enrich client-side if WS hasn't delivered yet
+    if (!state.project) {
+      state.project = data;
+      state.lastUpdate = new Date();
+      // Auto-expand in_progress milestones
+      for (const ms of data.milestones || []) {
+        if (ms.status === 'in_progress') {
+          state.expanded.add(ms.id);
+        }
       }
+      render();
+    }
+  } catch (e) {
+    if (!state.project) {
+      state.error = e.message;
+      render();
     }
   }
-  render();
-  startPolling();
 }
 
-async function toggleMilestone(msId) {
+function goBack() {
+  closeWebSocket();
+  state.project = null;
+  state.projectId = null;
+  state.expanded.clear();
+  state.milestones = {};
+  state.activeTab = 'dashboard';
+  state.retros = [];
+  state.retroContent = null;
+  state.statusFilter.clear();
+  lastProjectJson = null;
+  render();
+}
+
+function toggleMilestone(msId) {
   if (state.expanded.has(msId)) {
     state.expanded.delete(msId);
   } else {
     state.expanded.add(msId);
-    if (!state.milestones[msId]) {
-      await loadMilestone(state.projectId, msId);
-    }
   }
   render();
 }
 
-// ---- Polling ----
-
-let pollTimer = null;
-
-function startPolling() {
-  if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(async () => {
-    await loadProject(state.projectId);
-    // Refresh expanded milestones
-    for (const msId of state.expanded) {
-      await loadMilestone(state.projectId, msId);
-    }
-    render();
-  }, POLL_INTERVAL);
+function clearFilters() {
+  state.statusFilter.clear();
+  render();
 }
 
 // ---- URL routing ----
@@ -1037,7 +1450,6 @@ async function init() {
   await loadAuthConfig();
 
   if (!isAuthenticated()) {
-    // Wait for GIS script to load, then render login
     function waitForGsi() {
       if (window.google?.accounts) {
         renderLogin();

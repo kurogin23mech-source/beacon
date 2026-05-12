@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from typing import Optional
@@ -9,7 +10,7 @@ from typing import Optional
 # Add lib/ to path so we can import core
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -120,6 +121,9 @@ class LogCommit(BaseModel):
 
 class SummaryUpdate(BaseModel):
     text: str
+
+class RetroCreate(BaseModel):
+    content: str
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +341,142 @@ def update_summary(project_id: str, body: SummaryUpdate,
     data["summary"] = body.text
     _save(project_id, data)
     return {"summary": body.text}
+
+
+# ---------------------------------------------------------------------------
+# Retro
+# ---------------------------------------------------------------------------
+
+@app.get("/api/projects/{project_id}/retros")
+def list_retros(project_id: str, user: dict = Depends(require_auth)):
+    """List all retrospective documents for a project."""
+    return db.list_retros(project_id)
+
+
+@app.get("/api/projects/{project_id}/retros/{week}")
+def get_retro(project_id: str, week: str, user: dict = Depends(require_auth)):
+    """Get a specific retrospective document."""
+    retro = db.get_retro(project_id, week)
+    if retro is None:
+        raise HTTPException(status_code=404, detail=f"Retro '{week}' not found")
+    return retro
+
+
+@app.post("/api/projects/{project_id}/retros/{week}")
+def save_retro(project_id: str, week: str, body: RetroCreate,
+               user: dict = Depends(require_auth)):
+    """Save a retrospective document."""
+    db.save_retro(project_id, week, body.content)
+    return {"week": week, "status": "saved"}
+
+
+# ---------------------------------------------------------------------------
+# WebSocket (real-time project updates via Firestore on_snapshot)
+# ---------------------------------------------------------------------------
+
+_ws_connections: dict[str, set[WebSocket]] = {}
+_watchers: dict[str, object] = {}
+_event_loop: asyncio.AbstractEventLoop | None = None
+
+
+@app.on_event("startup")
+async def _capture_event_loop():
+    global _event_loop
+    _event_loop = asyncio.get_event_loop()
+
+
+def _enrich_project(data: dict) -> dict:
+    """Add computed fields (total_tasks, done_tasks, entries_to_json) to project."""
+    enriched = {**data}
+    milestones = []
+    for ms in data.get("milestones", []):
+        entries = ms.get("entries", [])
+        total, done = core.count_task_status(entries)
+        milestones.append({
+            **ms,
+            "entries": core.entries_to_json(entries),
+            "total_tasks": total,
+            "done_tasks": done,
+        })
+    enriched["milestones"] = milestones
+    return enriched
+
+
+async def _broadcast(project_id: str, data: dict):
+    """Send enriched project data to all WebSocket clients."""
+    clients = _ws_connections.get(project_id, set()).copy()
+    if not clients:
+        return
+    enriched = _enrich_project(data)
+    msg = {"type": "project", "data": enriched}
+    for ws in clients:
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            _ws_connections.get(project_id, set()).discard(ws)
+
+
+def _on_snapshot(project_id: str, doc_snapshot, changes, read_time):
+    """Firestore on_snapshot callback (runs in background thread)."""
+    for doc in doc_snapshot:
+        data = doc.to_dict()
+        if _event_loop and _ws_connections.get(project_id):
+            asyncio.run_coroutine_threadsafe(
+                _broadcast(project_id, data), _event_loop
+            )
+
+
+def _start_watcher(project_id: str):
+    if project_id in _watchers:
+        return
+    doc_ref = db.get_db().collection(db.COLLECTION).document(project_id)
+    unsub = doc_ref.on_snapshot(
+        lambda ds, ch, rt: _on_snapshot(project_id, ds, ch, rt)
+    )
+    _watchers[project_id] = unsub
+
+
+def _stop_watcher(project_id: str):
+    if project_id in _watchers and not _ws_connections.get(project_id):
+        _watchers[project_id]()
+        del _watchers[project_id]
+
+
+@app.websocket("/ws/projects/{project_id}")
+async def ws_project(websocket: WebSocket, project_id: str):
+    """WebSocket endpoint for real-time project monitoring."""
+    token = websocket.query_params.get("token")
+    if _auth_enabled:
+        if not token:
+            await websocket.close(code=1008)
+            return
+        try:
+            _verify_id_token(token)
+        except HTTPException:
+            await websocket.close(code=1008)
+            return
+
+    await websocket.accept()
+
+    if project_id not in _ws_connections:
+        _ws_connections[project_id] = set()
+    _ws_connections[project_id].add(websocket)
+
+    # Send initial enriched data
+    raw = db.get_project(project_id)
+    if raw:
+        await websocket.send_json({"type": "project", "data": _enrich_project(raw)})
+
+    _start_watcher(project_id)
+
+    try:
+        while True:
+            msg = await websocket.receive_text()
+            if msg == "ping":
+                await websocket.send_text("pong")
+    except WebSocketDisconnect:
+        _ws_connections[project_id].discard(websocket)
+        _stop_watcher(project_id)
 
 
 # ---------------------------------------------------------------------------

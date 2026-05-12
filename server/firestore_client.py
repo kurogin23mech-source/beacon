@@ -42,3 +42,53 @@ def list_projects() -> list[dict]:
             "objective": data.get("objective", ""),
         })
     return result
+
+
+# ---------------------------------------------------------------------------
+# Retros (subcollection: projects/{project_id}/retros/{week})
+# ---------------------------------------------------------------------------
+
+RETRO_SUBCOLLECTION = "retros"
+
+
+def list_retros(project_id: str) -> list[dict]:
+    """List all retro documents for a project (week + updated_at only)."""
+    docs = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(RETRO_SUBCOLLECTION)
+        .order_by("week", direction=firestore.Query.DESCENDING)
+        .stream()
+    )
+    return [{"week": doc.id, **doc.to_dict()} for doc in docs]
+
+
+def get_retro(project_id: str, week: str) -> dict | None:
+    """Get a single retro document."""
+    doc = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(RETRO_SUBCOLLECTION)
+        .document(week)
+        .get()
+    )
+    if not doc.exists:
+        return None
+    return {"week": doc.id, **doc.to_dict()}
+
+
+def save_retro(project_id: str, week: str, content: str) -> None:
+    """Save a retro document."""
+    import datetime
+
+    get_db().collection(COLLECTION).document(project_id).collection(
+        RETRO_SUBCOLLECTION
+    ).document(week).set(
+        {
+            "week": week,
+            "content": content,
+            "updated_at": datetime.datetime.now().isoformat(),
+        }
+    )
