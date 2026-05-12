@@ -55,22 +55,34 @@ def _verify_id_token(token: str) -> dict:
 async def require_auth(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
 ) -> dict:
-    """FastAPI dependency that enforces Bearer token auth."""
+    """FastAPI dependency that enforces Bearer token auth and auto-registers users."""
     if not _auth_enabled:
         return {"sub": "dev", "email": "dev@local"}
     if credentials is None:
         raise HTTPException(status_code=401, detail="Authorization header required")
-    return _verify_id_token(credentials.credentials)
+    claims = _verify_id_token(credentials.credentials)
+    # Auto-register user on first login
+    user_id = claims.get("sub", "")
+    email = claims.get("email", "")
+    if user_id:
+        db.get_or_create_user(user_id, email)
+    return claims
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _load(project_id: str) -> dict:
+def _load(project_id: str, user: dict | None = None) -> dict:
     data = db.get_project(project_id)
     if data is None:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    if user and _auth_enabled:
+        uid = user.get("sub", "")
+        owner = data.get("owner")
+        members = [m.get("user_id") for m in data.get("members", [])]
+        if owner and uid != owner and uid not in members:
+            raise HTTPException(status_code=403, detail="Access denied")
     return data
 
 
@@ -132,8 +144,8 @@ class RetroCreate(BaseModel):
 
 @app.get("/api/projects")
 def list_projects(user: dict = Depends(require_auth)):
-    """List all projects."""
-    return db.list_projects()
+    """List projects owned by or shared with the current user."""
+    return db.list_projects(user_id=user.get("sub"))
 
 
 @app.post("/api/projects/{project_id}")
@@ -143,14 +155,20 @@ def create_project(project_id: str, body: ProjectCreate,
     existing = db.get_project(project_id)
     if existing is not None:
         raise HTTPException(status_code=409, detail=f"Project '{project_id}' already exists")
-    data = {"name": body.name, "objective": body.objective, "milestones": []}
+    data = {
+        "name": body.name,
+        "objective": body.objective,
+        "milestones": [],
+        "owner": user.get("sub", ""),
+        "members": [],
+    }
     _save(project_id, data)
     return {"status": "created", "project_id": project_id}
 
 
 @app.get("/api/projects/{project_id}")
 def get_project(project_id: str, user: dict = Depends(require_auth)):
-    return _load(project_id)
+    return _load(project_id, user)
 
 
 @app.put("/api/projects/{project_id}")
@@ -171,7 +189,7 @@ def put_project(project_id: str, body: dict,
 @app.post("/api/projects/{project_id}/milestones")
 def create_milestone(project_id: str, body: MilestoneCreate,
                      user: dict = Depends(require_auth)):
-    data = _load(project_id)
+    data = _load(project_id, user)
     ms_id = core.milestone_add(data, body.title, body.target_date,
                                description=body.description)
     _save(project_id, data)
@@ -181,7 +199,7 @@ def create_milestone(project_id: str, body: MilestoneCreate,
 @app.get("/api/projects/{project_id}/milestones/{ms_id}")
 def get_milestone(project_id: str, ms_id: str,
                   user: dict = Depends(require_auth)):
-    data = _load(project_id)
+    data = _load(project_id, user)
     for ms in data["milestones"]:
         if ms["id"] == ms_id:
             entries = ms.get("entries", [])
@@ -198,7 +216,7 @@ def get_milestone(project_id: str, ms_id: str,
 @app.patch("/api/projects/{project_id}/milestones/{ms_id}")
 def update_milestone(project_id: str, ms_id: str, body: MilestoneUpdate,
                      user: dict = Depends(require_auth)):
-    data = _load(project_id)
+    data = _load(project_id, user)
     try:
         ms = core.milestone_update(
             data, ms_id,
@@ -216,7 +234,7 @@ def update_milestone(project_id: str, ms_id: str, body: MilestoneUpdate,
 @app.post("/api/projects/{project_id}/milestones/{ms_id}/start")
 def start_milestone(project_id: str, ms_id: str,
                     user: dict = Depends(require_auth)):
-    data = _load(project_id)
+    data = _load(project_id, user)
     try:
         ms = core.milestone_start(data, ms_id)
     except ValueError as e:
@@ -228,7 +246,7 @@ def start_milestone(project_id: str, ms_id: str,
 @app.post("/api/projects/{project_id}/milestones/{ms_id}/done")
 def done_milestone(project_id: str, ms_id: str,
                    user: dict = Depends(require_auth)):
-    data = _load(project_id)
+    data = _load(project_id, user)
     try:
         ms = core.milestone_done(data, ms_id)
     except ValueError as e:
@@ -240,7 +258,7 @@ def done_milestone(project_id: str, ms_id: str,
 @app.delete("/api/projects/{project_id}/milestones/{ms_id}")
 def delete_milestone(project_id: str, ms_id: str,
                      user: dict = Depends(require_auth)):
-    data = _load(project_id)
+    data = _load(project_id, user)
     try:
         ms = core.milestone_delete(data, ms_id)
     except ValueError as e:
@@ -256,7 +274,7 @@ def delete_milestone(project_id: str, ms_id: str,
 @app.post("/api/projects/{project_id}/milestones/{ms_id}/entries")
 def create_entry(project_id: str, ms_id: str, body: EntryCreate,
                  user: dict = Depends(require_auth)):
-    data = _load(project_id)
+    data = _load(project_id, user)
     try:
         eid = core.task_add(
             data, ms_id, body.description,
@@ -271,7 +289,7 @@ def create_entry(project_id: str, ms_id: str, body: EntryCreate,
 @app.patch("/api/projects/{project_id}/entries/{entry_id}")
 def update_entry(project_id: str, entry_id: str, body: EntryUpdate,
                  user: dict = Depends(require_auth)):
-    data = _load(project_id)
+    data = _load(project_id, user)
     try:
         ms, entry = core.task_update(
             data, entry_id,
@@ -287,7 +305,7 @@ def update_entry(project_id: str, entry_id: str, body: EntryUpdate,
 @app.post("/api/projects/{project_id}/entries/{entry_id}/done")
 def done_entry(project_id: str, entry_id: str,
                user: dict = Depends(require_auth)):
-    data = _load(project_id)
+    data = _load(project_id, user)
     import datetime
     today = datetime.date.today().isoformat()
     try:
@@ -301,7 +319,7 @@ def done_entry(project_id: str, entry_id: str,
 @app.delete("/api/projects/{project_id}/entries/{entry_id}")
 def delete_entry(project_id: str, entry_id: str,
                  user: dict = Depends(require_auth)):
-    data = _load(project_id)
+    data = _load(project_id, user)
     try:
         entry = core.task_delete(data, entry_id)
     except ValueError as e:
@@ -317,7 +335,7 @@ def delete_entry(project_id: str, entry_id: str,
 @app.post("/api/projects/{project_id}/log")
 def log_commit(project_id: str, body: LogCommit,
                user: dict = Depends(require_auth)):
-    data = _load(project_id)
+    data = _load(project_id, user)
     try:
         result = core.log_commit(
             data, ms_id=body.ms_id, commit_hash=body.hash,
@@ -337,7 +355,7 @@ def log_commit(project_id: str, body: LogCommit,
 @app.patch("/api/projects/{project_id}/summary")
 def update_summary(project_id: str, body: SummaryUpdate,
                    user: dict = Depends(require_auth)):
-    data = _load(project_id)
+    data = _load(project_id, user)
     data["summary"] = body.text
     _save(project_id, data)
     return {"summary": body.text}

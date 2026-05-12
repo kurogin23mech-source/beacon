@@ -30,18 +30,53 @@ def save_project(project_id: str, data: dict) -> None:
     get_db().collection(COLLECTION).document(project_id).set(data)
 
 
-def list_projects() -> list[dict]:
-    """List all projects (id + name only)."""
-    docs = get_db().collection(COLLECTION).stream()
+def list_projects(user_id: str | None = None) -> list[dict]:
+    """List projects. If user_id is given, only return projects owned by or shared with that user."""
+    query = get_db().collection(COLLECTION)
+    docs = query.stream()
     result = []
     for doc in docs:
         data = doc.to_dict()
+        if user_id:
+            owner = data.get("owner")
+            members = [m.get("user_id") for m in data.get("members", [])]
+            if owner != user_id and user_id not in members:
+                continue
         result.append({
             "project_id": doc.id,
             "name": data.get("name", ""),
             "objective": data.get("objective", ""),
         })
     return result
+
+
+# ---------------------------------------------------------------------------
+# Users (collection: users/{user_id})
+# ---------------------------------------------------------------------------
+
+USERS_COLLECTION = "users"
+
+
+def get_or_create_user(user_id: str, email: str) -> dict:
+    """Get or create a user document. Returns user data."""
+    import datetime
+
+    doc_ref = get_db().collection(USERS_COLLECTION).document(user_id)
+    doc = doc_ref.get()
+    if doc.exists:
+        user_data = doc.to_dict()
+        # Update email if changed
+        if user_data.get("email") != email:
+            doc_ref.update({"email": email})
+            user_data["email"] = email
+        return user_data
+
+    user_data = {
+        "email": email,
+        "created_at": datetime.datetime.now().isoformat(),
+    }
+    doc_ref.set(user_data)
+    return user_data
 
 
 # ---------------------------------------------------------------------------
