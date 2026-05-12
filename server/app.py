@@ -346,3 +346,21 @@ def update_summary(project_id: str, body: SummaryUpdate,
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Static files (Web UI)
+# ---------------------------------------------------------------------------
+
+from pathlib import Path
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
+_static_dir = Path(__file__).parent / "static"
+
+if _static_dir.exists():
+    @app.get("/")
+    def serve_index():
+        return FileResponse(_static_dir / "index.html")
+
+    app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
