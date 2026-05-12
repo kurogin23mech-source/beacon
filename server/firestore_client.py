@@ -39,9 +39,11 @@ def list_projects(user_id: str | None = None) -> list[dict]:
         data = doc.to_dict()
         if user_id:
             owner = data.get("owner")
-            members = [m.get("user_id") for m in data.get("members", [])]
-            if owner != user_id and user_id not in members:
-                continue
+            # Projects without owner are visible to all (migration period)
+            if owner:
+                members = [m.get("user_id") for m in data.get("members", [])]
+                if owner != user_id and user_id not in members:
+                    continue
         result.append({
             "project_id": doc.id,
             "name": data.get("name", ""),
