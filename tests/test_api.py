@@ -35,8 +35,12 @@ firestore_client.save_project = mock_save_project
 firestore_client.list_projects = mock_list_projects
 
 from fastapi.testclient import TestClient
-from app import app
+import app as app_module
 
+# Disable auth for functional tests (auth tested separately below)
+app_module._auth_enabled = False
+
+app = app_module.app
 client = TestClient(app)
 
 PROJECT_ID = "test-project"
@@ -292,3 +296,42 @@ def test_update_summary():
                      json={"text": "New summary"})
     assert r.status_code == 200
     assert _store[PROJECT_ID]["summary"] == "New summary"
+
+
+# ---------------------------------------------------------------------------
+# Auth middleware
+# ---------------------------------------------------------------------------
+
+def test_auth_required_when_enabled():
+    """When auth is enabled, requests without a token should get 401."""
+    original = app_module._auth_enabled
+    try:
+        app_module._auth_enabled = True
+        r = client.get("/api/projects")
+        assert r.status_code == 401
+    finally:
+        app_module._auth_enabled = original
+
+
+def test_auth_invalid_token():
+    """When auth is enabled, an invalid token should get 401."""
+    original = app_module._auth_enabled
+    try:
+        app_module._auth_enabled = True
+        r = client.get("/api/projects",
+                       headers={"Authorization": "Bearer invalid-token"})
+        assert r.status_code == 401
+    finally:
+        app_module._auth_enabled = original
+
+
+def test_health_no_auth():
+    """Health endpoint should work without auth regardless."""
+    original = app_module._auth_enabled
+    try:
+        app_module._auth_enabled = True
+        r = client.get("/health")
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+    finally:
+        app_module._auth_enabled = original

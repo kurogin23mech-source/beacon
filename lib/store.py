@@ -63,8 +63,14 @@ def get_store(project_file: str | None = None) -> Store:
         project_id = cloud_data.get("project_id")
         if not project_id:
             raise ValueError("cloud.json must contain 'project_id'")
-        from store_firestore import FirestoreStore
-        return FirestoreStore(project_id)
+        api_url = cloud_data.get("api_url", "")
+        if not api_url:
+            raise ValueError("cloud.json must contain 'api_url'")
+        from auth import load_credentials
+        creds = load_credentials()
+        token = creds.token if creds else ""
+        from store_api import StoreApi
+        return StoreApi(api_url, project_id, token)
 
     from store_local import LocalStore
     return LocalStore(project_file)

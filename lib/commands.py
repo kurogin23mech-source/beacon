@@ -852,6 +852,9 @@ def cmd_trigger_clear():
 # Cloud commands
 # ---------------------------------------------------------------------------
 
+DEFAULT_API_URL = "https://beacon-api-url.a.run.app"
+
+
 def _get_cloud_config_path():
     beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
     return os.path.join(beacon_dir, "cloud.json")
@@ -870,7 +873,8 @@ def _ensure_cloud_config():
     h = hashlib.md5(os.path.abspath(get_project_file()).encode()).hexdigest()[:6]
     project_id = f"{slug}-{h}"
 
-    config = {"project_id": project_id}
+    api_url = os.environ.get("BEACON_API_URL", DEFAULT_API_URL)
+    config = {"project_id": project_id, "api_url": api_url}
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
         f.write("\n")
@@ -878,71 +882,8 @@ def _ensure_cloud_config():
     return config
 
 
-def cmd_cloud_list():
-    """List cloud projects for selection."""
-    from store_firestore import FirestoreStore
-    from auth import load_credentials
-    creds = load_credentials()
-    if creds is None:
-        print("Not logged in. Run: beacon auth login")
-        sys.exit(1)
-
-    from google.cloud import firestore
-    db = firestore.Client(project="beacon-cloud-96f5f", credentials=creds)
-    docs = db.collection("projects").stream()
-    projects = []
-    for doc in docs:
-        data = doc.to_dict()
-        projects.append({
-            "project_id": doc.id,
-            "name": data.get("name", ""),
-            "objective": data.get("objective", ""),
-        })
-
-    json_mode = os.environ.get("BEACON_JSON", "") == "1"
-    if json_mode:
-        print(json.dumps(projects, ensure_ascii=False))
-    else:
-        if not projects:
-            print("No cloud projects found.")
-            print("Run 'beacon cloud push' to upload a project.")
-            return
-        for i, p in enumerate(projects, 1):
-            print(f"  {i}. {p['project_id']}: {p['name']}")
-            if p['objective']:
-                print(f"     {p['objective'][:60]}")
-
-
-def cmd_cloud_push():
-    from auth import load_credentials
-    creds = load_credentials()
-    if creds is None:
-        print("Not logged in. Run: beacon auth login")
-        sys.exit(1)
-
-    config = _ensure_cloud_config()
-    project_id = config["project_id"]
-
-    from store_local import LocalStore
-    local = LocalStore(get_project_file())
-    data = local.load_project()
-    core.validate_project(data)
-
-    from store_firestore import FirestoreStore
-    store = FirestoreStore(project_id)
-    store.save_project(data)
-    print(f"Pushed to Firestore: projects/{project_id}")
-
-    # Auto-switch to cloud mode
-    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
-    config_path = os.path.join(beacon_dir, "config.json")
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump({"mode": "cloud"}, f, indent=2)
-        f.write("\n")
-    print("Switched to cloud mode.")
-
-
-def cmd_cloud_pull():
+def _get_api_client():
+    """Create an ApiClient from cloud.json config and auth credentials."""
     from auth import load_credentials
     creds = load_credentials()
     if creds is None:
@@ -956,15 +897,99 @@ def cmd_cloud_pull():
 
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
+
+    api_url = config.get("api_url", DEFAULT_API_URL)
+    token = creds.token or ""
+
+    from api_client import ApiClient
+    return ApiClient(api_url, token), config
+
+
+def cmd_cloud_list():
+    """List cloud projects via API."""
+    from auth import load_credentials
+    creds = load_credentials()
+    if creds is None:
+        print("Not logged in. Run: beacon auth login")
+        sys.exit(1)
+
+    # cloud list may be called before cloud.json exists, so read api_url from env
+    api_url = os.environ.get("BEACON_API_URL", DEFAULT_API_URL)
+    config_path = _get_cloud_config_path()
+    if os.path.exists(config_path):
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        api_url = config.get("api_url", api_url)
+
+    from api_client import ApiClient
+    client = ApiClient(api_url, creds.token or "")
+
+    try:
+        projects = client.list_projects()
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if json_mode:
+        print(json.dumps(projects, ensure_ascii=False))
+    else:
+        if not projects:
+            print("No cloud projects found.")
+            print("Run 'beacon cloud push' to upload a project.")
+            return
+        for i, p in enumerate(projects, 1):
+            print(f"  {i}. {p['project_id']}: {p['name']}")
+            if p.get('objective'):
+                print(f"     {p['objective'][:60]}")
+
+
+def cmd_cloud_push():
+    from auth import load_credentials
+    creds = load_credentials()
+    if creds is None:
+        print("Not logged in. Run: beacon auth login")
+        sys.exit(1)
+
+    config = _ensure_cloud_config()
+    project_id = config["project_id"]
+    api_url = config.get("api_url", DEFAULT_API_URL)
+
+    from store_local import LocalStore
+    local = LocalStore(get_project_file())
+    data = local.load_project()
+    core.validate_project(data)
+
+    from api_client import ApiClient
+    client = ApiClient(api_url, creds.token or "")
+    try:
+        client.put_project(project_id, data)
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    print(f"Pushed to cloud: projects/{project_id}")
+
+    # Auto-switch to cloud mode
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    config_path = os.path.join(beacon_dir, "config.json")
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump({"mode": "cloud"}, f, indent=2)
+        f.write("\n")
+    print("Switched to cloud mode.")
+
+
+def cmd_cloud_pull():
+    client, config = _get_api_client()
     project_id = config["project_id"]
 
-    from store_firestore import FirestoreStore
-    store = FirestoreStore(project_id)
     try:
-        data = store.load_project()
-    except FileNotFoundError:
-        print(f"Project '{project_id}' not found in Firestore.")
-        print("Run 'beacon cloud push' to upload first.")
+        data = client.get_project(project_id)
+    except RuntimeError as e:
+        if "404" in str(e):
+            print(f"Project '{project_id}' not found in cloud.")
+            print("Run 'beacon cloud push' to upload first.")
+        else:
+            print(f"Error: {e}")
         sys.exit(1)
 
     core.validate_project(data)
@@ -972,7 +997,7 @@ def cmd_cloud_pull():
     from store_local import LocalStore
     local = LocalStore(get_project_file())
     local.save_project(data)
-    print(f"Pulled from Firestore: projects/{project_id}")
+    print(f"Pulled from cloud: projects/{project_id}")
 
 
 def cmd_cloud_status():
@@ -990,6 +1015,7 @@ def cmd_cloud_status():
     logged_in = creds is not None
 
     print(f"Cloud: {config['project_id']}")
+    print(f"API: {config.get('api_url', DEFAULT_API_URL)}")
     print(f"Auth: {'logged in' if logged_in else 'not logged in'}")
 
 

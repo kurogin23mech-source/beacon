@@ -1,0 +1,68 @@
+"""Beacon API Client - HTTP client for cloud API access.
+
+Used by CLI cloud commands to communicate with the Beacon API server
+instead of directly accessing Firestore.
+"""
+
+from __future__ import annotations
+
+import json
+import urllib.request
+import urllib.error
+
+
+class ApiClient:
+    """Simple HTTP client for Beacon API with auth token support."""
+
+    def __init__(self, base_url: str, token: str = ""):
+        self._base_url = base_url.rstrip("/")
+        self._token = token
+
+    def _request(self, method: str, path: str, body: dict | None = None) -> dict:
+        url = f"{self._base_url}{path}"
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method)
+        req.add_header("Content-Type", "application/json")
+        if self._token:
+            req.add_header("Authorization", f"Bearer {self._token}")
+
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8", errors="replace")
+            try:
+                detail = json.loads(error_body).get("detail", error_body)
+            except (json.JSONDecodeError, AttributeError):
+                detail = error_body
+            raise RuntimeError(f"API error {e.code}: {detail}") from e
+
+    def get(self, path: str) -> dict:
+        return self._request("GET", path)
+
+    def post(self, path: str, body: dict | None = None) -> dict:
+        return self._request("POST", path, body)
+
+    def put(self, path: str, body: dict) -> dict:
+        return self._request("PUT", path, body)
+
+    def patch(self, path: str, body: dict) -> dict:
+        return self._request("PATCH", path, body)
+
+    def delete(self, path: str) -> dict:
+        return self._request("DELETE", path)
+
+    # Convenience methods for beacon operations
+
+    def list_projects(self) -> list:
+        return self.get("/api/projects")
+
+    def get_project(self, project_id: str) -> dict:
+        return self.get(f"/api/projects/{project_id}")
+
+    def put_project(self, project_id: str, data: dict) -> dict:
+        return self.put(f"/api/projects/{project_id}", data)
+
+    def create_project(self, project_id: str, name: str, objective: str = "") -> dict:
+        return self.post(f"/api/projects/{project_id}",
+                         {"name": name, "objective": objective})
