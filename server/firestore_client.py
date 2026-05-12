@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import os
+
 from google.cloud import firestore
 
 _db: firestore.Client | None = None
 
 PROJECT_ID = "beacon-cloud-96f5f"
-COLLECTION = "projects"
+
+# Environment-based collection prefix: dev uses "projects-dev", prod uses "projects"
+_ENV = os.environ.get("BEACON_ENV", "dev")
+COLLECTION = "projects" if _ENV == "prod" else "projects-dev"
+USERS_COLLECTION = "users" if _ENV == "prod" else "users-dev"
 
 
 def get_db() -> firestore.Client:
@@ -56,8 +62,6 @@ def list_projects(user_id: str | None = None) -> list[dict]:
 # Users (collection: users/{user_id})
 # ---------------------------------------------------------------------------
 
-USERS_COLLECTION = "users"
-
 
 def get_or_create_user(user_id: str, email: str) -> dict:
     """Get or create a user document. Returns user data."""
@@ -79,6 +83,20 @@ def get_or_create_user(user_id: str, email: str) -> dict:
     }
     doc_ref.set(user_data)
     return user_data
+
+
+def find_user_by_email(email: str) -> tuple[str, dict] | None:
+    """Find a user by email. Returns (user_id, user_data) or None."""
+    docs = (
+        get_db()
+        .collection(USERS_COLLECTION)
+        .where("email", "==", email)
+        .limit(1)
+        .stream()
+    )
+    for doc in docs:
+        return doc.id, doc.to_dict()
+    return None
 
 
 # ---------------------------------------------------------------------------

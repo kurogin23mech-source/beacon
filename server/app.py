@@ -137,6 +137,10 @@ class SummaryUpdate(BaseModel):
 class RetroCreate(BaseModel):
     content: str
 
+class MemberInvite(BaseModel):
+    email: str
+    role: str = "viewer"  # viewer | editor
+
 
 # ---------------------------------------------------------------------------
 # Project
@@ -362,6 +366,66 @@ def update_summary(project_id: str, body: SummaryUpdate,
 
 
 # ---------------------------------------------------------------------------
+# Members (invite / remove)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/projects/{project_id}/members")
+def invite_member(project_id: str, body: MemberInvite,
+                  user: dict = Depends(require_auth)):
+    """Invite a member by email. Only project owner can invite."""
+    data = _load(project_id, user)
+    # Only owner can invite
+    if _auth_enabled and data.get("owner") != user.get("sub"):
+        raise HTTPException(status_code=403, detail="Only project owner can invite members")
+    if body.role not in ("viewer", "editor"):
+        raise HTTPException(status_code=400, detail="Role must be 'viewer' or 'editor'")
+    # Find user by email
+    found = db.find_user_by_email(body.email)
+    if found is None:
+        raise HTTPException(status_code=404,
+                            detail=f"User '{body.email}' not found. They must sign in to Beacon first.")
+    invited_id, invited_data = found
+    # Check not already a member
+    members = data.get("members", [])
+    if any(m.get("user_id") == invited_id for m in members):
+        raise HTTPException(status_code=409, detail=f"'{body.email}' is already a member")
+    if data.get("owner") == invited_id:
+        raise HTTPException(status_code=409, detail=f"'{body.email}' is the project owner")
+    members.append({"user_id": invited_id, "email": body.email, "role": body.role})
+    data["members"] = members
+    _save(project_id, data)
+    return {"status": "invited", "email": body.email, "role": body.role}
+
+
+@app.delete("/api/projects/{project_id}/members/{member_email}")
+def remove_member(project_id: str, member_email: str,
+                  user: dict = Depends(require_auth)):
+    """Remove a member. Only project owner can remove."""
+    data = _load(project_id, user)
+    if _auth_enabled and data.get("owner") != user.get("sub"):
+        raise HTTPException(status_code=403, detail="Only project owner can remove members")
+    members = data.get("members", [])
+    new_members = [m for m in members if m.get("email") != member_email]
+    if len(new_members) == len(members):
+        raise HTTPException(status_code=404, detail=f"Member '{member_email}' not found")
+    data["members"] = new_members
+    _save(project_id, data)
+    return {"status": "removed", "email": member_email}
+
+
+@app.get("/api/projects/{project_id}/members")
+def list_members(project_id: str, user: dict = Depends(require_auth)):
+    """List project members."""
+    data = _load(project_id, user)
+    owner_id = data.get("owner", "")
+    members = data.get("members", [])
+    return {
+        "owner": owner_id,
+        "members": members,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Retro
 # ---------------------------------------------------------------------------
 
@@ -503,7 +567,7 @@ async def ws_project(websocket: WebSocket, project_id: str):
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "env": os.environ.get("BEACON_ENV", "dev")}
 
 
 @app.get("/api/auth/config")
