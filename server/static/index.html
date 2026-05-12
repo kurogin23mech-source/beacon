@@ -9,7 +9,7 @@
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
 /* ================================================================
-   BEACON — Terminal Noir Dashboard v2
+   BEACON — Terminal Noir Dashboard v3
    ================================================================ */
 
 :root {
@@ -100,7 +100,7 @@ body::after {
 
 .header-top {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 12px;
   margin-bottom: 4px;
 }
@@ -111,22 +111,6 @@ body::after {
   font-weight: 700;
   letter-spacing: -0.02em;
   color: var(--text-primary);
-}
-
-.project-back {
-  font-size: 0.8rem;
-  color: var(--text-dim);
-  cursor: pointer;
-  padding: 2px 8px;
-  border: 1px solid transparent;
-  border-radius: 3px;
-  transition: border-color 0.2s, color 0.2s;
-  text-decoration: none;
-}
-
-.project-back:hover {
-  border-color: var(--border);
-  color: var(--text-secondary);
 }
 
 .header-tag {
@@ -165,6 +149,179 @@ body::after {
   50% { opacity: 0.4; }
 }
 
+/* ---- Hamburger Menu ---- */
+
+.hamburger-btn {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  cursor: pointer;
+  padding: 4px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  transition: border-color 0.2s;
+}
+
+.hamburger-btn:hover {
+  border-color: var(--border);
+}
+
+.hamburger-btn span {
+  display: block;
+  width: 16px;
+  height: 1.5px;
+  background: var(--text-dim);
+  transition: background 0.2s;
+}
+
+.hamburger-btn:hover span {
+  background: var(--text-secondary);
+}
+
+.menu-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 1000;
+  animation: fade-overlay 0.15s ease;
+}
+
+@keyframes fade-overlay {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.menu-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: 300px;
+  max-width: 80vw;
+  height: 100vh;
+  background: var(--bg-surface);
+  border-left: 1px solid var(--border);
+  z-index: 1001;
+  padding: 24px;
+  overflow-y: auto;
+  animation: slide-in 0.2s ease;
+}
+
+@keyframes slide-in {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+.menu-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.menu-title {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.menu-close {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 1.2rem;
+  cursor: pointer;
+  padding: 4px 8px;
+  transition: color 0.2s;
+}
+
+.menu-close:hover {
+  color: var(--text-primary);
+}
+
+.menu-section {
+  margin-bottom: 20px;
+}
+
+.menu-section-title {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+
+.menu-item {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  margin-bottom: 4px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  text-align: left;
+  transition: border-color 0.2s, background 0.2s, color 0.2s;
+}
+
+.menu-item:hover {
+  border-color: var(--border);
+  background: var(--bg-raised);
+  color: var(--text-primary);
+}
+
+.menu-item.current {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+}
+
+.menu-item-sub {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+.menu-user {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+
+/* ---- Project Info Block ---- */
+
+.project-info {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.project-info-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.project-info-label {
+  font-size: 0.65rem;
+  color: var(--text-dim);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.project-info-value {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
 /* ---- Summary Block ---- */
 
 .summary-block {
@@ -194,6 +351,7 @@ body::after {
   gap: 6px;
   padding: 16px 0 0;
   flex-wrap: wrap;
+  align-items: center;
 }
 
 .filter-btn {
@@ -203,20 +361,62 @@ body::after {
   border: 1px solid var(--border-subtle);
   border-radius: 3px;
   background: transparent;
-  color: var(--text-dim);
   cursor: pointer;
-  transition: border-color 0.2s, color 0.2s, background 0.2s;
+  transition: border-color 0.2s, color 0.2s, background 0.2s, opacity 0.2s;
 }
 
-.filter-btn:hover {
-  border-color: var(--border);
-  color: var(--text-secondary);
-}
-
-.filter-btn.active {
+/* Active (visible) state — colored per status */
+.filter-btn.on {
   border-color: var(--accent-dim);
   color: var(--accent);
   background: var(--accent-glow);
+}
+
+.filter-btn.on.f-todo { color: var(--todo); border-color: var(--todo); background: rgba(113,113,122,0.08); }
+.filter-btn.on.f-active { color: var(--in-progress); border-color: rgba(96,165,250,0.4); background: rgba(96,165,250,0.08); }
+.filter-btn.on.f-observing { color: var(--observing); border-color: rgba(167,139,250,0.4); background: rgba(167,139,250,0.08); }
+.filter-btn.on.f-done { color: var(--done); border-color: var(--accent-dim); background: var(--accent-glow); }
+
+/* Off (hidden) state */
+.filter-btn.off {
+  color: var(--text-dim);
+  opacity: 0.4;
+  border-color: var(--border-subtle);
+  background: transparent;
+}
+
+.filter-btn.off:hover {
+  opacity: 0.7;
+}
+
+.filter-btn.f-all {
+  color: var(--text-dim);
+  border-color: var(--border-subtle);
+}
+
+.filter-btn.f-all:hover {
+  color: var(--text-secondary);
+  border-color: var(--border);
+}
+
+/* ---- Sort Toggle ---- */
+
+.sort-toggle {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  padding: 4px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s;
+  margin-left: auto;
+}
+
+.sort-toggle:hover {
+  border-color: var(--border);
+  color: var(--text-secondary);
 }
 
 /* ---- Milestone List ---- */
@@ -379,12 +579,42 @@ body::after {
 }
 
 .ms-card.expanded .ms-body {
-  max-height: 4000px;
+  max-height: 8000px;
 }
 
 .ms-entries {
   padding: 0 16px 12px;
   border-top: 1px solid var(--border-subtle);
+}
+
+.ms-entries-toolbar {
+  display: flex;
+  align-items: center;
+  padding: 8px 0 4px;
+  gap: 8px;
+}
+
+.entry-filter-btn {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  padding: 2px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 2px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s, background 0.2s;
+}
+
+.entry-filter-btn:hover {
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
+
+.entry-filter-btn.active {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+  background: var(--accent-glow);
 }
 
 .ms-description {
@@ -443,7 +673,7 @@ body::after {
 }
 
 .entry-desc {
-  color: var(--text-secondary);
+  color: var(--text-primary);
   line-height: 1.6;
 }
 
@@ -478,6 +708,25 @@ body::after {
   margin-left: 4px;
 }
 
+/* ---- Entry Toggle (collapsible children) ---- */
+
+.entry-toggle {
+  cursor: pointer;
+  user-select: none;
+}
+
+.entry-toggle .entry-desc::before {
+  content: '\u25BC ';
+  font-size: 0.6rem;
+  color: var(--text-dim);
+  transition: transform 0.2s;
+  display: inline-block;
+}
+
+.entry-toggle.collapsed .entry-desc::before {
+  content: '\u25B6 ';
+}
+
 /* ---- Entry Detail ---- */
 
 .entry-detail {
@@ -496,6 +745,10 @@ body::after {
 .entry-children {
   grid-column: 1 / -1;
   padding-left: 18px;
+}
+
+.entry-children.hidden {
+  display: none;
 }
 
 .entry-children .entry {
@@ -803,22 +1056,6 @@ body::after {
   line-height: 1.6;
 }
 
-/* ---- User Info ---- */
-
-.user-info {
-  font-size: 0.75rem;
-  color: var(--text-dim);
-  cursor: pointer;
-  padding: 2px 8px;
-  border: 1px solid transparent;
-  border-radius: 3px;
-  transition: border-color 0.2s;
-}
-
-.user-info:hover {
-  border-color: var(--border);
-}
-
 </style>
 </head>
 <body>
@@ -830,9 +1067,12 @@ body::after {
   </div>
 </div>
 
+<!-- Menu overlay (rendered outside container) -->
+<div id="menu-root"></div>
+
 <script>
 // ================================================================
-// Beacon Dashboard v2 — WebSocket + UI improvements
+// Beacon Dashboard v3
 // ================================================================
 
 const API_BASE = window.location.origin;
@@ -841,15 +1081,23 @@ let state = {
   projects: [],
   projectId: null,
   project: null,
-  milestones: {},   // ms_id -> expanded detail (enriched data from WS includes this)
   expanded: new Set(),
   lastUpdate: null,
   connected: false,
   error: null,
-  activeTab: 'dashboard', // 'dashboard' | 'retros'
+  activeTab: 'dashboard',
   retros: [],
-  retroContent: null,  // { week, content }
-  statusFilter: new Set(), // empty = show all; otherwise only show these statuses
+  retroContent: null,
+  // Filter: hidden statuses (empty = show all)
+  hiddenStatuses: new Set(),
+  // Entry done filter
+  hideEntryDone: false,
+  // Collapsed nested entries
+  collapsedEntries: new Set(),
+  // Sort
+  sortAsc: true,
+  // Menu
+  menuOpen: false,
   auth: {
     token: localStorage.getItem('beacon_token'),
     email: localStorage.getItem('beacon_email'),
@@ -859,7 +1107,7 @@ let state = {
 
 let ws = null;
 let wsReconnectTimer = null;
-let lastProjectJson = null; // for diff-based rendering
+let lastProjectJson = null;
 
 // ---- Auth ----
 
@@ -894,7 +1142,6 @@ function renderLogin() {
       <div class="login-note">Sign in to view project telemetry</div>
     </div>
   `;
-
   if (state.auth.clientId && window.google?.accounts) {
     google.accounts.id.initialize({
       client_id: state.auth.clientId,
@@ -913,6 +1160,7 @@ function logout() {
   localStorage.removeItem('beacon_token');
   localStorage.removeItem('beacon_email');
   closeWebSocket();
+  closeMenu();
   renderLogin();
 }
 
@@ -921,23 +1169,16 @@ function isAuthenticated() {
   try {
     const payload = JSON.parse(atob(state.auth.token.split('.')[1]));
     return payload.exp * 1000 > Date.now();
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
 // ---- API ----
 
 async function api(path) {
   const headers = {};
-  if (state.auth.token) {
-    headers['Authorization'] = `Bearer ${state.auth.token}`;
-  }
+  if (state.auth.token) headers['Authorization'] = `Bearer ${state.auth.token}`;
   const res = await fetch(`${API_BASE}${path}`, { headers });
-  if (res.status === 401) {
-    logout();
-    throw new Error('Session expired');
-  }
+  if (res.status === 401) { logout(); throw new Error('Session expired'); }
   if (!res.ok) throw new Error(`${res.status}: ${res.statusText}`);
   return res.json();
 }
@@ -957,20 +1198,12 @@ async function loadProjects() {
 
 function connectWebSocket(projectId) {
   closeWebSocket();
-
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const host = window.location.host;
   const tokenParam = state.auth.token ? `?token=${encodeURIComponent(state.auth.token)}` : '';
-  const url = `${protocol}//${host}/ws/projects/${projectId}${tokenParam}`;
+  ws = new WebSocket(`${protocol}//${host}/ws/projects/${projectId}${tokenParam}`);
 
-  ws = new WebSocket(url);
-
-  ws.onopen = () => {
-    state.connected = true;
-    state.error = null;
-    updateConnectionStatus();
-  };
-
+  ws.onopen = () => { state.connected = true; state.error = null; updateConnectionStatus(); };
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
     if (msg.type === 'project') {
@@ -984,74 +1217,46 @@ function connectWebSocket(projectId) {
       }
     }
   };
-
   ws.onclose = () => {
     state.connected = false;
     updateConnectionStatus();
-    // Reconnect after 3 seconds
     wsReconnectTimer = setTimeout(() => {
-      if (state.projectId === projectId) {
-        connectWebSocket(projectId);
-      }
+      if (state.projectId === projectId) connectWebSocket(projectId);
     }, 3000);
   };
+  ws.onerror = () => { state.connected = false; updateConnectionStatus(); };
 
-  ws.onerror = () => {
-    state.connected = false;
-    updateConnectionStatus();
-  };
-
-  // Ping every 30s to keep connection alive
   const pingInterval = setInterval(() => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send('ping');
-    } else {
-      clearInterval(pingInterval);
-    }
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send('ping');
+    else clearInterval(pingInterval);
   }, 30000);
 }
 
 function closeWebSocket() {
-  if (ws) {
-    ws.onclose = null; // prevent reconnect
-    ws.close();
-    ws = null;
-  }
-  if (wsReconnectTimer) {
-    clearTimeout(wsReconnectTimer);
-    wsReconnectTimer = null;
-  }
+  if (ws) { ws.onclose = null; ws.close(); ws = null; }
+  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
 }
 
 function updateConnectionStatus() {
   const dot = document.querySelector('.status-dot');
   const label = document.querySelector('.connection-label');
-  if (dot) {
-    dot.className = `status-dot ${state.connected ? '' : 'offline'}`;
-  }
-  if (label) {
-    label.textContent = state.connected ? 'live' : 'reconnecting';
-  }
+  if (dot) dot.className = `status-dot ${state.connected ? '' : 'offline'}`;
+  if (label) label.textContent = state.connected ? 'live' : 'reconnecting';
 }
 
 // ---- Render Helpers ----
 
 const STATUS_LABELS = {
-  done: 'done',
-  in_progress: 'active',
-  observing: 'observing',
-  todo: 'todo',
-  waiting: 'waiting',
-  cancelled: 'cancelled',
+  done: 'done', in_progress: 'active', observing: 'observing',
+  todo: 'todo', waiting: 'waiting', cancelled: 'cancelled',
 };
+
+const FILTER_ORDER = ['todo', 'in_progress', 'observing', 'done'];
+const FILTER_CSS_CLASS = { todo: 'f-todo', in_progress: 'f-active', observing: 'f-observing', done: 'f-done' };
 
 function statusBadge(status) {
   const label = STATUS_LABELS[status] || status;
-  return `
-    <div class="ms-status-badge">
-      <div class="ms-status-icon ${status}"></div>
-      <span class="ms-status-text ${status}">${label}</span>
-    </div>`;
+  return `<div class="ms-status-badge"><div class="ms-status-icon ${status}"></div><span class="ms-status-text ${status}">${label}</span></div>`;
 }
 
 function entryTypeBadge(type) {
@@ -1066,18 +1271,25 @@ function entryStatusText(entry) {
 }
 
 function renderEntry(entry) {
+  if (state.hideEntryDone && entry.status === 'done') return '';
+
   const statusClass = entry.status === 'done' ? ' done' : '';
   const hash = entry.meta?.hash ? `<span class="entry-hash">${entry.meta.hash.slice(0, 7)}</span>` : '';
   const detail = entry.detail ? `<div class="entry-detail">${esc(entry.detail)}</div>` : '';
   const statusText = entryStatusText(entry);
+  const hasChildren = entry.entries?.length > 0;
+  const isCollapsed = state.collapsedEntries.has(entry.id);
+  const toggleClass = hasChildren ? ` entry-toggle${isCollapsed ? ' collapsed' : ''}` : '';
 
   let children = '';
-  if (entry.entries?.length) {
-    children = `<div class="entry-children">${entry.entries.map(renderEntry).join('')}</div>`;
+  if (hasChildren) {
+    const hiddenClass = isCollapsed ? ' hidden' : '';
+    const filteredChildren = entry.entries.map(renderEntry).join('');
+    children = `<div class="entry-children${hiddenClass}">${filteredChildren}</div>`;
   }
 
   return `
-    <div class="entry${statusClass}">
+    <div class="entry${statusClass}${toggleClass}" ${hasChildren ? `onclick="toggleEntry('${entry.id}', event)"` : ''}>
       ${entryTypeBadge(entry.type)}
       <span class="entry-id">${entry.id}</span>
       <span class="entry-desc">${esc(entry.description)}${hash}${statusText}</span>
@@ -1100,40 +1312,54 @@ function formatTime(date) {
   return date.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-// ---- Sort milestones ----
+// ---- Sort milestones by ID number ----
+
+function msIdNum(ms) {
+  const m = ms.id.match(/(\d+)/);
+  return m ? parseInt(m[1], 10) : 0;
+}
 
 function sortMilestones(milestones) {
-  const order = { in_progress: 0, observing: 1, todo: 2, waiting: 3, done: 4, cancelled: 5 };
   return [...milestones].sort((a, b) => {
-    const oa = order[a.status] ?? 6;
-    const ob = order[b.status] ?? 6;
-    return oa - ob;
+    const diff = msIdNum(a) - msIdNum(b);
+    return state.sortAsc ? diff : -diff;
   });
 }
 
 // ---- Filter ----
 
-function toggleFilter(status) {
-  if (state.statusFilter.has(status)) {
-    state.statusFilter.delete(status);
+function toggleStatusFilter(status) {
+  if (state.hiddenStatuses.has(status)) {
+    state.hiddenStatuses.delete(status);
   } else {
-    state.statusFilter.add(status);
+    state.hiddenStatuses.add(status);
   }
   render();
 }
 
-function filterMilestones(milestones) {
-  if (state.statusFilter.size === 0) return milestones;
-  return milestones.filter(ms => state.statusFilter.has(ms.status));
+function showAllStatuses() {
+  state.hiddenStatuses.clear();
+  render();
 }
 
-function getAvailableStatuses(milestones) {
-  const statuses = new Set();
-  for (const ms of milestones) {
-    statuses.add(ms.status);
-  }
-  const order = ['in_progress', 'observing', 'todo', 'waiting', 'done', 'cancelled'];
-  return order.filter(s => statuses.has(s));
+function filterMilestones(milestones) {
+  if (state.hiddenStatuses.size === 0) return milestones;
+  return milestones.filter(ms => !state.hiddenStatuses.has(ms.status));
+}
+
+// ---- Next retro date ----
+
+function nextRetroDate(retroDay) {
+  const days = { monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6, sunday: 0 };
+  const target = days[(retroDay || 'friday').toLowerCase()];
+  if (target === undefined) return null;
+  const now = new Date();
+  const current = now.getDay();
+  let diff = target - current;
+  if (diff <= 0) diff += 7;
+  const next = new Date(now);
+  next.setDate(now.getDate() + diff);
+  return next.toISOString().slice(0, 10);
 }
 
 // ---- Render ----
@@ -1142,18 +1368,11 @@ function render() {
   const app = document.getElementById('app');
 
   if (state.error && !state.project) {
-    app.innerHTML = `
-      <div class="error-state">
-        <div class="error-icon">\u26a0</div>
-        <div>${esc(state.error)}</div>
-      </div>
-    `;
+    app.innerHTML = `<div class="error-state"><div class="error-icon">\u26a0</div><div>${esc(state.error)}</div></div>`;
     return;
   }
 
-  if (!state.project && state.projects.length === 0) {
-    return; // still loading
-  }
+  if (!state.project && state.projects.length === 0) return;
 
   if (!state.project && state.projects.length > 0) {
     renderProjectSelector(app);
@@ -1162,24 +1381,32 @@ function render() {
 
   const p = state.project;
   const sorted = sortMilestones(p.milestones || []);
-  const availableStatuses = getAvailableStatuses(sorted);
   const filtered = filterMilestones(sorted);
-  const activeCount = sorted.filter(m => m.status === 'in_progress').length;
-  const doneCount = sorted.filter(m => m.status === 'done').length;
+  const activeCount = (p.milestones || []).filter(m => m.status === 'in_progress').length;
+  const doneCount = (p.milestones || []).filter(m => m.status === 'done').length;
+  const retroDate = nextRetroDate(p.retro_day);
 
   app.innerHTML = `
     <header class="header fade-in">
       <div class="header-top">
-        <span class="project-back" onclick="goBack()">\u2190 projects</span>
+        <button class="hamburger-btn" onclick="openMenu()" title="Menu">
+          <span></span><span></span><span></span>
+        </button>
         <span class="project-name">${esc(p.name)}</span>
         <span class="header-tag">beacon</span>
         <div class="connection-status">
           <div class="status-dot ${state.connected ? '' : 'offline'}"></div>
           <span class="connection-label">${state.connected ? 'live' : 'reconnecting'}</span>
         </div>
-        ${state.auth.email ? `<span class="user-info" onclick="logout()" title="Click to sign out">${esc(state.auth.email)}</span>` : ''}
       </div>
     </header>
+
+    ${(p.objective || retroDate) ? `
+    <div class="project-info fade-in stagger-1">
+      ${p.objective ? `<div class="project-info-item"><span class="project-info-label">Objective</span><span class="project-info-value">${esc(p.objective)}</span></div>` : ''}
+      ${retroDate ? `<div class="project-info-item"><span class="project-info-label">Next Retro</span><span class="project-info-value">${retroDate} (${esc(p.retro_day || 'friday')})</span></div>` : ''}
+    </div>
+    ` : ''}
 
     ${p.summary ? `
     <section class="summary-block fade-in stagger-1">
@@ -1197,16 +1424,16 @@ function render() {
     <section class="milestones fade-in">
       <div class="milestones-header">
         <span class="milestones-title">Milestones</span>
-        <span class="milestones-count">${activeCount} active \u00b7 ${doneCount}/${sorted.length} done</span>
+        <span class="milestones-count">${activeCount} active \u00b7 ${doneCount}/${(p.milestones||[]).length} done</span>
       </div>
-      ${availableStatuses.length > 1 ? `
       <div class="filter-bar">
-        ${availableStatuses.map(s => `
-          <button class="filter-btn ${state.statusFilter.has(s) ? 'active' : ''}" onclick="toggleFilter('${s}')">${STATUS_LABELS[s] || s}</button>
-        `).join('')}
-        ${state.statusFilter.size > 0 ? `<button class="filter-btn" onclick="clearFilters()">clear</button>` : ''}
+        <button class="filter-btn f-all" onclick="showAllStatuses()">all</button>
+        ${FILTER_ORDER.map(s => {
+          const isOn = !state.hiddenStatuses.has(s);
+          return `<button class="filter-btn ${isOn ? 'on' : 'off'} ${FILTER_CSS_CLASS[s] || ''}" onclick="toggleStatusFilter('${s}')">${STATUS_LABELS[s] || s}</button>`;
+        }).join('')}
+        <button class="sort-toggle" onclick="toggleSort()">${state.sortAsc ? '\u2191 ms-1 first' : '\u2193 latest first'}</button>
       </div>
-      ` : ''}
       ${filtered.map((ms, i) => renderMilestoneCard(ms, i)).join('')}
     </section>
     ` : ''}
@@ -1224,7 +1451,6 @@ function render() {
     </footer>
   `;
 
-  // Attach click handlers for milestone headers
   document.querySelectorAll('.ms-card-header').forEach(el => {
     el.addEventListener('click', () => toggleMilestone(el.dataset.msId));
   });
@@ -1247,7 +1473,6 @@ function renderProjectSelector(app) {
       </ul>
     </div>
   `;
-
   document.querySelectorAll('.project-item').forEach(el => {
     el.addEventListener('click', () => selectProject(el.dataset.id));
   });
@@ -1255,27 +1480,26 @@ function renderProjectSelector(app) {
 
 function renderMilestoneCard(ms, index) {
   const isExpanded = state.expanded.has(ms.id);
-  // WebSocket data already includes enriched entries
   const entries = ms.entries || [];
   const activeClass = ms.status === 'in_progress' ? ' active' : '';
   const expandedClass = isExpanded ? ' expanded' : '';
-
-  const tasksLabel = ms.total_tasks > 0
-    ? `${ms.done_tasks}/${ms.total_tasks}`
-    : '';
+  const tasksLabel = ms.total_tasks > 0 ? `${ms.done_tasks}/${ms.total_tasks}` : '';
 
   let bodyHtml = '';
-  if (isExpanded && entries.length > 0) {
+  if (isExpanded && (entries.length > 0 || ms.description)) {
+    const renderedEntries = entries.map(renderEntry).join('');
+    const hasDone = entries.some(e => e.status === 'done' || (e.entries || []).some(c => c.status === 'done'));
     bodyHtml = `
       <div class="ms-entries">
+        ${hasDone ? `
+        <div class="ms-entries-toolbar">
+          <button class="entry-filter-btn ${state.hideEntryDone ? 'active' : ''}" onclick="toggleHideEntryDone(event)">
+            ${state.hideEntryDone ? 'show done' : 'hide done'}
+          </button>
+        </div>
+        ` : ''}
         ${ms.description ? `<div class="ms-description">${esc(ms.description)}</div>` : ''}
-        ${entries.map(renderEntry).join('')}
-      </div>
-    `;
-  } else if (isExpanded && ms.description) {
-    bodyHtml = `
-      <div class="ms-entries">
-        <div class="ms-description">${esc(ms.description)}</div>
+        ${renderedEntries}
       </div>
     `;
   }
@@ -1296,9 +1520,7 @@ function renderMilestoneCard(ms, index) {
           <span class="ms-progress-text">${ms.progress || 0}%</span>
         </div>
       </div>
-      <div class="ms-body">
-        ${bodyHtml}
-      </div>
+      <div class="ms-body">${bodyHtml}</div>
     </div>
   `;
 }
@@ -1312,18 +1534,11 @@ function renderRetroSection() {
         <span class="retro-back" onclick="closeRetro()">\u2190 back to list</span>
         <h3 style="font-size: 1rem; color: var(--text-primary); margin: 8px 0 16px;">${esc(state.retroContent.week)}</h3>
         <div class="retro-content">${esc(state.retroContent.content)}</div>
-      </section>
-    `;
+      </section>`;
   }
-
   if (state.retros.length === 0) {
-    return `
-      <section class="retro-section fade-in">
-        <div class="retro-empty">No retrospective documents yet.</div>
-      </section>
-    `;
+    return `<section class="retro-section fade-in"><div class="retro-empty">No retrospective documents yet.</div></section>`;
   }
-
   return `
     <section class="retro-section fade-in">
       <ul class="retro-list">
@@ -1334,36 +1549,88 @@ function renderRetroSection() {
           </li>
         `).join('')}
       </ul>
-    </section>
-  `;
+    </section>`;
 }
 
 async function switchTab(tab) {
   state.activeTab = tab;
   state.retroContent = null;
   if (tab === 'retros' && state.retros.length === 0) {
-    try {
-      state.retros = await api(`/api/projects/${state.projectId}/retros`);
-    } catch (e) {
-      state.retros = [];
-    }
+    try { state.retros = await api(`/api/projects/${state.projectId}/retros`); }
+    catch (e) { state.retros = []; }
   }
   render();
 }
 
 async function openRetro(week) {
-  try {
-    const data = await api(`/api/projects/${state.projectId}/retros/${week}`);
-    state.retroContent = data;
-  } catch (e) {
-    state.retroContent = { week, content: 'Failed to load retro document.' };
-  }
+  try { state.retroContent = await api(`/api/projects/${state.projectId}/retros/${week}`); }
+  catch (e) { state.retroContent = { week, content: 'Failed to load retro document.' }; }
   render();
 }
 
-function closeRetro() {
-  state.retroContent = null;
-  render();
+function closeRetro() { state.retroContent = null; render(); }
+
+// ---- Hamburger Menu ----
+
+function openMenu() {
+  state.menuOpen = true;
+  renderMenu();
+}
+
+function closeMenu() {
+  state.menuOpen = false;
+  document.getElementById('menu-root').innerHTML = '';
+}
+
+async function renderMenu() {
+  // Load projects list if not loaded
+  if (state.projects.length === 0) {
+    try { await loadProjects(); } catch (e) {}
+  }
+
+  const root = document.getElementById('menu-root');
+  root.innerHTML = `
+    <div class="menu-overlay" onclick="closeMenu()"></div>
+    <div class="menu-panel">
+      <div class="menu-header">
+        <span class="menu-title">Menu</span>
+        <button class="menu-close" onclick="closeMenu()">\u00d7</button>
+      </div>
+
+      <div class="menu-section">
+        <div class="menu-section-title">Projects</div>
+        ${state.projects.map(p => `
+          <button class="menu-item ${p.project_id === state.projectId ? 'current' : ''}"
+                  onclick="menuSelectProject('${esc(p.project_id)}')">
+            ${esc(p.name)}
+            <div class="menu-item-sub">${esc(p.project_id)}</div>
+          </button>
+        `).join('')}
+      </div>
+
+      <div class="menu-section">
+        <div class="menu-section-title">Account</div>
+        ${state.auth.email ? `<div class="menu-user">${esc(state.auth.email)}</div>` : ''}
+        <button class="menu-item" onclick="logout()">Sign out</button>
+      </div>
+    </div>
+  `;
+}
+
+async function menuSelectProject(projectId) {
+  closeMenu();
+  if (projectId !== state.projectId) {
+    state.project = null;
+    state.expanded.clear();
+    state.hiddenStatuses.clear();
+    state.hideEntryDone = false;
+    state.collapsedEntries.clear();
+    state.activeTab = 'dashboard';
+    state.retros = [];
+    state.retroContent = null;
+    lastProjectJson = null;
+    await selectProject(projectId);
+  }
 }
 
 // ---- Interactions ----
@@ -1373,105 +1640,81 @@ async function selectProject(projectId) {
   state.activeTab = 'dashboard';
   state.retros = [];
   state.retroContent = null;
-  state.statusFilter.clear();
+  state.hiddenStatuses.clear();
   lastProjectJson = null;
 
   document.getElementById('app').innerHTML = `
-    <div class="loading">
-      <div class="loading-bar"></div>
-      <div class="loading-text">Loading</div>
-    </div>
+    <div class="loading"><div class="loading-bar"></div><div class="loading-text">Loading</div></div>
   `;
 
-  // Try WebSocket first
   connectWebSocket(projectId);
 
-  // Also do an initial API fetch as fallback
   try {
     const data = await api(`/api/projects/${projectId}`);
-    // Enrich client-side if WS hasn't delivered yet
     if (!state.project) {
       state.project = data;
       state.lastUpdate = new Date();
-      // Auto-expand in_progress milestones
       for (const ms of data.milestones || []) {
-        if (ms.status === 'in_progress') {
-          state.expanded.add(ms.id);
-        }
+        if (ms.status === 'in_progress') state.expanded.add(ms.id);
       }
       render();
     }
   } catch (e) {
-    if (!state.project) {
-      state.error = e.message;
-      render();
-    }
+    if (!state.project) { state.error = e.message; render(); }
   }
-}
-
-function goBack() {
-  closeWebSocket();
-  state.project = null;
-  state.projectId = null;
-  state.expanded.clear();
-  state.milestones = {};
-  state.activeTab = 'dashboard';
-  state.retros = [];
-  state.retroContent = null;
-  state.statusFilter.clear();
-  lastProjectJson = null;
-  render();
 }
 
 function toggleMilestone(msId) {
-  if (state.expanded.has(msId)) {
-    state.expanded.delete(msId);
-  } else {
-    state.expanded.add(msId);
-  }
+  if (state.expanded.has(msId)) state.expanded.delete(msId);
+  else state.expanded.add(msId);
   render();
 }
 
-function clearFilters() {
-  state.statusFilter.clear();
+function toggleEntry(entryId, event) {
+  // Don't toggle when clicking on links etc inside entry
+  if (event.target.closest('.entry-children')) return;
+  event.stopPropagation();
+  if (state.collapsedEntries.has(entryId)) state.collapsedEntries.delete(entryId);
+  else state.collapsedEntries.add(entryId);
+  render();
+}
+
+function toggleHideEntryDone(event) {
+  event.stopPropagation();
+  state.hideEntryDone = !state.hideEntryDone;
+  render();
+}
+
+function toggleSort() {
+  state.sortAsc = !state.sortAsc;
   render();
 }
 
 // ---- URL routing ----
 
 function getProjectIdFromUrl() {
-  const params = new URLSearchParams(window.location.search);
-  return params.get('project');
+  return new URLSearchParams(window.location.search).get('project');
 }
 
 // ---- Init ----
 
 async function init() {
   await loadAuthConfig();
-
   if (!isAuthenticated()) {
     function waitForGsi() {
-      if (window.google?.accounts) {
-        renderLogin();
-      } else {
-        setTimeout(waitForGsi, 100);
-      }
+      if (window.google?.accounts) renderLogin();
+      else setTimeout(waitForGsi, 100);
     }
     waitForGsi();
     return;
   }
-
   const urlProjectId = getProjectIdFromUrl();
-
   if (urlProjectId) {
     await selectProject(urlProjectId);
   } else {
     await loadProjects();
-    if (state.projects.length === 1) {
-      await selectProject(state.projects[0].project_id);
-    } else {
-      render();
-    }
+    if (state.projects.length === 1) await selectProject(state.projects[0].project_id);
+    else render();
   }
 }
 
