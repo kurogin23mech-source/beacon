@@ -78,6 +78,7 @@ class Dashboard:
     def __init__(self, project_path):
         self.project_path = project_path
         self.store = get_store(project_path)
+        self.store.start_watching()
         self.project = None
         self.scroll_offset = 0
         self.cursor_pos = 0  # Index into self.selectable
@@ -239,6 +240,12 @@ class Dashboard:
         for i, (fname, scope, title) in enumerate(self.doc_entries):
             grouped.setdefault(scope, []).append((i, title))
 
+        # Build display order: indices into doc_entries, grouped by scope
+        self._doc_display_order = []
+        for scope in scope_order:
+            for idx, _title in grouped.get(scope, []):
+                self._doc_display_order.append(idx)
+
         lines = []
         for scope in scope_order:
             entries = grouped.get(scope, [])
@@ -247,8 +254,9 @@ class Dashboard:
             label = scope_labels.get(scope, scope.upper())
             lines.append((f"  {label}", "section_yellow"))
             for idx, title in entries:
-                marker = " \u25b6 " if idx == self.doc_selected else "   "
-                style = "active" if idx == self.doc_selected else curses.A_NORMAL
+                display_pos = self._doc_display_order.index(idx)
+                marker = " \u25b6 " if display_pos == self.doc_selected else "   "
+                style = "active" if display_pos == self.doc_selected else curses.A_NORMAL
                 lines.append((f"  {marker}{title}", style))
             lines.append(("", 0))
         self.lines = lines
@@ -569,15 +577,17 @@ class Dashboard:
                     self.doc_content = None
                     self.doc_scroll = 0
             else:
-                # Document list: navigate and select
+                # Document list: navigate and select (in display order)
+                display_count = len(getattr(self, '_doc_display_order', []))
                 if key in (curses.KEY_UP, ord('k')):
                     self.doc_selected = max(0, self.doc_selected - 1)
                 elif key in (curses.KEY_DOWN, ord('j')):
-                    if self.doc_files:
-                        self.doc_selected = min(len(self.doc_files) - 1, self.doc_selected + 1)
+                    if display_count:
+                        self.doc_selected = min(display_count - 1, self.doc_selected + 1)
                 elif key in (curses.KEY_ENTER, 10, 13, ord(' ')):
-                    if self.doc_files:
-                        self._open_doc(self.doc_selected)
+                    if display_count:
+                        actual_idx = self._doc_display_order[self.doc_selected]
+                        self._open_doc(actual_idx)
             return True
         if not self.selectable:
             return True
@@ -663,7 +673,7 @@ class Dashboard:
                 _last_size = (height, width)
                 _needs_redraw = True
 
-            # Reload project data (triggers redraw if file changed)
+            # Check for data changes (push-notified flag or local file hash)
             if self.reload_if_changed():
                 _needs_redraw = True
 
@@ -821,7 +831,10 @@ def main():
     project_path = sys.argv[1]
     dashboard = Dashboard(project_path)
 
-    curses.wrapper(dashboard.draw)
+    try:
+        curses.wrapper(dashboard.draw)
+    finally:
+        dashboard.store.stop_watching()
 
 
 if __name__ == "__main__":

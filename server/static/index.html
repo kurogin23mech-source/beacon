@@ -1761,11 +1761,14 @@ async function loadMembers() {
     // Members
     for (const m of data.members || []) {
       html += `<div class="menu-user" style="display:flex;align-items:center;justify-content:space-between;">
-        <span>${esc(m.email)} <span style="color:var(--text-dim);font-size:0.7rem">${esc(m.role)}</span></span>
-        ${isOwner ? `<span style="display:flex;gap:4px;">
-          <button onclick="toggleMemberRole('${esc(m.email)}','${m.role === 'viewer' ? 'editor' : 'viewer'}')" style="background:none;border:1px solid var(--border);color:var(--text-secondary);font-size:0.65rem;padding:1px 5px;border-radius:3px;cursor:pointer">${m.role === 'viewer' ? '\u2191 editor' : '\u2193 viewer'}</button>
+        <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">${esc(m.email)}</span>
+        ${isOwner ? `<span style="display:flex;gap:4px;align-items:center;">
+          <select onchange="changeMemberRole('${esc(m.email)}',this.value)" style="background:var(--bg-surface);border:1px solid var(--border);color:var(--text-secondary);font-size:0.65rem;padding:1px 4px;border-radius:3px;cursor:pointer">
+            <option value="viewer"${m.role === 'viewer' ? ' selected' : ''}>viewer</option>
+            <option value="editor"${m.role === 'editor' ? ' selected' : ''}>editor</option>
+          </select>
           <button onclick="removeMember('${esc(m.email)}')" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:0.65rem;padding:1px 5px;border-radius:3px;cursor:pointer">\u00d7</button>
-        </span>` : ''}
+        </span>` : `<span style="color:var(--text-dim);font-size:0.7rem">${esc(m.role)}</span>`}
       </div>`;
     }
     // Invite form (owner only)
@@ -1811,7 +1814,7 @@ async function removeMember(email) {
   } catch (e) { alert(e.message || 'Error'); }
 }
 
-async function toggleMemberRole(email, newRole) {
+async function changeMemberRole(email, newRole) {
   try {
     await api(`/api/projects/${state.projectId}/members/${encodeURIComponent(email)}`, {
       method: 'PATCH', headers: {'Content-Type':'application/json'},

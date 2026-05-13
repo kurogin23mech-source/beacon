@@ -33,6 +33,17 @@ class Store(Protocol):
         """Return True if this store is cloud-backed."""
         ...
 
+    def start_watching(self) -> None:
+        """Start receiving push notifications for changes.
+
+        Cloud stores use WebSocket; local stores may no-op.
+        """
+        ...
+
+    def stop_watching(self) -> None:
+        """Stop receiving push notifications."""
+        ...
+
 
 def get_store(project_file: str | None = None) -> Store:
     """Return the appropriate Store instance.

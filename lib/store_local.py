@@ -50,6 +50,12 @@ class LocalStore:
     def is_cloud(self) -> bool:
         return False
 
+    def start_watching(self) -> None:
+        pass
+
+    def stop_watching(self) -> None:
+        pass
+
     def _file_hash(self) -> str | None:
         try:
             with open(self._project_file, "rb") as f:
