@@ -137,6 +137,10 @@ class SummaryUpdate(BaseModel):
 class RetroCreate(BaseModel):
     content: str
 
+class DocumentSave(BaseModel):
+    title: str
+    content: str
+
 class MemberInvite(BaseModel):
     email: str
     role: str = "viewer"  # viewer | editor
@@ -363,6 +367,56 @@ def update_summary(project_id: str, body: SummaryUpdate,
     data["summary"] = body.text
     _save(project_id, data)
     return {"summary": body.text}
+
+
+# ---------------------------------------------------------------------------
+# Documents
+# ---------------------------------------------------------------------------
+
+@app.get("/api/projects/{project_id}/documents")
+def list_documents(project_id: str, user: dict = Depends(require_auth)):
+    """List all documents for a project."""
+    _load(project_id, user)  # access check
+    return db.list_documents(project_id)
+
+
+@app.get("/api/projects/{project_id}/documents/{doc_id}")
+def get_document(project_id: str, doc_id: str,
+                 user: dict = Depends(require_auth)):
+    """Get a specific document."""
+    _load(project_id, user)  # access check
+    doc = db.get_document(project_id, doc_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
+    return doc
+
+
+@app.post("/api/projects/{project_id}/documents")
+def create_document(project_id: str, body: DocumentSave,
+                    user: dict = Depends(require_auth)):
+    """Create a new document."""
+    _load(project_id, user)  # access check
+    doc_id = db.save_document(project_id, "", body.title, body.content)
+    return {"doc_id": doc_id, "title": body.title}
+
+
+@app.put("/api/projects/{project_id}/documents/{doc_id}")
+def update_document(project_id: str, doc_id: str, body: DocumentSave,
+                    user: dict = Depends(require_auth)):
+    """Update an existing document."""
+    _load(project_id, user)  # access check
+    db.save_document(project_id, doc_id, body.title, body.content)
+    return {"doc_id": doc_id, "title": body.title}
+
+
+@app.delete("/api/projects/{project_id}/documents/{doc_id}")
+def delete_document_endpoint(project_id: str, doc_id: str,
+                             user: dict = Depends(require_auth)):
+    """Delete a document."""
+    _load(project_id, user)  # access check
+    if not db.delete_document(project_id, doc_id):
+        raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
+    return {"doc_id": doc_id, "status": "deleted"}
 
 
 # ---------------------------------------------------------------------------

@@ -1111,9 +1111,11 @@ let state = {
   lastUpdate: null,
   connected: false,
   error: null,
-  activeTab: 'dashboard',
+  activeTab: 'dashboard', // 'dashboard' | 'retros' | 'documents'
   retros: [],
   retroContent: null,
+  documents: [],
+  documentContent: null,  // { doc_id, title, content }
   // Filter: hidden statuses (empty = show all)
   hiddenStatuses: new Set(),
   // Entry done filter (per milestone)
@@ -1452,6 +1454,7 @@ function render() {
     <div class="tab-bar fade-in stagger-2">
       <button class="tab-btn ${state.activeTab === 'dashboard' ? 'active' : ''}" onclick="switchTab('dashboard')">Milestones</button>
       <button class="tab-btn ${state.activeTab === 'retros' ? 'active' : ''}" onclick="switchTab('retros')">Reviews</button>
+      <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" onclick="switchTab('documents')">Documents</button>
     </div>
 
     ${state.activeTab === 'dashboard' ? `
@@ -1473,6 +1476,8 @@ function render() {
     ` : ''}
 
     ${state.activeTab === 'retros' ? renderRetroSection() : ''}
+
+    ${state.activeTab === 'documents' ? renderDocumentsSection() : ''}
 
     <footer class="footer fade-in stagger-4">
       <div class="footer-left">
@@ -1593,9 +1598,14 @@ function renderRetroSection() {
 async function switchTab(tab) {
   state.activeTab = tab;
   state.retroContent = null;
+  state.documentContent = null;
   if (tab === 'retros' && state.retros.length === 0) {
     try { state.retros = await api(`/api/projects/${state.projectId}/retros`); }
     catch (e) { state.retros = []; }
+  }
+  if (tab === 'documents' && state.documents.length === 0) {
+    try { state.documents = await api(`/api/projects/${state.projectId}/documents`); }
+    catch (e) { state.documents = []; }
   }
   render();
 }
@@ -1607,6 +1617,41 @@ async function openRetro(week) {
 }
 
 function closeRetro() { state.retroContent = null; render(); }
+
+// ---- Documents ----
+
+function renderDocumentsSection() {
+  if (state.documentContent) {
+    return `
+      <section class="retro-section fade-in">
+        <span class="retro-back" onclick="closeDocument()">\u2190 back to list</span>
+        <h3 style="font-size: 1rem; color: var(--text-primary); margin: 8px 0 16px;">${esc(state.documentContent.title)}</h3>
+        <div class="retro-content">${esc(state.documentContent.content)}</div>
+      </section>`;
+  }
+  if (state.documents.length === 0) {
+    return `<section class="retro-section fade-in"><div class="retro-empty">No documents yet.</div></section>`;
+  }
+  return `
+    <section class="retro-section fade-in">
+      <ul class="retro-list">
+        ${state.documents.map(d => `
+          <li class="retro-item" onclick="openDocument('${esc(d.doc_id)}')">
+            <span class="retro-item-week">${esc(d.title)}</span>
+            <span class="retro-item-date">${d.updated_at ? d.updated_at.slice(0, 10) : ''}</span>
+          </li>
+        `).join('')}
+      </ul>
+    </section>`;
+}
+
+async function openDocument(docId) {
+  try { state.documentContent = await api(`/api/projects/${state.projectId}/documents/${docId}`); }
+  catch (e) { state.documentContent = { doc_id: docId, title: 'Error', content: 'Failed to load document.' }; }
+  render();
+}
+
+function closeDocument() { state.documentContent = null; render(); }
 
 // ---- Hamburger Menu ----
 
@@ -1666,6 +1711,8 @@ async function menuSelectProject(projectId) {
     state.activeTab = 'dashboard';
     state.retros = [];
     state.retroContent = null;
+    state.documents = [];
+    state.documentContent = null;
     lastProjectJson = null;
     await selectProject(projectId);
   }
@@ -1678,6 +1725,8 @@ async function selectProject(projectId) {
   state.activeTab = 'dashboard';
   state.retros = [];
   state.retroContent = null;
+  state.documents = [];
+  state.documentContent = null;
   state.hiddenStatuses.clear();
   lastProjectJson = null;
 

@@ -134,6 +134,88 @@ def get_retro(project_id: str, week: str) -> dict | None:
     return {"week": doc.id, **doc.to_dict()}
 
 
+# ---------------------------------------------------------------------------
+# Documents (subcollection: projects/{project_id}/documents/{doc_id})
+# ---------------------------------------------------------------------------
+
+DOCS_SUBCOLLECTION = "documents"
+
+
+def list_documents(project_id: str) -> list[dict]:
+    """List all documents for a project."""
+    docs = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(DOCS_SUBCOLLECTION)
+        .order_by("updated_at", direction=firestore.Query.DESCENDING)
+        .stream()
+    )
+    result = []
+    for doc in docs:
+        data = doc.to_dict()
+        result.append({
+            "doc_id": doc.id,
+            "title": data.get("title", ""),
+            "updated_at": data.get("updated_at", ""),
+        })
+    return result
+
+
+def get_document(project_id: str, doc_id: str) -> dict | None:
+    """Get a single document."""
+    doc = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(DOCS_SUBCOLLECTION)
+        .document(doc_id)
+        .get()
+    )
+    if not doc.exists:
+        return None
+    return {"doc_id": doc.id, **doc.to_dict()}
+
+
+def save_document(project_id: str, doc_id: str, title: str, content: str) -> str:
+    """Save a document. If doc_id is empty, auto-generate one."""
+    import datetime
+
+    col = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(DOCS_SUBCOLLECTION)
+    )
+    data = {
+        "title": title,
+        "content": content,
+        "updated_at": datetime.datetime.now().isoformat(),
+    }
+    if doc_id:
+        col.document(doc_id).set(data)
+        return doc_id
+    else:
+        ref = col.add(data)
+        return ref[1].id
+
+
+def delete_document(project_id: str, doc_id: str) -> bool:
+    """Delete a document. Returns True if existed."""
+    doc_ref = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(DOCS_SUBCOLLECTION)
+        .document(doc_id)
+    )
+    doc = doc_ref.get()
+    if not doc.exists:
+        return False
+    doc_ref.delete()
+    return True
+
+
 def save_retro(project_id: str, week: str, content: str) -> None:
     """Save a retro document."""
     import datetime

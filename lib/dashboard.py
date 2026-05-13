@@ -84,8 +84,12 @@ class Dashboard:
         self.expanded = set()  # Set of milestone IDs that are expanded
         self.expanded_entries = set()  # Set of entry IDs whose detail is shown
         self.hide_done = False  # Toggle to hide done entries
-        self.view_mode = "project"  # "project" or "retro"
+        self.view_mode = "project"  # "project", "retro", or "documents"
         self.retro_scroll = 0  # Scroll offset for retro view
+        self.doc_scroll = 0  # Scroll offset for documents view
+        self.doc_files = []  # List of document filenames
+        self.doc_selected = 0  # Selected document index
+        self.doc_content = None  # Content of currently viewed document
         self.header_lines = []  # Fixed header lines
         self.lines = []  # Scrollable body lines
         self.selectable = []  # List of (line_index, kind, key) for navigable rows
@@ -128,6 +132,75 @@ class Dashboard:
             except (j.JSONDecodeError, IOError):
                 pass
         return warnings
+
+    def _load_doc_files(self):
+        """Load document files from .beacon/documents/."""
+        import glob as g
+        project_dir = os.path.dirname(self.project_path)
+        doc_dir = os.path.join(project_dir, "documents")
+        os.makedirs(doc_dir, exist_ok=True)
+        files = sorted(g.glob(os.path.join(doc_dir, "*.md")))
+        self.doc_files = [os.path.basename(f) for f in files]
+        self.doc_selected = min(self.doc_selected, max(0, len(self.doc_files) - 1))
+
+    def _open_doc(self, index):
+        """Load a document by index."""
+        if index < 0 or index >= len(self.doc_files):
+            return
+        project_dir = os.path.dirname(self.project_path)
+        path = os.path.join(project_dir, "documents", self.doc_files[index])
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                self.doc_content = (self.doc_files[index], f.read())
+                self.doc_scroll = 0
+        except (FileNotFoundError, IOError):
+            self.doc_content = None
+
+    def build_documents_lines(self, width):
+        """Build display lines for documents view."""
+        self.header_lines = []
+        self.selectable = []
+
+        if self.doc_content is not None:
+            # Viewing a single document
+            name, content = self.doc_content
+            self.header_lines = [
+                (f" BEACON DOCUMENTS | {name}  (h/ESC: back, D: project) ", "header"),
+                ("", 0),
+            ]
+            lines = []
+            for raw_line in content.splitlines():
+                stripped = raw_line.rstrip()
+                if stripped.startswith("# "):
+                    style = "section"
+                elif stripped.startswith("## "):
+                    style = "section_yellow"
+                elif stripped.startswith("### "):
+                    style = "active"
+                else:
+                    style = curses.A_NORMAL
+                for wl in wrap_line("  " + stripped, width - 1):
+                    lines.append((wl, style))
+            self.lines = lines
+            return
+
+        # Document list
+        self.header_lines = [
+            (f" BEACON DOCUMENTS | {len(self.doc_files)} files  (D: back to project) ", "header"),
+            ("", 0),
+        ]
+
+        if not self.doc_files:
+            self.lines = [("  No documents found. Add .md files to .beacon/documents/", curses.A_NORMAL)]
+            return
+
+        lines = []
+        for i, fname in enumerate(self.doc_files):
+            marker = " \u25b6 " if i == self.doc_selected else "   "
+            style = "active" if i == self.doc_selected else curses.A_NORMAL
+            title = fname.replace(".md", "").replace("-", " ").replace("_", " ")
+            lines.append((f"{marker}{title}", style))
+        self.lines = lines
 
     def _get_latest_retro(self):
         """Find the latest retro file in .beacon/retro/."""
@@ -419,11 +492,41 @@ class Dashboard:
             else:
                 self.view_mode = "project"
             return True
+        if key == ord('D'):
+            if self.view_mode == "project":
+                self.view_mode = "documents"
+                self.doc_scroll = 0
+                self.doc_content = None
+                self._load_doc_files()
+            else:
+                self.view_mode = "project"
+            return True
         if self.view_mode == "retro":
             if key in (curses.KEY_UP, ord('k')):
                 self.retro_scroll = max(0, self.retro_scroll - 1)
             elif key in (curses.KEY_DOWN, ord('j')):
                 self.retro_scroll += 1
+            return True
+        if self.view_mode == "documents":
+            if self.doc_content is not None:
+                # Viewing a document: scroll or go back
+                if key in (curses.KEY_UP, ord('k')):
+                    self.doc_scroll = max(0, self.doc_scroll - 1)
+                elif key in (curses.KEY_DOWN, ord('j')):
+                    self.doc_scroll += 1
+                elif key in (27, ord('h'), curses.KEY_LEFT):  # ESC or h or left
+                    self.doc_content = None
+                    self.doc_scroll = 0
+            else:
+                # Document list: navigate and select
+                if key in (curses.KEY_UP, ord('k')):
+                    self.doc_selected = max(0, self.doc_selected - 1)
+                elif key in (curses.KEY_DOWN, ord('j')):
+                    if self.doc_files:
+                        self.doc_selected = min(len(self.doc_files) - 1, self.doc_selected + 1)
+                elif key in (curses.KEY_ENTER, 10, 13, ord(' ')):
+                    if self.doc_files:
+                        self._open_doc(self.doc_selected)
             return True
         if not self.selectable:
             return True
@@ -528,15 +631,26 @@ class Dashboard:
             # Build display
             if self.view_mode == "retro":
                 self.build_retro_lines(width)
+            elif self.view_mode == "documents":
+                self.build_documents_lines(width)
             else:
                 self.build_lines(width)
 
             # Build footer lines
             done_hint = "d:show done" if self.hide_done else "d:hide done"
             mode_label = "☁ Cloud" if self.store.is_cloud() else "💾 Local"
+            if self.view_mode == "documents":
+                if self.doc_content:
+                    footer_hint = f"  {mode_label}  ↑↓:scroll  h:back  D:project  q:quit"
+                else:
+                    footer_hint = f"  {mode_label}  ↑↓:select  Enter:open  D:project  q:quit"
+            elif self.view_mode == "retro":
+                footer_hint = f"  {mode_label}  ↑↓:scroll  r:project  q:quit"
+            else:
+                footer_hint = f"  {mode_label}  ↑↓:move  Enter:expand  {done_hint}  r:review  D:docs  q:quit"
             footer_lines = [
                 ("  " + "─" * ((width - 4) // 2), curses.A_NORMAL),
-                (f"  {mode_label}  ↑↓:move  Enter:expand  {done_hint}  r:retro  q:quit", curses.A_NORMAL),
+                (footer_hint, curses.A_NORMAL),
             ]
 
             # Calculate layout: fixed header + scrollable body + fixed footer
@@ -551,6 +665,12 @@ class Dashboard:
                 max_scroll = max(0, len(self.lines) - body_height)
                 self.retro_scroll = min(self.retro_scroll, max_scroll)
                 self.scroll_offset = self.retro_scroll
+            elif self.view_mode == "documents" and self.doc_content:
+                max_scroll = max(0, len(self.lines) - body_height)
+                self.doc_scroll = min(self.doc_scroll, max_scroll)
+                self.scroll_offset = self.doc_scroll
+            elif self.view_mode == "documents":
+                self.scroll_offset = 0
             else:
                 self._adjust_scroll(body_height)
 
