@@ -1172,6 +1172,38 @@ def cmd_cloud_push():
         sys.exit(1)
     print(f"Pushed to cloud: projects/{project_id}")
 
+    # Push local documents
+    docs_dir = os.path.join(os.path.dirname(get_project_file()) or ".beacon", "documents")
+    if os.path.isdir(docs_dir):
+        import glob
+        md_files = glob.glob(os.path.join(docs_dir, "*.md"))
+        for fpath in md_files:
+            doc_info = _read_local_doc(fpath)
+            try:
+                client.put_document(
+                    project_id, doc_info["doc_id"],
+                    doc_info["title"], doc_info["content"],
+                    doc_info.get("scope"),
+                )
+                print(f"  doc: {doc_info['doc_id']} ({doc_info.get('scope', 'memo')})")
+            except RuntimeError as e:
+                print(f"  doc error [{doc_info['doc_id']}]: {e}")
+
+    # Push local retros
+    retros_dir = os.path.join(os.path.dirname(get_project_file()) or ".beacon", "retro")
+    if os.path.isdir(retros_dir):
+        import glob
+        retro_files = glob.glob(os.path.join(retros_dir, "*.md"))
+        for fpath in retro_files:
+            week = os.path.basename(fpath)[:-3]  # e.g. "2026-W19"
+            with open(fpath, "r", encoding="utf-8") as f:
+                content = f.read()
+            try:
+                client.save_retro(project_id, week, content)
+                print(f"  retro: {week}")
+            except RuntimeError as e:
+                print(f"  retro error [{week}]: {e}")
+
     # Auto-switch to cloud mode
     beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
     config_path = os.path.join(beacon_dir, "config.json")

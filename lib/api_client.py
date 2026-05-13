@@ -83,13 +83,33 @@ class ApiClient:
     def get_document(self, project_id: str, doc_id: str) -> dict:
         return self.get(f"/api/projects/{project_id}/documents/{doc_id}")
 
-    def create_document(self, project_id: str, title: str, content: str) -> dict:
-        return self.post(f"/api/projects/{project_id}/documents",
-                         {"title": title, "content": content})
+    def create_document(self, project_id: str, title: str, content: str,
+                        scope: str | None = None) -> dict:
+        body = {"title": title, "content": content}
+        if scope:
+            body["scope"] = scope
+        return self.post(f"/api/projects/{project_id}/documents", body)
 
-    def update_document(self, project_id: str, doc_id: str, title: str, content: str) -> dict:
-        return self.put(f"/api/projects/{project_id}/documents/{doc_id}",
-                        {"title": title, "content": content})
+    def update_document(self, project_id: str, doc_id: str, title: str, content: str,
+                        scope: str | None = None) -> dict:
+        body = {"title": title, "content": content}
+        if scope:
+            body["scope"] = scope
+        return self.put(f"/api/projects/{project_id}/documents/{doc_id}", body)
+
+    def put_document(self, project_id: str, doc_id: str, title: str, content: str,
+                     scope: str | None = None) -> dict:
+        """Create or update a document by ID (upsert)."""
+        body = {"title": title, "content": content}
+        if scope:
+            body["scope"] = scope
+        return self.put(f"/api/projects/{project_id}/documents/{doc_id}", body)
 
     def delete_document(self, project_id: str, doc_id: str) -> dict:
         return self.delete(f"/api/projects/{project_id}/documents/{doc_id}")
+
+    # Retro operations
+
+    def save_retro(self, project_id: str, week: str, content: str) -> dict:
+        return self.post(f"/api/projects/{project_id}/retros/{week}",
+                         {"content": content})
