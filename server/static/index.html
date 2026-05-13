@@ -1444,20 +1444,19 @@ function render() {
     </div>
     ` : ''}
 
-    ${p.summary ? `
-    <section class="summary-block fade-in stagger-1">
-      <div class="summary-label">Session Context</div>
-      <div class="summary-text">${esc(p.summary)}</div>
-    </section>
-    ` : ''}
-
-    <div class="tab-bar fade-in stagger-2">
+    <div class="tab-bar fade-in stagger-1">
       <button class="tab-btn ${state.activeTab === 'dashboard' ? 'active' : ''}" onclick="switchTab('dashboard')">Milestones</button>
       <button class="tab-btn ${state.activeTab === 'retros' ? 'active' : ''}" onclick="switchTab('retros')">Reviews</button>
       <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" onclick="switchTab('documents')">Documents</button>
     </div>
 
     ${state.activeTab === 'dashboard' ? `
+    ${p.summary ? `
+    <section class="summary-block fade-in">
+      <div class="summary-label">Session Context</div>
+      <div class="summary-text">${esc(p.summary)}</div>
+    </section>
+    ` : ''}
     <section class="milestones fade-in">
       <div class="milestones-header">
         <span class="milestones-title">Milestones</span>

@@ -68,7 +68,7 @@ def get_store(project_file: str | None = None) -> Store:
             raise ValueError("cloud.json must contain 'api_url'")
         from auth import load_credentials
         creds = load_credentials()
-        token = creds.token if creds else ""
+        token = (creds.id_token or creds.token) if creds else ""
         from store_api import StoreApi
         return StoreApi(api_url, project_id, token)
 

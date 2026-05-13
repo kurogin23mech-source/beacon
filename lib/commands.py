@@ -1055,7 +1055,7 @@ def cmd_doc_add():
 # Cloud commands
 # ---------------------------------------------------------------------------
 
-DEFAULT_API_URL = "https://beacon-api-url.a.run.app"
+DEFAULT_API_URL = "https://beacon-ai.dev"
 
 
 def _get_cloud_config_path():
@@ -1102,7 +1102,7 @@ def _get_api_client():
         config = json.load(f)
 
     api_url = config.get("api_url", DEFAULT_API_URL)
-    token = creds.token or ""
+    token = creds.id_token or creds.token or ""
 
     from api_client import ApiClient
     return ApiClient(api_url, token), config
@@ -1125,7 +1125,7 @@ def cmd_cloud_list():
         api_url = config.get("api_url", api_url)
 
     from api_client import ApiClient
-    client = ApiClient(api_url, creds.token or "")
+    client = ApiClient(api_url, creds.id_token or creds.token or "")
 
     try:
         projects = client.list_projects()
@@ -1164,7 +1164,7 @@ def cmd_cloud_push():
     core.validate_project(data)
 
     from api_client import ApiClient
-    client = ApiClient(api_url, creds.token or "")
+    client = ApiClient(api_url, creds.id_token or creds.token or "")
     try:
         client.put_project(project_id, data)
     except RuntimeError as e:

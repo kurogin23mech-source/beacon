@@ -117,12 +117,14 @@ def load_credentials():
         scopes=creds_data.get("scopes"),
     )
 
-    # Refresh if expired
-    if credentials.expired and credentials.refresh_token:
+    # Always refresh to ensure we have a valid id_token for API calls
+    if credentials.refresh_token:
         try:
             credentials.refresh(google.auth.transport.requests.Request())
-            # Update saved token
+            # Update saved token + id_token
             creds_data["token"] = credentials.token
+            if credentials.id_token:
+                creds_data["id_token"] = credentials.id_token
             with open(CREDENTIALS_PATH, "w") as f:
                 json.dump(creds_data, f, indent=2)
         except Exception as e:
