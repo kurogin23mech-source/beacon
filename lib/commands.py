@@ -849,6 +849,209 @@ def cmd_trigger_clear():
 
 
 # ---------------------------------------------------------------------------
+# Document commands
+# ---------------------------------------------------------------------------
+
+VALID_SCOPES = ("core", "spec", "memo")
+DEFAULT_SCOPE = "memo"
+
+
+def _get_docs_dir():
+    project_dir = os.path.dirname(get_project_file()) or ".beacon"
+    return os.path.join(project_dir, "documents")
+
+
+def _doc_slug(title):
+    """Generate a file-safe slug from a document title."""
+    slug = re.sub(r"[^\w]+", "-", title.lower()).strip("-")
+    slug = re.sub(r"-+", "-", slug)
+    return slug or "untitled"
+
+
+def _is_cloud_mode():
+    """Check if we're in cloud mode (has cloud.json + config mode=cloud)."""
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    config_path = os.path.join(beacon_dir, "config.json")
+    if os.environ.get("BEACON_CLOUD") == "1":
+        return True
+    if os.path.exists(config_path):
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        return config.get("mode") == "cloud"
+    return False
+
+
+def _parse_frontmatter(text):
+    """Parse YAML-like frontmatter from markdown text.
+
+    Returns (metadata_dict, body_text).
+    """
+    if not text.startswith("---"):
+        return {}, text
+    end = text.find("\n---", 3)
+    if end == -1:
+        return {}, text
+    header = text[4:end]
+    body = text[end + 4:].lstrip("\n")
+    meta = {}
+    for line in header.split("\n"):
+        line = line.strip()
+        if ":" in line:
+            key, val = line.split(":", 1)
+            meta[key.strip()] = val.strip()
+    return meta, body
+
+
+def _add_frontmatter(content, scope):
+    """Prepend frontmatter to content, or update existing scope."""
+    meta, body = _parse_frontmatter(content)
+    meta["scope"] = scope
+    lines = ["---"]
+    for k, v in meta.items():
+        lines.append(f"{k}: {v}")
+    lines.append("---")
+    lines.append("")
+    return "\n".join(lines) + body
+
+
+def _read_local_doc(fpath):
+    """Read a local document file and return parsed metadata."""
+    import datetime
+    fname = os.path.basename(fpath)
+    with open(fpath, "r", encoding="utf-8") as f:
+        content = f.read()
+    meta, body = _parse_frontmatter(content)
+    scope = meta.get("scope", DEFAULT_SCOPE)
+    # Find title from first heading in body
+    first_line = ""
+    for line in body.split("\n"):
+        line = line.strip()
+        if line:
+            first_line = line
+            break
+    title = first_line.lstrip("# ") if first_line.startswith("#") else fname[:-3]
+    stat = os.stat(fpath)
+    updated = datetime.datetime.fromtimestamp(stat.st_mtime).isoformat()
+    return {
+        "doc_id": fname[:-3],
+        "title": title,
+        "scope": scope,
+        "content": content,
+        "updated_at": updated,
+    }
+
+
+def cmd_doc_list():
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    scope_filter = os.environ.get("BEACON_SCOPE", "")
+
+    if _is_cloud_mode():
+        client, config = _get_api_client()
+        docs = client.list_documents(config["project_id"])
+    else:
+        docs_dir = _get_docs_dir()
+        docs = []
+        if os.path.isdir(docs_dir):
+            for fname in sorted(os.listdir(docs_dir)):
+                if not fname.endswith(".md"):
+                    continue
+                doc = _read_local_doc(os.path.join(docs_dir, fname))
+                docs.append({
+                    "doc_id": doc["doc_id"],
+                    "title": doc["title"],
+                    "scope": doc["scope"],
+                    "updated_at": doc["updated_at"],
+                })
+
+    if scope_filter:
+        docs = [d for d in docs if d.get("scope") == scope_filter]
+
+    if json_mode:
+        print(json.dumps(docs, ensure_ascii=False))
+    else:
+        if not docs:
+            print("No documents.")
+            return
+        scope_icons = {"core": "*", "spec": "+", "memo": "-"}
+        for doc in docs:
+            icon = scope_icons.get(doc.get("scope", "memo"), "?")
+            print(f"  {icon} [{doc.get('scope', 'memo')}] {doc['doc_id']}: {doc['title']}")
+
+
+def cmd_doc_show():
+    doc_id = os.environ.get("BEACON_DOC_ID", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not doc_id:
+        print("Error: doc_id required")
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        client, config = _get_api_client()
+        doc = client.get_document(config["project_id"], doc_id)
+    else:
+        docs_dir = _get_docs_dir()
+        fpath = os.path.join(docs_dir, f"{doc_id}.md")
+        if not os.path.exists(fpath):
+            print(f"Document not found: {doc_id}")
+            sys.exit(1)
+        doc = _read_local_doc(fpath)
+
+    if json_mode:
+        print(json.dumps(doc, ensure_ascii=False))
+    else:
+        print(doc.get("content", ""))
+
+
+def cmd_doc_add():
+    title = os.environ.get("BEACON_TITLE", "")
+    content = os.environ.get("BEACON_CONTENT", "")
+    doc_id = os.environ.get("BEACON_DOC_ID", "")
+    scope = os.environ.get("BEACON_SCOPE", DEFAULT_SCOPE)
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not title:
+        print("Error: title required")
+        sys.exit(1)
+
+    if scope not in VALID_SCOPES:
+        print(f"Error: scope must be one of {VALID_SCOPES}")
+        sys.exit(1)
+
+    # Read content from stdin if not provided via env
+    if not content and not sys.stdin.isatty():
+        content = sys.stdin.read()
+
+    if not content:
+        print("Error: content required (pass via BEACON_CONTENT or stdin)")
+        sys.exit(1)
+
+    # Add frontmatter with scope
+    content = _add_frontmatter(content, scope)
+
+    if _is_cloud_mode():
+        client, config = _get_api_client()
+        if doc_id:
+            result = client.update_document(config["project_id"], doc_id, title, content)
+        else:
+            result = client.create_document(config["project_id"], title, content)
+        doc_id = result["doc_id"]
+    else:
+        docs_dir = _get_docs_dir()
+        os.makedirs(docs_dir, exist_ok=True)
+        if not doc_id:
+            doc_id = _doc_slug(title)
+        fpath = os.path.join(docs_dir, f"{doc_id}.md")
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(content)
+
+    if json_mode:
+        print(json.dumps({"doc_id": doc_id, "title": title, "scope": scope}, ensure_ascii=False))
+    else:
+        print(f"Saved: {doc_id} [{scope}] ({title})")
+
+
+# ---------------------------------------------------------------------------
 # Cloud commands
 # ---------------------------------------------------------------------------
 
@@ -1052,6 +1255,9 @@ if __name__ == "__main__":
         "trigger_fire": cmd_trigger_fire,
         "trigger_check": cmd_trigger_check,
         "trigger_clear": cmd_trigger_clear,
+        "doc_list": cmd_doc_list,
+        "doc_show": cmd_doc_show,
+        "doc_add": cmd_doc_add,
         "cloud_list": cmd_cloud_list,
         "cloud_push": cmd_cloud_push,
         "cloud_pull": cmd_cloud_pull,

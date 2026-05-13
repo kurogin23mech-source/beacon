@@ -22,6 +22,9 @@ Usage:
   beacon milestone observe <id> Set milestone to observing (watching)
   beacon log [message]    Record current HEAD commit to active milestone
   beacon sync             Auto-sync recent git commits to active milestone
+  beacon doc add "title"   Add/update a document (content via --content or stdin)
+  beacon doc list           List all documents
+  beacon doc show <id>     Show document content
   beacon cloud             Open cloud project (interactive select)
   beacon cloud <id>        Open cloud project by ID
   beacon cloud list        List cloud projects
@@ -721,6 +724,76 @@ cmd_launch() {
     fi
 }
 
+cmd_doc() {
+    ensure_project
+    case "${1:-}" in
+        add)
+            shift
+            local doc_title=""
+            local doc_id=""
+            local doc_content=""
+            local doc_scope=""
+            local json_flag=""
+
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --id)       doc_id="${2:-}"; shift 2 ;;
+                    --scope|-s) doc_scope="${2:-}"; shift 2 ;;
+                    --json)     json_flag="1"; shift ;;
+                    --content)  doc_content="${2:-}"; shift 2 ;;
+                    *)          doc_title="$1"; shift ;;
+                esac
+            done
+
+            if [ -z "$doc_title" ]; then
+                echo "Usage: beacon doc add \"title\" [--scope core|spec|memo] [--id slug] [--content text] [--json]"
+                echo "  Content can also be piped via stdin."
+                exit 1
+            fi
+            BEACON_TITLE="$doc_title" BEACON_DOC_ID="$doc_id" \
+                BEACON_CONTENT="$doc_content" BEACON_SCOPE="$doc_scope" \
+                BEACON_JSON="$json_flag" \
+                python3 "$COMMANDS_PY" doc_add
+            ;;
+        list|ls)
+            shift
+            local json_flag=""
+            local scope_filter=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --json)     json_flag="1"; shift ;;
+                    --scope|-s) scope_filter="${2:-}"; shift 2 ;;
+                    *) shift ;;
+                esac
+            done
+            BEACON_JSON="$json_flag" BEACON_SCOPE="$scope_filter" \
+                python3 "$COMMANDS_PY" doc_list
+            ;;
+        show|get)
+            shift
+            local doc_id=""
+            local json_flag=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --json) json_flag="1"; shift ;;
+                    *)      doc_id="$1"; shift ;;
+                esac
+            done
+            if [ -z "$doc_id" ]; then
+                echo "Usage: beacon doc show <doc-id> [--json]"
+                exit 1
+            fi
+            BEACON_DOC_ID="$doc_id" BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" doc_show
+            ;;
+        *)
+            echo "Usage: beacon doc [add|list|show]"
+            echo "  add  \"title\" --scope core|spec|memo  Create/update a document"
+            echo "  list [--scope core|spec|memo]        List documents (optionally filtered)"
+            echo "  show <doc-id>                        Show document content"
+            ;;
+    esac
+}
+
 # --- Main dispatch ---
 case "${1:-}" in
     ""|start)
@@ -830,6 +903,10 @@ case "${1:-}" in
                 echo "Usage: beacon trigger [fire|check|clear] <name> [message]"
                 ;;
         esac
+        ;;
+    doc|document)
+        shift
+        cmd_doc "$@"
         ;;
     cloud)
         case "${2:-}" in

@@ -74,3 +74,22 @@ class ApiClient:
     def create_project(self, project_id: str, name: str, objective: str = "") -> dict:
         return self.post(f"/api/projects/{project_id}",
                          {"name": name, "objective": objective})
+
+    # Document operations
+
+    def list_documents(self, project_id: str) -> list:
+        return self.get(f"/api/projects/{project_id}/documents")
+
+    def get_document(self, project_id: str, doc_id: str) -> dict:
+        return self.get(f"/api/projects/{project_id}/documents/{doc_id}")
+
+    def create_document(self, project_id: str, title: str, content: str) -> dict:
+        return self.post(f"/api/projects/{project_id}/documents",
+                         {"title": title, "content": content})
+
+    def update_document(self, project_id: str, doc_id: str, title: str, content: str) -> dict:
+        return self.put(f"/api/projects/{project_id}/documents/{doc_id}",
+                        {"title": title, "content": content})
+
+    def delete_document(self, project_id: str, doc_id: str) -> dict:
+        return self.delete(f"/api/projects/{project_id}/documents/{doc_id}")
