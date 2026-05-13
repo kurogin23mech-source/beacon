@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Beacon</title>
+<title>Beacon — AI-driven project monitoring tool</title>
+<meta name="description" content="Beacon is an AI-driven project monitoring tool. Track milestones, tasks, and commits in real time. Designed for collaboration between humans and AI agents.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -1087,9 +1088,14 @@ body::after {
 <body>
 
 <div class="container" id="app">
-  <div class="loading" id="loading-state">
-    <div class="loading-bar"></div>
-    <div class="loading-text">Connecting</div>
+  <!-- Static content for crawlers / pre-JS state (overwritten by renderLogin) -->
+  <div class="login-screen">
+    <div class="login-logo">Beacon</div>
+    <div class="login-tagline">Where humans and AI are bound together.</div>
+    <div class="login-note">Beacon is an AI-driven project monitoring tool.<br>Track milestones, tasks, and commits in real time.<br>Designed for collaboration between humans and AI agents.</div>
+    <div class="login-divider"></div>
+    <div class="login-note">Sign in with Google to view project telemetry</div>
+    <div class="login-note"><a href="/privacy">Privacy Policy</a></div>
   </div>
 </div>
 
