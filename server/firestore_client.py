@@ -85,10 +85,62 @@ def get_or_create_user(user_id: str, email: str) -> dict:
 
     user_data = {
         "email": email,
+        "role": "user",
         "created_at": datetime.datetime.now().isoformat(),
     }
     doc_ref.set(user_data)
     return user_data
+
+
+def list_users() -> list[dict]:
+    """List all users."""
+    docs = get_db().collection(USERS_COLLECTION).stream()
+    return [{"user_id": doc.id, **doc.to_dict()} for doc in docs]
+
+
+def update_user(user_id: str, updates: dict) -> bool:
+    """Update user fields. Returns True if user existed."""
+    doc_ref = get_db().collection(USERS_COLLECTION).document(user_id)
+    if not doc_ref.get().exists:
+        return False
+    doc_ref.update(updates)
+    return True
+
+
+def delete_user(user_id: str) -> bool:
+    """Delete a user. Returns True if existed."""
+    doc_ref = get_db().collection(USERS_COLLECTION).document(user_id)
+    if not doc_ref.get().exists:
+        return False
+    doc_ref.delete()
+    return True
+
+
+def list_all_projects() -> list[dict]:
+    """List all projects (admin). Returns summary only, no entries."""
+    import datetime
+    docs = get_db().collection(COLLECTION).stream()
+    result = []
+    for doc in docs:
+        data = doc.to_dict()
+        result.append({
+            "project_id": doc.id,
+            "name": data.get("name", ""),
+            "owner": data.get("owner", ""),
+            "member_count": len(data.get("members", [])),
+            "milestone_count": len(data.get("milestones", [])),
+            "updated_at": data.get("updated_at", ""),
+        })
+    return result
+
+
+def delete_project(project_id: str) -> bool:
+    """Delete a project. Returns True if existed."""
+    doc_ref = get_db().collection(COLLECTION).document(project_id)
+    if not doc_ref.get().exists:
+        return False
+    doc_ref.delete()
+    return True
 
 
 def find_user_by_email(email: str) -> tuple[str, dict] | None:

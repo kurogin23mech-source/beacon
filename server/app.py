@@ -69,6 +69,15 @@ async def require_auth(
     return claims
 
 
+def _require_admin(user: dict) -> None:
+    """Raise 403 if user is not an admin."""
+    if not _auth_enabled:
+        return
+    user_data = db.get_user(user.get("sub", ""))
+    if not user_data or user_data.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -545,6 +554,70 @@ def update_member_role(project_id: str, member_email: str, body: MemberRoleUpdat
 
 
 # ---------------------------------------------------------------------------
+# Admin
+# ---------------------------------------------------------------------------
+
+@app.get("/api/admin/users")
+def admin_list_users(user: dict = Depends(require_auth)):
+    """List all users (admin only)."""
+    _require_admin(user)
+    return db.list_users()
+
+
+class AdminUserUpdate(BaseModel):
+    role: str  # admin | user
+
+
+@app.patch("/api/admin/users/{user_id}")
+def admin_update_user(user_id: str, body: AdminUserUpdate,
+                      user: dict = Depends(require_auth)):
+    """Update a user's system role (admin only)."""
+    _require_admin(user)
+    if body.role not in ("admin", "user"):
+        raise HTTPException(status_code=400, detail="Role must be 'admin' or 'user'")
+    if user_id == user.get("sub"):
+        raise HTTPException(status_code=400, detail="Cannot change your own admin role")
+    if not db.update_user(user_id, {"role": body.role}):
+        raise HTTPException(status_code=404, detail=f"User '{user_id}' not found")
+    return {"user_id": user_id, "role": body.role}
+
+
+@app.delete("/api/admin/users/{user_id}")
+def admin_delete_user(user_id: str, user: dict = Depends(require_auth)):
+    """Delete a user (admin only)."""
+    _require_admin(user)
+    if user_id == user.get("sub"):
+        raise HTTPException(status_code=400, detail="Cannot delete yourself")
+    if not db.delete_user(user_id):
+        raise HTTPException(status_code=404, detail=f"User '{user_id}' not found")
+    return {"user_id": user_id, "status": "deleted"}
+
+
+@app.get("/api/admin/projects")
+def admin_list_projects(user: dict = Depends(require_auth)):
+    """List all projects summary (admin only). No project content exposed."""
+    _require_admin(user)
+    return db.list_all_projects()
+
+
+@app.delete("/api/admin/projects/{project_id}")
+def admin_delete_project(project_id: str, user: dict = Depends(require_auth)):
+    """Delete a project (admin only)."""
+    _require_admin(user)
+    if not db.delete_project(project_id):
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    return {"project_id": project_id, "status": "deleted"}
+
+
+@app.get("/api/admin/me")
+def admin_check(user: dict = Depends(require_auth)):
+    """Check if current user is admin."""
+    user_data = db.get_user(user.get("sub", ""))
+    is_admin = user_data.get("role") == "admin" if user_data else False
+    return {"is_admin": is_admin}
+
+
+# ---------------------------------------------------------------------------
 # Retro
 # ---------------------------------------------------------------------------
 
@@ -716,5 +789,9 @@ if _static_dir.exists():
     @app.get("/privacy")
     def privacy_policy():
         return FileResponse(_static_dir / "privacy.html")
+
+    @app.get("/admin")
+    def serve_admin():
+        return FileResponse(_static_dir / "admin.html")
 
     app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")

@@ -1738,6 +1738,7 @@ async function renderMenu() {
       <div class="menu-section">
         <div class="menu-section-title">Account</div>
         ${state.auth.email ? `<div class="menu-user">${esc(state.auth.email)}</div>` : ''}
+        <a class="menu-item" href="/admin" style="text-decoration:none;display:block">Admin</a>
         <button class="menu-item" onclick="logout()">Sign out</button>
       </div>
     </div>

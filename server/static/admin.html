@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Beacon — Admin</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+:root {
+  --bg-void: #0a0a0c;
+  --bg-surface: #111114;
+  --bg-raised: #18181c;
+  --bg-hover: #1f1f24;
+  --border: #2a2a30;
+  --text-primary: #e4e4e8;
+  --text-secondary: #a1a1aa;
+  --text-dim: #71717a;
+  --accent: #4ade80;
+  --accent-dim: #166534;
+  --danger: #ef4444;
+  --danger-dim: #7f1d1d;
+  --font-mono: 'IBM Plex Mono', monospace;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg-void); color: var(--text-primary); font-family: var(--font-mono); font-size: 14px; }
+.container { max-width: 800px; margin: 0 auto; padding: 24px 16px; }
+header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; }
+h1 { font-size: 1.2rem; font-weight: 600; }
+h1 span { color: var(--accent); }
+.back-link { color: var(--text-dim); text-decoration: none; font-size: 0.8rem; }
+.back-link:hover { color: var(--text-secondary); }
+.tabs { display: flex; gap: 4px; margin-bottom: 20px; }
+.tab { background: transparent; border: 1px solid var(--border); color: var(--text-secondary); padding: 6px 16px; border-radius: 4px; cursor: pointer; font-family: var(--font-mono); font-size: 0.8rem; }
+.tab.active { background: var(--bg-raised); color: var(--text-primary); border-color: var(--text-dim); }
+.section { display: none; }
+.section.active { display: block; }
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; padding: 8px; border-bottom: 1px solid var(--border); }
+td { padding: 8px; border-bottom: 1px solid var(--border); font-size: 0.8rem; color: var(--text-secondary); }
+tr:hover td { background: var(--bg-hover); }
+.badge { display: inline-block; font-size: 0.65rem; padding: 1px 6px; border-radius: 3px; }
+.badge-admin { background: var(--accent-dim); color: var(--accent); }
+.badge-user { background: var(--bg-raised); color: var(--text-dim); border: 1px solid var(--border); }
+.btn { background: none; border: 1px solid var(--border); color: var(--text-secondary); font-size: 0.7rem; padding: 2px 8px; border-radius: 3px; cursor: pointer; font-family: var(--font-mono); }
+.btn:hover { border-color: var(--text-dim); color: var(--text-primary); }
+.btn-danger { border-color: var(--danger-dim); color: var(--danger); }
+.btn-danger:hover { background: var(--danger-dim); }
+.msg { font-size: 0.75rem; color: var(--text-dim); padding: 16px; text-align: center; }
+.login-screen { display: flex; align-items: center; justify-content: center; min-height: 60vh; flex-direction: column; gap: 16px; }
+.login-screen .msg { font-size: 0.85rem; }
+#g_id_signin { margin-top: 8px; }
+.stats { display: flex; gap: 24px; margin-bottom: 20px; }
+.stat { text-align: center; }
+.stat-value { font-size: 1.4rem; font-weight: 600; color: var(--accent); }
+.stat-label { font-size: 0.7rem; color: var(--text-dim); text-transform: uppercase; }
+</style>
+</head>
+<body>
+<div class="container" id="app">
+  <div class="msg">Loading...</div>
+</div>
+
+<script>
+const API_BASE = window.location.origin;
+let token = localStorage.getItem('beacon_token');
+let clientId = null;
+let activeTab = 'users';
+let users = [];
+let projects = [];
+
+async function api(path, opts = {}) {
+  const headers = { ...opts.headers };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(`${API_BASE}${path}`, { ...opts, headers });
+  if (res.status === 401) { token = null; localStorage.removeItem('beacon_token'); renderLogin(); throw new Error('Session expired'); }
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText);
+    let detail = text;
+    try { detail = JSON.parse(text).detail || text; } catch {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+function esc(s) {
+  if (!s) return '';
+  const el = document.createElement('span');
+  el.textContent = s;
+  return el.innerHTML;
+}
+
+async function loadAuthConfig() {
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/config`);
+    if (res.ok) { clientId = (await res.json()).client_id; }
+  } catch {}
+}
+
+function handleCredentialResponse(response) {
+  token = response.credential;
+  const payload = JSON.parse(atob(token.split('.')[1]));
+  localStorage.setItem('beacon_token', token);
+  localStorage.setItem('beacon_email', payload.email || '');
+  init();
+}
+
+function renderLogin() {
+  document.getElementById('app').innerHTML = `
+    <div class="login-screen">
+      <h1>Beacon <span>Admin</span></h1>
+      <div class="msg">Sign in to access admin panel</div>
+      <div id="g_id_signin"></div>
+    </div>
+  `;
+  if (clientId && window.google?.accounts) {
+    google.accounts.id.initialize({ client_id: clientId, callback: handleCredentialResponse });
+    google.accounts.id.renderButton(document.getElementById('g_id_signin'),
+      { theme: 'filled_black', size: 'large', shape: 'rectangular', text: 'signin_with' });
+  }
+}
+
+function switchTab(tab) {
+  activeTab = tab;
+  render();
+}
+
+async function loadData() {
+  [users, projects] = await Promise.all([
+    api('/api/admin/users'),
+    api('/api/admin/projects'),
+  ]);
+}
+
+async function toggleUserRole(userId, currentRole) {
+  const newRole = currentRole === 'admin' ? 'user' : 'admin';
+  try {
+    await api(`/api/admin/users/${userId}`, {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({role: newRole})
+    });
+    await loadData(); render();
+  } catch (e) { alert(e.message); }
+}
+
+async function deleteUser(userId, email) {
+  if (!confirm(`Delete user ${email}?`)) return;
+  try {
+    await api(`/api/admin/users/${userId}`, { method: 'DELETE' });
+    await loadData(); render();
+  } catch (e) { alert(e.message); }
+}
+
+async function deleteProject(projectId) {
+  if (!confirm(`Delete project ${projectId}? This cannot be undone.`)) return;
+  try {
+    await api(`/api/admin/projects/${projectId}`, { method: 'DELETE' });
+    await loadData(); render();
+  } catch (e) { alert(e.message); }
+}
+
+function render() {
+  const adminCount = users.filter(u => u.role === 'admin').length;
+  document.getElementById('app').innerHTML = `
+    <header>
+      <h1>Beacon <span>Admin</span></h1>
+      <a href="/" class="back-link">&larr; Back to app</a>
+    </header>
+
+    <div class="stats">
+      <div class="stat"><div class="stat-value">${users.length}</div><div class="stat-label">Users</div></div>
+      <div class="stat"><div class="stat-value">${projects.length}</div><div class="stat-label">Projects</div></div>
+      <div class="stat"><div class="stat-value">${adminCount}</div><div class="stat-label">Admins</div></div>
+    </div>
+
+    <div class="tabs">
+      <button class="tab ${activeTab === 'users' ? 'active' : ''}" onclick="switchTab('users')">Users</button>
+      <button class="tab ${activeTab === 'projects' ? 'active' : ''}" onclick="switchTab('projects')">Projects</button>
+    </div>
+
+    <div class="section ${activeTab === 'users' ? 'active' : ''}">
+      <table>
+        <thead><tr><th>Email</th><th>Role</th><th>Created</th><th></th></tr></thead>
+        <tbody>
+          ${users.map(u => `<tr>
+            <td>${esc(u.email)}</td>
+            <td><span class="badge ${u.role === 'admin' ? 'badge-admin' : 'badge-user'}">${u.role || 'user'}</span></td>
+            <td>${(u.created_at || '').slice(0, 10)}</td>
+            <td style="text-align:right">
+              <button class="btn" onclick="toggleUserRole('${esc(u.user_id)}','${u.role || 'user'}')">${u.role === 'admin' ? 'Demote' : 'Promote'}</button>
+              <button class="btn btn-danger" onclick="deleteUser('${esc(u.user_id)}','${esc(u.email)}')">Delete</button>
+            </td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="section ${activeTab === 'projects' ? 'active' : ''}">
+      <table>
+        <thead><tr><th>Project ID</th><th>Name</th><th>Owner</th><th>Members</th><th>MSs</th><th></th></tr></thead>
+        <tbody>
+          ${projects.map(p => `<tr>
+            <td>${esc(p.project_id)}</td>
+            <td>${esc(p.name)}</td>
+            <td style="font-size:0.7rem">${esc(p.owner).slice(0, 12)}...</td>
+            <td>${p.member_count}</td>
+            <td>${p.milestone_count}</td>
+            <td style="text-align:right">
+              <button class="btn btn-danger" onclick="deleteProject('${esc(p.project_id)}')">Delete</button>
+            </td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+async function init() {
+  await loadAuthConfig();
+  if (!token) {
+    function waitForGsi() {
+      if (window.google?.accounts) renderLogin();
+      else setTimeout(waitForGsi, 100);
+    }
+    waitForGsi();
+    return;
+  }
+  try {
+    const check = await api('/api/admin/me');
+    if (!check.is_admin) {
+      document.getElementById('app').innerHTML = '<div class="login-screen"><div class="msg">Access denied. Admin role required.</div><a href="/" class="back-link">&larr; Back to app</a></div>';
+      return;
+    }
+    await loadData();
+    render();
+  } catch (e) {
+    document.getElementById('app').innerHTML = `<div class="login-screen"><div class="msg">${esc(e.message)}</div></div>`;
+  }
+}
+
+init();
+</script>
+</body>
+</html>
