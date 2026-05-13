@@ -74,6 +74,48 @@ This opens a tmux session with the dashboard on the left (33%) and your working 
 +------------------+----------------------------------------+
 ```
 
+## Cloud Mode
+
+Beacon can sync your project to the cloud for Web UI access and team collaboration.
+
+```bash
+# Initialize and set up locally first
+cd your-project
+beacon init
+beacon milestone add "First milestone"
+beacon milestone start ms-1
+
+# Sign in with Google
+beacon auth login
+
+# Push to cloud (auto-switches to cloud mode)
+beacon cloud push
+```
+
+Your project is now visible at **https://beacon-ai.dev**. All CLI commands (`beacon log`, `beacon task`, etc.) automatically work through the cloud API.
+
+### Team collaboration
+
+The project owner can invite members from the Web UI (hamburger menu → Members) or via API. Members need to sign in at beacon-ai.dev first.
+
+| Role | Read | Write | Manage members |
+|------|------|-------|----------------|
+| owner | ✓ | ✓ | ✓ |
+| editor | ✓ | ✓ | — |
+| viewer | ✓ | — | — |
+
+### Cloud commands
+
+| Command | Description |
+|---------|-------------|
+| `beacon auth login` | Sign in with Google / Googleログイン |
+| `beacon auth status` | Show login status / ログイン状態 |
+| `beacon cloud push` | Upload project to cloud / クラウドにアップロード |
+| `beacon cloud pull` | Download project from cloud / クラウドからダウンロード |
+| `beacon cloud list` | List cloud projects / クラウドプロジェクト一覧 |
+| `beacon cloud status` | Show cloud config / クラウド設定表示 |
+| `beacon cloud off` | Switch back to local mode / ローカルモードに戻す |
+
 ## CLI Commands
 
 ### Project
