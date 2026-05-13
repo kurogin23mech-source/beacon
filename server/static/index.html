@@ -1090,12 +1090,12 @@ body::after {
 <div class="container" id="app">
   <!-- Static content for crawlers / pre-JS state (overwritten by renderLogin) -->
   <div class="login-screen">
-    <div class="login-logo">Beacon</div>
-    <div class="login-tagline">Where humans and AI are bound together.</div>
-    <div class="login-note">Beacon is an AI-driven project monitoring tool.<br>Track milestones, tasks, and commits in real time.<br>Designed for collaboration between humans and AI agents.</div>
+    <h1 class="login-logo">Beacon</h1>
+    <p class="login-tagline">Where humans and AI are bound together.</p>
+    <p class="login-note">Beacon is an AI-driven project monitoring tool. Track milestones, tasks, and commits in real time. Designed for collaboration between humans and AI agents.</p>
     <div class="login-divider"></div>
-    <div class="login-note">Sign in with Google to view project telemetry</div>
-    <div class="login-note"><a href="/privacy">Privacy Policy</a></div>
+    <p class="login-note">Sign in with Google to view project telemetry</p>
+    <p class="login-note"><a href="https://beacon-ai.dev/privacy">Privacy Policy</a></p>
   </div>
 </div>
 
@@ -1175,7 +1175,7 @@ function renderLogin() {
       <div class="login-divider"></div>
       <div id="g_id_signin"></div>
       <div class="login-note">Sign in to view project telemetry</div>
-      <div class="login-note"><a href="/privacy">Privacy Policy</a></div>
+      <div class="login-note"><a href="https://beacon-ai.dev/privacy">Privacy Policy</a></div>
     </div>
   `;
   if (state.auth.clientId && window.google?.accounts) {
