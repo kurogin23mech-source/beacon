@@ -73,17 +73,38 @@ async def require_auth(
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _get_role(data: dict, user: dict) -> str:
+    """Return user's role: 'owner', 'editor', 'viewer', or '' (no access)."""
+    if not _auth_enabled:
+        return "owner"
+    uid = user.get("sub", "")
+    if data.get("owner") == uid:
+        return "owner"
+    for m in data.get("members", []):
+        if m.get("user_id") == uid:
+            return m.get("role", "viewer")
+    # Migration: ownerless projects are accessible to all
+    if not data.get("owner"):
+        return "editor"
+    return ""
+
+
 def _load(project_id: str, user: dict | None = None) -> dict:
     data = db.get_project(project_id)
     if data is None:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
     if user and _auth_enabled:
-        uid = user.get("sub", "")
-        owner = data.get("owner")
-        members = [m.get("user_id") for m in data.get("members", [])]
-        if owner and uid != owner and uid not in members:
+        role = _get_role(data, user)
+        if not role:
             raise HTTPException(status_code=403, detail="Access denied")
     return data
+
+
+def _require_write(data: dict, user: dict) -> None:
+    """Raise 403 if user doesn't have write access (editor or owner)."""
+    role = _get_role(data, user)
+    if role not in ("owner", "editor"):
+        raise HTTPException(status_code=403, detail="Write access required (editor or owner)")
 
 
 def _save(project_id: str, data: dict) -> None:
@@ -199,6 +220,7 @@ def put_project(project_id: str, body: dict,
 def create_milestone(project_id: str, body: MilestoneCreate,
                      user: dict = Depends(require_auth)):
     data = _load(project_id, user)
+    _require_write(data, user)
     ms_id = core.milestone_add(data, body.title, body.target_date,
                                description=body.description)
     _save(project_id, data)
@@ -226,6 +248,7 @@ def get_milestone(project_id: str, ms_id: str,
 def update_milestone(project_id: str, ms_id: str, body: MilestoneUpdate,
                      user: dict = Depends(require_auth)):
     data = _load(project_id, user)
+    _require_write(data, user)
     try:
         ms = core.milestone_update(
             data, ms_id,
@@ -244,6 +267,7 @@ def update_milestone(project_id: str, ms_id: str, body: MilestoneUpdate,
 def start_milestone(project_id: str, ms_id: str,
                     user: dict = Depends(require_auth)):
     data = _load(project_id, user)
+    _require_write(data, user)
     try:
         ms = core.milestone_start(data, ms_id)
     except ValueError as e:
@@ -256,6 +280,7 @@ def start_milestone(project_id: str, ms_id: str,
 def done_milestone(project_id: str, ms_id: str,
                    user: dict = Depends(require_auth)):
     data = _load(project_id, user)
+    _require_write(data, user)
     try:
         ms = core.milestone_done(data, ms_id)
     except ValueError as e:
@@ -268,6 +293,7 @@ def done_milestone(project_id: str, ms_id: str,
 def delete_milestone(project_id: str, ms_id: str,
                      user: dict = Depends(require_auth)):
     data = _load(project_id, user)
+    _require_write(data, user)
     try:
         ms = core.milestone_delete(data, ms_id)
     except ValueError as e:
@@ -284,6 +310,7 @@ def delete_milestone(project_id: str, ms_id: str,
 def create_entry(project_id: str, ms_id: str, body: EntryCreate,
                  user: dict = Depends(require_auth)):
     data = _load(project_id, user)
+    _require_write(data, user)
     try:
         eid = core.task_add(
             data, ms_id, body.description,
@@ -299,6 +326,7 @@ def create_entry(project_id: str, ms_id: str, body: EntryCreate,
 def update_entry(project_id: str, entry_id: str, body: EntryUpdate,
                  user: dict = Depends(require_auth)):
     data = _load(project_id, user)
+    _require_write(data, user)
     try:
         ms, entry = core.task_update(
             data, entry_id,
@@ -315,6 +343,7 @@ def update_entry(project_id: str, entry_id: str, body: EntryUpdate,
 def done_entry(project_id: str, entry_id: str,
                user: dict = Depends(require_auth)):
     data = _load(project_id, user)
+    _require_write(data, user)
     import datetime
     today = datetime.date.today().isoformat()
     try:
@@ -329,6 +358,7 @@ def done_entry(project_id: str, entry_id: str,
 def delete_entry(project_id: str, entry_id: str,
                  user: dict = Depends(require_auth)):
     data = _load(project_id, user)
+    _require_write(data, user)
     try:
         entry = core.task_delete(data, entry_id)
     except ValueError as e:
@@ -345,6 +375,7 @@ def delete_entry(project_id: str, entry_id: str,
 def log_commit(project_id: str, body: LogCommit,
                user: dict = Depends(require_auth)):
     data = _load(project_id, user)
+    _require_write(data, user)
     try:
         result = core.log_commit(
             data, ms_id=body.ms_id, commit_hash=body.hash,
@@ -365,6 +396,7 @@ def log_commit(project_id: str, body: LogCommit,
 def update_summary(project_id: str, body: SummaryUpdate,
                    user: dict = Depends(require_auth)):
     data = _load(project_id, user)
+    _require_write(data, user)
     data["summary"] = body.text
     _save(project_id, data)
     return {"summary": body.text}
@@ -396,7 +428,8 @@ def get_document(project_id: str, doc_id: str,
 def create_document(project_id: str, body: DocumentSave,
                     user: dict = Depends(require_auth)):
     """Create a new document."""
-    _load(project_id, user)  # access check
+    data = _load(project_id, user)
+    _require_write(data, user)
     doc_id = db.save_document(project_id, "", body.title, body.content, body.scope)
     return {"doc_id": doc_id, "title": body.title}
 
@@ -405,7 +438,8 @@ def create_document(project_id: str, body: DocumentSave,
 def update_document(project_id: str, doc_id: str, body: DocumentSave,
                     user: dict = Depends(require_auth)):
     """Update an existing document."""
-    _load(project_id, user)  # access check
+    data = _load(project_id, user)
+    _require_write(data, user)
     db.save_document(project_id, doc_id, body.title, body.content, body.scope)
     return {"doc_id": doc_id, "title": body.title}
 
@@ -414,7 +448,8 @@ def update_document(project_id: str, doc_id: str, body: DocumentSave,
 def delete_document_endpoint(project_id: str, doc_id: str,
                              user: dict = Depends(require_auth)):
     """Delete a document."""
-    _load(project_id, user)  # access check
+    data = _load(project_id, user)
+    _require_write(data, user)
     if not db.delete_document(project_id, doc_id):
         raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
     return {"doc_id": doc_id, "status": "deleted"}
@@ -473,11 +508,40 @@ def list_members(project_id: str, user: dict = Depends(require_auth)):
     """List project members."""
     data = _load(project_id, user)
     owner_id = data.get("owner", "")
+    owner_email = ""
+    if owner_id:
+        owner_data = db.get_user(owner_id)
+        if owner_data:
+            owner_email = owner_data.get("email", "")
     members = data.get("members", [])
     return {
         "owner": owner_id,
+        "owner_email": owner_email,
         "members": members,
     }
+
+
+class MemberRoleUpdate(BaseModel):
+    role: str  # viewer | editor
+
+
+@app.patch("/api/projects/{project_id}/members/{member_email}")
+def update_member_role(project_id: str, member_email: str, body: MemberRoleUpdate,
+                       user: dict = Depends(require_auth)):
+    """Update a member's role. Only project owner can change roles."""
+    data = _load(project_id, user)
+    if _auth_enabled and data.get("owner") != user.get("sub"):
+        raise HTTPException(status_code=403, detail="Only project owner can change roles")
+    if body.role not in ("viewer", "editor"):
+        raise HTTPException(status_code=400, detail="Role must be 'viewer' or 'editor'")
+    members = data.get("members", [])
+    for m in members:
+        if m.get("email") == member_email:
+            m["role"] = body.role
+            data["members"] = members
+            _save(project_id, data)
+            return {"email": member_email, "role": body.role}
+    raise HTTPException(status_code=404, detail=f"Member '{member_email}' not found")
 
 
 # ---------------------------------------------------------------------------
@@ -503,6 +567,8 @@ def get_retro(project_id: str, week: str, user: dict = Depends(require_auth)):
 def save_retro(project_id: str, week: str, body: RetroCreate,
                user: dict = Depends(require_auth)):
     """Save a retrospective document."""
+    data = _load(project_id, user)
+    _require_write(data, user)
     db.save_retro(project_id, week, body.content)
     return {"week": week, "status": "saved"}
 

@@ -63,6 +63,12 @@ def list_projects(user_id: str | None = None) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+def get_user(user_id: str) -> dict | None:
+    """Get a user document. Returns None if not found."""
+    doc = get_db().collection(USERS_COLLECTION).document(user_id).get()
+    return doc.to_dict() if doc.exists else None
+
+
 def get_or_create_user(user_id: str, email: str) -> dict:
     """Get or create a user document. Returns user data."""
     import datetime

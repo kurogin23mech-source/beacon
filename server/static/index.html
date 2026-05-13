@@ -506,6 +506,7 @@ body::after {
 
 .ms-status-text {
   font-size: 0.65rem;
+  line-height: 1.4;
   letter-spacing: 0.05em;
   text-transform: uppercase;
   font-weight: 500;
@@ -746,12 +747,14 @@ body::after {
 }
 
 .entry-child-count {
-  font-size: 0.6rem;
-  color: var(--text-dim);
+  font-size: 0.65rem;
+  color: var(--accent);
   margin-left: 6px;
-  padding: 0 4px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 2px;
+  padding: 1px 5px;
+  background: var(--accent-dim);
+  border: 1px solid var(--accent-dim);
+  border-radius: 3px;
+  font-weight: 500;
 }
 
 /* ---- Entry Detail ---- */
@@ -1210,12 +1213,17 @@ function isAuthenticated() {
 
 // ---- API ----
 
-async function api(path) {
-  const headers = {};
+async function api(path, opts = {}) {
+  const headers = { ...opts.headers };
   if (state.auth.token) headers['Authorization'] = `Bearer ${state.auth.token}`;
-  const res = await fetch(`${API_BASE}${path}`, { headers });
+  const res = await fetch(`${API_BASE}${path}`, { ...opts, headers });
   if (res.status === 401) { logout(); throw new Error('Session expired'); }
-  if (!res.ok) throw new Error(`${res.status}: ${res.statusText}`);
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText);
+    let detail = text;
+    try { detail = JSON.parse(text).detail || text; } catch {}
+    throw new Error(detail);
+  }
   return res.json();
 }
 
@@ -1723,12 +1731,93 @@ async function renderMenu() {
       </div>
 
       <div class="menu-section">
+        <div class="menu-section-title">Members</div>
+        <div id="menu-members"><div class="menu-user" style="color:var(--text-dim)">Loading...</div></div>
+      </div>
+
+      <div class="menu-section">
         <div class="menu-section-title">Account</div>
         ${state.auth.email ? `<div class="menu-user">${esc(state.auth.email)}</div>` : ''}
         <button class="menu-item" onclick="logout()">Sign out</button>
       </div>
     </div>
   `;
+  loadMembers();
+}
+
+async function loadMembers() {
+  if (!state.projectId) return;
+  const el = document.getElementById('menu-members');
+  if (!el) return;
+  try {
+    const data = await api(`/api/projects/${state.projectId}/members`);
+    const isOwner = state.auth.email && data.owner_email === state.auth.email;
+    let html = '';
+    // Owner
+    if (data.owner_email) {
+      html += `<div class="menu-user">${esc(data.owner_email)} <span style="color:var(--accent);font-size:0.7rem">owner</span></div>`;
+    }
+    // Members
+    for (const m of data.members || []) {
+      html += `<div class="menu-user" style="display:flex;align-items:center;justify-content:space-between;">
+        <span>${esc(m.email)} <span style="color:var(--text-dim);font-size:0.7rem">${esc(m.role)}</span></span>
+        ${isOwner ? `<span style="display:flex;gap:4px;">
+          <button onclick="toggleMemberRole('${esc(m.email)}','${m.role === 'viewer' ? 'editor' : 'viewer'}')" style="background:none;border:1px solid var(--border);color:var(--text-secondary);font-size:0.65rem;padding:1px 5px;border-radius:3px;cursor:pointer">${m.role === 'viewer' ? '\u2191 editor' : '\u2193 viewer'}</button>
+          <button onclick="removeMember('${esc(m.email)}')" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:0.65rem;padding:1px 5px;border-radius:3px;cursor:pointer">\u00d7</button>
+        </span>` : ''}
+      </div>`;
+    }
+    // Invite form (owner only)
+    if (isOwner) {
+      html += `<div style="margin-top:8px;display:flex;gap:4px;">
+        <input id="invite-email" type="email" placeholder="email" style="flex:1;background:var(--bg-surface);border:1px solid var(--border);color:var(--text-primary);padding:4px 8px;border-radius:4px;font-size:0.75rem;font-family:var(--font-mono)">
+        <select id="invite-role" style="background:var(--bg-surface);border:1px solid var(--border);color:var(--text-primary);padding:4px;border-radius:4px;font-size:0.75rem">
+          <option value="viewer">viewer</option>
+          <option value="editor">editor</option>
+        </select>
+        <button onclick="inviteMember()" style="background:var(--accent-dim);border:none;color:var(--accent);padding:4px 8px;border-radius:4px;font-size:0.75rem;cursor:pointer">Invite</button>
+      </div>
+      <div id="invite-msg" style="font-size:0.7rem;color:var(--text-dim);margin-top:4px;"></div>`;
+    }
+    if (!html) html = '<div class="menu-user" style="color:var(--text-dim)">No members</div>';
+    el.innerHTML = html;
+  } catch (e) {
+    el.innerHTML = '<div class="menu-user" style="color:var(--text-dim)">Failed to load</div>';
+  }
+}
+
+async function inviteMember() {
+  const email = document.getElementById('invite-email')?.value?.trim();
+  const role = document.getElementById('invite-role')?.value || 'viewer';
+  const msg = document.getElementById('invite-msg');
+  if (!email) return;
+  try {
+    await api(`/api/projects/${state.projectId}/members`, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({email, role})
+    });
+    if (msg) msg.textContent = `Invited ${email}`;
+    loadMembers();
+  } catch (e) {
+    if (msg) msg.textContent = e.message || 'Error';
+  }
+}
+
+async function removeMember(email) {
+  try {
+    await api(`/api/projects/${state.projectId}/members/${encodeURIComponent(email)}`, {method: 'DELETE'});
+    loadMembers();
+  } catch (e) { alert(e.message || 'Error'); }
+}
+
+async function toggleMemberRole(email, newRole) {
+  try {
+    await api(`/api/projects/${state.projectId}/members/${encodeURIComponent(email)}`, {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({role: newRole})
+    });
+    loadMembers();
+  } catch (e) { alert(e.message || 'Error'); }
 }
 
 async function menuSelectProject(projectId) {
