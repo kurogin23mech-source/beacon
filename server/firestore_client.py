@@ -157,6 +157,7 @@ def list_documents(project_id: str) -> list[dict]:
         result.append({
             "doc_id": doc.id,
             "title": data.get("title", ""),
+            "scope": data.get("scope", "memo"),
             "updated_at": data.get("updated_at", ""),
         })
     return result
@@ -177,9 +178,29 @@ def get_document(project_id: str, doc_id: str) -> dict | None:
     return {"doc_id": doc.id, **doc.to_dict()}
 
 
-def save_document(project_id: str, doc_id: str, title: str, content: str) -> str:
+def _extract_scope(content: str) -> str:
+    """Extract scope from YAML frontmatter in content. Default: memo."""
+    if not content.startswith("---"):
+        return "memo"
+    end = content.find("\n---", 3)
+    if end == -1:
+        return "memo"
+    for line in content[4:end].split("\n"):
+        line = line.strip()
+        if line.startswith("scope:"):
+            val = line.split(":", 1)[1].strip()
+            if val in ("core", "spec", "memo"):
+                return val
+    return "memo"
+
+
+def save_document(project_id: str, doc_id: str, title: str, content: str,
+                  scope: str | None = None) -> str:
     """Save a document. If doc_id is empty, auto-generate one."""
     import datetime
+
+    # Scope priority: explicit param > frontmatter > default
+    resolved_scope = scope if scope in ("core", "spec", "memo") else _extract_scope(content)
 
     col = (
         get_db()
@@ -190,6 +211,7 @@ def save_document(project_id: str, doc_id: str, title: str, content: str) -> str
     data = {
         "title": title,
         "content": content,
+        "scope": resolved_scope,
         "updated_at": datetime.datetime.now().isoformat(),
     }
     if doc_id:

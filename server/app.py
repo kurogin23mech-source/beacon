@@ -140,6 +140,7 @@ class RetroCreate(BaseModel):
 class DocumentSave(BaseModel):
     title: str
     content: str
+    scope: str | None = None  # core | spec | memo
 
 class MemberInvite(BaseModel):
     email: str
@@ -396,7 +397,7 @@ def create_document(project_id: str, body: DocumentSave,
                     user: dict = Depends(require_auth)):
     """Create a new document."""
     _load(project_id, user)  # access check
-    doc_id = db.save_document(project_id, "", body.title, body.content)
+    doc_id = db.save_document(project_id, "", body.title, body.content, body.scope)
     return {"doc_id": doc_id, "title": body.title}
 
 
@@ -405,7 +406,7 @@ def update_document(project_id: str, doc_id: str, body: DocumentSave,
                     user: dict = Depends(require_auth)):
     """Update an existing document."""
     _load(project_id, user)  # access check
-    db.save_document(project_id, doc_id, body.title, body.content)
+    db.save_document(project_id, doc_id, body.title, body.content, body.scope)
     return {"doc_id": doc_id, "title": body.title}
 
 

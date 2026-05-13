@@ -1620,29 +1620,55 @@ function closeRetro() { state.retroContent = null; render(); }
 
 // ---- Documents ----
 
+function scopeBadge(scope) {
+  const styles = {
+    core: 'background: var(--accent); color: #fff;',
+    spec: 'background: var(--border); color: var(--text-primary);',
+    memo: 'background: transparent; color: var(--text-secondary); border: 1px solid var(--border);',
+  };
+  return `<span style="display:inline-block; font-size:0.65rem; padding:1px 6px; border-radius:3px; margin-right:6px; ${styles[scope] || styles.memo}">${(scope || 'memo').toUpperCase()}</span>`;
+}
+
 function renderDocumentsSection() {
   if (state.documentContent) {
+    const scope = state.documentContent.scope || 'memo';
     return `
       <section class="retro-section fade-in">
         <span class="retro-back" onclick="closeDocument()">\u2190 back to list</span>
-        <h3 style="font-size: 1rem; color: var(--text-primary); margin: 8px 0 16px;">${esc(state.documentContent.title)}</h3>
+        <h3 style="font-size: 1rem; color: var(--text-primary); margin: 8px 0 16px;">${scopeBadge(scope)}${esc(state.documentContent.title)}</h3>
         <div class="retro-content">${esc(state.documentContent.content)}</div>
       </section>`;
   }
   if (state.documents.length === 0) {
     return `<section class="retro-section fade-in"><div class="retro-empty">No documents yet.</div></section>`;
   }
-  return `
-    <section class="retro-section fade-in">
-      <ul class="retro-list">
-        ${state.documents.map(d => `
-          <li class="retro-item" onclick="openDocument('${esc(d.doc_id)}')">
-            <span class="retro-item-week">${esc(d.title)}</span>
-            <span class="retro-item-date">${d.updated_at ? d.updated_at.slice(0, 10) : ''}</span>
-          </li>
-        `).join('')}
-      </ul>
-    </section>`;
+  // Group by scope
+  const order = ['core', 'spec', 'memo'];
+  const grouped = {};
+  for (const s of order) grouped[s] = [];
+  for (const d of state.documents) {
+    const s = d.scope || 'memo';
+    if (!grouped[s]) grouped[s] = [];
+    grouped[s].push(d);
+  }
+  const labels = { core: '\u2605 CORE', spec: '\u25CB SPEC', memo: '\u25CB MEMO' };
+  let html = '';
+  for (const s of order) {
+    if (grouped[s].length === 0) continue;
+    html += `
+      <section class="retro-section fade-in" style="margin-bottom: 12px;">
+        <h4 style="font-size: 0.75rem; color: var(--text-secondary); margin: 0 0 6px; letter-spacing: 0.05em;">${labels[s]}</h4>
+        <ul class="retro-list">
+          ${grouped[s].map(d => `
+            <li class="retro-item" onclick="openDocument('${esc(d.doc_id)}')">
+              <span class="retro-item-week">${esc(d.title)}</span>
+              <span class="retro-item-date">${d.updated_at ? d.updated_at.slice(0, 10) : ''}</span>
+            </li>
+          `).join('')}
+        </ul>
+      </section>`;
+  }
+  return html;
 }
 
 async function openDocument(docId) {
