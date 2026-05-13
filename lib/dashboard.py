@@ -88,6 +88,7 @@ class Dashboard:
         self.retro_scroll = 0  # Scroll offset for retro view
         self.doc_scroll = 0  # Scroll offset for documents view
         self.doc_files = []  # List of document filenames
+        self.doc_entries = []  # List of (filename, scope, title)
         self.doc_selected = 0  # Selected document index
         self.doc_content = None  # Content of currently viewed document
         self.header_lines = []  # Fixed header lines
@@ -133,26 +134,63 @@ class Dashboard:
                 pass
         return warnings
 
+    @staticmethod
+    def _parse_doc_frontmatter(text):
+        """Parse frontmatter from document text. Returns (scope, body)."""
+        if not text.startswith("---"):
+            return "memo", text
+        end = text.find("\n---", 3)
+        if end == -1:
+            return "memo", text
+        header = text[4:end]
+        body = text[end + 4:].lstrip("\n")
+        scope = "memo"
+        for line in header.split("\n"):
+            line = line.strip()
+            if line.startswith("scope:"):
+                scope = line.split(":", 1)[1].strip()
+        return scope, body
+
     def _load_doc_files(self):
-        """Load document files from .beacon/documents/."""
+        """Load document files from .beacon/documents/ with scope info."""
         import glob as g
         project_dir = os.path.dirname(self.project_path)
         doc_dir = os.path.join(project_dir, "documents")
         os.makedirs(doc_dir, exist_ok=True)
         files = sorted(g.glob(os.path.join(doc_dir, "*.md")))
-        self.doc_files = [os.path.basename(f) for f in files]
+        self.doc_entries = []  # list of (filename, scope, title)
+        for fpath in files:
+            fname = os.path.basename(fpath)
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    content = f.read()
+                scope, body = self._parse_doc_frontmatter(content)
+                # Extract title from first heading
+                title = fname[:-3]
+                for line in body.split("\n"):
+                    line = line.strip()
+                    if line.startswith("# "):
+                        title = line[2:].strip()
+                        break
+                self.doc_entries.append((fname, scope, title))
+            except (IOError, UnicodeDecodeError):
+                self.doc_entries.append((fname, "memo", fname[:-3]))
+        # Flatten for selection index
+        self.doc_files = [e[0] for e in self.doc_entries]
         self.doc_selected = min(self.doc_selected, max(0, len(self.doc_files) - 1))
 
     def _open_doc(self, index):
-        """Load a document by index."""
+        """Load a document by index, stripping frontmatter for display."""
         if index < 0 or index >= len(self.doc_files):
             return
         project_dir = os.path.dirname(self.project_path)
         path = os.path.join(project_dir, "documents", self.doc_files[index])
         try:
             with open(path, "r", encoding="utf-8") as f:
-                self.doc_content = (self.doc_files[index], f.read())
-                self.doc_scroll = 0
+                raw = f.read()
+            _, body = self._parse_doc_frontmatter(raw)
+            self.doc_content = (self.doc_files[index], body)
+            self.doc_scroll = 0
         except (FileNotFoundError, IOError):
             self.doc_content = None
 
@@ -184,7 +222,7 @@ class Dashboard:
             self.lines = lines
             return
 
-        # Document list
+        # Document list grouped by scope
         self.header_lines = [
             (f" BEACON DOCUMENTS | {len(self.doc_files)} files  (D: back to project) ", "header"),
             ("", 0),
@@ -194,12 +232,25 @@ class Dashboard:
             self.lines = [("  No documents found. Add .md files to .beacon/documents/", curses.A_NORMAL)]
             return
 
+        scope_order = ["core", "spec", "memo"]
+        scope_labels = {"core": "\u2605 CORE", "spec": "\u25cb SPEC", "memo": "\u25cc MEMO"}
+        # Group entries by scope
+        grouped = {}
+        for i, (fname, scope, title) in enumerate(self.doc_entries):
+            grouped.setdefault(scope, []).append((i, title))
+
         lines = []
-        for i, fname in enumerate(self.doc_files):
-            marker = " \u25b6 " if i == self.doc_selected else "   "
-            style = "active" if i == self.doc_selected else curses.A_NORMAL
-            title = fname.replace(".md", "").replace("-", " ").replace("_", " ")
-            lines.append((f"{marker}{title}", style))
+        for scope in scope_order:
+            entries = grouped.get(scope, [])
+            if not entries:
+                continue
+            label = scope_labels.get(scope, scope.upper())
+            lines.append((f"  {label}", "section_yellow"))
+            for idx, title in entries:
+                marker = " \u25b6 " if idx == self.doc_selected else "   "
+                style = "active" if idx == self.doc_selected else curses.A_NORMAL
+                lines.append((f"  {marker}{title}", style))
+            lines.append(("", 0))
         self.lines = lines
 
     def _get_latest_retro(self):
