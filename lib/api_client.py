@@ -14,17 +14,24 @@ import urllib.error
 class ApiClient:
     """Simple HTTP client for Beacon API with auth token support."""
 
-    def __init__(self, base_url: str, token: str = ""):
+    def __init__(self, base_url: str, token=""):
         self._base_url = base_url.rstrip("/")
+        # Accept either a static token string or a callable that returns one
         self._token = token
+
+    def _get_token(self) -> str:
+        if callable(self._token):
+            return self._token()
+        return self._token
 
     def _request(self, method: str, path: str, body: dict | None = None) -> dict:
         url = f"{self._base_url}{path}"
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(url, data=data, method=method)
         req.add_header("Content-Type", "application/json")
-        if self._token:
-            req.add_header("Authorization", f"Bearer {self._token}")
+        token = self._get_token()
+        if token:
+            req.add_header("Authorization", f"Bearer {token}")
 
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:

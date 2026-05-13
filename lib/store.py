@@ -66,11 +66,14 @@ def get_store(project_file: str | None = None) -> Store:
         api_url = cloud_data.get("api_url", "")
         if not api_url:
             raise ValueError("cloud.json must contain 'api_url'")
-        from auth import load_credentials
-        creds = load_credentials()
-        token = (creds.id_token or creds.token) if creds else ""
         from store_api import StoreApi
-        return StoreApi(api_url, project_id, token)
+
+        def _token_provider():
+            from auth import load_credentials
+            creds = load_credentials()
+            return (creds.id_token or creds.token) if creds else ""
+
+        return StoreApi(api_url, project_id, _token_provider)
 
     from store_local import LocalStore
     return LocalStore(project_file)
