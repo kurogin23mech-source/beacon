@@ -159,6 +159,25 @@ async function deleteProject(projectId) {
   } catch (e) { alert(e.message); }
 }
 
+function ownerEmail(ownerId) {
+  const u = users.find(u => u.user_id === ownerId);
+  return u ? u.email : ownerId ? ownerId.slice(0, 12) + '...' : 'none';
+}
+
+async function transferOwner(projectId) {
+  const email = prompt('New owner email:');
+  if (!email) return;
+  const u = users.find(u => u.email === email);
+  if (!u) { alert(`User '${email}' not found`); return; }
+  try {
+    await api(`/api/admin/projects/${projectId}/owner`, {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({new_owner_id: u.user_id})
+    });
+    await loadData(); render();
+  } catch (e) { alert(e.message); }
+}
+
 function render() {
   const adminCount = users.filter(u => u.role === 'admin').length;
   document.getElementById('app').innerHTML = `
@@ -202,10 +221,11 @@ function render() {
           ${projects.map(p => `<tr>
             <td>${esc(p.project_id)}</td>
             <td>${esc(p.name)}</td>
-            <td style="font-size:0.7rem">${esc(p.owner).slice(0, 12)}...</td>
+            <td style="font-size:0.7rem">${esc(ownerEmail(p.owner))}</td>
             <td>${p.member_count}</td>
             <td>${p.milestone_count}</td>
             <td style="text-align:right">
+              <button class="btn" onclick="transferOwner('${esc(p.project_id)}')">Transfer</button>
               <button class="btn btn-danger" onclick="deleteProject('${esc(p.project_id)}')">Delete</button>
             </td>
           </tr>`).join('')}

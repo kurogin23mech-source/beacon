@@ -217,6 +217,9 @@ def put_project(project_id: str, body: dict,
         core.validate_project(body)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # Auto-set owner if missing (e.g. cloud push from local)
+    if not body.get("owner") and _auth_enabled:
+        body["owner"] = user.get("sub", "")
     db.save_project(project_id, body)
     return {"status": "ok", "project_id": project_id}
 
@@ -607,6 +610,28 @@ def admin_delete_project(project_id: str, user: dict = Depends(require_auth)):
     if not db.delete_project(project_id):
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
     return {"project_id": project_id, "status": "deleted"}
+
+
+class AdminOwnerTransfer(BaseModel):
+    new_owner_id: str
+
+
+@app.patch("/api/admin/projects/{project_id}/owner")
+def admin_transfer_owner(project_id: str, body: AdminOwnerTransfer,
+                         user: dict = Depends(require_auth)):
+    """Transfer project ownership (admin only)."""
+    _require_admin(user)
+    data = db.get_project(project_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    new_owner = db.get_user(body.new_owner_id)
+    if new_owner is None:
+        raise HTTPException(status_code=404, detail=f"User '{body.new_owner_id}' not found")
+    data["owner"] = body.new_owner_id
+    # Remove new owner from members if present
+    data["members"] = [m for m in data.get("members", []) if m.get("user_id") != body.new_owner_id]
+    db.save_project(project_id, data)
+    return {"project_id": project_id, "new_owner": body.new_owner_id, "email": new_owner.get("email", "")}
 
 
 @app.get("/api/admin/me")
