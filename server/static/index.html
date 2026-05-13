@@ -1163,9 +1163,11 @@ function renderLogin() {
     <div class="login-screen fade-in">
       <div class="login-logo">Beacon</div>
       <div class="login-tagline">Where humans and AI are bound together.</div>
+      <div class="login-note">AI-driven project monitoring tool.<br>Track milestones, tasks, and commits in real time.</div>
       <div class="login-divider"></div>
       <div id="g_id_signin"></div>
       <div class="login-note">Sign in to view project telemetry</div>
+      <div class="login-note"><a href="/privacy">Privacy Policy</a></div>
     </div>
   `;
   if (state.auth.clientId && window.google?.accounts) {
