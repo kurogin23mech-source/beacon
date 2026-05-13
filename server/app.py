@@ -583,7 +583,7 @@ def auth_config():
 
 from pathlib import Path
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 
 _static_dir = Path(__file__).parent / "static"
 
@@ -591,5 +591,9 @@ if _static_dir.exists():
     @app.get("/")
     def serve_index():
         return FileResponse(_static_dir / "index.html")
+
+    @app.get("/privacy")
+    def privacy_policy():
+        return FileResponse(_static_dir / "privacy.html")
 
     app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
