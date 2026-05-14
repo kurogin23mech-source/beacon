@@ -1172,9 +1172,9 @@ function renderLogin() {
   const app = document.getElementById('app');
   app.innerHTML = `
     <div class="login-screen fade-in">
-      <div class="login-logo">Beacon</div>
-      <div class="login-tagline">Where humans and AI are bound together.</div>
-      <div class="login-note">AI-driven project monitoring tool.<br>Track milestones, tasks, and commits in real time.</div>
+      <h1 class="login-logo">Beacon</h1>
+      <p class="login-tagline">Where humans and AI are bound together.</p>
+      <p class="login-note">Beacon is an AI-driven project monitoring tool.<br>Track milestones, tasks, and commits in real time.</p>
       <div class="login-divider"></div>
       <div id="g_id_signin"></div>
       <div class="login-note">Sign in to view project telemetry</div>
@@ -1511,8 +1511,8 @@ function render() {
 function renderProjectSelector(app) {
   app.innerHTML = `
     <div class="project-selector fade-in">
-      <div class="login-logo">Beacon</div>
-      <div class="login-tagline">Where humans and AI are bound together.</div>
+      <h1 class="login-logo">Beacon</h1>
+      <p class="login-tagline">Where humans and AI are bound together.</p>
       <div style="height: 24px"></div>
       <div class="summary-label">Select Project</div>
       <ul class="project-list">
@@ -1932,5 +1932,13 @@ async function init() {
 
 init();
 </script>
+
+<!-- Persistent footer: outside #app so JS never overwrites it. -->
+<!-- Provides semantic signals for Google OAuth branding verification. -->
+<footer style="padding:24px;text-align:center;color:#666;font-size:0.75rem;border-top:1px solid #222;">
+  <h1 style="font-size:1rem;margin:0 0 8px;color:#999;font-weight:500;">Beacon</h1>
+  <p style="margin:0 0 8px;">Beacon is an AI-driven project monitoring tool. Track milestones, tasks, and commits in real time. Designed for collaboration between humans and AI agents.</p>
+  <a href="https://beacon-ai.dev/privacy" style="color:#888;text-decoration:underline;">Privacy Policy</a>
+</footer>
 </body>
 </html>
