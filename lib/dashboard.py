@@ -673,8 +673,8 @@ class Dashboard:
                 _last_size = (height, width)
                 _needs_redraw = True
 
-            # Check for data changes (push-notified flag or local file hash)
-            if self.reload_if_changed():
+            # Check for data changes only when idle (skip if already need redraw)
+            if not _needs_redraw and self.reload_if_changed():
                 _needs_redraw = True
 
             if not _needs_redraw:

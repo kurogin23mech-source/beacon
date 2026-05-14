@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+import time
 
 
 class StoreApi:
@@ -17,6 +18,12 @@ class StoreApi:
     Supports WebSocket-based change notification for the dashboard.
     Call start_watching() to receive push updates instead of polling.
     """
+
+    # HTTP polling interval when WebSocket is unavailable (seconds)
+    _POLL_INTERVAL = 5.0
+    # WebSocket reconnect delays (seconds): 1, 2, 4, 8, 16, 30, 30, ...
+    _WS_RECONNECT_BASE = 1.0
+    _WS_RECONNECT_MAX = 30.0
 
     def __init__(self, api_url: str, project_id: str, token: str = ""):
         from api_client import ApiClient
@@ -30,6 +37,12 @@ class StoreApi:
         self._ws_changed = False
         self._ws_data: dict | None = None
         self._ws_lock = threading.Lock()
+        # Watching lifecycle
+        self._watching = False  # True while start_watching() is active
+        self._ws_stop = threading.Event()
+        self._ws_reconnect_attempts = 0
+        # HTTP polling throttle
+        self._last_poll_time = 0.0
 
     def load_project(self) -> dict:
         # If we have fresh data from WebSocket, use it
@@ -51,16 +64,21 @@ class StoreApi:
         """Check if the project has changed since last load/save.
 
         When watching via WebSocket, this just checks a flag (no HTTP).
-        When not watching, falls back to HTTP polling.
+        When not watching, falls back to throttled HTTP polling.
         """
-        if self._ws_client is not None:
-            with self._ws_lock:
+        with self._ws_lock:
+            if self._ws_client is not None:
                 if self._ws_changed:
                     self._ws_changed = False
                     return True
-            return False
+                return False
 
-        # Fallback: HTTP polling (only used when not watching)
+        # Fallback: throttled HTTP polling (only used when not watching)
+        now = time.monotonic()
+        if now - self._last_poll_time < self._POLL_INTERVAL:
+            return False
+        self._last_poll_time = now
+
         try:
             data = self._client.get_project(self._project_id)
         except (RuntimeError, ConnectionError):
@@ -76,7 +94,16 @@ class StoreApi:
 
     def start_watching(self) -> None:
         """Start receiving push updates via WebSocket."""
-        if self._ws_client is not None:
+        if self._watching:
+            return
+        self._watching = True
+        self._ws_stop.clear()
+        self._ws_reconnect_attempts = 0
+        self._connect_ws()
+
+    def _connect_ws(self) -> None:
+        """Establish a new WebSocket connection."""
+        if self._ws_stop.is_set():
             return
 
         from ws_client import WebSocketClient
@@ -99,21 +126,45 @@ class StoreApi:
                 with self._ws_lock:
                     self._ws_data = data
                     self._ws_changed = True
+                    # Reset reconnect counter on successful message
+                    self._ws_reconnect_attempts = 0
 
         def on_error(e: Exception):
-            # On disconnect, clear the client so has_changed falls back to polling
             with self._ws_lock:
                 self._ws_client = None
+            # Schedule reconnect in background
+            if self._watching and not self._ws_stop.is_set():
+                self._schedule_reconnect()
 
         client = WebSocketClient(ws_url, on_message=on_message, on_error=on_error)
-        self._ws_client = client
+        with self._ws_lock:
+            self._ws_client = client
         client.connect()
 
+    def _schedule_reconnect(self) -> None:
+        """Schedule a WebSocket reconnection with exponential backoff."""
+        delay = min(
+            self._WS_RECONNECT_BASE * (2 ** self._ws_reconnect_attempts),
+            self._WS_RECONNECT_MAX,
+        )
+        self._ws_reconnect_attempts += 1
+
+        def reconnect():
+            if not self._ws_stop.wait(delay):
+                self._connect_ws()
+
+        t = threading.Thread(target=reconnect, daemon=True)
+        t.start()
+
     def stop_watching(self) -> None:
-        """Stop WebSocket connection."""
-        if self._ws_client is not None:
-            self._ws_client.close()
+        """Stop WebSocket connection and auto-reconnect."""
+        self._watching = False
+        self._ws_stop.set()
+        with self._ws_lock:
+            client = self._ws_client
             self._ws_client = None
+        if client is not None:
+            client.close()
 
     def is_cloud(self) -> bool:
         return True
