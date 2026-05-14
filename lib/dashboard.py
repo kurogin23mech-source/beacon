@@ -114,6 +114,20 @@ class Dashboard:
                     self.expanded.add(ms.get("id", ""))
         return True
 
+    def _get_next_retro_date(self):
+        """Calculate the next retro date from project's retro_day setting."""
+        import datetime
+        DAY_NAMES = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+                     "friday": 4, "saturday": 5, "sunday": 6}
+        day_str = (self.project or {}).get("retro_day", "friday").lower()
+        target_weekday = DAY_NAMES.get(day_str, 4)
+        today = datetime.date.today()
+        days_ahead = (target_weekday - today.weekday()) % 7
+        if days_ahead == 0:
+            return f"{today} (今日)"
+        next_date = today + datetime.timedelta(days=days_ahead)
+        return str(next_date)
+
     def _get_pending_triggers(self):
         """Read pending triggers from .beacon/triggers/. Returns list of warning messages."""
         import json as j
@@ -365,7 +379,12 @@ class Dashboard:
                 header_lines.append(("    ...", curses.A_DIM))
             header_lines.append(("", 0))
 
-        # Retro reminder
+        # Next retro date
+        next_retro = self._get_next_retro_date()
+        if next_retro:
+            header_lines.append((f"  ◇ Next Review: {next_retro}", curses.A_DIM))
+            header_lines.append(("", 0))
+
         # Pending triggers (from .beacon/triggers/)
         triggers = self._get_pending_triggers()
         for warning in triggers:
