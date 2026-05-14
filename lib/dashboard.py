@@ -128,9 +128,49 @@ class Dashboard:
         next_date = today + datetime.timedelta(days=days_ahead)
         return str(next_date)
 
+    def _auto_fire_retro_trigger(self):
+        """Create retro trigger file if today is retro day and not yet reviewed."""
+        import json as j
+        import datetime
+        project_dir = os.path.dirname(self.project_path)
+        try:
+            with open(self.project_path, "r") as f:
+                data = j.load(f)
+        except (IOError, j.JSONDecodeError):
+            return
+        day_names = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+                     "friday": 4, "saturday": 5, "sunday": 6}
+        retro_day = day_names.get(data.get("retro_day", "friday").lower(), 4)
+        today = datetime.date.today()
+        if today.weekday() != retro_day:
+            return
+        year, week, _ = today.isocalendar()
+        current_week = f"{year}-W{week:02d}"
+        reviewed_path = os.path.join(project_dir, "retro", ".reviewed")
+        try:
+            with open(reviewed_path, "r") as f:
+                if f.read().strip() >= current_week:
+                    return
+        except (FileNotFoundError, IOError):
+            pass
+        triggers_dir = os.path.join(project_dir, "triggers")
+        trigger_path = os.path.join(triggers_dir, "retro.json")
+        if os.path.exists(trigger_path):
+            return
+        os.makedirs(triggers_dir, exist_ok=True)
+        trigger_data = {
+            "name": "retro",
+            "message": f"今週の振り返りがまだです（{current_week}）。/beacon-retro で開始しますか？",
+            "created_at": today.isoformat(),
+        }
+        with open(trigger_path, "w") as f:
+            j.dump(trigger_data, f, ensure_ascii=False)
+            f.write("\n")
+
     def _get_pending_triggers(self):
         """Read pending triggers from .beacon/triggers/. Returns list of warning messages."""
         import json as j
+        self._auto_fire_retro_trigger()
         project_dir = os.path.dirname(self.project_path)
         triggers_dir = os.path.join(project_dir, "triggers")
         if not os.path.isdir(triggers_dir):
