@@ -373,7 +373,7 @@ def cmd_log_prepare():
             print(f"Milestone not found: {ms_id}")
             sys.exit(1)
     else:
-        targets = [ms for ms in data["milestones"] if ms["status"] in ("in_progress", "observing")]
+        targets = [ms for ms in data["milestones"] if ms["status"] in ("todo", "in_progress", "observing")]
         if not targets:
             print("No active milestone. Run: beacon milestone start <ms-id>")
             sys.exit(1)
