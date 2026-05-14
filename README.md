@@ -153,6 +153,17 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 | `beacon task delete <id>` | Logical delete / 論理削除 |
 | `beacon entry move <id> -t <task-id>` | Move entry under a task / タスク配下に移動 |
 
+### Documents
+
+| Command | Description |
+|---------|-------------|
+| `beacon doc add "title" [--scope core\|spec\|memo] [--content text]` | Add document / ドキュメント追加 |
+| `beacon doc list [--scope scope] [--json]` | List documents / 一覧 |
+| `beacon doc show <doc-id>` | Show document / 内容表示 |
+| `beacon doc update <doc-id> --content "text"` | Update document / 更新 |
+
+Scopes: `core` (design principles / 設計原則), `spec` (technical specs / 仕様), `memo` (notes / メモ)
+
 ### Logging
 
 | Command | Description |
@@ -189,7 +200,9 @@ The curses-based dashboard runs in the left tmux pane and auto-refreshes when `.
 | `k` / `↑` | Move up / 上移動 |
 | `Enter` / `Space` | Expand/collapse milestone / 展開・折りたたみ |
 | `d` | Toggle done entries / 完了エントリの表示切替 |
+| `D` | Toggle documents view / ドキュメントビューの切替 |
 | `r` | Toggle retro view / 振り返り表示の切替 |
+| `h` / `ESC` | Go back (in document detail) / 戻る |
 | `q` | Quit (closes tmux session) / 終了 |
 
 ## Claude Code Integration
@@ -220,6 +233,9 @@ All project state lives in `.beacon/project.json`. See [SPEC.md](docs/SPEC.md) f
 ```
 .beacon/
   project.json    # Project state (milestones, entries, summary)
+  config.json     # Mode config: local or cloud
+  cloud.json      # Cloud project binding (project_id, api_url)
+  documents/      # Project documents (Markdown with YAML frontmatter)
   retro/          # Weekly retrospective documents
   triggers/       # Async message queue (dashboard <-> Claude Code)
 ```

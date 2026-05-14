@@ -15,7 +15,16 @@ Beacon is a tool that keeps milestone-based project progress always visible duri
 ```
 beacon (bin/beacon)                   - CLI entrypoint (bash)
 lib/commands.py                       - Subcommand implementation (Python)
+lib/core.py                           - Pure business logic (validation, CRUD)
 lib/dashboard.py                      - Real-time tmux dashboard (Python/curses)
+lib/store.py                          - Storage abstraction (Protocol + factory)
+lib/store_local.py                    - Local JSON file backend
+lib/store_api.py                      - Cloud API backend (HTTP + WebSocket)
+lib/api_client.py                     - HTTP client for cloud API
+lib/ws_client.py                      - WebSocket client (stdlib only)
+lib/auth.py                           - Google OAuth authentication
+server/app.py                         - FastAPI cloud API server
+server/firestore_client.py            - Firestore wrapper for API backend
 .beacon/project.json                  - Project state file (JSON)
 ~/.claude/skills/beacon-*/SKILL.md    - Claude Code Skill definitions
 ```
@@ -34,12 +43,14 @@ lib/dashboard.py                      - Real-time tmux dashboard (Python/curses)
 │  - --prepare: output context as JSON    │
 │  - --finalize: write AI-generated input │
 ├─────────────────────────────────────────┤
-│  .beacon/project.json (data layer)      │
-│  Replaceable with a backend API         │
+│  Store abstraction (lib/store.py)       │
+│  - StoreLocal: .beacon/project.json    │
+│  - StoreApi: Cloud API + WebSocket      │
+│  Mode selected by .beacon/config.json   │
 └─────────────────────────────────────────┘
 ```
 
-**Principle**: Skills only bridge `--prepare` output to `--finalize` input. Business logic lives in the CLI.
+**Principle**: Skills only bridge `--prepare` output to `--finalize` input. Business logic lives in the CLI. The storage layer is transparent — CLI commands work identically in local and cloud mode.
 
 ## Launch Flow
 
@@ -60,7 +71,7 @@ To check status from within Claude Code, use `! beacon status`.
 
 | Command | Description | --json |
 |---------|-------------|--------|
-| `beacon milestone add "title" [-d date]` | Add a milestone | - |
+| `beacon milestone add "title" [-d date] [--description "desc"]` | Add a milestone | - |
 | `beacon milestone list` | List milestones | - |
 | `beacon milestone start <id>` | Set milestone as active | - |
 | `beacon milestone done <id>` | Set milestone as done | - |
@@ -82,6 +93,58 @@ To check status from within Claude Code, use `! beacon status`.
 | `beacon task update <id> [opts]` | Update fields | Yes |
 | `beacon task delete <id>` | Logical delete (cancelled) | Yes |
 
+### Document Subcommands
+
+| Command | Description | --json |
+|---------|-------------|--------|
+| `beacon doc add "title" [--scope scope] [--id slug] [--content text]` | Add a document | Yes |
+| `beacon doc list [--scope scope]` | List documents | Yes |
+| `beacon doc show <doc-id>` | Show document content | Yes |
+| `beacon doc update <doc-id> --content "text"` | Update document content | Yes |
+
+Document scopes: `core` (design principles, always loaded at session start), `spec` (technical specifications), `memo` (investigation notes, volatile).
+
+Content can be piped via stdin: `echo 'content' | beacon doc add "title" --scope spec --stdin`
+
+### Logging & Sync
+
+| Command | Description | --json |
+|---------|-------------|--------|
+| `beacon log [message] [-m ms-id] [-p progress]` | Record HEAD commit | Yes |
+| `beacon log --prepare` | Output evaluation context as JSON (read-only) | Yes |
+| `beacon log --finalize [--progress N] [--summary text]` | Write evaluation results | Yes |
+| `beacon sync` | Auto-sync recent git commits to active milestone | - |
+| `beacon summary [text]` | View/update project summary | Yes |
+
+### Retrospectives
+
+| Command | Description | --json |
+|---------|-------------|--------|
+| `beacon retro [--since DATE] [--until DATE]` | Generate weekly retro data | - |
+| `beacon retro done` | Mark current retro as reviewed | - |
+
+### Triggers
+
+| Command | Description | --json |
+|---------|-------------|--------|
+| `beacon trigger fire <name> [message]` | Fire a trigger (used by dashboard) | - |
+| `beacon trigger check` | Check pending triggers | Yes |
+| `beacon trigger clear <name>` | Clear a specific trigger | - |
+
+### Cloud & Auth
+
+| Command | Description |
+|---------|-------------|
+| `beacon auth login` | Sign in with Google |
+| `beacon auth logout` | Remove cached credentials |
+| `beacon auth status` | Show login status |
+| `beacon cloud push` | Upload project to cloud (auto-switches to cloud mode) |
+| `beacon cloud pull` | Download project from cloud |
+| `beacon cloud list` | List cloud projects |
+| `beacon cloud [project-id]` | Open a cloud project (interactive select or by ID) |
+| `beacon cloud status` | Show cloud config |
+| `beacon cloud off` | Switch back to local mode |
+
 ### Other Commands
 
 | Command | Description | --json |
@@ -89,17 +152,9 @@ To check status from within Claude Code, use `! beacon status`.
 | `beacon` | Launch tmux dashboard + shell | - |
 | `beacon init` | Initialize `.beacon/` in current directory | - |
 | `beacon status` | Show project status | Yes |
-| `beacon log [message] [-m ms-id] [-p progress]` | Record HEAD commit | Yes |
-| `beacon log --prepare` | Output evaluation context as JSON (read-only) | Yes |
-| `beacon log --finalize [--progress N] [--summary text]` | Write evaluation results | Yes |
-| `beacon sync` | Auto-sync recent git commits to active milestone | - |
-| `beacon summary [text]` | View/update project summary | Yes |
 | `beacon entry move <entry-id> -t <task-id>` | Move entry under a task | - |
-| `beacon retro [--since DATE] [--until DATE]` | Generate weekly retro data | - |
-| `beacon retro done` | Mark current retro as reviewed | - |
-| `beacon trigger fire <name> [message]` | Fire a trigger (used by dashboard) | - |
-| `beacon trigger check` | Check pending triggers | Yes |
-| `beacon trigger clear <name>` | Clear a specific trigger | - |
+| `beacon help` | Show help | - |
+| `beacon --version` | Show version | - |
 
 ### Common Options
 
@@ -113,7 +168,9 @@ To check status from within Claude Code, use `! beacon status`.
 | `--task <id>` | `-t` | Target task ID (entry move) |
 | `--all` | `-a` | Show all including cancelled |
 
-## Data Model (.beacon/project.json)
+## Data Model
+
+### Project State (.beacon/project.json)
 
 ```json
 {
@@ -124,7 +181,8 @@ To check status from within Claude Code, use `! beacon status`.
     {
       "id": "ms-1",
       "title": "Milestone title",
-      "status": "todo | in_progress | in_review | waiting | done | observing | cancelled",
+      "description": "Optional description",
+      "status": "todo | in_progress | done | observing | cancelled",
       "progress": 0,
       "target_date": "YYYY-MM-DD | null",
       "entries": [
@@ -135,7 +193,7 @@ To check status from within Claude Code, use `! beacon status`.
           "date": "YYYY-MM-DD",
           "created_at": "YYYY-MM-DD",
           "done_at": "YYYY-MM-DD | null",
-          "status": "todo | in_progress | done | cancelled",
+          "status": "todo | in_progress | in_review | waiting | done | cancelled",
           "detail": "Detail text (optional)",
           "meta": {
             "hash": "(for commits) 7-char short hash",
@@ -149,6 +207,52 @@ To check status from within Claude Code, use `! beacon status`.
     }
   ]
 }
+```
+
+### Documents (.beacon/documents/)
+
+Documents are Markdown files with YAML frontmatter:
+
+```yaml
+---
+scope: core
+---
+# Document title
+
+Content in Markdown.
+```
+
+In cloud mode, documents are stored via the API and synced on push/pull.
+
+### Cloud Config (.beacon/cloud.json)
+
+```json
+{
+  "project_id": "project-slug-abc123",
+  "api_url": "https://beacon-ai.dev"
+}
+```
+
+### Mode Config (.beacon/config.json)
+
+```json
+{
+  "mode": "cloud"
+}
+```
+
+When `mode` is `cloud`, all CLI commands route through the cloud API. When `local` (default), they read/write `.beacon/project.json` directly.
+
+### Directory Structure
+
+```
+.beacon/
+  project.json    # Project state (milestones, entries, summary)
+  config.json     # Mode config (local/cloud)
+  cloud.json      # Cloud project binding (project_id, api_url)
+  documents/      # Project documents (Markdown with frontmatter)
+  retro/          # Weekly retrospective documents
+  triggers/       # Async message queue (dashboard <-> Claude Code)
 ```
 
 ### ID Naming Convention
@@ -174,6 +278,8 @@ Entry:
 todo → in_progress → done
                    ↘ cancelled (logical delete)
 ```
+
+Additional entry statuses: `in_review`, `waiting` (for workflow tracking).
 
 Cancelled entries/milestones are hidden from `list` by default. Use `--all` to include them.
 
@@ -223,10 +329,23 @@ This structurally eliminates the problem of AI ignoring CLAUDE.md prompt instruc
 ## Dashboard (lib/dashboard.py)
 
 - Runs in the left tmux pane, always visible
-- Polls `project.json` file hash every 2 seconds
+- **Local mode**: polls `project.json` file hash for changes
+- **Cloud mode**: receives push updates via WebSocket (falls back to throttled HTTP polling)
 - Auto-redraws on change detection
-- Tree-style display of milestones and entries
-- Keyboard: j/k or arrows to navigate, Enter/Space to expand/collapse, d to toggle done, r to toggle retro view, q to quit
+- Three view modes: Project (default), Retro, Documents
+
+### Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `j` / `↓` | Move down / scroll |
+| `k` / `↑` | Move up / scroll |
+| `Enter` / `Space` | Expand/collapse (project view) / select document (documents view) |
+| `d` | Toggle done entries (project view) |
+| `D` | Switch to/from documents view |
+| `r` | Switch to/from retro view |
+| `h` / `ESC` / `←` | Go back (documents detail → list) |
+| `q` | Quit (closes tmux session) |
 
 ## tmux Session Layout
 
@@ -239,11 +358,25 @@ This structurally eliminates the problem of AI ignoring CLAUDE.md prompt instruc
 
 Session name: `beacon-<first 8 chars of directory path hash>`
 
-## Future Plans
+## Multi-user & Cloud
 
-### Multi-user Support (ms-6)
+### Roles
 
-- Per-milestone ownership
-- PR-driven: Map PR lifecycle (create → in_review → merge → done) to entry status
-- Data partitioning: Independent files/API resources per milestone
-- Backend: Replace project.json with an API; CLI abstracts the data access layer
+| Role | Read | Write | Manage members |
+|------|------|-------|----------------|
+| owner | Yes | Yes | Yes |
+| editor | Yes | Yes | No |
+| viewer | Yes | No | No |
+
+### Authentication
+
+- Google OAuth via `beacon auth login`
+- Credentials stored at `~/.beacon/credentials.json`
+- Token auto-refreshes on each API request
+
+### Cloud API
+
+- FastAPI server deployed on Cloud Run
+- Firestore for project data persistence
+- WebSocket endpoint for real-time dashboard updates
+- Role-based authorization on all write endpoints

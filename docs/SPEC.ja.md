@@ -15,7 +15,16 @@ Beacon は、AI駆動開発においてマイルストーンベースのプロ�
 ```
 beacon (bin/beacon)                   - CLI エントリポイント (bash)
 lib/commands.py                       - サブコマンド実装 (Python)
+lib/core.py                           - 純粋なビジネスロジック (バリデーション, CRUD)
 lib/dashboard.py                      - tmux左ペイン用リアルタイムダッシュボード (Python/curses)
+lib/store.py                          - ストレージ抽象化 (Protocol + ファクトリ)
+lib/store_local.py                    - ローカルJSONファイルバックエンド
+lib/store_api.py                      - クラウドAPIバックエンド (HTTP + WebSocket)
+lib/api_client.py                     - クラウドAPI用HTTPクライアント
+lib/ws_client.py                      - WebSocketクライアント (標準ライブラリのみ)
+lib/auth.py                           - Google OAuth認証
+server/app.py                         - FastAPIクラウドAPIサーバー
+server/firestore_client.py            - API用Firestoreラッパー
 .beacon/project.json                  - プロジェクト状態ファイル (JSON)
 ~/.claude/skills/beacon-*/SKILL.md    - Claude Code 用 Skill 定義
 ```
@@ -34,12 +43,14 @@ lib/dashboard.py                      - tmux左ペイン用リアルタイムダ
 │  - --prepare: 判断材料をJSON出力          │
 │  - --finalize: 生成結果を受けて書き込み   │
 ├─────────────────────────────────────────┤
-│  .beacon/project.json（データ層）         │
-│  将来的にバックエンドAPI に差し替え可能    │
+│  Store抽象化 (lib/store.py)              │
+│  - StoreLocal: .beacon/project.json      │
+│  - StoreApi: クラウドAPI + WebSocket      │
+│  .beacon/config.json でモード選択         │
 └─────────────────────────────────────────┘
 ```
 
-**原則**: Skill は prepare の実行と finalize への橋渡しのみを行う。ビジネスロジックはツール側が持つ。
+**原則**: Skill は prepare の実行と finalize への橋渡しのみを行う。ビジネスロジックはツール側が持つ。ストレージ層は透過的 — CLIコマンドはローカルモードでもクラウドモードでも同一の動作をする。
 
 ## 起動フロー
 
@@ -60,7 +71,7 @@ Claude Code 内からステータスを確認したい場合は `! beacon status
 
 | コマンド | 説明 | --json |
 |---------|------|--------|
-| `beacon milestone add "タイトル" [-d 目標日]` | マイルストーンを追加 | - |
+| `beacon milestone add "タイトル" [-d 目標日] [--description "説明"]` | マイルストーンを追加 | - |
 | `beacon milestone list` | マイルストーン一覧 | - |
 | `beacon milestone start <id>` | マイルストーンをアクティブに設定 | - |
 | `beacon milestone done <id>` | マイルストーンを完了に設定 | - |
@@ -82,6 +93,58 @@ Claude Code 内からステータスを確認したい場合は `! beacon status
 | `beacon task update <id> [opts]` | 任意フィールドを更新 | 対応済 |
 | `beacon task delete <id>` | 論理削除（cancelled） | 対応済 |
 
+### doc サブコマンド
+
+| コマンド | 説明 | --json |
+|---------|------|--------|
+| `beacon doc add "タイトル" [--scope scope] [--id slug] [--content text]` | ドキュメントを追加 | 対応済 |
+| `beacon doc list [--scope scope]` | ドキュメント一覧 | 対応済 |
+| `beacon doc show <doc-id>` | ドキュメント内容表示 | 対応済 |
+| `beacon doc update <doc-id> --content "text"` | ドキュメント内容更新 | 対応済 |
+
+ドキュメントスコープ: `core`（設計原則・常時参照）, `spec`（仕様・技術詳細）, `memo`（検討メモ・揮発してもよい情報）
+
+stdinからコンテンツを渡す場合: `echo 'content' | beacon doc add "タイトル" --scope spec --stdin`
+
+### ログ・同期
+
+| コマンド | 説明 | --json |
+|---------|------|--------|
+| `beacon log [message] [-m ms-id] [-p progress]` | HEAD コミットを記録 | 対応済 |
+| `beacon log --prepare` | 進捗評価用の判断材料をJSON出力（書き込みしない） | 対応済 |
+| `beacon log --finalize [--progress N] [--summary text]` | 評価結果を受けて書き込み | 対応済 |
+| `beacon sync` | 直近 git コミットをアクティブMSに同期 | - |
+| `beacon summary [text]` | サマリーの表示/更新 | 対応済 |
+
+### 振り返り
+
+| コマンド | 説明 | --json |
+|---------|------|--------|
+| `beacon retro [--since DATE] [--until DATE]` | 週次振り返りデータ生成 | - |
+| `beacon retro done` | 振り返りをレビュー済みにする | - |
+
+### トリガー
+
+| コマンド | 説明 | --json |
+|---------|------|--------|
+| `beacon trigger fire <name> [message]` | トリガーを発火（ダッシュボードから使用） | - |
+| `beacon trigger check` | 未処理トリガーを確認 | 対応済 |
+| `beacon trigger clear <name>` | トリガーを消化 | - |
+
+### クラウド・認証
+
+| コマンド | 説明 |
+|---------|------|
+| `beacon auth login` | Googleログイン |
+| `beacon auth logout` | 認証情報を削除 |
+| `beacon auth status` | ログイン状態を表示 |
+| `beacon cloud push` | プロジェクトをクラウドにアップロード（クラウドモードに自動切替） |
+| `beacon cloud pull` | クラウドからプロジェクトをダウンロード |
+| `beacon cloud list` | クラウドプロジェクト一覧 |
+| `beacon cloud [project-id]` | クラウドプロジェクトを開く（対話選択またはID指定） |
+| `beacon cloud status` | クラウド設定を表示 |
+| `beacon cloud off` | ローカルモードに戻す |
+
 ### その他コマンド
 
 | コマンド | 説明 | --json |
@@ -89,17 +152,9 @@ Claude Code 内からステータスを確認したい場合は `! beacon status
 | `beacon` | tmux ダッシュボード + シェルを起動 | - |
 | `beacon init` | `.beacon/` をカレントディレクトリに初期化 | - |
 | `beacon status` | プロジェクト全体の状態 | 対応済 |
-| `beacon log [message] [-m ms-id] [-p progress]` | HEAD コミットを記録 | 対応済 |
-| `beacon log --prepare` | 進捗評価用の判断材料をJSON出力（書き込みしない） | 対応済 |
-| `beacon log --finalize [--progress N] [--summary text]` | 評価結果を受けて書き込み | 対応済 |
-| `beacon sync` | 直近 git コミットをアクティブMSに同期 | - |
-| `beacon summary [text]` | サマリーの表示/更新 | 対応済 |
 | `beacon entry move <entry-id> -t <task-id>` | エントリをタスク配下に移動 | - |
-| `beacon retro [--since DATE] [--until DATE]` | 週次振り返りデータ生成 | - |
-| `beacon retro done` | 振り返りをレビュー済みにする | - |
-| `beacon trigger fire <name> [message]` | トリガーを発火（ダッシュボードから使用） | - |
-| `beacon trigger check` | 未処理トリガーを確認 | 対応済 |
-| `beacon trigger clear <name>` | トリガーを消化 | - |
+| `beacon help` | ヘルプ表示 | - |
+| `beacon --version` | バージョン表示 | - |
 
 ### 共通オプション
 
@@ -113,7 +168,9 @@ Claude Code 内からステータスを確認したい場合は `! beacon status
 | `--task <id>` | `-t` | 移動先タスクID（entry move） |
 | `--all` | `-a` | cancelledを含む全件表示 |
 
-## データモデル (.beacon/project.json)
+## データモデル
+
+### プロジェクト状態 (.beacon/project.json)
 
 ```json
 {
@@ -124,7 +181,8 @@ Claude Code 内からステータスを確認したい場合は `! beacon status
     {
       "id": "ms-1",
       "title": "マイルストーンタイトル",
-      "status": "todo | in_progress | in_review | waiting | done | observing | cancelled",
+      "description": "説明（任意）",
+      "status": "todo | in_progress | done | observing | cancelled",
       "progress": 0,
       "target_date": "YYYY-MM-DD | null",
       "entries": [
@@ -135,7 +193,7 @@ Claude Code 内からステータスを確認したい場合は `! beacon status
           "date": "YYYY-MM-DD",
           "created_at": "YYYY-MM-DD",
           "done_at": "YYYY-MM-DD | null",
-          "status": "todo | in_progress | done | cancelled",
+          "status": "todo | in_progress | in_review | waiting | done | cancelled",
           "detail": "詳細テキスト（任意）",
           "meta": {
             "hash": "(commit時) 7文字短縮ハッシュ",
@@ -149,6 +207,52 @@ Claude Code 内からステータスを確認したい場合は `! beacon status
     }
   ]
 }
+```
+
+### ドキュメント (.beacon/documents/)
+
+ドキュメントはYAMLフロントマター付きのMarkdownファイル:
+
+```yaml
+---
+scope: core
+---
+# ドキュメントタイトル
+
+Markdownで記述した内容。
+```
+
+クラウドモードではAPI経由で保存され、push/pullで同期される。
+
+### クラウド設定 (.beacon/cloud.json)
+
+```json
+{
+  "project_id": "project-slug-abc123",
+  "api_url": "https://beacon-ai.dev"
+}
+```
+
+### モード設定 (.beacon/config.json)
+
+```json
+{
+  "mode": "cloud"
+}
+```
+
+`mode` が `cloud` の場合、全CLIコマンドはクラウドAPI経由で動作する。`local`（デフォルト）の場合は `.beacon/project.json` を直接読み書きする。
+
+### ディレクトリ構成
+
+```
+.beacon/
+  project.json    # プロジェクト状態（マイルストーン、エントリ、サマリー）
+  config.json     # モード設定（local/cloud）
+  cloud.json      # クラウドプロジェクト紐付け（project_id, api_url）
+  documents/      # プロジェクトドキュメント（フロントマター付きMarkdown）
+  retro/          # 週次振り返りドキュメント
+  triggers/       # 非同期メッセージキュー（ダッシュボード ↔ Claude Code）
 ```
 
 ### ID命名規則
@@ -174,6 +278,8 @@ todo → in_progress → done
 todo → in_progress → done
                    ↘ cancelled（論理削除）
 ```
+
+追加のエントリステータス: `in_review`, `waiting`（ワークフロー追跡用）
 
 cancelled のエントリ/マイルストーンは `list` のデフォルト表示から除外される。`--all` フラグで表示可能。
 
@@ -223,10 +329,23 @@ beacon の Skill は Claude Code が beacon を操作するためのインター
 ## ダッシュボード (lib/dashboard.py)
 
 - tmux 左ペインで常時表示
-- `project.json` のファイルハッシュを 2 秒間隔でポーリング
+- **ローカルモード**: `project.json` のファイルハッシュでポーリング
+- **クラウドモード**: WebSocketプッシュでリアルタイム更新（切断時はスロットルHTTPポーリングにフォールバック）
 - 変更検出時に自動再描画
-- ツリー形式でマイルストーンとエントリを表示
-- キーボード操作: j/k or ↑↓移動、Enter/Space展開/折りたたみ、d完了トグル、r振り返り表示切替、q終了
+- 3つの表示モード: プロジェクト（デフォルト）、振り返り、ドキュメント
+
+### キーボードショートカット
+
+| キー | アクション |
+|------|----------|
+| `j` / `↓` | 下移動 / スクロール |
+| `k` / `↑` | 上移動 / スクロール |
+| `Enter` / `Space` | 展開・折りたたみ（プロジェクト） / ドキュメント選択（ドキュメント） |
+| `d` | 完了エントリの表示切替（プロジェクト） |
+| `D` | ドキュメントビューの切替 |
+| `r` | 振り返りビューの切替 |
+| `h` / `ESC` / `←` | 戻る（ドキュメント詳細 → 一覧） |
+| `q` | 終了（tmuxセッションを閉じる） |
 
 ## tmux セッション構成
 
@@ -239,11 +358,25 @@ beacon の Skill は Claude Code が beacon を操作するためのインター
 
 セッション名: `beacon-<ディレクトリパスハッシュ先頭8文字>`
 
-## 将来計画
+## マルチユーザー・クラウド
 
-### マルチユーザー対応（ms-6）
+### ロール
 
-- マイルストーンごとにオーナーを設定
-- PR駆動: PRのライフサイクル（作成→in_review→マージ→done）をエントリステータスにマッピング
-- データ分割: マイルストーンごとに独立したファイル/APIリソース
-- バックエンド: project.json をAPIに差し替え。CLI がデータアクセス層を抽象化。
+| ロール | 読み取り | 書き込み | メンバー管理 |
+|--------|---------|---------|-------------|
+| owner | 可 | 可 | 可 |
+| editor | 可 | 可 | 不可 |
+| viewer | 可 | 不可 | 不可 |
+
+### 認証
+
+- `beacon auth login` でGoogle OAuth認証
+- 認証情報は `~/.beacon/credentials.json` に保存
+- APIリクエストごとにトークンを自動リフレッシュ
+
+### クラウドAPI
+
+- Cloud Run上にデプロイされたFastAPIサーバー
+- Firestoreでプロジェクトデータを永続化
+- WebSocketエンドポイントでダッシュボードにリアルタイム通知
+- 全書き込みエンドポイントにロールベース認可
