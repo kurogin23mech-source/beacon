@@ -758,11 +758,13 @@ cmd_doc() {
             local doc_content=""
             local doc_scope=""
             local json_flag=""
+            local doc_ms=""
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --id)       doc_id="${2:-}"; shift 2 ;;
                     --scope|-s) doc_scope="${2:-}"; shift 2 ;;
+                    --ms)       doc_ms="${2:-}"; shift 2 ;;
                     --json)     json_flag="1"; shift ;;
                     --content)  doc_content="${2:-}"; shift 2 ;;
                     --stdin)    shift ;;  # stdin is handled by Python side
@@ -771,28 +773,30 @@ cmd_doc() {
             done
 
             if [ -z "$doc_title" ]; then
-                echo "Usage: beacon doc add \"title\" [--scope core|spec|memo] [--id slug] [--content text] [--json]"
+                echo "Usage: beacon doc add \"title\" [--scope core|spec|memo] [--ms ms-id] [--id slug] [--content text] [--json]"
                 echo "  Content can also be piped via stdin."
                 exit 1
             fi
             BEACON_TITLE="$doc_title" BEACON_DOC_ID="$doc_id" \
                 BEACON_CONTENT="$doc_content" BEACON_SCOPE="$doc_scope" \
-                BEACON_JSON="$json_flag" \
+                BEACON_MS="$doc_ms" BEACON_JSON="$json_flag" \
                 python3 "$COMMANDS_PY" doc_add
             ;;
         list|ls)
             shift
             local json_flag=""
             local scope_filter=""
+            local ms_filter=""
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --json)     json_flag="1"; shift ;;
                     --scope|-s) scope_filter="${2:-}"; shift 2 ;;
+                    --ms)       ms_filter="${2:-}"; shift 2 ;;
                     *) shift ;;
                 esac
             done
             BEACON_JSON="$json_flag" BEACON_SCOPE="$scope_filter" \
-                python3 "$COMMANDS_PY" doc_list
+                BEACON_MS="$ms_filter" python3 "$COMMANDS_PY" doc_list
             ;;
         show|get)
             shift
@@ -812,9 +816,9 @@ cmd_doc() {
             ;;
         *)
             echo "Usage: beacon doc [add|list|show]"
-            echo "  add  \"title\" --scope core|spec|memo  Create/update a document"
-            echo "  list [--scope core|spec|memo]        List documents (optionally filtered)"
-            echo "  show <doc-id>                        Show document content"
+            echo "  add  \"title\" --scope core|spec|memo [--ms ms-id]  Create/update a document"
+            echo "  list [--scope core|spec|memo] [--ms ms-id]        List documents (filtered)"
+            echo "  show <doc-id>                                      Show document content"
             ;;
     esac
 }

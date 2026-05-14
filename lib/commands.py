@@ -902,10 +902,14 @@ def _parse_frontmatter(text):
     return meta, body
 
 
-def _add_frontmatter(content, scope):
-    """Prepend frontmatter to content, or update existing scope."""
+def _add_frontmatter(content, scope, milestone=""):
+    """Prepend frontmatter to content, or update existing scope/milestone."""
     meta, body = _parse_frontmatter(content)
     meta["scope"] = scope
+    if milestone:
+        meta["milestone"] = milestone
+    elif "milestone" not in meta:
+        pass  # keep existing or absent
     lines = ["---"]
     for k, v in meta.items():
         lines.append(f"{k}: {v}")
@@ -922,6 +926,7 @@ def _read_local_doc(fpath):
         content = f.read()
     meta, body = _parse_frontmatter(content)
     scope = meta.get("scope", DEFAULT_SCOPE)
+    milestone = meta.get("milestone", "")
     # Find title from first heading in body
     first_line = ""
     for line in body.split("\n"):
@@ -932,18 +937,22 @@ def _read_local_doc(fpath):
     title = first_line.lstrip("# ") if first_line.startswith("#") else fname[:-3]
     stat = os.stat(fpath)
     updated = datetime.datetime.fromtimestamp(stat.st_mtime).isoformat()
-    return {
+    result = {
         "doc_id": fname[:-3],
         "title": title,
         "scope": scope,
         "content": content,
         "updated_at": updated,
     }
+    if milestone:
+        result["milestone"] = milestone
+    return result
 
 
 def cmd_doc_list():
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     scope_filter = os.environ.get("BEACON_SCOPE", "")
+    ms_filter = os.environ.get("BEACON_MS", "")
 
     if _is_cloud_mode():
         client, config = _get_api_client()
@@ -956,15 +965,20 @@ def cmd_doc_list():
                 if not fname.endswith(".md"):
                     continue
                 doc = _read_local_doc(os.path.join(docs_dir, fname))
-                docs.append({
+                entry = {
                     "doc_id": doc["doc_id"],
                     "title": doc["title"],
                     "scope": doc["scope"],
                     "updated_at": doc["updated_at"],
-                })
+                }
+                if doc.get("milestone"):
+                    entry["milestone"] = doc["milestone"]
+                docs.append(entry)
 
     if scope_filter:
         docs = [d for d in docs if d.get("scope") == scope_filter]
+    if ms_filter:
+        docs = [d for d in docs if d.get("milestone") == ms_filter]
 
     if json_mode:
         print(json.dumps(docs, ensure_ascii=False))
@@ -1008,6 +1022,7 @@ def cmd_doc_add():
     content = os.environ.get("BEACON_CONTENT", "")
     doc_id = os.environ.get("BEACON_DOC_ID", "")
     scope = os.environ.get("BEACON_SCOPE", DEFAULT_SCOPE)
+    milestone = os.environ.get("BEACON_MS", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not title:
@@ -1026,8 +1041,8 @@ def cmd_doc_add():
         print("Error: content required (pass via BEACON_CONTENT or stdin)")
         sys.exit(1)
 
-    # Add frontmatter with scope
-    content = _add_frontmatter(content, scope)
+    # Add frontmatter with scope and milestone
+    content = _add_frontmatter(content, scope, milestone)
 
     if _is_cloud_mode():
         client, config = _get_api_client()

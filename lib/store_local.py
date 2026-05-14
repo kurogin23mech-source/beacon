@@ -60,7 +60,7 @@ class LocalStore:
         for fpath in sorted(g.glob(os.path.join(doc_dir, "*.md"))):
             fname = os.path.basename(fpath)
             doc_id = fname[:-3]
-            scope, title = "memo", doc_id
+            scope, title, milestone = "memo", doc_id, ""
             try:
                 with open(fpath, "r", encoding="utf-8") as f:
                     raw = f.read()
@@ -71,6 +71,8 @@ class LocalStore:
                         for line in parts[1].strip().splitlines():
                             if line.startswith("scope:"):
                                 scope = line.split(":", 1)[1].strip()
+                            elif line.startswith("milestone:"):
+                                milestone = line.split(":", 1)[1].strip()
                         body = parts[2]
                     else:
                         body = raw
@@ -82,7 +84,10 @@ class LocalStore:
                         break
             except (IOError, UnicodeDecodeError):
                 pass
-            results.append({"doc_id": doc_id, "title": title, "scope": scope})
+            entry = {"doc_id": doc_id, "title": title, "scope": scope}
+            if milestone:
+                entry["milestone"] = milestone
+            results.append(entry)
         return results
 
     def get_document(self, doc_id: str) -> dict:

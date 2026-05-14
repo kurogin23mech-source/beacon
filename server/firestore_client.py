@@ -212,12 +212,19 @@ def list_documents(project_id: str) -> list[dict]:
     result = []
     for doc in docs:
         data = doc.to_dict()
-        result.append({
+        # milestone: Firestore field first, fallback to frontmatter
+        milestone = data.get("milestone") or _extract_frontmatter_field(
+            data.get("content", ""), "milestone"
+        )
+        entry = {
             "doc_id": doc.id,
             "title": data.get("title", ""),
             "scope": data.get("scope", "memo"),
             "updated_at": data.get("updated_at", ""),
-        })
+        }
+        if milestone:
+            entry["milestone"] = milestone
+        result.append(entry)
     return result
 
 
@@ -236,20 +243,24 @@ def get_document(project_id: str, doc_id: str) -> dict | None:
     return {"doc_id": doc.id, **doc.to_dict()}
 
 
-def _extract_scope(content: str) -> str:
-    """Extract scope from YAML frontmatter in content. Default: memo."""
+def _extract_frontmatter_field(content: str, field: str, default: str = "") -> str:
+    """Extract a field from YAML frontmatter in content."""
     if not content.startswith("---"):
-        return "memo"
+        return default
     end = content.find("\n---", 3)
     if end == -1:
-        return "memo"
+        return default
     for line in content[4:end].split("\n"):
         line = line.strip()
-        if line.startswith("scope:"):
-            val = line.split(":", 1)[1].strip()
-            if val in ("core", "spec", "memo"):
-                return val
-    return "memo"
+        if line.startswith(f"{field}:"):
+            return line.split(":", 1)[1].strip()
+    return default
+
+
+def _extract_scope(content: str) -> str:
+    """Extract scope from YAML frontmatter in content. Default: memo."""
+    val = _extract_frontmatter_field(content, "scope", "memo")
+    return val if val in ("core", "spec", "memo") else "memo"
 
 
 def save_document(project_id: str, doc_id: str, title: str, content: str,
@@ -259,6 +270,7 @@ def save_document(project_id: str, doc_id: str, title: str, content: str,
 
     # Scope priority: explicit param > frontmatter > default
     resolved_scope = scope if scope in ("core", "spec", "memo") else _extract_scope(content)
+    milestone = _extract_frontmatter_field(content, "milestone")
 
     col = (
         get_db()
@@ -272,6 +284,8 @@ def save_document(project_id: str, doc_id: str, title: str, content: str,
         "scope": resolved_scope,
         "updated_at": datetime.datetime.now().isoformat(),
     }
+    if milestone:
+        data["milestone"] = milestone
     if doc_id:
         col.document(doc_id).set(data)
         return doc_id
