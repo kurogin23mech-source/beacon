@@ -168,30 +168,14 @@ class Dashboard:
         return scope, body
 
     def _load_doc_files(self):
-        """Load document files from .beacon/documents/ with scope info."""
-        import glob as g
-        project_dir = os.path.dirname(self.project_path)
-        doc_dir = os.path.join(project_dir, "documents")
-        os.makedirs(doc_dir, exist_ok=True)
-        files = sorted(g.glob(os.path.join(doc_dir, "*.md")))
-        self.doc_entries = []  # list of (filename, scope, title)
-        for fpath in files:
-            fname = os.path.basename(fpath)
-            try:
-                with open(fpath, "r", encoding="utf-8") as f:
-                    content = f.read()
-                scope, body = self._parse_doc_frontmatter(content)
-                # Extract title from first heading
-                title = fname[:-3]
-                for line in body.split("\n"):
-                    line = line.strip()
-                    if line.startswith("# "):
-                        title = line[2:].strip()
-                        break
-                self.doc_entries.append((fname, scope, title))
-            except (IOError, UnicodeDecodeError):
-                self.doc_entries.append((fname, "memo", fname[:-3]))
-        # Flatten for selection index
+        """Load document list from store (cloud API or local files)."""
+        try:
+            docs = self.store.list_documents()
+        except Exception:
+            docs = []
+        self.doc_entries = []  # list of (doc_id, scope, title)
+        for d in docs:
+            self.doc_entries.append((d.get("doc_id", ""), d.get("scope", "memo"), d.get("title", "")))
         self.doc_files = [e[0] for e in self.doc_entries]
         self.doc_selected = min(self.doc_selected, max(0, len(self.doc_files) - 1))
 
@@ -199,15 +183,14 @@ class Dashboard:
         """Load a document by index, stripping frontmatter for display."""
         if index < 0 or index >= len(self.doc_files):
             return
-        project_dir = os.path.dirname(self.project_path)
-        path = os.path.join(project_dir, "documents", self.doc_files[index])
+        doc_id = self.doc_files[index]
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                raw = f.read()
+            result = self.store.get_document(doc_id)
+            raw = result.get("content", "")
             _, body = self._parse_doc_frontmatter(raw)
-            self.doc_content = (self.doc_files[index], body)
+            self.doc_content = (doc_id, body)
             self.doc_scroll = 0
-        except (FileNotFoundError, IOError):
+        except Exception:
             self.doc_content = None
 
     def build_documents_lines(self, width):

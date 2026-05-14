@@ -169,6 +169,20 @@ class StoreApi:
     def is_cloud(self) -> bool:
         return True
 
+    def list_documents(self) -> list:
+        """List documents from cloud API."""
+        try:
+            return self._client.list_documents(self._project_id)
+        except (RuntimeError, ConnectionError):
+            return []
+
+    def get_document(self, doc_id: str) -> dict:
+        """Get a single document from cloud API."""
+        try:
+            return self._client.get_document(self._project_id, doc_id)
+        except (RuntimeError, ConnectionError):
+            return {}
+
     @staticmethod
     def _hash(data: dict) -> str:
         return hashlib.md5(json.dumps(data, sort_keys=True).encode()).hexdigest()

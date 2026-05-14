@@ -765,6 +765,7 @@ cmd_doc() {
                     --scope|-s) doc_scope="${2:-}"; shift 2 ;;
                     --json)     json_flag="1"; shift ;;
                     --content)  doc_content="${2:-}"; shift 2 ;;
+                    --stdin)    shift ;;  # stdin is handled by Python side
                     *)          doc_title="$1"; shift ;;
                 esac
             done

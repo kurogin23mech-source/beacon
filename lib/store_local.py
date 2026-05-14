@@ -50,6 +50,52 @@ class LocalStore:
     def is_cloud(self) -> bool:
         return False
 
+    def list_documents(self) -> list:
+        """List documents from local .beacon/documents/."""
+        import glob as g
+        doc_dir = os.path.join(os.path.dirname(self._project_file), "documents")
+        if not os.path.isdir(doc_dir):
+            return []
+        results = []
+        for fpath in sorted(g.glob(os.path.join(doc_dir, "*.md"))):
+            fname = os.path.basename(fpath)
+            doc_id = fname[:-3]
+            scope, title = "memo", doc_id
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    raw = f.read()
+                # Parse frontmatter
+                if raw.startswith("---"):
+                    parts = raw.split("---", 2)
+                    if len(parts) >= 3:
+                        for line in parts[1].strip().splitlines():
+                            if line.startswith("scope:"):
+                                scope = line.split(":", 1)[1].strip()
+                        body = parts[2]
+                    else:
+                        body = raw
+                else:
+                    body = raw
+                for line in body.strip().splitlines():
+                    if line.startswith("# "):
+                        title = line[2:].strip()
+                        break
+            except (IOError, UnicodeDecodeError):
+                pass
+            results.append({"doc_id": doc_id, "title": title, "scope": scope})
+        return results
+
+    def get_document(self, doc_id: str) -> dict:
+        """Get a single document from local .beacon/documents/."""
+        doc_dir = os.path.join(os.path.dirname(self._project_file), "documents")
+        fpath = os.path.join(doc_dir, f"{doc_id}.md")
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                content = f.read()
+            return {"doc_id": doc_id, "content": content}
+        except (FileNotFoundError, IOError):
+            return {}
+
     def start_watching(self) -> None:
         pass
 
