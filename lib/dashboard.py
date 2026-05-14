@@ -85,6 +85,7 @@ class Dashboard:
         self.expanded = set()  # Set of milestone IDs that are expanded
         self.expanded_entries = set()  # Set of entry IDs whose detail is shown
         self.hide_done = False  # Toggle to hide done entries
+        self.summary_expanded = False  # Toggle to expand full summary
         self.view_mode = "project"  # "project", "retro", or "documents"
         self.retro_scroll = 0  # Scroll offset for retro view
         self.doc_scroll = 0  # Scroll offset for documents view
@@ -346,12 +347,22 @@ class Dashboard:
             header_lines.append((wl, curses.A_NORMAL))
         header_lines.append(("", 0))
 
-        # Summary
+        # Summary (collapsible: 's' to toggle)
         summary = self.project.get("summary", "")
         if summary:
-            header_lines.append(("  ▶ 現状", "section_yellow"))
-            for wl in wrap_line("    " + summary, width - 1):
-                header_lines.append((wl, curses.A_NORMAL))
+            max_preview_lines = 2
+            all_lines = wrap_line("    " + summary, width - 1)
+            needs_toggle = len(all_lines) > max_preview_lines
+            toggle_hint = " [s: 展開]" if needs_toggle and not self.summary_expanded else ""
+            toggle_hint = " [s: 折りたたみ]" if self.summary_expanded and needs_toggle else toggle_hint
+            header_lines.append(("  ▶ 現状" + toggle_hint, "section_yellow"))
+            if self.summary_expanded or not needs_toggle:
+                for wl in all_lines:
+                    header_lines.append((wl, curses.A_NORMAL))
+            else:
+                for wl in all_lines[:max_preview_lines]:
+                    header_lines.append((wl, curses.A_NORMAL))
+                header_lines.append(("    ...", curses.A_DIM))
             header_lines.append(("", 0))
 
         # Retro reminder
@@ -616,6 +627,8 @@ class Dashboard:
                     self.expanded_entries.add(sel_key)
         elif key == ord('d'):
             self.hide_done = not self.hide_done
+        elif key == ord('s'):
+            self.summary_expanded = not self.summary_expanded
         return True
 
     def draw(self, stdscr):

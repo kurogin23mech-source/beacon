@@ -342,6 +342,7 @@ This structurally eliminates the problem of AI ignoring CLAUDE.md prompt instruc
 | `k` / `↑` | Move up / scroll |
 | `Enter` / `Space` | Expand/collapse (project view) / select document (documents view) |
 | `d` | Toggle done entries (project view) |
+| `s` | Toggle summary expand/collapse (project view) |
 | `D` | Switch to/from documents view |
 | `r` | Switch to/from retro view |
 | `h` / `ESC` / `←` | Go back (documents detail → list) |

@@ -200,6 +200,7 @@ The curses-based dashboard runs in the left tmux pane and auto-refreshes when `.
 | `k` / `↑` | Move up / 上移動 |
 | `Enter` / `Space` | Expand/collapse milestone / 展開・折りたたみ |
 | `d` | Toggle done entries / 完了エントリの表示切替 |
+| `s` | Toggle summary expand / サマリーの展開・折りたたみ |
 | `D` | Toggle documents view / ドキュメントビューの切替 |
 | `r` | Toggle retro view / 振り返り表示の切替 |
 | `h` / `ESC` | Go back (in document detail) / 戻る |
