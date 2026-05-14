@@ -8,6 +8,7 @@ import curses
 import json
 import os
 import sys
+import time
 import unicodedata
 
 
@@ -713,6 +714,7 @@ class Dashboard:
 
         _last_size = (0, 0)  # Force size mismatch on first iteration
         _needs_redraw = True
+        _last_trigger_check = 0  # epoch seconds of last trigger check
 
         while True:
             height, width = stdscr.getmaxyx()
@@ -726,6 +728,12 @@ class Dashboard:
                 stdscr.refresh()
                 height, width = stdscr.getmaxyx()
                 _last_size = (height, width)
+                _needs_redraw = True
+
+            # Periodic trigger check (every 5 minutes, independent of data changes)
+            _now = time.time()
+            if _now - _last_trigger_check > 1800:
+                _last_trigger_check = _now
                 _needs_redraw = True
 
             # Check for data changes only when idle (skip if already need redraw)
