@@ -313,15 +313,18 @@ cmd_log() {
 
     # Skip beacon-only commits to prevent infinite loop:
     # beacon log → project.json change → commit → hook → beacon log → ...
-    local changed_files
-    changed_files=$(git diff-tree --no-commit-id --name-only -r "$target_ref" 2>/dev/null)
-    if echo "$changed_files" | grep -qE '^\.(beacon)/'; then
-        # All changed files are under .beacon/
-        local non_beacon
-        non_beacon=$(echo "$changed_files" | grep -vE '^\.(beacon)/' || true)
-        if [ -z "$non_beacon" ]; then
-            echo "Skipped: commit $hash only changes .beacon/ (avoiding infinite loop)"
-            exit 0
+    # Only skip in auto modes (normal/prepare). --finalize is explicitly called
+    # by Skill, so it should always proceed.
+    if [ "$mode" != "finalize" ]; then
+        local changed_files
+        changed_files=$(git diff-tree --no-commit-id --name-only -r "$target_ref" 2>/dev/null)
+        if echo "$changed_files" | grep -qE '^\.(beacon)/'; then
+            local non_beacon
+            non_beacon=$(echo "$changed_files" | grep -vE '^\.(beacon)/' || true)
+            if [ -z "$non_beacon" ]; then
+                echo "Skipped: commit $hash only changes .beacon/ (avoiding infinite loop)"
+                exit 0
+            fi
         fi
     fi
 
