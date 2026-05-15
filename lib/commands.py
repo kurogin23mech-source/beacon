@@ -1091,6 +1091,60 @@ def cmd_doc_add():
         print(f"Saved: {doc_id} [{scope}] ({title})")
 
 
+def cmd_doc_update():
+    doc_id = os.environ.get("BEACON_DOC_ID", "")
+    content = os.environ.get("BEACON_CONTENT", "")
+    title = os.environ.get("BEACON_TITLE", "")
+    scope = os.environ.get("BEACON_SCOPE", "")
+    milestone = os.environ.get("BEACON_MS", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not doc_id:
+        print("Error: doc_id required")
+        sys.exit(1)
+
+    # Read content from stdin if not provided via env
+    if not content and not sys.stdin.isatty():
+        content = sys.stdin.read()
+
+    # Fetch existing document to merge fields
+    if _is_cloud_mode():
+        client, config = _get_api_client()
+        existing = client.get_document(config["project_id"], doc_id)
+    else:
+        docs_dir = _get_docs_dir()
+        fpath = os.path.join(docs_dir, f"{doc_id}.md")
+        if not os.path.exists(fpath):
+            print(f"Document not found: {doc_id}")
+            sys.exit(1)
+        existing = _read_local_doc(fpath)
+
+    # Use existing values as defaults
+    if not title:
+        title = existing.get("title", "")
+    if not scope:
+        scope = existing.get("scope", DEFAULT_SCOPE)
+    if not milestone:
+        milestone = existing.get("milestone", "")
+    if not content:
+        content = existing.get("content", "")
+
+    # Rebuild with frontmatter
+    content = _add_frontmatter(content, scope, milestone)
+
+    if _is_cloud_mode():
+        client.update_document(config["project_id"], doc_id, title, content)
+    else:
+        fpath = os.path.join(docs_dir, f"{doc_id}.md")
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(content)
+
+    if json_mode:
+        print(json.dumps({"doc_id": doc_id, "title": title, "scope": scope}, ensure_ascii=False))
+    else:
+        print(f"Updated: {doc_id} [{scope}] ({title})")
+
+
 # ---------------------------------------------------------------------------
 # Cloud commands
 # ---------------------------------------------------------------------------
@@ -1330,6 +1384,7 @@ if __name__ == "__main__":
         "doc_list": cmd_doc_list,
         "doc_show": cmd_doc_show,
         "doc_add": cmd_doc_add,
+        "doc_update": cmd_doc_update,
         "cloud_list": cmd_cloud_list,
         "cloud_push": cmd_cloud_push,
         "cloud_pull": cmd_cloud_pull,

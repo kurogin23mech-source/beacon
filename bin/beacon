@@ -801,6 +801,37 @@ cmd_doc() {
             BEACON_JSON="$json_flag" BEACON_SCOPE="$scope_filter" \
                 BEACON_MS="$ms_filter" python3 "$COMMANDS_PY" doc_list
             ;;
+        update)
+            shift
+            local doc_id=""
+            local doc_content=""
+            local doc_title=""
+            local doc_scope=""
+            local doc_ms=""
+            local json_flag=""
+
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --content)  doc_content="${2:-}"; shift 2 ;;
+                    --title)    doc_title="${2:-}"; shift 2 ;;
+                    --scope|-s) doc_scope="${2:-}"; shift 2 ;;
+                    --ms)       doc_ms="${2:-}"; shift 2 ;;
+                    --json)     json_flag="1"; shift ;;
+                    --stdin)    shift ;;
+                    *)          doc_id="$1"; shift ;;
+                esac
+            done
+
+            if [ -z "$doc_id" ]; then
+                echo "Usage: beacon doc update <doc-id> [--title text] [--scope core|spec|memo] [--ms ms-id] [--content text] [--json]"
+                echo "  Content can also be piped via stdin."
+                exit 1
+            fi
+            BEACON_DOC_ID="$doc_id" BEACON_TITLE="$doc_title" \
+                BEACON_CONTENT="$doc_content" BEACON_SCOPE="$doc_scope" \
+                BEACON_MS="$doc_ms" BEACON_JSON="$json_flag" \
+                python3 "$COMMANDS_PY" doc_update
+            ;;
         show|get)
             shift
             local doc_id=""
@@ -818,10 +849,11 @@ cmd_doc() {
             BEACON_DOC_ID="$doc_id" BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" doc_show
             ;;
         *)
-            echo "Usage: beacon doc [add|list|show]"
-            echo "  add  \"title\" --scope core|spec|memo [--ms ms-id]  Create/update a document"
-            echo "  list [--scope core|spec|memo] [--ms ms-id]        List documents (filtered)"
-            echo "  show <doc-id>                                      Show document content"
+            echo "Usage: beacon doc [add|list|show|update]"
+            echo "  add    \"title\" --scope core|spec|memo [--ms ms-id]  Create a document"
+            echo "  update <doc-id> [--title text] [--content text]     Update a document"
+            echo "  list   [--scope core|spec|memo] [--ms ms-id]        List documents"
+            echo "  show   <doc-id>                                      Show document content"
             ;;
     esac
 }
