@@ -6,6 +6,7 @@ __version__ = "0.1.0"
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -158,6 +159,29 @@ def _install_claude_hook():
     print("Installed Claude Code PostToolUse hook")
 
 
+def _install_skills():
+    """Copy beacon skills to ~/.claude/skills/ for Claude Code integration."""
+    skills_src = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "skills",
+    )
+    if not os.path.isdir(skills_src):
+        return
+    skills_dst = os.path.expanduser("~/.claude/skills")
+    os.makedirs(skills_dst, exist_ok=True)
+    installed = []
+    for fname in os.listdir(skills_src):
+        if not fname.endswith(".md"):
+            continue
+        skill_name = fname[:-3]  # beacon-log.md -> beacon-log
+        dst_dir = os.path.join(skills_dst, skill_name)
+        os.makedirs(dst_dir, exist_ok=True)
+        shutil.copy2(os.path.join(skills_src, fname), os.path.join(dst_dir, "SKILL.md"))
+        installed.append(skill_name)
+    if installed:
+        print(f"Installed skills: {', '.join(sorted(installed))}")
+
+
 def cmd_init():
     name = os.environ.get("BEACON_NAME", "")
     objective = os.environ.get("BEACON_OBJECTIVE", "")
@@ -171,6 +195,7 @@ def cmd_init():
     _append_claude_md()
     _install_git_hook()
     _install_claude_hook()
+    _install_skills()
     print(f"Created {pf}")
     print("Next: beacon milestone add")
 
