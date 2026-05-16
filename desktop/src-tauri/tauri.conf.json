@@ -11,10 +11,10 @@
     "windows": [
       {
         "title": "Beacon",
-        "width": 1200,
+        "width": 480,
         "height": 800,
-        "minWidth": 800,
-        "minHeight": 600,
+        "minWidth": 360,
+        "minHeight": 400,
         "resizable": true,
         "fullscreen": false
       }
