@@ -168,11 +168,46 @@ cmd_setup() {
             fi
             ;;
         2)
-            read -rp "  Cloud project ID: " cloud_id
-            if [ -n "$cloud_id" ]; then
-                BEACON_CLOUD_PROJECT_ID="$cloud_id" python3 "$COMMANDS_PY" cloud_join
+            echo ""
+            echo "  Fetching accessible projects..."
+            local projects_json
+            projects_json=$(BEACON_JSON=1 python3 "$COMMANDS_PY" cloud_list 2>/dev/null || echo "[]")
+
+            # Print numbered list and capture IDs via Python
+            local list_output
+            list_output=$(echo "$projects_json" | python3 -c "
+import sys, json
+projects = json.load(sys.stdin)
+if not projects:
+    print('EMPTY')
+else:
+    for i, p in enumerate(projects, 1):
+        name = p.get('name', '')
+        obj = p.get('objective', '')[:50]
+        suffix = ('  ' + obj) if obj else ''
+        print(f'{i}) {p[\"project_id\"]}  \"{name}\"{suffix}')
+    print('IDS:' + ','.join(p['project_id'] for p in projects))
+" 2>/dev/null)
+
+            if [ "$list_output" = "EMPTY" ] || [ -z "$list_output" ]; then
+                echo "  No accessible projects found."
+                echo "  Ask your team owner to invite you first, then re-run beacon setup."
             else
-                echo "  No ID entered — skipped."
+                local ids_line
+                ids_line=$(echo "$list_output" | grep "^IDS:")
+                local display
+                display=$(echo "$list_output" | grep -v "^IDS:")
+                echo "$display" | sed 's/^/  /'
+                echo ""
+                read -rp "  Select project [1]: " proj_num
+                proj_num="${proj_num:-1}"
+                local selected_id
+                selected_id=$(echo "${ids_line#IDS:}" | cut -d',' -f"$proj_num")
+                if [ -n "$selected_id" ]; then
+                    BEACON_CLOUD_PROJECT_ID="$selected_id" python3 "$COMMANDS_PY" cloud_join
+                else
+                    echo "  Invalid selection — skipped."
+                fi
             fi
             ;;
         3)

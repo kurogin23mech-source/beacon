@@ -291,9 +291,11 @@ def cmd_cloud_join():
         json.dump({"mode": "cloud"}, f, indent=2, ensure_ascii=False)
         f.write("\n")
 
-    from store_local import LocalStore
-    local = LocalStore(get_project_file())
-    local.save_project(data)
+    # Write project.json directly (LocalStore.save_project requires the file to exist)
+    pf = get_project_file()
+    with open(pf, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
 
     print(f"Joined cloud project: {project_id}")
     print(f"Project: {data.get('name', 'unnamed')}")
