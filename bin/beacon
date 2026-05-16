@@ -312,7 +312,7 @@ cmd_milestone_graph() {
 
 cmd_save() {
     ensure_project
-    local ms_id="" description="" source="" url="" revision_id="" progress="" json_flag=""
+    local ms_id="" description="" source="" url="" revision_id="" progress="" json_flag="" hash=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -320,6 +320,7 @@ cmd_save() {
             --source)      source="${2:-}"; shift 2 ;;
             --url)         url="${2:-}"; shift 2 ;;
             --revision-id) revision_id="${2:-}"; shift 2 ;;
+            --hash)        hash="${2:-}"; shift 2 ;;
             -p|--progress) progress="${2:-}"; shift 2 ;;
             --json)        json_flag="1"; shift ;;
             *)             description="$1"; shift ;;
@@ -336,6 +337,7 @@ cmd_save() {
     BEACON_DESCRIPTION="$description" BEACON_MS_ID="$ms_id" \
         BEACON_SOURCE="$source" BEACON_URL="$url" \
         BEACON_REVISION_ID="$revision_id" BEACON_PROGRESS="$progress" \
+        BEACON_HASH="$hash" \
         BEACON_DATE="$date_str" BEACON_JSON="$json_flag" \
         python3 "$COMMANDS_PY" save
 }

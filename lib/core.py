@@ -513,7 +513,8 @@ def check_duplicate_save(entries: list, source: str, url: str, revision_id: str)
 
 def save_entry(data: dict, *, ms_id: str = "", description: str,
                source: str, date: str, url: str = "",
-               revision_id: str = "", progress: str = "") -> dict:
+               revision_id: str = "", hash: str = "",
+               progress: str = "") -> dict:
     """Record a save entry to the target milestone. Returns result info dict."""
     target = find_target_milestone(data, ms_id)
     entries = target.setdefault("entries", [])
@@ -538,6 +539,8 @@ def save_entry(data: dict, *, ms_id: str = "", description: str,
         entry["meta"]["url"] = url
     if revision_id:
         entry["meta"]["revision_id"] = revision_id
+    if hash:
+        entry["meta"]["hash"] = hash
     entries.append(entry)
     update_progress(target, progress)
 

@@ -708,6 +708,7 @@ def cmd_save():
     source = os.environ.get("BEACON_SOURCE", "")
     url = os.environ.get("BEACON_URL", "")
     revision_id = os.environ.get("BEACON_REVISION_ID", "")
+    hash_val = os.environ.get("BEACON_HASH", "")
     progress = os.environ.get("BEACON_PROGRESS", "")
     date = os.environ.get("BEACON_DATE", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
@@ -722,7 +723,8 @@ def cmd_save():
     data = load_project()
     result = core.save_entry(data, ms_id=ms_id, description=description,
                              source=source, date=date, url=url,
-                             revision_id=revision_id, progress=progress)
+                             revision_id=revision_id, hash=hash_val,
+                             progress=progress)
     save_project(data)
 
     if json_mode:

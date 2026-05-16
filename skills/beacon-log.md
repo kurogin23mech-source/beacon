@@ -1,7 +1,7 @@
 ---
 name: beacon-log
 description: コミット後にbeaconへ記録し、進捗率とサマリーをAI評価で自動更新する。prepare/finalizeの2段階ワークフロー。
-version: 0.3.0
+version: 0.4.0
 triggers:
   - /beacon-log
   - beacon に記録
@@ -53,7 +53,7 @@ stdout に JSON が返る。2つのパターンがある:
 
 ## Step 1.5: マイルストーン選定（candidatesがある場合のみ）
 
-パターンBの場合、以下の基準で **1つのMSを選定** する:
+パターンBの場合、以下の基準で **メインMSを1つ選定** する:
 
 ### 選定基準
 - `commit.message` の内容が、どのMSの `title`・`pending_tasks`・`recent_entries` に最も関連するかを判断する
@@ -64,6 +64,27 @@ stdout に JSON が返る。2つのパターンがある:
 選定した MS の `id`（例: `ms-9`）。以降の Step では選定した MS の情報を使う。
 
 パターンAの場合はこの Step をスキップし、`milestone` をそのまま使う。
+
+## Step 1.7: 副次MS記録（candidatesがあり、複数MSに関連する場合のみ）
+
+パターンBで、コミットが **メインMS以外のMSにも関連する** 場合、そのMSに `beacon save` で記録を残す。
+
+### 判断基準
+- `commit.message` が複数MSの `title` や `pending_tasks` に関連するかを評価する
+- 明確に関連するMSのみ対象とする。曖昧な場合は記録しない
+
+### 対象がある場合
+各副次MSに対して Bash ツールで実行:
+
+```bash
+beacon save "<コミット内容の1行要約（副次MSの観点から）>" -m <副次ms-id> --hash <commit.hash> --source manual --json
+```
+
+- description はメインMSへの記録とは異なり、**副次MSの視点で** コミットの貢献を要約する
+- `--hash` でコミットハッシュを紐づけることで、同じコミットがどのMSに影響したか追跡可能になる
+
+### 対象がない場合
+何もせず Step 2 へ進む。パターンAの場合もこの Step をスキップする。
 
 ## Step 2: 進捗率の評価
 
