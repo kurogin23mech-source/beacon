@@ -25,6 +25,7 @@ lib/ws_client.py                      - WebSocketクライアント (標準ラ�
 lib/auth.py                           - Google OAuth認証
 server/app.py                         - FastAPIクラウドAPIサーバー
 server/firestore_client.py            - API用Firestoreラッパー
+desktop/                              - Tauriデスクトップアプリ (Rust + Web UI)
 .beacon/project.json                  - プロジェクト状態ファイル (JSON)
 ~/.claude/skills/beacon-*/SKILL.md    - Claude Code 用 Skill 定義
 ```
@@ -80,6 +81,9 @@ Claude Code 内からステータスを確認したい場合は `! beacon status
 | `beacon milestone show <id>` | 単一マイルストーンの詳細 | 対応済 |
 | `beacon milestone update <id> [opts]` | 任意フィールドを更新 | 対応済 |
 | `beacon milestone delete <id>` | 論理削除（cancelled） | 対応済 |
+| `beacon milestone depends <id> --on <id>[,id]` | 依存関係を設定 | 対応済 |
+| `beacon milestone depends <id> --clear` | 依存関係を解除 | 対応済 |
+| `beacon milestone graph` | 依存グラフを表示（wave配置） | 対応済 |
 
 ### task サブコマンド
 
@@ -105,6 +109,18 @@ Claude Code 内からステータスを確認したい場合は `! beacon status
 ドキュメントスコープ: `core`（設計原則・常時参照）, `spec`（仕様・技術詳細）, `memo`（検討メモ・揮発してもよい情報）
 
 stdinからコンテンツを渡す場合: `echo 'content' | beacon doc add "タイトル" --scope spec --stdin`
+
+### save サブコマンド（非コミット行為の記録）
+
+| コマンド | 説明 | --json |
+|---------|------|--------|
+| `beacon save "説明" -m ms-id [--source src]` | 非コミット行為を記録 | 対応済 |
+| `beacon save "説明" -m ms-id --hash <hash>` | 関連コミットに紐づけて記録 | 対応済 |
+| `beacon save "説明" --source google_docs --url "..."` | 外部リソース付きで記録 | 対応済 |
+
+`save` タイプは、git commit以外の行為（ドキュメント作成、データ分析、調査など）をマイルストーンの証跡として記録する。`--hash` を指定すると関連コミットとの紐づけが可能になり、1コミットが複数MSに影響した場合のトラッキングに使える。
+
+重複検出: `source` + (`url` または `revision_id`) の組み合わせで判定。`source=manual` は重複チェックをスキップする。
 
 ### ログ・同期
 
@@ -185,10 +201,12 @@ stdinからコンテンツを渡す場合: `echo 'content' | beacon doc add "タ
       "status": "todo | in_progress | done | observing | cancelled",
       "progress": 0,
       "target_date": "YYYY-MM-DD | null",
+      "depends_on": ["ms-2", "ms-3"],
+      "workspace": "ワークスペース識別子（任意）",
       "entries": [
         {
           "id": "e-1",
-          "type": "commit | task | note",
+          "type": "commit | task | save | note",
           "description": "エントリの説明",
           "date": "YYYY-MM-DD",
           "created_at": "YYYY-MM-DD",
@@ -196,8 +214,11 @@ stdinからコンテンツを渡す場合: `echo 'content' | beacon doc add "タ
           "status": "todo | in_progress | in_review | waiting | done | cancelled",
           "detail": "詳細テキスト（任意）",
           "meta": {
-            "hash": "(commit時) 7文字短縮ハッシュ",
-            "message": "(commit時) コミットメッセージ"
+            "hash": "(commit/save時) 7文字短縮ハッシュ",
+            "message": "(commit時) コミットメッセージ",
+            "source": "(save時) manual | google_docs | notion | ...",
+            "url": "(save時, 任意) 外部リソースURL",
+            "revision_id": "(save時, 任意) 外部システムの識別子"
           },
           "entries": [
             "(ネストされた子エントリ。タスク配下のコミット等)"

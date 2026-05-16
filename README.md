@@ -139,6 +139,8 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 | `beacon milestone show <id> [--json]` | Show details / 詳細表示 |
 | `beacon milestone update <id> [options]` | Update fields / 更新 |
 | `beacon milestone delete <id>` | Logical delete (cancelled) / 論理削除 |
+| `beacon milestone depends <id> --on <id>[,id]` | Set dependencies / 依存関係設定 |
+| `beacon milestone graph [--json]` | Show dependency graph / 依存グラフ表示 |
 
 ### Tasks & Entries
 
@@ -163,6 +165,16 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 | `beacon doc update <doc-id> --content "text"` | Update document / 更新 |
 
 Scopes: `core` (design principles / 設計原則), `spec` (technical specs / 仕様), `memo` (notes / メモ)
+
+### Save (Non-commit actions)
+
+| Command | Description |
+|---------|-------------|
+| `beacon save "desc" -m ms-id [--source src]` | Record a non-commit action / コミット以外の行為を記録 |
+| `beacon save "desc" -m ms-id --hash <hash>` | Link save to a related commit / 関連コミットに紐づけ |
+| `beacon save "desc" --source google_docs --url "..."` | Record with external resource / 外部リソース付きで記録 |
+
+Sources: `manual` (default, AI self-report), `google_docs`, `notion`, `jupyter`, or any custom string.
 
 ### Logging
 
@@ -226,6 +238,19 @@ Skills use a **prepare/finalize** pattern to keep AI judgment structured:
 3. `beacon log --finalize --progress N --summary "text"` writes the result
 
 This design ensures AI-generated evaluations are channeled through deterministic CLI operations, not free-form file edits.
+
+## Desktop App
+
+Beacon includes a native desktop application built with [Tauri](https://tauri.app/) for local, cross-platform project monitoring without a browser.
+
+```bash
+cd desktop
+npm install
+npm run tauri dev   # Development
+npm run tauri build # Production (.app/.dmg on macOS)
+```
+
+The Desktop App uses the same beacon CLI as its backend and supports both local and cloud projects. It features the same tabs as the Web UI: Milestones, Graph, Reviews, and Documents.
 
 ## Data Model
 

@@ -25,6 +25,7 @@ lib/ws_client.py                      - WebSocket client (stdlib only)
 lib/auth.py                           - Google OAuth authentication
 server/app.py                         - FastAPI cloud API server
 server/firestore_client.py            - Firestore wrapper for API backend
+desktop/                              - Tauri desktop app (Rust + Web UI)
 .beacon/project.json                  - Project state file (JSON)
 ~/.claude/skills/beacon-*/SKILL.md    - Claude Code Skill definitions
 ```
@@ -80,6 +81,9 @@ To check status from within Claude Code, use `! beacon status`.
 | `beacon milestone show <id>` | Show milestone details | Yes |
 | `beacon milestone update <id> [opts]` | Update fields | Yes |
 | `beacon milestone delete <id>` | Logical delete (cancelled) | Yes |
+| `beacon milestone depends <id> --on <id>[,id]` | Set milestone dependencies | Yes |
+| `beacon milestone depends <id> --clear` | Remove all dependencies | Yes |
+| `beacon milestone graph` | Display dependency graph (waves) | Yes |
 
 ### Task Subcommands
 
@@ -105,6 +109,18 @@ To check status from within Claude Code, use `! beacon status`.
 Document scopes: `core` (design principles, always loaded at session start), `spec` (technical specifications), `memo` (investigation notes, volatile).
 
 Content can be piped via stdin: `echo 'content' | beacon doc add "title" --scope spec --stdin`
+
+### Save (Non-commit actions)
+
+| Command | Description | --json |
+|---------|-------------|--------|
+| `beacon save "desc" -m ms-id [--source src]` | Record a non-commit action | Yes |
+| `beacon save "desc" -m ms-id --hash <hash>` | Link save to a related commit | Yes |
+| `beacon save "desc" --source google_docs --url "..."` | Record with external resource | Yes |
+
+The `save` type records non-git actions (document creation, data analysis, research, etc.) as milestone evidence. When `--hash` is provided, the save entry is linked to a related commit, enabling multi-milestone tracking from a single commit.
+
+Duplicate detection: `source` + (`url` or `revision_id`). `source=manual` skips duplicate checking.
 
 ### Logging & Sync
 
@@ -185,10 +201,12 @@ Content can be piped via stdin: `echo 'content' | beacon doc add "title" --scope
       "status": "todo | in_progress | done | observing | cancelled",
       "progress": 0,
       "target_date": "YYYY-MM-DD | null",
+      "depends_on": ["ms-2", "ms-3"],
+      "workspace": "optional workspace identifier",
       "entries": [
         {
           "id": "e-1",
-          "type": "commit | task | note",
+          "type": "commit | task | save | note",
           "description": "Entry description",
           "date": "YYYY-MM-DD",
           "created_at": "YYYY-MM-DD",
@@ -196,8 +214,11 @@ Content can be piped via stdin: `echo 'content' | beacon doc add "title" --scope
           "status": "todo | in_progress | in_review | waiting | done | cancelled",
           "detail": "Detail text (optional)",
           "meta": {
-            "hash": "(for commits) 7-char short hash",
-            "message": "(for commits) Commit message"
+            "hash": "(for commits/saves) 7-char short hash",
+            "message": "(for commits) Commit message",
+            "source": "(for saves) manual | google_docs | notion | ...",
+            "url": "(for saves, optional) External resource URL",
+            "revision_id": "(for saves, optional) External system identifier"
           },
           "entries": [
             "(Nested child entries, e.g., commits under a task)"
