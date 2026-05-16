@@ -1,0 +1,103 @@
+name: Discord Push Notification
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Get commit info
+        id: commit
+        run: |
+          echo "hash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "author=$(git log -1 --format='%an')" >> $GITHUB_OUTPUT
+          echo "message=$(git log -1 --format='%s')" >> $GITHUB_OUTPUT
+          echo "date=$(git log -1 --format='%cd' --date=format:'%Y-%m-%d')" >> $GITHUB_OUTPUT
+          STATS=$(git diff --stat HEAD~1 HEAD | tail -1)
+          echo "stats=${STATS}" >> $GITHUB_OUTPUT
+
+      - name: Get beacon status
+        id: beacon
+        env:
+          BEACON_API_TOKEN: ${{ secrets.BEACON_API_TOKEN }}
+        run: |
+          RESPONSE=$(curl -sf \
+            -H "Authorization: Bearer $BEACON_API_TOKEN" \
+            "https://beacon-ai.dev/api/projects" 2>/dev/null || echo "[]")
+
+          # Find the beacon project (first project)
+          PROJECT_ID=$(echo "$RESPONSE" | python3 -c "
+          import sys, json
+          projects = json.load(sys.stdin)
+          if projects:
+              print(projects[0].get('id', ''))
+          " 2>/dev/null || echo "")
+
+          if [ -z "$PROJECT_ID" ]; then
+            echo "ms_info=（beacon情報取得失敗）" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Get project status
+          STATUS=$(curl -sf \
+            -H "Authorization: Bearer $BEACON_API_TOKEN" \
+            "https://beacon-ai.dev/api/projects/$PROJECT_ID" 2>/dev/null || echo "{}")
+
+          MS_INFO=$(echo "$STATUS" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          milestones = data.get('milestones', [])
+          active = [m for m in milestones if m.get('status') == 'in_progress']
+          if not active:
+              print('アクティブなMSなし')
+          else:
+              lines = []
+              for m in active[:3]:
+                  lines.append(f\"[{m['id']}] {m['title']} ({m.get('progress',0)}%)\")
+              print(' / '.join(lines))
+          " 2>/dev/null || echo "")
+
+          echo "ms_info=${MS_INFO}" >> $GITHUB_OUTPUT
+
+      - name: Post to Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          HASH="${{ steps.commit.outputs.hash }}"
+          AUTHOR="${{ steps.commit.outputs.author }}"
+          MESSAGE="${{ steps.commit.outputs.message }}"
+          DATE="${{ steps.commit.outputs.date }}"
+          STATS="${{ steps.commit.outputs.stats }}"
+          MS_INFO="${{ steps.beacon.outputs.ms_info }}"
+          REPO_URL="https://github.com/${{ github.repository }}"
+
+          PAYLOAD=$(python3 -c "
+          import json, sys
+          payload = {
+            'embeds': [{
+              'title': '📦 New Push to main',
+              'color': 0x5865F2,
+              'fields': [
+                {'name': 'コミット', 'value': '\`$HASH\` $MESSAGE', 'inline': False},
+                {'name': '変更', 'value': '$STATS' if '$STATS' else '(統計なし)', 'inline': True},
+                {'name': '作者', 'value': '$AUTHOR', 'inline': True},
+                {'name': '日付', 'value': '$DATE', 'inline': True},
+                {'name': 'Active MS', 'value': '$MS_INFO' if '$MS_INFO' else '(なし)', 'inline': False},
+              ],
+              'url': '$REPO_URL/commit/${{ github.sha }}',
+              'footer': {'text': 'beacon · ${{ github.repository }}'}
+            }]
+          }
+          print(json.dumps(payload))
+          ")
+
+          curl -sf -X POST "$DISCORD_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"
