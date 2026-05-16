@@ -1241,9 +1241,9 @@ cmd_pr() {
                 esac
             done
 
-            # Build gh args string for passthrough
+            # Build gh args string for passthrough (printf %q preserves args with spaces)
             if [ ${#remaining[@]} -gt 0 ]; then
-                gh_args="${remaining[*]}"
+                gh_args=$(printf '%q ' "${remaining[@]}")
             fi
 
             BEACON_MS_ID="$ms_id" BEACON_INTENT="$intent" BEACON_GH_ARGS="$gh_args" \

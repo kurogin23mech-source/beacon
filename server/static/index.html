@@ -699,6 +699,10 @@ body::after {
   border: 1px solid rgba(249, 115, 22, 0.15);
 }
 
+.entry-pr-block {
+  grid-column: 1 / -1;
+}
+
 .entry-pr-meta {
   display: flex;
   flex-wrap: wrap;
@@ -755,6 +759,11 @@ body::after {
   color: var(--text-dim);
   text-decoration: line-through;
   text-decoration-color: var(--border);
+}
+
+/* Commits are historical records, not to-dos — no strikethrough */
+.entry.entry-type-commit.done .entry-desc {
+  text-decoration: none;
 }
 
 .entry-status-text {
@@ -1528,7 +1537,7 @@ function renderEntry(entry) {
     const rationale = m.review_rationale
       ? `<div class="entry-pr-decision entry-pr-rationale-block"><div class="entry-pr-decision-label">rationale</div>${esc(m.review_rationale)}</div>`
       : '';
-    prMeta = `<div class="entry-pr-meta"><span class="entry-pr-status ${prStatus}">${prStatus}${reviewStatus}</span>${url}</div>${intent}${rationale}`;
+    prMeta = `<div class="entry-pr-block"><div class="entry-pr-meta"><span class="entry-pr-status ${prStatus}">${prStatus}${reviewStatus}</span>${url}</div>${intent}${rationale}</div>`;
   }
   const statusText = entryStatusText(entry);
   const hasChildren = entry.entries?.length > 0;
@@ -1546,7 +1555,7 @@ function renderEntry(entry) {
   const childBadge = hasChildren && isCollapsed ? `<span class="entry-child-count">${childCount}</span>` : '';
 
   return `
-    <div class="entry${statusClass}${toggleClass}" ${hasChildren ? `data-action="toggle-entry" data-entry-id="${entry.id}"` : ''}>
+    <div class="entry entry-type-${entry.type}${statusClass}${toggleClass}" ${hasChildren ? `data-action="toggle-entry" data-entry-id="${entry.id}"` : ''}>
       ${entryTypeBadge(entry.type)}
       <span class="entry-id">${entry.id}</span>
       <span class="entry-desc">${esc(entry.description)}${hash}${statusText}${childBadge}</span>
