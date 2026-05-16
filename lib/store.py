@@ -1,7 +1,7 @@
 """Beacon Store - Storage abstraction layer.
 
 Provides a protocol for project data storage and a factory function
-to select the appropriate backend (local JSON or Firestore).
+to select the appropriate backend (local JSON or cloud API).
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ def get_store(project_file: str | None = None) -> Store:
     """Return the appropriate Store instance.
 
     If .beacon/cloud.json exists alongside the project file,
-    returns a FirestoreStore (future). Otherwise returns LocalStore.
+    returns a StoreApi (cloud API). Otherwise returns LocalStore.
     """
     if project_file is None:
         project_file = os.environ.get("BEACON_PROJECT_FILE", ".beacon/project.json")
