@@ -53,6 +53,19 @@ cmd_init() {
         exit 1
     fi
 
+    # Guard: warn if initializing in home directory
+    if [ "$(pwd)" = "$HOME" ]; then
+        echo "Warning: You are about to initialize beacon in your home directory."
+        echo "This will create ~/.beacon/ and modify ~/CLAUDE.md."
+        echo "Beacon is designed for project directories, not the home directory."
+        echo ""
+        read -rp "Continue anyway? [y/N] " confirm
+        if [[ ! "$confirm" =~ ^[Yy] ]]; then
+            echo "Aborted."
+            exit 1
+        fi
+    fi
+
     local name="${1:-}"
     local objective="${2:-}"
 
