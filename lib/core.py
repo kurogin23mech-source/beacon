@@ -847,3 +847,4 @@ def collect_retro_entries(entries: list, since: str, until: str) -> list:
                 result.append(item)
 
     return result
+
