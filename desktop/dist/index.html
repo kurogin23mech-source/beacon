@@ -98,11 +98,25 @@ body::after { content: ''; position: fixed; inset: 0; background: repeating-line
 .entry-type-badge.task { color: var(--info); background: rgba(96,165,250,0.1); border: 1px solid rgba(96,165,250,0.15); }
 .entry-type-badge.note { color: var(--warning); background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.15); }
 .entry-type-badge.save { color: var(--save); background: rgba(192,132,252,0.1); border: 1px solid rgba(192,132,252,0.15); }
+.entry-type-badge.pr { color: #f97316; background: rgba(249,115,22,0.1); border: 1px solid rgba(249,115,22,0.15); }
+.entry-pr-block { grid-column: 1 / -1; }
+.entry-pr-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 4px; font-size: 0.7rem; color: var(--text-secondary); }
+.entry-pr-decision { margin-top: 6px; padding: 5px 8px; border-left: 2px solid rgba(251,191,36,0.4); font-size: 0.72rem; line-height: 1.5; }
+.entry-pr-decision-label { font-size: 0.65rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-dim); margin-bottom: 2px; }
+.entry-pr-intent .entry-pr-decision-label { color: #60a5fa; }
+.entry-pr-rationale-block .entry-pr-decision-label { color: #a3e635; }
+.entry-pr-rationale-block { border-left-color: rgba(163,230,53,0.4); }
+.entry-pr-status { font-weight: 500; }
+.entry-pr-status.open { color: #60a5fa; } .entry-pr-status.in_review { color: #fb923c; }
+.entry-pr-status.approved { color: #a3e635; } .entry-pr-status.merged { color: #a78bfa; }
+.entry-pr-status.closed { color: var(--text-dim); }
 .entry-id { font-size: 0.7rem; color: var(--text-dim); line-height: 1.8; }
 .entry-desc { color: #f4f4f5; line-height: 1.6; }
 .entry.done .entry-desc { color: var(--text-dim); text-decoration: line-through; text-decoration-color: var(--border); }
+.entry.entry-type-commit.done .entry-desc { text-decoration: none; }
 .entry-status-text { font-size: 0.6rem; color: var(--text-dim); letter-spacing: 0.03em; text-transform: uppercase; margin-left: 4px; }
 .entry-status-text.done { color: var(--done); } .entry-status-text.todo { color: var(--todo); } .entry-status-text.in_progress { color: var(--in-progress); }
+.entry-status-text.in_review { color: #fb923c; } .entry-status-text.approved { color: #a3e635; } .entry-status-text.cancelled { color: var(--text-dim); }
 .entry-date { font-size: 0.7rem; color: var(--text-dim); line-height: 1.8; white-space: nowrap; }
 .entry-hash { font-size: 0.7rem; color: var(--accent-dim); margin-left: 4px; }
 .entry-toggle { cursor: pointer; user-select: none; }
@@ -429,7 +443,7 @@ let state = {
   cloudDiag: null,
 };
 
-const STATUS_LABELS = { done: 'done', in_progress: 'active', observing: 'observing', todo: 'todo', waiting: 'waiting', cancelled: 'cancelled' };
+const STATUS_LABELS = { done: 'done', in_progress: 'active', observing: 'observing', todo: 'todo', waiting: 'waiting', cancelled: 'cancelled', in_review: 'in review', approved: 'approved' };
 const FILTER_ORDER = ['todo', 'in_progress', 'observing', 'done'];
 const FILTER_CSS = { todo: 'f-todo', in_progress: 'f-active', observing: 'f-observing', done: 'f-done' };
 
@@ -441,7 +455,10 @@ function filterMilestones(ms) { return state.hiddenStatuses.size === 0 ? ms : ms
 function countTasks(entries) { let t=0,d=0; for(const e of entries){if(e.type==='task'){t++;if(e.status==='done')d++;}if(e.entries){const c=countTasks(e.entries);t+=c.total;d+=c.done;}} return{total:t,done:d}; }
 function statusBadge(s) { return `<div class="ms-status-badge"><div class="ms-status-icon ${s}"></div><span class="ms-status-text ${s}">${STATUS_LABELS[s]||s}</span></div>`; }
 function entryTypeBadge(t) { return `<span class="entry-type-badge ${t}">${t}</span>`; }
-function entryStatusText(e) { if(e.type==='commit'||e.type==='save') return ''; return `<span class="entry-status-text ${e.status}">${STATUS_LABELS[e.status]||e.status}</span>`; }
+function entryStatusText(e) {
+  if (e.type==='commit'||e.type==='save'||e.type==='pr') return '';
+  return `<span class="entry-status-text ${e.status}">${STATUS_LABELS[e.status]||e.status}</span>`;
+}
 
 // ============================================================
 // SHARED: Rendering (from Web UI, onclick removed → data-action)
@@ -450,20 +467,34 @@ let _currentMsId = null;
 
 function renderEntry(entry) {
   if (_currentMsId && state.hideEntryDone.has(_currentMsId) && entry.status === 'done') return '';
-  const done = entry.status === 'done' ? ' done' : '';
+  const statusClass = entry.status === 'done' ? ' done' : '';
   const hash = entry.meta?.hash ? `<span class="entry-hash">${entry.meta.hash.slice(0,7)}</span>` : '';
   const src = entry.type==='save'&&entry.meta?.source ? `<span class="entry-hash">[${esc(entry.meta.source)}]</span>` : '';
   const detail = entry.detail ? `<div class="entry-detail">${esc(entry.detail)}</div>` : '';
+  let prMeta = '';
+  if (entry.type === 'pr' && entry.meta) {
+    const m = entry.meta;
+    const prStatus = m.pr_status || 'open';
+    const reviewStatus = m.review_status ? ` · review: ${m.review_status}` : '';
+    const url = m.url ? ` · <a href="${esc(m.url)}" target="_blank" rel="noopener" style="color:inherit;opacity:0.7;">${esc(m.url.replace(/.*\/pull\//, '#'))}</a>` : '';
+    const intent = m.intent
+      ? `<div class="entry-pr-decision entry-pr-intent"><div class="entry-pr-decision-label">intent</div>${esc(m.intent)}</div>`
+      : '';
+    const rationale = m.review_rationale
+      ? `<div class="entry-pr-decision entry-pr-rationale-block"><div class="entry-pr-decision-label">rationale</div>${esc(m.review_rationale)}</div>`
+      : '';
+    prMeta = `<div class="entry-pr-block"><div class="entry-pr-meta"><span class="entry-pr-status ${prStatus}">${prStatus}${reviewStatus}</span>${url}</div>${intent}${rationale}</div>`;
+  }
   const hasKids = entry.entries?.length > 0;
   const collapsed = state.collapsedEntries.has(entry.id);
   const toggle = hasKids ? ` entry-toggle${collapsed?' collapsed':''}` : '';
   let kids = '';
   if (hasKids) kids = `<div class="entry-children${collapsed?' hidden':''}">${entry.entries.map(renderEntry).join('')}</div>`;
   const badge = hasKids && collapsed ? `<span class="entry-child-count">${entry.entries.length}</span>` : '';
-  return `<div class="entry${done}${toggle}" ${hasKids?`data-action="toggle-entry" data-entry-id="${entry.id}"`:''}>
+  return `<div class="entry entry-type-${entry.type}${statusClass}${toggle}" ${hasKids?`data-action="toggle-entry" data-entry-id="${entry.id}"`:''}>
     ${entryTypeBadge(entry.type)}<span class="entry-id">${entry.id}</span>
     <span class="entry-desc">${esc(entry.description)}${hash}${src}${entryStatusText(entry)}${badge}</span>
-    <span class="entry-date">${entry.created_at||''}</span>${detail}${kids}
+    <span class="entry-date">${entry.created_at||''}</span>${prMeta}${detail}${kids}
   </div>`;
 }
 
@@ -712,7 +743,7 @@ function render() {
       </section>`) : ''}
     ${state.activeTab==='retros' ? renderRetrosSection() : ''}
     ${state.activeTab==='documents' ? renderDocumentsSection() : ''}
-    <footer class="footer fade-in stagger-3"><div class="footer-left"><div>local</div><div class="footer-tagline">Where humans and AI are bound together.</div></div><div class="footer-right">${state.lastUpdate?formatTime(state.lastUpdate):''}</div></footer>
+    <footer class="footer fade-in stagger-3"><div class="footer-left"><div>${cloudMode?'cloud':'local'}</div><div class="footer-tagline">Where humans and AI are bound together.</div></div><div class="footer-right" style="display:flex;align-items:center;gap:12px;">${state.lastUpdate?formatTime(state.lastUpdate):''}<button class="sort-toggle" data-action="export-json" style="font-size:0.65rem;">Export JSON</button></div></footer>
   `;
   bindEvents();
 }
@@ -786,8 +817,56 @@ async function handleAction(e) {
       state.cloudDiag = await invoke('cloud_diagnose').catch(e => String(e));
       renderProjectSelector();
       break;
+    case 'export-json': await exportProject(); break;
   }
 }
+
+async function exportProject() {
+  try {
+    let project, documents = [], retros = [];
+    if (cloudMode && state.cloudProjectId) {
+      project = JSON.parse(await invoke('cloud_load_project', { projectId: state.cloudProjectId }));
+      try { documents = JSON.parse(await invoke('cloud_list_documents')); } catch(e) {}
+      try { retros = JSON.parse(await invoke('cloud_list_retros')); } catch(e) {}
+    } else {
+      project = JSON.parse(await invoke('load_project_json'));
+      try { documents = JSON.parse(await invoke('get_documents', { scope: '' })); } catch(e) {}
+      try { retros = JSON.parse(await invoke('list_retros')); } catch(e) {}
+    }
+    const fullExport = { ...project, documents, retros };
+    const blob = new Blob([JSON.stringify(fullExport, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${state.cloudProjectId || 'project'}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch(e) { alert('Export failed: ' + e); }
+}
+
+// Reconnect when window regains focus
+function _tryReconnect() {
+  if (!state.project) return;
+  if (cloudMode) {
+    // Cloud mode: resume polling if stopped, and trigger immediate load
+    if (!pollTimer) startPolling();
+    loadProject();
+  } else {
+    // Local mode: restart watcher and reload
+    startWatcher();
+    loadProject();
+  }
+}
+// Tauri window focus event
+if (window.__TAURI__?.event) {
+  window.__TAURI__.event.listen('tauri://focus', _tryReconnect);
+}
+// Web visibilitychange fallback (also useful for web-view scenarios)
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') _tryReconnect();
+});
 
 // ============================================================
 // DESKTOP-SPECIFIC: Init

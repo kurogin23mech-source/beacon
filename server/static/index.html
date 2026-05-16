@@ -2464,6 +2464,17 @@ async function handleHashNav() {
 
 window.addEventListener('hashchange', handleHashNav);
 
+// Reconnect when the tab becomes visible or the window regains focus
+function _tryReconnect() {
+  if (state.projectId && !state.connected && (!ws || ws.readyState !== WebSocket.OPEN)) {
+    connectWebSocket(state.projectId);
+  }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') _tryReconnect();
+});
+window.addEventListener('focus', _tryReconnect);
+
 // ---- Init ----
 
 async function init() {
