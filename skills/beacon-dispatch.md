@@ -43,21 +43,28 @@ stdout に JSON が返る:
 }
 ```
 
-## Step 2: 実行可能MSの抽出
+## Step 2: MS分類
 
-以下の条件を **すべて** 満たすMSを「実行可能」とする:
+Step 1 の `nodes` から、対象MSを以下の2グループに分類する。
 
-1. `status` が `todo` または `in_progress` である
-2. `depends_on` に含まれるMS **すべて** が `done` または `observing` ステータスである
+### 実行可能（Runnable）
+以下の条件を **すべて** 満たすMS:
+1. `status` が `todo` または `in_progress`
+2. `depends_on` に含まれるMS **すべて** が `done` または `observing`
 
-ステータスの判定は Step 1 の `nodes` 配列から行う。
+### 待機中（Blocked）
+以下の条件を満たすMS:
+1. `status` が `todo` または `in_progress`
+2. `depends_on` に、`done`/`observing` 以外のステータスのMSが1つ以上含まれる
 
-実行可能MSがなければ:
+各ブロックされたMSについて、「どのMSがブロック要因か」（blocking deps）を記録する。
+
+実行可能MSが1つもなければ:
 ```
 Dispatch: 実行可能なマイルストーンがありません。
 依存関係の先行MSが未完了か、すべてのMSが完了済みです。
 ```
-と表示して終了。
+と表示し、待機中MSがあれば一覧を表示して終了。
 
 ## Step 3: 各MSの詳細情報取得
 
@@ -82,24 +89,31 @@ beacon task list --json --ms <ms-id>
 
 ## Step 4: Dispatch計画の提示
 
-収集した情報をユーザーに提示する:
+収集した情報をユーザーに提示する。**実行可能MSと待機中MSを両方表示する**:
 
 ```
 Dispatch Plan:
 ---
-[ms-id] [title] (workspace: [dir or "none"])
-  SPEC: [doc titles, comma-separated]
+実行可能:
+◐ [ms-id] [title] (workspace: [dir or "none"])
+  SPEC: [doc titles, comma-separated or "(none)"]
   Tasks: [N pending]
-    - [entry-id] [description]
     - [entry-id] [description]
 
-[ms-id] [title] (workspace: [dir or "none"])
-  SPEC: (none)
-  Tasks: [N pending]
-    - [entry-id] [description]
+◐ [ms-id] [title] ...
+
+依存関係により待機中:
+◌ [ms-id] [title]
+  ← ブロック: [blocking-ms-id] [blocking-title] ([status])
+  ← ブロック: [blocking-ms-id] [blocking-title] ([status])
+
+◌ [ms-id] [title]
+  ← ブロック: [blocking-ms-id] [blocking-title] ([status])
 ---
 実行しますか？ [全て / 選択 / キャンセル]
 ```
+
+待機中MSが1つもない場合は「依存関係により待機中」セクションを省略する。
 
 ユーザーの回答を待つ:
 - **全て**: すべての実行可能MSを起動

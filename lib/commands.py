@@ -79,11 +79,24 @@ This project uses [Beacon](https://github.com/r-kida2/beacon) for milestone-driv
 def _append_claude_md():
     claude_md = "CLAUDE.md"
     marker = "## Beacon Project Management"
-    content = ""
     if os.path.exists(claude_md):
         with open(claude_md, "r", encoding="utf-8") as f:
             content = f.read()
         if marker in content:
+            # Replace existing section with latest content
+            idx = content.index(marker)
+            prefix = content[:idx].rstrip('\n') + '\n\n'
+            new_section = CLAUDE_MD_BEACON_SECTION.lstrip('\n')
+            after = content[idx + len(marker):]
+            next_h2 = after.find('\n## ')
+            if next_h2 == -1:
+                new_content = prefix + new_section
+            else:
+                new_content = prefix + new_section + after[next_h2:]
+            if new_content != content:
+                with open(claude_md, "w", encoding="utf-8") as f:
+                    f.write(new_content)
+                print(f"Updated {claude_md} with beacon rules")
             return
     with open(claude_md, "a", encoding="utf-8") as f:
         f.write(CLAUDE_MD_BEACON_SECTION)
@@ -1645,8 +1658,9 @@ def cmd_cloud_status():
 # ---------------------------------------------------------------------------
 
 def cmd_skill_install():
-    """Install beacon Claude Code Skills into ~/.claude/skills/"""
+    """Install beacon Claude Code Skills into ~/.claude/skills/ and update CLAUDE.md."""
     import shutil
+    _append_claude_md()
 
     # Find skills source relative to this file: <beacon_root>/skills/
     beacon_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
