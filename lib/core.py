@@ -860,7 +860,7 @@ def entries_to_json(entries: list) -> list:
             "created_at": e.get("created_at", e.get("date", "")),
             "done_at": e.get("done_at"),
         }
-        if e.get("type") in ("commit", "save"):
+        if e.get("meta"):
             item["meta"] = e.get("meta", {})
         if e.get("detail"):
             item["detail"] = e["detail"]
