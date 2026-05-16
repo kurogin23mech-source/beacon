@@ -163,11 +163,9 @@ def milestone_add(data: dict, title: str, target_date: str = "",
 
 
 def milestone_start(data: dict, ms_id: str) -> dict:
-    """Activate a milestone, deactivating others. Returns the activated ms."""
+    """Activate a milestone (multiple can be active simultaneously). Returns the activated ms."""
     found = None
     for ms in data["milestones"]:
-        if ms["status"] == "in_progress":
-            ms["status"] = "todo"
         if ms["id"] == ms_id:
             ms["status"] = "in_progress"
             found = ms
