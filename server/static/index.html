@@ -1337,17 +1337,26 @@ function logout() {
   renderLogin();
 }
 
-function isAuthenticated() {
-  if (!state.auth.token) return false;
+function isTokenExpired(token) {
+  if (!token) return true;
   try {
-    const payload = JSON.parse(atob(state.auth.token.split('.')[1]));
-    return payload.exp * 1000 > Date.now();
-  } catch { return false; }
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    return payload.exp * 1000 <= Date.now();
+  } catch { return true; }
+}
+
+function isAuthenticated() {
+  return !!state.auth.token && !isTokenExpired(state.auth.token);
 }
 
 // ---- API ----
 
 async function api(path, opts = {}) {
+  // Proactively check token expiry before each request
+  if (state.auth.token && isTokenExpired(state.auth.token)) {
+    logout();
+    throw new Error('Session expired');
+  }
   const headers = { ...opts.headers };
   if (state.auth.token) headers['Authorization'] = `Bearer ${state.auth.token}`;
   const res = await fetch(`${API_BASE}${path}`, { ...opts, headers });
@@ -1633,6 +1642,7 @@ function render() {
         <div class="footer-tagline">Where humans and AI are bound together.</div>
       </div>
       <div class="footer-right">
+        <button class="sort-toggle" data-action="export-json" style="font-size:0.65rem;">Export JSON</button>
         <span>${state.lastUpdate ? formatTime(state.lastUpdate) : ''}</span>
       </div>
     </footer>
@@ -2190,6 +2200,24 @@ async function changeMemberRole(email, newRole) {
   } catch (e) { alert(e.message || 'Error'); }
 }
 
+async function exportProject() {
+  if (!state.projectId) return;
+  try {
+    const data = await api(`/api/projects/${state.projectId}`);
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${state.projectId}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert('Export failed: ' + (e.message || 'Unknown error'));
+  }
+}
+
 async function menuSelectProject(projectId) {
   closeMenu();
   if (projectId !== state.projectId) {
@@ -2325,6 +2353,7 @@ async function handleAction(e) {
     case 'menu-select-project': closeMenu(); await menuSelectProject(el.dataset.projectId); break;
     case 'select-project': await selectProject(el.dataset.projectId); break;
     case 'logout': logout(); break;
+    case 'export-json': await exportProject(); break;
     case 'remove-member': await removeMember(el.dataset.email); break;
     case 'invite-member': await inviteMember(); break;
     case 'change-member-role': await changeMemberRole(el.dataset.email, el.value); break;

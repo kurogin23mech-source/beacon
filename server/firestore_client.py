@@ -134,11 +134,21 @@ def list_all_projects() -> list[dict]:
     return result
 
 
+def _delete_subcollection(col_ref) -> None:
+    """Delete all documents in a subcollection (Firestore doesn't auto-delete these)."""
+    for doc in col_ref.stream():
+        doc.reference.delete()
+
+
 def delete_project(project_id: str) -> bool:
-    """Delete a project. Returns True if existed."""
+    """Delete a project and ALL its subcollections. Returns True if existed."""
     doc_ref = get_db().collection(COLLECTION).document(project_id)
     if not doc_ref.get().exists:
         return False
+    # Delete known subcollections first (Firestore does not cascade).
+    # Use literal names here to avoid forward-reference issues with the constants.
+    for subcol_name in ("documents", "retros", "members", "triggers"):
+        _delete_subcollection(doc_ref.collection(subcol_name))
     doc_ref.delete()
     return True
 

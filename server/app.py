@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import os
 import sys
+import time
 from typing import Optional
 
 # Add lib/ to path so we can import core
@@ -14,6 +17,8 @@ from fastapi import FastAPI, HTTPException, Depends, Request, WebSocket, WebSock
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 import core
 import firestore_client as db
@@ -26,6 +31,71 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---------------------------------------------------------------------------
+# Audit Logging
+# ---------------------------------------------------------------------------
+
+_audit_logger = logging.getLogger("beacon.audit")
+_audit_logger.setLevel(logging.INFO)
+
+# Ensure a handler exists (Cloud Run captures stdout)
+if not _audit_logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    _audit_logger.addHandler(_handler)
+_audit_logger.propagate = False
+
+# Mutating methods that should be audit-logged
+_AUDIT_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+# Path patterns for security-sensitive resources
+import re
+_AUDIT_PATHS = re.compile(
+    r"^/api/"
+    r"(?:projects/[^/]+(?:/milestones|/members|/documents|/log|/summary|$)"
+    r"|admin/(?:users|projects))"
+)
+
+def _extract_project_id(path: str) -> str:
+    m = re.match(r"^/api/projects/([^/]+)", path)
+    return m.group(1) if m else ""
+
+
+class AuditLogMiddleware(BaseHTTPMiddleware):
+    """Emit a structured JSON audit log line for security-sensitive mutations."""
+
+    async def dispatch(self, request: Request, call_next):
+        if request.method not in _AUDIT_METHODS or not _AUDIT_PATHS.match(request.url.path):
+            return await call_next(request)
+
+        start = time.time()
+        response: Response = await call_next(request)
+        elapsed_ms = int((time.time() - start) * 1000)
+
+        # Extract user info from request state (set by require_auth if called)
+        user_id = getattr(request.state, "audit_user_id", "")
+        email = getattr(request.state, "audit_email", "")
+
+        log_entry = {
+            "severity": "INFO",
+            "type": "audit",
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "method": request.method,
+            "path": request.url.path,
+            "status": response.status_code,
+            "user_id": user_id,
+            "email": email,
+            "project_id": _extract_project_id(request.url.path),
+            "ip": request.headers.get("x-forwarded-for", request.client.host if request.client else ""),
+            "elapsed_ms": elapsed_ms,
+        }
+        _audit_logger.info(json.dumps(log_entry))
+        return response
+
+
+app.add_middleware(AuditLogMiddleware)
 
 
 # ---------------------------------------------------------------------------
@@ -53,10 +123,13 @@ def _verify_id_token(token: str) -> dict:
 
 
 async def require_auth(
+    request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
 ) -> dict:
     """FastAPI dependency that enforces Bearer token auth and auto-registers users."""
     if not _auth_enabled:
+        request.state.audit_user_id = "dev"
+        request.state.audit_email = "dev@local"
         return {"sub": "dev", "email": "dev@local"}
     if credentials is None:
         raise HTTPException(status_code=401, detail="Authorization header required")
@@ -66,6 +139,9 @@ async def require_auth(
     email = claims.get("email", "")
     if user_id:
         db.get_or_create_user(user_id, email)
+    # Store for audit middleware
+    request.state.audit_user_id = user_id
+    request.state.audit_email = email
     return claims
 
 
