@@ -629,7 +629,7 @@ def pr_record_review(data: dict, entry_id: str, *, review_text: str,
 
 
 def pr_merge(data: dict, entry_id: str, *, date: str = "") -> tuple[dict, dict]:
-    """Merge a PR entry: sets pr_status=merged, status=done, done_at=today."""
+    """Merge a PR: pr_status=merged, entry.status=done, done_at=today."""
     import datetime as _dt
     result = find_entry(data, entry_id)
     if not result:
