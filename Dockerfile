@@ -7,6 +7,8 @@ COPY server/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
+# ARG CACHE_BUST is used to force Docker layer cache invalidation when lib/ changes
+ARG CACHE_BUST=1
 COPY lib/ /app/lib/
 COPY server/ /app/server/
 

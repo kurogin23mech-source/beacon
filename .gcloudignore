@@ -1,0 +1,8 @@
+# Explicitly include lib/ in Cloud Run source upload
+.DS_Store
+__pycache__/
+*.pyc
+desktop/
+.claude/
+.beacon/
+lib/firebase_config.json
