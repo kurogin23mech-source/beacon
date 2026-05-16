@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Beacon Desktop</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg-void: #0a0a0c;
+  --bg-surface: #111114;
+  --bg-raised: #18181c;
+  --bg-hover: #1f1f24;
+  --border: #2a2a30;
+  --border-subtle: #1e1e24;
+  --text-primary: #e4e4e8;
+  --text-secondary: #a1a1aa;
+  --text-dim: #71717a;
+  --accent: #4ade80;
+  --accent-dim: #166534;
+  --accent-glow: rgba(74, 222, 128, 0.08);
+  --warning: #fbbf24;
+  --info: #60a5fa;
+  --done: #4ade80;
+  --in-progress: #60a5fa;
+  --observing: #a78bfa;
+  --todo: #71717a;
+  --waiting: #f97316;
+  --cancelled: #ef4444;
+  --save: #c084fc;
+  --font-mono: 'JetBrains Mono', 'IBM Plex Mono', monospace;
+  --font-body: 'IBM Plex Mono', monospace;
+  --scanline-opacity: 0.03;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-size: 15px; -webkit-font-smoothing: antialiased; }
+body { background: var(--bg-void); color: var(--text-primary); font-family: var(--font-body); font-weight: 400; line-height: 1.6; min-height: 100vh; overflow-x: hidden; }
+body::after { content: ''; position: fixed; inset: 0; background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,var(--scanline-opacity)) 2px, rgba(0,0,0,var(--scanline-opacity)) 4px); pointer-events: none; z-index: 9999; }
+
+.container { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+.header { padding: 40px 0 32px; border-bottom: 1px solid var(--border); position: relative; }
+.header::before { content: ''; position: absolute; bottom: -1px; left: 0; width: 120px; height: 1px; background: var(--accent); box-shadow: 0 0 12px var(--accent); }
+.header-top { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
+.project-name { font-family: var(--font-mono); font-size: 1.6rem; font-weight: 700; letter-spacing: -0.02em; color: var(--text-primary); }
+.header-tag { font-size: 0.75rem; color: var(--text-dim); letter-spacing: 0.08em; text-transform: uppercase; }
+.connection-status { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 0.75rem; color: var(--text-dim); }
+.status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 6px var(--accent); animation: pulse-dot 2s ease-in-out infinite; }
+.status-dot.offline { background: var(--cancelled); box-shadow: 0 0 6px var(--cancelled); animation: none; }
+@keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+.project-info { padding: 16px 0; border-bottom: 1px solid var(--border-subtle); display: flex; gap: 24px; flex-wrap: wrap; }
+.project-info-item { display: flex; flex-direction: column; gap: 2px; }
+.project-info-label { font-size: 0.65rem; color: var(--text-dim); letter-spacing: 0.08em; text-transform: uppercase; }
+.project-info-value { font-size: 0.85rem; color: var(--text-secondary); }
+
+.summary-block { padding: 20px 0; border-bottom: 1px solid var(--border-subtle); }
+.summary-label { font-size: 0.75rem; color: var(--text-dim); letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 8px; }
+.summary-text { color: var(--text-secondary); font-size: 0.9rem; line-height: 1.7; }
+
+.filter-bar { display: flex; gap: 6px; padding: 16px 0 0; flex-wrap: wrap; align-items: center; }
+.filter-btn { font-family: var(--font-mono); font-size: 0.75rem; padding: 4px 10px; border: 1px solid var(--border-subtle); border-radius: 3px; background: transparent; cursor: pointer; transition: border-color 0.2s, color 0.2s, background 0.2s, opacity 0.2s; }
+.filter-btn.on { border-color: var(--accent-dim); color: var(--accent); background: var(--accent-glow); }
+.filter-btn.on.f-todo { color: var(--todo); border-color: var(--todo); background: rgba(113,113,122,0.08); }
+.filter-btn.on.f-active { color: var(--in-progress); border-color: rgba(96,165,250,0.4); background: rgba(96,165,250,0.08); }
+.filter-btn.on.f-observing { color: var(--observing); border-color: rgba(167,139,250,0.4); background: rgba(167,139,250,0.08); }
+.filter-btn.on.f-done { color: var(--done); border-color: var(--accent-dim); background: var(--accent-glow); }
+.filter-btn.off { color: var(--text-dim); opacity: 0.4; border-color: var(--border-subtle); background: transparent; }
+.filter-btn.off:hover { opacity: 0.7; }
+.sort-toggle { font-family: var(--font-mono); font-size: 0.75rem; padding: 4px 10px; border: 1px solid var(--border-subtle); border-radius: 3px; background: transparent; color: var(--text-dim); cursor: pointer; margin-left: auto; }
+.sort-toggle:hover { border-color: var(--border); color: var(--text-secondary); }
+
+.milestones { padding: 24px 0; }
+.milestones-header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 20px; }
+.milestones-title { font-size: 0.75rem; color: var(--text-dim); letter-spacing: 0.1em; text-transform: uppercase; }
+.milestones-count { font-size: 0.8rem; color: var(--text-dim); }
+
+.ms-card { border: 1px solid var(--border-subtle); border-radius: 4px; margin-bottom: 8px; background: var(--bg-surface); transition: border-color 0.2s, background 0.2s; overflow: hidden; }
+.ms-card:hover { border-color: var(--border); background: var(--bg-raised); }
+.ms-card.active { border-color: var(--accent-dim); background: var(--accent-glow); }
+.ms-card-header { padding: 12px 16px; cursor: pointer; display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; }
+.ms-status-badge { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.ms-status-icon { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.ms-status-icon.done { background: var(--done); box-shadow: 0 0 4px rgba(74,222,128,0.3); }
+.ms-status-icon.in_progress { background: var(--in-progress); box-shadow: 0 0 4px rgba(96,165,250,0.3); animation: pulse-dot 2s ease-in-out infinite; }
+.ms-status-icon.observing { background: var(--observing); box-shadow: 0 0 4px rgba(167,139,250,0.3); }
+.ms-status-icon.todo { background: var(--todo); }
+.ms-status-icon.waiting { background: var(--waiting); }
+.ms-status-icon.cancelled { background: var(--cancelled); }
+.ms-status-text { font-size: 0.65rem; line-height: 1.4; letter-spacing: 0.05em; text-transform: uppercase; font-weight: 500; }
+.ms-status-text.done { color: var(--done); }
+.ms-status-text.in_progress { color: var(--in-progress); }
+.ms-status-text.observing { color: var(--observing); }
+.ms-status-text.todo { color: var(--todo); }
+.ms-status-text.waiting { color: var(--waiting); }
+.ms-status-text.cancelled { color: var(--cancelled); }
+.ms-title-row { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.ms-id { font-size: 0.75rem; color: var(--text-dim); flex-shrink: 0; }
+.ms-title { font-size: 0.9rem; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ms-meta { display: flex; align-items: center; gap: 16px; flex-shrink: 0; }
+.ms-progress-bar { width: 80px; height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; }
+.ms-progress-fill { height: 100%; border-radius: 2px; transition: width 0.6s ease; }
+.ms-progress-fill.done { background: var(--done); }
+.ms-progress-fill.in_progress { background: var(--in-progress); }
+.ms-progress-fill.observing { background: var(--observing); }
+.ms-progress-fill.todo { background: var(--todo); }
+.ms-progress-text { font-size: 0.75rem; color: var(--text-dim); min-width: 32px; text-align: right; font-variant-numeric: tabular-nums; }
+.ms-expand-hint { font-size: 0.65rem; color: var(--text-dim); transition: transform 0.2s; }
+.ms-card.expanded .ms-expand-hint { transform: rotate(180deg); }
+.ms-tasks-text { font-size: 0.75rem; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.ms-body { max-height: 0; overflow: hidden; transition: max-height 0.3s ease; }
+.ms-card.expanded .ms-body { max-height: 8000px; }
+.ms-entries { padding: 0 16px 12px; border-top: 1px solid var(--border-subtle); }
+.ms-entries-toolbar { display: flex; align-items: center; padding: 8px 0 4px; gap: 8px; }
+.entry-filter-btn { font-family: var(--font-mono); font-size: 0.65rem; padding: 2px 8px; border: 1px solid var(--border-subtle); border-radius: 2px; background: transparent; color: var(--text-dim); cursor: pointer; }
+.entry-filter-btn:hover { border-color: var(--border); color: var(--text-secondary); }
+.entry-filter-btn.active { border-color: var(--accent-dim); color: var(--accent); background: var(--accent-glow); }
+.ms-description { padding: 8px 0 4px; color: var(--text-secondary); font-size: 0.85rem; font-style: italic; }
+
+.entry { display: grid; grid-template-columns: auto auto 1fr auto; gap: 8px; padding: 6px 0; align-items: start; border-bottom: 1px solid var(--border-subtle); font-size: 0.85rem; }
+.entry:last-child { border-bottom: none; }
+.entry-type-badge { font-size: 0.65rem; font-weight: 500; letter-spacing: 0.03em; padding: 1px 5px; border-radius: 2px; line-height: 1.8; white-space: nowrap; }
+.entry-type-badge.commit { color: var(--accent); background: rgba(74,222,128,0.1); border: 1px solid rgba(74,222,128,0.15); }
+.entry-type-badge.task { color: var(--info); background: rgba(96,165,250,0.1); border: 1px solid rgba(96,165,250,0.15); }
+.entry-type-badge.note { color: var(--warning); background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.15); }
+.entry-type-badge.save { color: var(--save); background: rgba(192,132,252,0.1); border: 1px solid rgba(192,132,252,0.15); }
+.entry-id { font-size: 0.7rem; color: var(--text-dim); line-height: 1.8; }
+.entry-desc { color: #f4f4f5; line-height: 1.6; }
+.entry.done .entry-desc { color: var(--text-dim); text-decoration: line-through; text-decoration-color: var(--border); }
+.entry-status-text { font-size: 0.6rem; color: var(--text-dim); letter-spacing: 0.03em; text-transform: uppercase; margin-left: 4px; }
+.entry-status-text.done { color: var(--done); }
+.entry-status-text.todo { color: var(--todo); }
+.entry-status-text.in_progress { color: var(--in-progress); }
+.entry-date { font-size: 0.7rem; color: var(--text-dim); line-height: 1.8; white-space: nowrap; }
+.entry-hash { font-size: 0.7rem; color: var(--accent-dim); margin-left: 4px; }
+.entry-toggle { cursor: pointer; user-select: none; }
+.entry-toggle .entry-desc::before { content: '\25BC '; font-size: 0.6rem; color: var(--text-dim); display: inline-block; }
+.entry-toggle.collapsed .entry-desc::before { content: '\25B6 '; }
+.entry-child-count { font-size: 0.65rem; color: var(--accent); margin-left: 6px; padding: 1px 5px; background: var(--accent-dim); border: 1px solid var(--accent-dim); border-radius: 3px; font-weight: 500; }
+.entry-detail { grid-column: 3 / -1; font-size: 0.8rem; color: var(--text-dim); padding: 4px 0 2px; line-height: 1.5; border-left: 2px solid var(--border-subtle); padding-left: 10px; margin-top: 2px; }
+.entry-children { grid-column: 1 / -1; padding-left: 18px; }
+.entry-children.hidden { display: none; }
+.entry-children .entry { border-bottom-color: transparent; padding: 3px 0; }
+
+.tab-bar { display: flex; gap: 0; border-bottom: 1px solid var(--border-subtle); }
+.tab-btn { font-family: var(--font-mono); font-size: 0.8rem; padding: 10px 20px; border: none; background: transparent; color: var(--text-dim); cursor: pointer; border-bottom: 2px solid transparent; transition: color 0.2s, border-color 0.2s; }
+.tab-btn:hover { color: var(--text-secondary); }
+.tab-btn.active { color: var(--text-primary); border-bottom-color: var(--accent); }
+
+.retro-section { padding: 24px 0; }
+.retro-list { list-style: none; }
+.retro-item { padding: 10px 16px; border: 1px solid var(--border-subtle); border-radius: 4px; margin-bottom: 6px; cursor: pointer; background: var(--bg-surface); transition: border-color 0.2s, background 0.2s; display: flex; justify-content: space-between; align-items: center; }
+.retro-item:hover { border-color: var(--border); background: var(--bg-raised); }
+.retro-item-week { font-size: 0.9rem; color: var(--text-primary); }
+.retro-item-date { font-size: 0.75rem; color: var(--text-dim); }
+.retro-content { background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 20px; white-space: pre-wrap; font-size: 0.85rem; line-height: 1.7; color: var(--text-secondary); max-height: 70vh; overflow-y: auto; }
+.retro-back { font-size: 0.8rem; color: var(--text-dim); cursor: pointer; margin-bottom: 12px; display: inline-block; }
+.retro-back:hover { color: var(--text-secondary); }
+.retro-empty { text-align: center; padding: 40px 0; color: var(--text-dim); font-size: 0.85rem; }
+
+.footer { padding: 24px 0 40px; border-top: 1px solid var(--border-subtle); display: flex; justify-content: space-between; align-items: center; }
+.footer-left { font-size: 0.75rem; color: var(--text-dim); letter-spacing: 0.05em; }
+.footer-tagline { font-size: 0.7rem; color: var(--text-dim); font-style: italic; letter-spacing: 0.03em; }
+.footer-right { font-size: 0.75rem; color: var(--text-dim); }
+
+.loading { display: flex; align-items: center; justify-content: center; min-height: 60vh; flex-direction: column; gap: 16px; }
+.loading-bar { width: 120px; height: 2px; background: var(--border); border-radius: 1px; overflow: hidden; }
+.loading-bar::after { content: ''; display: block; width: 40%; height: 100%; background: var(--accent); border-radius: 1px; animation: loading-slide 1.2s ease-in-out infinite; }
+@keyframes loading-slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(350%); } }
+.loading-text { font-size: 0.8rem; color: var(--text-dim); letter-spacing: 0.08em; text-transform: uppercase; }
+
+.error-state { text-align: center; padding: 80px 0; color: var(--text-dim); font-size: 0.9rem; }
+.error-state .error-icon { font-size: 1.5rem; margin-bottom: 12px; color: var(--cancelled); }
+
+.fade-in { animation: fade-in 0.4s ease both; }
+@keyframes fade-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+.stagger-1 { animation-delay: 0.05s; }
+.stagger-2 { animation-delay: 0.1s; }
+.stagger-3 { animation-delay: 0.15s; }
+
+/* Open folder prompt */
+.open-prompt { display: flex; align-items: center; justify-content: center; min-height: 80vh; flex-direction: column; gap: 24px; }
+.open-prompt h1 { font-family: var(--font-mono); font-size: 2rem; font-weight: 700; color: var(--text-primary); }
+.open-prompt p { font-size: 0.8rem; color: var(--text-dim); }
+.open-btn { font-family: var(--font-mono); font-size: 0.85rem; padding: 10px 24px; border: 1px solid var(--accent-dim); border-radius: 4px; background: var(--accent-glow); color: var(--accent); cursor: pointer; transition: background 0.2s, border-color 0.2s; }
+.open-btn:hover { background: rgba(74,222,128,0.15); border-color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="container" id="app">
+  <div class="loading"><div class="loading-bar"></div><div class="loading-text">Loading</div></div>
+</div>
+
+<script>
+const { invoke } = window.__TAURI__.core;
+
+let state = {
+  project: null,
+  expanded: new Set(),
+  lastUpdate: null,
+  connected: false,
+  error: null,
+  activeTab: 'dashboard',
+  documents: [],
+  documentContent: null,
+  hiddenStatuses: new Set(),
+  hideEntryDone: new Set(),
+  collapsedEntries: new Set(),
+  sortAsc: true,
+};
+
+let pollTimer = null;
+let lastProjectJson = null;
+
+// ---- Tauri Backend ----
+
+async function loadProject() {
+  try {
+    const json = await invoke('load_project_json');
+    const data = JSON.parse(json);
+    const newJson = JSON.stringify(data);
+    if (newJson !== lastProjectJson) {
+      lastProjectJson = newJson;
+      state.project = data;
+      state.lastUpdate = new Date();
+      state.connected = true;
+      state.error = null;
+      render();
+    }
+  } catch (e) {
+    state.error = e.toString();
+    state.connected = false;
+    render();
+  }
+}
+
+async function loadDocuments() {
+  try {
+    const json = await invoke('get_documents', { scope: '' });
+    state.documents = JSON.parse(json);
+  } catch (e) {
+    state.documents = [];
+  }
+}
+
+async function openDocument(docId) {
+  try {
+    const content = await invoke('get_document_content', { docId });
+    // Parse frontmatter
+    let title = docId;
+    let scope = 'memo';
+    let body = content;
+    if (content.startsWith('---')) {
+      const parts = content.split('---', 3);
+      if (parts.length >= 3) {
+        for (const line of parts[1].trim().split('\n')) {
+          if (line.startsWith('scope:')) scope = line.split(':',2)[1].trim();
+        }
+        body = parts[2].trim();
+      }
+    }
+    const titleMatch = body.match(/^# (.+)/m);
+    if (titleMatch) title = titleMatch[1];
+    state.documentContent = { doc_id: docId, title, scope, content: body };
+  } catch (e) {
+    state.documentContent = { doc_id: docId, title: 'Error', scope: 'memo', content: e.toString() };
+  }
+  render();
+}
+
+function closeDocument() { state.documentContent = null; render(); }
+
+function startPolling() {
+  if (pollTimer) return;
+  pollTimer = setInterval(loadProject, 2000);
+}
+
+// ---- Render Helpers ----
+
+const STATUS_LABELS = { done: 'done', in_progress: 'active', observing: 'observing', todo: 'todo', waiting: 'waiting', cancelled: 'cancelled' };
+const FILTER_ORDER = ['todo', 'in_progress', 'observing', 'done'];
+const FILTER_CSS_CLASS = { todo: 'f-todo', in_progress: 'f-active', observing: 'f-observing', done: 'f-done' };
+
+function statusBadge(status) {
+  const label = STATUS_LABELS[status] || status;
+  return `<div class="ms-status-badge"><div class="ms-status-icon ${status}"></div><span class="ms-status-text ${status}">${label}</span></div>`;
+}
+
+function entryTypeBadge(type) {
+  return `<span class="entry-type-badge ${type}">${type}</span>`;
+}
+
+function entryStatusText(entry) {
+  if (entry.type === 'commit' || entry.type === 'save') return '';
+  const label = STATUS_LABELS[entry.status] || entry.status;
+  return `<span class="entry-status-text ${entry.status}">${label}</span>`;
+}
+
+let _currentMsId = null;
+
+function renderEntry(entry) {
+  if (_currentMsId && state.hideEntryDone.has(_currentMsId) && entry.status === 'done') return '';
+  const statusClass = entry.status === 'done' ? ' done' : '';
+  const hash = entry.meta?.hash ? `<span class="entry-hash">${entry.meta.hash.slice(0,7)}</span>` : '';
+  const source = entry.type === 'save' && entry.meta?.source ? `<span class="entry-hash">[${esc(entry.meta.source)}]</span>` : '';
+  const detail = entry.detail ? `<div class="entry-detail">${esc(entry.detail)}</div>` : '';
+  const statusText = entryStatusText(entry);
+  const hasChildren = entry.entries?.length > 0;
+  const childCount = hasChildren ? entry.entries.length : 0;
+  const isCollapsed = state.collapsedEntries.has(entry.id);
+  const toggleClass = hasChildren ? ` entry-toggle${isCollapsed ? ' collapsed' : ''}` : '';
+  let children = '';
+  if (hasChildren) {
+    const hiddenClass = isCollapsed ? ' hidden' : '';
+    children = `<div class="entry-children${hiddenClass}">${entry.entries.map(renderEntry).join('')}</div>`;
+  }
+  const childBadge = hasChildren && isCollapsed ? `<span class="entry-child-count">${childCount}</span>` : '';
+  return `
+    <div class="entry${statusClass}${toggleClass}" ${hasChildren ? `onclick="toggleEntry('${entry.id}', event)"` : ''}>
+      ${entryTypeBadge(entry.type)}
+      <span class="entry-id">${entry.id}</span>
+      <span class="entry-desc">${esc(entry.description)}${hash}${source}${statusText}${childBadge}</span>
+      <span class="entry-date">${entry.created_at || ''}</span>
+      ${detail}
+      ${children}
+    </div>`;
+}
+
+function esc(s) { if (!s) return ''; const el = document.createElement('span'); el.textContent = s; return el.innerHTML; }
+function formatTime(date) { if (!date) return ''; return date.toLocaleTimeString('ja-JP', {hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
+function msIdNum(ms) { const m = ms.id.match(/(\d+)/); return m ? parseInt(m[1],10) : 0; }
+function sortMilestones(milestones) { return [...milestones].sort((a,b) => { const d = msIdNum(a)-msIdNum(b); return state.sortAsc ? d : -d; }); }
+function toggleStatusFilter(status) { if (state.hiddenStatuses.has(status)) state.hiddenStatuses.delete(status); else state.hiddenStatuses.add(status); render(); }
+function showAllStatuses() { state.hiddenStatuses.clear(); render(); }
+function filterMilestones(milestones) { if (state.hiddenStatuses.size===0) return milestones; return milestones.filter(ms => !state.hiddenStatuses.has(ms.status)); }
+function toggleSort() { state.sortAsc = !state.sortAsc; render(); }
+function toggleMilestone(msId) { if (state.expanded.has(msId)) state.expanded.delete(msId); else state.expanded.add(msId); render(); }
+function toggleEntry(entryId, event) { if (event.target.closest('.entry-children')) return; event.stopPropagation(); if (state.collapsedEntries.has(entryId)) state.collapsedEntries.delete(entryId); else state.collapsedEntries.add(entryId); render(); }
+function toggleHideEntryDone(msId, event) { event.stopPropagation(); if (state.hideEntryDone.has(msId)) state.hideEntryDone.delete(msId); else state.hideEntryDone.add(msId); render(); }
+
+// ---- Render ----
+
+function render() {
+  const app = document.getElementById('app');
+  if (state.error && !state.project) {
+    app.innerHTML = `<div class="open-prompt fade-in"><h1>Beacon</h1><p>${esc(state.error)}</p></div>`;
+    return;
+  }
+  if (!state.project) return;
+
+  const p = state.project;
+  const sorted = sortMilestones(p.milestones || []);
+  const filtered = filterMilestones(sorted);
+  const activeCount = (p.milestones||[]).filter(m => m.status === 'in_progress').length;
+  const doneCount = (p.milestones||[]).filter(m => m.status === 'done').length;
+
+  app.innerHTML = `
+    <header class="header fade-in">
+      <div class="header-top">
+        <span class="project-name">${esc(p.name)}</span>
+        <span class="header-tag">beacon desktop</span>
+        <div class="connection-status">
+          <div class="status-dot ${state.connected ? '' : 'offline'}"></div>
+          <span class="connection-label">${state.connected ? 'watching' : 'disconnected'}</span>
+        </div>
+      </div>
+    </header>
+
+    <div class="tab-bar fade-in stagger-1">
+      <button class="tab-btn ${state.activeTab === 'dashboard' ? 'active' : ''}" onclick="switchTab('dashboard')">Milestones</button>
+      <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" onclick="switchTab('documents')">Documents</button>
+    </div>
+
+    ${state.activeTab === 'dashboard' ? `
+    ${p.summary ? `<section class="summary-block fade-in"><div class="summary-label">Session Context</div><div class="summary-text">${esc(p.summary)}</div></section>` : ''}
+    <section class="milestones fade-in">
+      <div class="milestones-header">
+        <span class="milestones-title">Milestones</span>
+        <span class="milestones-count">${activeCount} active \u00b7 ${doneCount}/${(p.milestones||[]).length} done</span>
+      </div>
+      <div class="filter-bar">
+        <button class="filter-btn f-all ${state.hiddenStatuses.size===0?'on':'off'}" onclick="showAllStatuses()">all</button>
+        ${FILTER_ORDER.map(s => `<button class="filter-btn ${!state.hiddenStatuses.has(s)?'on':'off'} ${FILTER_CSS_CLASS[s]||''}" onclick="toggleStatusFilter('${s}')">${STATUS_LABELS[s]||s}</button>`).join('')}
+        <button class="sort-toggle" onclick="toggleSort()">${state.sortAsc ? '\u2191 ms-1 first' : '\u2193 latest first'}</button>
+      </div>
+      ${filtered.map((ms,i) => renderMilestoneCard(ms,i)).join('')}
+    </section>
+    ` : ''}
+
+    ${state.activeTab === 'documents' ? renderDocumentsSection() : ''}
+
+    <footer class="footer fade-in stagger-3">
+      <div class="footer-left">
+        <div>local</div>
+        <div class="footer-tagline">Where humans and AI are bound together.</div>
+      </div>
+      <div class="footer-right"><span>${state.lastUpdate ? formatTime(state.lastUpdate) : ''}</span></div>
+    </footer>
+  `;
+
+  document.querySelectorAll('.ms-card-header').forEach(el => {
+    el.addEventListener('click', () => toggleMilestone(el.dataset.msId));
+  });
+}
+
+function renderMilestoneCard(ms, index) {
+  const isExpanded = state.expanded.has(ms.id);
+  const entries = ms.entries || [];
+  const activeClass = ms.status === 'in_progress' ? ' active' : '';
+  const expandedClass = isExpanded ? ' expanded' : '';
+  const total = countTasks(entries);
+  const tasksLabel = total.total > 0 ? `${total.done}/${total.total}` : '';
+
+  let bodyHtml = '';
+  if (isExpanded && (entries.length > 0 || ms.description)) {
+    _currentMsId = ms.id;
+    const rendered = entries.map(renderEntry).join('');
+    _currentMsId = null;
+    const hasDone = entries.some(e => e.status === 'done');
+    const msHideDone = state.hideEntryDone.has(ms.id);
+    bodyHtml = `<div class="ms-entries">
+      ${hasDone ? `<div class="ms-entries-toolbar"><button class="entry-filter-btn ${msHideDone?'active':''}" onclick="toggleHideEntryDone('${ms.id}',event)">${msHideDone?'show done':'hide done'}</button></div>` : ''}
+      ${ms.description ? `<div class="ms-description">${esc(ms.description)}</div>` : ''}
+      ${rendered}
+    </div>`;
+  }
+
+  return `<div class="ms-card${activeClass}${expandedClass}">
+    <div class="ms-card-header" data-ms-id="${ms.id}">
+      ${statusBadge(ms.status)}
+      <div class="ms-title-row"><span class="ms-id">${ms.id}</span><span class="ms-title">${esc(ms.title)}</span></div>
+      <div class="ms-meta">
+        ${tasksLabel ? `<span class="ms-tasks-text">${tasksLabel}</span>` : ''}
+        <div class="ms-progress-bar"><div class="ms-progress-fill ${ms.status}" style="width:${ms.progress||0}%"></div></div>
+        <span class="ms-progress-text">${ms.progress||0}%</span>
+        ${entries.length > 0 ? `<span class="ms-expand-hint">\u25BE</span>` : ''}
+      </div>
+    </div>
+    <div class="ms-body">${bodyHtml}</div>
+  </div>`;
+}
+
+function countTasks(entries) {
+  let total = 0, done = 0;
+  for (const e of entries) {
+    if (e.type === 'task') { total++; if (e.status === 'done') done++; }
+    if (e.entries) { const c = countTasks(e.entries); total += c.total; done += c.done; }
+  }
+  return { total, done };
+}
+
+// ---- Documents ----
+
+function scopeBadge(scope) {
+  const styles = { core: 'background:var(--accent);color:#fff;', spec: 'background:var(--border);color:var(--text-primary);', memo: 'background:transparent;color:var(--text-secondary);border:1px solid var(--border);' };
+  return `<span style="display:inline-block;font-size:0.65rem;padding:1px 6px;border-radius:3px;margin-right:6px;${styles[scope]||styles.memo}">${(scope||'memo').toUpperCase()}</span>`;
+}
+
+function renderDocumentsSection() {
+  if (state.documentContent) {
+    return `<section class="retro-section fade-in">
+      <span class="retro-back" onclick="closeDocument()">\u2190 back</span>
+      <h3 style="font-size:1rem;color:var(--text-primary);margin:8px 0 16px;">${scopeBadge(state.documentContent.scope)}${esc(state.documentContent.title)}</h3>
+      <div class="retro-content">${esc(state.documentContent.content)}</div>
+    </section>`;
+  }
+  if (state.documents.length === 0) {
+    return `<section class="retro-section fade-in"><div class="retro-empty">No documents yet.</div></section>`;
+  }
+  const order = ['core','spec','memo'];
+  const grouped = {}; for (const s of order) grouped[s] = [];
+  for (const d of state.documents) { const s = d.scope||'memo'; if (!grouped[s]) grouped[s]=[]; grouped[s].push(d); }
+  const labels = { core: '\u2605 CORE', spec: '\u25CB SPEC', memo: '\u25CB MEMO' };
+  let html = '';
+  for (const s of order) {
+    if (grouped[s].length === 0) continue;
+    html += `<section class="retro-section fade-in" style="margin-bottom:12px;">
+      <h4 style="font-size:0.75rem;color:var(--text-secondary);margin:0 0 6px;letter-spacing:0.05em;">${labels[s]}</h4>
+      <ul class="retro-list">${grouped[s].map(d => `
+        <li class="retro-item" onclick="openDocument('${esc(d.doc_id)}')">
+          <span class="retro-item-week">${esc(d.title)}</span>
+          <span class="retro-item-date">${d.updated_at ? d.updated_at.slice(0,10) : ''}</span>
+        </li>`).join('')}
+      </ul>
+    </section>`;
+  }
+  return html;
+}
+
+async function switchTab(tab) {
+  state.activeTab = tab;
+  state.documentContent = null;
+  if (tab === 'documents' && state.documents.length === 0) await loadDocuments();
+  render();
+}
+
+// ---- Init ----
+
+async function init() {
+  await loadProject();
+  if (state.project) {
+    for (const ms of state.project.milestones || []) {
+      if (ms.status === 'in_progress') state.expanded.add(ms.id);
+    }
+    render();
+  }
+  startPolling();
+}
+
+init();
+</script>
+</body>
+</html>
