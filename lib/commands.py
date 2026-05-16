@@ -223,12 +223,80 @@ def cmd_init():
     with open(pf, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")
+    print(f"Created {pf}")
+    print("Next: beacon milestone add")
+
+
+def cmd_common_setup():
+    """Install Claude Code hooks, skills, and CLAUDE.md beacon section (idempotent)."""
     _append_claude_md()
     _install_git_hook()
     _install_claude_hook()
     _install_skills()
-    print(f"Created {pf}")
-    print("Next: beacon milestone add")
+    print("Claude Code integration ready.")
+
+
+def cmd_auth_check():
+    """Exit 0 if authenticated, exit 1 if not."""
+    from auth import load_credentials
+    creds = load_credentials()
+    if creds is None:
+        print("not_authenticated")
+        sys.exit(1)
+    email = getattr(creds, "email", "") or ""
+    print(f"authenticated:{email}")
+    sys.exit(0)
+
+
+def cmd_cloud_join():
+    """Join an existing cloud project (no .beacon/ required)."""
+    from auth import load_credentials
+    creds = load_credentials()
+    if creds is None:
+        print("Not logged in. Run: beacon auth login")
+        sys.exit(1)
+
+    project_id = os.environ.get("BEACON_CLOUD_PROJECT_ID", "")
+    if not project_id:
+        print("Error: project ID required")
+        sys.exit(1)
+
+    api_url = os.environ.get("BEACON_API_URL", DEFAULT_API_URL)
+    token = creds.id_token or creds.token or ""
+
+    from api_client import ApiClient
+    client = ApiClient(api_url, token)
+
+    try:
+        data = client.get_project(project_id)
+    except RuntimeError as e:
+        if "404" in str(e):
+            print(f"Project '{project_id}' not found in cloud.")
+        else:
+            print(f"Error: {e}")
+        sys.exit(1)
+
+    core.validate_project(data)
+
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    os.makedirs(beacon_dir, exist_ok=True)
+
+    cloud_config_path = os.path.join(beacon_dir, "cloud.json")
+    with open(cloud_config_path, "w", encoding="utf-8") as f:
+        json.dump({"project_id": project_id, "api_url": api_url}, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+    mode_config_path = os.path.join(beacon_dir, "config.json")
+    with open(mode_config_path, "w", encoding="utf-8") as f:
+        json.dump({"mode": "cloud"}, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+    from store_local import LocalStore
+    local = LocalStore(get_project_file())
+    local.save_project(data)
+
+    print(f"Joined cloud project: {project_id}")
+    print(f"Project: {data.get('name', 'unnamed')}")
 
 
 # ---------------------------------------------------------------------------
@@ -1654,6 +1722,9 @@ if __name__ == "__main__":
         "cloud_push": cmd_cloud_push,
         "cloud_pull": cmd_cloud_pull,
         "cloud_status": cmd_cloud_status,
+        "cloud_join": cmd_cloud_join,
+        "common_setup": cmd_common_setup,
+        "auth_check": cmd_auth_check,
         "auth_login": lambda: __import__("auth").login(),
         "auth_logout": lambda: __import__("auth").logout(),
         "auth_status": lambda: __import__("auth").status(),
