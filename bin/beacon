@@ -1241,9 +1241,9 @@ cmd_pr() {
                 esac
             done
 
-            # Build gh args string for passthrough
+            # Build gh args string for passthrough (printf %q preserves args with spaces)
             if [ ${#remaining[@]} -gt 0 ]; then
-                gh_args="${remaining[*]}"
+                gh_args=$(printf '%q ' "${remaining[@]}")
             fi
 
             BEACON_MS_ID="$ms_id" BEACON_INTENT="$intent" BEACON_GH_ARGS="$gh_args" \
@@ -1267,6 +1267,44 @@ cmd_pr() {
             fi
             BEACON_ENTRY_ID="$entry_id" BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" pr_request_review
             ;;
+        request-changes)
+            shift
+            local entry_id=""
+            local rationale=""
+            local json_flag=""
+
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --rationale) rationale="${2:-}"; shift 2 ;;
+                    --json)      json_flag="1"; shift ;;
+                    *)           entry_id="$1"; shift ;;
+                esac
+            done
+
+            if [ -z "$entry_id" ]; then
+                echo "Usage: beacon pr request-changes <entry-id> [--rationale \"text\"] [--json]"
+                exit 1
+            fi
+            BEACON_ENTRY_ID="$entry_id" BEACON_RATIONALE="$rationale" BEACON_JSON="$json_flag" \
+                python3 "$COMMANDS_PY" pr_request_changes
+            ;;
+        review)
+            shift
+            local entry_id=""
+
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    *)  entry_id="$1"; shift ;;
+                esac
+            done
+
+            if [ -z "$entry_id" ]; then
+                echo "Usage: beacon pr review <entry-id>"
+                echo "  Requires: ANTHROPIC_API_KEY env var"
+                exit 1
+            fi
+            BEACON_ENTRY_ID="$entry_id" python3 "$COMMANDS_PY" pr_review
+            ;;
         merge)
             shift
             local entry_id=""
@@ -1286,15 +1324,16 @@ cmd_pr() {
             BEACON_ENTRY_ID="$entry_id" BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" pr_merge
             ;;
         *)
-            echo "Usage: beacon pr [create|add|close|approve|reject|request-review|merge]"
-            echo "  create         [-m <ms-id>] [--intent \"text\"] [gh pr create flags...]"
-            echo "                 Run gh pr create and auto-record the PR in beacon"
-            echo "  add            <github-url> [-m <ms-id>] [--intent \"text\"]  Register a PR"
-            echo "  request-review <entry-id>                                     Mark as in_review"
-            echo "  approve        <entry-id> [--rationale \"text\"]              Approve a PR"
-            echo "  reject         <entry-id> [--rationale \"text\"]              Reject a PR"
-            echo "  merge          <entry-id>                                     Mark as merged"
-            echo "  close          <entry-id>                                     Close a PR"
+            echo "Usage: beacon pr [create|add|review|approve|request-changes|reject|merge|close]"
+            echo "  create          [-m <ms-id>] [--intent \"text\"] [gh pr create flags...]"
+            echo "                  Run gh pr create and auto-record the PR in beacon"
+            echo "  add             <github-url> [-m <ms-id>] [--intent \"text\"]  Register a PR"
+            echo "  review          <entry-id>   AI code review (requires ANTHROPIC_API_KEY)"
+            echo "  approve         <entry-id> [--rationale \"text\"]  Approve (rationale required)"
+            echo "  request-changes <entry-id> [--rationale \"text\"]  Request changes"
+            echo "  reject          <entry-id> [--rationale \"text\"]  Reject a PR"
+            echo "  merge           <entry-id>   Mark as merged"
+            echo "  close           <entry-id>   Close without merging"
             ;;
     esac
 }

@@ -61,6 +61,8 @@ This project uses [Beacon](https://github.com/r-kida2/beacon) for milestone-driv
   ユーザーがセッション終了を仄めかしたとき、または自分自身がセッション分割・終了を提案する前に、必ず `/beacon-session-end` Skill を実行する。
 - When the user wants to implement multiple milestones in parallel ("parallel", "sub-agents", "dispatch", etc.), run `/beacon-dispatch` Skill. Do not call the Agent tool directly.
   ユーザーが複数MSの並列実装を求めた場合（「パラレル」「サブエージェント」「並列」等）、必ず `/beacon-dispatch` Skill を実行する。Agent toolを直接呼ばない。
+- When the user asks to review a PR ("レビューして", "review this PR", etc.), or when `beacon trigger check` shows a PR review trigger, immediately invoke `/review`. Never call `beacon pr approve/reject` directly without running `/review` first.
+  ユーザーがPRのレビューを依頼したとき、またはbeacon triggerにPRレビュー通知があるとき、必ず `/review` Skillを使う。`/review` を経ずに `beacon pr approve/reject` を直接呼ばない。
 
 ### CLI Quick Reference
 
@@ -657,13 +659,25 @@ def cmd_task_done():
     today = datetime.date.today().isoformat()
 
     data = load_project()
-    # Check if this is a PR entry — use pr_merge instead
+    # PR entries: auto-forward to pr_merge, but warn if status is unexpected
     result = core.find_entry(data, entry_id)
     if result:
         _, _, entry, _ = result
         if entry.get("type") == "pr":
-            print(f"Note: {entry_id} is a PR entry. Use 'beacon pr merge {entry_id}' to mark as merged.")
-            print(f"      Marking done without updating pr_status.")
+            pr_status = entry.get("meta", {}).get("pr_status", "")
+            if pr_status not in ("approved", "merged"):
+                print(
+                    f"Warning: PR [{entry_id}] has pr_status='{pr_status}'. "
+                    "Use 'beacon pr merge' to merge explicitly, or 'beacon pr close' to close without merging.",
+                    file=sys.stderr,
+                )
+            ms, entry = core.pr_merge(data, entry_id, date=today)
+            print(f"Merged PR [{entry_id}]: {entry['description']}")
+            core.update_progress(ms, progress)
+            if progress:
+                print(f"  Progress: {ms.get('progress', 0)}%")
+            save_project(data)
+            return
     ms, entry = core.task_done(data, entry_id, date=today)
     print(f"Done: [{entry_id}] {entry['description']}")
     core.update_progress(ms, progress)
@@ -1678,6 +1692,20 @@ def cmd_cloud_status():
 # PR commands (ms-15)
 # ---------------------------------------------------------------------------
 
+def _fetch_gh_pr_info(url: str) -> dict:
+    """Fetch PR title and commits from GitHub via gh CLI. Returns {} on failure."""
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", url, "--json", "title,commits"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            return json.loads(result.stdout)
+    except Exception:
+        pass
+    return {}
+
+
 def cmd_pr_add():
     import datetime
     url = os.environ.get("BEACON_URL", "")
@@ -1692,25 +1720,34 @@ def cmd_pr_add():
         sys.exit(1)
 
     if not intent:
-        # Interactive prompt if not provided via env
         try:
             intent = input("Intent (why was this PR created?): ").strip()
         except (EOFError, KeyboardInterrupt):
             intent = ""
 
+    # Fetch PR title and commits from GitHub
+    gh_info = _fetch_gh_pr_info(url)
+    title = gh_info.get("title", "")
+    commits = gh_info.get("commits", [])
+    if gh_info and not title:
+        print("Warning: could not fetch PR title from GitHub", file=sys.stderr)
+
     data = load_project()
     try:
         eid = core.pr_add(data, ms_id=ms_id, url=url, author=author,
-                          intent=intent, date=date)
+                          intent=intent, date=date, title=title, commits=commits)
     except ValueError as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
     save_project(data)
 
     if json_mode:
-        print(json.dumps({"entry_id": eid, "url": url, "intent": intent}, ensure_ascii=False))
+        print(json.dumps({"entry_id": eid, "url": url, "title": title, "intent": intent,
+                          "commits": len(commits)}, ensure_ascii=False))
     else:
-        print(f"Added PR [{eid}]: {url}")
+        print(f"Added PR [{eid}]: {title or url}")
+        if commits:
+            print(f"  Commits: {len(commits)} linked")
         if intent:
             print(f"  Intent: {intent}")
 
@@ -1748,9 +1785,13 @@ def cmd_pr_approve():
 
     if not rationale:
         try:
-            rationale = input("Rationale (reason for approval): ").strip()
+            rationale = input("承認の根拠・受け入れたトレードオフは？ (Rationale for approval): ").strip()
         except (EOFError, KeyboardInterrupt):
-            rationale = ""
+            pass
+
+    if not rationale:
+        print("Error: rationale is required for approve. Decision trail must be complete.", file=sys.stderr)
+        sys.exit(1)
 
     data = load_project()
     try:
@@ -1780,9 +1821,13 @@ def cmd_pr_reject():
 
     if not rationale:
         try:
-            rationale = input("Rationale (reason for rejection): ").strip()
+            rationale = input("却下の理由・懸念点は？ (Rationale for rejection): ").strip()
         except (EOFError, KeyboardInterrupt):
-            rationale = ""
+            pass
+
+    if not rationale:
+        print("Error: rationale is required for reject. Decision trail must be complete.", file=sys.stderr)
+        sys.exit(1)
 
     data = load_project()
     try:
@@ -1818,6 +1863,191 @@ def cmd_pr_request_review():
         print(json.dumps({"entry_id": entry_id, "pr_status": "in_review"}, ensure_ascii=False))
     else:
         print(f"In review: [{entry_id}]: {entry.get('description', '')}")
+
+
+def cmd_pr_request_changes():
+    entry_id = os.environ.get("BEACON_ENTRY_ID", "")
+    rationale = os.environ.get("BEACON_RATIONALE", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not entry_id:
+        print("Error: entry ID required", file=sys.stderr)
+        sys.exit(1)
+
+    if not rationale:
+        try:
+            rationale = input("修正要求の理由・具体的な懸念点は？ (Reason for requesting changes): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            pass
+
+    if not rationale:
+        print("Error: rationale is required for request-changes. Decision trail must be complete.", file=sys.stderr)
+        sys.exit(1)
+
+    data = load_project()
+    try:
+        ms, entry = core.pr_request_changes(data, entry_id, rationale=rationale)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+
+    if json_mode:
+        print(json.dumps({"entry_id": entry_id, "review_status": "changes_requested"}, ensure_ascii=False))
+    else:
+        print(f"Changes requested on PR [{entry_id}]: {entry.get('description', '')}")
+        if rationale:
+            print(f"  Reason: {rationale}")
+
+
+def _call_claude_review(diff_text: str, pr_title: str, pr_intent: str) -> str:
+    """Call Claude API to review a PR diff. Returns review markdown text."""
+    import urllib.request as _urlreq
+    import json as _json
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY not set.\n"
+            "  export ANTHROPIC_API_KEY=sk-ant-...\n"
+            "Then retry: beacon pr review <entry-id>"
+        )
+
+    if len(diff_text) > 30000:
+        diff_text = diff_text[:30000] + "\n\n[diff truncated — too large to include in full]"
+
+    intent_section = f"\nPR Intent: {pr_intent}" if pr_intent else ""
+    prompt = f"""You are reviewing a pull request for a software project.
+
+PR Title: {pr_title}{intent_section}
+
+Review the following diff for:
+1. Bugs, logic errors, or edge cases
+2. Security issues
+3. Performance concerns
+4. Code quality and readability
+5. Whether the implementation matches the stated intent
+
+Be concise. End your review with exactly one line in this format:
+VERDICT: approved
+or
+VERDICT: changes_requested
+
+Followed by a one-sentence summary of the key reason.
+
+Diff:
+{diff_text}"""
+
+    body = {
+        "model": "claude-sonnet-4-6",
+        "max_tokens": 2048,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    req = _urlreq.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=_json.dumps(body).encode(),
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+    )
+    try:
+        with _urlreq.urlopen(req, timeout=60) as resp:
+            result = _json.loads(resp.read())
+        return result["content"][0]["text"]
+    except Exception as e:
+        raise RuntimeError(f"Claude API error: {e}") from e
+
+
+def cmd_pr_review():
+    """AI code review for a PR entry: fetches diff, calls Claude, records as note."""
+    import datetime
+
+    entry_id = os.environ.get("BEACON_ENTRY_ID", "")
+    if not entry_id:
+        print("Error: entry ID required", file=sys.stderr)
+        sys.exit(1)
+
+    data = load_project()
+    result = core.find_entry(data, entry_id)
+    if not result:
+        print(f"Error: Entry not found: {entry_id}", file=sys.stderr)
+        sys.exit(1)
+    _, _, entry, _ = result
+    if entry.get("type") != "pr":
+        print(f"Error: {entry_id} is not a PR entry", file=sys.stderr)
+        sys.exit(1)
+
+    meta = entry.get("meta", {})
+    url = meta.get("url", "")
+    pr_title = entry.get("description", "")
+    pr_intent = meta.get("intent", "")
+
+    if not url:
+        print("Error: PR entry has no URL", file=sys.stderr)
+        sys.exit(1)
+
+    # Fetch diff via gh
+    print(f"Fetching diff for [{entry_id}] {pr_title} ...")
+    diff_result = subprocess.run(["gh", "pr", "diff", url], capture_output=True, text=True)
+    if diff_result.returncode != 0:
+        print(f"Error fetching diff: {diff_result.stderr.strip()}", file=sys.stderr)
+        sys.exit(1)
+    diff_text = diff_result.stdout
+    if not diff_text.strip():
+        print("No diff found (PR may be empty or already merged).", file=sys.stderr)
+        sys.exit(1)
+
+    # Call Claude
+    print("Generating AI review ...")
+    try:
+        review_text = _call_claude_review(diff_text, pr_title, pr_intent)
+    except RuntimeError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+
+    # Parse verdict
+    verdict = "changes_requested"
+    for line in review_text.splitlines():
+        stripped = line.strip()
+        if stripped.upper().startswith("VERDICT:"):
+            v = stripped.split(":", 1)[1].strip().lower().replace("-", "_")
+            if v == "approved":
+                verdict = "approved"
+            break
+
+    print("\n" + "=" * 60)
+    print(review_text)
+    print("=" * 60)
+    print(f"\nAI verdict: {verdict}")
+
+    # Human confirmation
+    try:
+        confirm = input(
+            "Accept? [Enter=yes / 'a'=approved / 'c'=changes_requested / 'n'=discard]: "
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        confirm = ""
+
+    if confirm == "n":
+        print("Review discarded.")
+        return
+    if confirm == "a":
+        verdict = "approved"
+    elif confirm == "c":
+        verdict = "changes_requested"
+
+    today = datetime.date.today().isoformat()
+    try:
+        ms, entry, note = core.pr_record_review(data, entry_id,
+                                                 review_text=review_text,
+                                                 verdict=verdict, date=today)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Review recorded [{note['id']}] → PR [{entry_id}] review_status: {verdict}")
 
 
 def cmd_pr_merge():
@@ -1879,15 +2109,22 @@ def cmd_pr_create():
         except (EOFError, KeyboardInterrupt):
             intent = ""
 
+    gh_info = _fetch_gh_pr_info(pr_url)
+    title = gh_info.get("title", "")
+    commits = gh_info.get("commits", [])
+
     date = __import__("datetime").date.today().isoformat()
     data = load_project()
     try:
-        eid = core.pr_add(data, ms_id=ms_id, url=pr_url, intent=intent, date=date)
+        eid = core.pr_add(data, ms_id=ms_id, url=pr_url, intent=intent, date=date,
+                          title=title, commits=commits)
     except ValueError as e:
         print(f"Warning: beacon pr record failed: {e}", file=sys.stderr)
         return
     save_project(data)
-    print(f"Beacon: PR recorded [{eid}]")
+    print(f"Beacon: PR recorded [{eid}]: {title or pr_url}")
+    if commits:
+        print(f"  Commits: {len(commits)} linked")
 
 
 # ---------------------------------------------------------------------------
@@ -1990,6 +2227,8 @@ if __name__ == "__main__":
         "pr_reject": cmd_pr_reject,
         "pr_create": cmd_pr_create,
         "pr_request_review": cmd_pr_request_review,
+        "pr_request_changes": cmd_pr_request_changes,
+        "pr_review": cmd_pr_review,
         "pr_merge": cmd_pr_merge,
         "version": lambda: print(f"beacon {__version__}"),
     }

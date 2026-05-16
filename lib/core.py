@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import re
 
-VALID_STATUSES = {"todo", "in_progress", "in_review", "waiting", "done", "observing", "cancelled"}
+VALID_STATUSES = {"todo", "in_progress", "in_review", "approved", "waiting", "done", "observing", "cancelled"}
 VALID_ENTRY_TYPES = {"commit", "task", "note", "save", "pr"}
-VALID_PR_STATUSES = {"open", "in_review", "merged", "closed"}
+# PR lifecycle: in_review → approved → merged (or closed/rejected)
+# "open" is reserved for Phase 2 auto-detection via GitHub API (external PRs not yet picked up by beacon)
+VALID_PR_STATUSES = {"open", "in_review", "approved", "merged", "closed"}
 VALID_REVIEW_STATUSES = {"pending", "approved", "changes_requested", "rejected"}
 MS_ID_RE = re.compile(r"^ms-\d+$")
 ENTRY_ID_RE = re.compile(r"^e-\d+$")
@@ -495,20 +497,39 @@ def _find_matching_task(entries: list, commit_text: str):
 # ---------------------------------------------------------------------------
 
 def pr_add(data: dict, *, ms_id: str = "", url: str, author: str = "",
-           intent: str = "", date: str = "") -> str:
-    """Add a PR entry to a milestone. Returns the new entry id."""
+           intent: str = "", date: str = "", title: str = "",
+           commits: list = None) -> str:
+    """Add a PR entry to a milestone. Returns the new entry id.
+
+    commits: list of {"oid": "<sha>", "messageHeadline": "<msg>"} from gh pr view.
+    """
     import re as _re
     target = find_target_milestone(data, ms_id)
     entries = target.setdefault("entries", [])
     eid = next_entry_id(data)
+    eid_num = int(eid.split("-")[1])
 
-    # Extract PR number from URL (e.g. .../pull/42 -> 42)
     pr_number = None
     m = _re.search(r'/pull/(\d+)', url)
     if m:
         pr_number = int(m.group(1))
 
-    description = f"PR#{pr_number}: {url}" if pr_number else url
+    # Prefer explicit title; fall back to "PR#{n}" so URL stays only in meta
+    description = title or (f"PR#{pr_number}" if pr_number else url)
+
+    child_entries = []
+    for i, commit in enumerate(commits or [], start=1):
+        sha = commit.get("oid", "")
+        msg = commit.get("messageHeadline", "") or (sha[:7] if sha else "commit")
+        child_entries.append({
+            "id": f"e-{eid_num + i}",
+            "type": "commit",
+            "description": msg,
+            "date": date,
+            "created_at": date,
+            "status": "done",
+            "meta": {"hash": sha[:7] if sha else ""},
+        })
 
     entry = {
         "id": eid,
@@ -517,17 +538,20 @@ def pr_add(data: dict, *, ms_id: str = "", url: str, author: str = "",
         "date": date,
         "created_at": date,
         "done_at": None,
-        "status": "todo",
+        "status": "in_review",
         "meta": {
             "url": url,
             "author": author,
             "pr_number": pr_number,
-            "pr_status": "open",
+            "pr_status": "in_review",
             "review_status": "pending",
             "intent": intent,
             "review_rationale": None,
         },
     }
+    if child_entries:
+        entry["entries"] = child_entries
+
     entries.append(entry)
     return eid
 
@@ -543,11 +567,69 @@ def pr_request_review(data: dict, entry_id: str) -> tuple[dict, dict]:
     meta = entry.setdefault("meta", {})
     meta["pr_status"] = "in_review"
     meta["review_status"] = "pending"
+    entry["status"] = "in_review"
     return ms, entry
 
 
+def pr_request_changes(data: dict, entry_id: str, *, rationale: str = "") -> tuple[dict, dict]:
+    """Request changes on a PR: review_status=changes_requested, entry stays in_review."""
+    result = find_entry(data, entry_id)
+    if not result:
+        raise ValueError(f"Entry not found: {entry_id}")
+    ms, _, entry, _ = result
+    if entry.get("type") != "pr":
+        raise ValueError(f"Entry {entry_id} is not a pr entry")
+    meta = entry.setdefault("meta", {})
+    meta["pr_status"] = "in_review"
+    meta["review_status"] = "changes_requested"
+    entry["status"] = "in_review"
+    if rationale:
+        meta["review_rationale"] = rationale
+    return ms, entry
+
+
+def pr_record_review(data: dict, entry_id: str, *, review_text: str,
+                     verdict: str, date: str = "") -> tuple[dict, dict, dict]:
+    """Record an AI code review as a child note entry under the PR.
+
+    verdict: 'approved' or 'changes_requested'
+    Returns (milestone, pr_entry, note_entry).
+    """
+    import datetime as _dt
+    result = find_entry(data, entry_id)
+    if not result:
+        raise ValueError(f"Entry not found: {entry_id}")
+    ms, _, entry, _ = result
+    if entry.get("type") != "pr":
+        raise ValueError(f"Entry {entry_id} is not a pr entry")
+
+    today = date or _dt.date.today().isoformat()
+    note_eid = next_entry_id(data)
+    note_entry = {
+        "id": note_eid,
+        "type": "note",
+        "description": f"[AI Review] {verdict}",
+        "detail": review_text,
+        "date": today,
+        "created_at": today,
+        "status": "done",
+    }
+    entry.setdefault("entries", []).append(note_entry)
+
+    meta = entry.setdefault("meta", {})
+    meta["review_status"] = verdict
+    if verdict == "approved":
+        meta["pr_status"] = "approved"
+        entry["status"] = "approved"
+    else:
+        meta["pr_status"] = "in_review"
+        entry["status"] = "in_review"
+
+    return ms, entry, note_entry
+
+
 def pr_merge(data: dict, entry_id: str, *, date: str = "") -> tuple[dict, dict]:
-    """Merge a PR entry (pr_status=merged, status=done). Returns (milestone, entry)."""
+    """Merge a PR: pr_status=merged, entry.status=done, done_at=today."""
     import datetime as _dt
     result = find_entry(data, entry_id)
     if not result:
@@ -563,19 +645,7 @@ def pr_merge(data: dict, entry_id: str, *, date: str = "") -> tuple[dict, dict]:
 
 
 def pr_close(data: dict, entry_id: str) -> tuple[dict, dict]:
-    """Close a PR entry (pr_status=closed). Returns (milestone, entry)."""
-    result = find_entry(data, entry_id)
-    if not result:
-        raise ValueError(f"Entry not found: {entry_id}")
-    ms, _, entry, _ = result
-    if entry.get("type") != "pr":
-        raise ValueError(f"Entry {entry_id} is not a pr entry")
-    entry.setdefault("meta", {})["pr_status"] = "closed"
-    return ms, entry
-
-
-def pr_approve(data: dict, entry_id: str, *, rationale: str = "") -> tuple[dict, dict]:
-    """Approve a PR entry (review_status=approved). Returns (milestone, entry)."""
+    """Close a PR without merging: pr_status=closed, entry.status=cancelled."""
     result = find_entry(data, entry_id)
     if not result:
         raise ValueError(f"Entry not found: {entry_id}")
@@ -583,14 +653,30 @@ def pr_approve(data: dict, entry_id: str, *, rationale: str = "") -> tuple[dict,
     if entry.get("type") != "pr":
         raise ValueError(f"Entry {entry_id} is not a pr entry")
     meta = entry.setdefault("meta", {})
+    meta["pr_status"] = "closed"
+    entry["status"] = "cancelled"
+    return ms, entry
+
+
+def pr_approve(data: dict, entry_id: str, *, rationale: str = "") -> tuple[dict, dict]:
+    """Approve a PR: pr_status=approved, review_status=approved, entry.status=approved."""
+    result = find_entry(data, entry_id)
+    if not result:
+        raise ValueError(f"Entry not found: {entry_id}")
+    ms, _, entry, _ = result
+    if entry.get("type") != "pr":
+        raise ValueError(f"Entry {entry_id} is not a pr entry")
+    meta = entry.setdefault("meta", {})
+    meta["pr_status"] = "approved"
     meta["review_status"] = "approved"
+    entry["status"] = "approved"
     if rationale:
         meta["review_rationale"] = rationale
     return ms, entry
 
 
 def pr_reject(data: dict, entry_id: str, *, rationale: str = "") -> tuple[dict, dict]:
-    """Reject a PR entry (review_status=rejected). Returns (milestone, entry)."""
+    """Reject a PR: review_status=rejected, entry.status=cancelled."""
     result = find_entry(data, entry_id)
     if not result:
         raise ValueError(f"Entry not found: {entry_id}")
@@ -598,7 +684,9 @@ def pr_reject(data: dict, entry_id: str, *, rationale: str = "") -> tuple[dict, 
     if entry.get("type") != "pr":
         raise ValueError(f"Entry {entry_id} is not a pr entry")
     meta = entry.setdefault("meta", {})
+    meta["pr_status"] = "closed"
     meta["review_status"] = "rejected"
+    entry["status"] = "cancelled"
     if rationale:
         meta["review_rationale"] = rationale
     return ms, entry
@@ -772,7 +860,7 @@ def entries_to_json(entries: list) -> list:
             "created_at": e.get("created_at", e.get("date", "")),
             "done_at": e.get("done_at"),
         }
-        if e.get("type") in ("commit", "save"):
+        if e.get("meta"):
             item["meta"] = e.get("meta", {})
         if e.get("detail"):
             item["detail"] = e["detail"]

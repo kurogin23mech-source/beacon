@@ -699,6 +699,10 @@ body::after {
   border: 1px solid rgba(249, 115, 22, 0.15);
 }
 
+.entry-pr-block {
+  grid-column: 1 / -1;
+}
+
 .entry-pr-meta {
   display: flex;
   flex-wrap: wrap;
@@ -707,6 +711,27 @@ body::after {
   font-size: 0.7rem;
   color: var(--text-secondary);
 }
+
+.entry-pr-decision {
+  margin-top: 6px;
+  padding: 5px 8px;
+  border-left: 2px solid rgba(251,191,36,0.4);
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
+.entry-pr-decision-label {
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 2px;
+}
+
+.entry-pr-intent .entry-pr-decision-label { color: #60a5fa; }
+.entry-pr-rationale-block .entry-pr-decision-label { color: #a3e635; }
+.entry-pr-rationale-block { border-left-color: rgba(163,230,53,0.4); }
 
 .entry-pr-status {
   font-weight: 500;
@@ -736,6 +761,11 @@ body::after {
   text-decoration-color: var(--border);
 }
 
+/* Commits are historical records, not to-dos — no strikethrough */
+.entry.entry-type-commit.done .entry-desc {
+  text-decoration: none;
+}
+
 .entry-status-text {
   font-size: 0.6rem;
   color: var(--text-dim);
@@ -747,6 +777,9 @@ body::after {
 .entry-status-text.done { color: var(--done); }
 .entry-status-text.todo { color: var(--todo); }
 .entry-status-text.in_progress { color: var(--in-progress); }
+.entry-status-text.in_review { color: #fb923c; }
+.entry-status-text.approved { color: #a3e635; }
+.entry-status-text.cancelled { color: var(--text-dim); }
 
 .entry-date {
   font-size: 0.7rem;
@@ -1462,6 +1495,7 @@ function updateConnectionStatus() {
 const STATUS_LABELS = {
   done: 'done', in_progress: 'active', observing: 'observing',
   todo: 'todo', waiting: 'waiting', cancelled: 'cancelled',
+  in_review: 'in review', approved: 'approved',
 };
 
 const FILTER_ORDER = ['todo', 'in_progress', 'observing', 'done'];
@@ -1497,9 +1531,13 @@ function renderEntry(entry) {
     const prStatus = m.pr_status || 'open';
     const reviewStatus = m.review_status ? ` · review: ${m.review_status}` : '';
     const url = m.url ? ` · <a href="${esc(m.url)}" target="_blank" rel="noopener" style="color:inherit;opacity:0.7;">${esc(m.url.replace(/.*\/pull\//, '#'))}</a>` : '';
-    const intent = m.intent ? `<div style="margin-top:2px;color:var(--text-secondary);font-size:0.68rem;">${esc(m.intent)}</div>` : '';
-    const rationale = m.review_rationale ? `<div style="margin-top:2px;color:var(--text-dim);font-size:0.68rem;font-style:italic;">${esc(m.review_rationale)}</div>` : '';
-    prMeta = `<div class="entry-pr-meta"><span class="entry-pr-status ${prStatus}">${prStatus}${reviewStatus}</span>${url}</div>${intent}${rationale}`;
+    const intent = m.intent
+      ? `<div class="entry-pr-decision entry-pr-intent"><div class="entry-pr-decision-label">intent</div>${esc(m.intent)}</div>`
+      : '';
+    const rationale = m.review_rationale
+      ? `<div class="entry-pr-decision entry-pr-rationale-block"><div class="entry-pr-decision-label">rationale</div>${esc(m.review_rationale)}</div>`
+      : '';
+    prMeta = `<div class="entry-pr-block"><div class="entry-pr-meta"><span class="entry-pr-status ${prStatus}">${prStatus}${reviewStatus}</span>${url}</div>${intent}${rationale}</div>`;
   }
   const statusText = entryStatusText(entry);
   const hasChildren = entry.entries?.length > 0;
@@ -1517,7 +1555,7 @@ function renderEntry(entry) {
   const childBadge = hasChildren && isCollapsed ? `<span class="entry-child-count">${childCount}</span>` : '';
 
   return `
-    <div class="entry${statusClass}${toggleClass}" ${hasChildren ? `data-action="toggle-entry" data-entry-id="${entry.id}"` : ''}>
+    <div class="entry entry-type-${entry.type}${statusClass}${toggleClass}" ${hasChildren ? `data-action="toggle-entry" data-entry-id="${entry.id}"` : ''}>
       ${entryTypeBadge(entry.type)}
       <span class="entry-id">${entry.id}</span>
       <span class="entry-desc">${esc(entry.description)}${hash}${statusText}${childBadge}</span>
