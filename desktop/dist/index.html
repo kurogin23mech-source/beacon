@@ -176,10 +176,16 @@ const { invoke } = window.__TAURI__.core;
 
 let pollTimer = null;
 let lastProjectJson = null;
+let cloudMode = false;  // true when viewing a cloud project
 
 async function loadProject() {
   try {
-    const json = await invoke('load_project_json');
+    let json;
+    if (cloudMode && state.cloudProjectId) {
+      json = await invoke('cloud_load_project', { projectId: state.cloudProjectId });
+    } else {
+      json = await invoke('load_project_json');
+    }
     if (!json) return;
     const data = JSON.parse(json);
     const newJson = JSON.stringify(data);
@@ -203,42 +209,63 @@ async function loadProject() {
 
 async function loadDocuments() {
   try {
-    const json = await invoke('get_documents', { scope: '' });
-    state.documents = JSON.parse(json);
+    if (cloudMode) {
+      const json = await invoke('cloud_list_documents');
+      state.documents = JSON.parse(json);
+    } else {
+      const json = await invoke('get_documents', { scope: '' });
+      state.documents = JSON.parse(json);
+    }
   } catch (e) { state.documents = []; }
 }
 
 async function loadRetros() {
   try {
-    const json = await invoke('list_retros');
-    state.retros = JSON.parse(json);
+    if (cloudMode) {
+      const json = await invoke('cloud_list_retros');
+      state.retros = JSON.parse(json);
+    } else {
+      const json = await invoke('list_retros');
+      state.retros = JSON.parse(json);
+    }
   } catch (e) { state.retros = []; }
 }
 
 async function loadRetroContent(week) {
   try {
-    const json = await invoke('get_retro_content', { week });
-    state.retroContent = JSON.parse(json);
+    if (cloudMode) {
+      const json = await invoke('cloud_get_retro', { week });
+      state.retroContent = JSON.parse(json);
+    } else {
+      const json = await invoke('get_retro_content', { week });
+      state.retroContent = JSON.parse(json);
+    }
   } catch (e) { state.retroContent = { week, content: 'Failed to load.' }; }
   render();
 }
 
 async function loadDocumentContent(docId) {
   try {
-    const content = await invoke('get_document_content', { docId });
-    let title = docId, scope = 'memo', body = content;
-    if (content.startsWith('---')) {
-      const parts = content.split('---', 3);
-      if (parts.length >= 3) {
-        for (const line of parts[1].trim().split('\n')) {
-          if (line.startsWith('scope:')) scope = line.split(':',2)[1].trim();
+    if (cloudMode) {
+      const json = await invoke('cloud_get_document', { docId });
+      const doc = JSON.parse(json);
+      state.documentContent = doc;
+    } else {
+      const content = await invoke('get_document_content', { docId });
+      let title = docId, scope = 'memo', body = content;
+      if (content.startsWith('---')) {
+        const parts = content.split('---', 3);
+        if (parts.length >= 3) {
+          for (const line of parts[1].trim().split('\n')) {
+            if (line.startsWith('scope:')) scope = line.split(':',2)[1].trim();
+          }
+          body = parts[2].trim();
         }
-        body = parts[2].trim();
       }
+      const m = body.match(/^# (.+)/m);
+      if (m) title = m[1];
+      state.documentContent = { doc_id: docId, title, scope, content: body };
     }
-    const m = body.match(/^# (.+)/m);
-    if (m) title = m[1];
-    state.documentContent = { doc_id: docId, title, scope, content: body };
   } catch (e) {
     state.documentContent = { doc_id: docId, title: 'Error', scope: 'memo', content: String(e) };
   }
@@ -248,8 +275,29 @@ async function loadDocumentContent(docId) {
 function startPolling() { if (!pollTimer) pollTimer = setInterval(loadProject, 2000); }
 function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
 
+async function doSelectCloudProject(projectId) {
+  cloudMode = true;
+  state.cloudProjectId = projectId;
+  state.error = null; state.project = null; state.expanded.clear();
+  state.documents = []; state.documentContent = null;
+  state.retros = []; state.retroContent = null;
+  state.activeTab = 'dashboard'; lastProjectJson = null;
+  state.projectPath = 'cloud:' + projectId;
+  try {
+    await loadProject();
+    if (state.project) {
+      for (const ms of state.project.milestones || []) {
+        if (ms.status === 'in_progress') state.expanded.add(ms.id);
+      }
+      render(); startPolling();
+    }
+  } catch (e) { state.error = String(e); renderProjectSelector(); }
+}
+
 async function doSelectProject(path) {
   try {
+    cloudMode = false;
+    state.cloudProjectId = null;
     await invoke('set_project_dir', { dir: path });
     state.error = null; state.project = null; state.expanded.clear();
     state.documents = []; state.documentContent = null;
@@ -268,21 +316,34 @@ async function doSelectProject(path) {
 
 async function renderProjectSelector() {
   const app = document.getElementById('app');
-  let projects = [];
-  try { projects = await invoke('list_projects'); } catch (e) {}
-  const local = projects.filter(p => p.mode === 'local');
-  const cloud = projects.filter(p => p.mode === 'cloud');
+  let localProjects = [];
+  let cloudProjects = [];
+  let authenticated = false;
+  try { localProjects = await invoke('list_projects'); } catch (e) {}
+  try { authenticated = await invoke('is_authenticated'); } catch (e) {}
+  if (authenticated) {
+    try {
+      const json = await invoke('cloud_list_projects');
+      cloudProjects = JSON.parse(json);
+    } catch (e) {
+      console.error('cloud_list_projects error:', e);
+      // Show error in UI for debugging
+      state.cloudError = String(e);
+    }
+  }
+  const localOnly = localProjects.filter(p => p.mode === 'local');
+
   app.innerHTML = `
     <div class="open-prompt fade-in">
       <h1 style="font-family:var(--font-mono);font-size:2rem;font-weight:700;">Beacon</h1>
       <p style="font-size:0.8rem;color:var(--text-dim);font-style:italic;">Where humans and AI are bound together.</p>
       ${state.error ? `<p style="font-size:0.75rem;color:var(--cancelled);">${esc(state.error)}</p>` : ''}
       <div style="width:100%;max-width:480px;margin-top:24px;">
-        <div class="summary-label">Local Projects</div>
-        ${local.length === 0 ? '<p style="color:var(--text-dim);font-size:0.8rem;">None found</p>' :
-          local.map(p => `<div class="project-item" data-action="select-project" data-path="${esc(p.path)}"><div class="project-item-name">${esc(p.name)}</div><div class="project-item-id">${esc(p.path)}</div></div>`).join('')}
-        ${cloud.length > 0 ? `<div class="summary-label" style="margin-top:16px;">Cloud Projects</div>
-          ${cloud.map(p => `<div class="project-item" data-action="select-project" data-path="${esc(p.path)}"><div class="project-item-name">${esc(p.name)} <span style="font-size:0.65rem;color:var(--text-dim)">cloud</span></div><div class="project-item-id">${esc(p.path)}</div></div>`).join('')}` : ''}
+        ${localOnly.length > 0 ? `<div class="summary-label">Local Projects</div>
+          ${localOnly.map(p => `<div class="project-item" data-action="select-project" data-path="${esc(p.path)}"><div class="project-item-name">${esc(p.name)}</div><div class="project-item-id">${esc(p.path)}</div></div>`).join('')}` : ''}
+        ${cloudProjects.length > 0 ? `<div class="summary-label" style="margin-top:16px;">Cloud Projects</div>
+          ${cloudProjects.map(p => `<div class="project-item" data-action="select-cloud-project" data-project-id="${esc(p.project_id)}"><div class="project-item-name">${esc(p.name)} <span style="font-size:0.65rem;color:var(--info)">cloud</span></div><div class="project-item-id">${esc(p.project_id)}</div></div>`).join('')}` : ''}
+        ${!authenticated && localOnly.length === 0 ? `<p style="color:var(--text-dim);font-size:0.8rem;margin-top:12px;">Run <code style="color:var(--accent)">beacon auth login</code> to access cloud projects,<br>or <code style="color:var(--accent)">beacon init</code> to create a local project.</p>` : ''}
       </div>
     </div>`;
   bindEvents();
@@ -412,25 +473,42 @@ function renderRetrosSection() {
 }
 
 async function renderMenu() {
-  let projects = [];
-  try { projects = await invoke('list_projects'); } catch(e) {}
+  let localProjects = [];
+  let cloudProjects = [];
+  try { localProjects = await invoke('list_projects'); } catch(e) {}
+  try {
+    const auth = await invoke('is_authenticated');
+    if (auth) {
+      const json = await invoke('cloud_list_projects');
+      cloudProjects = JSON.parse(json);
+    }
+  } catch(e) {}
+  const localOnly = localProjects.filter(p => p.mode === 'local');
   const currentPath = state.projectPath || '';
   const root = document.getElementById('menu-root');
   root.innerHTML = `
     <div class="menu-overlay" data-action="close-menu"></div>
     <div class="menu-panel">
       <div class="menu-header"><span class="menu-title">Menu</span><button class="menu-close" data-action="close-menu">\u00d7</button></div>
-      <div class="menu-section">
-        <div class="menu-section-title">Projects</div>
-        ${projects.map(p => `
+      ${localOnly.length > 0 ? `<div class="menu-section">
+        <div class="menu-section-title">Local Projects</div>
+        ${localOnly.map(p => `
           <button class="menu-item ${p.path===currentPath?'current':''}" data-action="menu-select-project" data-path="${esc(p.path)}">
-            ${esc(p.name)}${p.mode==='cloud'?' <span style="font-size:0.65rem;color:var(--text-dim)">cloud</span>':''}
+            ${esc(p.name)}
             <div class="menu-item-sub">${esc(p.path)}</div>
           </button>
         `).join('')}
-      </div>
+      </div>` : ''}
+      ${cloudProjects.length > 0 ? `<div class="menu-section">
+        <div class="menu-section-title">Cloud Projects</div>
+        ${cloudProjects.map(p => `
+          <button class="menu-item ${('cloud:'+p.project_id)===currentPath?'current':''}" data-action="menu-select-cloud-project" data-project-id="${esc(p.project_id)}">
+            ${esc(p.name)}
+            <div class="menu-item-sub">${esc(p.project_id)}</div>
+          </button>
+        `).join('')}
+      </div>` : ''}
     </div>`;
-  // Bind menu events
   root.querySelectorAll('[data-action]').forEach(el => el.addEventListener('click', handleAction));
 }
 
@@ -526,6 +604,8 @@ async function handleAction(e) {
     case 'open-menu': await renderMenu(); break;
     case 'close-menu': closeMenu(); break;
     case 'menu-select-project': closeMenu(); await doSelectProject(el.dataset.path); break;
+    case 'menu-select-cloud-project': closeMenu(); await doSelectCloudProject(el.dataset.projectId); break;
+    case 'select-cloud-project': await doSelectCloudProject(el.dataset.projectId); break;
   }
 }
 

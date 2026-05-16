@@ -5,7 +5,11 @@ use tauri::{Manager, State};
 
 struct AppState {
     project_dir: Mutex<Option<String>>,
+    cloud_token: Mutex<Option<String>>,
+    cloud_project_id: Mutex<Option<String>>,
 }
+
+const DEFAULT_API_URL: &str = "https://beacon-ai.dev";
 
 /// Find a beacon project by checking multiple sources
 fn find_project_dir() -> Option<String> {
@@ -119,6 +123,85 @@ fn scan_beacon_projects() -> Vec<ProjectInfo> {
 #[tauri::command]
 fn list_projects() -> Vec<ProjectInfo> {
     scan_beacon_projects()
+}
+
+/// Load auth token from ~/.beacon/credentials.json
+fn load_auth_token() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let path = std::path::Path::new(&home).join(".beacon/credentials.json");
+    let content = std::fs::read_to_string(&path).ok()?;
+    let data: serde_json::Value = serde_json::from_str(&content).ok()?;
+    // Prefer id_token (needed for API auth), fall back to token
+    data.get("id_token")
+        .or_else(|| data.get("token"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
+/// Make an authenticated GET request to the Cloud API
+fn cloud_get(path: &str, token: &str) -> Result<String, String> {
+    let url = format!("{}{}", DEFAULT_API_URL, path);
+    let resp = ureq::get(&url)
+        .set("Authorization", &format!("Bearer {}", token))
+        .call()
+        .map_err(|e| format!("API error: {}", e))?;
+    resp.into_string().map_err(|e| format!("Read error: {}", e))
+}
+
+#[tauri::command]
+fn cloud_list_projects(state: State<AppState>) -> Result<String, String> {
+    let token = state.cloud_token.lock().unwrap();
+    let token = token.as_deref().ok_or("Not authenticated. Run: beacon auth login")?;
+    cloud_get("/api/projects", token)
+}
+
+#[tauri::command]
+fn cloud_load_project(state: State<AppState>, project_id: String) -> Result<String, String> {
+    let token = state.cloud_token.lock().unwrap();
+    let token = token.as_deref().ok_or("Not authenticated")?;
+    *state.cloud_project_id.lock().unwrap() = Some(project_id.clone());
+    cloud_get(&format!("/api/projects/{}", project_id), token)
+}
+
+#[tauri::command]
+fn cloud_list_documents(state: State<AppState>) -> Result<String, String> {
+    let token = state.cloud_token.lock().unwrap();
+    let token = token.as_deref().ok_or("Not authenticated")?;
+    let pid = state.cloud_project_id.lock().unwrap();
+    let pid = pid.as_deref().ok_or("No cloud project selected")?;
+    cloud_get(&format!("/api/projects/{}/documents", pid), token)
+}
+
+#[tauri::command]
+fn cloud_get_document(state: State<AppState>, doc_id: String) -> Result<String, String> {
+    let token = state.cloud_token.lock().unwrap();
+    let token = token.as_deref().ok_or("Not authenticated")?;
+    let pid = state.cloud_project_id.lock().unwrap();
+    let pid = pid.as_deref().ok_or("No cloud project selected")?;
+    cloud_get(&format!("/api/projects/{}/documents/{}", pid, doc_id), token)
+}
+
+#[tauri::command]
+fn cloud_list_retros(state: State<AppState>) -> Result<String, String> {
+    let token = state.cloud_token.lock().unwrap();
+    let token = token.as_deref().ok_or("Not authenticated")?;
+    let pid = state.cloud_project_id.lock().unwrap();
+    let pid = pid.as_deref().ok_or("No cloud project selected")?;
+    cloud_get(&format!("/api/projects/{}/retros", pid), token)
+}
+
+#[tauri::command]
+fn cloud_get_retro(state: State<AppState>, week: String) -> Result<String, String> {
+    let token = state.cloud_token.lock().unwrap();
+    let token = token.as_deref().ok_or("Not authenticated")?;
+    let pid = state.cloud_project_id.lock().unwrap();
+    let pid = pid.as_deref().ok_or("No cloud project selected")?;
+    cloud_get(&format!("/api/projects/{}/retros/{}", pid, week), token)
+}
+
+#[tauri::command]
+fn is_authenticated(state: State<AppState>) -> bool {
+    state.cloud_token.lock().unwrap().is_some()
 }
 
 /// Run a beacon CLI command and return its JSON output
@@ -272,6 +355,8 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState {
             project_dir: Mutex::new(find_project_dir()),
+            cloud_token: Mutex::new(load_auth_token()),
+            cloud_project_id: Mutex::new(None),
         })
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -295,6 +380,13 @@ pub fn run() {
             list_projects,
             list_retros,
             get_retro_content,
+            is_authenticated,
+            cloud_list_projects,
+            cloud_load_project,
+            cloud_list_documents,
+            cloud_get_document,
+            cloud_list_retros,
+            cloud_get_retro,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
