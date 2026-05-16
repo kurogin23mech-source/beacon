@@ -38,7 +38,7 @@ Beaconが想定するワークフローは**コミット駆動・マイルスト
 
 ```bash
 # Clone the repository
-git clone https://github.com/r-kida2/beacon.git
+git clone https://github.com/kurogin23mech-source/beacon.git
 
 # Add to PATH
 export PATH="$PATH:$(pwd)/beacon/bin"
