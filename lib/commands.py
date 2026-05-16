@@ -1784,6 +1784,55 @@ def cmd_pr_reject():
             print(f"  Rationale: {rationale}")
 
 
+def cmd_pr_create():
+    """Wrapper for gh pr create that auto-records the PR in beacon."""
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    intent = os.environ.get("BEACON_INTENT", "")
+    gh_args = os.environ.get("BEACON_GH_ARGS", "")
+
+    # Run gh pr create and capture the URL from stdout
+    cmd = ["gh", "pr", "create"]
+    if gh_args:
+        import shlex
+        cmd += shlex.split(gh_args)
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.stdout:
+        sys.stdout.write(result.stdout)
+    if result.stderr:
+        sys.stderr.write(result.stderr)
+    if result.returncode != 0:
+        sys.exit(result.returncode)
+
+    # Extract PR URL from gh output (last line that looks like a URL)
+    pr_url = ""
+    for line in reversed(result.stdout.strip().splitlines()):
+        line = line.strip()
+        if line.startswith("https://github.com/") and "/pull/" in line:
+            pr_url = line
+            break
+
+    if not pr_url:
+        print("Warning: could not detect PR URL from gh output", file=sys.stderr)
+        return
+
+    if not intent:
+        try:
+            intent = input(f"Intent for beacon PR record (or Enter to skip): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            intent = ""
+
+    date = __import__("datetime").date.today().isoformat()
+    data = load_project()
+    try:
+        eid = core.pr_add(data, ms_id=ms_id, url=pr_url, intent=intent, date=date)
+    except ValueError as e:
+        print(f"Warning: beacon pr record failed: {e}", file=sys.stderr)
+        return
+    save_project(data)
+    print(f"Beacon: PR recorded [{eid}]")
+
+
 # ---------------------------------------------------------------------------
 # Skill install
 # ---------------------------------------------------------------------------
@@ -1882,6 +1931,7 @@ if __name__ == "__main__":
         "pr_close": cmd_pr_close,
         "pr_approve": cmd_pr_approve,
         "pr_reject": cmd_pr_reject,
+        "pr_create": cmd_pr_create,
         "version": lambda: print(f"beacon {__version__}"),
     }
     fn = commands.get(cmd)

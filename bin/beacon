@@ -1225,8 +1225,34 @@ cmd_pr() {
             BEACON_ENTRY_ID="$entry_id" BEACON_RATIONALE="$rationale" BEACON_JSON="$json_flag" \
                 python3 "$COMMANDS_PY" pr_reject
             ;;
+        create)
+            shift
+            local ms_id=""
+            local intent=""
+            local gh_args=""
+
+            # Collect known beacon flags; pass remaining args to gh pr create
+            local remaining=()
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    -m|--ms)     ms_id="${2:-}"; shift 2 ;;
+                    --intent)    intent="${2:-}"; shift 2 ;;
+                    *)           remaining+=("$1"); shift ;;
+                esac
+            done
+
+            # Build gh args string for passthrough
+            if [ ${#remaining[@]} -gt 0 ]; then
+                gh_args="${remaining[*]}"
+            fi
+
+            BEACON_MS_ID="$ms_id" BEACON_INTENT="$intent" BEACON_GH_ARGS="$gh_args" \
+                python3 "$COMMANDS_PY" pr_create
+            ;;
         *)
-            echo "Usage: beacon pr [add|close|approve|reject]"
+            echo "Usage: beacon pr [create|add|close|approve|reject]"
+            echo "  create [-m <ms-id>] [--intent \"text\"] [gh pr create flags...]"
+            echo "         Run gh pr create and auto-record the PR in beacon"
             echo "  add    <github-url> [-m <ms-id>] [--intent \"text\"]  Register a PR"
             echo "  close  <entry-id>                                     Close a PR"
             echo "  approve <entry-id> [--rationale \"text\"]              Approve a PR"
