@@ -747,6 +747,9 @@ body::after {
 .entry-status-text.done { color: var(--done); }
 .entry-status-text.todo { color: var(--todo); }
 .entry-status-text.in_progress { color: var(--in-progress); }
+.entry-status-text.in_review { color: #fb923c; }
+.entry-status-text.approved { color: #a3e635; }
+.entry-status-text.cancelled { color: var(--text-dim); }
 
 .entry-date {
   font-size: 0.7rem;
@@ -1462,6 +1465,7 @@ function updateConnectionStatus() {
 const STATUS_LABELS = {
   done: 'done', in_progress: 'active', observing: 'observing',
   todo: 'todo', waiting: 'waiting', cancelled: 'cancelled',
+  in_review: 'in review', approved: 'approved',
 };
 
 const FILTER_ORDER = ['todo', 'in_progress', 'observing', 'done'];

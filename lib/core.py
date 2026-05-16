@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import re
 
-VALID_STATUSES = {"todo", "in_progress", "in_review", "waiting", "done", "observing", "cancelled"}
+VALID_STATUSES = {"todo", "in_progress", "in_review", "approved", "waiting", "done", "observing", "cancelled"}
 VALID_ENTRY_TYPES = {"commit", "task", "note", "save", "pr"}
-# PR lifecycle: open → in_review → approved → merged (or closed/rejected)
-VALID_PR_STATUSES = {"open", "in_review", "merged", "closed"}
+# PR lifecycle: in_review → approved → merged (or closed/rejected)
+VALID_PR_STATUSES = {"open", "in_review", "approved", "merged", "closed"}
 VALID_REVIEW_STATUSES = {"pending", "approved", "changes_requested", "rejected"}
 MS_ID_RE = re.compile(r"^ms-\d+$")
 ENTRY_ID_RE = re.compile(r"^e-\d+$")
@@ -537,12 +537,12 @@ def pr_add(data: dict, *, ms_id: str = "", url: str, author: str = "",
         "date": date,
         "created_at": date,
         "done_at": None,
-        "status": "todo",
+        "status": "in_review",
         "meta": {
             "url": url,
             "author": author,
             "pr_number": pr_number,
-            "pr_status": "open",
+            "pr_status": "in_review",
             "review_status": "pending",
             "intent": intent,
             "review_rationale": None,
@@ -566,6 +566,7 @@ def pr_request_review(data: dict, entry_id: str) -> tuple[dict, dict]:
     meta = entry.setdefault("meta", {})
     meta["pr_status"] = "in_review"
     meta["review_status"] = "pending"
+    entry["status"] = "in_review"
     return ms, entry
 
 
@@ -593,12 +594,14 @@ def pr_close(data: dict, entry_id: str) -> tuple[dict, dict]:
     ms, _, entry, _ = result
     if entry.get("type") != "pr":
         raise ValueError(f"Entry {entry_id} is not a pr entry")
-    entry.setdefault("meta", {})["pr_status"] = "closed"
+    meta = entry.setdefault("meta", {})
+    meta["pr_status"] = "closed"
+    entry["status"] = "cancelled"
     return ms, entry
 
 
 def pr_approve(data: dict, entry_id: str, *, rationale: str = "") -> tuple[dict, dict]:
-    """Approve a PR entry (review_status=approved). Returns (milestone, entry)."""
+    """Approve a PR: pr_status=approved, review_status=approved, entry.status=approved."""
     result = find_entry(data, entry_id)
     if not result:
         raise ValueError(f"Entry not found: {entry_id}")
@@ -606,14 +609,16 @@ def pr_approve(data: dict, entry_id: str, *, rationale: str = "") -> tuple[dict,
     if entry.get("type") != "pr":
         raise ValueError(f"Entry {entry_id} is not a pr entry")
     meta = entry.setdefault("meta", {})
+    meta["pr_status"] = "approved"
     meta["review_status"] = "approved"
+    entry["status"] = "approved"
     if rationale:
         meta["review_rationale"] = rationale
     return ms, entry
 
 
 def pr_reject(data: dict, entry_id: str, *, rationale: str = "") -> tuple[dict, dict]:
-    """Reject a PR entry (review_status=rejected). Returns (milestone, entry)."""
+    """Reject a PR: review_status=rejected, entry.status=cancelled."""
     result = find_entry(data, entry_id)
     if not result:
         raise ValueError(f"Entry not found: {entry_id}")
@@ -621,7 +626,9 @@ def pr_reject(data: dict, entry_id: str, *, rationale: str = "") -> tuple[dict, 
     if entry.get("type") != "pr":
         raise ValueError(f"Entry {entry_id} is not a pr entry")
     meta = entry.setdefault("meta", {})
+    meta["pr_status"] = "closed"
     meta["review_status"] = "rejected"
+    entry["status"] = "cancelled"
     if rationale:
         meta["review_rationale"] = rationale
     return ms, entry
