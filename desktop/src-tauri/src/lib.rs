@@ -172,18 +172,68 @@ fn load_auth_token() -> Option<String> {
         .map(String::from)
 }
 
+/// Refresh the id_token using the refresh_token from credentials.json.
+/// Updates credentials.json in-place on success and returns the new id_token.
+fn refresh_id_token() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let creds_path = std::path::Path::new(&home).join(".beacon/credentials.json");
+    let content = std::fs::read_to_string(&creds_path).ok()?;
+    let mut data: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    let refresh_token = data.get("refresh_token")?.as_str()?.to_string();
+    let client_id = data.get("client_id")?.as_str()?.to_string();
+    let client_secret = data.get("client_secret")?.as_str()?.to_string();
+    let token_uri = data.get("token_uri")
+        .and_then(|v| v.as_str())
+        .unwrap_or("https://oauth2.googleapis.com/token")
+        .to_string();
+
+    let body = format!(
+        "grant_type=refresh_token&refresh_token={}&client_id={}&client_secret={}",
+        refresh_token, client_id, client_secret
+    );
+
+    let resp_json: serde_json::Value = ureq::post(&token_uri)
+        .set("Content-Type", "application/x-www-form-urlencoded")
+        .send_string(&body)
+        .ok()?
+        .into_json()
+        .ok()?;
+
+    let new_id_token = resp_json.get("id_token")?.as_str()?.to_string();
+    if let Some(access_token) = resp_json.get("access_token").and_then(|v| v.as_str()) {
+        data["token"] = serde_json::Value::String(access_token.to_string());
+    }
+    data["id_token"] = serde_json::Value::String(new_id_token.clone());
+
+    if let Ok(updated) = serde_json::to_string_pretty(&data) {
+        let _ = std::fs::write(&creds_path, updated);
+    }
+
+    Some(new_id_token)
+}
+
 /// Make an authenticated GET request to the Cloud API.
-/// Always reads a fresh token from disk so that `beacon auth login` refreshes take effect
-/// without restarting the app.
+/// Always reads a fresh token from disk. On 401, auto-refreshes via refresh_token and retries once.
 fn cloud_get(path: &str) -> Result<String, String> {
     let token = load_auth_token()
         .ok_or("Not authenticated. Run: beacon auth login")?;
     let url = format!("{}{}", DEFAULT_API_URL, path);
-    let resp = ureq::get(&url)
-        .set("Authorization", &format!("Bearer {}", token))
-        .call()
-        .map_err(|e| format!("API error: {}", e))?;
-    resp.into_string().map_err(|e| format!("Read error: {}", e))
+
+    match ureq::get(&url).set("Authorization", &format!("Bearer {}", token)).call() {
+        Ok(resp) => resp.into_string().map_err(|e| format!("Read error: {}", e)),
+        Err(ureq::Error::Status(401, _)) => {
+            let new_token = refresh_id_token()
+                .ok_or("Token expired and refresh failed. Run: beacon auth login")?;
+            ureq::get(&url)
+                .set("Authorization", &format!("Bearer {}", new_token))
+                .call()
+                .map_err(|e| format!("API error: {}", e))?
+                .into_string()
+                .map_err(|e| format!("Read error: {}", e))
+        }
+        Err(e) => Err(format!("API error: {}", e)),
+    }
 }
 
 #[tauri::command]
