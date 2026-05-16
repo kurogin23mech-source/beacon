@@ -28,11 +28,25 @@ test -f .beacon/project.json && echo "OK" || echo "NO_BEACON"
 ```
 - `NO_BEACON` の場合、このSkillは何もせず終了する。
 
+## Step 0: 引数チェック
+
+ユーザーが `/beacon-session-start ms-XX` のように引数付きで呼んだ場合、`ms-XX` を **スコープMS** として記憶する。
+複数指定も可能: `/beacon-session-start ms-16 ms-17`
+
+スコープMSが指定された場合、Step 1a のコマンドが変わる。
+
 ## Step 1: プロジェクト状態の取得（並列実行可）
 
 以下の3つを **Bash ツール** で **並列に** 実行する:
 
 ### 1a. プロジェクト全体の状態
+
+スコープMSが **指定されている** 場合:
+```bash
+beacon status --json --ms <ms-id> [--ms <ms-id> ...]
+```
+
+スコープMSが **指定されていない** 場合（従来通り）:
 ```bash
 beacon status --json
 ```

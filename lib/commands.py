@@ -127,6 +127,11 @@ CLAUDE_HOOK_SCRIPT = os.path.join(
     "bin", "beacon-post-commit-hook.sh"
 )
 
+CLAUDE_SAVE_HOOK_SCRIPT = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "bin", "beacon-save-hook.sh"
+)
+
 
 def _install_claude_hook():
     settings_path = os.path.expanduser("~/.claude/settings.json")
@@ -138,25 +143,51 @@ def _install_claude_hook():
             settings = json.load(f)
     hooks = settings.setdefault("hooks", {})
     post_tool_use = hooks.setdefault("PostToolUse", [])
+
+    # Install commit detection hook (matcher: Bash)
+    commit_hook_exists = False
     for entry in post_tool_use:
         if entry.get("matcher") == "Bash":
             for h in entry.get("hooks", []):
                 cmd = h.get("command", "")
                 if "beacon-post-commit-hook" in cmd or "beacon log --prepare" in cmd:
-                    return
-    post_tool_use.append({
-        "matcher": "Bash",
-        "hooks": [{
-            "type": "command",
-            "command": CLAUDE_HOOK_SCRIPT,
-            "timeout": 10,
-            "statusMessage": "Beacon: checking commit...",
-        }],
-    })
+                    commit_hook_exists = True
+                    break
+    if not commit_hook_exists:
+        post_tool_use.append({
+            "matcher": "Bash",
+            "hooks": [{
+                "type": "command",
+                "command": CLAUDE_HOOK_SCRIPT,
+                "timeout": 10,
+                "statusMessage": "Beacon: checking commit...",
+            }],
+        })
+
+    # Install MCP save hook (matcher: mcp__)
+    save_hook_exists = False
+    for entry in post_tool_use:
+        if entry.get("matcher") == "mcp__":
+            for h in entry.get("hooks", []):
+                cmd = h.get("command", "")
+                if "beacon-save-hook" in cmd:
+                    save_hook_exists = True
+                    break
+    if not save_hook_exists:
+        post_tool_use.append({
+            "matcher": "mcp__",
+            "hooks": [{
+                "type": "command",
+                "command": CLAUDE_SAVE_HOOK_SCRIPT,
+                "timeout": 10,
+                "statusMessage": "Beacon: checking MCP operation...",
+            }],
+        })
+
     with open(settings_path, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2, ensure_ascii=False)
         f.write("\n")
-    print("Installed Claude Code PostToolUse hook")
+    print("Installed Claude Code PostToolUse hooks")
 
 
 def _install_skills():
@@ -217,11 +248,21 @@ def cmd_milestone_add():
 def cmd_milestone_list():
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     show_all = os.environ.get("BEACON_ALL", "") == "1"
+    ms_filter_str = os.environ.get("BEACON_MS_FILTER", "")
     data = load_project()
 
     milestones = data["milestones"]
     if not show_all:
         milestones = [ms for ms in milestones if ms.get("status") != "cancelled"]
+
+    if ms_filter_str:
+        ms_ids = [m.strip() for m in ms_filter_str.split(",") if m.strip()]
+        all_ids = {ms["id"] for ms in data["milestones"]}
+        for ms_id in ms_ids:
+            if ms_id not in all_ids:
+                print(f"Error: milestone not found: {ms_id}", file=sys.stderr)
+                sys.exit(1)
+        milestones = [ms for ms in milestones if ms["id"] in ms_ids]
 
     if json_mode:
         output = {

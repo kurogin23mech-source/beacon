@@ -737,14 +737,23 @@ cmd_status() {
     ensure_project
     local json_flag=""
     local all_flag=""
+    local ms_filter=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json_flag="1"; shift ;;
             --all|-a) all_flag="1"; shift ;;
+            --ms)
+                if [ -n "$ms_filter" ]; then
+                    ms_filter="$ms_filter,${2:-}"
+                else
+                    ms_filter="${2:-}"
+                fi
+                shift 2 ;;
             *) shift ;;
         esac
     done
-    BEACON_JSON="$json_flag" BEACON_ALL="$all_flag" python3 "$COMMANDS_PY" milestone_list
+    BEACON_JSON="$json_flag" BEACON_ALL="$all_flag" BEACON_MS_FILTER="$ms_filter" \
+        python3 "$COMMANDS_PY" milestone_list
 }
 
 cmd_cloud_launch() {
