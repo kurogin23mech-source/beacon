@@ -60,15 +60,24 @@ def _extract_project_id(path: str) -> str:
     return m.group(1) if m else ""
 
 
+_RESOURCE_SINGULAR = {
+    "members": "member",
+    "documents": "document",
+    "milestones": "milestone",
+    "entries": "entry",
+    "retros": "retro",
+}
+
+
 def _derive_action(method: str, path: str) -> str:
     """Derive a semantic action name from HTTP method + path."""
     if "/admin/users" in path:
         return f"admin.user.{method.lower()}"
     if "/admin/projects" in path:
         return f"admin.project.{method.lower()}"
-    for resource in ("members", "documents", "milestones", "entries", "retros"):
-        if f"/{resource}" in path:
-            return f"{resource[:-1]}.{method.lower()}"
+    for plural, singular in _RESOURCE_SINGULAR.items():
+        if f"/{plural}" in path:
+            return f"{singular}.{method.lower()}"
     if "/log" in path:
         return "project.log"
     if "/summary" in path:
