@@ -10,7 +10,9 @@ from __future__ import annotations
 import re
 
 VALID_STATUSES = {"todo", "in_progress", "in_review", "waiting", "done", "observing", "cancelled"}
-VALID_ENTRY_TYPES = {"commit", "task", "note", "save"}
+VALID_ENTRY_TYPES = {"commit", "task", "note", "save", "pr"}
+VALID_PR_STATUSES = {"open", "merged", "closed"}
+VALID_REVIEW_STATUSES = {"pending", "approved", "changes_requested", "rejected"}
 MS_ID_RE = re.compile(r"^ms-\d+$")
 ENTRY_ID_RE = re.compile(r"^e-\d+$")
 
@@ -486,6 +488,90 @@ def _find_matching_task(entries: list, commit_text: str):
     if best_overlap >= 1:
         return best_entry
     return None
+
+
+# ---------------------------------------------------------------------------
+# PR entry (ms-15)
+# ---------------------------------------------------------------------------
+
+def pr_add(data: dict, *, ms_id: str = "", url: str, author: str = "",
+           intent: str = "", date: str = "") -> str:
+    """Add a PR entry to a milestone. Returns the new entry id."""
+    import re as _re
+    target = find_target_milestone(data, ms_id)
+    entries = target.setdefault("entries", [])
+    eid = next_entry_id(data)
+
+    # Extract PR number from URL (e.g. .../pull/42 -> 42)
+    pr_number = None
+    m = _re.search(r'/pull/(\d+)', url)
+    if m:
+        pr_number = int(m.group(1))
+
+    description = f"PR#{pr_number}: {url}" if pr_number else url
+
+    entry = {
+        "id": eid,
+        "type": "pr",
+        "description": description,
+        "date": date,
+        "created_at": date,
+        "done_at": None,
+        "status": "todo",
+        "meta": {
+            "url": url,
+            "author": author,
+            "pr_number": pr_number,
+            "pr_status": "open",
+            "review_status": "pending",
+            "intent": intent,
+            "review_rationale": None,
+        },
+    }
+    entries.append(entry)
+    return eid
+
+
+def pr_close(data: dict, entry_id: str) -> tuple[dict, dict]:
+    """Close a PR entry (pr_status=closed). Returns (milestone, entry)."""
+    result = find_entry(data, entry_id)
+    if not result:
+        raise ValueError(f"Entry not found: {entry_id}")
+    ms, _, entry, _ = result
+    if entry.get("type") != "pr":
+        raise ValueError(f"Entry {entry_id} is not a pr entry")
+    entry.setdefault("meta", {})["pr_status"] = "closed"
+    return ms, entry
+
+
+def pr_approve(data: dict, entry_id: str, *, rationale: str = "") -> tuple[dict, dict]:
+    """Approve a PR entry (review_status=approved). Returns (milestone, entry)."""
+    result = find_entry(data, entry_id)
+    if not result:
+        raise ValueError(f"Entry not found: {entry_id}")
+    ms, _, entry, _ = result
+    if entry.get("type") != "pr":
+        raise ValueError(f"Entry {entry_id} is not a pr entry")
+    meta = entry.setdefault("meta", {})
+    meta["review_status"] = "approved"
+    if rationale:
+        meta["review_rationale"] = rationale
+    return ms, entry
+
+
+def pr_reject(data: dict, entry_id: str, *, rationale: str = "") -> tuple[dict, dict]:
+    """Reject a PR entry (review_status=rejected). Returns (milestone, entry)."""
+    result = find_entry(data, entry_id)
+    if not result:
+        raise ValueError(f"Entry not found: {entry_id}")
+    ms, _, entry, _ = result
+    if entry.get("type") != "pr":
+        raise ValueError(f"Entry {entry_id} is not a pr entry")
+    meta = entry.setdefault("meta", {})
+    meta["review_status"] = "rejected"
+    if rationale:
+        meta["review_rationale"] = rationale
+    return ms, entry
 
 
 # ---------------------------------------------------------------------------

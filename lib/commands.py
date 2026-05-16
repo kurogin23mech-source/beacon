@@ -669,10 +669,14 @@ def cmd_task_list():
     ms_id = os.environ.get("BEACON_MS_ID", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     show_all = os.environ.get("BEACON_ALL", "") == "1"
+    type_filter = os.environ.get("BEACON_TYPE_FILTER", "")
     data = load_project()
     target = core.find_target_milestone(data, ms_id)
 
     entries = core.filter_cancelled(target.get("entries", []), show_all)
+
+    if type_filter:
+        entries = [e for e in entries if e.get("type") == type_filter]
 
     if json_mode:
         output = {
@@ -1654,6 +1658,133 @@ def cmd_cloud_status():
 
 
 # ---------------------------------------------------------------------------
+# PR commands (ms-15)
+# ---------------------------------------------------------------------------
+
+def cmd_pr_add():
+    import datetime
+    url = os.environ.get("BEACON_URL", "")
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    intent = os.environ.get("BEACON_INTENT", "")
+    author = os.environ.get("BEACON_AUTHOR", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    date = os.environ.get("BEACON_DATE", "") or datetime.date.today().isoformat()
+
+    if not url:
+        print("Error: GitHub URL required", file=sys.stderr)
+        sys.exit(1)
+
+    if not intent:
+        # Interactive prompt if not provided via env
+        try:
+            intent = input("Intent (why was this PR created?): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            intent = ""
+
+    data = load_project()
+    try:
+        eid = core.pr_add(data, ms_id=ms_id, url=url, author=author,
+                          intent=intent, date=date)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+
+    if json_mode:
+        print(json.dumps({"entry_id": eid, "url": url, "intent": intent}, ensure_ascii=False))
+    else:
+        print(f"Added PR [{eid}]: {url}")
+        if intent:
+            print(f"  Intent: {intent}")
+
+
+def cmd_pr_close():
+    entry_id = os.environ.get("BEACON_ENTRY_ID", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not entry_id:
+        print("Error: entry ID required", file=sys.stderr)
+        sys.exit(1)
+
+    data = load_project()
+    try:
+        ms, entry = core.pr_close(data, entry_id)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+
+    if json_mode:
+        print(json.dumps({"entry_id": entry_id, "pr_status": "closed"}, ensure_ascii=False))
+    else:
+        print(f"Closed PR [{entry_id}]: {entry.get('description', '')}")
+
+
+def cmd_pr_approve():
+    entry_id = os.environ.get("BEACON_ENTRY_ID", "")
+    rationale = os.environ.get("BEACON_RATIONALE", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not entry_id:
+        print("Error: entry ID required", file=sys.stderr)
+        sys.exit(1)
+
+    if not rationale:
+        try:
+            rationale = input("Rationale (reason for approval): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            rationale = ""
+
+    data = load_project()
+    try:
+        ms, entry = core.pr_approve(data, entry_id, rationale=rationale)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+
+    if json_mode:
+        print(json.dumps({"entry_id": entry_id, "review_status": "approved",
+                          "review_rationale": rationale}, ensure_ascii=False))
+    else:
+        print(f"Approved PR [{entry_id}]: {entry.get('description', '')}")
+        if rationale:
+            print(f"  Rationale: {rationale}")
+
+
+def cmd_pr_reject():
+    entry_id = os.environ.get("BEACON_ENTRY_ID", "")
+    rationale = os.environ.get("BEACON_RATIONALE", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not entry_id:
+        print("Error: entry ID required", file=sys.stderr)
+        sys.exit(1)
+
+    if not rationale:
+        try:
+            rationale = input("Rationale (reason for rejection): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            rationale = ""
+
+    data = load_project()
+    try:
+        ms, entry = core.pr_reject(data, entry_id, rationale=rationale)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+
+    if json_mode:
+        print(json.dumps({"entry_id": entry_id, "review_status": "rejected",
+                          "review_rationale": rationale}, ensure_ascii=False))
+    else:
+        print(f"Rejected PR [{entry_id}]: {entry.get('description', '')}")
+        if rationale:
+            print(f"  Rationale: {rationale}")
+
+
+# ---------------------------------------------------------------------------
 # Skill install
 # ---------------------------------------------------------------------------
 
@@ -1747,6 +1878,10 @@ if __name__ == "__main__":
         "auth_logout": lambda: __import__("auth").logout(),
         "auth_status": lambda: __import__("auth").status(),
         "skill_install": cmd_skill_install,
+        "pr_add": cmd_pr_add,
+        "pr_close": cmd_pr_close,
+        "pr_approve": cmd_pr_approve,
+        "pr_reject": cmd_pr_reject,
         "version": lambda: print(f"beacon {__version__}"),
     }
     fn = commands.get(cmd)
