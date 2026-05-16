@@ -2278,8 +2278,13 @@ async function changeMemberRole(email, newRole) {
 async function exportProject() {
   if (!state.projectId) return;
   try {
-    const data = await api(`/api/projects/${state.projectId}`);
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const [project, documents, retros] = await Promise.all([
+      api(`/api/projects/${state.projectId}`),
+      api(`/api/projects/${state.projectId}/documents`).catch(() => []),
+      api(`/api/projects/${state.projectId}/retros`).catch(() => []),
+    ]);
+    const fullExport = { ...project, documents, retros };
+    const blob = new Blob([JSON.stringify(fullExport, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
