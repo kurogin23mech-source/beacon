@@ -1679,6 +1679,7 @@ def cmd_cloud_status():
 # ---------------------------------------------------------------------------
 
 def cmd_pr_add():
+    # Registers an existing GitHub PR URL into beacon with optional intent annotation.
     import datetime
     url = os.environ.get("BEACON_URL", "")
     ms_id = os.environ.get("BEACON_MS_ID", "")
