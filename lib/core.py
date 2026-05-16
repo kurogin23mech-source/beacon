@@ -496,20 +496,39 @@ def _find_matching_task(entries: list, commit_text: str):
 # ---------------------------------------------------------------------------
 
 def pr_add(data: dict, *, ms_id: str = "", url: str, author: str = "",
-           intent: str = "", date: str = "") -> str:
-    """Add a PR entry to a milestone. Returns the new entry id."""
+           intent: str = "", date: str = "", title: str = "",
+           commits: list = None) -> str:
+    """Add a PR entry to a milestone. Returns the new entry id.
+
+    commits: list of {"oid": "<sha>", "messageHeadline": "<msg>"} from gh pr view.
+    """
     import re as _re
     target = find_target_milestone(data, ms_id)
     entries = target.setdefault("entries", [])
     eid = next_entry_id(data)
+    eid_num = int(eid.split("-")[1])
 
-    # Extract PR number from URL (e.g. .../pull/42 -> 42)
     pr_number = None
     m = _re.search(r'/pull/(\d+)', url)
     if m:
         pr_number = int(m.group(1))
 
-    description = f"PR#{pr_number}: {url}" if pr_number else url
+    # Prefer explicit title; fall back to "PR#{n}" so URL stays only in meta
+    description = title or (f"PR#{pr_number}" if pr_number else url)
+
+    child_entries = []
+    for i, commit in enumerate(commits or [], start=1):
+        sha = commit.get("oid", "")
+        msg = commit.get("messageHeadline", "") or (sha[:7] if sha else "commit")
+        child_entries.append({
+            "id": f"e-{eid_num + i}",
+            "type": "commit",
+            "description": msg,
+            "date": date,
+            "created_at": date,
+            "status": "done",
+            "meta": {"hash": sha[:7] if sha else ""},
+        })
 
     entry = {
         "id": eid,
@@ -529,6 +548,9 @@ def pr_add(data: dict, *, ms_id: str = "", url: str, author: str = "",
             "review_rationale": None,
         },
     }
+    if child_entries:
+        entry["entries"] = child_entries
+
     entries.append(entry)
     return eid
 

@@ -1678,8 +1678,21 @@ def cmd_cloud_status():
 # PR commands (ms-15)
 # ---------------------------------------------------------------------------
 
+def _fetch_gh_pr_info(url: str) -> dict:
+    """Fetch PR title and commits from GitHub via gh CLI. Returns {} on failure."""
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", url, "--json", "title,commits"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            return json.loads(result.stdout)
+    except Exception:
+        pass
+    return {}
+
+
 def cmd_pr_add():
-    # Registers an existing GitHub PR URL into beacon with optional intent annotation.
     import datetime
     url = os.environ.get("BEACON_URL", "")
     ms_id = os.environ.get("BEACON_MS_ID", "")
@@ -1693,25 +1706,34 @@ def cmd_pr_add():
         sys.exit(1)
 
     if not intent:
-        # Interactive prompt if not provided via env
         try:
             intent = input("Intent (why was this PR created?): ").strip()
         except (EOFError, KeyboardInterrupt):
             intent = ""
 
+    # Fetch PR title and commits from GitHub
+    gh_info = _fetch_gh_pr_info(url)
+    title = gh_info.get("title", "")
+    commits = gh_info.get("commits", [])
+    if gh_info and not title:
+        print("Warning: could not fetch PR title from GitHub", file=sys.stderr)
+
     data = load_project()
     try:
         eid = core.pr_add(data, ms_id=ms_id, url=url, author=author,
-                          intent=intent, date=date)
+                          intent=intent, date=date, title=title, commits=commits)
     except ValueError as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
     save_project(data)
 
     if json_mode:
-        print(json.dumps({"entry_id": eid, "url": url, "intent": intent}, ensure_ascii=False))
+        print(json.dumps({"entry_id": eid, "url": url, "title": title, "intent": intent,
+                          "commits": len(commits)}, ensure_ascii=False))
     else:
-        print(f"Added PR [{eid}]: {url}")
+        print(f"Added PR [{eid}]: {title or url}")
+        if commits:
+            print(f"  Commits: {len(commits)} linked")
         if intent:
             print(f"  Intent: {intent}")
 
@@ -1880,15 +1902,22 @@ def cmd_pr_create():
         except (EOFError, KeyboardInterrupt):
             intent = ""
 
+    gh_info = _fetch_gh_pr_info(pr_url)
+    title = gh_info.get("title", "")
+    commits = gh_info.get("commits", [])
+
     date = __import__("datetime").date.today().isoformat()
     data = load_project()
     try:
-        eid = core.pr_add(data, ms_id=ms_id, url=pr_url, intent=intent, date=date)
+        eid = core.pr_add(data, ms_id=ms_id, url=pr_url, intent=intent, date=date,
+                          title=title, commits=commits)
     except ValueError as e:
         print(f"Warning: beacon pr record failed: {e}", file=sys.stderr)
         return
     save_project(data)
-    print(f"Beacon: PR recorded [{eid}]")
+    print(f"Beacon: PR recorded [{eid}]: {title or pr_url}")
+    if commits:
+        print(f"  Commits: {len(commits)} linked")
 
 
 # ---------------------------------------------------------------------------
