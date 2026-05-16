@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <style>
 /* ================================================================
    BEACON — Terminal Noir Milestones v3
@@ -957,6 +958,46 @@ body::after {
   overflow-y: auto;
 }
 
+.doc-content {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 20px 24px;
+  font-size: 0.85rem;
+  line-height: 1.8;
+  color: var(--text-secondary);
+  max-height: 70vh;
+  overflow-y: auto;
+}
+.doc-content h1, .doc-content h2, .doc-content h3, .doc-content h4 {
+  color: var(--text-primary); font-weight: 600; margin: 1.2em 0 0.4em;
+}
+.doc-content h1 { font-size: 1.1rem; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+.doc-content h2 { font-size: 0.95rem; }
+.doc-content h3 { font-size: 0.88rem; }
+.doc-content p { margin: 0 0 0.8em; }
+.doc-content ul, .doc-content ol { margin: 0 0 0.8em; padding-left: 1.6em; }
+.doc-content li { margin-bottom: 0.25em; }
+.doc-content code {
+  background: var(--bg-raised); border: 1px solid var(--border); border-radius: 3px;
+  padding: 1px 5px; font-size: 0.8em; color: var(--accent); font-family: 'JetBrains Mono', monospace;
+}
+.doc-content pre {
+  background: var(--bg-raised); border: 1px solid var(--border); border-radius: 4px;
+  padding: 12px 16px; overflow-x: auto; margin: 0 0 0.8em;
+}
+.doc-content pre code { background: none; border: none; padding: 0; color: var(--text-secondary); }
+.doc-content blockquote {
+  border-left: 3px solid var(--accent-dim); margin: 0 0 0.8em;
+  padding: 4px 0 4px 12px; color: var(--text-dim);
+}
+.doc-content a { color: var(--info); text-decoration: underline; }
+.doc-content hr { border: none; border-top: 1px solid var(--border); margin: 1em 0; }
+.doc-content table { border-collapse: collapse; width: 100%; margin: 0 0 0.8em; font-size: 0.82rem; }
+.doc-content th { color: var(--text-primary); border-bottom: 1px solid var(--border); padding: 4px 8px; text-align: left; }
+.doc-content td { border-bottom: 1px solid var(--border-subtle); padding: 4px 8px; }
+.doc-content strong { color: var(--text-primary); }
+
 .retro-back {
   font-size: 0.8rem;
   color: var(--text-dim);
@@ -1739,7 +1780,7 @@ function renderDocumentsSection() {
       <section class="retro-section fade-in">
         <span class="retro-back" data-action="close-document">\u2190 back to list</span>
         <h3 style="font-size: 1rem; color: var(--text-primary); margin: 8px 0 16px;">${scopeBadge(scope)}${esc(state.documentContent.title)}</h3>
-        <div class="retro-content">${esc(state.documentContent.content)}</div>
+        <div class="doc-content">${marked.parse(state.documentContent.content || '')}</div>
       </section>`;
   }
   if (state.documents.length === 0) {
@@ -1777,10 +1818,15 @@ function renderDocumentsSection() {
 async function openDocument(docId) {
   try { state.documentContent = await api(`/api/projects/${state.projectId}/documents/${docId}`); }
   catch (e) { state.documentContent = { doc_id: docId, title: 'Error', content: 'Failed to load document.' }; }
+  history.pushState(null, '', '#doc/' + docId);
   render();
 }
 
-function closeDocument() { state.documentContent = null; render(); }
+function closeDocument() {
+  state.documentContent = null;
+  history.pushState(null, '', location.pathname + location.search);
+  render();
+}
 
 // ---- Dependency Graph ----
 
@@ -2246,7 +2292,7 @@ async function handleAction(e) {
     case 'open-retro': await openRetro(el.dataset.week); break;
     case 'close-retro': state.retroContent = null; render(); break;
     case 'open-document': await openDocument(el.dataset.docId); break;
-    case 'close-document': state.documentContent = null; render(); break;
+    case 'close-document': closeDocument(); break;
     case 'open-menu': await renderMenu(); break;
     case 'close-menu': closeMenu(); break;
     case 'menu-select-project': closeMenu(); await menuSelectProject(el.dataset.projectId); break;
@@ -2263,6 +2309,24 @@ async function handleAction(e) {
 function getProjectIdFromUrl() {
   return new URLSearchParams(window.location.search).get('project');
 }
+
+function getDocIdFromHash() {
+  const m = location.hash.match(/^#doc\/(.+)$/);
+  return m ? m[1] : null;
+}
+
+async function handleHashNav() {
+  const docId = getDocIdFromHash();
+  if (docId && state.projectId) {
+    if (state.activeTab !== 'documents') await switchTab('documents');
+    if (!state.documentContent || state.documentContent.doc_id !== docId) await openDocument(docId);
+  } else if (!docId && state.documentContent) {
+    state.documentContent = null;
+    render();
+  }
+}
+
+window.addEventListener('hashchange', handleHashNav);
 
 // ---- Init ----
 
@@ -2284,6 +2348,7 @@ async function init() {
     if (state.projects.length === 1) await selectProject(state.projects[0].project_id);
     else render();
   }
+  await handleHashNav();
 }
 
 init();
