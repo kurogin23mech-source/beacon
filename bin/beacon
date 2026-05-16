@@ -29,8 +29,8 @@ Usage:
   beacon cloud             Open cloud project (interactive select)
   beacon cloud <id>        Open cloud project by ID
   beacon cloud list        List cloud projects
-  beacon cloud push        Push local project to Firestore
-  beacon cloud pull        Pull project from Firestore
+  beacon cloud push        Push local project to cloud
+  beacon cloud pull        Pull project from cloud
   beacon cloud join <id>   Join an existing cloud project (first-time)
   beacon cloud status      Show cloud config status
   beacon auth login       Sign in with Google
