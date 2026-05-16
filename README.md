@@ -48,22 +48,32 @@ Add the `export` line to your `~/.zshrc` or `~/.bashrc` to make it permanent.
 
 ## Quick Start
 
+Run the setup wizard from your project directory:
+
 ```bash
-# Initialize beacon in your project
 cd your-project
-beacon init
-
-# Add a milestone
-beacon milestone add "Implement user auth" -d 2026-06-01
-
-# Activate the milestone
-beacon milestone start ms-1
-
-# Launch the dashboard (tmux)
-beacon
+beacon setup
 ```
 
-This opens a tmux session with the dashboard on the left (33%) and your working shell on the right (67%). Run `claude` in the right pane to start an AI-assisted session with full project visibility.
+`beacon setup` handles everything in one go:
+1. **Sign in** with Google (for cloud features)
+2. **Install** Claude Code Skills and hooks
+3. **Initialize** a new local project — or **join** an existing cloud project
+4. **Launch** the dashboard
+
+### Path A: New local project
+
+Choose option `1` in step 3. The wizard prompts for a project name and objective, then launches the dashboard.
+
+```bash
+beacon setup
+# → Step 3: Choose [1] New local project
+# → Step 4: Launch dashboard? [Y]
+beacon milestone add "First milestone"
+beacon milestone start ms-1
+```
+
+The dashboard opens as a tmux split — your working shell on the right, live progress on the left:
 
 ```
 +------------------+----------------------------------------+
@@ -74,29 +84,43 @@ This opens a tmux session with the dashboard on the left (33%) and your working 
 +------------------+----------------------------------------+
 ```
 
-## Cloud Mode
-
-Beacon can sync your project to the cloud for Web UI access and team collaboration.
+To push to cloud later for Web UI access and team collaboration:
 
 ```bash
-# Initialize and set up locally first
-cd your-project
-beacon init
-beacon milestone add "First milestone"
-beacon milestone start ms-1
-
-# Sign in with Google
-beacon auth login
-
-# Push to cloud (auto-switches to cloud mode)
 beacon cloud push
 ```
 
-Your project is now visible at **https://beacon-ai.dev**. All CLI commands (`beacon log`, `beacon task`, etc.) automatically work through the cloud API.
+### Path B: Join an existing cloud project (invited)
+
+Choose option `2` in step 3 and enter the project ID shared by your team.
+
+```bash
+beacon setup
+# → Step 3: Choose [2] Join a cloud project
+# → Cloud project ID: your-project-abc123
+```
+
+Or skip the wizard and join directly:
+
+```bash
+beacon auth login
+beacon cloud join your-project-abc123
+beacon
+```
+
+> **Windows**: Use `beacon auth login` first (opens a browser). The rest of the commands work the same in PowerShell or CMD.
+
+### Desktop App (optional)
+
+The [Desktop App](#desktop-app) provides a native window for monitoring your project alongside your terminal — useful for keeping the dashboard visible without tmux.
+
+## Cloud Mode
+
+Beacon can sync to the cloud for Web UI access at **https://beacon-ai.dev** and team collaboration. All CLI commands (`beacon log`, `beacon task`, etc.) automatically work through the cloud API.
 
 ### Team collaboration
 
-The project owner can invite members from the Web UI (hamburger menu → Members) or via API. Members need to sign in at beacon-ai.dev first.
+The project owner can invite members from the Web UI (hamburger menu → Members). Members need to sign in at beacon-ai.dev first, then join via CLI.
 
 | Role | Read | Write | Manage members |
 |------|------|-------|----------------|
@@ -112,6 +136,7 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 | `beacon auth status` | Show login status / ログイン状態 |
 | `beacon cloud push` | Upload project to cloud / クラウドにアップロード |
 | `beacon cloud pull` | Download project from cloud / クラウドからダウンロード |
+| `beacon cloud join <id>` | Join an existing cloud project / 既存プロジェクトに参加 |
 | `beacon cloud list` | List cloud projects / クラウドプロジェクト一覧 |
 | `beacon cloud status` | Show cloud config / クラウド設定表示 |
 | `beacon cloud off` | Switch back to local mode / ローカルモードに戻す |
@@ -123,8 +148,10 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 | Command | Description |
 |---------|-------------|
 | `beacon` | Launch tmux dashboard + shell / ダッシュボード起動 |
-| `beacon init` | Initialize `.beacon/` in current directory / 初期化 |
+| `beacon setup` | First-time setup wizard (auth + hooks + project) / 初回セットアップ |
+| `beacon init` | Initialize `.beacon/` in current directory / プロジェクト作成のみ |
 | `beacon status [--json]` | Show project status / ステータス表示 |
+| `beacon skill install` | Install Claude Code Skills / Skillインストール |
 
 ### Milestones
 
@@ -220,7 +247,7 @@ The curses-based dashboard runs in the left tmux pane and auto-refreshes when `.
 
 ## Claude Code Integration
 
-Beacon ships with [Claude Code Skills](https://docs.anthropic.com/en/docs/claude-code) for automated project tracking. Install the Skills from `~/.claude/skills/`:
+Beacon ships with [Claude Code Skills](https://docs.anthropic.com/en/docs/claude-code) for automated project tracking. `beacon setup` installs them automatically; you can also run `beacon skill install` at any time to update.
 
 | Skill | Description |
 |-------|-------------|
