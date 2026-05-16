@@ -977,12 +977,29 @@ cmd_doc() {
             fi
             BEACON_DOC_ID="$doc_id" BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" doc_show
             ;;
+        delete|rm)
+            shift
+            local doc_id=""
+            local json_flag=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --json) json_flag="1"; shift ;;
+                    *)      doc_id="$1"; shift ;;
+                esac
+            done
+            if [ -z "$doc_id" ]; then
+                echo "Usage: beacon doc delete <doc-id>"
+                exit 1
+            fi
+            BEACON_DOC_ID="$doc_id" BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" doc_delete
+            ;;
         *)
-            echo "Usage: beacon doc [add|list|show|update]"
+            echo "Usage: beacon doc [add|list|show|update|delete]"
             echo "  add    \"title\" --scope core|spec|memo [--ms ms-id]  Create a document"
             echo "  update <doc-id> [--title text] [--content text]     Update a document"
             echo "  list   [--scope core|spec|memo] [--ms ms-id]        List documents"
             echo "  show   <doc-id>                                      Show document content"
+            echo "  delete <doc-id>                                      Delete a document"
             ;;
     esac
 }

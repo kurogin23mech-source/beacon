@@ -1336,6 +1336,35 @@ def cmd_doc_update():
         print(f"Updated: {doc_id} [{scope}] ({title})")
 
 
+def cmd_doc_delete():
+    doc_id = os.environ.get("BEACON_DOC_ID", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not doc_id:
+        print("Error: doc_id required")
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        client, config = _get_api_client()
+        try:
+            client.delete_document(config["project_id"], doc_id)
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+    else:
+        docs_dir = _get_docs_dir()
+        fpath = os.path.join(docs_dir, f"{doc_id}.md")
+        if not os.path.exists(fpath):
+            print(f"Document not found: {doc_id}")
+            sys.exit(1)
+        os.remove(fpath)
+
+    if json_mode:
+        print(json.dumps({"doc_id": doc_id, "deleted": True}, ensure_ascii=False))
+    else:
+        print(f"Deleted: {doc_id}")
+
+
 # ---------------------------------------------------------------------------
 # Cloud commands
 # ---------------------------------------------------------------------------
@@ -1580,6 +1609,7 @@ if __name__ == "__main__":
         "doc_show": cmd_doc_show,
         "doc_add": cmd_doc_add,
         "doc_update": cmd_doc_update,
+        "doc_delete": cmd_doc_delete,
         "cloud_list": cmd_cloud_list,
         "cloud_push": cmd_cloud_push,
         "cloud_pull": cmd_cloud_pull,

@@ -183,6 +183,14 @@ class StoreApi:
         except (RuntimeError, ConnectionError):
             return {}
 
+    def delete_document(self, doc_id: str) -> bool:
+        """Delete a document via cloud API."""
+        try:
+            self._client.delete_document(self._project_id, doc_id)
+            return True
+        except (RuntimeError, ConnectionError):
+            return False
+
     @staticmethod
     def _hash(data: dict) -> str:
         return hashlib.md5(json.dumps(data, sort_keys=True).encode()).hexdigest()
