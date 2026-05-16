@@ -1569,6 +1569,46 @@ def cmd_cloud_status():
 
 
 # ---------------------------------------------------------------------------
+# Skill install
+# ---------------------------------------------------------------------------
+
+def cmd_skill_install():
+    """Install beacon Claude Code Skills into ~/.claude/skills/"""
+    import shutil
+
+    # Find skills source relative to this file: <beacon_root>/skills/
+    beacon_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    skills_src = os.path.join(beacon_root, "skills")
+
+    if not os.path.isdir(skills_src):
+        print(f"Error: skills directory not found at {skills_src}")
+        sys.exit(1)
+
+    # Destination: ~/.claude/skills/
+    home = os.path.expanduser("~")
+    claude_skills = os.path.join(home, ".claude", "skills")
+    os.makedirs(claude_skills, exist_ok=True)
+
+    installed = []
+    for src_file in sorted(os.listdir(skills_src)):
+        if not src_file.endswith(".md"):
+            continue
+        skill_name = src_file[:-3]  # strip .md
+        dest_dir = os.path.join(claude_skills, skill_name)
+        os.makedirs(dest_dir, exist_ok=True)
+        dest_file = os.path.join(dest_dir, "SKILL.md")
+        shutil.copy2(os.path.join(skills_src, src_file), dest_file)
+        installed.append(skill_name)
+
+    if installed:
+        print(f"Installed {len(installed)} Skills to {claude_skills}:")
+        for name in installed:
+            print(f"  /{name}")
+    else:
+        print("No skills found to install.")
+
+
+# ---------------------------------------------------------------------------
 # Main dispatch
 # ---------------------------------------------------------------------------
 
@@ -1617,6 +1657,7 @@ if __name__ == "__main__":
         "auth_login": lambda: __import__("auth").login(),
         "auth_logout": lambda: __import__("auth").logout(),
         "auth_status": lambda: __import__("auth").status(),
+        "skill_install": cmd_skill_install,
         "version": lambda: print(f"beacon {__version__}"),
     }
     fn = commands.get(cmd)

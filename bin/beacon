@@ -1145,10 +1145,20 @@ case "${1:-}" in
         ;;
     auth)
         case "${2:-}" in
-            login)  python3 "$COMMANDS_PY" auth_login ;;
+            login)
+                python3 "$COMMANDS_PY" auth_login
+                echo ""
+                echo "Tip: Run 'beacon skill install' to set up Claude Code Skills."
+                ;;
             logout) python3 "$COMMANDS_PY" auth_logout ;;
             status) python3 "$COMMANDS_PY" auth_status ;;
             *)      echo "Usage: beacon auth [login|logout|status]" ;;
+        esac
+        ;;
+    skill)
+        case "${2:-}" in
+            install) python3 "$COMMANDS_PY" skill_install ;;
+            *)       echo "Usage: beacon skill install" ;;
         esac
         ;;
     help|-h|--help)
