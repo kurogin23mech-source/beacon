@@ -93,6 +93,33 @@ beacon doc list --scope spec --ms <active-ms-id> --json
 
 結果が空でなければ、各ドキュメントの内容を Step 1e と同様に `beacon doc show <doc_id>` で **並列に** 取得する。
 
+## Step 1g: GitHub PR 自動検知（fail-safe）
+
+Bash ツールで実行:
+
+```bash
+gh pr list --json number,title,url,author,headRefName,state 2>/dev/null
+```
+
+失敗した場合（gh未設定、リポジトリ外など）は無視してスキップする。
+
+取得できた場合、Step 1a または Step 2 の結果から beacon に記録済みの PR URL（`type == "pr"` のエントリの `meta.url`）を収集し、未記録のオープンPRがないか照合する。
+
+**未記録PRがある場合**、Step 3 の出力に含める:
+```
+未記録のPR:
+  - PR#42: [title] (author: [login]) → beacon pr add で記録できます
+```
+
+**review_status == "pending" または "changes_requested" の PR がある場合**:
+```
+レビュー待ちのPR:
+  - [e-xxx] PR#N: [title] [in_review / review: pending]
+```
+→ この場合は Step 3 出力の後に `/review <pr_number>` を即時起動する（beacon trigger より優先）。
+
+この Step は **読み取り専用**。自動で `beacon pr add` を実行してはならない。
+
 ## Step 2: アクティブMSの詳細取得
 
 Step 1a の結果から `status == "in_progress"` のマイルストーンを特定する。

@@ -61,6 +61,42 @@ Step 1c で uncommitted changes がある場合、ユーザーに通知:
 ```
 ユーザーの判断を待つ。
 
+## Step 2.5: MS・タスク棚卸し（自動整理）
+
+Step 1a の結果を読み、以下を自動整理する。
+
+### A. 完了済みMSのステータス修正
+
+`progress == 100` かつ `done_tasks == total_tasks` かつ `status == "in_progress"` のMSを検出:
+
+```bash
+beacon milestone observe <ms-id>
+```
+
+自動的に `observing` に移行し「[ms-id] を observing に移行しました」と報告する。
+完全クローズ（done）にしてよいかはユーザーに確認する。
+
+### B. 実装済みタスクの自動done候補提示
+
+アクティブMSの `pending_tasks` と Step 1c の `git log` を照合し、「最近のコミットで解決されたと思われるが done になっていないタスク」を特定:
+
+- コミットメッセージにタスクIDが含まれる
+- コミットメッセージがタスクの description と明確に対応する
+
+候補がある場合はユーザーに提示:
+```
+タスク完了の候補:
+  - [e-256] beacon setup コマンド実装
+  → done にしますか？
+```
+
+ユーザーが承認したら:
+```bash
+beacon task done <entry-id>
+```
+
+候補がない場合はこのステップをスキップする。
+
 ## Step 3: サマリーの生成
 
 Step 1 の情報を元に、以下の基準でサマリーを生成:
