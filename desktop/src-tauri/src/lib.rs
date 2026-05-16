@@ -1,9 +1,124 @@
 use std::process::Command;
 use std::sync::Mutex;
+use serde::Serialize;
 use tauri::{Manager, State};
 
 struct AppState {
     project_dir: Mutex<Option<String>>,
+}
+
+/// Find a beacon project by checking multiple sources
+fn find_project_dir() -> Option<String> {
+    // 1. CLI argument: beacon-desktop /path/to/project
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 {
+        let candidate = &args[1];
+        let p = std::path::Path::new(candidate);
+        if p.join(".beacon/project.json").exists() {
+            return Some(candidate.clone());
+        }
+        // Maybe they passed the .beacon dir itself
+        if p.join("project.json").exists() {
+            if let Some(parent) = p.parent() {
+                return Some(parent.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    // 2. Check env var
+    if let Ok(dir) = std::env::var("BEACON_PROJECT_DIR") {
+        let p = std::path::Path::new(&dir).join(".beacon/project.json");
+        if p.exists() {
+            return Some(dir);
+        }
+    }
+
+    // 3. Walk up from CWD
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut dir = cwd.as_path();
+        loop {
+            if dir.join(".beacon/project.json").exists() {
+                return Some(dir.to_string_lossy().to_string());
+            }
+            match dir.parent() {
+                Some(parent) => dir = parent,
+                None => break,
+            }
+        }
+    }
+
+    None
+}
+
+#[derive(Serialize, Clone)]
+struct ProjectInfo {
+    path: String,
+    name: String,
+    mode: String,
+}
+
+/// Scan home directory for beacon projects (max depth 3)
+fn scan_beacon_projects() -> Vec<ProjectInfo> {
+    let mut results = Vec::new();
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return results,
+    };
+    let home_path = std::path::Path::new(&home);
+
+    // Scan direct children and tools/ subdirectory
+    let search_dirs: Vec<std::path::PathBuf> = {
+        let mut dirs = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(home_path) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    dirs.push(p.clone());
+                    // Also check one level deeper (e.g. ~/tools/beacon)
+                    if let Ok(sub) = std::fs::read_dir(&p) {
+                        for s in sub.flatten() {
+                            if s.path().is_dir() {
+                                dirs.push(s.path());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        dirs
+    };
+
+    for dir in search_dirs {
+        let project_file = dir.join(".beacon/project.json");
+        if project_file.exists() {
+            let name = std::fs::read_to_string(&project_file)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| v.get("name")?.as_str().map(String::from))
+                .unwrap_or_else(|| dir.file_name().unwrap_or_default().to_string_lossy().to_string());
+
+            let config_file = dir.join(".beacon/config.json");
+            let mode = std::fs::read_to_string(&config_file)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| v.get("mode")?.as_str().map(String::from))
+                .unwrap_or_else(|| "local".to_string());
+
+            results.push(ProjectInfo {
+                path: dir.to_string_lossy().to_string(),
+                name,
+                mode,
+            });
+        }
+    }
+
+    results.sort_by(|a, b| a.name.cmp(&b.name));
+    results
+}
+
+#[tauri::command]
+fn list_projects() -> Vec<ProjectInfo> {
+    scan_beacon_projects()
 }
 
 /// Run a beacon CLI command and return its JSON output
@@ -65,7 +180,6 @@ fn get_document_content(state: State<AppState>, doc_id: String) -> Result<String
 
 #[tauri::command]
 fn set_project_dir(state: State<AppState>, dir: String) -> Result<String, String> {
-    // Verify .beacon/project.json exists
     let project_file = std::path::Path::new(&dir).join(".beacon/project.json");
     if !project_file.exists() {
         return Err(format!("No beacon project found at {}", dir));
@@ -76,14 +190,78 @@ fn set_project_dir(state: State<AppState>, dir: String) -> Result<String, String
 
 #[tauri::command]
 fn open_project_dialog() -> Result<String, String> {
-    // Return empty - frontend will use tauri dialog plugin
     Ok(String::new())
+}
+
+#[tauri::command]
+fn list_retros(state: State<AppState>) -> Result<String, String> {
+    let dir = state.project_dir.lock().unwrap();
+    let dir = dir.as_deref().ok_or("No project directory set")?;
+    let retro_dir = std::path::Path::new(dir).join(".beacon/retro");
+    let mut retros: Vec<serde_json::Value> = Vec::new();
+    if retro_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&retro_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |e| e == "md") {
+                    let fname = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                    let modified = std::fs::metadata(&path).ok()
+                        .and_then(|m| m.modified().ok())
+                        .map(|t| {
+                            let d = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                            chrono_format(d.as_secs())
+                        })
+                        .unwrap_or_default();
+                    retros.push(serde_json::json!({"week": fname, "updated_at": modified}));
+                }
+            }
+        }
+    }
+    retros.sort_by(|a, b| b["week"].as_str().unwrap_or("").cmp(a["week"].as_str().unwrap_or("")));
+    serde_json::to_string(&retros).map_err(|e| e.to_string())
+}
+
+fn chrono_format(secs: u64) -> String {
+    let days_since_epoch = (secs / 86400) as i64;
+    // Calculate date from days since 1970-01-01
+    let mut y = 1970i64;
+    let mut remaining = days_since_epoch;
+    loop {
+        let days_in_year = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
+        if remaining < days_in_year { break; }
+        remaining -= days_in_year;
+        y += 1;
+    }
+    let months: &[i64] = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+        &[31,29,31,30,31,30,31,31,30,31,30,31]
+    } else {
+        &[31,28,31,30,31,30,31,31,30,31,30,31]
+    };
+    let mut m = 1;
+    for &days_in_month in months {
+        if remaining < days_in_month { break; }
+        remaining -= days_in_month;
+        m += 1;
+    }
+    let d = remaining + 1;
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+#[tauri::command]
+fn get_retro_content(state: State<AppState>, week: String) -> Result<String, String> {
+    let dir = state.project_dir.lock().unwrap();
+    let dir = dir.as_deref().ok_or("No project directory set")?;
+    let path = std::path::Path::new(dir).join(".beacon/retro").join(format!("{}.md", week));
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read retro: {}", e))?;
+    let result = serde_json::json!({"week": week, "content": content});
+    serde_json::to_string(&result).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn load_project_json(state: State<AppState>) -> Result<String, String> {
     let dir = state.project_dir.lock().unwrap();
-    let dir = dir.as_deref().ok_or("No project directory set")?;
+    let dir = dir.as_deref().ok_or("No project directory set. Launch from a beacon project directory or set BEACON_PROJECT_DIR.")?;
     let path = std::path::Path::new(dir).join(".beacon/project.json");
     std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read project.json: {}", e))
@@ -93,7 +271,7 @@ fn load_project_json(state: State<AppState>) -> Result<String, String> {
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState {
-            project_dir: Mutex::new(None),
+            project_dir: Mutex::new(find_project_dir()),
         })
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -102,14 +280,6 @@ pub fn run() {
                         .level(log::LevelFilter::Info)
                         .build(),
                 )?;
-            }
-            // Try to auto-detect project from CWD
-            if let Ok(cwd) = std::env::current_dir() {
-                let project_file = cwd.join(".beacon/project.json");
-                if project_file.exists() {
-                    let state = app.state::<AppState>();
-                    *state.project_dir.lock().unwrap() = Some(cwd.to_string_lossy().to_string());
-                }
             }
             Ok(())
         })
@@ -122,6 +292,9 @@ pub fn run() {
             set_project_dir,
             open_project_dialog,
             load_project_json,
+            list_projects,
+            list_retros,
+            get_retro_content,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

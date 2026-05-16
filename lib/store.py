@@ -82,6 +82,11 @@ def get_store(project_file: str | None = None) -> Store:
         def _token_provider():
             from auth import load_credentials
             creds = load_credentials()
+            if not creds:
+                return ""
+            # Web auth mode: creds is a dict with id_token
+            if isinstance(creds, dict):
+                return creds.get("token", "")
             return (creds.id_token or creds.token) if creds else ""
 
         return StoreApi(api_url, project_id, _token_provider)

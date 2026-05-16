@@ -686,6 +686,12 @@ body::after {
   border: 1px solid rgba(251, 191, 36, 0.15);
 }
 
+.entry-type-badge.save {
+  color: #c084fc;
+  background: rgba(192, 132, 252, 0.1);
+  border: 1px solid rgba(192, 132, 252, 0.15);
+}
+
 .entry-id {
   font-size: 0.7rem;
   color: var(--text-dim);
@@ -1338,7 +1344,7 @@ function renderEntry(entry) {
   const childBadge = hasChildren && isCollapsed ? `<span class="entry-child-count">${childCount}</span>` : '';
 
   return `
-    <div class="entry${statusClass}${toggleClass}" ${hasChildren ? `onclick="toggleEntry('${entry.id}', event)"` : ''}>
+    <div class="entry${statusClass}${toggleClass}" ${hasChildren ? `data-action="toggle-entry" data-entry-id="${entry.id}"` : ''}>
       ${entryTypeBadge(entry.type)}
       <span class="entry-id">${entry.id}</span>
       <span class="entry-desc">${esc(entry.description)}${hash}${statusText}${childBadge}</span>
@@ -1439,7 +1445,7 @@ function render() {
   app.innerHTML = `
     <header class="header fade-in">
       <div class="header-top">
-        <button class="hamburger-btn" onclick="openMenu()" title="Menu">
+        <button class="hamburger-btn" data-action="open-menu" title="Menu">
           <span></span><span></span><span></span>
         </button>
         <span class="project-name">${esc(p.name)}</span>
@@ -1459,9 +1465,9 @@ function render() {
     ` : ''}
 
     <div class="tab-bar fade-in stagger-1">
-      <button class="tab-btn ${state.activeTab === 'dashboard' ? 'active' : ''}" onclick="switchTab('dashboard')">Milestones</button>
-      <button class="tab-btn ${state.activeTab === 'retros' ? 'active' : ''}" onclick="switchTab('retros')">Reviews</button>
-      <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" onclick="switchTab('documents')">Documents</button>
+      <button class="tab-btn ${state.activeTab === 'dashboard' ? 'active' : ''}" data-action="switch-tab" data-tab="dashboard">Milestones</button>
+      <button class="tab-btn ${state.activeTab === 'retros' ? 'active' : ''}" data-action="switch-tab" data-tab="retros">Reviews</button>
+      <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
     </div>
 
     ${state.activeTab === 'dashboard' ? `
@@ -1477,12 +1483,12 @@ function render() {
         <span class="milestones-count">${activeCount} active \u00b7 ${doneCount}/${(p.milestones||[]).length} done</span>
       </div>
       <div class="filter-bar">
-        <button class="filter-btn f-all ${state.hiddenStatuses.size === 0 ? 'on' : 'off'}" onclick="showAllStatuses()">all</button>
+        <button class="filter-btn f-all ${state.hiddenStatuses.size === 0 ? 'on' : 'off'}" data-action="filter-all">all</button>
         ${FILTER_ORDER.map(s => {
           const isOn = !state.hiddenStatuses.has(s);
-          return `<button class="filter-btn ${isOn ? 'on' : 'off'} ${FILTER_CSS_CLASS[s] || ''}" onclick="toggleStatusFilter('${s}')">${STATUS_LABELS[s] || s}</button>`;
+          return `<button class="filter-btn ${isOn ? 'on' : 'off'} ${FILTER_CSS_CLASS[s] || ''}" data-action="filter-status" data-status="${s}">${STATUS_LABELS[s] || s}</button>`;
         }).join('')}
-        <button class="sort-toggle" onclick="toggleSort()">${state.sortAsc ? '\u2191 ms-1 first' : '\u2193 latest first'}</button>
+        <button class="sort-toggle" data-action="toggle-sort">${state.sortAsc ? '\u2191 ms-1 first' : '\u2193 latest first'}</button>
       </div>
       ${filtered.map((ms, i) => renderMilestoneCard(ms, i)).join('')}
     </section>
@@ -1503,9 +1509,7 @@ function render() {
     </footer>
   `;
 
-  document.querySelectorAll('.ms-card-header').forEach(el => {
-    el.addEventListener('click', () => toggleMilestone(el.dataset.msId));
-  });
+  bindEvents();
 }
 
 function renderProjectSelector(app) {
@@ -1517,7 +1521,7 @@ function renderProjectSelector(app) {
       <div class="summary-label">Select Project</div>
       <ul class="project-list">
         ${state.projects.map(p => `
-          <li class="project-item" data-id="${esc(p.project_id)}">
+          <li class="project-item" data-action="select-project" data-project-id="${esc(p.project_id)}">
             <div class="project-item-name">${esc(p.name)}</div>
             <div class="project-item-id">${esc(p.project_id)}</div>
           </li>
@@ -1525,9 +1529,7 @@ function renderProjectSelector(app) {
       </ul>
     </div>
   `;
-  document.querySelectorAll('.project-item').forEach(el => {
-    el.addEventListener('click', () => selectProject(el.dataset.id));
-  });
+  bindEvents();
 }
 
 function renderMilestoneCard(ms, index) {
@@ -1548,7 +1550,7 @@ function renderMilestoneCard(ms, index) {
       <div class="ms-entries">
         ${hasDone ? `
         <div class="ms-entries-toolbar">
-          <button class="entry-filter-btn ${msHideDone ? 'active' : ''}" onclick="toggleHideEntryDone('${ms.id}', event)">
+          <button class="entry-filter-btn ${msHideDone ? 'active' : ''}" data-action="toggle-hide-done" data-ms-id="${ms.id}">
             ${msHideDone ? 'show done' : 'hide done'}
           </button>
         </div>
@@ -1561,7 +1563,7 @@ function renderMilestoneCard(ms, index) {
 
   return `
     <div class="ms-card${activeClass}${expandedClass}">
-      <div class="ms-card-header" data-ms-id="${ms.id}">
+      <div class="ms-card-header" data-action="toggle-ms" data-ms-id="${ms.id}">
         ${statusBadge(ms.status)}
         <div class="ms-title-row">
           <span class="ms-id">${ms.id}</span>
@@ -1587,7 +1589,7 @@ function renderRetroSection() {
   if (state.retroContent) {
     return `
       <section class="retro-section fade-in">
-        <span class="retro-back" onclick="closeRetro()">\u2190 back to list</span>
+        <span class="retro-back" data-action="close-retro">\u2190 back to list</span>
         <h3 style="font-size: 1rem; color: var(--text-primary); margin: 8px 0 16px;">${esc(state.retroContent.week)}</h3>
         <div class="retro-content">${esc(state.retroContent.content)}</div>
       </section>`;
@@ -1599,7 +1601,7 @@ function renderRetroSection() {
     <section class="retro-section fade-in">
       <ul class="retro-list">
         ${state.retros.map(r => `
-          <li class="retro-item" onclick="openRetro('${esc(r.week)}')">
+          <li class="retro-item" data-action="open-retro" data-week="${esc(r.week)}">
             <span class="retro-item-week">${esc(r.week)}</span>
             <span class="retro-item-date">${r.updated_at ? r.updated_at.slice(0, 10) : ''}</span>
           </li>
@@ -1647,7 +1649,7 @@ function renderDocumentsSection() {
     const scope = state.documentContent.scope || 'memo';
     return `
       <section class="retro-section fade-in">
-        <span class="retro-back" onclick="closeDocument()">\u2190 back to list</span>
+        <span class="retro-back" data-action="close-document">\u2190 back to list</span>
         <h3 style="font-size: 1rem; color: var(--text-primary); margin: 8px 0 16px;">${scopeBadge(scope)}${esc(state.documentContent.title)}</h3>
         <div class="retro-content">${esc(state.documentContent.content)}</div>
       </section>`;
@@ -1673,7 +1675,7 @@ function renderDocumentsSection() {
         <h4 style="font-size: 0.75rem; color: var(--text-secondary); margin: 0 0 6px; letter-spacing: 0.05em;">${labels[s]}</h4>
         <ul class="retro-list">
           ${grouped[s].map(d => `
-            <li class="retro-item" onclick="openDocument('${esc(d.doc_id)}')">
+            <li class="retro-item" data-action="open-document" data-doc-id="${esc(d.doc_id)}">
               <span class="retro-item-week">${esc(d.title)}</span>
               <span class="retro-item-date">${d.updated_at ? d.updated_at.slice(0, 10) : ''}</span>
             </li>
@@ -1712,18 +1714,18 @@ async function renderMenu() {
 
   const root = document.getElementById('menu-root');
   root.innerHTML = `
-    <div class="menu-overlay" onclick="closeMenu()"></div>
+    <div class="menu-overlay" data-action="close-menu"></div>
     <div class="menu-panel">
       <div class="menu-header">
         <span class="menu-title">Menu</span>
-        <button class="menu-close" onclick="closeMenu()">\u00d7</button>
+        <button class="menu-close" data-action="close-menu">\u00d7</button>
       </div>
 
       <div class="menu-section">
         <div class="menu-section-title">Projects</div>
         ${state.projects.map(p => `
           <button class="menu-item ${p.project_id === state.projectId ? 'current' : ''}"
-                  onclick="menuSelectProject('${esc(p.project_id)}')">
+                  data-action="menu-select-project" data-project-id="${esc(p.project_id)}">
             ${esc(p.name)}
             <div class="menu-item-sub">${esc(p.project_id)}</div>
           </button>
@@ -1739,10 +1741,14 @@ async function renderMenu() {
         <div class="menu-section-title">Account</div>
         ${state.auth.email ? `<div class="menu-user">${esc(state.auth.email)}</div>` : ''}
         <a class="menu-item" href="/admin" style="text-decoration:none;display:block">Admin</a>
-        <button class="menu-item" onclick="logout()">Sign out</button>
+        <button class="menu-item" data-action="logout">Sign out</button>
       </div>
     </div>
   `;
+  // Bind menu events
+  document.getElementById('menu-root').querySelectorAll('[data-action]').forEach(el => {
+    el.addEventListener('click', handleAction);
+  });
   loadMembers();
 }
 
@@ -1763,11 +1769,11 @@ async function loadMembers() {
       html += `<div class="menu-user" style="display:flex;align-items:center;justify-content:space-between;">
         <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">${esc(m.email)}</span>
         ${isOwner ? `<span style="display:flex;gap:4px;align-items:center;">
-          <select onchange="changeMemberRole('${esc(m.email)}',this.value)" style="background:var(--bg-surface);border:1px solid var(--border);color:var(--text-secondary);font-size:0.65rem;padding:1px 4px;border-radius:3px;cursor:pointer">
+          <select data-action="change-member-role" data-email="${esc(m.email)}" style="background:var(--bg-surface);border:1px solid var(--border);color:var(--text-secondary);font-size:0.65rem;padding:1px 4px;border-radius:3px;cursor:pointer">
             <option value="viewer"${m.role === 'viewer' ? ' selected' : ''}>viewer</option>
             <option value="editor"${m.role === 'editor' ? ' selected' : ''}>editor</option>
           </select>
-          <button onclick="removeMember('${esc(m.email)}')" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:0.65rem;padding:1px 5px;border-radius:3px;cursor:pointer">\u00d7</button>
+          <button data-action="remove-member" data-email="${esc(m.email)}" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:0.65rem;padding:1px 5px;border-radius:3px;cursor:pointer">\u00d7</button>
         </span>` : `<span style="color:var(--text-dim);font-size:0.7rem">${esc(m.role)}</span>`}
       </div>`;
     }
@@ -1779,12 +1785,17 @@ async function loadMembers() {
           <option value="viewer">viewer</option>
           <option value="editor">editor</option>
         </select>
-        <button onclick="inviteMember()" style="background:var(--accent-dim);border:none;color:var(--accent);padding:4px 8px;border-radius:4px;font-size:0.75rem;cursor:pointer">Invite</button>
+        <button data-action="invite-member" style="background:var(--accent-dim);border:none;color:var(--accent);padding:4px 8px;border-radius:4px;font-size:0.75rem;cursor:pointer">Invite</button>
       </div>
       <div id="invite-msg" style="font-size:0.7rem;color:var(--text-dim);margin-top:4px;"></div>`;
     }
     if (!html) html = '<div class="menu-user" style="color:var(--text-dim)">No members</div>';
     el.innerHTML = html;
+    // Bind member action events
+    el.querySelectorAll('[data-action]').forEach(btn => {
+      const act = btn.dataset.action;
+      btn.addEventListener(act === 'change-member-role' ? 'change' : 'click', handleAction);
+    });
   } catch (e) {
     el.innerHTML = '<div class="menu-user" style="color:var(--text-dim)">Failed to load</div>';
   }
@@ -1900,6 +1911,60 @@ function toggleHideEntryDone(msId, event) {
 function toggleSort() {
   state.sortAsc = !state.sortAsc;
   render();
+}
+
+// ---- Event delegation ----
+
+function bindEvents() {
+  document.querySelectorAll('[data-action]').forEach(el => {
+    const action = el.dataset.action;
+    if (action === 'change-member-role') {
+      el.addEventListener('change', handleAction);
+    } else {
+      el.addEventListener('click', handleAction);
+    }
+  });
+}
+
+async function handleAction(e) {
+  const el = e.currentTarget;
+  const action = el.dataset.action;
+  if (action === 'toggle-entry' && e.target.closest('.entry-children')) return;
+  e.stopPropagation();
+
+  switch (action) {
+    case 'toggle-ms': toggleMilestone(el.dataset.msId); break;
+    case 'toggle-entry':
+      const eid = el.dataset.entryId;
+      if (state.collapsedEntries.has(eid)) state.collapsedEntries.delete(eid);
+      else state.collapsedEntries.add(eid);
+      render(); break;
+    case 'toggle-hide-done':
+      const mid = el.dataset.msId;
+      if (state.hideEntryDone.has(mid)) state.hideEntryDone.delete(mid);
+      else state.hideEntryDone.add(mid);
+      render(); break;
+    case 'filter-status':
+      const s = el.dataset.status;
+      if (state.hiddenStatuses.has(s)) state.hiddenStatuses.delete(s);
+      else state.hiddenStatuses.add(s);
+      render(); break;
+    case 'filter-all': state.hiddenStatuses.clear(); render(); break;
+    case 'toggle-sort': state.sortAsc = !state.sortAsc; render(); break;
+    case 'switch-tab': await switchTab(el.dataset.tab); break;
+    case 'open-retro': await openRetro(el.dataset.week); break;
+    case 'close-retro': state.retroContent = null; render(); break;
+    case 'open-document': await openDocument(el.dataset.docId); break;
+    case 'close-document': state.documentContent = null; render(); break;
+    case 'open-menu': await renderMenu(); break;
+    case 'close-menu': closeMenu(); break;
+    case 'menu-select-project': closeMenu(); await menuSelectProject(el.dataset.projectId); break;
+    case 'select-project': await selectProject(el.dataset.projectId); break;
+    case 'logout': logout(); break;
+    case 'remove-member': await removeMember(el.dataset.email); break;
+    case 'invite-member': await inviteMember(); break;
+    case 'change-member-role': await changeMemberRole(el.dataset.email, el.value); break;
+  }
 }
 
 // ---- URL routing ----

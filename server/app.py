@@ -796,6 +796,74 @@ def auth_config():
     return {"client_id": client_id}
 
 
+
+# ---- CLI Auth (Web UI-mediated flow) ----
+
+import secrets
+import time
+
+# In-memory pending codes: code -> {sub, email, id_token, expires}
+_cli_pending: dict[str, dict] = {}
+
+
+@app.post("/api/auth/cli-start")
+def cli_auth_start():
+    """CLI calls this to get a pairing code. No auth required."""
+    code = secrets.token_urlsafe(6)[:8].upper()  # Short human-readable code
+    _cli_pending[code] = {"expires": time.time() + 300}
+    # Cleanup expired
+    now = time.time()
+    for k in [k for k, v in _cli_pending.items() if v["expires"] < now]:
+        del _cli_pending[k]
+    return {"code": code, "expires_in": 300, "url": f"https://beacon-ai.dev/cli-auth?code={code}"}
+
+
+class CliApproveRequest(BaseModel):
+    code: str
+
+@app.post("/api/auth/cli-approve")
+def cli_auth_approve(body: CliApproveRequest, user: dict = Depends(require_auth), request: Request = None):
+    """Web UI calls this (authenticated) to approve a CLI pairing code."""
+    code = body.code.upper()
+    if code not in _cli_pending:
+        raise HTTPException(status_code=404, detail="Invalid or expired code")
+    entry = _cli_pending[code]
+    if time.time() > entry["expires"]:
+        del _cli_pending[code]
+        raise HTTPException(status_code=410, detail="Code expired")
+    # Store the user's auth info for CLI to pick up
+    entry["email"] = user.get("email", "")
+    entry["sub"] = user.get("sub", "")
+    entry["approved"] = True
+    # Get the raw token from authorization header
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        entry["id_token"] = auth_header[7:]
+    return {"status": "approved", "email": entry["email"]}
+
+
+@app.get("/api/auth/cli-poll")
+def cli_auth_poll_get(code: str = ""):
+    """CLI polls this to check if the code has been approved. No auth required."""
+    code = code.upper()
+    if code not in _cli_pending:
+        raise HTTPException(status_code=404, detail="Invalid or expired code")
+    entry = _cli_pending[code]
+    if time.time() > entry["expires"]:
+        del _cli_pending[code]
+        raise HTTPException(status_code=410, detail="Code expired")
+    if not entry.get("approved"):
+        return {"status": "pending"}
+    # Approved — return token and cleanup
+    result = {
+        "status": "approved",
+        "email": entry.get("email", ""),
+        "id_token": entry.get("id_token", ""),
+    }
+    del _cli_pending[code]
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Static files (Web UI)
 # ---------------------------------------------------------------------------
@@ -818,5 +886,9 @@ if _static_dir.exists():
     @app.get("/admin")
     def serve_admin():
         return FileResponse(_static_dir / "admin.html")
+
+    @app.get("/cli-auth")
+    def serve_cli_auth():
+        return FileResponse(_static_dir / "cli-auth.html")
 
     app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")

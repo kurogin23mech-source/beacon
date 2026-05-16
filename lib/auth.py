@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
+import urllib.request
+import webbrowser
 from pathlib import Path
 
 # Credentials are stored per-user, not per-project
@@ -24,18 +27,26 @@ def _ensure_deps():
     try:
         import google.auth  # noqa: F401
         import google.oauth2.credentials  # noqa: F401
-        from google_auth_oauthlib.flow import InstalledAppFlow  # noqa: F401
     except ImportError:
         print("Error: Auth dependencies not installed.")
         print("Run: pip install google-auth google-auth-oauthlib google-cloud-firestore")
         sys.exit(1)
 
 
+def _get_api_url() -> str:
+    """Get API URL from cloud.json if available."""
+    cloud_json = Path(".beacon/cloud.json")
+    if cloud_json.exists():
+        with open(cloud_json, "r") as f:
+            return json.load(f).get("api_url", "")
+    return "https://beacon-ai.dev"
+
+
 def _load_firebase_config() -> dict:
-    """Load Firebase client config."""
+    """Load Firebase client config from local file."""
     if not FIREBASE_CONFIG_PATH.exists():
         print(f"Error: Firebase config not found at {FIREBASE_CONFIG_PATH}")
-        print("This is a beacon installation issue.")
+        print("Use 'beacon auth login --web' for web-mediated login (no config file needed).")
         sys.exit(1)
     with open(FIREBASE_CONFIG_PATH, "r") as f:
         return json.load(f)
@@ -43,8 +54,14 @@ def _load_firebase_config() -> dict:
 
 def login():
     """Run Google OAuth flow and save credentials."""
+    # Check if --web flag is passed (or no firebase_config.json)
+    use_web = "--web" in sys.argv or not FIREBASE_CONFIG_PATH.exists()
+
+    if use_web:
+        login_web()
+        return
+
     _ensure_deps()
-    # Allow Google to return fewer scopes than requested (e.g. Firestore API not yet enabled)
     os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
     from google_auth_oauthlib.flow import InstalledAppFlow
 
@@ -67,10 +84,71 @@ def login():
     with open(CREDENTIALS_PATH, "w") as f:
         json.dump(creds_data, f, indent=2)
 
-    # Get user email
     email = _get_user_email(credentials)
     print(f"Logged in as: {email}")
     print(f"Credentials saved to: {CREDENTIALS_PATH}")
+
+
+def login_web():
+    """Web UI-mediated login flow. No firebase_config.json needed."""
+    api_url = _get_api_url()
+
+    # Step 1: Request a pairing code from the server
+    print("Requesting pairing code...")
+    try:
+        req = urllib.request.Request(f"{api_url}/api/auth/cli-start", method="POST",
+                                     data=b"", headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+    except Exception as e:
+        print(f"Error: Could not reach server at {api_url}: {e}")
+        sys.exit(1)
+
+    code = data["code"]
+    url = data["url"]
+
+    # Step 2: Open browser for user to approve
+    print(f"\nYour pairing code: {code}")
+    print(f"Opening: {url}")
+    print("Sign in with Google and enter the code to authorize this CLI.\n")
+    webbrowser.open(url)
+
+    # Step 3: Poll for approval
+    print("Waiting for approval", end="", flush=True)
+    deadline = time.time() + 300
+    while time.time() < deadline:
+        time.sleep(3)
+        print(".", end="", flush=True)
+        try:
+            poll_url = f"{api_url}/api/auth/cli-poll?code={code}"
+            with urllib.request.urlopen(poll_url, timeout=10) as resp:
+                result = json.loads(resp.read())
+            if result.get("status") == "approved":
+                print(" approved!")
+                # Save the id_token
+                BEACON_HOME.mkdir(parents=True, exist_ok=True)
+                creds_data = {
+                    "token": result.get("id_token", ""),
+                    "email": result.get("email", ""),
+                    "web_auth": True,
+                }
+                with open(CREDENTIALS_PATH, "w") as f:
+                    json.dump(creds_data, f, indent=2)
+                print(f"Logged in as: {result.get('email', '?')}")
+                print(f"Credentials saved to: {CREDENTIALS_PATH}")
+                return
+        except urllib.error.HTTPError as e:
+            if e.code == 410:
+                print("\nCode expired. Run 'beacon auth login' again.")
+                sys.exit(1)
+            if e.code == 404:
+                print("\nInvalid code.")
+                sys.exit(1)
+        except Exception:
+            pass
+
+    print("\nTimeout. Run 'beacon auth login' again.")
+    sys.exit(1)
 
 
 def logout():
@@ -89,6 +167,11 @@ def status():
         print("Not logged in. Run: beacon auth login")
         return
 
+    # Web auth stores email directly
+    if isinstance(creds, dict) and creds.get("web_auth"):
+        print(f"Logged in as: {creds.get('email', '?')} (web auth)")
+        return
+
     email = _get_user_email(creds)
     if email:
         print(f"Logged in as: {email}")
@@ -97,16 +180,21 @@ def status():
 
 
 def load_credentials():
-    """Load and refresh cached credentials. Returns None if not logged in."""
+    """Load and refresh cached credentials. Returns credentials or None."""
     if not CREDENTIALS_PATH.exists():
         return None
 
+    with open(CREDENTIALS_PATH, "r") as f:
+        creds_data = json.load(f)
+
+    # Web auth mode: return raw dict with id_token
+    if creds_data.get("web_auth"):
+        return creds_data
+
+    # OAuth mode: use google credentials
     _ensure_deps()
     import google.oauth2.credentials
     import google.auth.transport.requests
-
-    with open(CREDENTIALS_PATH, "r") as f:
-        creds_data = json.load(f)
 
     credentials = google.oauth2.credentials.Credentials(
         token=creds_data.get("token"),
@@ -117,11 +205,9 @@ def load_credentials():
         scopes=creds_data.get("scopes"),
     )
 
-    # Always refresh to ensure we have a valid id_token for API calls
     if credentials.refresh_token:
         try:
             credentials.refresh(google.auth.transport.requests.Request())
-            # Update saved token + id_token
             creds_data["token"] = credentials.token
             if credentials.id_token:
                 creds_data["id_token"] = credentials.id_token

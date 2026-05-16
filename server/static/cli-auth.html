@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Beacon — CLI Authorization</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+:root { --bg: #0a0a0c; --surface: #111114; --border: #2a2a30; --text: #e4e4e8; --dim: #71717a; --accent: #4ade80; --accent-dim: #166534; --error: #ef4444; --font: 'JetBrains Mono', monospace; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: var(--font); min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 40px; max-width: 400px; width: 90%; text-align: center; }
+h1 { font-size: 1.8rem; margin-bottom: 8px; }
+.tagline { font-size: 0.75rem; color: var(--dim); font-style: italic; margin-bottom: 24px; }
+.step { margin: 20px 0; }
+.step-label { font-size: 0.7rem; color: var(--dim); letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 8px; }
+.code-display { font-size: 2rem; font-weight: 700; color: var(--accent); letter-spacing: 0.2em; margin: 12px 0; }
+#g_id_signin { display: inline-block; margin: 12px 0; }
+.btn { font-family: var(--font); font-size: 0.85rem; padding: 10px 24px; border: 1px solid var(--accent-dim); border-radius: 4px; background: rgba(74,222,128,0.08); color: var(--accent); cursor: pointer; transition: all 0.2s; }
+.btn:hover { background: rgba(74,222,128,0.15); border-color: var(--accent); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.status { font-size: 0.8rem; color: var(--dim); margin-top: 16px; }
+.status.success { color: var(--accent); }
+.status.error { color: var(--error); }
+.hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Beacon</h1>
+  <p class="tagline">CLI Authorization</p>
+
+  <!-- Step 1: Sign in -->
+  <div id="step-login" class="step">
+    <div class="step-label">Step 1: Sign in with Google</div>
+    <div id="g_id_signin"></div>
+  </div>
+
+  <!-- Step 2: Confirm code -->
+  <div id="step-approve" class="step hidden">
+    <div class="step-label">Step 2: Authorize CLI</div>
+    <p style="font-size:0.8rem;color:var(--dim);margin-bottom:12px;">Confirm this code matches your terminal:</p>
+    <div class="code-display" id="code-display"></div>
+    <button class="btn" id="approve-btn">Authorize</button>
+  </div>
+
+  <!-- Done -->
+  <div id="step-done" class="step hidden">
+    <div class="code-display" style="font-size:1.2rem;">Authorized</div>
+    <p style="font-size:0.8rem;color:var(--dim);">You can close this tab. The CLI is now logged in.</p>
+  </div>
+
+  <div id="status" class="status"></div>
+</div>
+
+<script>
+const API_BASE = window.location.origin;
+let authToken = null;
+let clientId = null;
+
+// Get code from URL
+const params = new URLSearchParams(window.location.search);
+const code = params.get('code') || '';
+
+async function loadAuthConfig() {
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/config`);
+    if (res.ok) {
+      const config = await res.json();
+      clientId = config.client_id;
+    }
+  } catch (e) {}
+}
+
+function handleCredentialResponse(response) {
+  authToken = response.credential;
+  const payload = JSON.parse(atob(authToken.split('.')[1]));
+  document.getElementById('status').textContent = `Signed in as ${payload.email}`;
+  document.getElementById('status').className = 'status';
+
+  if (code) {
+    // Show approve step
+    document.getElementById('step-login').classList.add('hidden');
+    document.getElementById('step-approve').classList.remove('hidden');
+    document.getElementById('code-display').textContent = code;
+
+    document.getElementById('approve-btn').addEventListener('click', async () => {
+      const btn = document.getElementById('approve-btn');
+      btn.disabled = true;
+      btn.textContent = 'Authorizing...';
+      try {
+        const res = await fetch(`${API_BASE}/api/auth/cli-approve`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
+          body: JSON.stringify({ code }),
+        });
+        if (res.ok) {
+          document.getElementById('step-approve').classList.add('hidden');
+          document.getElementById('step-done').classList.remove('hidden');
+          document.getElementById('status').textContent = 'CLI authorized successfully.';
+          document.getElementById('status').className = 'status success';
+        } else {
+          const err = await res.json().catch(() => ({}));
+          document.getElementById('status').textContent = err.detail || 'Failed to authorize.';
+          document.getElementById('status').className = 'status error';
+          btn.disabled = false;
+          btn.textContent = 'Authorize';
+        }
+      } catch (e) {
+        document.getElementById('status').textContent = 'Network error.';
+        document.getElementById('status').className = 'status error';
+        btn.disabled = false;
+        btn.textContent = 'Authorize';
+      }
+    });
+  }
+}
+
+async function init() {
+  await loadAuthConfig();
+  if (!code) {
+    document.getElementById('status').textContent = 'No pairing code. Run "beacon auth login" in your terminal first.';
+    document.getElementById('status').className = 'status error';
+    return;
+  }
+  document.getElementById('code-display').textContent = code;
+
+  function waitForGsi() {
+    if (window.google?.accounts && clientId) {
+      google.accounts.id.initialize({ client_id: clientId, callback: handleCredentialResponse });
+      google.accounts.id.renderButton(document.getElementById('g_id_signin'),
+        { theme: 'filled_black', size: 'large', shape: 'rectangular', text: 'signin_with' });
+    } else {
+      setTimeout(waitForGsi, 100);
+    }
+  }
+  waitForGsi();
+}
+
+init();
+</script>
+</body>
+</html>
