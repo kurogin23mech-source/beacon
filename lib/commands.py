@@ -1260,6 +1260,13 @@ def cmd_doc_add():
         with open(fpath, "w", encoding="utf-8") as f:
             f.write(content)
 
+    data = load_project()
+    today = datetime.date.today().isoformat()
+    core.save_entry(data, ms_id=milestone, description=f"doc add: {title} ({scope})",
+                    source="auto", date=today, revision_id=doc_id,
+                    url=None, hash=None, progress=None)
+    save_project(data)
+
     if json_mode:
         print(json.dumps({"doc_id": doc_id, "title": title, "scope": scope}, ensure_ascii=False))
     else:
@@ -1313,6 +1320,13 @@ def cmd_doc_update():
         fpath = os.path.join(docs_dir, f"{doc_id}.md")
         with open(fpath, "w", encoding="utf-8") as f:
             f.write(content)
+
+    data = load_project()
+    today = datetime.date.today().isoformat()
+    core.save_entry(data, ms_id=milestone, description=f"doc update: {title} ({scope})",
+                    source="auto", date=today, revision_id=doc_id,
+                    url=None, hash=None, progress=None)
+    save_project(data)
 
     if json_mode:
         print(json.dumps({"doc_id": doc_id, "title": title, "scope": scope}, ensure_ascii=False))
