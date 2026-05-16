@@ -657,6 +657,13 @@ def cmd_task_done():
     today = datetime.date.today().isoformat()
 
     data = load_project()
+    # Check if this is a PR entry — use pr_merge instead
+    result = core.find_entry(data, entry_id)
+    if result:
+        _, _, entry, _ = result
+        if entry.get("type") == "pr":
+            print(f"Note: {entry_id} is a PR entry. Use 'beacon pr merge {entry_id}' to mark as merged.")
+            print(f"      Marking done without updating pr_status.")
     ms, entry = core.task_done(data, entry_id, date=today)
     print(f"Done: [{entry_id}] {entry['description']}")
     core.update_progress(ms, progress)
@@ -723,11 +730,21 @@ def cmd_task_show():
     print(f"  Milestone: [{ms['id']}] {ms['title']}")
     print(f"  Type: {entry.get('type', '?')}  Status: {entry.get('status', '?')}")
     print(f"  Created: {entry.get('created_at', '-')}  Done: {entry.get('done_at', '-')}")
+    # Show PR-specific fields
+    if entry.get("type") == "pr":
+        meta = entry.get("meta", {})
+        print(f"  PR status: {meta.get('pr_status', '-')}  Review: {meta.get('review_status', '-')}")
+        if meta.get("url"):
+            print(f"  URL: {meta['url']}")
+        if meta.get("intent"):
+            print(f"  Intent: {meta['intent']}")
+        if meta.get("review_rationale"):
+            print(f"  Rationale: {meta['review_rationale']}")
+        if meta.get("author"):
+            print(f"  Author: {meta['author']}")
     detail = entry.get("detail", "")
     if detail:
         print(f"\n{detail}")
-    else:
-        print("\n(no detail)")
 
 
 def cmd_task_detail():
@@ -1784,6 +1801,46 @@ def cmd_pr_reject():
             print(f"  Rationale: {rationale}")
 
 
+def cmd_pr_request_review():
+    entry_id = os.environ.get("BEACON_ENTRY_ID", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not entry_id:
+        print("Error: entry ID required", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    try:
+        ms, entry = core.pr_request_review(data, entry_id)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    if json_mode:
+        print(json.dumps({"entry_id": entry_id, "pr_status": "in_review"}, ensure_ascii=False))
+    else:
+        print(f"In review: [{entry_id}]: {entry.get('description', '')}")
+
+
+def cmd_pr_merge():
+    entry_id = os.environ.get("BEACON_ENTRY_ID", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not entry_id:
+        print("Error: entry ID required", file=sys.stderr)
+        sys.exit(1)
+    import datetime
+    today = datetime.date.today().isoformat()
+    data = load_project()
+    try:
+        ms, entry = core.pr_merge(data, entry_id, date=today)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    if json_mode:
+        print(json.dumps({"entry_id": entry_id, "pr_status": "merged"}, ensure_ascii=False))
+    else:
+        print(f"Merged PR [{entry_id}]: {entry.get('description', '')}")
+
+
 def cmd_pr_create():
     """Wrapper for gh pr create that auto-records the PR in beacon."""
     ms_id = os.environ.get("BEACON_MS_ID", "")
@@ -1932,6 +1989,8 @@ if __name__ == "__main__":
         "pr_approve": cmd_pr_approve,
         "pr_reject": cmd_pr_reject,
         "pr_create": cmd_pr_create,
+        "pr_request_review": cmd_pr_request_review,
+        "pr_merge": cmd_pr_merge,
         "version": lambda: print(f"beacon {__version__}"),
     }
     fn = commands.get(cmd)

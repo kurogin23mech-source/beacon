@@ -693,6 +693,32 @@ body::after {
   border: 1px solid rgba(192, 132, 252, 0.15);
 }
 
+.entry-type-badge.pr {
+  color: #f97316;
+  background: rgba(249, 115, 22, 0.1);
+  border: 1px solid rgba(249, 115, 22, 0.15);
+}
+
+.entry-pr-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 4px;
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+}
+
+.entry-pr-status {
+  font-weight: 500;
+}
+
+.entry-pr-status.open { color: #60a5fa; }
+.entry-pr-status.in_review { color: #fb923c; }
+.entry-pr-status.approved { color: #a3e635; }
+.entry-pr-status.merged { color: #a78bfa; }
+.entry-pr-status.closed { color: var(--text-dim); }
+.entry-pr-status.rejected { color: #f87171; }
+
 .entry-id {
   font-size: 0.7rem;
   color: var(--text-dim);
@@ -1447,7 +1473,7 @@ function statusBadge(status) {
 }
 
 function entryTypeBadge(type) {
-  const labels = { commit: 'commit', task: 'task', note: 'note' };
+  const labels = { commit: 'commit', task: 'task', note: 'note', save: 'save', pr: 'PR' };
   return `<span class="entry-type-badge ${type}">${labels[type] || type}</span>`;
 }
 
@@ -1465,6 +1491,16 @@ function renderEntry(entry) {
   const statusClass = entry.status === 'done' ? ' done' : '';
   const hash = entry.meta?.hash ? `<span class="entry-hash">${entry.meta.hash.slice(0, 7)}</span>` : '';
   const detail = entry.detail ? `<div class="entry-detail">${esc(entry.detail)}</div>` : '';
+  let prMeta = '';
+  if (entry.type === 'pr' && entry.meta) {
+    const m = entry.meta;
+    const prStatus = m.pr_status || 'open';
+    const reviewStatus = m.review_status ? ` · review: ${m.review_status}` : '';
+    const url = m.url ? ` · <a href="${esc(m.url)}" target="_blank" rel="noopener" style="color:inherit;opacity:0.7;">${esc(m.url.replace(/.*\/pull\//, '#'))}</a>` : '';
+    const intent = m.intent ? `<div style="margin-top:2px;color:var(--text-secondary);font-size:0.68rem;">${esc(m.intent)}</div>` : '';
+    const rationale = m.review_rationale ? `<div style="margin-top:2px;color:var(--text-dim);font-size:0.68rem;font-style:italic;">${esc(m.review_rationale)}</div>` : '';
+    prMeta = `<div class="entry-pr-meta"><span class="entry-pr-status ${prStatus}">${prStatus}${reviewStatus}</span>${url}</div>${intent}${rationale}`;
+  }
   const statusText = entryStatusText(entry);
   const hasChildren = entry.entries?.length > 0;
   const childCount = hasChildren ? entry.entries.length : 0;
@@ -1486,6 +1522,7 @@ function renderEntry(entry) {
       <span class="entry-id">${entry.id}</span>
       <span class="entry-desc">${esc(entry.description)}${hash}${statusText}${childBadge}</span>
       <span class="entry-date">${entry.created_at || ''}</span>
+      ${prMeta}
       ${detail}
       ${children}
     </div>

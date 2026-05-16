@@ -11,7 +11,7 @@ import re
 
 VALID_STATUSES = {"todo", "in_progress", "in_review", "waiting", "done", "observing", "cancelled"}
 VALID_ENTRY_TYPES = {"commit", "task", "note", "save", "pr"}
-VALID_PR_STATUSES = {"open", "merged", "closed"}
+VALID_PR_STATUSES = {"open", "in_review", "merged", "closed"}
 VALID_REVIEW_STATUSES = {"pending", "approved", "changes_requested", "rejected"}
 MS_ID_RE = re.compile(r"^ms-\d+$")
 ENTRY_ID_RE = re.compile(r"^e-\d+$")
@@ -530,6 +530,36 @@ def pr_add(data: dict, *, ms_id: str = "", url: str, author: str = "",
     }
     entries.append(entry)
     return eid
+
+
+def pr_request_review(data: dict, entry_id: str) -> tuple[dict, dict]:
+    """Set PR to in_review. Returns (milestone, entry)."""
+    result = find_entry(data, entry_id)
+    if not result:
+        raise ValueError(f"Entry not found: {entry_id}")
+    ms, _, entry, _ = result
+    if entry.get("type") != "pr":
+        raise ValueError(f"Entry {entry_id} is not a pr entry")
+    meta = entry.setdefault("meta", {})
+    meta["pr_status"] = "in_review"
+    meta["review_status"] = "pending"
+    return ms, entry
+
+
+def pr_merge(data: dict, entry_id: str, *, date: str = "") -> tuple[dict, dict]:
+    """Merge a PR entry (pr_status=merged, status=done). Returns (milestone, entry)."""
+    import datetime as _dt
+    result = find_entry(data, entry_id)
+    if not result:
+        raise ValueError(f"Entry not found: {entry_id}")
+    ms, _, entry, _ = result
+    if entry.get("type") != "pr":
+        raise ValueError(f"Entry {entry_id} is not a pr entry")
+    meta = entry.setdefault("meta", {})
+    meta["pr_status"] = "merged"
+    entry["status"] = "done"
+    entry["done_at"] = date or _dt.date.today().isoformat()
+    return ms, entry
 
 
 def pr_close(data: dict, entry_id: str) -> tuple[dict, dict]:

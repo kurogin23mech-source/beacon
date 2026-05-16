@@ -1249,14 +1249,52 @@ cmd_pr() {
             BEACON_MS_ID="$ms_id" BEACON_INTENT="$intent" BEACON_GH_ARGS="$gh_args" \
                 python3 "$COMMANDS_PY" pr_create
             ;;
+        request-review)
+            shift
+            local entry_id=""
+            local json_flag=""
+
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --json) json_flag="1"; shift ;;
+                    *)      entry_id="$1"; shift ;;
+                esac
+            done
+
+            if [ -z "$entry_id" ]; then
+                echo "Usage: beacon pr request-review <entry-id> [--json]"
+                exit 1
+            fi
+            BEACON_ENTRY_ID="$entry_id" BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" pr_request_review
+            ;;
+        merge)
+            shift
+            local entry_id=""
+            local json_flag=""
+
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --json) json_flag="1"; shift ;;
+                    *)      entry_id="$1"; shift ;;
+                esac
+            done
+
+            if [ -z "$entry_id" ]; then
+                echo "Usage: beacon pr merge <entry-id> [--json]"
+                exit 1
+            fi
+            BEACON_ENTRY_ID="$entry_id" BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" pr_merge
+            ;;
         *)
-            echo "Usage: beacon pr [create|add|close|approve|reject]"
-            echo "  create [-m <ms-id>] [--intent \"text\"] [gh pr create flags...]"
-            echo "         Run gh pr create and auto-record the PR in beacon"
-            echo "  add    <github-url> [-m <ms-id>] [--intent \"text\"]  Register a PR"
-            echo "  close  <entry-id>                                     Close a PR"
-            echo "  approve <entry-id> [--rationale \"text\"]              Approve a PR"
-            echo "  reject  <entry-id> [--rationale \"text\"]              Reject a PR"
+            echo "Usage: beacon pr [create|add|close|approve|reject|request-review|merge]"
+            echo "  create         [-m <ms-id>] [--intent \"text\"] [gh pr create flags...]"
+            echo "                 Run gh pr create and auto-record the PR in beacon"
+            echo "  add            <github-url> [-m <ms-id>] [--intent \"text\"]  Register a PR"
+            echo "  request-review <entry-id>                                     Mark as in_review"
+            echo "  approve        <entry-id> [--rationale \"text\"]              Approve a PR"
+            echo "  reject         <entry-id> [--rationale \"text\"]              Reject a PR"
+            echo "  merge          <entry-id>                                     Mark as merged"
+            echo "  close          <entry-id>                                     Close a PR"
             ;;
     esac
 }
