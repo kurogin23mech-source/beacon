@@ -17,3 +17,6 @@ This is the Beacon tool itself. For using Beacon in your own project, run `beaco
 ## Beacon Project Management
 
 Skills and hooks are installed via `beacon setup`. This marker prevents `beacon setup` from re-appending this section to the beacon repo's own CLAUDE.md.
+
+- When the user wants to implement multiple milestones in parallel ("parallel", "sub-agents", "dispatch", etc.), run `/beacon-dispatch` Skill. Do not call the Agent tool directly.
+  ユーザーが複数MSの並列実装を求めた場合（「パラレル」「サブエージェント」「並列」等）、必ず `/beacon-dispatch` Skill を実行する。
