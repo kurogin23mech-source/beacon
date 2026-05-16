@@ -424,6 +424,50 @@ fn load_project_json(state: State<AppState>) -> Result<String, String> {
         .map_err(|e| format!("Failed to read project.json: {}", e))
 }
 
+#[tauri::command]
+fn cloud_diagnose() -> String {
+    let mut lines = vec![];
+
+    // 1. HOME env
+    let home = std::env::var("HOME").unwrap_or_else(|_| "(not set)".into());
+    lines.push(format!("HOME: {}", home));
+
+    // 2. credentials.json
+    let creds_path = std::path::Path::new(&home).join(".beacon/credentials.json");
+    lines.push(format!("credentials path: {}", creds_path.display()));
+    lines.push(format!("credentials exists: {}", creds_path.exists()));
+
+    if creds_path.exists() {
+        match std::fs::read_to_string(&creds_path) {
+            Ok(content) => {
+                let has_id_token = content.contains("\"id_token\"");
+                let has_refresh = content.contains("\"refresh_token\"");
+                lines.push(format!("has id_token: {}", has_id_token));
+                lines.push(format!("has refresh_token: {}", has_refresh));
+            }
+            Err(e) => lines.push(format!("read error: {}", e)),
+        }
+    }
+
+    // 3. API call
+    match load_auth_token() {
+        None => lines.push("token: None (not authenticated)".into()),
+        Some(token) => {
+            lines.push(format!("token: {}...", &token[..token.len().min(20)]));
+            let url = format!("{}/api/projects", DEFAULT_API_URL);
+            match ureq::get(&url).set("Authorization", &format!("Bearer {}", token)).call() {
+                Ok(resp) => match resp.into_string() {
+                    Ok(body) => lines.push(format!("API OK: {}", &body[..body.len().min(200)])),
+                    Err(e) => lines.push(format!("API read error: {}", e)),
+                },
+                Err(e) => lines.push(format!("API call error: {}", e)),
+            }
+        }
+    }
+
+    lines.join("\n")
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -466,6 +510,7 @@ pub fn run() {
             cloud_get_document,
             cloud_list_retros,
             cloud_get_retro,
+            cloud_diagnose,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

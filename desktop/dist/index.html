@@ -410,6 +410,8 @@ async function renderProjectSelector() {
           ${cloudProjects.map(p => `<div class="project-item" data-action="select-cloud-project" data-project-id="${esc(p.project_id)}"><div class="project-item-name">${esc(p.name)} <span style="font-size:0.65rem;color:var(--info)">cloud</span></div><div class="project-item-id">${esc(p.project_id)}</div></div>`).join('')}` : ''}
         ${!authenticated && localOnly.length === 0 ? `<p style="color:var(--text-dim);font-size:0.8rem;margin-top:12px;">Run <code style="color:var(--accent)">beacon auth login</code> to access cloud projects,<br>or <code style="color:var(--accent)">beacon init</code> to create a local project.</p>` : ''}
         ${state.cloudError ? `<p style="color:var(--warning);font-size:0.75rem;margin-top:12px;">Cloud error: ${esc(state.cloudError)}<br><span style="color:var(--text-dim);">Run <code style="color:var(--accent)">beacon auth login</code> to refresh.</span></p>` : ''}
+        ${state.cloudDiag ? `<pre style="color:var(--text-dim);font-size:0.65rem;margin-top:8px;white-space:pre-wrap;border:1px solid var(--border);padding:8px;border-radius:3px;">${esc(state.cloudDiag)}</pre>` : ''}
+        <button data-action="cloud-diagnose" style="margin-top:12px;font-size:0.7rem;padding:3px 10px;background:transparent;border:1px solid var(--border);border-radius:3px;color:var(--text-dim);cursor:pointer;font-family:inherit;">Diagnose cloud</button>
       </div>
     </div>`;
   bindEvents();
@@ -424,6 +426,7 @@ let state = {
   retros: [], retroContent: null,
   hiddenStatuses: new Set(), hideEntryDone: new Set(), collapsedEntries: new Set(), sortAsc: true,
   showGraph: false, graphFilterDeps: true,
+  cloudDiag: null,
 };
 
 const STATUS_LABELS = { done: 'done', in_progress: 'active', observing: 'observing', todo: 'todo', waiting: 'waiting', cancelled: 'cancelled' };
@@ -777,6 +780,12 @@ async function handleAction(e) {
     case 'menu-select-project': closeMenu(); await doSelectProject(el.dataset.path); break;
     case 'menu-select-cloud-project': closeMenu(); await doSelectCloudProject(el.dataset.projectId); break;
     case 'select-cloud-project': await doSelectCloudProject(el.dataset.projectId); break;
+    case 'cloud-diagnose':
+      state.cloudDiag = 'Running...';
+      renderProjectSelector();
+      state.cloudDiag = await invoke('cloud_diagnose').catch(e => String(e));
+      renderProjectSelector();
+      break;
   }
 }
 
