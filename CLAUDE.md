@@ -13,3 +13,7 @@ This is the Beacon tool itself. For using Beacon in your own project, run `beaco
 
 - Manage milestones with `beacon milestone` commands directly (no Skill for this yet)
 - If 2+ commits address the same issue, suggest grouping them into a task
+
+## Beacon Project Management
+
+Skills and hooks are installed via `beacon setup`. This marker prevents `beacon setup` from re-appending this section to the beacon repo's own CLAUDE.md.
