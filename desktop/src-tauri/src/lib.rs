@@ -160,8 +160,11 @@ fn list_projects() -> Vec<ProjectInfo> {
 }
 
 /// Load auth token from ~/.beacon/credentials.json
+/// HOME is used on macOS/Linux; USERPROFILE is used on Windows.
 fn load_auth_token() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()?;
     let path = std::path::Path::new(&home).join(".beacon/credentials.json");
     let content = std::fs::read_to_string(&path).ok()?;
     let data: serde_json::Value = serde_json::from_str(&content).ok()?;
@@ -429,8 +432,10 @@ fn cloud_diagnose() -> String {
     let mut lines = vec![];
 
     // 1. HOME env
-    let home = std::env::var("HOME").unwrap_or_else(|_| "(not set)".into());
-    lines.push(format!("HOME: {}", home));
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| "(not set)".into());
+    lines.push(format!("HOME/USERPROFILE: {}", home));
 
     // 2. credentials.json
     let creds_path = std::path::Path::new(&home).join(".beacon/credentials.json");
