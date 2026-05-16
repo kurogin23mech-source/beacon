@@ -216,6 +216,7 @@ async function loadProject() {
       state.error = String(e);
       state.connected = false;
       stopPolling();
+      stopWatcher();
       renderProjectSelector();
     }
   }
@@ -289,6 +290,15 @@ async function loadDocumentContent(docId) {
 function startPolling() { if (!pollTimer) pollTimer = setInterval(loadProject, 2000); }
 function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
 
+let unlistenWatcher = null;
+async function startWatcher() {
+  if (unlistenWatcher) return;
+  if (window.__TAURI__ && window.__TAURI__.event) {
+    unlistenWatcher = await window.__TAURI__.event.listen('beacon-changed', () => loadProject());
+  }
+}
+function stopWatcher() { if (unlistenWatcher) { unlistenWatcher(); unlistenWatcher = null; } }
+
 async function doSelectCloudProject(projectId) {
   cloudMode = true;
   state.cloudProjectId = projectId;
@@ -312,6 +322,7 @@ async function doSelectProject(path) {
   try {
     cloudMode = false;
     state.cloudProjectId = null;
+    stopPolling(); stopWatcher();
     await invoke('set_project_dir', { dir: path });
     state.error = null; state.project = null; state.expanded.clear();
     state.documents = []; state.documentContent = null;
@@ -323,7 +334,7 @@ async function doSelectProject(path) {
       for (const ms of state.project.milestones || []) {
         if (ms.status === 'in_progress') state.expanded.add(ms.id);
       }
-      render(); startPolling();
+      render(); startWatcher();
     }
   } catch (e) { state.error = String(e); renderProjectSelector(); }
 }
@@ -715,7 +726,7 @@ async function init() {
       for (const ms of state.project.milestones || []) {
         if (ms.status === 'in_progress') state.expanded.add(ms.id);
       }
-      render(); startPolling(); return;
+      render(); startWatcher(); return;
     }
   } catch (e) {}
   renderProjectSelector();

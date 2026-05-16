@@ -1,12 +1,47 @@
 use std::process::Command;
 use std::sync::Mutex;
 use serde::Serialize;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 struct AppState {
     project_dir: Mutex<Option<String>>,
     cloud_token: Mutex<Option<String>>,
     cloud_project_id: Mutex<Option<String>>,
+    watcher: Mutex<Option<RecommendedWatcher>>,
+}
+
+fn start_file_watcher(app_handle: tauri::AppHandle, project_dir: &str) -> Option<RecommendedWatcher> {
+    let beacon_dir = std::path::Path::new(project_dir).join(".beacon");
+    if !beacon_dir.exists() {
+        return None;
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if let Ok(event) = res {
+            use notify::EventKind;
+            match event.kind {
+                EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_) => {
+                    let _ = tx.send(());
+                }
+                _ => {}
+            }
+        }
+    }).ok()?;
+
+    watcher.watch(&beacon_dir, RecursiveMode::NonRecursive).ok()?;
+
+    std::thread::spawn(move || {
+        while rx.recv().is_ok() {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            while rx.try_recv().is_ok() {}
+            let _ = app_handle.emit("beacon-changed", ());
+        }
+    });
+
+    Some(watcher)
 }
 
 const DEFAULT_API_URL: &str = "https://beacon-ai.dev";
@@ -262,12 +297,14 @@ fn get_document_content(state: State<AppState>, doc_id: String) -> Result<String
 }
 
 #[tauri::command]
-fn set_project_dir(state: State<AppState>, dir: String) -> Result<String, String> {
+fn set_project_dir(app: tauri::AppHandle, state: State<AppState>, dir: String) -> Result<String, String> {
     let project_file = std::path::Path::new(&dir).join(".beacon/project.json");
     if !project_file.exists() {
         return Err(format!("No beacon project found at {}", dir));
     }
     *state.project_dir.lock().unwrap() = Some(dir.clone());
+    let w = start_file_watcher(app, &dir);
+    *state.watcher.lock().unwrap() = w;
     Ok(format!("Project set: {}", dir))
 }
 
@@ -357,6 +394,7 @@ pub fn run() {
             project_dir: Mutex::new(find_project_dir()),
             cloud_token: Mutex::new(load_auth_token()),
             cloud_project_id: Mutex::new(None),
+            watcher: Mutex::new(None),
         })
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -365,6 +403,11 @@ pub fn run() {
                         .level(log::LevelFilter::Info)
                         .build(),
                 )?;
+            }
+            let state: tauri::State<AppState> = app.state();
+            if let Some(dir) = state.project_dir.lock().unwrap().clone() {
+                let w = start_file_watcher(app.handle().clone(), &dir);
+                *state.watcher.lock().unwrap() = w;
             }
             Ok(())
         })
