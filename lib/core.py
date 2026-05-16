@@ -645,7 +645,7 @@ def pr_merge(data: dict, entry_id: str, *, date: str = "") -> tuple[dict, dict]:
 
 
 def pr_close(data: dict, entry_id: str) -> tuple[dict, dict]:
-    """Close a PR entry (pr_status=closed). Returns (milestone, entry)."""
+    """Close a PR without merging: pr_status=closed, entry.status=cancelled."""
     result = find_entry(data, entry_id)
     if not result:
         raise ValueError(f"Entry not found: {entry_id}")
