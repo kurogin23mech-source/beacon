@@ -396,6 +396,7 @@ let state = {
   activeTab: 'dashboard', documents: [], documentContent: null,
   retros: [], retroContent: null,
   hiddenStatuses: new Set(), hideEntryDone: new Set(), collapsedEntries: new Set(), sortAsc: true,
+  showGraph: false, graphFilterDeps: true,
 };
 
 const STATUS_LABELS = { done: 'done', in_progress: 'active', observing: 'observing', todo: 'todo', waiting: 'waiting', cancelled: 'cancelled' };
@@ -550,9 +551,18 @@ const GRAPH_STATUS_STROKES = { done:'#4ade80', in_progress:'#60a5fa', todo:'#717
 
 function renderGraphSection() {
   const p = state.project;
-  if (!p || !p.milestones || p.milestones.length === 0) return `<section class="graph-section fade-in"><div class="graph-empty">No milestones.</div></section>`;
-  const graph = buildGraph(p.milestones);
-  if (graph.edges.length === 0 && graph.waves.length <= 1) return `<section class="graph-section fade-in"><div class="graph-empty">No dependencies defined yet.<br><span style="font-size:0.7rem;color:var(--text-dim)">Use <code>beacon milestone depends ms-X --on ms-Y</code> to add.</span></div></section>`;
+  const header = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;"><span class="retro-back" data-action="hide-graph">← back</span><button class="sort-toggle" data-action="toggle-graph-filter" style="font-size:0.7rem;">${state.graphFilterDeps?'deps only ✓':'show all'}</button></div>`;
+  if (!p || !p.milestones || p.milestones.length === 0) return `<section class="graph-section fade-in">${header}<div class="graph-empty">No milestones.</div></section>`;
+  const fullGraph = buildGraph(p.milestones);
+  if (fullGraph.edges.length === 0) return `<section class="graph-section fade-in">${header}<div class="graph-empty">No dependencies defined yet.<br><span style="font-size:0.7rem;color:var(--text-dim)">Use <code>beacon milestone depends ms-X --on ms-Y</code> to add.</span></div></section>`;
+  let milestones = p.milestones;
+  if (state.graphFilterDeps) {
+    const connected = new Set();
+    for (const e of fullGraph.edges) { connected.add(e.from); connected.add(e.to); }
+    milestones = milestones.filter(ms => connected.has(ms.id));
+  }
+  const graph = state.graphFilterDeps ? buildGraph(milestones) : fullGraph;
+  if (graph.edges.length === 0) return `<section class="graph-section fade-in">${header}<div class="graph-empty">No dependencies defined yet.</div></section>`;
   const nodeW = 180, nodeH = 52, waveGap = 60, nodeGap = 16, padX = 40, padY = 32;
   const pos = {};
   let maxRow = 0;
@@ -586,7 +596,7 @@ function renderGraphSection() {
     waveSvg += `<text x="${x}" y="18" text-anchor="middle" fill="var(--text-dim)" font-size="10" font-family="var(--font-mono)">wave ${graph.waves[wi].wave}${graph.waves[wi].cycle?' (cycle)':''}</text>`;
   }
   const legendItems = [{label:'done',color:GRAPH_STATUS_STROKES.done},{label:'in_progress',color:GRAPH_STATUS_STROKES.in_progress},{label:'todo',color:GRAPH_STATUS_STROKES.todo},{label:'observing',color:GRAPH_STATUS_STROKES.observing},{label:'waiting',color:GRAPH_STATUS_STROKES.waiting}];
-  return `<section class="graph-section fade-in"><div class="graph-container">
+  return `<section class="graph-section fade-in">${header}<div class="graph-container">
     <svg width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}" xmlns="http://www.w3.org/2000/svg">
       <defs><marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="var(--border)" /></marker></defs>
       ${waveSvg}${edgeSvg}${nodeSvg}
@@ -656,22 +666,20 @@ function render() {
     </div></header>
     <div class="tab-bar fade-in stagger-1">
       <button class="tab-btn ${state.activeTab==='dashboard'?'active':''}" data-action="switch-tab" data-tab="dashboard">Milestones</button>
-      <button class="tab-btn ${state.activeTab==='graph'?'active':''}" data-action="switch-tab" data-tab="graph">Graph</button>
       <button class="tab-btn ${state.activeTab==='retros'?'active':''}" data-action="switch-tab" data-tab="retros">Reviews</button>
       <button class="tab-btn ${state.activeTab==='documents'?'active':''}" data-action="switch-tab" data-tab="documents">Documents</button>
     </div>
-    ${state.activeTab==='graph' ? renderGraphSection() : ''}
-    ${state.activeTab==='dashboard' ? `
+    ${state.activeTab==='dashboard' ? (state.showGraph ? renderGraphSection() : `
       ${p.summary?`<section class="summary-block fade-in"><div class="summary-label">Session Context</div><div class="summary-text">${esc(p.summary)}</div></section>`:''}
       <section class="milestones fade-in">
-        <div class="milestones-header"><span class="milestones-title">Milestones</span><span class="milestones-count">${activeCount} active \u00b7 ${doneCount}/${(p.milestones||[]).length} done</span></div>
+        <div class="milestones-header"><span class="milestones-title">Milestones</span><span class="milestones-count">${activeCount} active \u00b7 ${doneCount}/${(p.milestones||[]).length} done</span><button class="sort-toggle" data-action="show-graph" style="margin-left:auto;">Graph \u2192</button></div>
         <div class="filter-bar">
           <button class="filter-btn f-all ${state.hiddenStatuses.size===0?'on':'off'}" data-action="filter-all">all</button>
           ${FILTER_ORDER.map(s=>`<button class="filter-btn ${!state.hiddenStatuses.has(s)?'on':'off'} ${FILTER_CSS[s]||''}" data-action="filter-status" data-status="${s}">${STATUS_LABELS[s]}</button>`).join('')}
           <button class="sort-toggle" data-action="toggle-sort">${state.sortAsc?'\u2191 ms-1 first':'\u2193 latest first'}</button>
         </div>
         ${filtered.map(ms=>renderMilestoneCard(ms)).join('')}
-      </section>` : ''}
+      </section>`) : ''}
     ${state.activeTab==='retros' ? renderRetrosSection() : ''}
     ${state.activeTab==='documents' ? renderDocumentsSection() : ''}
     <footer class="footer fade-in stagger-3"><div class="footer-left"><div>local</div><div class="footer-tagline">Where humans and AI are bound together.</div></div><div class="footer-right">${state.lastUpdate?formatTime(state.lastUpdate):''}</div></footer>
@@ -718,10 +726,14 @@ async function handleAction(e) {
     case 'toggle-sort': state.sortAsc = !state.sortAsc; render(); break;
     case 'switch-tab':
       state.activeTab = el.dataset.tab;
+      state.showGraph = false;
       state.documentContent = null; state.retroContent = null;
       if (state.activeTab === 'documents' && state.documents.length === 0) await loadDocuments();
       if (state.activeTab === 'retros' && state.retros.length === 0) await loadRetros();
       render(); break;
+    case 'show-graph': state.showGraph = true; render(); break;
+    case 'hide-graph': state.showGraph = false; render(); break;
+    case 'toggle-graph-filter': state.graphFilterDeps = !state.graphFilterDeps; render(); break;
     case 'open-document': await loadDocumentContent(el.dataset.docId); break;
     case 'close-document': state.documentContent = null; render(); break;
     case 'copy-doc-link': {

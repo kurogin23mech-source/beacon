@@ -1253,6 +1253,8 @@ let state = {
   connected: false,
   error: null,
   activeTab: 'dashboard', // 'dashboard' | 'retros' | 'documents'
+  showGraph: false,
+  graphFilterDeps: true,
   retros: [],
   retroContent: null,
   documents: [],
@@ -1592,14 +1594,11 @@ function render() {
 
     <div class="tab-bar fade-in stagger-1">
       <button class="tab-btn ${state.activeTab === 'dashboard' ? 'active' : ''}" data-action="switch-tab" data-tab="dashboard">Milestones</button>
-      <button class="tab-btn ${state.activeTab === 'graph' ? 'active' : ''}" data-action="switch-tab" data-tab="graph">Graph</button>
       <button class="tab-btn ${state.activeTab === 'retros' ? 'active' : ''}" data-action="switch-tab" data-tab="retros">Reviews</button>
       <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
     </div>
 
-    ${state.activeTab === 'graph' ? renderGraphSection() : ''}
-
-    ${state.activeTab === 'dashboard' ? `
+    ${state.activeTab === 'dashboard' ? (state.showGraph ? renderGraphSection() : `
     ${p.summary ? `
     <section class="summary-block fade-in">
       <div class="summary-label">Session Context</div>
@@ -1610,6 +1609,7 @@ function render() {
       <div class="milestones-header">
         <span class="milestones-title">Milestones</span>
         <span class="milestones-count">${activeCount} active \u00b7 ${doneCount}/${(p.milestones||[]).length} done</span>
+        <button class="sort-toggle" data-action="show-graph" style="margin-left:auto;">Graph \u2192</button>
       </div>
       <div class="filter-bar">
         <button class="filter-btn f-all ${state.hiddenStatuses.size === 0 ? 'on' : 'off'}" data-action="filter-all">all</button>
@@ -1621,7 +1621,7 @@ function render() {
       </div>
       ${filtered.map((ms, i) => renderMilestoneCard(ms, i)).join('')}
     </section>
-    ` : ''}
+    `) : ''}
 
     ${state.activeTab === 'retros' ? renderRetroSection() : ''}
 
@@ -1741,6 +1741,7 @@ function renderRetroSection() {
 
 async function switchTab(tab) {
   state.activeTab = tab;
+  state.showGraph = false;
   state.retroContent = null;
   state.documentContent = null;
   if (tab === 'retros' && state.retros.length === 0) {
@@ -1779,6 +1780,7 @@ function renderDocumentsSection() {
     return `
       <section class="retro-section fade-in">
         <span class="retro-back" data-action="close-document">\u2190 back to list</span>
+        <button data-action="copy-doc-link" data-doc-id="${esc(state.documentContent.doc_id)}" style="float:right;font-size:0.72rem;padding:3px 10px;background:var(--bg-raised);border:1px solid var(--border);border-radius:3px;color:var(--text-secondary);cursor:pointer;font-family:inherit;">Copy link</button>
         <h3 style="font-size: 1rem; color: var(--text-primary); margin: 8px 0 16px;">${scopeBadge(scope)}${esc(state.documentContent.title)}</h3>
         <div class="doc-content">${marked.parse(state.documentContent.content || '')}</div>
       </section>`;
@@ -1915,15 +1917,30 @@ const GRAPH_STATUS_STROKES = {
 
 function renderGraphSection() {
   const p = state.project;
+  const header = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+    <span class="retro-back" data-action="hide-graph">← back</span>
+    <button class="sort-toggle" data-action="toggle-graph-filter" style="font-size:0.7rem;">${state.graphFilterDeps ? 'deps only ✓' : 'show all'}</button>
+  </div>`;
+
   if (!p || !p.milestones || p.milestones.length === 0) {
-    return `<section class="graph-section fade-in"><div class="graph-empty">No milestones.</div></section>`;
+    return `<section class="graph-section fade-in">${header}<div class="graph-empty">No milestones.</div></section>`;
   }
 
-  const graph = buildGraph(p.milestones);
+  const fullGraph = buildGraph(p.milestones);
+  if (fullGraph.edges.length === 0) {
+    return `<section class="graph-section fade-in">${header}<div class="graph-empty">No dependencies defined yet.<br><span style="font-size:0.7rem;color:var(--text-dim)">Use <code>beacon milestone depends ms-X --on ms-Y</code> to add.</span></div></section>`;
+  }
 
-  // Check if there are any edges
-  if (graph.edges.length === 0 && graph.waves.length <= 1) {
-    return `<section class="graph-section fade-in"><div class="graph-empty">No dependencies defined yet.<br><span style="font-size:0.7rem;color:var(--text-dim)">Use <code>beacon milestone depends ms-X --on ms-Y</code> to add.</span></div></section>`;
+  let milestones = p.milestones;
+  if (state.graphFilterDeps) {
+    const connected = new Set();
+    for (const e of fullGraph.edges) { connected.add(e.from); connected.add(e.to); }
+    milestones = milestones.filter(ms => connected.has(ms.id));
+  }
+  const graph = state.graphFilterDeps ? buildGraph(milestones) : fullGraph;
+
+  if (graph.edges.length === 0) {
+    return `<section class="graph-section fade-in">${header}<div class="graph-empty">No dependencies defined yet.<br><span style="font-size:0.7rem;color:var(--text-dim)">Use <code>beacon milestone depends ms-X --on ms-Y</code> to add.</span></div></section>`;
   }
 
   // Layout: waves flow left-to-right, nodes stacked vertically within each wave
@@ -2013,6 +2030,7 @@ function renderGraphSection() {
 
   return `
     <section class="graph-section fade-in">
+      ${header}
       <div class="graph-container">
         <svg width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}" xmlns="http://www.w3.org/2000/svg">
           <defs>
@@ -2291,8 +2309,17 @@ async function handleAction(e) {
     case 'switch-tab': await switchTab(el.dataset.tab); break;
     case 'open-retro': await openRetro(el.dataset.week); break;
     case 'close-retro': state.retroContent = null; render(); break;
+    case 'show-graph': state.showGraph = true; render(); break;
+    case 'hide-graph': state.showGraph = false; render(); break;
+    case 'toggle-graph-filter': state.graphFilterDeps = !state.graphFilterDeps; render(); break;
     case 'open-document': await openDocument(el.dataset.docId); break;
     case 'close-document': closeDocument(); break;
+    case 'copy-doc-link': {
+      await navigator.clipboard.writeText(window.location.href);
+      el.textContent = 'Copied!';
+      setTimeout(() => { el.textContent = 'Copy link'; }, 1500);
+      break;
+    }
     case 'open-menu': await renderMenu(); break;
     case 'close-menu': closeMenu(); break;
     case 'menu-select-project': closeMenu(); await menuSelectProject(el.dataset.projectId); break;
