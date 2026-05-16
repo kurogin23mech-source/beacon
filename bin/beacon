@@ -1289,21 +1289,8 @@ cmd_pr() {
                 python3 "$COMMANDS_PY" pr_request_changes
             ;;
         review)
-            shift
-            local entry_id=""
-
-            while [[ $# -gt 0 ]]; do
-                case "$1" in
-                    *)  entry_id="$1"; shift ;;
-                esac
-            done
-
-            if [ -z "$entry_id" ]; then
-                echo "Usage: beacon pr review <entry-id>"
-                echo "  Requires: ANTHROPIC_API_KEY env var"
-                exit 1
-            fi
-            BEACON_ENTRY_ID="$entry_id" python3 "$COMMANDS_PY" pr_review
+            echo "beacon pr review is now handled by the /review Claude Code Skill."
+            echo "Use: /review <PR-number>"
             ;;
         merge)
             shift
@@ -1328,7 +1315,7 @@ cmd_pr() {
             echo "  create          [-m <ms-id>] [--intent \"text\"] [gh pr create flags...]"
             echo "                  Run gh pr create and auto-record the PR in beacon"
             echo "  add             <github-url> [-m <ms-id>] [--intent \"text\"]  Register a PR"
-            echo "  review          <entry-id>   AI code review (requires ANTHROPIC_API_KEY)"
+            echo "  review          → use /review Claude Code Skill instead"
             echo "  approve         <entry-id> [--rationale \"text\"]  Approve (rationale required)"
             echo "  request-changes <entry-id> [--rationale \"text\"]  Request changes"
             echo "  reject          <entry-id> [--rationale \"text\"]  Reject a PR"
