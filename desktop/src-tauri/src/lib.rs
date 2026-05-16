@@ -6,7 +6,6 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 struct AppState {
     project_dir: Mutex<Option<String>>,
-    cloud_token: Mutex<Option<String>>,
     cloud_project_id: Mutex<Option<String>>,
     watcher: Mutex<Option<RecommendedWatcher>>,
 }
@@ -173,8 +172,12 @@ fn load_auth_token() -> Option<String> {
         .map(String::from)
 }
 
-/// Make an authenticated GET request to the Cloud API
-fn cloud_get(path: &str, token: &str) -> Result<String, String> {
+/// Make an authenticated GET request to the Cloud API.
+/// Always reads a fresh token from disk so that `beacon auth login` refreshes take effect
+/// without restarting the app.
+fn cloud_get(path: &str) -> Result<String, String> {
+    let token = load_auth_token()
+        .ok_or("Not authenticated. Run: beacon auth login")?;
     let url = format!("{}{}", DEFAULT_API_URL, path);
     let resp = ureq::get(&url)
         .set("Authorization", &format!("Bearer {}", token))
@@ -184,59 +187,43 @@ fn cloud_get(path: &str, token: &str) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn cloud_list_projects(state: State<AppState>) -> Result<String, String> {
-    let token = state.cloud_token.lock().unwrap();
-    let token = token.as_deref().ok_or("Not authenticated. Run: beacon auth login")?;
-    cloud_get("/api/projects", token)
+fn cloud_list_projects(_state: State<AppState>) -> Result<String, String> {
+    cloud_get("/api/projects")
 }
 
 #[tauri::command]
 fn cloud_load_project(state: State<AppState>, project_id: String) -> Result<String, String> {
-    let token = state.cloud_token.lock().unwrap();
-    let token = token.as_deref().ok_or("Not authenticated")?;
     *state.cloud_project_id.lock().unwrap() = Some(project_id.clone());
-    cloud_get(&format!("/api/projects/{}", project_id), token)
+    cloud_get(&format!("/api/projects/{}", project_id))
 }
 
 #[tauri::command]
 fn cloud_list_documents(state: State<AppState>) -> Result<String, String> {
-    let token = state.cloud_token.lock().unwrap();
-    let token = token.as_deref().ok_or("Not authenticated")?;
-    let pid = state.cloud_project_id.lock().unwrap();
-    let pid = pid.as_deref().ok_or("No cloud project selected")?;
-    cloud_get(&format!("/api/projects/{}/documents", pid), token)
+    let pid = state.cloud_project_id.lock().unwrap().clone().ok_or("No cloud project selected")?;
+    cloud_get(&format!("/api/projects/{}/documents", pid))
 }
 
 #[tauri::command]
 fn cloud_get_document(state: State<AppState>, doc_id: String) -> Result<String, String> {
-    let token = state.cloud_token.lock().unwrap();
-    let token = token.as_deref().ok_or("Not authenticated")?;
-    let pid = state.cloud_project_id.lock().unwrap();
-    let pid = pid.as_deref().ok_or("No cloud project selected")?;
-    cloud_get(&format!("/api/projects/{}/documents/{}", pid, doc_id), token)
+    let pid = state.cloud_project_id.lock().unwrap().clone().ok_or("No cloud project selected")?;
+    cloud_get(&format!("/api/projects/{}/documents/{}", pid, doc_id))
 }
 
 #[tauri::command]
 fn cloud_list_retros(state: State<AppState>) -> Result<String, String> {
-    let token = state.cloud_token.lock().unwrap();
-    let token = token.as_deref().ok_or("Not authenticated")?;
-    let pid = state.cloud_project_id.lock().unwrap();
-    let pid = pid.as_deref().ok_or("No cloud project selected")?;
-    cloud_get(&format!("/api/projects/{}/retros", pid), token)
+    let pid = state.cloud_project_id.lock().unwrap().clone().ok_or("No cloud project selected")?;
+    cloud_get(&format!("/api/projects/{}/retros", pid))
 }
 
 #[tauri::command]
 fn cloud_get_retro(state: State<AppState>, week: String) -> Result<String, String> {
-    let token = state.cloud_token.lock().unwrap();
-    let token = token.as_deref().ok_or("Not authenticated")?;
-    let pid = state.cloud_project_id.lock().unwrap();
-    let pid = pid.as_deref().ok_or("No cloud project selected")?;
-    cloud_get(&format!("/api/projects/{}/retros/{}", pid, week), token)
+    let pid = state.cloud_project_id.lock().unwrap().clone().ok_or("No cloud project selected")?;
+    cloud_get(&format!("/api/projects/{}/retros/{}", pid, week))
 }
 
 #[tauri::command]
-fn is_authenticated(state: State<AppState>) -> bool {
-    state.cloud_token.lock().unwrap().is_some()
+fn is_authenticated(_state: State<AppState>) -> bool {
+    load_auth_token().is_some()
 }
 
 /// Run a beacon CLI command and return its JSON output
@@ -392,7 +379,6 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState {
             project_dir: Mutex::new(find_project_dir()),
-            cloud_token: Mutex::new(load_auth_token()),
             cloud_project_id: Mutex::new(None),
             watcher: Mutex::new(None),
         })
