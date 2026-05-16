@@ -513,12 +513,15 @@ def cmd_task_add():
     entry_type = os.environ.get("BEACON_TYPE", "task")
     date = os.environ.get("BEACON_DATE", "")
     detail = os.environ.get("BEACON_DETAIL", "")
+    requested_by = os.environ.get("BEACON_REQUESTED_BY", "")
 
     data = load_project()
     target = core.find_target_milestone(data, ms_id)
-    eid = core.task_add(data, ms_id, description, entry_type=entry_type, date=date, detail=detail)
+    eid = core.task_add(data, ms_id, description, entry_type=entry_type,
+                        date=date, detail=detail, requested_by=requested_by)
     save_project(data)
-    print(f"Added {entry_type} [{eid}] to {target['title']}: {description}")
+    from_str = f" (from {requested_by})" if requested_by else ""
+    print(f"Added {entry_type} [{eid}] to {target['title']}: {description}{from_str}")
 
 
 def cmd_task_done():
@@ -693,6 +696,135 @@ def cmd_summary():
         print(json.dumps({"summary": data.get("summary", "")}, ensure_ascii=False))
     else:
         print(data.get("summary", "(未設定)"))
+
+
+# ---------------------------------------------------------------------------
+# Save (ms-16)
+# ---------------------------------------------------------------------------
+
+def cmd_save():
+    description = os.environ.get("BEACON_DESCRIPTION", "")
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    source = os.environ.get("BEACON_SOURCE", "")
+    url = os.environ.get("BEACON_URL", "")
+    revision_id = os.environ.get("BEACON_REVISION_ID", "")
+    progress = os.environ.get("BEACON_PROGRESS", "")
+    date = os.environ.get("BEACON_DATE", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not source:
+        print("Error: --source is required", file=sys.stderr)
+        sys.exit(1)
+    if not description:
+        print("Error: description is required", file=sys.stderr)
+        sys.exit(1)
+
+    data = load_project()
+    result = core.save_entry(data, ms_id=ms_id, description=description,
+                             source=source, date=date, url=url,
+                             revision_id=revision_id, progress=progress)
+    save_project(data)
+
+    if json_mode:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        if result["status"] == "duplicate":
+            print(f"Duplicate save skipped (source={source}, ms={result['milestone']})")
+        else:
+            print(f"Saved [{result['entry_id']}] to {result['milestone']}: {description}")
+
+
+# ---------------------------------------------------------------------------
+# Milestone depends / workspace / graph (ms-17)
+# ---------------------------------------------------------------------------
+
+def cmd_milestone_depends():
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    depends_on_str = os.environ.get("BEACON_DEPENDS_ON", "")
+    clear = os.environ.get("BEACON_CLEAR", "") == "1"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not ms_id:
+        print("Error: milestone ID is required", file=sys.stderr)
+        sys.exit(1)
+
+    data = load_project()
+    if clear:
+        ms = core.milestone_depends(data, ms_id, [])
+    else:
+        if not depends_on_str:
+            print("Error: --on is required (or use --clear)", file=sys.stderr)
+            sys.exit(1)
+        deps = [d.strip() for d in depends_on_str.split(",") if d.strip()]
+        ms = core.milestone_depends(data, ms_id, deps)
+    save_project(data)
+
+    if json_mode:
+        print(json.dumps({"id": ms["id"], "depends_on": ms.get("depends_on", [])}, ensure_ascii=False))
+    else:
+        deps = ms.get("depends_on", [])
+        if deps:
+            print(f"{ms_id} depends on: {', '.join(deps)}")
+        else:
+            print(f"{ms_id}: dependencies cleared")
+
+
+def cmd_milestone_workspace():
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    workspace = os.environ.get("BEACON_WORKSPACE", "")
+    clear = os.environ.get("BEACON_CLEAR", "") == "1"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not ms_id:
+        print("Error: milestone ID is required", file=sys.stderr)
+        sys.exit(1)
+
+    data = load_project()
+    if clear:
+        ms = core.milestone_workspace(data, ms_id, "")
+    else:
+        if not workspace:
+            print("Error: --dir is required (or use --clear)", file=sys.stderr)
+            sys.exit(1)
+        ms = core.milestone_workspace(data, ms_id, workspace)
+    save_project(data)
+
+    if json_mode:
+        print(json.dumps({"id": ms["id"], "workspace": ms.get("workspace")}, ensure_ascii=False))
+    else:
+        ws = ms.get("workspace")
+        if ws:
+            print(f"{ms_id} workspace: {ws}")
+        else:
+            print(f"{ms_id}: workspace cleared")
+
+
+def cmd_milestone_graph():
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    data = load_project()
+    graph = core.milestone_graph(data)
+
+    if json_mode:
+        print(json.dumps(graph, ensure_ascii=False))
+    else:
+        for wave_info in graph["waves"]:
+            wave_num = wave_info["wave"]
+            cycle_marker = " [CYCLE]" if wave_info.get("cycle") else ""
+            ms_ids = wave_info["milestones"]
+            # Build display lines
+            lines = []
+            for ms_id in ms_ids:
+                node = next((n for n in graph["nodes"] if n["id"] == ms_id), None)
+                if node:
+                    deps = node.get("depends_on", [])
+                    dep_str = f" <- {', '.join(deps)}" if deps else ""
+                    status_icon = {"done": "●", "in_progress": "◐", "todo": "○",
+                                   "waiting": "◌", "observing": "◔"}.get(node["status"], "?")
+                    lines.append(f"  {status_icon} {ms_id} {node['title']} ({node['progress']}%){dep_str}")
+            print(f"Wave {wave_num}{cycle_marker}:")
+            for line in lines:
+                print(line)
 
 
 # ---------------------------------------------------------------------------
@@ -1376,6 +1508,10 @@ if __name__ == "__main__":
         "task_delete": cmd_task_delete,
         "entry_move": cmd_entry_move,
         "summary": cmd_summary,
+        "save": cmd_save,
+        "milestone_depends": cmd_milestone_depends,
+        "milestone_workspace": cmd_milestone_workspace,
+        "milestone_graph": cmd_milestone_graph,
         "retro_prepare": cmd_retro_prepare,
         "retro_done": cmd_retro_done,
         "trigger_fire": cmd_trigger_fire,

@@ -5,6 +5,7 @@ Wraps the existing JSON file I/O pattern, implementing the Store protocol.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -23,14 +24,21 @@ class LocalStore:
 
     def load_project(self) -> dict:
         with open(self._project_file, "r", encoding="utf-8") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_SH)
             data = json.load(f)
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         self._last_hash = self._file_hash()
         return data
 
     def save_project(self, data: dict) -> None:
-        with open(self._project_file, "w", encoding="utf-8") as f:
+        with open(self._project_file, "r+", encoding="utf-8") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            f.seek(0)
+            f.truncate()
             json.dump(data, f, indent=2, ensure_ascii=False)
             f.write("\n")
+            f.flush()
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         self._last_hash = self._file_hash()
 
     def has_changed(self) -> bool:

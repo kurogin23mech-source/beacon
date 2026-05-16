@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 
 VALID_STATUSES = {"todo", "in_progress", "in_review", "waiting", "done", "observing", "cancelled"}
-VALID_ENTRY_TYPES = {"commit", "task", "note"}
+VALID_ENTRY_TYPES = {"commit", "task", "note", "save"}
 MS_ID_RE = re.compile(r"^ms-\d+$")
 ENTRY_ID_RE = re.compile(r"^e-\d+$")
 
@@ -228,11 +228,14 @@ def milestone_delete(data: dict, ms_id: str) -> dict:
 
 def task_add(data: dict, ms_id: str, description: str, *,
              entry_type: str = "task", date: str = "",
-             detail: str = "") -> str:
+             detail: str = "", requested_by: str = "") -> str:
     """Add an entry to a milestone. Returns the new entry id."""
     target = find_target_milestone(data, ms_id)
     entries = target.setdefault("entries", [])
     eid = next_entry_id(data)
+    meta = {}
+    if requested_by:
+        meta["requested_by"] = requested_by
     entry = {
         "id": eid,
         "type": entry_type,
@@ -241,7 +244,7 @@ def task_add(data: dict, ms_id: str, description: str, *,
         "created_at": date,
         "done_at": None,
         "status": "todo",
-        "meta": {},
+        "meta": meta,
     }
     if detail:
         entry["detail"] = detail
@@ -488,6 +491,155 @@ def _find_matching_task(entries: list, commit_text: str):
 
 
 # ---------------------------------------------------------------------------
+# Save entry (ms-16)
+# ---------------------------------------------------------------------------
+
+def check_duplicate_save(entries: list, source: str, url: str, revision_id: str) -> bool:
+    """Check if a save entry with same source+identifier already exists."""
+    if source == "manual":
+        return False
+    for entry in entries:
+        if entry.get("type") == "save":
+            meta = entry.get("meta", {})
+            if meta.get("source") == source:
+                if url and meta.get("url") == url:
+                    return True
+                if revision_id and meta.get("revision_id") == revision_id:
+                    return True
+        if check_duplicate_save(entry.get("entries", []), source, url, revision_id):
+            return True
+    return False
+
+
+def save_entry(data: dict, *, ms_id: str = "", description: str,
+               source: str, date: str, url: str = "",
+               revision_id: str = "", progress: str = "") -> dict:
+    """Record a save entry to the target milestone. Returns result info dict."""
+    target = find_target_milestone(data, ms_id)
+    entries = target.setdefault("entries", [])
+
+    if check_duplicate_save(entries, source, url, revision_id):
+        if progress:
+            update_progress(target, progress)
+        return {"status": "duplicate", "milestone": target["id"],
+                "progress": target.get("progress", 0)}
+
+    entry = {
+        "id": next_entry_id(data),
+        "type": "save",
+        "description": description,
+        "date": date,
+        "created_at": date,
+        "done_at": date,
+        "status": "done",
+        "meta": {"source": source},
+    }
+    if url:
+        entry["meta"]["url"] = url
+    if revision_id:
+        entry["meta"]["revision_id"] = revision_id
+    entries.append(entry)
+    update_progress(target, progress)
+
+    return {"status": "saved", "entry_id": entry["id"],
+            "milestone": target["id"], "progress": target.get("progress", 0)}
+
+
+# ---------------------------------------------------------------------------
+# Multi-agent coordination (ms-17)
+# ---------------------------------------------------------------------------
+
+def milestone_depends(data: dict, ms_id: str, depends_on: list) -> dict:
+    """Set depends_on for a milestone. Returns the milestone."""
+    all_ids = {ms["id"] for ms in data["milestones"]}
+    for dep_id in depends_on:
+        if dep_id == ms_id:
+            raise ValueError("Milestone cannot depend on itself")
+        if dep_id not in all_ids:
+            raise ValueError(f"Dependency not found: {dep_id}")
+    for ms in data["milestones"]:
+        if ms["id"] == ms_id:
+            if depends_on:
+                ms["depends_on"] = depends_on
+            elif "depends_on" in ms:
+                del ms["depends_on"]
+            return ms
+    raise ValueError(f"Milestone not found: {ms_id}")
+
+
+def milestone_workspace(data: dict, ms_id: str, workspace: str) -> dict:
+    """Set workspace path for a milestone. Returns the milestone."""
+    for ms in data["milestones"]:
+        if ms["id"] == ms_id:
+            if workspace:
+                ms["workspace"] = workspace
+            elif "workspace" in ms:
+                del ms["workspace"]
+            return ms
+    raise ValueError(f"Milestone not found: {ms_id}")
+
+
+def milestone_graph(data: dict) -> dict:
+    """Build dependency graph with topological waves. Returns {nodes, edges, waves}."""
+    nodes = []
+    edges = []
+    id_set = set()
+
+    for ms in data["milestones"]:
+        if ms.get("status") == "cancelled":
+            continue
+        ms_id = ms["id"]
+        id_set.add(ms_id)
+        nodes.append({
+            "id": ms_id,
+            "title": ms.get("title", ""),
+            "status": ms.get("status", ""),
+            "progress": ms.get("progress", 0),
+            "workspace": ms.get("workspace"),
+            "depends_on": ms.get("depends_on", []),
+        })
+        for dep in ms.get("depends_on", []):
+            edges.append({"from": ms_id, "to": dep, "type": "depends_on"})
+
+    # Cross-MS tasks
+    for ms in data["milestones"]:
+        if ms.get("status") == "cancelled":
+            continue
+        for entry in ms.get("entries", []):
+            req_by = entry.get("meta", {}).get("requested_by", "")
+            if req_by and req_by in id_set:
+                edges.append({"from": req_by, "to": ms["id"],
+                              "type": "cross_task", "task_id": entry.get("id", "")})
+
+    # Kahn's algorithm for waves
+    in_degree = {n["id"]: 0 for n in nodes}
+    for n in nodes:
+        for dep in n["depends_on"]:
+            if dep in in_degree:
+                in_degree[n["id"]] += 1
+
+    waves = []
+    remaining = dict(in_degree)
+    while remaining:
+        wave = sorted([nid for nid, deg in remaining.items() if deg == 0])
+        if not wave:
+            # Cycle detected - dump remaining as final wave with warning
+            wave = sorted(remaining.keys())
+            waves.append({"wave": len(waves) + 1, "milestones": wave, "cycle": True})
+            break
+        waves.append({"wave": len(waves) + 1, "milestones": wave})
+        for nid in wave:
+            del remaining[nid]
+        for n in nodes:
+            if n["id"] in remaining:
+                for dep in n["depends_on"]:
+                    if dep in {w for w in wave}:
+                        remaining[n["id"]] -= 1
+
+    return {"nodes": nodes, "edges": edges, "waves": waves}
+
+
+# ---------------------------------------------------------------------------
 # Serialization helpers
 # ---------------------------------------------------------------------------
 
@@ -503,7 +655,7 @@ def entries_to_json(entries: list) -> list:
             "created_at": e.get("created_at", e.get("date", "")),
             "done_at": e.get("done_at"),
         }
-        if e.get("type") == "commit":
+        if e.get("type") in ("commit", "save"):
             item["meta"] = e.get("meta", {})
         if e.get("detail"):
             item["detail"] = e["detail"]

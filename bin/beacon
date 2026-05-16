@@ -240,6 +240,106 @@ cmd_milestone_delete() {
     BEACON_MS_ID="$ms_id" BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" milestone_delete
 }
 
+cmd_milestone_depends() {
+    ensure_project
+    local ms_id=""
+    local depends_on=""
+    local clear=""
+    local json_flag=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --on)
+                if [ -n "$depends_on" ]; then
+                    depends_on="$depends_on,${2:-}"
+                else
+                    depends_on="${2:-}"
+                fi
+                shift 2 ;;
+            --clear) clear="1"; shift ;;
+            --json)  json_flag="1"; shift ;;
+            *)       ms_id="$1"; shift ;;
+        esac
+    done
+
+    if [ -z "$ms_id" ]; then
+        echo "Usage: beacon milestone depends <ms-id> --on <dep-id> [--on <dep-id>] | --clear"
+        exit 1
+    fi
+    BEACON_MS_ID="$ms_id" BEACON_DEPENDS_ON="$depends_on" \
+        BEACON_CLEAR="$clear" BEACON_JSON="$json_flag" \
+        python3 "$COMMANDS_PY" milestone_depends
+}
+
+cmd_milestone_workspace() {
+    ensure_project
+    local ms_id=""
+    local workspace=""
+    local clear=""
+    local json_flag=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dir)   workspace="${2:-}"; shift 2 ;;
+            --clear) clear="1"; shift ;;
+            --json)  json_flag="1"; shift ;;
+            *)       ms_id="$1"; shift ;;
+        esac
+    done
+
+    if [ -z "$ms_id" ]; then
+        echo "Usage: beacon milestone workspace <ms-id> --dir <path> | --clear"
+        exit 1
+    fi
+    BEACON_MS_ID="$ms_id" BEACON_WORKSPACE="$workspace" \
+        BEACON_CLEAR="$clear" BEACON_JSON="$json_flag" \
+        python3 "$COMMANDS_PY" milestone_workspace
+}
+
+cmd_milestone_graph() {
+    ensure_project
+    local json_flag=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_flag="1"; shift ;;
+            *)      shift ;;
+        esac
+    done
+
+    BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" milestone_graph
+}
+
+cmd_save() {
+    ensure_project
+    local ms_id="" description="" source="" url="" revision_id="" progress="" json_flag=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -m|--ms)       ms_id="${2:-}"; shift 2 ;;
+            --source)      source="${2:-}"; shift 2 ;;
+            --url)         url="${2:-}"; shift 2 ;;
+            --revision-id) revision_id="${2:-}"; shift 2 ;;
+            -p|--progress) progress="${2:-}"; shift 2 ;;
+            --json)        json_flag="1"; shift ;;
+            *)             description="$1"; shift ;;
+        esac
+    done
+
+    if [ -z "$source" ]; then
+        source="manual"
+    fi
+
+    local date_str
+    date_str=$(date +%Y-%m-%d)
+
+    BEACON_DESCRIPTION="$description" BEACON_MS_ID="$ms_id" \
+        BEACON_SOURCE="$source" BEACON_URL="$url" \
+        BEACON_REVISION_ID="$revision_id" BEACON_PROGRESS="$progress" \
+        BEACON_DATE="$date_str" BEACON_JSON="$json_flag" \
+        python3 "$COMMANDS_PY" save
+}
+
 cmd_log() {
     ensure_project
     if ! git rev-parse --is-inside-work-tree &>/dev/null; then
@@ -391,6 +491,7 @@ cmd_task_add() {
     local entry_type="task"
     local description=""
     local detail=""
+    local requested_by=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -406,6 +507,10 @@ cmd_task_add() {
                 detail="${2:-}"
                 shift 2
                 ;;
+            --from)
+                requested_by="${2:-}"
+                shift 2
+                ;;
             *)
                 description="$1"
                 shift
@@ -418,7 +523,7 @@ cmd_task_add() {
 
     BEACON_DESCRIPTION="$description" BEACON_MS_ID="$ms_id" \
         BEACON_TYPE="$entry_type" BEACON_DATE="$date_str" \
-        BEACON_DETAIL="$detail" \
+        BEACON_DETAIL="$detail" BEACON_REQUESTED_BY="$requested_by" \
         python3 "$COMMANDS_PY" task_add
 }
 
@@ -881,12 +986,19 @@ case "${1:-}" in
             show)   shift 2; cmd_milestone_show "$@" ;;
             update) shift 2; cmd_milestone_update "$@" ;;
             delete|cancel) shift 2; cmd_milestone_delete "$@" ;;
-            *)      echo "Usage: beacon milestone [add|list|start|close|observe|done|show|update|delete]" ;;
+            depends) shift 2; cmd_milestone_depends "$@" ;;
+            workspace) shift 2; cmd_milestone_workspace "$@" ;;
+            graph) shift 2; cmd_milestone_graph "$@" ;;
+            *)      echo "Usage: beacon milestone [add|list|start|close|observe|done|show|update|delete|depends|workspace|graph]" ;;
         esac
         ;;
     log)
         shift
         cmd_log "$@"
+        ;;
+    save)
+        shift
+        cmd_save "$@"
         ;;
     sync)
         cmd_sync
