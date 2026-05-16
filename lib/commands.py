@@ -1260,6 +1260,7 @@ def cmd_doc_add():
         with open(fpath, "w", encoding="utf-8") as f:
             f.write(content)
 
+    import datetime
     data = load_project()
     today = datetime.date.today().isoformat()
     core.save_entry(data, ms_id=milestone, description=f"doc add: {title} ({scope})",
@@ -1321,6 +1322,7 @@ def cmd_doc_update():
         with open(fpath, "w", encoding="utf-8") as f:
             f.write(content)
 
+    import datetime
     data = load_project()
     today = datetime.date.today().isoformat()
     core.save_entry(data, ms_id=milestone, description=f"doc update: {title} ({scope})",
