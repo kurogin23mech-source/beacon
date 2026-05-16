@@ -12,6 +12,7 @@ import re
 VALID_STATUSES = {"todo", "in_progress", "in_review", "approved", "waiting", "done", "observing", "cancelled"}
 VALID_ENTRY_TYPES = {"commit", "task", "note", "save", "pr"}
 # PR lifecycle: in_review → approved → merged (or closed/rejected)
+# "open" is reserved for Phase 2 auto-detection via GitHub API (external PRs not yet picked up by beacon)
 VALID_PR_STATUSES = {"open", "in_review", "approved", "merged", "closed"}
 VALID_REVIEW_STATUSES = {"pending", "approved", "changes_requested", "rejected"}
 MS_ID_RE = re.compile(r"^ms-\d+$")

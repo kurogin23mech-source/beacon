@@ -657,11 +657,18 @@ def cmd_task_done():
     today = datetime.date.today().isoformat()
 
     data = load_project()
-    # PR entries are auto-merged via pr_merge instead of generic task_done
+    # PR entries: auto-forward to pr_merge, but warn if status is unexpected
     result = core.find_entry(data, entry_id)
     if result:
         _, _, entry, _ = result
         if entry.get("type") == "pr":
+            pr_status = entry.get("meta", {}).get("pr_status", "")
+            if pr_status not in ("approved", "merged"):
+                print(
+                    f"Warning: PR [{entry_id}] has pr_status='{pr_status}'. "
+                    "Use 'beacon pr merge' to merge explicitly, or 'beacon pr close' to close without merging.",
+                    file=sys.stderr,
+                )
             ms, entry = core.pr_merge(data, entry_id, date=today)
             print(f"Merged PR [{entry_id}]: {entry['description']}")
             core.update_progress(ms, progress)
@@ -1778,10 +1785,11 @@ def cmd_pr_approve():
         try:
             rationale = input("承認の根拠・受け入れたトレードオフは？ (Rationale for approval): ").strip()
         except (EOFError, KeyboardInterrupt):
-            rationale = ""
+            pass
 
     if not rationale:
-        print("Warning: approval recorded without rationale. Decision trail will be incomplete.", file=sys.stderr)
+        print("Error: rationale is required for approve. Decision trail must be complete.", file=sys.stderr)
+        sys.exit(1)
 
     data = load_project()
     try:
@@ -1813,10 +1821,11 @@ def cmd_pr_reject():
         try:
             rationale = input("却下の理由・懸念点は？ (Rationale for rejection): ").strip()
         except (EOFError, KeyboardInterrupt):
-            rationale = ""
+            pass
 
     if not rationale:
-        print("Warning: rejection recorded without rationale. Decision trail will be incomplete.", file=sys.stderr)
+        print("Error: rationale is required for reject. Decision trail must be complete.", file=sys.stderr)
+        sys.exit(1)
 
     data = load_project()
     try:
@@ -1867,10 +1876,11 @@ def cmd_pr_request_changes():
         try:
             rationale = input("修正要求の理由・具体的な懸念点は？ (Reason for requesting changes): ").strip()
         except (EOFError, KeyboardInterrupt):
-            rationale = ""
+            pass
 
     if not rationale:
-        print("Warning: changes requested without rationale. Decision trail will be incomplete.", file=sys.stderr)
+        print("Error: rationale is required for request-changes. Decision trail must be complete.", file=sys.stderr)
+        sys.exit(1)
 
     data = load_project()
     try:

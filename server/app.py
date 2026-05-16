@@ -50,17 +50,42 @@ _audit_logger.propagate = False
 # Mutating methods that should be audit-logged
 _AUDIT_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
-# Path patterns for security-sensitive resources
+# All mutations under /api/projects/* and /api/admin/*
 import re
-_AUDIT_PATHS = re.compile(
-    r"^/api/"
-    r"(?:projects/[^/]+(?:/milestones|/members|/documents|/log|/summary|$)"
-    r"|admin/(?:users|projects))"
-)
+_AUDIT_PATHS = re.compile(r"^/api/(?:projects/[^/]+|admin/)")
+
 
 def _extract_project_id(path: str) -> str:
     m = re.match(r"^/api/projects/([^/]+)", path)
     return m.group(1) if m else ""
+
+
+def _derive_action(method: str, path: str) -> str:
+    """Derive a semantic action name from HTTP method + path."""
+    if "/admin/users" in path:
+        return f"admin.user.{method.lower()}"
+    if "/admin/projects" in path:
+        return f"admin.project.{method.lower()}"
+    for resource in ("members", "documents", "milestones", "entries", "retros"):
+        if f"/{resource}" in path:
+            return f"{resource[:-1]}.{method.lower()}"
+    if "/log" in path:
+        return "project.log"
+    if "/summary" in path:
+        return "project.summary"
+    return f"project.{method.lower()}"
+
+
+def _extract_resource(path: str) -> str:
+    """Extract the resource type from a path segment."""
+    if "/admin/users" in path:
+        return "admin.user"
+    if "/admin/projects" in path:
+        return "admin.project"
+    for resource in ("members", "documents", "milestones", "entries", "retros", "log", "summary"):
+        if f"/{resource}" in path:
+            return resource
+    return "project"
 
 
 class AuditLogMiddleware(BaseHTTPMiddleware):
@@ -77,18 +102,22 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
         # Extract user info from request state (set by require_auth if called)
         user_id = getattr(request.state, "audit_user_id", "")
         email = getattr(request.state, "audit_email", "")
+        path = request.url.path
 
         log_entry = {
             "severity": "INFO",
             "type": "audit",
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "action": _derive_action(request.method, path),
+            "resource": _extract_resource(path),
             "method": request.method,
-            "path": request.url.path,
+            "path": path,
             "status": response.status_code,
             "user_id": user_id,
             "email": email,
-            "project_id": _extract_project_id(request.url.path),
+            "project_id": _extract_project_id(path),
             "ip": request.headers.get("x-forwarded-for", request.client.host if request.client else ""),
+            "user_agent": request.headers.get("user-agent", ""),
             "elapsed_ms": elapsed_ms,
         }
         _audit_logger.info(json.dumps(log_entry))
