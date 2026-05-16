@@ -570,6 +570,63 @@ def pr_request_review(data: dict, entry_id: str) -> tuple[dict, dict]:
     return ms, entry
 
 
+def pr_request_changes(data: dict, entry_id: str, *, rationale: str = "") -> tuple[dict, dict]:
+    """Request changes on a PR: pr_status=in_review, review_status=changes_requested."""
+    result = find_entry(data, entry_id)
+    if not result:
+        raise ValueError(f"Entry not found: {entry_id}")
+    ms, _, entry, _ = result
+    if entry.get("type") != "pr":
+        raise ValueError(f"Entry {entry_id} is not a pr entry")
+    meta = entry.setdefault("meta", {})
+    meta["pr_status"] = "in_review"
+    meta["review_status"] = "changes_requested"
+    entry["status"] = "in_review"
+    if rationale:
+        meta["review_rationale"] = rationale
+    return ms, entry
+
+
+def pr_record_review(data: dict, entry_id: str, *, review_text: str,
+                     verdict: str, date: str = "") -> tuple[dict, dict, dict]:
+    """Record an AI code review as a child note entry under the PR.
+
+    verdict: 'approved' or 'changes_requested'
+    Returns (milestone, pr_entry, note_entry).
+    """
+    import datetime as _dt
+    result = find_entry(data, entry_id)
+    if not result:
+        raise ValueError(f"Entry not found: {entry_id}")
+    ms, _, entry, _ = result
+    if entry.get("type") != "pr":
+        raise ValueError(f"Entry {entry_id} is not a pr entry")
+
+    today = date or _dt.date.today().isoformat()
+    note_eid = next_entry_id(data)
+    note_entry = {
+        "id": note_eid,
+        "type": "note",
+        "description": f"[AI Review] {verdict}",
+        "detail": review_text,
+        "date": today,
+        "created_at": today,
+        "status": "done",
+    }
+    entry.setdefault("entries", []).append(note_entry)
+
+    meta = entry.setdefault("meta", {})
+    meta["review_status"] = verdict
+    if verdict == "approved":
+        meta["pr_status"] = "approved"
+        entry["status"] = "approved"
+    else:
+        meta["pr_status"] = "in_review"
+        entry["status"] = "in_review"
+
+    return ms, entry, note_entry
+
+
 def pr_merge(data: dict, entry_id: str, *, date: str = "") -> tuple[dict, dict]:
     """Merge a PR entry: sets pr_status=merged, status=done, done_at=today."""
     import datetime as _dt
