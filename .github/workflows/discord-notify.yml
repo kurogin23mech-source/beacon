@@ -26,8 +26,22 @@ jobs:
       - name: Get beacon status
         id: beacon
         env:
-          BEACON_API_TOKEN: ${{ secrets.BEACON_API_TOKEN }}
+          BEACON_CLIENT_ID: ${{ secrets.BEACON_CLIENT_ID }}
+          BEACON_CLIENT_SECRET: ${{ secrets.BEACON_CLIENT_SECRET }}
+          BEACON_REFRESH_TOKEN: ${{ secrets.BEACON_REFRESH_TOKEN }}
         run: |
+          # Refresh id_token using OAuth2 refresh_token
+          TOKEN_RESPONSE=$(curl -sf -X POST "https://oauth2.googleapis.com/token" \
+            -d "client_id=$BEACON_CLIENT_ID" \
+            -d "client_secret=$BEACON_CLIENT_SECRET" \
+            -d "refresh_token=$BEACON_REFRESH_TOKEN" \
+            -d "grant_type=refresh_token" 2>/dev/null || echo "{}")
+          BEACON_API_TOKEN=$(echo "$TOKEN_RESPONSE" | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          print(d.get('id_token', d.get('access_token', '')))
+          " 2>/dev/null || echo "")
+
           RESPONSE=$(curl -sf \
             -H "Authorization: Bearer $BEACON_API_TOKEN" \
             "https://beacon-ai.dev/api/projects" 2>/dev/null || echo "[]")
