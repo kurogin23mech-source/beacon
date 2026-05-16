@@ -572,7 +572,7 @@ def pr_request_review(data: dict, entry_id: str) -> tuple[dict, dict]:
 
 
 def pr_request_changes(data: dict, entry_id: str, *, rationale: str = "") -> tuple[dict, dict]:
-    """Request changes on a PR: pr_status=in_review, review_status=changes_requested."""
+    """Request changes on a PR: review_status=changes_requested, entry stays in_review."""
     result = find_entry(data, entry_id)
     if not result:
         raise ValueError(f"Entry not found: {entry_id}")
