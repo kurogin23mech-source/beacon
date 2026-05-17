@@ -690,6 +690,7 @@ cmd_task_update() {
     local description=""
     local status=""
     local detail=""
+    local ms_id=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -697,17 +698,18 @@ cmd_task_update() {
             --description)  description="${2:-}"; shift 2 ;;
             --status)       status="${2:-}"; shift 2 ;;
             -d|--detail)    detail="${2:-}"; shift 2 ;;
+            -m|--ms)        ms_id="${2:-}"; shift 2 ;;
             *)              entry_id="$1"; shift ;;
         esac
     done
 
     if [ -z "$entry_id" ]; then
-        echo "Usage: beacon task update <entry-id> [--description D] [--status S] [--detail D] [--json]"
+        echo "Usage: beacon task update <entry-id> [--description D] [--status S] [--detail D] [--ms MS-ID] [--json]"
         exit 1
     fi
     BEACON_ENTRY_ID="$entry_id" BEACON_JSON="$json_flag" \
         BEACON_DESCRIPTION="$description" BEACON_STATUS="$status" \
-        BEACON_DETAIL="$detail" \
+        BEACON_DETAIL="$detail" BEACON_MS_ID="$ms_id" \
         python3 "$COMMANDS_PY" task_update
 }
 
@@ -1350,11 +1352,12 @@ case "${1:-}" in
             observe)    cmd_milestone_observe "${3:-}" ;;
             show)   shift 2; cmd_milestone_show "$@" ;;
             update) shift 2; cmd_milestone_update "$@" ;;
+            rename) BEACON_MS_ID="${3:-}" BEACON_TITLE="${4:-}" python3 "$COMMANDS_PY" milestone_update ;;
             delete|cancel) shift 2; cmd_milestone_delete "$@" ;;
             depends) shift 2; cmd_milestone_depends "$@" ;;
             workspace) shift 2; cmd_milestone_workspace "$@" ;;
             graph) shift 2; cmd_milestone_graph "$@" ;;
-            *)      echo "Usage: beacon milestone [add|list|start|close|observe|done|show|update|delete|depends|workspace|graph]" ;;
+            *)      echo "Usage: beacon milestone [add|list|start|close|observe|done|show|update|rename|delete|depends|workspace|graph]" ;;
         esac
         ;;
     log)

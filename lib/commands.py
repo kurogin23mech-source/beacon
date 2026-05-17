@@ -781,11 +781,14 @@ def cmd_task_detail():
 def cmd_task_update():
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    ms_id = os.environ.get("BEACON_MS_ID", "")
     import datetime
     today = datetime.date.today().isoformat()
 
     data = load_project()
     try:
+        if ms_id:
+            core.entry_move(data, entry_id, ms_id=ms_id)
         ms, entry = core.task_update(
             data, entry_id,
             description=os.environ.get("BEACON_DESCRIPTION", ""),

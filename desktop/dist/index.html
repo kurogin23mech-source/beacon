@@ -47,6 +47,7 @@ body::after { content: ''; position: fixed; inset: 0; background: repeating-line
 .filter-btn.on.f-active { color: var(--in-progress); border-color: rgba(96,165,250,0.4); background: rgba(96,165,250,0.08); }
 .filter-btn.on.f-observing { color: var(--observing); border-color: rgba(167,139,250,0.4); background: rgba(167,139,250,0.08); }
 .filter-btn.on.f-done { color: var(--done); border-color: var(--accent-dim); background: var(--accent-glow); }
+.filter-btn.on.f-waiting { color: var(--waiting); border-color: rgba(249,115,22,0.4); background: rgba(249,115,22,0.08); }
 .filter-btn.off { color: var(--text-dim); opacity: 0.4; }
 .filter-btn.off:hover { opacity: 0.7; }
 .sort-toggle { font-family: var(--font-mono); font-size: 0.75rem; padding: 4px 10px; border: 1px solid var(--border-subtle); border-radius: 3px; background: transparent; color: var(--text-dim); cursor: pointer; margin-left: auto; }
@@ -444,8 +445,8 @@ let state = {
 };
 
 const STATUS_LABELS = { done: 'done', in_progress: 'active', observing: 'observing', todo: 'todo', waiting: 'waiting', cancelled: 'cancelled', in_review: 'in review', approved: 'approved' };
-const FILTER_ORDER = ['todo', 'in_progress', 'observing', 'done'];
-const FILTER_CSS = { todo: 'f-todo', in_progress: 'f-active', observing: 'f-observing', done: 'f-done' };
+const FILTER_ORDER = ['todo', 'in_progress', 'observing', 'waiting', 'done'];
+const FILTER_CSS = { todo: 'f-todo', in_progress: 'f-active', observing: 'f-observing', waiting: 'f-waiting', done: 'f-done' };
 
 function esc(s) { if (!s) return ''; const el = document.createElement('span'); el.textContent = s; return el.innerHTML; }
 function formatTime(d) { return d ? d.toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit',second:'2-digit'}) : ''; }
@@ -713,6 +714,7 @@ function closeMenu() {
 function render() {
   const app = document.getElementById('app');
   if (!state.project) return;
+  const scrollY = window.scrollY;
   const p = state.project;
   const sorted = sortMilestones(p.milestones || []);
   const filtered = filterMilestones(sorted);
@@ -745,6 +747,7 @@ function render() {
     ${state.activeTab==='documents' ? renderDocumentsSection() : ''}
     <footer class="footer fade-in stagger-3"><div class="footer-left"><div>${cloudMode?'cloud':'local'}</div><div class="footer-tagline">Where humans and AI are bound together.</div></div><div class="footer-right" style="display:flex;align-items:center;gap:12px;">${state.lastUpdate?formatTime(state.lastUpdate):''}<button class="sort-toggle" data-action="export-json" style="font-size:0.65rem;">Export JSON</button></div></footer>
   `;
+  window.scrollTo(0, scrollY);
   bindEvents();
 }
 

@@ -872,11 +872,11 @@ def entries_to_json(entries: list) -> list:
 
 
 def count_task_status(entries: list) -> tuple[int, int]:
-    """Count total and done tasks recursively. Returns (total, done)."""
+    """Count total and done tasks/commits/PRs recursively. Returns (total, done)."""
     total = 0
     done = 0
     for e in entries:
-        if e.get("type") == "task":
+        if e.get("type") in ("task", "commit", "pr"):
             total += 1
             if e.get("status") == "done":
                 done += 1
