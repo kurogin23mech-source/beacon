@@ -1715,10 +1715,10 @@ def cmd_cloud_status():
 # ---------------------------------------------------------------------------
 
 def _fetch_gh_pr_info(url: str) -> dict:
-    """Fetch PR title and commits from GitHub via gh CLI. Returns {} on failure."""
+    """Fetch PR title, body, and commits from GitHub via gh CLI. Returns {} on failure."""
     try:
         result = subprocess.run(
-            ["gh", "pr", "view", url, "--json", "title,commits"],
+            ["gh", "pr", "view", url, "--json", "title,body,commits"],
             capture_output=True, text=True, timeout=15,
         )
         if result.returncode == 0:
@@ -1741,18 +1741,26 @@ def cmd_pr_add():
         print("Error: GitHub URL required", file=sys.stderr)
         sys.exit(1)
 
-    if not intent:
-        try:
-            intent = input("Intent (why was this PR created?): ").strip()
-        except (EOFError, KeyboardInterrupt):
-            intent = ""
-
-    # Fetch PR title and commits from GitHub
+    # Fetch PR title, body, and commits from GitHub (before intent prompt so body can prefill)
     gh_info = _fetch_gh_pr_info(url)
     title = gh_info.get("title", "")
+    pr_body = gh_info.get("body", "") or ""
     commits = gh_info.get("commits", [])
     if gh_info and not title:
         print("Warning: could not fetch PR title from GitHub", file=sys.stderr)
+
+    if not intent:
+        try:
+            if pr_body.strip():
+                # Show PR body as prefill hint so user can accept or edit
+                print(f"PR body (prefill):\n  {pr_body.strip()[:300]}")
+                prefill_hint = f" [{pr_body.strip()[:120]}]" if len(pr_body.strip()) <= 120 else ""
+                raw = input(f"Intent (why was this PR created?){prefill_hint}: ").strip()
+                intent = raw if raw else pr_body.strip()
+            else:
+                intent = input("Intent (why was this PR created?): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            intent = pr_body.strip() if pr_body.strip() else ""
 
     data = load_project()
     try:
