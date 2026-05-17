@@ -1375,6 +1375,10 @@ def cmd_doc_add():
         print(f"Error: scope must be one of {VALID_SCOPES}")
         sys.exit(1)
 
+    # core docs are project-wide — MS association is optional
+    if scope == "core":
+        milestone = milestone or None
+
     # Read content from stdin if not provided via env
     if not content and not sys.stdin.isatty():
         content = sys.stdin.read()
@@ -1383,8 +1387,19 @@ def cmd_doc_add():
         print("Error: content required (pass via BEACON_CONTENT or stdin)")
         sys.exit(1)
 
+    # Duplicate check: warn if same title+scope already exists
+    if _is_cloud_mode():
+        try:
+            client, config = _get_api_client()
+            existing = client.list_documents(config["project_id"])
+            dupes = [d for d in existing if d.get("title") == title and d.get("scope") == scope]
+            if dupes:
+                print(f"Warning: document with same title+scope already exists ({dupes[0]['doc_id']}). Proceeding anyway.")
+        except Exception:
+            pass
+
     # Add frontmatter with scope and milestone
-    content = _add_frontmatter(content, scope, milestone)
+    content = _add_frontmatter(content, scope, milestone or "")
 
     if _is_cloud_mode():
         client, config = _get_api_client()
@@ -1405,10 +1420,12 @@ def cmd_doc_add():
     import datetime
     data = load_project()
     today = datetime.date.today().isoformat()
-    core.save_entry(data, ms_id=milestone, description=f"doc add: {title} ({scope})",
-                    source="auto", date=today, revision_id=doc_id,
-                    url=None, hash=None, progress=None)
-    save_project(data)
+    # core docs: skip MS entry recording (they're project-wide, not MS-specific)
+    if scope != "core":
+        core.save_entry(data, ms_id=milestone, description=f"doc add: {title} ({scope})",
+                        source="auto", date=today, revision_id=doc_id,
+                        url=None, hash=None, progress=None)
+        save_project(data)
 
     if json_mode:
         print(json.dumps({"doc_id": doc_id, "title": title, "scope": scope}, ensure_ascii=False))
