@@ -2031,7 +2031,7 @@ def cmd_pr_create():
 # ---------------------------------------------------------------------------
 
 def cmd_skill_install():
-    """Install beacon Claude Code Skills into ~/.claude/skills/ and update CLAUDE.md."""
+    """Install beacon Claude Code Skills into ~/.claude/skills/, update CLAUDE.md, and configure hooks."""
     import shutil
     _append_claude_md()
 
@@ -2055,7 +2055,7 @@ def cmd_skill_install():
         skill_name = src_file[:-3]  # strip .md
         dest_dir = os.path.join(claude_skills, skill_name)
         os.makedirs(dest_dir, exist_ok=True)
-        dest_file = os.path.join(dest_dir, "SKILL.md")
+        dest_file = os.path.join(dest_dir, "skill.md")
         shutil.copy2(os.path.join(skills_src, src_file), dest_file)
         installed.append(skill_name)
 
@@ -2065,6 +2065,53 @@ def cmd_skill_install():
             print(f"  /{name}")
     else:
         print("No skills found to install.")
+
+    # Configure Claude Code PostToolUse hooks
+    hook_script = os.path.join(beacon_root, "bin", "beacon-post-commit-hook.sh")
+    settings_path = os.path.join(home, ".claude", "settings.json")
+    _install_claude_hooks(hook_script, settings_path)
+
+
+def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
+    """Add beacon PostToolUse hooks to Claude Code settings.json if not already present."""
+    if not os.path.exists(hook_script):
+        print(f"Warning: hook script not found at {hook_script}")
+        return
+
+    # Load existing settings
+    settings = {}
+    if os.path.exists(settings_path):
+        try:
+            with open(settings_path, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    hooks = settings.setdefault("hooks", {})
+    post_tool_use = hooks.setdefault("PostToolUse", [])
+
+    # Check if beacon hook is already configured
+    beacon_hook_cmd = hook_script
+    for entry in post_tool_use:
+        for h in entry.get("hooks", []):
+            if h.get("command", "") == beacon_hook_cmd:
+                print("Hooks: already configured in ~/.claude/settings.json")
+                return
+
+    # Add beacon PostToolUse hook (commit + deploy detection)
+    post_tool_use.append({
+        "matcher": "Bash",
+        "hooks": [{
+            "type": "command",
+            "command": beacon_hook_cmd,
+            "timeout": 10,
+            "statusMessage": "Beacon: checking for commit or deploy..."
+        }]
+    })
+
+    with open(settings_path, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=2, ensure_ascii=False)
+    print(f"Hooks: PostToolUse hook configured in {settings_path}")
 
 
 def _next_deploy_id(data: dict, date_str: str) -> str:

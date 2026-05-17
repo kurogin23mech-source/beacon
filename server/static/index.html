@@ -2534,9 +2534,12 @@ async function loadProjectActions() {
     if (!isOwner) { el.innerHTML = ''; return; }
     const archived = data.archived;
     el.innerHTML = `
-      <button class="menu-item" style="color:var(--text-dim)" data-action="${archived ? 'unarchive-project' : 'archive-project'}">
-        ${archived ? '📂 Unarchive project' : '📦 Archive project'}
-      </button>
+      <div style="border-top:1px solid var(--border-subtle);margin:8px 0 4px;padding-top:6px;">
+        <div style="font-size:0.6rem;color:var(--text-dim);letter-spacing:0.08em;text-transform:uppercase;padding:0 12px 4px;">Danger zone</div>
+        <button class="menu-item" style="color:#c84040;font-size:0.78rem;" data-action="${archived ? 'unarchive-project' : 'archive-project'}">
+          ${archived ? '📂 Unarchive project' : '📦 Archive project'}
+        </button>
+      </div>
     `;
     el.querySelectorAll('[data-action]').forEach(e => e.addEventListener('click', handleAction));
   } catch (e) { el.innerHTML = ''; }
