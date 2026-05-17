@@ -1550,7 +1550,7 @@ function renderEntry(entry) {
   const hasChildren = entry.entries?.length > 0;
   const childCount = hasChildren ? entry.entries.length : 0;
   const isCollapsed = state.collapsedEntries.has(entry.id);
-  const toggleClass = hasChildren ? ` entry-toggle${isCollapsed ? ' collapsed' : ''}` : '';
+  const toggleClass = (hasChildren && entry.type !== 'commit') ? ` entry-toggle${isCollapsed ? ' collapsed' : ''}` : '';
 
   let children = '';
   if (hasChildren) {

@@ -490,7 +490,7 @@ function renderEntry(entry) {
   }
   const hasKids = entry.entries?.length > 0;
   const collapsed = state.collapsedEntries.has(entry.id);
-  const toggle = hasKids ? ` entry-toggle${collapsed?' collapsed':''}` : '';
+  const toggle = (hasKids && entry.type !== 'commit') ? ` entry-toggle${collapsed?' collapsed':''}` : '';
   let kids = '';
   if (hasKids) kids = `<div class="entry-children${collapsed?' hidden':''}">${entry.entries.map(renderEntry).join('')}</div>`;
   const badge = hasKids && collapsed ? `<span class="entry-child-count">${entry.entries.length}</span>` : '';
