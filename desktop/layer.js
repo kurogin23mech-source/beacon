@@ -201,6 +201,25 @@ async function renderProjectSelector() {
 
 // ---- Render ----
 
+function msList(filtered) {
+  if (state.searchQuery.trim()) return renderSearchResults();
+  return `
+    <div class="filter-bar">
+      <button class="filter-btn f-all ${state.hiddenStatuses.size === 0 ? 'on' : 'off'}" data-action="filter-all">all</button>
+      ${FILTER_ORDER.map(s => `<button class="filter-btn ${!state.hiddenStatuses.has(s) ? 'on' : 'off'} ${FILTER_CSS_CLASS[s] || ''}" data-action="filter-status" data-status="${s}">${STATUS_LABELS[s] || s}</button>`).join('')}
+      <button class="sort-toggle" data-action="toggle-sort">${state.sortAsc ? '↑ ms-1 first' : '↓ latest first'}</button>
+    </div>
+    ${filtered.map(ms => renderMilestoneCard(ms, 0)).join('')}`;
+}
+
+function renderMsListArea() {
+  const container = document.getElementById('ms-list-container');
+  if (!container || !state.project) return;
+  const filtered = filterMilestones(sortMilestones(state.project.milestones || []));
+  container.innerHTML = msList(filtered);
+  bindEvents();
+}
+
 function render() {
   const app = document.getElementById('app');
   if (!state.project) return;
@@ -246,14 +265,7 @@ function render() {
           <input class="ms-search-inline" id="search-input" type="search" placeholder="Search milestones, tasks, commits..." value="${esc(state.searchQuery)}" autocomplete="off">
           <button class="sort-toggle" data-action="show-graph">Graph →</button>
         </div>
-        ${state.searchQuery.trim() ? renderSearchResults() : `
-        <div class="filter-bar">
-          <button class="filter-btn f-all ${state.hiddenStatuses.size === 0 ? 'on' : 'off'}" data-action="filter-all">all</button>
-          ${FILTER_ORDER.map(s => `<button class="filter-btn ${!state.hiddenStatuses.has(s) ? 'on' : 'off'} ${FILTER_CSS_CLASS[s] || ''}" data-action="filter-status" data-status="${s}">${STATUS_LABELS[s] || s}</button>`).join('')}
-          <button class="sort-toggle" data-action="toggle-sort">${state.sortAsc ? '↑ ms-1 first' : '↓ latest first'}</button>
-        </div>
-        ${filtered.map(ms => renderMilestoneCard(ms, 0)).join('')}
-        `}
+        <div id="ms-list-container">${msList(filtered)}</div>
       </section>`) : ''}
 
     ${state.activeTab === 'documents' ? renderDocumentsSection() : ''}
@@ -270,7 +282,7 @@ function render() {
       </div>
     </footer>
   `;
-  window.scrollTo(0, scrollY);
+  if (!_userScrolling) window.scrollTo(0, scrollY);
   bindEvents();
 }
 
@@ -438,6 +450,16 @@ async function exportProject() {
   } catch (e) { alert('Export failed: ' + e); }
 }
 
+// ---- Scroll guard (prevent render from interrupting active scrolling) ----
+
+let _userScrolling = false;
+let _scrollEndTimer = null;
+window.addEventListener('scroll', () => {
+  _userScrolling = true;
+  clearTimeout(_scrollEndTimer);
+  _scrollEndTimer = setTimeout(() => { _userScrolling = false; }, 200);
+}, { passive: true });
+
 // ---- Reconnect (Tauri focus events) ----
 
 function _tryReconnect() {
@@ -458,18 +480,17 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') _tryReconnect();
 });
 
-// Search input: update query on each keystroke
+// Search input: partial re-render so the input element itself is never replaced
 document.addEventListener('input', e => {
   if (e.target.id === 'search-input') {
     state.searchQuery = e.target.value;
-    render();
-    const input = document.getElementById('search-input');
-    if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+    renderMsListArea();
   }
 });
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && state.searchQuery) {
-    state.searchQuery = ''; render();
+    state.searchQuery = '';
+    renderMsListArea();
     document.getElementById('search-input')?.focus();
   }
 });

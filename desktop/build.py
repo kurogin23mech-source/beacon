@@ -31,7 +31,10 @@ def extract_shared_js(web: str) -> str:
     )
     if not m:
         sys.exit('ERROR: @BUILD:SHARED-START / @BUILD:SHARED-END markers not found in web index.html')
-    return m.group(1).rstrip()
+    shared = m.group(1)
+    # Remove @BUILD:SKIP-START ... @BUILD:SKIP-END blocks (web-only functions)
+    shared = re.sub(r'// @BUILD:SKIP-START\n.*?// @BUILD:SKIP-END\n?', '', shared, flags=re.DOTALL)
+    return shared.rstrip()
 
 
 def build(web: str, layer: str) -> str:

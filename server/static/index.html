@@ -1740,6 +1740,7 @@ function nextRetroDate(retroDay) {
 
 // ---- Render ----
 
+// @BUILD:SKIP-START
 function render() {
   const app = document.getElementById('app');
 
@@ -1804,7 +1805,7 @@ function render() {
         <input class="ms-search-inline" id="search-input" type="search" placeholder="Search milestones, tasks, commits..." value="${esc(state.searchQuery)}" autocomplete="off">
         <button class="sort-toggle" data-action="show-graph">Graph \u2192</button>
       </div>
-      ${state.searchQuery.trim() ? renderSearchResults() : `
+      <div id="ms-list-container">${state.searchQuery.trim() ? renderSearchResults() : `
       <div class="filter-bar">
         <button class="filter-btn f-all ${state.hiddenStatuses.size === 0 ? 'on' : 'off'}" data-action="filter-all">all</button>
         ${FILTER_ORDER.map(s => {
@@ -1814,7 +1815,7 @@ function render() {
         <button class="sort-toggle" data-action="toggle-sort">${state.sortAsc ? '\u2191 ms-1 first' : '\u2193 latest first'}</button>
       </div>
       ${filtered.map((ms, i) => renderMilestoneCard(ms, i)).join('')}
-      `}
+      `}</div>
     </section>
     `) : ''}
 
@@ -1856,6 +1857,7 @@ function renderProjectSelector(app) {
   `;
   bindEvents();
 }
+// @BUILD:SKIP-END
 
 function renderMilestoneCard(ms, index) {
   const isExpanded = state.expanded.has(ms.id);
@@ -2865,19 +2867,35 @@ async function handleHashNav() {
 
 window.addEventListener('hashchange', handleHashNav);
 
-// Search input: update query on each keystroke
+function renderMsListArea() {
+  const container = document.getElementById('ms-list-container');
+  if (!container || !state.project) return;
+  const p = state.project;
+  const filtered = filterMilestones(sortMilestones(p.milestones || []));
+  container.innerHTML = state.searchQuery.trim() ? renderSearchResults() : `
+    <div class="filter-bar">
+      <button class="filter-btn f-all ${state.hiddenStatuses.size === 0 ? 'on' : 'off'}" data-action="filter-all">all</button>
+      ${FILTER_ORDER.map(s => {
+        const isOn = !state.hiddenStatuses.has(s);
+        return `<button class="filter-btn ${isOn ? 'on' : 'off'} ${FILTER_CSS_CLASS[s] || ''}" data-action="filter-status" data-status="${s}">${STATUS_LABELS[s] || s}</button>`;
+      }).join('')}
+      <button class="sort-toggle" data-action="toggle-sort">${state.sortAsc ? '↑ ms-1 first' : '↓ latest first'}</button>
+    </div>
+    ${filtered.map((ms, i) => renderMilestoneCard(ms, i)).join('')}`;
+  bindEvents();
+}
+
+// Search input: partial re-render so the input element itself is never replaced
 document.addEventListener('input', e => {
   if (e.target.id === 'search-input') {
     state.searchQuery = e.target.value;
-    render();
-    // Restore focus after re-render
-    const input = document.getElementById('search-input');
-    if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+    renderMsListArea();
   }
 });
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && state.searchQuery) {
-    state.searchQuery = ''; render();
+    state.searchQuery = '';
+    renderMsListArea();
     document.getElementById('search-input')?.focus();
   }
 });

@@ -1591,6 +1591,25 @@ async function renderProjectSelector() {
 
 // ---- Render ----
 
+function msList(filtered) {
+  if (state.searchQuery.trim()) return renderSearchResults();
+  return `
+    <div class="filter-bar">
+      <button class="filter-btn f-all ${state.hiddenStatuses.size === 0 ? 'on' : 'off'}" data-action="filter-all">all</button>
+      ${FILTER_ORDER.map(s => `<button class="filter-btn ${!state.hiddenStatuses.has(s) ? 'on' : 'off'} ${FILTER_CSS_CLASS[s] || ''}" data-action="filter-status" data-status="${s}">${STATUS_LABELS[s] || s}</button>`).join('')}
+      <button class="sort-toggle" data-action="toggle-sort">${state.sortAsc ? '↑ ms-1 first' : '↓ latest first'}</button>
+    </div>
+    ${filtered.map(ms => renderMilestoneCard(ms, 0)).join('')}`;
+}
+
+function renderMsListArea() {
+  const container = document.getElementById('ms-list-container');
+  if (!container || !state.project) return;
+  const filtered = filterMilestones(sortMilestones(state.project.milestones || []));
+  container.innerHTML = msList(filtered);
+  bindEvents();
+}
+
 function render() {
   const app = document.getElementById('app');
   if (!state.project) return;
@@ -1636,14 +1655,7 @@ function render() {
           <input class="ms-search-inline" id="search-input" type="search" placeholder="Search milestones, tasks, commits..." value="${esc(state.searchQuery)}" autocomplete="off">
           <button class="sort-toggle" data-action="show-graph">Graph →</button>
         </div>
-        ${state.searchQuery.trim() ? renderSearchResults() : `
-        <div class="filter-bar">
-          <button class="filter-btn f-all ${state.hiddenStatuses.size === 0 ? 'on' : 'off'}" data-action="filter-all">all</button>
-          ${FILTER_ORDER.map(s => `<button class="filter-btn ${!state.hiddenStatuses.has(s) ? 'on' : 'off'} ${FILTER_CSS_CLASS[s] || ''}" data-action="filter-status" data-status="${s}">${STATUS_LABELS[s] || s}</button>`).join('')}
-          <button class="sort-toggle" data-action="toggle-sort">${state.sortAsc ? '↑ ms-1 first' : '↓ latest first'}</button>
-        </div>
-        ${filtered.map(ms => renderMilestoneCard(ms, 0)).join('')}
-        `}
+        <div id="ms-list-container">${msList(filtered)}</div>
       </section>`) : ''}
 
     ${state.activeTab === 'documents' ? renderDocumentsSection() : ''}
@@ -1660,7 +1672,7 @@ function render() {
       </div>
     </footer>
   `;
-  window.scrollTo(0, scrollY);
+  if (!_userScrolling) window.scrollTo(0, scrollY);
   bindEvents();
 }
 
@@ -1828,6 +1840,16 @@ async function exportProject() {
   } catch (e) { alert('Export failed: ' + e); }
 }
 
+// ---- Scroll guard (prevent render from interrupting active scrolling) ----
+
+let _userScrolling = false;
+let _scrollEndTimer = null;
+window.addEventListener('scroll', () => {
+  _userScrolling = true;
+  clearTimeout(_scrollEndTimer);
+  _scrollEndTimer = setTimeout(() => { _userScrolling = false; }, 200);
+}, { passive: true });
+
 // ---- Reconnect (Tauri focus events) ----
 
 function _tryReconnect() {
@@ -1848,18 +1870,17 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') _tryReconnect();
 });
 
-// Search input: update query on each keystroke
+// Search input: partial re-render so the input element itself is never replaced
 document.addEventListener('input', e => {
   if (e.target.id === 'search-input') {
     state.searchQuery = e.target.value;
-    render();
-    const input = document.getElementById('search-input');
-    if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+    renderMsListArea();
   }
 });
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && state.searchQuery) {
-    state.searchQuery = ''; render();
+    state.searchQuery = '';
+    renderMsListArea();
     document.getElementById('search-input')?.focus();
   }
 });
@@ -2027,122 +2048,6 @@ function nextRetroDate(retroDay) {
 
 // ---- Render ----
 
-function render() {
-  const app = document.getElementById('app');
-
-  if (state.error && !state.project) {
-    app.innerHTML = `<div class="error-state"><div class="error-icon">\u26a0</div><div>${esc(state.error)}</div></div>`;
-    return;
-  }
-
-  if (!state.project && state.projects.length === 0) return;
-
-  if (!state.project && state.projects.length > 0) {
-    renderProjectSelector(app);
-    return;
-  }
-
-  const p = state.project;
-  const sorted = sortMilestones(p.milestones || []);
-  const filtered = filterMilestones(sorted);
-  const activeCount = (p.milestones || []).filter(m => m.status === 'in_progress').length;
-  const doneCount = (p.milestones || []).filter(m => m.status === 'done').length;
-  const retro = nextRetroDate(p.retro_day);
-
-  app.innerHTML = `
-    <header class="header fade-in">
-      <div class="header-top">
-        <button class="hamburger-btn" data-action="open-menu" title="Menu">
-          <span></span><span></span><span></span>
-        </button>
-        <span class="project-name">${esc(p.name)}</span>
-        <span class="header-tag">beacon</span>
-        <div class="connection-status">
-          <div class="status-dot ${state.connected ? '' : 'offline'}"></div>
-          <span class="connection-label">${state.connected ? 'live' : 'reconnecting'}</span>
-        </div>
-      </div>
-    </header>
-
-    ${(p.objective || retro) ? `
-    <div class="project-info fade-in stagger-1">
-      ${p.objective ? `<div class="project-info-item"><span class="project-info-label">Objective</span><span class="project-info-value">${esc(p.objective)}</span></div>` : ''}
-      ${retro ? `<div class="project-info-item${retro.isToday ? ' review-due' : ''}"><span class="project-info-label">${retro.isToday ? '\u26a0 Review Due Today' : 'Next Review'}</span><span class="project-info-value">${retro.date} (${esc(p.retro_day || 'friday')})</span></div>` : ''}
-    </div>
-    ` : ''}
-
-    <div class="tab-bar fade-in stagger-1">
-      <button class="tab-btn ${state.activeTab === 'dashboard' ? 'active' : ''}" data-action="switch-tab" data-tab="dashboard">Milestones</button>
-      <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
-      <button class="tab-btn ${state.activeTab === 'releases' ? 'active' : ''}" data-action="switch-tab" data-tab="releases">Releases</button>
-    </div>
-
-    ${state.activeTab === 'dashboard' ? (state.showGraph ? renderGraphSection() : `
-    ${p.summary ? `
-    <section class="summary-block fade-in">
-      <div class="summary-label">Session Context</div>
-      <div class="summary-text">${esc(p.summary)}</div>
-    </section>
-    ` : ''}
-    <section class="milestones fade-in">
-      <div class="milestones-header">
-        <span class="milestones-title">Milestones</span>
-        <span class="milestones-count">${activeCount} active \u00b7 ${doneCount}/${(p.milestones||[]).length} done</span>
-        <input class="ms-search-inline" id="search-input" type="search" placeholder="Search milestones, tasks, commits..." value="${esc(state.searchQuery)}" autocomplete="off">
-        <button class="sort-toggle" data-action="show-graph">Graph \u2192</button>
-      </div>
-      ${state.searchQuery.trim() ? renderSearchResults() : `
-      <div class="filter-bar">
-        <button class="filter-btn f-all ${state.hiddenStatuses.size === 0 ? 'on' : 'off'}" data-action="filter-all">all</button>
-        ${FILTER_ORDER.map(s => {
-          const isOn = !state.hiddenStatuses.has(s);
-          return `<button class="filter-btn ${isOn ? 'on' : 'off'} ${FILTER_CSS_CLASS[s] || ''}" data-action="filter-status" data-status="${s}">${STATUS_LABELS[s] || s}</button>`;
-        }).join('')}
-        <button class="sort-toggle" data-action="toggle-sort">${state.sortAsc ? '\u2191 ms-1 first' : '\u2193 latest first'}</button>
-      </div>
-      ${filtered.map((ms, i) => renderMilestoneCard(ms, i)).join('')}
-      `}
-    </section>
-    `) : ''}
-
-    ${state.activeTab === 'documents' ? renderDocumentsSection() : ''}
-
-    ${state.activeTab === 'releases' ? renderReleasesSection() : ''}
-
-    <footer class="footer fade-in stagger-4">
-      <div class="footer-left">
-        <div>${esc(state.projectId)}</div>
-        <div class="footer-tagline">Where humans and AI are bound together.</div>
-      </div>
-      <div class="footer-right">
-        <button class="sort-toggle" data-action="export-json" style="font-size:0.65rem;">Export JSON</button>
-        <span>${state.lastUpdate ? formatTime(state.lastUpdate) : ''}</span>
-      </div>
-    </footer>
-  `;
-
-  bindEvents();
-}
-
-function renderProjectSelector(app) {
-  app.innerHTML = `
-    <div class="project-selector fade-in">
-      <h1 class="login-logo">Beacon</h1>
-      <p class="login-tagline">Where humans and AI are bound together.</p>
-      <div style="height: 24px"></div>
-      <div class="summary-label">Select Project</div>
-      <ul class="project-list">
-        ${state.projects.map(p => `
-          <li class="project-item" data-action="select-project" data-project-id="${esc(p.project_id)}">
-            <div class="project-item-name">${esc(p.name)}</div>
-            <div class="project-item-id">${esc(p.project_id)}</div>
-          </li>
-        `).join('')}
-      </ul>
-    </div>
-  `;
-  bindEvents();
-}
 
 function renderMilestoneCard(ms, index) {
   const isExpanded = state.expanded.has(ms.id);
