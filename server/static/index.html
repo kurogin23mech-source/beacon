@@ -1186,6 +1186,8 @@ body::after {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .footer-left {
@@ -1204,6 +1206,7 @@ body::after {
 .footer-right {
   font-size: 0.75rem;
   color: var(--text-dim);
+  flex-shrink: 0;
 }
 
 /* ---- Loading State ---- */

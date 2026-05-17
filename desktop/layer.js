@@ -271,7 +271,6 @@ function render() {
       </div>
     </footer>
   `;
-  if (!_userScrolling) window.scrollTo(0, scrollY);
   bindEvents();
 }
 
@@ -434,16 +433,6 @@ async function exportProject() {
     document.body.removeChild(a); URL.revokeObjectURL(url);
   } catch (e) { alert('Export failed: ' + e); }
 }
-
-// ---- Scroll guard (prevent render from interrupting active scrolling) ----
-
-let _userScrolling = false;
-let _scrollEndTimer = null;
-window.addEventListener('scroll', () => {
-  _userScrolling = true;
-  clearTimeout(_scrollEndTimer);
-  _scrollEndTimer = setTimeout(() => { _userScrolling = false; }, 500);
-}, { passive: true });
 
 // ---- Reconnect (Tauri focus events) ----
 
