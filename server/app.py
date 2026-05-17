@@ -18,12 +18,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import Response
+from starlette.responses import Response, JSONResponse
 
 import core
 import firestore_client as db
 
-app = FastAPI(title="Beacon API", version="0.1.0")
+# debug=False is the default, but set explicitly to ensure stack traces are
+# never included in error responses in production.
+app = FastAPI(title="Beacon API", version="0.1.0", debug=False)
 
 app.add_middleware(
     CORSMiddleware,
@@ -31,6 +33,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---------------------------------------------------------------------------
+# Global exception handler – prevents stack traces from leaking in 500 responses
+# ---------------------------------------------------------------------------
+
+_server_logger = logging.getLogger("beacon.server")
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Catch-all handler that returns a generic 500 without exposing internals."""
+    _server_logger.exception(
+        "Unhandled exception: method=%s path=%s", request.method, request.url.path
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"},
+    )
 
 
 # ---------------------------------------------------------------------------

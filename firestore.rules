@@ -1,0 +1,20 @@
+rules_version = '2';
+
+// Beacon Firestore Security Rules
+//
+// All Firestore access is performed exclusively via the Cloud Run backend
+// (Firebase Admin SDK / Application Default Credentials), which bypasses
+// these rules entirely.  Direct client SDK access is therefore denied for
+// all collections to prevent data exfiltration or tampering.
+//
+// If a web/mobile client SDK is introduced in future, this file should be
+// revisited and scoped rules added here.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Deny all direct client access to every document.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
