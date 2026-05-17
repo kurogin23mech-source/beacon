@@ -467,7 +467,7 @@ function entryStatusText(e) {
 let _currentMsId = null;
 
 function renderEntry(entry) {
-  if (_currentMsId && state.hideEntryDone.has(_currentMsId) && entry.status === 'done') return '';
+  if (_currentMsId && state.hideEntryDone.has(_currentMsId) && (entry.status === 'done' || entry.status === 'cancelled')) return '';
   const statusClass = entry.status === 'done' ? ' done' : '';
   const hash = entry.meta?.hash ? `<span class="entry-hash">${entry.meta.hash.slice(0,7)}</span>` : '';
   const src = entry.type==='save'&&entry.meta?.source ? `<span class="entry-hash">[${esc(entry.meta.source)}]</span>` : '';
@@ -509,7 +509,7 @@ function renderMilestoneCard(ms) {
     _currentMsId = ms.id;
     const rendered = entries.map(renderEntry).join('');
     _currentMsId = null;
-    const hasDone = entries.some(e => e.status==='done');
+    const hasDone = entries.some(e => e.status==='done' || e.status==='cancelled');
     const hiding = state.hideEntryDone.has(ms.id);
     body = `<div class="ms-entries">
       ${hasDone ? `<div class="ms-entries-toolbar"><button class="entry-filter-btn ${hiding?'active':''}" data-action="toggle-hide-done" data-ms-id="${ms.id}">${hiding?'show done':'hide done'}</button></div>` : ''}
