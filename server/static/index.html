@@ -1785,14 +1785,6 @@ function render() {
       <button class="tab-btn ${state.activeTab === 'releases' ? 'active' : ''}" data-action="switch-tab" data-tab="releases">Releases</button>
     </div>
 
-    ${state.searchQuery !== null ? `
-    <div class="search-bar">
-      <input class="search-input" id="search-input" type="text" placeholder="Search milestones, tasks, commits..." value="${esc(state.searchQuery)}" autocomplete="off">
-      ${state.searchQuery ? `<button class="search-clear" data-action="clear-search">✕</button>` : ''}
-    </div>
-    ${state.searchQuery ? renderSearchResults() : ''}
-    ` : ''}
-
     ${state.activeTab === 'dashboard' ? (state.showGraph ? renderGraphSection() : `
     ${p.summary ? `
     <section class="summary-block fade-in">
@@ -2206,34 +2198,30 @@ function renderReleasesSection() {
   const releases = {};
   for (const r of (p?.releases || [])) releases[r.id] = r;
 
-  const header = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
-    <span style="font-size:0.75rem;color:var(--text-dim);letter-spacing:0.08em;text-transform:uppercase;">Releases</span>
-    ${allDeps.length > 0 ? `<button class="sort-toggle" data-action="toggle-release-graph" style="margin-left:auto;font-size:0.7rem;">${state.showReleaseGraph ? '← list' : 'Graph →'}</button>` : ''}
-  </div>`;
-
-  if (state.showReleaseGraph) return renderReleaseGraphSection(header);
-
   if (allDeps.length === 0) {
-    return `<section class="retro-section fade-in">${header}<div class="retro-empty">No deployments recorded yet.<br><span style="font-size:0.75rem;color:var(--text-dim)">Run <code>beacon deploy record</code> after each deploy.</span></div></section>`;
+    return `<section class="retro-section fade-in">
+      <div class="retro-empty">No deployments recorded yet.<br>
+        <span style="font-size:0.75rem;color:var(--text-dim)">Run <code>beacon deploy record</code> after each deploy.</span>
+      </div>
+    </section>`;
   }
 
   const hashMap = buildHashEntryMap(p);
   const msTitle = id => p?.milestones?.find(m => m.id === id)?.title || id;
 
-  // Build major → [minors] mapping
+  // major → [minors] mapping
   const majorToMinors = {};
   for (const d of allDeps) if (d.type === 'major') majorToMinors[d.id] = [];
-  const assignedMinors = new Set();
   for (const d of allDeps) {
     if (d.type === 'minor' && d.links_to?.length) {
-      const majorId = d.links_to[0];
-      if (majorToMinors[majorId]) { majorToMinors[majorId].push(d); assignedMinors.add(d.id); }
+      const mid = d.links_to[0];
+      if (majorToMinors[mid]) majorToMinors[mid].push(d);
     }
   }
 
-  // Group majors by release (newest first)
+  // Group majors by release
+  const releasedIds = new Set();
   const releaseGroups = [];
-  const releasedMajorIds = new Set();
   for (const r of Object.values(releases)) {
     const majors = (r.deploy_ids || [])
       .map(id => allDeps.find(d => d.id === id && d.type === 'major'))
@@ -2241,217 +2229,111 @@ function renderReleasesSection() {
       .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
     if (majors.length) {
       releaseGroups.push({ release: r, majors });
-      for (const m of majors) releasedMajorIds.add(m.id);
+      for (const m of majors) releasedIds.add(m.id);
     }
   }
   releaseGroups.sort((a, b) => (b.majors[0]?.date || '').localeCompare(a.majors[0]?.date || ''));
 
-  const ungroupedMajors = allDeps
-    .filter(d => d.type === 'major' && !releasedMajorIds.has(d.id))
+  const ungrouped = allDeps
+    .filter(d => d.type === 'major' && !releasedIds.has(d.id))
     .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 
-  function renderDeployDetail(d) {
+  function fmtDate(iso) { return iso ? iso.slice(0, 16).replace('T', ' ') : ''; }
+
+  function deployDetail(d) {
     const mcMap = d.milestone_commits;
     if (!mcMap || !Object.keys(mcMap).length) {
-      const badges = (d.milestones || []).map(id => `<span class="release-ms-badge">${esc(id)}</span>`).join('');
+      // legacy: badge list
+      const badges = (d.milestones || []).map(id =>
+        `<span class="release-ms-badge">${esc(id)}</span>`).join('');
       return badges ? `<div class="deploy-ms-badges">${badges}</div>` : '';
     }
     const newlyDone = new Set(d.newly_completed_ms || []);
-    // Sort: completions first, then patches
-    const sorted = Object.entries(mcMap).sort(([a], [b]) =>
-      (newlyDone.has(b) ? 1 : 0) - (newlyDone.has(a) ? 1 : 0)
-    );
-    let html = '<div class="deploy-detail">';
+    const sorted = Object.entries(mcMap).sort(([a],[b]) =>
+      (newlyDone.has(b)?1:0) - (newlyDone.has(a)?1:0));
+    let h = '<div class="deploy-detail">';
     for (const [msId, hashes] of sorted) {
-      const isCompletion = newlyDone.has(msId);
-      const blockClass = isCompletion ? 'completion' : 'patch';
-      const typeLabel = isCompletion ? 'MS release' : 'MS patch';
-      html += `<div class="deploy-ms-block ${blockClass}">
+      const completion = newlyDone.has(msId);
+      h += `<div class="deploy-ms-block ${completion ? 'completion' : 'patch'}">
         <div class="deploy-ms-block-header">
-          <span class="deploy-ms-type-label">${typeLabel}</span>
+          <span class="deploy-ms-type-label">${completion ? 'MS release' : 'MS patch'}</span>
           <span class="deploy-ms-block-id">${esc(msId)}</span>
           <span class="deploy-ms-block-title">${esc(msTitle(msId))}</span>
         </div>
         <div class="deploy-commit-list">`;
       for (const hash of hashes) {
         const entry = lookupEntry(hashMap, hash);
-        html += `<div class="deploy-commit-row">
+        h += `<div class="deploy-commit-row">
           <span class="deploy-commit-label">commit</span>
           <span class="deploy-commit-eid">${esc(entry?.id || '')}</span>
           <span class="deploy-commit-desc">${esc(entry?.description || hash)}</span>
-          <code class="deploy-commit-hash">${esc(hash.slice(0, 7))}</code>
+          <code class="deploy-commit-hash">${esc(hash.slice(0,7))}</code>
         </div>`;
       }
-      html += `</div></div>`;
+      h += `</div></div>`;
     }
     const unassigned = d.unassigned_commits || [];
     if (unassigned.length) {
-      html += `<div class="deploy-ms-block untracked">
+      h += `<div class="deploy-ms-block untracked">
         <div class="deploy-ms-block-header"><span class="deploy-ms-type-label">untracked</span></div>
         <div class="deploy-commit-list">`;
       for (const hash of unassigned) {
-        html += `<div class="deploy-commit-row">
+        h += `<div class="deploy-commit-row">
           <span class="deploy-commit-label">commit</span>
-          <code class="deploy-commit-hash">${esc(hash.slice(0, 7))}</code>
+          <code class="deploy-commit-hash">${esc(hash.slice(0,7))}</code>
         </div>`;
       }
-      html += `</div></div>`;
+      h += `</div></div>`;
     }
-    return html + '</div>';
+    return h + '</div>';
   }
 
-  function renderDeployCard(d) {
+  function deployCard(d) {
     const isMajor = d.type === 'major';
-    const isExpanded = state.expandedDeployId === d.id;
-    const dot = `<span class="deploy-type-dot ${isMajor ? 'major' : 'minor'}">${isMajor ? '◉' : '○'}</span>`;
-    const dateStr = (d.date || '').slice(0, 16).replace('T', ' ');
-    let html = `<div class="deploy-card">
+    const expanded = state.expandedDeployId === d.id;
+    const dot = `<span class="deploy-type-dot ${isMajor?'major':'minor'}">${isMajor?'◉':'○'}</span>`;
+    let h = `<div class="deploy-card">
       <div class="deploy-card-header" data-action="expand-deploy" data-deploy-id="${esc(d.id)}">
         ${dot}
         <span class="deploy-id">${esc(d.id)}</span>
-        <span class="deploy-datetime">${esc(dateStr)}</span>
-        <span class="deploy-env-badge">${esc(d.environment || 'prod')}</span>
-        <span class="deploy-expand-arrow">${isExpanded ? '▲' : '▼'}</span>
+        <span class="deploy-env-badge">${esc(d.environment||'prod')}</span>
+        <span class="deploy-datetime">${esc(fmtDate(d.date))}</span>
+        <span class="deploy-expand-arrow">${expanded?'▲':'▼'}</span>
       </div>
-      <div class="deploy-desc">${esc(d.description || '')}</div>`;
-    if (isExpanded) {
-      html += renderDeployDetail(d);
+      <div class="deploy-desc">${esc(d.description||'')}</div>`;
+    if (expanded) {
+      h += deployDetail(d);
     } else {
-      const badges = (d.milestones || []).map(id => `<span class="release-ms-badge">${esc(id)}</span>`).join('');
-      if (badges) html += `<div class="deploy-ms-badges">${badges}</div>`;
+      const badges = (d.milestones||[]).map(id=>`<span class="release-ms-badge">${esc(id)}</span>`).join('');
+      if (badges) h += `<div class="deploy-ms-badges">${badges}</div>`;
     }
-    return html + `</div>`;
+    return h + '</div>';
   }
 
-  function renderMajorWithMinors(major) {
-    const minors = (majorToMinors[major.id] || []).slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-    let html = renderDeployCard(major);
+  function majorBlock(major) {
+    const minors = (majorToMinors[major.id]||[]).slice()
+      .sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+    let h = deployCard(major);
     if (minors.length) {
-      html += `<div class="deploy-minor-group">`;
-      for (const minor of minors) html += renderDeployCard(minor);
-      html += `</div>`;
+      h += `<div class="deploy-minor-group">`;
+      for (const m of minors) h += deployCard(m);
+      h += `</div>`;
     }
-    return html;
+    return h;
   }
 
-  let html = `<section class="retro-section fade-in">${header}<div>`;
+  let html = `<section class="retro-section fade-in"><div>`;
 
-  for (const { release, majors } of releaseGroups) {
-    const semver = release.semver ? `<span class="release-group-semver">${esc(release.semver)}</span>` : '';
-    html += `<div class="release-group-header"><span>${esc(release.id)}</span>${semver}</div>`;
-    for (const major of majors) html += renderMajorWithMinors(major);
+  for (const {release, majors} of releaseGroups) {
+    const sv = release.semver ? `<span class="release-group-semver">${esc(release.semver)}</span>` : '';
+    html += `<div class="release-group-header"><span>${esc(release.id)}</span>${sv}</div>`;
+    for (const m of majors) html += majorBlock(m);
   }
-  for (const major of ungroupedMajors) html += renderMajorWithMinors(major);
+  for (const m of ungrouped) html += majorBlock(m);
 
   return html + `</div></section>`;
 }
 
-function renderReleaseGraphSection(header) {
-  const p = state.project;
-  const deps = (p?.deployments || []).slice(); // chronological order
-  const releases = {};
-  for (const r of (p?.releases || [])) releases[r.id] = r;
-
-  if (deps.length === 0) return `<section class="graph-section fade-in">${header}<div class="graph-empty">No deployments yet.</div></section>`;
-
-  const nodeW = 160, nodeH = 48, gapX = 50, gapY = 28, padX = 32, padY = 32;
-
-  // Separate major and minor
-  const majors = deps.filter(d => d.type === 'major');
-  const minors = deps.filter(d => d.type === 'minor');
-
-  // Layout: majors in top row (left=oldest, right=newest), minors in bottom row
-  const pos = {};
-  majors.forEach((d, i) => {
-    pos[d.id] = { x: padX + i * (nodeW + gapX), y: padY };
-  });
-
-  // Position each minor below its first linked major, or at end if unlinked
-  const minorRowUsed = {};
-  minors.forEach(d => {
-    const linkedId = (d.links_to || [])[0];
-    const anchor = linkedId && pos[linkedId] ? pos[linkedId].x : padX + majors.length * (nodeW + gapX);
-    let col = Math.round((anchor - padX) / (nodeW + gapX));
-    col = Math.max(0, col);
-    const row = minorRowUsed[col] || 0;
-    pos[d.id] = { x: padX + col * (nodeW + gapX), y: padY + nodeH + gapY + row * (nodeH + 12) };
-    minorRowUsed[col] = row + 1;
-  });
-
-  const allNodes = [...majors, ...minors];
-  const maxX = Math.max(...Object.values(pos).map(p => p.x)) + nodeW + padX;
-  const maxY = Math.max(...Object.values(pos).map(p => p.y)) + nodeH + padY;
-
-  // Edges: minor → linked majors
-  let edgeSvg = '';
-  for (const d of minors) {
-    for (const lid of (d.links_to || [])) {
-      const from = pos[d.id], to = pos[lid];
-      if (!from || !to) continue;
-      const x1 = from.x + nodeW / 2, y1 = from.y;
-      const x2 = to.x + nodeW / 2, y2 = to.y + nodeH;
-      edgeSvg += `<path class="graph-edge" d="M${x1},${y1} C${x1},${y1 - 20} ${x2},${y2 + 20} ${x2},${y2}" marker-end="url(#arrowhead-rel)" />`;
-    }
-  }
-
-  // Release grouping boxes
-  let relBoxSvg = '';
-  for (const rel of Object.values(releases)) {
-    const relDeps = (rel.deploy_ids || []).map(id => pos[id]).filter(Boolean);
-    if (relDeps.length === 0) continue;
-    const xs = relDeps.map(p => p.x), ys = relDeps.map(p => p.y);
-    const bx = Math.min(...xs) - 8, by = Math.min(...ys) - 20;
-    const bw = Math.max(...xs) - Math.min(...xs) + nodeW + 16;
-    const bh = Math.max(...ys) - Math.min(...ys) + nodeH + 28;
-    relBoxSvg += `<rect x="${bx}" y="${by}" width="${bw}" height="${bh}" rx="4" fill="none" stroke="var(--accent-dim)" stroke-dasharray="4 3" stroke-width="1.5" />
-      <text x="${bx + 6}" y="${by + 12}" fill="var(--accent)" font-size="10" font-family="var(--font-mono)">${esc(rel.semver || rel.id)}</text>`;
-  }
-
-  // Node rectangles
-  let nodeSvg = '';
-  for (const d of allNodes) {
-    const pp = pos[d.id];
-    if (!pp) continue;
-    const isMajor = d.type === 'major';
-    const fill = isMajor ? 'var(--bg-raised)' : 'var(--bg-surface)';
-    const stroke = isMajor ? 'var(--accent-dim)' : 'var(--border)';
-    const rel = releases[d.linked_release];
-    const semver = rel?.semver ? ` ${rel.semver}` : '';
-    const label = (d.id + semver).slice(0, 22);
-    const msStr = (d.milestones || []).slice(0, 3).join(' ') + ((d.milestones || []).length > 3 ? '…' : '');
-    nodeSvg += `
-      <g transform="translate(${pp.x},${pp.y})">
-        <rect width="${nodeW}" height="${nodeH}" fill="${fill}" stroke="${stroke}" rx="3" />
-        <text x="8" y="15" font-size="9" font-family="var(--font-mono)" fill="var(--text-dim)">${isMajor ? '◉' : '○'} ${esc(label)}</text>
-        <text x="8" y="30" font-size="9" font-family="var(--font-mono)" fill="var(--text-secondary)">${esc(d.date ? d.date.slice(0,16).replace('T',' ') : '')}</text>
-        <text x="8" y="43" font-size="8" font-family="var(--font-mono)" fill="var(--text-dim)">${esc(msStr)}</text>
-      </g>`;
-  }
-
-  // Row labels
-  const rowLabelSvg = majors.length > 0
-    ? `<text x="4" y="${padY + nodeH/2 + 4}" fill="var(--text-dim)" font-size="9" font-family="var(--font-mono)" text-anchor="start">major</text>
-       <text x="4" y="${padY + nodeH + gapY + nodeH/2 + 4}" fill="var(--text-dim)" font-size="9" font-family="var(--font-mono)" text-anchor="start">minor</text>`
-    : '';
-
-  return `
-    <section class="graph-section fade-in">
-      ${header}
-      <div class="graph-container">
-        <svg width="${maxX}" height="${maxY}" viewBox="0 0 ${maxX} ${maxY}" xmlns="http://www.w3.org/2000/svg">
-          <defs>
-            <marker id="arrowhead-rel" markerWidth="6" markerHeight="5" refX="6" refY="2.5" orient="auto">
-              <polygon points="0 0, 6 2.5, 0 5" fill="var(--border)" />
-            </marker>
-          </defs>
-          ${relBoxSvg}
-          ${edgeSvg}
-          ${nodeSvg}
-          ${rowLabelSvg}
-        </svg>
-      </div>
-    </section>`;
-}
 
 function renderGraphSection() {
   const p = state.project;
