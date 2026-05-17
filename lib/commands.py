@@ -2117,15 +2117,27 @@ def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
 def _next_deploy_id(data: dict, date_str: str) -> str:
     """Generate next deploy ID like deploy-20260517-1."""
     prefix = f"deploy-{date_str.replace('-', '')[:8]}"
-    existing = [d["id"] for d in data.get("deployments", []) if d["id"].startswith(prefix)]
-    n = len(existing) + 1
+    nums = []
+    for d in data.get("deployments", []):
+        if d["id"].startswith(prefix + "-"):
+            try:
+                nums.append(int(d["id"][len(prefix) + 1:]))
+            except ValueError:
+                pass
+    n = (max(nums) + 1) if nums else 1
     return f"{prefix}-{n}"
 
 
 def _next_release_id(data: dict, date_str: str) -> str:
     prefix = f"release-{date_str.replace('-', '')[:8]}"
-    existing = [r["id"] for r in data.get("releases", []) if r["id"].startswith(prefix)]
-    n = len(existing) + 1
+    nums = []
+    for r in data.get("releases", []):
+        if r["id"].startswith(prefix + "-"):
+            try:
+                nums.append(int(r["id"][len(prefix) + 1:]))
+            except ValueError:
+                pass
+    n = (max(nums) + 1) if nums else 1
     return f"{prefix}-{n}"
 
 
@@ -2193,6 +2205,12 @@ def cmd_deploy_record():
     commit_hashes = [c["hash"] for c in new_commits]
     ms_status: dict[str, str] = {ms["id"]: ms.get("status", "") for ms in data.get("milestones", [])}
 
+    # MSes that already appeared in previous deploys → they are patched, not newly completed
+    previously_deployed: set[str] = set()
+    for d in deployments:
+        previously_deployed.update(d.get("newly_completed_ms", []))
+        previously_deployed.update(d.get("milestones", []))  # legacy records
+
     # Find which MSes are touched by these commits, build per-MS commit lists
     newly_completed: set[str] = set()
     patch_ms: set[str] = set()
@@ -2211,7 +2229,7 @@ def cmd_deploy_record():
                             if (h.startswith(c) or c.startswith(h)) and c not in _matched:
                                 _matched.append(c)
                                 status = ms_status.get(_ms_id, "")
-                                if status in ("done", "observing"):
+                                if status in ("done", "observing") and _ms_id not in previously_deployed:
                                     newly_completed.add(_ms_id)
                                 else:
                                     patch_ms.add(_ms_id)
