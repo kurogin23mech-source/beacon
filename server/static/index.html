@@ -151,6 +151,67 @@ body::after {
   50% { opacity: 0.4; }
 }
 
+/* ---- Search ---- */
+
+.search-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 1rem;
+  padding: 4px 6px;
+  border-radius: 3px;
+  line-height: 1;
+  transition: color 0.2s;
+}
+.search-btn:hover { color: var(--text-secondary); }
+
+.search-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0 4px;
+}
+.search-input {
+  flex: 1;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  padding: 5px 10px;
+  outline: none;
+}
+.search-input:focus { border-color: var(--accent-dim); }
+.search-clear {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  padding: 2px 6px;
+}
+.search-results { margin-top: 8px; }
+.search-result-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 6px 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  margin-bottom: 4px;
+  background: var(--bg-surface);
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.search-result-item:hover { border-color: var(--border); }
+.search-result-type { font-size: 0.65rem; color: var(--text-dim); padding-top: 2px; }
+.search-result-desc { font-size: 0.8rem; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.search-result-ms { font-size: 0.65rem; color: var(--text-dim); grid-column: 2; }
+.search-result-date { font-size: 0.65rem; color: var(--text-dim); text-align: right; }
+.search-empty { padding: 16px 0; color: var(--text-dim); font-size: 0.8rem; text-align: center; }
+
 /* ---- Hamburger Menu ---- */
 
 .hamburger-btn {
@@ -1349,6 +1410,8 @@ let state = {
   sortAsc: true,
   // Menu
   menuOpen: false,
+  // Search (null = hidden, '' = open with no query, string = query)
+  searchQuery: null,
   auth: {
     token: localStorage.getItem('beacon_token'),
     email: localStorage.getItem('beacon_email'),
@@ -1683,6 +1746,7 @@ function render() {
         </button>
         <span class="project-name">${esc(p.name)}</span>
         <span class="header-tag">beacon</span>
+        <button class="search-btn" data-action="toggle-search" title="Search">&#x1F50D;</button>
         <div class="connection-status">
           <div class="status-dot ${state.connected ? '' : 'offline'}"></div>
           <span class="connection-label">${state.connected ? 'live' : 'reconnecting'}</span>
@@ -1702,6 +1766,14 @@ function render() {
       <button class="tab-btn ${state.activeTab === 'retros' ? 'active' : ''}" data-action="switch-tab" data-tab="retros">Reviews</button>
       <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
     </div>
+
+    ${state.searchQuery !== null ? `
+    <div class="search-bar">
+      <input class="search-input" id="search-input" type="text" placeholder="Search milestones, tasks, commits..." value="${esc(state.searchQuery)}" autocomplete="off">
+      ${state.searchQuery ? `<button class="search-clear" data-action="clear-search">✕</button>` : ''}
+    </div>
+    ${state.searchQuery ? renderSearchResults() : ''}
+    ` : ''}
 
     ${state.activeTab === 'dashboard' ? (state.showGraph ? renderGraphSection() : `
     ${p.summary ? `
@@ -1878,6 +1950,43 @@ function scopeBadge(scope) {
     memo: 'background: transparent; color: var(--text-secondary); border: 1px solid var(--border);',
   };
   return `<span style="display:inline-block; font-size:0.65rem; padding:1px 6px; border-radius:3px; margin-right:6px; ${styles[scope] || styles.memo}">${(scope || 'memo').toUpperCase()}</span>`;
+}
+
+function renderSearchResults() {
+  const q = state.searchQuery.toLowerCase().trim();
+  if (!q) return '';
+  const typeIcon = { task: '□', commit: '○', pr: 'PR', milestone: 'MS', save: '→' };
+  const results = [];
+
+  function searchEntries(entries, msId, msTitle) {
+    for (const e of entries) {
+      const desc = (e.description || '').toLowerCase();
+      const detail = (e.detail || '').toLowerCase();
+      if (desc.includes(q) || detail.includes(q)) {
+        results.push({ msId, msTitle, entryId: e.id, type: e.type, status: e.status, description: e.description || '', date: e.date || e.created_at || '' });
+      }
+      if (e.entries) searchEntries(e.entries, msId, msTitle);
+    }
+  }
+
+  for (const ms of (state.project?.milestones || [])) {
+    const t = (ms.title || '').toLowerCase();
+    if (t.includes(q)) results.push({ msId: ms.id, msTitle: ms.title, entryId: ms.id, type: 'milestone', status: ms.status, description: ms.title, date: '' });
+    searchEntries(ms.entries || [], ms.id, ms.title || '');
+  }
+
+  if (!results.length) return `<div class="search-results"><div class="search-empty">No results for "${esc(state.searchQuery)}"</div></div>`;
+
+  return `<div class="search-results">
+    <div class="milestones-count" style="margin-bottom:8px">${results.length} result${results.length === 1 ? '' : 's'}</div>
+    ${results.map(r => `
+    <div class="search-result-item" data-action="search-goto" data-ms-id="${esc(r.msId)}" data-entry-id="${esc(r.entryId)}">
+      <span class="search-result-type">${typeIcon[r.type] || '?'}</span>
+      <span class="search-result-desc">${esc(r.description)}</span>
+      <span class="search-result-date">${esc(r.date)}</span>
+      <span class="search-result-ms">${esc(r.msId)}: ${esc(r.msTitle)}</span>
+    </div>`).join('')}
+  </div>`;
 }
 
 function renderDocumentsSection() {
@@ -2449,6 +2558,21 @@ async function handleAction(e) {
       setTimeout(() => { el.textContent = 'Copy link'; }, 1500);
       break;
     }
+    case 'toggle-search':
+      state.searchQuery = state.searchQuery === null ? '' : null;
+      render();
+      if (state.searchQuery !== null) setTimeout(() => document.getElementById('search-input')?.focus(), 50);
+      break;
+    case 'clear-search': state.searchQuery = ''; render(); document.getElementById('search-input')?.focus(); break;
+    case 'search-goto': {
+      const msId = el.dataset.msId;
+      state.searchQuery = null;
+      state.activeTab = 'dashboard';
+      state.expanded.add(msId);
+      render();
+      setTimeout(() => document.getElementById(`ms-${msId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+      break;
+    }
     case 'open-menu': await renderMenu(); break;
     case 'close-menu': closeMenu(); break;
     case 'menu-select-project': closeMenu(); await menuSelectProject(el.dataset.projectId); break;
@@ -2484,6 +2608,22 @@ async function handleHashNav() {
 }
 
 window.addEventListener('hashchange', handleHashNav);
+
+// Search input: update query on each keystroke
+document.addEventListener('input', e => {
+  if (e.target.id === 'search-input') {
+    state.searchQuery = e.target.value;
+    render();
+    // Restore focus after re-render
+    const input = document.getElementById('search-input');
+    if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+  }
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && state.searchQuery !== null) {
+    state.searchQuery = null; render();
+  }
+});
 
 // Reconnect when the tab becomes visible or the window regains focus
 function _tryReconnect() {

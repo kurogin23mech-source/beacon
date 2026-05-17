@@ -1521,8 +1521,26 @@ case "${1:-}" in
             *)       echo "Usage: beacon skill install" ;;
         esac
         ;;
+    search)
+        ensure_project
+        local query="" ms_id="" json_flag=""
+        shift
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --ms) ms_id="${2:-}"; shift 2 ;;
+                --json) json_flag="1"; shift ;;
+                *) query="$1"; shift ;;
+            esac
+        done
+        BEACON_QUERY="$query" BEACON_MS_ID="$ms_id" BEACON_JSON="$json_flag" \
+            python3 "$COMMANDS_PY" search
+        ;;
     help|-h|--help)
-        usage
+        if [[ "${2:-}" == "--json" ]]; then
+            python3 "$COMMANDS_PY" help_json
+        else
+            usage
+        fi
         ;;
     --version|-V)
         python3 "$COMMANDS_PY" version

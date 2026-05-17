@@ -2042,6 +2042,113 @@ def cmd_skill_install():
         print("No skills found to install.")
 
 
+def cmd_search():
+    """Full-text search across milestones, tasks, commits, PRs, and saves."""
+    query = os.environ.get("BEACON_QUERY", "").lower().strip()
+    ms_filter = os.environ.get("BEACON_MS_ID", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not query:
+        print("Usage: beacon search <query>", file=sys.stderr)
+        sys.exit(1)
+
+    data = load_project()
+    results = []
+
+    def _search_entries(entries, ms_id, ms_title):
+        for e in entries:
+            desc = e.get("description", "").lower()
+            detail = e.get("detail", "").lower()
+            if query in desc or query in detail:
+                results.append({
+                    "ms_id": ms_id,
+                    "ms_title": ms_title,
+                    "entry_id": e.get("id", ""),
+                    "type": e.get("type", ""),
+                    "status": e.get("status", ""),
+                    "description": e.get("description", ""),
+                    "date": e.get("date", "") or e.get("created_at", ""),
+                })
+            _search_entries(e.get("entries", []), ms_id, ms_title)
+
+    for ms in data.get("milestones", []):
+        if ms_filter and ms["id"] != ms_filter:
+            continue
+        ms_title = ms.get("title", "")
+        if query in ms_title.lower():
+            results.append({
+                "ms_id": ms["id"],
+                "ms_title": ms_title,
+                "entry_id": ms["id"],
+                "type": "milestone",
+                "status": ms.get("status", ""),
+                "description": ms_title,
+                "date": "",
+            })
+        _search_entries(ms.get("entries", []), ms["id"], ms_title)
+
+    if json_mode:
+        print(json.dumps(results, ensure_ascii=False))
+        return
+
+    if not results:
+        print(f"No results for: {query}")
+        return
+
+    type_icons = {"task": "□", "commit": "○", "pr": "PR", "milestone": "MS", "save": "→"}
+    print(f"{len(results)} result(s) for: {query}")
+    for r in results:
+        icon = type_icons.get(r["type"], "?")
+        status_note = f" [{r['status']}]" if r["status"] not in ("done", "cancelled", "") else ""
+        print(f"  {icon} [{r['entry_id']}] {r['description'][:80]}{status_note}")
+        print(f"       └─ {r['ms_id']}: {r['ms_title'][:50]}")
+
+
+def cmd_help_json():
+    """Output beacon CLI command reference as machine-readable JSON."""
+    commands = [
+        {"command": "beacon init", "flags": [], "description": "Initialize .beacon/ in current directory"},
+        {"command": "beacon setup", "flags": [], "description": "First-time setup wizard (auth + hooks + project)"},
+        {"command": "beacon status", "flags": ["--json", "--ms <id>"], "description": "Show current status"},
+        {"command": "beacon milestone add", "flags": [], "description": "Add a new milestone (interactive)"},
+        {"command": "beacon milestone list", "flags": ["--json"], "description": "List milestones"},
+        {"command": "beacon milestone start <id>", "flags": [], "description": "Set milestone as active (in_progress)"},
+        {"command": "beacon milestone close <id>", "flags": [], "description": "Close milestone"},
+        {"command": "beacon milestone observe <id>", "flags": [], "description": "Set milestone to observing"},
+        {"command": "beacon milestone rename <id> <title>", "flags": [], "description": "Rename a milestone"},
+        {"command": "beacon milestone depends <id> --on <id>", "flags": [], "description": "Declare milestone dependency"},
+        {"command": "beacon milestone graph", "flags": ["--json"], "description": "Show dependency graph"},
+        {"command": "beacon task add <desc>", "flags": ["-m <ms-id>"], "description": "Add a task to a milestone"},
+        {"command": "beacon task done <entry-id>", "flags": [], "description": "Mark task as done"},
+        {"command": "beacon task list", "flags": ["--json", "--ms <id>"], "description": "List tasks"},
+        {"command": "beacon task update <entry-id>", "flags": ["--ms <ms-id>", "--desc <text>"], "description": "Update task description or move to another milestone"},
+        {"command": "beacon log [message]", "flags": ["--prepare", "--finalize", "-m <ms-id>", "--progress <n>", "--summary <text>"], "description": "Record HEAD commit to active milestone"},
+        {"command": "beacon save <desc>", "flags": ["-m <ms-id>", "--hash <hash>", "--source manual", "--json"], "description": "Save a freeform entry to a milestone"},
+        {"command": "beacon sync", "flags": [], "description": "Auto-sync recent git commits to active milestone"},
+        {"command": "beacon summary <text>", "flags": [], "description": "Update project summary"},
+        {"command": "beacon doc add", "flags": ["--scope <core|spec|memo>", "--ms <id>", "--title <title>", "--content <text>", "--stdin"], "description": "Add a document"},
+        {"command": "beacon doc list", "flags": ["--json", "--scope <scope>", "--ms <id>"], "description": "List documents"},
+        {"command": "beacon doc show <doc-id>", "flags": [], "description": "Show document content"},
+        {"command": "beacon doc update <doc-id>", "flags": ["--content <text>", "--stdin"], "description": "Update document content"},
+        {"command": "beacon pr add", "flags": ["-m <ms-id>", "--url <url>", "--intent <text>"], "description": "Record a PR entry"},
+        {"command": "beacon pr approve <entry-id>", "flags": [], "description": "Approve a PR"},
+        {"command": "beacon pr reject <entry-id>", "flags": [], "description": "Reject a PR"},
+        {"command": "beacon pr merge <entry-id>", "flags": [], "description": "Mark PR as merged"},
+        {"command": "beacon retro", "flags": [], "description": "Start weekly retrospective (interactive)"},
+        {"command": "beacon trigger check", "flags": [], "description": "Check pending triggers (JSON array)"},
+        {"command": "beacon cloud list", "flags": [], "description": "List cloud projects"},
+        {"command": "beacon cloud push", "flags": [], "description": "Push local project to cloud"},
+        {"command": "beacon cloud pull", "flags": [], "description": "Pull project from cloud"},
+        {"command": "beacon cloud join <id>", "flags": [], "description": "Join an existing cloud project"},
+        {"command": "beacon auth login", "flags": [], "description": "Sign in with Google"},
+        {"command": "beacon auth logout", "flags": [], "description": "Remove cached credentials"},
+        {"command": "beacon auth status", "flags": [], "description": "Show login status"},
+        {"command": "beacon skill install", "flags": [], "description": "Install Claude Code Skills to ~/.claude/skills/"},
+        {"command": "beacon help", "flags": ["--json"], "description": "Show help (--json for machine-readable output)"},
+    ]
+    print(json.dumps({"version": __version__, "commands": commands}, ensure_ascii=False, indent=2))
+
+
 # ---------------------------------------------------------------------------
 # Main dispatch
 # ---------------------------------------------------------------------------
@@ -2095,6 +2202,7 @@ if __name__ == "__main__":
         "auth_logout": lambda: __import__("auth").logout(),
         "auth_status": lambda: __import__("auth").status(),
         "skill_install": cmd_skill_install,
+        "search": cmd_search,
         "pr_add": cmd_pr_add,
         "pr_close": cmd_pr_close,
         "pr_approve": cmd_pr_approve,
@@ -2104,6 +2212,7 @@ if __name__ == "__main__":
         "pr_request_changes": cmd_pr_request_changes,
         "pr_merge": cmd_pr_merge,
         "version": lambda: print(f"beacon {__version__}"),
+        "help_json": cmd_help_json,
     }
     fn = commands.get(cmd)
     if fn:

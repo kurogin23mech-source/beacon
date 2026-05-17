@@ -785,6 +785,52 @@ def save_retro(project_id: str, week: str, body: RetroCreate,
     return {"week": week, "status": "saved"}
 
 
+@app.get("/api/projects/{project_id}/search")
+def search_project(project_id: str, q: str = "", ms: str = "",
+                   user: dict = Depends(require_auth)):
+    """Full-text search across milestones, tasks, commits, and saves."""
+    data = _load(project_id, user)
+    query = q.lower().strip()
+    if not query:
+        return []
+
+    results = []
+
+    def _search_entries(entries, ms_id, ms_title):
+        for e in entries:
+            desc = (e.get("description") or "").lower()
+            detail = (e.get("detail") or "").lower()
+            if query in desc or query in detail:
+                results.append({
+                    "ms_id": ms_id,
+                    "ms_title": ms_title,
+                    "entry_id": e.get("id", ""),
+                    "type": e.get("type", ""),
+                    "status": e.get("status", ""),
+                    "description": e.get("description", ""),
+                    "date": e.get("date", "") or e.get("created_at", ""),
+                })
+            _search_entries(e.get("entries", []), ms_id, ms_title)
+
+    for milestone in data.get("milestones", []):
+        if ms and milestone["id"] != ms:
+            continue
+        ms_title = milestone.get("title", "")
+        if query in ms_title.lower():
+            results.append({
+                "ms_id": milestone["id"],
+                "ms_title": ms_title,
+                "entry_id": milestone["id"],
+                "type": "milestone",
+                "status": milestone.get("status", ""),
+                "description": ms_title,
+                "date": "",
+            })
+        _search_entries(milestone.get("entries", []), milestone["id"], ms_title)
+
+    return results
+
+
 # ---------------------------------------------------------------------------
 # WebSocket (real-time project updates via Firestore on_snapshot)
 # ---------------------------------------------------------------------------
