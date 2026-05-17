@@ -151,48 +151,23 @@ body::after {
   50% { opacity: 0.4; }
 }
 
-/* ---- Search ---- */
+/* ---- Search (inline in milestones header) ---- */
 
-.search-btn {
-  background: none;
-  border: none;
-  cursor: pointer;
-  color: var(--text-dim);
-  font-size: 1rem;
-  padding: 4px 6px;
-  border-radius: 3px;
-  line-height: 1;
-  transition: color 0.2s;
-}
-.search-btn:hover { color: var(--text-secondary); }
-
-.search-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 0 4px;
-}
-.search-input {
+.ms-search-inline {
   flex: 1;
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
+  min-width: 0;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-subtle);
   border-radius: 3px;
+  padding: 4px 10px;
+  font-size: 0.75rem;
   color: var(--text-primary);
   font-family: var(--font-mono);
-  font-size: 0.8rem;
-  padding: 5px 10px;
   outline: none;
 }
-.search-input:focus { border-color: var(--accent-dim); }
-.search-clear {
-  background: none;
-  border: none;
-  cursor: pointer;
-  color: var(--text-dim);
-  font-size: 0.85rem;
-  padding: 2px 6px;
-}
-.search-results { margin-top: 8px; }
+.ms-search-inline:focus { border-color: var(--accent-dim); }
+.ms-search-inline::placeholder { color: var(--text-dim); }
+.search-results { margin-top: 4px; }
 .search-result-item {
   display: grid;
   grid-template-columns: auto 1fr auto;
@@ -212,28 +187,45 @@ body::after {
 .search-result-date { font-size: 0.65rem; color: var(--text-dim); text-align: right; }
 .search-empty { padding: 16px 0; color: var(--text-dim); font-size: 0.8rem; text-align: center; }
 
-/* ---- Releases ---- */
+/* ---- Releases / Deploy Timeline ---- */
 
-.release-item { padding: 10px 0; border-bottom: 1px solid var(--border-subtle); }
-.release-item:last-child { border-bottom: none; }
-.release-item-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.release-icon { font-size: 0.8rem; }
-.release-major .release-icon { color: var(--accent); }
-.release-id { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-dim); }
-.release-semver { font-family: var(--font-mono); font-size: 0.75rem; color: var(--accent); background: var(--accent-glow); padding: 1px 6px; border-radius: 3px; }
-.release-date { font-size: 0.72rem; color: var(--text-dim); margin-left: auto; }
-.release-env { font-size: 0.65rem; color: var(--text-dim); background: var(--bg-raised); padding: 1px 5px; border-radius: 2px; }
-.release-desc { font-size: 0.8rem; color: var(--text-secondary); margin: 4px 0 4px 18px; }
-.release-ms-list { margin: 4px 0 0 18px; display: flex; flex-wrap: wrap; gap: 4px; }
+.release-group-header { display: flex; align-items: center; gap: 10px; padding: 10px 0 8px; border-bottom: 1px solid var(--accent-dim); margin-bottom: 2px; font-family: var(--font-mono); font-size: 0.72rem; color: var(--accent); }
+.release-group-semver { background: var(--accent-glow); padding: 1px 6px; border-radius: 3px; font-size: 0.72rem; }
+.deploy-card { padding: 10px 0 6px; border-bottom: 1px solid var(--border-subtle); }
+.deploy-card:last-child { border-bottom: none; }
+.deploy-card-header { display: flex; align-items: center; gap: 8px; cursor: pointer; flex-wrap: wrap; }
+.deploy-card-header:hover .deploy-id { color: var(--text-secondary); }
+.deploy-type-dot { font-size: 0.85rem; }
+.deploy-type-dot.major { color: var(--accent); }
+.deploy-type-dot.minor { color: var(--text-dim); }
+.deploy-id { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-dim); }
+.deploy-datetime { font-size: 0.7rem; color: var(--text-dim); margin-left: auto; }
+.deploy-env-badge { font-size: 0.6rem; color: var(--text-dim); background: var(--bg-raised); padding: 1px 5px; border-radius: 2px; border: 1px solid var(--border-subtle); }
+.deploy-expand-arrow { font-size: 0.6rem; color: var(--text-dim); }
+.deploy-desc { font-size: 0.78rem; color: var(--text-secondary); margin: 4px 0 4px 18px; line-height: 1.4; }
+.deploy-ms-badges { margin: 4px 0 0 18px; display: flex; flex-wrap: wrap; gap: 4px; }
 .release-ms-badge { font-family: var(--font-mono); font-size: 0.65rem; padding: 1px 6px; border: 1px solid var(--border-subtle); border-radius: 2px; color: var(--text-dim); }
-.release-links { font-size: 0.72rem; color: var(--text-dim); margin: 4px 0 0 18px; }
-.release-commit-breakdown { margin: 6px 0 0 18px; display: flex; flex-direction: column; gap: 3px; }
-.release-ms-row { display: flex; align-items: center; gap: 6px; font-size: 0.7rem; flex-wrap: wrap; }
-.release-ms-row .release-ms-id { font-family: var(--font-mono); color: var(--text-secondary); min-width: 52px; }
-.release-commit-label-completion { font-size: 0.6rem; padding: 1px 5px; border-radius: 2px; background: var(--accent-glow); color: var(--accent); border: 1px solid var(--accent-dim); white-space: nowrap; }
-.release-commit-label-patch { font-size: 0.6rem; padding: 1px 5px; border-radius: 2px; background: var(--bg-raised); color: var(--text-dim); border: 1px solid var(--border-subtle); white-space: nowrap; }
-.release-commit-label-untracked { font-size: 0.6rem; padding: 1px 5px; border-radius: 2px; color: var(--text-dim); border: 1px dashed var(--border-subtle); white-space: nowrap; }
-.hash-badge { font-family: var(--font-mono); font-size: 0.65rem; background: var(--bg-raised); padding: 0 4px; border-radius: 2px; color: var(--text-secondary); }
+.deploy-minor-group { margin-left: 20px; padding-left: 12px; border-left: 2px solid var(--border-subtle); }
+
+/* Deploy expanded detail */
+.deploy-detail { margin: 8px 0 4px 18px; display: flex; flex-direction: column; gap: 6px; }
+.deploy-ms-block { border-radius: 3px; overflow: hidden; }
+.deploy-ms-block-header { display: flex; align-items: center; gap: 8px; padding: 5px 10px; flex-wrap: wrap; }
+.deploy-ms-block.completion .deploy-ms-block-header { background: var(--accent-glow); border-left: 3px solid var(--accent); }
+.deploy-ms-block.patch .deploy-ms-block-header { background: rgba(180,120,0,0.07); border-left: 3px solid #9a7000; }
+.deploy-ms-block.untracked .deploy-ms-block-header { background: var(--bg-raised); border-left: 3px solid var(--border); }
+.deploy-ms-type-label { font-size: 0.6rem; padding: 1px 6px; border-radius: 2px; font-weight: 600; letter-spacing: 0.04em; white-space: nowrap; }
+.deploy-ms-block.completion .deploy-ms-type-label { background: rgba(0,200,120,0.15); color: var(--accent); }
+.deploy-ms-block.patch .deploy-ms-type-label { background: rgba(180,120,0,0.2); color: #c89000; }
+.deploy-ms-block.untracked .deploy-ms-type-label { color: var(--text-dim); border: 1px dashed var(--border-subtle); }
+.deploy-ms-block-id { font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-dim); }
+.deploy-ms-block-title { font-size: 0.72rem; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 280px; }
+.deploy-commit-list { padding: 4px 10px 6px; display: flex; flex-direction: column; gap: 4px; }
+.deploy-commit-row { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.deploy-commit-label { font-size: 0.58rem; padding: 0 5px; border-radius: 2px; background: var(--bg-raised); color: var(--text-dim); border: 1px solid var(--border-subtle); white-space: nowrap; }
+.deploy-commit-eid { font-family: var(--font-mono); font-size: 0.65rem; color: var(--text-dim); min-width: 36px; }
+.deploy-commit-desc { flex: 1; min-width: 120px; color: var(--text-secondary); font-size: 0.72rem; }
+.deploy-commit-hash { font-family: var(--font-mono); font-size: 0.62rem; color: var(--text-dim); background: var(--bg-raised); padding: 0 4px; border-radius: 2px; }
 
 /* ---- Hamburger Menu ---- */
 
@@ -522,9 +514,9 @@ body::after {
 
 .milestones-header {
   display: flex;
-  align-items: baseline;
-  gap: 12px;
-  margin-bottom: 20px;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
 }
 
 .milestones-title {
@@ -1433,10 +1425,12 @@ let state = {
   sortAsc: true,
   // Menu
   menuOpen: false,
-  // Search (null = hidden, '' = open with no query, string = query)
-  searchQuery: null,
+  // Search (always active; '' = no query)
+  searchQuery: '',
   // Release graph
   showReleaseGraph: false,
+  // Expanded deploy card id
+  expandedDeployId: null,
   auth: {
     token: localStorage.getItem('beacon_token'),
     email: localStorage.getItem('beacon_email'),
@@ -1771,7 +1765,6 @@ function render() {
         </button>
         <span class="project-name">${esc(p.name)}</span>
         <span class="header-tag">beacon</span>
-        <button class="search-btn" data-action="toggle-search" title="Search">&#x1F50D;</button>
         <div class="connection-status">
           <div class="status-dot ${state.connected ? '' : 'offline'}"></div>
           <span class="connection-label">${state.connected ? 'live' : 'reconnecting'}</span>
@@ -1811,8 +1804,10 @@ function render() {
       <div class="milestones-header">
         <span class="milestones-title">Milestones</span>
         <span class="milestones-count">${activeCount} active \u00b7 ${doneCount}/${(p.milestones||[]).length} done</span>
-        <button class="sort-toggle" data-action="show-graph" style="margin-left:auto;">Graph \u2192</button>
+        <input class="ms-search-inline" id="search-input" type="search" placeholder="Search milestones, tasks, commits..." value="${esc(state.searchQuery)}" autocomplete="off">
+        <button class="sort-toggle" data-action="show-graph">Graph \u2192</button>
       </div>
+      ${state.searchQuery.trim() ? renderSearchResults() : `
       <div class="filter-bar">
         <button class="filter-btn f-all ${state.hiddenStatuses.size === 0 ? 'on' : 'off'}" data-action="filter-all">all</button>
         ${FILTER_ORDER.map(s => {
@@ -1822,6 +1817,7 @@ function render() {
         <button class="sort-toggle" data-action="toggle-sort">${state.sortAsc ? '\u2191 ms-1 first' : '\u2193 latest first'}</button>
       </div>
       ${filtered.map((ms, i) => renderMilestoneCard(ms, i)).join('')}
+      `}
     </section>
     `) : ''}
 
@@ -2179,91 +2175,175 @@ const GRAPH_STATUS_STROKES = {
   observing: '#a78bfa',
 };
 
+// Build hash → beacon entry map from all milestone entries
+function buildHashEntryMap(project) {
+  const map = {};
+  function scan(entries) {
+    for (const e of entries) {
+      if (e.type === 'commit') {
+        const h = (e.meta || {}).hash || '';
+        if (h) map[h] = { id: e.id || '', description: e.description || '', hash: h };
+      }
+      if (e.entries) scan(e.entries);
+    }
+  }
+  for (const ms of project.milestones || []) scan(ms.entries || []);
+  return map;
+}
+
+function lookupEntry(hashMap, shortHash) {
+  if (!shortHash) return null;
+  if (hashMap[shortHash]) return hashMap[shortHash];
+  for (const [k, v] of Object.entries(hashMap)) {
+    if (k.startsWith(shortHash) || shortHash.startsWith(k)) return v;
+  }
+  return null;
+}
+
 function renderReleasesSection() {
   const p = state.project;
-  const deployments = (p?.deployments || []).slice().reverse();
+  const allDeps = p?.deployments || [];
   const releases = {};
   for (const r of (p?.releases || [])) releases[r.id] = r;
 
   const header = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
     <span style="font-size:0.75rem;color:var(--text-dim);letter-spacing:0.08em;text-transform:uppercase;">Releases</span>
-    ${deployments.length > 0 ? `<button class="sort-toggle" data-action="toggle-release-graph" style="margin-left:auto;font-size:0.7rem;">${state.showReleaseGraph ? '← list' : 'Graph →'}</button>` : ''}
+    ${allDeps.length > 0 ? `<button class="sort-toggle" data-action="toggle-release-graph" style="margin-left:auto;font-size:0.7rem;">${state.showReleaseGraph ? '← list' : 'Graph →'}</button>` : ''}
   </div>`;
 
   if (state.showReleaseGraph) return renderReleaseGraphSection(header);
 
-  if (deployments.length === 0) {
+  if (allDeps.length === 0) {
     return `<section class="retro-section fade-in">${header}<div class="retro-empty">No deployments recorded yet.<br><span style="font-size:0.75rem;color:var(--text-dim)">Run <code>beacon deploy record</code> after each deploy.</span></div></section>`;
   }
 
+  const hashMap = buildHashEntryMap(p);
   const msTitle = id => p?.milestones?.find(m => m.id === id)?.title || id;
 
-  function fmtDeployDate(iso) {
-    if (!iso) return '';
-    // Show YYYY-MM-DD HH:MM
-    return iso.slice(0, 16).replace('T', ' ');
+  // Build major → [minors] mapping
+  const majorToMinors = {};
+  for (const d of allDeps) if (d.type === 'major') majorToMinors[d.id] = [];
+  const assignedMinors = new Set();
+  for (const d of allDeps) {
+    if (d.type === 'minor' && d.links_to?.length) {
+      const majorId = d.links_to[0];
+      if (majorToMinors[majorId]) { majorToMinors[majorId].push(d); assignedMinors.add(d.id); }
+    }
   }
 
-  function renderCommitBreakdown(d) {
+  // Group majors by release (newest first)
+  const releaseGroups = [];
+  const releasedMajorIds = new Set();
+  for (const r of Object.values(releases)) {
+    const majors = (r.deploy_ids || [])
+      .map(id => allDeps.find(d => d.id === id && d.type === 'major'))
+      .filter(Boolean)
+      .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    if (majors.length) {
+      releaseGroups.push({ release: r, majors });
+      for (const m of majors) releasedMajorIds.add(m.id);
+    }
+  }
+  releaseGroups.sort((a, b) => (b.majors[0]?.date || '').localeCompare(a.majors[0]?.date || ''));
+
+  const ungroupedMajors = allDeps
+    .filter(d => d.type === 'major' && !releasedMajorIds.has(d.id))
+    .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+
+  function renderDeployDetail(d) {
     const mcMap = d.milestone_commits;
-    if (!mcMap || Object.keys(mcMap).length === 0) {
-      // Legacy: just show milestone badges
-      const badges = (d.milestones || []).map(id =>
-        `<span class="release-ms-badge">${esc(id)}</span>`
-      ).join('');
-      return badges ? `<div class="release-ms-list">${badges}</div>` : '';
+    if (!mcMap || !Object.keys(mcMap).length) {
+      const badges = (d.milestones || []).map(id => `<span class="release-ms-badge">${esc(id)}</span>`).join('');
+      return badges ? `<div class="deploy-ms-badges">${badges}</div>` : '';
     }
     const newlyDone = new Set(d.newly_completed_ms || []);
-    let html = '<div class="release-commit-breakdown">';
-    for (const [msId, commits] of Object.entries(mcMap)) {
+    // Sort: completions first, then patches
+    const sorted = Object.entries(mcMap).sort(([a], [b]) =>
+      (newlyDone.has(b) ? 1 : 0) - (newlyDone.has(a) ? 1 : 0)
+    );
+    let html = '<div class="deploy-detail">';
+    for (const [msId, hashes] of sorted) {
       const isCompletion = newlyDone.has(msId);
-      const labelClass = isCompletion ? 'release-commit-label-completion' : 'release-commit-label-patch';
-      const labelText = isCompletion ? 'completion' : 'patch';
-      const title = msTitle(msId);
-      const hashes = commits.map(c => `<code class="hash-badge">${esc(c.slice(0,7))}</code>`).join(' ');
-      html += `<div class="release-ms-row">
-        <span class="release-ms-id">${esc(msId)}</span>
-        <span class="${labelClass}">${labelText}</span>
-        <span style="color:var(--text-dim);font-size:0.68rem;">${esc(title)}</span>
-        <span style="margin-left:4px;">${hashes}</span>
-      </div>`;
+      const blockClass = isCompletion ? 'completion' : 'patch';
+      const typeLabel = isCompletion ? 'MS release' : 'MS patch';
+      html += `<div class="deploy-ms-block ${blockClass}">
+        <div class="deploy-ms-block-header">
+          <span class="deploy-ms-type-label">${typeLabel}</span>
+          <span class="deploy-ms-block-id">${esc(msId)}</span>
+          <span class="deploy-ms-block-title">${esc(msTitle(msId))}</span>
+        </div>
+        <div class="deploy-commit-list">`;
+      for (const hash of hashes) {
+        const entry = lookupEntry(hashMap, hash);
+        html += `<div class="deploy-commit-row">
+          <span class="deploy-commit-label">commit</span>
+          <span class="deploy-commit-eid">${esc(entry?.id || '')}</span>
+          <span class="deploy-commit-desc">${esc(entry?.description || hash)}</span>
+          <code class="deploy-commit-hash">${esc(hash.slice(0, 7))}</code>
+        </div>`;
+      }
+      html += `</div></div>`;
     }
     const unassigned = d.unassigned_commits || [];
-    if (unassigned.length > 0) {
-      const hashes = unassigned.map(c => `<code class="hash-badge">${esc(c.slice(0,7))}</code>`).join(' ');
-      html += `<div class="release-ms-row">
-        <span class="release-ms-id" style="color:var(--text-dim)">—</span>
-        <span class="release-commit-label-untracked">untracked</span>
-        <span style="margin-left:4px;">${hashes}</span>
-      </div>`;
+    if (unassigned.length) {
+      html += `<div class="deploy-ms-block untracked">
+        <div class="deploy-ms-block-header"><span class="deploy-ms-type-label">untracked</span></div>
+        <div class="deploy-commit-list">`;
+      for (const hash of unassigned) {
+        html += `<div class="deploy-commit-row">
+          <span class="deploy-commit-label">commit</span>
+          <code class="deploy-commit-hash">${esc(hash.slice(0, 7))}</code>
+        </div>`;
+      }
+      html += `</div></div>`;
     }
-    html += '</div>';
+    return html + '</div>';
+  }
+
+  function renderDeployCard(d) {
+    const isMajor = d.type === 'major';
+    const isExpanded = state.expandedDeployId === d.id;
+    const dot = `<span class="deploy-type-dot ${isMajor ? 'major' : 'minor'}">${isMajor ? '◉' : '○'}</span>`;
+    const dateStr = (d.date || '').slice(0, 16).replace('T', ' ');
+    let html = `<div class="deploy-card">
+      <div class="deploy-card-header" data-action="expand-deploy" data-deploy-id="${esc(d.id)}">
+        ${dot}
+        <span class="deploy-id">${esc(d.id)}</span>
+        <span class="deploy-datetime">${esc(dateStr)}</span>
+        <span class="deploy-env-badge">${esc(d.environment || 'prod')}</span>
+        <span class="deploy-expand-arrow">${isExpanded ? '▲' : '▼'}</span>
+      </div>
+      <div class="deploy-desc">${esc(d.description || '')}</div>`;
+    if (isExpanded) {
+      html += renderDeployDetail(d);
+    } else {
+      const badges = (d.milestones || []).map(id => `<span class="release-ms-badge">${esc(id)}</span>`).join('');
+      if (badges) html += `<div class="deploy-ms-badges">${badges}</div>`;
+    }
+    return html + `</div>`;
+  }
+
+  function renderMajorWithMinors(major) {
+    const minors = (majorToMinors[major.id] || []).slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    let html = renderDeployCard(major);
+    if (minors.length) {
+      html += `<div class="deploy-minor-group">`;
+      for (const minor of minors) html += renderDeployCard(minor);
+      html += `</div>`;
+    }
     return html;
   }
 
-  let html = `<section class="retro-section fade-in">`;
-  for (const d of deployments) {
-    const isMajor = d.type === 'major';
-    const rel = releases[d.linked_release];
-    const semver = rel?.semver ? `<span class="release-semver">${esc(rel.semver)}</span>` : '';
-    const icon = isMajor ? '◉' : '○';
-    const indent = isMajor ? '' : 'margin-left:16px;border-left:2px solid var(--border-subtle);padding-left:10px;';
-    html += `
-      <div class="release-item ${isMajor ? 'release-major' : 'release-minor'}" style="${indent}">
-        <div class="release-item-header">
-          <span class="release-icon">${icon}</span>
-          <span class="release-id">${esc(d.id)}</span>
-          ${semver}
-          <span class="release-date">${fmtDeployDate(d.date)}</span>
-          <span class="release-env">${esc(d.environment || 'prod')}</span>
-        </div>
-        <div class="release-desc">${esc(d.description || '')}</div>
-        ${renderCommitBreakdown(d)}
-        ${d.links_to?.length ? `<div class="release-links">patches: ${d.links_to.map(l => `<span class="release-id">${esc(l)}</span>`).join(', ')}</div>` : ''}
-      </div>`;
+  let html = `<section class="retro-section fade-in">${header}<div>`;
+
+  for (const { release, majors } of releaseGroups) {
+    const semver = release.semver ? `<span class="release-group-semver">${esc(release.semver)}</span>` : '';
+    html += `<div class="release-group-header"><span>${esc(release.id)}</span>${semver}</div>`;
+    for (const major of majors) html += renderMajorWithMinors(major);
   }
-  html += `</section>`;
-  return html;
+  for (const major of ungroupedMajors) html += renderMajorWithMinors(major);
+
+  return html + `</div></section>`;
 }
 
 function renderReleaseGraphSection(header) {
@@ -2856,15 +2936,15 @@ async function handleAction(e) {
     case 'toggle-release-graph': state.showReleaseGraph = !state.showReleaseGraph; render(); break;
     case 'archive-project': await archiveProject(true); break;
     case 'unarchive-project': await archiveProject(false); break;
-    case 'toggle-search':
-      state.searchQuery = state.searchQuery === null ? '' : null;
+    case 'expand-deploy': {
+      const dId = el.dataset.deployId;
+      state.expandedDeployId = state.expandedDeployId === dId ? null : dId;
       render();
-      if (state.searchQuery !== null) setTimeout(() => document.getElementById('search-input')?.focus(), 50);
       break;
-    case 'clear-search': state.searchQuery = ''; render(); document.getElementById('search-input')?.focus(); break;
+    }
     case 'search-goto': {
       const msId = el.dataset.msId;
-      state.searchQuery = null;
+      state.searchQuery = '';
       state.activeTab = 'dashboard';
       state.expanded.add(msId);
       render();
@@ -2918,8 +2998,9 @@ document.addEventListener('input', e => {
   }
 });
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && state.searchQuery !== null) {
-    state.searchQuery = null; render();
+  if (e.key === 'Escape' && state.searchQuery) {
+    state.searchQuery = ''; render();
+    document.getElementById('search-input')?.focus();
   }
 });
 
