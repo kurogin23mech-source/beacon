@@ -2887,7 +2887,9 @@ function _tryReconnect() {
   connectWebSocket(state.projectId);
 }
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') _tryReconnect();
+  if (document.visibilityState !== 'visible' || !state.projectId) return;
+  // On tab focus, skip only if already OPEN — a CONNECTING ws may be stale from background throttling
+  if (!ws || ws.readyState !== WebSocket.OPEN) connectWebSocket(state.projectId);
 });
 window.addEventListener('focus', _tryReconnect);
 
