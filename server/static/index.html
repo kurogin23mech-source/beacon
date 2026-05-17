@@ -813,6 +813,11 @@ body::after {
   content: '\25B6 ';
 }
 
+.entry-type-commit.entry-toggle .entry-desc::before,
+.entry-type-commit.entry-toggle.collapsed .entry-desc::before {
+  content: none;
+}
+
 .entry-child-count {
   font-size: 0.65rem;
   color: var(--accent);
