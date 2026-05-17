@@ -991,7 +991,10 @@ _static_dir = Path(__file__).parent / "static"
 if _static_dir.exists():
     @app.get("/")
     def serve_index():
-        return FileResponse(_static_dir / "index.html")
+        return FileResponse(
+            _static_dir / "index.html",
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
 
     @app.get("/privacy")
     def privacy_policy():
