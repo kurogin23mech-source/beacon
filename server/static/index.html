@@ -812,14 +812,14 @@ body::after {
   user-select: none;
 }
 
-.entry-toggle .entry-desc::before {
+.entry-toggle > .entry-desc::before {
   content: '\25BC ';
   font-size: 0.6rem;
   color: var(--text-dim);
   display: inline-block;
 }
 
-.entry-toggle.collapsed .entry-desc::before {
+.entry-toggle.collapsed > .entry-desc::before {
   content: '\25B6 ';
 }
 

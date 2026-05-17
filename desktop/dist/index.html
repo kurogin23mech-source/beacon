@@ -121,8 +121,8 @@ body::after { content: ''; position: fixed; inset: 0; background: repeating-line
 .entry-date { font-size: 0.7rem; color: var(--text-dim); line-height: 1.8; white-space: nowrap; }
 .entry-hash { font-size: 0.7rem; color: var(--accent-dim); margin-left: 4px; }
 .entry-toggle { cursor: pointer; user-select: none; }
-.entry-toggle .entry-desc::before { content: '\25BC '; font-size: 0.6rem; color: var(--text-dim); }
-.entry-toggle.collapsed .entry-desc::before { content: '\25B6 '; }
+.entry-toggle > .entry-desc::before { content: '\25BC '; font-size: 0.6rem; color: var(--text-dim); }
+.entry-toggle.collapsed > .entry-desc::before { content: '\25B6 '; }
 .entry-type-commit.entry-toggle .entry-desc::before,
 .entry-type-commit.entry-toggle.collapsed .entry-desc::before { content: none; }
 .entry-child-count { font-size: 0.65rem; color: var(--accent); margin-left: 6px; padding: 1px 5px; background: var(--accent-dim); border: 1px solid var(--accent-dim); border-radius: 3px; }
