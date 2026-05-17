@@ -700,12 +700,16 @@ async function renderMenu() {
       </div>` : ''}
       ${cloudProjects.length > 0 ? `<div class="menu-section">
         <div class="menu-section-title">Cloud Projects</div>
-        ${cloudProjects.map(p => `
+        ${cloudProjects.filter(p=>!p.archived).map(p => `
           <button class="menu-item ${('cloud:'+p.project_id)===currentPath?'current':''}" data-action="menu-select-cloud-project" data-project-id="${esc(p.project_id)}">
             ${esc(p.name)}
             <div class="menu-item-sub">${esc(p.project_id)}</div>
           </button>
         `).join('')}
+      </div>` : ''}
+      ${state.cloudProjectId ? `<div class="menu-section">
+        <div class="menu-section-title">Project</div>
+        <button class="menu-item" style="color:var(--text-dim)" data-action="archive-cloud-project">📦 Archive project</button>
       </div>` : ''}
     </div>`;
   root.querySelectorAll('[data-action]').forEach(el => el.addEventListener('click', handleAction));
@@ -825,6 +829,21 @@ async function handleAction(e) {
       renderProjectSelector();
       break;
     case 'export-json': await exportProject(); break;
+    case 'archive-cloud-project': await archiveCloudProject(); break;
+  }
+}
+
+async function archiveCloudProject() {
+  if (!state.cloudProjectId) return;
+  if (!confirm(`Archive this project? It will be hidden from the project list.`)) return;
+  try {
+    await invoke('cloud_archive_project');
+    closeMenu();
+    state.cloudProjectId = null;
+    state.project = null;
+    renderProjectSelector();
+  } catch (e) {
+    alert(`Failed to archive: ${e}`);
   }
 }
 

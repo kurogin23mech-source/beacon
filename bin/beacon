@@ -1521,6 +1521,14 @@ case "${1:-}" in
             *)       echo "Usage: beacon skill install" ;;
         esac
         ;;
+    project)
+        ensure_project
+        case "${2:-}" in
+            archive)   python3 "$COMMANDS_PY" project_archive ;;
+            unarchive) python3 "$COMMANDS_PY" project_unarchive ;;
+            *) echo "Usage: beacon project archive|unarchive" ;;
+        esac
+        ;;
     search)
         ensure_project
         local query="" ms_id="" json_flag=""

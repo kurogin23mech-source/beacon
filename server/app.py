@@ -296,9 +296,31 @@ class MemberInvite(BaseModel):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/projects")
-def list_projects(user: dict = Depends(require_auth)):
+def list_projects(include_archived: bool = False, user: dict = Depends(require_auth)):
     """List projects owned by or shared with the current user."""
-    return db.list_projects(user_id=user.get("sub"))
+    return db.list_projects(user_id=user.get("sub"), include_archived=include_archived)
+
+
+@app.post("/api/projects/{project_id}/archive")
+def archive_project(project_id: str, user: dict = Depends(require_auth)):
+    """Archive a project (soft delete — hidden from default listing)."""
+    data = _load(project_id, user)
+    if _get_role(data, user) != "owner":
+        raise HTTPException(status_code=403, detail="Only the project owner can archive")
+    data["archived"] = True
+    _save(project_id, data)
+    return {"status": "archived", "project_id": project_id}
+
+
+@app.post("/api/projects/{project_id}/unarchive")
+def unarchive_project(project_id: str, user: dict = Depends(require_auth)):
+    """Restore an archived project."""
+    data = _load(project_id, user)
+    if _get_role(data, user) != "owner":
+        raise HTTPException(status_code=403, detail="Only the project owner can unarchive")
+    data["archived"] = False
+    _save(project_id, data)
+    return {"status": "unarchived", "project_id": project_id}
 
 
 @app.post("/api/projects/{project_id}")

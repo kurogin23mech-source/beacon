@@ -2307,6 +2307,12 @@ async function renderMenu() {
         <div id="menu-members"><div class="menu-user" style="color:var(--text-dim)">Loading...</div></div>
       </div>
 
+      ${state.projectId ? `
+      <div class="menu-section">
+        <div class="menu-section-title">Project</div>
+        <div id="menu-project-actions"><div class="menu-user" style="color:var(--text-dim)">Loading...</div></div>
+      </div>` : ''}
+
       <div class="menu-section">
         <div class="menu-section-title">Account</div>
         ${state.auth.email ? `<div class="menu-user">${esc(state.auth.email)}</div>` : ''}
@@ -2320,6 +2326,32 @@ async function renderMenu() {
     el.addEventListener('click', handleAction);
   });
   loadMembers();
+  if (state.projectId) loadProjectActions();
+}
+
+async function loadProjectActions() {
+  const el = document.getElementById('menu-project-actions');
+  if (!el) return;
+  try {
+    const data = await api(`/api/projects/${state.projectId}`);
+    const isOwner = _get_role_client(data);
+    if (!isOwner) { el.innerHTML = ''; return; }
+    const archived = data.archived;
+    el.innerHTML = `
+      <button class="menu-item" style="color:var(--text-dim)" data-action="${archived ? 'unarchive-project' : 'archive-project'}">
+        ${archived ? '📂 Unarchive project' : '📦 Archive project'}
+      </button>
+    `;
+    el.querySelectorAll('[data-action]').forEach(e => e.addEventListener('click', handleAction));
+  } catch (e) { el.innerHTML = ''; }
+}
+
+function _get_role_client(data) {
+  const uid = state.auth.email;
+  if (!uid) return false;
+  // Compare by email (owner field stores sub in API but members check is server-side)
+  // We just check if current user is owner via members API
+  return true; // server enforces owner check, show button for all and let server reject
 }
 
 async function loadMembers() {
@@ -2403,6 +2435,26 @@ async function changeMemberRole(email, newRole) {
     });
     loadMembers();
   } catch (e) { alert(e.message || 'Error'); }
+}
+
+async function archiveProject(archive) {
+  if (!state.projectId) return;
+  const action = archive ? 'archive' : 'unarchive';
+  if (!confirm(`${archive ? 'Archive' : 'Unarchive'} project "${state.project?.name}"? ${archive ? 'It will be hidden from the project list.' : 'It will reappear in the project list.'}`)) return;
+  try {
+    await api(`/api/projects/${state.projectId}/${action}`, { method: 'POST' });
+    closeMenu();
+    state.projects = [];
+    if (archive) {
+      // Navigate away from archived project
+      state.projectId = null;
+      state.project = null;
+      await loadProjects();
+      render();
+    }
+  } catch (e) {
+    alert(`Failed to ${action} project: ${e.message}`);
+  }
 }
 
 async function exportProject() {
@@ -2558,6 +2610,8 @@ async function handleAction(e) {
       setTimeout(() => { el.textContent = 'Copy link'; }, 1500);
       break;
     }
+    case 'archive-project': await archiveProject(true); break;
+    case 'unarchive-project': await archiveProject(false); break;
     case 'toggle-search':
       state.searchQuery = state.searchQuery === null ? '' : null;
       render();

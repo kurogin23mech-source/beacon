@@ -274,6 +274,39 @@ fn cloud_get_retro(state: State<AppState>, week: String) -> Result<String, Strin
     cloud_get(&format!("/api/projects/{}/retros/{}", pid, week))
 }
 
+fn cloud_post(path: &str) -> Result<String, String> {
+    let token = load_auth_token()
+        .ok_or("Not authenticated. Run: beacon auth login")?;
+    let url = format!("{}{}", DEFAULT_API_URL, path);
+    match ureq::post(&url).set("Authorization", &format!("Bearer {}", token)).set("Content-Length", "0").call() {
+        Ok(resp) => resp.into_string().map_err(|e| format!("Read error: {}", e)),
+        Err(ureq::Error::Status(401, _)) => {
+            let new_token = refresh_id_token()
+                .ok_or("Token expired and refresh failed. Run: beacon auth login")?;
+            ureq::post(&url)
+                .set("Authorization", &format!("Bearer {}", new_token))
+                .set("Content-Length", "0")
+                .call()
+                .map_err(|e| format!("API error: {}", e))?
+                .into_string()
+                .map_err(|e| format!("Read error: {}", e))
+        }
+        Err(e) => Err(format!("API error: {}", e)),
+    }
+}
+
+#[tauri::command]
+fn cloud_archive_project(state: State<AppState>) -> Result<String, String> {
+    let pid = state.cloud_project_id.lock().unwrap().clone().ok_or("No cloud project selected")?;
+    cloud_post(&format!("/api/projects/{}/archive", pid))
+}
+
+#[tauri::command]
+fn cloud_unarchive_project(state: State<AppState>) -> Result<String, String> {
+    let pid = state.cloud_project_id.lock().unwrap().clone().ok_or("No cloud project selected")?;
+    cloud_post(&format!("/api/projects/{}/unarchive", pid))
+}
+
 #[tauri::command]
 fn is_authenticated(_state: State<AppState>) -> bool {
     load_auth_token().is_some()
@@ -516,6 +549,8 @@ pub fn run() {
             cloud_list_retros,
             cloud_get_retro,
             cloud_diagnose,
+            cloud_archive_project,
+            cloud_unarchive_project,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

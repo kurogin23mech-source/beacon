@@ -2042,6 +2042,28 @@ def cmd_skill_install():
         print("No skills found to install.")
 
 
+def cmd_project_archive():
+    """Archive the current project (sets archived: true in project.json)."""
+    data = load_project()
+    if data.get("archived"):
+        print("Project is already archived.")
+        return
+    data["archived"] = True
+    save_project(data)
+    print(f"Archived: [{data.get('name', '')}]")
+
+
+def cmd_project_unarchive():
+    """Unarchive the current project."""
+    data = load_project()
+    if not data.get("archived"):
+        print("Project is not archived.")
+        return
+    data["archived"] = False
+    save_project(data)
+    print(f"Unarchived: [{data.get('name', '')}]")
+
+
 def cmd_search():
     """Full-text search across milestones, tasks, commits, PRs, and saves."""
     query = os.environ.get("BEACON_QUERY", "").lower().strip()
@@ -2203,6 +2225,8 @@ if __name__ == "__main__":
         "auth_status": lambda: __import__("auth").status(),
         "skill_install": cmd_skill_install,
         "search": cmd_search,
+        "project_archive": cmd_project_archive,
+        "project_unarchive": cmd_project_unarchive,
         "pr_add": cmd_pr_add,
         "pr_close": cmd_pr_close,
         "pr_approve": cmd_pr_approve,

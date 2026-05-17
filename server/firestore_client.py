@@ -36,13 +36,15 @@ def save_project(project_id: str, data: dict) -> None:
     get_db().collection(COLLECTION).document(project_id).set(data)
 
 
-def list_projects(user_id: str | None = None) -> list[dict]:
+def list_projects(user_id: str | None = None, include_archived: bool = False) -> list[dict]:
     """List projects. If user_id is given, only return projects owned by or shared with that user."""
     query = get_db().collection(COLLECTION)
     docs = query.stream()
     result = []
     for doc in docs:
         data = doc.to_dict()
+        if not include_archived and data.get("archived"):
+            continue
         if user_id:
             owner = data.get("owner")
             # Projects without owner are visible to all (migration period)
@@ -54,6 +56,7 @@ def list_projects(user_id: str | None = None) -> list[dict]:
             "project_id": doc.id,
             "name": data.get("name", ""),
             "objective": data.get("objective", ""),
+            "archived": data.get("archived", False),
         })
     return result
 
