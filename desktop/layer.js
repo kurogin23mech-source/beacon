@@ -266,7 +266,7 @@ function render() {
       </div>
       <div class="footer-right" style="display:flex;align-items:center;gap:12px;">
         ${state.lastUpdate ? formatTime(state.lastUpdate) : ''}
-        ${cloudMode && state.cloudProjectId ? `<button class="sort-toggle" data-action="archive-cloud-project" style="font-size:0.65rem;color:var(--text-dim);">Archive</button>` : ''}
+        ${cloudMode ? `<button class="sort-toggle" data-action="archive-cloud-project" style="font-size:0.65rem;color:var(--text-dim);">Archive</button>` : ''}
         <button class="sort-toggle" data-action="export-json" style="font-size:0.65rem;">Export JSON</button>
       </div>
     </footer>
@@ -442,7 +442,7 @@ let _scrollEndTimer = null;
 window.addEventListener('scroll', () => {
   _userScrolling = true;
   clearTimeout(_scrollEndTimer);
-  _scrollEndTimer = setTimeout(() => { _userScrolling = false; }, 200);
+  _scrollEndTimer = setTimeout(() => { _userScrolling = false; }, 500);
 }, { passive: true });
 
 // ---- Reconnect (Tauri focus events) ----

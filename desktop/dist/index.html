@@ -1656,7 +1656,7 @@ function render() {
       </div>
       <div class="footer-right" style="display:flex;align-items:center;gap:12px;">
         ${state.lastUpdate ? formatTime(state.lastUpdate) : ''}
-        ${cloudMode && state.cloudProjectId ? `<button class="sort-toggle" data-action="archive-cloud-project" style="font-size:0.65rem;color:var(--text-dim);">Archive</button>` : ''}
+        ${cloudMode ? `<button class="sort-toggle" data-action="archive-cloud-project" style="font-size:0.65rem;color:var(--text-dim);">Archive</button>` : ''}
         <button class="sort-toggle" data-action="export-json" style="font-size:0.65rem;">Export JSON</button>
       </div>
     </footer>
@@ -1832,7 +1832,7 @@ let _scrollEndTimer = null;
 window.addEventListener('scroll', () => {
   _userScrolling = true;
   clearTimeout(_scrollEndTimer);
-  _scrollEndTimer = setTimeout(() => { _userScrolling = false; }, 200);
+  _scrollEndTimer = setTimeout(() => { _userScrolling = false; }, 500);
 }, { passive: true });
 
 // ---- Reconnect (Tauri focus events) ----
@@ -2639,7 +2639,8 @@ function renderMsListArea() {
       <button class="sort-toggle" data-action="toggle-sort">${state.sortAsc ? '↑ ms-1 first' : '↓ latest first'}</button>
     </div>
     ${filtered.map((ms, i) => renderMilestoneCard(ms, i)).join('')}`;
-  bindEvents();
+  // Bind only within this container — avoids stacking duplicate handlers on the rest of the page
+  container.querySelectorAll('[data-action]').forEach(el => el.addEventListener('click', handleAction));
 }
 
 document.addEventListener('input', e => {

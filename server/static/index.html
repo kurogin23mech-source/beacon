@@ -2480,7 +2480,8 @@ function renderMsListArea() {
       <button class="sort-toggle" data-action="toggle-sort">${state.sortAsc ? '↑ ms-1 first' : '↓ latest first'}</button>
     </div>
     ${filtered.map((ms, i) => renderMilestoneCard(ms, i)).join('')}`;
-  bindEvents();
+  // Bind only within this container — avoids stacking duplicate handlers on the rest of the page
+  container.querySelectorAll('[data-action]').forEach(el => el.addEventListener('click', handleAction));
 }
 
 document.addEventListener('input', e => {
