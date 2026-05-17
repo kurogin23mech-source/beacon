@@ -208,6 +208,7 @@ body::after {
 .deploy-ms-badges { margin: 4px 0 0 18px; display: flex; flex-wrap: wrap; gap: 4px; }
 .release-ms-badge { font-family: var(--font-mono); font-size: 0.65rem; padding: 1px 6px; border: 1px solid var(--border-subtle); border-radius: 2px; color: var(--text-dim); }
 .release-ms-badge-completion { font-family: var(--font-mono); font-size: 0.65rem; padding: 1px 6px; border: 1px solid var(--accent-dim); border-radius: 2px; color: var(--accent); background: var(--accent-glow); }
+.release-ms-badge-patch { font-family: var(--font-mono); font-size: 0.65rem; padding: 1px 6px; border: 1px solid #9a7000; border-radius: 2px; color: #c89000; background: rgba(180,120,0,0.07); }
 .deploy-minor-group { margin-left: 20px; padding-left: 12px; border-left: 2px solid var(--border-subtle); }
 
 /* Deploy expanded detail */
@@ -2286,8 +2287,8 @@ function renderReleasesSection() {
     const isMajor = d.type === 'major';
     const expanded = state.expandedDeployId === d.id;
     const dot = `<span class="deploy-type-dot ${isMajor?'major':'minor'}">${isMajor?'◉':'○'}</span>`;
-    let h = `<div class="deploy-card ${isMajor?'is-major':'is-minor'}">
-      <div class="deploy-card-header" data-action="expand-deploy" data-deploy-id="${esc(d.id)}">
+    let h = `<div class="deploy-card ${isMajor?'is-major':'is-minor'}" data-action="expand-deploy" data-deploy-id="${esc(d.id)}" style="cursor:pointer;">
+      <div class="deploy-card-header">
         ${dot}
         <span class="deploy-id">${esc(d.id)}</span>
         <span class="deploy-env-badge">${esc(d.environment||'prod')}</span>
@@ -2300,8 +2301,9 @@ function renderReleasesSection() {
     } else {
       const newlyDone = new Set(d.newly_completed_ms || []);
       const badges = (d.milestones||[]).map(id => {
-        const cls = (d.type !== 'minor' && newlyDone.has(id))
-          ? 'release-ms-badge-completion' : 'release-ms-badge';
+        const isCompletion = d.type !== 'minor' && newlyDone.has(id);
+        const isPatch = !isCompletion;
+        const cls = isCompletion ? 'release-ms-badge-completion' : 'release-ms-badge-patch';
         return `<span class="${cls}">${esc(id)}</span>`;
       }).join('');
       if (badges) h += `<div class="deploy-ms-badges">${badges}</div>`;
