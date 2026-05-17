@@ -468,7 +468,7 @@ def _find_matching_task(entries: list, commit_text: str):
 
     candidates = []
     for entry in entries:
-        if entry.get("type") != "task" or entry.get("status") == "done":
+        if entry.get("type") != "task" or entry.get("status") in ("done", "cancelled"):
             continue
         task_text = entry.get("description", "") + " " + entry.get("detail", "")
         task_tokens = _tokenize(task_text)
@@ -480,7 +480,7 @@ def _find_matching_task(entries: list, commit_text: str):
             candidates.append((score, overlap, entry))
 
     if not candidates:
-        active_tasks = [e for e in entries if e.get("type") == "task" and e.get("status") != "done"]
+        active_tasks = [e for e in entries if e.get("type") == "task" and e.get("status") not in ("done", "cancelled")]
         if len(active_tasks) == 1:
             return active_tasks[0]
         return None
@@ -878,7 +878,7 @@ def count_task_status(entries: list) -> tuple[int, int]:
     for e in entries:
         if e.get("type") in ("task", "commit", "pr"):
             total += 1
-            if e.get("status") == "done":
+            if e.get("status") in ("done", "cancelled"):
                 done += 1
         t, d = count_task_status(e.get("entries", []))
         total += t
