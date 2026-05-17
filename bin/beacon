@@ -1526,9 +1526,11 @@ case "${1:-}" in
         case "${2:-}" in
             record)
                 shift 2
-                revision="" semver="" desc="" hash="" date="" before=""
+                revision="" semver="" desc="" hash="" date="" before="" mode=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
+                        --prepare)       mode="prepare";    shift ;;
+                        --finalize)      mode="finalize";   shift ;;
                         --revision)      revision="${2:-}"; shift 2 ;;
                         --semver)        semver="${2:-}";   shift 2 ;;
                         --desc)          desc="${2:-}";     shift 2 ;;
@@ -1538,7 +1540,7 @@ case "${1:-}" in
                         *) shift ;;
                     esac
                 done
-                BEACON_REVISION="$revision" BEACON_SEMVER="$semver" \
+                BEACON_MODE="$mode" BEACON_REVISION="$revision" BEACON_SEMVER="$semver" \
                     BEACON_DESCRIPTION="$desc" BEACON_HASH="$hash" \
                     BEACON_DATE="$date" BEACON_INSERT_BEFORE="$before" \
                     python3 "$COMMANDS_PY" deploy_record

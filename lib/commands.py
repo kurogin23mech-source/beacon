@@ -2085,6 +2085,7 @@ def _next_release_id(data: dict, date_str: str) -> str:
 def cmd_deploy_record():
     """Record a deployment entry (major or minor) based on recent commits."""
     import subprocess as _sp
+    mode = os.environ.get("BEACON_MODE", "")          # "prepare" or "finalize" or ""
     revision = os.environ.get("BEACON_REVISION", "")
     semver = os.environ.get("BEACON_SEMVER", "")
     description = os.environ.get("BEACON_DESCRIPTION", "")
@@ -2182,7 +2183,34 @@ def cmd_deploy_record():
     deploy_type = "major" if newly_completed else "minor"
     affected_ms = sorted(newly_completed if newly_completed else patch_ms)
 
-    # Auto-generate description if not provided
+    # --- Prepare mode: return context JSON for AI description generation ---
+    if mode == "prepare":
+        def _ms_context(ms_id):
+            ms = next((m for m in data.get("milestones", []) if m["id"] == ms_id), {})
+            entries = []
+            def _collect(es):
+                for e in es:
+                    if e.get("type") == "commit" and len(entries) < 5:
+                        h = (e.get("meta") or {}).get("hash", "")
+                        if h and any(h.startswith(c) or c.startswith(h) for c in commit_hashes):
+                            entries.append({"id": e.get("id",""), "description": e.get("description",""), "hash": h})
+                    for child in e.get("entries", []):
+                        _collect([child])
+            _collect(ms.get("entries", []))
+            return {"id": ms_id, "title": ms.get("title", ms_id), "commit_entries": entries}
+
+        payload = {
+            "deploy_type": "major" if newly_completed else "minor",
+            "new_commits": new_commits[:20],
+            "newly_completed_ms": [_ms_context(mid) for mid in sorted(newly_completed)],
+            "patch_ms": [_ms_context(mid) for mid in sorted(patch_ms)],
+            "unassigned_commits": unassigned_commits,
+            "last_deploy": {"id": deployments[-1]["id"], "date": deployments[-1].get("date","")} if deployments else None,
+        }
+        print(json.dumps(payload, ensure_ascii=False))
+        return
+
+    # Auto-generate description (fallback if not AI-provided)
     if not description:
         ms_titles = []
         for ms in data.get("milestones", []):
