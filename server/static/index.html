@@ -1428,6 +1428,8 @@ let state = {
   menuOpen: false,
   // Search (null = hidden, '' = open with no query, string = query)
   searchQuery: null,
+  // Release graph
+  showReleaseGraph: false,
   auth: {
     token: localStorage.getItem('beacon_token'),
     email: localStorage.getItem('beacon_email'),
@@ -2176,8 +2178,15 @@ function renderReleasesSection() {
   const releases = {};
   for (const r of (p?.releases || [])) releases[r.id] = r;
 
+  const header = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+    <span style="font-size:0.75rem;color:var(--text-dim);letter-spacing:0.08em;text-transform:uppercase;">Releases</span>
+    ${deployments.length > 0 ? `<button class="sort-toggle" data-action="toggle-release-graph" style="margin-left:auto;font-size:0.7rem;">${state.showReleaseGraph ? '← list' : 'Graph →'}</button>` : ''}
+  </div>`;
+
+  if (state.showReleaseGraph) return renderReleaseGraphSection(header);
+
   if (deployments.length === 0) {
-    return `<section class="retro-section fade-in"><div class="retro-empty">No deployments recorded yet.<br><span style="font-size:0.75rem;color:var(--text-dim)">Run <code>beacon deploy record</code> after each deploy.</span></div></section>`;
+    return `<section class="retro-section fade-in">${header}<div class="retro-empty">No deployments recorded yet.<br><span style="font-size:0.75rem;color:var(--text-dim)">Run <code>beacon deploy record</code> after each deploy.</span></div></section>`;
   }
 
   const msTitle = id => p?.milestones?.find(m => m.id === id)?.title || id;
@@ -2208,6 +2217,113 @@ function renderReleasesSection() {
   }
   html += `</section>`;
   return html;
+}
+
+function renderReleaseGraphSection(header) {
+  const p = state.project;
+  const deps = (p?.deployments || []).slice(); // chronological order
+  const releases = {};
+  for (const r of (p?.releases || [])) releases[r.id] = r;
+
+  if (deps.length === 0) return `<section class="graph-section fade-in">${header}<div class="graph-empty">No deployments yet.</div></section>`;
+
+  const nodeW = 160, nodeH = 48, gapX = 50, gapY = 28, padX = 32, padY = 32;
+
+  // Separate major and minor
+  const majors = deps.filter(d => d.type === 'major');
+  const minors = deps.filter(d => d.type === 'minor');
+
+  // Layout: majors in top row (left=oldest, right=newest), minors in bottom row
+  const pos = {};
+  majors.forEach((d, i) => {
+    pos[d.id] = { x: padX + i * (nodeW + gapX), y: padY };
+  });
+
+  // Position each minor below its first linked major, or at end if unlinked
+  const minorRowUsed = {};
+  minors.forEach(d => {
+    const linkedId = (d.links_to || [])[0];
+    const anchor = linkedId && pos[linkedId] ? pos[linkedId].x : padX + majors.length * (nodeW + gapX);
+    let col = Math.round((anchor - padX) / (nodeW + gapX));
+    col = Math.max(0, col);
+    const row = minorRowUsed[col] || 0;
+    pos[d.id] = { x: padX + col * (nodeW + gapX), y: padY + nodeH + gapY + row * (nodeH + 12) };
+    minorRowUsed[col] = row + 1;
+  });
+
+  const allNodes = [...majors, ...minors];
+  const maxX = Math.max(...Object.values(pos).map(p => p.x)) + nodeW + padX;
+  const maxY = Math.max(...Object.values(pos).map(p => p.y)) + nodeH + padY;
+
+  // Edges: minor → linked majors
+  let edgeSvg = '';
+  for (const d of minors) {
+    for (const lid of (d.links_to || [])) {
+      const from = pos[d.id], to = pos[lid];
+      if (!from || !to) continue;
+      const x1 = from.x + nodeW / 2, y1 = from.y;
+      const x2 = to.x + nodeW / 2, y2 = to.y + nodeH;
+      edgeSvg += `<path class="graph-edge" d="M${x1},${y1} C${x1},${y1 - 20} ${x2},${y2 + 20} ${x2},${y2}" marker-end="url(#arrowhead-rel)" />`;
+    }
+  }
+
+  // Release grouping boxes
+  let relBoxSvg = '';
+  for (const rel of Object.values(releases)) {
+    const relDeps = (rel.deploy_ids || []).map(id => pos[id]).filter(Boolean);
+    if (relDeps.length === 0) continue;
+    const xs = relDeps.map(p => p.x), ys = relDeps.map(p => p.y);
+    const bx = Math.min(...xs) - 8, by = Math.min(...ys) - 20;
+    const bw = Math.max(...xs) - Math.min(...xs) + nodeW + 16;
+    const bh = Math.max(...ys) - Math.min(...ys) + nodeH + 28;
+    relBoxSvg += `<rect x="${bx}" y="${by}" width="${bw}" height="${bh}" rx="4" fill="none" stroke="var(--accent-dim)" stroke-dasharray="4 3" stroke-width="1.5" />
+      <text x="${bx + 6}" y="${by + 12}" fill="var(--accent)" font-size="10" font-family="var(--font-mono)">${esc(rel.semver || rel.id)}</text>`;
+  }
+
+  // Node rectangles
+  let nodeSvg = '';
+  for (const d of allNodes) {
+    const pp = pos[d.id];
+    if (!pp) continue;
+    const isMajor = d.type === 'major';
+    const fill = isMajor ? 'var(--bg-raised)' : 'var(--bg-surface)';
+    const stroke = isMajor ? 'var(--accent-dim)' : 'var(--border)';
+    const rel = releases[d.linked_release];
+    const semver = rel?.semver ? ` ${rel.semver}` : '';
+    const label = (d.id + semver).slice(0, 22);
+    const msStr = (d.milestones || []).slice(0, 3).join(' ') + ((d.milestones || []).length > 3 ? '…' : '');
+    nodeSvg += `
+      <g transform="translate(${pp.x},${pp.y})">
+        <rect width="${nodeW}" height="${nodeH}" fill="${fill}" stroke="${stroke}" rx="3" />
+        <text x="8" y="15" font-size="9" font-family="var(--font-mono)" fill="var(--text-dim)">${isMajor ? '◉' : '○'} ${esc(label)}</text>
+        <text x="8" y="30" font-size="9" font-family="var(--font-mono)" fill="var(--text-secondary)">${esc(d.date ? d.date.slice(0,10) : '')}</text>
+        <text x="8" y="43" font-size="8" font-family="var(--font-mono)" fill="var(--text-dim)">${esc(msStr)}</text>
+      </g>`;
+  }
+
+  // Row labels
+  const rowLabelSvg = majors.length > 0
+    ? `<text x="4" y="${padY + nodeH/2 + 4}" fill="var(--text-dim)" font-size="9" font-family="var(--font-mono)" text-anchor="start">major</text>
+       <text x="4" y="${padY + nodeH + gapY + nodeH/2 + 4}" fill="var(--text-dim)" font-size="9" font-family="var(--font-mono)" text-anchor="start">minor</text>`
+    : '';
+
+  return `
+    <section class="graph-section fade-in">
+      ${header}
+      <div class="graph-container">
+        <svg width="${maxX}" height="${maxY}" viewBox="0 0 ${maxX} ${maxY}" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <marker id="arrowhead-rel" markerWidth="6" markerHeight="5" refX="6" refY="2.5" orient="auto">
+              <polygon points="0 0, 6 2.5, 0 5" fill="var(--border)" />
+            </marker>
+          </defs>
+          ${relBoxSvg}
+          ${edgeSvg}
+          ${nodeSvg}
+          ${rowLabelSvg}
+        </svg>
+      </div>
+    </section>`;
 }
 
 function renderGraphSection() {
@@ -2690,6 +2806,7 @@ async function handleAction(e) {
       setTimeout(() => { el.textContent = 'Copy link'; }, 1500);
       break;
     }
+    case 'toggle-release-graph': state.showReleaseGraph = !state.showReleaseGraph; render(); break;
     case 'archive-project': await archiveProject(true); break;
     case 'unarchive-project': await archiveProject(false); break;
     case 'toggle-search':
