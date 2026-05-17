@@ -2088,26 +2088,45 @@ def cmd_deploy_record():
     revision = os.environ.get("BEACON_REVISION", "")
     semver = os.environ.get("BEACON_SEMVER", "")
     description = os.environ.get("BEACON_DESCRIPTION", "")
+    deploy_hash = os.environ.get("BEACON_HASH", "")   # override: specify deployed commit
+    deploy_date = os.environ.get("BEACON_DATE", "")   # override: specify deploy datetime
+    insert_before = os.environ.get("BEACON_INSERT_BEFORE", "")  # insert before this deploy-id
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     data = load_project()
-    now = core._now_iso()
+    now = deploy_date or core._now_iso()
     today = now[:10]
 
-    # Get previous deploy's commit hashes to find new commits since last deploy
-    deployments = data.get("deployments", [])
-    last_deploy_hash = deployments[-1]["git_hash"] if deployments else ""
+    # Resolve the target hash (short form)
+    if deploy_hash:
+        try:
+            deploy_hash = _sp.check_output(
+                ["git", "rev-parse", "--short", deploy_hash],
+                stderr=_sp.DEVNULL, text=True
+            ).strip()
+        except Exception:
+            pass
 
-    # Collect commits since last deploy
+    # For retroactive inserts, find the previous deploy in insertion order
+    deployments = data.get("deployments", [])
+    if insert_before:
+        idx = next((i for i, d in enumerate(deployments) if d["id"] == insert_before), len(deployments))
+        prev_hash = deployments[idx - 1]["git_hash"] if idx > 0 else ""
+        after_hash = deploy_hash or (deployments[idx]["git_hash"] if idx < len(deployments) else "HEAD")
+    else:
+        prev_hash = deployments[-1]["git_hash"] if deployments else ""
+        after_hash = deploy_hash or "HEAD"
+
+    # Collect commits in the range prev_hash..after_hash
     try:
-        if last_deploy_hash:
+        if prev_hash:
             log_out = _sp.check_output(
-                ["git", "log", f"{last_deploy_hash}..HEAD", "--format=%H %s"],
+                ["git", "log", f"{prev_hash}..{after_hash}", "--format=%H %s"],
                 stderr=_sp.DEVNULL, text=True
             ).strip()
         else:
             log_out = _sp.check_output(
-                ["git", "log", "--format=%H %s", "-50"],
+                ["git", "log", after_hash, "--format=%H %s", "-50"],
                 stderr=_sp.DEVNULL, text=True
             ).strip()
     except Exception:
@@ -2119,8 +2138,8 @@ def cmd_deploy_record():
             parts = line.split(" ", 1)
             new_commits.append({"hash": parts[0][:7], "message": parts[1] if len(parts) > 1 else ""})
 
-    head_hash = new_commits[0]["hash"] if new_commits else _sp.check_output(
-        ["git", "rev-parse", "--short", "HEAD"], text=True).strip()
+    head_hash = deploy_hash or (new_commits[0]["hash"] if new_commits else _sp.check_output(
+        ["git", "rev-parse", "--short", "HEAD"], text=True).strip())
 
     # Map commit hashes to milestones via beacon entries
     commit_hashes = [c["hash"] for c in new_commits]
@@ -2210,7 +2229,12 @@ def cmd_deploy_record():
             if not json_mode:
                 print(f"Warning: git tag {semver} already exists or failed")
 
-    data.setdefault("deployments", []).append(deploy_entry)
+    dep_list = data.setdefault("deployments", [])
+    if insert_before:
+        idx = next((i for i, d in enumerate(dep_list) if d["id"] == insert_before), len(dep_list))
+        dep_list.insert(idx, deploy_entry)
+    else:
+        dep_list.append(deploy_entry)
     save_project(data)
 
     if json_mode:
