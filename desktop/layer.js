@@ -201,25 +201,6 @@ async function renderProjectSelector() {
 
 // ---- Render ----
 
-function msList(filtered) {
-  if (state.searchQuery.trim()) return renderSearchResults();
-  return `
-    <div class="filter-bar">
-      <button class="filter-btn f-all ${state.hiddenStatuses.size === 0 ? 'on' : 'off'}" data-action="filter-all">all</button>
-      ${FILTER_ORDER.map(s => `<button class="filter-btn ${!state.hiddenStatuses.has(s) ? 'on' : 'off'} ${FILTER_CSS_CLASS[s] || ''}" data-action="filter-status" data-status="${s}">${STATUS_LABELS[s] || s}</button>`).join('')}
-      <button class="sort-toggle" data-action="toggle-sort">${state.sortAsc ? '↑ ms-1 first' : '↓ latest first'}</button>
-    </div>
-    ${filtered.map(ms => renderMilestoneCard(ms, 0)).join('')}`;
-}
-
-function renderMsListArea() {
-  const container = document.getElementById('ms-list-container');
-  if (!container || !state.project) return;
-  const filtered = filterMilestones(sortMilestones(state.project.milestones || []));
-  container.innerHTML = msList(filtered);
-  bindEvents();
-}
-
 function render() {
   const app = document.getElementById('app');
   if (!state.project) return;
@@ -265,7 +246,14 @@ function render() {
           <input class="ms-search-inline" id="search-input" type="search" placeholder="Search milestones, tasks, commits..." value="${esc(state.searchQuery)}" autocomplete="off">
           <button class="sort-toggle" data-action="show-graph">Graph →</button>
         </div>
-        <div id="ms-list-container">${msList(filtered)}</div>
+        <div id="ms-list-container">${state.searchQuery.trim() ? renderSearchResults() : `
+          <div class="filter-bar">
+            <button class="filter-btn f-all ${state.hiddenStatuses.size === 0 ? 'on' : 'off'}" data-action="filter-all">all</button>
+            ${FILTER_ORDER.map(s => `<button class="filter-btn ${!state.hiddenStatuses.has(s) ? 'on' : 'off'} ${FILTER_CSS_CLASS[s] || ''}" data-action="filter-status" data-status="${s}">${STATUS_LABELS[s] || s}</button>`).join('')}
+            <button class="sort-toggle" data-action="toggle-sort">${state.sortAsc ? '↑ ms-1 first' : '↓ latest first'}</button>
+          </div>
+          ${filtered.map(ms => renderMilestoneCard(ms, 0)).join('')}
+        `}</div>
       </section>`) : ''}
 
     ${state.activeTab === 'documents' ? renderDocumentsSection() : ''}
@@ -278,6 +266,7 @@ function render() {
       </div>
       <div class="footer-right" style="display:flex;align-items:center;gap:12px;">
         ${state.lastUpdate ? formatTime(state.lastUpdate) : ''}
+        ${cloudMode && state.cloudProjectId ? `<button class="sort-toggle" data-action="archive-cloud-project" style="font-size:0.65rem;color:var(--text-dim);">Archive</button>` : ''}
         <button class="sort-toggle" data-action="export-json" style="font-size:0.65rem;">Export JSON</button>
       </div>
     </footer>
@@ -309,10 +298,6 @@ async function renderMenu() {
       ${cloudProjects.length > 0 ? `<div class="menu-section">
         <div class="menu-section-title">Cloud Projects</div>
         ${cloudProjects.filter(p => !p.archived).map(p => `<button class="menu-item ${('cloud:' + p.project_id) === currentPath ? 'current' : ''}" data-action="menu-select-cloud-project" data-project-id="${esc(p.project_id)}">${esc(p.name)}<div class="menu-item-sub">${esc(p.project_id)}</div></button>`).join('')}
-      </div>` : ''}
-      ${state.cloudProjectId ? `<div class="menu-section">
-        <div class="menu-section-title">Project</div>
-        <button class="menu-item" style="color:var(--text-dim)" data-action="archive-cloud-project">\u{1F4E6} Archive project</button>
       </div>` : ''}
     </div>`;
   root.querySelectorAll('[data-action]').forEach(el => el.addEventListener('click', handleAction));
@@ -478,21 +463,6 @@ if (window.__TAURI__?.event) {
 }
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') _tryReconnect();
-});
-
-// Search input: partial re-render so the input element itself is never replaced
-document.addEventListener('input', e => {
-  if (e.target.id === 'search-input') {
-    state.searchQuery = e.target.value;
-    renderMsListArea();
-  }
-});
-document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && state.searchQuery) {
-    state.searchQuery = '';
-    renderMsListArea();
-    document.getElementById('search-input')?.focus();
-  }
 });
 
 // ---- Init ----

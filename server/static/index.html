@@ -1829,6 +1829,7 @@ function render() {
         <div class="footer-tagline">Where humans and AI are bound together.</div>
       </div>
       <div class="footer-right">
+        ${state.projectId ? `<button class="sort-toggle" data-action="archive-project" style="font-size:0.65rem;color:var(--text-dim);">Archive</button>` : ''}
         <button class="sort-toggle" data-action="export-json" style="font-size:0.65rem;">Export JSON</button>
         <span>${state.lastUpdate ? formatTime(state.lastUpdate) : ''}</span>
       </div>
@@ -2462,6 +2463,39 @@ function renderGraphSection() {
       </div>
     </section>`;
 }
+
+// ---- Shared search partial-update (both Web and Desktop) ----
+
+function renderMsListArea() {
+  const container = document.getElementById('ms-list-container');
+  if (!container || !state.project) return;
+  const filtered = filterMilestones(sortMilestones(state.project.milestones || []));
+  container.innerHTML = state.searchQuery.trim() ? renderSearchResults() : `
+    <div class="filter-bar">
+      <button class="filter-btn f-all ${state.hiddenStatuses.size === 0 ? 'on' : 'off'}" data-action="filter-all">all</button>
+      ${FILTER_ORDER.map(s => {
+        const isOn = !state.hiddenStatuses.has(s);
+        return `<button class="filter-btn ${isOn ? 'on' : 'off'} ${FILTER_CSS_CLASS[s] || ''}" data-action="filter-status" data-status="${s}">${STATUS_LABELS[s] || s}</button>`;
+      }).join('')}
+      <button class="sort-toggle" data-action="toggle-sort">${state.sortAsc ? '↑ ms-1 first' : '↓ latest first'}</button>
+    </div>
+    ${filtered.map((ms, i) => renderMilestoneCard(ms, i)).join('')}`;
+  bindEvents();
+}
+
+document.addEventListener('input', e => {
+  if (e.target.id === 'search-input') {
+    state.searchQuery = e.target.value;
+    renderMsListArea();
+  }
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && state.searchQuery) {
+    state.searchQuery = '';
+    renderMsListArea();
+    document.getElementById('search-input')?.focus();
+  }
+});
 // @BUILD:SHARED-END
 
 // ---- Hamburger Menu ----
@@ -2536,16 +2570,6 @@ async function loadProjectActions() {
     const data = await api(`/api/projects/${state.projectId}`);
     const isOwner = _get_role_client(data);
     if (!isOwner) { el.innerHTML = ''; return; }
-    const archived = data.archived;
-    el.innerHTML = `
-      <div style="border-top:1px solid var(--border-subtle);margin:8px 0 4px;padding-top:6px;">
-        <div style="font-size:0.6rem;color:var(--text-dim);letter-spacing:0.08em;text-transform:uppercase;padding:0 12px 4px;">Danger zone</div>
-        <button class="menu-item" style="color:#c84040;font-size:0.78rem;" data-action="${archived ? 'unarchive-project' : 'archive-project'}">
-          ${archived ? '📂 Unarchive project' : '📦 Archive project'}
-        </button>
-      </div>
-    `;
-    el.querySelectorAll('[data-action]').forEach(e => e.addEventListener('click', handleAction));
   } catch (e) { el.innerHTML = ''; }
 }
 
@@ -2866,39 +2890,6 @@ async function handleHashNav() {
 }
 
 window.addEventListener('hashchange', handleHashNav);
-
-function renderMsListArea() {
-  const container = document.getElementById('ms-list-container');
-  if (!container || !state.project) return;
-  const p = state.project;
-  const filtered = filterMilestones(sortMilestones(p.milestones || []));
-  container.innerHTML = state.searchQuery.trim() ? renderSearchResults() : `
-    <div class="filter-bar">
-      <button class="filter-btn f-all ${state.hiddenStatuses.size === 0 ? 'on' : 'off'}" data-action="filter-all">all</button>
-      ${FILTER_ORDER.map(s => {
-        const isOn = !state.hiddenStatuses.has(s);
-        return `<button class="filter-btn ${isOn ? 'on' : 'off'} ${FILTER_CSS_CLASS[s] || ''}" data-action="filter-status" data-status="${s}">${STATUS_LABELS[s] || s}</button>`;
-      }).join('')}
-      <button class="sort-toggle" data-action="toggle-sort">${state.sortAsc ? '↑ ms-1 first' : '↓ latest first'}</button>
-    </div>
-    ${filtered.map((ms, i) => renderMilestoneCard(ms, i)).join('')}`;
-  bindEvents();
-}
-
-// Search input: partial re-render so the input element itself is never replaced
-document.addEventListener('input', e => {
-  if (e.target.id === 'search-input') {
-    state.searchQuery = e.target.value;
-    renderMsListArea();
-  }
-});
-document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && state.searchQuery) {
-    state.searchQuery = '';
-    renderMsListArea();
-    document.getElementById('search-input')?.focus();
-  }
-});
 
 // Reconnect when the tab becomes visible or the window regains focus
 function _tryReconnect() {
