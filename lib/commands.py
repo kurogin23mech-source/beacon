@@ -675,7 +675,7 @@ def cmd_task_done():
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
     progress = os.environ.get("BEACON_PROGRESS", "")
     import datetime
-    today = datetime.date.today().isoformat()
+    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     data = load_project()
     # PR entries: auto-forward to pr_merge, but warn if status is unexpected
@@ -802,7 +802,7 @@ def cmd_task_update():
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     ms_id = os.environ.get("BEACON_MS_ID", "")
     import datetime
-    today = datetime.date.today().isoformat()
+    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     data = load_project()
     try:
@@ -1419,7 +1419,7 @@ def cmd_doc_add():
 
     import datetime
     data = load_project()
-    today = datetime.date.today().isoformat()
+    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     # core docs: skip MS entry recording (they're project-wide, not MS-specific)
     if scope != "core":
         core.save_entry(data, ms_id=milestone, description=f"doc add: {title} ({scope})",
@@ -1483,7 +1483,7 @@ def cmd_doc_update():
 
     import datetime
     data = load_project()
-    today = datetime.date.today().isoformat()
+    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     core.save_entry(data, ms_id=milestone, description=f"doc update: {title} ({scope})",
                     source="auto", date=today, revision_id=doc_id,
                     url=None, hash=None, progress=None)
@@ -1752,7 +1752,7 @@ def cmd_pr_add():
     intent = os.environ.get("BEACON_INTENT", "")
     author = os.environ.get("BEACON_AUTHOR", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
-    date = os.environ.get("BEACON_DATE", "") or datetime.date.today().isoformat()
+    date = os.environ.get("BEACON_DATE", "") or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     if not url:
         print("Error: GitHub URL required", file=sys.stderr)
@@ -1956,7 +1956,7 @@ def cmd_pr_merge():
         print("Error: entry ID required", file=sys.stderr)
         sys.exit(1)
     import datetime
-    today = datetime.date.today().isoformat()
+    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     data = load_project()
     try:
         ms, entry = core.pr_merge(data, entry_id, date=today)

@@ -7,7 +7,13 @@ between the CLI (commands.py) and the API (server/app.py).
 
 from __future__ import annotations
 
+import datetime as _dt
 import re
+
+
+def _now_iso() -> str:
+    """Return current UTC time as ISO8601 string with seconds precision."""
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 VALID_STATUSES = {"todo", "in_progress", "in_review", "approved", "waiting", "done", "observing", "cancelled"}
 VALID_ENTRY_TYPES = {"commit", "task", "note", "save", "pr"}
@@ -238,12 +244,13 @@ def task_add(data: dict, ms_id: str, description: str, *,
     meta = {}
     if requested_by:
         meta["requested_by"] = requested_by
+    now = _now_iso()
     entry = {
         "id": eid,
         "type": entry_type,
         "description": description,
-        "date": date,
-        "created_at": date,
+        "date": date or now,
+        "created_at": now,
         "done_at": None,
         "status": "todo",
         "meta": meta,
@@ -261,9 +268,9 @@ def task_done(data: dict, entry_id: str, *, date: str = "") -> tuple[dict, dict]
         raise ValueError(f"Entry not found: {entry_id}")
     ms, _, entry, _ = result
     entry["status"] = "done"
-    entry["done_at"] = date
+    entry["done_at"] = date or _now_iso()
     if not entry.get("date"):
-        entry["date"] = date
+        entry["date"] = entry["done_at"]
     return ms, entry
 
 
@@ -410,13 +417,14 @@ def log_commit(data: dict, *, ms_id: str = "", commit_hash: str,
         return {"status": "duplicate", "hash": commit_hash,
                 "milestone": target["id"], "progress": target.get("progress", 0)}
 
+    now = _now_iso()
     commit_entry = {
         "id": next_entry_id(data),
         "type": "commit",
         "description": summary or message,
-        "date": date,
-        "created_at": date,
-        "done_at": date,
+        "date": date or now,
+        "created_at": now,
+        "done_at": now,
         "status": "done",
         "meta": {"hash": commit_hash, "message": message},
     }
@@ -567,6 +575,7 @@ def pr_request_review(data: dict, entry_id: str) -> tuple[dict, dict]:
     meta = entry.setdefault("meta", {})
     meta["pr_status"] = "in_review"
     meta["review_status"] = "pending"
+    meta["review_requested_at"] = _now_iso()
     entry["status"] = "in_review"
     return ms, entry
 
@@ -582,6 +591,7 @@ def pr_request_changes(data: dict, entry_id: str, *, rationale: str = "") -> tup
     meta = entry.setdefault("meta", {})
     meta["pr_status"] = "in_review"
     meta["review_status"] = "changes_requested"
+    meta["reviewed_at"] = _now_iso()
     entry["status"] = "in_review"
     if rationale:
         meta["review_rationale"] = rationale
@@ -603,15 +613,16 @@ def pr_record_review(data: dict, entry_id: str, *, review_text: str,
     if entry.get("type") != "pr":
         raise ValueError(f"Entry {entry_id} is not a pr entry")
 
-    today = date or _dt.date.today().isoformat()
+    now = _now_iso()
     note_eid = next_entry_id(data)
     note_entry = {
         "id": note_eid,
         "type": "note",
         "description": f"[AI Review] {verdict}",
         "detail": review_text,
-        "date": today,
-        "created_at": today,
+        "date": date or now,
+        "created_at": now,
+        "done_at": now,
         "status": "done",
     }
     entry.setdefault("entries", []).append(note_entry)
@@ -638,9 +649,11 @@ def pr_merge(data: dict, entry_id: str, *, date: str = "") -> tuple[dict, dict]:
     if entry.get("type") != "pr":
         raise ValueError(f"Entry {entry_id} is not a pr entry")
     meta = entry.setdefault("meta", {})
+    now = _now_iso()
     meta["pr_status"] = "merged"
+    meta["merged_at"] = now
     entry["status"] = "done"
-    entry["done_at"] = date or _dt.date.today().isoformat()
+    entry["done_at"] = date or now
     return ms, entry
 
 
@@ -654,6 +667,7 @@ def pr_close(data: dict, entry_id: str) -> tuple[dict, dict]:
         raise ValueError(f"Entry {entry_id} is not a pr entry")
     meta = entry.setdefault("meta", {})
     meta["pr_status"] = "closed"
+    meta["closed_at"] = _now_iso()
     entry["status"] = "cancelled"
     return ms, entry
 
@@ -669,6 +683,7 @@ def pr_approve(data: dict, entry_id: str, *, rationale: str = "") -> tuple[dict,
     meta = entry.setdefault("meta", {})
     meta["pr_status"] = "approved"
     meta["review_status"] = "approved"
+    meta["reviewed_at"] = _now_iso()
     entry["status"] = "approved"
     if rationale:
         meta["review_rationale"] = rationale
@@ -686,6 +701,8 @@ def pr_reject(data: dict, entry_id: str, *, rationale: str = "") -> tuple[dict, 
     meta = entry.setdefault("meta", {})
     meta["pr_status"] = "closed"
     meta["review_status"] = "rejected"
+    meta["reviewed_at"] = _now_iso()
+    meta["closed_at"] = _now_iso()
     entry["status"] = "cancelled"
     if rationale:
         meta["review_rationale"] = rationale
@@ -727,13 +744,14 @@ def save_entry(data: dict, *, ms_id: str = "", description: str,
         return {"status": "duplicate", "milestone": target["id"],
                 "progress": target.get("progress", 0)}
 
+    now = _now_iso()
     entry = {
         "id": next_entry_id(data),
         "type": "save",
         "description": description,
-        "date": date,
-        "created_at": date,
-        "done_at": date,
+        "date": date or now,
+        "created_at": now,
+        "done_at": now,
         "status": "done",
         "meta": {"source": source},
     }
