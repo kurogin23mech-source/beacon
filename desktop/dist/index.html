@@ -7,249 +7,1375 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-
-<!-- ============================================================
-     SHARED CSS (identical to server/static/index.html)
-     ============================================================ -->
 <style>
+/* ================================================================
+   BEACON — Terminal Noir Milestones v3
+   ================================================================ */
+
 :root {
-  --bg-void: #0a0a0c; --bg-surface: #111114; --bg-raised: #18181c; --bg-hover: #1f1f24;
-  --border: #2a2a30; --border-subtle: #1e1e24;
-  --text-primary: #e4e4e8; --text-secondary: #a1a1aa; --text-dim: #71717a;
-  --accent: #4ade80; --accent-dim: #166534; --accent-glow: rgba(74, 222, 128, 0.08);
-  --warning: #fbbf24; --info: #60a5fa;
-  --done: #4ade80; --in-progress: #60a5fa; --observing: #a78bfa; --todo: #71717a; --waiting: #f97316; --cancelled: #ef4444;
-  --save: #c084fc;
-  --font-mono: 'JetBrains Mono', 'IBM Plex Mono', monospace; --font-body: 'IBM Plex Mono', monospace;
+  --bg-void: #0a0a0c;
+  --bg-surface: #111114;
+  --bg-raised: #18181c;
+  --bg-hover: #1f1f24;
+  --border: #2a2a30;
+  --border-subtle: #1e1e24;
+  --text-primary: #e4e4e8;
+  --text-secondary: #a1a1aa;
+  --text-dim: #71717a;
+  --accent: #4ade80;
+  --accent-dim: #166534;
+  --accent-glow: rgba(74, 222, 128, 0.08);
+  --warning: #fbbf24;
+  --info: #60a5fa;
+  --done: #4ade80;
+  --in-progress: #60a5fa;
+  --observing: #a78bfa;
+  --todo: #71717a;
+  --waiting: #f97316;
+  --cancelled: #ef4444;
+  --font-mono: 'JetBrains Mono', 'IBM Plex Mono', monospace;
+  --font-body: 'IBM Plex Mono', monospace;
   --scanline-opacity: 0.03;
 }
+
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-html { font-size: 15px; -webkit-font-smoothing: antialiased; }
-body { background: var(--bg-void); color: var(--text-primary); font-family: var(--font-body); font-weight: 400; line-height: 1.6; min-height: 100vh; overflow-x: hidden; }
-body::after { content: ''; position: fixed; inset: 0; background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,var(--scanline-opacity)) 2px, rgba(0,0,0,var(--scanline-opacity)) 4px); pointer-events: none; z-index: 9999; }
-.container { max-width: 960px; margin: 0 auto; padding: 0 24px; }
-.header { padding: 40px 0 32px; border-bottom: 1px solid var(--border); position: relative; }
-.header::before { content: ''; position: absolute; bottom: -1px; left: 0; width: 120px; height: 1px; background: var(--accent); box-shadow: 0 0 12px var(--accent); }
-.header-top { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
-.project-name { font-family: var(--font-mono); font-size: 1.6rem; font-weight: 700; letter-spacing: -0.02em; }
-.header-tag { font-size: 0.75rem; color: var(--text-dim); letter-spacing: 0.08em; text-transform: uppercase; }
-.connection-status { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 0.75rem; color: var(--text-dim); }
-.status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 6px var(--accent); animation: pulse-dot 2s ease-in-out infinite; }
-.status-dot.offline { background: var(--cancelled); box-shadow: 0 0 6px var(--cancelled); animation: none; }
-@keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
-.summary-block { padding: 20px 0; border-bottom: 1px solid var(--border-subtle); }
-.summary-label { font-size: 0.75rem; color: var(--text-dim); letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 8px; }
-.summary-text { color: var(--text-secondary); font-size: 0.9rem; line-height: 1.7; }
-.filter-bar { display: flex; gap: 6px; padding: 16px 0 0; flex-wrap: wrap; align-items: center; }
-.filter-btn { font-family: var(--font-mono); font-size: 0.75rem; padding: 4px 10px; border: 1px solid var(--border-subtle); border-radius: 3px; background: transparent; cursor: pointer; transition: all 0.2s; }
-.filter-btn.on { border-color: var(--accent-dim); color: var(--accent); background: var(--accent-glow); }
+
+html {
+  font-size: 15px;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  background: var(--bg-void);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-weight: 400;
+  line-height: 1.6;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* Scanline overlay */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 0, var(--scanline-opacity)) 2px,
+    rgba(0, 0, 0, var(--scanline-opacity)) 4px
+  );
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* ---- Layout ---- */
+
+.container {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+/* ---- Header ---- */
+
+.header {
+  padding: 40px 0 32px;
+  border-bottom: 1px solid var(--border);
+  position: relative;
+}
+
+.header::before {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  width: 120px;
+  height: 1px;
+  background: var(--accent);
+  box-shadow: 0 0 12px var(--accent);
+}
+
+.header-top {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.project-name {
+  font-family: var(--font-mono);
+  font-size: 1.6rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+}
+
+.header-tag {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.connection-status {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+.status-dot.offline {
+  background: var(--cancelled);
+  box-shadow: 0 0 6px var(--cancelled);
+  animation: none;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* ---- Search (inline in milestones header) ---- */
+
+.ms-search-inline {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  padding: 4px 10px;
+  font-size: 0.75rem;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  outline: none;
+}
+.ms-search-inline:focus { border-color: var(--accent-dim); }
+.ms-search-inline::placeholder { color: var(--text-dim); }
+.search-results { margin-top: 4px; }
+.search-result-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 6px 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  margin-bottom: 4px;
+  background: var(--bg-surface);
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.search-result-item:hover { border-color: var(--border); }
+.search-result-type { font-size: 0.65rem; color: var(--text-dim); padding-top: 2px; }
+.search-result-desc { font-size: 0.8rem; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.search-result-ms { font-size: 0.65rem; color: var(--text-dim); grid-column: 2; }
+.search-result-date { font-size: 0.65rem; color: var(--text-dim); text-align: right; }
+.search-empty { padding: 16px 0; color: var(--text-dim); font-size: 0.8rem; text-align: center; }
+
+/* ---- Releases / Deploy Timeline ---- */
+
+.release-group-header { display: flex; align-items: center; gap: 10px; padding: 10px 0 8px; border-bottom: 1px solid var(--accent-dim); margin-bottom: 2px; font-family: var(--font-mono); font-size: 0.72rem; color: var(--accent); }
+.release-group-semver { background: var(--accent-glow); padding: 1px 6px; border-radius: 3px; font-size: 0.72rem; }
+.deploy-card { padding: 10px 0 6px 10px; border-bottom: 1px solid var(--border-subtle); border-left: 3px solid transparent; }
+.deploy-card:last-child { border-bottom: none; }
+.deploy-card.is-major { border-left-color: var(--accent-dim); }
+.deploy-card.is-minor { border-left-color: var(--border); }
+.deploy-card-header { display: flex; align-items: center; gap: 8px; cursor: pointer; flex-wrap: wrap; }
+.deploy-card-header:hover .deploy-id { color: var(--text-secondary); }
+.deploy-type-dot { font-size: 0.85rem; }
+.deploy-type-dot.major { color: var(--accent); }
+.deploy-type-dot.minor { color: var(--text-dim); }
+.deploy-id { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-dim); }
+.deploy-datetime { font-size: 0.7rem; color: var(--text-dim); margin-left: auto; }
+.deploy-env-badge { font-size: 0.6rem; color: var(--text-dim); background: var(--bg-raised); padding: 1px 5px; border-radius: 2px; border: 1px solid var(--border-subtle); }
+.deploy-expand-arrow { font-size: 0.6rem; color: var(--text-dim); }
+.deploy-desc { font-size: 0.78rem; color: var(--text-secondary); margin: 4px 0 4px 18px; line-height: 1.4; }
+.deploy-ms-badges { margin: 4px 0 0 18px; display: flex; flex-wrap: wrap; gap: 4px; }
+.release-ms-badge { font-family: var(--font-mono); font-size: 0.65rem; padding: 1px 6px; border: 1px solid var(--border-subtle); border-radius: 2px; color: var(--text-dim); }
+.release-ms-badge-completion { font-family: var(--font-mono); font-size: 0.65rem; padding: 1px 6px; border: 1px solid var(--accent-dim); border-radius: 2px; color: var(--accent); background: var(--accent-glow); }
+.release-ms-badge-patch { font-family: var(--font-mono); font-size: 0.65rem; padding: 1px 6px; border: 1px solid #9a7000; border-radius: 2px; color: #c89000; background: rgba(180,120,0,0.07); }
+.deploy-minor-group { margin-left: 20px; padding-left: 12px; border-left: 2px solid var(--border-subtle); }
+
+/* Deploy expanded detail */
+.deploy-detail { margin: 8px 0 4px 18px; display: flex; flex-direction: column; gap: 6px; }
+.deploy-ms-block { border-radius: 3px; overflow: hidden; }
+.deploy-ms-block-header { display: flex; align-items: center; gap: 8px; padding: 5px 10px; flex-wrap: wrap; }
+.deploy-ms-block.completion .deploy-ms-block-header { background: var(--accent-glow); border-left: 3px solid var(--accent); }
+.deploy-ms-block.patch .deploy-ms-block-header { background: rgba(180,120,0,0.07); border-left: 3px solid #9a7000; }
+.deploy-ms-block.untracked .deploy-ms-block-header { background: var(--bg-raised); border-left: 3px solid var(--border); }
+.deploy-ms-type-label { font-size: 0.6rem; padding: 1px 6px; border-radius: 2px; font-weight: 600; letter-spacing: 0.04em; white-space: nowrap; }
+.deploy-ms-block.completion .deploy-ms-type-label { background: rgba(0,200,120,0.15); color: var(--accent); }
+.deploy-ms-block.patch .deploy-ms-type-label { background: rgba(180,120,0,0.2); color: #c89000; }
+.deploy-ms-block.untracked .deploy-ms-type-label { color: var(--text-dim); border: 1px dashed var(--border-subtle); }
+.deploy-ms-block-id { font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-dim); }
+.deploy-ms-block-title { font-size: 0.72rem; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 280px; }
+.deploy-commit-list { padding: 4px 10px 6px; display: flex; flex-direction: column; gap: 4px; }
+.deploy-commit-row { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.deploy-commit-label { font-size: 0.58rem; padding: 0 5px; border-radius: 2px; background: var(--bg-raised); color: var(--text-dim); border: 1px solid var(--border-subtle); white-space: nowrap; }
+.deploy-commit-eid { font-family: var(--font-mono); font-size: 0.65rem; color: var(--text-dim); min-width: 36px; }
+.deploy-commit-desc { flex: 1; min-width: 120px; color: var(--text-secondary); font-size: 0.72rem; }
+.deploy-commit-hash { font-family: var(--font-mono); font-size: 0.62rem; color: var(--text-dim); background: var(--bg-raised); padding: 0 4px; border-radius: 2px; }
+
+/* ---- Hamburger Menu ---- */
+
+.hamburger-btn {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  cursor: pointer;
+  padding: 4px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  transition: border-color 0.2s;
+}
+
+.hamburger-btn:hover {
+  border-color: var(--border);
+}
+
+.hamburger-btn span {
+  display: block;
+  width: 16px;
+  height: 1.5px;
+  background: var(--text-dim);
+  transition: background 0.2s;
+}
+
+.hamburger-btn:hover span {
+  background: var(--text-secondary);
+}
+
+.menu-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 1000;
+  animation: fade-overlay 0.15s ease;
+}
+
+@keyframes fade-overlay {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.menu-panel {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 300px;
+  max-width: 80vw;
+  height: 100vh;
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border);
+  z-index: 1001;
+  padding: 24px;
+  overflow-y: auto;
+  animation: slide-in 0.2s ease;
+}
+
+@keyframes slide-in {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+
+.menu-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.menu-title {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.menu-close {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 1.2rem;
+  cursor: pointer;
+  padding: 4px 8px;
+  transition: color 0.2s;
+}
+
+.menu-close:hover {
+  color: var(--text-primary);
+}
+
+.menu-section {
+  margin-bottom: 20px;
+}
+
+.menu-section-title {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+
+.menu-item {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  margin-bottom: 4px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  text-align: left;
+  transition: border-color 0.2s, background 0.2s, color 0.2s;
+}
+
+.menu-item:hover {
+  border-color: var(--border);
+  background: var(--bg-raised);
+  color: var(--text-primary);
+}
+
+.menu-item.current {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+}
+
+.menu-item-sub {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+.menu-user {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+
+/* ---- Project Info Block ---- */
+
+.project-info {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.project-info-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.project-info-label {
+  font-size: 0.65rem;
+  color: var(--text-dim);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.project-info-value {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.project-info-item.review-due .project-info-label {
+  color: var(--warning);
+}
+
+.project-info-item.review-due .project-info-value {
+  color: var(--warning);
+  font-weight: 500;
+}
+
+/* ---- Summary Block ---- */
+
+.summary-block {
+  padding: 20px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.summary-label {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+
+.summary-text {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  line-height: 1.7;
+}
+
+/* ---- Filter Bar ---- */
+
+.filter-bar {
+  display: flex;
+  gap: 6px;
+  padding: 16px 0 0;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.filter-btn {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  padding: 4px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  background: transparent;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s, background 0.2s, opacity 0.2s;
+}
+
+/* Active (visible) state — colored per status */
+.filter-btn.on {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+  background: var(--accent-glow);
+}
+
 .filter-btn.on.f-todo { color: var(--todo); border-color: var(--todo); background: rgba(113,113,122,0.08); }
 .filter-btn.on.f-active { color: var(--in-progress); border-color: rgba(96,165,250,0.4); background: rgba(96,165,250,0.08); }
 .filter-btn.on.f-observing { color: var(--observing); border-color: rgba(167,139,250,0.4); background: rgba(167,139,250,0.08); }
 .filter-btn.on.f-done { color: var(--done); border-color: var(--accent-dim); background: var(--accent-glow); }
 .filter-btn.on.f-waiting { color: var(--waiting); border-color: rgba(249,115,22,0.4); background: rgba(249,115,22,0.08); }
-.filter-btn.off { color: var(--text-dim); opacity: 0.4; }
-.filter-btn.off:hover { opacity: 0.7; }
-.sort-toggle { font-family: var(--font-mono); font-size: 0.75rem; padding: 4px 10px; border: 1px solid var(--border-subtle); border-radius: 3px; background: transparent; color: var(--text-dim); cursor: pointer; margin-left: auto; }
-.sort-toggle:hover { border-color: var(--border); color: var(--text-secondary); }
-.milestones { padding: 24px 0; }
-.milestones-header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 20px; }
-.milestones-title { font-size: 0.75rem; color: var(--text-dim); letter-spacing: 0.1em; text-transform: uppercase; }
-.milestones-count { font-size: 0.8rem; color: var(--text-dim); }
-.ms-card { border: 1px solid var(--border-subtle); border-radius: 4px; margin-bottom: 8px; background: var(--bg-surface); transition: border-color 0.2s, background 0.2s; overflow: hidden; }
-.ms-card:hover { border-color: var(--border); background: var(--bg-raised); }
-.ms-card.active { border-color: var(--accent-dim); background: var(--accent-glow); }
-.ms-card-header { padding: 12px 16px; cursor: pointer; display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; }
-.ms-status-badge { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-.ms-status-icon { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
-.ms-status-icon.done { background: var(--done); box-shadow: 0 0 4px rgba(74,222,128,0.3); }
-.ms-status-icon.in_progress { background: var(--in-progress); box-shadow: 0 0 4px rgba(96,165,250,0.3); animation: pulse-dot 2s ease-in-out infinite; }
-.ms-status-icon.observing { background: var(--observing); box-shadow: 0 0 4px rgba(167,139,250,0.3); }
+
+/* Off (hidden) state */
+.filter-btn.off {
+  color: var(--text-dim);
+  opacity: 0.4;
+  border-color: var(--border-subtle);
+  background: transparent;
+}
+
+.filter-btn.off:hover {
+  opacity: 0.7;
+}
+
+.filter-btn.f-all {
+  color: var(--text-dim);
+  border-color: var(--border-subtle);
+}
+
+.filter-btn.f-all:hover {
+  color: var(--text-secondary);
+  border-color: var(--border);
+}
+
+/* ---- Sort Toggle ---- */
+
+.sort-toggle {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  padding: 4px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s;
+  margin-left: auto;
+}
+
+.sort-toggle:hover {
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
+
+/* ---- Milestone List ---- */
+
+.milestones {
+  padding: 24px 0;
+}
+
+.milestones-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.milestones-title {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.milestones-count {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+/* ---- Milestone Card ---- */
+
+.ms-card {
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  margin-bottom: 8px;
+  background: var(--bg-surface);
+  transition: border-color 0.2s, background 0.2s;
+  overflow: hidden;
+}
+
+.ms-card:hover {
+  border-color: var(--border);
+  background: var(--bg-raised);
+}
+
+.ms-card.active {
+  border-color: var(--accent-dim);
+  background: var(--accent-glow);
+}
+
+.ms-card-header {
+  padding: 12px 16px;
+  cursor: pointer;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 12px;
+  align-items: center;
+}
+
+.ms-status-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.ms-status-icon {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.ms-status-icon.done { background: var(--done); box-shadow: 0 0 4px rgba(74, 222, 128, 0.3); }
+.ms-status-icon.in_progress { background: var(--in-progress); box-shadow: 0 0 4px rgba(96, 165, 250, 0.3); animation: pulse-dot 2s ease-in-out infinite; }
+.ms-status-icon.observing { background: var(--observing); box-shadow: 0 0 4px rgba(167, 139, 250, 0.3); }
 .ms-status-icon.todo { background: var(--todo); }
 .ms-status-icon.waiting { background: var(--waiting); }
 .ms-status-icon.cancelled { background: var(--cancelled); }
-.ms-status-text { font-size: 0.65rem; letter-spacing: 0.05em; text-transform: uppercase; font-weight: 500; }
-.ms-status-text.done { color: var(--done); } .ms-status-text.in_progress { color: var(--in-progress); }
-.ms-status-text.observing { color: var(--observing); } .ms-status-text.todo { color: var(--todo); }
-.ms-status-text.waiting { color: var(--waiting); } .ms-status-text.cancelled { color: var(--cancelled); }
-.ms-title-row { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-.ms-id { font-size: 0.75rem; color: var(--text-dim); flex-shrink: 0; }
-.ms-title { font-size: 0.9rem; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.ms-meta { display: flex; align-items: center; gap: 16px; flex-shrink: 0; }
-.ms-progress-bar { width: 80px; height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; }
-.ms-progress-fill { height: 100%; border-radius: 2px; transition: width 0.6s ease; }
-.ms-progress-fill.done { background: var(--done); } .ms-progress-fill.in_progress { background: var(--in-progress); }
-.ms-progress-fill.observing { background: var(--observing); } .ms-progress-fill.todo { background: var(--todo); }
-.ms-progress-text { font-size: 0.75rem; color: var(--text-dim); min-width: 32px; text-align: right; font-variant-numeric: tabular-nums; }
-.ms-expand-hint { font-size: 0.65rem; color: var(--text-dim); transition: transform 0.2s; }
-.ms-card.expanded .ms-expand-hint { transform: rotate(180deg); }
-.ms-card.expanded .ms-title { white-space: normal; overflow: visible; }
-.ms-tasks-text { font-size: 0.75rem; color: var(--text-dim); font-variant-numeric: tabular-nums; }
-.ms-body { max-height: 0; overflow: hidden; transition: max-height 0.3s ease; }
-.ms-card.expanded .ms-body { max-height: 8000px; }
-.ms-entries { padding: 0 16px 12px; border-top: 1px solid var(--border-subtle); }
-.ms-entries-toolbar { display: flex; align-items: center; padding: 8px 0 4px; gap: 8px; }
-.entry-filter-btn { font-family: var(--font-mono); font-size: 0.65rem; padding: 2px 8px; border: 1px solid var(--border-subtle); border-radius: 2px; background: transparent; color: var(--text-dim); cursor: pointer; }
-.entry-filter-btn:hover { border-color: var(--border); color: var(--text-secondary); }
-.entry-filter-btn.active { border-color: var(--accent-dim); color: var(--accent); background: var(--accent-glow); }
-.ms-description { padding: 8px 0 4px; color: var(--text-secondary); font-size: 0.85rem; font-style: italic; }
-.entry { display: grid; grid-template-columns: auto auto 1fr auto; gap: 8px; padding: 6px 0; align-items: start; border-bottom: 1px solid var(--border-subtle); font-size: 0.85rem; }
+
+.ms-status-text {
+  font-size: 0.65rem;
+  line-height: 1.4;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  font-weight: 500;
+}
+
+.ms-status-text.done { color: var(--done); }
+.ms-status-text.in_progress { color: var(--in-progress); }
+.ms-status-text.observing { color: var(--observing); }
+.ms-status-text.todo { color: var(--todo); }
+.ms-status-text.waiting { color: var(--waiting); }
+.ms-status-text.cancelled { color: var(--cancelled); }
+
+.ms-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ms-id {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.ms-title {
+  font-size: 0.9rem;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.ms-meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-shrink: 0;
+}
+
+.ms-progress-bar {
+  width: 80px;
+  height: 3px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.ms-progress-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.6s ease;
+}
+
+.ms-progress-fill.done { background: var(--done); }
+.ms-progress-fill.in_progress { background: var(--in-progress); }
+.ms-progress-fill.observing { background: var(--observing); }
+.ms-progress-fill.todo { background: var(--todo); }
+
+.ms-progress-text {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  min-width: 32px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.ms-expand-hint {
+  font-size: 0.65rem;
+  color: var(--text-dim);
+  transition: transform 0.2s;
+}
+
+@media (max-width: 500px) {
+  .ms-meta { gap: 8px; }
+  .ms-progress-bar { width: 40px; }
+  .ms-tasks-text { display: none; }
+  .ms-status-text { display: none; }
+  .sort-toggle { display: none; }
+  .ms-card-header { gap: 8px; }
+}
+
+.ms-card.expanded .ms-title {
+  white-space: normal;
+  overflow: visible;
+}
+
+.ms-card.expanded .ms-expand-hint {
+  transform: rotate(180deg);
+}
+
+.ms-tasks-text {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- Milestone Expanded ---- */
+
+.ms-body {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.3s ease;
+}
+
+.ms-card.expanded .ms-body {
+  max-height: 8000px;
+}
+
+.ms-entries {
+  padding: 0 16px 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.ms-entries-toolbar {
+  display: flex;
+  align-items: center;
+  padding: 8px 0 4px;
+  gap: 8px;
+}
+
+.entry-filter-btn {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  padding: 2px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 2px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s, background 0.2s;
+}
+
+.entry-filter-btn:hover {
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
+
+.entry-filter-btn.active {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+  background: var(--accent-glow);
+}
+
+.ms-description {
+  padding: 8px 0 4px;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  font-style: italic;
+}
+
+/* ---- Entry Row ---- */
+
+.entry {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto;
+  gap: 8px;
+  padding: 6px 0;
+  align-items: start;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 0.85rem;
+}
+
 .entry:last-child { border-bottom: none; }
-.entry-type-badge { font-size: 0.65rem; font-weight: 500; padding: 1px 5px; border-radius: 2px; line-height: 1.8; white-space: nowrap; }
-.entry-type-badge.commit { color: var(--accent); background: rgba(74,222,128,0.1); border: 1px solid rgba(74,222,128,0.15); }
-.entry-type-badge.task { color: var(--info); background: rgba(96,165,250,0.1); border: 1px solid rgba(96,165,250,0.15); }
-.entry-type-badge.note { color: var(--warning); background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.15); }
-.entry-type-badge.save { color: var(--save); background: rgba(192,132,252,0.1); border: 1px solid rgba(192,132,252,0.15); }
-.entry-type-badge.pr { color: #f97316; background: rgba(249,115,22,0.1); border: 1px solid rgba(249,115,22,0.15); }
-.entry-pr-block { grid-column: 1 / -1; }
-.entry-pr-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 4px; font-size: 0.7rem; color: var(--text-secondary); }
-.entry-pr-decision { margin-top: 6px; padding: 5px 8px; border-left: 2px solid rgba(251,191,36,0.4); font-size: 0.72rem; line-height: 1.5; }
-.entry-pr-decision-label { font-size: 0.65rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-dim); margin-bottom: 2px; }
+
+.entry-type-badge {
+  font-size: 0.65rem;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  padding: 1px 5px;
+  border-radius: 2px;
+  line-height: 1.8;
+  white-space: nowrap;
+}
+
+.entry-type-badge.commit {
+  color: var(--accent);
+  background: rgba(74, 222, 128, 0.1);
+  border: 1px solid rgba(74, 222, 128, 0.15);
+}
+
+.entry-type-badge.task {
+  color: var(--info);
+  background: rgba(96, 165, 250, 0.1);
+  border: 1px solid rgba(96, 165, 250, 0.15);
+}
+
+.entry-type-badge.note {
+  color: var(--warning);
+  background: rgba(251, 191, 36, 0.1);
+  border: 1px solid rgba(251, 191, 36, 0.15);
+}
+
+.entry-type-badge.save {
+  color: #c084fc;
+  background: rgba(192, 132, 252, 0.1);
+  border: 1px solid rgba(192, 132, 252, 0.15);
+}
+
+.entry-type-badge.pr {
+  color: #f97316;
+  background: rgba(249, 115, 22, 0.1);
+  border: 1px solid rgba(249, 115, 22, 0.15);
+}
+
+.entry-pr-block {
+  grid-column: 1 / -1;
+}
+
+.entry-pr-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 4px;
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+}
+
+.entry-pr-decision {
+  margin-top: 6px;
+  padding: 5px 8px;
+  border-left: 2px solid rgba(251,191,36,0.4);
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
+.entry-pr-decision-label {
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 2px;
+}
+
 .entry-pr-intent .entry-pr-decision-label { color: #60a5fa; }
 .entry-pr-rationale-block .entry-pr-decision-label { color: #a3e635; }
 .entry-pr-rationale-block { border-left-color: rgba(163,230,53,0.4); }
-.entry-pr-status { font-weight: 500; }
-.entry-pr-status.open { color: #60a5fa; } .entry-pr-status.in_review { color: #fb923c; }
-.entry-pr-status.approved { color: #a3e635; } .entry-pr-status.merged { color: #a78bfa; }
-.entry-pr-status.closed { color: var(--text-dim); }
-.entry-id { font-size: 0.7rem; color: var(--text-dim); line-height: 1.8; }
-.entry-desc { color: #f4f4f5; line-height: 1.6; }
-.entry.done .entry-desc { color: var(--text-dim); text-decoration: line-through; text-decoration-color: var(--border); }
-.entry.entry-type-commit.done .entry-desc { text-decoration: none; }
-.entry-status-text { font-size: 0.6rem; color: var(--text-dim); letter-spacing: 0.03em; text-transform: uppercase; margin-left: 4px; }
-.entry-status-text.done { color: var(--done); } .entry-status-text.todo { color: var(--todo); } .entry-status-text.in_progress { color: var(--in-progress); }
-.entry-status-text.in_review { color: #fb923c; } .entry-status-text.approved { color: #a3e635; } .entry-status-text.cancelled { color: var(--text-dim); }
-.entry-date { font-size: 0.7rem; color: var(--text-dim); line-height: 1.8; white-space: nowrap; }
-.entry-hash { font-size: 0.7rem; color: var(--accent-dim); margin-left: 4px; }
-.entry-toggle { cursor: pointer; user-select: none; }
-.entry-toggle > .entry-desc::before { content: '\25BC '; font-size: 0.6rem; color: var(--text-dim); }
-.entry-toggle.collapsed > .entry-desc::before { content: '\25B6 '; }
-.entry-type-commit.entry-toggle .entry-desc::before,
-.entry-type-commit.entry-toggle.collapsed .entry-desc::before { content: none; }
-.entry-child-count { font-size: 0.65rem; color: var(--accent); margin-left: 6px; padding: 1px 5px; background: var(--accent-dim); border: 1px solid var(--accent-dim); border-radius: 3px; }
-.entry-detail { grid-column: 3 / -1; font-size: 0.8rem; color: var(--text-dim); padding: 4px 0 2px; line-height: 1.5; border-left: 2px solid var(--border-subtle); padding-left: 10px; margin-top: 2px; }
-.entry-children { grid-column: 1 / -1; padding-left: 18px; }
-.entry-children.hidden { display: none; }
-.entry-children .entry { border-bottom-color: transparent; padding: 3px 0; }
-.tab-bar { display: flex; gap: 0; border-bottom: 1px solid var(--border-subtle); }
-.tab-btn { font-family: var(--font-mono); font-size: 0.8rem; padding: 10px 20px; border: none; background: transparent; color: var(--text-dim); cursor: pointer; border-bottom: 2px solid transparent; transition: color 0.2s, border-color 0.2s; }
-.tab-btn:hover { color: var(--text-secondary); }
-.tab-btn.active { color: var(--text-primary); border-bottom-color: var(--accent); }
-.graph-section { padding: 24px 0; }
-.graph-container { width: 100%; overflow-x: auto; background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: 8px; padding: 16px; }
-.graph-container svg { display: block; margin: 0 auto; }
-.graph-node rect { rx: 6; ry: 6; stroke-width: 1.5; cursor: pointer; transition: filter 0.2s; }
-.graph-node:hover rect { filter: brightness(1.3); }
-.graph-node text { font-family: var(--font-mono); font-size: 11px; fill: var(--text-primary); pointer-events: none; }
-.graph-node .node-id { font-size: 9px; fill: var(--text-dim); }
-.graph-node .node-progress { font-size: 9px; fill: var(--text-secondary); font-variant-numeric: tabular-nums; }
-.graph-edge { fill: none; stroke: var(--border); stroke-width: 1.5; marker-end: url(#arrowhead); }
-.graph-edge.cross-task { stroke-dasharray: 4 3; stroke: var(--text-dim); }
-.graph-empty { color: var(--text-dim); text-align: center; padding: 48px 0; font-size: 0.85rem; }
-.graph-legend { display: flex; gap: 16px; margin-top: 12px; justify-content: center; flex-wrap: wrap; }
-.graph-legend-item { display: flex; align-items: center; gap: 6px; font-size: 0.7rem; color: var(--text-dim); }
-.graph-legend-swatch { width: 12px; height: 12px; border-radius: 3px; border: 1px solid var(--border); }
-.retro-section { padding: 24px 0; }
-.retro-list { list-style: none; }
-.retro-item { padding: 10px 16px; border: 1px solid var(--border-subtle); border-radius: 4px; margin-bottom: 6px; cursor: pointer; background: var(--bg-surface); transition: border-color 0.2s, background 0.2s; display: flex; justify-content: space-between; align-items: center; }
-.retro-item:hover { border-color: var(--border); background: var(--bg-raised); }
-.retro-item-week { font-size: 0.9rem; color: var(--text-primary); }
-.retro-item-date { font-size: 0.75rem; color: var(--text-dim); }
-.release-item { padding: 8px 0; border-bottom: 1px solid var(--border-subtle); }
-.release-item:last-child { border-bottom: none; }
-.release-item-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.release-id { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-dim); }
-.release-semver { font-family: var(--font-mono); font-size: 0.75rem; color: var(--accent); background: var(--accent-glow); padding: 1px 6px; border-radius: 3px; }
-.release-date { font-size: 0.72rem; color: var(--text-dim); margin-left: auto; }
-.release-desc { font-size: 0.8rem; color: var(--text-secondary); margin: 4px 0 0 16px; }
-.release-ms-list { margin: 4px 0 0 16px; display: flex; flex-wrap: wrap; gap: 4px; }
-.release-ms-badge { font-family: var(--font-mono); font-size: 0.65rem; padding: 1px 6px; border: 1px solid var(--border-subtle); border-radius: 2px; color: var(--text-dim); }
-.release-commit-breakdown { margin: 6px 0 0 16px; display: flex; flex-direction: column; gap: 3px; }
-.release-ms-row { display: flex; align-items: center; gap: 6px; font-size: 0.7rem; flex-wrap: wrap; }
-.release-ms-row .release-ms-id { font-family: var(--font-mono); color: var(--text-secondary); min-width: 52px; }
-.release-commit-label-completion { font-size: 0.6rem; padding: 1px 5px; border-radius: 2px; background: var(--accent-glow); color: var(--accent); border: 1px solid var(--accent-dim); white-space: nowrap; }
-.release-commit-label-patch { font-size: 0.6rem; padding: 1px 5px; border-radius: 2px; background: var(--bg-raised); color: var(--text-dim); border: 1px solid var(--border-subtle); white-space: nowrap; }
-.release-commit-label-untracked { font-size: 0.6rem; padding: 1px 5px; border-radius: 2px; color: var(--text-dim); border: 1px dashed var(--border-subtle); white-space: nowrap; }
-.hash-badge { font-family: var(--font-mono); font-size: 0.65rem; background: var(--bg-raised); padding: 0 4px; border-radius: 2px; color: var(--text-secondary); }
 
-/* ---- Narrow window (side-by-side with terminal) ---- */
-@media (max-width: 500px) {
-  .container { padding: 0 12px; }
-  .header { padding: 20px 0 14px; }
-  .project-name { font-size: 1.1rem; }
-  .header-tag { display: none; }
-  .tab-btn { padding: 8px 10px; font-size: 0.72rem; }
-  .ms-status-text { display: none; }
-  .ms-tasks-text { display: none; }
-  .ms-progress-bar { width: 40px; }
-  .ms-meta { gap: 8px; }
-  .ms-card-header { padding: 10px 12px; gap: 8px; }
-  .ms-title { font-size: 0.82rem; }
-  .sort-toggle { display: none; }
-  .milestones-header { flex-wrap: wrap; gap: 6px; }
-  .entry { grid-template-columns: auto 1fr auto; gap: 4px; font-size: 0.8rem; }
-  .entry-id { display: none; }
-  .entry-date { display: none; }
-  .summary-text { font-size: 0.82rem; }
-  .milestones { padding: 16px 0; }
+.entry-pr-status {
+  font-weight: 500;
 }
-@media (max-width: 420px) {
-  .ms-progress-bar { display: none; }
-  .ms-progress-text { display: none; }
-  .filter-bar { gap: 4px; }
-  .filter-btn { padding: 3px 7px; font-size: 0.7rem; }
+
+.entry-pr-status.open { color: #60a5fa; }
+.entry-pr-status.in_review { color: #fb923c; }
+.entry-pr-status.approved { color: #a3e635; }
+.entry-pr-status.merged { color: #a78bfa; }
+.entry-pr-status.closed { color: var(--text-dim); }
+.entry-pr-status.rejected { color: #f87171; }
+
+.entry-id {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  line-height: 1.8;
 }
-.retro-content { background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 20px; white-space: pre-wrap; font-size: 0.85rem; line-height: 1.7; color: var(--text-secondary); max-height: 70vh; overflow-y: auto; }
-.doc-content { background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 20px 24px; font-size: 0.85rem; line-height: 1.8; color: var(--text-secondary); max-height: 70vh; overflow-y: auto; }
-.doc-content h1, .doc-content h2, .doc-content h3, .doc-content h4 { color: var(--text-primary); font-weight: 600; margin: 1.2em 0 0.4em; }
+
+.entry-desc {
+  color: #f4f4f5;
+  line-height: 1.6;
+}
+
+.entry.done .entry-desc {
+  color: var(--text-dim);
+  text-decoration: line-through;
+  text-decoration-color: var(--border);
+}
+
+/* Commits are historical records, not to-dos — no strikethrough */
+.entry.entry-type-commit.done .entry-desc {
+  text-decoration: none;
+}
+
+.entry-status-text {
+  font-size: 0.6rem;
+  color: var(--text-dim);
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  margin-left: 4px;
+}
+
+.entry-status-text.done { color: var(--done); }
+.entry-status-text.todo { color: var(--todo); }
+.entry-status-text.in_progress { color: var(--in-progress); }
+.entry-status-text.in_review { color: #fb923c; }
+.entry-status-text.approved { color: #a3e635; }
+.entry-status-text.cancelled { color: var(--text-dim); }
+
+.entry-date {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  line-height: 1.8;
+  white-space: nowrap;
+}
+
+.entry-hash {
+  font-size: 0.7rem;
+  color: var(--accent-dim);
+  margin-left: 4px;
+}
+
+/* ---- Entry Toggle (collapsible children) ---- */
+
+.entry-toggle {
+  cursor: pointer;
+  user-select: none;
+}
+
+.entry-toggle > .entry-desc::before {
+  content: '\25BC ';
+  font-size: 0.6rem;
+  color: var(--text-dim);
+  display: inline-block;
+}
+
+.entry-toggle.collapsed > .entry-desc::before {
+  content: '\25B6 ';
+}
+
+.entry-type-commit.entry-toggle .entry-desc::before,
+.entry-type-commit.entry-toggle.collapsed .entry-desc::before {
+  content: none;
+}
+
+.entry-child-count {
+  font-size: 0.65rem;
+  color: var(--accent);
+  margin-left: 6px;
+  padding: 1px 5px;
+  background: var(--accent-dim);
+  border: 1px solid var(--accent-dim);
+  border-radius: 3px;
+  font-weight: 500;
+}
+
+/* ---- Entry Detail ---- */
+
+.entry-detail {
+  grid-column: 3 / -1;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  padding: 4px 0 2px;
+  line-height: 1.5;
+  border-left: 2px solid var(--border-subtle);
+  padding-left: 10px;
+  margin-top: 2px;
+}
+
+/* ---- Nested entries (under task) ---- */
+
+.entry-children {
+  grid-column: 1 / -1;
+  padding-left: 18px;
+}
+
+.entry-children.hidden {
+  display: none;
+}
+
+.entry-children .entry {
+  border-bottom-color: transparent;
+  padding: 3px 0;
+}
+
+/* ---- Tabs (Milestones / Reviews) ---- */
+
+.tab-bar {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.tab-btn {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  padding: 10px 20px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 0.2s, border-color 0.2s;
+}
+
+.tab-btn:hover {
+  color: var(--text-secondary);
+}
+
+.tab-btn.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent);
+}
+
+/* ---- Dependency Graph ---- */
+
+.graph-section { padding: 24px 0; }
+
+.graph-container {
+  width: 100%;
+  overflow-x: auto;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.graph-container svg { display: block; margin: 0 auto; }
+
+.graph-node rect {
+  rx: 6;
+  ry: 6;
+  stroke-width: 1.5;
+  cursor: pointer;
+  transition: filter 0.2s;
+}
+
+.graph-node:hover rect { filter: brightness(1.3); }
+
+.graph-node text {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  fill: var(--text-primary);
+  pointer-events: none;
+}
+
+.graph-node .node-id {
+  font-size: 9px;
+  fill: var(--text-dim);
+}
+
+.graph-node .node-progress {
+  font-size: 9px;
+  fill: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.graph-edge {
+  fill: none;
+  stroke: var(--border);
+  stroke-width: 1.5;
+  marker-end: url(#arrowhead);
+}
+
+.graph-edge.cross-task {
+  stroke-dasharray: 4 3;
+  stroke: var(--text-dim);
+}
+
+.graph-empty {
+  color: var(--text-dim);
+  text-align: center;
+  padding: 48px 0;
+  font-size: 0.85rem;
+}
+
+.graph-legend {
+  display: flex;
+  gap: 16px;
+  margin-top: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.graph-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+
+.graph-legend-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+}
+
+/* ---- Retro Viewer ---- */
+
+.retro-section {
+  padding: 24px 0;
+}
+
+.retro-list {
+  list-style: none;
+}
+
+.retro-item {
+  padding: 10px 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  background: var(--bg-surface);
+  transition: border-color 0.2s, background 0.2s;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.retro-item:hover {
+  border-color: var(--border);
+  background: var(--bg-raised);
+}
+
+.retro-item-week {
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+
+.retro-item-date {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
+.retro-content {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 20px;
+  white-space: pre-wrap;
+  font-size: 0.85rem;
+  line-height: 1.7;
+  color: var(--text-secondary);
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.doc-content {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 20px 24px;
+  font-size: 0.85rem;
+  line-height: 1.8;
+  color: var(--text-secondary);
+  max-height: 70vh;
+  overflow-y: auto;
+}
+.doc-content h1, .doc-content h2, .doc-content h3, .doc-content h4 {
+  color: var(--text-primary); font-weight: 600; margin: 1.2em 0 0.4em;
+}
 .doc-content h1 { font-size: 1.1rem; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
-.doc-content h2 { font-size: 0.95rem; } .doc-content h3 { font-size: 0.88rem; }
-.doc-content p { margin: 0 0 0.8em; } .doc-content ul, .doc-content ol { margin: 0 0 0.8em; padding-left: 1.6em; } .doc-content li { margin-bottom: 0.25em; }
-.doc-content code { background: var(--bg-raised); border: 1px solid var(--border); border-radius: 3px; padding: 1px 5px; font-size: 0.8em; color: var(--accent); font-family: 'JetBrains Mono', monospace; }
-.doc-content pre { background: var(--bg-raised); border: 1px solid var(--border); border-radius: 4px; padding: 12px 16px; overflow-x: auto; margin: 0 0 0.8em; }
+.doc-content h2 { font-size: 0.95rem; }
+.doc-content h3 { font-size: 0.88rem; }
+.doc-content p { margin: 0 0 0.8em; }
+.doc-content ul, .doc-content ol { margin: 0 0 0.8em; padding-left: 1.6em; }
+.doc-content li { margin-bottom: 0.25em; }
+.doc-content code {
+  background: var(--bg-raised); border: 1px solid var(--border); border-radius: 3px;
+  padding: 1px 5px; font-size: 0.8em; color: var(--accent); font-family: 'JetBrains Mono', monospace;
+}
+.doc-content pre {
+  background: var(--bg-raised); border: 1px solid var(--border); border-radius: 4px;
+  padding: 12px 16px; overflow-x: auto; margin: 0 0 0.8em;
+}
 .doc-content pre code { background: none; border: none; padding: 0; color: var(--text-secondary); }
-.doc-content blockquote { border-left: 3px solid var(--accent-dim); margin: 0 0 0.8em; padding: 4px 0 4px 12px; color: var(--text-dim); }
-.doc-content a { color: var(--info); text-decoration: underline; } .doc-content hr { border: none; border-top: 1px solid var(--border); margin: 1em 0; }
+.doc-content blockquote {
+  border-left: 3px solid var(--accent-dim); margin: 0 0 0.8em;
+  padding: 4px 0 4px 12px; color: var(--text-dim);
+}
+.doc-content a { color: var(--info); text-decoration: underline; }
+.doc-content hr { border: none; border-top: 1px solid var(--border); margin: 1em 0; }
 .doc-content table { border-collapse: collapse; width: 100%; margin: 0 0 0.8em; font-size: 0.82rem; }
-.doc-content th { color: var(--text-primary); border-bottom: 1px solid var(--border); padding: 4px 8px; text-align: left; } .doc-content td { border-bottom: 1px solid var(--border-subtle); padding: 4px 8px; }
+.doc-content th { color: var(--text-primary); border-bottom: 1px solid var(--border); padding: 4px 8px; text-align: left; }
+.doc-content td { border-bottom: 1px solid var(--border-subtle); padding: 4px 8px; }
 .doc-content strong { color: var(--text-primary); }
-.retro-back { font-size: 0.8rem; color: var(--text-dim); cursor: pointer; margin-bottom: 12px; display: inline-block; }
-.retro-back:hover { color: var(--text-secondary); }
-.retro-empty { text-align: center; padding: 40px 0; color: var(--text-dim); font-size: 0.85rem; }
-.footer { padding: 24px 0 40px; border-top: 1px solid var(--border-subtle); display: flex; justify-content: space-between; align-items: center; }
-.footer-left { font-size: 0.75rem; color: var(--text-dim); } .footer-tagline { font-size: 0.7rem; color: var(--text-dim); font-style: italic; }
-.footer-right { font-size: 0.75rem; color: var(--text-dim); }
-.loading { display: flex; align-items: center; justify-content: center; min-height: 60vh; flex-direction: column; gap: 16px; }
-.loading-bar { width: 120px; height: 2px; background: var(--border); border-radius: 1px; overflow: hidden; }
-.loading-bar::after { content: ''; display: block; width: 40%; height: 100%; background: var(--accent); border-radius: 1px; animation: loading-slide 1.2s ease-in-out infinite; }
-@keyframes loading-slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(350%); } }
-.loading-text { font-size: 0.8rem; color: var(--text-dim); letter-spacing: 0.08em; text-transform: uppercase; }
-.fade-in { animation: fade-in 0.4s ease both; }
-@keyframes fade-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-.stagger-1 { animation-delay: 0.05s; } .stagger-2 { animation-delay: 0.1s; } .stagger-3 { animation-delay: 0.15s; }
-.project-item { padding: 12px 16px; border: 1px solid var(--border-subtle); border-radius: 4px; margin-bottom: 6px; cursor: pointer; background: var(--bg-surface); transition: border-color 0.2s, background 0.2s; }
-.project-item:hover { border-color: var(--accent-dim); background: var(--accent-glow); }
-.project-item-name { font-size: 0.95rem; color: var(--text-primary); }
-.project-item-id { font-size: 0.75rem; color: var(--text-dim); margin-top: 2px; }
-.open-prompt { display: flex; align-items: center; justify-content: center; min-height: 80vh; flex-direction: column; gap: 16px; }
-.hamburger-btn { background: none; border: 1px solid transparent; border-radius: 3px; cursor: pointer; padding: 4px 6px; display: flex; flex-direction: column; gap: 3px; transition: border-color 0.2s; }
-.hamburger-btn:hover { border-color: var(--border); }
-.hamburger-btn span { display: block; width: 16px; height: 1.5px; background: var(--text-dim); transition: background 0.2s; }
-.hamburger-btn:hover span { background: var(--text-secondary); }
-.menu-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1000; animation: fade-overlay 0.15s ease; }
-@keyframes fade-overlay { from { opacity: 0; } to { opacity: 1; } }
-.menu-panel { position: fixed; top: 0; left: 0; width: 300px; max-width: 80vw; height: 100vh; background: var(--bg-surface); border-right: 1px solid var(--border); z-index: 1001; padding: 24px; overflow-y: auto; animation: slide-in 0.2s ease; }
-@keyframes slide-in { from { transform: translateX(-100%); } to { transform: translateX(0); } }
-.menu-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; padding-bottom: 12px; border-bottom: 1px solid var(--border-subtle); }
-.menu-title { font-size: 0.75rem; color: var(--text-dim); letter-spacing: 0.1em; text-transform: uppercase; }
-.menu-close { background: none; border: none; color: var(--text-dim); font-size: 1.2rem; cursor: pointer; padding: 4px 8px; }
-.menu-close:hover { color: var(--text-primary); }
-.menu-section { margin-bottom: 20px; }
-.menu-section-title { font-size: 0.7rem; color: var(--text-dim); letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 8px; }
-.menu-item { display: block; width: 100%; padding: 8px 12px; border: 1px solid var(--border-subtle); border-radius: 4px; margin-bottom: 4px; cursor: pointer; background: transparent; color: var(--text-secondary); font-family: var(--font-body); font-size: 0.85rem; text-align: left; transition: all 0.2s; }
-.menu-item:hover { border-color: var(--border); background: var(--bg-raised); color: var(--text-primary); }
-.menu-item.current { border-color: var(--accent-dim); color: var(--accent); }
-.menu-item-sub { font-size: 0.7rem; color: var(--text-dim); margin-top: 2px; }
+
+.retro-back {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  cursor: pointer;
+  margin-bottom: 12px;
+  display: inline-block;
+  transition: color 0.2s;
+}
+
+.retro-back:hover {
+  color: var(--text-secondary);
+}
+
+.retro-empty {
+  text-align: center;
+  padding: 40px 0;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+/* ---- Footer ---- */
+
+.footer {
+  padding: 24px 0 40px;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.footer-left {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  letter-spacing: 0.05em;
+}
+
+.footer-tagline {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  font-style: italic;
+  letter-spacing: 0.03em;
+}
+
+.footer-right {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
+/* ---- Loading State ---- */
+
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 60vh;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.loading-bar {
+  width: 120px;
+  height: 2px;
+  background: var(--border);
+  border-radius: 1px;
+  overflow: hidden;
+}
+
+.loading-bar::after {
+  content: '';
+  display: block;
+  width: 40%;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 1px;
+  animation: loading-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes loading-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
+}
+
+.loading-text {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* ---- Error State ---- */
+
+.error-state {
+  text-align: center;
+  padding: 80px 0;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+}
+
+.error-state .error-icon {
+  font-size: 1.5rem;
+  margin-bottom: 12px;
+  color: var(--cancelled);
+}
+
+/* ---- Fade-in animations ---- */
+
+.fade-in {
+  animation: fade-in 0.4s ease both;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.stagger-1 { animation-delay: 0.05s; }
+.stagger-2 { animation-delay: 0.1s; }
+.stagger-3 { animation-delay: 0.15s; }
+.stagger-4 { animation-delay: 0.2s; }
+
+/* ---- Project selector ---- */
+
+.project-selector {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 80vh;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.project-list {
+  list-style: none;
+  width: 100%;
+  max-width: 480px;
+}
+
+.project-item {
+  padding: 12px 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+  background: var(--bg-surface);
+}
+
+.project-item:hover {
+  border-color: var(--accent-dim);
+  background: var(--accent-glow);
+}
+
+.project-item-name {
+  font-size: 0.95rem;
+  color: var(--text-primary);
+}
+
+.project-item-id {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+/* ---- Login Screen ---- */
+
+.login-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 80vh;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.login-logo {
+  font-family: var(--font-mono);
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+
+.login-tagline {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+  font-style: italic;
+  margin-top: -16px;
+}
+
+.login-divider {
+  width: 60px;
+  height: 1px;
+  background: var(--border);
+  position: relative;
+}
+
+.login-divider::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 20px;
+  height: 1px;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+}
+
+#g_id_signin {
+  margin-top: 8px;
+}
+
+.login-note {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  max-width: 280px;
+  text-align: center;
+  line-height: 1.6;
+}
+
 </style>
 </head>
 <body>
@@ -260,13 +1386,37 @@ body::after { content: ''; position: fixed; inset: 0; background: repeating-line
 
 <script>
 // ============================================================
-// DESKTOP-SPECIFIC: Data layer (Tauri invoke)
+// DESKTOP LAYER (desktop/layer.js)
+// ============================================================
+// ============================================================
+// DESKTOP-SPECIFIC: Tauri data layer
+// Generated into desktop/dist/index.html by desktop/build.py
 // ============================================================
 const { invoke } = window.__TAURI__.core;
 
 let pollTimer = null;
 let lastProjectJson = null;
-let cloudMode = false;  // true when viewing a cloud project
+let cloudMode = false;
+
+let state = {
+  project: null, expanded: new Set(), lastUpdate: null, connected: false, error: null,
+  activeTab: 'dashboard',
+  showGraph: false, graphFilterDeps: true,
+  retros: [], retroContent: null,
+  documents: [], documentContent: null,
+  hiddenStatuses: new Set(),
+  hideEntryDone: new Set(),
+  collapsedEntries: new Set(),
+  sortAsc: true,
+  searchQuery: '',
+  showReleaseGraph: false,
+  expandedDeployId: null,
+  cloudDiag: null,
+  cloudProjectId: null,
+  projectPath: null,
+};
+
+// ---- Data loading (Tauri invoke) ----
 
 async function loadProject() {
   try {
@@ -291,8 +1441,7 @@ async function loadProject() {
     if (!state.error) {
       state.error = String(e);
       state.connected = false;
-      stopPolling();
-      stopWatcher();
+      stopPolling(); stopWatcher();
       renderProjectSelector();
     }
   }
@@ -301,11 +1450,9 @@ async function loadProject() {
 async function loadDocuments() {
   try {
     if (cloudMode) {
-      const json = await invoke('cloud_list_documents');
-      state.documents = JSON.parse(json);
+      state.documents = JSON.parse(await invoke('cloud_list_documents'));
     } else {
-      const json = await invoke('get_documents', { scope: '' });
-      state.documents = JSON.parse(json);
+      state.documents = JSON.parse(await invoke('get_documents', { scope: '' }));
     }
   } catch (e) { state.documents = []; }
 }
@@ -313,11 +1460,9 @@ async function loadDocuments() {
 async function loadRetros() {
   try {
     if (cloudMode) {
-      const json = await invoke('cloud_list_retros');
-      state.retros = JSON.parse(json);
+      state.retros = JSON.parse(await invoke('cloud_list_retros'));
     } else {
-      const json = await invoke('list_retros');
-      state.retros = JSON.parse(json);
+      state.retros = JSON.parse(await invoke('list_retros'));
     }
   } catch (e) { state.retros = []; }
 }
@@ -325,11 +1470,9 @@ async function loadRetros() {
 async function loadRetroContent(week) {
   try {
     if (cloudMode) {
-      const json = await invoke('cloud_get_retro', { week });
-      state.retroContent = JSON.parse(json);
+      state.retroContent = JSON.parse(await invoke('cloud_get_retro', { week }));
     } else {
-      const json = await invoke('get_retro_content', { week });
-      state.retroContent = JSON.parse(json);
+      state.retroContent = JSON.parse(await invoke('get_retro_content', { week }));
     }
   } catch (e) { state.retroContent = { week, content: 'Failed to load.' }; }
   render();
@@ -338,9 +1481,7 @@ async function loadRetroContent(week) {
 async function loadDocumentContent(docId) {
   try {
     if (cloudMode) {
-      const json = await invoke('cloud_get_document', { docId });
-      const doc = JSON.parse(json);
-      state.documentContent = doc;
+      state.documentContent = JSON.parse(await invoke('cloud_get_document', { docId }));
     } else {
       const content = await invoke('get_document_content', { docId });
       let title = docId, scope = 'memo', body = content;
@@ -348,7 +1489,7 @@ async function loadDocumentContent(docId) {
         const parts = content.split('---', 3);
         if (parts.length >= 3) {
           for (const line of parts[1].trim().split('\n')) {
-            if (line.startsWith('scope:')) scope = line.split(':',2)[1].trim();
+            if (line.startsWith('scope:')) scope = line.split(':', 2)[1].trim();
           }
           body = parts[2].trim();
         }
@@ -369,7 +1510,7 @@ function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = 
 let unlistenWatcher = null;
 async function startWatcher() {
   if (unlistenWatcher) return;
-  if (window.__TAURI__ && window.__TAURI__.event) {
+  if (window.__TAURI__?.event) {
     unlistenWatcher = await window.__TAURI__.event.listen('beacon-changed', () => loadProject());
   }
 }
@@ -415,22 +1556,17 @@ async function doSelectProject(path) {
   } catch (e) { state.error = String(e); renderProjectSelector(); }
 }
 
+// ---- Project selector ----
+
 async function renderProjectSelector() {
   const app = document.getElementById('app');
-  let localProjects = [];
-  let cloudProjects = [];
-  let authenticated = false;
+  let localProjects = [], cloudProjects = [], authenticated = false;
   try { localProjects = await invoke('list_projects'); } catch (e) {}
   try { authenticated = await invoke('is_authenticated'); } catch (e) {}
   if (authenticated) {
     try {
-      const json = await invoke('cloud_list_projects');
-      cloudProjects = JSON.parse(json);
-    } catch (e) {
-      console.error('cloud_list_projects error:', e);
-      // Show error in UI for debugging
-      state.cloudError = String(e);
-    }
+      cloudProjects = JSON.parse(await invoke('cloud_list_projects'));
+    } catch (e) { state.cloudError = String(e); }
   }
   const localOnly = localProjects.filter(p => p.mode === 'local');
 
@@ -443,7 +1579,7 @@ async function renderProjectSelector() {
         ${localOnly.length > 0 ? `<div class="summary-label">Local Projects</div>
           ${localOnly.map(p => `<div class="project-item" data-action="select-project" data-path="${esc(p.path)}"><div class="project-item-name">${esc(p.name)}</div><div class="project-item-id">${esc(p.path)}</div></div>`).join('')}` : ''}
         ${cloudProjects.length > 0 ? `<div class="summary-label" style="margin-top:16px;">Cloud Projects</div>
-          ${cloudProjects.map(p => `<div class="project-item" data-action="select-cloud-project" data-project-id="${esc(p.project_id)}"><div class="project-item-name">${esc(p.name)} <span style="font-size:0.65rem;color:var(--info)">cloud</span></div><div class="project-item-id">${esc(p.project_id)}</div></div>`).join('')}` : ''}
+          ${cloudProjects.filter(p => !p.archived).map(p => `<div class="project-item" data-action="select-cloud-project" data-project-id="${esc(p.project_id)}"><div class="project-item-name">${esc(p.name)} <span style="font-size:0.65rem;color:var(--info)">cloud</span></div><div class="project-item-id">${esc(p.project_id)}</div></div>`).join('')}` : ''}
         ${!authenticated && localOnly.length === 0 ? `<p style="color:var(--text-dim);font-size:0.8rem;margin-top:12px;">Run <code style="color:var(--accent)">beacon auth login</code> to access cloud projects,<br>or <code style="color:var(--accent)">beacon init</code> to create a local project.</p>` : ''}
         ${state.cloudError ? `<p style="color:var(--warning);font-size:0.75rem;margin-top:12px;">Cloud error: ${esc(state.cloudError)}<br><span style="color:var(--text-dim);">Run <code style="color:var(--accent)">beacon auth login</code> to refresh.</span></p>` : ''}
         ${state.cloudDiag ? `<pre style="color:var(--text-dim);font-size:0.65rem;margin-top:8px;white-space:pre-wrap;border:1px solid var(--border);padding:8px;border-radius:3px;">${esc(state.cloudDiag)}</pre>` : ''}
@@ -453,335 +1589,7 @@ async function renderProjectSelector() {
   bindEvents();
 }
 
-// ============================================================
-// SHARED: State & helpers (from Web UI)
-// ============================================================
-let state = {
-  project: null, expanded: new Set(), lastUpdate: null, connected: false, error: null,
-  activeTab: 'dashboard', documents: [], documentContent: null,
-  retros: [], retroContent: null,
-  hiddenStatuses: new Set(), hideEntryDone: new Set(), collapsedEntries: new Set(), sortAsc: true,
-  showGraph: false, graphFilterDeps: true,
-  cloudDiag: null,
-};
-
-const STATUS_LABELS = { done: 'done', in_progress: 'active', observing: 'observing', todo: 'todo', waiting: 'waiting', cancelled: 'cancelled', in_review: 'in review', approved: 'approved' };
-const FILTER_ORDER = ['todo', 'in_progress', 'observing', 'waiting', 'done'];
-const FILTER_CSS = { todo: 'f-todo', in_progress: 'f-active', observing: 'f-observing', waiting: 'f-waiting', done: 'f-done' };
-
-function esc(s) { if (!s) return ''; const el = document.createElement('span'); el.textContent = s; return el.innerHTML; }
-function formatTime(d) { return d ? d.toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit',second:'2-digit'}) : ''; }
-function msIdNum(ms) { const m = ms.id.match(/(\d+)/); return m ? parseInt(m[1]) : 0; }
-function sortMilestones(ms) { return [...ms].sort((a,b) => state.sortAsc ? msIdNum(a)-msIdNum(b) : msIdNum(b)-msIdNum(a)); }
-function filterMilestones(ms) { return state.hiddenStatuses.size === 0 ? ms : ms.filter(m => !state.hiddenStatuses.has(m.status)); }
-function countTasks(entries) { let t=0,d=0; for(const e of entries){if(e.type==='task'){t++;if(e.status==='done')d++;}if(e.entries){const c=countTasks(e.entries);t+=c.total;d+=c.done;}} return{total:t,done:d}; }
-function statusBadge(s) { return `<div class="ms-status-badge"><div class="ms-status-icon ${s}"></div><span class="ms-status-text ${s}">${STATUS_LABELS[s]||s}</span></div>`; }
-function entryTypeBadge(t) { return `<span class="entry-type-badge ${t}">${t}</span>`; }
-function entryStatusText(e) {
-  if (e.type==='commit'||e.type==='save'||e.type==='pr') return '';
-  return `<span class="entry-status-text ${e.status}">${STATUS_LABELS[e.status]||e.status}</span>`;
-}
-
-// ============================================================
-// SHARED: Rendering (from Web UI, onclick removed → data-action)
-// ============================================================
-let _currentMsId = null;
-
-function renderEntry(entry) {
-  if (_currentMsId && state.hideEntryDone.has(_currentMsId) && (entry.status === 'done' || entry.status === 'cancelled')) return '';
-  const statusClass = entry.status === 'done' ? ' done' : '';
-  const hash = entry.meta?.hash ? `<span class="entry-hash">${entry.meta.hash.slice(0,7)}</span>` : '';
-  const src = entry.type==='save'&&entry.meta?.source ? `<span class="entry-hash">[${esc(entry.meta.source)}]</span>` : '';
-  const detail = entry.detail ? `<div class="entry-detail">${esc(entry.detail)}</div>` : '';
-  let prMeta = '';
-  if (entry.type === 'pr' && entry.meta) {
-    const m = entry.meta;
-    const prStatus = m.pr_status || 'open';
-    const reviewStatus = m.review_status ? ` · review: ${m.review_status}` : '';
-    const url = m.url ? ` · <a href="${esc(m.url)}" target="_blank" rel="noopener" style="color:inherit;opacity:0.7;">${esc(m.url.replace(/.*\/pull\//, '#'))}</a>` : '';
-    const intent = m.intent
-      ? `<div class="entry-pr-decision entry-pr-intent"><div class="entry-pr-decision-label">intent</div>${esc(m.intent)}</div>`
-      : '';
-    const rationale = m.review_rationale
-      ? `<div class="entry-pr-decision entry-pr-rationale-block"><div class="entry-pr-decision-label">rationale</div>${esc(m.review_rationale)}</div>`
-      : '';
-    prMeta = `<div class="entry-pr-block"><div class="entry-pr-meta"><span class="entry-pr-status ${prStatus}">${prStatus}${reviewStatus}</span>${url}</div>${intent}${rationale}</div>`;
-  }
-  const hasKids = entry.entries?.length > 0;
-  const collapsed = state.collapsedEntries.has(entry.id);
-  const toggle = (hasKids && entry.type !== 'commit') ? ` entry-toggle${collapsed?' collapsed':''}` : '';
-  let kids = '';
-  if (hasKids) kids = `<div class="entry-children${collapsed?' hidden':''}">${entry.entries.map(renderEntry).join('')}</div>`;
-  const badge = hasKids && collapsed ? `<span class="entry-child-count">${entry.entries.length}</span>` : '';
-  return `<div class="entry entry-type-${entry.type}${statusClass}${toggle}" ${hasKids?`data-action="toggle-entry" data-entry-id="${entry.id}"`:''}>
-    ${entryTypeBadge(entry.type)}<span class="entry-id">${entry.id}</span>
-    <span class="entry-desc">${esc(entry.description)}${hash}${src}${entryStatusText(entry)}${badge}</span>
-    <span class="entry-date">${entry.created_at||''}</span>${prMeta}${detail}${kids}
-  </div>`;
-}
-
-function renderMilestoneCard(ms) {
-  const expanded = state.expanded.has(ms.id);
-  const entries = ms.entries || [];
-  const {total, done} = countTasks(entries);
-  const tasksLabel = total > 0 ? `${done}/${total}` : '';
-  let body = '';
-  if (expanded && (entries.length > 0 || ms.description)) {
-    _currentMsId = ms.id;
-    const rendered = entries.map(renderEntry).join('');
-    _currentMsId = null;
-    const hasDone = entries.some(e => e.status==='done' || e.status==='cancelled');
-    const hiding = state.hideEntryDone.has(ms.id);
-    body = `<div class="ms-entries">
-      ${hasDone ? `<div class="ms-entries-toolbar"><button class="entry-filter-btn ${hiding?'active':''}" data-action="toggle-hide-done" data-ms-id="${ms.id}">${hiding?'show done':'hide done'}</button></div>` : ''}
-      ${ms.description ? `<div class="ms-description">${esc(ms.description)}</div>` : ''}
-      ${rendered}</div>`;
-  }
-  return `<div class="ms-card${ms.status==='in_progress'?' active':''}${expanded?' expanded':''}">
-    <div class="ms-card-header" data-action="toggle-ms" data-ms-id="${ms.id}">
-      ${statusBadge(ms.status)}
-      <div class="ms-title-row"><span class="ms-id">${ms.id}</span><span class="ms-title">${esc(ms.title)}</span></div>
-      <div class="ms-meta">
-        ${tasksLabel?`<span class="ms-tasks-text">${tasksLabel}</span>`:''}
-        <div class="ms-progress-bar"><div class="ms-progress-fill ${ms.status}" style="width:${ms.progress||0}%"></div></div>
-        <span class="ms-progress-text">${ms.progress||0}%</span>
-        ${entries.length>0?'<span class="ms-expand-hint">\u25BE</span>':''}
-      </div>
-    </div>
-    <div class="ms-body">${body}</div>
-  </div>`;
-}
-
-function scopeBadge(s) {
-  const c = {core:'background:var(--accent);color:#fff;',spec:'background:var(--border);color:var(--text-primary);',memo:'background:transparent;color:var(--text-secondary);border:1px solid var(--border);'};
-  return `<span style="display:inline-block;font-size:0.65rem;padding:1px 6px;border-radius:3px;margin-right:6px;${c[s]||c.memo}">${(s||'memo').toUpperCase()}</span>`;
-}
-
-function renderDocumentsSection() {
-  if (state.documentContent) {
-    const copyBtn = cloudMode && state.cloudProjectId
-      ? `<button data-action="copy-doc-link" data-doc-id="${esc(state.documentContent.doc_id)}" style="float:right;font-size:0.72rem;padding:3px 10px;background:var(--bg-raised);border:1px solid var(--border);border-radius:3px;color:var(--text-secondary);cursor:pointer;font-family:inherit;">Copy web link</button>`
-      : '';
-    return `<section class="retro-section fade-in">
-      <span class="retro-back" data-action="close-document">\u2190 back</span>
-      ${copyBtn}
-      <h3 style="font-size:1rem;color:var(--text-primary);margin:8px 0 16px;">${scopeBadge(state.documentContent.scope)}${esc(state.documentContent.title)}</h3>
-      <div class="doc-content">${marked.parse(state.documentContent.content || '')}</div>
-    </section>`;
-  }
-  if (state.retroContent) {
-    return `<section class="retro-section fade-in">
-      <span class="retro-back" data-action="close-retro">\u2190 back to Documents</span>
-      <h3 style="font-size:1rem;color:var(--text-primary);margin:8px 0 16px;">${esc(state.retroContent.week)}</h3>
-      <div class="retro-content">${esc(state.retroContent.content)}</div>
-    </section>`;
-  }
-  const order = ['core','spec','memo'], grouped = {};
-  for (const s of order) grouped[s] = [];
-  for (const d of state.documents) { (grouped[d.scope||'memo'] = grouped[d.scope||'memo']||[]).push(d); }
-  const labels = {core:'\u2605 CORE',spec:'\u25CB SPEC',memo:'\u25CB MEMO'};
-  let html = '';
-  for (const s of order) {
-    if (!grouped[s]||grouped[s].length===0) continue;
-    html += `<section class="retro-section fade-in" style="margin-bottom:12px;">
-      <h4 style="font-size:0.75rem;color:var(--text-secondary);margin:0 0 6px;letter-spacing:0.05em;">${labels[s]}</h4>
-      <ul class="retro-list">${grouped[s].map(d => `<li class="retro-item" data-action="open-document" data-doc-id="${esc(d.doc_id)}"><span class="retro-item-week">${esc(d.title)}</span><span class="retro-item-date">${d.updated_at?d.updated_at.slice(0,10):''}</span></li>`).join('')}</ul>
-    </section>`;
-  }
-  if (state.retros.length > 0) {
-    html += `<section class="retro-section fade-in" style="margin-bottom:12px;">
-      <h4 style="font-size:0.75rem;color:var(--text-secondary);margin:0 0 6px;letter-spacing:0.05em;">\u25CB REVIEWS</h4>
-      <ul class="retro-list">${state.retros.map(r => `<li class="retro-item" data-action="open-retro" data-week="${esc(r.week)}"><span class="retro-item-week">${esc(r.week)}</span><span class="retro-item-date">${r.updated_at?r.updated_at.slice(0,10):''}</span></li>`).join('')}</ul>
-    </section>`;
-  }
-  if (!html) return `<section class="retro-section fade-in"><div class="retro-empty">No documents yet.</div></section>`;
-  return html;
-}
-
-function renderReleasesSection() {
-  const p = state.project;
-  const deployments = ((p?.deployments)||[]).slice().reverse();
-  const releases = {};
-  for (const r of (p?.releases||[])) releases[r.id] = r;
-  if (deployments.length===0) return `<section class="retro-section fade-in"><div class="retro-empty">No deployments recorded yet.<br><span style="font-size:0.75rem;color:var(--text-dim)">Run beacon deploy record after each deploy.</span></div></section>`;
-  const msTitle = id => p?.milestones?.find(m => m.id === id)?.title || id;
-
-  function renderCommitBreakdown(d) {
-    const mcMap = d.milestone_commits;
-    if (!mcMap || Object.keys(mcMap).length === 0) {
-      const badges = (d.milestones||[]).map(id=>`<span class="release-ms-badge">${esc(id)}</span>`).join('');
-      return badges ? `<div class="release-ms-list">${badges}</div>` : '';
-    }
-    const newlyDone = new Set(d.newly_completed_ms || []);
-    let html = '<div class="release-commit-breakdown">';
-    for (const [msId, commits] of Object.entries(mcMap)) {
-      const isCompletion = newlyDone.has(msId);
-      const labelClass = isCompletion ? 'release-commit-label-completion' : 'release-commit-label-patch';
-      const labelText = isCompletion ? 'completion' : 'patch';
-      const hashes = commits.map(c=>`<code class="hash-badge">${esc(c.slice(0,7))}</code>`).join(' ');
-      html += `<div class="release-ms-row"><span class="release-ms-id">${esc(msId)}</span><span class="${labelClass}">${labelText}</span><span style="color:var(--text-dim);font-size:0.68rem;">${esc(msTitle(msId))}</span><span style="margin-left:4px;">${hashes}</span></div>`;
-    }
-    const unassigned = d.unassigned_commits || [];
-    if (unassigned.length > 0) {
-      const hashes = unassigned.map(c=>`<code class="hash-badge">${esc(c.slice(0,7))}</code>`).join(' ');
-      html += `<div class="release-ms-row"><span class="release-ms-id" style="color:var(--text-dim)">\u2014</span><span class="release-commit-label-untracked">untracked</span><span style="margin-left:4px;">${hashes}</span></div>`;
-    }
-    return html + '</div>';
-  }
-
-  let html = `<section class="retro-section fade-in">`;
-  for (const d of deployments) {
-    const rel = releases[d.linked_release];
-    const semver = rel?.semver ? `<span class="release-semver">${esc(rel.semver)}</span>` : '';
-    const icon = d.type==='major' ? '\u25C9' : '\u25CB';
-    const indent = d.type==='major' ? '' : 'margin-left:16px;border-left:2px solid var(--border-subtle);padding-left:10px;';
-    const dateStr = (d.date||'').slice(0,16).replace('T',' ');
-    html += `<div class="release-item" style="${indent}">
-      <div class="release-item-header"><span>${icon}</span><span class="release-id">${esc(d.id)}</span>${semver}<span class="release-date">${esc(dateStr)}</span></div>
-      <div class="release-desc">${esc(d.description||'')}</div>
-      ${renderCommitBreakdown(d)}
-    </div>`;
-  }
-  html += `</section>`;
-  return html;
-}
-
-// ---- Dependency Graph ----
-
-function buildGraph(milestones) {
-  const nodes = [], edges = [], idSet = new Set();
-  for (const ms of milestones) {
-    if (ms.status === 'cancelled') continue;
-    idSet.add(ms.id);
-    nodes.push({ id: ms.id, title: ms.title||'', status: ms.status||'todo', progress: ms.progress||0, depends_on: ms.depends_on||[] });
-  }
-  for (const n of nodes) for (const dep of n.depends_on) if (idSet.has(dep)) edges.push({ from: n.id, to: dep, type: 'depends_on' });
-  for (const ms of milestones) {
-    if (ms.status === 'cancelled') continue;
-    for (const entry of (ms.entries||[])) {
-      const reqBy = (entry.meta||{}).requested_by||'';
-      if (reqBy && idSet.has(reqBy)) edges.push({ from: reqBy, to: ms.id, type: 'cross_task', task_id: entry.id||'' });
-    }
-  }
-  const inDeg = {}; for (const n of nodes) inDeg[n.id] = 0;
-  for (const n of nodes) for (const dep of n.depends_on) if (dep in inDeg) inDeg[n.id]++;
-  const waves = [], remaining = {...inDeg};
-  while (Object.keys(remaining).length > 0) {
-    const wave = Object.keys(remaining).filter(id => remaining[id]===0).sort();
-    if (wave.length === 0) { waves.push({ wave: waves.length+1, milestones: Object.keys(remaining).sort(), cycle: true }); break; }
-    waves.push({ wave: waves.length+1, milestones: wave });
-    for (const id of wave) delete remaining[id];
-    for (const n of nodes) if (n.id in remaining) for (const dep of n.depends_on) if (wave.includes(dep)) remaining[n.id]--;
-  }
-  return { nodes, edges, waves };
-}
-
-const GRAPH_STATUS_COLORS = { done:'#166534', in_progress:'#1e3a5f', todo:'#2a2a30', waiting:'#44403c', observing:'#3b2f4a' };
-const GRAPH_STATUS_STROKES = { done:'#4ade80', in_progress:'#60a5fa', todo:'#71717a', waiting:'#fbbf24', observing:'#a78bfa' };
-
-function renderGraphSection() {
-  const p = state.project;
-  const header = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;"><span class="retro-back" data-action="hide-graph">← back</span><button class="sort-toggle" data-action="toggle-graph-filter" style="font-size:0.7rem;">${state.graphFilterDeps?'deps only ✓':'show all'}</button></div>`;
-  if (!p || !p.milestones || p.milestones.length === 0) return `<section class="graph-section fade-in">${header}<div class="graph-empty">No milestones.</div></section>`;
-  const fullGraph = buildGraph(p.milestones);
-  if (fullGraph.edges.length === 0) return `<section class="graph-section fade-in">${header}<div class="graph-empty">No dependencies defined yet.<br><span style="font-size:0.7rem;color:var(--text-dim)">Use <code>beacon milestone depends ms-X --on ms-Y</code> to add.</span></div></section>`;
-  let milestones = p.milestones;
-  if (state.graphFilterDeps) {
-    const connected = new Set();
-    for (const e of fullGraph.edges) { connected.add(e.from); connected.add(e.to); }
-    milestones = milestones.filter(ms => connected.has(ms.id));
-  }
-  const graph = state.graphFilterDeps ? buildGraph(milestones) : fullGraph;
-  if (graph.edges.length === 0) return `<section class="graph-section fade-in">${header}<div class="graph-empty">No dependencies defined yet.</div></section>`;
-  const nodeW = 180, nodeH = 52, waveGap = 60, nodeGap = 16, padX = 40, padY = 32;
-  const pos = {};
-  let maxRow = 0;
-  for (const w of graph.waves) maxRow = Math.max(maxRow, w.milestones.length);
-  for (let wi = 0; wi < graph.waves.length; wi++) {
-    const wave = graph.waves[wi]; const count = wave.milestones.length;
-    const startY = (maxRow - count) * (nodeH + nodeGap) / 2;
-    for (let ni = 0; ni < count; ni++) pos[wave.milestones[ni]] = { x: padX + wi*(nodeW+waveGap), y: padY + startY + ni*(nodeH+nodeGap) };
-  }
-  const svgW = padX*2 + graph.waves.length*(nodeW+waveGap) - waveGap;
-  const svgH = padY*2 + maxRow*(nodeH+nodeGap) - nodeGap;
-  let edgeSvg = '';
-  for (const e of graph.edges) {
-    const from = pos[e.from], to = pos[e.to]; if (!from || !to) continue;
-    const x1=to.x+nodeW, y1=to.y+nodeH/2, x2=from.x, y2=from.y+nodeH/2;
-    const cx1=x1+(x2-x1)*0.4, cx2=x1+(x2-x1)*0.6;
-    const cls = e.type==='cross_task'?' cross-task':'';
-    edgeSvg += `<path class="graph-edge${cls}" d="M${x1},${y1} C${cx1},${y1} ${cx2},${y2} ${x2},${y2}" />`;
-  }
-  let nodeSvg = '';
-  for (const n of graph.nodes) {
-    const pp = pos[n.id]; if (!pp) continue;
-    const fill = GRAPH_STATUS_COLORS[n.status]||GRAPH_STATUS_COLORS.todo;
-    const stroke = GRAPH_STATUS_STROKES[n.status]||GRAPH_STATUS_STROKES.todo;
-    const titleTrunc = n.title.length > 20 ? n.title.slice(0,19)+'\u2026' : n.title;
-    nodeSvg += `<g class="graph-node" transform="translate(${pp.x},${pp.y})"><rect width="${nodeW}" height="${nodeH}" fill="${fill}" stroke="${stroke}" /><text class="node-id" x="8" y="16">${esc(n.id)}</text><text x="8" y="32">${esc(titleTrunc)}</text><text class="node-progress" x="${nodeW-8}" y="16" text-anchor="end">${n.progress}%</text></g>`;
-  }
-  let waveSvg = '';
-  for (let wi = 0; wi < graph.waves.length; wi++) {
-    const x = padX + wi*(nodeW+waveGap) + nodeW/2;
-    waveSvg += `<text x="${x}" y="18" text-anchor="middle" fill="var(--text-dim)" font-size="10" font-family="var(--font-mono)">wave ${graph.waves[wi].wave}${graph.waves[wi].cycle?' (cycle)':''}</text>`;
-  }
-  const legendItems = [{label:'done',color:GRAPH_STATUS_STROKES.done},{label:'in_progress',color:GRAPH_STATUS_STROKES.in_progress},{label:'todo',color:GRAPH_STATUS_STROKES.todo},{label:'observing',color:GRAPH_STATUS_STROKES.observing},{label:'waiting',color:GRAPH_STATUS_STROKES.waiting}];
-  return `<section class="graph-section fade-in">${header}<div class="graph-container">
-    <svg width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}" xmlns="http://www.w3.org/2000/svg">
-      <defs><marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="var(--border)" /></marker></defs>
-      ${waveSvg}${edgeSvg}${nodeSvg}
-    </svg></div>
-    <div class="graph-legend">${legendItems.map(l=>`<div class="graph-legend-item"><div class="graph-legend-swatch" style="background:${l.color}"></div>${l.label}</div>`).join('')}</div>
-  </section>`;
-}
-
-async function renderMenu() {
-  let localProjects = [];
-  let cloudProjects = [];
-  try { localProjects = await invoke('list_projects'); } catch(e) {}
-  try {
-    const auth = await invoke('is_authenticated');
-    if (auth) {
-      const json = await invoke('cloud_list_projects');
-      cloudProjects = JSON.parse(json);
-    }
-  } catch(e) {}
-  const localOnly = localProjects.filter(p => p.mode === 'local');
-  const currentPath = state.projectPath || '';
-  const root = document.getElementById('menu-root');
-  root.innerHTML = `
-    <div class="menu-overlay" data-action="close-menu"></div>
-    <div class="menu-panel">
-      <div class="menu-header"><span class="menu-title">Menu</span><button class="menu-close" data-action="close-menu">\u00d7</button></div>
-      ${localOnly.length > 0 ? `<div class="menu-section">
-        <div class="menu-section-title">Local Projects</div>
-        ${localOnly.map(p => `
-          <button class="menu-item ${p.path===currentPath?'current':''}" data-action="menu-select-project" data-path="${esc(p.path)}">
-            ${esc(p.name)}
-            <div class="menu-item-sub">${esc(p.path)}</div>
-          </button>
-        `).join('')}
-      </div>` : ''}
-      ${cloudProjects.length > 0 ? `<div class="menu-section">
-        <div class="menu-section-title">Cloud Projects</div>
-        ${cloudProjects.filter(p=>!p.archived).map(p => `
-          <button class="menu-item ${('cloud:'+p.project_id)===currentPath?'current':''}" data-action="menu-select-cloud-project" data-project-id="${esc(p.project_id)}">
-            ${esc(p.name)}
-            <div class="menu-item-sub">${esc(p.project_id)}</div>
-          </button>
-        `).join('')}
-      </div>` : ''}
-      ${state.cloudProjectId ? `<div class="menu-section">
-        <div class="menu-section-title">Project</div>
-        <button class="menu-item" style="color:var(--text-dim)" data-action="archive-cloud-project">📦 Archive project</button>
-      </div>` : ''}
-    </div>`;
-  root.querySelectorAll('[data-action]').forEach(el => el.addEventListener('click', handleAction));
-}
-
-function closeMenu() {
-  document.getElementById('menu-root').innerHTML = '';
-}
+// ---- Render ----
 
 function render() {
   const app = document.getElementById('app');
@@ -790,45 +1598,110 @@ function render() {
   const p = state.project;
   const sorted = sortMilestones(p.milestones || []);
   const filtered = filterMilestones(sorted);
-  const activeCount = (p.milestones||[]).filter(m=>m.status==='in_progress').length;
-  const doneCount = (p.milestones||[]).filter(m=>m.status==='done').length;
+  const activeCount = (p.milestones || []).filter(m => m.status === 'in_progress').length;
+  const doneCount = (p.milestones || []).filter(m => m.status === 'done').length;
+  const retro = nextRetroDate(p.retro_day);
 
   app.innerHTML = `
-    <header class="header fade-in"><div class="header-top">
-      <button class="hamburger-btn" data-action="open-menu" title="Menu"><span></span><span></span><span></span></button>
-      <span class="project-name">${esc(p.name)}</span><span class="header-tag">beacon desktop</span>
-      <div class="connection-status"><div class="status-dot ${state.connected?'':'offline'}"></div><span>${state.connected?'watching':'disconnected'}</span></div>
-    </div></header>
-    <div class="tab-bar fade-in stagger-1">
-      <button class="tab-btn ${state.activeTab==='dashboard'?'active':''}" data-action="switch-tab" data-tab="dashboard">Milestones</button>
-      <button class="tab-btn ${state.activeTab==='documents'?'active':''}" data-action="switch-tab" data-tab="documents">Documents</button>
-      <button class="tab-btn ${state.activeTab==='releases'?'active':''}" data-action="switch-tab" data-tab="releases">Releases</button>
-    </div>
-    ${state.activeTab==='dashboard' ? (state.showGraph ? renderGraphSection() : `
-      ${p.summary?`<section class="summary-block fade-in"><div class="summary-label">Session Context</div><div class="summary-text">${esc(p.summary)}</div></section>`:''}
-      <section class="milestones fade-in">
-        <div class="milestones-header"><span class="milestones-title">Milestones</span><span class="milestones-count">${activeCount} active \u00b7 ${doneCount}/${(p.milestones||[]).length} done</span><button class="sort-toggle" data-action="show-graph" style="margin-left:auto;">Graph \u2192</button></div>
-        <div class="filter-bar">
-          <button class="filter-btn f-all ${state.hiddenStatuses.size===0?'on':'off'}" data-action="filter-all">all</button>
-          ${FILTER_ORDER.map(s=>`<button class="filter-btn ${!state.hiddenStatuses.has(s)?'on':'off'} ${FILTER_CSS[s]||''}" data-action="filter-status" data-status="${s}">${STATUS_LABELS[s]}</button>`).join('')}
-          <button class="sort-toggle" data-action="toggle-sort">${state.sortAsc?'\u2191 ms-1 first':'\u2193 latest first'}</button>
+    <header class="header fade-in">
+      <div class="header-top">
+        <button class="hamburger-btn" data-action="open-menu" title="Menu"><span></span><span></span><span></span></button>
+        <span class="project-name">${esc(p.name)}</span>
+        <span class="header-tag">beacon desktop</span>
+        <div class="connection-status">
+          <div class="status-dot ${state.connected ? '' : 'offline'}"></div>
+          <span>${state.connected ? 'watching' : 'disconnected'}</span>
         </div>
-        ${filtered.map(ms=>renderMilestoneCard(ms)).join('')}
+      </div>
+    </header>
+
+    ${(p.objective || retro) ? `
+    <div class="project-info fade-in stagger-1">
+      ${p.objective ? `<div class="project-info-item"><span class="project-info-label">Objective</span><span class="project-info-value">${esc(p.objective)}</span></div>` : ''}
+      ${retro ? `<div class="project-info-item${retro.isToday ? ' review-due' : ''}"><span class="project-info-label">${retro.isToday ? '⚠ Review Due Today' : 'Next Review'}</span><span class="project-info-value">${retro.date} (${esc(p.retro_day || 'friday')})</span></div>` : ''}
+    </div>` : ''}
+
+    <div class="tab-bar fade-in stagger-1">
+      <button class="tab-btn ${state.activeTab === 'dashboard' ? 'active' : ''}" data-action="switch-tab" data-tab="dashboard">Milestones</button>
+      <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
+      <button class="tab-btn ${state.activeTab === 'releases' ? 'active' : ''}" data-action="switch-tab" data-tab="releases">Releases</button>
+    </div>
+
+    ${state.activeTab === 'dashboard' ? (state.showGraph ? renderGraphSection() : `
+      ${p.summary ? `<section class="summary-block fade-in"><div class="summary-label">Session Context</div><div class="summary-text">${esc(p.summary)}</div></section>` : ''}
+      <section class="milestones fade-in">
+        <div class="milestones-header">
+          <span class="milestones-title">Milestones</span>
+          <span class="milestones-count">${activeCount} active · ${doneCount}/${(p.milestones || []).length} done</span>
+          <input class="ms-search-inline" id="search-input" type="search" placeholder="Search milestones, tasks, commits..." value="${esc(state.searchQuery)}" autocomplete="off">
+          <button class="sort-toggle" data-action="show-graph">Graph →</button>
+        </div>
+        ${state.searchQuery.trim() ? renderSearchResults() : `
+        <div class="filter-bar">
+          <button class="filter-btn f-all ${state.hiddenStatuses.size === 0 ? 'on' : 'off'}" data-action="filter-all">all</button>
+          ${FILTER_ORDER.map(s => `<button class="filter-btn ${!state.hiddenStatuses.has(s) ? 'on' : 'off'} ${FILTER_CSS_CLASS[s] || ''}" data-action="filter-status" data-status="${s}">${STATUS_LABELS[s] || s}</button>`).join('')}
+          <button class="sort-toggle" data-action="toggle-sort">${state.sortAsc ? '↑ ms-1 first' : '↓ latest first'}</button>
+        </div>
+        ${filtered.map(ms => renderMilestoneCard(ms, 0)).join('')}
+        `}
       </section>`) : ''}
-    ${state.activeTab==='documents' ? renderDocumentsSection() : ''}
-    ${state.activeTab==='releases' ? renderReleasesSection() : ''}
-    <footer class="footer fade-in stagger-3"><div class="footer-left"><div>${cloudMode?'cloud':'local'}</div><div class="footer-tagline">Where humans and AI are bound together.</div></div><div class="footer-right" style="display:flex;align-items:center;gap:12px;">${state.lastUpdate?formatTime(state.lastUpdate):''}<button class="sort-toggle" data-action="export-json" style="font-size:0.65rem;">Export JSON</button></div></footer>
+
+    ${state.activeTab === 'documents' ? renderDocumentsSection() : ''}
+    ${state.activeTab === 'releases' ? renderReleasesSection() : ''}
+
+    <footer class="footer fade-in stagger-3">
+      <div class="footer-left">
+        <div>${cloudMode ? 'cloud' : 'local'}</div>
+        <div class="footer-tagline">Where humans and AI are bound together.</div>
+      </div>
+      <div class="footer-right" style="display:flex;align-items:center;gap:12px;">
+        ${state.lastUpdate ? formatTime(state.lastUpdate) : ''}
+        <button class="sort-toggle" data-action="export-json" style="font-size:0.65rem;">Export JSON</button>
+      </div>
+    </footer>
   `;
   window.scrollTo(0, scrollY);
   bindEvents();
 }
 
-// ============================================================
-// DESKTOP-SPECIFIC: Event delegation (replaces inline onclick)
-// ============================================================
+// ---- Menu ----
+
+async function renderMenu() {
+  let localProjects = [], cloudProjects = [];
+  try { localProjects = await invoke('list_projects'); } catch (e) {}
+  try {
+    const auth = await invoke('is_authenticated');
+    if (auth) cloudProjects = JSON.parse(await invoke('cloud_list_projects'));
+  } catch (e) {}
+  const localOnly = localProjects.filter(p => p.mode === 'local');
+  const currentPath = state.projectPath || '';
+  const root = document.getElementById('menu-root');
+  root.innerHTML = `
+    <div class="menu-overlay" data-action="close-menu"></div>
+    <div class="menu-panel">
+      <div class="menu-header"><span class="menu-title">Menu</span><button class="menu-close" data-action="close-menu">×</button></div>
+      ${localOnly.length > 0 ? `<div class="menu-section">
+        <div class="menu-section-title">Local Projects</div>
+        ${localOnly.map(p => `<button class="menu-item ${p.path === currentPath ? 'current' : ''}" data-action="menu-select-project" data-path="${esc(p.path)}">${esc(p.name)}<div class="menu-item-sub">${esc(p.path)}</div></button>`).join('')}
+      </div>` : ''}
+      ${cloudProjects.length > 0 ? `<div class="menu-section">
+        <div class="menu-section-title">Cloud Projects</div>
+        ${cloudProjects.filter(p => !p.archived).map(p => `<button class="menu-item ${('cloud:' + p.project_id) === currentPath ? 'current' : ''}" data-action="menu-select-cloud-project" data-project-id="${esc(p.project_id)}">${esc(p.name)}<div class="menu-item-sub">${esc(p.project_id)}</div></button>`).join('')}
+      </div>` : ''}
+      ${state.cloudProjectId ? `<div class="menu-section">
+        <div class="menu-section-title">Project</div>
+        <button class="menu-item" style="color:var(--text-dim)" data-action="archive-cloud-project">\u{1F4E6} Archive project</button>
+      </div>` : ''}
+    </div>`;
+  root.querySelectorAll('[data-action]').forEach(el => el.addEventListener('click', handleAction));
+}
+
+function closeMenu() { document.getElementById('menu-root').innerHTML = ''; }
+
+// ---- Event delegation ----
+
 function bindEvents() {
-  const app = document.getElementById('app');
-  app.querySelectorAll('[data-action]').forEach(el => {
+  document.querySelectorAll('[data-action]').forEach(el => {
     el.addEventListener('click', handleAction);
   });
 }
@@ -836,31 +1709,35 @@ function bindEvents() {
 async function handleAction(e) {
   const el = e.currentTarget;
   const action = el.dataset.action;
-  // Don't propagate from child entries
   if (action === 'toggle-entry' && e.target.closest('.entry-children')) return;
   e.stopPropagation();
 
   switch (action) {
-    case 'select-project': doSelectProject(el.dataset.path); break;
-    case 'toggle-ms':
+    case 'select-project': await doSelectProject(el.dataset.path); break;
+    case 'select-cloud-project': await doSelectCloudProject(el.dataset.projectId); break;
+    case 'toggle-ms': {
       const msId = el.dataset.msId;
       state.expanded.has(msId) ? state.expanded.delete(msId) : state.expanded.add(msId);
       render(); break;
-    case 'toggle-entry':
+    }
+    case 'toggle-entry': {
       const eid = el.dataset.entryId;
       state.collapsedEntries.has(eid) ? state.collapsedEntries.delete(eid) : state.collapsedEntries.add(eid);
       render(); break;
-    case 'toggle-hide-done':
+    }
+    case 'toggle-hide-done': {
       const mid = el.dataset.msId;
       state.hideEntryDone.has(mid) ? state.hideEntryDone.delete(mid) : state.hideEntryDone.add(mid);
       render(); break;
-    case 'filter-status':
+    }
+    case 'filter-status': {
       const s = el.dataset.status;
       state.hiddenStatuses.has(s) ? state.hiddenStatuses.delete(s) : state.hiddenStatuses.add(s);
       render(); break;
+    }
     case 'filter-all': state.hiddenStatuses.clear(); render(); break;
     case 'toggle-sort': state.sortAsc = !state.sortAsc; render(); break;
-    case 'switch-tab':
+    case 'switch-tab': {
       state.activeTab = el.dataset.tab;
       state.showGraph = false;
       state.documentContent = null; state.retroContent = null;
@@ -871,6 +1748,7 @@ async function handleAction(e) {
         await Promise.all(loads);
       }
       render(); break;
+    }
     case 'show-graph': state.showGraph = true; render(); break;
     case 'hide-graph': state.showGraph = false; render(); break;
     case 'toggle-graph-filter': state.graphFilterDeps = !state.graphFilterDeps; render(); break;
@@ -885,34 +1763,48 @@ async function handleAction(e) {
     }
     case 'open-retro': await loadRetroContent(el.dataset.week); break;
     case 'close-retro': state.retroContent = null; render(); break;
+    case 'expand-deploy': {
+      const dId = el.dataset.deployId;
+      state.expandedDeployId = state.expandedDeployId === dId ? null : dId;
+      render(); break;
+    }
+    case 'toggle-release-graph': state.showReleaseGraph = !state.showReleaseGraph; render(); break;
+    case 'search-goto': {
+      const msId = el.dataset.msId;
+      state.searchQuery = '';
+      state.activeTab = 'dashboard';
+      state.expanded.add(msId);
+      render();
+      setTimeout(() => document.getElementById(`ms-${msId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+      break;
+    }
     case 'open-menu': await renderMenu(); break;
     case 'close-menu': closeMenu(); break;
     case 'menu-select-project': closeMenu(); await doSelectProject(el.dataset.path); break;
     case 'menu-select-cloud-project': closeMenu(); await doSelectCloudProject(el.dataset.projectId); break;
-    case 'select-cloud-project': await doSelectCloudProject(el.dataset.projectId); break;
-    case 'cloud-diagnose':
+    case 'cloud-diagnose': {
       state.cloudDiag = 'Running...';
       renderProjectSelector();
       state.cloudDiag = await invoke('cloud_diagnose').catch(e => String(e));
       renderProjectSelector();
       break;
+    }
     case 'export-json': await exportProject(); break;
     case 'archive-cloud-project': await archiveCloudProject(); break;
   }
 }
 
+// ---- Project actions ----
+
 async function archiveCloudProject() {
   if (!state.cloudProjectId) return;
-  if (!confirm(`Archive this project? It will be hidden from the project list.`)) return;
+  if (!confirm('Archive this project? It will be hidden from the project list.')) return;
   try {
     await invoke('cloud_archive_project');
     closeMenu();
-    state.cloudProjectId = null;
-    state.project = null;
+    state.cloudProjectId = null; state.project = null;
     renderProjectSelector();
-  } catch (e) {
-    alert(`Failed to archive: ${e}`);
-  }
+  } catch (e) { alert('Failed to archive: ' + e); }
 }
 
 async function exportProject() {
@@ -920,51 +1812,60 @@ async function exportProject() {
     let project, documents = [], retros = [];
     if (cloudMode && state.cloudProjectId) {
       project = JSON.parse(await invoke('cloud_load_project', { projectId: state.cloudProjectId }));
-      try { documents = JSON.parse(await invoke('cloud_list_documents')); } catch(e) {}
-      try { retros = JSON.parse(await invoke('cloud_list_retros')); } catch(e) {}
+      try { documents = JSON.parse(await invoke('cloud_list_documents')); } catch (e) {}
+      try { retros = JSON.parse(await invoke('cloud_list_retros')); } catch (e) {}
     } else {
       project = JSON.parse(await invoke('load_project_json'));
-      try { documents = JSON.parse(await invoke('get_documents', { scope: '' })); } catch(e) {}
-      try { retros = JSON.parse(await invoke('list_retros')); } catch(e) {}
+      try { documents = JSON.parse(await invoke('get_documents', { scope: '' })); } catch (e) {}
+      try { retros = JSON.parse(await invoke('list_retros')); } catch (e) {}
     }
-    const fullExport = { ...project, documents, retros };
-    const blob = new Blob([JSON.stringify(fullExport, null, 2)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify({ ...project, documents, retros }, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
+    const a = document.createElement('a'); a.href = url;
     a.download = `${state.cloudProjectId || 'project'}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  } catch(e) { alert('Export failed: ' + e); }
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a); URL.revokeObjectURL(url);
+  } catch (e) { alert('Export failed: ' + e); }
 }
 
-// Reconnect when window regains focus
+// ---- Reconnect (Tauri focus events) ----
+
 function _tryReconnect() {
   if (!state.project) return;
   if (cloudMode) {
-    // Cloud mode: resume polling if stopped, and trigger immediate load
     if (!pollTimer) startPolling();
     loadProject();
   } else {
-    // Local mode: restart watcher and reload
     startWatcher();
     loadProject();
   }
 }
-// Tauri window focus event
+
 if (window.__TAURI__?.event) {
   window.__TAURI__.event.listen('tauri://focus', _tryReconnect);
 }
-// Web visibilitychange fallback (also useful for web-view scenarios)
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') _tryReconnect();
 });
 
-// ============================================================
-// DESKTOP-SPECIFIC: Init
-// ============================================================
+// Search input: update query on each keystroke
+document.addEventListener('input', e => {
+  if (e.target.id === 'search-input') {
+    state.searchQuery = e.target.value;
+    render();
+    const input = document.getElementById('search-input');
+    if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+  }
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && state.searchQuery) {
+    state.searchQuery = ''; render();
+    document.getElementById('search-input')?.focus();
+  }
+});
+
+// ---- Init ----
+
 async function init() {
   try {
     await loadProject();
@@ -981,7 +1882,871 @@ async function init() {
 if (window.__TAURI__) init();
 else document.addEventListener('DOMContentLoaded', () => { if (window.__TAURI__) init(); });
 
+// ============================================================
+// SHARED RENDERING (from server/static/index.html)
+// ============================================================
+// ---- Render Helpers ----
 
+const STATUS_LABELS = {
+  done: 'done', in_progress: 'active', observing: 'observing',
+  todo: 'todo', waiting: 'waiting', cancelled: 'cancelled',
+  in_review: 'in review', approved: 'approved',
+};
+
+const FILTER_ORDER = ['todo', 'in_progress', 'observing', 'waiting', 'done'];
+const FILTER_CSS_CLASS = { todo: 'f-todo', in_progress: 'f-active', observing: 'f-observing', waiting: 'f-waiting', done: 'f-done' };
+
+function statusBadge(status) {
+  const label = STATUS_LABELS[status] || status;
+  return `<div class="ms-status-badge"><div class="ms-status-icon ${status}"></div><span class="ms-status-text ${status}">${label}</span></div>`;
+}
+
+function entryTypeBadge(type) {
+  const labels = { commit: 'commit', task: 'task', note: 'note', save: 'save', pr: 'PR' };
+  return `<span class="entry-type-badge ${type}">${labels[type] || type}</span>`;
+}
+
+function entryStatusText(entry) {
+  if (entry.type === 'commit') return '';
+  const label = STATUS_LABELS[entry.status] || entry.status;
+  return `<span class="entry-status-text ${entry.status}">${label}</span>`;
+}
+
+let _currentMsId = null; // set during milestone card render
+
+function renderEntry(entry) {
+  if (_currentMsId && state.hideEntryDone.has(_currentMsId) && (entry.status === 'done' || entry.status === 'cancelled')) return '';
+
+  const statusClass = entry.status === 'done' ? ' done' : '';
+  const hash = entry.meta?.hash ? `<span class="entry-hash">${entry.meta.hash.slice(0, 7)}</span>` : '';
+  const detail = entry.detail ? `<div class="entry-detail">${esc(entry.detail)}</div>` : '';
+  let prMeta = '';
+  if (entry.type === 'pr' && entry.meta) {
+    const m = entry.meta;
+    const prStatus = m.pr_status || 'open';
+    const reviewStatus = m.review_status ? ` · review: ${m.review_status}` : '';
+    const url = m.url ? ` · <a href="${esc(m.url)}" target="_blank" rel="noopener" style="color:inherit;opacity:0.7;">${esc(m.url.replace(/.*\/pull\//, '#'))}</a>` : '';
+    const intent = m.intent
+      ? `<div class="entry-pr-decision entry-pr-intent"><div class="entry-pr-decision-label">intent</div>${esc(m.intent)}</div>`
+      : '';
+    const rationale = m.review_rationale
+      ? `<div class="entry-pr-decision entry-pr-rationale-block"><div class="entry-pr-decision-label">rationale</div>${esc(m.review_rationale)}</div>`
+      : '';
+    prMeta = `<div class="entry-pr-block"><div class="entry-pr-meta"><span class="entry-pr-status ${prStatus}">${prStatus}${reviewStatus}</span>${url}</div>${intent}${rationale}</div>`;
+  }
+  const statusText = entryStatusText(entry);
+  const hasChildren = entry.entries?.length > 0;
+  const childCount = hasChildren ? entry.entries.length : 0;
+  const isCollapsed = state.collapsedEntries.has(entry.id);
+  const toggleClass = (hasChildren && entry.type !== 'commit') ? ` entry-toggle${isCollapsed ? ' collapsed' : ''}` : '';
+
+  let children = '';
+  if (hasChildren) {
+    const hiddenClass = isCollapsed ? ' hidden' : '';
+    const filteredChildren = entry.entries.map(renderEntry).join('');
+    children = `<div class="entry-children${hiddenClass}">${filteredChildren}</div>`;
+  }
+
+  const childBadge = hasChildren && isCollapsed ? `<span class="entry-child-count">${childCount}</span>` : '';
+
+  return `
+    <div class="entry entry-type-${entry.type}${statusClass}${toggleClass}" ${hasChildren ? `data-action="toggle-entry" data-entry-id="${entry.id}"` : ''}>
+      ${entryTypeBadge(entry.type)}
+      <span class="entry-id">${entry.id}</span>
+      <span class="entry-desc">${esc(entry.description)}${hash}${statusText}${childBadge}</span>
+      <span class="entry-date">${entry.created_at || ''}</span>
+      ${prMeta}
+      ${detail}
+      ${children}
+    </div>
+  `;
+}
+
+function esc(s) {
+  if (!s) return '';
+  const el = document.createElement('span');
+  el.textContent = s;
+  return el.innerHTML;
+}
+
+function formatTime(date) {
+  if (!date) return '';
+  return date.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+// ---- Sort milestones by ID number ----
+
+function msIdNum(ms) {
+  const m = ms.id.match(/(\d+)/);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
+function sortMilestones(milestones) {
+  return [...milestones].sort((a, b) => {
+    const diff = msIdNum(a) - msIdNum(b);
+    return state.sortAsc ? diff : -diff;
+  });
+}
+
+// ---- Filter ----
+
+function toggleStatusFilter(status) {
+  if (state.hiddenStatuses.has(status)) {
+    state.hiddenStatuses.delete(status);
+  } else {
+    state.hiddenStatuses.add(status);
+  }
+  render();
+}
+
+function showAllStatuses() {
+  state.hiddenStatuses.clear();
+  render();
+}
+
+function filterMilestones(milestones) {
+  if (state.hiddenStatuses.size === 0) return milestones;
+  return milestones.filter(ms => !state.hiddenStatuses.has(ms.status));
+}
+
+// ---- Next retro date ----
+
+function nextRetroDate(retroDay) {
+  const days = { monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6, sunday: 0 };
+  const target = days[(retroDay || 'friday').toLowerCase()];
+  if (target === undefined) return null;
+  const now = new Date();
+  const current = now.getDay();
+  if (current === target) return { date: now.toISOString().slice(0, 10), isToday: true };
+  let diff = target - current;
+  if (diff <= 0) diff += 7;
+  const next = new Date(now);
+  next.setDate(now.getDate() + diff);
+  return { date: next.toISOString().slice(0, 10), isToday: false };
+}
+
+// ---- Render ----
+
+function render() {
+  const app = document.getElementById('app');
+
+  if (state.error && !state.project) {
+    app.innerHTML = `<div class="error-state"><div class="error-icon">\u26a0</div><div>${esc(state.error)}</div></div>`;
+    return;
+  }
+
+  if (!state.project && state.projects.length === 0) return;
+
+  if (!state.project && state.projects.length > 0) {
+    renderProjectSelector(app);
+    return;
+  }
+
+  const p = state.project;
+  const sorted = sortMilestones(p.milestones || []);
+  const filtered = filterMilestones(sorted);
+  const activeCount = (p.milestones || []).filter(m => m.status === 'in_progress').length;
+  const doneCount = (p.milestones || []).filter(m => m.status === 'done').length;
+  const retro = nextRetroDate(p.retro_day);
+
+  app.innerHTML = `
+    <header class="header fade-in">
+      <div class="header-top">
+        <button class="hamburger-btn" data-action="open-menu" title="Menu">
+          <span></span><span></span><span></span>
+        </button>
+        <span class="project-name">${esc(p.name)}</span>
+        <span class="header-tag">beacon</span>
+        <div class="connection-status">
+          <div class="status-dot ${state.connected ? '' : 'offline'}"></div>
+          <span class="connection-label">${state.connected ? 'live' : 'reconnecting'}</span>
+        </div>
+      </div>
+    </header>
+
+    ${(p.objective || retro) ? `
+    <div class="project-info fade-in stagger-1">
+      ${p.objective ? `<div class="project-info-item"><span class="project-info-label">Objective</span><span class="project-info-value">${esc(p.objective)}</span></div>` : ''}
+      ${retro ? `<div class="project-info-item${retro.isToday ? ' review-due' : ''}"><span class="project-info-label">${retro.isToday ? '\u26a0 Review Due Today' : 'Next Review'}</span><span class="project-info-value">${retro.date} (${esc(p.retro_day || 'friday')})</span></div>` : ''}
+    </div>
+    ` : ''}
+
+    <div class="tab-bar fade-in stagger-1">
+      <button class="tab-btn ${state.activeTab === 'dashboard' ? 'active' : ''}" data-action="switch-tab" data-tab="dashboard">Milestones</button>
+      <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
+      <button class="tab-btn ${state.activeTab === 'releases' ? 'active' : ''}" data-action="switch-tab" data-tab="releases">Releases</button>
+    </div>
+
+    ${state.activeTab === 'dashboard' ? (state.showGraph ? renderGraphSection() : `
+    ${p.summary ? `
+    <section class="summary-block fade-in">
+      <div class="summary-label">Session Context</div>
+      <div class="summary-text">${esc(p.summary)}</div>
+    </section>
+    ` : ''}
+    <section class="milestones fade-in">
+      <div class="milestones-header">
+        <span class="milestones-title">Milestones</span>
+        <span class="milestones-count">${activeCount} active \u00b7 ${doneCount}/${(p.milestones||[]).length} done</span>
+        <input class="ms-search-inline" id="search-input" type="search" placeholder="Search milestones, tasks, commits..." value="${esc(state.searchQuery)}" autocomplete="off">
+        <button class="sort-toggle" data-action="show-graph">Graph \u2192</button>
+      </div>
+      ${state.searchQuery.trim() ? renderSearchResults() : `
+      <div class="filter-bar">
+        <button class="filter-btn f-all ${state.hiddenStatuses.size === 0 ? 'on' : 'off'}" data-action="filter-all">all</button>
+        ${FILTER_ORDER.map(s => {
+          const isOn = !state.hiddenStatuses.has(s);
+          return `<button class="filter-btn ${isOn ? 'on' : 'off'} ${FILTER_CSS_CLASS[s] || ''}" data-action="filter-status" data-status="${s}">${STATUS_LABELS[s] || s}</button>`;
+        }).join('')}
+        <button class="sort-toggle" data-action="toggle-sort">${state.sortAsc ? '\u2191 ms-1 first' : '\u2193 latest first'}</button>
+      </div>
+      ${filtered.map((ms, i) => renderMilestoneCard(ms, i)).join('')}
+      `}
+    </section>
+    `) : ''}
+
+    ${state.activeTab === 'documents' ? renderDocumentsSection() : ''}
+
+    ${state.activeTab === 'releases' ? renderReleasesSection() : ''}
+
+    <footer class="footer fade-in stagger-4">
+      <div class="footer-left">
+        <div>${esc(state.projectId)}</div>
+        <div class="footer-tagline">Where humans and AI are bound together.</div>
+      </div>
+      <div class="footer-right">
+        <button class="sort-toggle" data-action="export-json" style="font-size:0.65rem;">Export JSON</button>
+        <span>${state.lastUpdate ? formatTime(state.lastUpdate) : ''}</span>
+      </div>
+    </footer>
+  `;
+
+  bindEvents();
+}
+
+function renderProjectSelector(app) {
+  app.innerHTML = `
+    <div class="project-selector fade-in">
+      <h1 class="login-logo">Beacon</h1>
+      <p class="login-tagline">Where humans and AI are bound together.</p>
+      <div style="height: 24px"></div>
+      <div class="summary-label">Select Project</div>
+      <ul class="project-list">
+        ${state.projects.map(p => `
+          <li class="project-item" data-action="select-project" data-project-id="${esc(p.project_id)}">
+            <div class="project-item-name">${esc(p.name)}</div>
+            <div class="project-item-id">${esc(p.project_id)}</div>
+          </li>
+        `).join('')}
+      </ul>
+    </div>
+  `;
+  bindEvents();
+}
+
+function renderMilestoneCard(ms, index) {
+  const isExpanded = state.expanded.has(ms.id);
+  const entries = ms.entries || [];
+  const activeClass = ms.status === 'in_progress' ? ' active' : '';
+  const expandedClass = isExpanded ? ' expanded' : '';
+  const tasksLabel = ms.total_tasks > 0 ? `${ms.done_tasks}/${ms.total_tasks}` : '';
+
+  let bodyHtml = '';
+  if (isExpanded && (entries.length > 0 || ms.description)) {
+    _currentMsId = ms.id;
+    const renderedEntries = entries.map(renderEntry).join('');
+    _currentMsId = null;
+    const hasDone = entries.some(e => e.status === 'done' || e.status === 'cancelled' || (e.entries || []).some(c => c.status === 'done' || c.status === 'cancelled'));
+    const msHideDone = state.hideEntryDone.has(ms.id);
+    bodyHtml = `
+      <div class="ms-entries">
+        ${hasDone ? `
+        <div class="ms-entries-toolbar">
+          <button class="entry-filter-btn ${msHideDone ? 'active' : ''}" data-action="toggle-hide-done" data-ms-id="${ms.id}">
+            ${msHideDone ? 'show done' : 'hide done'}
+          </button>
+        </div>
+        ` : ''}
+        ${ms.description ? `<div class="ms-description">${esc(ms.description)}</div>` : ''}
+        ${renderedEntries}
+      </div>
+    `;
+  }
+
+  return `
+    <div class="ms-card${activeClass}${expandedClass}">
+      <div class="ms-card-header" data-action="toggle-ms" data-ms-id="${ms.id}">
+        ${statusBadge(ms.status)}
+        <div class="ms-title-row">
+          <span class="ms-id">${ms.id}</span>
+          <span class="ms-title">${esc(ms.title)}</span>
+        </div>
+        <div class="ms-meta">
+          ${tasksLabel ? `<span class="ms-tasks-text">${tasksLabel}</span>` : ''}
+          <div class="ms-progress-bar">
+            <div class="ms-progress-fill ${ms.status}" style="width: ${ms.progress || 0}%"></div>
+          </div>
+          <span class="ms-progress-text">${ms.progress || 0}%</span>
+          ${entries.length > 0 ? `<span class="ms-expand-hint">\u25BE</span>` : ''}
+        </div>
+      </div>
+      <div class="ms-body">${bodyHtml}</div>
+    </div>
+  `;
+}
+
+// ---- Retro ----
+
+function renderRetroSection() {
+  if (state.retroContent) {
+    return `
+      <section class="retro-section fade-in">
+        <span class="retro-back" data-action="close-retro">\u2190 back to list</span>
+        <h3 style="font-size: 1rem; color: var(--text-primary); margin: 8px 0 16px;">${esc(state.retroContent.week)}</h3>
+        <div class="retro-content">${esc(state.retroContent.content)}</div>
+      </section>`;
+  }
+  if (state.retros.length === 0) {
+    return `<section class="retro-section fade-in"><div class="retro-empty">No retrospective documents yet.</div></section>`;
+  }
+  return `
+    <section class="retro-section fade-in">
+      <ul class="retro-list">
+        ${state.retros.map(r => `
+          <li class="retro-item" data-action="open-retro" data-week="${esc(r.week)}">
+            <span class="retro-item-week">${esc(r.week)}</span>
+            <span class="retro-item-date">${r.updated_at ? r.updated_at.slice(0, 10) : ''}</span>
+          </li>
+        `).join('')}
+      </ul>
+    </section>`;
+}
+
+async function switchTab(tab) {
+  state.activeTab = tab;
+  state.showGraph = false;
+  state.retroContent = null;
+  state.documentContent = null;
+  if (tab === 'documents') {
+    const loads = [];
+    if (state.documents.length === 0)
+      loads.push(api(`/api/projects/${state.projectId}/documents`).then(r => { state.documents = r; }).catch(() => {}));
+    if (state.retros.length === 0)
+      loads.push(api(`/api/projects/${state.projectId}/retros`).then(r => { state.retros = r; }).catch(() => {}));
+    await Promise.all(loads);
+  }
+  render();
+}
+
+async function openRetro(week) {
+  try { state.retroContent = await api(`/api/projects/${state.projectId}/retros/${week}`); }
+  catch (e) { state.retroContent = { week, content: 'Failed to load retro document.' }; }
+  render();
+}
+
+function closeRetro() { state.retroContent = null; render(); }
+
+// ---- Documents ----
+
+function scopeBadge(scope) {
+  const styles = {
+    core: 'background: var(--accent); color: #fff;',
+    spec: 'background: var(--border); color: var(--text-primary);',
+    memo: 'background: transparent; color: var(--text-secondary); border: 1px solid var(--border);',
+  };
+  return `<span style="display:inline-block; font-size:0.65rem; padding:1px 6px; border-radius:3px; margin-right:6px; ${styles[scope] || styles.memo}">${(scope || 'memo').toUpperCase()}</span>`;
+}
+
+function renderSearchResults() {
+  const q = state.searchQuery.toLowerCase().trim();
+  if (!q) return '';
+  const typeIcon = { task: '□', commit: '○', pr: 'PR', milestone: 'MS', save: '→' };
+  const results = [];
+
+  function searchEntries(entries, msId, msTitle) {
+    for (const e of entries) {
+      const desc = (e.description || '').toLowerCase();
+      const detail = (e.detail || '').toLowerCase();
+      if (desc.includes(q) || detail.includes(q)) {
+        results.push({ msId, msTitle, entryId: e.id, type: e.type, status: e.status, description: e.description || '', date: e.date || e.created_at || '' });
+      }
+      if (e.entries) searchEntries(e.entries, msId, msTitle);
+    }
+  }
+
+  for (const ms of (state.project?.milestones || [])) {
+    const t = (ms.title || '').toLowerCase();
+    if (t.includes(q)) results.push({ msId: ms.id, msTitle: ms.title, entryId: ms.id, type: 'milestone', status: ms.status, description: ms.title, date: '' });
+    searchEntries(ms.entries || [], ms.id, ms.title || '');
+  }
+
+  if (!results.length) return `<div class="search-results"><div class="search-empty">No results for "${esc(state.searchQuery)}"</div></div>`;
+
+  return `<div class="search-results">
+    <div class="milestones-count" style="margin-bottom:8px">${results.length} result${results.length === 1 ? '' : 's'}</div>
+    ${results.map(r => `
+    <div class="search-result-item" data-action="search-goto" data-ms-id="${esc(r.msId)}" data-entry-id="${esc(r.entryId)}">
+      <span class="search-result-type">${typeIcon[r.type] || '?'}</span>
+      <span class="search-result-desc">${esc(r.description)}</span>
+      <span class="search-result-date">${esc(r.date)}</span>
+      <span class="search-result-ms">${esc(r.msId)}: ${esc(r.msTitle)}</span>
+    </div>`).join('')}
+  </div>`;
+}
+
+function renderDocumentsSection() {
+  if (state.documentContent) {
+    const scope = state.documentContent.scope || 'memo';
+    return `
+      <section class="retro-section fade-in">
+        <span class="retro-back" data-action="close-document">\u2190 back to list</span>
+        <button data-action="copy-doc-link" data-doc-id="${esc(state.documentContent.doc_id)}" style="float:right;font-size:0.72rem;padding:3px 10px;background:var(--bg-raised);border:1px solid var(--border);border-radius:3px;color:var(--text-secondary);cursor:pointer;font-family:inherit;">Copy link</button>
+        <h3 style="font-size: 1rem; color: var(--text-primary); margin: 8px 0 16px;">${scopeBadge(scope)}${esc(state.documentContent.title)}</h3>
+        <div class="doc-content">${marked.parse(state.documentContent.content || '')}</div>
+      </section>`;
+  }
+  if (state.documents.length === 0) {
+    return `<section class="retro-section fade-in"><div class="retro-empty">No documents yet.</div></section>`;
+  }
+  // Group by scope
+  const order = ['core', 'spec', 'memo'];
+  const grouped = {};
+  for (const s of order) grouped[s] = [];
+  for (const d of state.documents) {
+    const s = d.scope || 'memo';
+    if (!grouped[s]) grouped[s] = [];
+    grouped[s].push(d);
+  }
+  const labels = { core: '\u2605 CORE', spec: '\u25CB SPEC', memo: '\u25CB MEMO' };
+  let html = '';
+  for (const s of order) {
+    if (grouped[s].length === 0) continue;
+    html += `
+      <section class="retro-section fade-in" style="margin-bottom: 12px;">
+        <h4 style="font-size: 0.75rem; color: var(--text-secondary); margin: 0 0 6px; letter-spacing: 0.05em;">${labels[s]}</h4>
+        <ul class="retro-list">
+          ${grouped[s].map(d => `
+            <li class="retro-item" data-action="open-document" data-doc-id="${esc(d.doc_id)}">
+              <span class="retro-item-week">${esc(d.title)}</span>
+              <span class="retro-item-date">${d.updated_at ? d.updated_at.slice(0, 10) : ''}</span>
+            </li>
+          `).join('')}
+        </ul>
+      </section>`;
+  }
+  // Reviews section (retros)
+  if (state.retroContent) {
+    return `
+      <section class="retro-section fade-in">
+        <span class="retro-back" data-action="close-retro">← back to Documents</span>
+        <h3 style="font-size:1rem;color:var(--text-primary);margin:8px 0 16px;">${esc(state.retroContent.week)}</h3>
+        <div class="retro-content">${esc(state.retroContent.content)}</div>
+      </section>`;
+  }
+  if (state.retros.length > 0) {
+    html += `
+      <section class="retro-section fade-in" style="margin-bottom:12px;">
+        <h4 style="font-size:0.75rem;color:var(--text-secondary);margin:0 0 6px;letter-spacing:0.05em;">○ REVIEWS</h4>
+        <ul class="retro-list">
+          ${state.retros.map(r => `
+            <li class="retro-item" data-action="open-retro" data-week="${esc(r.week)}">
+              <span class="retro-item-week">${esc(r.week)}</span>
+              <span class="retro-item-date">${r.updated_at ? r.updated_at.slice(0, 10) : ''}</span>
+            </li>
+          `).join('')}
+        </ul>
+      </section>`;
+  }
+  if (!html) return `<section class="retro-section fade-in"><div class="retro-empty">No documents yet.</div></section>`;
+  return html;
+}
+
+async function openDocument(docId) {
+  try { state.documentContent = await api(`/api/projects/${state.projectId}/documents/${docId}`); }
+  catch (e) { state.documentContent = { doc_id: docId, title: 'Error', content: 'Failed to load document.' }; }
+  history.pushState(null, '', '#doc/' + docId);
+  render();
+}
+
+function closeDocument() {
+  state.documentContent = null;
+  history.pushState(null, '', location.pathname + location.search);
+  render();
+}
+
+// ---- Dependency Graph ----
+
+function buildGraph(milestones) {
+  const nodes = [];
+  const edges = [];
+  const idSet = new Set();
+
+  for (const ms of milestones) {
+    if (ms.status === 'cancelled') continue;
+    idSet.add(ms.id);
+    nodes.push({
+      id: ms.id,
+      title: ms.title || '',
+      status: ms.status || 'todo',
+      progress: ms.progress || 0,
+      depends_on: ms.depends_on || [],
+    });
+  }
+
+  for (const n of nodes) {
+    for (const dep of n.depends_on) {
+      if (idSet.has(dep)) {
+        edges.push({ from: n.id, to: dep, type: 'depends_on' });
+      }
+    }
+  }
+
+  // Cross-MS task references
+  for (const ms of milestones) {
+    if (ms.status === 'cancelled') continue;
+    for (const entry of (ms.entries || [])) {
+      const reqBy = (entry.meta || {}).requested_by || '';
+      if (reqBy && idSet.has(reqBy)) {
+        edges.push({ from: reqBy, to: ms.id, type: 'cross_task', task_id: entry.id || '' });
+      }
+    }
+  }
+
+  // Kahn's algorithm for waves
+  const inDeg = {};
+  for (const n of nodes) inDeg[n.id] = 0;
+  for (const n of nodes) {
+    for (const dep of n.depends_on) {
+      if (dep in inDeg) inDeg[n.id]++;
+    }
+  }
+
+  const waves = [];
+  const remaining = { ...inDeg };
+  while (Object.keys(remaining).length > 0) {
+    const wave = Object.keys(remaining).filter(id => remaining[id] === 0).sort();
+    if (wave.length === 0) {
+      waves.push({ wave: waves.length + 1, milestones: Object.keys(remaining).sort(), cycle: true });
+      break;
+    }
+    waves.push({ wave: waves.length + 1, milestones: wave });
+    for (const id of wave) delete remaining[id];
+    for (const n of nodes) {
+      if (n.id in remaining) {
+        for (const dep of n.depends_on) {
+          if (wave.includes(dep)) remaining[n.id]--;
+        }
+      }
+    }
+  }
+
+  return { nodes, edges, waves };
+}
+
+const GRAPH_STATUS_COLORS = {
+  done: '#166534',
+  in_progress: '#1e3a5f',
+  todo: '#2a2a30',
+  waiting: '#44403c',
+  observing: '#3b2f4a',
+};
+
+const GRAPH_STATUS_STROKES = {
+  done: '#4ade80',
+  in_progress: '#60a5fa',
+  todo: '#71717a',
+  waiting: '#fbbf24',
+  observing: '#a78bfa',
+};
+
+// Build hash → beacon entry map from all milestone entries
+function buildHashEntryMap(project) {
+  const map = {};
+  function scan(entries) {
+    for (const e of entries) {
+      if (e.type === 'commit') {
+        const h = (e.meta || {}).hash || '';
+        if (h) map[h] = { id: e.id || '', description: e.description || '', hash: h };
+      }
+      if (e.entries) scan(e.entries);
+    }
+  }
+  for (const ms of project.milestones || []) scan(ms.entries || []);
+  return map;
+}
+
+function lookupEntry(hashMap, shortHash) {
+  if (!shortHash) return null;
+  if (hashMap[shortHash]) return hashMap[shortHash];
+  for (const [k, v] of Object.entries(hashMap)) {
+    if (k.startsWith(shortHash) || shortHash.startsWith(k)) return v;
+  }
+  return null;
+}
+
+function renderReleasesSection() {
+  const p = state.project;
+  const allDeps = p?.deployments || [];
+  const releases = {};
+  for (const r of (p?.releases || [])) releases[r.id] = r;
+
+  if (allDeps.length === 0) {
+    return `<section class="retro-section fade-in">
+      <div class="retro-empty">No deployments recorded yet.<br>
+        <span style="font-size:0.75rem;color:var(--text-dim)">Run <code>beacon deploy record</code> after each deploy.</span>
+      </div>
+    </section>`;
+  }
+
+  const hashMap = buildHashEntryMap(p);
+  const msTitle = id => p?.milestones?.find(m => m.id === id)?.title || id;
+
+  // Build deploy-id → release mapping (from release.deploy_ids only, not from deploy.linked_release)
+  const deployToRelease = {};
+  for (const r of Object.values(releases)) {
+    for (const id of (r.deploy_ids || [])) deployToRelease[id] = r;
+  }
+
+  // Sort all deploys newest first (true chronological order)
+  const sorted = allDeps.slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+
+  function fmtDate(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  function deployDetail(d) {
+    const mcMap = d.milestone_commits;
+    if (!mcMap || !Object.keys(mcMap).length) {
+      const badges = (d.milestones || []).map(id =>
+        `<span class="release-ms-badge">${esc(id)}</span>`).join('');
+      return badges ? `<div class="deploy-ms-badges">${badges}</div>` : '';
+    }
+    const newlyDone = new Set(d.newly_completed_ms || []);
+    // completions first, patches after
+    const sorted = Object.entries(mcMap).sort(([a],[b]) =>
+      (newlyDone.has(b)?1:0) - (newlyDone.has(a)?1:0));
+    let h = '<div class="deploy-detail">';
+    for (const [msId, hashes] of sorted) {
+      const completion = newlyDone.has(msId);
+      // Minor deploys cannot have MS release
+      const blockType = (d.type === 'minor') ? 'patch' : (completion ? 'completion' : 'patch');
+      h += `<div class="deploy-ms-block ${blockType}">
+        <div class="deploy-ms-block-header">
+          <span class="deploy-ms-type-label">${blockType === 'completion' ? 'MS release' : 'MS patch'}</span>
+          <span class="deploy-ms-block-id">${esc(msId)}</span>
+          <span class="deploy-ms-block-title">${esc(msTitle(msId))}</span>
+        </div>
+        <div class="deploy-commit-list">`;
+      for (const hash of hashes) {
+        const entry = lookupEntry(hashMap, hash);
+        h += `<div class="deploy-commit-row">
+          <span class="deploy-commit-label">commit</span>
+          <span class="deploy-commit-eid">${esc(entry?.id || '')}</span>
+          <span class="deploy-commit-desc">${esc(entry?.description || hash)}</span>
+          <code class="deploy-commit-hash">${esc(hash.slice(0,7))}</code>
+        </div>`;
+      }
+      h += `</div></div>`;
+    }
+    const unassigned = d.unassigned_commits || [];
+    if (unassigned.length) {
+      h += `<div class="deploy-ms-block untracked">
+        <div class="deploy-ms-block-header"><span class="deploy-ms-type-label">untracked</span></div>
+        <div class="deploy-commit-list">`;
+      for (const hash of unassigned) {
+        h += `<div class="deploy-commit-row">
+          <span class="deploy-commit-label">commit</span>
+          <code class="deploy-commit-hash">${esc(hash.slice(0,7))}</code>
+        </div>`;
+      }
+      h += `</div></div>`;
+    }
+    return h + '</div>';
+  }
+
+  function deployCard(d) {
+    const isMajor = d.type === 'major';
+    const expanded = state.expandedDeployId === d.id;
+    const dot = `<span class="deploy-type-dot ${isMajor?'major':'minor'}">${isMajor?'◉':'○'}</span>`;
+    let h = `<div class="deploy-card ${isMajor?'is-major':'is-minor'}" data-action="expand-deploy" data-deploy-id="${esc(d.id)}" style="cursor:pointer;">
+      <div class="deploy-card-header">
+        ${dot}
+        <span class="deploy-id">${esc(d.id)}</span>
+        <span class="deploy-env-badge">${esc(d.environment||'prod')}</span>
+        <span class="deploy-datetime">${esc(fmtDate(d.date))}</span>
+        <span class="deploy-expand-arrow">${expanded?'▲':'▼'}</span>
+      </div>
+      <div class="deploy-desc">${esc(d.description||'')}</div>`;
+    if (expanded) {
+      h += deployDetail(d);
+    } else {
+      const newlyDone = new Set(d.newly_completed_ms || []);
+      const badges = (d.milestones||[]).map(id => {
+        const isCompletion = d.type !== 'minor' && newlyDone.has(id);
+        const isPatch = !isCompletion;
+        const cls = isCompletion ? 'release-ms-badge-completion' : 'release-ms-badge-patch';
+        return `<span class="${cls}">${esc(id)}</span>`;
+      }).join('');
+      if (badges) h += `<div class="deploy-ms-badges">${badges}</div>`;
+    }
+    return h + '</div>';
+  }
+
+  let html = `<section class="retro-section fade-in"><div>`;
+
+  // Render purely chronologically; insert release header before the first deploy in that release
+  const shownReleases = new Set();
+  for (const d of sorted) {
+    const rel = deployToRelease[d.id];
+    if (rel && !shownReleases.has(rel.id)) {
+      shownReleases.add(rel.id);
+      const sv = rel.semver ? `<span class="release-group-semver">${esc(rel.semver)}</span>` : '';
+      html += `<div class="release-group-header"><span>${esc(rel.id)}</span>${sv}</div>`;
+    }
+    html += deployCard(d);
+  }
+
+  return html + `</div></section>`;
+}
+
+
+
+function renderGraphSection() {
+  const p = state.project;
+  const header = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+    <span class="retro-back" data-action="hide-graph">← back</span>
+    <button class="sort-toggle" data-action="toggle-graph-filter" style="font-size:0.7rem;">${state.graphFilterDeps ? 'deps only ✓' : 'show all'}</button>
+  </div>`;
+
+  if (!p || !p.milestones || p.milestones.length === 0) {
+    return `<section class="graph-section fade-in">${header}<div class="graph-empty">No milestones.</div></section>`;
+  }
+
+  const fullGraph = buildGraph(p.milestones);
+  if (fullGraph.edges.length === 0) {
+    return `<section class="graph-section fade-in">${header}<div class="graph-empty">No dependencies defined yet.<br><span style="font-size:0.7rem;color:var(--text-dim)">Use <code>beacon milestone depends ms-X --on ms-Y</code> to add.</span></div></section>`;
+  }
+
+  let milestones = p.milestones;
+  if (state.graphFilterDeps) {
+    const connected = new Set();
+    for (const e of fullGraph.edges) { connected.add(e.from); connected.add(e.to); }
+    milestones = milestones.filter(ms => connected.has(ms.id));
+  }
+  const graph = state.graphFilterDeps ? buildGraph(milestones) : fullGraph;
+
+  if (graph.edges.length === 0) {
+    return `<section class="graph-section fade-in">${header}<div class="graph-empty">No dependencies defined yet.<br><span style="font-size:0.7rem;color:var(--text-dim)">Use <code>beacon milestone depends ms-X --on ms-Y</code> to add.</span></div></section>`;
+  }
+
+  // Layout: waves flow left-to-right, nodes stacked vertically within each wave
+  const nodeW = 180;
+  const nodeH = 52;
+  const waveGap = 60;
+  const nodeGap = 16;
+  const padX = 40;
+  const padY = 32;
+
+  // Assign positions
+  const pos = {};
+  let maxRow = 0;
+  for (const w of graph.waves) {
+    maxRow = Math.max(maxRow, w.milestones.length);
+  }
+
+  for (let wi = 0; wi < graph.waves.length; wi++) {
+    const wave = graph.waves[wi];
+    const count = wave.milestones.length;
+    const startY = (maxRow - count) * (nodeH + nodeGap) / 2;
+    for (let ni = 0; ni < count; ni++) {
+      pos[wave.milestones[ni]] = {
+        x: padX + wi * (nodeW + waveGap),
+        y: padY + startY + ni * (nodeH + nodeGap),
+      };
+    }
+  }
+
+  const svgW = padX * 2 + graph.waves.length * (nodeW + waveGap) - waveGap;
+  const svgH = padY * 2 + maxRow * (nodeH + nodeGap) - nodeGap;
+
+  // Build SVG
+  const nodeMap = {};
+  for (const n of graph.nodes) nodeMap[n.id] = n;
+
+  let edgeSvg = '';
+  for (const e of graph.edges) {
+    const from = pos[e.from];
+    const to = pos[e.to];
+    if (!from || !to) continue;
+
+    // Edge: from depends on to, arrow from "to" to "from" (dependency flows right)
+    const x1 = to.x + nodeW;
+    const y1 = to.y + nodeH / 2;
+    const x2 = from.x;
+    const y2 = from.y + nodeH / 2;
+
+    const cx1 = x1 + (x2 - x1) * 0.4;
+    const cx2 = x1 + (x2 - x1) * 0.6;
+
+    const cls = e.type === 'cross_task' ? ' cross-task' : '';
+    edgeSvg += `<path class="graph-edge${cls}" d="M${x1},${y1} C${cx1},${y1} ${cx2},${y2} ${x2},${y2}" />`;
+  }
+
+  let nodeSvg = '';
+  for (const n of graph.nodes) {
+    const p = pos[n.id];
+    if (!p) continue;
+    const fill = GRAPH_STATUS_COLORS[n.status] || GRAPH_STATUS_COLORS.todo;
+    const stroke = GRAPH_STATUS_STROKES[n.status] || GRAPH_STATUS_STROKES.todo;
+    const titleTrunc = n.title.length > 20 ? n.title.slice(0, 19) + '\u2026' : n.title;
+
+    nodeSvg += `
+      <g class="graph-node" transform="translate(${p.x},${p.y})">
+        <rect width="${nodeW}" height="${nodeH}" fill="${fill}" stroke="${stroke}" />
+        <text class="node-id" x="8" y="16">${esc(n.id)}</text>
+        <text x="8" y="32">${esc(titleTrunc)}</text>
+        <text class="node-progress" x="${nodeW - 8}" y="16" text-anchor="end">${n.progress}%</text>
+      </g>`;
+  }
+
+  // Wave labels
+  let waveSvg = '';
+  for (let wi = 0; wi < graph.waves.length; wi++) {
+    const x = padX + wi * (nodeW + waveGap) + nodeW / 2;
+    waveSvg += `<text x="${x}" y="18" text-anchor="middle" fill="var(--text-dim)" font-size="10" font-family="var(--font-mono)">wave ${graph.waves[wi].wave}${graph.waves[wi].cycle ? ' (cycle)' : ''}</text>`;
+  }
+
+  const legendItems = [
+    { label: 'done', color: GRAPH_STATUS_STROKES.done },
+    { label: 'in_progress', color: GRAPH_STATUS_STROKES.in_progress },
+    { label: 'todo', color: GRAPH_STATUS_STROKES.todo },
+    { label: 'observing', color: GRAPH_STATUS_STROKES.observing },
+    { label: 'waiting', color: GRAPH_STATUS_STROKES.waiting },
+  ];
+
+  return `
+    <section class="graph-section fade-in">
+      ${header}
+      <div class="graph-container">
+        <svg width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+              <polygon points="0 0, 8 3, 0 6" fill="var(--border)" />
+            </marker>
+          </defs>
+          ${waveSvg}
+          ${edgeSvg}
+          ${nodeSvg}
+        </svg>
+      </div>
+      <div class="graph-legend">
+        ${legendItems.map(l => `<div class="graph-legend-item"><div class="graph-legend-swatch" style="background:${l.color}"></div>${l.label}</div>`).join('')}
+      </div>
+    </section>`;
+}
 </script>
 </body>
 </html>

@@ -1597,6 +1597,7 @@ function updateConnectionStatus() {
   if (label) label.textContent = state.connected ? 'live' : 'reconnecting';
 }
 
+// @BUILD:SHARED-START
 // ---- Render Helpers ----
 
 const STATUS_LABELS = {
@@ -2459,6 +2460,7 @@ function renderGraphSection() {
       </div>
     </section>`;
 }
+// @BUILD:SHARED-END
 
 // ---- Hamburger Menu ----
 
