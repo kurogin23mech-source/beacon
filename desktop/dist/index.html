@@ -155,6 +155,16 @@ body::after { content: ''; position: fixed; inset: 0; background: repeating-line
 .retro-item:hover { border-color: var(--border); background: var(--bg-raised); }
 .retro-item-week { font-size: 0.9rem; color: var(--text-primary); }
 .retro-item-date { font-size: 0.75rem; color: var(--text-dim); }
+.release-item { padding: 8px 0; border-bottom: 1px solid var(--border-subtle); }
+.release-item:last-child { border-bottom: none; }
+.release-item-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.release-id { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-dim); }
+.release-semver { font-family: var(--font-mono); font-size: 0.75rem; color: var(--accent); background: var(--accent-glow); padding: 1px 6px; border-radius: 3px; }
+.release-date { font-size: 0.72rem; color: var(--text-dim); margin-left: auto; }
+.release-desc { font-size: 0.8rem; color: var(--text-secondary); margin: 4px 0 0 16px; }
+.release-ms-list { margin: 4px 0 0 16px; display: flex; flex-wrap: wrap; gap: 4px; }
+.release-ms-badge { font-family: var(--font-mono); font-size: 0.65rem; padding: 1px 6px; border: 1px solid var(--border-subtle); border-radius: 2px; color: var(--text-dim); }
+
 /* ---- Narrow window (side-by-side with terminal) ---- */
 @media (max-width: 500px) {
   .container { padding: 0 12px; }
@@ -552,7 +562,13 @@ function renderDocumentsSection() {
       <div class="doc-content">${marked.parse(state.documentContent.content || '')}</div>
     </section>`;
   }
-  if (state.documents.length === 0) return `<section class="retro-section fade-in"><div class="retro-empty">No documents yet.</div></section>`;
+  if (state.retroContent) {
+    return `<section class="retro-section fade-in">
+      <span class="retro-back" data-action="close-retro">\u2190 back to Documents</span>
+      <h3 style="font-size:1rem;color:var(--text-primary);margin:8px 0 16px;">${esc(state.retroContent.week)}</h3>
+      <div class="retro-content">${esc(state.retroContent.content)}</div>
+    </section>`;
+  }
   const order = ['core','spec','memo'], grouped = {};
   for (const s of order) grouped[s] = [];
   for (const d of state.documents) { (grouped[d.scope||'memo'] = grouped[d.scope||'memo']||[]).push(d); }
@@ -565,21 +581,37 @@ function renderDocumentsSection() {
       <ul class="retro-list">${grouped[s].map(d => `<li class="retro-item" data-action="open-document" data-doc-id="${esc(d.doc_id)}"><span class="retro-item-week">${esc(d.title)}</span><span class="retro-item-date">${d.updated_at?d.updated_at.slice(0,10):''}</span></li>`).join('')}</ul>
     </section>`;
   }
+  if (state.retros.length > 0) {
+    html += `<section class="retro-section fade-in" style="margin-bottom:12px;">
+      <h4 style="font-size:0.75rem;color:var(--text-secondary);margin:0 0 6px;letter-spacing:0.05em;">\u25CB REVIEWS</h4>
+      <ul class="retro-list">${state.retros.map(r => `<li class="retro-item" data-action="open-retro" data-week="${esc(r.week)}"><span class="retro-item-week">${esc(r.week)}</span><span class="retro-item-date">${r.updated_at?r.updated_at.slice(0,10):''}</span></li>`).join('')}</ul>
+    </section>`;
+  }
+  if (!html) return `<section class="retro-section fade-in"><div class="retro-empty">No documents yet.</div></section>`;
   return html;
 }
 
-function renderRetrosSection() {
-  if (state.retroContent) {
-    return `<section class="retro-section fade-in">
-      <span class="retro-back" data-action="close-retro">\u2190 back</span>
-      <h3 style="font-size:1rem;color:var(--text-primary);margin:8px 0 16px;">${esc(state.retroContent.week)}</h3>
-      <div class="retro-content">${esc(state.retroContent.content)}</div>
-    </section>`;
+function renderReleasesSection() {
+  const p = state.project;
+  const deployments = ((p?.deployments)||[]).slice().reverse();
+  const releases = {};
+  for (const r of (p?.releases||[])) releases[r.id] = r;
+  if (deployments.length===0) return `<section class="retro-section fade-in"><div class="retro-empty">No deployments recorded yet.<br><span style="font-size:0.75rem;color:var(--text-dim)">Run beacon deploy record after each deploy.</span></div></section>`;
+  let html = `<section class="retro-section fade-in">`;
+  for (const d of deployments) {
+    const rel = releases[d.linked_release];
+    const semver = rel?.semver ? `<span class="release-semver">${esc(rel.semver)}</span>` : '';
+    const icon = d.type==='major' ? '\u25C9' : '\u25CB';
+    const indent = d.type==='major' ? '' : 'margin-left:16px;border-left:2px solid var(--border-subtle);padding-left:10px;';
+    const msBadges = (d.milestones||[]).map(id=>`<span class="release-ms-badge">${esc(id)}</span>`).join('');
+    html += `<div class="release-item" style="${indent}">
+      <div class="release-item-header"><span>${icon}</span><span class="release-id">${esc(d.id)}</span>${semver}<span class="release-date">${(d.date||'').slice(0,10)}</span></div>
+      <div class="release-desc">${esc(d.description||'')}</div>
+      ${msBadges?`<div class="release-ms-list">${msBadges}</div>`:''}
+    </div>`;
   }
-  if (state.retros.length === 0) return `<section class="retro-section fade-in"><div class="retro-empty">No review documents yet.</div></section>`;
-  return `<section class="retro-section fade-in"><ul class="retro-list">
-    ${state.retros.map(r => `<li class="retro-item" data-action="open-retro" data-week="${esc(r.week)}"><span class="retro-item-week">${esc(r.week)}</span><span class="retro-item-date">${r.updated_at?r.updated_at.slice(0,10):''}</span></li>`).join('')}
-  </ul></section>`;
+  html += `</section>`;
+  return html;
 }
 
 // ---- Dependency Graph ----
@@ -737,8 +769,8 @@ function render() {
     </div></header>
     <div class="tab-bar fade-in stagger-1">
       <button class="tab-btn ${state.activeTab==='dashboard'?'active':''}" data-action="switch-tab" data-tab="dashboard">Milestones</button>
-      <button class="tab-btn ${state.activeTab==='retros'?'active':''}" data-action="switch-tab" data-tab="retros">Reviews</button>
       <button class="tab-btn ${state.activeTab==='documents'?'active':''}" data-action="switch-tab" data-tab="documents">Documents</button>
+      <button class="tab-btn ${state.activeTab==='releases'?'active':''}" data-action="switch-tab" data-tab="releases">Releases</button>
     </div>
     ${state.activeTab==='dashboard' ? (state.showGraph ? renderGraphSection() : `
       ${p.summary?`<section class="summary-block fade-in"><div class="summary-label">Session Context</div><div class="summary-text">${esc(p.summary)}</div></section>`:''}
@@ -751,8 +783,8 @@ function render() {
         </div>
         ${filtered.map(ms=>renderMilestoneCard(ms)).join('')}
       </section>`) : ''}
-    ${state.activeTab==='retros' ? renderRetrosSection() : ''}
     ${state.activeTab==='documents' ? renderDocumentsSection() : ''}
+    ${state.activeTab==='releases' ? renderReleasesSection() : ''}
     <footer class="footer fade-in stagger-3"><div class="footer-left"><div>${cloudMode?'cloud':'local'}</div><div class="footer-tagline">Where humans and AI are bound together.</div></div><div class="footer-right" style="display:flex;align-items:center;gap:12px;">${state.lastUpdate?formatTime(state.lastUpdate):''}<button class="sort-toggle" data-action="export-json" style="font-size:0.65rem;">Export JSON</button></div></footer>
   `;
   window.scrollTo(0, scrollY);
@@ -800,8 +832,12 @@ async function handleAction(e) {
       state.activeTab = el.dataset.tab;
       state.showGraph = false;
       state.documentContent = null; state.retroContent = null;
-      if (state.activeTab === 'documents' && state.documents.length === 0) await loadDocuments();
-      if (state.activeTab === 'retros' && state.retros.length === 0) await loadRetros();
+      if (state.activeTab === 'documents') {
+        const loads = [];
+        if (state.documents.length === 0) loads.push(loadDocuments());
+        if (state.retros.length === 0) loads.push(loadRetros());
+        await Promise.all(loads);
+      }
       render(); break;
     case 'show-graph': state.showGraph = true; render(); break;
     case 'hide-graph': state.showGraph = false; render(); break;

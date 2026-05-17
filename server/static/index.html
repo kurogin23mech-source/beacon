@@ -212,6 +212,22 @@ body::after {
 .search-result-date { font-size: 0.65rem; color: var(--text-dim); text-align: right; }
 .search-empty { padding: 16px 0; color: var(--text-dim); font-size: 0.8rem; text-align: center; }
 
+/* ---- Releases ---- */
+
+.release-item { padding: 10px 0; border-bottom: 1px solid var(--border-subtle); }
+.release-item:last-child { border-bottom: none; }
+.release-item-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.release-icon { font-size: 0.8rem; }
+.release-major .release-icon { color: var(--accent); }
+.release-id { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-dim); }
+.release-semver { font-family: var(--font-mono); font-size: 0.75rem; color: var(--accent); background: var(--accent-glow); padding: 1px 6px; border-radius: 3px; }
+.release-date { font-size: 0.72rem; color: var(--text-dim); margin-left: auto; }
+.release-env { font-size: 0.65rem; color: var(--text-dim); background: var(--bg-raised); padding: 1px 5px; border-radius: 2px; }
+.release-desc { font-size: 0.8rem; color: var(--text-secondary); margin: 4px 0 4px 18px; }
+.release-ms-list { margin: 4px 0 0 18px; display: flex; flex-wrap: wrap; gap: 4px; }
+.release-ms-badge { font-family: var(--font-mono); font-size: 0.65rem; padding: 1px 6px; border: 1px solid var(--border-subtle); border-radius: 2px; color: var(--text-dim); }
+.release-links { font-size: 0.72rem; color: var(--text-dim); margin: 4px 0 0 18px; }
+
 /* ---- Hamburger Menu ---- */
 
 .hamburger-btn {
@@ -1393,7 +1409,7 @@ let state = {
   lastUpdate: null,
   connected: false,
   error: null,
-  activeTab: 'dashboard', // 'dashboard' | 'retros' | 'documents'
+  activeTab: 'dashboard', // 'dashboard' | 'documents' | 'releases'
   showGraph: false,
   graphFilterDeps: true,
   retros: [],
@@ -1763,8 +1779,8 @@ function render() {
 
     <div class="tab-bar fade-in stagger-1">
       <button class="tab-btn ${state.activeTab === 'dashboard' ? 'active' : ''}" data-action="switch-tab" data-tab="dashboard">Milestones</button>
-      <button class="tab-btn ${state.activeTab === 'retros' ? 'active' : ''}" data-action="switch-tab" data-tab="retros">Reviews</button>
       <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
+      <button class="tab-btn ${state.activeTab === 'releases' ? 'active' : ''}" data-action="switch-tab" data-tab="releases">Releases</button>
     </div>
 
     ${state.searchQuery !== null ? `
@@ -1800,9 +1816,9 @@ function render() {
     </section>
     `) : ''}
 
-    ${state.activeTab === 'retros' ? renderRetroSection() : ''}
-
     ${state.activeTab === 'documents' ? renderDocumentsSection() : ''}
+
+    ${state.activeTab === 'releases' ? renderReleasesSection() : ''}
 
     <footer class="footer fade-in stagger-4">
       <div class="footer-left">
@@ -1922,13 +1938,13 @@ async function switchTab(tab) {
   state.showGraph = false;
   state.retroContent = null;
   state.documentContent = null;
-  if (tab === 'retros' && state.retros.length === 0) {
-    try { state.retros = await api(`/api/projects/${state.projectId}/retros`); }
-    catch (e) { state.retros = []; }
-  }
-  if (tab === 'documents' && state.documents.length === 0) {
-    try { state.documents = await api(`/api/projects/${state.projectId}/documents`); }
-    catch (e) { state.documents = []; }
+  if (tab === 'documents') {
+    const loads = [];
+    if (state.documents.length === 0)
+      loads.push(api(`/api/projects/${state.projectId}/documents`).then(r => { state.documents = r; }).catch(() => {}));
+    if (state.retros.length === 0)
+      loads.push(api(`/api/projects/${state.projectId}/retros`).then(r => { state.retros = r; }).catch(() => {}));
+    await Promise.all(loads);
   }
   render();
 }
@@ -2029,6 +2045,30 @@ function renderDocumentsSection() {
         </ul>
       </section>`;
   }
+  // Reviews section (retros)
+  if (state.retroContent) {
+    return `
+      <section class="retro-section fade-in">
+        <span class="retro-back" data-action="close-retro">← back to Documents</span>
+        <h3 style="font-size:1rem;color:var(--text-primary);margin:8px 0 16px;">${esc(state.retroContent.week)}</h3>
+        <div class="retro-content">${esc(state.retroContent.content)}</div>
+      </section>`;
+  }
+  if (state.retros.length > 0) {
+    html += `
+      <section class="retro-section fade-in" style="margin-bottom:12px;">
+        <h4 style="font-size:0.75rem;color:var(--text-secondary);margin:0 0 6px;letter-spacing:0.05em;">○ REVIEWS</h4>
+        <ul class="retro-list">
+          ${state.retros.map(r => `
+            <li class="retro-item" data-action="open-retro" data-week="${esc(r.week)}">
+              <span class="retro-item-week">${esc(r.week)}</span>
+              <span class="retro-item-date">${r.updated_at ? r.updated_at.slice(0, 10) : ''}</span>
+            </li>
+          `).join('')}
+        </ul>
+      </section>`;
+  }
+  if (!html) return `<section class="retro-section fade-in"><div class="retro-empty">No documents yet.</div></section>`;
   return html;
 }
 
@@ -2129,6 +2169,46 @@ const GRAPH_STATUS_STROKES = {
   waiting: '#fbbf24',
   observing: '#a78bfa',
 };
+
+function renderReleasesSection() {
+  const p = state.project;
+  const deployments = (p?.deployments || []).slice().reverse();
+  const releases = {};
+  for (const r of (p?.releases || [])) releases[r.id] = r;
+
+  if (deployments.length === 0) {
+    return `<section class="retro-section fade-in"><div class="retro-empty">No deployments recorded yet.<br><span style="font-size:0.75rem;color:var(--text-dim)">Run <code>beacon deploy record</code> after each deploy.</span></div></section>`;
+  }
+
+  const msTitle = id => p?.milestones?.find(m => m.id === id)?.title || id;
+
+  let html = `<section class="retro-section fade-in">`;
+  for (const d of deployments) {
+    const isMajor = d.type === 'major';
+    const rel = releases[d.linked_release];
+    const semver = rel?.semver ? `<span class="release-semver">${esc(rel.semver)}</span>` : '';
+    const icon = isMajor ? '◉' : '○';
+    const indent = isMajor ? '' : 'margin-left:16px;border-left:2px solid var(--border-subtle);padding-left:10px;';
+    const msBadges = (d.milestones || []).map(id =>
+      `<span class="release-ms-badge">${esc(id)}</span>`
+    ).join('');
+    html += `
+      <div class="release-item ${isMajor ? 'release-major' : 'release-minor'}" style="${indent}">
+        <div class="release-item-header">
+          <span class="release-icon">${icon}</span>
+          <span class="release-id">${esc(d.id)}</span>
+          ${semver}
+          <span class="release-date">${(d.date || '').slice(0, 10)}</span>
+          <span class="release-env">${esc(d.environment || 'prod')}</span>
+        </div>
+        <div class="release-desc">${esc(d.description || '')}</div>
+        ${msBadges ? `<div class="release-ms-list">${msBadges}</div>` : ''}
+        ${d.links_to?.length ? `<div class="release-links">patches: ${d.links_to.map(l => `<span class="release-id">${esc(l)}</span>`).join(', ')}</div>` : ''}
+      </div>`;
+  }
+  html += `</section>`;
+  return html;
+}
 
 function renderGraphSection() {
   const p = state.project;
