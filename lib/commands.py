@@ -2067,6 +2067,196 @@ def cmd_skill_install():
         print("No skills found to install.")
 
 
+def _next_deploy_id(data: dict, date_str: str) -> str:
+    """Generate next deploy ID like deploy-20260517-1."""
+    prefix = f"deploy-{date_str.replace('-', '')[:8]}"
+    existing = [d["id"] for d in data.get("deployments", []) if d["id"].startswith(prefix)]
+    n = len(existing) + 1
+    return f"{prefix}-{n}"
+
+
+def _next_release_id(data: dict, date_str: str) -> str:
+    prefix = f"release-{date_str.replace('-', '')[:8]}"
+    existing = [r["id"] for r in data.get("releases", []) if r["id"].startswith(prefix)]
+    n = len(existing) + 1
+    return f"{prefix}-{n}"
+
+
+def cmd_deploy_record():
+    """Record a deployment entry (major or minor) based on recent commits."""
+    import subprocess as _sp
+    revision = os.environ.get("BEACON_REVISION", "")
+    semver = os.environ.get("BEACON_SEMVER", "")
+    description = os.environ.get("BEACON_DESCRIPTION", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    data = load_project()
+    now = core._now_iso()
+    today = now[:10]
+
+    # Get previous deploy's commit hashes to find new commits since last deploy
+    deployments = data.get("deployments", [])
+    last_deploy_hash = deployments[-1]["git_hash"] if deployments else ""
+
+    # Collect commits since last deploy
+    try:
+        if last_deploy_hash:
+            log_out = _sp.check_output(
+                ["git", "log", f"{last_deploy_hash}..HEAD", "--format=%H %s"],
+                stderr=_sp.DEVNULL, text=True
+            ).strip()
+        else:
+            log_out = _sp.check_output(
+                ["git", "log", "--format=%H %s", "-50"],
+                stderr=_sp.DEVNULL, text=True
+            ).strip()
+    except Exception:
+        log_out = ""
+
+    new_commits = []
+    for line in log_out.splitlines():
+        if line.strip():
+            parts = line.split(" ", 1)
+            new_commits.append({"hash": parts[0][:7], "message": parts[1] if len(parts) > 1 else ""})
+
+    head_hash = new_commits[0]["hash"] if new_commits else _sp.check_output(
+        ["git", "rev-parse", "--short", "HEAD"], text=True).strip()
+
+    # Map commit hashes to milestones via beacon entries
+    commit_hashes = [c["hash"] for c in new_commits]
+    ms_status: dict[str, str] = {ms["id"]: ms.get("status", "") for ms in data.get("milestones", [])}
+
+    # Find which MSes are touched by these commits and whether they're newly completed
+    newly_completed: set[str] = set()
+    patch_ms: set[str] = set()
+
+    for ms in data.get("milestones", []):
+        ms_id = ms["id"]
+        def _scan(entries):
+            for e in entries:
+                if e.get("type") == "commit":
+                    h = (e.get("meta") or {}).get("hash", "")
+                    if h and any(h.startswith(c) or c.startswith(h) for c in commit_hashes):
+                        status = ms_status.get(ms_id, "")
+                        if status in ("done", "observing"):
+                            # Check if this MS was already done at last deploy time
+                            # Heuristic: if MS has recent entries matching our new commits, it's newly completed
+                            newly_completed.add(ms_id)
+                        else:
+                            patch_ms.add(ms_id)
+                for child in e.get("entries", []):
+                    _scan([child])
+        _scan(ms.get("entries", []))
+
+    # Determine type
+    deploy_type = "major" if newly_completed else "minor"
+    affected_ms = sorted(newly_completed if newly_completed else patch_ms)
+
+    # Auto-generate description if not provided
+    if not description:
+        ms_titles = []
+        for ms in data.get("milestones", []):
+            if ms["id"] in affected_ms:
+                ms_titles.append(ms.get("title", ms["id"]))
+        description = "・".join(ms_titles) if ms_titles else "deploy"
+
+    deploy_id = _next_deploy_id(data, today)
+
+    # Find links_to for minor: find the most recent major deploys that touch the same MSes
+    links_to = []
+    if deploy_type == "minor":
+        for d in reversed(deployments):
+            if d.get("type") == "major":
+                if any(m in d.get("milestones", []) for m in affected_ms):
+                    links_to.append(d["id"])
+            if len(links_to) >= 3:
+                break
+
+    deploy_entry = {
+        "id": deploy_id,
+        "type": deploy_type,
+        "date": now,
+        "git_hash": head_hash,
+        "environment": "prod",
+        "milestones": affected_ms,
+        "commit_hashes": commit_hashes,
+        "description": description,
+        "linked_release": None,
+    }
+    if revision:
+        deploy_entry["cloud_run_revision"] = revision
+    if links_to:
+        deploy_entry["links_to"] = links_to
+
+    # Handle semver: create a Release entry and link
+    release_entry = None
+    if semver:
+        release_id = _next_release_id(data, today)
+        release_entry = {
+            "id": release_id,
+            "date": now,
+            "semver": semver,
+            "deploy_ids": [deploy_id],
+            "description": description,
+        }
+        deploy_entry["linked_release"] = release_id
+        data.setdefault("releases", []).append(release_entry)
+        # Create git tag
+        try:
+            _sp.run(["git", "tag", semver], check=True, capture_output=True)
+            if not json_mode:
+                print(f"Tagged: {semver}")
+        except _sp.CalledProcessError:
+            if not json_mode:
+                print(f"Warning: git tag {semver} already exists or failed")
+
+    data.setdefault("deployments", []).append(deploy_entry)
+    save_project(data)
+
+    if json_mode:
+        out = {"deploy": deploy_entry}
+        if release_entry:
+            out["release"] = release_entry
+        print(json.dumps(out, ensure_ascii=False))
+    else:
+        icon = "◉" if deploy_type == "major" else "○"
+        ms_str = " ".join(f"[{m}]" for m in affected_ms) or "(no MS detected)"
+        print(f"{icon} {deploy_id} [{deploy_type}] {ms_str}")
+        print(f"  {description}")
+        if semver:
+            print(f"  Release: {release_entry['id']} ({semver})")
+        if links_to:
+            print(f"  Patches: {', '.join(links_to)}")
+
+
+def cmd_deploy_list():
+    """List deployment records."""
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    deployments = data.get("deployments", [])
+    releases = {r["id"]: r for r in data.get("releases", [])}
+
+    if json_mode:
+        print(json.dumps({"deployments": deployments, "releases": list(releases.values())},
+                         ensure_ascii=False))
+        return
+
+    if not deployments:
+        print("No deployments recorded yet.")
+        print("Run 'beacon deploy record' after each deploy.")
+        return
+
+    for d in reversed(deployments):
+        icon = "◉" if d.get("type") == "major" else "○"
+        rel = releases.get(d.get("linked_release", ""))
+        semver_str = f" {rel['semver']}" if rel and rel.get("semver") else ""
+        ms_str = " ".join(d.get("milestones", [])) or "-"
+        print(f"{icon} {d['id']}{semver_str}  {d['date'][:10]}  [{d.get('type','')}]  {ms_str}")
+        print(f"   {d.get('description', '')}")
+        if d.get("links_to"):
+            print(f"   patches: {', '.join(d['links_to'])}")
+
+
 def cmd_project_archive():
     """Archive the current project (sets archived: true in project.json)."""
     data = load_project()
@@ -2251,6 +2441,8 @@ if __name__ == "__main__":
         "skill_install": cmd_skill_install,
         "search": cmd_search,
         "project_archive": cmd_project_archive,
+        "deploy_record": cmd_deploy_record,
+        "deploy_list": cmd_deploy_list,
         "project_unarchive": cmd_project_unarchive,
         "pr_add": cmd_pr_add,
         "pr_close": cmd_pr_close,
