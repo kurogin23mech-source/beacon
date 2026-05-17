@@ -2213,25 +2213,21 @@ function renderReleasesSection() {
   const hashMap = buildHashEntryMap(p);
   const msTitle = id => p?.milestones?.find(m => m.id === id)?.title || id;
 
-  // Build release → deploy set mapping
+  // Build deploy-id → release mapping (from release.deploy_ids only, not from deploy.linked_release)
   const deployToRelease = {};
   for (const r of Object.values(releases)) {
     for (const id of (r.deploy_ids || [])) deployToRelease[id] = r;
   }
 
-  // Sort all deploys newest first
+  // Sort all deploys newest first (true chronological order)
   const sorted = allDeps.slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 
-  // Group into release sections and ungrouped, preserving time order
-  // A release section is contiguous only if we render each release as a block.
-  // Strategy: render release groups in descending date order, then ungrouped.
-  const releaseOrder = Object.values(releases)
-    .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-
-  const groupedIds = new Set(Object.keys(deployToRelease));
-  const ungrouped = sorted.filter(d => !groupedIds.has(d.id));
-
-  function fmtDate(iso) { return iso ? iso.slice(0, 16).replace('T', ' ') : ''; }
+  function fmtDate(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
 
   function deployDetail(d) {
     const mcMap = d.milestone_commits;
@@ -2313,23 +2309,21 @@ function renderReleasesSection() {
 
   let html = `<section class="retro-section fade-in"><div>`;
 
-  // Release groups (newest first)
-  for (const rel of releaseOrder) {
-    const deploys = (rel.deploy_ids || [])
-      .map(id => allDeps.find(d => d.id === id))
-      .filter(Boolean)
-      .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-    if (!deploys.length) continue;
-    const sv = rel.semver ? `<span class="release-group-semver">${esc(rel.semver)}</span>` : '';
-    html += `<div class="release-group-header"><span>${esc(rel.id)}</span>${sv}</div>`;
-    for (const d of deploys) html += deployCard(d);
+  // Render purely chronologically; insert release header before the first deploy in that release
+  const shownReleases = new Set();
+  for (const d of sorted) {
+    const rel = deployToRelease[d.id];
+    if (rel && !shownReleases.has(rel.id)) {
+      shownReleases.add(rel.id);
+      const sv = rel.semver ? `<span class="release-group-semver">${esc(rel.semver)}</span>` : '';
+      html += `<div class="release-group-header"><span>${esc(rel.id)}</span>${sv}</div>`;
+    }
+    html += deployCard(d);
   }
-
-  // Ungrouped (newest first)
-  for (const d of ungrouped) html += deployCard(d);
 
   return html + `</div></section>`;
 }
+
 
 
 function renderGraphSection() {
