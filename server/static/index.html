@@ -191,8 +191,10 @@ body::after {
 
 .release-group-header { display: flex; align-items: center; gap: 10px; padding: 10px 0 8px; border-bottom: 1px solid var(--accent-dim); margin-bottom: 2px; font-family: var(--font-mono); font-size: 0.72rem; color: var(--accent); }
 .release-group-semver { background: var(--accent-glow); padding: 1px 6px; border-radius: 3px; font-size: 0.72rem; }
-.deploy-card { padding: 10px 0 6px; border-bottom: 1px solid var(--border-subtle); }
+.deploy-card { padding: 10px 0 6px 10px; border-bottom: 1px solid var(--border-subtle); border-left: 3px solid transparent; }
 .deploy-card:last-child { border-bottom: none; }
+.deploy-card.is-major { border-left-color: var(--accent-dim); }
+.deploy-card.is-minor { border-left-color: var(--border); }
 .deploy-card-header { display: flex; align-items: center; gap: 8px; cursor: pointer; flex-wrap: wrap; }
 .deploy-card-header:hover .deploy-id { color: var(--text-secondary); }
 .deploy-type-dot { font-size: 0.85rem; }
@@ -2209,54 +2211,45 @@ function renderReleasesSection() {
   const hashMap = buildHashEntryMap(p);
   const msTitle = id => p?.milestones?.find(m => m.id === id)?.title || id;
 
-  // major → [minors] mapping
-  const majorToMinors = {};
-  for (const d of allDeps) if (d.type === 'major') majorToMinors[d.id] = [];
-  for (const d of allDeps) {
-    if (d.type === 'minor' && d.links_to?.length) {
-      const mid = d.links_to[0];
-      if (majorToMinors[mid]) majorToMinors[mid].push(d);
-    }
-  }
-
-  // Group majors by release
-  const releasedIds = new Set();
-  const releaseGroups = [];
+  // Build release → deploy set mapping
+  const deployToRelease = {};
   for (const r of Object.values(releases)) {
-    const majors = (r.deploy_ids || [])
-      .map(id => allDeps.find(d => d.id === id && d.type === 'major'))
-      .filter(Boolean)
-      .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-    if (majors.length) {
-      releaseGroups.push({ release: r, majors });
-      for (const m of majors) releasedIds.add(m.id);
-    }
+    for (const id of (r.deploy_ids || [])) deployToRelease[id] = r;
   }
-  releaseGroups.sort((a, b) => (b.majors[0]?.date || '').localeCompare(a.majors[0]?.date || ''));
 
-  const ungrouped = allDeps
-    .filter(d => d.type === 'major' && !releasedIds.has(d.id))
+  // Sort all deploys newest first
+  const sorted = allDeps.slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+
+  // Group into release sections and ungrouped, preserving time order
+  // A release section is contiguous only if we render each release as a block.
+  // Strategy: render release groups in descending date order, then ungrouped.
+  const releaseOrder = Object.values(releases)
     .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+
+  const groupedIds = new Set(Object.keys(deployToRelease));
+  const ungrouped = sorted.filter(d => !groupedIds.has(d.id));
 
   function fmtDate(iso) { return iso ? iso.slice(0, 16).replace('T', ' ') : ''; }
 
   function deployDetail(d) {
     const mcMap = d.milestone_commits;
     if (!mcMap || !Object.keys(mcMap).length) {
-      // legacy: badge list
       const badges = (d.milestones || []).map(id =>
         `<span class="release-ms-badge">${esc(id)}</span>`).join('');
       return badges ? `<div class="deploy-ms-badges">${badges}</div>` : '';
     }
     const newlyDone = new Set(d.newly_completed_ms || []);
+    // completions first, patches after
     const sorted = Object.entries(mcMap).sort(([a],[b]) =>
       (newlyDone.has(b)?1:0) - (newlyDone.has(a)?1:0));
     let h = '<div class="deploy-detail">';
     for (const [msId, hashes] of sorted) {
       const completion = newlyDone.has(msId);
-      h += `<div class="deploy-ms-block ${completion ? 'completion' : 'patch'}">
+      // Minor deploys cannot have MS release
+      const blockType = (d.type === 'minor') ? 'patch' : (completion ? 'completion' : 'patch');
+      h += `<div class="deploy-ms-block ${blockType}">
         <div class="deploy-ms-block-header">
-          <span class="deploy-ms-type-label">${completion ? 'MS release' : 'MS patch'}</span>
+          <span class="deploy-ms-type-label">${blockType === 'completion' ? 'MS release' : 'MS patch'}</span>
           <span class="deploy-ms-block-id">${esc(msId)}</span>
           <span class="deploy-ms-block-title">${esc(msTitle(msId))}</span>
         </div>
@@ -2292,7 +2285,7 @@ function renderReleasesSection() {
     const isMajor = d.type === 'major';
     const expanded = state.expandedDeployId === d.id;
     const dot = `<span class="deploy-type-dot ${isMajor?'major':'minor'}">${isMajor?'◉':'○'}</span>`;
-    let h = `<div class="deploy-card">
+    let h = `<div class="deploy-card ${isMajor?'is-major':'is-minor'}">
       <div class="deploy-card-header" data-action="expand-deploy" data-deploy-id="${esc(d.id)}">
         ${dot}
         <span class="deploy-id">${esc(d.id)}</span>
@@ -2310,26 +2303,22 @@ function renderReleasesSection() {
     return h + '</div>';
   }
 
-  function majorBlock(major) {
-    const minors = (majorToMinors[major.id]||[]).slice()
-      .sort((a,b)=>(b.date||'').localeCompare(a.date||''));
-    let h = deployCard(major);
-    if (minors.length) {
-      h += `<div class="deploy-minor-group">`;
-      for (const m of minors) h += deployCard(m);
-      h += `</div>`;
-    }
-    return h;
-  }
-
   let html = `<section class="retro-section fade-in"><div>`;
 
-  for (const {release, majors} of releaseGroups) {
-    const sv = release.semver ? `<span class="release-group-semver">${esc(release.semver)}</span>` : '';
-    html += `<div class="release-group-header"><span>${esc(release.id)}</span>${sv}</div>`;
-    for (const m of majors) html += majorBlock(m);
+  // Release groups (newest first)
+  for (const rel of releaseOrder) {
+    const deploys = (rel.deploy_ids || [])
+      .map(id => allDeps.find(d => d.id === id))
+      .filter(Boolean)
+      .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    if (!deploys.length) continue;
+    const sv = rel.semver ? `<span class="release-group-semver">${esc(rel.semver)}</span>` : '';
+    html += `<div class="release-group-header"><span>${esc(rel.id)}</span>${sv}</div>`;
+    for (const d of deploys) html += deployCard(d);
   }
-  for (const m of ungrouped) html += majorBlock(m);
+
+  // Ungrouped (newest first)
+  for (const d of ungrouped) html += deployCard(d);
 
   return html + `</div></section>`;
 }
