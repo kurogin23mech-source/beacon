@@ -78,12 +78,22 @@ cmd_init() {
         echo "Beacon - Project Initialization"
         echo "================================"
         echo ""
-        read -rp "Project name: " name
-        read -rp "Project objective: " objective
+        echo "Project name:"
+        echo "  リポジトリ名や略称で構いません。ダッシュボードの表示名になります。"
+        read -rp "> " name
         echo ""
-        echo "Weekly retro day (1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat, 7=Sun)"
-        read -rp "Retro day [1]: " retro_choice
-        retro_choice="${retro_choice:-1}"
+        echo "Project objective:"
+        echo "  このプロジェクトで最終的に何を実現したいですか？"
+        echo "  あなたとAIが共有するゴール宣言です。セッションをまたいで判断の基準になります。"
+        echo "  動詞で締めると明確になります。"
+        echo "  例）「個人開発者が使える軽量なプロジェクト管理CLIをOSSとしてリリースする」"
+        read -rp "> " objective
+        echo ""
+        echo "Weekly retro day:"
+        echo "  毎週この曜日にAIが振り返りを促します。週の締めに近い曜日がおすすめです。"
+        echo "  1=Mon  2=Tue  3=Wed  4=Thu  5=Fri  6=Sat  7=Sun"
+        read -rp "> [5]: " retro_choice
+        retro_choice="${retro_choice:-5}"
         case "$retro_choice" in
             1) retro_day="monday" ;;
             2) retro_day="tuesday" ;;
@@ -92,12 +102,14 @@ cmd_init() {
             5) retro_day="friday" ;;
             6) retro_day="saturday" ;;
             7) retro_day="sunday" ;;
-            *) retro_day="monday" ;;
+            *) retro_day="friday" ;;
         esac
 
         echo ""
-        echo "Storage: 1=Local, 2=Cloud"
-        read -rp "Storage [1]: " storage_choice
+        echo "Storage:"
+        echo "  1=Local   .beacon/ をローカルのみで管理。チーム共有・Web UIは使えません。"
+        echo "  2=Cloud   クラウドに同期。Web UIとチーム共有が使えます（Googleアカウント必要）。"
+        read -rp "> [1]: " storage_choice
         storage_choice="${storage_choice:-1}"
     fi
 
@@ -146,12 +158,22 @@ cmd_setup() {
             if [ -f "$BEACON_PROJECT_FILE" ]; then
                 echo "  .beacon/project.json already exists — skipping init."
             else
-                read -rp "  Project name: " proj_name
-                read -rp "  Project objective: " proj_objective
+                echo "  Project name:"
+                echo "    リポジトリ名や略称で構いません。ダッシュボードの表示名になります。"
+                read -rp "  > " proj_name
                 echo ""
-                echo "  Weekly retro day (1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat, 7=Sun)"
-                read -rp "  Retro day [1]: " retro_choice
-                retro_choice="${retro_choice:-1}"
+                echo "  Project objective:"
+                echo "    このプロジェクトで最終的に何を実現したいですか？"
+                echo "    あなたとAIが共有するゴール宣言です。セッションをまたいで判断の基準になります。"
+                echo "    動詞で締めると明確になります。"
+                echo "    例）「個人開発者が使える軽量なプロジェクト管理CLIをOSSとしてリリースする」"
+                read -rp "  > " proj_objective
+                echo ""
+                echo "  Weekly retro day:"
+                echo "    毎週この曜日にAIが振り返りを促します。週の締めに近い曜日がおすすめです。"
+                echo "    1=Mon  2=Tue  3=Wed  4=Thu  5=Fri  6=Sat  7=Sun"
+                read -rp "  > [5]: " retro_choice
+                retro_choice="${retro_choice:-5}"
                 local retro_day
                 case "$retro_choice" in
                     1) retro_day="monday" ;;
@@ -161,7 +183,7 @@ cmd_setup() {
                     5) retro_day="friday" ;;
                     6) retro_day="saturday" ;;
                     7) retro_day="sunday" ;;
-                    *) retro_day="monday" ;;
+                    *) retro_day="friday" ;;
                 esac
                 BEACON_NAME="$proj_name" BEACON_OBJECTIVE="$proj_objective" \
                     BEACON_RETRO_DAY="$retro_day" python3 "$COMMANDS_PY" init

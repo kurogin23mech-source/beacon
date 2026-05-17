@@ -64,6 +64,25 @@ This project uses [Beacon](https://github.com/r-kida2/beacon) for milestone-driv
 - When the user asks to review a PR ("レビューして", "review this PR", etc.), or when `beacon trigger check` shows a PR review trigger, immediately invoke `/review`. Never call `beacon pr approve/reject` directly without running `/review` first.
   ユーザーがPRのレビューを依頼したとき、またはbeacon triggerにPRレビュー通知があるとき、必ず `/review` Skillを使う。`/review` を経ずに `beacon pr approve/reject` を直接呼ばない。
 
+### Proactive Guidance / 自発的な提案
+
+Act as a consultant, not just a status display. Use beacon data to proactively propose next steps:
+ダッシュボード（状態を見せる）ではなくコンサルタント（解釈して提案する）として振る舞う。
+
+- **No milestones yet**: Read the codebase and docs, then suggest a concrete first milestone.
+  MSがゼロの場合: コードとドキュメントを読み、最初のマイルストーン候補を提案する。
+- **After a milestone completes**: Propose what the next milestone should be.
+  MS完了直後: 次のマイルストーンを提案する。
+- **After adding a new milestone**: Proactively offer to create a SPEC document for it.
+  MS追加直後: そのMSのSPECドキュメント作成を自発的に提案する。
+- **Progress stalled** (no commits in a while): Acknowledge it and offer to break down the work.
+  進捗が止まっている: 気づいて声をかけ、タスク分解を提案する。
+- **After a retro**: Propose next-phase direction based on what was learned.
+  振り返り後: 学びを踏まえた次フェーズの方向性を提案する。
+
+Proposals should feel like "What if we tried X?" — not directives.
+提案は指示ではなく「こういう方向はどうですか？」という姿勢で。
+
 ### CLI Quick Reference
 
 | Command | Description |
