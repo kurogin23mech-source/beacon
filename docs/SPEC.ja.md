@@ -132,6 +132,33 @@ stdinからコンテンツを渡す場合: `echo 'content' | beacon doc add "タ
 | `beacon sync` | 直近 git コミットをアクティブMSに同期 | - |
 | `beacon summary [text]` | サマリーの表示/更新 | 対応済 |
 
+### pr サブコマンド
+
+| コマンド | 説明 | --json |
+|---------|------|--------|
+| `beacon pr create [-m ms-id] [--intent "text"] [gh フラグ...]` | `gh pr create` を実行しPRを自動記録 | - |
+| `beacon pr add <github-url> [-m ms-id] [--intent "text"]` | 既存PRをbeaconに登録 | 対応済 |
+| `beacon pr approve <entry-id> [--rationale "text"]` | PRを承認（rationale必須） | 対応済 |
+| `beacon pr request-changes <entry-id> [--rationale "text"]` | 修正依頼 | 対応済 |
+| `beacon pr reject <entry-id> [--rationale "text"]` | PRを却下 | 対応済 |
+| `beacon pr merge <entry-id>` | マージ済みに設定 | 対応済 |
+| `beacon pr close <entry-id>` | マージなしでクローズ | 対応済 |
+
+AIコードレビューには `beacon pr review` ではなく `/review` Claude Code Skill を使う。
+
+### deploy サブコマンド
+
+| コマンド | 説明 | --json |
+|---------|------|--------|
+| `beacon deploy record [--revision <rev>] [--semver <v>] [--desc "text"]` | デプロイを記録（major/minor自動判定） | 対応済 |
+| `beacon deploy record --prepare` | デプロイ判断材料をJSON出力（書き込みしない） | 対応済 |
+| `beacon deploy record --finalize --desc "text" [--semver v]` | AI生成説明を書き込み | 対応済 |
+| `beacon deploy list` | デプロイ履歴一覧 | 対応済 |
+
+**major/minor の自動判定**:
+- **major**: 前回デプロイ以降に1つ以上のマイルストーンが新たに完了した場合
+- **minor**: 既完了MSへのバグ修正・ホットフィックス（新規MS完了なし）
+
 ### 振り返り
 
 | コマンド | 説明 | --json |
@@ -168,6 +195,7 @@ stdinからコンテンツを渡す場合: `echo 'content' | beacon doc add "タ
 | `beacon` | tmux ダッシュボード + シェルを起動 | - |
 | `beacon init` | `.beacon/` をカレントディレクトリに初期化 | - |
 | `beacon status` | プロジェクト全体の状態 | 対応済 |
+| `beacon search <query> [-m ms-id]` | マイルストーン・エントリ・PR全文検索 | 対応済 |
 | `beacon entry move <entry-id> -t <task-id>` | エントリをタスク配下に移動 | - |
 | `beacon help` | ヘルプ表示 | - |
 | `beacon --version` | バージョン表示 | - |
@@ -206,25 +234,58 @@ stdinからコンテンツを渡す場合: `echo 'content' | beacon doc add "タ
       "entries": [
         {
           "id": "e-1",
-          "type": "commit | task | save | note",
+          "type": "commit | task | save | note | pr",
           "description": "エントリの説明",
-          "date": "YYYY-MM-DD",
-          "created_at": "YYYY-MM-DD",
-          "done_at": "YYYY-MM-DD | null",
+          "date": "YYYY-MM-DDThh:mm:ssZ",
+          "created_at": "YYYY-MM-DDThh:mm:ssZ",
+          "done_at": "YYYY-MM-DDThh:mm:ssZ | null",
           "status": "todo | in_progress | in_review | waiting | done | cancelled",
           "detail": "詳細テキスト（任意）",
           "meta": {
-            "hash": "(commit/save時) 7文字短縮ハッシュ",
-            "message": "(commit時) コミットメッセージ",
-            "source": "(save時) manual | google_docs | notion | ...",
-            "url": "(save時, 任意) 外部リソースURL",
-            "revision_id": "(save時, 任意) 外部システムの識別子"
+            "hash": "(commit/save) 7文字短縮ハッシュ",
+            "message": "(commit) コミットメッセージ",
+            "source": "(save) manual | google_docs | notion | ...",
+            "url": "(save/pr) 外部リソースURL",
+            "revision_id": "(save, 任意) 外部システムの識別子",
+            "pr_number": "(pr) GitHub PR番号",
+            "author": "(pr) GitHubユーザー名",
+            "pr_status": "(pr) in_review | approved | merged | closed",
+            "review_status": "(pr) pending | changes_requested | approved | rejected",
+            "intent": "(pr) このPRを作った理由・意図",
+            "review_rationale": "(pr) 承認/却下の根拠"
           },
           "entries": [
-            "(ネストされた子エントリ。タスク配下のコミット等)"
+            "(ネストされた子エントリ。タスクやPR配下のコミット等)"
           ]
         }
       ]
+    }
+  ],
+  "deployments": [
+    {
+      "id": "deploy-20260517-1",
+      "type": "major | minor",
+      "date": "2026-05-17T12:00:00Z",
+      "environment": "prod",
+      "git_hash": "abc1234",
+      "commit_hashes": ["abc1234", "def5678"],
+      "description": "AIが生成したデプロイ説明",
+      "newly_completed_ms": ["ms-5"],
+      "patch_ms": [],
+      "milestones": ["ms-5"],
+      "milestone_commits": {"ms-5": ["abc1234"]},
+      "linked_release": "release-20260517-1 | null",
+      "unassigned_commits": []
+    }
+  ],
+  "releases": [
+    {
+      "id": "release-20260517-1",
+      "date": "2026-05-17",
+      "milestones": ["ms-5"],
+      "semver": "v1.2.0 | null",
+      "description": "リリース説明",
+      "deploy_ids": ["deploy-20260517-1"]
     }
   ]
 }
@@ -327,9 +388,9 @@ beacon の Skill は Claude Code が beacon を操作するためのインター
 ```
 
 **2段階呼び出し**:
-1. `beacon log --prepare`: 判断材料（MS状態、タスク消化率、直近エントリ等）をJSONで出力。書き込みしない。
-2. Skill が Claude に固定テンプレートで「進捗率とサマリーを生成せよ」と指示。
-3. `beacon log --finalize --progress N --summary "text"`: 生成結果を受けて project.json に書き込み。
+1. `beacon log --prepare`（または `beacon deploy record --prepare`）: 判断材料をJSONで出力。書き込みしない。
+2. Skill が Claude に固定テンプレートで進捗評価またはデプロイ説明の生成を指示。
+3. `beacon log --finalize --progress N --summary "text"`（または `beacon deploy record --finalize --desc "text"`）: 生成結果を project.json に書き込み。
 
 これにより、CLAUDE.md のプロンプト指示がスルーされる問題が構造的に解消される。
 
@@ -341,6 +402,9 @@ beacon の Skill は Claude Code が beacon を操作するためのインター
 | `beacon-log` | PostToolUse hook（コミット時自動）, `/beacon-log` | コミット記録+進捗評価+summary更新 | あり（finalize経由） |
 | `beacon-task` | `/beacon-task` | タスク操作（add/done/update/delete） | あり |
 | `beacon-session-end` | ユーザーの終了シグナル, Claude自身の提案前, `/beacon-end` | summary更新+未完了整理 | あり |
+| `beacon-deploy` | PostToolUse hook（デプロイ時自動）, `/beacon-deploy` | AI説明付きデプロイ記録 | あり（finalize経由） |
+| `beacon-retro` | `/beacon-retro`, 週次トリガー | 週次振り返りドキュメント生成・ディスカッション | あり |
+| `beacon-dispatch` | `/beacon-dispatch`, 並列実装依頼 | 実行可能MSを特定し並列サブエージェントを起動 | なし（オーケストレーションのみ） |
 
 ### Skill の制約
 

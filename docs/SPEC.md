@@ -132,6 +132,33 @@ Duplicate detection: `source` + (`url` or `revision_id`). `source=manual` skips 
 | `beacon sync` | Auto-sync recent git commits to active milestone | - |
 | `beacon summary [text]` | View/update project summary | Yes |
 
+### Pull Requests
+
+| Command | Description | --json |
+|---------|-------------|--------|
+| `beacon pr create [-m ms-id] [--intent "text"] [gh flags...]` | Run `gh pr create` and auto-record the PR | - |
+| `beacon pr add <github-url> [-m ms-id] [--intent "text"]` | Register an existing PR | Yes |
+| `beacon pr approve <entry-id> [--rationale "text"]` | Approve a PR (rationale required) | Yes |
+| `beacon pr request-changes <entry-id> [--rationale "text"]` | Request changes | Yes |
+| `beacon pr reject <entry-id> [--rationale "text"]` | Reject a PR | Yes |
+| `beacon pr merge <entry-id>` | Mark as merged | Yes |
+| `beacon pr close <entry-id>` | Close without merging | Yes |
+
+Use `/review` Claude Code Skill (not `beacon pr review`) for AI-assisted code review.
+
+### Deploy
+
+| Command | Description | --json |
+|---------|-------------|--------|
+| `beacon deploy record [--revision <rev>] [--semver <v>] [--desc "text"]` | Record a deployment (auto major/minor) | Yes |
+| `beacon deploy record --prepare` | Output deploy context as JSON (read-only) | Yes |
+| `beacon deploy record --finalize --desc "text" [--semver v]` | Write AI-generated deploy description | Yes |
+| `beacon deploy list` | List deployment history | Yes |
+
+**Major vs minor** is determined automatically from commit history:
+- **Major**: one or more milestones newly completed since last deploy
+- **Minor**: commits that patch already-shipped milestones (no new completions)
+
 ### Retrospectives
 
 | Command | Description | --json |
@@ -168,6 +195,7 @@ Duplicate detection: `source` + (`url` or `revision_id`). `source=manual` skips 
 | `beacon` | Launch tmux dashboard + shell | - |
 | `beacon init` | Initialize `.beacon/` in current directory | - |
 | `beacon status` | Show project status | Yes |
+| `beacon search <query> [-m ms-id]` | Full-text search across milestones, entries, PRs | Yes |
 | `beacon entry move <entry-id> -t <task-id>` | Move entry under a task | - |
 | `beacon help` | Show help | - |
 | `beacon --version` | Show version | - |
@@ -206,25 +234,58 @@ Duplicate detection: `source` + (`url` or `revision_id`). `source=manual` skips 
       "entries": [
         {
           "id": "e-1",
-          "type": "commit | task | save | note",
+          "type": "commit | task | save | note | pr",
           "description": "Entry description",
-          "date": "YYYY-MM-DD",
-          "created_at": "YYYY-MM-DD",
-          "done_at": "YYYY-MM-DD | null",
+          "date": "YYYY-MM-DDThh:mm:ssZ",
+          "created_at": "YYYY-MM-DDThh:mm:ssZ",
+          "done_at": "YYYY-MM-DDThh:mm:ssZ | null",
           "status": "todo | in_progress | in_review | waiting | done | cancelled",
           "detail": "Detail text (optional)",
           "meta": {
-            "hash": "(for commits/saves) 7-char short hash",
-            "message": "(for commits) Commit message",
-            "source": "(for saves) manual | google_docs | notion | ...",
-            "url": "(for saves, optional) External resource URL",
-            "revision_id": "(for saves, optional) External system identifier"
+            "hash": "(commit/save) 7-char short hash",
+            "message": "(commit) Commit message",
+            "source": "(save) manual | google_docs | notion | ...",
+            "url": "(save/pr) External resource URL",
+            "revision_id": "(save, optional) External system identifier",
+            "pr_number": "(pr) GitHub PR number",
+            "author": "(pr) GitHub username",
+            "pr_status": "(pr) in_review | approved | merged | closed",
+            "review_status": "(pr) pending | changes_requested | approved | rejected",
+            "intent": "(pr) Why was this PR created?",
+            "review_rationale": "(pr) Rationale for approve/reject decision"
           },
           "entries": [
-            "(Nested child entries, e.g., commits under a task)"
+            "(Nested child entries, e.g., commits under a task or PR)"
           ]
         }
       ]
+    }
+  ],
+  "deployments": [
+    {
+      "id": "deploy-20260517-1",
+      "type": "major | minor",
+      "date": "2026-05-17T12:00:00Z",
+      "environment": "prod",
+      "git_hash": "abc1234",
+      "commit_hashes": ["abc1234", "def5678"],
+      "description": "AI-generated deploy description",
+      "newly_completed_ms": ["ms-5"],
+      "patch_ms": [],
+      "milestones": ["ms-5"],
+      "milestone_commits": {"ms-5": ["abc1234"]},
+      "linked_release": "release-20260517-1 | null",
+      "unassigned_commits": []
+    }
+  ],
+  "releases": [
+    {
+      "id": "release-20260517-1",
+      "date": "2026-05-17",
+      "milestones": ["ms-5"],
+      "semver": "v1.2.0 | null",
+      "description": "Release description",
+      "deploy_ids": ["deploy-20260517-1"]
     }
   ]
 }
@@ -327,9 +388,9 @@ Beacon:      CLI controls workflow → specific steps request AI generation → 
 ```
 
 **Two-phase invocation**:
-1. `beacon log --prepare`: Outputs milestone state, task completion rates, and recent entries as JSON. No writes.
-2. The Skill prompts Claude with a fixed template to generate progress evaluation and summary.
-3. `beacon log --finalize --progress N --summary "text"`: Writes the generated result to project.json.
+1. `beacon log --prepare` (or `beacon deploy record --prepare`): Outputs context as JSON. No writes.
+2. The Skill prompts Claude with a fixed template to generate a progress evaluation or deploy description.
+3. `beacon log --finalize --progress N --summary "text"` (or `beacon deploy record --finalize --desc "text"`): Writes the generated result to project.json.
 
 This structurally eliminates the problem of AI ignoring CLAUDE.md prompt instructions.
 
@@ -341,6 +402,9 @@ This structurally eliminates the problem of AI ignoring CLAUDE.md prompt instruc
 | `beacon-log` | PostToolUse hook (auto on commit), `/beacon-log` | Record commit + evaluate progress + update summary | Yes (via finalize) |
 | `beacon-task` | `/beacon-task` | Task CRUD (add/done/update/delete) | Yes |
 | `beacon-session-end` | User end-of-session cues, Claude self-proposal, `/beacon-end` | Update summary + organize open tasks | Yes |
+| `beacon-deploy` | PostToolUse hook (auto on deploy), `/beacon-deploy` | Record deployment with AI-generated description | Yes (via finalize) |
+| `beacon-retro` | `/beacon-retro`, weekly trigger | Generate and discuss weekly retrospective | Yes |
+| `beacon-dispatch` | `/beacon-dispatch`, user requests parallel work | Identify executable milestones, launch parallel sub-agents | No (orchestration only) |
 
 ### Skill Constraints
 

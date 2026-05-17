@@ -182,6 +182,29 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 | `beacon task delete <id>` | Logical delete / 論理削除 |
 | `beacon entry move <id> -t <task-id>` | Move entry under a task / タスク配下に移動 |
 
+### Pull Requests
+
+| Command | Description |
+|---------|-------------|
+| `beacon pr create [-m ms-id] [--intent "text"] [gh flags...]` | Run `gh pr create` and record the PR / PR作成+自動記録 |
+| `beacon pr add <github-url> [-m ms-id] [--intent "text"]` | Register an existing PR / 既存PRを登録 |
+| `beacon pr approve <entry-id> [--rationale "text"]` | Approve a PR (rationale required) / 承認 |
+| `beacon pr request-changes <entry-id> [--rationale "text"]` | Request changes / 修正依頼 |
+| `beacon pr reject <entry-id> [--rationale "text"]` | Reject a PR / 却下 |
+| `beacon pr merge <entry-id>` | Mark as merged / マージ済みに設定 |
+| `beacon pr close <entry-id>` | Close without merging / クローズ |
+
+Use `/review` Claude Code Skill instead of `beacon pr review` for AI-assisted code review.
+
+### Deploy
+
+| Command | Description |
+|---------|-------------|
+| `beacon deploy record [--revision <rev>] [--semver <v1.0.0>] [--desc "text"]` | Record a deployment (auto major/minor detection) / デプロイ記録 |
+| `beacon deploy list [--json]` | List deployment history / デプロイ履歴一覧 |
+
+`beacon deploy record` automatically determines **major** (one or more milestones newly completed) vs **minor** (bug fix / patch to already-shipped milestones) based on commit history. The `/beacon-deploy` Skill wraps this with a two-phase prepare/finalize flow for AI-generated deploy descriptions.
+
 ### Documents
 
 | Command | Description |
@@ -212,6 +235,7 @@ Sources: `manual` (default, AI self-report), `google_docs`, `notion`, `jupyter`,
 | `beacon log --finalize --progress N --summary "text"` | Write evaluation results / 評価結果書き込み |
 | `beacon summary [text] [--json]` | View/update project summary / サマリー更新 |
 | `beacon sync` | Auto-sync recent commits / 直近コミットを同期 |
+| `beacon search <query> [-m ms-id] [--json]` | Full-text search across milestones, tasks, commits, PRs, and saves / 全文検索 |
 
 ### Retrospectives
 
@@ -255,16 +279,19 @@ Beacon ships with [Claude Code Skills](https://docs.anthropic.com/en/docs/claude
 | `beacon-log` | Record commits with AI-evaluated progress and summary / コミット記録+AI進捗評価 |
 | `beacon-task` | Task CRUD operations / タスク操作 |
 | `beacon-session-end` | Update summary and organize open tasks / サマリー更新+未完了整理 |
+| `beacon-deploy` | Record a deployment with AI-generated description / AI説明付きデプロイ記録 |
+| `beacon-retro` | Generate and discuss weekly retrospective / 週次振り返りドキュメント生成 |
+| `beacon-dispatch` | Identify executable milestones and launch parallel sub-agents / 並列サブエージェント起動 |
 
 ### Two-phase workflow
 
 Skills use a **prepare/finalize** pattern to keep AI judgment structured:
 
-1. `beacon log --prepare` outputs milestone state, task completion rates, and recent entries as JSON
-2. The Skill prompts Claude to evaluate progress and generate a summary
-3. `beacon log --finalize --progress N --summary "text"` writes the result
+1. `beacon log --prepare` (or `beacon deploy record --prepare`) outputs context as JSON
+2. The Skill prompts Claude to generate a summary or deploy description
+3. `beacon log --finalize` (or `beacon deploy record --finalize`) writes the result
 
-This design ensures AI-generated evaluations are channeled through deterministic CLI operations, not free-form file edits.
+This design ensures AI-generated content is channeled through deterministic CLI operations, not free-form file edits.
 
 ## Desktop App
 
