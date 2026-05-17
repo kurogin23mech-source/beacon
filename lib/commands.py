@@ -2145,27 +2145,38 @@ def cmd_deploy_record():
     commit_hashes = [c["hash"] for c in new_commits]
     ms_status: dict[str, str] = {ms["id"]: ms.get("status", "") for ms in data.get("milestones", [])}
 
-    # Find which MSes are touched by these commits and whether they're newly completed
+    # Find which MSes are touched by these commits, build per-MS commit lists
     newly_completed: set[str] = set()
     patch_ms: set[str] = set()
+    milestone_commits: dict[str, list[str]] = {}  # ms_id -> [commit_hashes]
 
     for ms in data.get("milestones", []):
         ms_id = ms["id"]
-        def _scan(entries):
+        matched: list[str] = []
+
+        def _scan(entries, _matched=matched, _ms_id=ms_id):
             for e in entries:
                 if e.get("type") == "commit":
                     h = (e.get("meta") or {}).get("hash", "")
-                    if h and any(h.startswith(c) or c.startswith(h) for c in commit_hashes):
-                        status = ms_status.get(ms_id, "")
-                        if status in ("done", "observing"):
-                            # Check if this MS was already done at last deploy time
-                            # Heuristic: if MS has recent entries matching our new commits, it's newly completed
-                            newly_completed.add(ms_id)
-                        else:
-                            patch_ms.add(ms_id)
+                    if h:
+                        for c in commit_hashes:
+                            if (h.startswith(c) or c.startswith(h)) and c not in _matched:
+                                _matched.append(c)
+                                status = ms_status.get(_ms_id, "")
+                                if status in ("done", "observing"):
+                                    newly_completed.add(_ms_id)
+                                else:
+                                    patch_ms.add(_ms_id)
                 for child in e.get("entries", []):
-                    _scan([child])
+                    _scan([child], _matched, _ms_id)
         _scan(ms.get("entries", []))
+
+        if matched:
+            milestone_commits[ms_id] = matched
+
+    # Commits not associated with any milestone
+    assigned_hashes = {c for cs in milestone_commits.values() for c in cs}
+    unassigned_commits = [c for c in commit_hashes if c not in assigned_hashes]
 
     # Determine type
     deploy_type = "major" if newly_completed else "minor"
@@ -2198,6 +2209,10 @@ def cmd_deploy_record():
         "git_hash": head_hash,
         "environment": "prod",
         "milestones": affected_ms,
+        "newly_completed_ms": sorted(newly_completed),
+        "patch_ms": sorted(patch_ms),
+        "milestone_commits": milestone_commits,
+        "unassigned_commits": unassigned_commits,
         "commit_hashes": commit_hashes,
         "description": description,
         "linked_release": None,

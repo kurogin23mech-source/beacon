@@ -164,6 +164,13 @@ body::after { content: ''; position: fixed; inset: 0; background: repeating-line
 .release-desc { font-size: 0.8rem; color: var(--text-secondary); margin: 4px 0 0 16px; }
 .release-ms-list { margin: 4px 0 0 16px; display: flex; flex-wrap: wrap; gap: 4px; }
 .release-ms-badge { font-family: var(--font-mono); font-size: 0.65rem; padding: 1px 6px; border: 1px solid var(--border-subtle); border-radius: 2px; color: var(--text-dim); }
+.release-commit-breakdown { margin: 6px 0 0 16px; display: flex; flex-direction: column; gap: 3px; }
+.release-ms-row { display: flex; align-items: center; gap: 6px; font-size: 0.7rem; flex-wrap: wrap; }
+.release-ms-row .release-ms-id { font-family: var(--font-mono); color: var(--text-secondary); min-width: 52px; }
+.release-commit-label-completion { font-size: 0.6rem; padding: 1px 5px; border-radius: 2px; background: var(--accent-glow); color: var(--accent); border: 1px solid var(--accent-dim); white-space: nowrap; }
+.release-commit-label-patch { font-size: 0.6rem; padding: 1px 5px; border-radius: 2px; background: var(--bg-raised); color: var(--text-dim); border: 1px solid var(--border-subtle); white-space: nowrap; }
+.release-commit-label-untracked { font-size: 0.6rem; padding: 1px 5px; border-radius: 2px; color: var(--text-dim); border: 1px dashed var(--border-subtle); white-space: nowrap; }
+.hash-badge { font-family: var(--font-mono); font-size: 0.65rem; background: var(--bg-raised); padding: 0 4px; border-radius: 2px; color: var(--text-secondary); }
 
 /* ---- Narrow window (side-by-side with terminal) ---- */
 @media (max-width: 500px) {
@@ -597,17 +604,42 @@ function renderReleasesSection() {
   const releases = {};
   for (const r of (p?.releases||[])) releases[r.id] = r;
   if (deployments.length===0) return `<section class="retro-section fade-in"><div class="retro-empty">No deployments recorded yet.<br><span style="font-size:0.75rem;color:var(--text-dim)">Run beacon deploy record after each deploy.</span></div></section>`;
+  const msTitle = id => p?.milestones?.find(m => m.id === id)?.title || id;
+
+  function renderCommitBreakdown(d) {
+    const mcMap = d.milestone_commits;
+    if (!mcMap || Object.keys(mcMap).length === 0) {
+      const badges = (d.milestones||[]).map(id=>`<span class="release-ms-badge">${esc(id)}</span>`).join('');
+      return badges ? `<div class="release-ms-list">${badges}</div>` : '';
+    }
+    const newlyDone = new Set(d.newly_completed_ms || []);
+    let html = '<div class="release-commit-breakdown">';
+    for (const [msId, commits] of Object.entries(mcMap)) {
+      const isCompletion = newlyDone.has(msId);
+      const labelClass = isCompletion ? 'release-commit-label-completion' : 'release-commit-label-patch';
+      const labelText = isCompletion ? 'completion' : 'patch';
+      const hashes = commits.map(c=>`<code class="hash-badge">${esc(c.slice(0,7))}</code>`).join(' ');
+      html += `<div class="release-ms-row"><span class="release-ms-id">${esc(msId)}</span><span class="${labelClass}">${labelText}</span><span style="color:var(--text-dim);font-size:0.68rem;">${esc(msTitle(msId))}</span><span style="margin-left:4px;">${hashes}</span></div>`;
+    }
+    const unassigned = d.unassigned_commits || [];
+    if (unassigned.length > 0) {
+      const hashes = unassigned.map(c=>`<code class="hash-badge">${esc(c.slice(0,7))}</code>`).join(' ');
+      html += `<div class="release-ms-row"><span class="release-ms-id" style="color:var(--text-dim)">\u2014</span><span class="release-commit-label-untracked">untracked</span><span style="margin-left:4px;">${hashes}</span></div>`;
+    }
+    return html + '</div>';
+  }
+
   let html = `<section class="retro-section fade-in">`;
   for (const d of deployments) {
     const rel = releases[d.linked_release];
     const semver = rel?.semver ? `<span class="release-semver">${esc(rel.semver)}</span>` : '';
     const icon = d.type==='major' ? '\u25C9' : '\u25CB';
     const indent = d.type==='major' ? '' : 'margin-left:16px;border-left:2px solid var(--border-subtle);padding-left:10px;';
-    const msBadges = (d.milestones||[]).map(id=>`<span class="release-ms-badge">${esc(id)}</span>`).join('');
+    const dateStr = (d.date||'').slice(0,16).replace('T',' ');
     html += `<div class="release-item" style="${indent}">
-      <div class="release-item-header"><span>${icon}</span><span class="release-id">${esc(d.id)}</span>${semver}<span class="release-date">${(d.date||'').slice(0,10)}</span></div>
+      <div class="release-item-header"><span>${icon}</span><span class="release-id">${esc(d.id)}</span>${semver}<span class="release-date">${esc(dateStr)}</span></div>
       <div class="release-desc">${esc(d.description||'')}</div>
-      ${msBadges?`<div class="release-ms-list">${msBadges}</div>`:''}
+      ${renderCommitBreakdown(d)}
     </div>`;
   }
   html += `</section>`;
