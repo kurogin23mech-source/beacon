@@ -83,6 +83,7 @@ body::after { content: ''; position: fixed; inset: 0; background: repeating-line
 .ms-progress-text { font-size: 0.75rem; color: var(--text-dim); min-width: 32px; text-align: right; font-variant-numeric: tabular-nums; }
 .ms-expand-hint { font-size: 0.65rem; color: var(--text-dim); transition: transform 0.2s; }
 .ms-card.expanded .ms-expand-hint { transform: rotate(180deg); }
+.ms-card.expanded .ms-title { white-space: normal; overflow: visible; }
 .ms-tasks-text { font-size: 0.75rem; color: var(--text-dim); font-variant-numeric: tabular-nums; }
 .ms-body { max-height: 0; overflow: hidden; transition: max-height 0.3s ease; }
 .ms-card.expanded .ms-body { max-height: 8000px; }
@@ -165,7 +166,6 @@ body::after { content: ''; position: fixed; inset: 0; background: repeating-line
   .ms-tasks-text { display: none; }
   .ms-progress-bar { width: 40px; }
   .ms-meta { gap: 8px; }
-  .ms-card.expanded .ms-title { white-space: normal; overflow: visible; }
   .ms-card-header { padding: 10px 12px; gap: 8px; }
   .ms-title { font-size: 0.82rem; }
   .sort-toggle { display: none; }

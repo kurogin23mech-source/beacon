@@ -590,7 +590,11 @@ body::after {
   .ms-status-text { display: none; }
   .sort-toggle { display: none; }
   .ms-card-header { gap: 8px; }
-  .ms-card.expanded .ms-title { white-space: normal; overflow: visible; }
+}
+
+.ms-card.expanded .ms-title {
+  white-space: normal;
+  overflow: visible;
 }
 
 .ms-card.expanded .ms-expand-hint {
@@ -2483,9 +2487,9 @@ window.addEventListener('hashchange', handleHashNav);
 
 // Reconnect when the tab becomes visible or the window regains focus
 function _tryReconnect() {
-  if (state.projectId && !state.connected && (!ws || ws.readyState !== WebSocket.OPEN)) {
-    connectWebSocket(state.projectId);
-  }
+  if (!state.projectId) return;
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  connectWebSocket(state.projectId);
 }
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') _tryReconnect();
