@@ -15,6 +15,23 @@ def _now_iso() -> str:
     """Return current UTC time as ISO8601 string with seconds precision."""
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+
+def _get_actor() -> str:
+    """Return the current operator: 'claude' if running inside Claude Code, else git user email."""
+    import os as _os
+    if _os.environ.get("BEACON_CLAUDE_CODE") == "1":
+        return "claude"
+    try:
+        import subprocess
+        r = subprocess.run(["git", "config", "user.email"],
+                           capture_output=True, text=True, timeout=2)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except Exception:
+        pass
+    return _os.environ.get("USER", _os.environ.get("USERNAME", "unknown"))
+
+
 VALID_STATUSES = {"todo", "in_progress", "in_review", "approved", "waiting", "done", "observing", "cancelled"}
 VALID_ENTRY_TYPES = {"commit", "task", "note", "save", "pr"}
 # PR lifecycle: in_review → approved → merged (or closed/rejected)
@@ -165,6 +182,8 @@ def milestone_add(data: dict, title: str, target_date: str = "",
         "status": "todo",
         "target_date": target_date,
         "commits": [],
+        "created_by": _get_actor(),
+        "created_at": _now_iso(),
     }
     if description:
         ms["description"] = description
@@ -184,11 +203,16 @@ def milestone_start(data: dict, ms_id: str) -> dict:
     return found
 
 
-def milestone_done(data: dict, ms_id: str) -> dict:
+def milestone_done(data: dict, ms_id: str, *, reason: str = "") -> dict:
     """Mark a milestone as done. Returns the milestone."""
     for ms in data["milestones"]:
         if ms["id"] == ms_id:
             ms["status"] = "done"
+            meta = ms.setdefault("meta", {})
+            meta["done_at"] = _now_iso()
+            meta["done_by"] = _get_actor()
+            if reason:
+                meta["done_reason"] = reason
             return ms
     raise ValueError(f"Milestone not found: {ms_id}")
 
@@ -196,7 +220,7 @@ def milestone_done(data: dict, ms_id: str) -> dict:
 def milestone_update(data: dict, ms_id: str, *,
                      title: str = "", progress: str = "",
                      target_date: str = "", status: str = "",
-                     description: str = "") -> dict:
+                     description: str = "", reason: str = "") -> dict:
     """Update milestone fields. Returns the milestone."""
     for ms in data["milestones"]:
         if ms["id"] == ms_id:
@@ -217,15 +241,25 @@ def milestone_update(data: dict, ms_id: str, *,
                         f"Invalid status: {status}. Valid: {', '.join(sorted(VALID_STATUSES))}"
                     )
                 ms["status"] = status
+                meta = ms.setdefault("meta", {})
+                meta[f"{status}_at"] = _now_iso()
+                meta[f"{status}_by"] = _get_actor()
+                if reason:
+                    meta[f"{status}_reason"] = reason
             return ms
     raise ValueError(f"Milestone not found: {ms_id}")
 
 
-def milestone_delete(data: dict, ms_id: str) -> dict:
+def milestone_delete(data: dict, ms_id: str, *, reason: str = "") -> dict:
     """Cancel a milestone (soft delete). Returns the milestone."""
     for ms in data["milestones"]:
         if ms["id"] == ms_id:
             ms["status"] = "cancelled"
+            meta = ms.setdefault("meta", {})
+            meta["cancelled_at"] = _now_iso()
+            meta["cancelled_by"] = _get_actor()
+            if reason:
+                meta["cancel_reason"] = reason
             return ms
     raise ValueError(f"Milestone not found: {ms_id}")
 
@@ -245,6 +279,7 @@ def task_add(data: dict, ms_id: str, description: str, *,
     if requested_by:
         meta["requested_by"] = requested_by
     now = _now_iso()
+    meta["created_by"] = _get_actor()
     entry = {
         "id": eid,
         "type": entry_type,
@@ -261,7 +296,7 @@ def task_add(data: dict, ms_id: str, description: str, *,
     return eid
 
 
-def task_done(data: dict, entry_id: str, *, date: str = "") -> tuple[dict, dict]:
+def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "") -> tuple[dict, dict]:
     """Mark an entry as done. Returns (milestone, entry)."""
     result = find_entry(data, entry_id)
     if not result:
@@ -271,6 +306,10 @@ def task_done(data: dict, entry_id: str, *, date: str = "") -> tuple[dict, dict]
     entry["done_at"] = date or _now_iso()
     if not entry.get("date"):
         entry["date"] = entry["done_at"]
+    meta = entry.setdefault("meta", {})
+    meta["done_by"] = _get_actor()
+    if reason:
+        meta["done_reason"] = reason
     return ms, entry
 
 
@@ -297,13 +336,18 @@ def task_update(data: dict, entry_id: str, *,
     return ms, entry
 
 
-def task_delete(data: dict, entry_id: str) -> dict:
+def task_delete(data: dict, entry_id: str, *, reason: str = "") -> dict:
     """Cancel an entry (soft delete). Returns the entry."""
     result = find_entry(data, entry_id)
     if not result:
         raise ValueError(f"Entry not found: {entry_id}")
     _, _, entry, _ = result
     entry["status"] = "cancelled"
+    meta = entry.setdefault("meta", {})
+    meta["cancelled_at"] = _now_iso()
+    meta["cancelled_by"] = _get_actor()
+    if reason:
+        meta["cancel_reason"] = reason
     return entry
 
 
@@ -984,3 +1028,22 @@ def collect_retro_entries(entries: list, since: str, until: str) -> list:
 
     return result
 
+
+
+# ---------------------------------------------------------------------------
+# Deploy operations
+# ---------------------------------------------------------------------------
+
+def deploy_void(data: dict, deploy_id: str, *, reason: str) -> dict:
+    """Mark a deployment record as voided (immutable — never physically deleted).
+
+    Returns the updated deployment entry.
+    """
+    for dep in data.get("deployments", []):
+        if dep.get("id") == deploy_id:
+            dep["voided"] = True
+            dep["void_reason"] = reason
+            dep["voided_at"] = _now_iso()
+            dep["voided_by"] = _get_actor()
+            return dep
+    raise ValueError(f"Deployment not found: {deploy_id}")

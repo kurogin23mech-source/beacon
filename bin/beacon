@@ -309,22 +309,41 @@ cmd_milestone_start() {
 
 cmd_milestone_done() {
     ensure_project
-    local ms_id="${1:-}"
+    local ms_id=""
+    local reason=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -r|--reason) reason="${2:-}"; shift 2 ;;
+            *)           ms_id="$1";     shift   ;;
+        esac
+    done
+
     if [ -z "$ms_id" ]; then
-        echo "Usage: beacon milestone close <ms-id>"
+        echo "Usage: beacon milestone done <ms-id> [--reason <text>]"
         exit 1
     fi
-    BEACON_MS_ID="$ms_id" python3 "$COMMANDS_PY" milestone_done
+    BEACON_MS_ID="$ms_id" BEACON_REASON="$reason" python3 "$COMMANDS_PY" milestone_done
 }
 
 cmd_milestone_observe() {
     ensure_project
-    local ms_id="${1:-}"
+    local ms_id=""
+    local reason=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -r|--reason) reason="${2:-}"; shift 2 ;;
+            *)           ms_id="$1";     shift   ;;
+        esac
+    done
+
     if [ -z "$ms_id" ]; then
-        echo "Usage: beacon milestone observe <ms-id>"
+        echo "Usage: beacon milestone observe <ms-id> [--reason <text>]"
         exit 1
     fi
-    BEACON_MS_ID="$ms_id" BEACON_STATUS="observing" python3 "$COMMANDS_PY" milestone_update
+    BEACON_MS_ID="$ms_id" BEACON_STATUS="observing" BEACON_REASON="$reason" \
+        python3 "$COMMANDS_PY" milestone_update
 }
 
 cmd_milestone_show() {
@@ -381,20 +400,23 @@ cmd_milestone_update() {
 cmd_milestone_delete() {
     ensure_project
     local ms_id=""
+    local reason=""
     local json_flag=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --json) json_flag="1"; shift ;;
-            *)      ms_id="$1"; shift ;;
+            --json)      json_flag="1";    shift   ;;
+            -r|--reason) reason="${2:-}";  shift 2 ;;
+            *)           ms_id="$1";       shift   ;;
         esac
     done
 
     if [ -z "$ms_id" ]; then
-        echo "Usage: beacon milestone delete <ms-id> [--json]"
+        echo "Usage: beacon milestone delete <ms-id> --reason <text> [--json]"
         exit 1
     fi
-    BEACON_MS_ID="$ms_id" BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" milestone_delete
+    BEACON_MS_ID="$ms_id" BEACON_REASON="$reason" BEACON_JSON="$json_flag" \
+        python3 "$COMMANDS_PY" milestone_delete
 }
 
 cmd_milestone_depends() {
@@ -770,26 +792,42 @@ cmd_task_done() {
     ensure_project
     local entry_id=""
     local progress=""
+    local reason=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -p|--progress)
-                progress="${2:-}"
-                shift 2
-                ;;
-            *)
-                entry_id="$1"
-                shift
-                ;;
+            -p|--progress) progress="${2:-}"; shift 2 ;;
+            -r|--reason)   reason="${2:-}";   shift 2 ;;
+            *)             entry_id="$1";     shift   ;;
         esac
     done
 
     if [ -z "$entry_id" ]; then
-        echo "Usage: beacon task done <entry-id> [-p <progress>]"
+        echo "Usage: beacon task done <entry-id> [-p <progress>] [--reason <text>]"
         exit 1
     fi
-    BEACON_ENTRY_ID="$entry_id" BEACON_PROGRESS="$progress" \
+    BEACON_ENTRY_ID="$entry_id" BEACON_PROGRESS="$progress" BEACON_REASON="$reason" \
         python3 "$COMMANDS_PY" task_done
+}
+
+cmd_task_cancel() {
+    ensure_project
+    local entry_id=""
+    local reason=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -r|--reason) reason="${2:-}"; shift 2 ;;
+            *)           entry_id="$1";  shift   ;;
+        esac
+    done
+
+    if [ -z "$entry_id" ]; then
+        echo "Usage: beacon task cancel <entry-id> [--reason <text>]"
+        exit 1
+    fi
+    BEACON_ENTRY_ID="$entry_id" BEACON_REASON="$reason" \
+        python3 "$COMMANDS_PY" task_cancel
 }
 
 cmd_task_list() {
@@ -1571,10 +1609,23 @@ case "${1:-}" in
                 BEACON_JSON="${3:+1}" python3 "$COMMANDS_PY" deploy_list ;;
             delete)
                 BEACON_DEPLOY_ID="${3:-}" python3 "$COMMANDS_PY" deploy_delete ;;
+            void)
+                local deploy_id="${3:-}"
+                local reason=""
+                shift 3 || true
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        -r|--reason) reason="${2:-}"; shift 2 ;;
+                        *) shift ;;
+                    esac
+                done
+                BEACON_DEPLOY_ID="$deploy_id" BEACON_REASON="$reason" \
+                    python3 "$COMMANDS_PY" deploy_void
+                ;;
             *)
                 echo "Usage: beacon deploy record [--revision <rev>] [--semver <v1.0.0>] [--desc <text>]"
                 echo "       beacon deploy list [--json]"
-                echo "       beacon deploy delete <id>"
+                echo "       beacon deploy void <id> --reason <text>"
                 ;;
         esac
         ;;

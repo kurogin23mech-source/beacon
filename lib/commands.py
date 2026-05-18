@@ -411,10 +411,14 @@ def cmd_milestone_start():
 
 def cmd_milestone_done():
     ms_id = os.environ.get("BEACON_MS_ID", "")
+    reason = os.environ.get("BEACON_REASON", "")
     data = load_project()
-    ms = core.milestone_done(data, ms_id)
+    ms = core.milestone_done(data, ms_id, reason=reason)
     save_project(data)
-    print(f"Completed: {ms['title']}")
+    msg = f"Completed: {ms['title']}"
+    if reason:
+        msg += f"\n  Reason: {reason}"
+    print(msg)
 
 
 def cmd_milestone_show():
@@ -467,6 +471,7 @@ def cmd_milestone_update():
             target_date=os.environ.get("BEACON_TARGET_DATE", ""),
             status=os.environ.get("BEACON_STATUS", ""),
             description=os.environ.get("BEACON_DESCRIPTION", ""),
+            reason=os.environ.get("BEACON_REASON", ""),
         )
     except ValueError as e:
         print(str(e))
@@ -482,10 +487,15 @@ def cmd_milestone_update():
 
 def cmd_milestone_delete():
     ms_id = os.environ.get("BEACON_MS_ID", "")
+    reason = os.environ.get("BEACON_REASON", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not reason:
+        print("Error: --reason is required for milestone delete.")
+        print("  Example: beacon milestone delete <ms-id> --reason \"スコープアウト: 別MSに統合\"")
+        sys.exit(1)
     data = load_project()
     try:
-        ms = core.milestone_delete(data, ms_id)
+        ms = core.milestone_delete(data, ms_id, reason=reason)
     except ValueError as e:
         print(str(e))
         sys.exit(1)
@@ -494,6 +504,7 @@ def cmd_milestone_delete():
         print(json.dumps({"id": ms["id"], "status": "cancelled"}, ensure_ascii=False))
     else:
         print(f"Cancelled: [{ms['id']}] {ms['title']}")
+        print(f"  Reason: {reason}")
 
 
 # ---------------------------------------------------------------------------
@@ -697,8 +708,11 @@ def cmd_task_done():
                 print(f"  Progress: {ms.get('progress', 0)}%")
             save_project(data)
             return
-    ms, entry = core.task_done(data, entry_id, date=today)
+    reason = os.environ.get("BEACON_REASON", "")
+    ms, entry = core.task_done(data, entry_id, date=today, reason=reason)
     print(f"Done: [{entry_id}] {entry['description']}")
+    if reason:
+        print(f"  Reason: {reason}")
     core.update_progress(ms, progress)
     if progress:
         print(f"  Progress: {ms.get('progress', 0)}%")
@@ -826,11 +840,19 @@ def cmd_task_update():
 
 
 def cmd_task_delete():
+    print("Error: 'beacon task delete' is deprecated. Use 'beacon task cancel' instead.")
+    print("  Physical deletion is not allowed — all cancellations are soft and traceable.")
+    print("  Example: beacon task cancel <entry-id> --reason \"重複タスクのため\"")
+    sys.exit(1)
+
+
+def cmd_task_cancel():
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
+    reason = os.environ.get("BEACON_REASON", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     data = load_project()
     try:
-        entry = core.task_delete(data, entry_id)
+        entry = core.task_delete(data, entry_id, reason=reason)
     except ValueError as e:
         print(str(e))
         sys.exit(1)
@@ -839,6 +861,8 @@ def cmd_task_delete():
         print(json.dumps({"id": entry_id, "status": "cancelled"}, ensure_ascii=False))
     else:
         print(f"Cancelled: [{entry_id}] {entry.get('description', '')}")
+        if reason:
+            print(f"  Reason: {reason}")
 
 
 def cmd_entry_move():
@@ -2437,23 +2461,40 @@ def cmd_deploy_list():
 
 
 def cmd_deploy_delete():
-    """Delete a deployment record by ID."""
+    """Deprecated: physical deletion of deploy records is not allowed."""
+    print("Error: 'beacon deploy delete' is deprecated.")
+    print("  Deploy records are immutable facts — they cannot be physically deleted.")
+    print("  To mark a record as invalid: beacon deploy void <id> --reason \"...\"")
+    sys.exit(1)
+
+
+def cmd_deploy_void():
+    """Mark a deployment record as voided (immutable, never physically deleted)."""
     deploy_id = os.environ.get("BEACON_DEPLOY_ID", "")
+    reason = os.environ.get("BEACON_REASON", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
     if not deploy_id:
         print("Error: deploy ID required", file=sys.stderr)
         sys.exit(1)
+    if not reason:
+        print("Error: --reason is required for deploy void.", file=sys.stderr)
+        print("  Example: beacon deploy void <id> --reason \"誤ったハッシュで記録\"", file=sys.stderr)
+        sys.exit(1)
 
     data = load_project()
-    deployments = data.get("deployments", [])
-    original_len = len(deployments)
-    data["deployments"] = [d for d in deployments if d.get("id") != deploy_id]
-
-    if len(data["deployments"]) == original_len:
-        print(f"Error: deploy '{deploy_id}' not found", file=sys.stderr)
+    try:
+        dep = core.deploy_void(data, deploy_id, reason=reason)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
         sys.exit(1)
 
     save_project(data)
-    print(f"Deleted {deploy_id}")
+    if json_mode:
+        print(json.dumps({"id": dep["id"], "voided": True}, ensure_ascii=False))
+    else:
+        print(f"Voided: {dep['id']}")
+        print(f"  Reason: {reason}")
 
 
 def cmd_project_archive():
@@ -2611,6 +2652,7 @@ if __name__ == "__main__":
         "task_detail": cmd_task_detail,
         "task_update": cmd_task_update,
         "task_delete": cmd_task_delete,
+        "task_cancel": cmd_task_cancel,
         "entry_move": cmd_entry_move,
         "summary": cmd_summary,
         "save": cmd_save,
@@ -2643,6 +2685,7 @@ if __name__ == "__main__":
         "deploy_record": cmd_deploy_record,
         "deploy_list": cmd_deploy_list,
         "deploy_delete": cmd_deploy_delete,
+        "deploy_void": cmd_deploy_void,
         "project_unarchive": cmd_project_unarchive,
         "pr_add": cmd_pr_add,
         "pr_close": cmd_pr_close,
