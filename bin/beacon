@@ -1547,9 +1547,12 @@ case "${1:-}" in
                 ;;
             list)
                 BEACON_JSON="${3:+1}" python3 "$COMMANDS_PY" deploy_list ;;
+            delete)
+                BEACON_DEPLOY_ID="${3:-}" python3 "$COMMANDS_PY" deploy_delete ;;
             *)
                 echo "Usage: beacon deploy record [--revision <rev>] [--semver <v1.0.0>] [--desc <text>]"
                 echo "       beacon deploy list [--json]"
+                echo "       beacon deploy delete <id>"
                 ;;
         esac
         ;;

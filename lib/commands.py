@@ -2389,6 +2389,26 @@ def cmd_deploy_list():
             print(f"   patches: {', '.join(d['links_to'])}")
 
 
+def cmd_deploy_delete():
+    """Delete a deployment record by ID."""
+    deploy_id = os.environ.get("BEACON_DEPLOY_ID", "")
+    if not deploy_id:
+        print("Error: deploy ID required", file=sys.stderr)
+        sys.exit(1)
+
+    data = load_project()
+    deployments = data.get("deployments", [])
+    original_len = len(deployments)
+    data["deployments"] = [d for d in deployments if d.get("id") != deploy_id]
+
+    if len(data["deployments"]) == original_len:
+        print(f"Error: deploy '{deploy_id}' not found", file=sys.stderr)
+        sys.exit(1)
+
+    save_project(data)
+    print(f"Deleted {deploy_id}")
+
+
 def cmd_project_archive():
     """Archive the current project (sets archived: true in project.json)."""
     data = load_project()
@@ -2575,6 +2595,7 @@ if __name__ == "__main__":
         "project_archive": cmd_project_archive,
         "deploy_record": cmd_deploy_record,
         "deploy_list": cmd_deploy_list,
+        "deploy_delete": cmd_deploy_delete,
         "project_unarchive": cmd_project_unarchive,
         "pr_add": cmd_pr_add,
         "pr_close": cmd_pr_close,
