@@ -1496,7 +1496,12 @@ case "${1:-}" in
         ;;
     cloud)
         case "${2:-}" in
-            push)   ensure_project; python3 "$COMMANDS_PY" cloud_push ;;
+            push)
+                ensure_project
+                force=""
+                [[ "${3:-}" == "--force" || "${3:-}" == "-f" ]] && force="1"
+                BEACON_FORCE="$force" python3 "$COMMANDS_PY" cloud_push
+                ;;
             pull)   ensure_project; python3 "$COMMANDS_PY" cloud_pull ;;
             join)
                 if [ -z "${3:-}" ]; then

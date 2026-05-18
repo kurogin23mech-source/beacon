@@ -1636,6 +1636,8 @@ def cmd_cloud_list():
 
 
 def cmd_cloud_push():
+    force = os.environ.get("BEACON_FORCE", "") == "1"
+
     from auth import load_credentials
     creds = load_credentials()
     if creds is None:
@@ -1645,6 +1647,22 @@ def cmd_cloud_push():
     config = _ensure_cloud_config()
     project_id = config["project_id"]
     api_url = config.get("api_url", DEFAULT_API_URL)
+
+    # In cloud mode, CLI writes go directly to cloud — local project.json is stale.
+    # Pushing it would overwrite cloud state and cause data loss.
+    if _is_cloud_mode():
+        if not force:
+            print("Error: already in cloud mode.")
+            print("")
+            print("  In cloud mode, all CLI changes go directly to the cloud.")
+            print("  Pushing the local project.json (which may be stale) would")
+            print("  overwrite cloud state and cause data loss.")
+            print("")
+            print("  To sync cloud state to local:  beacon cloud pull")
+            print("  To force-push local state:     beacon cloud push --force")
+            sys.exit(1)
+        print("Warning: --force specified. Overwriting cloud project data with local file.")
+        print("  documents and retros will NOT be pushed (they are managed in cloud).")
 
     from store_local import LocalStore
     local = LocalStore(get_project_file())
@@ -1671,37 +1689,39 @@ def cmd_cloud_push():
         sys.exit(1)
     print(f"Pushed to cloud: projects/{project_id}")
 
-    # Push local documents
-    docs_dir = os.path.join(os.path.dirname(get_project_file()) or ".beacon", "documents")
-    if os.path.isdir(docs_dir):
-        import glob
-        md_files = glob.glob(os.path.join(docs_dir, "*.md"))
-        for fpath in md_files:
-            doc_info = _read_local_doc(fpath)
-            try:
-                client.put_document(
-                    project_id, doc_info["doc_id"],
-                    doc_info["title"], doc_info["content"],
-                    doc_info.get("scope"),
-                )
-                print(f"  doc: {doc_info['doc_id']} ({doc_info.get('scope', 'memo')})")
-            except RuntimeError as e:
-                print(f"  doc error [{doc_info['doc_id']}]: {e}")
+    # Push local documents and retros only on the initial push (local → cloud).
+    # In cloud mode they are managed via the API; pushing local files would
+    # silently overwrite any edits made through the Web UI or CLI.
+    if not _is_cloud_mode():
+        docs_dir = os.path.join(os.path.dirname(get_project_file()) or ".beacon", "documents")
+        if os.path.isdir(docs_dir):
+            import glob
+            md_files = glob.glob(os.path.join(docs_dir, "*.md"))
+            for fpath in md_files:
+                doc_info = _read_local_doc(fpath)
+                try:
+                    client.put_document(
+                        project_id, doc_info["doc_id"],
+                        doc_info["title"], doc_info["content"],
+                        doc_info.get("scope"),
+                    )
+                    print(f"  doc: {doc_info['doc_id']} ({doc_info.get('scope', 'memo')})")
+                except RuntimeError as e:
+                    print(f"  doc error [{doc_info['doc_id']}]: {e}")
 
-    # Push local retros
-    retros_dir = os.path.join(os.path.dirname(get_project_file()) or ".beacon", "retro")
-    if os.path.isdir(retros_dir):
-        import glob
-        retro_files = glob.glob(os.path.join(retros_dir, "*.md"))
-        for fpath in retro_files:
-            week = os.path.basename(fpath)[:-3]  # e.g. "2026-W19"
-            with open(fpath, "r", encoding="utf-8") as f:
-                content = f.read()
-            try:
-                client.save_retro(project_id, week, content)
-                print(f"  retro: {week}")
-            except RuntimeError as e:
-                print(f"  retro error [{week}]: {e}")
+        retros_dir = os.path.join(os.path.dirname(get_project_file()) or ".beacon", "retro")
+        if os.path.isdir(retros_dir):
+            import glob
+            retro_files = glob.glob(os.path.join(retros_dir, "*.md"))
+            for fpath in retro_files:
+                week = os.path.basename(fpath)[:-3]  # e.g. "2026-W19"
+                with open(fpath, "r", encoding="utf-8") as f:
+                    content = f.read()
+                try:
+                    client.save_retro(project_id, week, content)
+                    print(f"  retro: {week}")
+                except RuntimeError as e:
+                    print(f"  retro error [{week}]: {e}")
 
     # Auto-switch to cloud mode
     beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
