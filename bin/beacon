@@ -867,18 +867,34 @@ cmd_retro() {
         esac
     done
 
-    # Default: current week (Monday to today)
+    # Default: current week (Monday to today).
+    # If today IS Monday (dow=1), use previous week (last Mon to yesterday)
+    # so the retro covers a full week of activity.
     if [ -z "$since" ]; then
         local dow
         dow=$(date +%u)  # 1=Mon, 7=Sun
         if [[ "$(uname)" == "Darwin" ]]; then
-            since=$(date -v-"$((dow - 1))"d +%Y-%m-%d)
+            if [[ "$dow" -eq 1 ]]; then
+                since=$(date -v-7d +%Y-%m-%d)
+            else
+                since=$(date -v-"$((dow - 1))"d +%Y-%m-%d)
+            fi
         else
-            since=$(date -d "last monday" +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)
+            if [[ "$dow" -eq 1 ]]; then
+                since=$(date -d "7 days ago" +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)
+            else
+                since=$(date -d "last monday" +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)
+            fi
         fi
     fi
     if [ -z "$until" ]; then
-        until=$(date +%Y-%m-%d)
+        local dow
+        dow=$(date +%u)
+        if [[ "$dow" -eq 1 ]]; then
+            until=$(date -v-1d +%Y-%m-%d 2>/dev/null || date -d "yesterday" +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)
+        else
+            until=$(date +%Y-%m-%d)
+        fi
     fi
 
     BEACON_SINCE="$since" BEACON_UNTIL="$until" \
@@ -1526,7 +1542,7 @@ case "${1:-}" in
         case "${2:-}" in
             record)
                 shift 2
-                revision="" semver="" desc="" hash="" date="" before="" mode=""
+                revision="" semver="" desc="" hash="" date="" before="" mode="" type=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --prepare)       mode="prepare";    shift ;;
@@ -1537,12 +1553,13 @@ case "${1:-}" in
                         --hash)          hash="${2:-}";     shift 2 ;;
                         --date)          date="${2:-}";     shift 2 ;;
                         --insert-before) before="${2:-}";   shift 2 ;;
+                        --type)          type="${2:-}";     shift 2 ;;
                         *) shift ;;
                     esac
                 done
                 BEACON_MODE="$mode" BEACON_REVISION="$revision" BEACON_SEMVER="$semver" \
                     BEACON_DESCRIPTION="$desc" BEACON_HASH="$hash" \
-                    BEACON_DATE="$date" BEACON_INSERT_BEFORE="$before" \
+                    BEACON_DATE="$date" BEACON_INSERT_BEFORE="$before" BEACON_TYPE="$type" \
                     python3 "$COMMANDS_PY" deploy_record
                 ;;
             list)

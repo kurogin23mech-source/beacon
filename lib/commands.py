@@ -1033,11 +1033,26 @@ def cmd_retro_prepare():
                 "entries": ms_entries,
             })
 
+    # Include deploy records that fall within the period
+    weekly_deploys = []
+    for dep in data.get("deployments", []):
+        dep_date = (dep.get("date") or "")[:10]
+        if (not since or dep_date >= since) and (not until or dep_date <= until):
+            weekly_deploys.append({
+                "id": dep["id"],
+                "type": dep.get("type", ""),
+                "date": dep.get("date", "")[:10],
+                "milestones": dep.get("milestones", []),
+                "newly_completed_ms": dep.get("newly_completed_ms", []),
+                "description": dep.get("description", ""),
+            })
+
     output = {
         "project": data.get("name", ""),
         "period": {"since": since, "until": until},
         "summary": data.get("summary", ""),
         "milestones": weekly_milestones,
+        "deploys": weekly_deploys,
     }
     print(json.dumps(output, ensure_ascii=False))
 
@@ -1638,6 +1653,17 @@ def cmd_cloud_push():
 
     from api_client import ApiClient
     client = ApiClient(api_url, creds.id_token or creds.token or "")
+
+    # Preserve cloud-only fields (deployments, releases) that are written directly
+    # to Firestore and never synced back to local project.json.
+    try:
+        remote = client.get_project(project_id)
+        for field in ("deployments", "releases"):
+            if remote.get(field):
+                data.setdefault(field, remote[field])
+    except RuntimeError:
+        pass  # new project or unreachable — proceed with local data only
+
     try:
         client.put_project(project_id, data)
     except RuntimeError as e:
@@ -2151,6 +2177,7 @@ def cmd_deploy_record():
     deploy_hash = os.environ.get("BEACON_HASH", "")   # override: specify deployed commit
     deploy_date = os.environ.get("BEACON_DATE", "")   # override: specify deploy datetime
     insert_before = os.environ.get("BEACON_INSERT_BEFORE", "")  # insert before this deploy-id
+    type_override = os.environ.get("BEACON_TYPE", "")  # override: "major" or "minor"
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     data = load_project()
@@ -2244,8 +2271,8 @@ def cmd_deploy_record():
     assigned_hashes = {c for cs in milestone_commits.values() for c in cs}
     unassigned_commits = [c for c in commit_hashes if c not in assigned_hashes]
 
-    # Determine type
-    deploy_type = "major" if newly_completed else "minor"
+    # Determine type (allow manual override)
+    deploy_type = type_override if type_override in ("major", "minor") else ("major" if newly_completed else "minor")
     affected_ms = sorted(newly_completed if newly_completed else patch_ms)
 
     # --- Prepare mode: return context JSON for AI description generation ---
