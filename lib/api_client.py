@@ -7,6 +7,7 @@ instead of directly accessing Firestore.
 from __future__ import annotations
 
 import json
+import urllib.parse
 import urllib.request
 import urllib.error
 
@@ -88,7 +89,7 @@ class ApiClient:
         return self.get(f"/api/projects/{project_id}/documents")
 
     def get_document(self, project_id: str, doc_id: str) -> dict:
-        return self.get(f"/api/projects/{project_id}/documents/{doc_id}")
+        return self.get(f"/api/projects/{project_id}/documents/{urllib.parse.quote(doc_id, safe='')}")
 
     def create_document(self, project_id: str, title: str, content: str,
                         scope: str | None = None) -> dict:
@@ -102,7 +103,7 @@ class ApiClient:
         body = {"title": title, "content": content}
         if scope:
             body["scope"] = scope
-        return self.put(f"/api/projects/{project_id}/documents/{doc_id}", body)
+        return self.put(f"/api/projects/{project_id}/documents/{urllib.parse.quote(doc_id, safe='')}", body)
 
     def put_document(self, project_id: str, doc_id: str, title: str, content: str,
                      scope: str | None = None) -> dict:
@@ -110,10 +111,10 @@ class ApiClient:
         body = {"title": title, "content": content}
         if scope:
             body["scope"] = scope
-        return self.put(f"/api/projects/{project_id}/documents/{doc_id}", body)
+        return self.put(f"/api/projects/{project_id}/documents/{urllib.parse.quote(doc_id, safe='')}", body)
 
     def delete_document(self, project_id: str, doc_id: str) -> dict:
-        return self.delete(f"/api/projects/{project_id}/documents/{doc_id}")
+        return self.delete(f"/api/projects/{project_id}/documents/{urllib.parse.quote(doc_id, safe='')}")
 
     # Retro operations
 
