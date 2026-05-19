@@ -210,6 +210,7 @@ def get_retro(project_id: str, week: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 DOCS_SUBCOLLECTION = "documents"
+DOC_REVISIONS_SUBCOLLECTION = "document_revisions"
 
 
 def list_documents(project_id: str) -> list[dict]:
@@ -225,6 +226,9 @@ def list_documents(project_id: str) -> list[dict]:
     result = []
     for doc in docs:
         data = doc.to_dict()
+        # Filter out soft-deleted documents
+        if data.get("deleted"):
+            continue
         # milestone: Firestore field first, fallback to frontmatter
         milestone = data.get("milestone") or _extract_frontmatter_field(
             data.get("content", ""), "milestone"
@@ -277,49 +281,97 @@ def _extract_scope(content: str) -> str:
 
 
 def save_document(project_id: str, doc_id: str, title: str, content: str,
-                  scope: str | None = None) -> str:
-    """Save a document. If doc_id is empty, auto-generate one."""
+                  scope: str | None = None, updated_by: str = "unknown") -> str:
+    """Save a document. If doc_id is empty, auto-generate one.
+    When updating an existing document, the current content is saved as a revision first.
+    """
     import datetime
-
-    # Scope priority: explicit param > frontmatter > default
     resolved_scope = scope if scope in ("core", "spec", "memo") else _extract_scope(content)
     milestone = _extract_frontmatter_field(content, "milestone")
 
-    col = (
-        get_db()
-        .collection(COLLECTION)
-        .document(project_id)
-        .collection(DOCS_SUBCOLLECTION)
-    )
+    col = get_db().collection(COLLECTION).document(project_id).collection(DOCS_SUBCOLLECTION)
     data = {
         "title": title,
         "content": content,
         "scope": resolved_scope,
         "updated_at": datetime.datetime.now().isoformat(),
+        "updated_by": updated_by,
     }
     if milestone:
         data["milestone"] = milestone
+
     if doc_id:
-        col.document(doc_id).set(data)
+        doc_ref = col.document(doc_id)
+        existing = doc_ref.get()
+        if existing.exists:
+            # Save current content as a revision before overwriting
+            rev_col = doc_ref.collection(DOC_REVISIONS_SUBCOLLECTION)
+            existing_data = existing.to_dict()
+            rev_docs = rev_col.order_by("rev", direction="DESCENDING").limit(1).stream()
+            last_rev = 0
+            for r in rev_docs:
+                last_rev = r.to_dict().get("rev", 0)
+            rev_col.add({
+                "rev": last_rev + 1,
+                "content": existing_data.get("content", ""),
+                "title": existing_data.get("title", ""),
+                "ts": existing_data.get("updated_at", ""),
+                "saved_by": existing_data.get("updated_by", "unknown"),
+            })
+        doc_ref.set(data)
         return doc_id
     else:
         ref = col.add(data)
         return ref[1].id
 
 
-def delete_document(project_id: str, doc_id: str) -> bool:
-    """Delete a document. Returns True if existed."""
+def list_document_revisions(project_id: str, doc_id: str) -> list:
+    """List all revisions of a document (newest first)."""
+    revs = (
+        get_db()
+        .collection(COLLECTION).document(project_id)
+        .collection(DOCS_SUBCOLLECTION).document(doc_id)
+        .collection(DOC_REVISIONS_SUBCOLLECTION)
+        .order_by("rev", direction="DESCENDING")
+        .stream()
+    )
+    return [{"rev": r.to_dict().get("rev"), "ts": r.to_dict().get("ts"), "saved_by": r.to_dict().get("saved_by")} for r in revs]
+
+
+def get_document_revision(project_id: str, doc_id: str, rev: int) -> dict | None:
+    """Get a specific revision of a document."""
+    revs = (
+        get_db()
+        .collection(COLLECTION).document(project_id)
+        .collection(DOCS_SUBCOLLECTION).document(doc_id)
+        .collection(DOC_REVISIONS_SUBCOLLECTION)
+        .where("rev", "==", rev)
+        .limit(1)
+        .stream()
+    )
+    for r in revs:
+        d = r.to_dict()
+        return {"rev": d.get("rev"), "content": d.get("content", ""), "title": d.get("title", ""), "ts": d.get("ts"), "saved_by": d.get("saved_by")}
+    return None
+
+
+def delete_document(project_id: str, doc_id: str, deleted_by: str = "unknown") -> bool:
+    """Soft-delete a document (sets deleted flag, never physically removes). Returns True if existed."""
+    import datetime
     doc_ref = (
         get_db()
-        .collection(COLLECTION)
-        .document(project_id)
+        .collection(COLLECTION).document(project_id)
         .collection(DOCS_SUBCOLLECTION)
         .document(doc_id)
     )
     doc = doc_ref.get()
     if not doc.exists:
         return False
-    doc_ref.delete()
+    doc_ref.update({
+        "deleted": True,
+        "deleted_at": datetime.datetime.now().isoformat(),
+        "deleted_by": deleted_by,
+    })
     return True
 
 

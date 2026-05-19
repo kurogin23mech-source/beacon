@@ -1199,13 +1199,32 @@ cmd_doc() {
             fi
             BEACON_DOC_ID="$doc_id" BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" doc_delete
             ;;
+        history)
+            ensure_project
+            BEACON_DOC_ID="${3:-}" python3 "$COMMANDS_PY" doc_history
+            ;;
+        restore)
+            ensure_project
+            local doc_id="${3:-}"
+            local rev=""
+            shift 3 || true
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --rev) rev="${2:-}"; shift 2 ;;
+                    *) shift ;;
+                esac
+            done
+            BEACON_DOC_ID="$doc_id" BEACON_REV="$rev" python3 "$COMMANDS_PY" doc_restore
+            ;;
         *)
-            echo "Usage: beacon doc [add|list|show|update|delete]"
+            echo "Usage: beacon doc [add|list|show|update|delete|history|restore]"
             echo "  add    \"title\" --scope core|spec|memo [--ms ms-id]  Create a document"
             echo "  update <doc-id> [--title text] [--content text]     Update a document"
             echo "  list   [--scope core|spec|memo] [--ms ms-id]        List documents"
             echo "  show   <doc-id>                                      Show document content"
             echo "  delete <doc-id>                                      Delete a document"
+            echo "  history <doc-id>                                     Show revision history"
+            echo "  restore <doc-id> --rev <n>                           Restore to a revision"
             ;;
     esac
 }

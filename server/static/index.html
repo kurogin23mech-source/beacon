@@ -1488,6 +1488,7 @@ function renderLogin() {
     google.accounts.id.initialize({
       client_id: state.auth.clientId,
       callback: handleCredentialResponse,
+      ux_mode: 'popup',
     });
     google.accounts.id.renderButton(
       document.getElementById('g_id_signin'),

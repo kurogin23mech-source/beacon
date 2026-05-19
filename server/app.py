@@ -609,17 +609,35 @@ def update_document(project_id: str, doc_id: str, body: DocumentSave,
     """Update an existing document."""
     data = _load(project_id, user)
     _require_write(data, user)
-    db.save_document(project_id, doc_id, body.title, body.content, body.scope)
+    db.save_document(project_id, doc_id, body.title, body.content, body.scope,
+                     updated_by=user.get("email", "unknown"))
     return {"doc_id": doc_id, "title": body.title}
+
+
+@app.get("/api/projects/{project_id}/documents/{doc_id}/revisions")
+def list_document_revisions(project_id: str, doc_id: str, user: dict = Depends(require_auth)):
+    """List revision history of a document."""
+    _load(project_id, user)
+    return db.list_document_revisions(project_id, doc_id)
+
+
+@app.get("/api/projects/{project_id}/documents/{doc_id}/revisions/{rev}")
+def get_document_revision(project_id: str, doc_id: str, rev: int, user: dict = Depends(require_auth)):
+    """Get a specific revision of a document."""
+    _load(project_id, user)
+    result = db.get_document_revision(project_id, doc_id, rev)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Revision {rev} not found for '{doc_id}'")
+    return result
 
 
 @app.delete("/api/projects/{project_id}/documents/{doc_id}")
 def delete_document_endpoint(project_id: str, doc_id: str,
                              user: dict = Depends(require_auth)):
-    """Delete a document."""
+    """Delete a document (soft delete)."""
     data = _load(project_id, user)
     _require_write(data, user)
-    if not db.delete_document(project_id, doc_id):
+    if not db.delete_document(project_id, doc_id, deleted_by=user.get("email", "unknown")):
         raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
     return {"doc_id": doc_id, "status": "deleted"}
 

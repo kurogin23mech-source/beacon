@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.parse
 
 from store import get_store
 import core
@@ -28,10 +29,29 @@ def load_project():
     return data
 
 
-def save_project(data):
+def _append_changelog(op: dict) -> None:
+    """Append an operation entry to .beacon/changelog.jsonl."""
+    import json as _json
+    import datetime as _dt
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    changelog_path = os.path.join(beacon_dir, "changelog.jsonl")
+    entry = {
+        "ts": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        **op,
+    }
+    try:
+        with open(changelog_path, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass  # changelog is best-effort; never block operations
+
+
+def save_project(data, op=None):
     core.validate_project(data)
     store = get_store()
     store.save_project(data)
+    if op:
+        _append_changelog(op)
 
 
 # ---------------------------------------------------------------------------
@@ -414,7 +434,7 @@ def cmd_milestone_done():
     reason = os.environ.get("BEACON_REASON", "")
     data = load_project()
     ms = core.milestone_done(data, ms_id, reason=reason)
-    save_project(data)
+    save_project(data, op={"op": "milestone_done", "ms_id": ms_id, "reason": reason})
     msg = f"Completed: {ms['title']}"
     if reason:
         msg += f"\n  Reason: {reason}"
@@ -462,6 +482,8 @@ def cmd_milestone_show():
 def cmd_milestone_update():
     ms_id = os.environ.get("BEACON_MS_ID", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    status = os.environ.get("BEACON_STATUS", "")
+    reason = os.environ.get("BEACON_REASON", "")
     data = load_project()
     try:
         ms = core.milestone_update(
@@ -469,14 +491,15 @@ def cmd_milestone_update():
             title=os.environ.get("BEACON_TITLE", ""),
             progress=os.environ.get("BEACON_PROGRESS", ""),
             target_date=os.environ.get("BEACON_TARGET_DATE", ""),
-            status=os.environ.get("BEACON_STATUS", ""),
+            status=status,
             description=os.environ.get("BEACON_DESCRIPTION", ""),
-            reason=os.environ.get("BEACON_REASON", ""),
+            reason=reason,
         )
     except ValueError as e:
         print(str(e))
         sys.exit(1)
-    save_project(data)
+    changelog_op = {"op": f"milestone_{status}", "ms_id": ms_id, "reason": reason} if status else None
+    save_project(data, op=changelog_op)
     if json_mode:
         print(json.dumps({"id": ms["id"], "title": ms["title"],
                           "status": ms["status"], "progress": ms.get("progress", 0)},
@@ -499,7 +522,7 @@ def cmd_milestone_delete():
     except ValueError as e:
         print(str(e))
         sys.exit(1)
-    save_project(data)
+    save_project(data, op={"op": "milestone_delete", "ms_id": ms_id, "reason": reason})
     if json_mode:
         print(json.dumps({"id": ms["id"], "status": "cancelled"}, ensure_ascii=False))
     else:
@@ -716,7 +739,7 @@ def cmd_task_done():
     core.update_progress(ms, progress)
     if progress:
         print(f"  Progress: {ms.get('progress', 0)}%")
-    save_project(data)
+    save_project(data, op={"op": "task_done", "entry_id": entry_id, "reason": reason})
 
 
 def cmd_task_list():
@@ -856,7 +879,7 @@ def cmd_task_cancel():
     except ValueError as e:
         print(str(e))
         sys.exit(1)
-    save_project(data)
+    save_project(data, op={"op": "task_cancel", "entry_id": entry_id, "reason": reason})
     if json_mode:
         print(json.dumps({"id": entry_id, "status": "cancelled"}, ensure_ascii=False))
     else:
@@ -1534,6 +1557,48 @@ def cmd_doc_update():
         print(f"Updated: {doc_id} [{scope}] ({title})")
 
 
+def cmd_doc_history():
+    """Show revision history of a document."""
+    doc_id = os.environ.get("BEACON_DOC_ID", "")
+    if not doc_id:
+        print("Error: doc ID required")
+        sys.exit(1)
+    client, config = _get_api_client()
+    project_id = config["project_id"]
+    try:
+        revs = client.get(f"/api/projects/{project_id}/documents/{urllib.parse.quote(doc_id, safe='')}/revisions")
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    if not revs:
+        print(f"No revisions found for '{doc_id}'")
+        return
+    for r in revs:
+        print(f"  rev-{r['rev']}  {r['ts'][:10]}  {r.get('saved_by', '?')}")
+
+
+def cmd_doc_restore():
+    """Restore a document to a previous revision (creates new save, keeps history)."""
+    doc_id = os.environ.get("BEACON_DOC_ID", "")
+    rev = os.environ.get("BEACON_REV", "")
+    if not doc_id or not rev:
+        print("Error: doc ID and --rev required")
+        sys.exit(1)
+    client, config = _get_api_client()
+    project_id = config["project_id"]
+    try:
+        rev_data = client.get(f"/api/projects/{project_id}/documents/{urllib.parse.quote(doc_id, safe='')}/revisions/{rev}")
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    try:
+        client.put_document(project_id, doc_id, rev_data["title"], rev_data["content"])
+    except RuntimeError as e:
+        print(f"Error restoring: {e}")
+        sys.exit(1)
+    print(f"Restored '{doc_id}' to rev-{rev}")
+
+
 def cmd_doc_delete():
     doc_id = os.environ.get("BEACON_DOC_ID", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
@@ -1711,6 +1776,8 @@ def cmd_cloud_push():
     except RuntimeError as e:
         print(f"Error: {e}")
         sys.exit(1)
+    if force:
+        _append_changelog({"op": "cloud_push_force", "project_id": project_id, "warning": "stale_local"})
     print(f"Pushed to cloud: projects/{project_id}")
 
     # Push local documents and retros only on the initial push (local → cloud).
@@ -2489,7 +2556,7 @@ def cmd_deploy_void():
         print(str(e), file=sys.stderr)
         sys.exit(1)
 
-    save_project(data)
+    save_project(data, op={"op": "deploy_void", "deploy_id": dep["id"], "reason": reason})
     if json_mode:
         print(json.dumps({"id": dep["id"], "voided": True}, ensure_ascii=False))
     else:
@@ -2669,6 +2736,8 @@ if __name__ == "__main__":
         "doc_add": cmd_doc_add,
         "doc_update": cmd_doc_update,
         "doc_delete": cmd_doc_delete,
+        "doc_history": cmd_doc_history,
+        "doc_restore": cmd_doc_restore,
         "cloud_list": cmd_cloud_list,
         "cloud_push": cmd_cloud_push,
         "cloud_pull": cmd_cloud_pull,
