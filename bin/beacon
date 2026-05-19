@@ -1721,6 +1721,39 @@ case "${1:-}" in
             *) echo "Usage: beacon project archive|unarchive" ;;
         esac
         ;;
+    reset)
+        # ⚠️  DANGER: moves .beacon/ to a timestamped backup. LOCAL ONLY — cloud data is untouched.
+        if [ ! -f "$BEACON_PROJECT_FILE" ]; then
+            echo "Error: No .beacon/project.json found."
+            exit 1
+        fi
+        _reset_beacon_dir="$(dirname "$BEACON_PROJECT_FILE")"
+        _reset_project_name=$(python3 -c "import json; print(json.load(open('$BEACON_PROJECT_FILE')).get('name','?'))" 2>/dev/null)
+        _reset_backup_dir="${_reset_beacon_dir}.bak.$(date +%Y%m%d_%H%M%S)"
+
+        echo ""
+        echo "WARNING: beacon reset"
+        echo "========================================"
+        echo "  Project : $_reset_project_name"
+        echo "  Location: $(pwd)/$_reset_beacon_dir"
+        echo ""
+        echo "  ALL local beacon data will be moved to:"
+        echo "  $(pwd)/$_reset_backup_dir"
+        echo ""
+        echo "  Cloud data is NOT affected."
+        echo "  Fully reversible: mv $_reset_backup_dir $_reset_beacon_dir"
+        echo "========================================"
+        echo ""
+        read -rp "  Type RESET to confirm: " _reset_confirm
+        if [ "$_reset_confirm" != "RESET" ]; then
+            echo "Cancelled."
+            exit 0
+        fi
+        mv "$_reset_beacon_dir" "$_reset_backup_dir"
+        echo ""
+        echo "Moved: $_reset_beacon_dir -> $_reset_backup_dir"
+        echo "Restore: mv $_reset_backup_dir $_reset_beacon_dir"
+        ;;
     search)
         ensure_project
         local query="" ms_id="" json_flag=""
