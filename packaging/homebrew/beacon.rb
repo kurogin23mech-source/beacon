@@ -1,7 +1,7 @@
 class Beacon < Formula
   desc "AI-driven milestone tracker for Claude Code sessions"
-  homepage "https://github.com/r-kida2/beacon"
-  url "https://github.com/r-kida2/beacon/archive/refs/heads/main.tar.gz"
+  homepage "https://github.com/kurogin23mech-source/beacon"
+  url "https://github.com/kurogin23mech-source/beacon/archive/refs/heads/main.tar.gz"
   version "0.1.0"
   license "MIT"
 
@@ -55,7 +55,7 @@ class Beacon < Formula
       For Claude Code integration, Skills are installed automatically by:
         beacon skill install
 
-      Full documentation: https://github.com/r-kida2/beacon
+      Full documentation: https://github.com/kurogin23mech-source/beacon
     EOS
   end
 
