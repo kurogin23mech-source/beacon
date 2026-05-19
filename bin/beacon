@@ -12,33 +12,80 @@ usage() {
 Beacon - Milestone-driven project management
 
 Usage:
-  beacon                  Launch tmux dashboard + shell
-  beacon setup            First-time setup wizard (auth + hooks + project)
-  beacon init             Initialize .beacon/ in current directory
-  beacon status           Show current status (no tmux)
-  beacon milestone add    Add a new milestone (interactive)
-  beacon milestone list   List milestones
-  beacon milestone start <id>  Set milestone as active
-  beacon milestone close <id>  Close milestone (keeps current progress)
-  beacon milestone observe <id> Set milestone to observing (watching)
-  beacon log [message]    Record current HEAD commit to active milestone
-  beacon sync             Auto-sync recent git commits to active milestone
-  beacon doc add "title"   Add/update a document (content via --content or stdin)
-  beacon doc list           List all documents
-  beacon doc show <id>     Show document content
-  beacon cloud             Open cloud project (interactive select)
-  beacon cloud <id>        Open cloud project by ID
-  beacon cloud list        List cloud projects
-  beacon cloud push        Push local project to cloud
-  beacon cloud pull        Pull project from cloud
-  beacon cloud join <id>   Join an existing cloud project (first-time)
-  beacon cloud status      Show cloud config status
-  beacon auth login       Sign in with Google
-  beacon auth logout      Remove cached credentials
-  beacon auth status      Show login status
-  beacon skill install    Install Claude Code Skills
-  beacon help             Show this help
-  beacon --version        Show version
+  beacon                        Launch tmux dashboard + shell
+  beacon setup                  First-time setup wizard (auth + hooks + project)
+  beacon init                   Initialize .beacon/ in current directory
+  beacon status                 Show current milestone status (no tmux)
+
+Milestones:
+  beacon milestone add "title"  Add a new milestone
+  beacon milestone list         List milestones
+  beacon milestone start <id>   Set milestone as active
+  beacon milestone close <id>   Close milestone (keeps current progress)
+  beacon milestone observe <id> Set milestone to observing
+  beacon milestone update <id>  Update title/progress/status/description
+  beacon milestone delete <id>  Delete (soft) a milestone
+  beacon milestone depends <id> Set milestone dependencies
+  beacon milestone graph        Show dependency graph
+
+Tasks & Progress:
+  beacon task add "desc" [-m <ms-id>]   Add a task to a milestone
+  beacon task done <entry-id>           Mark task as done
+  beacon task list [-m <ms-id>]         List tasks
+  beacon task update <entry-id>         Update task description/status
+  beacon task cancel <entry-id>         Cancel a task
+  beacon log [message]                  Record HEAD commit to active milestone
+  beacon save "desc" [-m <ms-id>]       Record a manual progress note
+  beacon sync                           Auto-sync recent git commits
+  beacon summary "text"                 Update the project summary
+
+Pull Requests:
+  beacon pr create [-m <ms-id>] [gh flags...]  Create PR and record it
+  beacon pr add <url> [-m <ms-id>]             Register an existing PR
+  beacon pr approve <entry-id>                 Approve a PR
+  beacon pr request-changes <entry-id>         Request changes on a PR
+  beacon pr reject <entry-id>                  Reject a PR
+  beacon pr merge <entry-id>                   Mark PR as merged
+  beacon pr close <entry-id>                   Close PR without merging
+
+Documents:
+  beacon doc add "title" [--scope core|spec|memo]  Create a document
+  beacon doc list [--scope <scope>]                List all documents
+  beacon doc show <doc-id>                         Show document content
+  beacon doc update <doc-id>                       Update a document
+  beacon doc delete <doc-id>                       Delete a document
+
+Releases & Deploys:
+  beacon deploy record [--revision <rev>] [--semver <v>] [--desc <text>]
+  beacon deploy list
+  beacon deploy void <id> --reason <text>
+  beacon push record [--from <hash>] [--to <hash>] [--desc <text>] [-m <ms-id>]
+  beacon push list
+
+Cloud:
+  beacon cloud                  Open cloud project (interactive select)
+  beacon cloud list             List accessible cloud projects
+  beacon cloud push             Push local project to cloud
+  beacon cloud pull             Pull project from cloud
+  beacon cloud join <id>        Join an existing cloud project
+  beacon cloud open <id>        Open a specific cloud project
+  beacon cloud status           Show cloud config status
+  beacon cloud off              Switch back to local mode
+
+Other:
+  beacon trigger fire <name> [msg]  Fire a named trigger
+  beacon trigger check              Check pending triggers
+  beacon trigger clear <name>       Clear a trigger
+  beacon retro                      Prepare weekly retro
+  beacon search "query"             Search milestones and entries
+  beacon doctor                     Check PATH, hooks, skills, token, cloud.json
+  beacon reset                      Move .beacon/ to timestamped backup (reversible)
+  beacon auth login                 Sign in with Google (use this, not 'cloud login')
+  beacon auth logout                Remove cached credentials
+  beacon auth status                Show login status
+  beacon skill install              Install Claude Code Skills
+  beacon help                       Show this help
+  beacon --version                  Show version
 EOF
 }
 
