@@ -143,9 +143,33 @@ Dispatch Plan:
 - **選択**: ユーザーが指定したMS-IDのみ起動
 - **キャンセル**: 何もせず終了
 
+## Step 4.5: Worktree作成フェーズ
+
+ユーザーが承認後（「全て」または「選択」）、エージェント起動の前に各MSのworktreeを準備する。
+
+### Worktree作成手順
+
+承認されたMSそれぞれについて、以下を順次実行する:
+
+```bash
+beacon milestone workspace <ms-id> --executor ai --json
+```
+
+成功した場合（JSON出力あり）:
+- `workspace_path` を記録する（Step 5 の prompt に使用）
+- `workspace_branch` も記録する
+
+失敗した場合:
+- エラーを表示してユーザーに確認を求める
+- 「worktreeなしで続行しますか？」と問い、承認されれば workspace_path = "プロジェクトルート" で続行
+
+### Worktreeが既に存在する場合
+
+`beacon milestone workspace` は冪等に動作する（既存のworktreeがあればスキップして情報を返す）ので、再実行しても安全。
+
 ## Step 5: サブエージェント起動
 
-ユーザー承認後、各MSに対して **Agent tool** でサブエージェントを起動する。
+Step 4.5 で準備したworktree情報を使い、各MSに対して **Agent tool** でサブエージェントを起動する。
 
 ### 起動ルール
 - 互いに依存関係のないMS同士は **並列** で起動してよい
@@ -154,7 +178,7 @@ Dispatch Plan:
 
 ### 各エージェントへのPrompt
 
-以下のテンプレートで prompt を構成する:
+以下のテンプレートで prompt を構成する（`workspace_path` は Step 4.5 で取得した値を使用）:
 
 ```
 あなたは beacon プロジェクトのサブエージェントです。以下のマイルストーンを担当します。
@@ -162,7 +186,13 @@ Dispatch Plan:
 ## 担当マイルストーン
 - ID: [ms-id]
 - Title: [title]
-- Workspace: [workspace path or "プロジェクトルート"]
+- Workspace: [workspace_path from Step 4.5, or "プロジェクトルート"]
+
+## 作業ディレクトリ
+Workspace: [workspace_path]
+このディレクトリで作業してください（絶対パスで指定するか、cd して作業する）。
+Worktreeブランチ: [workspace_branch]
+git操作はこのworktree内で完結させてください（mainブランチには直接コミットしない）。
 
 ## セッション開始
 まず `/beacon-session-start [ms-id]` を実行して、担当MSのコンテキストを復元してください。
@@ -176,11 +206,12 @@ Dispatch Plan:
 - [entry-id]: [description]
 
 ## 作業ルール
-1. workspaceが指定されている場合は、そのディレクトリで作業する
+1. Workspaceディレクトリ内で作業する（絶対パス: [abs_workspace_path]）
 2. タスクを完了したら `beacon task done <entry-id>` で記録する
 3. コミット後は `/beacon-log` で進捗を記録する
 4. 新しいタスクが必要になったら `beacon task add "description" -m [ms-id]` で追加する
 5. 作業完了後、最終状態を簡潔に報告する
+6. 作業完了後: オーケストレーターが `beacon milestone workspace-cleanup [ms-id]` でworktreeをクリーンアップする
 ```
 
 ## Step 6: 結果報告
