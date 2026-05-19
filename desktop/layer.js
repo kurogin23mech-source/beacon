@@ -21,6 +21,8 @@ let state = {
   searchQuery: '',
   showReleaseGraph: false,
   expandedDeployId: null,
+  releasesSubTab: 'service',
+  expandedPushId: null,
   cloudDiag: null,
   cloudProjectId: null,
   projectPath: null,
@@ -369,6 +371,12 @@ async function handleAction(e) {
     }
     case 'open-retro': await loadRetroContent(el.dataset.week); break;
     case 'close-retro': state.retroContent = null; render(); break;
+    case 'switch-releases-tab': state.releasesSubTab = el.dataset.subtab; render(); break;
+    case 'expand-push': {
+      const pId = el.dataset.pushId;
+      state.expandedPushId = state.expandedPushId === pId ? null : pId;
+      render(); break;
+    }
     case 'expand-deploy': {
       const dId = el.dataset.deployId;
       state.expandedDeployId = state.expandedDeployId === dId ? null : dId;
