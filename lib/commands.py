@@ -318,7 +318,7 @@ def cmd_cloud_join():
         sys.exit(1)
 
     api_url = os.environ.get("BEACON_API_URL", DEFAULT_API_URL)
-    token = creds.id_token or creds.token or ""
+    token = _extract_token(creds)
 
     from api_client import ApiClient
     client = ApiClient(api_url, token)
@@ -1662,6 +1662,13 @@ def _ensure_cloud_config():
     return config
 
 
+
+def _extract_token(creds) -> str:
+    """Extract bearer token from credentials (handles both object and dict forms)."""
+    if isinstance(creds, dict):
+        return creds.get("token", "") or creds.get("id_token", "")
+    return (creds.id_token or creds.token) if creds else ""
+
 def _get_api_client():
     """Create an ApiClient from cloud.json config and auth credentials."""
     from auth import load_credentials
@@ -1679,7 +1686,7 @@ def _get_api_client():
         config = json.load(f)
 
     api_url = config.get("api_url", DEFAULT_API_URL)
-    token = creds.id_token or creds.token or ""
+    token = _extract_token(creds)
 
     from api_client import ApiClient
     return ApiClient(api_url, token), config
@@ -1702,7 +1709,7 @@ def cmd_cloud_list():
         api_url = config.get("api_url", api_url)
 
     from api_client import ApiClient
-    client = ApiClient(api_url, creds.id_token or creds.token or "")
+    client = ApiClient(api_url, _extract_token(creds))
 
     try:
         projects = client.list_projects()
@@ -1759,7 +1766,7 @@ def cmd_cloud_push():
     core.validate_project(data)
 
     from api_client import ApiClient
-    client = ApiClient(api_url, creds.id_token or creds.token or "")
+    client = ApiClient(api_url, _extract_token(creds))
 
     # Preserve cloud-only fields (deployments, releases) that are written directly
     # to Firestore and never synced back to local project.json.
