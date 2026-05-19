@@ -2992,8 +2992,9 @@ function _tryReconnect() {
 }
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible' || !state.projectId) return;
-  // On tab focus, skip only if already OPEN — a CONNECTING ws may be stale from background throttling
-  if (!ws || ws.readyState !== WebSocket.OPEN) connectWebSocket(state.projectId);
+  // Always reconnect on visibility change: onclose may arrive *after* visibilitychange
+  // when the browser throttles the tab, leaving ws.readyState stale (OPEN but dead).
+  connectWebSocket(state.projectId);
 });
 window.addEventListener('focus', _tryReconnect);
 
