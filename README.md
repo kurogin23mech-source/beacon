@@ -36,15 +36,32 @@ Beaconが想定するワークフローは**コミット駆動・マイルスト
 
 ## Installation
 
+### Homebrew (macOS — recommended)
+
+```bash
+brew tap r-kida2/beacon
+brew install beacon
+```
+
+### Manual
+
 ```bash
 # Clone the repository
-git clone https://github.com/kurogin23mech-source/beacon.git
+git clone https://github.com/r-kida2/beacon.git
 
 # Add to PATH
 export PATH="$PATH:$(pwd)/beacon/bin"
 ```
 
 Add the `export` line to your `~/.zshrc` or `~/.bashrc` to make it permanent.
+
+For cloud features (Google auth, team collaboration), also install:
+
+```bash
+pip install google-auth-oauthlib google-auth
+```
+
+See [INSTALL.md](INSTALL.md) for full details including tap setup for maintainers.
 
 ## Quick Start
 
