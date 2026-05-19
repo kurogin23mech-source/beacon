@@ -1618,8 +1618,10 @@ case "${1:-}" in
         case "${2:-}" in
             login)
                 python3 "$COMMANDS_PY" auth_login
-                echo ""
-                echo "Tip: Run 'beacon skill install' to set up Claude Code Skills."
+                if [ ! -d "${HOME}/.claude/skills/beacon-log" ]; then
+                    echo ""
+                    echo "Tip: Run 'beacon skill install' to set up Claude Code Skills."
+                fi
                 ;;
             logout) python3 "$COMMANDS_PY" auth_logout ;;
             status) python3 "$COMMANDS_PY" auth_status ;;
