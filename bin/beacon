@@ -498,28 +498,64 @@ cmd_milestone_depends() {
 }
 
 cmd_milestone_workspace() {
+    # OSS: git worktree lifecycle core
+    # Usage:
+    #   beacon milestone workspace <ms-id> [--executor ai|human|human:<user>] [--json]
+    #   beacon milestone workspace <ms-id> --dir <path> [--no-git] [--json]   (legacy)
+    #   beacon milestone workspace <ms-id> --clear                             (legacy)
     ensure_project
     local ms_id=""
     local workspace=""
     local clear=""
     local json_flag=""
+    local executor=""
+    local no_git=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --dir)   workspace="${2:-}"; shift 2 ;;
-            --clear) clear="1"; shift ;;
-            --json)  json_flag="1"; shift ;;
-            *)       ms_id="$1"; shift ;;
+            --dir)      workspace="${2:-}"; shift 2 ;;
+            --clear)    clear="1"; shift ;;
+            --json)     json_flag="1"; shift ;;
+            --executor) executor="${2:-}"; shift 2 ;;
+            --no-git)   no_git="1"; shift ;;
+            *)          ms_id="$1"; shift ;;
         esac
     done
 
     if [ -z "$ms_id" ]; then
-        echo "Usage: beacon milestone workspace <ms-id> --dir <path> | --clear"
+        echo "Usage: beacon milestone workspace <ms-id> [--executor ai|human|human:<user>]"
+        echo "       beacon milestone workspace <ms-id> --dir <path> [--no-git]"
+        echo "       beacon milestone workspace <ms-id> --clear"
         exit 1
     fi
     BEACON_MS_ID="$ms_id" BEACON_WORKSPACE="$workspace" \
         BEACON_CLEAR="$clear" BEACON_JSON="$json_flag" \
+        BEACON_EXECUTOR="$executor" BEACON_NO_GIT="$no_git" \
         python3 "$COMMANDS_PY" milestone_workspace
+}
+
+cmd_milestone_workspace_cleanup() {
+    # OSS: git merge + git worktree remove lifecycle cleanup
+    # Usage: beacon milestone workspace-cleanup <ms-id> [--merge-to <branch>] [--json]
+    ensure_project
+    local ms_id=""
+    local merge_to=""
+    local json_flag=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --merge-to) merge_to="${2:-}"; shift 2 ;;
+            --json)     json_flag="1"; shift ;;
+            *)          ms_id="$1"; shift ;;
+        esac
+    done
+
+    if [ -z "$ms_id" ]; then
+        echo "Usage: beacon milestone workspace-cleanup <ms-id> [--merge-to <branch>]"
+        exit 1
+    fi
+    BEACON_MS_ID="$ms_id" BEACON_MERGE_TO="$merge_to" BEACON_JSON="$json_flag" \
+        python3 "$COMMANDS_PY" milestone_workspace_cleanup
 }
 
 cmd_milestone_graph() {
@@ -1520,8 +1556,9 @@ case "${1:-}" in
             delete|cancel) shift 2; cmd_milestone_delete "$@" ;;
             depends) shift 2; cmd_milestone_depends "$@" ;;
             workspace) shift 2; cmd_milestone_workspace "$@" ;;
+            workspace-cleanup) shift 2; cmd_milestone_workspace_cleanup "$@" ;;
             graph) shift 2; cmd_milestone_graph "$@" ;;
-            *)      echo "Usage: beacon milestone [add|list|start|close|observe|done|show|update|rename|delete|depends|workspace|graph]" ;;
+            *)      echo "Usage: beacon milestone [add|list|start|close|observe|done|show|update|rename|delete|depends|workspace|workspace-cleanup|graph]" ;;
         esac
         ;;
     log)

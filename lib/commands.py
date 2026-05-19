@@ -1022,9 +1022,122 @@ def cmd_milestone_depends():
 
 
 def cmd_milestone_workspace():
+    # OSS: git worktree lifecycle core
+    # Human Executor notification (beacon trigger fire) is handled below and is closed-source.
+    import subprocess
+    from datetime import datetime, timezone
+
     ms_id = os.environ.get("BEACON_MS_ID", "")
     workspace = os.environ.get("BEACON_WORKSPACE", "")
     clear = os.environ.get("BEACON_CLEAR", "") == "1"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    executor = os.environ.get("BEACON_EXECUTOR", "")  # ai | human | human:<user>
+    no_git = os.environ.get("BEACON_NO_GIT", "") == "1"  # skip git worktree add (for --dir mode)
+
+    if not ms_id:
+        print("Error: milestone ID is required", file=sys.stderr)
+        sys.exit(1)
+
+    data = load_project()
+
+    if clear:
+        # Legacy --clear: remove the old workspace field only
+        ms = core.milestone_workspace(data, ms_id, "")
+        save_project(data)
+        if json_mode:
+            print(json.dumps({"id": ms["id"], "workspace": ms.get("workspace")}, ensure_ascii=False))
+        else:
+            print(f"{ms_id}: workspace cleared")
+        return
+
+    if workspace and no_git:
+        # Legacy --dir mode: set workspace path without git worktree
+        ms = core.milestone_workspace(data, ms_id, workspace)
+        save_project(data)
+        if json_mode:
+            print(json.dumps({"id": ms["id"], "workspace": ms.get("workspace")}, ensure_ascii=False))
+        else:
+            print(f"{ms_id} workspace: {workspace}")
+        return
+
+    # OSS: git worktree add + milestone field update
+    # Determine worktree path and branch
+    workspace_branch = f"{ms_id}/work"
+    workspace_path = os.path.join(".worktrees", ms_id)
+    abs_workspace_path = os.path.abspath(workspace_path)
+
+    # Check if worktree already exists
+    if os.path.exists(abs_workspace_path):
+        print(f"Worktree already exists at {workspace_path}", file=sys.stderr)
+    else:
+        # git worktree add .worktrees/<ms-id> -b <ms-id>/work
+        try:
+            result = subprocess.run(
+                ["git", "worktree", "add", abs_workspace_path, "-b", workspace_branch],
+                capture_output=True, text=True
+            )
+            if result.returncode != 0:
+                # Branch may already exist; try without -b
+                result2 = subprocess.run(
+                    ["git", "worktree", "add", abs_workspace_path, workspace_branch],
+                    capture_output=True, text=True
+                )
+                if result2.returncode != 0:
+                    print(f"git worktree add failed: {result.stderr.strip()}", file=sys.stderr)
+                    print(f"Retry also failed: {result2.stderr.strip()}", file=sys.stderr)
+                    sys.exit(1)
+        except FileNotFoundError:
+            print("Error: git not found in PATH", file=sys.stderr)
+            sys.exit(1)
+
+    assigned_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    effective_executor = executor or "ai"
+
+    ms = core.milestone_worktree_set(
+        data, ms_id,
+        workspace_branch=workspace_branch,
+        workspace_path=workspace_path,
+        executor=effective_executor,
+        executor_assigned_at=assigned_at,
+    )
+    # Also update legacy workspace field for backward compatibility
+    ms = core.milestone_workspace(data, ms_id, workspace_path)
+    save_project(data)
+
+    # Closed-source: Human Executor notification via beacon trigger
+    if effective_executor.startswith("human"):
+        user_part = effective_executor[len("human:"):] if ":" in effective_executor else ""
+        user_label = f" ({user_part})" if user_part else ""
+        msg = (
+            f"ブランチ {workspace_branch} をチェックアウトして作業開始: "
+            f"git checkout {workspace_branch}"
+        )
+        try:
+            subprocess.run(
+                ["beacon", "trigger", "fire", f"{ms_id}-workspace", msg],
+                capture_output=True, text=True
+            )
+        except FileNotFoundError:
+            pass  # beacon not in PATH; skip trigger
+
+    if json_mode:
+        print(json.dumps({
+            "id": ms_id,
+            "workspace_branch": workspace_branch,
+            "workspace_path": workspace_path,
+            "executor": effective_executor,
+            "executor_assigned_at": assigned_at,
+        }, ensure_ascii=False))
+    else:
+        print(f"{ms_id} worktree: {workspace_path}  branch: {workspace_branch}  executor: {effective_executor}")
+
+
+def cmd_milestone_workspace_cleanup():
+    # OSS: git merge + git worktree remove lifecycle cleanup
+    import subprocess
+
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    merge_to = os.environ.get("BEACON_MERGE_TO", "")  # target branch for merge
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not ms_id:
@@ -1032,23 +1145,64 @@ def cmd_milestone_workspace():
         sys.exit(1)
 
     data = load_project()
-    if clear:
-        ms = core.milestone_workspace(data, ms_id, "")
-    else:
-        if not workspace:
-            print("Error: --dir is required (or use --clear)", file=sys.stderr)
-            sys.exit(1)
-        ms = core.milestone_workspace(data, ms_id, workspace)
+    ms = next((m for m in data["milestones"] if m["id"] == ms_id), None)
+    if ms is None:
+        print(f"Error: milestone not found: {ms_id}", file=sys.stderr)
+        sys.exit(1)
+
+    workspace_path = ms.get("workspace_path") or ms.get("workspace")
+    if not workspace_path:
+        print(f"Error: {ms_id} has no workspace_path set", file=sys.stderr)
+        sys.exit(1)
+
+    abs_workspace_path = os.path.abspath(workspace_path)
+    workspace_branch = ms.get("workspace_branch", "")
+
+    errors = []
+
+    # Step 1: git merge (OSS: git worktree lifecycle)
+    if merge_to:
+        # Merge workspace branch into the specified branch
+        if workspace_branch:
+            merge_result = subprocess.run(
+                ["git", "merge", workspace_branch],
+                capture_output=True, text=True,
+                cwd=os.path.abspath(".")  # run from project root
+            )
+        else:
+            merge_result = subprocess.run(
+                ["git", "merge", abs_workspace_path],
+                capture_output=True, text=True
+            )
+        if merge_result.returncode != 0:
+            errors.append(f"git merge failed: {merge_result.stderr.strip()}")
+
+    # Step 2: git worktree remove (OSS: git worktree lifecycle)
+    if os.path.exists(abs_workspace_path):
+        rm_result = subprocess.run(
+            ["git", "worktree", "remove", abs_workspace_path, "--force"],
+            capture_output=True, text=True
+        )
+        if rm_result.returncode != 0:
+            errors.append(f"git worktree remove failed: {rm_result.stderr.strip()}")
+
+    # Step 3: clear milestone worktree fields
+    core.milestone_worktree_clear(data, ms_id)
+    # Also clear legacy workspace field
+    core.milestone_workspace(data, ms_id, "")
     save_project(data)
 
     if json_mode:
-        print(json.dumps({"id": ms["id"], "workspace": ms.get("workspace")}, ensure_ascii=False))
+        print(json.dumps({
+            "id": ms_id,
+            "cleaned_up": True,
+            "errors": errors,
+        }, ensure_ascii=False))
     else:
-        ws = ms.get("workspace")
-        if ws:
-            print(f"{ms_id} workspace: {ws}")
-        else:
-            print(f"{ms_id}: workspace cleared")
+        if errors:
+            for e in errors:
+                print(f"Warning: {e}", file=sys.stderr)
+        print(f"{ms_id}: workspace cleaned up (path: {workspace_path})")
 
 
 def cmd_milestone_graph():
@@ -3055,6 +3209,7 @@ if __name__ == "__main__":
         "save": cmd_save,
         "milestone_depends": cmd_milestone_depends,
         "milestone_workspace": cmd_milestone_workspace,
+        "milestone_workspace_cleanup": cmd_milestone_workspace_cleanup,
         "milestone_graph": cmd_milestone_graph,
         "retro_prepare": cmd_retro_prepare,
         "retro_done": cmd_retro_done,

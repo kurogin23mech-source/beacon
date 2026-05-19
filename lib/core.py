@@ -846,6 +846,51 @@ def milestone_workspace(data: dict, ms_id: str, workspace: str) -> dict:
     raise ValueError(f"Milestone not found: {ms_id}")
 
 
+# OSS: worktree lifecycle management core
+# The functions below handle git worktree fields on milestone objects.
+# workspace_branch, workspace_path, executor, executor_assigned_at are optional fields.
+# Human Executor notification (trigger fire, multi-user management) is closed-source.
+
+def milestone_worktree_set(
+    data: dict,
+    ms_id: str,
+    workspace_branch: str,
+    workspace_path: str,
+    executor: str,
+    executor_assigned_at: str,
+) -> dict:
+    """
+    Set worktree fields on a milestone (OSS: git worktree lifecycle core).
+    All fields are optional; pass empty string to skip setting.
+    Returns the updated milestone dict.
+    """
+    for ms in data["milestones"]:
+        if ms["id"] == ms_id:
+            if workspace_branch:
+                ms["workspace_branch"] = workspace_branch
+            if workspace_path:
+                ms["workspace_path"] = workspace_path
+            if executor:
+                ms["executor"] = executor
+            if executor_assigned_at:
+                ms["executor_assigned_at"] = executor_assigned_at
+            return ms
+    raise ValueError(f"Milestone not found: {ms_id}")
+
+
+def milestone_worktree_clear(data: dict, ms_id: str) -> dict:
+    """
+    Clear worktree fields from a milestone after cleanup (OSS: git worktree lifecycle core).
+    Returns the updated milestone dict.
+    """
+    for ms in data["milestones"]:
+        if ms["id"] == ms_id:
+            for field in ("workspace_path", "workspace_branch", "executor", "executor_assigned_at"):
+                ms.pop(field, None)
+            return ms
+    raise ValueError(f"Milestone not found: {ms_id}")
+
+
 def milestone_graph(data: dict) -> dict:
     """Build dependency graph with topological waves. Returns {nodes, edges, waves}."""
     nodes = []

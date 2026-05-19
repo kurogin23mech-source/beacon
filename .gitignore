@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 .beacon/
 lib/firebase_config.json
+.worktrees/
