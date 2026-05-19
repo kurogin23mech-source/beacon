@@ -38,7 +38,7 @@ def _get_api_url() -> str:
     cloud_json = Path(".beacon/cloud.json")
     if cloud_json.exists():
         with open(cloud_json, "r") as f:
-            return json.load(f).get("api_url", "")
+            return json.load(f).get("api_url") or "https://beacon-ai.dev"
     return "https://beacon-ai.dev"
 
 
