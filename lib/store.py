@@ -74,9 +74,7 @@ def get_store(project_file: str | None = None) -> Store:
         project_id = cloud_data.get("project_id")
         if not project_id:
             raise ValueError("cloud.json must contain 'project_id'")
-        api_url = cloud_data.get("api_url", "")
-        if not api_url:
-            raise ValueError("cloud.json must contain 'api_url'")
+        api_url = cloud_data.get("api_url") or "https://beacon-ai.dev"
         from store_api import StoreApi
 
         def _token_provider():

@@ -978,11 +978,33 @@ cmd_cloud_launch() {
         fi
     fi
 
+    # Verify the project exists in cloud before writing cloud.json
+    if ! python3 "$COMMANDS_PY" cloud_check_project "$project_id" 2>/dev/null; then
+        echo "Error: project '$project_id' not found in cloud."
+        echo "Run 'beacon cloud list' to see available projects."
+        return 1
+    fi
+
+    # Guard: warn if cloud.json already exists with a different project
+    if [ -f .beacon/cloud.json ]; then
+        local existing_id
+        existing_id=$(python3 -c "import json; print(json.load(open('.beacon/cloud.json')).get('project_id',''))" 2>/dev/null)
+        if [ -n "$existing_id" ] && [ "$existing_id" != "$project_id" ]; then
+            echo "Warning: .beacon/cloud.json already points to '$existing_id'."
+            read -rp "Switch to '$project_id'? [y/N]: " confirm
+            if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                echo "Cancelled."
+                return 1
+            fi
+        fi
+    fi
+
     # Ensure .beacon dir, cloud.json, and config.json exist
     mkdir -p .beacon
     cat > .beacon/cloud.json <<EOJSON
 {
-  "project_id": "$project_id"
+  "project_id": "$project_id",
+  "api_url": "https://beacon-ai.dev"
 }
 EOJSON
     cat > .beacon/config.json <<EOJSON
@@ -1577,8 +1599,19 @@ case "${1:-}" in
                     echo "No .beacon/config.json found."
                 fi
                 ;;
+            open)
+                if [ -z "${3:-}" ]; then
+                    echo "Usage: beacon cloud open <project-id>"
+                    exit 1
+                fi
+                cmd_cloud_launch "${3}"
+                ;;
             "")     cmd_cloud_launch ;;
-            *)      cmd_cloud_launch "$2" ;;
+            *)
+                echo "Error: unknown subcommand '${2}'."
+                echo "Usage: beacon cloud [push|pull|join|open|list|status|off]"
+                exit 1
+                ;;
         esac
         ;;
     auth)
@@ -1645,6 +1678,36 @@ case "${1:-}" in
                 echo "Usage: beacon deploy record [--revision <rev>] [--semver <v1.0.0>] [--desc <text>]"
                 echo "       beacon deploy list [--json]"
                 echo "       beacon deploy void <id> --reason <text>"
+                ;;
+        esac
+        ;;
+    push)
+        ensure_project
+        case "${2:-}" in
+            record)
+                shift 2
+                from="" to="" branch="" desc="" ms=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --prepare)  mode="prepare"; shift ;;
+                        --finalize) mode="finalize"; shift ;;
+                        --from)     from="${2:-}"; shift 2 ;;
+                        --to)       to="${2:-}"; shift 2 ;;
+                        --branch)   branch="${2:-}"; shift 2 ;;
+                        --desc)     desc="${2:-}"; shift 2 ;;
+                        -m|--ms)    ms="${2:-}"; shift 2 ;;
+                        *) shift ;;
+                    esac
+                done
+                BEACON_MODE="${mode:-}" BEACON_FROM="$from" BEACON_TO="$to" \
+                    BEACON_BRANCH="$branch" BEACON_DESCRIPTION="$desc" BEACON_MS="$ms" \
+                    python3 "$COMMANDS_PY" push_record
+                ;;
+            list)
+                BEACON_JSON="${3:+1}" python3 "$COMMANDS_PY" push_list ;;
+            *)
+                echo "Usage: beacon push record [--from <hash>] [--to <hash>] [--desc <text>] [-m <ms-id>]"
+                echo "       beacon push list [--json]"
                 ;;
         esac
         ;;

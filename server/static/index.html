@@ -187,6 +187,28 @@ body::after {
 .search-result-date { font-size: 0.65rem; color: var(--text-dim); text-align: right; }
 .search-empty { padding: 16px 0; color: var(--text-dim); font-size: 0.8rem; text-align: center; }
 
+/* ---- Releases subtabs ---- */
+.releases-subtabs { display: flex; gap: 0; margin-bottom: 14px; border-bottom: 1px solid var(--border-subtle); }
+.releases-subtab-btn { background: none; border: none; border-bottom: 2px solid transparent; padding: 6px 16px; font-size: 0.78rem; font-family: var(--font-mono); color: var(--text-dim); cursor: pointer; margin-bottom: -1px; }
+.releases-subtab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+/* Push cards */
+.push-card { padding: 10px 0 6px 10px; border-bottom: 1px solid var(--border-subtle); border-left: 3px solid #2a5080; }
+.push-card:last-child { border-bottom: none; }
+.push-card-header { display: flex; align-items: center; gap: 8px; cursor: pointer; flex-wrap: wrap; }
+.push-card-header:hover .push-id { color: var(--text-secondary); }
+.push-icon { color: #4a9fd4; font-size: 0.85rem; }
+.push-id { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-dim); }
+.push-branch-badge { font-size: 0.6rem; color: #4a9fd4; background: rgba(74,159,212,0.1); padding: 1px 5px; border-radius: 2px; border: 1px solid rgba(74,159,212,0.25); }
+.push-by { font-size: 0.7rem; color: var(--text-dim); }
+.push-datetime { font-size: 0.7rem; color: var(--text-dim); margin-left: auto; }
+.push-expand-arrow { font-size: 0.6rem; color: var(--text-dim); }
+.push-summary { font-size: 0.78rem; color: var(--text-secondary); margin: 4px 0 4px 18px; line-height: 1.4; }
+.push-commit-count { font-family: var(--font-mono); font-size: 0.65rem; color: var(--text-dim); padding: 1px 6px; border: 1px solid var(--border-subtle); border-radius: 2px; }
+.push-commit-list { margin: 8px 0 4px 18px; display: flex; flex-direction: column; gap: 3px; }
+.push-commit-row { display: flex; align-items: baseline; gap: 8px; font-size: 0.72rem; }
+.push-commit-hash { font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-dim); }
+.push-commit-msg { color: var(--text-secondary); }
+
 /* ---- Releases / Deploy Timeline ---- */
 
 .release-group-header { display: flex; align-items: center; gap: 10px; padding: 10px 0 8px; border-bottom: 1px solid var(--accent-dim); margin-bottom: 2px; font-family: var(--font-mono); font-size: 0.72rem; color: var(--accent); }
@@ -1438,6 +1460,8 @@ let state = {
   showReleaseGraph: false,
   // Expanded deploy card id
   expandedDeployId: null,
+  releasesSubTab: 'service', // 'service' | 'code'
+  expandedPushId: null,
   auth: {
     token: localStorage.getItem('beacon_token'),
     email: localStorage.getItem('beacon_email'),
@@ -2206,15 +2230,24 @@ function lookupEntry(hashMap, shortHash) {
 
 function renderReleasesSection() {
   const p = state.project;
+  const subtabs = `<div class="releases-subtabs">
+    <button class="releases-subtab-btn ${state.releasesSubTab === 'service' ? 'active' : ''}" data-action="switch-releases-tab" data-subtab="service">サービス</button>
+    <button class="releases-subtab-btn ${state.releasesSubTab === 'code' ? 'active' : ''}" data-action="switch-releases-tab" data-subtab="code">コード</button>
+  </div>`;
+
+  if (state.releasesSubTab === 'code') {
+    return `<section class="retro-section fade-in"><div>${subtabs}${renderCodeReleasesTab(p)}</div></section>`;
+  }
+
   const allDeps = p?.deployments || [];
   const releases = {};
   for (const r of (p?.releases || [])) releases[r.id] = r;
 
   if (allDeps.length === 0) {
-    return `<section class="retro-section fade-in">
+    return `<section class="retro-section fade-in"><div>${subtabs}
       <div class="retro-empty">No deployments recorded yet.<br>
         <span style="font-size:0.75rem;color:var(--text-dim)">Run <code>beacon deploy record</code> after each deploy.</span>
-      </div>
+      </div></div>
     </section>`;
   }
 
@@ -2315,7 +2348,7 @@ function renderReleasesSection() {
     return h + '</div>';
   }
 
-  let html = `<section class="retro-section fade-in"><div>`;
+  let html = `<section class="retro-section fade-in"><div>${subtabs}`;
 
   // Render purely chronologically; insert release header before the first deploy in that release
   const shownReleases = new Set();
@@ -2330,6 +2363,51 @@ function renderReleasesSection() {
   }
 
   return html + `</div></section>`;
+}
+
+function renderCodeReleasesTab(p) {
+  const pushes = (p?.pushes || []).slice().sort((a, b) =>
+    (b.pushed_at || '').localeCompare(a.pushed_at || ''));
+
+  if (!pushes.length) {
+    return `<div class="retro-empty">No push records yet.<br>
+      <span style="font-size:0.75rem;color:var(--text-dim)">Run <code>beacon push record</code> after each push.</span>
+    </div>`;
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  return pushes.map(push => {
+    const expanded = state.expandedPushId === push.id;
+    const commits = push.commits || [];
+    let h = `<div class="push-card" data-action="expand-push" data-push-id="${esc(push.id)}" style="cursor:pointer;">
+      <div class="push-card-header">
+        <span class="push-icon">↑</span>
+        <span class="push-id">${esc(push.id)}</span>
+        <span class="push-branch-badge">${esc(push.branch || 'main')}</span>
+        ${push.pushed_by ? `<span class="push-by">${esc(push.pushed_by)}</span>` : ''}
+        <span class="push-commit-count">${push.commit_count || commits.length} commits</span>
+        <span class="push-datetime">${esc(fmtDate(push.pushed_at))}</span>
+        <span class="push-expand-arrow">${expanded ? '▲' : '▼'}</span>
+      </div>
+      ${push.summary ? `<div class="push-summary">${esc(push.summary)}</div>` : ''}`;
+    if (expanded && commits.length) {
+      h += `<div class="push-commit-list">`;
+      for (const c of commits) {
+        h += `<div class="push-commit-row">
+          <code class="push-commit-hash">${esc(c.hash || '')}</code>
+          <span class="push-commit-msg">${esc(c.message || '')}</span>
+        </div>`;
+      }
+      h += `</div>`;
+    }
+    return h + `</div>`;
+  }).join('');
 }
 
 
@@ -2845,6 +2923,16 @@ async function handleAction(e) {
     case 'toggle-release-graph': state.showReleaseGraph = !state.showReleaseGraph; render(); break;
     case 'archive-project': await archiveProject(true); break;
     case 'unarchive-project': await archiveProject(false); break;
+    case 'switch-releases-tab':
+      state.releasesSubTab = el.dataset.subtab;
+      render();
+      break;
+    case 'expand-push': {
+      const pId = el.dataset.pushId;
+      state.expandedPushId = state.expandedPushId === pId ? null : pId;
+      render();
+      break;
+    }
     case 'expand-deploy': {
       const dId = el.dataset.deployId;
       state.expandedDeployId = state.expandedDeployId === dId ? null : dId;
