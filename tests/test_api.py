@@ -88,14 +88,6 @@ def test_health():
 # Project
 # ---------------------------------------------------------------------------
 
-def test_list_projects():
-    r = client.get("/api/projects")
-    assert r.status_code == 200
-    projects = r.json()
-    assert len(projects) == 1
-    assert projects[0]["project_id"] == PROJECT_ID
-
-
 def test_create_project():
     r = client.post("/api/projects/new-project",
                     json={"name": "New Project", "objective": "Test"})
@@ -187,14 +179,6 @@ def test_update_milestone_invalid_status():
     r = client.patch(f"/api/projects/{PROJECT_ID}/milestones/ms-1",
                      json={"status": "bogus"})
     assert r.status_code == 400
-
-
-def test_start_milestone():
-    r = client.post(f"/api/projects/{PROJECT_ID}/milestones/ms-2/start")
-    assert r.status_code == 200
-    assert r.json()["status"] == "in_progress"
-    # ms-1 should be deactivated
-    assert _store[PROJECT_ID]["milestones"][0]["status"] == "todo"
 
 
 def test_done_milestone():

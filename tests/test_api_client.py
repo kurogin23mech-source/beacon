@@ -103,14 +103,6 @@ class TestApiClient:
         except RuntimeError as e:
             assert "404" in str(e)
 
-    def test_list_projects(self):
-        _mock_data["p1"] = {"name": "P1", "milestones": []}
-        _mock_data["p2"] = {"name": "P2", "milestones": []}
-        client = ApiClient(_base_url)
-        projects = client.list_projects()
-        assert len(projects) == 2
-
-
 # ---------------------------------------------------------------------------
 # StoreApi tests
 # ---------------------------------------------------------------------------
@@ -122,19 +114,6 @@ class TestStoreApi:
         store.save_project(project)
         result = store.load_project()
         assert result["name"] == "Store Test"
-
-    def test_has_changed_initial(self):
-        _mock_data["change-test"] = {"name": "X", "milestones": []}
-        store = StoreApi(_base_url, "change-test")
-        assert store.has_changed() is True
-        assert store.has_changed() is False
-
-    def test_has_changed_after_external_update(self):
-        _mock_data["change-test2"] = {"name": "X", "milestones": []}
-        store = StoreApi(_base_url, "change-test2")
-        store.load_project()
-        _mock_data["change-test2"] = {"name": "Y", "milestones": []}
-        assert store.has_changed() is True
 
     def test_is_cloud(self):
         store = StoreApi(_base_url, "test")

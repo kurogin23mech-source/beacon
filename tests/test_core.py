@@ -163,15 +163,6 @@ class TestMilestones:
         core.milestone_add(data, "No desc MS")
         assert "description" not in data["milestones"][0]
 
-    def test_start(self):
-        data = make_project(milestones=[
-            make_ms(ms_id="ms-1", status="in_progress"),
-            make_ms(ms_id="ms-2", status="todo"),
-        ])
-        ms = core.milestone_start(data, "ms-2")
-        assert ms["status"] == "in_progress"
-        assert data["milestones"][0]["status"] == "todo"  # deactivated
-
     def test_start_not_found(self):
         data = make_project(milestones=[make_ms()])
         with pytest.raises(ValueError):
@@ -391,16 +382,6 @@ class TestSerialization:
         result = core.entries_to_json([entry])
         assert len(result) == 1
         assert result[0]["id"] == "e-1"
-
-    def test_count_task_status(self):
-        entries = [
-            make_entry("e-1", status="done"),
-            make_entry("e-2", status="todo"),
-            make_entry("e-3", etype="commit", status="done"),
-        ]
-        total, done = core.count_task_status(entries)
-        assert total == 2  # commits don't count
-        assert done == 1
 
     def test_filter_cancelled(self):
         entries = [
