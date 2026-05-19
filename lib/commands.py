@@ -1690,7 +1690,12 @@ def _extract_token(creds) -> str:
     return (creds.id_token or creds.token) if creds else ""
 
 def _get_api_client():
-    """Create an ApiClient from cloud.json config and auth credentials."""
+    """Create an ApiClient from cloud.json config and auth credentials.
+
+    The ApiClient receives a TokenProvider callable instead of a static token,
+    so tokens are refreshed on every API call. This prevents long-lived CLI
+    sessions from failing after the initial token expires.
+    """
     from auth import load_credentials
     creds = load_credentials()
     if creds is None:
@@ -1706,10 +1711,17 @@ def _get_api_client():
         config = json.load(f)
 
     api_url = config.get("api_url", DEFAULT_API_URL)
-    token = _extract_token(creds)
+
+    # Use a TokenProvider callable so each request picks up a fresh token.
+    # load_credentials() refreshes OAuth tokens automatically; web_auth tokens
+    # will be refreshed once _refresh_web_auth_token() support is wired in.
+    def _token_provider() -> str:
+        from auth import load_credentials as _load
+        _creds = _load()
+        return _extract_token(_creds) if _creds else ""
 
     from api_client import ApiClient
-    return ApiClient(api_url, token), config
+    return ApiClient(api_url, _token_provider), config
 
 
 def cmd_cloud_list():
