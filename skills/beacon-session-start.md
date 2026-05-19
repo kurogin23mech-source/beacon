@@ -298,7 +298,23 @@ beacon milestone add "<次MS提案1>"
 #### やること
 
 1. CORE ドキュメントがあれば読む（Step 1d/1e の結果を利用）
-2. プロジェクト名・objective（summary に記載があれば）を踏まえて、**最初のマイルストーン候補を1〜3個提案する**
+2. **ソースコードを読んで実装状況を把握する**（以下を並列実行）:
+
+```bash
+cat README.md 2>/dev/null
+```
+
+```bash
+find . -type f \( -name "*.ts" -o -name "*.tsx" -o -name "*.py" -o -name "*.vue" -o -name "*.go" -o -name "*.rb" \) \
+  -not -path "*/node_modules/*" -not -path "*/.git/*" \
+  -not -path "*/dist/*" -not -path "*/__pycache__/*" | head -40
+```
+
+READMEがあればそれを読む。ファイル一覧からルーター・型定義・ページ・モデル等の主要ファイルを特定し、3〜5件を並列Readする。
+
+**この情報はドキュメントとして保存しない。提案の精度向上のみに使う。**
+
+3. プロジェクト名・objective・ソースコードの実態を踏まえて、**最初のマイルストーン候補を1〜3個提案する**
 
 #### 提案の視点（重要）
 
