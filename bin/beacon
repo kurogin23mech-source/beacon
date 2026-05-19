@@ -1815,6 +1815,9 @@ case "${1:-}" in
         BEACON_QUERY="$query" BEACON_MS_ID="$ms_id" BEACON_JSON="$json_flag" \
             python3 "$COMMANDS_PY" search
         ;;
+    doctor)
+        python3 "$COMMANDS_PY" doctor
+        ;;
     help|-h|--help)
         if [[ "${2:-}" == "--json" ]]; then
             python3 "$COMMANDS_PY" help_json

@@ -28,7 +28,18 @@ test -f .beacon/project.json && echo "OK" || echo "NO_BEACON"
 ```
 - `NO_BEACON` の場合、このSkillは何もせず終了する。
 
-## Step 0: 引数チェック
+## Step 0: 環境チェック（beacon doctor 軽量版）
+
+Bash ツールで実行:
+```bash
+beacon doctor 2>&1
+```
+
+- 出力が `OK:` で始まる場合 → 何もせず次へ進む
+- 警告が含まれる場合 → その警告をそのまま提示し、次へ進む（中断しない）
+- `beacon` コマンドが存在しない場合 → スキップして次へ進む
+
+## Step 0a: 引数チェック
 
 ユーザーが `/beacon-session-start ms-XX` のように引数付きで呼んだ場合、`ms-XX` を **スコープMS** として記憶する。
 複数指定も可能: `/beacon-session-start ms-16 ms-17`

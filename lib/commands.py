@@ -2835,6 +2835,149 @@ def cmd_search():
         print(f"       └─ {r['ms_id']}: {r['ms_title'][:50]}")
 
 
+def cmd_doctor():
+    """Lightweight environment health check for Beacon.
+
+    Checks (in order):
+      1. beacon binary is on PATH
+      2. ~/.claude/settings.json has PostToolUse hook configured
+      3. Required Skills are installed in ~/.claude/skills/
+      4. Token expiry (JWT decode — no network required)
+      5. .beacon/cloud.json exists and has api_url set (if project is cloud-mode)
+
+    Only prints warnings for problems found. Exits 0 if all checks pass,
+    exits 1 if at least one warning was emitted.
+    """
+    import shutil as _shutil
+    import time as _time
+
+    home = os.path.expanduser("~")
+    warnings: list[str] = []
+
+    # ------------------------------------------------------------------ #
+    # 1. beacon on PATH
+    # ------------------------------------------------------------------ #
+    if not _shutil.which("beacon"):
+        warnings.append(
+            "WARN [PATH] `beacon` not found on PATH.\n"
+            "       Add the beacon bin/ directory to your PATH, or use\n"
+            "       the full path to the beacon script."
+        )
+
+    # ------------------------------------------------------------------ #
+    # 2. PostToolUse hook in ~/.claude/settings.json
+    # ------------------------------------------------------------------ #
+    settings_path = os.path.join(home, ".claude", "settings.json")
+    hook_ok = False
+    if os.path.exists(settings_path):
+        try:
+            with open(settings_path, "r", encoding="utf-8") as _f:
+                _settings = json.load(_f)
+            _post_tool = _settings.get("hooks", {}).get("PostToolUse", [])
+            for _entry in _post_tool:
+                for _h in _entry.get("hooks", []):
+                    if "beacon" in _h.get("command", ""):
+                        hook_ok = True
+                        break
+                if hook_ok:
+                    break
+        except Exception:
+            pass
+    if not hook_ok:
+        warnings.append(
+            "WARN [hooks] PostToolUse hook not configured in ~/.claude/settings.json.\n"
+            "       Run: beacon skill install"
+        )
+
+    # ------------------------------------------------------------------ #
+    # 3. Required Skills installed
+    # ------------------------------------------------------------------ #
+    required_skills = ["beacon-log", "beacon-session-start", "beacon-session-end"]
+    claude_skills = os.path.join(home, ".claude", "skills")
+    for _skill in required_skills:
+        _skill_dir = os.path.join(claude_skills, _skill)
+        if not os.path.isdir(_skill_dir):
+            warnings.append(
+                f"WARN [skills] Skill `{_skill}` not installed.\n"
+                "       Run: beacon skill install"
+            )
+
+    # ------------------------------------------------------------------ #
+    # 4. Token expiry (no network — JWT decode only)
+    # ------------------------------------------------------------------ #
+    from auth import CREDENTIALS_PATH, _decode_jwt_expiry
+    if CREDENTIALS_PATH.exists():
+        try:
+            with open(CREDENTIALS_PATH, "r") as _f:
+                _creds = json.load(_f)
+            _token = _creds.get("token") or _creds.get("id_token") or ""
+            if _token:
+                _exp = _creds.get("token_expiry") or _decode_jwt_expiry(_token)
+                if _exp:
+                    _now = int(_time.time())
+                    _remaining = _exp - _now
+                    if _remaining < 0:
+                        warnings.append(
+                            "WARN [token] Credentials have expired.\n"
+                            "       Run: beacon auth login"
+                        )
+                    elif _remaining < 300:  # less than 5 minutes
+                        warnings.append(
+                            f"WARN [token] Credentials expire in {_remaining}s (< 5 min).\n"
+                            "       Run: beacon auth login"
+                        )
+        except Exception:
+            pass
+    else:
+        warnings.append(
+            "WARN [token] Not logged in (no credentials file found).\n"
+            "       Run: beacon auth login"
+        )
+
+    # ------------------------------------------------------------------ #
+    # 5. cloud.json present and valid (only when in a beacon project dir)
+    # ------------------------------------------------------------------ #
+    cloud_json_path = os.path.join(".beacon", "cloud.json")
+    config_json_path = os.path.join(".beacon", "config.json")
+    if os.path.exists(config_json_path):
+        try:
+            with open(config_json_path, "r") as _f:
+                _config = json.load(_f)
+            if _config.get("mode") == "cloud":
+                if not os.path.exists(cloud_json_path):
+                    warnings.append(
+                        "WARN [cloud.json] Project is in cloud mode but .beacon/cloud.json is missing.\n"
+                        "       Run: beacon cloud push"
+                    )
+                else:
+                    try:
+                        with open(cloud_json_path, "r") as _f:
+                            _cloud = json.load(_f)
+                        if not _cloud.get("api_url"):
+                            warnings.append(
+                                "WARN [cloud.json] api_url is not set in .beacon/cloud.json.\n"
+                                "       Run: beacon cloud push"
+                            )
+                    except Exception:
+                        warnings.append(
+                            "WARN [cloud.json] .beacon/cloud.json is unreadable.\n"
+                            "       Run: beacon cloud push"
+                        )
+        except Exception:
+            pass  # config.json unreadable — not a fatal error
+
+    # ------------------------------------------------------------------ #
+    # Summary
+    # ------------------------------------------------------------------ #
+    if warnings:
+        for w in warnings:
+            print(w)
+        sys.exit(1)
+    else:
+        print("OK: all checks passed.")
+        sys.exit(0)
+
+
 def cmd_help_json():
     """Output beacon CLI command reference as machine-readable JSON."""
     commands = [
@@ -2956,6 +3099,7 @@ if __name__ == "__main__":
         "pr_merge": cmd_pr_merge,
         "version": lambda: print(f"beacon {__version__}"),
         "help_json": cmd_help_json,
+        "doctor": cmd_doctor,
     }
     fn = commands.get(cmd)
     if fn:
