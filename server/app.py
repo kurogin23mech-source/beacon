@@ -305,7 +305,7 @@ class RetroCreate(BaseModel):
 class DocumentSave(BaseModel):
     title: str
     content: str
-    scope: str | None = None  # core | spec | memo
+    scope: Optional[str] = None  # core | spec | memo
 
 class MemberInvite(BaseModel):
     email: str
