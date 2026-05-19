@@ -7,6 +7,7 @@ import os
 import sys
 import time
 import urllib.request
+import urllib.error
 import webbrowser
 from pathlib import Path
 
@@ -125,13 +126,21 @@ def login_web():
                 result = json.loads(resp.read())
             if result.get("status") == "approved":
                 print(" approved!")
-                # Save the id_token
+                # Save id_token (and refresh_token if provided by the server)
                 BEACON_HOME.mkdir(parents=True, exist_ok=True)
-                creds_data = {
-                    "token": result.get("id_token", ""),
+                id_token = result.get("id_token", "")
+                creds_data: dict = {
+                    "token": id_token,
                     "email": result.get("email", ""),
                     "web_auth": True,
                 }
+                # Store expiry so we can detect staleness without a network call
+                if id_token:
+                    creds_data["token_expiry"] = _decode_jwt_expiry(id_token)
+                # Server may include refresh_token in the future; save it as a
+                # client-side receiver so token refresh works without re-login.
+                if result.get("refresh_token"):
+                    creds_data["refresh_token"] = result["refresh_token"]
                 with open(CREDENTIALS_PATH, "w") as f:
                     json.dump(creds_data, f, indent=2)
                 print(f"Logged in as: {result.get('email', '?')}")
@@ -179,6 +188,91 @@ def status():
         print("Logged in (could not retrieve email).")
 
 
+def _decode_jwt_expiry(token: str) -> int:
+    """Return the 'exp' Unix timestamp from a JWT without verifying signature.
+
+    Returns 0 on any parse error (treat as already expired).
+    """
+    try:
+        import base64
+        parts = token.split(".")
+        if len(parts) < 2:
+            return 0
+        # Add padding so base64 does not raise
+        payload_b64 = parts[1] + "=" * (4 - len(parts[1]) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+        return int(payload.get("exp", 0))
+    except Exception:
+        return 0
+
+
+def _refresh_web_auth_token(creds_data: dict) -> dict | None:
+    """Try to refresh the web-auth id_token using a saved refresh_token.
+
+    Uses the Firebase securetoken REST endpoint (no firebase_config.json needed
+    as the API key is embedded in the token itself via the 'aud' claim).
+
+    Returns an updated creds_data dict on success, or None on failure.
+    """
+    refresh_token = creds_data.get("refresh_token")
+    if not refresh_token:
+        return None
+
+    # Derive the Firebase API key from the token audience ('aud' claim)
+    api_key = _get_firebase_api_key_from_token(creds_data.get("token", ""))
+    if not api_key:
+        return None
+
+    url = f"https://securetoken.googleapis.com/v1/token?key={api_key}"
+    body = json.dumps({
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+    }).encode("utf-8")
+    req = urllib.request.Request(url, data=body, method="POST",
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+    except Exception:
+        return None
+
+    new_id_token = result.get("id_token", "")
+    if not new_id_token:
+        return None
+
+    updated = dict(creds_data)
+    updated["token"] = new_id_token
+    updated["token_expiry"] = _decode_jwt_expiry(new_id_token)
+    if result.get("refresh_token"):
+        updated["refresh_token"] = result["refresh_token"]
+
+    try:
+        with open(CREDENTIALS_PATH, "w") as f:
+            json.dump(updated, f, indent=2)
+    except OSError:
+        pass  # best-effort; return the updated dict even if write fails
+
+    return updated
+
+
+def _get_firebase_api_key_from_token(token: str) -> str | None:
+    """Extract the Firebase project's web API key stored in the token 'aud'.
+
+    Firebase id_tokens have 'aud' = the project ID, not the API key directly.
+    We fall back to reading firebase_config.json if present.
+    """
+    if FIREBASE_CONFIG_PATH.exists():
+        try:
+            with open(FIREBASE_CONFIG_PATH, "r") as f:
+                config = json.load(f)
+            # Accept both top-level and nested {"web": {...}} formats
+            web = config.get("web", config)
+            return web.get("apiKey") or web.get("api_key")
+        except Exception:
+            pass
+    return None
+
+
 def load_credentials():
     """Load and refresh cached credentials. Returns credentials or None."""
     if not CREDENTIALS_PATH.exists():
@@ -187,8 +281,24 @@ def load_credentials():
     with open(CREDENTIALS_PATH, "r") as f:
         creds_data = json.load(f)
 
-    # Web auth mode: return raw dict with id_token
+    # Web auth mode: check expiry and attempt silent refresh
     if creds_data.get("web_auth"):
+        expiry = creds_data.get("token_expiry") or _decode_jwt_expiry(
+            creds_data.get("token", "")
+        )
+        now = int(time.time())
+        # Give a 60-second buffer before actual expiry
+        if expiry and now >= expiry - 60:
+            # Try silent refresh via refresh_token
+            refreshed = _refresh_web_auth_token(creds_data)
+            if refreshed:
+                return refreshed
+            # No refresh_token or refresh failed — tell the user clearly
+            print(
+                "Error: トークンが期限切れです。`beacon auth login` を実行してください。\n"
+                "       (Token expired. Run: beacon auth login)"
+            )
+            return None
         return creds_data
 
     # OAuth mode: use google credentials
