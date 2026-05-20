@@ -81,9 +81,12 @@ To check status from within Claude Code, use `! beacon status`.
 | `beacon milestone show <id>` | Show milestone details | Yes |
 | `beacon milestone update <id> [opts]` | Update fields | Yes |
 | `beacon milestone delete <id>` | Logical delete (cancelled) | Yes |
+| `beacon milestone rename <id> "new title"` | Rename a milestone | - |
 | `beacon milestone depends <id> --on <id>[,id]` | Set milestone dependencies | Yes |
 | `beacon milestone depends <id> --clear` | Remove all dependencies | Yes |
 | `beacon milestone graph` | Display dependency graph (waves) | Yes |
+| `beacon milestone workspace <id> [--executor ai\|human]` | Create git worktree for isolated milestone development | - |
+| `beacon milestone workspace-cleanup <id>` | Remove worktree after work completes | - |
 
 ### Task Subcommands
 
@@ -159,6 +162,16 @@ Use `/review` Claude Code Skill (not `beacon pr review`) for AI-assisted code re
 - **Major**: one or more milestones newly completed since last deploy
 - **Minor**: commits that patch already-shipped milestones (no new completions)
 
+### Code Releases (Push Log)
+
+| Command | Description | --json |
+|---------|-------------|--------|
+| `beacon push record [--desc "text"]` | Record a git push (auto-collects commits since last push) | - |
+| `beacon push record --prepare` | Output push context as JSON (read-only) | Yes |
+| `beacon push list` | List push history | Yes |
+
+The `/beacon-push` Skill wraps `beacon push record --prepare` → AI description generation → `beacon push record --desc "..."` for value-based descriptions (same pattern as deploy).
+
 ### Retrospectives
 
 | Command | Description | --json |
@@ -193,8 +206,10 @@ Use `/review` Claude Code Skill (not `beacon pr review`) for AI-assisted code re
 | Command | Description | --json |
 |---------|-------------|--------|
 | `beacon` | Launch tmux dashboard + shell | - |
-| `beacon init` | Initialize `.beacon/` in current directory | - |
+| `beacon init [--name n] [--objective o] [--retro-day d] [--storage local\|cloud]` | Initialize `.beacon/` (flags enable non-interactive use) | - |
 | `beacon status` | Show project status | Yes |
+| `beacon doctor` | Health check: PATH, hooks, Skills, auth token, cloud config | - |
+| `beacon reset` | Move `.beacon/` to a timestamped backup (local only, cloud untouched) | - |
 | `beacon search <query> [-m ms-id]` | Full-text search across milestones, entries, PRs | Yes |
 | `beacon entry move <entry-id> -t <task-id>` | Move entry under a task | - |
 | `beacon help` | Show help | - |
@@ -231,6 +246,9 @@ Use `/review` Claude Code Skill (not `beacon pr review`) for AI-assisted code re
       "target_date": "YYYY-MM-DD | null",
       "depends_on": ["ms-2", "ms-3"],
       "workspace": "optional workspace identifier",
+      "workspace_branch": "ms-5-workspace | null",
+      "workspace_path": "/path/to/worktree | null",
+      "workspace_executor": "ai | human | null",
       "entries": [
         {
           "id": "e-1",
@@ -286,6 +304,20 @@ Use `/review` Claude Code Skill (not `beacon pr review`) for AI-assisted code re
       "semver": "v1.2.0 | null",
       "description": "Release description",
       "deploy_ids": ["deploy-20260517-1"]
+    }
+  ],
+  "pushes": [
+    {
+      "id": "push-20260517-1",
+      "branch": "main",
+      "from_hash": "abc1234",
+      "to_hash": "def5678",
+      "commit_count": 5,
+      "commits": [{"hash": "def5678", "message": "feat: ..."}],
+      "summary": "AI-generated push description",
+      "pushed_by": "r_kida2",
+      "pushed_at": "2026-05-17T12:00:00Z",
+      "ms_id": "ms-5"
     }
   ]
 }
@@ -403,8 +435,10 @@ This structurally eliminates the problem of AI ignoring CLAUDE.md prompt instruc
 | `beacon-task` | `/beacon-task` | Task CRUD (add/done/update/delete) | Yes |
 | `beacon-session-end` | User end-of-session cues, Claude self-proposal, `/beacon-end` | Update summary + organize open tasks | Yes |
 | `beacon-deploy` | PostToolUse hook (auto on deploy), `/beacon-deploy` | Record deployment with AI-generated description | Yes (via finalize) |
+| `beacon-push` | PostToolUse hook (auto on git push), `/beacon-push` | Record git push with AI-generated value description | Yes |
 | `beacon-retro` | `/beacon-retro`, weekly trigger | Generate and discuss weekly retrospective | Yes |
 | `beacon-dispatch` | `/beacon-dispatch`, user requests parallel work | Identify executable milestones, launch parallel sub-agents | No (orchestration only) |
+| `beacon-init` | `/beacon-init` | Conversational project init; proposes MS via Project Archaeology for existing repos | Yes |
 
 ### Skill Constraints
 

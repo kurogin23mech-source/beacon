@@ -81,9 +81,12 @@ Claude Code 内からステータスを確認したい場合は `! beacon status
 | `beacon milestone show <id>` | 単一マイルストーンの詳細 | 対応済 |
 | `beacon milestone update <id> [opts]` | 任意フィールドを更新 | 対応済 |
 | `beacon milestone delete <id>` | 論理削除（cancelled） | 対応済 |
+| `beacon milestone rename <id> "新タイトル"` | マイルストーン名を変更 | - |
 | `beacon milestone depends <id> --on <id>[,id]` | 依存関係を設定 | 対応済 |
 | `beacon milestone depends <id> --clear` | 依存関係を解除 | 対応済 |
 | `beacon milestone graph` | 依存グラフを表示（wave配置） | 対応済 |
+| `beacon milestone workspace <id> [--executor ai\|human]` | MSごとにgit worktreeを作成して開発環境を分離 | - |
+| `beacon milestone workspace-cleanup <id>` | 作業完了後にworktreeを削除 | - |
 
 ### task サブコマンド
 
@@ -159,6 +162,16 @@ AIコードレビューには `beacon pr review` ではなく `/review` Claude C
 - **major**: 前回デプロイ以降に1つ以上のマイルストーンが新たに完了した場合
 - **minor**: 既完了MSへのバグ修正・ホットフィックス（新規MS完了なし）
 
+### コードリリース（pushログ）
+
+| コマンド | 説明 | --json |
+|---------|------|--------|
+| `beacon push record [--desc "text"]` | git pushを記録（前回push以降のコミットを自動収集） | - |
+| `beacon push record --prepare` | push判断材料をJSON出力（書き込みしない） | 対応済 |
+| `beacon push list` | push履歴一覧 | 対応済 |
+
+`/beacon-push` Skillがpush後に自動実行され、`--prepare` → AI説明生成 → `--desc "..."` の2ステップでdeployと同品質の価値説明を生成する。
+
 ### 振り返り
 
 | コマンド | 説明 | --json |
@@ -193,8 +206,10 @@ AIコードレビューには `beacon pr review` ではなく `/review` Claude C
 | コマンド | 説明 | --json |
 |---------|------|--------|
 | `beacon` | tmux ダッシュボード + シェルを起動 | - |
-| `beacon init` | `.beacon/` をカレントディレクトリに初期化 | - |
+| `beacon init [--name n] [--objective o] [--retro-day d] [--storage local\|cloud]` | `.beacon/` を初期化（フラグで非対話実行可能） | - |
 | `beacon status` | プロジェクト全体の状態 | 対応済 |
+| `beacon doctor` | PATH・hooks・Skills・認証トークン・cloud設定のヘルスチェック | - |
+| `beacon reset` | `.beacon/` をタイムスタンプ付きバックアップに移動（ローカルのみ・クラウド非影響） | - |
 | `beacon search <query> [-m ms-id]` | マイルストーン・エントリ・PR全文検索 | 対応済 |
 | `beacon entry move <entry-id> -t <task-id>` | エントリをタスク配下に移動 | - |
 | `beacon help` | ヘルプ表示 | - |
@@ -231,6 +246,9 @@ AIコードレビューには `beacon pr review` ではなく `/review` Claude C
       "target_date": "YYYY-MM-DD | null",
       "depends_on": ["ms-2", "ms-3"],
       "workspace": "ワークスペース識別子（任意）",
+      "workspace_branch": "ms-5-workspace | null",
+      "workspace_path": "/path/to/worktree | null",
+      "workspace_executor": "ai | human | null",
       "entries": [
         {
           "id": "e-1",
@@ -286,6 +304,20 @@ AIコードレビューには `beacon pr review` ではなく `/review` Claude C
       "semver": "v1.2.0 | null",
       "description": "リリース説明",
       "deploy_ids": ["deploy-20260517-1"]
+    }
+  ],
+  "pushes": [
+    {
+      "id": "push-20260517-1",
+      "branch": "main",
+      "from_hash": "abc1234",
+      "to_hash": "def5678",
+      "commit_count": 5,
+      "commits": [{"hash": "def5678", "message": "feat: ..."}],
+      "summary": "AIが生成したpush説明",
+      "pushed_by": "r_kida2",
+      "pushed_at": "2026-05-17T12:00:00Z",
+      "ms_id": "ms-5"
     }
   ]
 }
@@ -403,8 +435,10 @@ beacon の Skill は Claude Code が beacon を操作するためのインター
 | `beacon-task` | `/beacon-task` | タスク操作（add/done/update/delete） | あり |
 | `beacon-session-end` | ユーザーの終了シグナル, Claude自身の提案前, `/beacon-end` | summary更新+未完了整理 | あり |
 | `beacon-deploy` | PostToolUse hook（デプロイ時自動）, `/beacon-deploy` | AI説明付きデプロイ記録 | あり（finalize経由） |
+| `beacon-push` | PostToolUse hook（git push時自動）, `/beacon-push` | AI価値説明付きpush記録 | あり |
 | `beacon-retro` | `/beacon-retro`, 週次トリガー | 週次振り返りドキュメント生成・ディスカッション | あり |
 | `beacon-dispatch` | `/beacon-dispatch`, 並列実装依頼 | 実行可能MSを特定し並列サブエージェントを起動 | なし（オーケストレーションのみ） |
+| `beacon-init` | `/beacon-init` | 会話形式でプロジェクト初期化。既存リポジトリはProject Archaeologyでgit logから過去MSを自動推測 | あり |
 
 ### Skill の制約
 

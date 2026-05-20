@@ -39,7 +39,7 @@ Beaconが想定するワークフローは**コミット駆動・マイルスト
 ### Homebrew (macOS — recommended)
 
 ```bash
-brew tap r-kida2/beacon
+brew tap kurogin23mech-source/beacon
 brew install beacon
 ```
 
@@ -47,7 +47,7 @@ brew install beacon
 
 ```bash
 # Clone the repository
-git clone https://github.com/r-kida2/beacon.git
+git clone https://github.com/kurogin23mech-source/beacon.git
 
 # Add to PATH
 export PATH="$PATH:$(pwd)/beacon/bin"
@@ -166,9 +166,11 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 |---------|-------------|
 | `beacon` | Launch tmux dashboard + shell / ダッシュボード起動 |
 | `beacon setup` | First-time setup wizard (auth + hooks + project) / 初回セットアップ |
-| `beacon init` | Initialize `.beacon/` in current directory / プロジェクト作成のみ |
+| `beacon init [--name n] [--objective o] [--storage local\|cloud]` | Initialize `.beacon/` (flags for non-interactive use) / プロジェクト作成 |
 | `beacon status [--json]` | Show project status / ステータス表示 |
 | `beacon skill install` | Install Claude Code Skills / Skillインストール |
+| `beacon doctor` | Check PATH, hooks, Skills, auth, and cloud config / 環境ヘルスチェック |
+| `beacon reset` | Move `.beacon/` to a timestamped backup (local only) / ローカルデータのリセット |
 
 ### Milestones
 
@@ -183,8 +185,11 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 | `beacon milestone show <id> [--json]` | Show details / 詳細表示 |
 | `beacon milestone update <id> [options]` | Update fields / 更新 |
 | `beacon milestone delete <id>` | Logical delete (cancelled) / 論理削除 |
+| `beacon milestone rename <id> "new title"` | Rename milestone / 名前変更 |
 | `beacon milestone depends <id> --on <id>[,id]` | Set dependencies / 依存関係設定 |
 | `beacon milestone graph [--json]` | Show dependency graph / 依存グラフ表示 |
+| `beacon milestone workspace <id> [--executor ai\|human]` | Create git worktree for isolated development / worktree作成 |
+| `beacon milestone workspace-cleanup <id>` | Remove worktree after work completes / worktree削除 |
 
 ### Tasks & Entries
 
@@ -221,6 +226,15 @@ Use `/review` Claude Code Skill instead of `beacon pr review` for AI-assisted co
 | `beacon deploy list [--json]` | List deployment history / デプロイ履歴一覧 |
 
 `beacon deploy record` automatically determines **major** (one or more milestones newly completed) vs **minor** (bug fix / patch to already-shipped milestones) based on commit history. The `/beacon-deploy` Skill wraps this with a two-phase prepare/finalize flow for AI-generated deploy descriptions.
+
+### Code Releases (Push Log)
+
+| Command | Description |
+|---------|-------------|
+| `beacon push record [--desc "text"]` | Record a git push (auto-collects commits since last push) / pushを記録 |
+| `beacon push list [--json]` | List push history / push履歴一覧 |
+
+The `/beacon-push` Skill wraps push recording with AI-generated value descriptions, triggered automatically by the PostToolUse hook after each `git push`.
 
 ### Documents
 
@@ -297,16 +311,18 @@ Beacon ships with [Claude Code Skills](https://docs.anthropic.com/en/docs/claude
 | `beacon-task` | Task CRUD operations / タスク操作 |
 | `beacon-session-end` | Update summary and organize open tasks / サマリー更新+未完了整理 |
 | `beacon-deploy` | Record a deployment with AI-generated description / AI説明付きデプロイ記録 |
+| `beacon-push` | Record a git push with AI-generated value description / AI説明付きpush記録 |
 | `beacon-retro` | Generate and discuss weekly retrospective / 週次振り返りドキュメント生成 |
 | `beacon-dispatch` | Identify executable milestones and launch parallel sub-agents / 並列サブエージェント起動 |
+| `beacon-init` | Conversational project initialization with Project Archaeology / 会話形式プロジェクト初期化 |
 
 ### Two-phase workflow
 
 Skills use a **prepare/finalize** pattern to keep AI judgment structured:
 
-1. `beacon log --prepare` (or `beacon deploy record --prepare`) outputs context as JSON
-2. The Skill prompts Claude to generate a summary or deploy description
-3. `beacon log --finalize` (or `beacon deploy record --finalize`) writes the result
+1. `beacon log --prepare` (or `beacon deploy record --prepare`, `beacon push record --prepare`) outputs context as JSON
+2. The Skill prompts Claude to generate a summary, deploy description, or push description
+3. `beacon log --finalize` (or `beacon deploy record --finalize`, `beacon push record --desc "..."`) writes the result
 
 This design ensures AI-generated content is channeled through deterministic CLI operations, not free-form file edits.
 
