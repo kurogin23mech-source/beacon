@@ -532,14 +532,13 @@ def _find_matching_task(entries: list, commit_text: str):
             candidates.append((score, overlap, entry))
 
     if not candidates:
-        active_tasks = [e for e in entries if e.get("type") == "task" and e.get("status") not in ("done", "cancelled")]
-        if len(active_tasks) == 1:
-            return active_tasks[0]
         return None
 
     candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
     best_score, best_overlap, best_entry = candidates[0]
-    if best_overlap >= 1:
+    # Require at least 2 overlapping tokens or a score above 0.3 to avoid
+    # false positives from coincidental single-word matches.
+    if best_overlap >= 2 or (best_overlap >= 1 and best_score >= 0.3):
         return best_entry
     return None
 
