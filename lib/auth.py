@@ -134,11 +134,13 @@ def login_web():
                     "email": result.get("email", ""),
                     "web_auth": True,
                 }
-                # Store expiry so we can detect staleness without a network call
-                if id_token:
+                # Prefer server-provided expiry (long-lived CLI tokens);
+                # fall back to decoding the JWT for legacy Google ID tokens.
+                if result.get("token_expiry"):
+                    creds_data["token_expiry"] = result["token_expiry"]
+                    creds_data["token_type"] = "beacon_cli"
+                elif id_token:
                     creds_data["token_expiry"] = _decode_jwt_expiry(id_token)
-                # Server may include refresh_token in the future; save it as a
-                # client-side receiver so token refresh works without re-login.
                 if result.get("refresh_token"):
                     creds_data["refresh_token"] = result["refresh_token"]
                 with open(CREDENTIALS_PATH, "w") as f:
@@ -281,19 +283,24 @@ def load_credentials():
     with open(CREDENTIALS_PATH, "r") as f:
         creds_data = json.load(f)
 
-    # Web auth mode: check expiry and attempt silent refresh
+    # Web auth mode: check expiry
     if creds_data.get("web_auth"):
         expiry = creds_data.get("token_expiry") or _decode_jwt_expiry(
             creds_data.get("token", "")
         )
         now = int(time.time())
-        # Give a 60-second buffer before actual expiry
         if expiry and now >= expiry - 60:
-            # Try silent refresh via refresh_token
+            # Long-lived CLI token: no refresh possible, just re-login
+            if creds_data.get("token_type") == "beacon_cli":
+                print(
+                    "Error: セッションが期限切れです。`beacon auth login` を実行してください。\n"
+                    "       (Session expired. Run: beacon auth login)"
+                )
+                return None
+            # Legacy Google ID token: try silent refresh via refresh_token
             refreshed = _refresh_web_auth_token(creds_data)
             if refreshed:
                 return refreshed
-            # No refresh_token or refresh failed — tell the user clearly
             print(
                 "Error: トークンが期限切れです。`beacon auth login` を実行してください。\n"
                 "       (Token expired. Run: beacon auth login)"

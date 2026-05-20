@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac as _hmac
 import json
 import logging
 import os
@@ -167,8 +170,47 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 _auth_enabled = os.environ.get("BEACON_API_AUTH", "1") != "0"
 
 
+_CLI_TOKEN_PREFIX = "bcli."
+_CLI_TOKEN_LIFETIME = 86400 * 30  # 30 days
+
+
+def _make_cli_token(sub: str, email: str) -> tuple[str, int]:
+    """Issue a long-lived CLI token (HMAC-SHA256). Returns (token, expiry_unix)."""
+    expiry = int(time.time()) + _CLI_TOKEN_LIFETIME
+    payload = json.dumps({"sub": sub, "email": email, "exp": expiry}, separators=(",", ":"))
+    payload_b64 = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+    secret = os.environ.get("BEACON_CLI_TOKEN_SECRET", "dev-secret-CHANGE-ME")
+    sig = _hmac.new(secret.encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
+    return f"{_CLI_TOKEN_PREFIX}{payload_b64}.{sig}", expiry
+
+
+def _verify_cli_token(token: str) -> dict | None:
+    """Verify a beacon CLI token. Returns claims dict or None if invalid/expired."""
+    if not token.startswith(_CLI_TOKEN_PREFIX):
+        return None
+    try:
+        rest = token[len(_CLI_TOKEN_PREFIX):]
+        payload_b64, sig = rest.rsplit(".", 1)
+        secret = os.environ.get("BEACON_CLI_TOKEN_SECRET", "dev-secret-CHANGE-ME")
+        expected = _hmac.new(secret.encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
+        if not _hmac.compare_digest(sig, expected):
+            return None
+        padding = (4 - len(payload_b64) % 4) % 4
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64 + "=" * padding))
+        if payload.get("exp", 0) < time.time():
+            return None
+        return payload
+    except Exception:
+        return None
+
+
 def _verify_id_token(token: str) -> dict:
-    """Verify a Google ID token and return the claims."""
+    """Verify a Google ID token or Beacon CLI token and return the claims."""
+    # Check for long-lived CLI token first (no network call)
+    claims = _verify_cli_token(token)
+    if claims:
+        return claims
+    # Fall back to Google ID token verification
     from google.oauth2 import id_token
     from google.auth.transport import requests as google_requests
 
@@ -1075,11 +1117,15 @@ def cli_auth_poll_get(code: str = ""):
         raise HTTPException(status_code=410, detail="Code expired")
     if not entry.get("approved"):
         return {"status": "pending"}
-    # Approved — return token and cleanup
+    # Approved — issue a long-lived CLI token and return it
+    sub = entry.get("sub", "")
+    email = entry.get("email", "")
+    cli_token, token_expiry = _make_cli_token(sub, email)
     result = {
         "status": "approved",
-        "email": entry.get("email", ""),
-        "id_token": entry.get("id_token", ""),
+        "email": email,
+        "id_token": cli_token,
+        "token_expiry": token_expiry,
     }
     del _cli_pending[code]
     return result
