@@ -1651,6 +1651,34 @@ case "${1:-}" in
         shift
         cmd_pr "$@"
         ;;
+    issue)
+        ensure_project
+        case "${2:-}" in
+            import)
+                BEACON_ISSUE_NUMBER="${3:-}" BEACON_MS_ID="${5:-}" \
+                    BEACON_JSON="${4:+1}" python3 "$COMMANDS_PY" issue_import
+                ;;
+            sync)
+                shift 2
+                ms=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        -m|--ms) ms="${2:-}"; shift 2 ;;
+                        *) shift ;;
+                    esac
+                done
+                BEACON_MS_ID="$ms" python3 "$COMMANDS_PY" issue_sync
+                ;;
+            list)
+                BEACON_JSON="${3:+1}" python3 "$COMMANDS_PY" issue_list
+                ;;
+            *)
+                echo "Usage: beacon issue import <number> [-m <ms-id>]"
+                echo "       beacon issue sync [-m <ms-id>]"
+                echo "       beacon issue list [--json]"
+                ;;
+        esac
+        ;;
     retro)
         shift
         case "${1:-}" in

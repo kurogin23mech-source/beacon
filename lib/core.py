@@ -544,6 +544,55 @@ def _find_matching_task(entries: list, commit_text: str):
 
 
 # ---------------------------------------------------------------------------
+# GitHub Issue import (ms-28)
+# ---------------------------------------------------------------------------
+
+def _find_imported_issue_numbers(data: dict) -> set:
+    """Return set of GitHub issue numbers already imported as task entries."""
+    imported = set()
+    for ms in data.get("milestones", []):
+        for entry in _iter_all_entries(ms.get("entries", [])):
+            n = entry.get("meta", {}).get("issue_number")
+            if n is not None:
+                imported.add(int(n))
+    return imported
+
+
+def _iter_all_entries(entries: list):
+    """Recursively yield all entries."""
+    for entry in entries:
+        yield entry
+        yield from _iter_all_entries(entry.get("entries", []))
+
+
+def issue_import(data: dict, *, ms_id: str = "", number: int, url: str,
+                 title: str = "", body: str = "", date: str = "") -> str:
+    """Import a GitHub Issue as a task entry. Returns the new entry id."""
+    target = find_target_milestone(data, ms_id)
+    entries = target.setdefault("entries", [])
+    eid = next_entry_id(data)
+    now = _now_iso()
+    description = f"#{number}: {title}" if title else f"Issue #{number}"
+    entry = {
+        "id": eid,
+        "type": "task",
+        "description": description,
+        "date": date or now,
+        "created_at": now,
+        "done_at": None,
+        "status": "todo",
+        "meta": {
+            "issue_number": number,
+            "issue_url": url,
+            "created_by": _get_actor(),
+        },
+    }
+    if body and body.strip():
+        entry["detail"] = body.strip()[:500]
+    entries.append(entry)
+    return eid
+
+
 # PR entry (ms-15)
 # ---------------------------------------------------------------------------
 

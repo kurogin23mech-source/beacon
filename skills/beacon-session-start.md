@@ -153,6 +153,26 @@ beacon に `review_status == "pending"` または `review_status == "changes_req
 
 この Step は **読み取り専用**。自動で `beacon pr add` や `beacon pr close` を実行してはならない。
 
+## Step 1h: GitHub Issue 自動検知（fail-safe）
+
+Step 1g と **並列に** Bash ツールで実行:
+
+```bash
+beacon issue list --json 2>/dev/null
+```
+
+失敗した場合（gh未設定、リポジトリ外など）は無視してスキップする。
+
+結果が空でなければ、Step 3 の出力に含める:
+```
+未インポートのIssue:
+  - #42: [title] → beacon issue import 42 で取り込めます
+```
+
+3件以上ある場合は先頭2件を表示し「他N件: beacon issue sync で一括インポート」と追記する。
+
+この Step は **読み取り専用**。自動で `beacon issue import` や `beacon issue sync` を実行してはならない。
+
 ## Step 2: アクティブMSの詳細取得
 
 Step 1a の結果から `status == "in_progress"` のマイルストーンを特定する。
