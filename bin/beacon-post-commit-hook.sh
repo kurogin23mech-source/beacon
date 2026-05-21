@@ -16,4 +16,8 @@ elif echo "$CMD_BARE" | grep -qE 'gcloud run deploy|gcloud app deploy|scripts/de
   printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"BEACON: Deploy detected. You MUST now run /beacon-deploy Skill to record this deployment."}}'
 elif echo "$CMD_BARE" | grep -qE 'aws s3 sync.*s3://|terraform apply|aws cloudfront create-invalidation' && [ -f .beacon/project.json ]; then
   printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"BEACON: Deploy detected. You MUST now run /beacon-deploy Skill to record this deployment."}}'
+elif echo "$CMD_BARE" | grep -qE 'vercel( --prod| deploy)|firebase deploy|fly deploy|flyctl deploy|netlify deploy' && [ -f .beacon/project.json ]; then
+  printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"BEACON: Deploy detected. You MUST now run /beacon-deploy Skill to record this deployment."}}'
+elif echo "$CMD_BARE" | grep -qE 'kubectl apply|cdk deploy|serverless deploy|sls deploy|pulumi up|eb deploy|az webapp deploy|az functionapp' && [ -f .beacon/project.json ]; then
+  printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"BEACON: Deploy detected. You MUST now run /beacon-deploy Skill to record this deployment."}}'
 fi
