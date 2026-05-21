@@ -1777,7 +1777,7 @@ case "${1:-}" in
         case "${2:-}" in
             record)
                 shift 2
-                revision="" semver="" desc="" hash="" date="" before="" mode="" type=""
+                revision="" semver="" desc="" hash="" date="" before="" mode="" type="" env=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --prepare)       mode="prepare";    shift ;;
@@ -1789,16 +1789,27 @@ case "${1:-}" in
                         --date)          date="${2:-}";     shift 2 ;;
                         --insert-before) before="${2:-}";   shift 2 ;;
                         --type)          type="${2:-}";     shift 2 ;;
+                        --env)           env="${2:-}";      shift 2 ;;
                         *) shift ;;
                     esac
                 done
                 BEACON_MODE="$mode" BEACON_REVISION="$revision" BEACON_SEMVER="$semver" \
                     BEACON_DESCRIPTION="$desc" BEACON_HASH="$hash" \
                     BEACON_DATE="$date" BEACON_INSERT_BEFORE="$before" BEACON_TYPE="$type" \
+                    BEACON_ENVIRONMENT="$env" \
                     python3 "$COMMANDS_PY" deploy_record
                 ;;
             list)
-                BEACON_JSON="${3:+1}" python3 "$COMMANDS_PY" deploy_list ;;
+                shift 2
+                env="" json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --env)    env="${2:-}"; shift 2 ;;
+                        --json)   json="1";     shift ;;
+                        *) shift ;;
+                    esac
+                done
+                BEACON_JSON="$json" BEACON_ENVIRONMENT="$env" python3 "$COMMANDS_PY" deploy_list ;;
             delete)
                 BEACON_DEPLOY_ID="${3:-}" python3 "$COMMANDS_PY" deploy_delete ;;
             void)
@@ -1815,8 +1826,8 @@ case "${1:-}" in
                     python3 "$COMMANDS_PY" deploy_void
                 ;;
             *)
-                echo "Usage: beacon deploy record [--revision <rev>] [--semver <v1.0.0>] [--desc <text>]"
-                echo "       beacon deploy list [--json]"
+                echo "Usage: beacon deploy record [--env <env>] [--revision <rev>] [--semver <v1.0.0>] [--desc <text>]"
+                echo "       beacon deploy list [--env <env>] [--json]"
                 echo "       beacon deploy void <id> --reason <text>"
                 ;;
         esac

@@ -2625,6 +2625,7 @@ def cmd_deploy_record():
     deploy_date = os.environ.get("BEACON_DATE", "")   # override: specify deploy datetime
     insert_before = os.environ.get("BEACON_INSERT_BEFORE", "")  # insert before this deploy-id
     type_override = os.environ.get("BEACON_TYPE", "")  # override: "major" or "minor"
+    environment = os.environ.get("BEACON_ENVIRONMENT", "prod")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     data = load_project()
@@ -2774,7 +2775,7 @@ def cmd_deploy_record():
         "type": deploy_type,
         "date": now,
         "git_hash": head_hash,
-        "environment": "prod",
+        "environment": environment,
         "milestones": affected_ms,
         "newly_completed_ms": sorted(newly_completed),
         "patch_ms": sorted(patch_ms),
@@ -2836,11 +2837,15 @@ def cmd_deploy_record():
 
 
 def cmd_deploy_list():
-    """List deployment records."""
+    """List deployment records, optionally filtered by environment."""
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    env_filter = os.environ.get("BEACON_ENVIRONMENT", "")
     data = load_project()
     deployments = data.get("deployments", [])
     releases = {r["id"]: r for r in data.get("releases", [])}
+
+    if env_filter:
+        deployments = [d for d in deployments if d.get("environment", "prod") == env_filter]
 
     if json_mode:
         print(json.dumps({"deployments": deployments, "releases": list(releases.values())},
@@ -2848,8 +2853,8 @@ def cmd_deploy_list():
         return
 
     if not deployments:
-        print("No deployments recorded yet.")
-        print("Run 'beacon deploy record' after each deploy.")
+        msg = f"No deployments recorded for env='{env_filter}'." if env_filter else "No deployments recorded yet."
+        print(msg)
         return
 
     for d in reversed(deployments):
@@ -2857,7 +2862,8 @@ def cmd_deploy_list():
         rel = releases.get(d.get("linked_release", ""))
         semver_str = f" {rel['semver']}" if rel and rel.get("semver") else ""
         ms_str = " ".join(d.get("milestones", [])) or "-"
-        print(f"{icon} {d['id']}{semver_str}  {d['date'][:10]}  [{d.get('type','')}]  {ms_str}")
+        env_str = f" [{d.get('environment', 'prod')}]" if d.get("environment") not in (None, "prod") else ""
+        print(f"{icon} {d['id']}{semver_str}  {d['date'][:10]}  [{d.get('type','')}]{env_str}  {ms_str}")
         print(f"   {d.get('description', '')}")
         if d.get("links_to"):
             print(f"   patches: {', '.join(d['links_to'])}")
