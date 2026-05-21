@@ -1774,16 +1774,16 @@ case "${1:-}" in
             delete)
                 BEACON_DEPLOY_ID="${3:-}" python3 "$COMMANDS_PY" deploy_delete ;;
             void)
-                local deploy_id="${3:-}"
-                local reason=""
+                _void_deploy_id="${3:-}"
+                _void_reason=""
                 shift 3 || true
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
-                        -r|--reason) reason="${2:-}"; shift 2 ;;
+                        -r|--reason) _void_reason="${2:-}"; shift 2 ;;
                         *) shift ;;
                     esac
                 done
-                BEACON_DEPLOY_ID="$deploy_id" BEACON_REASON="$reason" \
+                BEACON_DEPLOY_ID="$_void_deploy_id" BEACON_REASON="$_void_reason" \
                     python3 "$COMMANDS_PY" deploy_void
                 ;;
             *)
