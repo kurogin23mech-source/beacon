@@ -225,6 +225,9 @@ body::after {
 .deploy-id { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-dim); }
 .deploy-datetime { font-size: 0.7rem; color: var(--text-dim); margin-left: auto; }
 .deploy-env-badge { font-size: 0.6rem; color: var(--text-dim); background: var(--bg-raised); padding: 1px 5px; border-radius: 2px; border: 1px solid var(--border-subtle); }
+.deploy-env-filter { display: flex; gap: 4px; margin: 6px 0 10px; flex-wrap: wrap; }
+.deploy-env-btn { font-size: 0.7rem; padding: 2px 8px; border-radius: 3px; border: 1px solid var(--border-subtle); background: var(--bg-raised); color: var(--text-dim); cursor: pointer; }
+.deploy-env-btn.active { background: var(--accent-muted); color: var(--accent); border-color: var(--accent); }
 .deploy-expand-arrow { font-size: 0.6rem; color: var(--text-dim); }
 .deploy-desc { font-size: 0.78rem; color: var(--text-secondary); margin: 4px 0 4px 18px; line-height: 1.4; }
 .deploy-ms-badges { margin: 4px 0 0 18px; display: flex; flex-wrap: wrap; gap: 4px; }
@@ -1462,6 +1465,7 @@ let state = {
   expandedDeployId: null,
   releasesSubTab: 'service', // 'service' | 'code'
   expandedPushId: null,
+  selectedDeployEnv: null, // null = all environments
   auth: {
     token: localStorage.getItem('beacon_token'),
     email: localStorage.getItem('beacon_email'),
@@ -2260,8 +2264,17 @@ function renderReleasesSection() {
     for (const id of (r.deploy_ids || [])) deployToRelease[id] = r;
   }
 
-  // Sort all deploys newest first (true chronological order)
-  const sorted = allDeps.slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  // Collect unique environments for filter buttons
+  const envSet = new Set(allDeps.map(d => d.environment || 'prod'));
+  const envList = [...envSet].sort();
+
+  // Filter by selected environment
+  const filtered = state.selectedDeployEnv
+    ? allDeps.filter(d => (d.environment || 'prod') === state.selectedDeployEnv)
+    : allDeps;
+
+  // Sort newest first
+  const sorted = filtered.slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 
   function fmtDate(iso) {
     if (!iso) return '';
@@ -2348,7 +2361,13 @@ function renderReleasesSection() {
     return h + '</div>';
   }
 
-  let html = `<section class="retro-section fade-in"><div>${subtabs}`;
+  // Env filter bar (only shown when multiple environments exist)
+  const envFilter = envList.length > 1 ? `<div class="deploy-env-filter">
+    <button class="deploy-env-btn ${!state.selectedDeployEnv ? 'active' : ''}" data-action="switch-deploy-env" data-env="">すべて</button>
+    ${envList.map(e => `<button class="deploy-env-btn ${state.selectedDeployEnv === e ? 'active' : ''}" data-action="switch-deploy-env" data-env="${esc(e)}">${esc(e)}</button>`).join('')}
+  </div>` : '';
+
+  let html = `<section class="retro-section fade-in"><div>${subtabs}${envFilter}`;
 
   // Render purely chronologically; insert release header before the first deploy in that release
   const shownReleases = new Set();
@@ -2925,6 +2944,10 @@ async function handleAction(e) {
     case 'unarchive-project': await archiveProject(false); break;
     case 'switch-releases-tab':
       state.releasesSubTab = el.dataset.subtab;
+      render();
+      break;
+    case 'switch-deploy-env':
+      state.selectedDeployEnv = el.dataset.env || null;
       render();
       break;
     case 'expand-push': {
