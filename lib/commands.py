@@ -83,6 +83,8 @@ This project uses [Beacon](https://github.com/r-kida2/beacon) for milestone-driv
   ユーザーが複数MSの並列実装を求めた場合（「パラレル」「サブエージェント」「並列」等）、必ず `/beacon-dispatch` Skill を実行する。Agent toolを直接呼ばない。
 - When the user asks to review a PR ("レビューして", "review this PR", etc.), or when `beacon trigger check` shows a PR review trigger, immediately invoke `/review`. Never call `beacon pr approve/reject` directly without running `/review` first.
   ユーザーがPRのレビューを依頼したとき、またはbeacon triggerにPRレビュー通知があるとき、必ず `/review` Skillを使う。`/review` を経ずに `beacon pr approve/reject` を直接呼ばない。
+- When the user says "memo this", "remember this", "メモして", "覚えておいて", or when you find context that must survive compaction, use `/beacon-note` Skill (or `beacon note "text"`). Notes are cleared at session-end.
+  ユーザーが「メモして」「覚えておいて」と言ったとき、またはコンパクション後に必要なコンテキストを見つけたときは `/beacon-note` Skill を使う。セッション終了時にクリアされる。
 
 ### Proactive Guidance / 自発的な提案
 
@@ -114,6 +116,9 @@ Proposals should feel like "What if we tried X?" — not directives.
 | `beacon task done <id>` | Complete task / タスク完了 |
 | `beacon log "summary"` | Record commit (auto via hook) / コミット記録（hook経由で自動） |
 | `beacon summary "text"` | Update summary / サマリー更新 |
+| `beacon note "text"` | Add session note (ephemeral, cleared at session-end) / セッションメモ追加 |
+| `beacon note list` | Show session notes / メモ一覧 |
+| `beacon note clear` | Clear all session notes / メモ全削除 |
 """
 
 

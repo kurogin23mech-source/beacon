@@ -863,6 +863,28 @@ def admin_check(user: dict = Depends(require_auth)):
 # Retro
 # ---------------------------------------------------------------------------
 
+@app.get("/api/projects/{project_id}/notes")
+def list_notes(project_id: str, user: dict = Depends(require_auth)):
+    """List session notes from local .beacon/session_notes.jsonl (local mode only)."""
+    _load(project_id, user)  # auth check
+    notes_path = os.path.join(".beacon", "session_notes.jsonl")
+    if not os.path.exists(notes_path):
+        return []
+    notes = []
+    try:
+        with open(notes_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        notes.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+    except IOError:
+        pass
+    return notes
+
+
 @app.get("/api/projects/{project_id}/retros")
 def list_retros(project_id: str, user: dict = Depends(require_auth)):
     """List all retrospective documents for a project."""

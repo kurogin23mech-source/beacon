@@ -246,6 +246,10 @@ body::after {
 .op-incident-id { font-family: var(--font-mono); font-size: 0.7rem; color: var(--text-dim); }
 .op-incident-title { flex: 1; color: var(--text); }
 .op-incident-date { font-size: 0.7rem; color: var(--text-dim); }
+.note-row { display: flex; align-items: baseline; gap: 8px; font-size: 0.82rem; padding: 5px 0; border-bottom: 1px solid var(--border-subtle); }
+.note-time { font-family: var(--font-mono); font-size: 0.7rem; color: var(--text-dim); min-width: 36px; }
+.note-ctx { font-size: 0.7rem; color: var(--accent); font-family: var(--font-mono); }
+.note-text { flex: 1; color: var(--text); }
 .deploy-expand-arrow { font-size: 0.6rem; color: var(--text-dim); }
 .deploy-desc { font-size: 0.78rem; color: var(--text-secondary); margin: 4px 0 4px 18px; line-height: 1.4; }
 .deploy-ms-badges { margin: 4px 0 0 18px; display: flex; flex-wrap: wrap; gap: 4px; }
@@ -1458,7 +1462,8 @@ let state = {
   lastUpdate: null,
   connected: false,
   error: null,
-  activeTab: 'dashboard', // 'dashboard' | 'documents' | 'releases' | 'operations'
+  activeTab: 'dashboard', // 'dashboard' | 'documents' | 'releases' | 'operations' | 'notes'
+  sessionNotes: [],
   showGraph: false,
   graphFilterDeps: true,
   retros: [],
@@ -1840,6 +1845,7 @@ function render() {
       <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
       <button class="tab-btn ${state.activeTab === 'releases' ? 'active' : ''}" data-action="switch-tab" data-tab="releases">Releases</button>
       <button class="tab-btn ${state.activeTab === 'operations' ? 'active' : ''}" data-action="switch-tab" data-tab="operations">Operations</button>
+      <button class="tab-btn ${state.activeTab === 'notes' ? 'active' : ''}" data-action="switch-tab" data-tab="notes">Notes</button>
     </div>
 
     ${state.activeTab === 'dashboard' ? (state.showGraph ? renderGraphSection() : `
@@ -1874,6 +1880,7 @@ function render() {
 
     ${state.activeTab === 'releases' ? renderReleasesSection() : ''}
     ${state.activeTab === 'operations' ? renderOperationsSection() : ''}
+    ${state.activeTab === 'notes' ? renderNotesSection() : ''}
 
     <footer class="footer fade-in stagger-4">
       <div class="footer-left">
@@ -2002,6 +2009,9 @@ async function switchTab(tab) {
     if (state.retros.length === 0)
       loads.push(api(`/api/projects/${state.projectId}/retros`).then(r => { state.retros = r; }).catch(() => {}));
     await Promise.all(loads);
+  }
+  if (tab === 'notes') {
+    api(`/api/projects/${state.projectId}/notes`).then(r => { state.sessionNotes = r; render(); }).catch(() => {});
   }
   render();
 }
@@ -2520,6 +2530,29 @@ function renderOperationsSection() {
       <summary style="font-size:0.75rem;color:var(--text-dim);cursor:pointer;">Closed Operations (${closedOps.length})</summary>
       <div style="margin-top:8px;opacity:0.6;">${closedOps.map(renderOp).join('')}</div>
     </details>` : ''}
+  </section>`;
+}
+
+
+function renderNotesSection() {
+  const notes = state.sessionNotes || [];
+  const noteRows = notes.map(n => {
+    const time = (n.ts || '').slice(11, 16);
+    const ctx = n.context ? `<span class="note-ctx">[${esc(n.context)}]</span> ` : '';
+    return `<div class="note-row"><span class="note-time">${time}</span>${ctx}<span class="note-text">${esc(n.text || '')}</span></div>`;
+  }).join('');
+
+  return `<section class="retro-section fade-in">
+    <div class="op-section-label" style="margin-bottom:10px;">
+      セッションメモ（ephemeral — セッション終了時にクリア）
+    </div>
+    ${notes.length === 0
+      ? `<div class="op-empty" style="padding:16px 0;">
+          メモなし。<br>
+          <span style="font-size:0.72rem;color:var(--text-dim);">Claude Codeで「メモして」と言うか、<code>beacon note "text"</code> で追加できます。</span>
+        </div>`
+      : noteRows}
+    ${notes.length > 0 ? `<div style="margin-top:12px;font-size:0.7rem;color:var(--text-dim);">${notes.length}件 · beacon note clear でクリア</div>` : ''}
   </section>`;
 }
 

@@ -8,6 +8,7 @@ This is the Beacon tool itself. For using Beacon in your own project, run `beaco
 - **After commit**: Use `/beacon-log` Skill to record progress
 - **Task operations**: Use `/beacon-task` Skill
 - **Session end**: Use `/beacon-session-end` Skill
+- **Session notes**: Use `/beacon-note` Skill (or `beacon note "text"`) to jot down ephemeral memos that survive compaction. Cleared at session end.
 
 ## Development Rules (not covered by Skills)
 
