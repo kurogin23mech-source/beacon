@@ -93,13 +93,18 @@ beacon doc show <doc_id>
 
 stdout にドキュメント本文（Markdown）が返る。frontmatter（`---` で囲まれた部分）は除去して本文のみ使う。
 
-## Step 1f: アクティブMSに紐づくSPECドキュメント取得
+## Step 1f: アクティブMSおよびアクティブOperationのSPECドキュメント取得
 
-Step 1a の結果から `status == "in_progress"` のマイルストーンIDを特定する。
-あれば **Bash ツール** で実行:
+Step 1a の結果から `status == "in_progress"` のマイルストーンIDと、`operations[]` のうち `status == "open"` のOperation IDを特定する。
+
+あれば **Bash ツール** で **並列に** 実行:
 
 ```bash
+# アクティブMSのSPEC
 beacon doc list --scope spec --ms <active-ms-id> --json
+
+# アクティブOperationのSPEC（各op-idに対して）
+beacon doc list --scope spec --op <op-id> --json
 ```
 
 結果が空でなければ、各ドキュメントの内容を Step 1e と同様に `beacon doc show <doc_id>` で **並列に** 取得する。
@@ -381,9 +386,15 @@ Beacon: [name]
   [CORE] [title]: [本文（短ければ全文、長ければ要約）]
   ...
   [SPEC] [title] (ms-xx): [要約]
+  [SPEC] [title] (op-x): [要約]
   ...
 
 前回の経緯: [summary]
+
+Active Operation: [op-id] "[title]" [schedule.frequency]  ← openのOperationがある場合
+  直近のrun: [date] [✓ok/⚠warning/✗error] / [date] ... （最新3件）
+  未解決Incident: [N]件                                    ← あれば
+    - [e-id] [title]
 
 Active: [ms-id] [title] ([progress]%) [done_tasks]/[total_tasks]タスク完了
   未消化タスク:

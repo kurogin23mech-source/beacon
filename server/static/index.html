@@ -228,6 +228,24 @@ body::after {
 .deploy-env-filter { display: flex; gap: 4px; margin: 6px 0 10px; flex-wrap: wrap; }
 .deploy-env-btn { font-size: 0.7rem; padding: 2px 8px; border-radius: 3px; border: 1px solid var(--border-subtle); background: var(--bg-raised); color: var(--text-dim); cursor: pointer; }
 .deploy-env-btn.active { background: var(--accent-muted); color: var(--accent); border-color: var(--accent); }
+.op-card { background: var(--bg-raised); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 12px 16px; margin-bottom: 14px; }
+.op-header { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.op-id { font-size: 0.7rem; color: var(--accent); font-family: var(--font-mono); }
+.op-title { font-size: 0.88rem; color: var(--text); font-weight: 600; flex: 1; }
+.op-badge { font-size: 0.65rem; padding: 1px 6px; border-radius: 3px; background: var(--bg-mid); color: var(--text-dim); }
+.op-source { font-size: 0.7rem; color: var(--text-dim); font-family: var(--font-mono); }
+.op-incident-count { font-size: 0.72rem; color: var(--warn,#f0b429); margin-left: auto; }
+.op-section-label { font-size: 0.65rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 6px; margin-top: 8px; }
+.op-run-row { display: flex; align-items: baseline; gap: 8px; font-size: 0.78rem; padding: 2px 0; }
+.op-run-date { color: var(--text-dim); font-family: var(--font-mono); font-size: 0.72rem; min-width: 72px; }
+.op-run-batch { color: var(--text-dim); font-family: var(--font-mono); font-size: 0.72rem; }
+.op-run-desc { color: var(--text); flex: 1; }
+.op-empty { font-size: 0.75rem; color: var(--text-dim); font-style: italic; }
+.op-incident { display: flex; align-items: baseline; gap: 6px; font-size: 0.78rem; padding: 3px 0; }
+.op-incident-icon { font-size: 0.8rem; }
+.op-incident-id { font-family: var(--font-mono); font-size: 0.7rem; color: var(--text-dim); }
+.op-incident-title { flex: 1; color: var(--text); }
+.op-incident-date { font-size: 0.7rem; color: var(--text-dim); }
 .deploy-expand-arrow { font-size: 0.6rem; color: var(--text-dim); }
 .deploy-desc { font-size: 0.78rem; color: var(--text-secondary); margin: 4px 0 4px 18px; line-height: 1.4; }
 .deploy-ms-badges { margin: 4px 0 0 18px; display: flex; flex-wrap: wrap; gap: 4px; }
@@ -1440,7 +1458,7 @@ let state = {
   lastUpdate: null,
   connected: false,
   error: null,
-  activeTab: 'dashboard', // 'dashboard' | 'documents' | 'releases'
+  activeTab: 'dashboard', // 'dashboard' | 'documents' | 'releases' | 'operations'
   showGraph: false,
   graphFilterDeps: true,
   retros: [],
@@ -1821,6 +1839,7 @@ function render() {
       <button class="tab-btn ${state.activeTab === 'dashboard' ? 'active' : ''}" data-action="switch-tab" data-tab="dashboard">Milestones</button>
       <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
       <button class="tab-btn ${state.activeTab === 'releases' ? 'active' : ''}" data-action="switch-tab" data-tab="releases">Releases</button>
+      ${(p.operations||[]).some(o=>o.status==='open') ? `<button class="tab-btn ${state.activeTab === 'operations' ? 'active' : ''}" data-action="switch-tab" data-tab="operations">Operations</button>` : ''}
     </div>
 
     ${state.activeTab === 'dashboard' ? (state.showGraph ? renderGraphSection() : `
@@ -1854,6 +1873,7 @@ function render() {
     ${state.activeTab === 'documents' ? renderDocumentsSection() : ''}
 
     ${state.activeTab === 'releases' ? renderReleasesSection() : ''}
+    ${state.activeTab === 'operations' ? renderOperationsSection() : ''}
 
     <footer class="footer fade-in stagger-4">
       <div class="footer-left">
@@ -2429,6 +2449,79 @@ function renderCodeReleasesTab(p) {
   }).join('');
 }
 
+
+
+function renderOperationsSection() {
+  const p = state.project;
+  const ops = (p.operations || []).filter(o => o.status === 'open');
+  const closedOps = (p.operations || []).filter(o => o.status === 'closed');
+
+  const runIcon = s => s === 'ok' ? '✓' : s === 'warning' ? '⚠' : s === 'error' ? '✗' : '?';
+  const runColor = s => s === 'ok' ? 'var(--green)' : s === 'warning' ? 'var(--warn,#f0b429)' : s === 'error' ? 'var(--red,#e55)' : 'var(--text-dim)';
+
+  const renderOp = (op) => {
+    const entries = op.entries || [];
+    const runs = entries.filter(e => e.type === 'run_record').slice(-5).reverse();
+    const incidents = entries.filter(e => e.type === 'incident' && e.status === 'open');
+    const resolvedIncidents = entries.filter(e => e.type === 'incident' && e.status === 'resolved');
+
+    const runsHtml = runs.length ? runs.map(r => `
+      <div class="op-run-row">
+        <span style="color:${runColor(r.status)};font-size:0.85em;">${runIcon(r.status)}</span>
+        <span class="op-run-date">${(r.date||'').slice(0,10)}</span>
+        <span class="op-run-batch">${esc(r.batch||'')}</span>
+        <span class="op-run-desc">${esc(r.description||'')}</span>
+      </div>`).join('') : '<div class="op-empty">まだ記録なし</div>';
+
+    const incidentsHtml = incidents.map(i => `
+      <div class="op-incident open">
+        <span class="op-incident-icon">⚠</span>
+        <span class="op-incident-id">[${esc(i.id)}]</span>
+        <span class="op-incident-title">${esc(i.title||'')}</span>
+        <span class="op-incident-date">${(i.opened_at||'').slice(0,10)}</span>
+      </div>`).join('');
+
+    const resolvedHtml = resolvedIncidents.slice(-3).map(i => `
+      <div class="op-incident resolved">
+        <span class="op-incident-icon" style="color:var(--text-dim)">✓</span>
+        <span class="op-incident-id">[${esc(i.id)}]</span>
+        <span class="op-incident-title" style="color:var(--text-dim)">${esc(i.title||'')}</span>
+        <span class="op-incident-date">${(i.resolved_at||'').slice(0,10)}</span>
+      </div>`).join('');
+
+    return `
+    <div class="op-card">
+      <div class="op-header">
+        <span class="op-id">${esc(op.id)}</span>
+        <span class="op-title">${esc(op.title||'')}</span>
+        <span class="op-badge">${esc((op.schedule||{}).frequency||'')}</span>
+        <span class="op-source">${esc(op.log_source||'')}</span>
+        ${incidents.length ? `<span class="op-incident-count">⚠ ${incidents.length}件</span>` : ''}
+      </div>
+      <div class="op-runs">
+        <div class="op-section-label">Run Records</div>
+        ${runsHtml}
+      </div>
+      ${incidents.length || resolvedIncidents.length ? `
+      <div class="op-incidents">
+        <div class="op-section-label">Incidents</div>
+        ${incidentsHtml}${resolvedHtml}
+      </div>` : ''}
+    </div>`;
+  };
+
+  return `<section class="retro-section fade-in">
+    <div style="margin-bottom:12px;font-size:0.78rem;color:var(--text-dim);">
+      ${ops.length} open operation${ops.length !== 1 ? 's' : ''}${closedOps.length ? ` · ${closedOps.length} closed` : ''}
+    </div>
+    ${ops.map(renderOp).join('')}
+    ${closedOps.length ? `
+    <details style="margin-top:16px;">
+      <summary style="font-size:0.75rem;color:var(--text-dim);cursor:pointer;">Closed Operations (${closedOps.length})</summary>
+      <div style="margin-top:8px;opacity:0.6;">${closedOps.map(renderOp).join('')}</div>
+    </details>` : ''}
+  </section>`;
+}
 
 
 function renderGraphSection() {

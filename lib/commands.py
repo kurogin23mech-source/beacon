@@ -415,6 +415,7 @@ def cmd_milestone_list():
             "name": data.get("name", ""),
             "summary": data.get("summary", ""),
             "milestones": [],
+            "operations": [],
         }
         for ms in milestones:
             entries = ms.get("entries", [])
@@ -427,6 +428,26 @@ def cmd_milestone_list():
                 "target_date": ms.get("target_date", ""),
                 "total_tasks": total_tasks,
                 "done_tasks": done_tasks,
+            })
+        import datetime as _dt
+        today_str = _dt.date.today().isoformat()
+        for op in data.get("operations", []):
+            if op.get("status") != "open":
+                continue
+            entries = op.get("entries", [])
+            runs = [e for e in entries if e.get("type") == "run_record"]
+            open_incidents = [e for e in entries if e.get("type") == "incident" and e.get("status") == "open"]
+            recent_runs = []
+            for r in runs[-3:]:
+                recent_runs.append({"date": r.get("date", "")[:10], "status": r.get("status", "")})
+            output["operations"].append({
+                "id": op["id"],
+                "title": op.get("title", ""),
+                "status": op.get("status", "open"),
+                "log_source": op.get("log_source", ""),
+                "schedule": op.get("schedule", {}),
+                "recent_runs": recent_runs,
+                "open_incidents": open_incidents,
             })
         print(json.dumps(output, ensure_ascii=False))
         return
@@ -1416,10 +1437,24 @@ def _auto_fire_operation_triggers():
         if os.path.exists(trigger_path):
             continue
         log_source = op.get("log_source", op_id)
+        # Find linked SPEC doc for this operation
+        spec_ref = ""
+        try:
+            docs_dir = _get_docs_dir()
+            if os.path.isdir(docs_dir):
+                for fname in sorted(os.listdir(docs_dir)):
+                    if not fname.endswith(".md"):
+                        continue
+                    doc = _read_local_doc(os.path.join(docs_dir, fname))
+                    if doc.get("operation") == op_id and doc.get("scope") == "spec":
+                        spec_ref = f" (doc: {doc['doc_id']} 参照)"
+                        break
+        except Exception:
+            pass
         os.makedirs(triggers_dir, exist_ok=True)
         trigger_data = {
             "name": trigger_name,
-            "message": f"{op_id} ({log_source}) のバッチ確認が必要です。/beacon-operation-review で記録してください。",
+            "message": f"{op_id} ({log_source}) のバッチ確認が必要です{spec_ref}。/beacon-operation-review で記録してください。",
             "created_at": today_str,
         }
         with open(trigger_path, "w") as f:
@@ -1538,14 +1573,18 @@ def _parse_frontmatter(text):
     return meta, body
 
 
-def _add_frontmatter(content, scope, milestone=""):
-    """Prepend frontmatter to content, or update existing scope/milestone."""
+def _add_frontmatter(content, scope, milestone="", operation=""):
+    """Prepend frontmatter to content, or update existing scope/milestone/operation."""
     meta, body = _parse_frontmatter(content)
     meta["scope"] = scope
     if milestone:
         meta["milestone"] = milestone
     elif "milestone" not in meta:
-        pass  # keep existing or absent
+        pass
+    if operation:
+        meta["operation"] = operation
+    elif "operation" not in meta:
+        pass
     lines = ["---"]
     for k, v in meta.items():
         lines.append(f"{k}: {v}")
@@ -1573,6 +1612,7 @@ def _read_local_doc(fpath):
     title = first_line.lstrip("# ") if first_line.startswith("#") else fname[:-3]
     stat = os.stat(fpath)
     updated = datetime.datetime.fromtimestamp(stat.st_mtime).isoformat()
+    operation = meta.get("operation", "")
     result = {
         "doc_id": fname[:-3],
         "title": title,
@@ -1582,6 +1622,8 @@ def _read_local_doc(fpath):
     }
     if milestone:
         result["milestone"] = milestone
+    if operation:
+        result["operation"] = operation
     return result
 
 
@@ -1589,6 +1631,7 @@ def cmd_doc_list():
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     scope_filter = os.environ.get("BEACON_SCOPE", "")
     ms_filter = os.environ.get("BEACON_MS", "")
+    op_filter = os.environ.get("BEACON_OP", "")
 
     if _is_cloud_mode():
         client, config = _get_api_client()
@@ -1609,12 +1652,16 @@ def cmd_doc_list():
                 }
                 if doc.get("milestone"):
                     entry["milestone"] = doc["milestone"]
+                if doc.get("operation"):
+                    entry["operation"] = doc["operation"]
                 docs.append(entry)
 
     if scope_filter:
         docs = [d for d in docs if d.get("scope") == scope_filter]
     if ms_filter:
         docs = [d for d in docs if d.get("milestone") == ms_filter]
+    if op_filter:
+        docs = [d for d in docs if d.get("operation") == op_filter]
 
     if json_mode:
         print(json.dumps(docs, ensure_ascii=False))
@@ -1659,6 +1706,7 @@ def cmd_doc_add():
     doc_id = os.environ.get("BEACON_DOC_ID", "")
     scope = os.environ.get("BEACON_SCOPE", DEFAULT_SCOPE)
     milestone = os.environ.get("BEACON_MS", "")
+    operation = os.environ.get("BEACON_OP", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not title:
@@ -1692,8 +1740,8 @@ def cmd_doc_add():
         except Exception:
             pass
 
-    # Add frontmatter with scope and milestone
-    content = _add_frontmatter(content, scope, milestone or "")
+    # Add frontmatter with scope, milestone, and operation
+    content = _add_frontmatter(content, scope, milestone or "", operation or "")
 
     if _is_cloud_mode():
         client, config = _get_api_client()
@@ -1714,11 +1762,27 @@ def cmd_doc_add():
     import datetime
     data = load_project()
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    # core docs: skip MS entry recording (they're project-wide, not MS-specific)
+    # core docs: skip MS/Op entry recording (they're project-wide)
     if scope != "core":
-        core.save_entry(data, ms_id=milestone, description=f"doc add: {title} ({scope})",
-                        source="auto", date=today, revision_id=doc_id,
-                        url=None, hash=None, progress=None)
+        if operation:
+            # Record in operation entries
+            for op in data.get("operations", []):
+                if op.get("id") == operation:
+                    eid = core.next_entry_id(data)
+                    op.setdefault("entries", []).append({
+                        "id": eid,
+                        "type": "save",
+                        "description": f"doc add: {title} ({scope})",
+                        "status": "done",
+                        "created_at": today,
+                        "done_at": today,
+                        "meta": {"revision_id": doc_id, "source": "auto"},
+                    })
+                    break
+        else:
+            core.save_entry(data, ms_id=milestone, description=f"doc add: {title} ({scope})",
+                            source="auto", date=today, revision_id=doc_id,
+                            url=None, hash=None, progress=None)
         save_project(data)
 
     if json_mode:
@@ -1755,6 +1819,7 @@ def cmd_doc_update():
             sys.exit(1)
         existing = _read_local_doc(fpath)
 
+    operation = os.environ.get("BEACON_OP", "")
     # Use existing values as defaults
     if not title:
         title = existing.get("title", "")
@@ -1762,11 +1827,13 @@ def cmd_doc_update():
         scope = existing.get("scope", DEFAULT_SCOPE)
     if not milestone:
         milestone = existing.get("milestone", "")
+    if not operation:
+        operation = existing.get("operation", "")
     if not content:
         content = existing.get("content", "")
 
     # Rebuild with frontmatter
-    content = _add_frontmatter(content, scope, milestone)
+    content = _add_frontmatter(content, scope, milestone, operation)
 
     if _is_cloud_mode():
         client.update_document(config["project_id"], doc_id, title, content)
