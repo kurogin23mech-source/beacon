@@ -55,6 +55,17 @@ Documents:
   beacon doc update <doc-id>                       Update a document
   beacon doc delete <doc-id>                       Delete a document
 
+Operations:
+  beacon operation open "<title>" [--schedule daily|weekdays|weekly] [--log-source <name>]
+  beacon operation close <op-id>
+  beacon operation list [--json]
+  beacon operation show <op-id> [--json]
+  beacon run record -o <op-id> --batch <name> --status ok|warning|error --desc "..."
+  beacon run list -o <op-id> [--json]
+  beacon incident open "<title>" -o <op-id> [--desc "..."]
+  beacon incident close <id> --resolution "..."
+  beacon incident escalate <id> -m <ms-id>
+
 Releases & Deploys:
   beacon deploy record [--revision <rev>] [--semver <v>] [--desc <text>]
   beacon deploy list
