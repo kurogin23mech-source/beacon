@@ -236,16 +236,28 @@ Use `/review` Claude Code Skill instead of `beacon pr review` for AI-assisted co
 
 The `/beacon-push` Skill wraps push recording with AI-generated value descriptions, triggered automatically by the PostToolUse hook after each `git push`.
 
+### GitHub Issues
+
+| Command | Description |
+|---------|-------------|
+| `beacon issue import <number> [-m ms-id]` | Import a GitHub Issue as a beacon task / IssueをBeaconタスクとして取り込み |
+| `beacon issue sync [-m ms-id]` | Bulk import all open Issues not yet imported / 未インポートIssueを一括取り込み |
+| `beacon issue list [--json]` | List open Issues not yet imported / 未インポートIssue一覧 |
+
+Requires `gh` CLI authenticated. When a task linked to an Issue is marked done, beacon suggests closing the Issue via `gh issue close`.
+
 ### Documents
 
 | Command | Description |
 |---------|-------------|
-| `beacon doc add "title" [--scope core\|spec\|memo] [--content text]` | Add document / ドキュメント追加 |
-| `beacon doc list [--scope scope] [--json]` | List documents / 一覧 |
+| `beacon doc add "title" [--scope core\|spec\|memo] [--ms ms-id] [--op op-id] [--content text]` | Add document / ドキュメント追加 |
+| `beacon doc list [--scope scope] [--ms ms-id] [--op op-id] [--json]` | List documents / 一覧 |
 | `beacon doc show <doc-id>` | Show document / 内容表示 |
 | `beacon doc update <doc-id> --content "text"` | Update document / 更新 |
 
 Scopes: `core` (design principles / 設計原則), `spec` (technical specs / 仕様), `memo` (notes / メモ)
+
+Use `--ms <ms-id>` to associate a document with a milestone, or `--op <op-id>` to associate with an Operation (e.g. log fetch instructions for `/beacon-operation-review`).
 
 ### Save (Non-commit actions)
 
@@ -267,6 +279,36 @@ Sources: `manual` (default, AI self-report), `google_docs`, `notion`, `jupyter`,
 | `beacon summary [text] [--json]` | View/update project summary / サマリー更新 |
 | `beacon sync` | Auto-sync recent commits / 直近コミットを同期 |
 | `beacon search <query> [-m ms-id] [--json]` | Full-text search across milestones, tasks, commits, PRs, and saves / 全文検索 |
+
+### Operations
+
+Operations track recurring operational workloads (daily batch jobs, incident management) — the "maintenance" layer alongside development Milestones.
+
+| Command | Description |
+|---------|-------------|
+| `beacon operation open "title" [--schedule daily\|weekdays\|weekly] [--log-source name]` | Start a new Operation cycle / 新しいOperationを開始 |
+| `beacon operation close <op-id>` | Close an Operation cycle / クローズ |
+| `beacon operation list [--json]` | List Operations / 一覧 |
+| `beacon operation show <op-id> [--json]` | Show Operation with entries / 詳細表示 |
+| `beacon run record -o <op-id> --batch <name> --status ok\|warning\|error --desc "..."` | Record a batch run result / バッチ実行結果を記録 |
+| `beacon run list -o <op-id> [--json]` | List run records / 実行記録一覧 |
+| `beacon incident open "title" -o <op-id> [--desc "..."]` | Open an incident / インシデント起票 |
+| `beacon incident close <id> --resolution "..."` | Resolve an incident / インシデント解決 |
+| `beacon incident escalate <id> -m <ms-id>` | Escalate incident to a Milestone task / Milestoneタスクに昇格 |
+
+The `/beacon-operation-setup` Skill walks through setup conversationally and auto-generates a SPEC document (log fetch instructions). The `/beacon-operation-review` Skill reads that SPEC, fetches logs, interprets them, and records the result — triggered automatically by `operation_check_<op-id>` triggers at session start.
+
+### Session Notes
+
+Ephemeral memos that survive context compaction within a session — cleared at session end.
+
+| Command | Description |
+|---------|-------------|
+| `beacon note "text" [--context "label"]` | Add a session note / セッションメモ追加 |
+| `beacon note list [--json]` | Show session notes / メモ一覧 |
+| `beacon note clear` | Clear all session notes / 全削除 |
+
+Say "メモして" or "remember this" and Claude will call `/beacon-note` automatically. At session end, `/beacon-session-end` prompts to promote important notes to permanent Documents before clearing.
 
 ### Retrospectives
 
@@ -315,6 +357,9 @@ Beacon ships with [Claude Code Skills](https://docs.anthropic.com/en/docs/claude
 | `beacon-retro` | Generate and discuss weekly retrospective / 週次振り返りドキュメント生成 |
 | `beacon-dispatch` | Identify executable milestones and launch parallel sub-agents / 並列サブエージェント起動 |
 | `beacon-init` | Conversational project initialization with Project Archaeology / 会話形式プロジェクト初期化 |
+| `beacon-note` | Record an ephemeral session memo (auto-triggered by "メモして") / セッションメモ記録 |
+| `beacon-operation-setup` | Conversational Operation setup with auto-generated SPEC doc / 会話形式でOperation作成+SPEC自動生成 |
+| `beacon-operation-review` | Fetch logs per SPEC, interpret, and record run result / SPECに従いログ取得→解釈→run record記録 |
 
 ### Two-phase workflow
 
