@@ -104,12 +104,14 @@ Claude Code 内からステータスを確認したい場合は `! beacon status
 
 | コマンド | 説明 | --json |
 |---------|------|--------|
-| `beacon doc add "タイトル" [--scope scope] [--id slug] [--content text]` | ドキュメントを追加 | 対応済 |
-| `beacon doc list [--scope scope]` | ドキュメント一覧 | 対応済 |
+| `beacon doc add "タイトル" [--scope scope] [--ms ms-id] [--op op-id] [--id slug] [--content text]` | ドキュメントを追加 | 対応済 |
+| `beacon doc list [--scope scope] [--ms ms-id] [--op op-id]` | ドキュメント一覧 | 対応済 |
 | `beacon doc show <doc-id>` | ドキュメント内容表示 | 対応済 |
 | `beacon doc update <doc-id> --content "text"` | ドキュメント内容更新 | 対応済 |
 
 ドキュメントスコープ: `core`（設計原則・常時参照）, `spec`（仕様・技術詳細）, `memo`（検討メモ・揮発してもよい情報）
+
+`--ms <ms-id>` でマイルストーンに、`--op <op-id>` でOperationに紐づけ可能（Operation固有のログ取得手順SPECドキュメントに使用）。
 
 stdinからコンテンツを渡す場合: `echo 'content' | beacon doc add "タイトル" --scope spec --stdin`
 
@@ -171,6 +173,46 @@ AIコードレビューには `beacon pr review` ではなく `/review` Claude C
 | `beacon push list` | push履歴一覧 | 対応済 |
 
 `/beacon-push` Skillがpush後に自動実行され、`--prepare` → AI説明生成 → `--desc "..."` の2ステップでdeployと同品質の価値説明を生成する。
+
+### GitHub Issues
+
+| コマンド | 説明 | --json |
+|---------|------|--------|
+| `beacon issue import <number> [-m ms-id]` | GitHub IssueをBeaconタスクとして取り込み | - |
+| `beacon issue sync [-m ms-id]` | 未インポートのopen Issueを一括取り込み | - |
+| `beacon issue list` | 未インポートのopen Issue一覧 | 対応済 |
+
+`gh` CLI認証が必要。タスク完了時に `gh issue close` の実行提案が表示される。
+
+### Operation（運用サイクル記録）
+
+Milestoneがゴールドリブンなフェーズであるのに対し、Operationは時間で区切る定常監視サイクル（日次バッチ・インシデント管理など）を表す。
+
+| コマンド | 説明 | --json |
+|---------|------|--------|
+| `beacon operation open "タイトル" [--schedule daily\|weekdays\|weekly] [--log-source name]` | 新しいOperationを開始 | - |
+| `beacon operation close <op-id>` | Operationをクローズ | - |
+| `beacon operation list` | Operation一覧 | 対応済 |
+| `beacon operation show <op-id>` | Operation詳細（entries含む） | 対応済 |
+| `beacon run record -o <op-id> --batch <name> --status ok\|warning\|error --desc "..."` | バッチ実行結果を記録 | - |
+| `beacon run list -o <op-id>` | run record一覧 | 対応済 |
+| `beacon incident open "タイトル" -o <op-id> [--desc "..."]` | インシデントを起票 | - |
+| `beacon incident close <id> --resolution "..."` | インシデントを解決 | - |
+| `beacon incident escalate <id> -m <ms-id>` | インシデントをMilestoneタスクに昇格 | - |
+
+scheduleに応じて `operation_check_<op-id>` トリガーがsession-start時に自動発火。`/beacon-operation-setup` でセットアップ、`/beacon-operation-review` でログ取得→解釈→記録のフローが自動実行される。
+
+### セッションメモ（Session Notes）
+
+コンパクション対策のセッション内一時メモ。セッション終了時にDocumentのmemoへ昇格するか、そのまま削除する。
+
+| コマンド | 説明 | --json |
+|---------|------|--------|
+| `beacon note "text" [--context "ラベル"]` | セッションメモを追加 | - |
+| `beacon note list` | メモ一覧 | 対応済 |
+| `beacon note clear` | メモを全削除（.bakに退避） | - |
+
+保存先: `.beacon/session_notes.jsonl`（クラウド非同期・ローカルのみ）
 
 ### 振り返り
 
@@ -439,6 +481,9 @@ beacon の Skill は Claude Code が beacon を操作するためのインター
 | `beacon-retro` | `/beacon-retro`, 週次トリガー | 週次振り返りドキュメント生成・ディスカッション | あり |
 | `beacon-dispatch` | `/beacon-dispatch`, 並列実装依頼 | 実行可能MSを特定し並列サブエージェントを起動 | なし（オーケストレーションのみ） |
 | `beacon-init` | `/beacon-init` | 会話形式でプロジェクト初期化。既存リポジトリはProject Archaeologyでgit logから過去MSを自動推測 | あり |
+| `beacon-note` | `「メモして」`, `/beacon-note` | セッション内一時メモを記録（コンパクション対策） | あり |
+| `beacon-operation-setup` | `/beacon-operation-setup` | 会話形式でOperation作成+ログ取得SPEC doc自動生成 | あり |
+| `beacon-operation-review` | `/beacon-operation-review`, operation_checkトリガー | SPECに従いログ取得→解釈→run record記録 | あり |
 
 ### Skill の制約
 
