@@ -419,6 +419,20 @@ status-icon の対応: done=●, in_progress=◐, todo=○, waiting=◌, observi
 - git log の各コミットハッシュ（先頭7文字）が、Step 1a または Step 2 のエントリの `meta.hash` に存在するか確認
 - 存在しないものを「未記録のコミット」として表示
 
+## Step 3.5: セッションメモの表示
+
+Bash ツールで実行:
+```bash
+beacon note list --json
+```
+
+結果が空でなければ、Step 3 の出力に追加:
+```
+セッションメモ（前回セッションから引き継ぎ）:
+  [HH:MM] [context]: [text]
+  ...
+```
+
 ## Step 4: トリガーチェック
 
 Bash ツールで実行:

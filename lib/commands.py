@@ -955,6 +955,67 @@ def cmd_entry_move():
 
 
 # ---------------------------------------------------------------------------
+# Session Notes (ephemeral, cleared at session-end)
+# ---------------------------------------------------------------------------
+
+def _get_notes_path():
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    return os.path.join(beacon_dir, "session_notes.jsonl")
+
+
+def cmd_note_add():
+    import datetime
+    text = os.environ.get("BEACON_NOTE_TEXT", "")
+    context = os.environ.get("BEACON_NOTE_CONTEXT", "")
+    if not text:
+        print("Error: note text required")
+        sys.exit(1)
+    note = {
+        "ts": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "text": text,
+    }
+    if context:
+        note["context"] = context
+    path = _get_notes_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(note, ensure_ascii=False) + "\n")
+    print(f"Note: {text[:60]}{'...' if len(text) > 60 else ''}")
+
+
+def cmd_note_list():
+    path = _get_notes_path()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    notes = []
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        notes.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+    if json_mode:
+        print(json.dumps(notes, ensure_ascii=False))
+        return
+    if not notes:
+        print("(メモなし)")
+        return
+    for n in notes:
+        ctx = f" [{n['context']}]" if n.get("context") else ""
+        print(f"  {n['ts'][:16]}{ctx}: {n['text']}")
+
+
+def cmd_note_clear():
+    path = _get_notes_path()
+    if os.path.exists(path):
+        import shutil
+        shutil.move(path, path + ".bak")
+    print("Session notes cleared.")
+
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 
@@ -3699,6 +3760,9 @@ if __name__ == "__main__":
         "incident_open": cmd_incident_open,
         "incident_close": cmd_incident_close,
         "incident_escalate": cmd_incident_escalate,
+        "note_add": cmd_note_add,
+        "note_list": cmd_note_list,
+        "note_clear": cmd_note_clear,
         "version": lambda: print(f"beacon {__version__}"),
         "help_json": cmd_help_json,
         "doctor": cmd_doctor,

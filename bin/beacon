@@ -84,6 +84,9 @@ Cloud:
   beacon cloud off              Switch back to local mode
 
 Other:
+  beacon note "<text>" [--context "<label>"]   Add a session note (ephemeral, cleared at session-end)
+  beacon note list                             Show session notes
+  beacon note clear                            Clear all session notes
   beacon trigger fire <name> [msg]  Fire a named trigger
   beacon trigger check              Check pending triggers
   beacon trigger clear <name>       Clear a trigger
@@ -1821,6 +1824,35 @@ case "${1:-}" in
                 echo "Usage: beacon incident open \"<title>\" -o <op-id> [--desc \"...\"]"
                 echo "       beacon incident close <id> --resolution \"...\""
                 echo "       beacon incident escalate <id> -m <ms-id>"
+                ;;
+        esac
+        ;;
+    note)
+        ensure_project
+        case "${2:-}" in
+            list)
+                BEACON_JSON="${3:+1}" python3 "$COMMANDS_PY" note_list
+                ;;
+            clear)
+                python3 "$COMMANDS_PY" note_clear
+                ;;
+            "")
+                echo "Usage: beacon note \"<text>\" [--context \"<label>\"]"
+                echo "       beacon note list [--json]"
+                echo "       beacon note clear"
+                ;;
+            *)
+                shift
+                note_text=""
+                note_context=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --context) note_context="${2:-}"; shift 2 ;;
+                        *) [[ -z "$note_text" ]] && note_text="$1"; shift ;;
+                    esac
+                done
+                BEACON_NOTE_TEXT="$note_text" BEACON_NOTE_CONTEXT="$note_context" \
+                    python3 "$COMMANDS_PY" note_add
                 ;;
         esac
         ;;

@@ -121,6 +121,40 @@ Bash ツールで実行:
 beacon summary "<Step3のテキスト>"
 ```
 
+## Step 4.5: セッションメモのレビューと整理
+
+Bash ツールで実行:
+```bash
+beacon note list --json
+```
+
+メモが存在する場合、ユーザーに提示:
+```
+セッションメモ:
+  [HH:MM] [context]: [text]
+  ...
+
+重要なメモをDocumentのmemoとして残しますか？
+```
+
+### メモの昇格
+
+ユーザーが昇格を承認したメモに対して:
+```bash
+beacon doc add "<メモのtext>" --scope memo --content "<text>"
+```
+
+複数ある場合はそれぞれ実行する。
+
+### メモの削除
+
+昇格の確認後（承認・却下問わず）、Bash ツールで実行:
+```bash
+beacon note clear
+```
+
+メモが存在しない場合はこのステップをスキップする。
+
 ## Step 5: 終了レポート
 
 ユーザーに結果を提示:
@@ -141,3 +175,4 @@ Active: [ms-id] [title] ([progress]%)
 - データ取得は Bash ツール経由の beacon CLI のみ。project.json を直接読まない。
 - サマリーの書き込みは `beacon summary` コマンド経由のみ。
 - 未コミット変更がある場合、勝手にコミットしない。ユーザーに判断を委ねる。
+- `beacon note clear` はメモのレビュー後にのみ実行する。スキップしない。
