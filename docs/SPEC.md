@@ -104,12 +104,14 @@ To check status from within Claude Code, use `! beacon status`.
 
 | Command | Description | --json |
 |---------|-------------|--------|
-| `beacon doc add "title" [--scope scope] [--id slug] [--content text]` | Add a document | Yes |
-| `beacon doc list [--scope scope]` | List documents | Yes |
+| `beacon doc add "title" [--scope scope] [--ms ms-id] [--op op-id] [--id slug] [--content text]` | Add a document | Yes |
+| `beacon doc list [--scope scope] [--ms ms-id] [--op op-id]` | List documents | Yes |
 | `beacon doc show <doc-id>` | Show document content | Yes |
 | `beacon doc update <doc-id> --content "text"` | Update document content | Yes |
 
 Document scopes: `core` (design principles, always loaded at session start), `spec` (technical specifications), `memo` (investigation notes, volatile).
+
+Use `--ms <ms-id>` to associate a document with a milestone, or `--op <op-id>` to associate with an Operation (e.g. log fetch instructions for `/beacon-operation-review`).
 
 Content can be piped via stdin: `echo 'content' | beacon doc add "title" --scope spec --stdin`
 
@@ -171,6 +173,46 @@ Use `/review` Claude Code Skill (not `beacon pr review`) for AI-assisted code re
 | `beacon push list` | List push history | Yes |
 
 The `/beacon-push` Skill wraps `beacon push record --prepare` → AI description generation → `beacon push record --desc "..."` for value-based descriptions (same pattern as deploy).
+
+### GitHub Issues
+
+| Command | Description | --json |
+|---------|-------------|--------|
+| `beacon issue import <number> [-m ms-id]` | Import a GitHub Issue as a beacon task | - |
+| `beacon issue sync [-m ms-id]` | Bulk import all open Issues not yet imported | - |
+| `beacon issue list` | List open Issues not yet imported | Yes |
+
+Requires `gh` CLI authenticated. When a linked task is marked done, beacon suggests `gh issue close`.
+
+### Operations
+
+Operations track recurring operational workloads (daily batches, incident management) — the maintenance layer alongside development Milestones.
+
+| Command | Description | --json |
+|---------|-------------|--------|
+| `beacon operation open "title" [--schedule daily\|weekdays\|weekly] [--log-source name]` | Start a new Operation cycle | - |
+| `beacon operation close <op-id>` | Close an Operation cycle | - |
+| `beacon operation list` | List Operations | Yes |
+| `beacon operation show <op-id>` | Show Operation with entries | Yes |
+| `beacon run record -o <op-id> --batch <name> --status ok\|warning\|error --desc "..."` | Record a batch run result | - |
+| `beacon run list -o <op-id>` | List run records | Yes |
+| `beacon incident open "title" -o <op-id> [--desc "..."]` | Open an incident | - |
+| `beacon incident close <id> --resolution "..."` | Resolve an incident | - |
+| `beacon incident escalate <id> -m <ms-id>` | Escalate incident to a Milestone task | - |
+
+The `/beacon-operation-setup` Skill handles conversational setup and auto-generates a SPEC document for log fetch instructions. The `/beacon-operation-review` Skill fetches logs per SPEC, interprets them, and records the result — triggered by `operation_check_<op-id>` at session start.
+
+### Session Notes
+
+Ephemeral memos that survive context compaction within a session — cleared at session end.
+
+| Command | Description | --json |
+|---------|-------------|--------|
+| `beacon note "text" [--context "label"]` | Add a session note | - |
+| `beacon note list` | Show session notes | Yes |
+| `beacon note clear` | Clear all session notes (moved to .bak) | - |
+
+Storage: `.beacon/session_notes.jsonl` (local only, not cloud-synced). Say "remember this" and Claude calls `/beacon-note` automatically. At session end, `/beacon-session-end` prompts to promote important notes to Documents before clearing.
 
 ### Retrospectives
 
@@ -439,6 +481,9 @@ This structurally eliminates the problem of AI ignoring CLAUDE.md prompt instruc
 | `beacon-retro` | `/beacon-retro`, weekly trigger | Generate and discuss weekly retrospective | Yes |
 | `beacon-dispatch` | `/beacon-dispatch`, user requests parallel work | Identify executable milestones, launch parallel sub-agents | No (orchestration only) |
 | `beacon-init` | `/beacon-init` | Conversational project init; proposes MS via Project Archaeology for existing repos | Yes |
+| `beacon-note` | "remember this", `/beacon-note` | Record an ephemeral session memo (compaction safety) | Yes |
+| `beacon-operation-setup` | `/beacon-operation-setup` | Conversational Operation setup with auto-generated SPEC doc | Yes |
+| `beacon-operation-review` | `/beacon-operation-review`, operation_check trigger | Fetch logs per SPEC, interpret, record run result | Yes |
 
 ### Skill Constraints
 
