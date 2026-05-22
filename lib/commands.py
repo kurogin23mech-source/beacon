@@ -1360,17 +1360,71 @@ def _cleanup_stale_triggers():
     import datetime
     today = datetime.date.today()
     triggers_dir = _get_triggers_dir()
-    retro_path = os.path.join(triggers_dir, "retro.json")
-    if not os.path.exists(retro_path):
+    if not os.path.isdir(triggers_dir):
         return
+    # Clean up stale retro trigger
+    retro_path = os.path.join(triggers_dir, "retro.json")
+    if os.path.exists(retro_path):
+        try:
+            with open(retro_path, "r") as f:
+                trigger = json.load(f)
+            created = datetime.date.fromisoformat(trigger["created_at"][:10])
+            if today > created:
+                os.remove(retro_path)
+        except (json.JSONDecodeError, KeyError, ValueError, IOError):
+            pass
+    # Clean up stale operation_check triggers
+    for fname in os.listdir(triggers_dir):
+        if not fname.startswith("operation_check_") or not fname.endswith(".json"):
+            continue
+        fpath = os.path.join(triggers_dir, fname)
+        try:
+            with open(fpath, "r") as f:
+                trigger = json.load(f)
+            created = datetime.date.fromisoformat(trigger["created_at"][:10])
+            if today > created:
+                os.remove(fpath)
+        except (json.JSONDecodeError, KeyError, ValueError, IOError):
+            pass
+
+
+def _auto_fire_operation_triggers():
+    import datetime
+    today = datetime.date.today()
+    day_abbr = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"][today.weekday()]
+    today_str = today.isoformat()
     try:
-        with open(retro_path, "r") as f:
-            trigger = json.load(f)
-        created = datetime.date.fromisoformat(trigger["created_at"][:10])
-        if today > created:
-            os.remove(retro_path)
-    except (json.JSONDecodeError, KeyError, ValueError, IOError):
-        pass
+        data = load_project()
+    except Exception:
+        return
+    triggers_dir = _get_triggers_dir()
+    for op in data.get("operations", []):
+        if op.get("status") != "open":
+            continue
+        op_id = op["id"]
+        days = op.get("schedule", {}).get("days", [])
+        if day_abbr not in days:
+            continue
+        has_today_run = any(
+            e.get("type") == "run_record" and e.get("date", "").startswith(today_str)
+            for e in op.get("entries", [])
+        )
+        if has_today_run:
+            continue
+        trigger_name = f"operation_check_{op_id}"
+        trigger_path = os.path.join(triggers_dir, f"{trigger_name}.json")
+        if os.path.exists(trigger_path):
+            continue
+        log_source = op.get("log_source", op_id)
+        os.makedirs(triggers_dir, exist_ok=True)
+        trigger_data = {
+            "name": trigger_name,
+            "message": f"{op_id} ({log_source}) のバッチ確認が必要です。/beacon-operation-review で記録してください。",
+            "created_at": today_str,
+        }
+        with open(trigger_path, "w") as f:
+            json.dump(trigger_data, f, ensure_ascii=False)
+            f.write("\n")
 
 
 def cmd_trigger_fire():
@@ -1397,6 +1451,7 @@ def cmd_trigger_fire():
 
 def cmd_trigger_check():
     _auto_fire_retro_trigger()
+    _auto_fire_operation_triggers()
     _cleanup_stale_triggers()
     triggers_dir = _get_triggers_dir()
     if not os.path.isdir(triggers_dir):
@@ -3327,6 +3382,170 @@ def cmd_help_json():
 
 
 # ---------------------------------------------------------------------------
+# Operation / Run / Incident commands
+# ---------------------------------------------------------------------------
+
+def cmd_operation_open():
+    title = os.environ.get("BEACON_OPERATION_TITLE", "")
+    schedule = os.environ.get("BEACON_OPERATION_SCHEDULE", "weekdays")
+    log_source = os.environ.get("BEACON_OPERATION_LOG_SOURCE", "")
+    if not title:
+        print("Error: operation title required")
+        sys.exit(1)
+    data = load_project()
+    data, op = core.operation_open(data, title, schedule=schedule, log_source=log_source)
+    save_project(data, op={"type": "operation_open", "op_id": op["id"], "title": title})
+    if os.environ.get("BEACON_JSON"):
+        print(json.dumps(op, ensure_ascii=False))
+    else:
+        print(f"Operation opened: {op['id']} \"{op['title']}\" [{op['schedule']['frequency']}]")
+
+
+def cmd_operation_close():
+    op_id = os.environ.get("BEACON_OPERATION_ID", "")
+    if not op_id:
+        print("Error: operation id required")
+        sys.exit(1)
+    data = load_project()
+    op = core.operation_close(data, op_id)
+    save_project(data, op={"type": "operation_close", "op_id": op_id})
+    print(f"Operation closed: {op_id} \"{op.get('title', '')}\"")
+
+
+def cmd_operation_list():
+    data = load_project()
+    ops = data.get("operations", [])
+    if os.environ.get("BEACON_JSON"):
+        print(json.dumps(ops, ensure_ascii=False))
+        return
+    if not ops:
+        print("No operations.")
+        return
+    for op in ops:
+        status_icon = "◐" if op.get("status") == "open" else "●"
+        entries = op.get("entries", [])
+        runs = [e for e in entries if e.get("type") == "run_record"]
+        incidents = [e for e in entries if e.get("type") == "incident" and e.get("status") == "open"]
+        last_run = f" last: {runs[-1]['date'][:10]} {runs[-1]['status']}" if runs else ""
+        incident_info = f" ⚠ {len(incidents)} incident(s)" if incidents else ""
+        print(f"{status_icon} {op['id']} \"{op.get('title', '')}\" [{op.get('schedule', {}).get('frequency', '')}]{last_run}{incident_info}")
+
+
+def cmd_operation_show():
+    op_id = os.environ.get("BEACON_OPERATION_ID", "")
+    if not op_id:
+        print("Error: operation id required")
+        sys.exit(1)
+    data = load_project()
+    for op in data.get("operations", []):
+        if op.get("id") == op_id:
+            if os.environ.get("BEACON_JSON"):
+                print(json.dumps(op, ensure_ascii=False))
+            else:
+                print(f"{op['id']} \"{op.get('title', '')}\" [{op.get('status', '')}]")
+                for e in op.get("entries", []):
+                    if e.get("type") == "run_record":
+                        icon = {"ok": "✓", "warning": "⚠", "error": "✗"}.get(e.get("status", ""), "?")
+                        print(f"  {icon} {e['date'][:10]} {e.get('batch', '')} — {e.get('description', '')}")
+                    elif e.get("type") == "incident":
+                        icon = "⚠" if e.get("status") == "open" else "✓"
+                        print(f"  {icon} [{e['id']}] {e.get('title', '')} [{e.get('status', '')}]")
+            return
+    print(f"Operation not found: {op_id}")
+    sys.exit(1)
+
+
+def cmd_run_record():
+    op_id = os.environ.get("BEACON_OPERATION_ID", "")
+    batch = os.environ.get("BEACON_RUN_BATCH", "")
+    status = os.environ.get("BEACON_RUN_STATUS", "")
+    description = os.environ.get("BEACON_RUN_DESC", "")
+    if not op_id or not batch or not status:
+        print("Error: -o <op-id>, --batch <name>, --status ok|warning|error required")
+        sys.exit(1)
+    data = load_project()
+    op, entry = core.run_record_add(data, op_id, batch=batch, status=status, description=description)
+    save_project(data, op={"type": "run_record", "op_id": op_id, "entry_id": entry["id"], "status": status})
+    # Clear the operation_check trigger for this op
+    trigger_path = os.path.join(_get_triggers_dir(), f"operation_check_{op_id}.json")
+    if os.path.exists(trigger_path):
+        os.remove(trigger_path)
+    if os.environ.get("BEACON_JSON"):
+        print(json.dumps(entry, ensure_ascii=False))
+    else:
+        icon = {"ok": "✓", "warning": "⚠", "error": "✗"}.get(status, "?")
+        print(f"Run recorded: {op_id} / {batch} {icon} {status}")
+        if description:
+            print(f"  {description}")
+
+
+def cmd_run_list():
+    op_id = os.environ.get("BEACON_OPERATION_ID", "")
+    if not op_id:
+        print("Error: -o <op-id> required")
+        sys.exit(1)
+    data = load_project()
+    for op in data.get("operations", []):
+        if op.get("id") == op_id:
+            runs = [e for e in op.get("entries", []) if e.get("type") == "run_record"]
+            if os.environ.get("BEACON_JSON"):
+                print(json.dumps(runs, ensure_ascii=False))
+            else:
+                for e in runs:
+                    icon = {"ok": "✓", "warning": "⚠", "error": "✗"}.get(e.get("status", ""), "?")
+                    print(f"{icon} {e['date'][:10]} {e.get('batch', '')} — {e.get('description', '')}")
+            return
+    print(f"Operation not found: {op_id}")
+    sys.exit(1)
+
+
+def cmd_incident_open():
+    op_id = os.environ.get("BEACON_OPERATION_ID", "")
+    title = os.environ.get("BEACON_INCIDENT_TITLE", "")
+    description = os.environ.get("BEACON_INCIDENT_DESC", "")
+    if not op_id or not title:
+        print("Error: -o <op-id> and incident title required")
+        sys.exit(1)
+    data = load_project()
+    op, entry = core.incident_open(data, op_id, title=title, description=description)
+    save_project(data, op={"type": "incident_open", "op_id": op_id, "entry_id": entry["id"], "title": title})
+    if os.environ.get("BEACON_JSON"):
+        print(json.dumps(entry, ensure_ascii=False))
+    else:
+        print(f"Incident opened: {entry['id']} \"{title}\" in {op_id}")
+
+
+def cmd_incident_close():
+    incident_id = os.environ.get("BEACON_INCIDENT_ID", "")
+    resolution = os.environ.get("BEACON_INCIDENT_RESOLUTION", "")
+    if not incident_id:
+        print("Error: incident entry id required")
+        sys.exit(1)
+    data = load_project()
+    container, entry = core.incident_close(data, incident_id, resolution=resolution)
+    save_project(data, op={"type": "incident_close", "entry_id": incident_id, "resolution": resolution})
+    if os.environ.get("BEACON_JSON"):
+        print(json.dumps(entry, ensure_ascii=False))
+    else:
+        print(f"Incident resolved: {incident_id} \"{entry.get('title', '')}\"")
+        if resolution:
+            print(f"  Resolution: {resolution}")
+
+
+def cmd_incident_escalate():
+    incident_id = os.environ.get("BEACON_INCIDENT_ID", "")
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    if not incident_id or not ms_id:
+        print("Error: incident id and -m <ms-id> required")
+        sys.exit(1)
+    data = load_project()
+    op, incident, task = core.incident_escalate(data, incident_id, ms_id)
+    save_project(data, op={"type": "incident_escalate", "entry_id": incident_id, "ms_id": ms_id, "task_id": task["id"]})
+    print(f"Incident escalated: {incident_id} → {ms_id} as task {task['id']}")
+    print(f"  {task['description']}")
+
+
+# ---------------------------------------------------------------------------
 # Main dispatch
 # ---------------------------------------------------------------------------
 
@@ -3404,6 +3623,15 @@ if __name__ == "__main__":
         "issue_import": cmd_issue_import,
         "issue_list": cmd_issue_list,
         "issue_sync": cmd_issue_sync,
+        "operation_open": cmd_operation_open,
+        "operation_close": cmd_operation_close,
+        "operation_list": cmd_operation_list,
+        "operation_show": cmd_operation_show,
+        "run_record": cmd_run_record,
+        "run_list": cmd_run_list,
+        "incident_open": cmd_incident_open,
+        "incident_close": cmd_incident_close,
+        "incident_escalate": cmd_incident_escalate,
         "version": lambda: print(f"beacon {__version__}"),
         "help_json": cmd_help_json,
         "doctor": cmd_doctor,

@@ -1679,6 +1679,134 @@ case "${1:-}" in
                 ;;
         esac
         ;;
+    operation)
+        ensure_project
+        case "${2:-}" in
+            open)
+                shift 2
+                title=""
+                schedule="weekdays"
+                log_source=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --schedule) schedule="${2:-}"; shift 2 ;;
+                        --log-source) log_source="${2:-}"; shift 2 ;;
+                        *) [[ -z "$title" ]] && title="$1"; shift ;;
+                    esac
+                done
+                BEACON_OPERATION_TITLE="$title" \
+                    BEACON_OPERATION_SCHEDULE="$schedule" \
+                    BEACON_OPERATION_LOG_SOURCE="$log_source" \
+                    python3 "$COMMANDS_PY" operation_open
+                ;;
+            close)
+                BEACON_OPERATION_ID="${3:-}" python3 "$COMMANDS_PY" operation_close
+                ;;
+            list)
+                BEACON_JSON="${3:+1}" python3 "$COMMANDS_PY" operation_list
+                ;;
+            show)
+                BEACON_OPERATION_ID="${3:-}" BEACON_JSON="${4:+1}" python3 "$COMMANDS_PY" operation_show
+                ;;
+            *)
+                echo "Usage: beacon operation open \"<title>\" [--schedule daily|weekdays|weekly] [--log-source <name>]"
+                echo "       beacon operation close <op-id>"
+                echo "       beacon operation list [--json]"
+                echo "       beacon operation show <op-id> [--json]"
+                ;;
+        esac
+        ;;
+    run)
+        ensure_project
+        case "${2:-}" in
+            record)
+                shift 2
+                op_id=""
+                batch=""
+                status=""
+                desc=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        -o|--op) op_id="${2:-}"; shift 2 ;;
+                        --batch) batch="${2:-}"; shift 2 ;;
+                        --status) status="${2:-}"; shift 2 ;;
+                        --desc) desc="${2:-}"; shift 2 ;;
+                        *) shift ;;
+                    esac
+                done
+                BEACON_OPERATION_ID="$op_id" BEACON_RUN_BATCH="$batch" \
+                    BEACON_RUN_STATUS="$status" BEACON_RUN_DESC="$desc" \
+                    python3 "$COMMANDS_PY" run_record
+                ;;
+            list)
+                shift 2
+                op_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        -o|--op) op_id="${2:-}"; shift 2 ;;
+                        --json) BEACON_JSON=1; shift ;;
+                        *) shift ;;
+                    esac
+                done
+                BEACON_OPERATION_ID="$op_id" python3 "$COMMANDS_PY" run_list
+                ;;
+            *)
+                echo "Usage: beacon run record -o <op-id> --batch <name> --status ok|warning|error --desc \"...\""
+                echo "       beacon run list -o <op-id> [--json]"
+                ;;
+        esac
+        ;;
+    incident)
+        ensure_project
+        case "${2:-}" in
+            open)
+                shift 2
+                op_id=""
+                title=""
+                desc=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        -o|--op) op_id="${2:-}"; shift 2 ;;
+                        --desc) desc="${2:-}"; shift 2 ;;
+                        *) [[ -z "$title" ]] && title="$1"; shift ;;
+                    esac
+                done
+                BEACON_OPERATION_ID="$op_id" BEACON_INCIDENT_TITLE="$title" \
+                    BEACON_INCIDENT_DESC="$desc" python3 "$COMMANDS_PY" incident_open
+                ;;
+            close)
+                shift 2
+                incident_id=""
+                resolution=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --resolution) resolution="${2:-}"; shift 2 ;;
+                        *) [[ -z "$incident_id" ]] && incident_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_INCIDENT_ID="$incident_id" BEACON_INCIDENT_RESOLUTION="$resolution" \
+                    python3 "$COMMANDS_PY" incident_close
+                ;;
+            escalate)
+                shift 2
+                incident_id=""
+                ms_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        -m|--ms) ms_id="${2:-}"; shift 2 ;;
+                        *) [[ -z "$incident_id" ]] && incident_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_INCIDENT_ID="$incident_id" BEACON_MS_ID="$ms_id" \
+                    python3 "$COMMANDS_PY" incident_escalate
+                ;;
+            *)
+                echo "Usage: beacon incident open \"<title>\" -o <op-id> [--desc \"...\"]"
+                echo "       beacon incident close <id> --resolution \"...\""
+                echo "       beacon incident escalate <id> -m <ms-id>"
+                ;;
+        esac
+        ;;
     retro)
         shift
         case "${1:-}" in

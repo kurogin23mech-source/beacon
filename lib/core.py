@@ -33,13 +33,23 @@ def _get_actor() -> str:
 
 
 VALID_STATUSES = {"todo", "in_progress", "in_review", "approved", "waiting", "done", "observing", "cancelled"}
-VALID_ENTRY_TYPES = {"commit", "task", "note", "save", "pr"}
+VALID_ENTRY_TYPES = {"commit", "task", "note", "save", "pr", "run_record", "incident"}
 # PR lifecycle: in_review → approved → merged (or closed/rejected)
 # "open" is reserved for Phase 2 auto-detection via GitHub API (external PRs not yet picked up by beacon)
 VALID_PR_STATUSES = {"open", "in_review", "approved", "merged", "closed"}
 VALID_REVIEW_STATUSES = {"pending", "approved", "changes_requested", "rejected"}
+VALID_RUN_STATUSES = {"ok", "warning", "error"}
+VALID_INCIDENT_STATUSES = {"open", "resolved"}
+VALID_OPERATION_STATUSES = {"open", "closed"}
 MS_ID_RE = re.compile(r"^ms-\d+$")
 ENTRY_ID_RE = re.compile(r"^e-\d+$")
+OP_ID_RE = re.compile(r"^op-\d+$")
+
+SCHEDULE_DAYS = {
+    "daily":    ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+    "weekdays": ["mon", "tue", "wed", "thu", "fri"],
+    "weekly":   ["fri"],
+}
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +85,19 @@ def validate_project(data: dict) -> None:
             )
         for entry in ms.get("entries", []):
             _validate_entry(entry, ms.get("id", "?"))
+
+    for op in data.get("operations", []):
+        op_id = op.get("id", "")
+        if op_id and not OP_ID_RE.match(op_id):
+            raise ValueError(
+                f"Operation ID '{op_id}' does not match required format 'op-{{N}}'. "
+                "IDs must be op-1, op-2, etc."
+            )
+        if op.get("status") and op["status"] not in VALID_OPERATION_STATUSES:
+            raise ValueError(
+                f"Operation '{op_id or '?'}' has invalid status '{op['status']}'. "
+                f"Valid: {', '.join(sorted(VALID_OPERATION_STATUSES))}"
+            )
 
 
 def _validate_entry(entry: dict, ms_id: str) -> None:
@@ -124,12 +147,28 @@ def find_target_milestone(data: dict, ms_id: str = "") -> dict:
 
 
 def next_entry_id(data: dict) -> str:
-    """Generate next entry id across all milestones (including nested)."""
+    """Generate next entry id across all milestones and operations (including nested)."""
     max_id = 0
     for ms in data["milestones"]:
         for entry in ms.get("entries", []):
             max_id = _max_entry_id(entry, max_id)
+    for op in data.get("operations", []):
+        for entry in op.get("entries", []):
+            max_id = _max_entry_id(entry, max_id)
     return f"e-{max_id + 1}"
+
+
+def next_op_id(data: dict) -> str:
+    """Generate next operation id."""
+    max_id = 0
+    for op in data.get("operations", []):
+        oid = op.get("id", "")
+        if oid.startswith("op-"):
+            try:
+                max_id = max(max_id, int(oid[3:]))
+            except ValueError:
+                pass
+    return f"op-{max_id + 1}"
 
 
 def _max_entry_id(entry: dict, current_max: int) -> int:
@@ -145,12 +184,17 @@ def _max_entry_id(entry: dict, current_max: int) -> int:
 
 
 def find_entry(data: dict, entry_id: str):
-    """Find an entry by ID across all milestones (including nested).
+    """Find an entry by ID across all milestones and operations (including nested).
 
-    Returns (milestone, parent_entries_list, entry, index) or None.
+    Returns (container, parent_entries_list, entry, index) or None.
+    Container is either a milestone dict or an operation dict.
     """
     for ms in data["milestones"]:
         result = _find_entry_in(ms.get("entries", []), entry_id, ms)
+        if result:
+            return result
+    for op in data.get("operations", []):
+        result = _find_entry_in(op.get("entries", []), entry_id, op)
         if result:
             return result
     return None
@@ -1140,3 +1184,132 @@ def deploy_void(data: dict, deploy_id: str, *, reason: str) -> dict:
             dep["voided_by"] = _get_actor()
             return dep
     raise ValueError(f"Deployment not found: {deploy_id}")
+
+
+# ---------------------------------------------------------------------------
+# Operation operations
+# ---------------------------------------------------------------------------
+
+def _find_operation(data: dict, op_id: str) -> dict:
+    for op in data.get("operations", []):
+        if op.get("id") == op_id:
+            return op
+    raise ValueError(f"Operation not found: {op_id}")
+
+
+def operation_open(data: dict, title: str, *,
+                   schedule: str = "weekdays", log_source: str = "") -> tuple[dict, dict]:
+    """Create a new open Operation. Returns (data, operation)."""
+    if schedule not in SCHEDULE_DAYS:
+        raise ValueError(f"Invalid schedule: {schedule}. Valid: {', '.join(sorted(SCHEDULE_DAYS))}")
+    op_id = next_op_id(data)
+    op = {
+        "id": op_id,
+        "title": title,
+        "status": "open",
+        "opened_at": _now_iso(),
+        "closed_at": None,
+        "schedule": {
+            "frequency": schedule,
+            "days": SCHEDULE_DAYS[schedule],
+        },
+        "log_source": log_source or op_id,
+        "entries": [],
+    }
+    data.setdefault("operations", []).append(op)
+    return data, op
+
+
+def operation_close(data: dict, op_id: str) -> dict:
+    """Close an Operation. Returns the operation."""
+    op = _find_operation(data, op_id)
+    if op["status"] == "closed":
+        raise ValueError(f"Operation {op_id} is already closed")
+    op["status"] = "closed"
+    op["closed_at"] = _now_iso()
+    return op
+
+
+def run_record_add(data: dict, op_id: str, *,
+                   batch: str, status: str, description: str,
+                   date: str = "") -> tuple[dict, dict]:
+    """Add a run_record entry to an Operation. Returns (operation, entry)."""
+    if status not in VALID_RUN_STATUSES:
+        raise ValueError(f"Invalid status: {status}. Valid: ok, warning, error")
+    op = _find_operation(data, op_id)
+    eid = next_entry_id(data)
+    entry = {
+        "id": eid,
+        "type": "run_record",
+        "batch": batch,
+        "status": status,
+        "description": description,
+        "date": date or _now_iso(),
+        "meta": {"created_by": _get_actor()},
+    }
+    op.setdefault("entries", []).append(entry)
+    return op, entry
+
+
+def incident_open(data: dict, op_id: str, *,
+                  title: str, description: str = "") -> tuple[dict, dict]:
+    """Open an Incident in an Operation. Returns (operation, entry)."""
+    op = _find_operation(data, op_id)
+    eid = next_entry_id(data)
+    entry = {
+        "id": eid,
+        "type": "incident",
+        "title": title,
+        "status": "open",
+        "description": description,
+        "opened_at": _now_iso(),
+        "resolved_at": None,
+        "resolution": None,
+        "linked_ms_task": None,
+        "meta": {"created_by": _get_actor()},
+    }
+    op.setdefault("entries", []).append(entry)
+    return op, entry
+
+
+def incident_close(data: dict, incident_id: str, *, resolution: str) -> tuple[dict, dict]:
+    """Resolve an Incident. Returns (operation, entry)."""
+    result = find_entry(data, incident_id)
+    if not result:
+        raise ValueError(f"Incident not found: {incident_id}")
+    container, _, entry, _ = result
+    if entry.get("type") != "incident":
+        raise ValueError(f"{incident_id} is not an incident entry")
+    entry["status"] = "resolved"
+    entry["resolved_at"] = _now_iso()
+    entry["resolution"] = resolution
+    meta = entry.setdefault("meta", {})
+    meta["resolved_by"] = _get_actor()
+    return container, entry
+
+
+def incident_escalate(data: dict, incident_id: str, ms_id: str) -> tuple[dict, dict, dict]:
+    """Escalate an Incident to a Milestone task. Returns (operation, incident_entry, task_entry)."""
+    result = find_entry(data, incident_id)
+    if not result:
+        raise ValueError(f"Incident not found: {incident_id}")
+    op, _, incident, _ = result
+    if incident.get("type") != "incident":
+        raise ValueError(f"{incident_id} is not an incident entry")
+    ms = find_target_milestone(data, ms_id)
+    eid = next_entry_id(data)
+    task = {
+        "id": eid,
+        "type": "task",
+        "description": f"[Incident] {incident.get('title', incident_id)}: {incident.get('description', '')}".strip(": "),
+        "status": "todo",
+        "created_at": _now_iso(),
+        "meta": {
+            "created_by": _get_actor(),
+            "escalated_from": incident_id,
+            "escalated_from_op": op.get("id"),
+        },
+    }
+    ms.setdefault("entries", []).append(task)
+    incident["linked_ms_task"] = eid
+    return op, incident, task
