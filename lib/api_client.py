@@ -121,3 +121,14 @@ class ApiClient:
     def save_retro(self, project_id: str, week: str, content: str) -> dict:
         return self.post(f"/api/projects/{project_id}/retros/{week}",
                          {"content": content})
+
+    # Session Note operations
+
+    def add_note(self, project_id: str, note: dict) -> dict:
+        return self.post(f"/api/projects/{project_id}/notes", note)
+
+    def list_notes(self, project_id: str) -> list:
+        return self.get(f"/api/projects/{project_id}/notes")
+
+    def clear_notes(self, project_id: str) -> dict:
+        return self.delete(f"/api/projects/{project_id}/notes")

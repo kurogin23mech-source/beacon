@@ -344,6 +344,11 @@ class SummaryUpdate(BaseModel):
 class RetroCreate(BaseModel):
     content: str
 
+class NoteCreate(BaseModel):
+    text: str
+    context: str = ""
+    ts: str = ""
+
 class DocumentSave(BaseModel):
     title: str
     content: str
@@ -865,24 +870,33 @@ def admin_check(user: dict = Depends(require_auth)):
 
 @app.get("/api/projects/{project_id}/notes")
 def list_notes(project_id: str, user: dict = Depends(require_auth)):
-    """List session notes from local .beacon/session_notes.jsonl (local mode only)."""
-    _load(project_id, user)  # auth check
-    notes_path = os.path.join(".beacon", "session_notes.jsonl")
-    if not os.path.exists(notes_path):
-        return []
-    notes = []
-    try:
-        with open(notes_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        notes.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        pass
-    except IOError:
-        pass
-    return notes
+    """List session notes from Firestore."""
+    _load(project_id, user)
+    return db.list_notes(project_id)
+
+
+@app.post("/api/projects/{project_id}/notes")
+def add_note(project_id: str, body: NoteCreate, user: dict = Depends(require_auth)):
+    """Add a session note."""
+    import datetime
+    _load(project_id, user)
+    note = {
+        "ts": body.ts or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "text": body.text,
+    }
+    if body.context:
+        note["context"] = body.context
+    note_id = db.add_note(project_id, note)
+    return {"note_id": note_id, **note}
+
+
+@app.delete("/api/projects/{project_id}/notes")
+def clear_notes(project_id: str, user: dict = Depends(require_auth)):
+    """Clear all session notes."""
+    data = _load(project_id, user)
+    _require_write(data, user)
+    db.clear_notes(project_id)
+    return {"status": "cleared"}
 
 
 @app.get("/api/projects/{project_id}/retros")

@@ -968,6 +968,33 @@ def _get_notes_path():
     return os.path.join(beacon_dir, "session_notes.jsonl")
 
 
+def _push_note_to_cloud(note: dict) -> None:
+    """Push a session note to cloud API. Best-effort: silently ignores all errors."""
+    try:
+        config_path = _get_cloud_config_path()
+        if not os.path.exists(config_path):
+            return
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        project_id = config.get("project_id", "")
+        api_url = config.get("api_url", DEFAULT_API_URL)
+        if not project_id:
+            return
+        from auth import load_credentials
+        creds = load_credentials()
+        if creds is None:
+            return
+        from api_client import ApiClient
+        def _token():
+            from auth import load_credentials as _lc
+            c = _lc()
+            return _extract_token(c) if c else ""
+        client = ApiClient(api_url, _token)
+        client.add_note(project_id, note)
+    except Exception:
+        pass
+
+
 def cmd_note_add():
     import datetime
     text = os.environ.get("BEACON_NOTE_TEXT", "")
@@ -985,6 +1012,7 @@ def cmd_note_add():
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(note, ensure_ascii=False) + "\n")
+    _push_note_to_cloud(note)
     print(f"Note: {text[:60]}{'...' if len(text) > 60 else ''}")
 
 
@@ -1017,6 +1045,25 @@ def cmd_note_clear():
     if os.path.exists(path):
         import shutil
         shutil.move(path, path + ".bak")
+    try:
+        config_path = _get_cloud_config_path()
+        if os.path.exists(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            project_id = config.get("project_id", "")
+            api_url = config.get("api_url", DEFAULT_API_URL)
+            if project_id:
+                from auth import load_credentials
+                creds = load_credentials()
+                if creds:
+                    from api_client import ApiClient
+                    def _token():
+                        from auth import load_credentials as _lc
+                        c = _lc()
+                        return _extract_token(c) if c else ""
+                    ApiClient(api_url, _token).clear_notes(project_id)
+    except Exception:
+        pass
     print("Session notes cleared.")
 
 

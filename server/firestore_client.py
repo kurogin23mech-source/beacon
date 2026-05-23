@@ -150,7 +150,7 @@ def delete_project(project_id: str) -> bool:
         return False
     # Delete known subcollections first (Firestore does not cascade).
     # Use literal names here to avoid forward-reference issues with the constants.
-    for subcol_name in ("documents", "retros", "members", "triggers"):
+    for subcol_name in ("documents", "retros", "members", "triggers", "notes"):
         _delete_subcollection(doc_ref.collection(subcol_name))
     doc_ref.delete()
     return True
@@ -373,6 +373,49 @@ def delete_document(project_id: str, doc_id: str, deleted_by: str = "unknown") -
         "deleted_by": deleted_by,
     })
     return True
+
+
+# ---------------------------------------------------------------------------
+# Session Notes (subcollection: projects/{project_id}/notes/{note_id})
+# ---------------------------------------------------------------------------
+
+NOTES_SUBCOLLECTION = "notes"
+
+
+def add_note(project_id: str, note: dict) -> str:
+    """Add a session note. Returns the generated note ID."""
+    col = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(NOTES_SUBCOLLECTION)
+    )
+    ref = col.add(note)
+    return ref[1].id
+
+
+def list_notes(project_id: str) -> list[dict]:
+    """List session notes ordered by timestamp."""
+    docs = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(NOTES_SUBCOLLECTION)
+        .order_by("ts")
+        .stream()
+    )
+    return [doc.to_dict() for doc in docs]
+
+
+def clear_notes(project_id: str) -> None:
+    """Delete all session notes for a project."""
+    col = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(NOTES_SUBCOLLECTION)
+    )
+    _delete_subcollection(col)
 
 
 def save_retro(project_id: str, week: str, content: str) -> None:
