@@ -1003,7 +1003,7 @@ def cmd_note_add():
         print("Error: note text required")
         sys.exit(1)
     note = {
-        "ts": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "ts": datetime.datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z"),
         "text": text,
     }
     if context:
