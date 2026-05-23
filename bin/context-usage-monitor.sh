@@ -145,24 +145,9 @@ REMAINING=$((200000 - CURRENT_CONTEXT))
 CONTEXT_APPROX="$CURRENT_CONTEXT"
 
 if [ "$TRIGGERED_THRESHOLD" -ge 80 ]; then
-  ADVICE=$(cat <<ADVICE
-BEACON [⚠️ コンテキスト ${PERCENT}%]: コンテキストが逼迫しています（${CONTEXT_APPROX} / 200,000 tokens）。
-今すぐタスクを一時停止し、ユーザーに確認してください:「コンテキストが ${PERCENT}% です。/beacon-note でサマリーを記録しますか？」
-記録する場合は以下のフォーマットで /beacon-note を実行してください:
-  作業中のテーマ: [1行]
-  決定・合意事項: [箇条書き]
-  定量情報（あれば必ず含める）: 数値・閾値・件数・パーセンテージ等を忠実に転記
-  未解決の課題: [次に再開すべき論点]
-  次のアクション: [直後にやること]
-ADVICE
-)
+  ADVICE="BEACON [⚠️ コンテキスト ${PERCENT}%] ${CONTEXT_APPROX}/200,000 tokens — beacon noteに自動記録済み。必要なら /beacon-note で詳細サマリーを追加してください。"
 else
-  ADVICE=$(cat <<ADVICE
-BEACON [コンテキスト ${PERCENT}%]: 使用量が ${TRIGGERED_THRESHOLD}% に達しました（${CONTEXT_APPROX} / 200,000 tokens）。
-タスクが途中でも、ユーザーに確認してください:「コンテキストが ${PERCENT}% です。/beacon-note でサマリーを記録しますか？」
-不要であれば「続けて」と答えてもらうだけで構いません。
-ADVICE
-)
+  ADVICE="BEACON [コンテキスト ${PERCENT}%] ${CONTEXT_APPROX}/200,000 tokens — beacon noteに自動記録済み。"
 fi
 
 # ─── 状態ファイルの更新 ────────────────────────────────────────────────────────
@@ -201,10 +186,9 @@ beacon note "⚠️ コンテキスト ${PERCENT}% (${CURRENT_CONTEXT} / 200,000
 python3 - "$ADVICE" <<'PYEOF'
 import json, sys
 advice = sys.argv[1]
-# 全閾値で decision:block — Claude を強制応答させてユーザーに確認を取る
+# systemMessage のみ — ターン追加なし、スクリプトの beacon note が記録を保証
 output = {
-    "decision": "block",
-    "reason": advice
+    "systemMessage": advice
 }
 print(json.dumps(output, ensure_ascii=False))
 PYEOF
