@@ -167,6 +167,37 @@ brew test beacon
 
 ---
 
+## Deploying the API server (maintainer only)
+
+The Beacon cloud API runs on **Cloud Run** (`beacon-api-prod`, region `asia-northeast1`).
+
+### Deploy
+
+```bash
+gcloud run deploy beacon-api-prod \
+  --source . \
+  --region asia-northeast1 \
+  --build-arg CACHE_BUST=$(date +%s)
+```
+
+`CACHE_BUST` forces Docker to re-copy `lib/` even when only Python files change (Cloud Build otherwise caches the layer).
+
+### Why `--source .`
+
+Cloud Build reads the `Dockerfile` at the repo root, copies `lib/` and `server/` into the image, and deploys to Cloud Run automatically. No manual `docker build` or `docker push` needed.
+
+### After deploying
+
+Record the deploy in Beacon so the Releases tab stays current:
+
+```bash
+beacon deploy record --desc "brief description of what changed"
+```
+
+Or just commit and let the `/beacon-deploy` Skill handle it automatically via the PostToolUse hook.
+
+---
+
 ## Troubleshooting
 
 | Problem | Solution |

@@ -83,6 +83,10 @@ Cloud:
   beacon cloud status           Show cloud config status
   beacon cloud off              Switch back to local mode
 
+Server (maintainer only):
+  gcloud run deploy beacon-api-prod --source . --region asia-northeast1 \
+    --build-arg CACHE_BUST=$(date +%s)
+
 Other:
   beacon note "<text>" [--context "<label>"]   Add a session note (ephemeral, cleared at session-end)
   beacon note list                             Show session notes
