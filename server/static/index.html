@@ -940,6 +940,115 @@ body::after {
   margin-bottom: 2px;
 }
 
+/* Entry detail button */
+.entry-info-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 0 5px;
+  height: 15px;
+  margin-left: 6px;
+  vertical-align: middle;
+  line-height: 1;
+  letter-spacing: 0.05em;
+  transition: color 0.15s, border-color 0.15s;
+}
+.entry-info-btn:hover { color: var(--text-secondary); border-color: var(--text-dim); }
+
+/* Entry detail modal */
+.entry-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.72);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.entry-modal {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-width: 560px;
+  width: 100%;
+  max-height: 80vh;
+  overflow-y: auto;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.7);
+}
+.entry-modal-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 18px 12px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--bg-raised);
+}
+.entry-modal-title {
+  font-size: 12px;
+  color: var(--text-secondary);
+  flex: 1;
+}
+.entry-modal-close {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+.entry-modal-close:hover { color: var(--text-primary); background: var(--bg-hover); }
+.entry-modal-body {
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.entry-modal-desc {
+  font-size: 13px;
+  color: var(--text-primary);
+  line-height: 1.6;
+}
+.entry-modal-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.entry-modal-field {
+  padding: 7px 11px;
+  border-left: 2px solid rgba(148,163,184,0.3);
+  font-size: 12px;
+  color: #94a3b8;
+  line-height: 1.6;
+}
+.entry-modal-field-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 3px;
+}
+.modal-field-why      .entry-modal-field-label { color: #60a5fa; }
+.modal-field-why      { border-left-color: rgba(96,165,250,0.4); }
+.modal-field-ac       .entry-modal-field-label { color: #a3e635; }
+.modal-field-ac       { border-left-color: rgba(163,230,53,0.4); }
+.modal-field-behavior .entry-modal-field-label { color: #c084fc; }
+.modal-field-behavior { border-left-color: rgba(192,132,252,0.4); }
+.modal-field-resolves .entry-modal-field-label { color: #f59e0b; }
+.modal-field-resolves { border-left-color: rgba(245,158,11,0.4); }
+.modal-field-detail   .entry-modal-field-label { color: var(--text-dim); }
+
 .entry-pr-status {
   font-weight: 500;
 }
@@ -1553,6 +1662,7 @@ let state = {
   releasesSubTab: 'service', // 'service' | 'code'
   expandedPushId: null,
   selectedDeployEnv: null, // null = all environments
+  openEntryId: null,
   auth: {
     token: localStorage.getItem('beacon_token'),
     email: localStorage.getItem('beacon_email'),
@@ -1769,15 +1879,8 @@ function renderEntry(entry) {
   const priority = entry.meta?.priority;
   const priorityBadge = priority ? `<span class="priority-badge priority-${priority}">${priority}</span>` : '';
 
-  const motivation = entry.motivation
-    ? `<div class="entry-info-block entry-info-why"><div class="entry-info-label">why</div>${esc(entry.motivation)}</div>`
-    : '';
-  const ac = entry.acceptance_criteria
-    ? `<div class="entry-info-block entry-info-ac"><div class="entry-info-label">done when</div>${esc(entry.acceptance_criteria)}</div>`
-    : '';
-  const behavior = entry.behavior
-    ? `<div class="entry-info-block entry-info-behavior"><div class="entry-info-label">behavior</div>${esc(entry.behavior)}</div>`
-    : '';
+  const hasDetail = !!(entry.motivation || entry.acceptance_criteria || entry.behavior || entry.detail
+    || entry.meta?.resolves || entry.meta?.hash);
 
   const statusText = entryStatusText(entry);
   const hasChildren = entry.entries?.length > 0;
@@ -1794,15 +1897,23 @@ function renderEntry(entry) {
 
   const childBadge = hasChildren && isCollapsed ? `<span class="entry-child-count">${childCount}</span>` : '';
 
+  // Rows with children: whole-row click = toggle expand; info button opens modal
+  // Rows without children: whole-row click = open modal
+  const rowAction = hasChildren
+    ? `data-action="toggle-entry" data-entry-id="${entry.id}"`
+    : `data-action="open-entry-detail" data-entry-id="${entry.id}" style="cursor:pointer;"`;
+
+  const infoBtn = hasChildren
+    ? `<button class="entry-info-btn" data-action="open-entry-detail" data-entry-id="${entry.id}">···</button>`
+    : '';
+
   return `
-    <div class="entry entry-type-${entry.type}${statusClass}${toggleClass}" ${hasChildren ? `data-action="toggle-entry" data-entry-id="${entry.id}"` : ''}>
+    <div class="entry entry-type-${entry.type}${statusClass}${toggleClass}" ${rowAction}>
       ${entryTypeBadge(entry.type)}
       <span class="entry-id">${entry.id}</span>
-      <span class="entry-desc">${esc(entry.description)}${hash}${statusText}${childBadge}${priorityBadge}</span>
+      <span class="entry-desc">${esc(entry.description)}${hash}${statusText}${childBadge}${priorityBadge}${infoBtn}</span>
       <span class="entry-date">${entry.created_at || ''}</span>
       ${prMeta}
-      ${detail}
-      ${motivation}${ac}${behavior}
       ${children}
     </div>
   `;
@@ -3078,6 +3189,76 @@ function toggleMilestone(msId) {
   render();
 }
 
+function findEntryById(id, entries) {
+  for (const e of entries || []) {
+    if (e.id === id) return e;
+    const found = findEntryById(id, e.entries);
+    if (found) return found;
+  }
+  return null;
+}
+
+function findEntryInProject(id) {
+  for (const ms of state.project?.milestones || []) {
+    const found = findEntryById(id, ms.entries || []);
+    if (found) return { entry: found, ms };
+  }
+  return null;
+}
+
+function openEntryDetail(entryId) {
+  const result = findEntryInProject(entryId);
+  if (!result) return;
+  state.openEntryId = entryId;
+  renderEntryModal(result.entry, result.ms);
+}
+
+function renderEntryModal(entry, ms) {
+  const overlay = document.getElementById('entry-detail-modal');
+  if (!overlay) return;
+
+  const priority = entry.meta?.priority;
+  const priorityBadge = priority ? `<span class="priority-badge priority-${priority}">${priority}</span>` : '';
+  const hash = entry.meta?.hash ? `<span class="entry-hash">${entry.meta.hash.slice(0, 7)}</span>` : '';
+
+  const motivation = entry.motivation
+    ? `<div class="entry-modal-field modal-field-why"><div class="entry-modal-field-label">why</div>${esc(entry.motivation)}</div>` : '';
+  const ac = entry.acceptance_criteria
+    ? `<div class="entry-modal-field modal-field-ac"><div class="entry-modal-field-label">done when</div>${esc(entry.acceptance_criteria)}</div>` : '';
+  const behavior = entry.behavior
+    ? `<div class="entry-modal-field modal-field-behavior"><div class="entry-modal-field-label">behavior</div>${esc(entry.behavior)}</div>` : '';
+  const resolves = entry.meta?.resolves
+    ? `<div class="entry-modal-field modal-field-resolves"><div class="entry-modal-field-label">resolves</div>${esc(entry.meta.resolves)}</div>` : '';
+  const detail = entry.detail
+    ? `<div class="entry-modal-field modal-field-detail"><div class="entry-modal-field-label">detail</div>${esc(entry.detail)}</div>` : '';
+
+  const statusText = entryStatusText(entry);
+  const msLabel = ms ? `<span style="color:var(--text-dim);font-size:11px;">${esc(ms.id)}</span>` : '';
+
+  overlay.innerHTML = `
+    <div class="entry-modal" onclick="event.stopPropagation()">
+      <div class="entry-modal-header">
+        ${entryTypeBadge(entry.type)}
+        <span class="entry-modal-title">${esc(entry.id)}${hash} ${msLabel}</span>
+        <button class="entry-modal-close" data-action="close-entry-modal">✕</button>
+      </div>
+      <div class="entry-modal-body">
+        <div class="entry-modal-meta">${priorityBadge}${statusText}</div>
+        <div class="entry-modal-desc">${esc(entry.description)}</div>
+        ${motivation}${ac}${behavior}${resolves}${detail}
+      </div>
+    </div>
+  `;
+  overlay.style.display = 'flex';
+  overlay.querySelector('[data-action="close-entry-modal"]')?.addEventListener('click', closeEntryModal);
+}
+
+function closeEntryModal() {
+  state.openEntryId = null;
+  const overlay = document.getElementById('entry-detail-modal');
+  if (overlay) overlay.style.display = 'none';
+}
+
 function toggleEntry(entryId, event) {
   // Don't toggle when clicking on links etc inside entry
   if (event.target.closest('.entry-children')) return;
@@ -3143,6 +3324,8 @@ async function handleAction(e) {
     case 'show-graph': state.showGraph = true; render(); break;
     case 'hide-graph': state.showGraph = false; render(); break;
     case 'toggle-graph-filter': state.graphFilterDeps = !state.graphFilterDeps; render(); break;
+    case 'open-entry-detail': openEntryDetail(el.dataset.entryId); break;
+    case 'close-entry-modal': closeEntryModal(); break;
     case 'open-document': await openDocument(el.dataset.docId); break;
     case 'close-document': closeDocument(); break;
     case 'copy-doc-link': {
@@ -3256,8 +3439,15 @@ async function init() {
   await handleHashNav();
 }
 
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && state.openEntryId) closeEntryModal();
+});
+
 init();
 </script>
+
+<!-- Entry detail modal (outside #app to prevent re-render wipe) -->
+<div id="entry-detail-modal" class="entry-modal-overlay" style="display:none;" onclick="closeEntryModal()"></div>
 
 <!-- Persistent footer: outside #app so JS never overwrites it. -->
 <!-- Provides semantic signals for Google OAuth branding verification. -->
