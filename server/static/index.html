@@ -876,6 +876,70 @@ body::after {
 .entry-pr-rationale-block .entry-pr-decision-label { color: #a3e635; }
 .entry-pr-rationale-block { border-left-color: rgba(163,230,53,0.4); }
 
+/* Priority badge */
+.priority-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  margin-left: 6px;
+  vertical-align: middle;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.priority-highest { background: rgba(239,68,68,0.2); color: #f87171; border: 1px solid rgba(239,68,68,0.4); }
+.priority-high    { background: rgba(251,146,60,0.2); color: #fb923c; border: 1px solid rgba(251,146,60,0.4); }
+.priority-middle  { background: rgba(234,179,8,0.2);  color: #eab308; border: 1px solid rgba(234,179,8,0.4); }
+.priority-low     { background: rgba(148,163,184,0.2); color: #94a3b8; border: 1px solid rgba(148,163,184,0.3); }
+.priority-lowest  { background: rgba(100,116,139,0.15); color: #64748b; border: 1px solid rgba(100,116,139,0.2); }
+
+/* Entry info blocks (motivation / acceptance_criteria / behavior) */
+.entry-info-block {
+  margin-top: 6px;
+  padding: 5px 10px;
+  border-left: 2px solid rgba(148,163,184,0.3);
+  font-size: 12px;
+  color: #94a3b8;
+  line-height: 1.5;
+}
+.entry-info-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 2px;
+}
+.entry-info-why   .entry-info-label { color: #60a5fa; }
+.entry-info-ac    .entry-info-label { color: #a3e635; }
+.entry-info-behavior .entry-info-label { color: #c084fc; }
+.entry-info-why   { border-left-color: rgba(96,165,250,0.4); }
+.entry-info-ac    { border-left-color: rgba(163,230,53,0.4); }
+.entry-info-behavior { border-left-color: rgba(192,132,252,0.4); }
+
+/* MS objective / acceptance_criteria */
+.ms-objective {
+  font-size: 12px;
+  color: #94a3b8;
+  margin-bottom: 6px;
+  font-style: italic;
+}
+.ms-ac {
+  font-size: 12px;
+  color: #94a3b8;
+  margin-bottom: 8px;
+  padding: 4px 8px;
+  border-left: 2px solid rgba(163,230,53,0.4);
+}
+.ms-ac-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #a3e635;
+  margin-bottom: 2px;
+}
+
 .entry-pr-status {
   font-weight: 500;
 }
@@ -1702,6 +1766,19 @@ function renderEntry(entry) {
       : '';
     prMeta = `<div class="entry-pr-block"><div class="entry-pr-meta"><span class="entry-pr-status ${prStatus}">${prStatus}${reviewStatus}</span>${url}</div>${intent}${rationale}</div>`;
   }
+  const priority = entry.meta?.priority;
+  const priorityBadge = priority ? `<span class="priority-badge priority-${priority}">${priority}</span>` : '';
+
+  const motivation = entry.motivation
+    ? `<div class="entry-info-block entry-info-why"><div class="entry-info-label">why</div>${esc(entry.motivation)}</div>`
+    : '';
+  const ac = entry.acceptance_criteria
+    ? `<div class="entry-info-block entry-info-ac"><div class="entry-info-label">done when</div>${esc(entry.acceptance_criteria)}</div>`
+    : '';
+  const behavior = entry.behavior
+    ? `<div class="entry-info-block entry-info-behavior"><div class="entry-info-label">behavior</div>${esc(entry.behavior)}</div>`
+    : '';
+
   const statusText = entryStatusText(entry);
   const hasChildren = entry.entries?.length > 0;
   const childCount = hasChildren ? entry.entries.length : 0;
@@ -1721,10 +1798,11 @@ function renderEntry(entry) {
     <div class="entry entry-type-${entry.type}${statusClass}${toggleClass}" ${hasChildren ? `data-action="toggle-entry" data-entry-id="${entry.id}"` : ''}>
       ${entryTypeBadge(entry.type)}
       <span class="entry-id">${entry.id}</span>
-      <span class="entry-desc">${esc(entry.description)}${hash}${statusText}${childBadge}</span>
+      <span class="entry-desc">${esc(entry.description)}${hash}${statusText}${childBadge}${priorityBadge}</span>
       <span class="entry-date">${entry.created_at || ''}</span>
       ${prMeta}
       ${detail}
+      ${motivation}${ac}${behavior}
       ${children}
     </div>
   `;
@@ -1933,6 +2011,12 @@ function renderMilestoneCard(ms, index) {
     _currentMsId = null;
     const hasDone = entries.some(e => e.status === 'done' || e.status === 'cancelled' || (e.entries || []).some(c => c.status === 'done' || c.status === 'cancelled'));
     const msHideDone = state.hideEntryDone.has(ms.id);
+    const msObjective = ms.objective
+      ? `<div class="ms-objective">${esc(ms.objective)}</div>`
+      : '';
+    const msAc = ms.acceptance_criteria
+      ? `<div class="ms-ac"><div class="ms-ac-label">done when</div>${esc(ms.acceptance_criteria)}</div>`
+      : '';
     bodyHtml = `
       <div class="ms-entries">
         ${hasDone ? `
@@ -1942,19 +2026,21 @@ function renderMilestoneCard(ms, index) {
           </button>
         </div>
         ` : ''}
+        ${msObjective}${msAc}
         ${ms.description ? `<div class="ms-description">${esc(ms.description)}</div>` : ''}
         ${renderedEntries}
       </div>
     `;
   }
 
+  const msPriorityBadge = ms.priority ? `<span class="priority-badge priority-${ms.priority}">${ms.priority}</span>` : '';
   return `
     <div class="ms-card${activeClass}${expandedClass}">
       <div class="ms-card-header" data-action="toggle-ms" data-ms-id="${ms.id}">
         ${statusBadge(ms.status)}
         <div class="ms-title-row">
           <span class="ms-id">${ms.id}</span>
-          <span class="ms-title">${esc(ms.title)}</span>
+          <span class="ms-title">${esc(ms.title)}${msPriorityBadge}</span>
         </div>
         <div class="ms-meta">
           ${tasksLabel ? `<span class="ms-tasks-text">${tasksLabel}</span>` : ''}

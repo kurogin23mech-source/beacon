@@ -176,19 +176,81 @@ PYEOF
 
 log "threshold ${TRIGGERED_THRESHOLD}% triggered — sending notification"
 
-# ─── 自動ノート記録（Claude の応答を待たずに hook から直接記録）─────────────────
-beacon note "⚠️ コンテキスト ${PERCENT}% (${CURRENT_CONTEXT} / 200,000 tokens) — 閾値 ${TRIGGERED_THRESHOLD}% 到達。次の区切りで /beacon-note でサマリーを記録してください。" 2>/dev/null || true
-
-# ─── Claude への通知出力 ──────────────────────────────────────────────────────
-# Stop hook の正しい出力フォーマット:
-#   80%+: decision=block + reason → Claude が強制的にノート記録を実行
-#   <80%: systemMessage → Claude が次のターンで参照するアドバイス（非ブロッキング）
-python3 - "$ADVICE" <<'PYEOF'
+# ─── 現在地の自動取得（beacon status --json）──────────────────────────────────
+LOCATION_TEXT=""
+STATUS_JSON=$(beacon status --json 2>/dev/null || echo "")
+if [ -n "$STATUS_JSON" ]; then
+  LOCATION_TEXT=$(python3 - "$STATUS_JSON" <<'PYEOF'
 import json, sys
-advice = sys.argv[1]
-# systemMessage のみ — ターン追加なし、スクリプトの beacon note が記録を保証
-output = {
-    "systemMessage": advice
-}
+try:
+    d = json.loads(sys.argv[1])
+    lines = []
+    for ms in d.get("milestones", []):
+        if ms.get("status") == "in_progress":
+            lines.append(f"- Active MS: {ms['id']} \"{ms['title']}\" ({ms.get('progress',0)}% / {ms.get('done_tasks',0)}/{ms.get('total_tasks',0)}タスク完了)")
+    for op in d.get("operations", []):
+        if op.get("status") == "open":
+            lines.append(f"- Active Operation: {op['id']} \"{op['title']}\"")
+    print("\n".join(lines))
+except Exception:
+    pass
+PYEOF
+)
+fi
+
+# ─── 自動ノート記録（テンプレート形式）─────────────────────────────────────────
+NOTE_DATE=$(date +"%Y-%m-%d %H:%M")
+NOTE_BODY="## コンテキストサマリー（自動記録 ${PERCENT}% / ${NOTE_DATE})
+
+### 現在地（自動取得）
+${LOCATION_TEXT:-（取得失敗）}
+
+### 取り組んでいること
+（Claudeが記述してください）
+
+### このセッションで決めたこと
+（Claudeが記述してください）
+
+### 定量情報
+（Claudeが記述してください）
+
+### 未解決の課題
+（Claudeが記述してください）
+
+### 次のアクション
+（Claudeが記述してください）"
+
+beacon note "$NOTE_BODY" 2>/dev/null || true
+
+# ─── Claude への通知出力（残りブロックの記述を依頼）────────────────────────────
+TEMPLATE_INSTRUCTION="BEACON [コンテキスト ${PERCENT}% / ${CURRENT_CONTEXT}/200,000 tokens]
+閾値 ${TRIGGERED_THRESHOLD}% 到達。現在地ブロックを自動記録しました。
+以下のフォーマットで /beacon-note を実行し、残りのブロックを上書き補完してください:
+
+## コンテキストサマリー（${PERCENT}% / ${NOTE_DATE}）
+
+### 現在地（自動取得）
+${LOCATION_TEXT:-（取得失敗）}
+
+### 取り組んでいること
+[1〜3文]
+
+### このセッションで決めたこと
+[箇条書き]
+
+### 定量情報
+[数値・件数・率・閾値など、再現に必要な数字を全て]
+
+### 未解決の課題
+[次のターンまたは次セッションで再開すべき論点]
+
+### 次のアクション
+[直後にやること]
+
+コンパクション後のClaudeがこのノートだけで文脈を完全復元できる精度で書くこと。"
+
+python3 - "$TEMPLATE_INSTRUCTION" <<'PYEOF'
+import json, sys
+output = {"systemMessage": sys.argv[1]}
 print(json.dumps(output, ensure_ascii=False))
 PYEOF

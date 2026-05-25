@@ -40,6 +40,7 @@ VALID_PR_STATUSES = {"open", "in_review", "approved", "merged", "closed"}
 VALID_REVIEW_STATUSES = {"pending", "approved", "changes_requested", "rejected"}
 VALID_RUN_STATUSES = {"ok", "warning", "error"}
 VALID_INCIDENT_STATUSES = {"open", "resolved"}
+VALID_PRIORITIES = {"highest", "high", "middle", "low", "lowest"}
 VALID_OPERATION_STATUSES = {"open", "closed"}
 MS_ID_RE = re.compile(r"^ms-\d+$")
 ENTRY_ID_RE = re.compile(r"^e-\d+$")
@@ -216,7 +217,8 @@ def _find_entry_in(entries: list, entry_id: str, ms: dict):
 # ---------------------------------------------------------------------------
 
 def milestone_add(data: dict, title: str, target_date: str = "",
-                   description: str = "") -> str:
+                   description: str = "", priority: str = "",
+                   objective: str = "", acceptance_criteria: str = "") -> str:
     """Add a milestone. Returns the new ms_id."""
     ms_id_num = len(data["milestones"]) + 1
     ms_id = f"ms-{ms_id_num}"
@@ -231,6 +233,14 @@ def milestone_add(data: dict, title: str, target_date: str = "",
     }
     if description:
         ms["description"] = description
+    if priority:
+        if priority not in VALID_PRIORITIES:
+            raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
+        ms["priority"] = priority
+    if objective:
+        ms["objective"] = objective
+    if acceptance_criteria:
+        ms["acceptance_criteria"] = acceptance_criteria
     data["milestones"].append(ms)
     return ms_id
 
@@ -314,7 +324,9 @@ def milestone_delete(data: dict, ms_id: str, *, reason: str = "") -> dict:
 
 def task_add(data: dict, ms_id: str, description: str, *,
              entry_type: str = "task", date: str = "",
-             detail: str = "", requested_by: str = "") -> str:
+             detail: str = "", requested_by: str = "",
+             priority: str = "", motivation: str = "",
+             acceptance_criteria: str = "") -> str:
     """Add an entry to a milestone. Returns the new entry id."""
     target = find_target_milestone(data, ms_id)
     entries = target.setdefault("entries", [])
@@ -322,6 +334,10 @@ def task_add(data: dict, ms_id: str, description: str, *,
     meta = {}
     if requested_by:
         meta["requested_by"] = requested_by
+    if priority:
+        if priority not in VALID_PRIORITIES:
+            raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
+        meta["priority"] = priority
     now = _now_iso()
     meta["created_by"] = _get_actor()
     entry = {
@@ -336,6 +352,10 @@ def task_add(data: dict, ms_id: str, description: str, *,
     }
     if detail:
         entry["detail"] = detail
+    if motivation:
+        entry["motivation"] = motivation
+    if acceptance_criteria:
+        entry["acceptance_criteria"] = acceptance_criteria
     entries.append(entry)
     return eid
 
@@ -494,7 +514,8 @@ def check_duplicate_commit(entries: list, commit_hash: str) -> bool:
 
 def log_commit(data: dict, *, ms_id: str = "", commit_hash: str,
                message: str, date: str, summary: str = "",
-               progress: str = "") -> dict:
+               progress: str = "", behavior: str = "",
+               resolves: str = "") -> dict:
     """Record a commit to the target milestone. Returns result info dict."""
     target = find_target_milestone(data, ms_id)
     entries = target.setdefault("entries", [])
@@ -506,6 +527,9 @@ def log_commit(data: dict, *, ms_id: str = "", commit_hash: str,
                 "milestone": target["id"], "progress": target.get("progress", 0)}
 
     now = _now_iso()
+    meta = {"hash": commit_hash, "message": message}
+    if resolves:
+        meta["resolves"] = resolves
     commit_entry = {
         "id": next_entry_id(data),
         "type": "commit",
@@ -514,8 +538,10 @@ def log_commit(data: dict, *, ms_id: str = "", commit_hash: str,
         "created_at": now,
         "done_at": now,
         "status": "done",
-        "meta": {"hash": commit_hash, "message": message},
+        "meta": meta,
     }
+    if behavior:
+        commit_entry["behavior"] = behavior
 
     commit_text = (summary or "") + " " + (message or "")
     matched_task = _find_matching_task(entries, commit_text)
@@ -1063,6 +1089,9 @@ def entries_to_json(entries: list) -> list:
             item["meta"] = e.get("meta", {})
         if e.get("detail"):
             item["detail"] = e["detail"]
+        for field in ("motivation", "acceptance_criteria", "behavior"):
+            if e.get(field):
+                item[field] = e[field]
         children = e.get("entries", [])
         if children:
             item["entries"] = entries_to_json(children)
@@ -1252,10 +1281,13 @@ def run_record_add(data: dict, op_id: str, *,
 
 
 def incident_open(data: dict, op_id: str, *,
-                  title: str, description: str = "") -> tuple[dict, dict]:
+                  title: str, description: str = "",
+                  priority: str = "") -> tuple[dict, dict]:
     """Open an Incident in an Operation. Returns (operation, entry)."""
     op = _find_operation(data, op_id)
     eid = next_entry_id(data)
+    if priority and priority not in VALID_PRIORITIES:
+        raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
     entry = {
         "id": eid,
         "type": "incident",
@@ -1268,6 +1300,8 @@ def incident_open(data: dict, op_id: str, *,
         "linked_ms_task": None,
         "meta": {"created_by": _get_actor()},
     }
+    if priority:
+        entry["priority"] = priority
     op.setdefault("entries", []).append(entry)
     return op, entry
 

@@ -49,15 +49,42 @@ beacon status --json
 判定した操作に応じて、Bash ツールで対応するコマンドを実行する:
 
 ### add
+
+タスク追加前に、以下の3つを会話文脈から生成する:
+
+**motivation（なぜ必要か）**: 「なぜ今このタスクが必要か」を1文で。ユーザーの発言・作業文脈・紐づくMSのタイトルから推論する。
+
+**acceptance_criteria（完了条件）**: 「これを満たしたらdoneにできる」を具体的に1〜3項目。曖昧な場合は「〜が動作すること」「〜が確認できること」形式で記述する。
+
+**priority（優先度）**: 以下の定義を参照して判定する:
+
+| 優先度 | 基準 |
+|---|---|
+| `highest` | サービスの価値が成立しないレベルの影響 |
+| `high` | 大コンポーネントに致命的な影響 |
+| `middle` | 大コンポーネントに使いにくいレベル、または小機能に致命的 |
+| `low` | 小機能に使いにくいレベル |
+| `lowest` | 軽微（誤字・表示系など、修正も軽微） |
+
+タスクの性質（バグ修正・新機能・改善・ドキュメント等）と影響範囲から判断する。
+
 ```bash
-beacon task add "<description>" --ms <ms-id>
+beacon task add "<description>" --ms <ms-id> \
+  --motivation "<生成したmotivation>" \
+  --acceptance-criteria "<生成したacceptance_criteria>" \
+  --priority <生成したpriority>
 ```
-- ユーザーの指示から description を抽出
 - detail がある場合は `--detail "<text>"` も付加
 
 ### done
+
+完了前に `--reason`（完了根拠）を会話文脈から生成する:
+- コミットハッシュがあれば「コミット XXXXXXX で実装済み、動作確認済み」
+- ユーザーの発言から「〜を確認したため」「〜が不要となったため」等
+- acceptance_criteria が記録されている場合はそれを参照して満足度を記述する
+
 ```bash
-beacon task done <entry-id>
+beacon task done <entry-id> --reason "<生成したreason>"
 ```
 - entry-id はユーザーが指定するか、description からの照合で特定する
 - 照合する場合は先に `beacon task list --json --ms <ms-id>` で一覧を取得し、未完了タスクから一致するものを探す

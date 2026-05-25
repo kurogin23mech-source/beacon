@@ -338,36 +338,35 @@ cmd_milestone_add() {
     local title=""
     local target_date=""
     local description=""
+    local priority=""
+    local objective=""
+    local acceptance_criteria=""
 
-    # Parse arguments: beacon milestone add "title" [-d target_date] [--description "desc"]
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -d)
-                target_date="${2:-}"
-                shift 2
-                ;;
-            --description|--desc)
-                description="${2:-}"
-                shift 2
-                ;;
-            *)
-                title="$1"
-                shift
-                ;;
+            -d)                         target_date="${2:-}";          shift 2 ;;
+            --description|--desc)       description="${2:-}";          shift 2 ;;
+            --priority)                 priority="${2:-}";             shift 2 ;;
+            --objective)                objective="${2:-}";            shift 2 ;;
+            --acceptance-criteria|--ac) acceptance_criteria="${2:-}";  shift 2 ;;
+            *)                          title="$1";                    shift   ;;
         esac
     done
 
-    # Fall back to interactive if no title given
     if [ -z "$title" ]; then
         echo "Add Milestone"
         echo "============="
         read -rp "Title: " title
         read -rp "Target date (YYYY-MM-DD): " target_date
         read -rp "Description: " description
+        read -rp "Priority (highest/high/middle/low/lowest): " priority
+        read -rp "Objective (what becomes possible): " objective
+        read -rp "Acceptance criteria (when is it done): " acceptance_criteria
     fi
 
     BEACON_TITLE="$title" BEACON_TARGET_DATE="$target_date" \
-        BEACON_DESCRIPTION="$description" \
+        BEACON_DESCRIPTION="$description" BEACON_PRIORITY="$priority" \
+        BEACON_OBJECTIVE="$objective" BEACON_ACCEPTANCE_CRITERIA="$acceptance_criteria" \
         python3 "$COMMANDS_PY" milestone_add
 }
 
@@ -649,42 +648,22 @@ cmd_log() {
     local json_flag=""
     local mode="normal"
     local explicit_hash=""
+    local behavior=""
+    local resolves=""
 
     # Parse options
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -m|--ms)
-                ms_id="${2:-}"
-                shift 2
-                ;;
-            -p|--progress)
-                progress="${2:-}"
-                shift 2
-                ;;
-            --json)
-                json_flag="1"
-                shift
-                ;;
-            --prepare)
-                mode="prepare"
-                shift
-                ;;
-            --finalize)
-                mode="finalize"
-                shift
-                ;;
-            --summary)
-                custom_summary="${2:-}"
-                shift 2
-                ;;
-            --hash)
-                explicit_hash="${2:-}"
-                shift 2
-                ;;
-            *)
-                custom_summary="$1"
-                shift
-                ;;
+            -m|--ms)       ms_id="${2:-}";          shift 2 ;;
+            -p|--progress) progress="${2:-}";        shift 2 ;;
+            --json)        json_flag="1";            shift   ;;
+            --prepare)     mode="prepare";           shift   ;;
+            --finalize)    mode="finalize";          shift   ;;
+            --summary)     custom_summary="${2:-}";  shift 2 ;;
+            --hash)        explicit_hash="${2:-}";   shift 2 ;;
+            --behavior)    behavior="${2:-}";        shift 2 ;;
+            --resolves)    resolves="${2:-}";        shift 2 ;;
+            *)             custom_summary="$1";      shift   ;;
         esac
     done
 
@@ -736,12 +715,14 @@ cmd_log() {
                 BEACON_PROGRESS="$progress" \
                 BEACON_NEW_SUMMARY="${BEACON_NEW_SUMMARY:-$custom_summary}" \
                 BEACON_JSON="$json_flag" \
+                BEACON_BEHAVIOR="$behavior" BEACON_RESOLVES="$resolves" \
                 python3 "$COMMANDS_PY" log_finalize
             ;;
         normal)
             BEACON_HASH="$hash" BEACON_MESSAGE="$message" BEACON_DATE="$date_str" \
                 BEACON_SUMMARY="$custom_summary" BEACON_MS_ID="$ms_id" \
                 BEACON_PROGRESS="$progress" BEACON_JSON="$json_flag" \
+                BEACON_BEHAVIOR="$behavior" BEACON_RESOLVES="$resolves" \
                 python3 "$COMMANDS_PY" log
             ;;
     esac
@@ -788,29 +769,20 @@ cmd_task_add() {
     local description=""
     local detail=""
     local requested_by=""
+    local priority=""
+    local motivation=""
+    local acceptance_criteria=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -m|--ms)
-                ms_id="${2:-}"
-                shift 2
-                ;;
-            -t|--type)
-                entry_type="${2:-}"
-                shift 2
-                ;;
-            -d|--detail)
-                detail="${2:-}"
-                shift 2
-                ;;
-            --from)
-                requested_by="${2:-}"
-                shift 2
-                ;;
-            *)
-                description="$1"
-                shift
-                ;;
+            -m|--ms)                    ms_id="${2:-}";                shift 2 ;;
+            -t|--type)                  entry_type="${2:-}";           shift 2 ;;
+            -d|--detail)                detail="${2:-}";               shift 2 ;;
+            --from)                     requested_by="${2:-}";         shift 2 ;;
+            --priority)                 priority="${2:-}";             shift 2 ;;
+            --motivation|--why)         motivation="${2:-}";           shift 2 ;;
+            --acceptance-criteria|--ac) acceptance_criteria="${2:-}";  shift 2 ;;
+            *)                          description="$1";              shift   ;;
         esac
     done
 
@@ -820,6 +792,8 @@ cmd_task_add() {
     BEACON_DESCRIPTION="$description" BEACON_MS_ID="$ms_id" \
         BEACON_TYPE="$entry_type" BEACON_DATE="$date_str" \
         BEACON_DETAIL="$detail" BEACON_REQUESTED_BY="$requested_by" \
+        BEACON_PRIORITY="$priority" BEACON_MOTIVATION="$motivation" \
+        BEACON_ACCEPTANCE_CRITERIA="$acceptance_criteria" \
         python3 "$COMMANDS_PY" task_add
 }
 
@@ -1633,7 +1607,8 @@ case "${1:-}" in
                 cmd_task_add "$@"
                 ;;
             done)
-                cmd_task_done "${3:-}"
+                shift 2
+                cmd_task_done "$@"
                 ;;
             list|ls)
                 shift 2
@@ -1788,15 +1763,18 @@ case "${1:-}" in
                 op_id=""
                 title=""
                 desc=""
+                priority=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
-                        -o|--op) op_id="${2:-}"; shift 2 ;;
-                        --desc) desc="${2:-}"; shift 2 ;;
+                        -o|--op)    op_id="${2:-}";    shift 2 ;;
+                        --desc)     desc="${2:-}";     shift 2 ;;
+                        --priority) priority="${2:-}"; shift 2 ;;
                         *) [[ -z "$title" ]] && title="$1"; shift ;;
                     esac
                 done
                 BEACON_OPERATION_ID="$op_id" BEACON_INCIDENT_TITLE="$title" \
-                    BEACON_INCIDENT_DESC="$desc" python3 "$COMMANDS_PY" incident_open
+                    BEACON_INCIDENT_DESC="$desc" BEACON_INCIDENT_PRIORITY="$priority" \
+                    python3 "$COMMANDS_PY" incident_open
                 ;;
             close)
                 shift 2

@@ -390,8 +390,13 @@ def cmd_milestone_add():
     title = os.environ.get("BEACON_TITLE", "")
     target_date = os.environ.get("BEACON_TARGET_DATE", "")
     description = os.environ.get("BEACON_DESCRIPTION", "")
+    priority = os.environ.get("BEACON_PRIORITY", "")
+    objective = os.environ.get("BEACON_OBJECTIVE", "")
+    acceptance_criteria = os.environ.get("BEACON_ACCEPTANCE_CRITERIA", "")
     data = load_project()
-    ms_id = core.milestone_add(data, title, target_date, description=description)
+    ms_id = core.milestone_add(data, title, target_date, description=description,
+                               priority=priority, objective=objective,
+                               acceptance_criteria=acceptance_criteria)
     save_project(data)
     print(f"Added milestone {ms_id}: {title}")
 
@@ -478,13 +483,13 @@ def cmd_milestone_start():
 def cmd_milestone_done():
     ms_id = os.environ.get("BEACON_MS_ID", "")
     reason = os.environ.get("BEACON_REASON", "")
+    if not reason:
+        print("Error: --reason is required. Record what was achieved (decision trail must be complete).", file=sys.stderr)
+        sys.exit(1)
     data = load_project()
     ms = core.milestone_done(data, ms_id, reason=reason)
     save_project(data, op={"op": "milestone_done", "ms_id": ms_id, "reason": reason})
-    msg = f"Completed: {ms['title']}"
-    if reason:
-        msg += f"\n  Reason: {reason}"
-    print(msg)
+    print(f"Completed: {ms['title']}\n  Reason: {reason}")
 
 
 def cmd_milestone_show():
@@ -587,12 +592,15 @@ def cmd_log():
     date = os.environ.get("BEACON_DATE", "")
     ms_id = os.environ.get("BEACON_MS_ID", "")
     progress = os.environ.get("BEACON_PROGRESS", "")
+    behavior = os.environ.get("BEACON_BEHAVIOR", "")
+    resolves = os.environ.get("BEACON_RESOLVES", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     data = load_project()
     result = core.log_commit(
         data, ms_id=ms_id, commit_hash=commit_hash,
         message=message, date=date, summary=summary, progress=progress,
+        behavior=behavior, resolves=resolves,
     )
     save_project(data)
 
@@ -651,12 +659,15 @@ def cmd_log_finalize():
     summary_text = os.environ.get("BEACON_SUMMARY", "")
     progress = os.environ.get("BEACON_PROGRESS", "")
     new_summary = os.environ.get("BEACON_NEW_SUMMARY", "")
+    behavior = os.environ.get("BEACON_BEHAVIOR", "")
+    resolves = os.environ.get("BEACON_RESOLVES", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     data = load_project()
     result = core.log_commit(
         data, ms_id=ms_id, commit_hash=commit_hash,
         message=message, date=date, summary=summary_text, progress=progress,
+        behavior=behavior, resolves=resolves,
     )
 
     if new_summary:
@@ -741,11 +752,16 @@ def cmd_task_add():
     date = os.environ.get("BEACON_DATE", "")
     detail = os.environ.get("BEACON_DETAIL", "")
     requested_by = os.environ.get("BEACON_REQUESTED_BY", "")
+    priority = os.environ.get("BEACON_PRIORITY", "")
+    motivation = os.environ.get("BEACON_MOTIVATION", "")
+    acceptance_criteria = os.environ.get("BEACON_ACCEPTANCE_CRITERIA", "")
 
     data = load_project()
     target = core.find_target_milestone(data, ms_id)
     eid = core.task_add(data, ms_id, description, entry_type=entry_type,
-                        date=date, detail=detail, requested_by=requested_by)
+                        date=date, detail=detail, requested_by=requested_by,
+                        priority=priority, motivation=motivation,
+                        acceptance_criteria=acceptance_criteria)
     save_project(data)
     from_str = f" (from {requested_by})" if requested_by else ""
     print(f"Added {entry_type} [{eid}] to {target['title']}: {description}{from_str}")
@@ -754,6 +770,10 @@ def cmd_task_add():
 def cmd_task_done():
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
     progress = os.environ.get("BEACON_PROGRESS", "")
+    reason = os.environ.get("BEACON_REASON", "")
+    if not reason:
+        print("Error: --reason is required. Record completion evidence (decision trail must be complete).", file=sys.stderr)
+        sys.exit(1)
     import datetime
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -848,7 +868,16 @@ def cmd_task_show():
     print(f"{icon} [{entry['id']}] {entry.get('description', '')}")
     print(f"  Milestone: [{ms['id']}] {ms['title']}")
     print(f"  Type: {entry.get('type', '?')}  Status: {entry.get('status', '?')}")
+    priority = entry.get("meta", {}).get("priority", "")
+    if priority:
+        print(f"  Priority: {priority}")
     print(f"  Created: {entry.get('created_at', '-')}  Done: {entry.get('done_at', '-')}")
+    if entry.get("motivation"):
+        print(f"  Why: {entry['motivation']}")
+    if entry.get("acceptance_criteria"):
+        print(f"  Done when: {entry['acceptance_criteria']}")
+    if entry.get("behavior"):
+        print(f"  Behavior: {entry['behavior']}")
     # Show PR-specific fields
     if entry.get("type") == "pr":
         meta = entry.get("meta", {})
@@ -3683,11 +3712,12 @@ def cmd_incident_open():
     op_id = os.environ.get("BEACON_OPERATION_ID", "")
     title = os.environ.get("BEACON_INCIDENT_TITLE", "")
     description = os.environ.get("BEACON_INCIDENT_DESC", "")
+    priority = os.environ.get("BEACON_INCIDENT_PRIORITY", "")
     if not op_id or not title:
         print("Error: -o <op-id> and incident title required")
         sys.exit(1)
     data = load_project()
-    op, entry = core.incident_open(data, op_id, title=title, description=description)
+    op, entry = core.incident_open(data, op_id, title=title, description=description, priority=priority)
     save_project(data, op={"type": "incident_open", "op_id": op_id, "entry_id": entry["id"], "title": title})
     if os.environ.get("BEACON_JSON"):
         print(json.dumps(entry, ensure_ascii=False))
