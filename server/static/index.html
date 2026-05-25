@@ -1015,9 +1015,12 @@ body::after {
   gap: 10px;
 }
 .entry-modal-desc {
-  font-size: 13px;
+  font-size: 15px;
+  font-weight: 500;
   color: var(--text-primary);
-  line-height: 1.6;
+  line-height: 1.5;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-subtle);
 }
 .entry-modal-meta {
   display: flex;
@@ -3243,8 +3246,8 @@ function renderEntryModal(entry, ms) {
         <button class="entry-modal-close" data-action="close-entry-modal">✕</button>
       </div>
       <div class="entry-modal-body">
-        <div class="entry-modal-meta">${priorityBadge}${statusText}</div>
         <div class="entry-modal-desc">${esc(entry.description)}</div>
+        <div class="entry-modal-meta">${priorityBadge}${statusText}</div>
         ${motivation}${ac}${behavior}${resolves}${detail}
       </div>
     </div>
