@@ -452,6 +452,9 @@ cmd_milestone_update() {
     local target_date=""
     local status=""
     local description=""
+    local priority=""
+    local objective=""
+    local acceptance_criteria=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -461,17 +464,22 @@ cmd_milestone_update() {
             --target-date)  target_date="${2:-}"; shift 2 ;;
             --status)       status="${2:-}"; shift 2 ;;
             --description|--desc) description="${2:-}"; shift 2 ;;
+            --priority)     priority="${2:-}"; shift 2 ;;
+            --objective)    objective="${2:-}"; shift 2 ;;
+            --acceptance-criteria|--ac) acceptance_criteria="${2:-}"; shift 2 ;;
             *)              ms_id="$1"; shift ;;
         esac
     done
 
     if [ -z "$ms_id" ]; then
-        echo "Usage: beacon milestone update <ms-id> [--title T] [--progress N] [--target-date D] [--status S] [--description D] [--json]"
+        echo "Usage: beacon milestone update <ms-id> [--title T] [--progress N] [--target-date D] [--status S] [--description D] [--priority P] [--objective O] [--ac A] [--json]"
         exit 1
     fi
     BEACON_MS_ID="$ms_id" BEACON_JSON="$json_flag" BEACON_TITLE="$title" \
         BEACON_PROGRESS="$progress" BEACON_TARGET_DATE="$target_date" \
         BEACON_STATUS="$status" BEACON_DESCRIPTION="$description" \
+        BEACON_PRIORITY="$priority" BEACON_OBJECTIVE="$objective" \
+        BEACON_ACCEPTANCE_CRITERIA="$acceptance_criteria" \
         python3 "$COMMANDS_PY" milestone_update
 }
 

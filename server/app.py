@@ -310,6 +310,9 @@ class MilestoneCreate(BaseModel):
     title: str
     target_date: str = ""
     description: str = ""
+    priority: str = ""
+    objective: str = ""
+    acceptance_criteria: str = ""
 
 class MilestoneUpdate(BaseModel):
     title: str = ""
@@ -317,6 +320,9 @@ class MilestoneUpdate(BaseModel):
     target_date: str = ""
     status: str = ""
     description: str = ""
+    priority: str = ""
+    objective: str = ""
+    acceptance_criteria: str = ""
 
 class EntryCreate(BaseModel):
     description: str
@@ -438,7 +444,10 @@ def create_milestone(project_id: str, body: MilestoneCreate,
     data = _load(project_id, user)
     _require_write(data, user)
     ms_id = core.milestone_add(data, body.title, body.target_date,
-                               description=body.description)
+                               description=body.description,
+                               priority=body.priority,
+                               objective=body.objective,
+                               acceptance_criteria=body.acceptance_criteria)
     _save(project_id, data)
     return {"ms_id": ms_id, "title": body.title}
 
@@ -471,6 +480,9 @@ def update_milestone(project_id: str, ms_id: str, body: MilestoneUpdate,
             title=body.title, progress=body.progress,
             target_date=body.target_date, status=body.status,
             description=body.description,
+            priority=body.priority,
+            objective=body.objective,
+            acceptance_criteria=body.acceptance_criteria,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

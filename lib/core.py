@@ -274,7 +274,9 @@ def milestone_done(data: dict, ms_id: str, *, reason: str = "") -> dict:
 def milestone_update(data: dict, ms_id: str, *,
                      title: str = "", progress: str = "",
                      target_date: str = "", status: str = "",
-                     description: str = "", reason: str = "") -> dict:
+                     description: str = "", reason: str = "",
+                     priority: str = "", objective: str = "",
+                     acceptance_criteria: str = "") -> dict:
     """Update milestone fields. Returns the milestone."""
     for ms in data["milestones"]:
         if ms["id"] == ms_id:
@@ -289,6 +291,14 @@ def milestone_update(data: dict, ms_id: str, *,
                     pass
             if target_date:
                 ms["target_date"] = target_date
+            if priority:
+                if priority not in VALID_PRIORITIES:
+                    raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
+                ms["priority"] = priority
+            if objective:
+                ms["objective"] = objective
+            if acceptance_criteria:
+                ms["acceptance_criteria"] = acceptance_criteria
             if status:
                 if status not in VALID_STATUSES:
                     raise ValueError(

@@ -430,7 +430,7 @@ def cmd_milestone_list():
         for ms in milestones:
             entries = ms.get("entries", [])
             total_tasks, done_tasks = core.count_task_status(entries)
-            output["milestones"].append({
+            ms_item = {
                 "id": ms["id"],
                 "title": ms.get("title", ""),
                 "status": ms.get("status", "todo"),
@@ -438,7 +438,11 @@ def cmd_milestone_list():
                 "target_date": ms.get("target_date", ""),
                 "total_tasks": total_tasks,
                 "done_tasks": done_tasks,
-            })
+            }
+            for f in ("priority", "objective", "acceptance_criteria", "description"):
+                if ms.get(f):
+                    ms_item[f] = ms[f]
+            output["milestones"].append(ms_item)
         import datetime as _dt
         today_str = _dt.date.today().isoformat()
         for op in data.get("operations", []):
@@ -513,6 +517,9 @@ def cmd_milestone_show():
                     "done_tasks": done_tasks,
                     "entries": core.entries_to_json(entries),
                 }
+                for f in ("priority", "objective", "acceptance_criteria"):
+                    if ms.get(f):
+                        output[f] = ms[f]
                 print(json.dumps(output, ensure_ascii=False))
             else:
                 icons = {"done": "\u25cf", "in_progress": "\u25d1", "todo": "\u25cb",
@@ -545,6 +552,9 @@ def cmd_milestone_update():
             status=status,
             description=os.environ.get("BEACON_DESCRIPTION", ""),
             reason=reason,
+            priority=os.environ.get("BEACON_PRIORITY", ""),
+            objective=os.environ.get("BEACON_OBJECTIVE", ""),
+            acceptance_criteria=os.environ.get("BEACON_ACCEPTANCE_CRITERIA", ""),
         )
     except ValueError as e:
         print(str(e))
