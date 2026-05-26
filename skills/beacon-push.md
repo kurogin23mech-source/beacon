@@ -50,6 +50,63 @@ Step 1 の情報を読み、**日本語で1〜3文の説明文**を生成する�
 
 悪い例: 「beacon-init Skill・Project Archaeology強化・beacon initフラグ対応・CLIコマンド安全性修正・ms-26 worktreeDispatch・ms-5安定化（16コミット）」
 
+## Step 2.5: バージョン判定（オプション）
+
+プロジェクトが **opt-in している場合のみ** 実行する。判定基準:
+
+```bash
+beacon doc show version-rules 2>/dev/null
+```
+
+stdoutに本文があれば opt-in。空（exit code非ゼロ含む）ならこのStepをスキップしてStep 3へ。
+
+### 判定ロジック
+
+opt-inしている場合、Bash ツールで以下を実行:
+
+```bash
+python3 -c "
+import sys, json
+sys.path.insert(0, '$(beacon --help 2>&1 | head -1 | grep -oE '/[^ ]+' | head -1)')
+# (実際には beacon インストール先の lib/ を sys.path に追加)
+" 2>/dev/null || true
+
+# 簡易版: git tag + 未push commits から判定
+CURRENT_TAG=$(git describe --tags --abbrev=0 --match='v[0-9]*' 2>/dev/null || echo "v0.0.0")
+COMMITS=$(echo '<Step1のJSON>' | python3 -c "import json,sys; d=json.load(sys.stdin); print('\n'.join(c['message'] for c in d['commits']))")
+```
+
+`version-rules` ドキュメントの内容を読み、commits を分類して次バージョンを判定する:
+
+1. **MAJOR候補**: `BREAKING CHANGE` / `BREAKING:` を含むメッセージ、または `feat!:` / `fix!:` プレフィックス
+2. **MINOR候補**: `feat:` / `feat(...):` プレフィックス
+3. **PATCH候補**: その他すべて
+
+最大の昇格度を採用し、`git describe --tags --abbrev=0 --match='v[0-9]*'` で取得した現tagをbumpする。
+
+### ユーザーへの提示
+
+```
+バージョン判定:
+  現tag: v0.1.0
+  次:    v0.2.0  (MINOR bump)
+  根拠:  feat 5本, fix 4本, BREAKINGなし
+
+このpushにタグを切ってGitHub Releaseを作成しますか？ [y/N]
+```
+
+### 承認時の処理
+
+ユーザーが承認したら Bash ツールで実行:
+
+```bash
+git tag vX.Y.Z
+git push origin vX.Y.Z
+gh release create vX.Y.Z --title vX.Y.Z --notes "Release vX.Y.Z" 2>/dev/null || true
+```
+
+却下またはスキップ時は何もしない。Step 3 へ進む。
+
 ## Step 3: 書き込み
 
 Step 2 で生成した説明文を使って Bash ツールで実行:
@@ -57,6 +114,8 @@ Step 2 で生成した説明文を使って Bash ツールで実行:
 ```bash
 beacon push record --desc "<Step2の説明文>"
 ```
+
+Step 2.5 でバージョンを切った場合は、`--meta` で記録できる場合は version を含める（CLI未対応ならスキップ）。
 
 ## Step 4: 結果の提示
 

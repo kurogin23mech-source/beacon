@@ -31,6 +31,34 @@ stdout に JSON が返る:
 
 new_commits が空の場合（前回デプロイ以降に新しいコミットなし）は何もせず終了する。
 
+## Step 1.5: 対応バージョンの特定（オプション）
+
+プロジェクトが **opt-in している場合のみ** 実行する。判定基準:
+
+```bash
+beacon doc show version-rules 2>/dev/null
+```
+
+stdoutに本文があれば opt-in。空ならスキップしてStep 2へ。
+
+### 処理
+
+デプロイは新規バージョンを生まない（pushで切ったtagをデプロイするだけ）。HEADコミットに紐づくtagを取得:
+
+```bash
+git describe --tags --exact-match HEAD --match='v[0-9]*' 2>/dev/null
+```
+
+- tagが返れば → そのバージョンを「Deploy対象バージョン」として記録対象に含める
+- 返らなければ → 「未タグデプロイ（HEAD: {short-hash}）」と扱う（警告レベル、ブロックしない）
+
+### 出力への反映
+
+Step 4 の結果報告に追加:
+```
+Deploy対象バージョン: v0.2.0    （または「未タグ (abc123)」）
+```
+
 ## Step 2: 説明文の生成
 
 Step 1 の情報を読み、**日本語で1〜3文の説明文**を生成する。
