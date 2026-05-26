@@ -44,7 +44,7 @@ def determine_version(beacon_root):
     sys.path.insert(0, os.path.join(beacon_root, "lib"))
     from version_rules import propose_next_version, get_current_tag
 
-    current_tag = get_current_tag(beacon_root)
+    current_tag = get_current_tag(prefix="v", repo_path=beacon_root)
     if current_tag:
         rev_range = f"{current_tag}..HEAD"
     else:
@@ -68,7 +68,7 @@ def determine_version(beacon_root):
     if not commits:
         sys.exit("Error: no new commits since last release.")
 
-    info = propose_next_version(commits, repo_path=beacon_root)
+    info = propose_next_version(commits, axis="push", repo_path=beacon_root)
     info["commits"] = commits
     return info["next"], info
 

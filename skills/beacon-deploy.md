@@ -31,32 +31,67 @@ stdout に JSON が返る:
 
 new_commits が空の場合（前回デプロイ以降に新しいコミットなし）は何もせず終了する。
 
-## Step 1.5: 対応バージョンの特定（オプション）
+## Step 1.5: Deployバージョン判定（オプション）
 
-プロジェクトが **opt-in している場合のみ** 実行する。判定基準:
+CORE doc `version-rules` の **deploy軸** 設定に従って処理する。
 
-```bash
-beacon doc show version-rules 2>/dev/null
-```
+### deploy軸の設定取得
 
-stdoutに本文があれば opt-in。空ならスキップしてStep 2へ。
-
-### 処理
-
-デプロイは新規バージョンを生まない（pushで切ったtagをデプロイするだけ）。HEADコミットに紐づくtagを取得:
+Bash ツールで実行（`<beacon_lib>` は `beacon` インストール先のlib/、例: `/opt/homebrew/Cellar/beacon/X.Y.Z/libexec`）:
 
 ```bash
-git describe --tags --exact-match HEAD --match='v[0-9]*' 2>/dev/null
+python3 -c "
+import sys
+sys.path.insert(0, '<beacon_lib>')
+from version_rules import propose_next_version, describe_from_tag
+import json, subprocess
+prepare = subprocess.run(['beacon','deploy','record','--prepare'], capture_output=True, text=True).stdout
+d = json.loads(prepare)
+commits = d.get('new_commits', [])
+info = propose_next_version(commits, axis='deploy', repo_path='.')
+push_tag = describe_from_tag(prefix='v', repo_path='.')
+print(json.dumps({'deploy': info, 'push_tag': push_tag}))
+"
 ```
 
-- tagが返れば → そのバージョンを「Deploy対象バージョン」として記録対象に含める
-- 返らなければ → 「未タグデプロイ（HEAD: {short-hash}）」と扱う（警告レベル、ブロックしない）
+### 分岐: deploy軸が有効か
+
+#### A. deploy軸が **無効** （デフォルト）
+
+`enabled == False` の場合、deployにはバージョンを切らない。表示のみ：
+- `git describe --tags --match='v[0-9]*' HEAD` で push軸の現在地を表示
+  - exactなら `Deploy対象 v0.2.1`
+  - 非exact（commits先）なら `Deploy対象 v0.2.1+3 (server変更3件先)`
+  - tag無しなら `未タグ (abc123)`
+- バージョン提案・タグ切りはしない
+
+#### B. deploy軸が **有効**
+
+`enabled == True` の場合、push軸と同様の挙動：
+- `scope_paths` が指定されていればそのpath配下を変更したcommitsのみ対象
+- bump判定 → 次バージョン提案
+- ユーザーに提示:
+  ```
+  Deployバージョン判定:
+    現tag: deploy-v1.4.2
+    次:    deploy-v1.5.0  (MINOR bump)
+    根拠:  feat 2本（serverスコープ内）
+    BREAKING: なし
+
+  このdeployにタグ deploy-v1.5.0 を切ってGitHub Releaseを作成しますか？ [y/N]
+  ```
+- 承認時:
+  ```bash
+  git tag deploy-vX.Y.Z
+  git push origin deploy-vX.Y.Z
+  gh release create deploy-vX.Y.Z --title deploy-vX.Y.Z --notes "Deploy release"
+  ```
 
 ### 出力への反映
 
 Step 4 の結果報告に追加:
 ```
-Deploy対象バージョン: v0.2.0    （または「未タグ (abc123)」）
+Deploy対象バージョン: v0.2.1+3   （またはdeploy-v1.5.0、または「未タグ (abc123)」）
 ```
 
 ## Step 2: 説明文の生成
