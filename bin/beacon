@@ -18,12 +18,12 @@ Usage:
   beacon status                 Show current milestone status (no tmux)
 
 Milestones:
-  beacon milestone add "title"  Add a new milestone
+  beacon milestone add "title" [--priority P] [--objective O] [--ac A]   Add a new milestone
   beacon milestone list         List milestones
   beacon milestone start <id>   Set milestone as active
   beacon milestone close <id>   Close milestone (keeps current progress)
   beacon milestone observe <id> Set milestone to observing
-  beacon milestone update <id>  Update title/progress/status/description
+  beacon milestone update <id>  Update title/progress/status/description/priority/objective/ac
   beacon milestone delete <id>  Delete (soft) a milestone
   beacon milestone depends <id> Set milestone dependencies
   beacon milestone graph        Show dependency graph
