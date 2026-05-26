@@ -50,9 +50,10 @@ def main():
 
     # ---- Step 1: Pre-flight ----
     print("=> Pre-flight checks")
-    status = run(["git", "status", "--porcelain"], cwd=beacon_root, capture=True, dry_run=False)
+    status = run(["git", "status", "--porcelain", "--untracked-files=no"],
+                 cwd=beacon_root, capture=True, dry_run=False)
     if status:
-        print("Error: git working tree is not clean. Commit or stash changes first.", file=sys.stderr)
+        print("Error: tracked files have uncommitted changes. Commit or stash first.", file=sys.stderr)
         print(status, file=sys.stderr)
         sys.exit(1)
     branch = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=beacon_root, capture=True, dry_run=False)
