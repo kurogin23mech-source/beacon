@@ -23,6 +23,13 @@ class Beacon < Formula
     libexec.install Dir["lib/*.py"]
     libexec.install "lib/firebase_config.json.example"
 
+    # Hook scripts (used by `beacon skill install` to configure Claude Code).
+    # Placed alongside the Python library so commands.py can find them.
+    libexec.install Dir["bin/*.sh"]
+
+    # Skills source files (distributed to ~/.claude/skills/ via `beacon skill install`).
+    prefix.install "skills"
+
     # Rewrite BEACON_DIR inside bin/beacon so it points to libexec.
     # The original script resolves lib/ relative to itself; after install the
     # layout changes, so we patch the two path variables accordingly.

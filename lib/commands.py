@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Beacon CLI commands - thin adapter over core.py logic."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 import json
 import os
@@ -183,15 +183,19 @@ def _install_git_hook():
     print("Installed git post-commit hook")
 
 
-CLAUDE_HOOK_SCRIPT = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "bin", "beacon-post-commit-hook.sh"
-)
+def _find_hook(name):
+    """Locate a hook script. Brew install places hooks alongside this file
+    (libexec/); dev repo has them at <repo>/bin/."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    repo_bin = os.path.join(os.path.dirname(here), "bin", name)
+    sibling = os.path.join(here, name)
+    if os.path.exists(sibling):
+        return sibling
+    return repo_bin
 
-CLAUDE_SAVE_HOOK_SCRIPT = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "bin", "beacon-save-hook.sh"
-)
+
+CLAUDE_HOOK_SCRIPT = _find_hook("beacon-post-commit-hook.sh")
+CLAUDE_SAVE_HOOK_SCRIPT = _find_hook("beacon-save-hook.sh")
 
 
 def _install_claude_hook():
@@ -2814,7 +2818,7 @@ def cmd_skill_install():
         print("No skills found to install.")
 
     # Configure Claude Code PostToolUse hooks
-    hook_script = os.path.join(beacon_root, "bin", "beacon-post-commit-hook.sh")
+    hook_script = _find_hook("beacon-post-commit-hook.sh")
     settings_path = os.path.join(home, ".claude", "settings.json")
     _install_claude_hooks(hook_script, settings_path)
 

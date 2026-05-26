@@ -120,6 +120,18 @@ def main():
 
     version_str = v.lstrip("v")
 
+    # ---- Bump __version__ in lib/commands.py ----
+    print("=> Updating __version__ in lib/commands.py")
+    commands_path = os.path.join(beacon_root, "lib", "commands.py")
+    cmds_src = open(commands_path, encoding="utf-8").read()
+    new_cmds = re.sub(r'(__version__\s*=\s*)"[^"]+"', f'\\1"{version_str}"', cmds_src, count=1)
+    if new_cmds != cmds_src and not dry:
+        with open(commands_path, "w", encoding="utf-8") as f:
+            f.write(new_cmds)
+        run(["git", "add", "lib/commands.py"], cwd=beacon_root, dry_run=dry)
+        run(["git", "commit", "-m", f"chore(release): bump __version__ to {version_str}"],
+            cwd=beacon_root, dry_run=dry)
+
     # ---- Push beacon repo (if any unpushed) ----
     print("=> Pushing beacon repo to origin/main")
     run(["git", "push", "origin", "main"], cwd=beacon_root, dry_run=dry)
