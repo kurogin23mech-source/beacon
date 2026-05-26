@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
 """Beacon release pipeline (maintainer-only).
 
-Run from the beacon repo root:
-    python3 scripts/release.py [--version v0.2.0] [--tap-path PATH] [--dry-run]
+Usage:
+    python3 scripts/release.py                  # auto-detect version from commits
+    python3 scripts/release.py --version vX.Y.Z # explicit version
+    python3 scripts/release.py --dry-run
+    python3 scripts/release.py --yes            # skip confirmation
 
-Steps:
-  1. Pre-flight: git working tree clean, on main branch
-  2. git push origin main
-  3. If --version: git tag + push tag + gh release create
-  4. Fetch tarball + compute SHA-256
-  5. Update packaging/homebrew/beacon.rb (sha256 / version / url)
-  6. Commit + push the formula bump
-  7. Mirror Formula/beacon.rb to the homebrew-beacon tap repo, commit + push
+Auto-version uses lib/version_rules.py, which reads the 'version-rules' CORE
+doc if present, otherwise falls back to Conventional Commits semver.
 
-NOT shipped via brew. This is a dev tool that lives in the repo.
+NOT shipped via brew. Lives in repo only.
 """
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -38,17 +36,55 @@ def run(cmd, cwd=None, *, check=True, capture=False, dry_run=False):
     return result.stdout.strip() if capture else ""
 
 
+def determine_version(beacon_root):
+    """Auto-detect next version from commits since last tag.
+
+    Returns (version_str_with_v, info_dict).
+    """
+    sys.path.insert(0, os.path.join(beacon_root, "lib"))
+    from version_rules import propose_next_version, get_current_tag
+
+    current_tag = get_current_tag(beacon_root)
+    if current_tag:
+        rev_range = f"{current_tag}..HEAD"
+    else:
+        rev_range = "HEAD"
+    log_output = subprocess.run(
+        ["git", "log", rev_range, "--pretty=format:%H%x00%s%x00%b%x1e"],
+        capture_output=True, text=True, cwd=beacon_root,
+    ).stdout
+
+    commits = []
+    for entry in log_output.split("\x1e"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        parts = entry.split("\x00")
+        if len(parts) >= 2:
+            subject, body = parts[1], (parts[2] if len(parts) > 2 else "")
+            full_message = subject + ("\n\n" + body if body else "")
+            commits.append({"hash": parts[0][:7], "message": full_message})
+
+    if not commits:
+        sys.exit("Error: no new commits since last release.")
+
+    info = propose_next_version(commits, repo_path=beacon_root)
+    info["commits"] = commits
+    return info["next"], info
+
+
 def main():
     parser = argparse.ArgumentParser(description="Beacon release pipeline")
-    parser.add_argument("--version", default="", help="Semantic version (e.g. v0.2.0). Omit to keep current version & main tarball.")
-    parser.add_argument("--tap-path", default="", help="Path to homebrew-beacon tap repo. Auto-detected via brew if omitted.")
+    parser.add_argument("--version", default="", help="Override auto-detected version (e.g. v0.2.0)")
+    parser.add_argument("--tap-path", default="", help="Path to homebrew-beacon tap. Auto-detected via brew if omitted.")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
     args = parser.parse_args()
 
     dry = args.dry_run
     beacon_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-    # ---- Step 1: Pre-flight ----
+    # ---- Pre-flight ----
     print("=> Pre-flight checks")
     status = run(["git", "status", "--porcelain", "--untracked-files=no"],
                  cwd=beacon_root, capture=True, dry_run=False)
@@ -58,44 +94,59 @@ def main():
         sys.exit(1)
     branch = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=beacon_root, capture=True, dry_run=False)
     if branch != "main":
-        print(f"Error: must be on 'main' branch (current: {branch})", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(f"Error: must be on 'main' branch (current: {branch})")
 
-    # ---- Step 2: Parse formula for repo URL ----
+    # ---- Version determination ----
+    if args.version:
+        v = args.version if args.version.startswith("v") else f"v{args.version}"
+        print(f"=> Using explicit version: {v}")
+        info = None
+    else:
+        print("=> Determining next version from commits...")
+        v, info = determine_version(beacon_root)
+        nonzero = {k: n for k, n in info["counts"].items() if n}
+        print(f"   Current tag:  {info['current']}")
+        print(f"   Next version: {v}  (bump: {info['level']})")
+        print(f"   Commits:      {len(info['commits'])} (breakdown: {nonzero})")
+        if info["counts"]["breaking"] > 0:
+            print(f"   ⚠️  BREAKING change detected → MAJOR bump")
+
+    if not args.yes and not dry:
+        print()
+        confirm = input(f"Release {v}? [y/N]: ").strip().lower()
+        if confirm not in ("y", "yes"):
+            print("Cancelled.")
+            sys.exit(0)
+
+    version_str = v.lstrip("v")
+
+    # ---- Push beacon repo (if any unpushed) ----
+    print("=> Pushing beacon repo to origin/main")
+    run(["git", "push", "origin", "main"], cwd=beacon_root, dry_run=dry)
+
+    # ---- Create + push tag ----
+    print(f"=> Tagging {v}")
+    run(["git", "tag", v], cwd=beacon_root, dry_run=dry)
+    run(["git", "push", "origin", v], cwd=beacon_root, dry_run=dry)
+
+    # ---- GitHub release (best-effort) ----
+    print(f"=> Creating GitHub release {v}")
+    try:
+        run(["gh", "release", "create", v, "--title", v, "--notes", f"Release {v}"],
+            cwd=beacon_root, dry_run=dry)
+    except SystemExit as e:
+        print(f"  (gh release create skipped: {e})", file=sys.stderr)
+
+    # ---- Parse formula for repo URL ----
     formula_path = os.path.join(beacon_root, "packaging", "homebrew", "beacon.rb")
-    if not os.path.exists(formula_path):
-        sys.exit(f"Error: formula not found at {formula_path}")
     formula_src = open(formula_path, encoding="utf-8").read()
     homepage_match = re.search(r'homepage\s+"([^"]+)"', formula_src)
     if not homepage_match:
         sys.exit("Error: cannot parse homepage from formula")
     repo_url = homepage_match.group(1).rstrip("/")
+    tarball_url = f"{repo_url}/archive/refs/tags/{v}.tar.gz"
 
-    if args.version:
-        v = args.version if args.version.startswith("v") else f"v{args.version}"
-        tarball_url = f"{repo_url}/archive/refs/tags/{v}.tar.gz"
-        version_str = v.lstrip("v")
-    else:
-        tarball_url = f"{repo_url}/archive/refs/heads/main.tar.gz"
-        version_match = re.search(r'version\s+"([^"]+)"', formula_src)
-        version_str = version_match.group(1) if version_match else "0.1.0"
-        v = None
-
-    # ---- Step 3: Push beacon repo ----
-    print("=> Pushing beacon repo to origin/main")
-    run(["git", "push", "origin", "main"], cwd=beacon_root, dry_run=dry)
-
-    if v:
-        print(f"=> Tagging {v}")
-        run(["git", "tag", v], cwd=beacon_root, dry_run=dry)
-        run(["git", "push", "origin", v], cwd=beacon_root, dry_run=dry)
-        try:
-            run(["gh", "release", "create", v, "--title", v, "--notes", f"Release {v}"],
-                cwd=beacon_root, dry_run=dry)
-        except SystemExit as e:
-            print(f"  (gh release create skipped: {e})", file=sys.stderr)
-
-    # ---- Step 4: Fetch tarball + SHA-256 ----
+    # ---- Fetch tarball + SHA-256 ----
     print(f"=> Fetching {tarball_url}")
     if dry:
         sha256 = "0" * 64
@@ -115,7 +166,7 @@ def main():
                 time.sleep(3)
         print(f"   sha256 = {sha256}")
 
-    # ---- Step 5: Patch formula ----
+    # ---- Patch repo formula ----
     print("=> Updating repo formula")
     new_src = formula_src
     new_src = re.sub(r'(\n\s*url\s+)"[^"]+"', f'\\1"{tarball_url}"', new_src, count=1)
@@ -134,7 +185,7 @@ def main():
         cwd=beacon_root, dry_run=dry)
     run(["git", "push", "origin", "main"], cwd=beacon_root, dry_run=dry)
 
-    # ---- Step 6: Mirror to tap ----
+    # ---- Mirror to tap ----
     print("=> Updating tap repo")
     tap_path = args.tap_path
     if not tap_path:
@@ -169,12 +220,12 @@ def main():
         print("   (tap formula already up-to-date)")
 
     print()
-    print(f"Release complete: {version_str}")
+    print(f"Release complete: {v}")
     print(f"   Tarball: {tarball_url}")
     print(f"   SHA256:  {sha256}")
     print()
     print("Users can update with:")
-    print("   brew upgrade beacon && beacon skill install")
+    print("   brew update && brew upgrade beacon && beacon skill install")
 
 
 if __name__ == "__main__":
