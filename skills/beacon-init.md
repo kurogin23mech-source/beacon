@@ -153,11 +153,40 @@ Bash ツール呼び出し例:
 Bash(command="beacon init --name ... --objective ... --retro-day ... --storage ...", cwd=$PROJECT_DIR)
 ```
 
+### Step 5b: Web UI を自動オープン（cloud mode の場合）
+
+Beacon の作業形態は「ターミナル + Web UI 並列表示」が前提。  
+init 直後に Web UI を立ち上げて、以降は別ウィンドウで開いたままにする。
+
+```bash
+# Bash 呼び出し (cwd=$PROJECT_DIR)
+if [ -f .beacon/cloud.json ]; then
+  PROJECT_ID=$(python3 -c "import json; print(json.load(open('.beacon/cloud.json')).get('project_id',''))")
+  if [ -n "$PROJECT_ID" ]; then
+    WEBUI_URL="https://beacon-ai.dev/projects/$PROJECT_ID"
+    # OS判別: mac/Linux/Win いずれかで動く
+    (open "$WEBUI_URL" 2>/dev/null \
+      || xdg-open "$WEBUI_URL" 2>/dev/null \
+      || cmd.exe /c start "$WEBUI_URL" 2>/dev/null \
+      || powershell.exe -Command "Start-Process '$WEBUI_URL'" 2>/dev/null) &
+    echo "WEBUI_URL=$WEBUI_URL"
+  fi
+fi
+```
+
+local mode（cloud.json 無し）の場合は Web UI なし。  
+代わりに案内（Tauri Desktop App or tmux ダッシュボード）。
+
 成功したら、モード別のメッセージを出す:
 
 **モード B**:
 ```
 「[name]」のスペースを準備しました（場所: $PROJECT_DIR）。
+
+📊 Web UI を別ウィンドウで開きました: $WEBUI_URL
+   ターミナルの隣に並べておくと、これからの状態変化が常に見られます。
+   （local mode の場合: beacon Tauri Desktop または `beacon` で tmux ダッシュボードが使えます）
+
 続けてもう少しだけ話を聞かせてください、目指す形を整理してから始めましょう。
 → /beacon-vision に続きます
 ```
@@ -165,6 +194,10 @@ Bash(command="beacon init --name ... --objective ... --retro-day ... --storage .
 **モード C**:
 ```
 このリポジトリを Beacon で管理する準備ができました。
+
+📊 Web UI を別ウィンドウで開きました: $WEBUI_URL
+   ターミナルの隣に並べておくと、これからの状態変化が常に見られます。
+
 続けて、ターゲットや成功基準など、READMEには書かれていない部分を整理しましょう。
 → /beacon-vision (Existing モード) に続きます
 ```

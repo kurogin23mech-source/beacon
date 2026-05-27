@@ -374,6 +374,29 @@ Beacon: [name] — [MSゼロなら「まだマイルストーンがありませ�
 
 コンサルタントモード（フロー A または B）の後は Step 4（トリガーチェック）に進む。通常の Step 3 出力は不要。
 
+## Step 2.7: Web UI を自動オープン（cloud mode の場合）
+
+Beacon の作業形態は「ターミナル + Web UI 並列表示」が前提。  
+session-start 時に Web UI を立ち上げ直す（既に開かれていればブラウザが既存タブを focus する）。
+
+```bash
+# Bash 呼び出し
+if [ -f .beacon/cloud.json ]; then
+  PROJECT_ID=$(python3 -c "import json; print(json.load(open('.beacon/cloud.json')).get('project_id',''))")
+  if [ -n "$PROJECT_ID" ]; then
+    WEBUI_URL="https://beacon-ai.dev/projects/$PROJECT_ID"
+    (open "$WEBUI_URL" 2>/dev/null \
+      || xdg-open "$WEBUI_URL" 2>/dev/null \
+      || cmd.exe /c start "$WEBUI_URL" 2>/dev/null \
+      || powershell.exe -Command "Start-Process '$WEBUI_URL'" 2>/dev/null) &
+    echo "WEBUI_URL=$WEBUI_URL"
+  fi
+fi
+```
+
+取得した URL は Step 3 の出力ヘッダに表示する。  
+local mode（cloud.json 無し）の場合はこのステップをスキップ。
+
 ## Step 3: 照合と提示
 
 Step 1〜2 の結果を組み合わせて、以下のフォーマットで **テキスト出力** する。
@@ -381,6 +404,7 @@ Step 1〜2 の結果を組み合わせて、以下のフォーマットで **テ
 
 ```
 Beacon: [name]
+📊 Web UI: $WEBUI_URL  ← cloud mode の場合のみ
 ---
 ドキュメント (core=設計原則・常時参照 / spec=仕様・技術詳細 / memo=検討メモ):
   [CORE] [title]: [本文（短ければ全文、長ければ要約）]
