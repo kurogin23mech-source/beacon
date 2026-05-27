@@ -2841,20 +2841,47 @@ def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
     hooks = settings.setdefault("hooks", {})
     post_tool_use = hooks.setdefault("PostToolUse", [])
 
-    # Check if beacon hook is already configured
-    beacon_hook_cmd = hook_script
+    # Dedup by basename: remove stale entries pointing to old install paths
+    # (e.g. previous brew Cellar versions that no longer exist after upgrade).
+    hook_basename = os.path.basename(hook_script)
+    removed_stale = False
+    cleaned_post = []
     for entry in post_tool_use:
+        new_hooks_in_entry = []
         for h in entry.get("hooks", []):
-            if h.get("command", "") == beacon_hook_cmd:
-                print("Hooks: already configured in ~/.claude/settings.json")
-                return
+            existing = h.get("command", "")
+            same_name = os.path.basename(existing) == hook_basename
+            if same_name and existing != hook_script:
+                removed_stale = True
+                continue  # drop stale
+            new_hooks_in_entry.append(h)
+        entry["hooks"] = new_hooks_in_entry
+        if new_hooks_in_entry:
+            cleaned_post.append(entry)
+    post_tool_use[:] = cleaned_post
+
+    # Check exact-path presence
+    already_present = any(
+        h.get("command", "") == hook_script
+        for entry in post_tool_use
+        for h in entry.get("hooks", [])
+    )
+
+    if already_present:
+        if removed_stale:
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(settings, f, indent=2, ensure_ascii=False)
+            print(f"Hooks: cleaned stale {hook_basename} entries; current path active")
+        else:
+            print("Hooks: already configured in ~/.claude/settings.json")
+        return
 
     # Add beacon PostToolUse hook (commit + deploy detection)
     post_tool_use.append({
         "matcher": "Bash",
         "hooks": [{
             "type": "command",
-            "command": beacon_hook_cmd,
+            "command": hook_script,
             "timeout": 10,
             "statusMessage": "Beacon: checking for commit or deploy..."
         }]
@@ -2862,7 +2889,10 @@ def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
 
     with open(settings_path, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2, ensure_ascii=False)
-    print(f"Hooks: PostToolUse hook configured in {settings_path}")
+    if removed_stale:
+        print(f"Hooks: replaced stale {hook_basename} entry → {hook_script}")
+    else:
+        print(f"Hooks: PostToolUse hook configured in {settings_path}")
 
 
 def _next_deploy_id(data: dict, date_str: str) -> str:
