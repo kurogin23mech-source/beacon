@@ -134,7 +134,39 @@ beacon init --name "[name]" --objective "[objective]" --retro-day [retro_day] --
   [コミット数 < 10 の場合]: → 最初のマイルストーンを一緒に考えます
 ```
 
-## Step 6: session-start の起動
+## Step 6: ビジョン構造化の提案（新規プロジェクト向け）
+
+`beacon init` 完了直後、git のコミット数を確認:
+
+```bash
+git log --oneline 2>/dev/null | wc -l
+```
+
+### コミット数 < 10（新規プロジェクト）の場合
+
+ユーザーに提案:
+
+```
+これから何を作っていくか、もう少しだけ整理しておきませんか？
+
+「○○みたいなのを作りたい」くらいのふわっとしたイメージから、対話しながら大目的・ターゲット・成功基準などを形にしていきます。これがあると、その後のマイルストーン設計や、実装中のAIへの指示がぐっと精度が上がります。
+
+  1) /beacon-vision を実行してビジョンを整理する（推奨）
+  2) スキップして、まず session-start でプロジェクト状態を見る
+
+どちらにしますか？
+```
+
+ユーザーが「1」または同意（「やる」「お願い」など）を返したら `/beacon-vision` を起動。
+完了後、`/beacon-vision` 内の Step 6 で `/beacon-roadmap` へのチェーン提案が走り、必要ならフルロードマップが描かれる。
+
+ユーザーが「2」を選んだ場合は Step 7 へ。
+
+### コミット数 >= 10（既存リポジトリ）の場合
+
+vision 提案はスキップ（既存コードが存在するため Project Archaeology の方が優先）。直接 Step 7 へ。
+
+## Step 7: session-start の起動
 
 `/beacon-session-start` を即時実行する。
 
@@ -143,3 +175,4 @@ beacon init --name "[name]" --objective "[objective]" --retro-day [retro_day] --
 - `beacon init` はBash ツールで実行する（ユーザーに `!` で実行させない）
 - `rm` は使わない
 - ユーザーが明示的に答えた情報は再度聞かない
+- ビジョン提案はあくまでオプション。ユーザーがスキップしたら何もしない
