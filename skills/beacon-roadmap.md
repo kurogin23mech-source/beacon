@@ -70,6 +70,27 @@ beacon status --json
 - **priority**: highest / high / middle / low / lowest（chest-up: 大目的への寄与で判定）
 - **依存関係**: どのMSに依存するか（基本は直前のMS）
 
+## Step 2.5: Operation 輪郭の同時提案
+
+ビジョンの「成功基準」「やらないこと」を踏まえ、**プロジェクトが完成したあと運用継続が必要なOperationの輪郭** を 0〜5個提案する。
+
+### 対象となるOperationの判断基準
+
+- 「動き続けることで価値が出る」もの（監視・定期収集・継続コミュニケーション等）
+- プロジェクトの規模・性質によりOperationが少ない/不要なケースもある（小さなツール、一回完結の制作物等）
+
+すべてのプロジェクトにOperationを強制しないこと。本当に必要なものだけ提案する。
+
+### 各Operationの構成要素
+
+各Operationに次を持たせる:
+- **title**: 「○○を継続的に○○する」形式
+- **objective**: なぜこのOperationが必要か（ビジョンの何を支えるか）
+- **schedule**: daily / weekdays / weekly のいずれか（粗い段階の見立て）
+- **activation_hint**: いつ動かし始めるべきか（自由テキスト、AIへのヒント）
+- **対応 Milestone**: どのMSが完成した後に活性化すべきか
+- **初期 OperationTasks**: 活性化に必要な準備項目 2〜3個（粗い段階で）
+
 ## Step 3: 提案の提示
 
 ユーザーに **ロードマップ全体** を一覧で見せる:
@@ -101,6 +122,21 @@ beacon status --json
 - **acceptance_criteria**: ...
 - **priority**: high
 - **依存**: ms-A
+
+...
+
+---
+
+【Operations】（運用継続が必要なもの、Step 2.5 で抽出された場合のみ）
+
+## op-A: [title]
+- **objective**: なぜ運用が必要か
+- **schedule**: weekly
+- **activation_hint**: いつ動かし始めるか
+- **対応Milestone**: ms-B（このMSが完了したあと活性化候補）
+- **初期OperationTasks**:
+  - [準備項目1]
+  - [準備項目2]
 
 ...
 
@@ -156,6 +192,27 @@ beacon milestone depends <ms-id> --on <previous-ms-id>
 ```bash
 beacon milestone start <最初のms-id>
 ```
+
+### Operationの登録（Step 2.5 で提案した場合のみ）
+
+各 Operation を **todo 状態** で作成:
+
+```bash
+beacon operation create "<title>" \
+  --schedule <schedule> \
+  --hint "<activation_hint>" \
+  --objective "<objective>"
+```
+
+戻り値で `op-N` のIDが得られる。
+
+各Operationに初期OperationTasksを追加:
+
+```bash
+beacon operation task add "<description>" -o <op-id> --priority <priority>
+```
+
+Operationsは全て todo 状態のまま登録される（活性化は対応Milestoneが完了した後、session-start での議論経由）。
 
 ## Step 6: 完了報告
 

@@ -396,6 +396,14 @@ Active Operation: [op-id] "[title]" [schedule.frequency]  ← openのOperation�
   未解決Incident: [N]件                                    ← あれば
     - [e-id] [title]
 
+Pending Operation: [op-id] "[title]"  ← todo/in_progressのOperationがある場合
+  status: [todo/in_progress]
+  activation_hint: [hint があれば]
+  準備項目: [done]/[total] 完了
+    - ○ [entry-id] [operation_task description]
+    - ●  ...
+  → 「活性化議論」セクション参照
+
 Active: [ms-id] [title] ([progress]%) [done_tasks]/[total_tasks]タスク完了
   未消化タスク:
   - [entry-id] [description]
@@ -432,6 +440,45 @@ beacon note list --json
   [HH:MM] [context]: [text]
   ...
 ```
+
+## Step 3.7: pending Operation の活性化議論
+
+Step 1a の結果から `status == "todo"` または `status == "in_progress"` の Operation を取得する。空ならこの Step はスキップ。
+
+各pendingOperationについて、AIが **総合的に判断する** （機械的なルールではなく文脈推論）:
+
+### 判断材料
+1. **activation_hint**: 設計時に書かれたヒント（例: 「本番デプロイ後」「ユーザー10人超えたら」）
+2. **OperationTasks の消化状況**: `beacon operation task list -o <op-id> --json` で取得した未完了 / 完了状況
+3. **プロジェクト全体の状態**: Step 1a の MS状態、進捗、ビジョン
+4. **CORE ドキュメント (project-vision など)**: 「現時点でこの運用が必要か？」を判断する文脈
+
+### 判断ロジック（AI が文脈で）
+
+各 pending Operation に対して、AI は以下のいずれかを選ぶ:
+
+- **「動かす時が来た」と推論**: hint の条件が満たされている、または状態的に活性化が筋。  
+  → 議論をユーザーに振る:
+  ```
+  op-X "Service health monitoring" の準備が整っているように見えます。
+    根拠: ms-22 が完了して本番稼働中 / OperationTasks 3/3 done
+    activation_hint: "Cloud Run 本番稼働後に有効化"
+
+  動かしますか？それともまだ早い？
+  ```
+
+- **「まだ早い」と判定**: 触れない（出力にも含めない、ノイズを避ける）
+
+- **「OperationTasks の消化が先」と判定**:
+  ```
+  op-Y "Cost watch" は活性化前にOperationTasks 2件の消化が必要。
+  /beacon-operation-setup で進めますか？
+  ```
+
+### 出力位置
+
+Step 3 の出力の末尾、Step 4 トリガーチェックの直前に挿入。  
+論点が無いなら出力に含めない。
 
 ## Step 4: トリガーチェック
 
