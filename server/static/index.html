@@ -842,6 +842,67 @@ body::after {
   border: 1px solid rgba(249, 115, 22, 0.15);
 }
 
+.entry-type-badge.operation_task {
+  color: #a78bfa;
+  background: rgba(167, 139, 250, 0.1);
+  border: 1px solid rgba(167, 139, 250, 0.18);
+}
+
+/* Operation status badge in header */
+.op-status-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-left: 4px;
+}
+.op-status-badge.todo        { color: var(--text-dim); background: rgba(113,113,122,0.15); border: 1px solid rgba(113,113,122,0.25); }
+.op-status-badge.in_progress { color: #60a5fa; background: rgba(96,165,250,0.15); border: 1px solid rgba(96,165,250,0.25); }
+.op-status-badge.open        { color: #4ade80; background: rgba(74,222,128,0.15); border: 1px solid rgba(74,222,128,0.25); }
+.op-status-badge.closed      { color: var(--text-dim); background: rgba(100,116,139,0.1); border: 1px solid rgba(100,116,139,0.15); }
+
+.op-meta-block {
+  margin-top: 6px;
+  padding: 5px 10px;
+  border-left: 2px solid rgba(148,163,184,0.3);
+  font-size: 11px;
+  color: #94a3b8;
+  line-height: 1.5;
+}
+.op-meta-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 2px;
+}
+.op-meta-objective .op-meta-label  { color: #a3e635; }
+.op-meta-objective                 { border-left-color: rgba(163,230,53,0.4); }
+.op-meta-hint .op-meta-label       { color: #fbbf24; }
+.op-meta-hint                      { border-left-color: rgba(251,191,36,0.4); }
+
+.op-tasks {
+  margin-top: 10px;
+}
+.op-task-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 0;
+  font-size: 12px;
+  cursor: pointer;
+}
+.op-task-row:hover { background: var(--bg-hover); }
+.op-task-row.done .op-task-desc { color: var(--text-dim); text-decoration: line-through; }
+.op-task-status { font-size: 0.8em; }
+.op-task-progress {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-left: 8px;
+}
+
 .entry-pr-block {
   grid-column: 1 / -1;
 }
@@ -1846,7 +1907,7 @@ function statusBadge(status) {
 }
 
 function entryTypeBadge(type) {
-  const labels = { commit: 'commit', task: 'task', note: 'note', save: 'save', pr: 'PR' };
+  const labels = { commit: 'commit', task: 'task', note: 'note', save: 'save', pr: 'PR', operation_task: 'op-task' };
   return `<span class="entry-type-badge ${type}">${labels[type] || type}</span>`;
 }
 
@@ -2662,25 +2723,57 @@ function renderCodeReleasesTab(p) {
 
 function renderOperationsSection() {
   const p = state.project;
-  const ops = (p.operations || []).filter(o => o.status === 'open');
-  const closedOps = (p.operations || []).filter(o => o.status === 'closed');
+  const allOps = p.operations || [];
+  const activeOps = allOps.filter(o => o.status === 'open');
+  const pendingOps = allOps.filter(o => o.status === 'todo' || o.status === 'in_progress');
+  const closedOps = allOps.filter(o => o.status === 'closed');
 
   const runIcon = s => s === 'ok' ? '✓' : s === 'warning' ? '⚠' : s === 'error' ? '✗' : '?';
   const runColor = s => s === 'ok' ? 'var(--green)' : s === 'warning' ? 'var(--warn,#f0b429)' : s === 'error' ? 'var(--red,#e55)' : 'var(--text-dim)';
 
   const renderOp = (op) => {
     const entries = op.entries || [];
+    const opTasks = entries.filter(e => e.type === 'operation_task');
+    const opTasksDone = opTasks.filter(t => t.status === 'done').length;
     const runs = entries.filter(e => e.type === 'run_record').slice(-5).reverse();
     const incidents = entries.filter(e => e.type === 'incident' && e.status === 'open');
     const resolvedIncidents = entries.filter(e => e.type === 'incident' && e.status === 'resolved');
 
-    const runsHtml = runs.length ? runs.map(r => `
-      <div class="op-run-row">
-        <span style="color:${runColor(r.status)};font-size:0.85em;">${runIcon(r.status)}</span>
-        <span class="op-run-date">${(r.date||'').slice(0,10)}</span>
-        <span class="op-run-batch">${esc(r.batch||'')}</span>
-        <span class="op-run-desc">${esc(r.description||'')}</span>
-      </div>`).join('') : '<div class="op-empty">まだ記録なし</div>';
+    const status = op.status || 'open';
+    const statusBadge = `<span class="op-status-badge ${status}">${status}</span>`;
+    const priorityBadge = op.priority ? `<span class="priority-badge priority-${op.priority}">${op.priority}</span>` : '';
+
+    const objectiveBlock = op.objective
+      ? `<div class="op-meta-block op-meta-objective"><div class="op-meta-label">objective</div>${esc(op.objective)}</div>` : '';
+    const hintBlock = op.activation_hint
+      ? `<div class="op-meta-block op-meta-hint"><div class="op-meta-label">activation hint</div>${esc(op.activation_hint)}</div>` : '';
+
+    const opTasksHtml = opTasks.length ? `
+      <div class="op-tasks">
+        <div class="op-section-label">OperationTasks <span class="op-task-progress">(${opTasksDone}/${opTasks.length} 完了)</span></div>
+        ${opTasks.map(t => {
+          const isDone = t.status === 'done';
+          const icon = isDone ? '●' : '○';
+          const pri = t.meta?.priority ? `<span class="priority-badge priority-${t.meta.priority}">${t.meta.priority}</span>` : '';
+          return `<div class="op-task-row ${isDone ? 'done' : ''}" data-action="open-entry-detail" data-entry-id="${esc(t.id)}">
+            <span class="op-task-status">${icon}</span>
+            <span class="op-task-desc">${esc(t.description||'')}</span>
+            ${pri}
+          </div>`;
+        }).join('')}
+      </div>` : '';
+
+    const runsHtml = (status === 'open') ? `
+      <div class="op-runs">
+        <div class="op-section-label">Run Records</div>
+        ${runs.length ? runs.map(r => `
+          <div class="op-run-row">
+            <span style="color:${runColor(r.status)};font-size:0.85em;">${runIcon(r.status)}</span>
+            <span class="op-run-date">${(r.date||'').slice(0,10)}</span>
+            <span class="op-run-batch">${esc(r.batch||'')}</span>
+            <span class="op-run-desc">${esc(r.description||'')}</span>
+          </div>`).join('') : '<div class="op-empty">まだ記録なし</div>'}
+      </div>` : '';
 
     const incidentsHtml = incidents.map(i => `
       <div class="op-incident open">
@@ -2703,14 +2796,15 @@ function renderOperationsSection() {
       <div class="op-header">
         <span class="op-id">${esc(op.id)}</span>
         <span class="op-title">${esc(op.title||'')}</span>
+        ${statusBadge}
+        ${priorityBadge}
         <span class="op-badge">${esc((op.schedule||{}).frequency||'')}</span>
         <span class="op-source">${esc(op.log_source||'')}</span>
         ${incidents.length ? `<span class="op-incident-count">⚠ ${incidents.length}件</span>` : ''}
       </div>
-      <div class="op-runs">
-        <div class="op-section-label">Run Records</div>
-        ${runsHtml}
-      </div>
+      ${objectiveBlock}${hintBlock}
+      ${opTasksHtml}
+      ${runsHtml}
       ${incidents.length || resolvedIncidents.length ? `
       <div class="op-incidents">
         <div class="op-section-label">Incidents</div>
@@ -2719,11 +2813,22 @@ function renderOperationsSection() {
     </div>`;
   };
 
+  const summary = [
+    activeOps.length ? `${activeOps.length} active` : '',
+    pendingOps.length ? `${pendingOps.length} pending` : '',
+    closedOps.length ? `${closedOps.length} closed` : '',
+  ].filter(Boolean).join(' · ');
+
   return `<section class="retro-section fade-in">
     <div style="margin-bottom:12px;font-size:0.78rem;color:var(--text-dim);">
-      ${ops.length} open operation${ops.length !== 1 ? 's' : ''}${closedOps.length ? ` · ${closedOps.length} closed` : ''}
+      ${summary || 'No operations.'}
     </div>
-    ${ops.map(renderOp).join('')}
+    ${activeOps.map(renderOp).join('')}
+    ${pendingOps.length ? `
+    <details open style="margin-top:16px;">
+      <summary style="font-size:0.75rem;color:var(--text-dim);cursor:pointer;">Pending Operations (${pendingOps.length})</summary>
+      <div style="margin-top:8px;">${pendingOps.map(renderOp).join('')}</div>
+    </details>` : ''}
     ${closedOps.length ? `
     <details style="margin-top:16px;">
       <summary style="font-size:0.75rem;color:var(--text-dim);cursor:pointer;">Closed Operations (${closedOps.length})</summary>
@@ -3205,6 +3310,10 @@ function findEntryInProject(id) {
     const found = findEntryById(id, ms.entries || []);
     if (found) return { entry: found, ms };
   }
+  for (const op of state.project?.operations || []) {
+    const found = findEntryById(id, op.entries || []);
+    if (found) return { entry: found, op };
+  }
   return null;
 }
 
@@ -3212,10 +3321,10 @@ function openEntryDetail(entryId) {
   const result = findEntryInProject(entryId);
   if (!result) return;
   state.openEntryId = entryId;
-  renderEntryModal(result.entry, result.ms);
+  renderEntryModal(result.entry, result.ms || result.op);
 }
 
-function renderEntryModal(entry, ms) {
+function renderEntryModal(entry, parent) {
   const overlay = document.getElementById('entry-detail-modal');
   if (!overlay) return;
 
@@ -3235,7 +3344,7 @@ function renderEntryModal(entry, ms) {
     ? `<div class="entry-modal-field modal-field-detail"><div class="entry-modal-field-label">detail</div>${esc(entry.detail)}</div>` : '';
 
   const statusText = entryStatusText(entry);
-  const msLabel = ms ? `<span style="color:var(--text-dim);font-size:11px;">${esc(ms.id)}</span>` : '';
+  const msLabel = parent ? `<span style="color:var(--text-dim);font-size:11px;">${esc(parent.id)}</span>` : '';
 
   overlay.innerHTML = `
     <div class="entry-modal" onclick="event.stopPropagation()">
