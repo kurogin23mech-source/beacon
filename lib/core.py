@@ -33,7 +33,14 @@ def _get_actor() -> str:
 
 
 VALID_STATUSES = {"todo", "in_progress", "in_review", "approved", "waiting", "done", "observing", "cancelled"}
-VALID_ENTRY_TYPES = {"commit", "task", "note", "save", "pr", "run_record", "incident"}
+VALID_ENTRY_TYPES = {"commit", "task", "note", "save", "pr", "run_record", "incident", "operation_task"}
+
+# Operation lifecycle states (mirrors Milestone for symmetry):
+#   todo         — defined but not active (outline only, OperationTasks not finished)
+#   in_progress  — actively preparing (filling OperationTasks)
+#   open         — fully activated, run_records flow in
+#   closed       — role finished
+VALID_OP_STATUSES = {"todo", "in_progress", "open", "closed"}
 # PR lifecycle: in_review → approved → merged (or closed/rejected)
 # "open" is reserved for Phase 2 auto-detection via GitHub API (external PRs not yet picked up by beacon)
 VALID_PR_STATUSES = {"open", "in_review", "approved", "merged", "closed"}
@@ -1237,16 +1244,28 @@ def _find_operation(data: dict, op_id: str) -> dict:
 
 
 def operation_open(data: dict, title: str, *,
-                   schedule: str = "weekdays", log_source: str = "") -> tuple[dict, dict]:
-    """Create a new open Operation. Returns (data, operation)."""
+                   schedule: str = "weekdays", log_source: str = "",
+                   status: str = "open", activation_hint: str = "",
+                   objective: str = "", acceptance_criteria: str = "",
+                   priority: str = "") -> tuple[dict, dict]:
+    """Create a new Operation. Returns (data, operation).
+
+    Defaults to status='open' for backward compat. Pass status='todo' to
+    create an outline-only Operation that will be activated later via
+    operation_set_status (todo → in_progress → open).
+    """
     if schedule not in SCHEDULE_DAYS:
         raise ValueError(f"Invalid schedule: {schedule}. Valid: {', '.join(sorted(SCHEDULE_DAYS))}")
+    if status not in VALID_OP_STATUSES:
+        raise ValueError(f"Invalid status: {status}. Valid: {', '.join(sorted(VALID_OP_STATUSES))}")
+    if priority and priority not in VALID_PRIORITIES:
+        raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
     op_id = next_op_id(data)
     op = {
         "id": op_id,
         "title": title,
-        "status": "open",
-        "opened_at": _now_iso(),
+        "status": status,
+        "opened_at": _now_iso() if status == "open" else None,
         "closed_at": None,
         "schedule": {
             "frequency": schedule,
@@ -1255,8 +1274,60 @@ def operation_open(data: dict, title: str, *,
         "log_source": log_source or op_id,
         "entries": [],
     }
+    if activation_hint:
+        op["activation_hint"] = activation_hint
+    if objective:
+        op["objective"] = objective
+    if acceptance_criteria:
+        op["acceptance_criteria"] = acceptance_criteria
+    if priority:
+        op["priority"] = priority
     data.setdefault("operations", []).append(op)
     return data, op
+
+
+def operation_set_status(data: dict, op_id: str, status: str) -> dict:
+    """Transition an Operation's status. Records timestamp for open transitions."""
+    if status not in VALID_OP_STATUSES:
+        raise ValueError(f"Invalid status: {status}. Valid: {', '.join(sorted(VALID_OP_STATUSES))}")
+    op = _find_operation(data, op_id)
+    prev = op["status"]
+    op["status"] = status
+    if status == "open" and not op.get("opened_at"):
+        op["opened_at"] = _now_iso()
+    if status == "closed":
+        op["closed_at"] = _now_iso()
+    op.setdefault("meta", {})[f"{status}_at"] = _now_iso()
+    op.setdefault("meta", {})[f"{status}_by"] = _get_actor()
+    return op
+
+
+def operation_update(data: dict, op_id: str, *,
+                     title: str = "", schedule: str = "",
+                     activation_hint: str = "", objective: str = "",
+                     acceptance_criteria: str = "", priority: str = "",
+                     log_source: str = "") -> dict:
+    """Update Operation metadata fields."""
+    op = _find_operation(data, op_id)
+    if title:
+        op["title"] = title
+    if schedule:
+        if schedule not in SCHEDULE_DAYS:
+            raise ValueError(f"Invalid schedule: {schedule}. Valid: {', '.join(sorted(SCHEDULE_DAYS))}")
+        op["schedule"] = {"frequency": schedule, "days": SCHEDULE_DAYS[schedule]}
+    if activation_hint:
+        op["activation_hint"] = activation_hint
+    if objective:
+        op["objective"] = objective
+    if acceptance_criteria:
+        op["acceptance_criteria"] = acceptance_criteria
+    if priority:
+        if priority not in VALID_PRIORITIES:
+            raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
+        op["priority"] = priority
+    if log_source:
+        op["log_source"] = log_source
+    return op
 
 
 def operation_close(data: dict, op_id: str) -> dict:
@@ -1267,6 +1338,46 @@ def operation_close(data: dict, op_id: str) -> dict:
     op["status"] = "closed"
     op["closed_at"] = _now_iso()
     return op
+
+
+def operation_task_add(data: dict, op_id: str, description: str, *,
+                       priority: str = "", motivation: str = "",
+                       acceptance_criteria: str = "") -> tuple[dict, dict]:
+    """Add an operation_task entry to an Operation. Returns (operation, entry)."""
+    op = _find_operation(data, op_id)
+    if priority and priority not in VALID_PRIORITIES:
+        raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
+    eid = next_entry_id(data)
+    entry = {
+        "id": eid,
+        "type": "operation_task",
+        "description": description,
+        "status": "todo",
+        "created_at": _now_iso(),
+        "done_at": None,
+        "meta": {"created_by": _get_actor()},
+    }
+    if priority:
+        entry["meta"]["priority"] = priority
+    if motivation:
+        entry["motivation"] = motivation
+    if acceptance_criteria:
+        entry["acceptance_criteria"] = acceptance_criteria
+    op.setdefault("entries", []).append(entry)
+    return op, entry
+
+
+def operation_task_done(data: dict, entry_id: str, *, reason: str = "") -> dict:
+    """Mark an operation_task as done. Returns the entry."""
+    for op in data.get("operations", []):
+        for e in op.get("entries", []):
+            if e.get("id") == entry_id and e.get("type") == "operation_task":
+                e["status"] = "done"
+                e["done_at"] = _now_iso()
+                if reason:
+                    e["done_reason"] = reason
+                return e
+    raise ValueError(f"operation_task not found: {entry_id}")
 
 
 def run_record_add(data: dict, op_id: str, *,
