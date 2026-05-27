@@ -1691,20 +1691,86 @@ case "${1:-}" in
         case "${2:-}" in
             open)
                 shift 2
-                title=""
-                schedule="weekdays"
-                log_source=""
+                title="" schedule="weekdays" log_source="" status="open"
+                activation_hint="" objective="" ac="" priority=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --schedule) schedule="${2:-}"; shift 2 ;;
                         --log-source) log_source="${2:-}"; shift 2 ;;
+                        --status) status="${2:-}"; shift 2 ;;
+                        --activation-hint|--hint) activation_hint="${2:-}"; shift 2 ;;
+                        --objective) objective="${2:-}"; shift 2 ;;
+                        --acceptance-criteria|--ac) ac="${2:-}"; shift 2 ;;
+                        --priority) priority="${2:-}"; shift 2 ;;
                         *) [[ -z "$title" ]] && title="$1"; shift ;;
                     esac
                 done
                 BEACON_OPERATION_TITLE="$title" \
                     BEACON_OPERATION_SCHEDULE="$schedule" \
                     BEACON_OPERATION_LOG_SOURCE="$log_source" \
+                    BEACON_OPERATION_STATUS="$status" \
+                    BEACON_ACTIVATION_HINT="$activation_hint" \
+                    BEACON_OBJECTIVE="$objective" \
+                    BEACON_ACCEPTANCE_CRITERIA="$ac" \
+                    BEACON_PRIORITY="$priority" \
                     python3 "$COMMANDS_PY" operation_open
+                ;;
+            create)
+                # alias: create in todo state by default
+                shift 2
+                title="" schedule="weekdays" log_source="" status="todo"
+                activation_hint="" objective="" ac="" priority=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --schedule) schedule="${2:-}"; shift 2 ;;
+                        --log-source) log_source="${2:-}"; shift 2 ;;
+                        --status) status="${2:-}"; shift 2 ;;
+                        --activation-hint|--hint) activation_hint="${2:-}"; shift 2 ;;
+                        --objective) objective="${2:-}"; shift 2 ;;
+                        --acceptance-criteria|--ac) ac="${2:-}"; shift 2 ;;
+                        --priority) priority="${2:-}"; shift 2 ;;
+                        *) [[ -z "$title" ]] && title="$1"; shift ;;
+                    esac
+                done
+                BEACON_OPERATION_TITLE="$title" \
+                    BEACON_OPERATION_SCHEDULE="$schedule" \
+                    BEACON_OPERATION_LOG_SOURCE="$log_source" \
+                    BEACON_OPERATION_STATUS="$status" \
+                    BEACON_ACTIVATION_HINT="$activation_hint" \
+                    BEACON_OBJECTIVE="$objective" \
+                    BEACON_ACCEPTANCE_CRITERIA="$ac" \
+                    BEACON_PRIORITY="$priority" \
+                    python3 "$COMMANDS_PY" operation_open
+                ;;
+            activate)
+                BEACON_OPERATION_ID="${3:-}" BEACON_OPERATION_STATUS="open" \
+                    python3 "$COMMANDS_PY" operation_set_status
+                ;;
+            status)
+                BEACON_OPERATION_ID="${3:-}" BEACON_OPERATION_STATUS="${4:-}" \
+                    python3 "$COMMANDS_PY" operation_set_status
+                ;;
+            update)
+                shift 2
+                op_id="" title="" schedule="" hint="" obj="" ac="" priority=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --title) title="${2:-}"; shift 2 ;;
+                        --schedule) schedule="${2:-}"; shift 2 ;;
+                        --activation-hint|--hint) hint="${2:-}"; shift 2 ;;
+                        --objective) obj="${2:-}"; shift 2 ;;
+                        --acceptance-criteria|--ac) ac="${2:-}"; shift 2 ;;
+                        --priority) priority="${2:-}"; shift 2 ;;
+                        *) [[ -z "$op_id" ]] && op_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_OPERATION_ID="$op_id" BEACON_TITLE="$title" \
+                    BEACON_OPERATION_SCHEDULE="$schedule" \
+                    BEACON_ACTIVATION_HINT="$hint" \
+                    BEACON_OBJECTIVE="$obj" \
+                    BEACON_ACCEPTANCE_CRITERIA="$ac" \
+                    BEACON_PRIORITY="$priority" \
+                    python3 "$COMMANDS_PY" operation_update
                 ;;
             close)
                 BEACON_OPERATION_ID="${3:-}" python3 "$COMMANDS_PY" operation_close
@@ -1715,11 +1781,70 @@ case "${1:-}" in
             show)
                 BEACON_OPERATION_ID="${3:-}" BEACON_JSON="${4:+1}" python3 "$COMMANDS_PY" operation_show
                 ;;
+            task)
+                case "${3:-}" in
+                    add)
+                        shift 3
+                        op_id="" desc="" priority="" motivation="" ac=""
+                        while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                -o|--op) op_id="${2:-}"; shift 2 ;;
+                                --priority) priority="${2:-}"; shift 2 ;;
+                                --motivation|--why) motivation="${2:-}"; shift 2 ;;
+                                --acceptance-criteria|--ac) ac="${2:-}"; shift 2 ;;
+                                *) [[ -z "$desc" ]] && desc="$1"; shift ;;
+                            esac
+                        done
+                        BEACON_OPERATION_ID="$op_id" BEACON_DESCRIPTION="$desc" \
+                            BEACON_PRIORITY="$priority" \
+                            BEACON_MOTIVATION="$motivation" \
+                            BEACON_ACCEPTANCE_CRITERIA="$ac" \
+                            python3 "$COMMANDS_PY" operation_task_add
+                        ;;
+                    done)
+                        shift 3
+                        entry_id="" reason=""
+                        while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                -r|--reason) reason="${2:-}"; shift 2 ;;
+                                *) [[ -z "$entry_id" ]] && entry_id="$1"; shift ;;
+                            esac
+                        done
+                        BEACON_ENTRY_ID="$entry_id" BEACON_REASON="$reason" \
+                            python3 "$COMMANDS_PY" operation_task_done
+                        ;;
+                    list)
+                        shift 3
+                        op_id="" json_flag=""
+                        while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                -o|--op) op_id="${2:-}"; shift 2 ;;
+                                --json) json_flag="1"; shift ;;
+                                *) shift ;;
+                            esac
+                        done
+                        BEACON_OPERATION_ID="$op_id" BEACON_JSON="$json_flag" \
+                            python3 "$COMMANDS_PY" operation_task_list
+                        ;;
+                    *)
+                        echo "Usage: beacon operation task add \"<desc>\" -o <op-id> [--priority P --why W --ac A]"
+                        echo "       beacon operation task done <entry-id> [--reason R]"
+                        echo "       beacon operation task list -o <op-id> [--json]"
+                        ;;
+                esac
+                ;;
             *)
-                echo "Usage: beacon operation open \"<title>\" [--schedule daily|weekdays|weekly] [--log-source <name>]"
+                echo "Usage: beacon operation open \"<title>\" [--schedule daily|weekdays|weekly]"
+                echo "                                [--status todo|in_progress|open|closed]"
+                echo "                                [--activation-hint H --objective O --ac A --priority P]"
+                echo "       beacon operation create \"<title>\" ...    (alias for open --status todo)"
+                echo "       beacon operation activate <op-id>          (todo/in_progress → open)"
+                echo "       beacon operation status <op-id> <status>   (any transition)"
+                echo "       beacon operation update <op-id> [--title --schedule --hint --objective --ac --priority]"
                 echo "       beacon operation close <op-id>"
                 echo "       beacon operation list [--json]"
                 echo "       beacon operation show <op-id> [--json]"
+                echo "       beacon operation task add/done/list ..."
                 ;;
         esac
         ;;

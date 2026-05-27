@@ -35,12 +35,6 @@ def _get_actor() -> str:
 VALID_STATUSES = {"todo", "in_progress", "in_review", "approved", "waiting", "done", "observing", "cancelled"}
 VALID_ENTRY_TYPES = {"commit", "task", "note", "save", "pr", "run_record", "incident", "operation_task"}
 
-# Operation lifecycle states (mirrors Milestone for symmetry):
-#   todo         — defined but not active (outline only, OperationTasks not finished)
-#   in_progress  — actively preparing (filling OperationTasks)
-#   open         — fully activated, run_records flow in
-#   closed       — role finished
-VALID_OP_STATUSES = {"todo", "in_progress", "open", "closed"}
 # PR lifecycle: in_review → approved → merged (or closed/rejected)
 # "open" is reserved for Phase 2 auto-detection via GitHub API (external PRs not yet picked up by beacon)
 VALID_PR_STATUSES = {"open", "in_review", "approved", "merged", "closed"}
@@ -48,7 +42,13 @@ VALID_REVIEW_STATUSES = {"pending", "approved", "changes_requested", "rejected"}
 VALID_RUN_STATUSES = {"ok", "warning", "error"}
 VALID_INCIDENT_STATUSES = {"open", "resolved"}
 VALID_PRIORITIES = {"highest", "high", "middle", "low", "lowest"}
-VALID_OPERATION_STATUSES = {"open", "closed"}
+# Operation lifecycle states (mirrors Milestone for symmetry):
+#   todo         — defined but not active (outline only, OperationTasks not finished)
+#   in_progress  — actively preparing (filling OperationTasks)
+#   open         — fully activated, run_records flow in
+#   closed       — role finished
+VALID_OPERATION_STATUSES = {"todo", "in_progress", "open", "closed"}
+VALID_OP_STATUSES = VALID_OPERATION_STATUSES  # alias
 MS_ID_RE = re.compile(r"^ms-\d+$")
 ENTRY_ID_RE = re.compile(r"^e-\d+$")
 OP_ID_RE = re.compile(r"^op-\d+$")

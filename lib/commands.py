@@ -3612,16 +3612,133 @@ def cmd_operation_open():
     title = os.environ.get("BEACON_OPERATION_TITLE", "")
     schedule = os.environ.get("BEACON_OPERATION_SCHEDULE", "weekdays")
     log_source = os.environ.get("BEACON_OPERATION_LOG_SOURCE", "")
+    status = os.environ.get("BEACON_OPERATION_STATUS", "open")
+    activation_hint = os.environ.get("BEACON_ACTIVATION_HINT", "")
+    objective = os.environ.get("BEACON_OBJECTIVE", "")
+    acceptance_criteria = os.environ.get("BEACON_ACCEPTANCE_CRITERIA", "")
+    priority = os.environ.get("BEACON_PRIORITY", "")
     if not title:
         print("Error: operation title required")
         sys.exit(1)
     data = load_project()
-    data, op = core.operation_open(data, title, schedule=schedule, log_source=log_source)
+    try:
+        data, op = core.operation_open(
+            data, title, schedule=schedule, log_source=log_source,
+            status=status, activation_hint=activation_hint,
+            objective=objective, acceptance_criteria=acceptance_criteria,
+            priority=priority,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
     save_project(data, op={"type": "operation_open", "op_id": op["id"], "title": title})
     if os.environ.get("BEACON_JSON"):
         print(json.dumps(op, ensure_ascii=False))
     else:
-        print(f"Operation opened: {op['id']} \"{op['title']}\" [{op['schedule']['frequency']}]")
+        print(f"Operation {op['status']}: {op['id']} \"{op['title']}\" [{op['schedule']['frequency']}]")
+
+
+def cmd_operation_set_status():
+    op_id = os.environ.get("BEACON_OPERATION_ID", "")
+    status = os.environ.get("BEACON_OPERATION_STATUS", "")
+    if not op_id or not status:
+        print("Error: operation id and status required")
+        sys.exit(1)
+    data = load_project()
+    try:
+        op = core.operation_set_status(data, op_id, status)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"type": "operation_status", "op_id": op_id, "status": status})
+    print(f"Operation {status}: {op_id} \"{op.get('title','')}\"")
+
+
+def cmd_operation_update():
+    op_id = os.environ.get("BEACON_OPERATION_ID", "")
+    if not op_id:
+        print("Error: operation id required")
+        sys.exit(1)
+    data = load_project()
+    try:
+        op = core.operation_update(
+            data, op_id,
+            title=os.environ.get("BEACON_TITLE", ""),
+            schedule=os.environ.get("BEACON_OPERATION_SCHEDULE", ""),
+            activation_hint=os.environ.get("BEACON_ACTIVATION_HINT", ""),
+            objective=os.environ.get("BEACON_OBJECTIVE", ""),
+            acceptance_criteria=os.environ.get("BEACON_ACCEPTANCE_CRITERIA", ""),
+            priority=os.environ.get("BEACON_PRIORITY", ""),
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"type": "operation_update", "op_id": op_id})
+    print(f"Operation updated: {op_id} \"{op.get('title','')}\"")
+
+
+def cmd_operation_task_add():
+    op_id = os.environ.get("BEACON_OPERATION_ID", "")
+    description = os.environ.get("BEACON_DESCRIPTION", "")
+    if not op_id or not description:
+        print("Error: --op and description required")
+        sys.exit(1)
+    data = load_project()
+    try:
+        op, entry = core.operation_task_add(
+            data, op_id, description,
+            priority=os.environ.get("BEACON_PRIORITY", ""),
+            motivation=os.environ.get("BEACON_MOTIVATION", ""),
+            acceptance_criteria=os.environ.get("BEACON_ACCEPTANCE_CRITERIA", ""),
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"type": "operation_task_add", "op_id": op_id, "entry_id": entry["id"]})
+    print(f"Added operation_task [{entry['id']}] to {op_id}: {description}")
+
+
+def cmd_operation_task_done():
+    entry_id = os.environ.get("BEACON_ENTRY_ID", "")
+    reason = os.environ.get("BEACON_REASON", "")
+    if not entry_id:
+        print("Error: entry id required")
+        sys.exit(1)
+    if not reason:
+        print("Error: --reason is required. Record why this task is done.", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    try:
+        entry = core.operation_task_done(data, entry_id, reason=reason)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"type": "operation_task_done", "entry_id": entry_id, "reason": reason})
+    print(f"Done: [{entry_id}] {entry.get('description','')}\n  Reason: {reason}")
+
+
+def cmd_operation_task_list():
+    op_id = os.environ.get("BEACON_OPERATION_ID", "")
+    if not op_id:
+        print("Error: --op required")
+        sys.exit(1)
+    data = load_project()
+    for op in data.get("operations", []):
+        if op.get("id") == op_id:
+            tasks = [e for e in op.get("entries", []) if e.get("type") == "operation_task"]
+            if os.environ.get("BEACON_JSON"):
+                print(json.dumps(tasks, ensure_ascii=False))
+                return
+            if not tasks:
+                print(f"No operation_tasks in {op_id}")
+                return
+            for t in tasks:
+                icon = "●" if t.get("status") == "done" else "○"
+                pri = f" [{t['meta']['priority']}]" if t.get("meta", {}).get("priority") else ""
+                print(f"  {icon} [{t['id']}]{pri} {t.get('description','')}")
+            return
+    print(f"Operation not found: {op_id}")
+    sys.exit(1)
 
 
 def cmd_operation_close():
@@ -3849,6 +3966,11 @@ if __name__ == "__main__":
         "issue_sync": cmd_issue_sync,
         "operation_open": cmd_operation_open,
         "operation_close": cmd_operation_close,
+        "operation_set_status": cmd_operation_set_status,
+        "operation_update": cmd_operation_update,
+        "operation_task_add": cmd_operation_task_add,
+        "operation_task_done": cmd_operation_task_done,
+        "operation_task_list": cmd_operation_task_list,
         "operation_list": cmd_operation_list,
         "operation_show": cmd_operation_show,
         "run_record": cmd_run_record,
