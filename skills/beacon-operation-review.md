@@ -116,6 +116,36 @@ Incident 起票の判断基準:
 - `warning` で継続的または増加傾向 → 起票推奨
 - `error` → 原則として起票
 
+### Step 6a: 解決タスク化の提案 (e-591 / UC7-L4)
+
+Incident を起票した直後、それを **「解決する作業」として MS にタスク化** するかをユーザーに提案する。提案だけで、実行はユーザー判断:
+
+```
+Incident [e-id] "[title]" を起票しました。
+これを解決するタスクをどの MS に作りますか？
+
+  候補:
+    - ms-XX [active MS title] (推奨: Operation 関連の修正系 MS があればそれ)
+    - ms-YY ...
+    - 何も作らない（今は記録だけで、後で対応）
+
+選んでもらえれば beacon incident escalate <e-id> -m <ms-id> を実行します。
+```
+
+### 判断ロジック
+
+- **active MS が 1 つだけ** で、そのテーマが Incident 領域と関連深い → その MS を強く推奨
+- **active MS が複数** → 候補を列挙してユーザーに選ばせる
+- **関連 MS が見当たらない** → 「新しい MS を立てるかどうか」を聞く（`beacon milestone add` の話に切替）
+- ユーザーが「不要」と言えば何もしない (`incident escalate` を呼ばない)
+
+承認時:
+```bash
+cd "$PROJECT_DIR" && beacon incident escalate <incident-id> -m <ms-id>
+```
+
+これにより `linked_ms_task` でインシデントと task の双方向リンクが付き、後で retrospection で辿れる。
+
 ## Step 6.5: 既存 open Incident のクローズ誘導 (e-595)
 
 このレビュー対象の Operation に紐づく **既存の open Incident** が無いか確認する。

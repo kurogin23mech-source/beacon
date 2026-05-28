@@ -4259,6 +4259,82 @@ def cmd_incident_escalate():
     print(f"  {task['description']}")
 
 
+def cmd_incident_list():
+    """List incidents.
+
+    Filters:
+      -o <op-id>          only this Operation
+      --status <status>   open / closed (default: all)
+      --include-closed    shorthand for --status closed but additive
+      --json              machine-readable output
+
+    Used by:
+      - /beacon-operation-review Step 6.5 (open Incident close 誘導)
+      - /beacon-retrospect (past Incident history retrospection, UC10-O6 / e-619)
+      - Direct CLI inspection
+    """
+    op_filter = os.environ.get("BEACON_OPERATION_ID", "")
+    status_filter = os.environ.get("BEACON_INCIDENT_STATUS", "")
+    include_closed = os.environ.get("BEACON_INCLUDE_CLOSED", "") == "1"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    data = load_project()
+    results = []
+    for op in data.get("operations", []):
+        if op_filter and op.get("id") != op_filter:
+            continue
+        for entry in op.get("entries", []):
+            if entry.get("type") != "incident":
+                continue
+            entry_status = entry.get("status", "open")
+            # status_filter wins; if not specified, default is to show open only
+            # unless --include-closed is set. Treat "closed" / "resolved" /
+            # "cancelled" all as "not open" for the include_closed shorthand
+            # since Beacon's incident states are not fully standardized yet.
+            if status_filter:
+                if status_filter != entry_status:
+                    continue
+            elif not include_closed:
+                if entry_status != "open":
+                    continue
+            results.append({
+                "id": entry.get("id"),
+                "op_id": op.get("id"),
+                "op_title": op.get("title", ""),
+                "title": entry.get("title", ""),
+                "description": entry.get("description", ""),
+                "status": entry_status,
+                "priority": entry.get("priority", ""),
+                "created_at": entry.get("created_at", ""),
+                "closed_at": entry.get("closed_at", ""),
+                "resolution": entry.get("resolution", ""),
+            })
+
+    # Most recent first
+    results.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+
+    if json_mode:
+        print(json.dumps(results, ensure_ascii=False))
+        return
+
+    if not results:
+        if op_filter:
+            print(f"No incidents found for {op_filter}.")
+        else:
+            print("No incidents found.")
+        return
+
+    for r in results:
+        status_icon = "✓" if r["status"] == "closed" else "⚠"
+        date_part = (r.get("closed_at") or r.get("created_at") or "")[:10]
+        print(f"{status_icon} [{r['id']}] {r['title']}")
+        print(f"  op: {r['op_id']} \"{r['op_title']}\" / {date_part} / status: {r['status']}")
+        if r["status"] == "closed" and r.get("resolution"):
+            print(f"  resolution: {r['resolution'][:120]}")
+        elif r.get("description"):
+            print(f"  desc: {r['description'][:120]}")
+
+
 # ---------------------------------------------------------------------------
 # Main dispatch
 # ---------------------------------------------------------------------------
@@ -4352,6 +4428,7 @@ if __name__ == "__main__":
         "incident_open": cmd_incident_open,
         "incident_close": cmd_incident_close,
         "incident_escalate": cmd_incident_escalate,
+        "incident_list": cmd_incident_list,
         "note_add": cmd_note_add,
         "note_list": cmd_note_list,
         "note_clear": cmd_note_clear,

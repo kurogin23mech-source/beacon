@@ -1939,10 +1939,30 @@ case "${1:-}" in
                 BEACON_INCIDENT_ID="$incident_id" BEACON_MS_ID="$ms_id" \
                     python3 "$COMMANDS_PY" incident_escalate
                 ;;
+            list)
+                shift 2
+                op_id=""
+                status=""
+                include_closed=""
+                json_mode=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        -o|--op)         op_id="${2:-}"; shift 2 ;;
+                        --status)        status="${2:-}"; shift 2 ;;
+                        --include-closed) include_closed="1"; shift ;;
+                        --json)          json_mode="1"; shift ;;
+                        *) shift ;;
+                    esac
+                done
+                BEACON_OPERATION_ID="$op_id" BEACON_INCIDENT_STATUS="$status" \
+                    BEACON_INCLUDE_CLOSED="$include_closed" BEACON_JSON="$json_mode" \
+                    python3 "$COMMANDS_PY" incident_list
+                ;;
             *)
                 echo "Usage: beacon incident open \"<title>\" -o <op-id> [--desc \"...\"]"
                 echo "       beacon incident close <id> --resolution \"...\""
                 echo "       beacon incident escalate <id> -m <ms-id>"
+                echo "       beacon incident list [-o <op-id>] [--status open|closed] [--include-closed] [--json]"
                 ;;
         esac
         ;;
