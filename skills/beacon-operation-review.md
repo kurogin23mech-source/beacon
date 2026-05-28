@@ -104,6 +104,27 @@ Incident 起票の判断基準:
 - `warning` で継続的または増加傾向 → 起票推奨
 - `error` → 原則として起票
 
+## Step 6.5: 既存 open Incident のクローズ誘導 (e-595)
+
+このレビュー対象の Operation に紐づく **既存の open Incident** が無いか確認する。
+
+```bash
+beacon incident list -o <op-id> --json
+```
+
+`status == "open"` のエントリが存在する場合、**毎回必ず提示する** (UX レビュー UC7-L8 で実害あり)。誘導文の例:
+
+```
+このオペレーションには未解決の Incident が [N]件 残っています:
+  - [e-id] "[title]" (open since [created_at])
+今回の run record の結果を踏まえて、解決済みのものはありますか？
+- close する場合: /beacon-incident-report Skill を実行してください
+  (close + report 作成までエスコートします)
+- まだ未解決なら、本 Skill では何もしません
+```
+
+判断はユーザーに委ねる (この Skill は close を直接行わない)。`/beacon-incident-report` 経由で必ず report 作成まで一体的に進める。
+
 ## Step 7: 結果報告
 
 ユーザーに簡潔に報告:
@@ -112,10 +133,13 @@ Incident 起票の判断基準:
 Run recorded: [op-id] / [batch] [✓ok/⚠warning/✗error]
   [description]
 [→ Incident起票: [e-id] "[title]"]  ← 起票した場合のみ
+[→ 未解決 Incident [N]件 — close 検討の機会です]  ← Step 6.5 で見つかった場合のみ
 ```
 
 ## 制約
 
 - 書き込みは `beacon run record` と `beacon incident open` のみ
+- close 操作は **直接行わない**。close は `/beacon-incident-report` Skill 経由で
+  必ず report 作成までエスコートする (e-595)
 - SPEC の手順に忠実に従う。独自の判断でログ取得方法を変えない
 - 読み取り専用の操作（ログ取得）は Bash/Read/WebFetch を自由に使う

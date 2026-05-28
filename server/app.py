@@ -25,6 +25,7 @@ from starlette.responses import Response, JSONResponse
 
 import core
 import firestore_client as db
+import operations
 
 # debug=False is the default, but set explicitly to ensure stack traces are
 # never included in error responses in production.
@@ -378,29 +379,43 @@ def list_projects(include_archived: bool = False, user: dict = Depends(require_a
 @app.post("/api/projects/{project_id}/archive")
 def archive_project(project_id: str, user: dict = Depends(require_auth)):
     """Archive a project (soft delete — hidden from default listing)."""
-    data = _load(project_id, user)
-    if _get_role(data, user) != "owner":
-        raise HTTPException(status_code=403, detail="Only the project owner can archive")
-    data["archived"] = True
-    _save(project_id, data)
-    return {"status": "archived", "project_id": project_id}
+    def op(data: dict):
+        if _get_role(data, user) != "owner":
+            raise HTTPException(status_code=403, detail="Only the project owner can archive")
+        data["archived"] = True
+        return data, {"status": "archived", "project_id": project_id}
+    return operations.apply_operation(
+        project_id, op, op_name="project.archive", actor=user.get("sub", ""),
+    )
 
 
 @app.post("/api/projects/{project_id}/unarchive")
 def unarchive_project(project_id: str, user: dict = Depends(require_auth)):
     """Restore an archived project."""
-    data = _load(project_id, user)
-    if _get_role(data, user) != "owner":
-        raise HTTPException(status_code=403, detail="Only the project owner can unarchive")
-    data["archived"] = False
-    _save(project_id, data)
-    return {"status": "unarchived", "project_id": project_id}
+    def op(data: dict):
+        if _get_role(data, user) != "owner":
+            raise HTTPException(status_code=403, detail="Only the project owner can unarchive")
+        data["archived"] = False
+        return data, {"status": "unarchived", "project_id": project_id}
+    return operations.apply_operation(
+        project_id, op, op_name="project.unarchive", actor=user.get("sub", ""),
+    )
 
 
 @app.post("/api/projects/{project_id}")
 def create_project(project_id: str, body: ProjectCreate,
                    user: dict = Depends(require_auth)):
-    """Create a new project (like beacon init)."""
+    """Create a new project (like beacon init).
+
+    New projects are created with schema_version=2 (β subcollection layout)
+    by default — see SPEC doc gP9pCssCoa3QduuSMGR0 §"新規プロジェクトは
+    β スキーマで作る (並列性確保)". This lets concurrent writes to different
+    milestones proceed without contending on a single document.
+
+    Existing projects (created before this change) remain on schema_version=1
+    (legacy whole-document) and are not auto-migrated; apply_operation
+    transparently routes them through the legacy transaction path.
+    """
     existing = db.get_project(project_id)
     if existing is not None:
         raise HTTPException(status_code=409, detail=f"Project '{project_id}' already exists")
@@ -410,6 +425,8 @@ def create_project(project_id: str, body: ProjectCreate,
         "milestones": [],
         "owner": user.get("sub", ""),
         "members": [],
+        # SCHEMA_V2_BETA — see lib/operations.py
+        "schema_version": operations.SCHEMA_V2_BETA,
     }
     _save(project_id, data)
     return {"status": "created", "project_id": project_id}
@@ -423,6 +440,8 @@ def get_project(project_id: str, user: dict = Depends(require_auth)):
 @app.put("/api/projects/{project_id}")
 def put_project(project_id: str, body: dict,
                 user: dict = Depends(require_auth)):
+    # validate_project is also called inside replace_project, but we pre-call
+    # here so the 400 path doesn't open a transaction unnecessarily.
     try:
         core.validate_project(body)
     except ValueError as e:
@@ -430,7 +449,11 @@ def put_project(project_id: str, body: dict,
     # Auto-set owner if missing (e.g. cloud push from local)
     if not body.get("owner") and _auth_enabled:
         body["owner"] = user.get("sub", "")
-    db.save_project(project_id, body)
+    operations.replace_project(
+        project_id, body,
+        actor=user.get("sub", ""),
+        reason="PUT /api/projects (whole-document replace)",
+    )
     return {"status": "ok", "project_id": project_id}
 
 
@@ -441,15 +464,22 @@ def put_project(project_id: str, body: dict,
 @app.post("/api/projects/{project_id}/milestones")
 def create_milestone(project_id: str, body: MilestoneCreate,
                      user: dict = Depends(require_auth)):
-    data = _load(project_id, user)
-    _require_write(data, user)
-    ms_id = core.milestone_add(data, body.title, body.target_date,
-                               description=body.description,
-                               priority=body.priority,
-                               objective=body.objective,
-                               acceptance_criteria=body.acceptance_criteria)
-    _save(project_id, data)
-    return {"ms_id": ms_id, "title": body.title}
+    def op(data: dict):
+        _require_write(data, user)
+        try:
+            ms_id = core.milestone_add(
+                data, body.title, body.target_date,
+                description=body.description,
+                priority=body.priority,
+                objective=body.objective,
+                acceptance_criteria=body.acceptance_criteria,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return data, {"ms_id": ms_id, "title": body.title}
+    return operations.apply_operation(
+        project_id, op, op_name="milestone.create", actor=user.get("sub", ""),
+    )
 
 
 @app.get("/api/projects/{project_id}/milestones/{ms_id}")
@@ -472,62 +502,72 @@ def get_milestone(project_id: str, ms_id: str,
 @app.patch("/api/projects/{project_id}/milestones/{ms_id}")
 def update_milestone(project_id: str, ms_id: str, body: MilestoneUpdate,
                      user: dict = Depends(require_auth)):
-    data = _load(project_id, user)
-    _require_write(data, user)
-    try:
-        ms = core.milestone_update(
-            data, ms_id,
-            title=body.title, progress=body.progress,
-            target_date=body.target_date, status=body.status,
-            description=body.description,
-            priority=body.priority,
-            objective=body.objective,
-            acceptance_criteria=body.acceptance_criteria,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    _save(project_id, data)
-    return {"id": ms["id"], "title": ms["title"], "status": ms["status"],
-            "progress": ms.get("progress", 0)}
+    def op(data: dict):
+        _require_write(data, user)
+        try:
+            ms = core.milestone_update(
+                data, ms_id,
+                title=body.title, progress=body.progress,
+                target_date=body.target_date, status=body.status,
+                description=body.description,
+                priority=body.priority,
+                objective=body.objective,
+                acceptance_criteria=body.acceptance_criteria,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return data, {
+            "id": ms["id"], "title": ms["title"], "status": ms["status"],
+            "progress": ms.get("progress", 0),
+        }
+    return operations.apply_operation(
+        project_id, op, op_name="milestone.update", actor=user.get("sub", ""),
+    )
 
 
 @app.post("/api/projects/{project_id}/milestones/{ms_id}/start")
 def start_milestone(project_id: str, ms_id: str,
                     user: dict = Depends(require_auth)):
-    data = _load(project_id, user)
-    _require_write(data, user)
-    try:
-        ms = core.milestone_start(data, ms_id)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    _save(project_id, data)
-    return {"id": ms["id"], "title": ms["title"], "status": "in_progress"}
+    def op(data: dict):
+        _require_write(data, user)
+        try:
+            ms = core.milestone_start(data, ms_id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return data, {"id": ms["id"], "title": ms["title"], "status": "in_progress"}
+    return operations.apply_operation(
+        project_id, op, op_name="milestone.start", actor=user.get("sub", ""),
+    )
 
 
 @app.post("/api/projects/{project_id}/milestones/{ms_id}/done")
 def done_milestone(project_id: str, ms_id: str,
                    user: dict = Depends(require_auth)):
-    data = _load(project_id, user)
-    _require_write(data, user)
-    try:
-        ms = core.milestone_done(data, ms_id)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    _save(project_id, data)
-    return {"id": ms["id"], "title": ms["title"], "status": "done"}
+    def op(data: dict):
+        _require_write(data, user)
+        try:
+            ms = core.milestone_done(data, ms_id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return data, {"id": ms["id"], "title": ms["title"], "status": "done"}
+    return operations.apply_operation(
+        project_id, op, op_name="milestone.done", actor=user.get("sub", ""),
+    )
 
 
 @app.delete("/api/projects/{project_id}/milestones/{ms_id}")
 def delete_milestone(project_id: str, ms_id: str,
                      user: dict = Depends(require_auth)):
-    data = _load(project_id, user)
-    _require_write(data, user)
-    try:
-        ms = core.milestone_delete(data, ms_id)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    _save(project_id, data)
-    return {"id": ms["id"], "status": "cancelled"}
+    def op(data: dict):
+        _require_write(data, user)
+        try:
+            ms = core.milestone_delete(data, ms_id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return data, {"id": ms["id"], "status": "cancelled"}
+    return operations.apply_operation(
+        project_id, op, op_name="milestone.delete", actor=user.get("sub", ""),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -537,62 +577,71 @@ def delete_milestone(project_id: str, ms_id: str,
 @app.post("/api/projects/{project_id}/milestones/{ms_id}/entries")
 def create_entry(project_id: str, ms_id: str, body: EntryCreate,
                  user: dict = Depends(require_auth)):
-    data = _load(project_id, user)
-    _require_write(data, user)
-    try:
-        eid = core.task_add(
-            data, ms_id, body.description,
-            entry_type=body.type, date=body.date, detail=body.detail,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    _save(project_id, data)
-    return {"entry_id": eid, "description": body.description}
+    def op(data: dict):
+        _require_write(data, user)
+        try:
+            eid = core.task_add(
+                data, ms_id, body.description,
+                entry_type=body.type, date=body.date, detail=body.detail,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return data, {"entry_id": eid, "description": body.description}
+    return operations.apply_operation(
+        project_id, op, op_name="entry.create", actor=user.get("sub", ""),
+    )
 
 
 @app.patch("/api/projects/{project_id}/entries/{entry_id}")
 def update_entry(project_id: str, entry_id: str, body: EntryUpdate,
                  user: dict = Depends(require_auth)):
-    data = _load(project_id, user)
-    _require_write(data, user)
-    try:
-        ms, entry = core.task_update(
-            data, entry_id,
-            description=body.description, status=body.status,
-            detail=body.detail, date=body.date,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    _save(project_id, data)
-    return core.entries_to_json([entry])[0]
+    def op(data: dict):
+        _require_write(data, user)
+        try:
+            ms, entry = core.task_update(
+                data, entry_id,
+                description=body.description, status=body.status,
+                detail=body.detail, date=body.date,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return data, core.entries_to_json([entry])[0]
+    return operations.apply_operation(
+        project_id, op, op_name="entry.update", actor=user.get("sub", ""),
+    )
 
 
 @app.post("/api/projects/{project_id}/entries/{entry_id}/done")
 def done_entry(project_id: str, entry_id: str,
                user: dict = Depends(require_auth)):
-    data = _load(project_id, user)
-    _require_write(data, user)
     import datetime
     today = datetime.date.today().isoformat()
-    try:
-        ms, entry = core.task_done(data, entry_id, date=today)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    _save(project_id, data)
-    return {"entry_id": entry_id, "status": "done"}
+
+    def op(data: dict):
+        _require_write(data, user)
+        try:
+            ms, entry = core.task_done(data, entry_id, date=today)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return data, {"entry_id": entry_id, "status": "done"}
+    return operations.apply_operation(
+        project_id, op, op_name="entry.done", actor=user.get("sub", ""),
+    )
 
 
 @app.delete("/api/projects/{project_id}/entries/{entry_id}")
 def delete_entry(project_id: str, entry_id: str,
                  user: dict = Depends(require_auth)):
-    data = _load(project_id, user)
-    _require_write(data, user)
-    try:
-        entry = core.task_delete(data, entry_id)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    _save(project_id, data)
-    return {"entry_id": entry_id, "status": "cancelled"}
+    def op(data: dict):
+        _require_write(data, user)
+        try:
+            entry = core.task_delete(data, entry_id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return data, {"entry_id": entry_id, "status": "cancelled"}
+    return operations.apply_operation(
+        project_id, op, op_name="entry.delete", actor=user.get("sub", ""),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -602,18 +651,20 @@ def delete_entry(project_id: str, entry_id: str,
 @app.post("/api/projects/{project_id}/log")
 def log_commit(project_id: str, body: LogCommit,
                user: dict = Depends(require_auth)):
-    data = _load(project_id, user)
-    _require_write(data, user)
-    try:
-        result = core.log_commit(
-            data, ms_id=body.ms_id, commit_hash=body.hash,
-            message=body.message, date=body.date,
-            summary=body.summary, progress=body.progress,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    _save(project_id, data)
-    return result
+    def op(data: dict):
+        _require_write(data, user)
+        try:
+            result = core.log_commit(
+                data, ms_id=body.ms_id, commit_hash=body.hash,
+                message=body.message, date=body.date,
+                summary=body.summary, progress=body.progress,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return data, result
+    return operations.apply_operation(
+        project_id, op, op_name="project.log", actor=user.get("sub", ""),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -623,11 +674,13 @@ def log_commit(project_id: str, body: LogCommit,
 @app.patch("/api/projects/{project_id}/summary")
 def update_summary(project_id: str, body: SummaryUpdate,
                    user: dict = Depends(require_auth)):
-    data = _load(project_id, user)
-    _require_write(data, user)
-    data["summary"] = body.text
-    _save(project_id, data)
-    return {"summary": body.text}
+    def op(data: dict):
+        _require_write(data, user)
+        data["summary"] = body.text
+        return data, {"summary": body.text}
+    return operations.apply_operation(
+        project_id, op, op_name="project.summary", actor=user.get("sub", ""),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -709,44 +762,62 @@ def delete_document_endpoint(project_id: str, doc_id: str,
 def invite_member(project_id: str, body: MemberInvite,
                   user: dict = Depends(require_auth)):
     """Invite a member by email. Only project owner can invite."""
-    data = _load(project_id, user)
-    # Only owner can invite
-    if _auth_enabled and data.get("owner") != user.get("sub"):
-        raise HTTPException(status_code=403, detail="Only project owner can invite members")
     if body.role not in ("viewer", "editor"):
         raise HTTPException(status_code=400, detail="Role must be 'viewer' or 'editor'")
-    # Find user by email
+    # Look up the invitee outside the transaction — read-only on the users
+    # collection, not the project doc. Safe and avoids extending the txn window.
     found = db.find_user_by_email(body.email)
     if found is None:
-        raise HTTPException(status_code=404,
-                            detail=f"User '{body.email}' not found. They must sign in to Beacon first.")
-    invited_id, invited_data = found
-    # Check not already a member
-    members = data.get("members", [])
-    if any(m.get("user_id") == invited_id for m in members):
-        raise HTTPException(status_code=409, detail=f"'{body.email}' is already a member")
-    if data.get("owner") == invited_id:
-        raise HTTPException(status_code=409, detail=f"'{body.email}' is the project owner")
-    members.append({"user_id": invited_id, "email": body.email, "role": body.role})
-    data["members"] = members
-    _save(project_id, data)
-    return {"status": "invited", "email": body.email, "role": body.role}
+        raise HTTPException(
+            status_code=404,
+            detail=f"User '{body.email}' not found. They must sign in to Beacon first.",
+        )
+    invited_id, _ = found
+
+    def op(data: dict):
+        if _auth_enabled and data.get("owner") != user.get("sub"):
+            raise HTTPException(
+                status_code=403, detail="Only project owner can invite members"
+            )
+        members = data.get("members", [])
+        if any(m.get("user_id") == invited_id for m in members):
+            raise HTTPException(
+                status_code=409, detail=f"'{body.email}' is already a member"
+            )
+        if data.get("owner") == invited_id:
+            raise HTTPException(
+                status_code=409, detail=f"'{body.email}' is the project owner"
+            )
+        members.append({"user_id": invited_id, "email": body.email, "role": body.role})
+        data["members"] = members
+        return data, {"status": "invited", "email": body.email, "role": body.role}
+
+    return operations.apply_operation(
+        project_id, op, op_name="member.invite", actor=user.get("sub", ""),
+    )
 
 
 @app.delete("/api/projects/{project_id}/members/{member_email}")
 def remove_member(project_id: str, member_email: str,
                   user: dict = Depends(require_auth)):
     """Remove a member. Only project owner can remove."""
-    data = _load(project_id, user)
-    if _auth_enabled and data.get("owner") != user.get("sub"):
-        raise HTTPException(status_code=403, detail="Only project owner can remove members")
-    members = data.get("members", [])
-    new_members = [m for m in members if m.get("email") != member_email]
-    if len(new_members) == len(members):
-        raise HTTPException(status_code=404, detail=f"Member '{member_email}' not found")
-    data["members"] = new_members
-    _save(project_id, data)
-    return {"status": "removed", "email": member_email}
+    def op(data: dict):
+        if _auth_enabled and data.get("owner") != user.get("sub"):
+            raise HTTPException(
+                status_code=403, detail="Only project owner can remove members"
+            )
+        members = data.get("members", [])
+        new_members = [m for m in members if m.get("email") != member_email]
+        if len(new_members) == len(members):
+            raise HTTPException(
+                status_code=404, detail=f"Member '{member_email}' not found"
+            )
+        data["members"] = new_members
+        return data, {"status": "removed", "email": member_email}
+
+    return operations.apply_operation(
+        project_id, op, op_name="member.remove", actor=user.get("sub", ""),
+    )
 
 
 @app.get("/api/projects/{project_id}/members")
@@ -775,19 +846,27 @@ class MemberRoleUpdate(BaseModel):
 def update_member_role(project_id: str, member_email: str, body: MemberRoleUpdate,
                        user: dict = Depends(require_auth)):
     """Update a member's role. Only project owner can change roles."""
-    data = _load(project_id, user)
-    if _auth_enabled and data.get("owner") != user.get("sub"):
-        raise HTTPException(status_code=403, detail="Only project owner can change roles")
     if body.role not in ("viewer", "editor"):
         raise HTTPException(status_code=400, detail="Role must be 'viewer' or 'editor'")
-    members = data.get("members", [])
-    for m in members:
-        if m.get("email") == member_email:
-            m["role"] = body.role
-            data["members"] = members
-            _save(project_id, data)
-            return {"email": member_email, "role": body.role}
-    raise HTTPException(status_code=404, detail=f"Member '{member_email}' not found")
+
+    def op(data: dict):
+        if _auth_enabled and data.get("owner") != user.get("sub"):
+            raise HTTPException(
+                status_code=403, detail="Only project owner can change roles"
+            )
+        members = data.get("members", [])
+        for m in members:
+            if m.get("email") == member_email:
+                m["role"] = body.role
+                data["members"] = members
+                return data, {"email": member_email, "role": body.role}
+        raise HTTPException(
+            status_code=404, detail=f"Member '{member_email}' not found"
+        )
+
+    return operations.apply_operation(
+        project_id, op, op_name="member.update_role", actor=user.get("sub", ""),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -855,17 +934,29 @@ def admin_transfer_owner(project_id: str, body: AdminOwnerTransfer,
                          user: dict = Depends(require_auth)):
     """Transfer project ownership (admin only)."""
     _require_admin(user)
-    data = db.get_project(project_id)
-    if data is None:
-        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    # Validate the new owner exists before entering the transaction so we
+    # can return a clean 404 without aborting a txn.
     new_owner = db.get_user(body.new_owner_id)
     if new_owner is None:
-        raise HTTPException(status_code=404, detail=f"User '{body.new_owner_id}' not found")
-    data["owner"] = body.new_owner_id
-    # Remove new owner from members if present
-    data["members"] = [m for m in data.get("members", []) if m.get("user_id") != body.new_owner_id]
-    db.save_project(project_id, data)
-    return {"project_id": project_id, "new_owner": body.new_owner_id, "email": new_owner.get("email", "")}
+        raise HTTPException(
+            status_code=404, detail=f"User '{body.new_owner_id}' not found"
+        )
+
+    def op(data: dict):
+        data["owner"] = body.new_owner_id
+        # Remove new owner from members if present
+        data["members"] = [
+            m for m in data.get("members", []) if m.get("user_id") != body.new_owner_id
+        ]
+        return data, {
+            "project_id": project_id,
+            "new_owner": body.new_owner_id,
+            "email": new_owner.get("email", ""),
+        }
+
+    return operations.apply_operation(
+        project_id, op, op_name="admin.transfer_owner", actor=user.get("sub", ""),
+    )
 
 
 @app.get("/api/admin/me")
@@ -1056,16 +1147,32 @@ def _stop_watcher(project_id: str):
 
 @app.websocket("/ws/projects/{project_id}")
 async def ws_project(websocket: WebSocket, project_id: str):
-    """WebSocket endpoint for real-time project monitoring."""
+    """WebSocket endpoint for real-time project monitoring.
+
+    Close codes used by this endpoint (clients must distinguish them — e-639):
+
+      4401  TOKEN MISSING   — no token query param. Client should not retry
+                              silently; redirect to login.
+      4403  TOKEN EXPIRED   — token presented but rejected. Client should
+                              attempt a refresh (where supported) and either
+                              re-connect with a fresh token or surface a
+                              "please log in again" notice.
+
+    Both codes are in the application-private range (4000–4999) so they do
+    not collide with standard WebSocket close codes. The browser exposes them
+    via CloseEvent.code, which makes the retry decision deterministic on the
+    client side (no more silent 1008 + infinite reconnect loop).
+    """
     token = websocket.query_params.get("token")
     if _auth_enabled:
         if not token:
-            await websocket.close(code=1008)
+            # Reason text helps server-side audit logs; clients should rely on code.
+            await websocket.close(code=4401, reason="token_missing")
             return
         try:
             _verify_id_token(token)
         except HTTPException:
-            await websocket.close(code=1008)
+            await websocket.close(code=4403, reason="token_expired_or_invalid")
             return
 
     await websocket.accept()

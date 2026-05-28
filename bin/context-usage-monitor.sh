@@ -9,6 +9,13 @@
 # 通知は hookSpecificOutput.additionalContext に含める
 # 閾値: 20 / 40 / 60 / 80 (%)、各閾値に初回到達時のみ通知
 # 状態ファイル: .claude/context-usage-state.json
+#
+# Context limit detection (e-561):
+#   1. BEACON_CONTEXT_LIMIT env var (explicit override, integer tokens)
+#   2. transcript の最新 assistant message.model から自動判定
+#      - Opus / Sonnet 4.x の "[1m]" suffix が付くもの → 1,000,000
+#      - それ以外の Claude モデル → 200,000
+#   3. fallback: 200,000
 
 set -euo pipefail
 
@@ -36,16 +43,17 @@ if [ ! -f "$TRANSCRIPT_PATH" ]; then
   exit 0
 fi
 
-# ─── transcript から最新 assistant メッセージの usage を取得 ────────────────────
-# JSONL の各行を逆順で走査して最初に見つかった usage を使う
-USAGE_JSON=$(python3 - "$TRANSCRIPT_PATH" <<'PYEOF'
+# ─── transcript から最新 assistant メッセージの usage + model を取得 ───────────
+# JSONL の各行を逆順で走査して最初に見つかった usage を使う。同時に model 名も
+# 拾って context_limit 判定に使う (e-561)。
+USAGE_AND_MODEL=$(python3 - "$TRANSCRIPT_PATH" <<'PYEOF'
 import json, sys
 
 path = sys.argv[1]
 try:
     with open(path) as f:
         lines = f.readlines()
-except Exception as e:
+except Exception:
     print("{}", end="")
     sys.exit(0)
 
@@ -54,7 +62,8 @@ for line in reversed(lines):
         d = json.loads(line)
         msg = d.get('message', {})
         if msg.get('role') == 'assistant' and 'usage' in msg:
-            print(json.dumps(msg['usage']), end="")
+            out = {"usage": msg['usage'], "model": msg.get('model', '')}
+            print(json.dumps(out), end="")
             sys.exit(0)
     except Exception:
         continue
@@ -63,10 +72,27 @@ print("{}", end="")
 PYEOF
 )
 
-if [ "$USAGE_JSON" = "{}" ] || [ -z "$USAGE_JSON" ]; then
+if [ "$USAGE_AND_MODEL" = "{}" ] || [ -z "$USAGE_AND_MODEL" ]; then
   log "no assistant usage data found in transcript — skipping"
   exit 0
 fi
+
+USAGE_JSON=$(echo "$USAGE_AND_MODEL" | jq -c '.usage // {}')
+MODEL_NAME=$(echo "$USAGE_AND_MODEL" | jq -r '.model // ""')
+
+# ─── Context limit の判定 (e-561) ──────────────────────────────────────────────
+# 優先順位: BEACON_CONTEXT_LIMIT env var > model 名から推定 > 200K fallback.
+CONTEXT_LIMIT="${BEACON_CONTEXT_LIMIT:-}"
+if [ -z "$CONTEXT_LIMIT" ]; then
+  # Claude 4.7 / 4.x の 1M ベータ系は model id に "[1m]" を含む
+  # 例: "claude-opus-4-7[1m]", "claude-sonnet-4-6[1m]"
+  if echo "$MODEL_NAME" | grep -qE '\[1m\]|-1m$|1m-'; then
+    CONTEXT_LIMIT=1000000
+  else
+    CONTEXT_LIMIT=200000
+  fi
+fi
+log "context_limit=$CONTEXT_LIMIT (model=${MODEL_NAME:-unknown})"
 
 # ─── コンテキスト使用量の計算 ──────────────────────────────────────────────────
 CURRENT_CONTEXT=$(echo "$USAGE_JSON" | jq -r '
@@ -78,8 +104,8 @@ if [ -z "$CURRENT_CONTEXT" ] || [ "$CURRENT_CONTEXT" = "null" ]; then
   exit 0
 fi
 
-# 使用率 % (整数)
-PERCENT=$(python3 -c "print(int($CURRENT_CONTEXT / 200000 * 100))")
+# 使用率 % (整数) — denominator は context_limit に動的化
+PERCENT=$(python3 -c "print(int($CURRENT_CONTEXT / $CONTEXT_LIMIT * 100))")
 
 # コンパクション後の継続セッションで 100% 超える場合はスキップ
 if [ "$PERCENT" -gt 100 ]; then
@@ -87,7 +113,7 @@ if [ "$PERCENT" -gt 100 ]; then
   exit 0
 fi
 
-log "session=$SESSION_ID context=$CURRENT_CONTEXT percent=${PERCENT}%"
+log "session=$SESSION_ID context=$CURRENT_CONTEXT/${CONTEXT_LIMIT} percent=${PERCENT}%"
 
 # ─── 状態ファイルの読み込み・セッション管理 ────────────────────────────────────
 STATE_FILE=".claude/context-usage-state.json"
@@ -141,13 +167,15 @@ PYEOF
 fi
 
 # ─── 通知メッセージの生成 ──────────────────────────────────────────────────────
-REMAINING=$((200000 - CURRENT_CONTEXT))
+REMAINING=$((CONTEXT_LIMIT - CURRENT_CONTEXT))
 CONTEXT_APPROX="$CURRENT_CONTEXT"
+# 表示用に CONTEXT_LIMIT を 3-digit カンマ区切りで整形 (Bash 内で完結)
+CONTEXT_LIMIT_FMT=$(python3 -c "print(f'{int($CONTEXT_LIMIT):,}')")
 
 if [ "$TRIGGERED_THRESHOLD" -ge 80 ]; then
-  ADVICE="BEACON [⚠️ コンテキスト ${PERCENT}%] ${CONTEXT_APPROX}/200,000 tokens — beacon noteに自動記録済み。必要なら /beacon-note で詳細サマリーを追加してください。"
+  ADVICE="BEACON [⚠️ コンテキスト ${PERCENT}%] ${CONTEXT_APPROX}/${CONTEXT_LIMIT_FMT} tokens — beacon noteに自動記録済み。必要なら /beacon-note で詳細サマリーを追加してください。"
 else
-  ADVICE="BEACON [コンテキスト ${PERCENT}%] ${CONTEXT_APPROX}/200,000 tokens — beacon noteに自動記録済み。"
+  ADVICE="BEACON [コンテキスト ${PERCENT}%] ${CONTEXT_APPROX}/${CONTEXT_LIMIT_FMT} tokens — beacon noteに自動記録済み。"
 fi
 
 # ─── 状態ファイルの更新 ────────────────────────────────────────────────────────
@@ -223,7 +251,7 @@ ${LOCATION_TEXT:-（取得失敗）}
 beacon note "$NOTE_BODY" 2>/dev/null || true
 
 # ─── Claude への通知出力（残りブロックの記述を依頼）────────────────────────────
-TEMPLATE_INSTRUCTION="BEACON [コンテキスト ${PERCENT}% / ${CURRENT_CONTEXT}/200,000 tokens]
+TEMPLATE_INSTRUCTION="BEACON [コンテキスト ${PERCENT}% / ${CURRENT_CONTEXT}/${CONTEXT_LIMIT_FMT} tokens]
 閾値 ${TRIGGERED_THRESHOLD}% 到達。現在地ブロックを自動記録しました。
 以下のフォーマットで /beacon-note を実行し、残りのブロックを上書き補完してください:
 
