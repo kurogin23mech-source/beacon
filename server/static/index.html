@@ -122,6 +122,26 @@ body::after {
   text-transform: uppercase;
 }
 
+/* e-587: project version badge in the header. Shown only when the project
+   has at least one push record with a semver. Format: "v0.4.0  +N" */
+.version-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--accent);
+  background: var(--accent-glow, rgba(80,180,140,0.08));
+  border: 1px solid var(--accent-dim, rgba(80,180,140,0.3));
+  border-radius: 4px;
+  letter-spacing: 0.02em;
+}
+.version-badge .vb-diff {
+  color: var(--text-dim);
+  font-size: 0.68rem;
+}
+
 .connection-status {
   margin-left: auto;
   display: flex;
@@ -1726,6 +1746,9 @@ let state = {
   expandedPushId: null,
   selectedDeployEnv: null, // null = all environments
   openEntryId: null,
+  // Per-project version info (e-587) — {latest_pushed_semver, commits_since_release, ...}
+  // null until first fetch; {} if no push records exist (silently hides badge)
+  projectVersion: null,
   auth: {
     token: localStorage.getItem('beacon_token'),
     email: localStorage.getItem('beacon_email'),
@@ -2009,6 +2032,25 @@ function esc(s) {
   return el.innerHTML;
 }
 
+/* e-587: header version badge.
+ *   Shows "v0.4.0  +N commits since release" when the project has any push
+ *   record with a semver. Returns empty string when:
+ *     - the fetch hasn't completed yet (avoid layout flash)
+ *     - the project has no pushed releases yet (silently hidden)
+ * The badge is informational only — clicking it does nothing yet (clickable
+ * UI is a separate future task to drill into the releases tab).
+ */
+function renderVersionBadge() {
+  const v = state.projectVersion;
+  if (!v || !v.tag) return '';
+  const tag = esc(v.tag);
+  const diff = v.commits_since_release || 0;
+  const diffPart = diff > 0
+    ? `<span class="vb-diff" title="${diff} commits pushed since this release">+${diff}</span>`
+    : '';
+  return `<span class="version-badge" title="Latest released semver per push records">${tag}${diffPart}</span>`;
+}
+
 function formatTime(date) {
   if (!date) return '';
   return date.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -2098,6 +2140,7 @@ function render() {
         </button>
         <span class="project-name">${esc(p.name)}</span>
         <span class="header-tag">beacon</span>
+        ${renderVersionBadge()}
         <div class="connection-status">
           <div class="status-dot ${state.connected ? '' : 'offline'}"></div>
           <span class="connection-label">${state.connected ? 'live' : 'reconnecting'}</span>
@@ -3287,7 +3330,17 @@ async function selectProject(projectId) {
   state.documents = [];
   state.documentContent = null;
   state.hiddenStatuses.clear();
+  state.projectVersion = null;
   lastProjectJson = null;
+
+  // Fire-and-forget: version info is cosmetic, don't block project load on it.
+  api(`/api/projects/${projectId}/version`).then(v => {
+    state.projectVersion = v || {};
+    render();
+  }).catch(() => {
+    // 403/404 fine — just hide the badge.
+    state.projectVersion = {};
+  });
 
   document.getElementById('app').innerHTML = `
     <div class="loading"><div class="loading-bar"></div><div class="loading-text">Loading</div></div>

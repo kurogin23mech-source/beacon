@@ -2281,10 +2281,27 @@ case "${1:-}" in
                 BEACON_DEPLOY_ID="$_void_deploy_id" BEACON_REASON="$_void_reason" \
                     python3 "$COMMANDS_PY" deploy_void
                 ;;
+            rollback)
+                shift 2
+                rb_reason="" rb_execute="" rb_service="" rb_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        -r|--reason)  rb_reason="${2:-}"; shift 2 ;;
+                        --execute)    rb_execute="1"; shift ;;
+                        --service)    rb_service="${2:-}"; shift 2 ;;
+                        --json)       rb_json="1"; shift ;;
+                        *) shift ;;
+                    esac
+                done
+                BEACON_REASON="$rb_reason" BEACON_EXECUTE="$rb_execute" \
+                    BEACON_SERVICE="$rb_service" BEACON_JSON="$rb_json" \
+                    python3 "$COMMANDS_PY" deploy_rollback
+                ;;
             *)
                 echo "Usage: beacon deploy record [--env <env>] [--revision <rev>] [--semver <v1.0.0>] [--desc <text>]"
                 echo "       beacon deploy list [--env <env>] [--json]"
                 echo "       beacon deploy void <id> --reason <text>"
+                echo "       beacon deploy rollback --reason <text> [--service <name>] [--execute]"
                 ;;
         esac
         ;;

@@ -370,6 +370,93 @@ class MemberInvite(BaseModel):
 # Project
 # ---------------------------------------------------------------------------
 
+@app.get("/api/version")
+def get_server_version():
+    """Server-side beacon CLI version + git revision.
+
+    Returned to the Web UI so the header banner can show
+        "Beacon 0.4.0 (rev abc1234)"
+    and so the client can detect a stale tab when the server is upgraded.
+
+    See e-587 for the UI hookup (server/static/index.html).
+    """
+    import subprocess
+    try:
+        # lib/commands.py is the source of truth for the version string.
+        from commands import __version__ as cli_version  # type: ignore
+    except Exception:
+        cli_version = "unknown"
+
+    git_rev = ""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=2,
+            cwd=os.path.dirname(os.path.dirname(__file__)),
+        )
+        if result.returncode == 0:
+            git_rev = result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+
+    return {"cli": cli_version, "git_rev": git_rev}
+
+
+@app.get("/api/projects/{project_id}/version")
+def get_project_version(project_id: str, user: dict = Depends(require_auth)):
+    """Per-project version info derived from push records (e-587).
+
+    Returns:
+      {
+        "latest_pushed_semver":   "v0.4.0"  | "",   # most recent push that
+                                                   # carried an explicit semver
+        "latest_pushed_at":       "2026-05-28T..." | "",
+        "commits_since_release":  N,         # length of pushes after that one
+        "total_pushes":           N,
+        "tag":                    "v0.4.0" | "",   # convenience alias
+      }
+
+    The Web UI displays this as "v0.4.0  +N commits since release". A
+    blank `tag` means the project hasn't started using version-rules yet —
+    show nothing rather than a misleading "v?".
+    """
+    data = db.get_project(project_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Project not found")
+    # Permission check — viewers are fine for read.
+    if _get_role(data, user) is None and not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="No access to this project")
+
+    pushes = data.get("pushes") or []
+    # `pushes` ordering varies — sort by pushed_at to be safe.
+    sortable = []
+    for p in pushes:
+        if not isinstance(p, dict):
+            continue
+        sortable.append((p.get("pushed_at", "") or "", p))
+    sortable.sort(key=lambda x: x[0], reverse=True)
+
+    latest_semver = ""
+    latest_at = ""
+    commits_since = 0
+    for _, p in sortable:
+        meta = p.get("meta") or {}
+        sem = p.get("semver") or meta.get("semver") or ""
+        if sem and not latest_semver:
+            latest_semver = sem
+            latest_at = p.get("pushed_at", "")
+            break
+        commits_since += p.get("commit_count", 0) or 0
+
+    return {
+        "latest_pushed_semver": latest_semver,
+        "latest_pushed_at": latest_at,
+        "commits_since_release": commits_since,
+        "total_pushes": len(pushes),
+        "tag": latest_semver,
+    }
+
+
 @app.get("/api/projects")
 def list_projects(include_archived: bool = False, user: dict = Depends(require_auth)):
     """List projects owned by or shared with the current user."""

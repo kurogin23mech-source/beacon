@@ -596,6 +596,31 @@ def cmd_milestone_update():
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     status = os.environ.get("BEACON_STATUS", "")
     reason = os.environ.get("BEACON_REASON", "")
+
+    # e-630: changing MS status or owner/assignee is a decision worth
+    # recording. Require --reason so the changelog has a "why", not just
+    # a "what". Other fields (title, description, etc.) are content edits
+    # and don't need a reason — those are equivalent to documentation
+    # updates and would just create noise if forced.
+    decision_fields = bool(
+        status
+        or os.environ.get("BEACON_OWNER", "")
+        or os.environ.get("BEACON_ASSIGNEE", "")
+    )
+    if decision_fields and not reason:
+        print(
+            "Error: --reason is required when changing status / owner / "
+            "assignee. These are team-visible decisions and the decision "
+            "trail must record the 'why' (CORE doc data-immutability-principle).",
+            file=sys.stderr,
+        )
+        print(
+            "  Example: beacon milestone update ms-42 --status observing "
+            "--reason 'merge after ms-43 lands'",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     data = load_project()
     try:
         ms = core.milestone_update(
@@ -4034,6 +4059,128 @@ def cmd_deploy_delete():
     sys.exit(1)
 
 
+def cmd_deploy_rollback():
+    """Roll back to the deployment that ran *before* the most recent one (e-581).
+
+    Plan:
+      1. Find the latest non-voided deploy in `data["deployments"]`.
+      2. Find the deploy immediately before it (same `service` if recorded).
+      3. Print the `gcloud run services update-traffic ... --to-revisions ...`
+         command the user should run.
+      4. Optionally execute it (when --execute is passed).
+      5. Mark the rolled-back deploy as voided with reason="rolled back to
+         <prev-id>" so the timeline preserves the decision.
+
+    This is an audit-first design: we never silently execute gcloud. The
+    user must opt in with `--execute`, or read the command and run it
+    themselves. Reason matches CORE doc `data-immutability-principle`:
+    void carries a reason; the reason is what makes the timeline auditable.
+    """
+    reason = os.environ.get("BEACON_REASON", "")
+    execute = os.environ.get("BEACON_EXECUTE", "") == "1"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    service_override = os.environ.get("BEACON_SERVICE", "")
+
+    if not reason:
+        print("Error: --reason is required for deploy rollback.", file=sys.stderr)
+        print("  Example: beacon deploy rollback --reason \"high error rate on prod\"",
+              file=sys.stderr)
+        sys.exit(1)
+
+    data = load_project()
+    deployments = data.get("deployments", []) or []
+    # Sort by date desc; void records may exist but should still be present.
+    active = [d for d in deployments if not d.get("voided")]
+    if not active:
+        print("Error: no active deployments to roll back.", file=sys.stderr)
+        sys.exit(1)
+    active.sort(key=lambda d: d.get("deployed_at") or d.get("date", ""), reverse=True)
+
+    current = active[0]
+    service = service_override or current.get("service", "")
+    previous = None
+    for d in active[1:]:
+        # Match by service when possible; fall back to "most recent earlier" otherwise.
+        if not service or d.get("service") == service:
+            previous = d
+            break
+
+    if not previous:
+        print(
+            "Error: cannot determine rollback target — only one active deploy "
+            "exists for this service. Roll forward instead.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    prev_rev = previous.get("revision", "") or previous.get("meta", {}).get("revision", "")
+    if not prev_rev:
+        print(
+            "Error: previous deploy has no `revision` recorded — cannot construct "
+            "the gcloud update-traffic command. Add it with "
+            f"`beacon deploy update {previous['id']} --revision <rev>`.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    region = current.get("region", "") or os.environ.get("BEACON_REGION", "asia-northeast1")
+    gcloud_cmd = [
+        "gcloud", "run", "services", "update-traffic", service,
+        f"--to-revisions={prev_rev}=100",
+        f"--region={region}",
+    ]
+    cmd_str = " ".join(gcloud_cmd)
+
+    print(f"Rolling back {service}:")
+    print(f"  current  → {current['id']}  rev={current.get('revision', '?')}")
+    print(f"  rollback → {previous['id']}  rev={prev_rev}")
+    print(f"  command  → {cmd_str}")
+    print()
+
+    if execute:
+        print("=> executing gcloud command...")
+        r = subprocess.run(gcloud_cmd)
+        if r.returncode != 0:
+            print("Error: gcloud command failed; deploy record NOT voided.", file=sys.stderr)
+            sys.exit(r.returncode)
+    else:
+        print(
+            "Not executed. Run the command above, then re-invoke with --execute "
+            "to mark the deploy as voided automatically."
+        )
+        if not json_mode:
+            sys.exit(0)
+
+    # Void the rolled-back deploy so the project timeline reflects the
+    # decision. We reuse cmd_deploy_void's core function via apply_operation.
+    try:
+        import operations
+        project_id = _project_id_for_ops()
+
+        full_reason = f"rolled back to {previous['id']} ({prev_rev}): {reason}"
+
+        def op(d):
+            voided = core.deploy_void(d, current["id"], reason=full_reason)
+            return d, voided
+
+        voided = operations.apply_operation(
+            project_id, op, op_name="deploy.rollback", reason=full_reason,
+        )
+    except Exception as e:
+        print(f"Warning: failed to void deploy record: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps({
+            "voided_deploy": current["id"],
+            "rollback_target": previous["id"],
+            "rollback_revision": prev_rev,
+            "executed": execute,
+        }, ensure_ascii=False))
+    else:
+        print(f"✓ Voided {current['id']} with reason: {full_reason}")
+
+
 def cmd_deploy_void():
     """Mark a deployment record as voided (immutable, never physically deleted)."""
     deploy_id = os.environ.get("BEACON_DEPLOY_ID", "")
@@ -5060,6 +5207,7 @@ if __name__ == "__main__":
         "deploy_list": cmd_deploy_list,
         "deploy_delete": cmd_deploy_delete,
         "deploy_void": cmd_deploy_void,
+        "deploy_rollback": cmd_deploy_rollback,
         "push_record": cmd_push_record,
         "push_list": cmd_push_list,
         "project_unarchive": cmd_project_unarchive,
