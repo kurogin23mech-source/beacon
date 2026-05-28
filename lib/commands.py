@@ -3099,6 +3099,208 @@ def cmd_skill_install():
     _install_claude_hooks(hook_script, settings_path)
 
 
+# ---------------------------------------------------------------------------
+# Self-update (`beacon update`)
+# ---------------------------------------------------------------------------
+
+def _detect_install_method() -> dict:
+    """Detect how beacon was installed.
+
+    Returns a dict:
+      {
+        "method": "brew" | "git" | "unknown",
+        "prefix": str | None,           # brew prefix or git repo root
+        "current_version": str,         # beacon --version
+      }
+
+    "brew": realpath of the running bin/beacon lives under `brew --prefix`.
+    "git":  beacon root has a `.git/` directory (developer / manual clone install).
+    "unknown": none of the above.
+    """
+    info = {"method": "unknown", "prefix": None, "current_version": __version__}
+
+    # Resolve the running beacon root (lib/commands.py is at <root>/lib/commands.py)
+    beacon_root = os.path.realpath(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+    # 1) Homebrew detection
+    try:
+        result = subprocess.run(
+            ["brew", "--prefix", "beacon"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            brew_prefix = result.stdout.strip()
+            if brew_prefix:
+                brew_real = os.path.realpath(brew_prefix)
+                # beacon root may be the brew prefix itself, or sit under Cellar/...
+                if beacon_root == brew_real or beacon_root.startswith(brew_real + os.sep):
+                    info["method"] = "brew"
+                    info["prefix"] = brew_prefix
+                    return info
+                # Cellar path: brew_prefix is a symlink to Cellar/beacon/<v>/...
+                # If beacon_root is under any HOMEBREW Cellar, treat as brew.
+                if "/Cellar/beacon/" in beacon_root:
+                    info["method"] = "brew"
+                    info["prefix"] = brew_prefix
+                    return info
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+
+    # 2) Git checkout detection
+    if os.path.isdir(os.path.join(beacon_root, ".git")):
+        info["method"] = "git"
+        info["prefix"] = beacon_root
+        return info
+
+    return info
+
+
+def cmd_update():
+    """Self-update beacon: `brew upgrade beacon` (or git pull) then `beacon skill install`.
+
+    Flags (via environment):
+      BEACON_UPDATE_CHECK=1     Dry-run; report what would happen, no changes.
+      BEACON_UPDATE_SKILL_ONLY=1  Skip brew/git step, only refresh skills.
+      BEACON_UPDATE_YES=1       Skip interactive confirmation.
+
+    Exit codes:
+      0  success (or no-op when already up to date)
+      1  failure (network / brew / git error)
+    """
+    check_only = os.environ.get("BEACON_UPDATE_CHECK", "") == "1"
+    skill_only = os.environ.get("BEACON_UPDATE_SKILL_ONLY", "") == "1"
+    auto_yes = os.environ.get("BEACON_UPDATE_YES", "") == "1"
+
+    info = _detect_install_method()
+    current = info["current_version"]
+    method = info["method"]
+
+    print(f"Current: beacon {current}  (install method: {method})")
+
+    if skill_only:
+        print("→ Skipping CLI upgrade (--skill-only); refreshing Claude Code Skills only.")
+        if check_only:
+            print("[dry-run] would run: beacon skill install")
+            sys.exit(0)
+        cmd_skill_install()
+        return
+
+    if method == "brew":
+        # 1. Probe latest available version (best-effort).
+        latest = None
+        try:
+            r = subprocess.run(
+                ["brew", "info", "--json=v2", "beacon"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode == 0:
+                try:
+                    payload = json.loads(r.stdout)
+                    formulae = payload.get("formulae", [])
+                    if formulae:
+                        latest = formulae[0].get("versions", {}).get("stable")
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    pass
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            pass
+
+        if latest:
+            print(f"Latest:  beacon {latest}")
+            if latest == current:
+                print("✓ Already up to date.")
+                if not check_only:
+                    print("→ Re-installing Skills to ensure they match the running CLI.")
+                    cmd_skill_install()
+                sys.exit(0)
+        else:
+            print("Latest:  (could not determine — proceeding anyway)")
+
+        if check_only:
+            print("[dry-run] would run:")
+            print("  brew update")
+            print("  brew upgrade beacon")
+            print("  beacon skill install")
+            sys.exit(0)
+
+        if not auto_yes:
+            try:
+                ans = input("Proceed with upgrade? [Y/n]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ans = "n"
+            if ans and ans not in ("y", "yes", ""):
+                print("Aborted.")
+                sys.exit(0)
+
+        # 2. brew update (best-effort; do not abort on network blip)
+        print("→ brew update ...")
+        r = subprocess.run(["brew", "update"])
+        if r.returncode != 0:
+            print("  (brew update failed; continuing to upgrade anyway)")
+
+        # 3. brew upgrade beacon
+        print("→ brew upgrade beacon ...")
+        r = subprocess.run(["brew", "upgrade", "beacon"])
+        if r.returncode != 0:
+            # Detect the common "already up to date" case via re-check
+            after = subprocess.run(
+                ["beacon", "--version"], capture_output=True, text=True
+            )
+            if after.returncode == 0 and current in after.stdout:
+                print("  No upgrade available (already at latest).")
+            else:
+                print("  brew upgrade failed.")
+                sys.exit(1)
+
+        # 4. Reinstall skills (the new CLI may have new/changed Skills)
+        print("→ beacon skill install ...")
+        # IMPORTANT: invoke the freshly-installed CLI, not this in-memory module.
+        r = subprocess.run(["beacon", "skill", "install"])
+        if r.returncode != 0:
+            print("  Skill install failed.")
+            sys.exit(1)
+
+        print("✓ Update complete.")
+        return
+
+    if method == "git":
+        prefix = info["prefix"]
+        print(f"Detected developer / git install at: {prefix}")
+        print("→ This install is not managed by Homebrew. Recommended manual steps:")
+        print(f"    git -C {prefix} pull --ff-only")
+        print(f"    beacon skill install")
+        if check_only:
+            print("[dry-run] no changes applied.")
+            sys.exit(0)
+
+        if not auto_yes:
+            try:
+                ans = input("Attempt automatic `git pull --ff-only` + skill install? [Y/n]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ans = "n"
+            if ans and ans not in ("y", "yes", ""):
+                print("Aborted. Run the commands above manually when ready.")
+                sys.exit(0)
+
+        r = subprocess.run(["git", "-C", prefix, "pull", "--ff-only"])
+        if r.returncode != 0:
+            print("  git pull failed (uncommitted changes or non-fast-forward). Resolve manually.")
+            sys.exit(1)
+
+        r = subprocess.run(["beacon", "skill", "install"])
+        if r.returncode != 0:
+            print("  Skill install failed.")
+            sys.exit(1)
+        print("✓ Update complete.")
+        return
+
+    # Unknown install method
+    print("⚠ Could not determine how beacon was installed.")
+    print("  If installed via Homebrew, ensure `brew` is on PATH.")
+    print("  Otherwise, re-run the installer for your setup.")
+    print(f"  You can refresh Skills only with: beacon update --skill-only")
+    sys.exit(1)
+
+
 def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
     """Add beacon PostToolUse hooks to Claude Code settings.json if not already present."""
     if not os.path.exists(hook_script):
@@ -4479,6 +4681,7 @@ if __name__ == "__main__":
         "auth_logout": lambda: __import__("auth").logout(),
         "auth_status": lambda: __import__("auth").status(),
         "skill_install": cmd_skill_install,
+        "update": cmd_update,
         "search": cmd_search,
         "cycle_status": cmd_cycle_status,
         "project_archive": cmd_project_archive,

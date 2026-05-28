@@ -102,6 +102,8 @@ Other:
   beacon auth logout                Remove cached credentials
   beacon auth status                Show login status
   beacon skill install              Install Claude Code Skills
+  beacon update [--check] [--skill-only] [--yes]
+                                    Self-update: brew upgrade + skill install (one shot)
   beacon help                       Show this help
   beacon --version                  Show version
 EOF
@@ -2087,6 +2089,31 @@ case "${1:-}" in
             install) python3 "$COMMANDS_PY" skill_install ;;
             *)       echo "Usage: beacon skill install" ;;
         esac
+        ;;
+    update)
+        shift
+        upd_check="" upd_skill_only="" upd_yes=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --check)      upd_check="1"; shift ;;
+                --skill-only) upd_skill_only="1"; shift ;;
+                -y|--yes)     upd_yes="1"; shift ;;
+                -h|--help)
+                    echo "Usage: beacon update [--check] [--skill-only] [-y|--yes]"
+                    echo ""
+                    echo "Self-update beacon and refresh Claude Code Skills."
+                    echo "  --check       Dry-run: show what would happen, no changes."
+                    echo "  --skill-only  Skip brew/git upgrade; only re-install Skills."
+                    echo "  -y, --yes     Skip interactive confirmation."
+                    exit 0
+                    ;;
+                *) shift ;;
+            esac
+        done
+        BEACON_UPDATE_CHECK="$upd_check" \
+            BEACON_UPDATE_SKILL_ONLY="$upd_skill_only" \
+            BEACON_UPDATE_YES="$upd_yes" \
+            python3 "$COMMANDS_PY" update
         ;;
     deploy)
         ensure_project
