@@ -384,7 +384,7 @@ session-start 時に Web UI を立ち上げ直す（既に開かれていれば�
 if [ -f .beacon/cloud.json ]; then
   PROJECT_ID=$(python3 -c "import json; print(json.load(open('.beacon/cloud.json')).get('project_id',''))")
   if [ -n "$PROJECT_ID" ]; then
-    WEBUI_URL="https://beacon-ai.dev/projects/$PROJECT_ID"
+    WEBUI_URL="https://beacon-ai.dev/?project=$PROJECT_ID"
     (open "$WEBUI_URL" 2>/dev/null \
       || xdg-open "$WEBUI_URL" 2>/dev/null \
       || cmd.exe /c start "$WEBUI_URL" 2>/dev/null \
