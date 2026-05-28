@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import urllib.parse
+from typing import Optional
 
 from store import get_store
 import core
@@ -1543,31 +1544,132 @@ def _get_retro_day():
         return 4
 
 
-def _auto_fire_retro_trigger():
-    import datetime
-    today = datetime.date.today()
-    retro_day = _get_retro_day()
-    if today.weekday() != retro_day:
-        return
-    year, week, _ = today.isocalendar()
-    current_week = f"{year}-W{week:02d}"
+def _last_reviewed_week() -> Optional[str]:
+    """Return the most recent ISO-week string a retro was reviewed for, or None.
+
+    Reads the `.beacon/retro/.reviewed` marker that `beacon retro done` writes.
+    Used by the persistent retro trigger to distinguish "already retro'd this
+    week" from "retro is overdue for one or more past weeks".
+    """
     project_dir = os.path.dirname(get_project_file())
     reviewed_path = os.path.join(project_dir, "retro", ".reviewed")
     try:
         with open(reviewed_path, "r") as f:
-            if f.read().strip() >= current_week:
-                return
+            return f.read().strip() or None
     except (FileNotFoundError, IOError):
-        pass
-    triggers_dir = os.path.join(project_dir, "triggers")
-    trigger_path = os.path.join(triggers_dir, "retro.json")
-    if os.path.exists(trigger_path):
+        return None
+
+
+def _iso_week_string(date) -> str:
+    """`YYYY-WNN` formatted ISO week for a `datetime.date`."""
+    year, week, _ = date.isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def _most_recent_retro_day_on_or_before(today, retro_day_idx: int):
+    """Return the latest date <= today whose weekday() == retro_day_idx.
+
+    If today *is* the retro day, returns today. Used to anchor the
+    "current retro week" — every Friday (or configured day) starts a new
+    retro slot that must be settled before it becomes "stale".
+    """
+    import datetime as _dt
+    delta = (today.weekday() - retro_day_idx) % 7
+    return today - _dt.timedelta(days=delta)
+
+
+def _auto_fire_retro_trigger():
+    """Fire (or refresh) the retro trigger until the user actually retros.
+
+    Per e-575 / SPEC ms-40 §B-1: the retro trigger MUST persist across days
+    until the corresponding week is reviewed. Earlier behavior fired only on
+    the configured retro day and `_cleanup_stale_triggers` deleted it the
+    next morning — meaning a busy user who deferred retro to Monday saw the
+    reminder vanish.
+
+    New behavior:
+      - Compute the most recent retro-day date on or before today
+      - Identify the ISO-week of that retro day as the "current retro slot"
+      - If `.reviewed` says we already retro'd that week or later, do nothing
+      - Otherwise fire/refresh the trigger with a message that:
+          - Names the unreviewed week (or weeks, if multiple slots accumulated)
+          - Persists across days until `beacon retro done` writes a fresh
+            `.reviewed` value
+    """
+    import datetime
+    today = datetime.date.today()
+    retro_day = _get_retro_day()
+
+    # The retro slot for "this period" anchors on the most recent retro_day.
+    # Before the first retro_day has occurred for the current week, we don't
+    # have a slot yet (the week's data isn't ready to review). Skip silently.
+    anchor = _most_recent_retro_day_on_or_before(today, retro_day)
+    if anchor > today:
         return
+    current_slot = _iso_week_string(anchor)
+
+    last_reviewed = _last_reviewed_week()
+    # If we've already reviewed this slot (or a later one), no trigger needed.
+    if last_reviewed and last_reviewed >= current_slot:
+        return
+
+    # Determine whether multiple unreviewed slots have piled up. We count
+    # weeks between (last_reviewed exclusive, current_slot inclusive). For
+    # cosmetic purposes only — the trigger fires once either way.
+    slots_overdue: list[str] = [current_slot]
+    if last_reviewed:
+        # Walk back week-by-week from current_slot until last_reviewed.
+        cursor = anchor
+        while True:
+            cursor = cursor - datetime.timedelta(days=7)
+            slot = _iso_week_string(cursor)
+            if slot <= last_reviewed:
+                break
+            slots_overdue.insert(0, slot)
+            # Safety bound: stop after 12 weeks to avoid runaway messages.
+            if len(slots_overdue) >= 12:
+                break
+
+    project_dir = os.path.dirname(get_project_file())
+    triggers_dir = os.path.join(project_dir, "triggers")
     os.makedirs(triggers_dir, exist_ok=True)
+    trigger_path = os.path.join(triggers_dir, "retro.json")
+
+    # Build the message — singular for one slot, multi for catchup.
+    if len(slots_overdue) == 1:
+        message = (
+            f"今週の振り返りがまだです（{current_slot}）。"
+            "/beacon-retro で開始しますか？"
+        )
+    else:
+        weeks_str = ", ".join(slots_overdue)
+        message = (
+            f"振り返り未完の週が {len(slots_overdue)} 件あります（{weeks_str}）。"
+            "/beacon-retro で順に消化できます。"
+        )
+
+    # Persist: rewrite the trigger every check so the message reflects the
+    # current accumulation. created_at stays as the original first-fire date
+    # if the trigger already exists, so users see "this has been pending
+    # since YYYY-MM-DD".
+    created_at = today.isoformat()
+    if os.path.exists(trigger_path):
+        try:
+            with open(trigger_path, "r") as f:
+                existing = json.load(f)
+            if isinstance(existing.get("created_at"), str):
+                created_at = existing["created_at"]
+        except (json.JSONDecodeError, IOError):
+            pass
+
     trigger_data = {
         "name": "retro",
-        "message": f"今週の振り返りがまだです（{current_week}）。/beacon-retro で開始しますか？",
-        "created_at": today.isoformat(),
+        "kind": "retro-due",
+        "current_slot": current_slot,
+        "overdue_slots": slots_overdue,
+        "message": message,
+        "created_at": created_at,
+        "refreshed_at": today.isoformat(),
     }
     with open(trigger_path, "w") as f:
         json.dump(trigger_data, f, ensure_ascii=False)
@@ -1676,17 +1778,11 @@ def _cleanup_stale_triggers():
         return
     # Clean up stale spec-needed triggers (MS gone or SPEC now exists)
     _cleanup_spec_needed_triggers()
-    # Clean up stale retro trigger
-    retro_path = os.path.join(triggers_dir, "retro.json")
-    if os.path.exists(retro_path):
-        try:
-            with open(retro_path, "r") as f:
-                trigger = json.load(f)
-            created = datetime.date.fromisoformat(trigger["created_at"][:10])
-            if today > created:
-                os.remove(retro_path)
-        except (json.JSONDecodeError, KeyError, ValueError, IOError):
-            pass
+    # NOTE (e-575): Do NOT auto-delete retro.json by age. The retro trigger now
+    # persists across days until `beacon retro done` (cmd_retro_done) explicitly
+    # removes it. _auto_fire_retro_trigger refreshes the message daily so the
+    # "overdue weeks" list stays accurate; deletion solely on age would defeat
+    # the persistence requirement of UC5-J5'.
     # Clean up stale operation_check triggers
     for fname in os.listdir(triggers_dir):
         if not fname.startswith("operation_check_") or not fname.endswith(".json"):
