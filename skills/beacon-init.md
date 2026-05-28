@@ -85,7 +85,7 @@ cwd が `$HOME` / `/` / `/tmp` / `$HOME/Desktop` / `$HOME/Documents` 等の **�
 - **name**: 推定済み（subdir 名 or basename）
 - **objective**: ユーザーの最初の発言をそのまま、または整形
 - **retro-day**: friday（デフォルト）
-- **storage**: cloud（認証済み）/ local
+- **storage**: **local（デフォルト）**。cloud は明示的に「cloud で」「クラウドで」「チームで使う」等の opt-in 発言があった時のみ
 
 質問は **0回**。ただし、ユーザーが明らかに違うものを期待してそうなら一言確認:
 > 「ところで名前は kakeibo-app で大丈夫？」
@@ -100,7 +100,7 @@ $PROJECT_DIR = "$(pwd)"
 - **name**: ディレクトリ basename
 - **objective**: README 先頭 / package.json description / pyproject description のいずれか1文
 - **retro-day**: friday（デフォルト）
-- **storage**: cloud（デフォルト、認証済みなら）/ local
+- **storage**: **local（デフォルト）**。cloud は明示的 opt-in （「cloud で」「team で使う」等）の時のみ
 
 Step 3 でまとめて1画面確認（個別質問しない）。
 
@@ -113,7 +113,7 @@ Step 3 でまとめて1画面確認（個別質問しない）。
 - name: Step 2 で推定済み
 - objective: ユーザーの最初の発言（必要に応じてAIが整形）
 - retro_day: friday
-- storage: cloud（認証済みなら）/ local（未認証）
+- storage: **local（デフォルト）**。発言に「cloud」「クラウド」「team」「チーム」「複数人」「同期」等が含まれていたら cloud に変更
 
 → Step 4 へ（確認も最小限）
 
@@ -153,10 +153,32 @@ Bash ツール呼び出し例:
 Bash(command="beacon init --name ... --objective ... --retro-day ... --storage ...", cwd=$PROJECT_DIR)
 ```
 
-### Step 5b: Web UI を自動オープン（cloud mode の場合）
+### Step 5b: 監査 UI の起動 (mode 別)
 
-Beacon の作業形態は「ターミナル + Web UI 並列表示」が前提。  
-init 直後に Web UI を立ち上げて、以降は別ウィンドウで開いたままにする。
+Beacon の作業形態は「ターミナル + 監査 UI 並列表示」が前提。init 直後に UI を立ち上げて、以降は別ウィンドウで開いたままにする。
+
+#### local mode（デフォルト、cloud.json 無し）
+
+Tauri Desktop App の自動起動を試みる（インストール済みなら）。未インストールなら案内のみ:
+
+```bash
+# Bash 呼び出し (cwd=$PROJECT_DIR)
+# Tauri Desktop App の起動 (OS 別)
+TAURI_OPENED=""
+if [ -d "/Applications/Beacon.app" ]; then
+  open -a Beacon 2>/dev/null && TAURI_OPENED="1"
+elif command -v beacon-desktop >/dev/null 2>&1; then
+  beacon-desktop &>/dev/null & TAURI_OPENED="1"
+elif [ -x "$HOME/AppData/Local/Programs/Beacon/Beacon.exe" ]; then
+  "$HOME/AppData/Local/Programs/Beacon/Beacon.exe" &>/dev/null & TAURI_OPENED="1"
+fi
+
+if [ -z "$TAURI_OPENED" ]; then
+  echo "TAURI_NOT_INSTALLED"
+fi
+```
+
+#### cloud mode（明示的 opt-in、cloud.json あり）
 
 ```bash
 # Bash 呼び出し (cwd=$PROJECT_DIR)
@@ -174,18 +196,31 @@ if [ -f .beacon/cloud.json ]; then
 fi
 ```
 
-local mode（cloud.json 無し）の場合は Web UI なし。  
-代わりに案内（Tauri Desktop App or tmux ダッシュボード）。
-
 成功したら、モード別のメッセージを出す:
 
-**モード B**:
+**モード B / local mode (デフォルト)**:
 ```
-「[name]」のスペースを準備しました（場所: $PROJECT_DIR）。
+「[name]」のスペースを準備しました（場所: $PROJECT_DIR、local mode）。
+
+[Tauri 起動成功時]
+🖥  Beacon Desktop App を開きました。ターミナルの隣に並べておくと、これからの状態変化が常に見られます。
+
+[Tauri 未インストール時]
+ℹ️  確認方法:
+  - `beacon` で tmux ダッシュボード (要 tmux)
+  - Beacon Desktop App をインストール (現在配布パイプライン整備中、ms-44 参照)
+  - cloud sync が欲しくなったら `beacon cloud setup` で opt-in
+
+続けてもう少しだけ話を聞かせてください、目指す形を整理してから始めましょう。
+→ /beacon-vision に続きます
+```
+
+**モード B / cloud mode (明示的 opt-in)**:
+```
+「[name]」のスペース (cloud sync 有効) を準備しました（場所: $PROJECT_DIR）。
 
 📊 Web UI を別ウィンドウで開きました: $WEBUI_URL
    ターミナルの隣に並べておくと、これからの状態変化が常に見られます。
-   （local mode の場合: beacon Tauri Desktop または `beacon` で tmux ダッシュボードが使えます）
 
 続けてもう少しだけ話を聞かせてください、目指す形を整理してから始めましょう。
 → /beacon-vision に続きます
