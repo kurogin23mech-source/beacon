@@ -98,6 +98,22 @@ def test_create_project():
     assert r.status_code == 200
     assert r.json()["status"] == "created"
     assert "new-project" in _store
+    # New projects default to schema_version=2 (β subcollection) so concurrent
+    # writes to different milestones can proceed in parallel. See e-632.
+    assert _store["new-project"].get("schema_version") == 2
+
+
+def test_existing_project_remains_legacy_v1():
+    # The SEED_PROJECT fixture does NOT set schema_version, which mirrors
+    # how pre-existing Firestore projects look on disk. apply_operation
+    # must still route them through the legacy path without errors.
+    assert "schema_version" not in _store[PROJECT_ID]
+    # A simple mutation should succeed and not implicitly upgrade the schema.
+    r = client.patch(f"/api/projects/{PROJECT_ID}/summary",
+                     json={"text": "still v1"})
+    assert r.status_code == 200
+    assert _store[PROJECT_ID].get("summary") == "still v1"
+    assert "schema_version" not in _store[PROJECT_ID]
 
 
 def test_create_project_duplicate():

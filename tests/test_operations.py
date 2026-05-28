@@ -249,3 +249,81 @@ def test_load_project_consistent_local(local_project):
     loaded = operations.load_project_consistent("p-test")
     assert loaded["summary"] == "hello"
     assert loaded["name"] == "test"
+
+
+# ---------------------------------------------------------------------------
+# Schema-aware dispatch (cloud path, with Firestore SDK stubbed out)
+# ---------------------------------------------------------------------------
+
+def test_apply_operation_routes_v2_when_schema_version_2(monkeypatch):
+    """A project with schema_version=2 must take the v2 (subcollection) path.
+
+    We can't run real Firestore here, so we stub both _apply_cloud_v1 and
+    _apply_cloud_v2 and just assert which one is called.
+    """
+    monkeypatch.setenv("BEACON_OPERATIONS_BACKEND", "cloud")
+
+    called: list[str] = []
+
+    def fake_v1(project_id, op):
+        called.append("v1")
+        # Run the op so semantics still execute (e.g. validation).
+        data = {"name": "n", "milestones": [], "schema_version": 1}
+        _, result = op(data)
+        return result
+
+    def fake_v2(project_id, op):
+        called.append("v2")
+        data = {"name": "n", "milestones": [], "schema_version": 2}
+        _, result = op(data)
+        return result
+
+    monkeypatch.setattr(operations, "_apply_cloud_v1", fake_v1)
+    monkeypatch.setattr(operations, "_apply_cloud_v2", fake_v2)
+
+    # Mock db.get_project so the pre-dispatch read returns a v2 project.
+    fake_db = type("FakeDb", (), {})()
+    fake_db.get_project = lambda pid: {
+        "name": "n", "milestones": [], "schema_version": 2,
+    }
+    monkeypatch.setitem(sys.modules, "firestore_client", fake_db)
+
+    def op(data):
+        return data, "ok"
+
+    result = operations.apply_operation("p-test", op, actor="tester")
+    assert result == "ok"
+    assert called == ["v2"]
+
+
+def test_apply_operation_routes_v1_when_schema_absent(monkeypatch):
+    """Existing projects without schema_version must use the v1 (legacy) path."""
+    monkeypatch.setenv("BEACON_OPERATIONS_BACKEND", "cloud")
+
+    called: list[str] = []
+    monkeypatch.setattr(operations, "_apply_cloud_v1",
+                        lambda pid, op: (called.append("v1") or op({"name": "n", "milestones": []})[1]))
+    monkeypatch.setattr(operations, "_apply_cloud_v2",
+                        lambda pid, op: (called.append("v2") or op({"name": "n", "milestones": []})[1]))
+
+    fake_db = type("FakeDb", (), {})()
+    fake_db.get_project = lambda pid: {"name": "n", "milestones": []}  # no schema_version
+    monkeypatch.setitem(sys.modules, "firestore_client", fake_db)
+
+    def op(data):
+        return data, "ok"
+
+    result = operations.apply_operation("p-test", op, actor="tester")
+    assert result == "ok"
+    assert called == ["v1"]
+
+
+def test_apply_operation_raises_lookup_when_cloud_project_missing(monkeypatch):
+    monkeypatch.setenv("BEACON_OPERATIONS_BACKEND", "cloud")
+
+    fake_db = type("FakeDb", (), {})()
+    fake_db.get_project = lambda pid: None
+    monkeypatch.setitem(sys.modules, "firestore_client", fake_db)
+
+    with pytest.raises(LookupError):
+        operations.apply_operation("p-missing", lambda d: (d, None), actor="tester")

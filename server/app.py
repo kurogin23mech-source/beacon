@@ -405,7 +405,17 @@ def unarchive_project(project_id: str, user: dict = Depends(require_auth)):
 @app.post("/api/projects/{project_id}")
 def create_project(project_id: str, body: ProjectCreate,
                    user: dict = Depends(require_auth)):
-    """Create a new project (like beacon init)."""
+    """Create a new project (like beacon init).
+
+    New projects are created with schema_version=2 (β subcollection layout)
+    by default — see SPEC doc gP9pCssCoa3QduuSMGR0 §"新規プロジェクトは
+    β スキーマで作る (並列性確保)". This lets concurrent writes to different
+    milestones proceed without contending on a single document.
+
+    Existing projects (created before this change) remain on schema_version=1
+    (legacy whole-document) and are not auto-migrated; apply_operation
+    transparently routes them through the legacy transaction path.
+    """
     existing = db.get_project(project_id)
     if existing is not None:
         raise HTTPException(status_code=409, detail=f"Project '{project_id}' already exists")
@@ -415,6 +425,8 @@ def create_project(project_id: str, body: ProjectCreate,
         "milestones": [],
         "owner": user.get("sub", ""),
         "members": [],
+        # SCHEMA_V2_BETA — see lib/operations.py
+        "schema_version": operations.SCHEMA_V2_BETA,
     }
     _save(project_id, data)
     return {"status": "created", "project_id": project_id}
