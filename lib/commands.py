@@ -2643,6 +2643,101 @@ def cmd_pr_add():
             print(f"  Intent: {intent}")
 
 
+def cmd_pr_show():
+    """Show a PR record's full detail (intent / commits / review history).
+
+    Used by /review to pull intent before judging code changes (e-608).
+    Resolution rules for the input identifier:
+      - `e-NNN`         → entry id direct match
+      - `<int>`         → PR number; looks up the matching entry
+      - `https://…/pull/<n>` → URL match
+    """
+    ident = (os.environ.get("BEACON_PR_IDENT", "") or "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not ident:
+        print("Error: PR identifier required (e-id, PR number, or URL)", file=sys.stderr)
+        sys.exit(1)
+
+    data = load_project()
+
+    # Find candidate PR entries across all milestones
+    found = None
+    found_ms_id = ""
+    for ms in data.get("milestones", []):
+        if not isinstance(ms, dict):
+            continue
+        for ent in ms.get("entries", []) or []:
+            if not isinstance(ent, dict) or ent.get("type") != "pr":
+                continue
+            meta = ent.get("meta") or {}
+            # Match by entry id
+            if ent.get("id") == ident:
+                found, found_ms_id = ent, ms.get("id", "")
+                break
+            # Match by PR number (int or numeric string)
+            try:
+                if ident.isdigit() and int(ident) == meta.get("pr_number"):
+                    found, found_ms_id = ent, ms.get("id", "")
+                    break
+            except (ValueError, AttributeError):
+                pass
+            # Match by URL
+            if meta.get("url") and (meta["url"] == ident or meta["url"].rstrip("/") == ident.rstrip("/")):
+                found, found_ms_id = ent, ms.get("id", "")
+                break
+        if found:
+            break
+
+    if not found:
+        print(f"Error: no PR entry matches '{ident}'", file=sys.stderr)
+        sys.exit(1)
+
+    meta = found.get("meta") or {}
+    payload = {
+        "entry_id": found.get("id"),
+        "ms_id": found_ms_id,
+        "description": found.get("description"),
+        "status": found.get("status"),
+        "url": meta.get("url"),
+        "pr_number": meta.get("pr_number"),
+        "author": meta.get("author"),
+        "intent": meta.get("intent") or "",
+        "pr_status": meta.get("pr_status"),
+        "review_status": meta.get("review_status"),
+        "review_rationale": meta.get("review_rationale"),
+        "commits": [
+            {
+                "id": c.get("id"),
+                "hash": (c.get("meta") or {}).get("hash"),
+                "message": c.get("description"),
+            }
+            for c in (found.get("entries") or [])
+            if isinstance(c, dict) and c.get("type") == "commit"
+        ],
+    }
+
+    if json_mode:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+
+    print(f"PR {payload['entry_id']} (ms: {found_ms_id})")
+    if payload["url"]:
+        print(f"  URL:    {payload['url']}")
+    print(f"  Title:  {payload['description']}")
+    print(f"  Status: {payload['status']} / review: {payload['review_status']}")
+    if payload["intent"]:
+        print(f"  Intent: {payload['intent']}")
+    else:
+        print(f"  Intent: (none recorded — /review cannot do intent-vs-impl check)")
+    if payload["review_rationale"]:
+        print(f"  Rationale: {payload['review_rationale']}")
+    if payload["commits"]:
+        print(f"  Commits ({len(payload['commits'])}):")
+        for c in payload["commits"]:
+            print(f"    {c['hash']}  {c['message']}")
+
+
 def cmd_pr_close():
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
@@ -4786,6 +4881,7 @@ if __name__ == "__main__":
         "pr_approve": cmd_pr_approve,
         "pr_reject": cmd_pr_reject,
         "pr_create": cmd_pr_create,
+        "pr_show": cmd_pr_show,
         "pr_request_review": cmd_pr_request_review,
         "pr_request_changes": cmd_pr_request_changes,
         "pr_merge": cmd_pr_merge,

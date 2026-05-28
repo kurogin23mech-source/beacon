@@ -42,6 +42,7 @@ Tasks & Progress:
 Pull Requests:
   beacon pr create [-m <ms-id>] [gh flags...]  Create PR and record it
   beacon pr add <url> [-m <ms-id>]             Register an existing PR
+  beacon pr show <id|number|url> [--json]      Show PR detail (intent / commits)
   beacon pr approve <entry-id>                 Approve a PR
   beacon pr request-changes <entry-id>         Request changes on a PR
   beacon pr reject <entry-id>                  Reject a PR
@@ -1359,6 +1360,23 @@ cmd_doc() {
 cmd_pr() {
     ensure_project
     case "${1:-}" in
+        show)
+            shift
+            local ident=""
+            local json_flag=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --json) json_flag="1"; shift ;;
+                    *)      ident="$1"; shift ;;
+                esac
+            done
+            if [ -z "$ident" ]; then
+                echo "Usage: beacon pr show <entry-id|pr-number|url> [--json]"
+                exit 1
+            fi
+            BEACON_PR_IDENT="$ident" BEACON_JSON="$json_flag" \
+                python3 "$COMMANDS_PY" pr_show
+            ;;
         add)
             shift
             local url=""
@@ -1535,10 +1553,11 @@ cmd_pr() {
             BEACON_ENTRY_ID="$entry_id" BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" pr_merge
             ;;
         *)
-            echo "Usage: beacon pr [create|add|review|approve|request-changes|reject|merge|close]"
+            echo "Usage: beacon pr [create|add|show|review|approve|request-changes|reject|merge|close]"
             echo "  create          [-m <ms-id>] [--intent \"text\"] [gh pr create flags...]"
             echo "                  Run gh pr create and auto-record the PR in beacon"
             echo "  add             <github-url> [-m <ms-id>] [--intent \"text\"]  Register a PR"
+            echo "  show            <entry-id|pr-number|url> [--json]  Show PR detail (intent, commits, review history)"
             echo "  review          → use /review Claude Code Skill instead"
             echo "  approve         <entry-id> [--rationale \"text\"]  Approve (rationale required)"
             echo "  request-changes <entry-id> [--rationale \"text\"]  Request changes"
