@@ -27,6 +27,14 @@ Milestones:
   beacon milestone delete <id>  Delete (soft) a milestone
   beacon milestone depends <id> Set milestone dependencies
   beacon milestone graph        Show dependency graph
+  beacon milestone add ... [--owner U] [--assignee U]   Set owner/assignee at creation
+  beacon milestone update <id> [--owner U] [--assignee U]   Change owner/assignee
+
+Members (2-5 person teams):
+  beacon member add <id> [--name N] [--email E] [--role R]   Add a project member
+  beacon member list [--json]                                 List members
+  beacon member remove <id> --reason <text>                   Remove (audit required)
+  beacon member role <id> <role>                              Change role
 
 Tasks & Progress:
   beacon task add "desc" [-m <ms-id>]   Add a task to a milestone
@@ -42,6 +50,7 @@ Tasks & Progress:
 Pull Requests:
   beacon pr create [-m <ms-id>] [gh flags...]  Create PR and record it
   beacon pr add <url> [-m <ms-id>]             Register an existing PR
+  beacon pr show <id|number|url> [--json]      Show PR detail (intent / commits)
   beacon pr approve <entry-id>                 Approve a PR
   beacon pr request-changes <entry-id>         Request changes on a PR
   beacon pr reject <entry-id>                  Reject a PR
@@ -102,6 +111,8 @@ Other:
   beacon auth logout                Remove cached credentials
   beacon auth status                Show login status
   beacon skill install              Install Claude Code Skills
+  beacon update [--check] [--skill-only] [--yes]
+                                    Self-update: brew upgrade + skill install (one shot)
   beacon help                       Show this help
   beacon --version                  Show version
 EOF
@@ -341,6 +352,8 @@ cmd_milestone_add() {
     local priority=""
     local objective=""
     local acceptance_criteria=""
+    local owner=""
+    local assignee=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -349,6 +362,8 @@ cmd_milestone_add() {
             --priority)                 priority="${2:-}";             shift 2 ;;
             --objective)                objective="${2:-}";            shift 2 ;;
             --acceptance-criteria|--ac) acceptance_criteria="${2:-}";  shift 2 ;;
+            --owner)                    owner="${2:-}";                shift 2 ;;
+            --assignee)                 assignee="${2:-}";             shift 2 ;;
             *)                          title="$1";                    shift   ;;
         esac
     done
@@ -367,6 +382,7 @@ cmd_milestone_add() {
     BEACON_TITLE="$title" BEACON_TARGET_DATE="$target_date" \
         BEACON_DESCRIPTION="$description" BEACON_PRIORITY="$priority" \
         BEACON_OBJECTIVE="$objective" BEACON_ACCEPTANCE_CRITERIA="$acceptance_criteria" \
+        BEACON_OWNER="$owner" BEACON_ASSIGNEE="$assignee" \
         python3 "$COMMANDS_PY" milestone_add
 }
 
@@ -455,6 +471,9 @@ cmd_milestone_update() {
     local priority=""
     local objective=""
     local acceptance_criteria=""
+    local owner=""
+    local assignee=""
+    local reason=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -467,12 +486,16 @@ cmd_milestone_update() {
             --priority)     priority="${2:-}"; shift 2 ;;
             --objective)    objective="${2:-}"; shift 2 ;;
             --acceptance-criteria|--ac) acceptance_criteria="${2:-}"; shift 2 ;;
+            --owner)        owner="${2:-}"; shift 2 ;;
+            --assignee)     assignee="${2:-}"; shift 2 ;;
+            -r|--reason)    reason="${2:-}"; shift 2 ;;
             *)              ms_id="$1"; shift ;;
         esac
     done
 
     if [ -z "$ms_id" ]; then
-        echo "Usage: beacon milestone update <ms-id> [--title T] [--progress N] [--target-date D] [--status S] [--description D] [--priority P] [--objective O] [--ac A] [--json]"
+        echo "Usage: beacon milestone update <ms-id> [--title T] [--progress N] [--target-date D] [--status S] [--description D] [--priority P] [--objective O] [--ac A] [--owner OWNER] [--assignee ASSIGNEE] [-r REASON] [--json]"
+        echo "  Tip: pass --owner '-' or --assignee '-' to clear the field."
         exit 1
     fi
     BEACON_MS_ID="$ms_id" BEACON_JSON="$json_flag" BEACON_TITLE="$title" \
@@ -480,6 +503,8 @@ cmd_milestone_update() {
         BEACON_STATUS="$status" BEACON_DESCRIPTION="$description" \
         BEACON_PRIORITY="$priority" BEACON_OBJECTIVE="$objective" \
         BEACON_ACCEPTANCE_CRITERIA="$acceptance_criteria" \
+        BEACON_OWNER="$owner" BEACON_ASSIGNEE="$assignee" \
+        BEACON_REASON="$reason" \
         python3 "$COMMANDS_PY" milestone_update
 }
 
@@ -1357,6 +1382,23 @@ cmd_doc() {
 cmd_pr() {
     ensure_project
     case "${1:-}" in
+        show)
+            shift
+            local ident=""
+            local json_flag=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --json) json_flag="1"; shift ;;
+                    *)      ident="$1"; shift ;;
+                esac
+            done
+            if [ -z "$ident" ]; then
+                echo "Usage: beacon pr show <entry-id|pr-number|url> [--json]"
+                exit 1
+            fi
+            BEACON_PR_IDENT="$ident" BEACON_JSON="$json_flag" \
+                python3 "$COMMANDS_PY" pr_show
+            ;;
         add)
             shift
             local url=""
@@ -1533,10 +1575,11 @@ cmd_pr() {
             BEACON_ENTRY_ID="$entry_id" BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" pr_merge
             ;;
         *)
-            echo "Usage: beacon pr [create|add|review|approve|request-changes|reject|merge|close]"
+            echo "Usage: beacon pr [create|add|show|review|approve|request-changes|reject|merge|close]"
             echo "  create          [-m <ms-id>] [--intent \"text\"] [gh pr create flags...]"
             echo "                  Run gh pr create and auto-record the PR in beacon"
             echo "  add             <github-url> [-m <ms-id>] [--intent \"text\"]  Register a PR"
+            echo "  show            <entry-id|pr-number|url> [--json]  Show PR detail (intent, commits, review history)"
             echo "  review          → use /review Claude Code Skill instead"
             echo "  approve         <entry-id> [--rationale \"text\"]  Approve (rationale required)"
             echo "  request-changes <entry-id> [--rationale \"text\"]  Request changes"
@@ -2088,6 +2131,103 @@ case "${1:-}" in
             *)       echo "Usage: beacon skill install" ;;
         esac
         ;;
+    member)
+        ensure_project
+        case "${2:-}" in
+            add)
+                shift 2
+                mid="" mname="" memail="" mrole="contributor" mjson=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --name)  mname="${2:-}"; shift 2 ;;
+                        --email) memail="${2:-}"; shift 2 ;;
+                        --role)  mrole="${2:-}"; shift 2 ;;
+                        --json)  mjson="1"; shift ;;
+                        *)       [[ -z "$mid" ]] && mid="$1"; shift ;;
+                    esac
+                done
+                if [ -z "$mid" ]; then
+                    echo "Usage: beacon member add <id> [--name N] [--email E] [--role owner|maintainer|contributor|viewer] [--json]"
+                    exit 1
+                fi
+                BEACON_MEMBER_ID="$mid" BEACON_MEMBER_NAME="$mname" \
+                    BEACON_MEMBER_EMAIL="$memail" BEACON_MEMBER_ROLE="$mrole" \
+                    BEACON_JSON="$mjson" \
+                    python3 "$COMMANDS_PY" member_add
+                ;;
+            list|ls)
+                shift 2
+                mjson=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) mjson="1"; shift ;;
+                        *) shift ;;
+                    esac
+                done
+                BEACON_JSON="$mjson" python3 "$COMMANDS_PY" member_list
+                ;;
+            remove|rm)
+                shift 2
+                mid="" reason="" mjson=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        -r|--reason) reason="${2:-}"; shift 2 ;;
+                        --json)      mjson="1"; shift ;;
+                        *)           [[ -z "$mid" ]] && mid="$1"; shift ;;
+                    esac
+                done
+                if [ -z "$mid" ]; then
+                    echo "Usage: beacon member remove <id> --reason <text> [--json]"
+                    exit 1
+                fi
+                BEACON_MEMBER_ID="$mid" BEACON_REASON="$reason" BEACON_JSON="$mjson" \
+                    python3 "$COMMANDS_PY" member_remove
+                ;;
+            role)
+                shift 2
+                mid="${1:-}"
+                mrole="${2:-}"
+                if [ -z "$mid" ] || [ -z "$mrole" ]; then
+                    echo "Usage: beacon member role <id> <owner|maintainer|contributor|viewer>"
+                    exit 1
+                fi
+                BEACON_MEMBER_ID="$mid" BEACON_MEMBER_ROLE="$mrole" \
+                    python3 "$COMMANDS_PY" member_role
+                ;;
+            *)
+                echo "Usage: beacon member [add|list|remove|role]"
+                echo "  add <id> [--name N] [--email E] [--role R]   Add a member to the project"
+                echo "  list [--json]                                  List members"
+                echo "  remove <id> --reason <text>                    Remove a member (audit reason required)"
+                echo "  role <id> <role>                               Change role (owner|maintainer|contributor|viewer)"
+                ;;
+        esac
+        ;;
+    update)
+        shift
+        upd_check="" upd_skill_only="" upd_yes=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --check)      upd_check="1"; shift ;;
+                --skill-only) upd_skill_only="1"; shift ;;
+                -y|--yes)     upd_yes="1"; shift ;;
+                -h|--help)
+                    echo "Usage: beacon update [--check] [--skill-only] [-y|--yes]"
+                    echo ""
+                    echo "Self-update beacon and refresh Claude Code Skills."
+                    echo "  --check       Dry-run: show what would happen, no changes."
+                    echo "  --skill-only  Skip brew/git upgrade; only re-install Skills."
+                    echo "  -y, --yes     Skip interactive confirmation."
+                    exit 0
+                    ;;
+                *) shift ;;
+            esac
+        done
+        BEACON_UPDATE_CHECK="$upd_check" \
+            BEACON_UPDATE_SKILL_ONLY="$upd_skill_only" \
+            BEACON_UPDATE_YES="$upd_yes" \
+            python3 "$COMMANDS_PY" update
+        ;;
     deploy)
         ensure_project
         case "${2:-}" in
@@ -2141,10 +2281,27 @@ case "${1:-}" in
                 BEACON_DEPLOY_ID="$_void_deploy_id" BEACON_REASON="$_void_reason" \
                     python3 "$COMMANDS_PY" deploy_void
                 ;;
+            rollback)
+                shift 2
+                rb_reason="" rb_execute="" rb_service="" rb_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        -r|--reason)  rb_reason="${2:-}"; shift 2 ;;
+                        --execute)    rb_execute="1"; shift ;;
+                        --service)    rb_service="${2:-}"; shift 2 ;;
+                        --json)       rb_json="1"; shift ;;
+                        *) shift ;;
+                    esac
+                done
+                BEACON_REASON="$rb_reason" BEACON_EXECUTE="$rb_execute" \
+                    BEACON_SERVICE="$rb_service" BEACON_JSON="$rb_json" \
+                    python3 "$COMMANDS_PY" deploy_rollback
+                ;;
             *)
                 echo "Usage: beacon deploy record [--env <env>] [--revision <rev>] [--semver <v1.0.0>] [--desc <text>]"
                 echo "       beacon deploy list [--env <env>] [--json]"
                 echo "       beacon deploy void <id> --reason <text>"
+                echo "       beacon deploy rollback --reason <text> [--service <name>] [--execute]"
                 ;;
         esac
         ;;

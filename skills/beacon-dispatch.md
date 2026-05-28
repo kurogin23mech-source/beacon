@@ -77,19 +77,48 @@ Step 1 の `nodes` データを使い、実行可能MSのすべてのペア (A, 
 - B の `depends_on` に A が含まれるか
 - どちらも含まれない場合 → **「未定義」**
 
-### 未定義ペアへの判断
+### 未定義ペアへの判断（静的シグナル）
 
 未定義ペアが存在する場合、各ペアについて以下を推論する:
 
 - 両MSのタイトル・タスク説明を読み、**同じファイルに触れる可能性があるか**を判断する
 - 論理的な実行順序が必要か（例: 片方が削除するものをもう片方が参照するなど）を評価する
-- リスクを **「低（並列可）」「中（注意）」「高（順序付け推奨）」** の3段階で評価する
+
+### 動的シグナル: 直近 commit のファイル衝突予測（e-602）
+
+加えて、**直近の作業履歴から「実際にどのファイルを触っているか」**を取得し、衝突可能性を機械的に評価する:
+
+各実行可能MS (X) について、Bash ツールで:
+
+```bash
+# X が紐づくブランチがあればその差分、なければ過去14日の MS タグ付き commit
+beacon task list --json --ms <ms-id> | jq -r '.entries[] | select(.type=="commit") | .meta.hash' | head -20 \
+  | while read h; do git show --name-only --pretty=format: "$h" 2>/dev/null; done | sort -u
+```
+
+これで各MSが直近触ったファイルセット `F(X)` を得る。
+
+ペア (A, B) の **衝突可能性** は:
+
+| `F(A) ∩ F(B)` | 解釈 |
+|---|---|
+| 空 | **静的シグナルだけ見る** — 既存の Title/Task ベース判断を使う |
+| 1 ファイル & テストのみ | **中** — テスト追加と本体追加で互いに干渉する可能性。SPEC を読んで判断 |
+| 1〜2 ファイル & コア | **高** — 同じ関数 / クラス / モジュールを両側が触る。**順序付け推奨** |
+| 3+ ファイル | **高** — 大域変更系。直列実行を強く推奨 |
+
+### リスク評価
+
+静的シグナル + 動的シグナルを統合して、ペアごとに:
+**「低（並列可）」「中（注意）」「高（順序付け推奨）」** の3段階で評価する。
+
+リスクが「高」の場合、Step 4 で「並列実行を推奨しません。順序付けして直列実行しますか？」をユーザーに確認する。
 
 ### 出力
 
 未定義ペアがない場合はこのStepをスキップ。
 
-未定義ペアがある場合、Step 4 の Dispatch Plan に含める（後述）。
+未定義ペアがある場合、Step 4 の Dispatch Plan に含める（後述）。各ペアの「触ったファイルセット F(X)」と「F(A) ∩ F(B)」も併せて表示し、判断の透明性を確保する。
 
 ## Step 3: 各MSの詳細情報取得
 
@@ -270,7 +299,13 @@ cd "[abs_workspace_path]" && /beacon-session-start [ms-id]
    - 主要コミットハッシュ
    - 学んだこと・判断軌跡で SPEC や CORE doc に昇格すべきもの（提案レベルで OK、親に伝える）
    - 注意点・既知の問題
-8. 作業完了後: オーケストレーターが `beacon milestone workspace-cleanup [ms-id]` でworktreeをクリーンアップする
+8. **失敗・中断時の必須報告 (e-601)**: 例外で停止する場合、または途中で作業を諦める場合、必ず以下を返答に含める:
+   - `STATUS: failed` または `STATUS: partial` の明示ヘッダ
+   - 何処まで進んだか（最後の正常コミットハッシュ）
+   - 失敗理由を 1 行サマリ + 詳細
+   - worktree を残すべきか破棄してよいか（次セッションで継続可能性）
+   - 親側で `beacon trigger fire dispatch-failure-<ms-id>` を打ってほしい場合は明示
+9. 作業完了後: オーケストレーターが `beacon milestone workspace-cleanup [ms-id]` でworktreeをクリーンアップする
 ```
 
 ## Step 6: 結果報告
@@ -282,23 +317,43 @@ cd "[abs_workspace_path]" && /beacon-session-start [ms-id]
 beacon milestone graph --json
 ```
 
-### 6b. 報告フォーマット
+### 6b. サブエージェントの最終状態を分類（e-601）
+
+各サブエージェントの返答を以下に分類する。**握りつぶさず**、未完了・失敗も明示的に取り上げる:
+
+| 分類 | 判定基準 | 報告での扱い |
+|---|---|---|
+| ✓ 完了 (success) | 全担当タスクが done、エラーなし | 「[ms-id] complete: N tasks done」 |
+| ⚠ 部分完了 (partial) | 一部 done、残りはタスクとして残置 | 「[ms-id] partial: M/N done, 残: [entry-ids]」 |
+| ✗ 失敗 (failed) | 例外で停止 / Workspace破損 / 0タスク完了で終了 | 「[ms-id] FAILED: [first line of error]」 + 続行可能か判定 |
+| ⏸ タイムアウト | サブエージェントが応答しない | 「[ms-id] TIMEOUT: kill 推奨」 |
+
+失敗・タイムアウト時は **必ずトリガーを発火**して Web UI 側にも警告を出す:
+```bash
+beacon trigger fire dispatch-failure-<ms-id> "Sub-agent for <ms-id> failed: <one-line reason>"
+```
+
+これがあると、別端末で Web UI を見ている他メンバーも気付ける（e-628 通知系統と統合される素地）。
+
+### 6c. 報告フォーマット
 
 Step 2 で記録した各MSの元の `progress` と比較して報告する:
 
 ```
 Dispatch Complete:
 ---
-[ms-id] [title]: [new progress]% (was [old progress]%)
+✓ [ms-id] [title]: [new progress]% (was [old progress]%)
   Completed tasks: [entry-ids of tasks marked done]
   Remaining tasks: [entry-ids of still-pending tasks, if any]
 
-[ms-id] [title]: [new progress]% (was [old progress]%)
-  [Agent error summary, if failed]
+✗ [ms-id] [title]: FAILED
+  Reason: [one-line summary from sub-agent's last message]
+  Commits made before failure: [hashes, if any]
+  Recommended next step: [retry / kick to user / abandon worktree]
 ---
 ```
 
-### 6c. 次Waveの提示
+### 6d. 次Waveの提示
 
 Step 1 のグラフ情報と最新ステータスから、新たに実行可能になったMSがあれば提示:
 ```
@@ -306,6 +361,57 @@ Next wave available:
   [ms-id] [title] (depends_on: [completed deps])
 再度 /beacon-dispatch で起動できます。
 ```
+
+## Step 7: Worktree merge とコンフリクト解消（e-600）
+
+サブエージェントが成功で返ってきたら、各worktreeブランチを **PR 経由** または **直接 merge** で main に統合する。
+
+### 7a. PR 駆動（推奨、ユーザーが2-5人体制）
+
+各 ms-XX/work ブランチについて:
+```bash
+git -C <worktree-path> push -u origin <branch>
+```
+で push し、`/beacon-pr-create` を案内する（オーケストレーター自身が呼ぶことも可）。各PRが merge されたら自然に main に統合される。
+
+### 7b. 直接 merge（1人開発で素早く統合したい場合）
+
+各worktreeブランチを順次 main に merge:
+```bash
+git -C <project-root> checkout main
+for branch in ms-39/work ms-40/work ms-41/work; do
+    git merge --no-ff "$branch" -m "Merge $branch"
+done
+```
+
+### 7c. コンフリクト検知と解消フロー
+
+`git merge` でコンフリクトが発生した場合、**Skill が自動で次の判断を行う**:
+
+1. `git status --porcelain` でコンフリクトファイル一覧を取得
+2. 各ファイルを Read で読み込み、**コンフリクトの性質を分類**:
+
+   | 分類 | 判定基準 | 自動解消可否 |
+   |---|---|---|
+   | **trivial (片側だけ追加)** | 一方が空、他方が新規追加 | ✓ 自動解消可（追加された方を採用） |
+   | **non-overlapping additive** | 両側とも追記のみ、行範囲が異なる | ✓ 自動解消可（両方残す） |
+   | **semantic overlap** | 同じ関数 / 同じ宣言を両側が修正 | ✗ ユーザー判断必須 |
+   | **structural rewrite** | ファイル削除 vs 修正 / リネーム衝突 | ✗ ユーザー判断必須 |
+
+3. 自動解消可のものは AI が解消（`git add` まで）してユーザーに「自動解消したファイル: ..., 確認しますか？」と提示
+4. 自動解消不可のものは「以下のファイルは AI では判断できません。手動解消お願いします:」とリストし、`git merge --abort` も選択肢として提示
+5. 解消後は **トリガー発火** で Web UI 側にも記録:
+   ```bash
+   beacon trigger fire dispatch-merge-conflict "<ms-id>: <auto-resolved>件/<manual>件"
+   ```
+
+### 7d. merge後のworktree cleanup
+
+merge 完了したMSは:
+```bash
+beacon milestone workspace-cleanup <ms-id>
+```
+で worktree を片付ける。`git worktree remove` + ブランチ削除まで一気にやる（既存実装に準拠）。
 
 ## 制約
 

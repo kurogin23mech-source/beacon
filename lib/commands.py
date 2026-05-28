@@ -422,12 +422,20 @@ def cmd_milestone_add():
     priority = os.environ.get("BEACON_PRIORITY", "")
     objective = os.environ.get("BEACON_OBJECTIVE", "")
     acceptance_criteria = os.environ.get("BEACON_ACCEPTANCE_CRITERIA", "")
+    owner = os.environ.get("BEACON_OWNER", "")
+    assignee = os.environ.get("BEACON_ASSIGNEE", "")
     data = load_project()
     ms_id = core.milestone_add(data, title, target_date, description=description,
                                priority=priority, objective=objective,
-                               acceptance_criteria=acceptance_criteria)
+                               acceptance_criteria=acceptance_criteria,
+                               owner=owner, assignee=assignee)
     save_project(data)
     print(f"Added milestone {ms_id}: {title}")
+    if owner or assignee:
+        if owner:
+            print(f"  owner: {owner}")
+        if assignee:
+            print(f"  assignee: {assignee}")
 
     # Promote SPEC creation: fire a trigger so session-start / next prompt
     # surfaces a warning. SPEC = requirements + decision trail (see CORE
@@ -588,6 +596,31 @@ def cmd_milestone_update():
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     status = os.environ.get("BEACON_STATUS", "")
     reason = os.environ.get("BEACON_REASON", "")
+
+    # e-630: changing MS status or owner/assignee is a decision worth
+    # recording. Require --reason so the changelog has a "why", not just
+    # a "what". Other fields (title, description, etc.) are content edits
+    # and don't need a reason — those are equivalent to documentation
+    # updates and would just create noise if forced.
+    decision_fields = bool(
+        status
+        or os.environ.get("BEACON_OWNER", "")
+        or os.environ.get("BEACON_ASSIGNEE", "")
+    )
+    if decision_fields and not reason:
+        print(
+            "Error: --reason is required when changing status / owner / "
+            "assignee. These are team-visible decisions and the decision "
+            "trail must record the 'why' (CORE doc data-immutability-principle).",
+            file=sys.stderr,
+        )
+        print(
+            "  Example: beacon milestone update ms-42 --status observing "
+            "--reason 'merge after ms-43 lands'",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     data = load_project()
     try:
         ms = core.milestone_update(
@@ -601,6 +634,8 @@ def cmd_milestone_update():
             priority=os.environ.get("BEACON_PRIORITY", ""),
             objective=os.environ.get("BEACON_OBJECTIVE", ""),
             acceptance_criteria=os.environ.get("BEACON_ACCEPTANCE_CRITERIA", ""),
+            owner=os.environ.get("BEACON_OWNER", ""),
+            assignee=os.environ.get("BEACON_ASSIGNEE", ""),
         )
     except ValueError as e:
         print(str(e))
@@ -1150,6 +1185,183 @@ def cmd_note_clear():
     except Exception:
         pass
     print("Session notes cleared.")
+
+
+# ---------------------------------------------------------------------------
+# Member management (e-624)
+# ---------------------------------------------------------------------------
+#
+# All write paths go through lib/operations.apply_operation so the ms-39
+# lost-update protection covers concurrent member edits (two maintainers
+# inviting different people at the same moment, etc.). Reads are direct
+# load_project, which is consistent with task_list / milestone_list and
+# does not need atomicity.
+
+def _project_id_for_ops() -> str:
+    """Return the project_id used by apply_operation for this CLI invocation.
+
+    Local mode: project_id is irrelevant beyond changelog labeling, so we
+    use the project's `name` field. Cloud mode: requires the cloud.json
+    project_id which the API layer normally supplies — here we read
+    .beacon/cloud.json if present, else fall back to project name.
+    """
+    try:
+        data = load_project()
+    except Exception:
+        return ""
+    project_file = get_project_file()
+    beacon_dir = os.path.dirname(project_file) or ".beacon"
+    cloud_json = os.path.join(beacon_dir, "cloud.json")
+    if os.path.exists(cloud_json):
+        try:
+            with open(cloud_json, "r", encoding="utf-8") as f:
+                return json.load(f).get("project_id", "") or data.get("name", "")
+        except (OSError, json.JSONDecodeError):
+            pass
+    return data.get("name", "")
+
+
+def cmd_member_add():
+    """Add a member to the project."""
+    import operations  # lazy import to avoid circular at module load
+
+    member_id = (os.environ.get("BEACON_MEMBER_ID", "") or "").strip()
+    name = os.environ.get("BEACON_MEMBER_NAME", "")
+    email = os.environ.get("BEACON_MEMBER_EMAIL", "")
+    role = os.environ.get("BEACON_MEMBER_ROLE", "") or "contributor"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not member_id:
+        print("Error: member id is required", file=sys.stderr)
+        print("Usage: beacon member add <id> [--name N] [--email E] [--role owner|maintainer|contributor|viewer]",
+              file=sys.stderr)
+        sys.exit(1)
+
+    project_id = _project_id_for_ops()
+
+    def op(data):
+        new_member = core.member_add(data, member_id, name=name, email=email, role=role)
+        return data, new_member
+
+    try:
+        new_member = operations.apply_operation(
+            project_id, op,
+            op_name="member.add",
+            reason=f"add member {member_id} as {role}",
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(new_member, ensure_ascii=False))
+    else:
+        print(f"Added member {new_member['id']} ({new_member['role']})")
+
+
+def cmd_member_list():
+    """List members of the project."""
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    members = core.members_list(data)
+    if json_mode:
+        print(json.dumps(members, ensure_ascii=False, indent=2))
+        return
+    if not members:
+        print("(no members — `beacon member add <id>` to add the first one)")
+        return
+    print(f"Members ({len(members)}):")
+    # Pretty-print: align role column for readability
+    width = max(len(m.get("id", "")) for m in members) + 2
+    for m in members:
+        role = m.get("role", "?")
+        name = m.get("name", "")
+        email = m.get("email", "")
+        extras = []
+        if name and name != m.get("id"):
+            extras.append(name)
+        if email:
+            extras.append(email)
+        extras_str = f"  ({', '.join(extras)})" if extras else ""
+        print(f"  {m.get('id', '?'):<{width}} {role:<11}{extras_str}")
+
+
+def cmd_member_remove():
+    """Remove a member from the project."""
+    import operations
+
+    member_id = (os.environ.get("BEACON_MEMBER_ID", "") or "").strip()
+    reason = os.environ.get("BEACON_REASON", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not member_id:
+        print("Error: member id is required", file=sys.stderr)
+        sys.exit(1)
+    if not reason:
+        # e-630: state-changing operations require an audit reason.
+        print(
+            "Error: --reason is required for member remove "
+            "(audit trail per CORE doc data-immutability-principle)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    project_id = _project_id_for_ops()
+
+    def op(data):
+        removed = core.member_remove(data, member_id, reason=reason)
+        return data, removed
+
+    try:
+        removed = operations.apply_operation(
+            project_id, op,
+            op_name="member.remove",
+            reason=reason,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(removed, ensure_ascii=False))
+    else:
+        print(f"Removed member {removed['id']}")
+
+
+def cmd_member_role():
+    """Change a member's role."""
+    import operations
+
+    member_id = (os.environ.get("BEACON_MEMBER_ID", "") or "").strip()
+    role = (os.environ.get("BEACON_MEMBER_ROLE", "") or "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not member_id or not role:
+        print("Error: member id and role are required", file=sys.stderr)
+        print("Usage: beacon member role <id> <owner|maintainer|contributor|viewer>",
+              file=sys.stderr)
+        sys.exit(1)
+
+    project_id = _project_id_for_ops()
+
+    def op(data):
+        updated = core.member_set_role(data, member_id, role)
+        return data, updated
+
+    try:
+        updated = operations.apply_operation(
+            project_id, op,
+            op_name="member.role",
+            reason=f"set role of {member_id} to {role}",
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(updated, ensure_ascii=False))
+    else:
+        print(f"Set {updated['id']} role to {updated['role']}")
 
 
 # ---------------------------------------------------------------------------
@@ -2643,6 +2855,116 @@ def cmd_pr_add():
             print(f"  Intent: {intent}")
 
 
+def cmd_pr_show():
+    """Show a PR record's full detail (intent / commits / review history).
+
+    Used by /review to pull intent before judging code changes (e-608).
+    Resolution rules for the input identifier:
+      - `e-NNN`         → entry id direct match
+      - `<int>`         → PR number; looks up the matching entry
+      - `https://…/pull/<n>` → URL match
+    """
+    ident = (os.environ.get("BEACON_PR_IDENT", "") or "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not ident:
+        print("Error: PR identifier required (e-id, PR number, or URL)", file=sys.stderr)
+        sys.exit(1)
+
+    data = load_project()
+
+    # Find candidate PR entries across all milestones
+    found = None
+    found_ms_id = ""
+    for ms in data.get("milestones", []):
+        if not isinstance(ms, dict):
+            continue
+        for ent in ms.get("entries", []) or []:
+            if not isinstance(ent, dict) or ent.get("type") != "pr":
+                continue
+            meta = ent.get("meta") or {}
+            # Match by entry id
+            if ent.get("id") == ident:
+                found, found_ms_id = ent, ms.get("id", "")
+                break
+            # Match by PR number (int or numeric string)
+            try:
+                if ident.isdigit() and int(ident) == meta.get("pr_number"):
+                    found, found_ms_id = ent, ms.get("id", "")
+                    break
+            except (ValueError, AttributeError):
+                pass
+            # Match by URL
+            if meta.get("url") and (meta["url"] == ident or meta["url"].rstrip("/") == ident.rstrip("/")):
+                found, found_ms_id = ent, ms.get("id", "")
+                break
+        if found:
+            break
+
+    if not found:
+        print(f"Error: no PR entry matches '{ident}'", file=sys.stderr)
+        sys.exit(1)
+
+    meta = found.get("meta") or {}
+    payload = {
+        "entry_id": found.get("id"),
+        "ms_id": found_ms_id,
+        "description": found.get("description"),
+        "status": found.get("status"),
+        "url": meta.get("url"),
+        "pr_number": meta.get("pr_number"),
+        "author": meta.get("author"),
+        "intent": meta.get("intent") or "",
+        "pr_status": meta.get("pr_status"),
+        "review_status": meta.get("review_status"),
+        "review_rationale": meta.get("review_rationale"),
+        # e-609: review back-and-forth visibility — full transition history
+        # so the timeline can render "pending → changes_requested → pending → approved"
+        "review_history": meta.get("review_history") or [],
+        "commits": [
+            {
+                "id": c.get("id"),
+                "hash": (c.get("meta") or {}).get("hash"),
+                "message": c.get("description"),
+            }
+            for c in (found.get("entries") or [])
+            if isinstance(c, dict) and c.get("type") == "commit"
+        ],
+    }
+
+    if json_mode:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+
+    print(f"PR {payload['entry_id']} (ms: {found_ms_id})")
+    if payload["url"]:
+        print(f"  URL:    {payload['url']}")
+    print(f"  Title:  {payload['description']}")
+    print(f"  Status: {payload['status']} / review: {payload['review_status']}")
+    if payload["intent"]:
+        print(f"  Intent: {payload['intent']}")
+    else:
+        print(f"  Intent: (none recorded — /review cannot do intent-vs-impl check)")
+    if payload["review_rationale"]:
+        print(f"  Rationale: {payload['review_rationale']}")
+    if payload["review_history"]:
+        # e-609: surface review back-and-forth count + the transition trail
+        roundtrips = sum(
+            1 for i, h in enumerate(payload["review_history"][1:], 1)
+            if h["status"] == "pending"
+        )
+        print(f"  Review history ({len(payload['review_history'])} transitions, "
+              f"{roundtrips} round-trip(s)):")
+        for h in payload["review_history"]:
+            at = h.get("at", "")[:19]  # trim to "YYYY-MM-DDTHH:MM:SS"
+            tail = f" — {h['rationale'][:60]}" if h.get("rationale") else ""
+            print(f"    {at}  {h.get('status', '?'):<19}{tail}")
+    if payload["commits"]:
+        print(f"  Commits ({len(payload['commits'])}):")
+        for c in payload["commits"]:
+            print(f"    {c['hash']}  {c['message']}")
+
+
 def cmd_pr_close():
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
@@ -2814,11 +3136,100 @@ def cmd_pr_merge():
         print(f"Merged PR [{entry_id}]: {entry.get('description', '')}")
 
 
+def _infer_pr_ms_id(data: dict) -> tuple[str, str]:
+    """Infer the most likely target milestone ID for a PR being created.
+
+    Returns (ms_id, reason). ms_id is "" when nothing matched confidently.
+    Priority (highest first):
+      1. Current branch name matches `ms-<n>` → use it if that MS exists.
+      2. Last 5 commit messages contain `ms-<n>` → use it.
+      3. Last 5 commit messages contain `(e-<n>)` → look up which MS owns that task.
+      4. Exactly one milestone has status == "in_progress" → use it.
+      5. Otherwise: return "" and let the caller prompt.
+
+    This is best-effort and read-only. The caller MUST surface the `reason`
+    to the user (no silent guessing).
+    """
+    if not isinstance(data, dict):
+        return "", ""
+
+    ms_ids = {m.get("id") for m in data.get("milestones", []) if isinstance(m, dict)}
+
+    # 1) Branch name
+    try:
+        branch = subprocess.run(
+            ["git", "branch", "--show-current"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        branch = ""
+    if branch:
+        m = re.search(r"ms-(\d+)", branch)
+        if m:
+            cand = f"ms-{m.group(1)}"
+            if cand in ms_ids:
+                return cand, f"branch name `{branch}` → {cand}"
+
+    # 2) Recent commit messages for ms-N
+    try:
+        log = subprocess.run(
+            ["git", "log", "--pretty=%s", "-5"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        log = ""
+    for line in log.splitlines():
+        m = re.search(r"ms-(\d+)", line)
+        if m:
+            cand = f"ms-{m.group(1)}"
+            if cand in ms_ids:
+                return cand, f"recent commit `{line[:60]}` → {cand}"
+
+    # 3) Recent commits for e-N → reverse-lookup owning MS
+    for line in log.splitlines():
+        m = re.search(r"\be-(\d+)\b", line)
+        if m:
+            eid = f"e-{m.group(1)}"
+            for ms in data.get("milestones", []):
+                if not isinstance(ms, dict):
+                    continue
+                for ent in ms.get("entries", []) or []:
+                    if isinstance(ent, dict) and ent.get("id") == eid:
+                        return ms.get("id", ""), f"task {eid} in commit `{line[:60]}` → {ms.get('id')}"
+
+    # 4) Single in-progress milestone
+    active = [m for m in data.get("milestones", [])
+              if isinstance(m, dict) and m.get("status") == "in_progress"]
+    if len(active) == 1:
+        return active[0].get("id", ""), f"sole active milestone ({active[0].get('id')})"
+
+    return "", ""
+
+
 def cmd_pr_create():
     """Wrapper for gh pr create that auto-records the PR in beacon."""
     ms_id = os.environ.get("BEACON_MS_ID", "")
     intent = os.environ.get("BEACON_INTENT", "")
     gh_args = os.environ.get("BEACON_GH_ARGS", "")
+
+    # e-607: auto-infer ms_id when -m was omitted.
+    if not ms_id:
+        try:
+            _data_for_infer = load_project()
+        except Exception:
+            _data_for_infer = {}
+        inferred, reason = _infer_pr_ms_id(_data_for_infer)
+        if inferred:
+            ms_id = inferred
+            print(f"Beacon: inferred -m {ms_id} ({reason})", file=sys.stderr)
+        else:
+            # We DO NOT abort — gh pr create can still run, but the PR record
+            # will not be linked to any MS. Warn the caller so the user knows.
+            print(
+                "Beacon: -m was not given and no MS could be inferred from "
+                "branch/commits/active state. PR record will be unattached.",
+                file=sys.stderr,
+            )
 
     # Run gh pr create and capture the URL from stdout
     cmd = ["gh", "pr", "create"]
@@ -3097,6 +3508,208 @@ def cmd_skill_install():
     hook_script = _find_hook("beacon-post-commit-hook.sh")
     settings_path = os.path.join(home, ".claude", "settings.json")
     _install_claude_hooks(hook_script, settings_path)
+
+
+# ---------------------------------------------------------------------------
+# Self-update (`beacon update`)
+# ---------------------------------------------------------------------------
+
+def _detect_install_method() -> dict:
+    """Detect how beacon was installed.
+
+    Returns a dict:
+      {
+        "method": "brew" | "git" | "unknown",
+        "prefix": str | None,           # brew prefix or git repo root
+        "current_version": str,         # beacon --version
+      }
+
+    "brew": realpath of the running bin/beacon lives under `brew --prefix`.
+    "git":  beacon root has a `.git/` directory (developer / manual clone install).
+    "unknown": none of the above.
+    """
+    info = {"method": "unknown", "prefix": None, "current_version": __version__}
+
+    # Resolve the running beacon root (lib/commands.py is at <root>/lib/commands.py)
+    beacon_root = os.path.realpath(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+    # 1) Homebrew detection
+    try:
+        result = subprocess.run(
+            ["brew", "--prefix", "beacon"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            brew_prefix = result.stdout.strip()
+            if brew_prefix:
+                brew_real = os.path.realpath(brew_prefix)
+                # beacon root may be the brew prefix itself, or sit under Cellar/...
+                if beacon_root == brew_real or beacon_root.startswith(brew_real + os.sep):
+                    info["method"] = "brew"
+                    info["prefix"] = brew_prefix
+                    return info
+                # Cellar path: brew_prefix is a symlink to Cellar/beacon/<v>/...
+                # If beacon_root is under any HOMEBREW Cellar, treat as brew.
+                if "/Cellar/beacon/" in beacon_root:
+                    info["method"] = "brew"
+                    info["prefix"] = brew_prefix
+                    return info
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+
+    # 2) Git checkout detection
+    if os.path.isdir(os.path.join(beacon_root, ".git")):
+        info["method"] = "git"
+        info["prefix"] = beacon_root
+        return info
+
+    return info
+
+
+def cmd_update():
+    """Self-update beacon: `brew upgrade beacon` (or git pull) then `beacon skill install`.
+
+    Flags (via environment):
+      BEACON_UPDATE_CHECK=1     Dry-run; report what would happen, no changes.
+      BEACON_UPDATE_SKILL_ONLY=1  Skip brew/git step, only refresh skills.
+      BEACON_UPDATE_YES=1       Skip interactive confirmation.
+
+    Exit codes:
+      0  success (or no-op when already up to date)
+      1  failure (network / brew / git error)
+    """
+    check_only = os.environ.get("BEACON_UPDATE_CHECK", "") == "1"
+    skill_only = os.environ.get("BEACON_UPDATE_SKILL_ONLY", "") == "1"
+    auto_yes = os.environ.get("BEACON_UPDATE_YES", "") == "1"
+
+    info = _detect_install_method()
+    current = info["current_version"]
+    method = info["method"]
+
+    print(f"Current: beacon {current}  (install method: {method})")
+
+    if skill_only:
+        print("→ Skipping CLI upgrade (--skill-only); refreshing Claude Code Skills only.")
+        if check_only:
+            print("[dry-run] would run: beacon skill install")
+            sys.exit(0)
+        cmd_skill_install()
+        return
+
+    if method == "brew":
+        # 1. Probe latest available version (best-effort).
+        latest = None
+        try:
+            r = subprocess.run(
+                ["brew", "info", "--json=v2", "beacon"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode == 0:
+                try:
+                    payload = json.loads(r.stdout)
+                    formulae = payload.get("formulae", [])
+                    if formulae:
+                        latest = formulae[0].get("versions", {}).get("stable")
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    pass
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            pass
+
+        if latest:
+            print(f"Latest:  beacon {latest}")
+            if latest == current:
+                print("✓ Already up to date.")
+                if not check_only:
+                    print("→ Re-installing Skills to ensure they match the running CLI.")
+                    cmd_skill_install()
+                sys.exit(0)
+        else:
+            print("Latest:  (could not determine — proceeding anyway)")
+
+        if check_only:
+            print("[dry-run] would run:")
+            print("  brew update")
+            print("  brew upgrade beacon")
+            print("  beacon skill install")
+            sys.exit(0)
+
+        if not auto_yes:
+            try:
+                ans = input("Proceed with upgrade? [Y/n]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ans = "n"
+            if ans and ans not in ("y", "yes", ""):
+                print("Aborted.")
+                sys.exit(0)
+
+        # 2. brew update (best-effort; do not abort on network blip)
+        print("→ brew update ...")
+        r = subprocess.run(["brew", "update"])
+        if r.returncode != 0:
+            print("  (brew update failed; continuing to upgrade anyway)")
+
+        # 3. brew upgrade beacon
+        print("→ brew upgrade beacon ...")
+        r = subprocess.run(["brew", "upgrade", "beacon"])
+        if r.returncode != 0:
+            # Detect the common "already up to date" case via re-check
+            after = subprocess.run(
+                ["beacon", "--version"], capture_output=True, text=True
+            )
+            if after.returncode == 0 and current in after.stdout:
+                print("  No upgrade available (already at latest).")
+            else:
+                print("  brew upgrade failed.")
+                sys.exit(1)
+
+        # 4. Reinstall skills (the new CLI may have new/changed Skills)
+        print("→ beacon skill install ...")
+        # IMPORTANT: invoke the freshly-installed CLI, not this in-memory module.
+        r = subprocess.run(["beacon", "skill", "install"])
+        if r.returncode != 0:
+            print("  Skill install failed.")
+            sys.exit(1)
+
+        print("✓ Update complete.")
+        return
+
+    if method == "git":
+        prefix = info["prefix"]
+        print(f"Detected developer / git install at: {prefix}")
+        print("→ This install is not managed by Homebrew. Recommended manual steps:")
+        print(f"    git -C {prefix} pull --ff-only")
+        print(f"    beacon skill install")
+        if check_only:
+            print("[dry-run] no changes applied.")
+            sys.exit(0)
+
+        if not auto_yes:
+            try:
+                ans = input("Attempt automatic `git pull --ff-only` + skill install? [Y/n]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ans = "n"
+            if ans and ans not in ("y", "yes", ""):
+                print("Aborted. Run the commands above manually when ready.")
+                sys.exit(0)
+
+        r = subprocess.run(["git", "-C", prefix, "pull", "--ff-only"])
+        if r.returncode != 0:
+            print("  git pull failed (uncommitted changes or non-fast-forward). Resolve manually.")
+            sys.exit(1)
+
+        r = subprocess.run(["beacon", "skill", "install"])
+        if r.returncode != 0:
+            print("  Skill install failed.")
+            sys.exit(1)
+        print("✓ Update complete.")
+        return
+
+    # Unknown install method
+    print("⚠ Could not determine how beacon was installed.")
+    print("  If installed via Homebrew, ensure `brew` is on PATH.")
+    print("  Otherwise, re-run the installer for your setup.")
+    print(f"  You can refresh Skills only with: beacon update --skill-only")
+    sys.exit(1)
 
 
 def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
@@ -3459,6 +4072,128 @@ def cmd_deploy_delete():
     print("  Deploy records are immutable facts — they cannot be physically deleted.")
     print("  To mark a record as invalid: beacon deploy void <id> --reason \"...\"")
     sys.exit(1)
+
+
+def cmd_deploy_rollback():
+    """Roll back to the deployment that ran *before* the most recent one (e-581).
+
+    Plan:
+      1. Find the latest non-voided deploy in `data["deployments"]`.
+      2. Find the deploy immediately before it (same `service` if recorded).
+      3. Print the `gcloud run services update-traffic ... --to-revisions ...`
+         command the user should run.
+      4. Optionally execute it (when --execute is passed).
+      5. Mark the rolled-back deploy as voided with reason="rolled back to
+         <prev-id>" so the timeline preserves the decision.
+
+    This is an audit-first design: we never silently execute gcloud. The
+    user must opt in with `--execute`, or read the command and run it
+    themselves. Reason matches CORE doc `data-immutability-principle`:
+    void carries a reason; the reason is what makes the timeline auditable.
+    """
+    reason = os.environ.get("BEACON_REASON", "")
+    execute = os.environ.get("BEACON_EXECUTE", "") == "1"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    service_override = os.environ.get("BEACON_SERVICE", "")
+
+    if not reason:
+        print("Error: --reason is required for deploy rollback.", file=sys.stderr)
+        print("  Example: beacon deploy rollback --reason \"high error rate on prod\"",
+              file=sys.stderr)
+        sys.exit(1)
+
+    data = load_project()
+    deployments = data.get("deployments", []) or []
+    # Sort by date desc; void records may exist but should still be present.
+    active = [d for d in deployments if not d.get("voided")]
+    if not active:
+        print("Error: no active deployments to roll back.", file=sys.stderr)
+        sys.exit(1)
+    active.sort(key=lambda d: d.get("deployed_at") or d.get("date", ""), reverse=True)
+
+    current = active[0]
+    service = service_override or current.get("service", "")
+    previous = None
+    for d in active[1:]:
+        # Match by service when possible; fall back to "most recent earlier" otherwise.
+        if not service or d.get("service") == service:
+            previous = d
+            break
+
+    if not previous:
+        print(
+            "Error: cannot determine rollback target — only one active deploy "
+            "exists for this service. Roll forward instead.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    prev_rev = previous.get("revision", "") or previous.get("meta", {}).get("revision", "")
+    if not prev_rev:
+        print(
+            "Error: previous deploy has no `revision` recorded — cannot construct "
+            "the gcloud update-traffic command. Add it with "
+            f"`beacon deploy update {previous['id']} --revision <rev>`.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    region = current.get("region", "") or os.environ.get("BEACON_REGION", "asia-northeast1")
+    gcloud_cmd = [
+        "gcloud", "run", "services", "update-traffic", service,
+        f"--to-revisions={prev_rev}=100",
+        f"--region={region}",
+    ]
+    cmd_str = " ".join(gcloud_cmd)
+
+    print(f"Rolling back {service}:")
+    print(f"  current  → {current['id']}  rev={current.get('revision', '?')}")
+    print(f"  rollback → {previous['id']}  rev={prev_rev}")
+    print(f"  command  → {cmd_str}")
+    print()
+
+    if execute:
+        print("=> executing gcloud command...")
+        r = subprocess.run(gcloud_cmd)
+        if r.returncode != 0:
+            print("Error: gcloud command failed; deploy record NOT voided.", file=sys.stderr)
+            sys.exit(r.returncode)
+    else:
+        print(
+            "Not executed. Run the command above, then re-invoke with --execute "
+            "to mark the deploy as voided automatically."
+        )
+        if not json_mode:
+            sys.exit(0)
+
+    # Void the rolled-back deploy so the project timeline reflects the
+    # decision. We reuse cmd_deploy_void's core function via apply_operation.
+    try:
+        import operations
+        project_id = _project_id_for_ops()
+
+        full_reason = f"rolled back to {previous['id']} ({prev_rev}): {reason}"
+
+        def op(d):
+            voided = core.deploy_void(d, current["id"], reason=full_reason)
+            return d, voided
+
+        voided = operations.apply_operation(
+            project_id, op, op_name="deploy.rollback", reason=full_reason,
+        )
+    except Exception as e:
+        print(f"Warning: failed to void deploy record: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps({
+            "voided_deploy": current["id"],
+            "rollback_target": previous["id"],
+            "rollback_revision": prev_rev,
+            "executed": execute,
+        }, ensure_ascii=False))
+    else:
+        print(f"✓ Voided {current['id']} with reason: {full_reason}")
 
 
 def cmd_deploy_void():
@@ -4479,6 +5214,7 @@ if __name__ == "__main__":
         "auth_logout": lambda: __import__("auth").logout(),
         "auth_status": lambda: __import__("auth").status(),
         "skill_install": cmd_skill_install,
+        "update": cmd_update,
         "search": cmd_search,
         "cycle_status": cmd_cycle_status,
         "project_archive": cmd_project_archive,
@@ -4486,6 +5222,7 @@ if __name__ == "__main__":
         "deploy_list": cmd_deploy_list,
         "deploy_delete": cmd_deploy_delete,
         "deploy_void": cmd_deploy_void,
+        "deploy_rollback": cmd_deploy_rollback,
         "push_record": cmd_push_record,
         "push_list": cmd_push_list,
         "project_unarchive": cmd_project_unarchive,
@@ -4494,6 +5231,7 @@ if __name__ == "__main__":
         "pr_approve": cmd_pr_approve,
         "pr_reject": cmd_pr_reject,
         "pr_create": cmd_pr_create,
+        "pr_show": cmd_pr_show,
         "pr_request_review": cmd_pr_request_review,
         "pr_request_changes": cmd_pr_request_changes,
         "pr_merge": cmd_pr_merge,
@@ -4518,6 +5256,10 @@ if __name__ == "__main__":
         "note_add": cmd_note_add,
         "note_list": cmd_note_list,
         "note_clear": cmd_note_clear,
+        "member_add": cmd_member_add,
+        "member_list": cmd_member_list,
+        "member_remove": cmd_member_remove,
+        "member_role": cmd_member_role,
         "version": lambda: print(f"beacon {__version__}"),
         "help_json": cmd_help_json,
         "doctor": cmd_doctor,
