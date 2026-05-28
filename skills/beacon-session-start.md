@@ -406,6 +406,12 @@ Step 1〜2 の結果を組み合わせて、以下のフォーマットで **テ
 Beacon: [name]
 📊 Web UI: $WEBUI_URL  ← cloud mode の場合のみ
 ---
+⚠️  未解決 Incident: [N]件  ← e-595 / 一件でもあれば最上位に出す。無ければセクションごと省略
+  - [e-id] "[title]" (op-X) — open since [created_at]
+  - ...
+  → 解決済みなら /beacon-incident-report で close + report を作成してください。
+  → /beacon-operation-review でも close 誘導が走ります。
+
 ドキュメント (core=設計原則・常時参照 / spec=仕様・技術詳細 / memo=検討メモ):
   [CORE] [title]: [本文（短ければ全文、長ければ要約）]
   ...
@@ -417,8 +423,6 @@ Beacon: [name]
 
 Active Operation: [op-id] "[title]" [schedule.frequency]  ← openのOperationがある場合
   直近のrun: [date] [✓ok/⚠warning/✗error] / [date] ... （最新3件）
-  未解決Incident: [N]件                                    ← あれば
-    - [e-id] [title]
 
 Pending Operation: [op-id] "[title]"  ← todo/in_progressのOperationがある場合
   status: [todo/in_progress]
@@ -444,6 +448,9 @@ uncommitted changes: [git statusの結果があれば]
 ---
 何から始めますか？
 ```
+
+**未解決 Incident セクション (e-595):**
+Step 2 で取得した entries (および Operation 配下の incident エントリ) のうち `type == "incident"` かつ `status == "open"` のものを抽出する。一件でもあれば **必ず最上位に表示**する。これは UX レビュー (UC7-L8) で「閉じられていないインシデントが見落とされる」実害があったため、構造的にユーザーの目に最初に入る位置に固定する。
 
 status-icon の対応: done=●, in_progress=◐, todo=○, waiting=◌, observing=◔
 
