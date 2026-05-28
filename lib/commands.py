@@ -428,6 +428,23 @@ def cmd_milestone_add():
     save_project(data)
     print(f"Added milestone {ms_id}: {title}")
 
+    # Promote SPEC creation: fire a trigger so session-start / next prompt
+    # surfaces a warning. SPEC = requirements + decision trail (see CORE
+    # doc `doc-classification`). This is a soft promotion (warning only),
+    # never a hard block — see SPEC for ms-41.
+    try:
+        _fire_spec_needed_trigger(ms_id, title)
+    except Exception:
+        pass  # Trigger is best-effort; never block milestone creation.
+
+    # Print an inline hint so the user sees it immediately, in addition to
+    # the trigger that surfaces in session-start later.
+    print(
+        f"\n  Hint: SPEC (要求書 / 判断軌跡) を作成すると、サブエージェントや retrospection が"
+        f"機能しやすくなります。`/beacon-spec {ms_id}` を実行するか、後で session-start で"
+        f"warning が出たときに作成してください。"
+    )
+
 
 def cmd_milestone_list():
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
@@ -1557,12 +1574,108 @@ def _auto_fire_retro_trigger():
         f.write("\n")
 
 
+def _fire_spec_needed_trigger(ms_id: str, ms_title: str) -> None:
+    """Promote SPEC creation for a newly-added milestone.
+
+    Writes a trigger file that session-start / dispatch will surface as a
+    warning. This is a *soft* promotion: never blocks. The trigger is
+    cleared when a SPEC doc is added for the MS (see _spec_exists_for_ms
+    in trigger_check).
+    """
+    if not ms_id:
+        return
+    # If SPEC already exists for this MS, no need to fire.
+    if _spec_exists_for_ms(ms_id):
+        return
+    triggers_dir = _get_triggers_dir()
+    os.makedirs(triggers_dir, exist_ok=True)
+    trigger_path = os.path.join(triggers_dir, f"spec-needed-{ms_id}.json")
+    if os.path.exists(trigger_path):
+        return
+    import datetime
+    trigger_data = {
+        "name": f"spec-needed-{ms_id}",
+        "kind": "spec-needed",
+        "ms_id": ms_id,
+        "ms_title": ms_title,
+        "message": f"{ms_id} \"{ms_title}\" に SPEC (要求書/判断軌跡) がありません。"
+                   f"`/beacon-spec {ms_id}` で作成すると、サブエージェントや retrospection が機能しやすくなります。",
+        "created_at": datetime.datetime.now().isoformat(),
+    }
+    with open(trigger_path, "w") as f:
+        json.dump(trigger_data, f, ensure_ascii=False)
+        f.write("\n")
+
+
+def _spec_exists_for_ms(ms_id: str) -> bool:
+    """Return True if any spec-scoped document is attached to ms_id.
+
+    Works for both local mode (reads .beacon/documents/*.md frontmatter)
+    and cloud mode (queries the API). Cloud mode failures degrade silently
+    to False (no trigger cleanup is best-effort).
+    """
+    if not ms_id:
+        return False
+    if _is_cloud_mode():
+        try:
+            client, config = _get_api_client()
+            docs = client.list_documents(config["project_id"])
+        except Exception:
+            return False
+        for doc in docs:
+            if doc.get("scope") == "spec" and doc.get("milestone") == ms_id:
+                return True
+        return False
+    # Local mode: read frontmatter from .beacon/documents/*.md
+    docs_dir = _get_docs_dir()
+    if not os.path.isdir(docs_dir):
+        return False
+    for fname in os.listdir(docs_dir):
+        if not fname.endswith(".md"):
+            continue
+        try:
+            doc = _read_local_doc(os.path.join(docs_dir, fname))
+        except Exception:
+            continue
+        if doc.get("scope") == "spec" and doc.get("milestone") == ms_id:
+            return True
+    return False
+
+
+def _cleanup_spec_needed_triggers() -> None:
+    """Remove spec-needed triggers for milestones that now have SPEC docs,
+    or for milestones that no longer exist (cancelled/deleted)."""
+    triggers_dir = _get_triggers_dir()
+    if not os.path.isdir(triggers_dir):
+        return
+    try:
+        data = load_project()
+    except Exception:
+        return
+    valid_ms_ids = {ms.get("id") for ms in data.get("milestones", [])
+                    if ms.get("status") not in ("cancelled",)}
+    for fname in os.listdir(triggers_dir):
+        if not fname.startswith("spec-needed-"):
+            continue
+        if not fname.endswith(".json"):
+            continue
+        ms_id = fname[len("spec-needed-"):-len(".json")]
+        # Cleared if MS gone, or SPEC now exists for it
+        if ms_id not in valid_ms_ids or _spec_exists_for_ms(ms_id):
+            try:
+                os.remove(os.path.join(triggers_dir, fname))
+            except OSError:
+                pass
+
+
 def _cleanup_stale_triggers():
     import datetime
     today = datetime.date.today()
     triggers_dir = _get_triggers_dir()
     if not os.path.isdir(triggers_dir):
         return
+    # Clean up stale spec-needed triggers (MS gone or SPEC now exists)
+    _cleanup_spec_needed_triggers()
     # Clean up stale retro trigger
     retro_path = os.path.join(triggers_dir, "retro.json")
     if os.path.exists(retro_path):

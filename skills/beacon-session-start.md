@@ -109,6 +109,23 @@ beacon doc list --scope spec --op <op-id> --json
 
 結果が空でなければ、各ドキュメントの内容を Step 1e と同様に `beacon doc show <doc_id>` で **並列に** 取得する。
 
+### SPEC 無し active MS の検出 (warning only, never block)
+
+active な MS (`status == "in_progress"`) で SPEC が **1 つも存在しない** ものを **SPEC 無し MS** として記憶する。
+
+これは CORE doc `doc-classification` および ms-41 SPEC で確立した運用:
+- SPEC = 要求書 / 判断軌跡 (詳細仕様書ではない)
+- SPEC 無しでも作業は続行可能 (hard block しない)
+- 但しサブエージェント dispatch・retrospection・onboarding の質が下がるため、warning で促進
+
+Step 3 の出力でこのリストを表示する (後述):
+```
+SPEC 無し active MS:
+  - [ms-id] [title] → `/beacon-spec [ms-id]` で対話駆動作成できます
+```
+
+なお、これと並行して `beacon trigger check` (Step 4) も `spec-needed-<ms-id>` トリガーを返す。両者は同じ事象を別経路で通知している (trigger は MS 追加時 fire、こちらは session-start 時のスキャン)。重複表示は冗長なので、**warning 表示はどちらか一方** (典型的には trigger を優先) で構わない。
+
 ## Step 1g: GitHub PR 自動検知（fail-safe）
 
 Bash ツールで **2つ並列に** 実行:
@@ -442,6 +459,10 @@ Active: [ms-id] [title] ([progress]%) [done_tasks]/[total_tasks]タスク完了
 他のマイルストーン:
   [status-icon] [ms-id] [title] ([progress]%)
   ...
+
+SPEC 無し active MS (warning):     ← Step 1f で検出した SPEC 無しactive MS がある場合のみ
+  ⚠ [ms-id] [title] — `/beacon-spec [ms-id]` で対話駆動作成できます
+  ※ SPEC = 要求書/判断軌跡。dispatch / retrospection の質が下がるため、作成を推奨
 
 未記録のコミット: [git logのハッシュがbeaconエントリに存在しないもの]
 uncommitted changes: [git statusの結果があれば]
