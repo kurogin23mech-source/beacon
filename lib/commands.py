@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import urllib.parse
+from typing import Optional
 
 from store import get_store
 import core
@@ -1543,31 +1544,132 @@ def _get_retro_day():
         return 4
 
 
-def _auto_fire_retro_trigger():
-    import datetime
-    today = datetime.date.today()
-    retro_day = _get_retro_day()
-    if today.weekday() != retro_day:
-        return
-    year, week, _ = today.isocalendar()
-    current_week = f"{year}-W{week:02d}"
+def _last_reviewed_week() -> Optional[str]:
+    """Return the most recent ISO-week string a retro was reviewed for, or None.
+
+    Reads the `.beacon/retro/.reviewed` marker that `beacon retro done` writes.
+    Used by the persistent retro trigger to distinguish "already retro'd this
+    week" from "retro is overdue for one or more past weeks".
+    """
     project_dir = os.path.dirname(get_project_file())
     reviewed_path = os.path.join(project_dir, "retro", ".reviewed")
     try:
         with open(reviewed_path, "r") as f:
-            if f.read().strip() >= current_week:
-                return
+            return f.read().strip() or None
     except (FileNotFoundError, IOError):
-        pass
-    triggers_dir = os.path.join(project_dir, "triggers")
-    trigger_path = os.path.join(triggers_dir, "retro.json")
-    if os.path.exists(trigger_path):
+        return None
+
+
+def _iso_week_string(date) -> str:
+    """`YYYY-WNN` formatted ISO week for a `datetime.date`."""
+    year, week, _ = date.isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def _most_recent_retro_day_on_or_before(today, retro_day_idx: int):
+    """Return the latest date <= today whose weekday() == retro_day_idx.
+
+    If today *is* the retro day, returns today. Used to anchor the
+    "current retro week" — every Friday (or configured day) starts a new
+    retro slot that must be settled before it becomes "stale".
+    """
+    import datetime as _dt
+    delta = (today.weekday() - retro_day_idx) % 7
+    return today - _dt.timedelta(days=delta)
+
+
+def _auto_fire_retro_trigger():
+    """Fire (or refresh) the retro trigger until the user actually retros.
+
+    Per e-575 / SPEC ms-40 §B-1: the retro trigger MUST persist across days
+    until the corresponding week is reviewed. Earlier behavior fired only on
+    the configured retro day and `_cleanup_stale_triggers` deleted it the
+    next morning — meaning a busy user who deferred retro to Monday saw the
+    reminder vanish.
+
+    New behavior:
+      - Compute the most recent retro-day date on or before today
+      - Identify the ISO-week of that retro day as the "current retro slot"
+      - If `.reviewed` says we already retro'd that week or later, do nothing
+      - Otherwise fire/refresh the trigger with a message that:
+          - Names the unreviewed week (or weeks, if multiple slots accumulated)
+          - Persists across days until `beacon retro done` writes a fresh
+            `.reviewed` value
+    """
+    import datetime
+    today = datetime.date.today()
+    retro_day = _get_retro_day()
+
+    # The retro slot for "this period" anchors on the most recent retro_day.
+    # Before the first retro_day has occurred for the current week, we don't
+    # have a slot yet (the week's data isn't ready to review). Skip silently.
+    anchor = _most_recent_retro_day_on_or_before(today, retro_day)
+    if anchor > today:
         return
+    current_slot = _iso_week_string(anchor)
+
+    last_reviewed = _last_reviewed_week()
+    # If we've already reviewed this slot (or a later one), no trigger needed.
+    if last_reviewed and last_reviewed >= current_slot:
+        return
+
+    # Determine whether multiple unreviewed slots have piled up. We count
+    # weeks between (last_reviewed exclusive, current_slot inclusive). For
+    # cosmetic purposes only — the trigger fires once either way.
+    slots_overdue: list[str] = [current_slot]
+    if last_reviewed:
+        # Walk back week-by-week from current_slot until last_reviewed.
+        cursor = anchor
+        while True:
+            cursor = cursor - datetime.timedelta(days=7)
+            slot = _iso_week_string(cursor)
+            if slot <= last_reviewed:
+                break
+            slots_overdue.insert(0, slot)
+            # Safety bound: stop after 12 weeks to avoid runaway messages.
+            if len(slots_overdue) >= 12:
+                break
+
+    project_dir = os.path.dirname(get_project_file())
+    triggers_dir = os.path.join(project_dir, "triggers")
     os.makedirs(triggers_dir, exist_ok=True)
+    trigger_path = os.path.join(triggers_dir, "retro.json")
+
+    # Build the message — singular for one slot, multi for catchup.
+    if len(slots_overdue) == 1:
+        message = (
+            f"今週の振り返りがまだです（{current_slot}）。"
+            "/beacon-retro で開始しますか？"
+        )
+    else:
+        weeks_str = ", ".join(slots_overdue)
+        message = (
+            f"振り返り未完の週が {len(slots_overdue)} 件あります（{weeks_str}）。"
+            "/beacon-retro で順に消化できます。"
+        )
+
+    # Persist: rewrite the trigger every check so the message reflects the
+    # current accumulation. created_at stays as the original first-fire date
+    # if the trigger already exists, so users see "this has been pending
+    # since YYYY-MM-DD".
+    created_at = today.isoformat()
+    if os.path.exists(trigger_path):
+        try:
+            with open(trigger_path, "r") as f:
+                existing = json.load(f)
+            if isinstance(existing.get("created_at"), str):
+                created_at = existing["created_at"]
+        except (json.JSONDecodeError, IOError):
+            pass
+
     trigger_data = {
         "name": "retro",
-        "message": f"今週の振り返りがまだです（{current_week}）。/beacon-retro で開始しますか？",
-        "created_at": today.isoformat(),
+        "kind": "retro-due",
+        "current_slot": current_slot,
+        "overdue_slots": slots_overdue,
+        "message": message,
+        "created_at": created_at,
+        "refreshed_at": today.isoformat(),
     }
     with open(trigger_path, "w") as f:
         json.dump(trigger_data, f, ensure_ascii=False)
@@ -1676,17 +1778,11 @@ def _cleanup_stale_triggers():
         return
     # Clean up stale spec-needed triggers (MS gone or SPEC now exists)
     _cleanup_spec_needed_triggers()
-    # Clean up stale retro trigger
-    retro_path = os.path.join(triggers_dir, "retro.json")
-    if os.path.exists(retro_path):
-        try:
-            with open(retro_path, "r") as f:
-                trigger = json.load(f)
-            created = datetime.date.fromisoformat(trigger["created_at"][:10])
-            if today > created:
-                os.remove(retro_path)
-        except (json.JSONDecodeError, KeyError, ValueError, IOError):
-            pass
+    # NOTE (e-575): Do NOT auto-delete retro.json by age. The retro trigger now
+    # persists across days until `beacon retro done` (cmd_retro_done) explicitly
+    # removes it. _auto_fire_retro_trigger refreshes the message daily so the
+    # "overdue weeks" list stays accurate; deletion solely on age would defeat
+    # the persistence requirement of UC5-J5'.
     # Clean up stale operation_check triggers
     for fname in os.listdir(triggers_dir):
         if not fname.startswith("operation_check_") or not fname.endswith(".json"):
@@ -3564,66 +3660,219 @@ def cmd_project_unarchive():
     print(f"Unarchived: [{data.get('name', '')}]")
 
 
-def cmd_search():
-    """Full-text search across milestones, tasks, commits, PRs, and saves."""
-    query = os.environ.get("BEACON_QUERY", "").lower().strip()
-    ms_filter = os.environ.get("BEACON_MS_ID", "")
+def cmd_cycle_status():
+    """Emit a per-cycle activation snapshot for the current project.
+
+    Output (JSON mode is default for AI consumers):
+
+      {
+        "push":     {"active": true,  "last_action_date": "2026-05-10T00:00:00Z"},
+        "deploy":   {"active": false, "last_action_date": null},
+        "retro":    {"active": false, "last_action_date": null},
+        "operation":{"active": true,  "last_action_date": "..."},
+        "release":  {"active": false, "last_action_date": null}
+      }
+
+    Skill consumers (/beacon-log Step 7, /beacon-push Step 2.5, etc.) call
+    this once and branch their rhythm-suggestion logic on the result. Centra-
+    lizing it here means every Skill agrees on activation semantics — see
+    CORE doc `Cdg2zJtrOajm1q8adMa1` and SPEC `LqXEEbgsH712Z78KBELP`.
+
+    Text mode is for human inspection and not load-bearing.
+    """
+    import cycle as cycle_mod  # local import: optional dependency outside of Skill use
+
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
-
-    if not query:
-        print("Usage: beacon search <query>", file=sys.stderr)
-        sys.exit(1)
-
     data = load_project()
-    results = []
 
-    def _search_entries(entries, ms_id, ms_title):
-        for e in entries:
-            desc = e.get("description", "").lower()
-            detail = e.get("detail", "").lower()
-            if query in desc or query in detail:
-                results.append({
-                    "ms_id": ms_id,
-                    "ms_title": ms_title,
-                    "entry_id": e.get("id", ""),
-                    "type": e.get("type", ""),
-                    "status": e.get("status", ""),
-                    "description": e.get("description", ""),
-                    "date": e.get("date", "") or e.get("created_at", ""),
-                })
-            _search_entries(e.get("entries", []), ms_id, ms_title)
+    # In cloud mode the document list may live in a Firestore subcollection;
+    # we ask the doc list command's helper to fetch them lazily. Failure here
+    # is non-fatal — we degrade to "no docs known" which is the same as the
+    # legacy behavior of the per-cycle predicates.
+    documents: list[dict] = []
+    try:
+        if _is_cloud_mode():
+            client, config = _get_api_client()
+            documents = client.list_documents(config["project_id"]) or []
+        else:
+            docs_dir = _get_docs_dir()
+            if os.path.isdir(docs_dir):
+                for fname in sorted(os.listdir(docs_dir)):
+                    if not fname.endswith(".md"):
+                        continue
+                    try:
+                        documents.append(_read_local_doc(os.path.join(docs_dir, fname)))
+                    except Exception:
+                        # Best-effort: a single unparsable doc shouldn't abort the
+                        # whole snapshot. We just won't see it in the retro signal.
+                        continue
+    except Exception:
+        # If doc fetch fails entirely (e.g. cloud auth glitch), keep going
+        # with an empty list. push / deploy / operation cycles do not depend
+        # on documents and will still report correctly.
+        documents = []
 
-    for ms in data.get("milestones", []):
-        if ms_filter and ms["id"] != ms_filter:
-            continue
-        ms_title = ms.get("title", "")
-        if query in ms_title.lower():
-            results.append({
-                "ms_id": ms["id"],
-                "ms_title": ms_title,
-                "entry_id": ms["id"],
-                "type": "milestone",
-                "status": ms.get("status", ""),
-                "description": ms_title,
-                "date": "",
-            })
-        _search_entries(ms.get("entries", []), ms["id"], ms_title)
+    snapshot = cycle_mod.cycle_status_snapshot(data, documents=documents)
 
     if json_mode:
-        print(json.dumps(results, ensure_ascii=False))
+        print(json.dumps(snapshot, ensure_ascii=False))
         return
+
+    # Human-readable mode. Used for spot-checking during development; Skills
+    # always use --json.
+    print("Cycle status:")
+    for c, info in snapshot.items():
+        flag = "active" if info["active"] else "inactive"
+        last = info["last_action_date"] or "—"
+        print(f"  {c:<10s} {flag:<10s} last: {last}")
+
+
+def cmd_search():
+    """Unified search across all Beacon entities (CORE doc 検索基盤の原則 / SPEC 3ne57ccZegYQXDQA03op).
+
+    Delegates the actual work to lib/search.search_project so the CLI, server
+    endpoint, and Skill all share the same logic.
+    """
+    import search as _search  # noqa: PLC0415
+
+    query = os.environ.get("BEACON_QUERY", "")
+    ms_filter = os.environ.get("BEACON_MS_ID", "")
+    op_filter = os.environ.get("BEACON_OPERATION_ID", "")
+    id_filter = os.environ.get("BEACON_ENTRY_ID", "")
+    scope_filter = os.environ.get("BEACON_SCOPE", "")
+    assignee = os.environ.get("BEACON_ASSIGNEE", "")
+    owner = os.environ.get("BEACON_OWNER", "")
+    from_date = os.environ.get("BEACON_FROM", "")
+    to_date = os.environ.get("BEACON_TO", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    def _parse_list(env_key: str) -> list[str]:
+        raw = os.environ.get(env_key, "").strip()
+        if not raw:
+            return []
+        return [x.strip() for x in raw.split(",") if x.strip()]
+
+    type_list = _parse_list("BEACON_TYPE")
+    status_list = _parse_list("BEACON_STATUS")
+    priority_list = _parse_list("BEACON_PRIORITY")
+
+    try:
+        limit = int(os.environ.get("BEACON_LIMIT", "50"))
+    except ValueError:
+        limit = 50
+    try:
+        offset = int(os.environ.get("BEACON_OFFSET", "0"))
+    except ValueError:
+        offset = 0
+
+    # Without any filters the search defaults to "give me the 50 most-recent
+    # entities". This matches the SPEC: "all params omitted = ダッシュボード
+    # 最近の動き相当". So an empty query is no longer an error.
+
+    data = load_project()
+    documents = _load_local_documents()
+
+    result = _search.search_project(
+        data,
+        documents,
+        q=query,
+        type=type_list or None,
+        status=status_list or None,
+        priority=priority_list or None,
+        scope=scope_filter,
+        ms=ms_filter,
+        op=op_filter,
+        id=id_filter,
+        assignee=assignee,
+        owner=owner,
+        from_date=from_date,
+        to_date=to_date,
+        limit=limit,
+        offset=offset,
+    )
+
+    if json_mode:
+        print(json.dumps(result, ensure_ascii=False))
+        return
+
+    results = result["results"]
+    total = result["total"]
 
     if not results:
-        print(f"No results for: {query}")
+        if query:
+            print(f"No results for: {query}")
+        else:
+            print("No results.")
         return
 
-    type_icons = {"task": "□", "commit": "○", "pr": "PR", "milestone": "MS", "save": "→"}
-    print(f"{len(results)} result(s) for: {query}")
+    type_icons = {
+        "task": "□", "commit": "○", "pr": "PR", "milestone": "MS",
+        "save": "→", "document": "📄", "push": "↑", "deploy": "▲",
+        "operation": "⚙", "operation_task": "·", "run": "▷", "incident": "⚠",
+    }
+    header = f"{total} result(s)"
+    if query:
+        header += f" for: {query}"
+    if total > len(results):
+        header += f"  (showing {len(results)} from offset {result['offset']})"
+    print(header)
     for r in results:
-        icon = type_icons.get(r["type"], "?")
-        status_note = f" [{r['status']}]" if r["status"] not in ("done", "cancelled", "") else ""
-        print(f"  {icon} [{r['entry_id']}] {r['description'][:80]}{status_note}")
-        print(f"       └─ {r['ms_id']}: {r['ms_title'][:50]}")
+        icon = type_icons.get(r.get("entity_type", ""), "?")
+        status_note = f" [{r['status']}]" if r.get("status") else ""
+        date_part = (r.get("created_at") or "")[:10]
+        title = r.get("title") or r.get("snippet", "")[:80]
+        print(f"  {icon} [{r['id']}] {title[:80]}{status_note}")
+        scope_or_ms = r.get("scope") or r.get("ms_id") or r.get("op_id") or ""
+        if scope_or_ms or date_part:
+            print(f"       └─ {scope_or_ms}  {date_part}")
+        if r.get("snippet") and r["snippet"] != title:
+            snip = r["snippet"][:120]
+            print(f"       └─ {snip}")
+
+
+def _load_local_documents() -> list[dict]:
+    """Read all .beacon/documents/*.md files and return them as dicts with
+    frontmatter fields (title, scope, milestone, operation, content, etc.)
+    promoted to top level. Used by cmd_search for local-mode document search."""
+    docs: list[dict] = []
+    project_file = get_project_file()
+    docs_dir = os.path.join(os.path.dirname(project_file), "documents")
+    if not os.path.isdir(docs_dir):
+        return docs
+    for fname in os.listdir(docs_dir):
+        if not fname.endswith(".md"):
+            continue
+        path = os.path.join(docs_dir, fname)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = f.read()
+        except OSError:
+            continue
+        # Parse YAML-ish frontmatter (--- delimited)
+        meta: dict[str, str] = {}
+        content = raw
+        if raw.startswith("---\n"):
+            try:
+                _, fm, body = raw.split("---\n", 2)
+                for line in fm.splitlines():
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        meta[k.strip()] = v.strip().strip('"').strip("'")
+                content = body
+            except ValueError:
+                pass
+        doc_id = meta.get("doc_id") or fname[:-3]
+        docs.append({
+            "doc_id": doc_id,
+            "title": meta.get("title", fname[:-3]),
+            "scope": meta.get("scope", "memo"),
+            "milestone": meta.get("milestone", ""),
+            "operation": meta.get("operation", ""),
+            "content": content,
+            "created_at": meta.get("created_at", ""),
+            "updated_at": meta.get("updated_at", ""),
+        })
+    return docs
 
 
 def cmd_doctor():
@@ -4096,6 +4345,82 @@ def cmd_incident_escalate():
     print(f"  {task['description']}")
 
 
+def cmd_incident_list():
+    """List incidents.
+
+    Filters:
+      -o <op-id>          only this Operation
+      --status <status>   open / closed (default: all)
+      --include-closed    shorthand for --status closed but additive
+      --json              machine-readable output
+
+    Used by:
+      - /beacon-operation-review Step 6.5 (open Incident close 誘導)
+      - /beacon-retrospect (past Incident history retrospection, UC10-O6 / e-619)
+      - Direct CLI inspection
+    """
+    op_filter = os.environ.get("BEACON_OPERATION_ID", "")
+    status_filter = os.environ.get("BEACON_INCIDENT_STATUS", "")
+    include_closed = os.environ.get("BEACON_INCLUDE_CLOSED", "") == "1"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    data = load_project()
+    results = []
+    for op in data.get("operations", []):
+        if op_filter and op.get("id") != op_filter:
+            continue
+        for entry in op.get("entries", []):
+            if entry.get("type") != "incident":
+                continue
+            entry_status = entry.get("status", "open")
+            # status_filter wins; if not specified, default is to show open only
+            # unless --include-closed is set. Treat "closed" / "resolved" /
+            # "cancelled" all as "not open" for the include_closed shorthand
+            # since Beacon's incident states are not fully standardized yet.
+            if status_filter:
+                if status_filter != entry_status:
+                    continue
+            elif not include_closed:
+                if entry_status != "open":
+                    continue
+            results.append({
+                "id": entry.get("id"),
+                "op_id": op.get("id"),
+                "op_title": op.get("title", ""),
+                "title": entry.get("title", ""),
+                "description": entry.get("description", ""),
+                "status": entry_status,
+                "priority": entry.get("priority", ""),
+                "created_at": entry.get("created_at", ""),
+                "closed_at": entry.get("closed_at", ""),
+                "resolution": entry.get("resolution", ""),
+            })
+
+    # Most recent first
+    results.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+
+    if json_mode:
+        print(json.dumps(results, ensure_ascii=False))
+        return
+
+    if not results:
+        if op_filter:
+            print(f"No incidents found for {op_filter}.")
+        else:
+            print("No incidents found.")
+        return
+
+    for r in results:
+        status_icon = "✓" if r["status"] == "closed" else "⚠"
+        date_part = (r.get("closed_at") or r.get("created_at") or "")[:10]
+        print(f"{status_icon} [{r['id']}] {r['title']}")
+        print(f"  op: {r['op_id']} \"{r['op_title']}\" / {date_part} / status: {r['status']}")
+        if r["status"] == "closed" and r.get("resolution"):
+            print(f"  resolution: {r['resolution'][:120]}")
+        elif r.get("description"):
+            print(f"  desc: {r['description'][:120]}")
+
+
 # ---------------------------------------------------------------------------
 # Main dispatch
 # ---------------------------------------------------------------------------
@@ -4155,6 +4480,7 @@ if __name__ == "__main__":
         "auth_status": lambda: __import__("auth").status(),
         "skill_install": cmd_skill_install,
         "search": cmd_search,
+        "cycle_status": cmd_cycle_status,
         "project_archive": cmd_project_archive,
         "deploy_record": cmd_deploy_record,
         "deploy_list": cmd_deploy_list,
@@ -4188,6 +4514,7 @@ if __name__ == "__main__":
         "incident_open": cmd_incident_open,
         "incident_close": cmd_incident_close,
         "incident_escalate": cmd_incident_escalate,
+        "incident_list": cmd_incident_list,
         "note_add": cmd_note_add,
         "note_list": cmd_note_list,
         "note_clear": cmd_note_clear,

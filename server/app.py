@@ -16,7 +16,7 @@ from typing import Optional
 # Add lib/ to path so we can import core
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
-from fastapi import FastAPI, HTTPException, Depends, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Depends, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -1028,49 +1028,63 @@ def save_retro(project_id: str, week: str, body: RetroCreate,
 
 
 @app.get("/api/projects/{project_id}/search")
-def search_project(project_id: str, q: str = "", ms: str = "",
-                   user: dict = Depends(require_auth)):
-    """Full-text search across milestones, tasks, commits, and saves."""
+def search_project(
+    project_id: str,
+    q: str = "",
+    type: Optional[str] = None,        # CSV (task,commit,...) — required by CORE doc
+    status: Optional[str] = None,      # CSV
+    priority: Optional[str] = None,    # CSV
+    scope: str = "",
+    ms: str = "",
+    op: str = "",
+    id: str = "",
+    assignee: str = "",
+    owner: str = "",
+    from_: Optional[str] = Query(default=None, alias="from"),
+    to: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    user: dict = Depends(require_auth),
+):
+    """Unified search across all Beacon entities.
+
+    See CORE doc 'Beacon 検索基盤の原則' and SPEC '3ne57ccZegYQXDQA03op' for
+    the design contract. This endpoint delegates to lib/search.search_project
+    so the CLI, server, and Skills all share the same logic.
+    """
+    import sys as _sys, os as _os
+    _LIB = _os.path.join(_os.path.dirname(__file__), "..", "lib")
+    if _LIB not in _sys.path:
+        _sys.path.insert(0, _LIB)
+    import search as _search  # noqa: PLC0415
+
     data = _load(project_id, user)
-    query = q.lower().strip()
-    if not query:
-        return []
+    # Hydrate documents from Firestore subcollection.
+    documents = db.list_documents(project_id)
 
-    results = []
+    def _split(s: Optional[str]) -> Optional[list[str]]:
+        if not s:
+            return None
+        return [x.strip() for x in s.split(",") if x.strip()]
 
-    def _search_entries(entries, ms_id, ms_title):
-        for e in entries:
-            desc = (e.get("description") or "").lower()
-            detail = (e.get("detail") or "").lower()
-            if query in desc or query in detail:
-                results.append({
-                    "ms_id": ms_id,
-                    "ms_title": ms_title,
-                    "entry_id": e.get("id", ""),
-                    "type": e.get("type", ""),
-                    "status": e.get("status", ""),
-                    "description": e.get("description", ""),
-                    "date": e.get("date", "") or e.get("created_at", ""),
-                })
-            _search_entries(e.get("entries", []), ms_id, ms_title)
-
-    for milestone in data.get("milestones", []):
-        if ms and milestone["id"] != ms:
-            continue
-        ms_title = milestone.get("title", "")
-        if query in ms_title.lower():
-            results.append({
-                "ms_id": milestone["id"],
-                "ms_title": ms_title,
-                "entry_id": milestone["id"],
-                "type": "milestone",
-                "status": milestone.get("status", ""),
-                "description": ms_title,
-                "date": "",
-            })
-        _search_entries(milestone.get("entries", []), milestone["id"], ms_title)
-
-    return results
+    return _search.search_project(
+        data,
+        documents,
+        q=q,
+        type=_split(type),
+        status=_split(status),
+        priority=_split(priority),
+        scope=scope,
+        ms=ms,
+        op=op,
+        id=id,
+        assignee=assignee,
+        owner=owner,
+        from_date=from_ or "",
+        to_date=to or "",
+        limit=limit,
+        offset=offset,
+    )
 
 
 # ---------------------------------------------------------------------------

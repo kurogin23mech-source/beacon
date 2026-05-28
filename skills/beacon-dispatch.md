@@ -1,7 +1,7 @@
 ---
 name: beacon-dispatch
 description: 依存グラフから実行可能なマイルストーンを特定し、サブエージェントを並列起動する。マルチエージェント協奏のオーケストレーター。
-version: 0.1.0
+version: 0.2.0
 triggers:
   - /beacon-dispatch
   - サブエージェントを起動
@@ -112,6 +112,22 @@ beacon task list --json --ms <ms-id>
 
 `entries[]` から `type == "task"` かつ `status != "done"` かつ `status != "cancelled"` のものを抽出する（ネストされた `entries[]` 内も再帰的に確認）。
 
+### 3c. CORE doc 一覧（全MS共通の前提として渡す）
+
+```bash
+beacon doc list --scope core --json
+```
+
+結果から `project-vision` doc と、ms-40 等で参照される **重要 CORE doc 群** を特定する。サブエージェントには doc_id とタイトルのリストを渡し、必要に応じて自ら `beacon doc show <doc_id>` で取得させる方針 (prompt 肥大化回避)。
+
+特に以下の CORE doc は **常に明示的に prompt に列挙**する（参照の漏れを防ぐ）:
+- `project-vision` — プロジェクトビジョン
+- 関連 SPEC が参照している CORE doc（SPEC 本文から `関連 CORE` セクションを抽出して取得）
+
+### 3d. MS が参照する SPEC / CORE doc の依存関係抽出
+
+各 MS の SPEC 本文 (Step 3a で取得) から「関連 CORE」「関連 SPEC」セクションを軽くパースして、サブエージェントが追加で読むべきドキュメント ID を列挙する。これは prompt の「## 前提コンテキスト」セクションに記載される。
+
 ## Step 4: Dispatch計画の提示
 
 収集した情報をユーザーに提示する。**実行可能MS・待機中MS・相互依存チェックをすべて表示する**:
@@ -201,18 +217,41 @@ Step 4.5 で準備したworktree情報を使い、各MSに対して **Agent tool
 - ID: [ms-id]
 - Title: [title]
 - Workspace: [workspace_path from Step 4.5, or "プロジェクトルート"]
+- Branch: [workspace_branch]
 
-## 作業ディレクトリ
-Workspace: [workspace_path]
-このディレクトリで作業してください（絶対パスで指定するか、cd して作業する）。
-Worktreeブランチ: [workspace_branch]
-git操作はこのworktree内で完結させてください（mainブランチには直接コミットしない）。
+## 作業ディレクトリ（重要: cwd を必ず明示）
 
-## セッション開始
-まず `/beacon-session-start [ms-id]` を実行して、担当MSのコンテキストを復元してください。
+Workspace 絶対パス: [abs_workspace_path]
 
-## SPECドキュメント
-[SPECの全文をここに展開。なければ "(SPECなし)"]
+- すべての Bash 呼び出しに `cwd=[abs_workspace_path]` を明示する、または `cd "[abs_workspace_path]" && ...` 形式で実行する
+- ホームディレクトリで起動された場合でも、上記 workspace を基準に動作させる
+- git 操作は `git -C [abs_workspace_path] <subcommand>` 形式が安全
+- worktree が無い場合はプロジェクトルートで作業（main ブランチには直接コミットしない）
+
+## ⚠️ 最初の必須ステップ: セッション開始
+
+**何を始めるよりも先に** Bash ツールで:
+```
+cd "[abs_workspace_path]" && /beacon-session-start [ms-id]
+```
+を実行し、担当 MS のコンテキスト（CORE doc / SPEC / タスク / Operation / 未解決 Incident）を完全に復元すること。
+
+これは規約であり、スキップしてはならない。session-start 出力に書かれた前提（CORE 原則、SPEC の判断軌跡、未解決 Incident、トリガー）はすべて作業中に尊重する。
+
+## 前提コンテキスト
+
+### Project Vision (重要)
+プロジェクト全体のビジョンは CORE doc `project-vision`。session-start が読み込んでくれるので、その内容を熟読してから着手すること。
+
+### 参照すべき CORE doc
+以下の CORE doc を session-start 後に必要に応じて `beacon doc show <doc_id>` で取得：
+[Step 3c で抽出した CORE doc id とタイトル一覧]
+
+### 関連 SPEC（本 MS の SPEC 本文から抽出した参照リンク）
+[Step 3d で抽出した関連 SPEC / CORE doc 一覧]
+
+## SPEC ドキュメント（本 MS 専用）
+[SPECの全文をここに展開。なければ "(SPECなし — objective / ac とタスク description のみを材料に判断すること)"]
 
 ## 未完了タスク
 [タスク一覧を展開]
@@ -220,12 +259,18 @@ git操作はこのworktree内で完結させてください（mainブランチ�
 - [entry-id]: [description]
 
 ## 作業ルール
-1. Workspaceディレクトリ内で作業する（絶対パス: [abs_workspace_path]）
-2. タスクを完了したら `beacon task done <entry-id>` で記録する
-3. コミット後は `/beacon-log` で進捗を記録する
-4. 新しいタスクが必要になったら `beacon task add "description" -m [ms-id]` で追加する
-5. 作業完了後、最終状態を簡潔に報告する
-6. 作業完了後: オーケストレーターが `beacon milestone workspace-cleanup [ms-id]` でworktreeをクリーンアップする
+1. 上記「最初の必須ステップ」を **必ず最初に** 実行する（session-start）
+2. 全ての Bash 呼び出しに `cwd=[abs_workspace_path]` または `cd "[abs_workspace_path]" && ...` を明示する
+3. タスクを完了したら `beacon task done <entry-id> --reason "..."` で記録する (reason 必須)
+4. コミット後は `/beacon-log` で進捗を記録する (PostToolUse hook で自動)
+5. 新しいタスクが必要になったら `beacon task add "description" -m [ms-id] --motivation "..." --acceptance-criteria "..."` で追加する
+6. **書き込み系コードを新規追加する場合**は `lib/operations.py` の `apply_operation` を経由させる（lost-update protection）
+7. 作業完了後、以下を **親エージェントへの報告として** 含める:
+   - 完了タスク ID 一覧 + 残タスク ID 一覧
+   - 主要コミットハッシュ
+   - 学んだこと・判断軌跡で SPEC や CORE doc に昇格すべきもの（提案レベルで OK、親に伝える）
+   - 注意点・既知の問題
+8. 作業完了後: オーケストレーターが `beacon milestone workspace-cleanup [ms-id]` でworktreeをクリーンアップする
 ```
 
 ## Step 6: 結果報告
@@ -269,3 +314,5 @@ Next wave available:
 - **ユーザー承認必須**: Step 4 でユーザーの明示的な承認がなければ Step 5 に進まない。
 - **失敗の報告**: サブエージェントがエラーを返した場合、握りつぶさずそのまま報告する。
 - **project.json への直接書き込み禁止**: beacon CLI を通じてのみ状態を変更する。
+- **サブエージェント session-start を必ず prompt に強制**: prompt の冒頭に「最初の必須ステップ: `/beacon-session-start <ms-id>`」を明示する。これがないと CORE doc / SPEC のコンテキストが復元されず、実装方針がブレる。
+- **CORE doc / project-vision の参照を明示**: Step 3c/3d で抽出した CORE / 関連 SPEC のリストを prompt に必ず含める。サブエージェントは新セッション扱いなので、自動で読まれることに依存しない。
