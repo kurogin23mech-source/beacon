@@ -42,6 +42,12 @@ VALID_REVIEW_STATUSES = {"pending", "approved", "changes_requested", "rejected"}
 VALID_RUN_STATUSES = {"ok", "warning", "error"}
 VALID_INCIDENT_STATUSES = {"open", "resolved"}
 VALID_PRIORITIES = {"highest", "high", "middle", "low", "lowest"}
+# Member roles (e-624): defines permissions in 2-5 person team context.
+# - owner: project owner, all permissions including delete project
+# - maintainer: can manage milestones / merge PRs / approve operations
+# - contributor: can create tasks / PRs but not delete or merge
+# - viewer: read-only (Web UI dashboard observer)
+VALID_MEMBER_ROLES = {"owner", "maintainer", "contributor", "viewer"}
 # Operation lifecycle states (mirrors Milestone for symmetry):
 #   todo         — defined but not active (outline only, OperationTasks not finished)
 #   in_progress  — actively preparing (filling OperationTasks)
@@ -225,7 +231,8 @@ def _find_entry_in(entries: list, entry_id: str, ms: dict):
 
 def milestone_add(data: dict, title: str, target_date: str = "",
                    description: str = "", priority: str = "",
-                   objective: str = "", acceptance_criteria: str = "") -> str:
+                   objective: str = "", acceptance_criteria: str = "",
+                   owner: str = "", assignee: str = "") -> str:
     """Add a milestone. Returns the new ms_id."""
     ms_id_num = len(data["milestones"]) + 1
     ms_id = f"ms-{ms_id_num}"
@@ -248,6 +255,14 @@ def milestone_add(data: dict, title: str, target_date: str = "",
         ms["objective"] = objective
     if acceptance_criteria:
         ms["acceptance_criteria"] = acceptance_criteria
+    # e-625: owner/assignee are recorded but NOT validated against members[]
+    # at this layer — that check belongs in the CLI/API surface, where we
+    # can produce a friendly "did you mean to `beacon member add` first?"
+    # message. Here we just store whatever string the caller provided.
+    if owner:
+        ms["owner"] = owner
+    if assignee:
+        ms["assignee"] = assignee
     data["milestones"].append(ms)
     return ms_id
 
@@ -283,8 +298,14 @@ def milestone_update(data: dict, ms_id: str, *,
                      target_date: str = "", status: str = "",
                      description: str = "", reason: str = "",
                      priority: str = "", objective: str = "",
-                     acceptance_criteria: str = "") -> dict:
-    """Update milestone fields. Returns the milestone."""
+                     acceptance_criteria: str = "",
+                     owner: str = "", assignee: str = "") -> dict:
+    """Update milestone fields. Returns the milestone.
+
+    e-625: owner / assignee can be cleared by passing the literal string
+    "-" (matches the convention used by other CLI clear-this-field tools);
+    any other non-empty value sets the field.
+    """
     for ms in data["milestones"]:
         if ms["id"] == ms_id:
             if title:
@@ -306,6 +327,10 @@ def milestone_update(data: dict, ms_id: str, *,
                 ms["objective"] = objective
             if acceptance_criteria:
                 ms["acceptance_criteria"] = acceptance_criteria
+            if owner:
+                ms["owner"] = "" if owner == "-" else owner
+            if assignee:
+                ms["assignee"] = "" if assignee == "-" else assignee
             if status:
                 if status not in VALID_STATUSES:
                     raise ValueError(
@@ -333,6 +358,109 @@ def milestone_delete(data: dict, ms_id: str, *, reason: str = "") -> dict:
                 meta["cancel_reason"] = reason
             return ms
     raise ValueError(f"Milestone not found: {ms_id}")
+
+
+# ---------------------------------------------------------------------------
+# Member operations (e-624)
+# ---------------------------------------------------------------------------
+#
+# `members` is a flat list at project root. Each member is:
+#   {
+#     "id":       "<handle>",          # required, unique within the project
+#     "name":     "<display name>",     # optional, defaults to id
+#     "email":    "<email>",            # optional
+#     "role":     "owner|maintainer|contributor|viewer",
+#     "added_at": "<iso-timestamp>",
+#     "added_by": "<actor>",
+#   }
+#
+# These functions are PURE — they mutate the project dict and return a value
+# but never touch I/O. They are designed to be called from inside an
+# apply_operation closure.
+
+def members_list(data: dict) -> list:
+    """Return the list of members (never None — empty list if absent)."""
+    members = data.get("members")
+    if not isinstance(members, list):
+        return []
+    return members
+
+
+def member_add(data: dict, member_id: str, *, name: str = "", email: str = "",
+               role: str = "contributor") -> dict:
+    """Add a member to the project. Returns the new member dict.
+
+    Raises ValueError if member_id is empty, role is invalid, or a member
+    with the same id already exists.
+    """
+    if not member_id or not member_id.strip():
+        raise ValueError("Member id is required")
+    member_id = member_id.strip()
+    if role not in VALID_MEMBER_ROLES:
+        raise ValueError(
+            f"Invalid role: {role}. Valid: {', '.join(sorted(VALID_MEMBER_ROLES))}"
+        )
+    members = data.setdefault("members", [])
+    if not isinstance(members, list):
+        # Heal a corrupt members field rather than raising — this only happens
+        # if someone hand-edited project.json (which is explicitly banned).
+        members = []
+        data["members"] = members
+    for m in members:
+        if isinstance(m, dict) and m.get("id") == member_id:
+            raise ValueError(f"Member already exists: {member_id}")
+    new_member = {
+        "id": member_id,
+        "name": name or member_id,
+        "email": email,
+        "role": role,
+        "added_at": _now_iso(),
+        "added_by": _get_actor(),
+    }
+    members.append(new_member)
+    return new_member
+
+
+def member_remove(data: dict, member_id: str, *, reason: str = "") -> dict:
+    """Remove a member from the project. Returns the removed member dict.
+
+    Raises ValueError if no such member exists. owner role cannot be removed
+    (escalate the new owner first with `member role`).
+    """
+    members = data.get("members", [])
+    if not isinstance(members, list):
+        raise ValueError(f"Member not found: {member_id}")
+    for i, m in enumerate(members):
+        if isinstance(m, dict) and m.get("id") == member_id:
+            if m.get("role") == "owner":
+                raise ValueError(
+                    f"Cannot remove owner {member_id}. "
+                    "Promote another member with `beacon member role <id> owner` first."
+                )
+            removed = members.pop(i)
+            # Audit trail lives in changelog.jsonl via apply_operation; we
+            # don't write that here (this function is pure data).
+            return removed
+    raise ValueError(f"Member not found: {member_id}")
+
+
+def member_set_role(data: dict, member_id: str, role: str) -> dict:
+    """Change a member's role. Returns the updated member dict.
+
+    Raises ValueError on invalid role or unknown member.
+    """
+    if role not in VALID_MEMBER_ROLES:
+        raise ValueError(
+            f"Invalid role: {role}. Valid: {', '.join(sorted(VALID_MEMBER_ROLES))}"
+        )
+    members = data.get("members", [])
+    if not isinstance(members, list):
+        raise ValueError(f"Member not found: {member_id}")
+    for m in members:
+        if isinstance(m, dict) and m.get("id") == member_id:
+            m["role"] = role
+            return m
+    raise ValueError(f"Member not found: {member_id}")
 
 
 # ---------------------------------------------------------------------------

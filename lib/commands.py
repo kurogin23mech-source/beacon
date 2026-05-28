@@ -422,12 +422,20 @@ def cmd_milestone_add():
     priority = os.environ.get("BEACON_PRIORITY", "")
     objective = os.environ.get("BEACON_OBJECTIVE", "")
     acceptance_criteria = os.environ.get("BEACON_ACCEPTANCE_CRITERIA", "")
+    owner = os.environ.get("BEACON_OWNER", "")
+    assignee = os.environ.get("BEACON_ASSIGNEE", "")
     data = load_project()
     ms_id = core.milestone_add(data, title, target_date, description=description,
                                priority=priority, objective=objective,
-                               acceptance_criteria=acceptance_criteria)
+                               acceptance_criteria=acceptance_criteria,
+                               owner=owner, assignee=assignee)
     save_project(data)
     print(f"Added milestone {ms_id}: {title}")
+    if owner or assignee:
+        if owner:
+            print(f"  owner: {owner}")
+        if assignee:
+            print(f"  assignee: {assignee}")
 
     # Promote SPEC creation: fire a trigger so session-start / next prompt
     # surfaces a warning. SPEC = requirements + decision trail (see CORE
@@ -601,6 +609,8 @@ def cmd_milestone_update():
             priority=os.environ.get("BEACON_PRIORITY", ""),
             objective=os.environ.get("BEACON_OBJECTIVE", ""),
             acceptance_criteria=os.environ.get("BEACON_ACCEPTANCE_CRITERIA", ""),
+            owner=os.environ.get("BEACON_OWNER", ""),
+            assignee=os.environ.get("BEACON_ASSIGNEE", ""),
         )
     except ValueError as e:
         print(str(e))
@@ -1150,6 +1160,183 @@ def cmd_note_clear():
     except Exception:
         pass
     print("Session notes cleared.")
+
+
+# ---------------------------------------------------------------------------
+# Member management (e-624)
+# ---------------------------------------------------------------------------
+#
+# All write paths go through lib/operations.apply_operation so the ms-39
+# lost-update protection covers concurrent member edits (two maintainers
+# inviting different people at the same moment, etc.). Reads are direct
+# load_project, which is consistent with task_list / milestone_list and
+# does not need atomicity.
+
+def _project_id_for_ops() -> str:
+    """Return the project_id used by apply_operation for this CLI invocation.
+
+    Local mode: project_id is irrelevant beyond changelog labeling, so we
+    use the project's `name` field. Cloud mode: requires the cloud.json
+    project_id which the API layer normally supplies — here we read
+    .beacon/cloud.json if present, else fall back to project name.
+    """
+    try:
+        data = load_project()
+    except Exception:
+        return ""
+    project_file = get_project_file()
+    beacon_dir = os.path.dirname(project_file) or ".beacon"
+    cloud_json = os.path.join(beacon_dir, "cloud.json")
+    if os.path.exists(cloud_json):
+        try:
+            with open(cloud_json, "r", encoding="utf-8") as f:
+                return json.load(f).get("project_id", "") or data.get("name", "")
+        except (OSError, json.JSONDecodeError):
+            pass
+    return data.get("name", "")
+
+
+def cmd_member_add():
+    """Add a member to the project."""
+    import operations  # lazy import to avoid circular at module load
+
+    member_id = (os.environ.get("BEACON_MEMBER_ID", "") or "").strip()
+    name = os.environ.get("BEACON_MEMBER_NAME", "")
+    email = os.environ.get("BEACON_MEMBER_EMAIL", "")
+    role = os.environ.get("BEACON_MEMBER_ROLE", "") or "contributor"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not member_id:
+        print("Error: member id is required", file=sys.stderr)
+        print("Usage: beacon member add <id> [--name N] [--email E] [--role owner|maintainer|contributor|viewer]",
+              file=sys.stderr)
+        sys.exit(1)
+
+    project_id = _project_id_for_ops()
+
+    def op(data):
+        new_member = core.member_add(data, member_id, name=name, email=email, role=role)
+        return data, new_member
+
+    try:
+        new_member = operations.apply_operation(
+            project_id, op,
+            op_name="member.add",
+            reason=f"add member {member_id} as {role}",
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(new_member, ensure_ascii=False))
+    else:
+        print(f"Added member {new_member['id']} ({new_member['role']})")
+
+
+def cmd_member_list():
+    """List members of the project."""
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    members = core.members_list(data)
+    if json_mode:
+        print(json.dumps(members, ensure_ascii=False, indent=2))
+        return
+    if not members:
+        print("(no members — `beacon member add <id>` to add the first one)")
+        return
+    print(f"Members ({len(members)}):")
+    # Pretty-print: align role column for readability
+    width = max(len(m.get("id", "")) for m in members) + 2
+    for m in members:
+        role = m.get("role", "?")
+        name = m.get("name", "")
+        email = m.get("email", "")
+        extras = []
+        if name and name != m.get("id"):
+            extras.append(name)
+        if email:
+            extras.append(email)
+        extras_str = f"  ({', '.join(extras)})" if extras else ""
+        print(f"  {m.get('id', '?'):<{width}} {role:<11}{extras_str}")
+
+
+def cmd_member_remove():
+    """Remove a member from the project."""
+    import operations
+
+    member_id = (os.environ.get("BEACON_MEMBER_ID", "") or "").strip()
+    reason = os.environ.get("BEACON_REASON", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not member_id:
+        print("Error: member id is required", file=sys.stderr)
+        sys.exit(1)
+    if not reason:
+        # e-630: state-changing operations require an audit reason.
+        print(
+            "Error: --reason is required for member remove "
+            "(audit trail per CORE doc data-immutability-principle)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    project_id = _project_id_for_ops()
+
+    def op(data):
+        removed = core.member_remove(data, member_id, reason=reason)
+        return data, removed
+
+    try:
+        removed = operations.apply_operation(
+            project_id, op,
+            op_name="member.remove",
+            reason=reason,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(removed, ensure_ascii=False))
+    else:
+        print(f"Removed member {removed['id']}")
+
+
+def cmd_member_role():
+    """Change a member's role."""
+    import operations
+
+    member_id = (os.environ.get("BEACON_MEMBER_ID", "") or "").strip()
+    role = (os.environ.get("BEACON_MEMBER_ROLE", "") or "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not member_id or not role:
+        print("Error: member id and role are required", file=sys.stderr)
+        print("Usage: beacon member role <id> <owner|maintainer|contributor|viewer>",
+              file=sys.stderr)
+        sys.exit(1)
+
+    project_id = _project_id_for_ops()
+
+    def op(data):
+        updated = core.member_set_role(data, member_id, role)
+        return data, updated
+
+    try:
+        updated = operations.apply_operation(
+            project_id, op,
+            op_name="member.role",
+            reason=f"set role of {member_id} to {role}",
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(updated, ensure_ascii=False))
+    else:
+        print(f"Set {updated['id']} role to {updated['role']}")
 
 
 # ---------------------------------------------------------------------------
@@ -4906,6 +5093,10 @@ if __name__ == "__main__":
         "note_add": cmd_note_add,
         "note_list": cmd_note_list,
         "note_clear": cmd_note_clear,
+        "member_add": cmd_member_add,
+        "member_list": cmd_member_list,
+        "member_remove": cmd_member_remove,
+        "member_role": cmd_member_role,
         "version": lambda: print(f"beacon {__version__}"),
         "help_json": cmd_help_json,
         "doctor": cmd_doctor,

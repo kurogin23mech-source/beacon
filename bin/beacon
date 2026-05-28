@@ -27,6 +27,14 @@ Milestones:
   beacon milestone delete <id>  Delete (soft) a milestone
   beacon milestone depends <id> Set milestone dependencies
   beacon milestone graph        Show dependency graph
+  beacon milestone add ... [--owner U] [--assignee U]   Set owner/assignee at creation
+  beacon milestone update <id> [--owner U] [--assignee U]   Change owner/assignee
+
+Members (2-5 person teams):
+  beacon member add <id> [--name N] [--email E] [--role R]   Add a project member
+  beacon member list [--json]                                 List members
+  beacon member remove <id> --reason <text>                   Remove (audit required)
+  beacon member role <id> <role>                              Change role
 
 Tasks & Progress:
   beacon task add "desc" [-m <ms-id>]   Add a task to a milestone
@@ -344,6 +352,8 @@ cmd_milestone_add() {
     local priority=""
     local objective=""
     local acceptance_criteria=""
+    local owner=""
+    local assignee=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -352,6 +362,8 @@ cmd_milestone_add() {
             --priority)                 priority="${2:-}";             shift 2 ;;
             --objective)                objective="${2:-}";            shift 2 ;;
             --acceptance-criteria|--ac) acceptance_criteria="${2:-}";  shift 2 ;;
+            --owner)                    owner="${2:-}";                shift 2 ;;
+            --assignee)                 assignee="${2:-}";             shift 2 ;;
             *)                          title="$1";                    shift   ;;
         esac
     done
@@ -370,6 +382,7 @@ cmd_milestone_add() {
     BEACON_TITLE="$title" BEACON_TARGET_DATE="$target_date" \
         BEACON_DESCRIPTION="$description" BEACON_PRIORITY="$priority" \
         BEACON_OBJECTIVE="$objective" BEACON_ACCEPTANCE_CRITERIA="$acceptance_criteria" \
+        BEACON_OWNER="$owner" BEACON_ASSIGNEE="$assignee" \
         python3 "$COMMANDS_PY" milestone_add
 }
 
@@ -458,6 +471,9 @@ cmd_milestone_update() {
     local priority=""
     local objective=""
     local acceptance_criteria=""
+    local owner=""
+    local assignee=""
+    local reason=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -470,12 +486,16 @@ cmd_milestone_update() {
             --priority)     priority="${2:-}"; shift 2 ;;
             --objective)    objective="${2:-}"; shift 2 ;;
             --acceptance-criteria|--ac) acceptance_criteria="${2:-}"; shift 2 ;;
+            --owner)        owner="${2:-}"; shift 2 ;;
+            --assignee)     assignee="${2:-}"; shift 2 ;;
+            -r|--reason)    reason="${2:-}"; shift 2 ;;
             *)              ms_id="$1"; shift ;;
         esac
     done
 
     if [ -z "$ms_id" ]; then
-        echo "Usage: beacon milestone update <ms-id> [--title T] [--progress N] [--target-date D] [--status S] [--description D] [--priority P] [--objective O] [--ac A] [--json]"
+        echo "Usage: beacon milestone update <ms-id> [--title T] [--progress N] [--target-date D] [--status S] [--description D] [--priority P] [--objective O] [--ac A] [--owner OWNER] [--assignee ASSIGNEE] [-r REASON] [--json]"
+        echo "  Tip: pass --owner '-' or --assignee '-' to clear the field."
         exit 1
     fi
     BEACON_MS_ID="$ms_id" BEACON_JSON="$json_flag" BEACON_TITLE="$title" \
@@ -483,6 +503,8 @@ cmd_milestone_update() {
         BEACON_STATUS="$status" BEACON_DESCRIPTION="$description" \
         BEACON_PRIORITY="$priority" BEACON_OBJECTIVE="$objective" \
         BEACON_ACCEPTANCE_CRITERIA="$acceptance_criteria" \
+        BEACON_OWNER="$owner" BEACON_ASSIGNEE="$assignee" \
+        BEACON_REASON="$reason" \
         python3 "$COMMANDS_PY" milestone_update
 }
 
@@ -2107,6 +2129,78 @@ case "${1:-}" in
         case "${2:-}" in
             install) python3 "$COMMANDS_PY" skill_install ;;
             *)       echo "Usage: beacon skill install" ;;
+        esac
+        ;;
+    member)
+        ensure_project
+        case "${2:-}" in
+            add)
+                shift 2
+                mid="" mname="" memail="" mrole="contributor" mjson=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --name)  mname="${2:-}"; shift 2 ;;
+                        --email) memail="${2:-}"; shift 2 ;;
+                        --role)  mrole="${2:-}"; shift 2 ;;
+                        --json)  mjson="1"; shift ;;
+                        *)       [[ -z "$mid" ]] && mid="$1"; shift ;;
+                    esac
+                done
+                if [ -z "$mid" ]; then
+                    echo "Usage: beacon member add <id> [--name N] [--email E] [--role owner|maintainer|contributor|viewer] [--json]"
+                    exit 1
+                fi
+                BEACON_MEMBER_ID="$mid" BEACON_MEMBER_NAME="$mname" \
+                    BEACON_MEMBER_EMAIL="$memail" BEACON_MEMBER_ROLE="$mrole" \
+                    BEACON_JSON="$mjson" \
+                    python3 "$COMMANDS_PY" member_add
+                ;;
+            list|ls)
+                shift 2
+                mjson=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) mjson="1"; shift ;;
+                        *) shift ;;
+                    esac
+                done
+                BEACON_JSON="$mjson" python3 "$COMMANDS_PY" member_list
+                ;;
+            remove|rm)
+                shift 2
+                mid="" reason="" mjson=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        -r|--reason) reason="${2:-}"; shift 2 ;;
+                        --json)      mjson="1"; shift ;;
+                        *)           [[ -z "$mid" ]] && mid="$1"; shift ;;
+                    esac
+                done
+                if [ -z "$mid" ]; then
+                    echo "Usage: beacon member remove <id> --reason <text> [--json]"
+                    exit 1
+                fi
+                BEACON_MEMBER_ID="$mid" BEACON_REASON="$reason" BEACON_JSON="$mjson" \
+                    python3 "$COMMANDS_PY" member_remove
+                ;;
+            role)
+                shift 2
+                mid="${1:-}"
+                mrole="${2:-}"
+                if [ -z "$mid" ] || [ -z "$mrole" ]; then
+                    echo "Usage: beacon member role <id> <owner|maintainer|contributor|viewer>"
+                    exit 1
+                fi
+                BEACON_MEMBER_ID="$mid" BEACON_MEMBER_ROLE="$mrole" \
+                    python3 "$COMMANDS_PY" member_role
+                ;;
+            *)
+                echo "Usage: beacon member [add|list|remove|role]"
+                echo "  add <id> [--name N] [--email E] [--role R]   Add a member to the project"
+                echo "  list [--json]                                  List members"
+                echo "  remove <id> --reason <text>                    Remove a member (audit reason required)"
+                echo "  role <id> <role>                               Change role (owner|maintainer|contributor|viewer)"
+                ;;
         esac
         ;;
     update)
