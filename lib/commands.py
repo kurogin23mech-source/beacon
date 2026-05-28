@@ -2799,16 +2799,55 @@ def cmd_skill_install():
     claude_skills = os.path.join(home, ".claude", "skills")
     os.makedirs(claude_skills, exist_ok=True)
 
-    installed = []
+    # Separate skills from companion files.
+    # Companion convention: filename starts with `_` and is NOT installed as a
+    # standalone Skill. Instead it's placed in the related Skill's directory
+    # as a doc that the Skill can Read at runtime.
+    # Filename: _<skill-name>-<companion-suffix>.md
+    #   The <skill-name> portion is matched against existing skill names
+    #   (longest match wins). The <companion-suffix> becomes the destination
+    #   filename inside that Skill's directory.
+    skill_files = []
+    companion_files = []
     for src_file in sorted(os.listdir(skills_src)):
         if not src_file.endswith(".md"):
             continue
-        skill_name = src_file[:-3]  # strip .md
+        if src_file.startswith("_"):
+            companion_files.append(src_file)
+        else:
+            skill_files.append(src_file)
+
+    skill_names = [f[:-3] for f in skill_files]
+
+    installed = []
+    for src_file in skill_files:
+        skill_name = src_file[:-3]
         dest_dir = os.path.join(claude_skills, skill_name)
         os.makedirs(dest_dir, exist_ok=True)
         dest_file = os.path.join(dest_dir, "skill.md")
         shutil.copy2(os.path.join(skills_src, src_file), dest_file)
         installed.append(skill_name)
+
+    companion_installed = []
+    for src_file in companion_files:
+        base = src_file[1:-3]  # strip leading _ and trailing .md
+        # Find longest matching skill name as the owning skill
+        match = ""
+        for s in skill_names:
+            if (base == s or base.startswith(s + "-")) and len(s) > len(match):
+                match = s
+        if not match:
+            print(f"  ! Companion file {src_file} doesn't match any installed skill (skipping)")
+            continue
+        # Companion suffix: everything after `<skill-name>-`
+        suffix = base[len(match) + 1:] if len(base) > len(match) else "companion"
+        if not suffix:
+            suffix = "companion"
+        dest_dir = os.path.join(claude_skills, match)
+        os.makedirs(dest_dir, exist_ok=True)
+        dest_file = os.path.join(dest_dir, f"{suffix}.md")
+        shutil.copy2(os.path.join(skills_src, src_file), dest_file)
+        companion_installed.append(f"{match}/{suffix}.md")
 
     if installed:
         print(f"Installed {len(installed)} Skills to {claude_skills}:")
@@ -2816,6 +2855,10 @@ def cmd_skill_install():
             print(f"  /{name}")
     else:
         print("No skills found to install.")
+    if companion_installed:
+        print(f"Installed {len(companion_installed)} companion file(s):")
+        for path in companion_installed:
+            print(f"  {path}")
 
     # Configure Claude Code PostToolUse hooks
     hook_script = _find_hook("beacon-post-commit-hook.sh")
