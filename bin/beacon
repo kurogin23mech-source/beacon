@@ -1634,7 +1634,11 @@ case "${1:-}" in
                 shift 2
                 cmd_task_update "$@"
                 ;;
-            delete|cancel)
+            cancel)
+                shift 2
+                cmd_task_cancel "$@"
+                ;;
+            delete)
                 shift 2
                 cmd_task_delete "$@"
                 ;;
