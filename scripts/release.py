@@ -1,16 +1,27 @@
 #!/usr/bin/env python3
+# =============================================================================
+#  THIS SCRIPT IS FOR BEACON MAINTAINERS ONLY.
+#  Regular users should never need to run this — to upgrade beacon use:
+#      beacon update
+#  (or the manual equivalent: brew update && brew upgrade beacon && beacon skill install)
+# =============================================================================
 """Beacon release pipeline (maintainer-only).
+
+Audience: Beacon maintainers cutting a new release of the CLI itself.
+NOT for end users. If you're a user of beacon and you ended up here looking
+for "how do I update", you want `beacon update` instead. See e-577.
 
 Usage:
     python3 scripts/release.py                  # auto-detect version from commits
     python3 scripts/release.py --version vX.Y.Z # explicit version
-    python3 scripts/release.py --dry-run
+    python3 scripts/release.py --dry-run        # show every step without doing it
     python3 scripts/release.py --yes            # skip confirmation
+    python3 scripts/release.py --no-readme      # skip README badge / CHANGELOG update
 
 Auto-version uses lib/version_rules.py, which reads the 'version-rules' CORE
 doc if present, otherwise falls back to Conventional Commits semver.
 
-NOT shipped via brew. Lives in repo only.
+This file is NOT shipped via brew. It lives only in the source repo.
 """
 
 import argparse
@@ -34,6 +45,96 @@ def run(cmd, cwd=None, *, check=True, capture=False, dry_run=False):
         err = result.stderr or result.stdout or ""
         raise SystemExit(f"Command failed: {' '.join(cmd)}\n{err}")
     return result.stdout.strip() if capture else ""
+
+
+def _update_readme_version(beacon_root, version_str, *, dry_run=False):
+    """Update the README version badge marker, if present.
+
+    Looks for one of these patterns in README.md and rewrites the version:
+        <!-- BEACON_VERSION -->v0.4.0<!-- /BEACON_VERSION -->
+        ![version](https://img.shields.io/badge/version-vX.Y.Z-blue)
+
+    Returns True iff README.md was changed. Returns False (silently) if no
+    matching pattern is found — that way release.py does not force a README
+    layout on the maintainer.
+    """
+    readme_path = os.path.join(beacon_root, "README.md")
+    if not os.path.exists(readme_path):
+        return False
+    src = open(readme_path, encoding="utf-8").read()
+    new = src
+
+    # Pattern 1: explicit comment-marker pair
+    marker_re = re.compile(
+        r"(<!--\s*BEACON_VERSION\s*-->)[^<]*(<!--\s*/BEACON_VERSION\s*-->)"
+    )
+    if marker_re.search(new):
+        new = marker_re.sub(r"\1v" + version_str + r"\2", new)
+
+    # Pattern 2: shields.io version badge
+    badge_re = re.compile(r"(version-)v?\d+\.\d+\.\d+(-\w+)")
+    if badge_re.search(new):
+        new = badge_re.sub(r"\g<1>v" + version_str + r"\g<2>", new)
+
+    if new == src:
+        return False
+    if not dry_run:
+        with open(readme_path, "w", encoding="utf-8") as f:
+            f.write(new)
+    return True
+
+
+def _update_changelog(beacon_root, version_tag, info, *, dry_run=False):
+    """Prepend a new entry to CHANGELOG.md. Creates the file if missing.
+
+    The entry shape (Keep-a-Changelog flavoured) is:
+        ## [vX.Y.Z] - YYYY-MM-DD
+        - <subject line of commit 1>
+        - <subject line of commit 2>
+
+    Returns True iff CHANGELOG.md was created or modified.
+    """
+    changelog_path = os.path.join(beacon_root, "CHANGELOG.md")
+    today = time.strftime("%Y-%m-%d")
+    lines = [f"## [{version_tag}] - {today}", ""]
+    if info is not None and info.get("commits"):
+        for c in info["commits"]:
+            subj = c["message"].splitlines()[0] if c["message"] else c["hash"]
+            lines.append(f"- {subj}")
+        lines.append("")
+
+    new_entry = "\n".join(lines)
+
+    if not os.path.exists(changelog_path):
+        content = (
+            "# Changelog\n\n"
+            "All notable changes to Beacon are documented here. See "
+            "[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.\n\n"
+        ) + new_entry + "\n"
+        if not dry_run:
+            with open(changelog_path, "w", encoding="utf-8") as f:
+                f.write(content)
+        return True
+
+    existing = open(changelog_path, encoding="utf-8").read()
+    # If the version line already exists, do nothing (idempotent re-run).
+    if f"## [{version_tag}]" in existing:
+        return False
+
+    # Insert after the leading top-level heading + intro paragraph.
+    # Heuristic: find the first `## ` heading and insert before it. If there
+    # is no `## ` heading yet, append at end.
+    next_section = re.search(r"\n## ", existing)
+    if next_section:
+        i = next_section.start() + 1  # keep the preceding newline
+        new_content = existing[:i] + new_entry + "\n" + existing[i:]
+    else:
+        new_content = existing.rstrip() + "\n\n" + new_entry + "\n"
+
+    if not dry_run:
+        with open(changelog_path, "w", encoding="utf-8") as f:
+            f.write(new_content)
+    return True
 
 
 def determine_version(beacon_root):
@@ -79,6 +180,11 @@ def main():
     parser.add_argument("--tap-path", default="", help="Path to homebrew-beacon tap. Auto-detected via brew if omitted.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
+    parser.add_argument(
+        "--no-readme", action="store_true",
+        help="Skip README badge and CHANGELOG.md auto-update (e-582). "
+             "Use when the release isn't user-visible (e.g. tooling-only)."
+    )
     args = parser.parse_args()
 
     dry = args.dry_run
@@ -111,9 +217,39 @@ def main():
         if info["counts"]["breaking"] > 0:
             print(f"   ⚠️  BREAKING change detected → MAJOR bump")
 
+    # ---- Explicit pre-release preview (e-579) ----
+    print()
+    print("─" * 72)
+    print("Release preview")
+    print("─" * 72)
+    print(f"  Version:     {v}")
+    if info is not None:
+        print(f"  From:        {info['current']}")
+        print(f"  Bump level:  {info['level']}")
+    print(f"  Repo:        {beacon_root}")
+    print(f"  Branch:      {branch}")
+    print(f"  HEAD:        " + (run(['git', 'rev-parse', '--short', 'HEAD'],
+                                    cwd=beacon_root, capture=True, dry_run=False) or '?'))
+    if info is not None and info.get("commits"):
+        print(f"  Commits to release ({len(info['commits'])}):")
+        for c in info["commits"][:10]:
+            first_line = c["message"].splitlines()[0] if c["message"] else ""
+            print(f"    {c['hash']}  {first_line}")
+        if len(info["commits"]) > 10:
+            print(f"    ... and {len(info['commits']) - 10} more")
+    print("  Will:")
+    print(f"    1. bump __version__ in lib/commands.py to {v.lstrip('v')}")
+    print(f"    2. git push origin {branch}")
+    print(f"    3. git tag {v} && git push origin {v}")
+    print(f"    4. gh release create {v}")
+    print(f"    5. update homebrew formula (sha256 of tarball)")
+    print(f"    6. mirror formula to homebrew-beacon tap repo")
+    if not args.no_readme:
+        print(f"    7. update README version badge and CHANGELOG.md  (--no-readme to skip)")
+    print("─" * 72)
+
     if not args.yes and not dry:
-        print()
-        confirm = input(f"Release {v}? [y/N]: ").strip().lower()
+        confirm = input(f"Proceed with releasing {v}? [y/N]: ").strip().lower()
         if confirm not in ("y", "yes"):
             print("Cancelled.")
             sys.exit(0)
@@ -195,6 +331,25 @@ def main():
     run(["git", "add", "packaging/homebrew/beacon.rb"], cwd=beacon_root, dry_run=dry)
     run(["git", "commit", "-m", f"chore(release): bump formula to {version_str}"],
         cwd=beacon_root, dry_run=dry)
+
+    # ---- README badge + CHANGELOG update (e-582) ----
+    if not args.no_readme:
+        readme_changed = _update_readme_version(beacon_root, version_str, dry_run=dry)
+        changelog_changed = _update_changelog(beacon_root, v, info, dry_run=dry)
+        if readme_changed or changelog_changed:
+            staged = []
+            if readme_changed:
+                staged.append("README.md")
+                print("=> README version badge updated")
+            if changelog_changed:
+                staged.append("CHANGELOG.md")
+                print(f"=> CHANGELOG.md updated with {v} entry")
+            for f in staged:
+                run(["git", "add", f], cwd=beacon_root, dry_run=dry)
+            run(["git", "commit", "-m",
+                 f"docs(release): update README/CHANGELOG for {v}"],
+                cwd=beacon_root, dry_run=dry)
+
     run(["git", "push", "origin", "main"], cwd=beacon_root, dry_run=dry)
 
     # ---- Mirror to tap ----
