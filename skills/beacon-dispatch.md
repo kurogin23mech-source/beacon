@@ -121,7 +121,7 @@ Dispatch Plan:
 ---
 実行可能:
 ◐ [ms-id] [title] (workspace: [dir or "none"])
-  SPEC: [doc titles, comma-separated or "(none)"]
+  SPEC: [doc titles, comma-separated or "⚠ (none) — `/beacon-spec [ms-id]` で作成推奨"]
   Tasks: [N pending]
     - [entry-id] [description]
 
@@ -133,15 +133,29 @@ Dispatch Plan:
   [ms-id-A] ↔ [ms-id-B]: 未定義 [低/中/高] — [1行の理由]
   [ms-id-A] ↔ [ms-id-C]: 未定義 [低/中/高] — [1行の理由]
   ※ リスク「高」のペアは依存関係を定義してから起動することを推奨
+
+SPEC 無し MS warning:            ← SPEC 無し実行可能 MS が 1 つ以上ある場合のみ
+  ⚠ 以下の MS には SPEC (要求書/判断軌跡) がありません:
+    - [ms-id-X] [title]
+    - [ms-id-Y] [title]
+  サブエージェントは MS の objective / ac とタスク description のみを材料に判断します。
+  「なぜこのMSをやるのか」「どこまでがスコープか」が SPEC で言語化されていないと、
+  実装方針がブレやすくなります。
+  推奨:
+    a) このまま続行 (起動は許可されます。緊急時はこれで OK)
+    b) `/beacon-spec [ms-id]` で SPEC を先に作成してから dispatch (推奨)
 ---
 実行しますか？ [全て / 選択 / キャンセル]
 依存関係を先に定義する場合: beacon milestone depends <ms-id> --on <dep-id>
+SPEC を先に作る場合: 一旦キャンセルして `/beacon-spec <ms-id>` を実行してください
 ```
 
+**重要**: SPEC 無し warning は **hard block ではない**。ユーザーが「全て」「選択」と答えれば、SPEC が無い MS でもサブエージェントを起動する。ms-41 SPEC で確立した方針 (warning のみ、強制力で動かさない) に従う。
+
 ユーザーの回答を待つ:
-- **全て**: すべての実行可能MSを並列起動
+- **全て**: すべての実行可能MSを並列起動 (SPEC 無しでも起動可)
 - **選択**: ユーザーが指定したMS-IDのみ起動
-- **キャンセル**: 何もせず終了
+- **キャンセル**: 何もせず終了 (SPEC 作成は別途 `/beacon-spec` で)
 
 ## Step 4.5: Worktree作成フェーズ
 
