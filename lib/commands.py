@@ -3728,65 +3728,151 @@ def cmd_cycle_status():
 
 
 def cmd_search():
-    """Full-text search across milestones, tasks, commits, PRs, and saves."""
-    query = os.environ.get("BEACON_QUERY", "").lower().strip()
+    """Unified search across all Beacon entities (CORE doc 検索基盤の原則 / SPEC 3ne57ccZegYQXDQA03op).
+
+    Delegates the actual work to lib/search.search_project so the CLI, server
+    endpoint, and Skill all share the same logic.
+    """
+    import search as _search  # noqa: PLC0415
+
+    query = os.environ.get("BEACON_QUERY", "")
     ms_filter = os.environ.get("BEACON_MS_ID", "")
+    op_filter = os.environ.get("BEACON_OPERATION_ID", "")
+    id_filter = os.environ.get("BEACON_ENTRY_ID", "")
+    scope_filter = os.environ.get("BEACON_SCOPE", "")
+    assignee = os.environ.get("BEACON_ASSIGNEE", "")
+    owner = os.environ.get("BEACON_OWNER", "")
+    from_date = os.environ.get("BEACON_FROM", "")
+    to_date = os.environ.get("BEACON_TO", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
-    if not query:
-        print("Usage: beacon search <query>", file=sys.stderr)
-        sys.exit(1)
+    def _parse_list(env_key: str) -> list[str]:
+        raw = os.environ.get(env_key, "").strip()
+        if not raw:
+            return []
+        return [x.strip() for x in raw.split(",") if x.strip()]
+
+    type_list = _parse_list("BEACON_TYPE")
+    status_list = _parse_list("BEACON_STATUS")
+    priority_list = _parse_list("BEACON_PRIORITY")
+
+    try:
+        limit = int(os.environ.get("BEACON_LIMIT", "50"))
+    except ValueError:
+        limit = 50
+    try:
+        offset = int(os.environ.get("BEACON_OFFSET", "0"))
+    except ValueError:
+        offset = 0
+
+    # Without any filters the search defaults to "give me the 50 most-recent
+    # entities". This matches the SPEC: "all params omitted = ダッシュボード
+    # 最近の動き相当". So an empty query is no longer an error.
 
     data = load_project()
-    results = []
+    documents = _load_local_documents()
 
-    def _search_entries(entries, ms_id, ms_title):
-        for e in entries:
-            desc = e.get("description", "").lower()
-            detail = e.get("detail", "").lower()
-            if query in desc or query in detail:
-                results.append({
-                    "ms_id": ms_id,
-                    "ms_title": ms_title,
-                    "entry_id": e.get("id", ""),
-                    "type": e.get("type", ""),
-                    "status": e.get("status", ""),
-                    "description": e.get("description", ""),
-                    "date": e.get("date", "") or e.get("created_at", ""),
-                })
-            _search_entries(e.get("entries", []), ms_id, ms_title)
-
-    for ms in data.get("milestones", []):
-        if ms_filter and ms["id"] != ms_filter:
-            continue
-        ms_title = ms.get("title", "")
-        if query in ms_title.lower():
-            results.append({
-                "ms_id": ms["id"],
-                "ms_title": ms_title,
-                "entry_id": ms["id"],
-                "type": "milestone",
-                "status": ms.get("status", ""),
-                "description": ms_title,
-                "date": "",
-            })
-        _search_entries(ms.get("entries", []), ms["id"], ms_title)
+    result = _search.search_project(
+        data,
+        documents,
+        q=query,
+        type=type_list or None,
+        status=status_list or None,
+        priority=priority_list or None,
+        scope=scope_filter,
+        ms=ms_filter,
+        op=op_filter,
+        id=id_filter,
+        assignee=assignee,
+        owner=owner,
+        from_date=from_date,
+        to_date=to_date,
+        limit=limit,
+        offset=offset,
+    )
 
     if json_mode:
-        print(json.dumps(results, ensure_ascii=False))
+        print(json.dumps(result, ensure_ascii=False))
         return
+
+    results = result["results"]
+    total = result["total"]
 
     if not results:
-        print(f"No results for: {query}")
+        if query:
+            print(f"No results for: {query}")
+        else:
+            print("No results.")
         return
 
-    type_icons = {"task": "□", "commit": "○", "pr": "PR", "milestone": "MS", "save": "→"}
-    print(f"{len(results)} result(s) for: {query}")
+    type_icons = {
+        "task": "□", "commit": "○", "pr": "PR", "milestone": "MS",
+        "save": "→", "document": "📄", "push": "↑", "deploy": "▲",
+        "operation": "⚙", "operation_task": "·", "run": "▷", "incident": "⚠",
+    }
+    header = f"{total} result(s)"
+    if query:
+        header += f" for: {query}"
+    if total > len(results):
+        header += f"  (showing {len(results)} from offset {result['offset']})"
+    print(header)
     for r in results:
-        icon = type_icons.get(r["type"], "?")
-        status_note = f" [{r['status']}]" if r["status"] not in ("done", "cancelled", "") else ""
-        print(f"  {icon} [{r['entry_id']}] {r['description'][:80]}{status_note}")
-        print(f"       └─ {r['ms_id']}: {r['ms_title'][:50]}")
+        icon = type_icons.get(r.get("entity_type", ""), "?")
+        status_note = f" [{r['status']}]" if r.get("status") else ""
+        date_part = (r.get("created_at") or "")[:10]
+        title = r.get("title") or r.get("snippet", "")[:80]
+        print(f"  {icon} [{r['id']}] {title[:80]}{status_note}")
+        scope_or_ms = r.get("scope") or r.get("ms_id") or r.get("op_id") or ""
+        if scope_or_ms or date_part:
+            print(f"       └─ {scope_or_ms}  {date_part}")
+        if r.get("snippet") and r["snippet"] != title:
+            snip = r["snippet"][:120]
+            print(f"       └─ {snip}")
+
+
+def _load_local_documents() -> list[dict]:
+    """Read all .beacon/documents/*.md files and return them as dicts with
+    frontmatter fields (title, scope, milestone, operation, content, etc.)
+    promoted to top level. Used by cmd_search for local-mode document search."""
+    docs: list[dict] = []
+    project_file = get_project_file()
+    docs_dir = os.path.join(os.path.dirname(project_file), "documents")
+    if not os.path.isdir(docs_dir):
+        return docs
+    for fname in os.listdir(docs_dir):
+        if not fname.endswith(".md"):
+            continue
+        path = os.path.join(docs_dir, fname)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = f.read()
+        except OSError:
+            continue
+        # Parse YAML-ish frontmatter (--- delimited)
+        meta: dict[str, str] = {}
+        content = raw
+        if raw.startswith("---\n"):
+            try:
+                _, fm, body = raw.split("---\n", 2)
+                for line in fm.splitlines():
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        meta[k.strip()] = v.strip().strip('"').strip("'")
+                content = body
+            except ValueError:
+                pass
+        doc_id = meta.get("doc_id") or fname[:-3]
+        docs.append({
+            "doc_id": doc_id,
+            "title": meta.get("title", fname[:-3]),
+            "scope": meta.get("scope", "memo"),
+            "milestone": meta.get("milestone", ""),
+            "operation": meta.get("operation", ""),
+            "content": content,
+            "created_at": meta.get("created_at", ""),
+            "updated_at": meta.get("updated_at", ""),
+        })
+    return docs
 
 
 def cmd_doctor():

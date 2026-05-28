@@ -2221,16 +2221,59 @@ case "${1:-}" in
         ;;
     search)
         ensure_project
-        local query="" ms_id="" json_flag=""
+        # Unified search (CORE doc 検索基盤の原則).
+        # Flags mirror SPEC `3ne57ccZegYQXDQA03op` so the CLI, server API, and
+        # /beacon-retrospect Skill all share the same parameter surface.
+        search_query=""
+        search_ms_id=""
+        search_op_id=""
+        search_entry_id=""
+        search_scope=""
+        search_assignee=""
+        search_owner=""
+        search_from=""
+        search_to=""
+        search_type=""
+        search_status=""
+        search_priority=""
+        search_limit=""
+        search_offset=""
+        search_json_flag=""
         shift
         while [[ $# -gt 0 ]]; do
             case "$1" in
-                --ms) ms_id="${2:-}"; shift 2 ;;
-                --json) json_flag="1"; shift ;;
-                *) query="$1"; shift ;;
+                -m|--ms)       search_ms_id="${2:-}";    shift 2 ;;
+                -o|--op)       search_op_id="${2:-}";    shift 2 ;;
+                --id)          search_entry_id="${2:-}"; shift 2 ;;
+                --scope)       search_scope="${2:-}";    shift 2 ;;
+                --assignee)    search_assignee="${2:-}"; shift 2 ;;
+                --owner)       search_owner="${2:-}";    shift 2 ;;
+                --from)        search_from="${2:-}";     shift 2 ;;
+                --to)          search_to="${2:-}";       shift 2 ;;
+                --type)        search_type="${2:-}";     shift 2 ;;
+                --status)      search_status="${2:-}";   shift 2 ;;
+                --priority)    search_priority="${2:-}"; shift 2 ;;
+                --limit)       search_limit="${2:-}";    shift 2 ;;
+                --offset)      search_offset="${2:-}";   shift 2 ;;
+                --json)        search_json_flag="1";     shift ;;
+                *) [[ -z "$search_query" ]] && search_query="$1"; shift ;;
             esac
         done
-        BEACON_QUERY="$query" BEACON_MS_ID="$ms_id" BEACON_JSON="$json_flag" \
+        BEACON_QUERY="$search_query" \
+            BEACON_MS_ID="$search_ms_id" \
+            BEACON_OPERATION_ID="$search_op_id" \
+            BEACON_ENTRY_ID="$search_entry_id" \
+            BEACON_SCOPE="$search_scope" \
+            BEACON_ASSIGNEE="$search_assignee" \
+            BEACON_OWNER="$search_owner" \
+            BEACON_FROM="$search_from" \
+            BEACON_TO="$search_to" \
+            BEACON_TYPE="$search_type" \
+            BEACON_STATUS="$search_status" \
+            BEACON_PRIORITY="$search_priority" \
+            BEACON_LIMIT="$search_limit" \
+            BEACON_OFFSET="$search_offset" \
+            BEACON_JSON="$search_json_flag" \
             python3 "$COMMANDS_PY" search
         ;;
     doctor)
