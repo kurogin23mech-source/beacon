@@ -947,7 +947,15 @@ def pr_record_review(data: dict, entry_id: str, *, review_text: str,
 
 
 def pr_merge(data: dict, entry_id: str, *, date: str = "") -> tuple[dict, dict]:
-    """Merge a PR: pr_status=merged, entry.status=done, done_at=today."""
+    """Merge a PR: pr_status=merged, entry.status=done, done_at=today.
+
+    Side effect (e-610): for each commit hash recorded under the PR's child
+    entries, find any *other* commit entry across all milestones with the
+    same short hash and tag it with `meta.pr_id = entry_id`. This is the
+    "the same commit shows up both as a beacon-log entry and as a PR child
+    entry — link them so the timeline shows the PR origin" rule. Idempotent:
+    re-merging the same PR re-applies the same tag.
+    """
     import datetime as _dt
     result = find_entry(data, entry_id)
     if not result:
@@ -961,6 +969,36 @@ def pr_merge(data: dict, entry_id: str, *, date: str = "") -> tuple[dict, dict]:
     meta["merged_at"] = now
     entry["status"] = "done"
     entry["done_at"] = date or now
+
+    # e-610: back-link beacon-side commit entries to this PR.
+    pr_commit_hashes = set()
+    for child in entry.get("entries", []) or []:
+        if isinstance(child, dict) and child.get("type") == "commit":
+            h = (child.get("meta") or {}).get("hash", "")
+            if h:
+                pr_commit_hashes.add(h[:7])
+
+    if pr_commit_hashes:
+        linked = 0
+        for ms_iter in data.get("milestones", []):
+            if not isinstance(ms_iter, dict):
+                continue
+            for ent in ms_iter.get("entries", []) or []:
+                if not isinstance(ent, dict) or ent.get("type") != "commit":
+                    continue
+                # Skip the PR's own child entries — they already live under
+                # the PR; we don't need a self-loop link.
+                if any(ent is c for c in entry.get("entries", []) or []):
+                    continue
+                ent_meta = ent.get("meta") or {}
+                ent_hash = (ent_meta.get("hash") or "")[:7]
+                if ent_hash and ent_hash in pr_commit_hashes:
+                    ent_meta = ent.setdefault("meta", {})
+                    ent_meta["pr_id"] = entry_id
+                    linked += 1
+        # Record how many backlinks we just stamped (informational).
+        meta["linked_commits"] = linked
+
     return ms, entry
 
 

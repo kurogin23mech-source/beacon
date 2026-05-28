@@ -386,13 +386,40 @@ def main():
     else:
         print("   (tap formula already up-to-date)")
 
+    # ---- Release notification trigger (e-580) ----
+    # We do not post directly to Discord/Slack from this script — those
+    # integrations live in user-installed Skills (`discord-post`) so the
+    # message is composed by Claude with full release context rather than
+    # by a templated curl call. Here we fire a beacon trigger; the user's
+    # next /beacon-session-start (or any beacon trigger check) surfaces it
+    # and prompts the user to invoke `discord-post`.
+    print()
+    print("=> Firing release-notify trigger")
+    try:
+        beacon_bin = shutil.which("beacon") or "beacon"
+        commit_count = len(info["commits"]) if info and info.get("commits") else 0
+        msg = (
+            f"beacon {v} released "
+            f"({commit_count} commits). "
+            f"Use /discord-post to share."
+        )
+        if not dry:
+            subprocess.run(
+                [beacon_bin, "trigger", "fire", f"release-{version_str}", msg],
+                cwd=beacon_root,
+            )
+        else:
+            print(f"   [dry-run] beacon trigger fire release-{version_str} '{msg}'")
+    except Exception as e:
+        print(f"   (trigger fire skipped: {e})")
+
     print()
     print(f"Release complete: {v}")
     print(f"   Tarball: {tarball_url}")
     print(f"   SHA256:  {sha256}")
     print()
     print("Users can update with:")
-    print("   brew update && brew upgrade beacon && beacon skill install")
+    print("   beacon update    # or: brew update && brew upgrade beacon && beacon skill install")
 
 
 if __name__ == "__main__":
