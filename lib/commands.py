@@ -196,6 +196,7 @@ def _find_hook(name):
 
 CLAUDE_HOOK_SCRIPT = _find_hook("beacon-post-commit-hook.sh")
 CLAUDE_SAVE_HOOK_SCRIPT = _find_hook("beacon-save-hook.sh")
+CLAUDE_POSTCOMPACT_HOOK_SCRIPT = _find_hook("beacon-postcompact.sh")
 
 
 def _install_claude_hook():
@@ -249,10 +250,33 @@ def _install_claude_hook():
             }],
         })
 
+    # Install PostCompact hook (e-565): inject Tier-2 orientation after
+    # transcript compaction so the AI re-fetches the source of truth rather
+    # than trusting the (now blurry) summary's specific IDs / numbers.
+    post_compact = hooks.setdefault("PostCompact", [])
+    postcompact_hook_exists = False
+    for entry in post_compact:
+        for h in entry.get("hooks", []):
+            cmd = h.get("command", "")
+            if "beacon-postcompact" in cmd:
+                postcompact_hook_exists = True
+                break
+        if postcompact_hook_exists:
+            break
+    if not postcompact_hook_exists and os.path.exists(CLAUDE_POSTCOMPACT_HOOK_SCRIPT):
+        post_compact.append({
+            "hooks": [{
+                "type": "command",
+                "command": CLAUDE_POSTCOMPACT_HOOK_SCRIPT,
+                "timeout": 10,
+                "statusMessage": "Beacon: post-compaction orientation...",
+            }],
+        })
+
     with open(settings_path, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2, ensure_ascii=False)
         f.write("\n")
-    print("Installed Claude Code PostToolUse hooks")
+    print("Installed Claude Code PostToolUse + PostCompact hooks")
 
 
 def _install_skills():
