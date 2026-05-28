@@ -871,6 +871,31 @@ def pr_add(data: dict, *, ms_id: str = "", url: str, author: str = "",
     return eid
 
 
+def _append_review_history(meta: dict, *, status: str,
+                            rationale: str = "", actor: str = "") -> None:
+    """Append a single transition to meta.review_history[] (e-609).
+
+    Each entry: {"at": <iso>, "status": <new review_status>,
+                 "rationale": <text>, "actor": <who>}
+
+    This lives in meta so the timeline view can render the back-and-forth
+    sequence: pending → changes_requested → pending → approved, etc.
+    Idempotent only by *timestamp* — same status transitioned at the same
+    millisecond will collide, but real usage has whole-second gaps.
+    """
+    history = meta.setdefault("review_history", [])
+    if not isinstance(history, list):
+        # Heal a corrupted field rather than crashing the caller.
+        history = []
+        meta["review_history"] = history
+    history.append({
+        "at": _now_iso(),
+        "status": status,
+        "rationale": rationale or "",
+        "actor": actor or _get_actor(),
+    })
+
+
 def pr_request_review(data: dict, entry_id: str) -> tuple[dict, dict]:
     """Set PR to in_review. Returns (milestone, entry)."""
     result = find_entry(data, entry_id)
@@ -884,6 +909,7 @@ def pr_request_review(data: dict, entry_id: str) -> tuple[dict, dict]:
     meta["review_status"] = "pending"
     meta["review_requested_at"] = _now_iso()
     entry["status"] = "in_review"
+    _append_review_history(meta, status="pending")
     return ms, entry
 
 
@@ -902,6 +928,7 @@ def pr_request_changes(data: dict, entry_id: str, *, rationale: str = "") -> tup
     entry["status"] = "in_review"
     if rationale:
         meta["review_rationale"] = rationale
+    _append_review_history(meta, status="changes_requested", rationale=rationale)
     return ms, entry
 
 
@@ -942,6 +969,7 @@ def pr_record_review(data: dict, entry_id: str, *, review_text: str,
     else:
         meta["pr_status"] = "in_review"
         entry["status"] = "in_review"
+    _append_review_history(meta, status=verdict, rationale=review_text[:200])
 
     return ms, entry, note_entry
 
@@ -1032,6 +1060,7 @@ def pr_approve(data: dict, entry_id: str, *, rationale: str = "") -> tuple[dict,
     entry["status"] = "approved"
     if rationale:
         meta["review_rationale"] = rationale
+    _append_review_history(meta, status="approved", rationale=rationale)
     return ms, entry
 
 
@@ -1051,6 +1080,7 @@ def pr_reject(data: dict, entry_id: str, *, rationale: str = "") -> tuple[dict, 
     entry["status"] = "cancelled"
     if rationale:
         meta["review_rationale"] = rationale
+    _append_review_history(meta, status="rejected", rationale=rationale)
     return ms, entry
 
 

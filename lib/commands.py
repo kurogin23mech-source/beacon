@@ -2918,6 +2918,9 @@ def cmd_pr_show():
         "pr_status": meta.get("pr_status"),
         "review_status": meta.get("review_status"),
         "review_rationale": meta.get("review_rationale"),
+        # e-609: review back-and-forth visibility — full transition history
+        # so the timeline can render "pending → changes_requested → pending → approved"
+        "review_history": meta.get("review_history") or [],
         "commits": [
             {
                 "id": c.get("id"),
@@ -2944,6 +2947,18 @@ def cmd_pr_show():
         print(f"  Intent: (none recorded — /review cannot do intent-vs-impl check)")
     if payload["review_rationale"]:
         print(f"  Rationale: {payload['review_rationale']}")
+    if payload["review_history"]:
+        # e-609: surface review back-and-forth count + the transition trail
+        roundtrips = sum(
+            1 for i, h in enumerate(payload["review_history"][1:], 1)
+            if h["status"] == "pending"
+        )
+        print(f"  Review history ({len(payload['review_history'])} transitions, "
+              f"{roundtrips} round-trip(s)):")
+        for h in payload["review_history"]:
+            at = h.get("at", "")[:19]  # trim to "YYYY-MM-DDTHH:MM:SS"
+            tail = f" — {h['rationale'][:60]}" if h.get("rationale") else ""
+            print(f"    {at}  {h.get('status', '?'):<19}{tail}")
     if payload["commits"]:
         print(f"  Commits ({len(payload['commits'])}):")
         for c in payload["commits"]:

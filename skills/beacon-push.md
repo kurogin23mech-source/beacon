@@ -134,6 +134,33 @@ beacon trigger check
 
 空でなければ各トリガーの `message` を提示する。
 
+## 他プロジェクトでの「リリース体験」（e-578）
+
+このSkillは **beacon リポジトリ専用ではない**。version-rules を opt-in している任意のプロジェクトで動作する。
+
+### opt-in 手順
+
+1. プロジェクトに CORE doc `version-rules` を作る（既存beaconプロジェクトの doc を参考に）
+2. `lib/version_rules.py` 相当の解釈ロジックは beacon CLI に同梱されているので、追加インストール不要
+3. `/beacon-push` を実行すると Step 2.5 が自動で発火する
+
+### scripts/release.py との違い
+
+| | `/beacon-push` Skill | `scripts/release.py` |
+|---|---|---|
+| 対象 | 任意のプロジェクト | beacon CLI 自身（メンテナ専用） |
+| 配布 | beacon CLI に同梱 | リポジトリ内のみ |
+| Brew formula 更新 | ❌ | ✓ |
+| GitHub Release 作成 | ✓ (opt-in) | ✓ |
+| README/CHANGELOG 更新 | （プロジェクト側のhookで） | ✓ (e-582) |
+| Discord/Slack 通知 | trigger fire のみ (e-580) | trigger fire + brewまで |
+
+ユーザープロジェクトでは `/beacon-push` を使う。beacon CLI 自体のリリースは `scripts/release.py` を使う。両者を混同しないこと。
+
+### 1 コマンドリリースを目指す未来形
+
+将来的には `beacon release --semver patch --notes "<text>"` のような単一コマンドで、tag切り → GitHub Release → CHANGELOG 更新 → 通知トリガー発火までを 1 ステップで行うコマンドを追加する候補がある。本タスク (e-578) では Skill での opt-in パスを完成させるところまでで止め、CLI 単独コマンドは別タスクで扱う。
+
 ## 制約
 
 - Step 1（prepare）は読み取り専用。書き込みは Step 3 のみ。
