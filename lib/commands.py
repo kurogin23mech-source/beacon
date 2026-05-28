@@ -2814,11 +2814,100 @@ def cmd_pr_merge():
         print(f"Merged PR [{entry_id}]: {entry.get('description', '')}")
 
 
+def _infer_pr_ms_id(data: dict) -> tuple[str, str]:
+    """Infer the most likely target milestone ID for a PR being created.
+
+    Returns (ms_id, reason). ms_id is "" when nothing matched confidently.
+    Priority (highest first):
+      1. Current branch name matches `ms-<n>` → use it if that MS exists.
+      2. Last 5 commit messages contain `ms-<n>` → use it.
+      3. Last 5 commit messages contain `(e-<n>)` → look up which MS owns that task.
+      4. Exactly one milestone has status == "in_progress" → use it.
+      5. Otherwise: return "" and let the caller prompt.
+
+    This is best-effort and read-only. The caller MUST surface the `reason`
+    to the user (no silent guessing).
+    """
+    if not isinstance(data, dict):
+        return "", ""
+
+    ms_ids = {m.get("id") for m in data.get("milestones", []) if isinstance(m, dict)}
+
+    # 1) Branch name
+    try:
+        branch = subprocess.run(
+            ["git", "branch", "--show-current"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        branch = ""
+    if branch:
+        m = re.search(r"ms-(\d+)", branch)
+        if m:
+            cand = f"ms-{m.group(1)}"
+            if cand in ms_ids:
+                return cand, f"branch name `{branch}` → {cand}"
+
+    # 2) Recent commit messages for ms-N
+    try:
+        log = subprocess.run(
+            ["git", "log", "--pretty=%s", "-5"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        log = ""
+    for line in log.splitlines():
+        m = re.search(r"ms-(\d+)", line)
+        if m:
+            cand = f"ms-{m.group(1)}"
+            if cand in ms_ids:
+                return cand, f"recent commit `{line[:60]}` → {cand}"
+
+    # 3) Recent commits for e-N → reverse-lookup owning MS
+    for line in log.splitlines():
+        m = re.search(r"\be-(\d+)\b", line)
+        if m:
+            eid = f"e-{m.group(1)}"
+            for ms in data.get("milestones", []):
+                if not isinstance(ms, dict):
+                    continue
+                for ent in ms.get("entries", []) or []:
+                    if isinstance(ent, dict) and ent.get("id") == eid:
+                        return ms.get("id", ""), f"task {eid} in commit `{line[:60]}` → {ms.get('id')}"
+
+    # 4) Single in-progress milestone
+    active = [m for m in data.get("milestones", [])
+              if isinstance(m, dict) and m.get("status") == "in_progress"]
+    if len(active) == 1:
+        return active[0].get("id", ""), f"sole active milestone ({active[0].get('id')})"
+
+    return "", ""
+
+
 def cmd_pr_create():
     """Wrapper for gh pr create that auto-records the PR in beacon."""
     ms_id = os.environ.get("BEACON_MS_ID", "")
     intent = os.environ.get("BEACON_INTENT", "")
     gh_args = os.environ.get("BEACON_GH_ARGS", "")
+
+    # e-607: auto-infer ms_id when -m was omitted.
+    if not ms_id:
+        try:
+            _data_for_infer = load_project()
+        except Exception:
+            _data_for_infer = {}
+        inferred, reason = _infer_pr_ms_id(_data_for_infer)
+        if inferred:
+            ms_id = inferred
+            print(f"Beacon: inferred -m {ms_id} ({reason})", file=sys.stderr)
+        else:
+            # We DO NOT abort — gh pr create can still run, but the PR record
+            # will not be linked to any MS. Warn the caller so the user knows.
+            print(
+                "Beacon: -m was not given and no MS could be inferred from "
+                "branch/commits/active state. PR record will be unattached.",
+                file=sys.stderr,
+            )
 
     # Run gh pr create and capture the URL from stdout
     cmd = ["gh", "pr", "create"]
