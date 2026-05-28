@@ -40,6 +40,10 @@ def local_project(monkeypatch):
     json.dump({"name": "test", "milestones": [], "summary": ""}, tmp)
     tmp.close()
     monkeypatch.setenv("BEACON_PROJECT_FILE", tmp.name)
+    # Explicitly force local backend. Other test files (e.g. test_api.py) may
+    # have set BEACON_OPERATIONS_BACKEND=mock at import time, which leaks via
+    # os.environ. monkeypatch restores it after the test.
+    monkeypatch.setenv("BEACON_OPERATIONS_BACKEND", "local")
     # Ensure cloud-detection stays in "local" — make sure firestore_client
     # is not on sys.modules (it shouldn't be in tests, but be defensive).
     sys.modules.pop("firestore_client", None)
@@ -187,9 +191,18 @@ def test_local_apply_op_called_with_fresh_data(local_project):
 # Backend detection
 # ---------------------------------------------------------------------------
 
-def test_backend_local_when_firestore_client_not_loaded():
-    # Sanity: tests run without the server module loaded.
+def test_backend_local_when_firestore_client_not_loaded(monkeypatch):
+    # Sanity: with the explicit override removed and the server module unloaded,
+    # detection falls through to "local".
+    monkeypatch.delenv("BEACON_OPERATIONS_BACKEND", raising=False)
     sys.modules.pop("firestore_client", None)
+    assert operations._detect_backend() == "local"
+
+
+def test_backend_respects_explicit_override(monkeypatch):
+    monkeypatch.setenv("BEACON_OPERATIONS_BACKEND", "mock")
+    assert operations._detect_backend() == "mock"
+    monkeypatch.setenv("BEACON_OPERATIONS_BACKEND", "local")
     assert operations._detect_backend() == "local"
 
 

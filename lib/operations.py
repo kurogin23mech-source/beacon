@@ -319,16 +319,72 @@ def _apply_cloud_v2(project_id: str, op: Op) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Mock-mode atomic apply (in-process lock, for unit tests with patched db)
+# ---------------------------------------------------------------------------
+
+# Single process-wide lock for the mock backend. Tests are not concurrent
+# across files (pytest serializes by default), but we still want the lock so
+# that intra-test concurrency tests can be added later without surprises.
+_mock_lock = None
+
+
+def _get_mock_lock():
+    global _mock_lock
+    if _mock_lock is None:
+        import threading
+        _mock_lock = threading.RLock()
+    return _mock_lock
+
+
+def _apply_mock(project_id: str, op: Op) -> Any:
+    """Apply op atomically using the patched firestore_client module.
+
+    This path is selected by BEACON_OPERATIONS_BACKEND=mock and exists so that
+    tests/test_api.py can monkey-patch firestore_client.get_project /
+    save_project (its in-memory store) and have apply_operation route through
+    those mocks rather than the real Firestore transactional API.
+
+    Semantically equivalent to the cloud v1 path for the test's purposes:
+    read → op → validate → write, serialized by a process-wide lock.
+    """
+    import firestore_client as db  # type: ignore[import-not-found]
+
+    with _get_mock_lock():
+        data = db.get_project(project_id)
+        if data is None:
+            raise LookupError(f"Project '{project_id}' not found")
+
+        new_data, result = op(data)
+
+        import core  # noqa: PLC0415
+        core.validate_project(new_data)
+
+        db.save_project(project_id, new_data)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Backend detection
 # ---------------------------------------------------------------------------
 
 def _detect_backend() -> str:
     """Return 'cloud' if running inside the API server, else 'local'.
 
+    Precedence:
+      1. BEACON_OPERATIONS_BACKEND env var (explicit override for tests)
+      2. Presence of firestore_client on sys.modules (server context)
+      3. Default: 'local'
+
     The server imports firestore_client at module load, so its presence on
-    sys.modules is a reliable signal. We avoid importing it here to keep
-    this module usable from CLI without firestore deps.
+    sys.modules is a reliable signal in production. The env var override lets
+    tests bypass that signal — see tests/test_api.py which imports
+    firestore_client purely to monkey-patch the helpers but never wants the
+    real Firestore client to run.
     """
+    forced = os.environ.get("BEACON_OPERATIONS_BACKEND", "").strip().lower()
+    if forced in ("local", "cloud", "mock"):
+        return forced
+
     import sys
     if "firestore_client" in sys.modules:
         return "cloud"
@@ -392,6 +448,9 @@ def apply_operation(
     if backend == "local":
         path = project_file or os.environ.get("BEACON_PROJECT_FILE", ".beacon/project.json")
         result = _apply_local(path, op)
+    elif backend == "mock":
+        # Test path: uses patched firestore_client.{get,save}_project.
+        result = _apply_mock(project_id, op)
     else:
         # Cloud: pick v1 or v2 based on the existing project's schema_version.
         # We must read the project once outside the transaction to decide which
@@ -413,6 +472,82 @@ def apply_operation(
     _append_changelog(project_id, op_name, actor, reason=reason)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Whole-document replace (special path for `PUT /api/projects/{id}`)
+# ---------------------------------------------------------------------------
+
+def replace_project(
+    project_id: str,
+    new_data: dict,
+    *,
+    actor: str = "",
+    reason: str = "",
+    project_file: Optional[str] = None,
+) -> None:
+    """Atomically replace the entire project document.
+
+    This is the moral equivalent of `cloud push` — the caller has its own copy
+    of the project state and wants to overwrite the server-side state with it.
+    Lost-update protection here means "no in-flight write gets silently
+    discarded mid-replace", not "stale local data is detected and rejected".
+    The latter is `cloud push`'s --force semantics and lives elsewhere.
+
+    Despite the destructive semantics, this still runs inside the same
+    transactional envelope as apply_operation so it cannot tear concurrent
+    mutations (e.g. a member update racing with the replace).
+
+    The new_data is validated via core.validate_project before write.
+    """
+    # Validate up-front; replace_project is not a "retry" operation so we
+    # don't need validation inside the txn closure.
+    import core  # noqa: PLC0415
+    core.validate_project(new_data)
+
+    if not actor:
+        actor = core._get_actor()
+
+    backend = _detect_backend()
+
+    if backend == "local":
+        path = project_file or os.environ.get("BEACON_PROJECT_FILE", ".beacon/project.json")
+        # Identity op — apply_operation already handles the locking, just
+        # discard whatever's there.
+        # NOTE: _apply_local requires the file to exist; for replace where the
+        # file may be absent (first cloud push, etc.), fall back to a direct
+        # write under the lock. Keep semantics tight.
+        if os.path.exists(path):
+            _apply_local(path, lambda _existing: (new_data, None))
+        else:
+            # First-time write — bypass lock since no existing state to race against.
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(new_data, f, indent=2, ensure_ascii=False)
+                f.write("\n")
+    elif backend == "mock":
+        import firestore_client as db  # type: ignore[import-not-found]
+        with _get_mock_lock():
+            db.save_project(project_id, new_data)
+    else:
+        import firestore_client as db  # type: ignore[import-not-found]
+        from google.cloud import firestore  # type: ignore[import-not-found]
+
+        client = db.get_db()
+        doc_ref = client.collection(db.COLLECTION).document(project_id)
+
+        @firestore.transactional
+        def _txn(transaction):
+            # We still read so we have a transactional read-write pair;
+            # whether the doc exists is informational only for replace.
+            doc_ref.get(transaction=transaction)
+            transaction.set(doc_ref, new_data)
+
+        _txn(client.transaction())
+
+    _append_changelog(
+        project_id, "project.replace", actor,
+        reason=reason or "whole-document replace (cloud push or admin write)",
+    )
 
 
 # ---------------------------------------------------------------------------

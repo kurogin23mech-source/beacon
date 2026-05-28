@@ -8,6 +8,10 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
 
+# Route operations.apply_operation through the in-memory mock instead of real
+# Firestore. Must be set BEFORE importing operations / app.
+os.environ["BEACON_OPERATIONS_BACKEND"] = "mock"
+
 # Mock firestore_client before importing app
 import firestore_client
 
