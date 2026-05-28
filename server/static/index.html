@@ -1862,8 +1862,28 @@ function connectWebSocket(projectId) {
       }
     }
   };
-  ws.onclose = () => {
+  ws.onclose = (ev) => {
     state.connected = false;
+    // Server-side auth failure codes (e-639):
+    //   4401: token missing (we never sent one or it was stripped)
+    //   4403: token expired or invalid
+    // For 4403, attempt one silent refresh; if the user is on a Google ID
+    // token, prompt them to re-sign-in rather than spin in a reconnect loop.
+    if (ev && (ev.code === 4401 || ev.code === 4403)) {
+      // Stop any pending reconnect — we won't retry until the user reauths.
+      if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+      state.error = ev.code === 4403
+        ? 'Session expired. Please sign in again.'
+        : 'Not signed in. Please sign in to enable live updates.';
+      // Surface the message in the connection label so the user sees it
+      // without needing to open devtools.
+      const label = document.querySelector('.connection-label');
+      if (label) label.textContent = ev.code === 4403 ? 'session expired' : 'not signed in';
+      const dot = document.querySelector('.status-dot');
+      if (dot) dot.className = 'status-dot offline';
+      console.warn('[beacon ws]', state.error, 'close code:', ev.code);
+      return;
+    }
     updateConnectionStatus();
     wsReconnectTimer = setTimeout(() => {
       if (state.projectId === projectId) connectWebSocket(projectId);
@@ -3513,14 +3533,22 @@ async function handleHashNav() {
 
 window.addEventListener('hashchange', handleHashNav);
 
-// Reconnect when the tab becomes visible or the window regains focus
+// Reconnect when the tab becomes visible or the window regains focus.
+// Skip when we've already been rejected for auth reasons (e-639) — retrying
+// without a fresh token just produces another 4403 close and the same UX.
+function _isAuthFailureState() {
+  const e = (state.error || '').toLowerCase();
+  return e.includes('session expired') || e.includes('not signed in');
+}
 function _tryReconnect() {
   if (!state.projectId) return;
+  if (_isAuthFailureState()) return;
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
   connectWebSocket(state.projectId);
 }
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible' || !state.projectId) return;
+  if (_isAuthFailureState()) return;
   // Always reconnect on visibility change: onclose may arrive *after* visibilitychange
   // when the browser throttles the tab, leaving ws.readyState stale (OPEN but dead).
   connectWebSocket(state.projectId);

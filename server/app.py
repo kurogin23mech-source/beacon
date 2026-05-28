@@ -1147,16 +1147,32 @@ def _stop_watcher(project_id: str):
 
 @app.websocket("/ws/projects/{project_id}")
 async def ws_project(websocket: WebSocket, project_id: str):
-    """WebSocket endpoint for real-time project monitoring."""
+    """WebSocket endpoint for real-time project monitoring.
+
+    Close codes used by this endpoint (clients must distinguish them — e-639):
+
+      4401  TOKEN MISSING   — no token query param. Client should not retry
+                              silently; redirect to login.
+      4403  TOKEN EXPIRED   — token presented but rejected. Client should
+                              attempt a refresh (where supported) and either
+                              re-connect with a fresh token or surface a
+                              "please log in again" notice.
+
+    Both codes are in the application-private range (4000–4999) so they do
+    not collide with standard WebSocket close codes. The browser exposes them
+    via CloseEvent.code, which makes the retry decision deterministic on the
+    client side (no more silent 1008 + infinite reconnect loop).
+    """
     token = websocket.query_params.get("token")
     if _auth_enabled:
         if not token:
-            await websocket.close(code=1008)
+            # Reason text helps server-side audit logs; clients should rely on code.
+            await websocket.close(code=4401, reason="token_missing")
             return
         try:
             _verify_id_token(token)
         except HTTPException:
-            await websocket.close(code=1008)
+            await websocket.close(code=4403, reason="token_expired_or_invalid")
             return
 
     await websocket.accept()
