@@ -3564,6 +3564,73 @@ def cmd_project_unarchive():
     print(f"Unarchived: [{data.get('name', '')}]")
 
 
+def cmd_cycle_status():
+    """Emit a per-cycle activation snapshot for the current project.
+
+    Output (JSON mode is default for AI consumers):
+
+      {
+        "push":     {"active": true,  "last_action_date": "2026-05-10T00:00:00Z"},
+        "deploy":   {"active": false, "last_action_date": null},
+        "retro":    {"active": false, "last_action_date": null},
+        "operation":{"active": true,  "last_action_date": "..."},
+        "release":  {"active": false, "last_action_date": null}
+      }
+
+    Skill consumers (/beacon-log Step 7, /beacon-push Step 2.5, etc.) call
+    this once and branch their rhythm-suggestion logic on the result. Centra-
+    lizing it here means every Skill agrees on activation semantics — see
+    CORE doc `Cdg2zJtrOajm1q8adMa1` and SPEC `LqXEEbgsH712Z78KBELP`.
+
+    Text mode is for human inspection and not load-bearing.
+    """
+    import cycle as cycle_mod  # local import: optional dependency outside of Skill use
+
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+
+    # In cloud mode the document list may live in a Firestore subcollection;
+    # we ask the doc list command's helper to fetch them lazily. Failure here
+    # is non-fatal — we degrade to "no docs known" which is the same as the
+    # legacy behavior of the per-cycle predicates.
+    documents: list[dict] = []
+    try:
+        if _is_cloud_mode():
+            client, config = _get_api_client()
+            documents = client.list_documents(config["project_id"]) or []
+        else:
+            docs_dir = _get_docs_dir()
+            if os.path.isdir(docs_dir):
+                for fname in sorted(os.listdir(docs_dir)):
+                    if not fname.endswith(".md"):
+                        continue
+                    try:
+                        documents.append(_read_local_doc(os.path.join(docs_dir, fname)))
+                    except Exception:
+                        # Best-effort: a single unparsable doc shouldn't abort the
+                        # whole snapshot. We just won't see it in the retro signal.
+                        continue
+    except Exception:
+        # If doc fetch fails entirely (e.g. cloud auth glitch), keep going
+        # with an empty list. push / deploy / operation cycles do not depend
+        # on documents and will still report correctly.
+        documents = []
+
+    snapshot = cycle_mod.cycle_status_snapshot(data, documents=documents)
+
+    if json_mode:
+        print(json.dumps(snapshot, ensure_ascii=False))
+        return
+
+    # Human-readable mode. Used for spot-checking during development; Skills
+    # always use --json.
+    print("Cycle status:")
+    for c, info in snapshot.items():
+        flag = "active" if info["active"] else "inactive"
+        last = info["last_action_date"] or "—"
+        print(f"  {c:<10s} {flag:<10s} last: {last}")
+
+
 def cmd_search():
     """Full-text search across milestones, tasks, commits, PRs, and saves."""
     query = os.environ.get("BEACON_QUERY", "").lower().strip()
@@ -4155,6 +4222,7 @@ if __name__ == "__main__":
         "auth_status": lambda: __import__("auth").status(),
         "skill_install": cmd_skill_install,
         "search": cmd_search,
+        "cycle_status": cmd_cycle_status,
         "project_archive": cmd_project_archive,
         "deploy_record": cmd_deploy_record,
         "deploy_list": cmd_deploy_list,

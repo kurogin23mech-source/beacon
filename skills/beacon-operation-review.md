@@ -1,7 +1,7 @@
 ---
 name: beacon-operation-review
 description: 定期チェックトリガー発火時に実行。Operation に紐づく SPEC ドキュメントの手順でログを取得・解釈し、run record を記録する。問題があれば Incident を起票する。
-version: 1.0.0
+version: 1.1.0
 triggers:
   - /beacon-operation-review
   - バッチ確認
@@ -12,11 +12,23 @@ triggers:
 
 > 定期チェックトリガー発火時に実行。SPECに従いログを取得・解釈し、run record を記録する。
 
+## cwd 解決（最重要）
+
+このSkillは trigger 発火 (session-start 表示) 経由で Claude Code がホームで起動された状態から呼ばれることが多い。
+
+以下の優先順位で **作業ディレクトリ** を決定する（以降 `$PROJECT_DIR` と呼ぶ）:
+
+1. **trigger / hook が渡した `(project: ...)` パス**を additionalContext から抽出
+2. ユーザーが引数で渡したパスがあればそれを使う
+3. それ以外は Bash の `pwd` 結果。ホーム直下なら abort
+
+**以降、すべての Bash 呼び出しは `cd "$PROJECT_DIR" && ...` 形式で実行する。**
+
 ## 前提条件チェック
 
 Bash ツールで以下を実行:
 ```bash
-test -f .beacon/project.json && echo "OK" || echo "NO_BEACON"
+cd "$PROJECT_DIR" && test -f .beacon/project.json && echo "OK" || echo "NO_BEACON"
 ```
 
 - `NO_BEACON` の場合、このSkillは何もせず終了する。
@@ -30,7 +42,7 @@ test -f .beacon/project.json && echo "OK" || echo "NO_BEACON"
 
 Bash ツールで実行:
 ```bash
-beacon operation show <op-id> --json
+cd "$PROJECT_DIR" && beacon operation show <op-id> --json
 ```
 
 Operation の `log_source`・`schedule`・`entries`（直近 run_record）を確認する。
@@ -41,12 +53,12 @@ Step 1f でセッション開始時に自動読み込み済みの場合はそれ
 未読みの場合は Bash ツールで実行:
 
 ```bash
-beacon doc list --scope spec --op <op-id> --json
+cd "$PROJECT_DIR" && beacon doc list --scope spec --op <op-id> --json
 ```
 
 結果があれば:
 ```bash
-beacon doc show <doc_id>
+cd "$PROJECT_DIR" && beacon doc show <doc_id>
 ```
 
 **SPEC に書かれた手順に従ってログを取得する。**
@@ -88,7 +100,7 @@ SPEC にこのセクションが**無い場合**（古いOperation）:
 Bash ツールで実行:
 
 ```bash
-beacon run record -o <op-id> --batch <log_source> --status <ok|warning|error> --desc "<Step4のdescription>"
+cd "$PROJECT_DIR" && beacon run record -o <op-id> --batch <log_source> --status <ok|warning|error> --desc "<Step4のdescription>"
 ```
 
 ## Step 6: 問題があれば Incident 起票
@@ -96,7 +108,7 @@ beacon run record -o <op-id> --batch <log_source> --status <ok|warning|error> --
 Step 4 でステータスが `warning` または `error` の場合、かつユーザーが Incident として記録すべき問題と判断した場合:
 
 ```bash
-beacon incident open "<問題のタイトル>" -o <op-id> --desc "<詳細な説明>"
+cd "$PROJECT_DIR" && beacon incident open "<問題のタイトル>" -o <op-id> --desc "<詳細な説明>"
 ```
 
 Incident 起票の判断基準:
@@ -109,7 +121,7 @@ Incident 起票の判断基準:
 このレビュー対象の Operation に紐づく **既存の open Incident** が無いか確認する。
 
 ```bash
-beacon incident list -o <op-id> --json
+cd "$PROJECT_DIR" && beacon incident list -o <op-id> --json
 ```
 
 `status == "open"` のエントリが存在する場合、**毎回必ず提示する** (UX レビュー UC7-L8 で実害あり)。誘導文の例:
@@ -143,3 +155,4 @@ Run recorded: [op-id] / [batch] [✓ok/⚠warning/✗error]
   必ず report 作成までエスコートする (e-595)
 - SPEC の手順に忠実に従う。独自の判断でログ取得方法を変えない
 - 読み取り専用の操作（ログ取得）は Bash/Read/WebFetch を自由に使う
+- **すべての beacon CLI 呼び出しに `cd "$PROJECT_DIR" && ...` を前置する**。Claude Code がホームで起動していても正しく動くため。

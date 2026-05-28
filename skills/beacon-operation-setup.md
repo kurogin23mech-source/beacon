@@ -1,7 +1,7 @@
 ---
 name: beacon-operation-setup
 description: Operationを輪郭(todo)から実稼働(open)まで会話で組み立てる。新規Operationの作成と、既存todoOperationの活性化の両方に対応。OperationTasks（準備項目）とSPECドキュメント（ログ取得手順）をセットで整備する。
-version: 2.0.0
+version: 2.1.0
 triggers:
   - /beacon-operation-setup
   - Operationをセットアップ
@@ -14,17 +14,29 @@ triggers:
 
 > Operationを輪郭(todo)から実稼働(open)まで組み立てるSkill。新規作成と既存todo活性化の両対応。
 
+## cwd 解決（最重要）
+
+このSkillは Claude Code をホームディレクトリで起動したまま `~/<proj>/` 配下の Operation を扱うケースを想定する。
+
+以下の優先順位で **作業ディレクトリ** を決定する（以降 `$PROJECT_DIR` と呼ぶ）:
+
+1. **hook が渡した `(project: ...)` パス**を additionalContext から抽出（trigger 経由起動時）
+2. ユーザーが `/beacon-operation-setup <op-id>` のように引数で渡し、現在の cwd 配下に `.beacon/project.json` がある場合は cwd を使う
+3. それ以外は Bash ツールで `pwd` の結果を `$PROJECT_DIR` とし、ホームディレクトリそのものなら abort
+
+**以降、すべての Bash 呼び出しは `cd "$PROJECT_DIR" && ...` 形式で実行する。**
+
 ## 前提条件チェック
 
 ```bash
-test -f .beacon/project.json && echo "OK" || echo "NO_BEACON"
+cd "$PROJECT_DIR" && test -f .beacon/project.json && echo "OK" || echo "NO_BEACON"
 ```
 `NO_BEACON` なら終了。
 
 ## Step 0: 対象Operationの特定
 
 ```bash
-beacon operation list --json
+cd "$PROJECT_DIR" && beacon operation list --json
 ```
 
 todo状態のOperationが存在するか確認:
@@ -118,7 +130,7 @@ todo状態のOperationが存在するか確認:
 Step 0 で既存を選んだ場合:
 
 ```bash
-beacon operation show <op-id>
+cd "$PROJECT_DIR" && beacon operation show <op-id>
 ```
 
 既存の情報（title / objective / hint / 既存OperationTasks / 既存SPEC）を読み込む。
@@ -183,7 +195,7 @@ OperationTasks（このOperationを open化するための準備）:
 ### 4a. Operation を todo で作成（新規の場合のみ）
 
 ```bash
-beacon operation create "<title>" \
+cd "$PROJECT_DIR" && beacon operation create "<title>" \
   --schedule <schedule> \
   --log-source <log_source> \
   --objective "<objective>" \
@@ -197,7 +209,7 @@ stdout から op-id を取得。既存活性化フローではこのステップ
 
 各タスクに対して:
 ```bash
-beacon operation task add "<description>" -o <op-id> \
+cd "$PROJECT_DIR" && beacon operation task add "<description>" -o <op-id> \
   --priority <priority> \
   --why "<motivation>" \
   --ac "<acceptance_criteria>"
@@ -206,7 +218,7 @@ beacon operation task add "<description>" -o <op-id> \
 ### 4c. SPECドキュメント生成
 
 ```bash
-beacon doc add "<log_source> ログ取得・解釈手順" --scope spec --op <op-id> --stdin <<'EOF'
+cd "$PROJECT_DIR" && beacon doc add "<log_source> ログ取得・解釈手順" --scope spec --op <op-id> --stdin <<'EOF'
 # <log_source> ログ取得・解釈手順
 
 ## ログ取得
@@ -264,7 +276,7 @@ EOF
 OperationTasks の状況を見て判断:
 
 ```bash
-beacon operation task list -o <op-id>
+cd "$PROJECT_DIR" && beacon operation task list -o <op-id>
 ```
 
 ### 全 OperationTasks が done
@@ -272,7 +284,7 @@ beacon operation task list -o <op-id>
 「準備が完了しています、`open`（稼働状態）に遷移しますか？」とユーザーに確認。  
 承認なら:
 ```bash
-beacon operation activate <op-id>
+cd "$PROJECT_DIR" && beacon operation activate <op-id>
 ```
 
 ### まだ done になっていない OperationTasks がある
@@ -289,7 +301,7 @@ OperationTasksの準備が完了したら、再度 /beacon-operation-setup で�
 
 OperationTasks を `in_progress` にしたい場合、ユーザーは:
 ```bash
-beacon operation status <op-id> in_progress
+cd "$PROJECT_DIR" && beacon operation status <op-id> in_progress
 ```
 
 ## Step 6: 完了メッセージ
@@ -316,3 +328,4 @@ Operation セットアップ完了
 - ユーザーが明示的に答えた情報は再度聞かない
 - Operation ID は `beacon operation create` の stdout から取得する（仮定しない）
 - 既存todoOperation活性化フローでは、既存情報を尊重する（上書きしない、不足分のみ補完）
+- **すべての Bash 呼び出しに `cd "$PROJECT_DIR" && ...` を前置する**。Claude Code がホームで起動していても正しく動くため。

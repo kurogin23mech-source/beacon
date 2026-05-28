@@ -2216,6 +2216,29 @@ case "${1:-}" in
     doctor)
         python3 "$COMMANDS_PY" doctor
         ;;
+    cycle)
+        ensure_project
+        shift
+        local sub="${1:-status}"
+        case "$sub" in
+            status)
+                shift
+                local json_flag=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) json_flag="1"; shift ;;
+                        *) shift ;;
+                    esac
+                done
+                BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" cycle_status
+                ;;
+            *)
+                echo "Unknown cycle subcommand: $sub"
+                echo "Usage: beacon cycle status [--json]"
+                exit 1
+                ;;
+        esac
+        ;;
     help|-h|--help)
         if [[ "${2:-}" == "--json" ]]; then
             python3 "$COMMANDS_PY" help_json
