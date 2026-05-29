@@ -13,6 +13,15 @@ triggers:
 
 > ふわっとしたアイデアを対話で精緻化し、構造化ビジョンとして記録する。フォーム入力ではなく対話駆動。
 
+## 起動ポリシー (重要、CORE doc `PU9HG2IVQdW3tLiAJvix` / `4AS5ehyJc8mGU1gsiFvz` 準拠)
+
+このSkillは **ユーザーが明示的に呼んだ時だけ動く**。`/beacon-init` などからの **自動チェーンはしない**。
+
+- Beacon の北極星 (Philosophy) は「最低限の情報でまずアウトプット、FB で質を上げる」
+- vision の 6 セクション対話は構造化が欲しくなったユーザーのための機能 (default off)
+- 新規 init 後は `/beacon-roadmap` (minimal) → 即実装、が default
+- 「ビジョン整理したい」「ターゲットや成功基準を詰めたい」とユーザーが望んだ時にだけ価値を出す
+
 ## 前提条件チェック
 
 Bash ツールで以下を実行（cwd=$PROJECT_DIR、または現在のcwd）:

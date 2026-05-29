@@ -108,18 +108,31 @@ Step 3 でまとめて1画面確認（個別質問しない）。
 
 ### モード B（subdir作成）
 
-ユーザーの最初の発言（やりたいこと）を **そのまま objective に転用** する。  
-個別質問は **0 回**。デフォルト値を適用:
-- name: Step 2 で推定済み (subdir 名)
-- objective: ユーザーの最初の発言（必要に応じてAIが整形）
-- retro_day: friday
-- storage: **local（デフォルト）**。発言に「cloud」「クラウド」「team」「チーム」「複数人」「同期」等が含まれていたら cloud に変更
+CORE doc `4AS5ehyJc8mGU1gsiFvz` (最速アウトプット、構造は後から) に従い、**3 つの基本フィールドを質問** する。ただし全部一気に聞かない、objective だけが本当の質問:
 
-→ Step 4 へ（1 回だけの terminal 確認）
+#### Step 3a: objective を 1 度だけ聞く (短い質問)
+
+ユーザーの最初の発言が「○○作りたい」等で十分な場合はそれを objective に流用 → 質問スキップ。  
+最初の発言が抽象的すぎる場合だけ、1 行で聞く:
+
+```
+「[ユーザー発言]」を Beacon プロジェクトとして始めますね。
+目的を 1〜2 行で教えてください (ターゲット・成功基準・制約などを一緒に書きたければどうぞ。空でも OK、後で `/beacon-vision` で深掘りできます)。
+```
+
+#### Step 3b: 推定値準備
+
+- **name**: Step 2 で推定済み (subdir 名)
+- **objective**: Step 3a で確定
+- **retro_day**: friday (デフォルト、後で `--retro-day` で変更可)
+- **storage**: **local（デフォルト）**。発言に「cloud」「クラウド」「team」「チーム」「複数人」「同期」等が含まれていたら cloud に変更
+
+→ Step 4 へ (1 回だけの terminal 確認)
 
 ### モード C（既存リポジトリBeacon化）
 
-Step 2 で準備した推定値を Step 4 で確認する（モード B と同じ流れ）。
+Step 2 で準備した推定値を Step 4 で確認する（モード B と同じ流れ）。  
+objective は README から自動抽出済みなので質問スキップ可能。
 
 ## Step 4: 確認 (Mode B / C 共通、不可逆操作の手前なので 1 回必須)
 
@@ -238,8 +251,8 @@ fi
   - Beacon Desktop App をインストール (現在配布パイプライン整備中、ms-44 参照)
   - cloud sync が欲しくなったら `beacon cloud setup` で opt-in
 
-続けてもう少しだけ話を聞かせてください、目指す形を整理してから始めましょう。
-→ /beacon-vision に続きます
+次は、目的に向けた「最初の一手」を一緒に決めて、すぐ動かせる状態にします。
+→ /beacon-roadmap (ミニマム提案モード) に進みます
 ```
 
 **モード B / cloud mode (明示的 opt-in)**:
@@ -249,8 +262,8 @@ fi
 📊 Web UI を別ウィンドウで開きました: $WEBUI_URL
    ターミナルの隣に並べておくと、これからの状態変化が常に見られます。
 
-続けてもう少しだけ話を聞かせてください、目指す形を整理してから始めましょう。
-→ /beacon-vision に続きます
+次は、目的に向けた「最初の一手」を一緒に決めて、すぐ動かせる状態にします。
+→ /beacon-roadmap (ミニマム提案モード) に進みます
 ```
 
 **モード C**:
@@ -260,40 +273,38 @@ fi
 📊 Web UI を別ウィンドウで開きました: $WEBUI_URL
    ターミナルの隣に並べておくと、これからの状態変化が常に見られます。
 
-続けて、ターゲットや成功基準など、READMEには書かれていない部分を整理しましょう。
-→ /beacon-vision (Existing モード) に続きます
+→ /beacon-session-start で Project Archaeology が走り、これまでの開発履歴から MS 群を提案します。
 ```
 
 ## Step 6: 次フローへのチェイン（モード別）
 
-### モード B → /beacon-vision (Fresh モード) に必ずチェイン
+CORE doc `4AS5ehyJc8mGU1gsiFvz` (最速アウトプット、構造は後から) に従い、**vision には自動チェインしない**。  
+モード B では `/beacon-roadmap` (ミニマム提案) に直行 → 最初の MS を 1〜2 個提案 → 即実装着手の流れ。  
+深掘りビジョン整理が必要になったら、ユーザーが明示的に `/beacon-vision` を呼ぶ。
 
-新規プロジェクトの本質はビジョン整理から。確認なしで `/beacon-vision` を起動。  
-ユーザーの最初の発言がすでに「やりたいこと」なので、Skill 内で Fresh モードとして対話継続。
-
-```
-Bash(... or Skill invocation ...) で /beacon-vision を起動
-渡す context: $PROJECT_DIR, ユーザーの初期発言
-```
-
-### モード C → /beacon-vision (Existing モード) に必ずチェイン
-
-既存リポでも **ターゲット・成功基準・制約・やらないこと** の明文化は必要。  
-README + package.json description で objective は推定済み、Existing モードが Skill 内で残り4セクションを直接質問で埋める。
+### モード B → /beacon-roadmap (ミニマム提案モード) にチェイン
 
 ```
-Bash(... or Skill invocation ...) で /beacon-vision を起動
-渡す context: $PROJECT_DIR, 既存推定値（name/objective）
+Bash(... or Skill invocation ...) で /beacon-roadmap を起動
+渡す context: $PROJECT_DIR, objective, ユーザーの初期発言
+モード: minimal (最初の MS 1〜2 個だけ提案、全 5〜7 MS のフル roadmap は出さない)
 ```
 
-完了後、roadmap はスキップして `/beacon-session-start` で Project Archaeology が走る。
+### モード C → /beacon-session-start (Project Archaeology) に直接チェイン
 
-## Step 7: session-start の起動
+既存リポは git log から MS が逆算できるので roadmap スキップ、`/beacon-session-start` の Archaeology に直行。
 
-`/beacon-vision` が完了した後、Skill 内チェインで `/beacon-session-start` が `cwd=$PROJECT_DIR` で起動する。
+```
+Bash(... or Skill invocation ...) で /beacon-session-start を起動
+渡す context: $PROJECT_DIR
+```
 
-モード B では: vision → roadmap → session-start のチェイン  
-モード C では: vision (Existing) → session-start (Archaeology) のチェイン（roadmap スキップ）
+## Step 7: 廃止 (旧 vision → roadmap → session-start のチェイン)
+
+旧フロー: vision → roadmap → session-start を Skill 内で連続起動。  
+新フロー (本 Skill): モード B = roadmap に直行 / モード C = session-start に直行。
+
+`/beacon-vision` は **明示的に呼ばれた時だけ** 動く Skill に格下げ。慣れたユーザーが「もっとビジョンを深掘りしたい」と思った時点で `/beacon-vision` を起動する。
 
 ## 制約
 

@@ -11,7 +11,22 @@ triggers:
 
 # Beacon Roadmap
 
-> プロジェクトビジョンから、大目的達成までのマイルストーン群を一括設計する。
+> プロジェクトビジョンから、最初の MS 1〜2 個 (minimal) または大目的達成までの MS 群 (full) を設計する。
+
+## モード判定 (重要、CORE doc `4AS5ehyJc8mGU1gsiFvz` 準拠)
+
+CORE doc 「Beacon Onboarding の本質: 最速アウトプット、構造は後から自然発生」に従い、起動時に **mode を判定**:
+
+| 条件 | mode | 振る舞い |
+|---|---|---|
+| `/beacon-init` 直後の自動チェイン | **minimal** | 最初の MS 1〜2 個だけ提案、即実装着手の流れに |
+| `/beacon-roadmap minimal` 引数 or 「最小から」発言 | **minimal** | 同上 |
+| `/beacon-roadmap full` 引数 or 「全体ロードマップ」発言 | **full** | 5〜7 MS をフル roadmap、依存関係まで |
+| 引数なし、既存 MS が 1 つ以上ある | **full** | 続きの roadmap として追加分を提案 |
+| 引数なし、MS ゼロ、明示指定なし | **minimal** (デフォルト) | 最速アウトプット原則 |
+
+minimal モードでは Step 2 / 2.5 を簡略化、Step 5 で 1〜2 MS だけ登録。  
+full モードでは従来通り 5〜7 MS 一括設計。
 
 ## 前提条件チェック
 
@@ -21,32 +36,43 @@ test -f .beacon/project.json && echo "OK" || echo "NO_BEACON"
 beacon doc show project-vision 2>/dev/null
 ```
 
-`project-vision` ドキュメントが存在しない場合:
-```
-プロジェクトビジョンドキュメントがありません。
+`project-vision` ドキュメントが存在しない場合の挙動 (mode 別):
 
-ロードマップは「何を達成するか」が定義されていないと描けません。先に /beacon-vision でビジョンを整理しますか？
-```
+- **minimal モード** (デフォルト): vision 不在でも進める。`beacon status --json` の `objective` (init で設定済み) を「達成したいこと」として扱う。  
+  vision を強制しない (Philosophy: 構造化は default off)
+- **full モード**: vision がないと全体設計しづらいので、ユーザーに案内:
+  ```
+  full ロードマップは project-vision を読んで設計するのが本来の形です。
+  vision を先に書きますか？ それとも objective ベースで進めますか？
+  ```
 
-ユーザーが承認したら `/beacon-vision` を起動。それ以外は終了。
+## Step 1: コンテキスト読み込み
 
-## Step 1: ビジョンの読み込み
-
-Bash ツールで実行:
+Bash ツールで **並列に** 実行:
 ```bash
-beacon doc show project-vision
+beacon doc show project-vision 2>/dev/null    # vision あれば読む、無くてもエラーにしない
+beacon status --json                          # objective / 既存MS
 ```
 
-stdoutの内容（6セクション）をAIが読み込み、内部で理解する。
+vision があれば 6 セクション内容を踏まえる。  
+無ければ `beacon status` の `objective` を「達成したいこと」として扱う (minimal モードは vision 不要)。
 
-あわせて既存のマイルストーン状態も把握:
-```bash
-beacon status --json
-```
+既に `in_progress` / `todo` / `observing` 状態の MS があれば、それを踏まえて (重複・衝突なし) 設計する。
 
-既に `in_progress` / `todo` / `observing` 状態のMSがあれば、それを踏まえてロードマップを設計する（既存MSと衝突・重複しないように）。
+## Step 2: マイルストーン設計 (mode 別)
 
-## Step 2: マイルストーン群の設計
+### minimal モード (デフォルト、最速アウトプット)
+
+**最初の MS 1〜2 個だけ** 設計する。設計原則:
+- 「触って動くもの」を最短で作れる粒度 (1〜3 コミットで完了)
+- objective + 軽い AC (3〜5 項目) のみ、SPEC は書かない
+- 後続 MS は触ってから決める方針なので「ここまで描く」
+
+設計例:
+- objective が「家計簿アプリ」→ MS 1: 「手入力で支出を 1 件記録できる」 (それだけ)
+- objective が「ブログ書きたい」→ MS 1: 「最低限の記事を 1 本 publish できる」
+
+### full モード (明示指定 or 既存 MS あり)
 
 ビジョンに従い、**3〜7個のマイルストーン** を順序つきで設計する。
 
@@ -70,9 +96,11 @@ beacon status --json
 - **priority**: highest / high / middle / low / lowest（chest-up: 大目的への寄与で判定）
 - **依存関係**: どのMSに依存するか（基本は直前のMS）
 
-## Step 2.5: Operation 輪郭の同時提案
+## Step 2.5: Operation 輪郭の同時提案 (full モードのみ)
 
-ビジョンの「成功基準」「やらないこと」を踏まえ、**プロジェクトが完成したあと運用継続が必要なOperationの輪郭** を 0〜5個提案する。
+**minimal モードでは Operation 提案を skip** (最初の 1 MS の段階では運用は早すぎる)。
+
+full モードのみ、ビジョンの「成功基準」「やらないこと」を踏まえ、**プロジェクトが完成したあと運用継続が必要なOperationの輪郭** を 0〜5個提案する。
 
 ### 対象となるOperationの判断基準
 
@@ -91,7 +119,27 @@ beacon status --json
 - **対応 Milestone**: どのMSが完成した後に活性化すべきか
 - **初期 OperationTasks**: 活性化に必要な準備項目 2〜3個（粗い段階で）
 
-## Step 3: 提案の提示
+## Step 3: 提案の提示 (mode 別)
+
+### minimal モードの提示 (デフォルト、最速アウトプット)
+
+最初の MS 1〜2 個だけを軽量に提示:
+
+```
+ざっくり、最初の一手として「[ms-1 title]」を提案します。
+  - objective: [1〜2 行]
+  - 完了の目安: [AC を 2〜3 個、観察可能な形で]
+
+これでまず動くものを作ってから、次の MS は触ってみて見えてきたら追加しましょう。
+(全体像をいま描きたければ「フル roadmap で」と言ってください)
+
+このまま登録して着手しますか？
+```
+
+ユーザー OK で Step 5 (1〜2 MS 登録 + 最初の MS active 化)。  
+「フルで」と言われたら full モードに切り替えて再生成。
+
+### full モードの提示 (明示指定 or 既存 MS あり)
 
 ユーザーに **ロードマップ全体** を一覧で見せる:
 
@@ -160,13 +208,23 @@ beacon status --json
 修正後、Step 3 の形式で再提示。ユーザーが「OK」「そのまま」等で承認したら Step 5 へ。  
 修正指示が無ければ Step 4 をスキップして直接 Step 5。
 
-## Step 5: 一括登録 (Act)
+## Step 5: 登録 (Act first — CORE doc `AeN9aPpjvh6URTQlFmb6`)
 
-ユーザー承認 (or 無修正での進行) で、各MSを順番に登録する。
+ユーザー承認 (or 無修正での進行) で登録。**確認なしで実行**、結果を Step 6 で報告。
 
-### 各MSの追加
+### minimal モード
 
-Bash ツールで全MSに対して順次実行（順序が重要）:
+- 提案した 1〜2 MS だけ登録 → 最初の MS を即 active 化
+- **Operation 登録は skip** (Step 2.5 で提案していない)
+- 依存関係: 2 MS の場合のみ `ms-2 depends_on ms-1`
+
+### full モード
+
+全 MS 登録 + 依存関係 + 最初の MS active 化 + Operation 登録。
+
+### 各MSの追加 (両モード共通)
+
+Bash ツールで順次実行（順序が重要）:
 
 ```bash
 beacon milestone add "<title>" \
@@ -191,7 +249,7 @@ beacon milestone depends <ms-id> --on <previous-ms-id>
 beacon milestone start <最初のms-id>
 ```
 
-### Operationの登録（Step 2.5 で提案した場合のみ）
+### Operationの登録（full モードかつ Step 2.5 で提案した場合のみ）
 
 各 Operation を **todo 状態** で作成:
 
@@ -212,7 +270,25 @@ beacon operation task add "<description>" -o <op-id> --priority <priority>
 
 Operationsは全て todo 状態のまま登録される（活性化は対応Milestoneが完了した後、session-start での議論経由）。
 
-## Step 6: 完了報告
+## Step 6: 完了報告 (mode 別)
+
+### minimal モード (Philosophy: 即着手、SPEC 提案しない)
+
+```
+ms-1 「[title]」を登録 + アクティブ化しました。
+
+最初の一手として例えば:
+  - [具体的にユーザーが触れる小さなアウトプット 1 つ、AI が推測で書く]
+
+このまま実装に着手しますか？ (タスク細分化や SPEC は後から必要を感じたら `/beacon-task` `/beacon-spec` で)
+```
+
+ポイント:
+- **SPEC 提案を default 出さない** (CORE doc `4AS5ehyJc8mGU1gsiFvz`: 構造化は default off)
+- 1 つの具体的アクション (どこから手を付けるか) を AI が推測で示す
+- ユーザーが「やる」と言えば実装着手、「タスク先に切りたい」「SPEC 書きたい」と言えば対応 Skill
+
+### full モード
 
 ```
 ロードマップを登録しました。
@@ -223,13 +299,14 @@ Operationsは全て todo 状態のまま登録される（活性化は対応Mile
   ...
 
 最初のマイルストーン「[ms-A.title]」を開始しています。
-このMSの最初のタスクから始めますか？それともこのMSの SPEC ドキュメントを先に書きますか？
+このMSの最初のタスクから始めますか？ (構造化したければ `/beacon-spec [ms-A]` も使えます)
 ```
 
 ## 制約
 
 - 既存MS（in_progress / todo / observing）と重複・衝突するMSは提案しない
 - 各MSは「機能の実装」ではなく「ユーザーが何を手にするか」で表現する
-- ロードマップは3〜7個に収める。多すぎると消化できず、少なすぎると粒度が粗い
-- ビジョンの「やらないこと」をスコープ外に保つ
+- mode 別の上限: **minimal は 1〜2 MS**、**full は 3〜7 MS** (full で多すぎると消化できず、少なすぎると粒度が粗い)
+- ビジョンがあれば「やらないこと」をスコープ外に保つ
 - bulk add時にエラーが出たら、その時点で停止してユーザーに状況を報告する
+- **Philosophy 適合**: minimal は CORE doc `PU9HG2IVQdW3tLiAJvix` (バイブコーダーのためのツール) と `4AS5ehyJc8mGU1gsiFvz` (最速アウトプット) に従う。`/beacon-spec` への自動チェーンはしない。
