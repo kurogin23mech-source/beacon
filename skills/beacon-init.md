@@ -1,7 +1,7 @@
 ---
 name: beacon-init
-description: Beaconプロジェクトを会話形式で初期化。既存リポジトリはProject Archaeologyでgit logから自動分析。beacon init --name/--objective フラグで非対話実行。
-version: 1.0.0
+description: Beaconプロジェクトを会話形式で初期化。プロジェクト名と大目的を明示的に聞いてから場所を決める。既存リポはProject Archaeologyへ自動チェイン。
+version: 2.0.0
 triggers:
   - beacon init
   - プロジェクトをbeaconで管理したい
@@ -10,12 +10,15 @@ triggers:
 
 # Beacon Init
 
-> 会話でプロジェクト情報を収集し、`beacon init` を非対話で実行する。既存リポジトリはProject Archaeologyを提案する。
+> 名前と大目的を明示的に聞いて、場所決め → 確認 → init を 1 本道で進める。環境による事前分岐は最小化する (CORE doc `PU9HG2IVQdW3tLiAJvix` バイブコーダー Philosophy に準拠)。
 
-## Step 1: 環境スキャン + モード判定
+## Step 1: 軽い環境スキャン (分岐はしない、情報収集だけ)
 
-以下を **並列に** Bash ツールで実行（CWD は Claude Code 起動時の cwd）:
+以下を **並列に** Bash ツールで実行 (CWD は Claude Code 起動時の cwd):
 
+```bash
+test -f .beacon/project.json && echo "BEACON_EXISTS"
+```
 ```bash
 pwd
 ```
@@ -26,191 +29,151 @@ basename "$(pwd)"
 git log --oneline 2>/dev/null | wc -l | tr -d ' '
 ```
 ```bash
-ls -la 2>/dev/null | head -10
-```
-```bash
-test -f .beacon/project.json && echo "BEACON_EXISTS"
-```
-```bash
-cat README.md 2>/dev/null | head -5
+cat README.md 2>/dev/null | head -10
 ```
 ```bash
 cat package.json 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('description',''))" 2>/dev/null
-cat pyproject.toml 2>/dev/null | grep -m1 '^description' 2>/dev/null
-cat Cargo.toml 2>/dev/null | grep -m1 '^description' 2>/dev/null
+cat pyproject.toml 2>/dev/null | grep -m1 '^description'
+cat Cargo.toml 2>/dev/null | grep -m1 '^description'
 ```
 
-### モード判定（3モード）
+### 早期 escape: 既存 Beacon
 
-| 判定材料 | モード |
-|---|---|
-| `.beacon/project.json` あり | **A: 既存Beacon** → 「すでに初期化済みです」と伝えて終了 |
-| `.git` あり + コミット数 >= 10 + README/package.json description あり | **C: 既存リポBeacon化**（経験開発者の既存プロジェクト） |
-| 上記以外（ホーム / 空dir / 軽量dir / git無し等） | **B: 新規プロジェクト**（推定駆動、subdir作成は必要時のみ） |
+`BEACON_EXISTS` を検知したら即:
 
-判定結果を内部で `$INIT_MODE = A/B/C` として保持。
-
-**Note**: 旧設計の Mode B / D を統合。「ホームで起動した非開発者」と「mkdir済みの開発者」は subdir 作成有無が違うだけで UX は同じであるべき（質問最小化）。
-
-## Step 2: モード別の準備
-
-### モード A（既存Beacon）
 ```
 このディレクトリにはすでに beacon が初期化されています。
 状態を確認するには /beacon-session-start を実行してください。
 ```
 → 終了
 
-### モード B（新規プロジェクト、推定駆動）
+それ以外は続行。以下を内部で保持:
+- `$CWD`, `$CWD_BASENAME`
+- `$GIT_COMMITS` (コミット数、0 含む)
+- `$README_HEAD` (README の最初の数行)
+- `$PKG_DESC` (package.json / pyproject.toml / Cargo.toml の description、見つかれば)
 
-ユーザーの最初の発話から **プロジェクト名と目的を推定** する。
+**この段階ではホーム判定や Mode 分岐をしない**。環境情報は Step 2 の draft 組み立てと Step 3 の場所決めに使うだけ。
 
-#### サブステップ B-1: subdir 必要性の判定
+## Step 2: name + 大目的を明示的に聞く
 
-cwd が `$HOME` / `/` / `/tmp` / `$HOME/Desktop` / `$HOME/Documents` 等の **汎用ディレクトリ** か？
-
-- **YES（汎用ディレクトリ）**: 専用 subdir を作る必要あり
-  - ユーザーの発話から名前推定（「家計簿アプリ作りたい」→ `kakeibo-app`）
-  - Bash(`mkdir -p ~/<name>`, cwd=~)
-  - `$PROJECT_DIR = ~/<name>`
-  - ユーザーへ告知: 「『○○』のスペースを ~/<name> に作りますね」
-
-- **NO（既にディレクトリが指定されている、空でも軽量プロジェクトでも）**:
-  - subdir 作成は不要
-  - `$PROJECT_DIR = "$(pwd)"`
-  - 名前推定はディレクトリ basename またはユーザー発話から
-
-#### サブステップ B-2: 推定値の準備
-
-- **name**: 推定済み（subdir 名 or basename）
-- **objective**: ユーザーの最初の発言をそのまま、または整形
-- **retro-day**: friday（デフォルト）
-- **storage**: **local（デフォルト）**。cloud は明示的に「cloud で」「クラウドで」「チームで使う」等の opt-in 発言があった時のみ
-
-質問は **0回**。ただし、ユーザーが明らかに違うものを期待してそうなら一言確認:
-> 「ところで名前は kakeibo-app で大丈夫？」
-
-### モード C（既存リポBeacon化）
+ユーザーに対して **1 メッセージで以下のフォーム** を提示する:
 
 ```
-$PROJECT_DIR = "$(pwd)"
+Beacon プロジェクトとして始めますね。以下を教えてください:
+
+  📛 プロジェクト名:   [name-draft があれば挿入、なければ「(例: kakeibo-app)」]
+  🎯 大目的:           [objective-draft があれば挿入、なければ「1〜2 行で
+                       (このプロジェクトが完成したら何ができるようになるか)」]
+
+  以下は任意 (空でも OK、後で /beacon-vision で深掘りできます):
+  👥 ターゲット:        誰のためのプロジェクトか
+  📝 その他補足:        制約・成功基準・やらないこと等
 ```
 
-推定値を準備:
-- **name**: ディレクトリ basename
-- **objective**: README 先頭 / package.json description / pyproject description のいずれか1文
-- **retro-day**: friday（デフォルト）
-- **storage**: **local（デフォルト）**。cloud は明示的 opt-in （「cloud で」「team で使う」等）の時のみ
+### draft の組み立て
 
-Step 3 でまとめて1画面確認（個別質問しない）。
+- **name-draft**:
+  - ユーザーの初期発話に明示的な名前があればそれ
+  - そうでなく `$GIT_COMMITS >= 10` (既存リポ) なら `$CWD_BASENAME`
+  - それ以外は draft なし (フォームは例文だけ)
 
-## Step 3: モード別の情報収集
+- **objective-draft** (信頼順に上から拾う):
+  - ユーザーの初期発話 (「家計簿アプリ作りたい」等) があればそれ
+  - `$README_HEAD` の最初の意味ある 1〜2 行 (HTML/Markdown 装飾は除去)
+  - `$PKG_DESC`
+  - 何もなければ draft なし
 
-### モード B（subdir作成）
+draft を出すときは「README から拾いました、違ったら修正してください」のように **出どころを 1 行添える**。
 
-CORE doc `4AS5ehyJc8mGU1gsiFvz` (最速アウトプット、構造は後から) に従い、**3 つの基本フィールドを質問** する。ただし全部一気に聞かない、objective だけが本当の質問:
+### このステップでは聞かないもの
 
-#### Step 3a: objective を 1 度だけ聞く (短い質問)
+- retro-day → デフォルト friday を Step 4 の確認画面で見せる
+- storage → デフォルト local。発話に「cloud」「クラウド」「team」「チーム」「複数人」「同期」が含まれていたら cloud にして確認画面に出す
+- 場所 → Step 3 で AI が判定、確認画面で見せる
 
-ユーザーの最初の発言が「○○作りたい」等で十分な場合はそれを objective に流用 → 質問スキップ。  
-最初の発言が抽象的すぎる場合だけ、1 行で聞く:
+## Step 3: 場所決め (name/objective が固まった後)
 
-```
-「[ユーザー発言]」を Beacon プロジェクトとして始めますね。
-目的を 1〜2 行で教えてください (ターゲット・成功基準・制約などを一緒に書きたければどうぞ。空でも OK、後で `/beacon-vision` で深掘りできます)。
-```
+ユーザーから name と objective が返ってきた後、cwd を見て subdir 作成要否を判定:
 
-#### Step 3b: 推定値準備
+| `$CWD` の種類 | 判定 | `$PROJECT_DIR` |
+|---|---|---|
+| `$HOME` / `/` / `/tmp` / `$HOME/Desktop` / `$HOME/Documents` / `$HOME/Downloads` | **汎用** → subdir 必要 | `$CWD/<name-as-dirname>` |
+| それ以外 (空 dir, 軽量 dir, 既存リポ等) | **専用** → そのまま使う | `$CWD` |
 
-- **name**: Step 2 で推定済み (subdir 名)
-- **objective**: Step 3a で確定
-- **retro_day**: friday (デフォルト、後で `--retro-day` で変更可)
-- **storage**: **local（デフォルト）**。発言に「cloud」「クラウド」「team」「チーム」「複数人」「同期」等が含まれていたら cloud に変更
+`<name-as-dirname>` は name から英数字+ハイフン化:
+- 例: 「家計簿アプリ」→ `kakeibo-app` (ユーザーが name に英字系を書いてくれていればそれを使う、漢字だけなら romaji 化、それも難しければ `project-YYYYMMDD` フォールバック)
 
-→ Step 4 へ (1 回だけの terminal 確認)
+**この時点ではまだ mkdir しない**。Step 4 で確認してから Step 5 で実行する。
 
-### モード C（既存リポジトリBeacon化）
+## Step 4: 確認 (不可逆操作の前、1 回必須)
 
-Step 2 で準備した推定値を Step 4 で確認する（モード B と同じ流れ）。  
-objective は README から自動抽出済みなので質問スキップ可能。
+CORE doc `AeN9aPpjvh6URTQlFmb6` の例外規定: 不可逆操作は事前確認必須。`mkdir` と `beacon init` (cloud project_id 発行を含む) はここに該当する。
 
-## Step 4: 確認 (Mode B / C 共通、不可逆操作の手前なので 1 回必須)
-
-CORE doc `AeN9aPpjvh6URTQlFmb6` の例外規定:
-> 不可逆操作 (commit / deploy / merge / milestone done / cloud push --force) は事前確認必須
-
-`beacon init` も同じ性質 (cloud project_id 発行、subdir + .beacon/ 作成は後で重い) なので、**実行直前に 1 回だけ terminal 確認** を入れる:
-
-### Mode B (subdir 作成) の確認テンプレ
+### 確認テンプレ
 
 ```
-ホームディレクトリですね。「[ユーザー発言]」のスペースを以下で作ります:
+以下で進めます:
 
-  📁 場所:        ~/[subdir-name]/        (新規作成)
-  📛 名前:        [name]
-  🎯 目的:        [objective]
-  🔁 振り返り日:  金曜日                  (後で変更可)
-  💾 保存先:      ローカル                 (cloud 同期したい場合は今「cloud で作って」と言ってください)
+  📁 場所:              $PROJECT_DIR  [汎用cwdの場合は末尾に「(新規作成)」]
+  📛 プロジェクト名:    [name]
+  🎯 大目的:            [objective]
+  [target が非空なら] 👥 ターゲット:   [target]
+  [notes が非空なら]  📝 補足:        [notes]
+  🔁 振り返り日:        金曜日                  (後で変更可)
+  💾 保存先:            [ローカル or クラウド]  (cloud sync したい場合は「cloud で」と言ってください)
 
-このまま進めて大丈夫ですか？(「OK」or 修正点を指示)
+このまま進めて大丈夫ですか？ (「OK」or 修正点を指示)
 ```
 
-### Mode C (既存リポBeacon化) の確認テンプレ
-
-```
-このリポジトリを Beacon で管理しますね。以下で進めます:
-
-  📁 場所:        [pwd]
-  📛 プロジェクト名: [basename]
-  🎯 大目的:      [READMEから推定]
-  🔁 振り返り日:  金曜日                  (後で変更可)
-  💾 保存先:      [cloud or local]
-
-OK ですか？変えたい項目があれば教えてください（例: 「name は○○で」「retro 日は日曜で」「cloud で」）
-```
+任意項目 (target / notes) が空のまま提出された場合は **その行自体を出さない** (空欄を見せない)。
 
 ### 修正の受付
 
-ユーザーが個別項目の修正を指示してきたら該当項目だけ更新して **再提示**。  
-「OK」「いいよ」「進めて」等で承認 → Step 5 へ。
+- 個別項目修正 (「name は household-budget で」「cloud で」等) → 該当項目だけ更新して **再提示**
+- 「OK」「進めて」「いいよ」等 → Step 5 へ
 
-### 確認を取る理由
+## Step 5: 実行
 
-- `beacon init` は ディレクトリ作成 + cloud project_id 発行を含み、後でリネーム / 削除に手間がかかる
-- 個別質問は 0 回でも、**最終 1 回だけ** 全体像を見せて修正機会を与えることで、不安と「やり直し」コストを両方下げる
-- これが CORE doc 「Act first, confirm next-step」の「不可逆操作の前は事前確認」の典型例
+**重要**: Bash 呼び出しは必ず `cwd` を明示する (Claude Code 起動時の cwd と `$PROJECT_DIR` は異なる場合がある)。
 
-## Step 5: 実行（モード B / C 共通）
+### Step 5a: mkdir (汎用 cwd の場合のみ)
 
-**重要**: Bash 呼び出しは必ず `cwd=$PROJECT_DIR` を指定する（Claude Code 起動時の cwd と異なる場合があるため）。
-
-```bash
-beacon init --name "[name]" --objective "[objective]" --retro-day [retro_day] --storage [storage]
+```
+Bash(command="mkdir -p $PROJECT_DIR", cwd="$CWD")
 ```
 
-Bash ツール呼び出し例:
+### Step 5b: beacon init
+
 ```
-Bash(command="beacon init --name ... --objective ... --retro-day ... --storage ...", cwd=$PROJECT_DIR)
+Bash(
+  command="beacon init --name '[name]' --objective '[objective]' --retro-day [retro_day] --storage [storage]",
+  cwd="$PROJECT_DIR"
+)
 ```
 
-### Step 5b: 監査 UI の起動 (mode 別)
+### Step 5c: 監査 UI 起動
 
-Beacon の作業形態は「ターミナル + 監査 UI 並列表示」が前提。init 直後に UI を立ち上げて、以降は別ウィンドウで開いたままにする。
+Beacon の作業形態は「ターミナル + 監査 UI 並列表示」が前提。init 直後に UI を立ち上げる。
 
-#### local mode（デフォルト、cloud.json 無し）
+#### local mode (デフォルト、cloud.json 無し)
 
-Tauri Desktop App の自動起動を試みる（インストール済みなら）。未インストールなら案内のみ:
+Tauri Desktop App の自動起動を試みる。**プロジェクトパスを必ず引数で渡す** (Tauri 側 `find_project_dir()` が `args[1]` を見るため):
 
 ```bash
 # Bash 呼び出し (cwd=$PROJECT_DIR)
-# Tauri Desktop App の起動 (OS 別)
 TAURI_OPENED=""
 if [ -d "/Applications/Beacon.app" ]; then
-  open -a Beacon 2>/dev/null && TAURI_OPENED="1"
+  # macOS: --args の前に、既存インスタンスがあれば一旦終了させる (open -a は warm start 時に args を再処理しないため)
+  pkill -x Beacon 2>/dev/null
+  sleep 0.3
+  open -a Beacon --args "$PROJECT_DIR" 2>/dev/null && TAURI_OPENED="1"
 elif command -v beacon-desktop >/dev/null 2>&1; then
-  beacon-desktop &>/dev/null & TAURI_OPENED="1"
+  # Linux: バイナリは args[1] を直接受け取れる
+  beacon-desktop "$PROJECT_DIR" &>/dev/null & TAURI_OPENED="1"
 elif [ -x "$HOME/AppData/Local/Programs/Beacon/Beacon.exe" ]; then
-  "$HOME/AppData/Local/Programs/Beacon/Beacon.exe" &>/dev/null & TAURI_OPENED="1"
+  # Windows: 同上
+  "$HOME/AppData/Local/Programs/Beacon/Beacon.exe" "$PROJECT_DIR" &>/dev/null & TAURI_OPENED="1"
 fi
 
 if [ -z "$TAURI_OPENED" ]; then
@@ -218,7 +181,11 @@ if [ -z "$TAURI_OPENED" ]; then
 fi
 ```
 
-#### cloud mode（明示的 opt-in、cloud.json あり）
+**既知の制約 (本格対応は別タスク)**:
+- 現状 deep link / single-instance プラグインが入っていないため、macOS では既存インスタンスを一度落としてから起動している
+- 本来は `beacon://open?dir=...` のようなカスタム URL scheme でランタイム切替できるべき。それは別タスクで対応 (起動済みアプリのプロジェクト切替・複数プロジェクト同時表示等の基盤になる)
+
+#### cloud mode (明示的 opt-in、cloud.json あり)
 
 ```bash
 # Bash 呼び出し (cwd=$PROJECT_DIR)
@@ -226,7 +193,6 @@ if [ -f .beacon/cloud.json ]; then
   PROJECT_ID=$(python3 -c "import json; print(json.load(open('.beacon/cloud.json')).get('project_id',''))")
   if [ -n "$PROJECT_ID" ]; then
     WEBUI_URL="https://beacon-ai.dev/?project=$PROJECT_ID"
-    # OS判別: mac/Linux/Win いずれかで動く
     (open "$WEBUI_URL" 2>/dev/null \
       || xdg-open "$WEBUI_URL" 2>/dev/null \
       || cmd.exe /c start "$WEBUI_URL" 2>/dev/null \
@@ -236,11 +202,13 @@ if [ -f .beacon/cloud.json ]; then
 fi
 ```
 
-成功したら、モード別のメッセージを出す:
+### Step 5d: 完了報告
 
-**モード B / local mode (デフォルト)**:
+`$GIT_COMMITS` と storage で内容を変える。target/notes が入力されていれば末尾に `/beacon-vision` 誘導を 1 行添える。
+
+**新規プロジェクト (local, `$GIT_COMMITS < 10`)**:
 ```
-「[name]」のスペースを準備しました（場所: $PROJECT_DIR、local mode）。
+「[name]」のスペースを準備しました (場所: $PROJECT_DIR、local mode)。
 
 [Tauri 起動成功時]
 🖥  Beacon Desktop App を開きました。ターミナルの隣に並べておくと、これからの状態変化が常に見られます。
@@ -248,73 +216,75 @@ fi
 [Tauri 未インストール時]
 ℹ️  確認方法:
   - `beacon` で tmux ダッシュボード (要 tmux)
-  - Beacon Desktop App をインストール (現在配布パイプライン整備中、ms-44 参照)
+  - Beacon Desktop App をインストール (配布パイプライン整備中、ms-44 参照)
   - cloud sync が欲しくなったら `beacon cloud setup` で opt-in
 
-次は、目的に向けた「最初の一手」を一緒に決めて、すぐ動かせる状態にします。
-→ /beacon-roadmap (ミニマム提案モード) に進みます
+[target/notes が入力されていた場合]
+書いてくれたターゲット・補足は `/beacon-vision` で正式なビジョン doc として整形できます。
+
+→ Step 6 (マイルストーン着手) に進みます
 ```
 
-**モード B / cloud mode (明示的 opt-in)**:
+**新規プロジェクト (cloud)**:
 ```
-「[name]」のスペース (cloud sync 有効) を準備しました（場所: $PROJECT_DIR）。
+「[name]」のスペース (cloud sync 有効) を準備しました (場所: $PROJECT_DIR)。
 
 📊 Web UI を別ウィンドウで開きました: $WEBUI_URL
    ターミナルの隣に並べておくと、これからの状態変化が常に見られます。
 
-次は、目的に向けた「最初の一手」を一緒に決めて、すぐ動かせる状態にします。
-→ /beacon-roadmap (ミニマム提案モード) に進みます
+[target/notes が入力されていた場合の /beacon-vision 誘導 1 行]
+
+→ Step 6 (マイルストーン着手) に進みます
 ```
 
-**モード C**:
+**既存リポ (`$GIT_COMMITS >= 10`)**:
 ```
 このリポジトリを Beacon で管理する準備ができました。
 
-📊 Web UI を別ウィンドウで開きました: $WEBUI_URL
-   ターミナルの隣に並べておくと、これからの状態変化が常に見られます。
+[Tauri or Web UI 起動結果]
 
 → /beacon-session-start で Project Archaeology が走り、これまでの開発履歴から MS 群を提案します。
 ```
 
-## Step 6: 次フローへのチェイン（モード別）
+## Step 6: マイルストーン着手の入り口
 
-CORE doc `4AS5ehyJc8mGU1gsiFvz` (最速アウトプット、構造は後から) に従い、**vision には自動チェインしない**。  
-モード B では `/beacon-roadmap` (ミニマム提案) に直行 → 最初の MS を 1〜2 個提案 → 即実装着手の流れ。  
-深掘りビジョン整理が必要になったら、ユーザーが明示的に `/beacon-vision` を呼ぶ。
+### 既存リポ (`$GIT_COMMITS >= 10`) の場合
 
-### モード B → /beacon-roadmap (ミニマム提案モード) にチェイン
+`/beacon-session-start` に直接チェイン。Archaeology が走り、これまでの開発履歴から MS 群を提案する。
 
-```
-Bash(... or Skill invocation ...) で /beacon-roadmap を起動
-渡す context: $PROJECT_DIR, objective, ユーザーの初期発言
-モード: minimal (最初の MS 1〜2 個だけ提案、全 5〜7 MS のフル roadmap は出さない)
-```
+### 新規プロジェクトの場合
 
-### モード C → /beacon-session-start (Project Archaeology) に直接チェイン
-
-既存リポは git log から MS が逆算できるので roadmap スキップ、`/beacon-session-start` の Archaeology に直行。
+**いきなり `/beacon-roadmap` を起動しない**。ユーザーに既にイメージがあるケースが多いので、まず聞く:
 
 ```
-Bash(... or Skill invocation ...) で /beacon-session-start を起動
-渡す context: $PROJECT_DIR
+最初のマイルストーンを決めましょう。
+
+  すでにイメージがあれば教えてください (例: 「領収書の取り込みから始めたい」)。
+  まだぼんやりしてるなら、こちらから簡単に提案します。
 ```
 
-## Step 7: 廃止 (旧 vision → roadmap → session-start のチェイン)
+ユーザーの返答で分岐:
 
-旧フロー: vision → roadmap → session-start を Skill 内で連続起動。  
-新フロー (本 Skill): モード B = roadmap に直行 / モード C = session-start に直行。
+| ユーザー応答 | 動作 |
+|---|---|
+| 「提案して」「お任せ」「分からない」「ぼんやり」等 | → `/beacon-roadmap` (ミニマム提案モード) を起動 |
+| 具体的な MS イメージ (「○○から始めたい」「△△を作る」等) | → 即 `beacon milestone add "[ユーザー発話を MS タイトル化]"` を実行。SPEC・vision チェインはしない (ユーザーが明示的に欲しがれば後で呼ぶ) |
+| 「ちょっと考える」「まだ決めてない」等 | → 「決まったら `beacon milestone add` で起票できます。`/beacon-roadmap` を呼べばこちらから提案もできます」と案内だけして待機 |
 
-`/beacon-vision` は **明示的に呼ばれた時だけ** 動く Skill に格下げ。慣れたユーザーが「もっとビジョンを深掘りしたい」と思った時点で `/beacon-vision` を起動する。
+CORE doc `4AS5ehyJc8mGU1gsiFvz` (最速アウトプット) と `PU9HG2IVQdW3tLiAJvix` (バイブコーダー Philosophy) に従い、**`/beacon-vision` には自動チェインしない**。深掘りビジョン整理が必要になったら、ユーザーが明示的に `/beacon-vision` を呼ぶ。
 
 ## 制約
 
-- **ユーザーをターミナルに戻さない**（CORE doc `ux-principle-no-terminal` 参照）
+- **ユーザーをターミナルに戻さない** (CORE doc `ux-principle-no-terminal`)
   - `beacon init` も `mkdir` もすべて Bash ツール経由で Skill が実行する
   - ユーザーに `cd` や `claude` 再起動を依頼しない
-- すべての Bash 呼び出しで `cwd=$PROJECT_DIR` を指定する（Claude Code 起動時の cwd と異なる場合があるため）
-- ファイル操作は絶対パスを使う（`$PROJECT_DIR/foo` の形式）
+- すべての Bash 呼び出しで `cwd` を明示する
+- ファイル操作は絶対パスを使う (`$PROJECT_DIR/foo` の形式)
 - `rm` は使わない
-- ユーザーが明示的に答えた情報は再度聞かない
-- モード B/C では質問を最小化（推定 + デフォルト適用、修正は受け付ける）
-- モード D は従来通り 4 問順に聞く
-- 専門用語（プロジェクト、ディレクトリ、リポジトリ等）は使ってOK。説明はしない（ユーザーがClaude Codeに聞ける環境を信頼）
+- name と objective は **必ず明示的に聞く** (推定だけで進めない)。draft の pre-fill はしてよい
+- target/notes は **任意の補足欄として案内するだけ**、空で進んで OK。空なら確認画面にも出さない
+- mkdir は **確認 (Step 4) の後で実行** する。確認前には絶対に作らない
+- 旧 Mode A/B/C 分岐は廃止。早期 escape (既存 Beacon) と Step 6 のルーティング (新規 vs 既存リポ) だけ残す
+- 新規プロジェクトで `/beacon-roadmap` を自動チェインしない。**Step 6 でユーザーにイメージの有無を聞いてから分岐** する (バイブコーダーが既に手を動かしたい状態を尊重)
+- Tauri Desktop の起動コマンドには **必ずプロジェクトパスを引数で渡す** (`open -a Beacon --args "$PROJECT_DIR"` 等)。引数なしだとアプリは起動するがプロジェクト未指定状態になる
+- 専門用語 (プロジェクト、ディレクトリ、リポジトリ等) は使ってよい。説明はしない (ユーザーが Claude Code に聞ける環境を信頼)
