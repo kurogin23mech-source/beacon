@@ -273,17 +273,28 @@ beacon doc update <doc-id> --content "[新しい内容]"
 ```
 (長文の場合、`/tmp/` に書き出して `--content "$(cat ...)"` ではなく stdin リダイレクト `< /tmp/...md` を使う)
 
-書き込み完了後、結果報告 (確認は取らない、次フェーズへ即進む):
+書き込み完了後、結果報告 (確認は取らない、次フェーズへ即進む)。**mode 別に保存先案内を分岐**:
 
+**cloud mode の場合**:
 ```
-SPEC を記録しました ([doc-id])。
-🔗 https://beacon-ai.dev/?project=<project_id>#doc/<doc-id>  (cloud mode の場合)
-受入条件と実装順序は AI が推測で埋めました — 触ってみて気になれば指示してください。
+ms-XX の SPEC を記録しました。
+🔗 https://beacon-ai.dev/?project=<project_id>#doc/<doc-id>
+   (Web UI の Documents タブ → 「ms-XX SPEC: [title]」)
+   受入条件と実装順序は AI が推測で埋めました — 触ってみて気になれば指示してください、`beacon doc update <doc-id>` で直せます。
 
 続けてタスクに分割して起票します。
 ```
 
-そのまま Step 6 へ進む (ユーザー応答待たず act)。
+**local mode の場合** (Beacon Desktop App 起動中):
+```
+ms-XX の SPEC を記録しました。
+📄 Beacon Desktop App の Documents タブ → 「ms-XX SPEC: [title]」 で確認できます。
+   受入条件と実装順序は AI が推測で埋めました — 触ってみて気になれば指示してください、`beacon doc update <doc-id>` で直せます。
+
+続けてタスクに分割して起票します。
+```
+
+そのまま Step 6 へ進む (ユーザー応答待たず act)。`project_id` は `.beacon/cloud.json` から取得、`doc-id` は `beacon doc add` の戻り値から。
 
 ## Step 6: タスク分割と一括起票 (Act first)
 

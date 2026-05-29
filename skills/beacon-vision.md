@@ -242,9 +242,14 @@ echo "..." | beacon doc update project-vision --stdin
 
 ### Fresh モード → /beacon-roadmap にチェイン
 
+保存先の案内を **mode 別に分岐**:
+
+**cloud mode の場合**:
 ```
-プロジェクトビジョンを記録しました ([url])。
-推測で埋めた部分は触ってみて気になれば指示してください、`beacon doc update` で直せます。
+プロジェクトビジョンを記録しました。
+🔗 https://beacon-ai.dev/?project=<project_id>#doc/project-vision
+   (Web UI の Documents タブ → 「プロジェクトビジョン」)
+   気になれば見てください、推測で埋めた部分は `beacon doc update project-vision` で直せます。
 
 次は、このビジョン (大目的) に到達するまでの道のりを 3〜7 個のマイルストーンに分けて整理します
 (マイルストーン = 「ここまで進んだら一区切り」と呼べる単位)。
@@ -252,6 +257,21 @@ echo "..." | beacon doc update project-vision --stdin
 
 進めますか？ (内部的には /beacon-roadmap Skill を起動します)
 ```
+
+**local mode の場合** (Beacon Desktop App 起動中):
+```
+プロジェクトビジョンを記録しました。
+📄 Beacon Desktop App の Documents タブ → 「プロジェクトビジョン」 で確認できます。
+   気になれば見てください、推測で埋めた部分は `beacon doc update project-vision` で直せます。
+
+次は、このビジョン (大目的) に到達するまでの道のりを 3〜7 個のマイルストーンに分けて整理します
+(マイルストーン = 「ここまで進んだら一区切り」と呼べる単位)。
+順序や依存関係も一緒に考えて、最初のマイルストーンから着手できる状態を作ります。
+
+進めますか？ (内部的には /beacon-roadmap Skill を起動します)
+```
+
+`project_id` は `.beacon/cloud.json` の `project_id` フィールドから取得。`<project_id>` プレースホルダは実値で置換する。
 
 ユーザー承認なら `/beacon-roadmap` を起動。
 
