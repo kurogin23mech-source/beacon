@@ -1,7 +1,7 @@
 ---
 name: beacon-init
 description: Beaconプロジェクトを会話形式で初期化。プロジェクト名と大目的を明示的に聞いてから場所を決める。既存リポはProject Archaeologyへ自動チェイン。
-version: 2.0.0
+version: 2.2.0
 triggers:
   - beacon init
   - プロジェクトをbeaconで管理したい
@@ -164,9 +164,9 @@ Tauri Desktop App の自動起動を試みる。**プロジェクトパスを必
 # Bash 呼び出し (cwd=$PROJECT_DIR)
 TAURI_OPENED=""
 if [ -d "/Applications/Beacon.app" ]; then
-  # macOS: --args の前に、既存インスタンスがあれば一旦終了させる (open -a は warm start 時に args を再処理しないため)
-  pkill -x Beacon 2>/dev/null
-  sleep 0.3
+  # macOS: --args でプロジェクトパスを渡す。warm start (既存インスタンスあり) の時は
+  # tauri-plugin-single-instance が args を running instance に転送し、
+  # project-changed イベント経由でフロントが対象プロジェクトに切り替わる (F27)。
   open -a Beacon --args "$PROJECT_DIR" 2>/dev/null && TAURI_OPENED="1"
 elif command -v beacon-desktop >/dev/null 2>&1; then
   # Linux: バイナリは args[1] を直接受け取れる
@@ -181,9 +181,7 @@ if [ -z "$TAURI_OPENED" ]; then
 fi
 ```
 
-**既知の制約 (本格対応は別タスク)**:
-- 現状 deep link / single-instance プラグインが入っていないため、macOS では既存インスタンスを一度落としてから起動している
-- 本来は `beacon://open?dir=...` のようなカスタム URL scheme でランタイム切替できるべき。それは別タスクで対応 (起動済みアプリのプロジェクト切替・複数プロジェクト同時表示等の基盤になる)
+**前提**: Beacon.app v0.1+ (tauri-plugin-single-instance 同梱、F27 で導入)。古い Beacon.app では warm start 時に args が再処理されず、引数なし起動と同等の挙動になる。その場合 Beacon.app を最新ビルドに差し替える。
 
 #### cloud mode (明示的 opt-in、cloud.json あり)
 
@@ -204,9 +202,9 @@ fi
 
 ### Step 5d: 完了報告
 
-`$GIT_COMMITS` と storage で内容を変える。target/notes が入力されていれば末尾に `/beacon-vision` 誘導を 1 行添える。
+mkdir 有無 (= Step 5a が走ったか) と storage で内容を変える。target/notes が入力されていれば末尾に `/beacon-vision` 誘導を 1 行添える。
 
-**新規プロジェクト (local, `$GIT_COMMITS < 10`)**:
+**brand-new dir (Step 5a で mkdir, local)**:
 ```
 「[name]」のスペースを準備しました (場所: $PROJECT_DIR、local mode)。
 
@@ -225,7 +223,7 @@ fi
 → Step 6 (マイルストーン着手) に進みます
 ```
 
-**新規プロジェクト (cloud)**:
+**brand-new dir (Step 5a で mkdir, cloud)**:
 ```
 「[name]」のスペース (cloud sync 有効) を準備しました (場所: $PROJECT_DIR)。
 
@@ -237,24 +235,22 @@ fi
 → Step 6 (マイルストーン着手) に進みます
 ```
 
-**既存リポ (`$GIT_COMMITS >= 10`)**:
+**既存 dir (Step 5a で mkdir せず、`$PROJECT_DIR == $CWD`)**:
 ```
 このリポジトリを Beacon で管理する準備ができました。
 
 [Tauri or Web UI 起動結果]
 
-→ /beacon-session-start で Project Archaeology が走り、これまでの開発履歴から MS 群を提案します。
+→ /beacon-session-start に進みます (現状の git/コードを読み込んで、マイルストーン提案を出します)。
 ```
 
 ## Step 6: マイルストーン着手の入り口
 
-### 既存リポ (`$GIT_COMMITS >= 10`) の場合
+判定軸は **「Step 5a で mkdir したか否か」** だけ。`$PROJECT_DIR != $CWD` (Step 3 で汎用 cwd → subdir 必要と判定) なら mkdir 経由 = brand-new empty dir。それ以外は既存 dir で /beacon-init が叩かれたケース。**git commits 数のような閾値判定はしない** (session-start に委ねる)。
 
-`/beacon-session-start` に直接チェイン。Archaeology が走り、これまでの開発履歴から MS 群を提案する。
+### A. Step 5a で mkdir した場合 (brand-new empty dir)
 
-### 新規プロジェクトの場合
-
-**いきなり `/beacon-roadmap` を起動しない**。ユーザーに既にイメージがあるケースが多いので、まず聞く:
+dir に何もないので Archaeology / code reading の素材がない。**いきなり `/beacon-roadmap` を起動しない**。ユーザーに既にイメージがあるケースが多いので、まず聞く:
 
 ```
 最初のマイルストーンを決めましょう。
@@ -271,6 +267,22 @@ fi
 | 具体的な MS イメージ (「○○から始めたい」「△△を作る」等) | → 即 `beacon milestone add "[ユーザー発話を MS タイトル化]"` を実行。SPEC・vision チェインはしない (ユーザーが明示的に欲しがれば後で呼ぶ) |
 | 「ちょっと考える」「まだ決めてない」等 | → 「決まったら `beacon milestone add` で起票できます。`/beacon-roadmap` を呼べばこちらから提案もできます」と案内だけして待機 |
 
+### B. Step 5a で mkdir しなかった場合 (既存 dir で /beacon-init を叩いた)
+
+`$PROJECT_DIR == $CWD`。dir に何かしらコンテキストがある可能性が高い (README / source / git history など)。**`/beacon-session-start` に直接チェイン**:
+
+```
+このリポジトリの現状を読み込んで、マイルストーン提案を出します。
+→ /beacon-session-start
+```
+
+session-start 側が consultant mode で内部判定する (init 側で git 履歴量を見ない、判定責務は session-start に集約):
+- `git_commits >= 10` → Archaeology (git log clustering) + code reading
+- それ未満 → code reading だけ (B フロー)
+- 真の空 dir → 結果が薄くて Q&A 相当に自然に落ちる
+
+### 共通: vision には自動チェインしない
+
 CORE doc `4AS5ehyJc8mGU1gsiFvz` (最速アウトプット) と `PU9HG2IVQdW3tLiAJvix` (バイブコーダー Philosophy) に従い、**`/beacon-vision` には自動チェインしない**。深掘りビジョン整理が必要になったら、ユーザーが明示的に `/beacon-vision` を呼ぶ。
 
 ## 制約
@@ -284,7 +296,9 @@ CORE doc `4AS5ehyJc8mGU1gsiFvz` (最速アウトプット) と `PU9HG2IVQdW3tLiA
 - name と objective は **必ず明示的に聞く** (推定だけで進めない)。draft の pre-fill はしてよい
 - target/notes は **任意の補足欄として案内するだけ**、空で進んで OK。空なら確認画面にも出さない
 - mkdir は **確認 (Step 4) の後で実行** する。確認前には絶対に作らない
-- 旧 Mode A/B/C 分岐は廃止。早期 escape (既存 Beacon) と Step 6 のルーティング (新規 vs 既存リポ) だけ残す
-- 新規プロジェクトで `/beacon-roadmap` を自動チェインしない。**Step 6 でユーザーにイメージの有無を聞いてから分岐** する (バイブコーダーが既に手を動かしたい状態を尊重)
+- 旧 Mode A/B/C 分岐は廃止。早期 escape (既存 Beacon) と Step 6 のルーティング (mkdir 有無) だけ残す
+- **Step 6 で git_commits 数による分岐をしない**。「mkdir した = brand-new」「mkdir しなかった = 既存 dir → session-start に委ねる」だけ。閾値判定は session-start の責務 (F28)
+- 新規プロジェクト (brand-new dir) で `/beacon-roadmap` を自動チェインしない。**Step 6 A でユーザーにイメージの有無を聞いてから分岐** する (バイブコーダーが既に手を動かしたい状態を尊重)
 - Tauri Desktop の起動コマンドには **必ずプロジェクトパスを引数で渡す** (`open -a Beacon --args "$PROJECT_DIR"` 等)。引数なしだとアプリは起動するがプロジェクト未指定状態になる
+- warm start (Tauri 既起動) でも引数が再処理される (F27: tauri-plugin-single-instance 同梱)。pkill 不要
 - 専門用語 (プロジェクト、ディレクトリ、リポジトリ等) は使ってよい。説明はしない (ユーザーが Claude Code に聞ける環境を信頼)

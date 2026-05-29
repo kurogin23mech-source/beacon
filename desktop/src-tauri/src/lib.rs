@@ -506,9 +506,49 @@ fn cloud_diagnose() -> String {
     lines.join("\n")
 }
 
+/// Find a project dir in a second-instance args vector and switch to it.
+/// Called by tauri-plugin-single-instance when another `open -a Beacon --args /path`
+/// (or `beacon-desktop /path`) is invoked while an instance is already running.
+/// This eliminates the `pkill -x Beacon` warm-start workaround in /beacon-init.
+fn switch_project_from_args(app: &tauri::AppHandle, args: &[String]) {
+    // Look through args (skipping argv[0]) for the first path containing .beacon/project.json
+    let candidate = args.iter().skip(1).find_map(|a| {
+        let p = std::path::Path::new(a);
+        if p.join(".beacon/project.json").exists() {
+            Some(a.clone())
+        } else if p.join("project.json").exists() {
+            p.parent().map(|x| x.to_string_lossy().to_string())
+        } else {
+            None
+        }
+    });
+    if let Some(dir) = candidate {
+        let state: tauri::State<AppState> = app.state();
+        *state.project_dir.lock().unwrap() = Some(dir.clone());
+        let w = start_file_watcher(app.clone(), &dir);
+        *state.watcher.lock().unwrap() = w;
+        // Notify frontend so it can clear state and reload via load_project_json
+        let _ = app.emit("project-changed", &dir);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // F27: single-instance — when a second launch happens (e.g. /beacon-init
+        // re-running `open -a Beacon --args /new/path`), forward args to the
+        // running instance instead of starting a new process. Replaces the
+        // pkill warm-start workaround.
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            log::info!("single-instance fired, args: {:?}", args);
+            switch_project_from_args(app, &args);
+            // Bring window to front so user sees the switch
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .manage(AppState {
             project_dir: Mutex::new(find_project_dir()),
             cloud_project_id: Mutex::new(None),

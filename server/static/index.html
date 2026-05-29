@@ -1881,7 +1881,7 @@ function connectWebSocket(projectId) {
         state.project = msg.data;
         state.lastUpdate = new Date();
         state.connected = true;
-        render();
+        renderOnDataChange();
       }
     }
   };
@@ -3076,6 +3076,20 @@ function renderMsListArea() {
     ${filtered.map((ms, i) => renderMilestoneCard(ms, i)).join('')}`;
   // Bind only within this container — avoids stacking duplicate handlers on the rest of the page
   container.querySelectorAll('[data-action]').forEach(el => el.addEventListener('click', handleAction));
+}
+
+// Smart re-render on data updates from WS / file watcher.
+// On the MS tab (non-graph), do a partial update of just the MS list container —
+// the scroll container itself is not rebuilt, so scroll position is preserved
+// naturally without needing window.scrollTo() (which caused the jitter/snap
+// behavior that 6d7f2f0 removed). Other tabs still take full render(); their
+// scroll regression is not reported, expand here if needed.
+function renderOnDataChange() {
+  if (state.activeTab === 'milestones' && !state.showGraph) {
+    renderMsListArea();
+  } else {
+    render();
+  }
 }
 
 document.addEventListener('input', e => {

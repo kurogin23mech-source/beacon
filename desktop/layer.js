@@ -47,7 +47,7 @@ async function loadProject() {
       state.lastUpdate = new Date();
       state.connected = true;
       state.error = null;
-      render();
+      renderOnDataChange();
     }
   } catch (e) {
     if (!state.error) {
@@ -127,6 +127,31 @@ async function startWatcher() {
   }
 }
 function stopWatcher() { if (unlistenWatcher) { unlistenWatcher(); unlistenWatcher = null; } }
+
+// F27: project-changed event — fired by Rust single-instance plugin when a
+// second `open -a Beacon --args /path` lands. Clear current state and reload
+// from the new project dir.
+let unlistenProjectSwitch = null;
+async function startProjectSwitchListener() {
+  if (unlistenProjectSwitch) return;
+  if (window.__TAURI__?.event) {
+    unlistenProjectSwitch = await window.__TAURI__.event.listen('project-changed', async () => {
+      // Clear in-flight watcher / state from previous project
+      stopWatcher();
+      state.project = null;
+      state.expanded.clear();
+      lastProjectJson = '';
+      state.cloudProjectId = null;
+      cloudMode = false;
+      state.connected = false;
+      state.error = null;
+      render();
+      // Reload from the new project_dir set by Rust
+      await loadProject();
+      await startWatcher();
+    });
+  }
+}
 
 async function doSelectCloudProject(projectId) {
   cloudMode = true;
@@ -465,6 +490,10 @@ document.addEventListener('visibilitychange', () => {
 // ---- Init ----
 
 async function init() {
+  // F27: always listen for project-changed even before project loads — covers
+  // the cold-start case where Beacon was launched via `open -a Beacon --args ...`
+  // but the running instance later receives another launch with a different path.
+  startProjectSwitchListener();
   try {
     await loadProject();
     if (state.project) {

@@ -1,7 +1,7 @@
 ---
 name: beacon-session-start
 description: Beaconプロジェクトのセッション開始時にコンテキストを復元。アクティブMS・未消化タスク・summaryを提示する。
-version: 0.6.0
+version: 0.7.0
 triggers:
   - セッション開始
   - /beacon-start
@@ -13,6 +13,14 @@ triggers:
   - 前回の続き
   - 現状を確認
   - 今どうなってる
+  # archaeology / project history 系 (F30: ユーザーが概念名で呼ぶケース)
+  - archaeology して
+  - Archaeology して
+  - 過去掘って
+  - 過去の経緯まとめて
+  - これまでの流れまとめて
+  - コード読んで提案して
+  - リポジトリ分析して
   - 状況を教えて
 ---
 
@@ -217,16 +225,43 @@ stdout の JSON から:
 
 「やるべきことが前に存在しない」状態 = 次のマイルストーンを作るタイミング。
 
-### 分岐: Project Archaeology か 白紙提案か
+### F30: 起動原因の橋渡しメッセージ
 
-まず **git のコミット数** を確認する:
+ユーザーが「archaeology して」「過去掘って」「リポジトリ分析して」等の **概念名** で起動した場合、ユーザー視点では「archaeology Skill」を呼んだつもりが `/beacon-session-start` が動くため、Skill 名のミスマッチで一瞬「あれ違う Skill？」となる。
+
+以下のキーワードが直近の user 発話に含まれていたら、コンサルタントモードの出力の **最初の 1 行** に橋渡しメッセージを添える:
+
+- `archaeology` / `Archaeology`
+- `掘って` / `経緯` / `これまでの流れ`
+- `リポジトリ分析` / `コード読んで`
+
+```
+(Archaeology を含む /beacon-session-start を起動します — git log とコードを読んで提案します)
+
+このリポジトリを分析しました。
+...
+```
+
+含まれていなければ橋渡し行は不要。
+
+### 分岐: 常に B (code reading)、git 履歴あれば A も追加 (F29)
+
+排他分岐ではなく **加算構成**:
 
 ```bash
 git log --oneline 2>/dev/null | wc -l
 ```
 
-- **コミット数 >= 10** かつ git が初期化されている場合 → **Project Archaeology フロー（A）**
-- **コミット数 < 10** または git 未初期化の場合 → **白紙提案フロー（B）**
+- **常に B (code reading) を実行**: README/source/設定ファイルを読んでプロジェクトの現状を理解する
+- **追加で `git_commits >= 10` の時のみ A (Archaeology) を実行**: git log clustering で過去フェーズを推測する
+- B の結果と A の結果を **統合して提案を出す**
+
+つまり「コード文脈は常に拾う、git 履歴がある時は追加で過去経緯も拾う」。閾値で **排他にしない** (commit 少の既存リポでも code reading は走る)。
+
+A 単独実行時のエッジケースは自然に degrade:
+- `commits == 1` (初期コミットのみ) → A は phase 0〜1 個しか作れない、B の code reading が主軸になる
+- `commits >= 10` → A の phase clustering が主軸、B が補完
+- `commits == 0` (git 未初期化) → A スキップ、B のみ
 
 ---
 

@@ -120,6 +120,26 @@ body::after {
   text-transform: uppercase;
 }
 
+/* e-587: project version badge in the header. Shown only when the project
+   has at least one push record with a semver. Format: "v0.4.0  +N" */
+.version-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--accent);
+  background: var(--accent-glow, rgba(80,180,140,0.08));
+  border: 1px solid var(--accent-dim, rgba(80,180,140,0.3));
+  border-radius: 4px;
+  letter-spacing: 0.02em;
+}
+.version-badge .vb-diff {
+  color: var(--text-dim);
+  font-size: 0.68rem;
+}
+
 .connection-status {
   margin-left: auto;
   display: flex;
@@ -226,6 +246,28 @@ body::after {
 .deploy-env-filter { display: flex; gap: 4px; margin: 6px 0 10px; flex-wrap: wrap; }
 .deploy-env-btn { font-size: 0.7rem; padding: 2px 8px; border-radius: 3px; border: 1px solid var(--border-subtle); background: var(--bg-raised); color: var(--text-dim); cursor: pointer; }
 .deploy-env-btn.active { background: var(--accent-muted); color: var(--accent); border-color: var(--accent); }
+.op-card { background: var(--bg-raised); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 12px 16px; margin-bottom: 14px; }
+.op-header { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.op-id { font-size: 0.7rem; color: var(--accent); font-family: var(--font-mono); }
+.op-title { font-size: 0.88rem; color: var(--text); font-weight: 600; flex: 1; }
+.op-badge { font-size: 0.65rem; padding: 1px 6px; border-radius: 3px; background: var(--bg-mid); color: var(--text-dim); }
+.op-source { font-size: 0.7rem; color: var(--text-dim); font-family: var(--font-mono); }
+.op-incident-count { font-size: 0.72rem; color: var(--warn,#f0b429); margin-left: auto; }
+.op-section-label { font-size: 0.65rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 6px; margin-top: 8px; }
+.op-run-row { display: flex; align-items: baseline; gap: 8px; font-size: 0.78rem; padding: 2px 0; }
+.op-run-date { color: var(--text-dim); font-family: var(--font-mono); font-size: 0.72rem; min-width: 72px; }
+.op-run-batch { color: var(--text-dim); font-family: var(--font-mono); font-size: 0.72rem; }
+.op-run-desc { color: var(--text); flex: 1; }
+.op-empty { font-size: 0.75rem; color: var(--text-dim); font-style: italic; }
+.op-incident { display: flex; align-items: baseline; gap: 6px; font-size: 0.78rem; padding: 3px 0; }
+.op-incident-icon { font-size: 0.8rem; }
+.op-incident-id { font-family: var(--font-mono); font-size: 0.7rem; color: var(--text-dim); }
+.op-incident-title { flex: 1; color: var(--text); }
+.op-incident-date { font-size: 0.7rem; color: var(--text-dim); }
+.note-row { display: flex; align-items: baseline; gap: 8px; font-size: 0.82rem; padding: 5px 0; border-bottom: 1px solid var(--border-subtle); }
+.note-time { font-family: var(--font-mono); font-size: 0.7rem; color: var(--text-dim); min-width: 36px; }
+.note-ctx { font-size: 0.7rem; color: var(--accent); font-family: var(--font-mono); }
+.note-text { flex: 1; color: var(--text); }
 .deploy-expand-arrow { font-size: 0.6rem; color: var(--text-dim); }
 .deploy-desc { font-size: 0.78rem; color: var(--text-secondary); margin: 4px 0 4px 18px; line-height: 1.4; }
 .deploy-ms-badges { margin: 4px 0 0 18px; display: flex; flex-wrap: wrap; gap: 4px; }
@@ -818,6 +860,67 @@ body::after {
   border: 1px solid rgba(249, 115, 22, 0.15);
 }
 
+.entry-type-badge.operation_task {
+  color: #a78bfa;
+  background: rgba(167, 139, 250, 0.1);
+  border: 1px solid rgba(167, 139, 250, 0.18);
+}
+
+/* Operation status badge in header */
+.op-status-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-left: 4px;
+}
+.op-status-badge.todo        { color: var(--text-dim); background: rgba(113,113,122,0.15); border: 1px solid rgba(113,113,122,0.25); }
+.op-status-badge.in_progress { color: #60a5fa; background: rgba(96,165,250,0.15); border: 1px solid rgba(96,165,250,0.25); }
+.op-status-badge.open        { color: #4ade80; background: rgba(74,222,128,0.15); border: 1px solid rgba(74,222,128,0.25); }
+.op-status-badge.closed      { color: var(--text-dim); background: rgba(100,116,139,0.1); border: 1px solid rgba(100,116,139,0.15); }
+
+.op-meta-block {
+  margin-top: 6px;
+  padding: 5px 10px;
+  border-left: 2px solid rgba(148,163,184,0.3);
+  font-size: 11px;
+  color: #94a3b8;
+  line-height: 1.5;
+}
+.op-meta-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 2px;
+}
+.op-meta-objective .op-meta-label  { color: #a3e635; }
+.op-meta-objective                 { border-left-color: rgba(163,230,53,0.4); }
+.op-meta-hint .op-meta-label       { color: #fbbf24; }
+.op-meta-hint                      { border-left-color: rgba(251,191,36,0.4); }
+
+.op-tasks {
+  margin-top: 10px;
+}
+.op-task-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 0;
+  font-size: 12px;
+  cursor: pointer;
+}
+.op-task-row:hover { background: var(--bg-hover); }
+.op-task-row.done .op-task-desc { color: var(--text-dim); text-decoration: line-through; }
+.op-task-status { font-size: 0.8em; }
+.op-task-progress {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-left: 8px;
+}
+
 .entry-pr-block {
   grid-column: 1 / -1;
 }
@@ -851,6 +954,181 @@ body::after {
 .entry-pr-intent .entry-pr-decision-label { color: #60a5fa; }
 .entry-pr-rationale-block .entry-pr-decision-label { color: #a3e635; }
 .entry-pr-rationale-block { border-left-color: rgba(163,230,53,0.4); }
+
+/* Priority badge */
+.priority-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  margin-left: 6px;
+  vertical-align: middle;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.priority-highest { background: rgba(239,68,68,0.2); color: #f87171; border: 1px solid rgba(239,68,68,0.4); }
+.priority-high    { background: rgba(251,146,60,0.2); color: #fb923c; border: 1px solid rgba(251,146,60,0.4); }
+.priority-middle  { background: rgba(234,179,8,0.2);  color: #eab308; border: 1px solid rgba(234,179,8,0.4); }
+.priority-low     { background: rgba(148,163,184,0.2); color: #94a3b8; border: 1px solid rgba(148,163,184,0.3); }
+.priority-lowest  { background: rgba(100,116,139,0.15); color: #64748b; border: 1px solid rgba(100,116,139,0.2); }
+
+/* Entry info blocks (motivation / acceptance_criteria / behavior) */
+.entry-info-block {
+  margin-top: 6px;
+  padding: 5px 10px;
+  border-left: 2px solid rgba(148,163,184,0.3);
+  font-size: 12px;
+  color: #94a3b8;
+  line-height: 1.5;
+}
+.entry-info-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 2px;
+}
+.entry-info-why   .entry-info-label { color: #60a5fa; }
+.entry-info-ac    .entry-info-label { color: #a3e635; }
+.entry-info-behavior .entry-info-label { color: #c084fc; }
+.entry-info-why   { border-left-color: rgba(96,165,250,0.4); }
+.entry-info-ac    { border-left-color: rgba(163,230,53,0.4); }
+.entry-info-behavior { border-left-color: rgba(192,132,252,0.4); }
+
+/* MS objective / acceptance_criteria */
+.ms-objective {
+  font-size: 12px;
+  color: #94a3b8;
+  margin-bottom: 6px;
+  font-style: italic;
+}
+.ms-ac {
+  font-size: 12px;
+  color: #94a3b8;
+  margin-bottom: 8px;
+  padding: 4px 8px;
+  border-left: 2px solid rgba(163,230,53,0.4);
+}
+.ms-ac-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #a3e635;
+  margin-bottom: 2px;
+}
+
+/* Entry detail button */
+.entry-info-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 0 5px;
+  height: 15px;
+  margin-left: 6px;
+  vertical-align: middle;
+  line-height: 1;
+  letter-spacing: 0.05em;
+  transition: color 0.15s, border-color 0.15s;
+}
+.entry-info-btn:hover { color: var(--text-secondary); border-color: var(--text-dim); }
+
+/* Entry detail modal */
+.entry-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.72);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.entry-modal {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-width: 560px;
+  width: 100%;
+  max-height: 80vh;
+  overflow-y: auto;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.7);
+}
+.entry-modal-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 18px 12px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--bg-raised);
+}
+.entry-modal-title {
+  font-size: 12px;
+  color: var(--text-secondary);
+  flex: 1;
+}
+.entry-modal-close {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+.entry-modal-close:hover { color: var(--text-primary); background: var(--bg-hover); }
+.entry-modal-body {
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.entry-modal-desc {
+  font-size: 13px;
+  color: var(--text-primary);
+  line-height: 1.6;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.entry-modal-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.entry-modal-field {
+  padding: 7px 11px;
+  border-left: 2px solid rgba(148,163,184,0.3);
+  font-size: 12px;
+  color: #94a3b8;
+  line-height: 1.6;
+}
+.entry-modal-field-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 3px;
+}
+.modal-field-why      .entry-modal-field-label { color: #60a5fa; }
+.modal-field-why      { border-left-color: rgba(96,165,250,0.4); }
+.modal-field-ac       .entry-modal-field-label { color: #a3e635; }
+.modal-field-ac       { border-left-color: rgba(163,230,53,0.4); }
+.modal-field-behavior .entry-modal-field-label { color: #c084fc; }
+.modal-field-behavior { border-left-color: rgba(192,132,252,0.4); }
+.modal-field-resolves .entry-modal-field-label { color: #f59e0b; }
+.modal-field-resolves { border-left-color: rgba(245,158,11,0.4); }
+.modal-field-detail   .entry-modal-field-label { color: var(--text-dim); }
 
 .entry-pr-status {
   font-weight: 500;
@@ -1465,7 +1743,7 @@ async function loadProject() {
       state.lastUpdate = new Date();
       state.connected = true;
       state.error = null;
-      render();
+      renderOnDataChange();
     }
   } catch (e) {
     if (!state.error) {
@@ -1918,7 +2196,7 @@ function statusBadge(status) {
 }
 
 function entryTypeBadge(type) {
-  const labels = { commit: 'commit', task: 'task', note: 'note', save: 'save', pr: 'PR' };
+  const labels = { commit: 'commit', task: 'task', note: 'note', save: 'save', pr: 'PR', operation_task: 'op-task' };
   return `<span class="entry-type-badge ${type}">${labels[type] || type}</span>`;
 }
 
@@ -1950,6 +2228,12 @@ function renderEntry(entry) {
       : '';
     prMeta = `<div class="entry-pr-block"><div class="entry-pr-meta"><span class="entry-pr-status ${prStatus}">${prStatus}${reviewStatus}</span>${url}</div>${intent}${rationale}</div>`;
   }
+  const priority = entry.meta?.priority;
+  const priorityBadge = priority ? `<span class="priority-badge priority-${priority}">${priority}</span>` : '';
+
+  const hasDetail = !!(entry.motivation || entry.acceptance_criteria || entry.behavior || entry.detail
+    || entry.meta?.resolves || entry.meta?.hash);
+
   const statusText = entryStatusText(entry);
   const hasChildren = entry.entries?.length > 0;
   const childCount = hasChildren ? entry.entries.length : 0;
@@ -1965,14 +2249,23 @@ function renderEntry(entry) {
 
   const childBadge = hasChildren && isCollapsed ? `<span class="entry-child-count">${childCount}</span>` : '';
 
+  // Rows with children: whole-row click = toggle expand; info button opens modal
+  // Rows without children: whole-row click = open modal
+  const rowAction = hasChildren
+    ? `data-action="toggle-entry" data-entry-id="${entry.id}"`
+    : `data-action="open-entry-detail" data-entry-id="${entry.id}" style="cursor:pointer;"`;
+
+  const infoBtn = hasChildren
+    ? `<button class="entry-info-btn" data-action="open-entry-detail" data-entry-id="${entry.id}">···</button>`
+    : '';
+
   return `
-    <div class="entry entry-type-${entry.type}${statusClass}${toggleClass}" ${hasChildren ? `data-action="toggle-entry" data-entry-id="${entry.id}"` : ''}>
+    <div class="entry entry-type-${entry.type}${statusClass}${toggleClass}" ${rowAction}>
       ${entryTypeBadge(entry.type)}
       <span class="entry-id">${entry.id}</span>
-      <span class="entry-desc">${esc(entry.description)}${hash}${statusText}${childBadge}</span>
+      <span class="entry-desc">${esc(entry.description)}${hash}${statusText}${childBadge}${priorityBadge}${infoBtn}</span>
       <span class="entry-date">${entry.created_at || ''}</span>
       ${prMeta}
-      ${detail}
       ${children}
     </div>
   `;
@@ -1983,6 +2276,25 @@ function esc(s) {
   const el = document.createElement('span');
   el.textContent = s;
   return el.innerHTML;
+}
+
+/* e-587: header version badge.
+ *   Shows "v0.4.0  +N commits since release" when the project has any push
+ *   record with a semver. Returns empty string when:
+ *     - the fetch hasn't completed yet (avoid layout flash)
+ *     - the project has no pushed releases yet (silently hidden)
+ * The badge is informational only — clicking it does nothing yet (clickable
+ * UI is a separate future task to drill into the releases tab).
+ */
+function renderVersionBadge() {
+  const v = state.projectVersion;
+  if (!v || !v.tag) return '';
+  const tag = esc(v.tag);
+  const diff = v.commits_since_release || 0;
+  const diffPart = diff > 0
+    ? `<span class="vb-diff" title="${diff} commits pushed since this release">+${diff}</span>`
+    : '';
+  return `<span class="version-badge" title="Latest released semver per push records">${tag}${diffPart}</span>`;
 }
 
 function formatTime(date) {
@@ -2058,6 +2370,12 @@ function renderMilestoneCard(ms, index) {
     _currentMsId = null;
     const hasDone = entries.some(e => e.status === 'done' || e.status === 'cancelled' || (e.entries || []).some(c => c.status === 'done' || c.status === 'cancelled'));
     const msHideDone = state.hideEntryDone.has(ms.id);
+    const msObjective = ms.objective
+      ? `<div class="ms-objective">${esc(ms.objective)}</div>`
+      : '';
+    const msAc = ms.acceptance_criteria
+      ? `<div class="ms-ac"><div class="ms-ac-label">done when</div>${esc(ms.acceptance_criteria)}</div>`
+      : '';
     bodyHtml = `
       <div class="ms-entries">
         ${hasDone ? `
@@ -2067,19 +2385,21 @@ function renderMilestoneCard(ms, index) {
           </button>
         </div>
         ` : ''}
+        ${msObjective}${msAc}
         ${ms.description ? `<div class="ms-description">${esc(ms.description)}</div>` : ''}
         ${renderedEntries}
       </div>
     `;
   }
 
+  const msPriorityBadge = ms.priority ? `<span class="priority-badge priority-${ms.priority}">${ms.priority}</span>` : '';
   return `
     <div class="ms-card${activeClass}${expandedClass}">
       <div class="ms-card-header" data-action="toggle-ms" data-ms-id="${ms.id}">
         ${statusBadge(ms.status)}
         <div class="ms-title-row">
           <span class="ms-id">${ms.id}</span>
-          <span class="ms-title">${esc(ms.title)}</span>
+          <span class="ms-title">${esc(ms.title)}${msPriorityBadge}</span>
         </div>
         <div class="ms-meta">
           ${tasksLabel ? `<span class="ms-tasks-text">${tasksLabel}</span>` : ''}
@@ -2134,6 +2454,9 @@ async function switchTab(tab) {
     if (state.retros.length === 0)
       loads.push(api(`/api/projects/${state.projectId}/retros`).then(r => { state.retros = r; }).catch(() => {}));
     await Promise.all(loads);
+  }
+  if (tab === 'notes') {
+    api(`/api/projects/${state.projectId}/notes`).then(r => { state.sessionNotes = r; render(); }).catch(() => {});
   }
   render();
 }
@@ -2583,6 +2906,146 @@ function renderCodeReleasesTab(p) {
 
 
 
+function renderOperationsSection() {
+  const p = state.project;
+  const allOps = p.operations || [];
+  const activeOps = allOps.filter(o => o.status === 'open');
+  const pendingOps = allOps.filter(o => o.status === 'todo' || o.status === 'in_progress');
+  const closedOps = allOps.filter(o => o.status === 'closed');
+
+  const runIcon = s => s === 'ok' ? '✓' : s === 'warning' ? '⚠' : s === 'error' ? '✗' : '?';
+  const runColor = s => s === 'ok' ? 'var(--green)' : s === 'warning' ? 'var(--warn,#f0b429)' : s === 'error' ? 'var(--red,#e55)' : 'var(--text-dim)';
+
+  const renderOp = (op) => {
+    const entries = op.entries || [];
+    const opTasks = entries.filter(e => e.type === 'operation_task');
+    const opTasksDone = opTasks.filter(t => t.status === 'done').length;
+    const runs = entries.filter(e => e.type === 'run_record').slice(-5).reverse();
+    const incidents = entries.filter(e => e.type === 'incident' && e.status === 'open');
+    const resolvedIncidents = entries.filter(e => e.type === 'incident' && e.status === 'resolved');
+
+    const status = op.status || 'open';
+    const statusBadge = `<span class="op-status-badge ${status}">${status}</span>`;
+    const priorityBadge = op.priority ? `<span class="priority-badge priority-${op.priority}">${op.priority}</span>` : '';
+
+    const objectiveBlock = op.objective
+      ? `<div class="op-meta-block op-meta-objective"><div class="op-meta-label">objective</div>${esc(op.objective)}</div>` : '';
+    const hintBlock = op.activation_hint
+      ? `<div class="op-meta-block op-meta-hint"><div class="op-meta-label">activation hint</div>${esc(op.activation_hint)}</div>` : '';
+
+    const opTasksHtml = opTasks.length ? `
+      <div class="op-tasks">
+        <div class="op-section-label">OperationTasks <span class="op-task-progress">(${opTasksDone}/${opTasks.length} 完了)</span></div>
+        ${opTasks.map(t => {
+          const isDone = t.status === 'done';
+          const icon = isDone ? '●' : '○';
+          const pri = t.meta?.priority ? `<span class="priority-badge priority-${t.meta.priority}">${t.meta.priority}</span>` : '';
+          return `<div class="op-task-row ${isDone ? 'done' : ''}" data-action="open-entry-detail" data-entry-id="${esc(t.id)}">
+            <span class="op-task-status">${icon}</span>
+            <span class="op-task-desc">${esc(t.description||'')}</span>
+            ${pri}
+          </div>`;
+        }).join('')}
+      </div>` : '';
+
+    const runsHtml = (status === 'open') ? `
+      <div class="op-runs">
+        <div class="op-section-label">Run Records</div>
+        ${runs.length ? runs.map(r => `
+          <div class="op-run-row">
+            <span style="color:${runColor(r.status)};font-size:0.85em;">${runIcon(r.status)}</span>
+            <span class="op-run-date">${(r.date||'').slice(0,10)}</span>
+            <span class="op-run-batch">${esc(r.batch||'')}</span>
+            <span class="op-run-desc">${esc(r.description||'')}</span>
+          </div>`).join('') : '<div class="op-empty">まだ記録なし</div>'}
+      </div>` : '';
+
+    const incidentsHtml = incidents.map(i => `
+      <div class="op-incident open">
+        <span class="op-incident-icon">⚠</span>
+        <span class="op-incident-id">[${esc(i.id)}]</span>
+        <span class="op-incident-title">${esc(i.title||'')}</span>
+        <span class="op-incident-date">${(i.opened_at||'').slice(0,10)}</span>
+      </div>`).join('');
+
+    const resolvedHtml = resolvedIncidents.slice(-3).map(i => `
+      <div class="op-incident resolved">
+        <span class="op-incident-icon" style="color:var(--text-dim)">✓</span>
+        <span class="op-incident-id">[${esc(i.id)}]</span>
+        <span class="op-incident-title" style="color:var(--text-dim)">${esc(i.title||'')}</span>
+        <span class="op-incident-date">${(i.resolved_at||'').slice(0,10)}</span>
+      </div>`).join('');
+
+    return `
+    <div class="op-card">
+      <div class="op-header">
+        <span class="op-id">${esc(op.id)}</span>
+        <span class="op-title">${esc(op.title||'')}</span>
+        ${statusBadge}
+        ${priorityBadge}
+        <span class="op-badge">${esc((op.schedule||{}).frequency||'')}</span>
+        <span class="op-source">${esc(op.log_source||'')}</span>
+        ${incidents.length ? `<span class="op-incident-count">⚠ ${incidents.length}件</span>` : ''}
+      </div>
+      ${objectiveBlock}${hintBlock}
+      ${opTasksHtml}
+      ${runsHtml}
+      ${incidents.length || resolvedIncidents.length ? `
+      <div class="op-incidents">
+        <div class="op-section-label">Incidents</div>
+        ${incidentsHtml}${resolvedHtml}
+      </div>` : ''}
+    </div>`;
+  };
+
+  const summary = [
+    activeOps.length ? `${activeOps.length} active` : '',
+    pendingOps.length ? `${pendingOps.length} pending` : '',
+    closedOps.length ? `${closedOps.length} closed` : '',
+  ].filter(Boolean).join(' · ');
+
+  return `<section class="retro-section fade-in">
+    <div style="margin-bottom:12px;font-size:0.78rem;color:var(--text-dim);">
+      ${summary || 'No operations.'}
+    </div>
+    ${activeOps.map(renderOp).join('')}
+    ${pendingOps.length ? `
+    <details open style="margin-top:16px;">
+      <summary style="font-size:0.75rem;color:var(--text-dim);cursor:pointer;">Pending Operations (${pendingOps.length})</summary>
+      <div style="margin-top:8px;">${pendingOps.map(renderOp).join('')}</div>
+    </details>` : ''}
+    ${closedOps.length ? `
+    <details style="margin-top:16px;">
+      <summary style="font-size:0.75rem;color:var(--text-dim);cursor:pointer;">Closed Operations (${closedOps.length})</summary>
+      <div style="margin-top:8px;opacity:0.6;">${closedOps.map(renderOp).join('')}</div>
+    </details>` : ''}
+  </section>`;
+}
+
+
+function renderNotesSection() {
+  const notes = state.sessionNotes || [];
+  const noteRows = notes.map(n => {
+    const time = (n.ts || '').slice(11, 16);
+    const ctx = n.context ? `<span class="note-ctx">[${esc(n.context)}]</span> ` : '';
+    return `<div class="note-row"><span class="note-time">${time}</span>${ctx}<span class="note-text">${esc(n.text || '')}</span></div>`;
+  }).join('');
+
+  return `<section class="retro-section fade-in">
+    <div class="op-section-label" style="margin-bottom:10px;">
+      セッションメモ（ephemeral — セッション終了時にクリア）
+    </div>
+    ${notes.length === 0
+      ? `<div class="op-empty" style="padding:16px 0;">
+          メモなし。<br>
+          <span style="font-size:0.72rem;color:var(--text-dim);">Claude Codeで「メモして」と言うか、<code>beacon note "text"</code> で追加できます。</span>
+        </div>`
+      : noteRows}
+    ${notes.length > 0 ? `<div style="margin-top:12px;font-size:0.7rem;color:var(--text-dim);">${notes.length}件 · beacon note clear でクリア</div>` : ''}
+  </section>`;
+}
+
+
 function renderGraphSection() {
   const p = state.project;
   const header = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
@@ -2735,6 +3198,20 @@ function renderMsListArea() {
     ${filtered.map((ms, i) => renderMilestoneCard(ms, i)).join('')}`;
   // Bind only within this container — avoids stacking duplicate handlers on the rest of the page
   container.querySelectorAll('[data-action]').forEach(el => el.addEventListener('click', handleAction));
+}
+
+// Smart re-render on data updates from WS / file watcher.
+// On the MS tab (non-graph), do a partial update of just the MS list container —
+// the scroll container itself is not rebuilt, so scroll position is preserved
+// naturally without needing window.scrollTo() (which caused the jitter/snap
+// behavior that 6d7f2f0 removed). Other tabs still take full render(); their
+// scroll regression is not reported, expand here if needed.
+function renderOnDataChange() {
+  if (state.activeTab === 'milestones' && !state.showGraph) {
+    renderMsListArea();
+  } else {
+    render();
+  }
 }
 
 document.addEventListener('input', e => {
