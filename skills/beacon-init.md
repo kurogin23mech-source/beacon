@@ -109,36 +109,63 @@ Step 3 でまとめて1画面確認（個別質問しない）。
 ### モード B（subdir作成）
 
 ユーザーの最初の発言（やりたいこと）を **そのまま objective に転用** する。  
-追加で聞くことはなし。デフォルト値を適用:
-- name: Step 2 で推定済み
+個別質問は **0 回**。デフォルト値を適用:
+- name: Step 2 で推定済み (subdir 名)
 - objective: ユーザーの最初の発言（必要に応じてAIが整形）
 - retro_day: friday
 - storage: **local（デフォルト）**。発言に「cloud」「クラウド」「team」「チーム」「複数人」「同期」等が含まれていたら cloud に変更
 
-→ Step 4 へ（確認も最小限）
+→ Step 4 へ（1 回だけの terminal 確認）
 
 ### モード C（既存リポジトリBeacon化）
 
-Step 2 で準備した推定値を **1画面で確認** する（個別質問しない）:
+Step 2 で準備した推定値を Step 4 で確認する（モード B と同じ流れ）。
+
+## Step 4: 確認 (Mode B / C 共通、不可逆操作の手前なので 1 回必須)
+
+CORE doc `AeN9aPpjvh6URTQlFmb6` の例外規定:
+> 不可逆操作 (commit / deploy / merge / milestone done / cloud push --force) は事前確認必須
+
+`beacon init` も同じ性質 (cloud project_id 発行、subdir + .beacon/ 作成は後で重い) なので、**実行直前に 1 回だけ terminal 確認** を入れる:
+
+### Mode B (subdir 作成) の確認テンプレ
+
+```
+ホームディレクトリですね。「[ユーザー発言]」のスペースを以下で作ります:
+
+  📁 場所:        ~/[subdir-name]/        (新規作成)
+  📛 名前:        [name]
+  🎯 目的:        [objective]
+  🔁 振り返り日:  金曜日                  (後で変更可)
+  💾 保存先:      ローカル                 (cloud 同期したい場合は今「cloud で作って」と言ってください)
+
+このまま進めて大丈夫ですか？(「OK」or 修正点を指示)
+```
+
+### Mode C (既存リポBeacon化) の確認テンプレ
 
 ```
 このリポジトリを Beacon で管理しますね。以下で進めます:
 
-  プロジェクト名: [basename]
-  大目的: [READMEから推定]
-  Retro day: 金曜日
-  Storage: [cloud or local]
+  📁 場所:        [pwd]
+  📛 プロジェクト名: [basename]
+  🎯 大目的:      [READMEから推定]
+  🔁 振り返り日:  金曜日                  (後で変更可)
+  💾 保存先:      [cloud or local]
 
-OK ですか？変えたい項目があれば教えてください（例: 「nameは○○で」）
+OK ですか？変えたい項目があれば教えてください（例: 「name は○○で」「retro 日は日曜で」「cloud で」）
 ```
 
-ユーザーが「OK」「いいよ」等で承認 → Step 5 へ。  
-修正があれば該当項目だけ更新して再提示。
+### 修正の受付
 
-## Step 4: 確認
+ユーザーが個別項目の修正を指示してきたら該当項目だけ更新して **再提示**。  
+「OK」「いいよ」「進めて」等で承認 → Step 5 へ。
 
-モード B: 確認スキップ（推定で進む、Step 3 で告知済み）  
-モード C: Step 3 で確認済み。ユーザー修正があれば該当項目だけ更新
+### 確認を取る理由
+
+- `beacon init` は ディレクトリ作成 + cloud project_id 発行を含み、後でリネーム / 削除に手間がかかる
+- 個別質問は 0 回でも、**最終 1 回だけ** 全体像を見せて修正機会を与えることで、不安と「やり直し」コストを両方下げる
+- これが CORE doc 「Act first, confirm next-step」の「不可逆操作の前は事前確認」の典型例
 
 ## Step 5: 実行（モード B / C 共通）
 
