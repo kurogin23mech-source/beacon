@@ -446,13 +446,52 @@ def cmd_milestone_add():
     except Exception:
         pass  # Trigger is best-effort; never block milestone creation.
 
-    # Print an inline hint so the user sees it immediately, in addition to
-    # the trigger that surfaces in session-start later.
-    print(
-        f"\n  Hint: SPEC (要求書 / 判断軌跡) を作成すると、サブエージェントや retrospection が"
-        f"機能しやすくなります。`/beacon-spec {ms_id}` を実行するか、後で session-start で"
-        f"warning が出たときに作成してください。"
-    )
+    # Print an inline hint, but suppress it when the user is doing a bulk
+    # add (e.g. /beacon-roadmap registering 5+ MSs in a row). Without this
+    # suppression the hint repeats N times and adds noise (e-702).
+    # Detection heuristic: if another milestone was added within the last
+    # 60 seconds, treat this as bulk-add mode and skip the inline hint.
+    # session-start / dispatch warnings still surface the SPEC promotion
+    # for any MS still missing a SPEC, so users don't lose the reminder.
+    if not _is_bulk_milestone_add(data, ms_id):
+        print(
+            f"\n  Hint: SPEC (要求書 / 判断軌跡) を作成すると、サブエージェントや retrospection が"
+            f"機能しやすくなります。`/beacon-spec {ms_id}` を実行するか、後で session-start で"
+            f"warning が出たときに作成してください。"
+        )
+
+
+def _is_bulk_milestone_add(data: dict, current_ms_id: str) -> bool:
+    """Return True if another milestone was added within the last 60 seconds.
+
+    Used by cmd_milestone_add to suppress the SPEC promotion hint during
+    bulk-add operations (e.g. /beacon-roadmap registering 6 MSs in a row).
+    The trigger system still records spec-needed for each MS, and
+    session-start surfaces them — only the inline hint is suppressed.
+    """
+    import datetime as _dt
+    try:
+        now = _dt.datetime.now(_dt.timezone.utc)
+        milestones = data.get("milestones", [])
+        # Compare against the second-most-recent MS (the most recent is the
+        # one we just added).
+        prior = None
+        for ms in reversed(milestones):
+            if ms.get("id") == current_ms_id:
+                continue
+            prior = ms
+            break
+        if prior is None:
+            return False
+        prior_created = prior.get("created_at", "") or ""
+        if not prior_created:
+            return False
+        # ISO format; strip trailing Z and parse
+        prior_dt = _dt.datetime.fromisoformat(prior_created.replace("Z", "+00:00"))
+        delta = (now - prior_dt).total_seconds()
+        return delta < 60.0
+    except Exception:
+        return False
 
 
 def cmd_milestone_list():
