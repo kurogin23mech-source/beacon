@@ -2272,6 +2272,18 @@ function render() {
 
   if (!state.project && state.projects.length === 0) return;
 
+  // Once the user has expressed intent to view a project (state.projectId set),
+  // don't bounce back to the selector while project data is still loading.
+  // Multiple async sources (version fetch, WS open, project fetch) can each
+  // call render() in any order \u2014 we must keep the loading state visible until
+  // state.project is actually populated.
+  if (!state.project && state.projectId) {
+    if (!app.querySelector('.loading')) {
+      app.innerHTML = `<div class="loading"><div class="loading-bar"></div><div class="loading-text">Loading</div></div>`;
+    }
+    return;
+  }
+
   if (!state.project && state.projects.length > 0) {
     renderProjectSelector(app);
     return;
