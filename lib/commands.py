@@ -1059,6 +1059,10 @@ def cmd_task_update():
             status=os.environ.get("BEACON_STATUS", ""),
             detail=os.environ.get("BEACON_DETAIL", ""),
             date=today,
+            motivation=os.environ.get("BEACON_MOTIVATION", ""),
+            acceptance_criteria=os.environ.get("BEACON_ACCEPTANCE_CRITERIA", ""),
+            behavior=os.environ.get("BEACON_BEHAVIOR", ""),
+            priority=os.environ.get("BEACON_PRIORITY", ""),
         )
     except ValueError as e:
         print(str(e))
@@ -1749,6 +1753,60 @@ def cmd_retro_prepare():
         "deploys": weekly_deploys,
     }
     print(json.dumps(output, ensure_ascii=False))
+
+
+def cmd_retro_default_since():
+    """Print the recommended default `--since` date for `beacon retro`.
+
+    ms-43 e-570: when the user delays a retro past the configured retro_day,
+    the previous default ("this Monday") covers too short a window and misses
+    the actual unreviewed period. Logic:
+
+      1. Read `.reviewed` for the most recent reviewed ISO week (if any).
+      2. If found, return the Monday of the **next** ISO week after that.
+      3. Otherwise fall back to the most recent retro_day on or before today,
+         minus 6 days (= the start of the slot being reviewed).
+      4. Final fallback: this Monday.
+
+    Output is a YYYY-MM-DD line; empty on error (the shell wrapper has its
+    own date-arithmetic fallback so older installs still function).
+    """
+    import datetime
+    try:
+        today = datetime.date.today()
+        # 1. Try the .reviewed marker first.
+        reviewed = _last_reviewed_week()
+        if reviewed:
+            # ISO week format: YYYY-WNN. The Monday of the NEXT week begins
+            # the period we still owe a retro for.
+            try:
+                year_str, wk_str = reviewed.split("-W")
+                year = int(year_str); wk = int(wk_str)
+                # ISO week's Monday: use isocalendar inverse.
+                # week N's Monday = first ISO date with isocalendar() == (year, wk, 1)
+                jan4 = datetime.date(year, 1, 4)  # Always in ISO week 1
+                week1_mon = jan4 - datetime.timedelta(days=jan4.weekday())
+                last_reviewed_mon = week1_mon + datetime.timedelta(weeks=wk - 1)
+                next_mon = last_reviewed_mon + datetime.timedelta(days=7)
+                # Don't let it go past today.
+                if next_mon <= today:
+                    print(next_mon.strftime("%Y-%m-%d"))
+                    return
+            except (ValueError, IndexError):
+                pass  # malformed marker, fall through
+
+        # 2. No marker: anchor on the most recent retro_day.
+        retro_day = _get_retro_day()
+        anchor = _most_recent_retro_day_on_or_before(today, retro_day)
+        # Cover the week ending on the anchor day.
+        since = anchor - datetime.timedelta(days=6)
+        # But not past today (defensive).
+        if since > today:
+            since = today
+        print(since.strftime("%Y-%m-%d"))
+    except Exception:
+        # Empty output → shell wrapper falls back to its own date math.
+        pass
 
 
 def cmd_retro_done():
@@ -3818,7 +3876,14 @@ def cmd_update():
 
 
 def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
-    """Add beacon PostToolUse hooks to Claude Code settings.json if not already present."""
+    """Add beacon PostToolUse + PostCompact hooks to Claude Code settings.json.
+
+    ms-43 e-672: previously this only registered the PostToolUse commit hook,
+    so users who installed via `beacon skill install` ended up missing the
+    PostCompact orientation hook (registered by the legacy `_install_claude_hook`
+    code path used by `beacon init`). The two install paths must produce the
+    same end state.
+    """
     if not os.path.exists(hook_script):
         print(f"Warning: hook script not found at {hook_script}")
         return
@@ -3861,32 +3926,55 @@ def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
         for h in entry.get("hooks", [])
     )
 
-    if already_present:
-        if removed_stale:
-            with open(settings_path, "w", encoding="utf-8") as f:
-                json.dump(settings, f, indent=2, ensure_ascii=False)
+    posttooluse_dirty = False
+    if not already_present:
+        # Add beacon PostToolUse hook (commit + deploy detection)
+        post_tool_use.append({
+            "matcher": "Bash",
+            "hooks": [{
+                "type": "command",
+                "command": hook_script,
+                "timeout": 10,
+                "statusMessage": "Beacon: checking for commit or deploy..."
+            }]
+        })
+        posttooluse_dirty = True
+
+    # ms-43 e-672: also register the PostCompact hook so this code path has
+    # parity with `_install_claude_hook` (used by `beacon init`).
+    postcompact_dirty = False
+    if CLAUDE_POSTCOMPACT_HOOK_SCRIPT and os.path.exists(CLAUDE_POSTCOMPACT_HOOK_SCRIPT):
+        post_compact = hooks.setdefault("PostCompact", [])
+        already_pc = any(
+            "beacon-postcompact" in h.get("command", "")
+            for entry in post_compact
+            for h in entry.get("hooks", [])
+        )
+        if not already_pc:
+            post_compact.append({
+                "hooks": [{
+                    "type": "command",
+                    "command": CLAUDE_POSTCOMPACT_HOOK_SCRIPT,
+                    "timeout": 10,
+                    "statusMessage": "Beacon: post-compaction orientation...",
+                }],
+            })
+            postcompact_dirty = True
+
+    if removed_stale or posttooluse_dirty or postcompact_dirty:
+        with open(settings_path, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2, ensure_ascii=False)
+        if removed_stale and not posttooluse_dirty:
             print(f"Hooks: cleaned stale {hook_basename} entries; current path active")
         else:
-            print("Hooks: already configured in ~/.claude/settings.json")
-        return
-
-    # Add beacon PostToolUse hook (commit + deploy detection)
-    post_tool_use.append({
-        "matcher": "Bash",
-        "hooks": [{
-            "type": "command",
-            "command": hook_script,
-            "timeout": 10,
-            "statusMessage": "Beacon: checking for commit or deploy..."
-        }]
-    })
-
-    with open(settings_path, "w", encoding="utf-8") as f:
-        json.dump(settings, f, indent=2, ensure_ascii=False)
-    if removed_stale:
-        print(f"Hooks: replaced stale {hook_basename} entry → {hook_script}")
+            parts = []
+            if posttooluse_dirty:
+                parts.append("PostToolUse")
+            if postcompact_dirty:
+                parts.append("PostCompact")
+            print(f"Hooks: registered {' + '.join(parts) or 'nothing new'} in {settings_path}")
     else:
-        print(f"Hooks: PostToolUse hook configured in {settings_path}")
+        print("Hooks: already configured in ~/.claude/settings.json")
 
 
 def _next_deploy_id(data: dict, date_str: str) -> str:
@@ -4875,7 +4963,7 @@ def cmd_help_json():
         {"command": "beacon task add <desc>", "flags": ["-m <ms-id>"], "description": "Add a task to a milestone"},
         {"command": "beacon task done <entry-id>", "flags": [], "description": "Mark task as done"},
         {"command": "beacon task list", "flags": ["--json", "--ms <id>"], "description": "List tasks"},
-        {"command": "beacon task update <entry-id>", "flags": ["--ms <ms-id>", "--desc <text>"], "description": "Update task description or move to another milestone"},
+        {"command": "beacon task update <entry-id>", "flags": ["--ms <ms-id>", "--description <text>", "--status <s>", "--detail <text>", "--motivation <text>", "--acceptance-criteria <text>", "--behavior <text>", "--priority <p>"], "description": "Update task fields (description / status / detail / motivation / acceptance_criteria / behavior / priority) or move to another milestone"},
         {"command": "beacon log [message]", "flags": ["--prepare", "--finalize", "-m <ms-id>", "--progress <n>", "--summary <text>"], "description": "Record HEAD commit to active milestone"},
         {"command": "beacon save <desc>", "flags": ["-m <ms-id>", "--hash <hash>", "--source manual", "--json"], "description": "Save a freeform entry to a milestone"},
         {"command": "beacon sync", "flags": [], "description": "Auto-sync recent git commits to active milestone"},
@@ -5297,6 +5385,7 @@ if __name__ == "__main__":
         "milestone_graph": cmd_milestone_graph,
         "retro_prepare": cmd_retro_prepare,
         "retro_done": cmd_retro_done,
+        "retro_default_since": cmd_retro_default_since,
         "trigger_fire": cmd_trigger_fire,
         "trigger_check": cmd_trigger_check,
         "trigger_clear": cmd_trigger_clear,

@@ -65,16 +65,36 @@ Step 1c で uncommitted changes がある場合、ユーザーに通知:
 
 Step 1a の結果を読み、以下を自動整理する。
 
-### A. 完了済みMSのステータス修正
+### A. 完了済みMSのステータス修正 (ms-43 e-567: 柔軟化)
 
-`progress == 100` かつ `done_tasks == total_tasks` かつ `status == "in_progress"` のMSを検出:
+これまでは `progress == 100` **かつ** `done_tasks == total_tasks` の AND 条件のみで検出していたが、現場では片方しか満たさないが「実質完了」のケースが多く、過半数の MS が in_progress に留まる問題があった。以下の **3 つのシグナルのうち 2 つ以上** が成立する MS を「完了候補」とする。
 
-```bash
-beacon milestone observe <ms-id>
+**シグナル**:
+1. `progress == 100`
+2. `done_tasks + cancelled_tasks == total_tasks` (cancel は完了とみなす)
+3. 直近 14 日以内に **新規 task が追加されていない** かつ 直近 7 日以内にコミットがある (= 静かに収束した)
+
+`status == "in_progress"` の MS のうち上記を満たすものを **「完了候補」** として **ユーザーに確認** する:
+
+```
+完了候補と思われる MS:
+  - [ms-XX] [title]
+    シグナル: progress=100 / 全タスク消化 / 直近 7 日でコミット 5 件
+    → observing にしますか？ done にしますか？ それともまだ作業継続？
 ```
 
-自動的に `observing` に移行し「[ms-id] を observing に移行しました」と報告する。
-完全クローズ（done）にしてよいかはユーザーに確認する。
+ユーザー承認後に **Bash ツール** で実行:
+
+```bash
+# observing にする場合
+beacon milestone observe <ms-id>
+# done にする場合 (進行中マイルストーン状態を「閉じる」)
+beacon milestone close <ms-id>
+```
+
+**強制実行はしない**。AND 条件を緩めた分、誤判定リスクが上がるので、必ず人間に確認を求める。
+
+なお、シグナル 2 で言う `cancelled_tasks` は `beacon task list --json --ms <ms> | jq '[.entries[] | select(.status=="cancelled" and .type=="task")] | length'` 相当で取得する。CLI が直接フィールドを返していない場合は `entries[]` を AI が走査する。
 
 ### B. 実装済みタスクの自動done候補提示
 

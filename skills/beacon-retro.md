@@ -34,7 +34,11 @@ Bash ツールで以下を **並列に** 実行:
 ```bash
 cd "$PROJECT_DIR" && beacon retro --prepare [--since YYYY-MM-DD] [--until YYYY-MM-DD]
 ```
-- デフォルトは今週（月曜〜今日）
+- デフォルト挙動 (ms-43 e-570 で柔軟化):
+  - `.beacon/retro/.reviewed` がある → 「最後にreviewした週の翌週月曜」が since
+  - なければ「直近の retro_day から 6日遡った日」が since
+  - 後方互換: 古い install は date 演算で「今週月曜 (月曜起動時は先週月曜)」にフォールバック
+- これにより **金曜 retro を忘れて翌週火曜に retro した場合でも、先週月曜〜今週火曜の全期間がカバーされる**
 - ユーザーが期間を指定した場合は `--since` / `--until` を付加
 
 ### 1b. git コミット一覧（コンテキスト補完用）

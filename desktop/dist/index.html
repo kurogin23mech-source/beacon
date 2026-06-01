@@ -2495,7 +2495,7 @@ function renderShell(app) {
     </section>
     `) : ''}
 
-    ${state.activeTab === 'documents' ? renderDocumentsSection() : ''}
+    ${state.activeTab === 'documents' ? `<div id="documents-container">${renderDocumentsSection()}</div>` : ''}
 
     ${state.activeTab === 'releases' ? renderReleasesSection() : ''}
     ${state.activeTab === 'operations' ? renderOperationsSection() : ''}
@@ -2668,40 +2668,160 @@ function scopeBadge(scope) {
   return `<span style="display:inline-block; font-size:0.65rem; padding:1px 6px; border-radius:3px; margin-right:6px; ${styles[scope] || styles.memo}">${(scope || 'memo').toUpperCase()}</span>`;
 }
 
-function renderSearchResults() {
-  const q = state.searchQuery.toLowerCase().trim();
-  if (!q) return '';
-  const typeIcon = { task: '□', commit: '○', pr: 'PR', milestone: 'MS', save: '→' };
-  const results = [];
+// ms-43 e-631: cross-entity search rendering.
+// When state.searchResults is populated (server response), render the unified
+// list with facet chips. Otherwise fall back to a local milestones-only walk
+// so the UI is never blank during the first request or offline.
+const SEARCH_TYPE_ICON = {
+  task: '□', commit: '○', pr: 'PR', save: '→',
+  milestone: 'MS', operation: 'OP', operation_task: 'OT',
+  run: 'R·', incident: 'INC',
+  document: 'DOC', push: 'PUSH', deploy: 'DEP',
+};
 
-  function searchEntries(entries, msId, msTitle) {
+const SEARCH_TYPE_LABEL = {
+  task: 'Tasks', commit: 'Commits', pr: 'PRs', save: 'Saves',
+  milestone: 'Milestones', operation: 'Operations', operation_task: 'Op tasks',
+  run: 'Runs', incident: 'Incidents',
+  document: 'Documents', push: 'Pushes', deploy: 'Deploys',
+};
+
+// Order used to group results (most "primary" first).
+const SEARCH_TYPE_ORDER = [
+  'milestone', 'task', 'pr', 'commit', 'save',
+  'document', 'operation', 'incident', 'operation_task', 'run',
+  'push', 'deploy',
+];
+
+function _localSearchFallback(q) {
+  // Old behavior: walk milestones + nested entries. Kept as last-resort when
+  // the server hasn't responded yet (e.g. first keystroke).
+  const results = [];
+  function walk(entries, msId, msTitle) {
     for (const e of entries) {
       const desc = (e.description || '').toLowerCase();
       const detail = (e.detail || '').toLowerCase();
       if (desc.includes(q) || detail.includes(q)) {
-        results.push({ msId, msTitle, entryId: e.id, type: e.type, status: e.status, description: e.description || '', date: e.date || e.created_at || '' });
+        results.push({
+          entity_type: e.type || 'task',
+          id: e.id, title: e.description || '',
+          snippet: e.description || '',
+          ms_id: msId, ms_title: msTitle, status: e.status,
+          created_at: e.date || e.created_at || '',
+        });
       }
-      if (e.entries) searchEntries(e.entries, msId, msTitle);
+      if (e.entries) walk(e.entries, msId, msTitle);
     }
   }
-
   for (const ms of (state.project?.milestones || [])) {
     const t = (ms.title || '').toLowerCase();
-    if (t.includes(q)) results.push({ msId: ms.id, msTitle: ms.title, entryId: ms.id, type: 'milestone', status: ms.status, description: ms.title, date: '' });
-    searchEntries(ms.entries || [], ms.id, ms.title || '');
+    if (t.includes(q)) {
+      results.push({
+        entity_type: 'milestone', id: ms.id, title: ms.title,
+        snippet: ms.title, ms_id: ms.id, ms_title: ms.title,
+        status: ms.status, created_at: '',
+      });
+    }
+    walk(ms.entries || [], ms.id, ms.title || '');
+  }
+  return results;
+}
+
+function _renderFacetChips() {
+  const counts = state.searchFacets?.type || {};
+  const allCount = Object.values(counts).reduce((a, b) => a + b, 0);
+  const isAll = state.searchTypeFilter.size === 0;
+  const chips = [
+    `<button class="filter-btn ${isAll ? 'on' : 'off'}" data-action="search-filter-type" data-type="">all <span style="opacity:0.6">${allCount}</span></button>`,
+  ];
+  for (const t of SEARCH_TYPE_ORDER) {
+    const c = counts[t] || 0;
+    if (!c) continue;
+    const on = state.searchTypeFilter.has(t);
+    chips.push(
+      `<button class="filter-btn ${on ? 'on' : 'off'}" data-action="search-filter-type" data-type="${esc(t)}">` +
+      `${esc(SEARCH_TYPE_LABEL[t] || t)} <span style="opacity:0.6">${c}</span></button>`
+    );
+  }
+  return `<div class="filter-bar" style="margin: 4px 0 8px;">${chips.join('')}</div>`;
+}
+
+function renderSearchResults() {
+  const q = state.searchQuery.trim();
+  if (!q) return '';
+
+  // Prefer server response; fall back to local walk while loading.
+  let results = state.searchResults;
+  let fallback = false;
+  if (!Array.isArray(results)) {
+    results = _localSearchFallback(q.toLowerCase());
+    fallback = true;
   }
 
-  if (!results.length) return `<div class="search-results"><div class="search-empty">No results for "${esc(state.searchQuery)}"</div></div>`;
+  // Apply client-side type filter on top of the server response so toggling
+  // chips doesn't require a round-trip.
+  if (state.searchTypeFilter.size > 0) {
+    results = results.filter(r => state.searchTypeFilter.has(r.entity_type));
+  }
+
+  const facetChipsHTML = fallback ? '' : _renderFacetChips();
+  const loadingHint = state.searchLoading
+    ? ' <span style="color:var(--text-dim);font-size:0.7rem;">searching...</span>'
+    : '';
+  const total = fallback ? results.length : state.searchTotal;
+  const countHTML = `<div class="milestones-count" style="margin-bottom:6px">${results.length} of ${total} result${total === 1 ? '' : 's'}${loadingHint}</div>`;
+
+  if (!results.length) {
+    return `<div class="search-results">
+      ${countHTML}
+      ${facetChipsHTML}
+      <div class="search-empty">No results for "${esc(state.searchQuery)}"</div>
+    </div>`;
+  }
+
+  // Group by entity_type so the user can scan by category.
+  const grouped = {};
+  for (const r of results) {
+    const t = r.entity_type || 'task';
+    (grouped[t] = grouped[t] || []).push(r);
+  }
+  const sectionsHTML = SEARCH_TYPE_ORDER
+    .filter(t => grouped[t]?.length)
+    .map(t => {
+      const items = grouped[t].map(r => {
+        const date = (r.updated_at || r.created_at || '').slice(0, 10);
+        const ctx = r.ms_id ? `${esc(r.ms_id)}${r.ms_title ? ': ' + esc(r.ms_title) : ''}` :
+                    r.op_id ? `${esc(r.op_id)}${r.op_title ? ': ' + esc(r.op_title) : ''}` :
+                    r.scope ? `scope:${esc(r.scope)}` : '';
+        const dataAction =
+          t === 'document' ? 'search-open-document' :
+          t === 'milestone' ? 'search-goto' :
+          'search-goto';
+        const dataAttrs =
+          t === 'document' ? `data-doc-id="${esc(r.id)}"` :
+          `data-ms-id="${esc(r.ms_id || '')}" data-entry-id="${esc(r.id)}"`;
+        const snippet = r.snippet || r.title || '';
+        return `
+        <div class="search-result-item" data-action="${dataAction}" ${dataAttrs}>
+          <span class="search-result-type">${esc(SEARCH_TYPE_ICON[t] || '?')}</span>
+          <span class="search-result-desc">${esc(snippet)}</span>
+          <span class="search-result-date">${esc(date)}</span>
+          <span class="search-result-ms">${ctx}</span>
+        </div>`;
+      }).join('');
+      return `
+      <section style="margin-bottom: 10px;">
+        <div style="font-size:0.7rem;color:var(--text-dim);margin:6px 0 4px;letter-spacing:0.05em;text-transform:uppercase;">
+          ${esc(SEARCH_TYPE_LABEL[t] || t)} (${grouped[t].length})
+        </div>
+        ${items}
+      </section>`;
+    }).join('');
 
   return `<div class="search-results">
-    <div class="milestones-count" style="margin-bottom:8px">${results.length} result${results.length === 1 ? '' : 's'}</div>
-    ${results.map(r => `
-    <div class="search-result-item" data-action="search-goto" data-ms-id="${esc(r.msId)}" data-entry-id="${esc(r.entryId)}">
-      <span class="search-result-type">${typeIcon[r.type] || '?'}</span>
-      <span class="search-result-desc">${esc(r.description)}</span>
-      <span class="search-result-date">${esc(r.date)}</span>
-      <span class="search-result-ms">${esc(r.msId)}: ${esc(r.msTitle)}</span>
-    </div>`).join('')}
+    ${countHTML}
+    ${facetChipsHTML}
+    ${sectionsHTML}
   </div>`;
 }
 
@@ -2719,17 +2839,56 @@ function renderDocumentsSection() {
   if (state.documents.length === 0) {
     return `<section class="retro-section fade-in"><div class="retro-empty">No documents yet.</div></section>`;
   }
+
+  // ms-43 e-616: Documents-tab fulltext filter + scope chips.
+  // Filtering happens client-side over the already-loaded titles. Body match is
+  // available via the unified search bar in the dashboard (cross-entity).
+  const filter = (state.documentsFilter || '').toLowerCase().trim();
+  const scopeFilter = state.documentsScopeFilter || '';
+  const isMatch = (d) => {
+    if (scopeFilter && (d.scope || 'memo') !== scopeFilter) return false;
+    if (!filter) return true;
+    const t = (d.title || '').toLowerCase();
+    const id = (d.doc_id || '').toLowerCase();
+    return t.includes(filter) || id.includes(filter);
+  };
+
   // Group by scope
-  const order = ['core', 'spec', 'memo'];
+  const order = ['core', 'spec', 'memo', 'report'];
   const grouped = {};
   for (const s of order) grouped[s] = [];
+  let scopeCounts = { core: 0, spec: 0, memo: 0, report: 0 };
   for (const d of state.documents) {
     const s = d.scope || 'memo';
+    scopeCounts[s] = (scopeCounts[s] || 0) + 1;
     if (!grouped[s]) grouped[s] = [];
-    grouped[s].push(d);
+    if (isMatch(d)) grouped[s].push(d);
   }
-  const labels = { core: '\u2605 CORE', spec: '\u25CB SPEC', memo: '\u25CB MEMO' };
-  let html = '';
+  const totalMatches = Object.values(grouped).reduce((a, b) => a + b.length, 0);
+  const labels = { core: '\u2605 CORE', spec: '\u25CB SPEC', memo: '\u25CB MEMO', report: '\u25CB REPORT' };
+
+  // Filter bar (search input + scope chips). Always visible to teach the feature.
+  const scopeChip = (s) => {
+    const c = scopeCounts[s] || 0;
+    if (!c) return '';
+    const on = scopeFilter === s;
+    return `<button class="filter-btn ${on ? 'on' : 'off'}" data-action="documents-filter-scope" data-scope="${s}">${(labels[s] || s).replace(/^[\u2605\u25CB]\s*/, '')} <span style="opacity:0.6">${c}</span></button>`;
+  };
+  const allChip = `<button class="filter-btn ${scopeFilter ? 'off' : 'on'}" data-action="documents-filter-scope" data-scope="">all</button>`;
+
+  let html = `
+    <section class="retro-section fade-in" style="margin-bottom: 8px;">
+      <div class="milestones-header" style="margin-bottom: 4px;">
+        <span class="milestones-title">Documents</span>
+        <span class="milestones-count">${state.documents.length} total${filter || scopeFilter ? ` / ${totalMatches} shown` : ''}</span>
+        <input class="ms-search-inline" id="documents-filter" type="search" placeholder="Filter documents..." value="${esc(state.documentsFilter || '')}" autocomplete="off">
+      </div>
+      <div class="filter-bar" style="margin: 4px 0 0;">
+        ${allChip}${order.map(scopeChip).join('')}
+      </div>
+    </section>
+  `;
+
   for (const s of order) {
     if (grouped[s].length === 0) continue;
     html += `
@@ -2744,6 +2903,9 @@ function renderDocumentsSection() {
           `).join('')}
         </ul>
       </section>`;
+  }
+  if (totalMatches === 0 && (filter || scopeFilter)) {
+    html += `<section class="retro-section fade-in"><div class="retro-empty">No documents match "${esc(filter || scopeFilter)}".</div></section>`;
   }
   // Reviews section (retros)
   if (state.retroContent) {
@@ -3388,6 +3550,26 @@ function renderMsListArea() {
   container.querySelectorAll('[data-action]').forEach(el => el.addEventListener('click', handleAction));
 }
 
+// ms-43 e-616: partial-render for Documents tab — preserves input focus while typing.
+function renderDocumentsArea() {
+  const container = document.getElementById('documents-container');
+  if (!container || !state.project) return;
+  // Preserve focus/caret position across innerHTML rebuild.
+  const focused = document.activeElement;
+  const wasFilterFocused = focused && focused.id === 'documents-filter';
+  const caretStart = wasFilterFocused ? focused.selectionStart : 0;
+  const caretEnd = wasFilterFocused ? focused.selectionEnd : 0;
+  container.innerHTML = renderDocumentsSection();
+  container.querySelectorAll('[data-action]').forEach(el => el.addEventListener('click', handleAction));
+  if (wasFilterFocused) {
+    const input = document.getElementById('documents-filter');
+    if (input) {
+      input.focus();
+      try { input.setSelectionRange(caretStart, caretEnd); } catch (_) {}
+    }
+  }
+}
+
 // Smart re-render on data updates from WS / file watcher.
 // (1) On the MS tab (non-graph), use renderMsListArea() (partial) so the outer
 //     scroll container is not rebuilt.
@@ -3441,15 +3623,66 @@ function renderOnDataChange() {
   doRender();
 }
 
+// ms-43 e-631: debounced unified search dispatch.
+let _searchDebounceTimer = null;
+function _runUnifiedSearch() {
+  const q = state.searchQuery.trim();
+  if (!q) {
+    state.searchResults = null;
+    state.searchFacets = { type: {}, status: {}, priority: {}, scope: {} };
+    state.searchTotal = 0;
+    state.searchLoading = false;
+    renderMsListArea();
+    return;
+  }
+  if (!dataSource.searchProject) {
+    // Tauri (not yet wired) or older clients: local fallback only.
+    state.searchResults = null;
+    renderMsListArea();
+    return;
+  }
+  state.searchLoading = true;
+  const myToken = ++state.searchToken;
+  renderMsListArea();
+  dataSource.searchProject({ q, limit: 200 })
+    .then(resp => {
+      if (myToken !== state.searchToken) return; // stale response
+      state.searchResults = resp?.results || [];
+      state.searchFacets = resp?.facets || { type: {}, status: {}, priority: {}, scope: {} };
+      state.searchTotal = resp?.total || 0;
+      state.searchLoading = false;
+      renderMsListArea();
+    })
+    .catch(() => {
+      if (myToken !== state.searchToken) return;
+      // Fall back to local on error so the UI is still usable.
+      state.searchResults = null;
+      state.searchLoading = false;
+      renderMsListArea();
+    });
+}
+
 document.addEventListener('input', e => {
   if (e.target.id === 'search-input') {
     state.searchQuery = e.target.value;
+    // Reset client-side type filter when query changes substantially.
+    state.searchTypeFilter = new Set();
+    // Local-render immediately for responsiveness; debounce the API call.
     renderMsListArea();
+    clearTimeout(_searchDebounceTimer);
+    _searchDebounceTimer = setTimeout(_runUnifiedSearch, 200);
+  } else if (e.target.id === 'documents-filter') {
+    // ms-43 e-616: independent Documents-tab filter.
+    state.documentsFilter = e.target.value;
+    renderDocumentsArea();
   }
 });
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && state.searchQuery) {
     state.searchQuery = '';
+    state.searchResults = null;
+    state.searchTypeFilter = new Set();
+    state.searchLoading = false;
     renderMsListArea();
     document.getElementById('search-input')?.focus();
   }
@@ -3514,11 +3747,53 @@ function handleCommonAction(action, el) {
     }
     case 'search-goto': {
       const msId = el.dataset.msId;
+      const entryId = el.dataset.entryId;
       state.searchQuery = '';
+      state.searchResults = null;
+      state.searchTypeFilter = new Set();
       state.activeTab = 'dashboard';
-      state.expanded.add(msId);
+      if (msId) state.expanded.add(msId);
+      // ms-43 e-618: deep-link hash on click so the URL bar can be shared.
+      if (typeof history !== 'undefined' && history.pushState) {
+        if (entryId && entryId !== msId) {
+          history.pushState(null, '', '#entry/' + entryId);
+        } else if (msId) {
+          history.pushState(null, '', '#ms/' + msId);
+        }
+      }
       render();
-      setTimeout(() => document.getElementById(`ms-${msId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+      if (entryId && entryId !== msId) {
+        setTimeout(() => document.querySelector(`[data-entry-id="${entryId}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 100);
+      } else if (msId) {
+        setTimeout(() => document.getElementById(`ms-${msId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+      }
+      return true;
+    }
+    case 'search-filter-type': {
+      // ms-43 e-631: toggle facet chip.
+      const t = el.dataset.type || '';
+      if (!t) state.searchTypeFilter = new Set();
+      else if (state.searchTypeFilter.has(t)) state.searchTypeFilter.delete(t);
+      else state.searchTypeFilter.add(t);
+      renderMsListArea();
+      return true;
+    }
+    case 'search-open-document': {
+      // Document hit in unified search results → open the doc directly.
+      const docId = el.dataset.docId;
+      state.searchQuery = '';
+      state.searchResults = null;
+      state.searchTypeFilter = new Set();
+      state.activeTab = 'documents';
+      if (docId) openDocument(docId);
+      else render();
+      return true;
+    }
+    case 'documents-filter-scope': {
+      // ms-43 e-616: Documents-tab scope chip toggle.
+      const s = el.dataset.scope || '';
+      state.documentsScopeFilter = (state.documentsScopeFilter === s) ? '' : s;
+      render();
       return true;
     }
     // close-* / close-menu: each platform supplies its own helper

@@ -11,8 +11,49 @@ CMD=$(echo "$INPUT" | jq -r '.tool_input.command // ""')
 # Bash tool's cwd parameter (Claude Code passes the cwd argument here when set)
 TOOL_CWD=$(echo "$INPUT" | jq -r '.tool_input.cwd // empty')
 
-# Strip content inside quotes to avoid matching patterns in --summary or --desc arguments
-CMD_BARE=$(echo "$CMD" | sed "s/\"[^\"]*\"//g; s/'[^']*'//g")
+# Strip content inside quoted strings AND heredoc bodies to avoid matching
+# patterns that appear inside commit messages / docs being written via cat <<EOF
+# (ms-43 e-613: heredoc body containing `git push` / `gcloud run deploy` was
+# misfiring the push/deploy detection).
+#
+# Strategy:
+#   1. Remove heredoc bodies: `<<[-]?'?MARKER'? ... MARKER` (any line containing
+#      only the marker, optionally preceded by tabs for <<-). We approximate
+#      this with a single awk pass so multi-line stdin works correctly.
+#   2. Strip single- and double-quoted string contents (existing protection
+#      against patterns inside --summary / --desc arguments).
+CMD_BARE=$(printf '%s' "$CMD" | awk '
+  BEGIN { in_heredoc = 0; marker = "" }
+  {
+    if (in_heredoc) {
+      # End when the line (trimmed of leading tabs for <<-) equals marker
+      line = $0
+      trimmed = line
+      sub(/^[ \t]+/, "", trimmed)
+      if (trimmed == marker) {
+        in_heredoc = 0
+        marker = ""
+        # Keep the marker line itself (its text is not user content)
+        print line
+      }
+      # else: drop the heredoc body line
+      next
+    }
+    # Detect heredoc opener anywhere on the line:
+    #   <<[-]? optional whitespace, optional quote (single or double), MARKER, optional close-quote
+    if (match($0, /<<-?[[:space:]]*[\x27"]?[A-Za-z_][A-Za-z0-9_]*[\x27"]?/)) {
+      m = substr($0, RSTART, RLENGTH)
+      # Strip the <<, optional dash, whitespace, and any surrounding quotes
+      sub(/^<<-?[[:space:]]*[\x27"]?/, "", m)
+      sub(/[\x27"]?$/, "", m)
+      marker = m
+      in_heredoc = 1
+      print $0
+      next
+    }
+    print $0
+  }
+' | sed "s/\"[^\"]*\"//g; s/'[^']*'//g")
 
 # Resolve which directory the command actually ran in:
 #   1. tool_input.cwd if explicitly set

@@ -857,25 +857,40 @@ cmd_task_update() {
     local status=""
     local detail=""
     local ms_id=""
+    local motivation=""
+    local acceptance_criteria=""
+    local behavior=""
+    local priority=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --json)         json_flag="1"; shift ;;
-            --description)  description="${2:-}"; shift 2 ;;
-            --status)       status="${2:-}"; shift 2 ;;
-            -d|--detail)    detail="${2:-}"; shift 2 ;;
-            -m|--ms)        ms_id="${2:-}"; shift 2 ;;
-            *)              entry_id="$1"; shift ;;
+            --json)                     json_flag="1"; shift ;;
+            --description)              description="${2:-}"; shift 2 ;;
+            --status)                   status="${2:-}"; shift 2 ;;
+            -d|--detail)                detail="${2:-}"; shift 2 ;;
+            -m|--ms)                    ms_id="${2:-}"; shift 2 ;;
+            --motivation|--why)         motivation="${2:-}"; shift 2 ;;
+            --acceptance-criteria|--ac) acceptance_criteria="${2:-}"; shift 2 ;;
+            --behavior)                 behavior="${2:-}"; shift 2 ;;
+            --priority|-p)              priority="${2:-}"; shift 2 ;;
+            *)                          entry_id="$1"; shift ;;
         esac
     done
 
     if [ -z "$entry_id" ]; then
-        echo "Usage: beacon task update <entry-id> [--description D] [--status S] [--detail D] [--ms MS-ID] [--json]"
+        echo "Usage: beacon task update <entry-id> [--description D] [--status S] [--detail D] [--ms MS-ID]"
+        echo "                                     [--motivation TEXT] [--acceptance-criteria TEXT]"
+        echo "                                     [--behavior TEXT] [--priority highest|high|middle|low|lowest]"
+        echo "                                     [--json]"
         exit 1
     fi
     BEACON_ENTRY_ID="$entry_id" BEACON_JSON="$json_flag" \
         BEACON_DESCRIPTION="$description" BEACON_STATUS="$status" \
         BEACON_DETAIL="$detail" BEACON_MS_ID="$ms_id" \
+        BEACON_MOTIVATION="$motivation" \
+        BEACON_ACCEPTANCE_CRITERIA="$acceptance_criteria" \
+        BEACON_BEHAVIOR="$behavior" \
+        BEACON_PRIORITY="$priority" \
         python3 "$COMMANDS_PY" task_update
 }
 
@@ -1027,12 +1042,28 @@ cmd_retro() {
         esac
     done
 
-    # Default: current week (Monday to today).
-    # If today IS Monday (dow=1), use previous week (last Mon to yesterday)
-    # so the retro covers a full week of activity.
+    # ms-43 e-570: when --since is omitted, prefer "day after last reviewed week"
+    # over the naive "this Monday". If the user delayed retro from Friday to
+    # Tuesday next week, "this Monday" would cover only 2 days and miss the
+    # entire previous week. The Python helper looks at `.beacon/retro/.reviewed`
+    # and falls back to ISO-week boundaries when no marker exists.
+    if [ -z "$since" ]; then
+        since=$(BEACON_DEFAULT_SINCE_QUERY=1 python3 "$COMMANDS_PY" retro_default_since 2>/dev/null)
+    fi
+    if [ -z "$until" ]; then
+        local dow
+        dow=$(date +%u)
+        if [[ "$dow" -eq 1 ]]; then
+            until=$(date -v-1d +%Y-%m-%d 2>/dev/null || date -d "yesterday" +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)
+        else
+            until=$(date +%Y-%m-%d)
+        fi
+    fi
+
+    # Fallback if the helper didn't yield a value (older install, py error, etc.)
     if [ -z "$since" ]; then
         local dow
-        dow=$(date +%u)  # 1=Mon, 7=Sun
+        dow=$(date +%u)
         if [[ "$(uname)" == "Darwin" ]]; then
             if [[ "$dow" -eq 1 ]]; then
                 since=$(date -v-7d +%Y-%m-%d)
@@ -1045,15 +1076,6 @@ cmd_retro() {
             else
                 since=$(date -d "last monday" +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)
             fi
-        fi
-    fi
-    if [ -z "$until" ]; then
-        local dow
-        dow=$(date +%u)
-        if [[ "$dow" -eq 1 ]]; then
-            until=$(date -v-1d +%Y-%m-%d 2>/dev/null || date -d "yesterday" +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)
-        else
-            until=$(date +%Y-%m-%d)
         fi
     fi
 
@@ -1623,8 +1645,8 @@ case "${1:-}" in
             add)    shift 2; cmd_milestone_add "$@" ;;
             list|ls) cmd_milestone_list ;;
             start)  cmd_milestone_start "${3:-}" ;;
-            done|close) cmd_milestone_done "${3:-}" ;;
-            observe)    cmd_milestone_observe "${3:-}" ;;
+            done|close) shift 2; cmd_milestone_done "$@" ;;
+            observe)    shift 2; cmd_milestone_observe "$@" ;;
             show)   shift 2; cmd_milestone_show "$@" ;;
             update) shift 2; cmd_milestone_update "$@" ;;
             rename) BEACON_MS_ID="${3:-}" BEACON_TITLE="${4:-}" python3 "$COMMANDS_PY" milestone_update ;;
