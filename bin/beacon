@@ -857,25 +857,40 @@ cmd_task_update() {
     local status=""
     local detail=""
     local ms_id=""
+    local motivation=""
+    local acceptance_criteria=""
+    local behavior=""
+    local priority=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --json)         json_flag="1"; shift ;;
-            --description)  description="${2:-}"; shift 2 ;;
-            --status)       status="${2:-}"; shift 2 ;;
-            -d|--detail)    detail="${2:-}"; shift 2 ;;
-            -m|--ms)        ms_id="${2:-}"; shift 2 ;;
-            *)              entry_id="$1"; shift ;;
+            --json)                     json_flag="1"; shift ;;
+            --description)              description="${2:-}"; shift 2 ;;
+            --status)                   status="${2:-}"; shift 2 ;;
+            -d|--detail)                detail="${2:-}"; shift 2 ;;
+            -m|--ms)                    ms_id="${2:-}"; shift 2 ;;
+            --motivation|--why)         motivation="${2:-}"; shift 2 ;;
+            --acceptance-criteria|--ac) acceptance_criteria="${2:-}"; shift 2 ;;
+            --behavior)                 behavior="${2:-}"; shift 2 ;;
+            --priority|-p)              priority="${2:-}"; shift 2 ;;
+            *)                          entry_id="$1"; shift ;;
         esac
     done
 
     if [ -z "$entry_id" ]; then
-        echo "Usage: beacon task update <entry-id> [--description D] [--status S] [--detail D] [--ms MS-ID] [--json]"
+        echo "Usage: beacon task update <entry-id> [--description D] [--status S] [--detail D] [--ms MS-ID]"
+        echo "                                     [--motivation TEXT] [--acceptance-criteria TEXT]"
+        echo "                                     [--behavior TEXT] [--priority highest|high|middle|low|lowest]"
+        echo "                                     [--json]"
         exit 1
     fi
     BEACON_ENTRY_ID="$entry_id" BEACON_JSON="$json_flag" \
         BEACON_DESCRIPTION="$description" BEACON_STATUS="$status" \
         BEACON_DETAIL="$detail" BEACON_MS_ID="$ms_id" \
+        BEACON_MOTIVATION="$motivation" \
+        BEACON_ACCEPTANCE_CRITERIA="$acceptance_criteria" \
+        BEACON_BEHAVIOR="$behavior" \
+        BEACON_PRIORITY="$priority" \
         python3 "$COMMANDS_PY" task_update
 }
 

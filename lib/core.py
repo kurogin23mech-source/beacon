@@ -524,8 +524,15 @@ def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "") ->
 
 def task_update(data: dict, entry_id: str, *,
                 description: str = "", status: str = "",
-                detail: str = "", date: str = "") -> tuple[dict, dict]:
-    """Update entry fields. Returns (milestone, entry)."""
+                detail: str = "", date: str = "",
+                motivation: str = "", acceptance_criteria: str = "",
+                behavior: str = "", priority: str = "") -> tuple[dict, dict]:
+    """Update entry fields. Returns (milestone, entry).
+
+    The MS-32 "必要十分フォーマット" fields (motivation / acceptance_criteria /
+    behavior) and priority are now updatable here. Empty strings are treated as
+    "no change" so callers can omit fields they don't want to touch.
+    """
     result = find_entry(data, entry_id)
     if not result:
         raise ValueError(f"Entry not found: {entry_id}")
@@ -542,6 +549,19 @@ def task_update(data: dict, entry_id: str, *,
             entry["done_at"] = date
     if detail:
         entry["detail"] = detail
+    if motivation:
+        entry["motivation"] = motivation
+    if acceptance_criteria:
+        entry["acceptance_criteria"] = acceptance_criteria
+    if behavior:
+        entry["behavior"] = behavior
+    if priority:
+        if priority not in VALID_PRIORITIES:
+            raise ValueError(
+                f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}"
+            )
+        meta = entry.setdefault("meta", {})
+        meta["priority"] = priority
     return ms, entry
 
 

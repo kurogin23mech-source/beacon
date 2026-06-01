@@ -1059,6 +1059,10 @@ def cmd_task_update():
             status=os.environ.get("BEACON_STATUS", ""),
             detail=os.environ.get("BEACON_DETAIL", ""),
             date=today,
+            motivation=os.environ.get("BEACON_MOTIVATION", ""),
+            acceptance_criteria=os.environ.get("BEACON_ACCEPTANCE_CRITERIA", ""),
+            behavior=os.environ.get("BEACON_BEHAVIOR", ""),
+            priority=os.environ.get("BEACON_PRIORITY", ""),
         )
     except ValueError as e:
         print(str(e))
@@ -4875,7 +4879,7 @@ def cmd_help_json():
         {"command": "beacon task add <desc>", "flags": ["-m <ms-id>"], "description": "Add a task to a milestone"},
         {"command": "beacon task done <entry-id>", "flags": [], "description": "Mark task as done"},
         {"command": "beacon task list", "flags": ["--json", "--ms <id>"], "description": "List tasks"},
-        {"command": "beacon task update <entry-id>", "flags": ["--ms <ms-id>", "--desc <text>"], "description": "Update task description or move to another milestone"},
+        {"command": "beacon task update <entry-id>", "flags": ["--ms <ms-id>", "--description <text>", "--status <s>", "--detail <text>", "--motivation <text>", "--acceptance-criteria <text>", "--behavior <text>", "--priority <p>"], "description": "Update task fields (description / status / detail / motivation / acceptance_criteria / behavior / priority) or move to another milestone"},
         {"command": "beacon log [message]", "flags": ["--prepare", "--finalize", "-m <ms-id>", "--progress <n>", "--summary <text>"], "description": "Record HEAD commit to active milestone"},
         {"command": "beacon save <desc>", "flags": ["-m <ms-id>", "--hash <hash>", "--source manual", "--json"], "description": "Save a freeform entry to a milestone"},
         {"command": "beacon sync", "flags": [], "description": "Auto-sync recent git commits to active milestone"},

@@ -248,6 +248,37 @@ class TestTasks:
         with pytest.raises(ValueError, match="Invalid status"):
             core.task_update(data, "e-1", status="bogus")
 
+    def test_update_motivation_ac_behavior_priority(self):
+        # ms-43 e-553: task update must update the MS-32 fields
+        entry = make_entry("e-1")
+        ms = make_ms(entries=[entry])
+        data = make_project(milestones=[ms])
+        _, updated = core.task_update(
+            data, "e-1",
+            motivation="because Y",
+            acceptance_criteria="works when Z",
+            behavior="behaves like W",
+            priority="high",
+        )
+        assert updated["motivation"] == "because Y"
+        assert updated["acceptance_criteria"] == "works when Z"
+        assert updated["behavior"] == "behaves like W"
+        assert updated.get("meta", {}).get("priority") == "high"
+
+    def test_update_invalid_priority(self):
+        entry = make_entry("e-1")
+        data = make_project(milestones=[make_ms(entries=[entry])])
+        with pytest.raises(ValueError, match="Invalid priority"):
+            core.task_update(data, "e-1", priority="bogus")
+
+    def test_update_motivation_empty_no_change(self):
+        # Empty string is treated as "no change" (preserves existing value)
+        entry = make_entry("e-1")
+        entry["motivation"] = "original"
+        data = make_project(milestones=[make_ms(entries=[entry])])
+        _, updated = core.task_update(data, "e-1", motivation="")
+        assert updated["motivation"] == "original"
+
     def test_delete(self):
         entry = make_entry("e-1")
         data = make_project(milestones=[make_ms(entries=[entry])])
