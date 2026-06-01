@@ -1048,7 +1048,11 @@ body::after {
   inset: 0;
   background: rgba(0,0,0,0.72);
   z-index: 10000;
-  display: flex;
+  /* デフォルトは非表示。JS (renderEntryModal) が open 時に inline style.display='flex' をセット。
+     以前は display:flex デフォルト + HTML 側 inline style="display:none" で隠していたが、
+     Tauri WebKit で inline style が効かないケースが発生 (Web は OK)。CSS デフォルトを none に
+     することで origin に依らず確実に閉じた状態で起動する (ms-46 e-740 follow-up)。 */
+  display: none;
   align-items: center;
   justify-content: center;
   padding: 24px;
