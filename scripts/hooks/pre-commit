@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Beacon pre-commit hook
+#
+# Two checks:
+#   1. Block accidental secret commits (Google API key / OAuth token / PEM etc.)
+#   2. Regenerate desktop/dist/index.html when server/static/index.html or
+#      desktop/layer.js changes (drift防止).
+#
+# Install:
+#   ln -sf ../../scripts/hooks/pre-commit .git/hooks/pre-commit
+#   chmod +x scripts/hooks/pre-commit
+#
+# CORE doc: "Tauri/Web UI 二層アーキテクチャ: 共有境界とメンテナンス手順" (K8AhPgjpDG3mEa4eVm37)
+
+set -e
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# ==============================================================================
+# Check 1: Secret detection (legacy, originally installed manually 2026-05-15)
+# ==============================================================================
+BLOCKED=0
+PATTERNS=(
+  'GOCSPX-[A-Za-z0-9_-]+'          # Google OAuth client secret
+  'AIza[A-Za-z0-9_-]{35}'          # Google API key
+  'ya29\.[A-Za-z0-9_-]+'           # Google OAuth access token
+  '"client_secret"\s*:\s*"[^"]+"'  # client_secret in JSON
+  'PRIVATE KEY-----'               # PEM private key
+)
+SKIP='\.example$|\.md$|\.lock$|\.txt$|CLAUDE\.md|^scripts/hooks/'
+
+for file in $(git diff --cached --name-only --diff-filter=ACM); do
+  echo "$file" | grep -qE "$SKIP" && continue
+  content=$(git show ":$file" 2>/dev/null) || continue
+  for pattern in "${PATTERNS[@]}"; do
+    match=$(echo "$content" | grep -nEi "$pattern" || true)
+    if [ -n "$match" ]; then
+      if [ "$BLOCKED" -eq 0 ]; then
+        echo "🚫 Secret detected in staged files:"
+        echo ""
+      fi
+      echo "  $file:"
+      echo "$match" | head -3 | sed 's/^/    /'
+      echo ""
+      BLOCKED=1
+    fi
+  done
+done
+
+if [ "$BLOCKED" -ne 0 ]; then
+  echo "Commit blocked. Remove secrets or add file to .gitignore."
+  echo "To bypass (not recommended): git commit --no-verify"
+  exit 1
+fi
+
+# ==============================================================================
+# Check 2: Tauri dist sync (added 2026-06-01, ms-46 e-725)
+# ==============================================================================
+STAGED=$(git diff --cached --name-only --diff-filter=ACM)
+if echo "$STAGED" | grep -qE "^server/static/index\.html$|^desktop/layer\.js$"; then
+  echo "[pre-commit] server/static/index.html or desktop/layer.js changed — regenerating desktop/dist/index.html"
+  if ! python3 desktop/build.py >/dev/null 2>&1; then
+    echo "[pre-commit] ERROR: desktop/build.py failed. Commit aborted."
+    echo "             Run: python3 desktop/build.py"
+    echo "             for the full error."
+    exit 1
+  fi
+  git add desktop/dist/index.html
+  echo "[pre-commit] desktop/dist/index.html staged (regenerated)"
+  echo "[pre-commit] NOTE: Tauri release rebuild (cargo tauri build) + .app reinstall"
+  echo "             are still manual. See CORE doc K8AhPgjpDG3mEa4eVm37."
+fi
+
+exit 0

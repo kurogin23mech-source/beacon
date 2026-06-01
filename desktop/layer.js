@@ -167,7 +167,10 @@ async function doSelectCloudProject(projectId) {
       for (const ms of state.project.milestones || []) {
         if (ms.status === 'in_progress') state.expanded.add(ms.id);
       }
-      render(); startPolling();
+      render();
+      // Polling 撤去: 2s setInterval が main thread を JSON parse でブロックして
+      // scroll を catch していた。Cloud の live 更新は Web UI 側 (WS) で見る。
+      // Tauri cloud の live は別タスクで Tauri-side WS を入れる方針。
     }
   } catch (e) { state.error = String(e); renderProjectSelector(); }
 }
@@ -472,7 +475,8 @@ async function exportProject() {
 function _tryReconnect() {
   if (!state.project) return;
   if (cloudMode) {
-    if (!pollTimer) startPolling();
+    // Polling 撤去 (上記 doSelectCloudProject 同様)。focus 復帰時に
+    // 1 回だけ loadProject を呼んでスナップショットを取り直す。以降は静音。
     loadProject();
   } else {
     startWatcher();

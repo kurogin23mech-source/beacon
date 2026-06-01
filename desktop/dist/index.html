@@ -1824,6 +1824,31 @@ async function startWatcher() {
 }
 function stopWatcher() { if (unlistenWatcher) { unlistenWatcher(); unlistenWatcher = null; } }
 
+// F27: project-changed event — fired by Rust single-instance plugin when a
+// second `open -a Beacon --args /path` lands. Clear current state and reload
+// from the new project dir.
+let unlistenProjectSwitch = null;
+async function startProjectSwitchListener() {
+  if (unlistenProjectSwitch) return;
+  if (window.__TAURI__?.event) {
+    unlistenProjectSwitch = await window.__TAURI__.event.listen('project-changed', async () => {
+      // Clear in-flight watcher / state from previous project
+      stopWatcher();
+      state.project = null;
+      state.expanded.clear();
+      lastProjectJson = '';
+      state.cloudProjectId = null;
+      cloudMode = false;
+      state.connected = false;
+      state.error = null;
+      render();
+      // Reload from the new project_dir set by Rust
+      await loadProject();
+      await startWatcher();
+    });
+  }
+}
+
 async function doSelectCloudProject(projectId) {
   cloudMode = true;
   state.cloudProjectId = projectId;
@@ -1838,7 +1863,10 @@ async function doSelectCloudProject(projectId) {
       for (const ms of state.project.milestones || []) {
         if (ms.status === 'in_progress') state.expanded.add(ms.id);
       }
-      render(); startPolling();
+      render();
+      // Polling 撤去: 2s setInterval が main thread を JSON parse でブロックして
+      // scroll を catch していた。Cloud の live 更新は Web UI 側 (WS) で見る。
+      // Tauri cloud の live は別タスクで Tauri-side WS を入れる方針。
     }
   } catch (e) { state.error = String(e); renderProjectSelector(); }
 }
@@ -2143,7 +2171,8 @@ async function exportProject() {
 function _tryReconnect() {
   if (!state.project) return;
   if (cloudMode) {
-    if (!pollTimer) startPolling();
+    // Polling 撤去 (上記 doSelectCloudProject 同様)。focus 復帰時に
+    // 1 回だけ loadProject を呼んでスナップショットを取り直す。以降は静音。
     loadProject();
   } else {
     startWatcher();
@@ -2161,6 +2190,10 @@ document.addEventListener('visibilitychange', () => {
 // ---- Init ----
 
 async function init() {
+  // F27: always listen for project-changed even before project loads — covers
+  // the cold-start case where Beacon was launched via `open -a Beacon --args ...`
+  // but the running instance later receives another launch with a different path.
+  startProjectSwitchListener();
   try {
     await loadProject();
     if (state.project) {
@@ -3201,17 +3234,56 @@ function renderMsListArea() {
 }
 
 // Smart re-render on data updates from WS / file watcher.
-// On the MS tab (non-graph), do a partial update of just the MS list container —
-// the scroll container itself is not rebuilt, so scroll position is preserved
-// naturally without needing window.scrollTo() (which caused the jitter/snap
-// behavior that 6d7f2f0 removed). Other tabs still take full render(); their
-// scroll regression is not reported, expand here if needed.
+// (1) On the MS tab (non-graph), use renderMsListArea() (partial) so the outer
+//     scroll container is not rebuilt.
+// (2) Even with partial render, WKWebView cancels momentum scrolling if
+//     innerHTML is rebuilt mid-scroll → defer until user stops scrolling.
+//
+// Scroll detection caveats:
+//   - scroll events DON'T bubble by default → window-only listener misses
+//     events from nested scroll containers. Use `capture: true` on document
+//     to catch scroll on any element.
+//   - On trackpads, `wheel` fires before scroll, and momentum continues
+//     after the last scroll event. Cover both.
+//   - touchmove for touch devices.
+// 300ms quiet window — short enough to feel responsive, long enough to
+// outlast trackpad momentum.
+let _userScrolling = false;
+let _scrollEndTimer = null;
+let _pendingDataRender = null;
+function _markUserScrolling() {
+  _userScrolling = true;
+  clearTimeout(_scrollEndTimer);
+  _scrollEndTimer = setTimeout(() => {
+    _userScrolling = false;
+    if (_pendingDataRender) {
+      const fn = _pendingDataRender;
+      _pendingDataRender = null;
+      fn();
+    }
+  }, 300);
+}
+document.addEventListener('scroll', _markUserScrolling, { capture: true, passive: true });
+document.addEventListener('wheel', _markUserScrolling, { passive: true });
+document.addEventListener('touchmove', _markUserScrolling, { passive: true });
+
 function renderOnDataChange() {
-  if (state.activeTab === 'milestones' && !state.showGraph) {
-    renderMsListArea();
-  } else {
-    render();
+  const doRender = () => {
+    // The MS list tab is internally called 'dashboard' (see tab-btn data-tab="dashboard").
+    // Use renderMsListArea (partial) on that tab to keep the outer scroll container
+    // intact and avoid restarting fade-in animations on every WS update.
+    if (state.activeTab === 'dashboard' && !state.showGraph && !state.documentContent && !state.retroContent) {
+      renderMsListArea();
+    } else {
+      render();
+    }
+  };
+  if (_userScrolling) {
+    // Coalesce — keep only the latest pending render; state has the freshest data
+    _pendingDataRender = doRender;
+    return;
   }
+  doRender();
 }
 
 document.addEventListener('input', e => {
