@@ -3548,6 +3548,72 @@ def cmd_skill_install():
     settings_path = os.path.join(home, ".claude", "settings.json")
     _install_claude_hooks(hook_script, settings_path)
 
+    # ms-46 e-725 follow-up: install git pre-commit hook for beacon dev clones.
+    # Only acts when running inside the beacon source repo (has .git/ AND
+    # scripts/hooks/pre-commit). Brew-installed users don't have a .git/ here
+    # so this is a no-op for them.
+    _install_dev_precommit_hook(beacon_root)
+
+
+def _install_dev_precommit_hook(beacon_root: str) -> None:
+    """Install scripts/hooks/pre-commit as a symlink to .git/hooks/pre-commit.
+
+    Idempotent. Safe to call from any environment — does nothing if not a git clone.
+    Backs up any existing non-symlink pre-commit hook to .git/hooks/pre-commit.bak.
+    """
+    git_dir = os.path.join(beacon_root, ".git")
+    if not os.path.isdir(git_dir):
+        return  # brew install / tarball, no .git
+    src_rel = os.path.join("scripts", "hooks", "pre-commit")
+    src_abs = os.path.join(beacon_root, src_rel)
+    if not os.path.isfile(src_abs):
+        return  # source not present (e.g., very old checkout)
+
+    hooks_dir = os.path.join(git_dir, "hooks")
+    os.makedirs(hooks_dir, exist_ok=True)
+    target = os.path.join(hooks_dir, "pre-commit")
+    # Compute relative path from .git/hooks/ back to scripts/hooks/pre-commit
+    # (.git/hooks/ → .git/ → repo root → scripts/hooks/pre-commit)
+    link_target = os.path.join("..", "..", src_rel)
+
+    # If already symlinked correctly, nothing to do.
+    if os.path.islink(target):
+        try:
+            current = os.readlink(target)
+            if current == link_target:
+                return  # already correct
+        except OSError:
+            pass
+
+    # Back up existing non-symlink hook so we don't clobber custom logic.
+    if os.path.exists(target) and not os.path.islink(target):
+        import time
+        backup = target + f".bak.{int(time.time())}"
+        try:
+            os.rename(target, backup)
+            print(f"  [hook] backed up existing pre-commit hook → {os.path.basename(backup)}")
+        except OSError as e:
+            print(f"  [hook] WARN: couldn't back up existing pre-commit ({e}), skipping")
+            return
+    elif os.path.islink(target):
+        # Stale symlink (pointing elsewhere) — remove
+        try:
+            os.unlink(target)
+        except OSError:
+            return
+
+    # Make sure source is executable (chmod 0o755)
+    try:
+        os.chmod(src_abs, 0o755)
+    except OSError:
+        pass
+
+    try:
+        os.symlink(link_target, target)
+        print(f"  [hook] installed pre-commit hook (symlink → {src_rel})")
+    except OSError as e:
+        print(f"  [hook] WARN: couldn't create pre-commit symlink: {e}")
+
 
 # ---------------------------------------------------------------------------
 # Self-update (`beacon update`)

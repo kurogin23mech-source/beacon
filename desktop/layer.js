@@ -348,31 +348,19 @@ async function handleAction(e) {
   if (action === 'toggle-entry' && e.target.closest('.entry-children')) return;
   e.stopPropagation();
 
+  // First try SHARED common-action dispatcher (ms-46 e-726).
+  // Returns true if handled — keeps platform handleAction focused on
+  // data-source-specific cases.
+  if (handleCommonAction(action, el)) return;
+
   switch (action) {
+    // ---- Project selection (path-based for Tauri local) ----
     case 'select-project': await doSelectProject(el.dataset.path); break;
     case 'select-cloud-project': await doSelectCloudProject(el.dataset.projectId); break;
-    case 'toggle-ms': {
-      const msId = el.dataset.msId;
-      state.expanded.has(msId) ? state.expanded.delete(msId) : state.expanded.add(msId);
-      render(); break;
-    }
-    case 'toggle-entry': {
-      const eid = el.dataset.entryId;
-      state.collapsedEntries.has(eid) ? state.collapsedEntries.delete(eid) : state.collapsedEntries.add(eid);
-      render(); break;
-    }
-    case 'toggle-hide-done': {
-      const mid = el.dataset.msId;
-      state.hideEntryDone.has(mid) ? state.hideEntryDone.delete(mid) : state.hideEntryDone.add(mid);
-      render(); break;
-    }
-    case 'filter-status': {
-      const s = el.dataset.status;
-      state.hiddenStatuses.has(s) ? state.hiddenStatuses.delete(s) : state.hiddenStatuses.add(s);
-      render(); break;
-    }
-    case 'filter-all': state.hiddenStatuses.clear(); render(); break;
-    case 'toggle-sort': state.sortAsc = !state.sortAsc; render(); break;
+    case 'menu-select-project': closeMenu(); await doSelectProject(el.dataset.path); break;
+    case 'menu-select-cloud-project': closeMenu(); await doSelectCloudProject(el.dataset.projectId); break;
+
+    // ---- Data fetching (Tauri invoke; e-728 DataSource adapter で統一予定) ----
     case 'switch-tab': {
       state.activeTab = el.dataset.tab;
       state.showGraph = false;
@@ -385,11 +373,10 @@ async function handleAction(e) {
       }
       render(); break;
     }
-    case 'show-graph': state.showGraph = true; render(); break;
-    case 'hide-graph': state.showGraph = false; render(); break;
-    case 'toggle-graph-filter': state.graphFilterDeps = !state.graphFilterDeps; render(); break;
     case 'open-document': await loadDocumentContent(el.dataset.docId); break;
-    case 'close-document': state.documentContent = null; render(); break;
+    case 'open-retro': await loadRetroContent(el.dataset.week); break;
+
+    // ---- Tauri-specific: clipboard URL format / commands ----
     case 'copy-doc-link': {
       const url = `https://beacon-ai.dev/?project=${state.cloudProjectId}#doc/${el.dataset.docId}`;
       await navigator.clipboard.writeText(url);
@@ -397,33 +384,7 @@ async function handleAction(e) {
       setTimeout(() => { el.textContent = 'Copy web link'; }, 1500);
       break;
     }
-    case 'open-retro': await loadRetroContent(el.dataset.week); break;
-    case 'close-retro': state.retroContent = null; render(); break;
-    case 'switch-releases-tab': state.releasesSubTab = el.dataset.subtab; render(); break;
-    case 'expand-push': {
-      const pId = el.dataset.pushId;
-      state.expandedPushId = state.expandedPushId === pId ? null : pId;
-      render(); break;
-    }
-    case 'expand-deploy': {
-      const dId = el.dataset.deployId;
-      state.expandedDeployId = state.expandedDeployId === dId ? null : dId;
-      render(); break;
-    }
-    case 'toggle-release-graph': state.showReleaseGraph = !state.showReleaseGraph; render(); break;
-    case 'search-goto': {
-      const msId = el.dataset.msId;
-      state.searchQuery = '';
-      state.activeTab = 'dashboard';
-      state.expanded.add(msId);
-      render();
-      setTimeout(() => document.getElementById(`ms-${msId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
-      break;
-    }
     case 'open-menu': await renderMenu(); break;
-    case 'close-menu': closeMenu(); break;
-    case 'menu-select-project': closeMenu(); await doSelectProject(el.dataset.path); break;
-    case 'menu-select-cloud-project': closeMenu(); await doSelectCloudProject(el.dataset.projectId); break;
     case 'cloud-diagnose': {
       state.cloudDiag = 'Running...';
       renderProjectSelector();
