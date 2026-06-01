@@ -248,9 +248,9 @@ function render() {
         <button class="hamburger-btn" data-action="open-menu" title="Menu"><span></span><span></span><span></span></button>
         <span class="project-name">${esc(p.name)}</span>
         <span class="header-tag">beacon desktop</span>
-        <div class="connection-status">
+        <div class="connection-status" title="${cloudMode ? 'live = cloud API watcher' : 'live = local file watcher'}">
           <div class="status-dot ${state.connected ? '' : 'offline'}"></div>
-          <span>${state.connected ? 'watching' : 'disconnected'}</span>
+          <span>${state.connected ? 'live' : 'offline'}</span>
         </div>
       </div>
     </header>

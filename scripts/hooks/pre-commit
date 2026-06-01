@@ -71,4 +71,19 @@ if echo "$STAGED" | grep -qE "^server/static/index\.html$|^desktop/layer\.js$"; 
   echo "             are still manual. See CORE doc K8AhPgjpDG3mEa4eVm37."
 fi
 
+# ==============================================================================
+# Check 3: Tauri source change warning (added 2026-06-01, ms-46 e-735)
+# ==============================================================================
+# desktop/src-tauri/ 配下 (Rust / tauri.conf.json) が変わったら Tauri 本体の
+# rebuild が必要。これは frequency 低いので自動化はせず、warning で通知のみ。
+if echo "$STAGED" | grep -qE "^desktop/src-tauri/(Cargo\.toml|src/|tauri\.conf\.json|capabilities/)"; then
+  echo ""
+  echo "[pre-commit] WARN: desktop/src-tauri/ が変更されています (Rust / config)。"
+  echo "             Tauri 本体の rebuild が必要です:"
+  echo "               cd desktop && ./node_modules/.bin/tauri build"
+  echo "             その後 /Applications/Beacon.app の差し替えも忘れずに。"
+  echo "             ※ commit はそのまま進めます。"
+  echo ""
+fi
+
 exit 0

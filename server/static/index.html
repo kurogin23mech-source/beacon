@@ -1929,7 +1929,7 @@ function updateConnectionStatus() {
   const dot = document.querySelector('.status-dot');
   const label = document.querySelector('.connection-label');
   if (dot) dot.className = `status-dot ${state.connected ? '' : 'offline'}`;
-  if (label) label.textContent = state.connected ? 'live' : 'reconnecting';
+  if (label) label.textContent = state.connected ? 'live' : 'offline';
 }
 
 // @BUILD:SHARED-START
@@ -2141,9 +2141,9 @@ function render() {
         <span class="project-name">${esc(p.name)}</span>
         <span class="header-tag">beacon</span>
         ${renderVersionBadge()}
-        <div class="connection-status">
+        <div class="connection-status" title="live = WebSocket push from server">
           <div class="status-dot ${state.connected ? '' : 'offline'}"></div>
-          <span class="connection-label">${state.connected ? 'live' : 'reconnecting'}</span>
+          <span class="connection-label">${state.connected ? 'live' : 'offline'}</span>
         </div>
       </div>
     </header>
