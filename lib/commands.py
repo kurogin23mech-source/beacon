@@ -3876,7 +3876,14 @@ def cmd_update():
 
 
 def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
-    """Add beacon PostToolUse hooks to Claude Code settings.json if not already present."""
+    """Add beacon PostToolUse + PostCompact hooks to Claude Code settings.json.
+
+    ms-43 e-672: previously this only registered the PostToolUse commit hook,
+    so users who installed via `beacon skill install` ended up missing the
+    PostCompact orientation hook (registered by the legacy `_install_claude_hook`
+    code path used by `beacon init`). The two install paths must produce the
+    same end state.
+    """
     if not os.path.exists(hook_script):
         print(f"Warning: hook script not found at {hook_script}")
         return
@@ -3919,32 +3926,55 @@ def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
         for h in entry.get("hooks", [])
     )
 
-    if already_present:
-        if removed_stale:
-            with open(settings_path, "w", encoding="utf-8") as f:
-                json.dump(settings, f, indent=2, ensure_ascii=False)
+    posttooluse_dirty = False
+    if not already_present:
+        # Add beacon PostToolUse hook (commit + deploy detection)
+        post_tool_use.append({
+            "matcher": "Bash",
+            "hooks": [{
+                "type": "command",
+                "command": hook_script,
+                "timeout": 10,
+                "statusMessage": "Beacon: checking for commit or deploy..."
+            }]
+        })
+        posttooluse_dirty = True
+
+    # ms-43 e-672: also register the PostCompact hook so this code path has
+    # parity with `_install_claude_hook` (used by `beacon init`).
+    postcompact_dirty = False
+    if CLAUDE_POSTCOMPACT_HOOK_SCRIPT and os.path.exists(CLAUDE_POSTCOMPACT_HOOK_SCRIPT):
+        post_compact = hooks.setdefault("PostCompact", [])
+        already_pc = any(
+            "beacon-postcompact" in h.get("command", "")
+            for entry in post_compact
+            for h in entry.get("hooks", [])
+        )
+        if not already_pc:
+            post_compact.append({
+                "hooks": [{
+                    "type": "command",
+                    "command": CLAUDE_POSTCOMPACT_HOOK_SCRIPT,
+                    "timeout": 10,
+                    "statusMessage": "Beacon: post-compaction orientation...",
+                }],
+            })
+            postcompact_dirty = True
+
+    if removed_stale or posttooluse_dirty or postcompact_dirty:
+        with open(settings_path, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2, ensure_ascii=False)
+        if removed_stale and not posttooluse_dirty:
             print(f"Hooks: cleaned stale {hook_basename} entries; current path active")
         else:
-            print("Hooks: already configured in ~/.claude/settings.json")
-        return
-
-    # Add beacon PostToolUse hook (commit + deploy detection)
-    post_tool_use.append({
-        "matcher": "Bash",
-        "hooks": [{
-            "type": "command",
-            "command": hook_script,
-            "timeout": 10,
-            "statusMessage": "Beacon: checking for commit or deploy..."
-        }]
-    })
-
-    with open(settings_path, "w", encoding="utf-8") as f:
-        json.dump(settings, f, indent=2, ensure_ascii=False)
-    if removed_stale:
-        print(f"Hooks: replaced stale {hook_basename} entry → {hook_script}")
+            parts = []
+            if posttooluse_dirty:
+                parts.append("PostToolUse")
+            if postcompact_dirty:
+                parts.append("PostCompact")
+            print(f"Hooks: registered {' + '.join(parts) or 'nothing new'} in {settings_path}")
     else:
-        print(f"Hooks: PostToolUse hook configured in {settings_path}")
+        print("Hooks: already configured in ~/.claude/settings.json")
 
 
 def _next_deploy_id(data: dict, date_str: str) -> str:

@@ -3530,13 +3530,26 @@ function handleCommonAction(action, el) {
     }
     case 'search-goto': {
       const msId = el.dataset.msId;
+      const entryId = el.dataset.entryId;
       state.searchQuery = '';
       state.searchResults = null;
       state.searchTypeFilter = new Set();
       state.activeTab = 'dashboard';
       if (msId) state.expanded.add(msId);
+      // ms-43 e-618: deep-link hash on click so the URL bar can be shared.
+      if (typeof history !== 'undefined' && history.pushState) {
+        if (entryId && entryId !== msId) {
+          history.pushState(null, '', '#entry/' + entryId);
+        } else if (msId) {
+          history.pushState(null, '', '#ms/' + msId);
+        }
+      }
       render();
-      if (msId) setTimeout(() => document.getElementById(`ms-${msId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+      if (entryId && entryId !== msId) {
+        setTimeout(() => document.querySelector(`[data-entry-id="${entryId}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 100);
+      } else if (msId) {
+        setTimeout(() => document.getElementById(`ms-${msId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+      }
       return true;
     }
     case 'search-filter-type': {
@@ -4019,25 +4032,119 @@ async function handleAction(e) {
   }
 }
 
-// ---- URL routing ----
+// ---- URL routing (ms-43 e-618: deep links for MS / doc / push / deploy / entry) ----
+//
+// Supported hash schemes:
+//   #doc/<doc_id>         → Documents tab, open that doc
+//   #ms/<ms-id>           → Dashboard, expand+scroll to MS
+//   #entry/<entry-id>     → Dashboard, scroll to entry
+//   #push/<push-id>       → Releases tab, expand push card
+//   #deploy/<deploy-id>   → Releases tab, expand deploy card
+//   #retro/<week>         → Documents tab, open retro
+//
+// search-goto / search-open-document write these via history.pushState so
+// users can share a link to a specific entity from the search results.
 
 function getProjectIdFromUrl() {
   return new URLSearchParams(window.location.search).get('project');
 }
 
+function parseDeepLinkHash() {
+  const h = location.hash || '';
+  let m;
+  if ((m = h.match(/^#doc\/(.+)$/))) return { type: 'doc', id: m[1] };
+  if ((m = h.match(/^#ms\/([\w-]+)$/))) return { type: 'ms', id: m[1] };
+  if ((m = h.match(/^#entry\/([\w-]+)$/))) return { type: 'entry', id: m[1] };
+  if ((m = h.match(/^#push\/(.+)$/))) return { type: 'push', id: m[1] };
+  if ((m = h.match(/^#deploy\/(.+)$/))) return { type: 'deploy', id: m[1] };
+  if ((m = h.match(/^#retro\/(.+)$/))) return { type: 'retro', id: m[1] };
+  return null;
+}
+
+// Back-compat alias for older callers / tests.
 function getDocIdFromHash() {
-  const m = location.hash.match(/^#doc\/(.+)$/);
-  return m ? m[1] : null;
+  const link = parseDeepLinkHash();
+  return link && link.type === 'doc' ? link.id : null;
 }
 
 async function handleHashNav() {
-  const docId = getDocIdFromHash();
-  if (docId && state.projectId) {
-    if (state.activeTab !== 'documents') await switchTab('documents');
-    if (!state.documentContent || state.documentContent.doc_id !== docId) await openDocument(docId);
-  } else if (!docId && state.documentContent) {
-    state.documentContent = null;
-    render();
+  if (!state.projectId) return;
+  const link = parseDeepLinkHash();
+  if (!link) {
+    if (state.documentContent) {
+      state.documentContent = null;
+      render();
+    }
+    return;
+  }
+  switch (link.type) {
+    case 'doc': {
+      if (state.activeTab !== 'documents') await switchTab('documents');
+      if (!state.documentContent || state.documentContent.doc_id !== link.id) {
+        await openDocument(link.id);
+      }
+      return;
+    }
+    case 'retro': {
+      if (state.activeTab !== 'documents') await switchTab('documents');
+      if (!state.retroContent || state.retroContent.week !== link.id) {
+        await openRetro(link.id);
+      }
+      return;
+    }
+    case 'ms': {
+      if (state.activeTab !== 'dashboard') {
+        state.activeTab = 'dashboard';
+      }
+      state.expanded.add(link.id);
+      render();
+      setTimeout(() => {
+        document.getElementById(`ms-${link.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 100);
+      return;
+    }
+    case 'entry': {
+      // Locate the entry to find its containing MS, expand, scroll, and
+      // pop the detail modal if the helper is available.
+      if (state.activeTab !== 'dashboard') state.activeTab = 'dashboard';
+      const entry = typeof findEntryInProject === 'function' ? findEntryInProject(link.id) : null;
+      // Find owning MS so we can expand it.
+      for (const ms of state.project?.milestones || []) {
+        const found = (function walk(es) {
+          for (const e of es || []) {
+            if (e.id === link.id) return true;
+            if (walk(e.entries)) return true;
+          }
+          return false;
+        })(ms.entries || []);
+        if (found) { state.expanded.add(ms.id); break; }
+      }
+      render();
+      setTimeout(() => {
+        const el = document.querySelector(`[data-entry-id="${link.id}"]`);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        if (entry && typeof openEntryDetail === 'function') openEntryDetail(link.id);
+      }, 120);
+      return;
+    }
+    case 'push': {
+      if (state.activeTab !== 'releases') state.activeTab = 'releases';
+      state.expandedPushId = link.id;
+      render();
+      setTimeout(() => {
+        document.querySelector(`[data-push-id="${link.id}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 120);
+      return;
+    }
+    case 'deploy': {
+      if (state.activeTab !== 'releases') state.activeTab = 'releases';
+      state.expandedDeployId = link.id;
+      render();
+      setTimeout(() => {
+        document.querySelector(`[data-deploy-id="${link.id}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 120);
+      return;
+    }
   }
 }
 

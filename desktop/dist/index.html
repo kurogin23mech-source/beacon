@@ -3747,13 +3747,26 @@ function handleCommonAction(action, el) {
     }
     case 'search-goto': {
       const msId = el.dataset.msId;
+      const entryId = el.dataset.entryId;
       state.searchQuery = '';
       state.searchResults = null;
       state.searchTypeFilter = new Set();
       state.activeTab = 'dashboard';
       if (msId) state.expanded.add(msId);
+      // ms-43 e-618: deep-link hash on click so the URL bar can be shared.
+      if (typeof history !== 'undefined' && history.pushState) {
+        if (entryId && entryId !== msId) {
+          history.pushState(null, '', '#entry/' + entryId);
+        } else if (msId) {
+          history.pushState(null, '', '#ms/' + msId);
+        }
+      }
       render();
-      if (msId) setTimeout(() => document.getElementById(`ms-${msId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+      if (entryId && entryId !== msId) {
+        setTimeout(() => document.querySelector(`[data-entry-id="${entryId}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 100);
+      } else if (msId) {
+        setTimeout(() => document.getElementById(`ms-${msId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+      }
       return true;
     }
     case 'search-filter-type': {

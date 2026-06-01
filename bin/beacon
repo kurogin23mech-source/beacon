@@ -1645,8 +1645,8 @@ case "${1:-}" in
             add)    shift 2; cmd_milestone_add "$@" ;;
             list|ls) cmd_milestone_list ;;
             start)  cmd_milestone_start "${3:-}" ;;
-            done|close) cmd_milestone_done "${3:-}" ;;
-            observe)    cmd_milestone_observe "${3:-}" ;;
+            done|close) shift 2; cmd_milestone_done "$@" ;;
+            observe)    shift 2; cmd_milestone_observe "$@" ;;
             show)   shift 2; cmd_milestone_show "$@" ;;
             update) shift 2; cmd_milestone_update "$@" ;;
             rename) BEACON_MS_ID="${3:-}" BEACON_TITLE="${4:-}" python3 "$COMMANDS_PY" milestone_update ;;
