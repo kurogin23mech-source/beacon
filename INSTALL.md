@@ -177,10 +177,18 @@ The Beacon cloud API runs on **Cloud Run** (`beacon-api-prod`, region `asia-nort
 gcloud run deploy beacon-api-prod \
   --source . \
   --region asia-northeast1 \
-  --build-arg CACHE_BUST=$(date +%s)
+  --set-build-env-vars=CACHE_BUST=$(date +%s)
 ```
 
-`CACHE_BUST` forces Docker to re-copy `lib/` even when only Python files change (Cloud Build otherwise caches the layer).
+`CACHE_BUST` forces Cloud Build to re-copy `lib/` even when only Python files change (Cloud Build otherwise caches the layer). Use `--set-build-env-vars=KEY=VALUE` — `--build-arg` is a Docker CLI flag and is **not recognized by gcloud**.
+
+Quick smoke test after the deploy completes (~3-5 min):
+
+```bash
+curl -s https://beacon-ai.dev/health
+```
+
+Expect `{"status":"ok",...}` plus a new revision number (`beacon-api-prod-NNNNN-xxx`).
 
 ### Why `--source .`
 
