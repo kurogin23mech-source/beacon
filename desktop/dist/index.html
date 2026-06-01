@@ -1738,6 +1738,10 @@ let state = {
   cloudDiag: null,
   cloudProjectId: null,
   projectPath: null,
+  // ms-46 e-745: Operations / Notes alignment with Web UI.
+  // Operations は state.project.operations から read (追加 loader 不要)。
+  // Notes はサーバー / CLI 経由で取得する必要があるため state に持つ。
+  sessionNotes: [],
 };
 
 // ---- Data loading (Tauri invoke) ----
@@ -1800,6 +1804,21 @@ async function loadRetroContent(week) {
     }
   } catch (e) { state.retroContent = { week, content: 'Failed to load.' }; }
   render();
+}
+
+// ms-46 e-745: session notes loader for Notes tab.
+// Cloud mode: API 経由。Local mode は将来 beacon CLI 経由を追加するが、
+// 現状 cloud のみサポート (band-aid)。
+async function loadSessionNotes() {
+  try {
+    if (cloudMode) {
+      state.sessionNotes = JSON.parse(await invoke('cloud_list_notes'));
+    } else {
+      state.sessionNotes = [];  // local mode は未対応 (e-745 follow-up)
+    }
+  } catch (e) {
+    state.sessionNotes = [];
+  }
 }
 
 async function loadDocumentContent(docId) {
@@ -2098,6 +2117,8 @@ function render() {
       <button class="tab-btn ${state.activeTab === 'dashboard' ? 'active' : ''}" data-action="switch-tab" data-tab="dashboard">Milestones</button>
       <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
       <button class="tab-btn ${state.activeTab === 'releases' ? 'active' : ''}" data-action="switch-tab" data-tab="releases">Releases</button>
+      <button class="tab-btn ${state.activeTab === 'operations' ? 'active' : ''}" data-action="switch-tab" data-tab="operations">Operations</button>
+      <button class="tab-btn ${state.activeTab === 'notes' ? 'active' : ''}" data-action="switch-tab" data-tab="notes">Notes</button>
     </div>
 
     ${state.activeTab === 'dashboard' ? (state.showGraph ? renderGraphSection() : `
@@ -2121,6 +2142,8 @@ function render() {
 
     ${state.activeTab === 'documents' ? renderDocumentsSection() : ''}
     ${state.activeTab === 'releases' ? renderReleasesSection() : ''}
+    ${state.activeTab === 'operations' ? renderOperationsSection() : ''}
+    ${state.activeTab === 'notes' ? renderNotesSection() : ''}
 
     <footer class="footer fade-in stagger-3">
       <div class="footer-left">
@@ -2203,6 +2226,9 @@ async function handleAction(e) {
         if (state.documents.length === 0) loads.push(loadDocuments());
         if (state.retros.length === 0) loads.push(loadRetros());
         await Promise.all(loads);
+      }
+      if (state.activeTab === 'notes') {
+        loadSessionNotes().then(() => render()).catch(() => {});
       }
       render(); break;
     }

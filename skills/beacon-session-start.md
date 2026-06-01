@@ -433,11 +433,33 @@ session-start 時に Web UI を立ち上げ直す（既に開かれていれば�
 
 ```bash
 # Bash 呼び出し
+# ms-46 e-737: open URL は macOS が Beacon.app を URL handler として解釈し
+# Tauri を起動してしまうケースがある (cloud mode で Tauri が起動すると
+# ローカルキャッシュ表示で混乱)。ブラウザを明示的に指定して回避。
+# macOS: Python webbrowser は LSGetDefaultRoleHandler を使うので Beacon.app
+# を回避できないことがある → -b で default browser app ID を直接渡す。
+# 検出失敗時は Safari にフォールバック (System 標準で必ず存在)。
 if [ -f .beacon/cloud.json ]; then
   PROJECT_ID=$(python3 -c "import json; print(json.load(open('.beacon/cloud.json')).get('project_id',''))")
   if [ -n "$PROJECT_ID" ]; then
     WEBUI_URL="https://beacon-ai.dev/?project=$PROJECT_ID"
-    (open "$WEBUI_URL" 2>/dev/null \
+    # macOS: 既定の https handler を取得 (Beacon.app になっていたら Safari にフォールバック)
+    DEFAULT_BROWSER=$(python3 -c "
+import subprocess, plistlib, os, sys
+p = os.path.expanduser('~/Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist')
+try:
+    with open(p, 'rb') as f: d = plistlib.load(f)
+    for h in d.get('LSHandlers', []):
+        if h.get('LSHandlerURLScheme') == 'https':
+            r = h.get('LSHandlerRoleAll', '')
+            if r and 'beacon' not in r.lower():
+                print(r); sys.exit(0)
+except Exception: pass
+print('com.apple.Safari')
+" 2>/dev/null || echo 'com.apple.Safari')
+
+    (open -b "$DEFAULT_BROWSER" "$WEBUI_URL" 2>/dev/null \
+      || open -a Safari "$WEBUI_URL" 2>/dev/null \
       || xdg-open "$WEBUI_URL" 2>/dev/null \
       || cmd.exe /c start "$WEBUI_URL" 2>/dev/null \
       || powershell.exe -Command "Start-Process '$WEBUI_URL'" 2>/dev/null) &

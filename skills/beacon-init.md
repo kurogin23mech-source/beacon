@@ -191,7 +191,23 @@ if [ -f .beacon/cloud.json ]; then
   PROJECT_ID=$(python3 -c "import json; print(json.load(open('.beacon/cloud.json')).get('project_id',''))")
   if [ -n "$PROJECT_ID" ]; then
     WEBUI_URL="https://beacon-ai.dev/?project=$PROJECT_ID"
-    (open "$WEBUI_URL" 2>/dev/null \
+    # ms-46 e-737: macOS が Beacon.app を URL handler に登録するケースを避け、
+    # ブラウザを明示的に指定 (Tauri 起動防止)。
+    DEFAULT_BROWSER=$(python3 -c "
+import subprocess, plistlib, os, sys
+p = os.path.expanduser('~/Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist')
+try:
+    with open(p, 'rb') as f: d = plistlib.load(f)
+    for h in d.get('LSHandlers', []):
+        if h.get('LSHandlerURLScheme') == 'https':
+            r = h.get('LSHandlerRoleAll', '')
+            if r and 'beacon' not in r.lower():
+                print(r); sys.exit(0)
+except Exception: pass
+print('com.apple.Safari')
+" 2>/dev/null || echo 'com.apple.Safari')
+    (open -b "$DEFAULT_BROWSER" "$WEBUI_URL" 2>/dev/null \
+      || open -a Safari "$WEBUI_URL" 2>/dev/null \
       || xdg-open "$WEBUI_URL" 2>/dev/null \
       || cmd.exe /c start "$WEBUI_URL" 2>/dev/null \
       || powershell.exe -Command "Start-Process '$WEBUI_URL'" 2>/dev/null) &

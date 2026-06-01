@@ -274,6 +274,15 @@ fn cloud_get_retro(state: State<AppState>, week: String) -> Result<String, Strin
     cloud_get(&format!("/api/projects/{}/retros/{}", pid, week))
 }
 
+/// ms-46 e-745: Tauri 側でも Notes タブを動かすため、session notes を取得する。
+/// Cloud: /api/projects/{id}/notes
+/// Local: 後続で `beacon note list --json` を呼ぶ別 command が要るが、当面 cloud のみ。
+#[tauri::command]
+fn cloud_list_notes(state: State<AppState>) -> Result<String, String> {
+    let pid = state.cloud_project_id.lock().unwrap().clone().ok_or("No cloud project selected")?;
+    cloud_get(&format!("/api/projects/{}/notes", pid))
+}
+
 fn cloud_post(path: &str) -> Result<String, String> {
     let token = load_auth_token()
         .ok_or("Not authenticated. Run: beacon auth login")?;
@@ -612,6 +621,7 @@ pub fn run() {
             cloud_unarchive_project,
             cloud_get_auth_token,
             cloud_refresh_auth_token,
+            cloud_list_notes,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
