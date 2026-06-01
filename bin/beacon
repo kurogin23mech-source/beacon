@@ -1042,12 +1042,28 @@ cmd_retro() {
         esac
     done
 
-    # Default: current week (Monday to today).
-    # If today IS Monday (dow=1), use previous week (last Mon to yesterday)
-    # so the retro covers a full week of activity.
+    # ms-43 e-570: when --since is omitted, prefer "day after last reviewed week"
+    # over the naive "this Monday". If the user delayed retro from Friday to
+    # Tuesday next week, "this Monday" would cover only 2 days and miss the
+    # entire previous week. The Python helper looks at `.beacon/retro/.reviewed`
+    # and falls back to ISO-week boundaries when no marker exists.
+    if [ -z "$since" ]; then
+        since=$(BEACON_DEFAULT_SINCE_QUERY=1 python3 "$COMMANDS_PY" retro_default_since 2>/dev/null)
+    fi
+    if [ -z "$until" ]; then
+        local dow
+        dow=$(date +%u)
+        if [[ "$dow" -eq 1 ]]; then
+            until=$(date -v-1d +%Y-%m-%d 2>/dev/null || date -d "yesterday" +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)
+        else
+            until=$(date +%Y-%m-%d)
+        fi
+    fi
+
+    # Fallback if the helper didn't yield a value (older install, py error, etc.)
     if [ -z "$since" ]; then
         local dow
-        dow=$(date +%u)  # 1=Mon, 7=Sun
+        dow=$(date +%u)
         if [[ "$(uname)" == "Darwin" ]]; then
             if [[ "$dow" -eq 1 ]]; then
                 since=$(date -v-7d +%Y-%m-%d)
@@ -1060,15 +1076,6 @@ cmd_retro() {
             else
                 since=$(date -d "last monday" +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)
             fi
-        fi
-    fi
-    if [ -z "$until" ]; then
-        local dow
-        dow=$(date +%u)
-        if [[ "$dow" -eq 1 ]]; then
-            until=$(date -v-1d +%Y-%m-%d 2>/dev/null || date -d "yesterday" +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)
-        else
-            until=$(date +%Y-%m-%d)
         fi
     fi
 

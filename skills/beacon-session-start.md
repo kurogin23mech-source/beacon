@@ -91,7 +91,18 @@ beacon doc list --scope core --json
 stdout に JSON 配列が返る。各要素は `doc_id`, `title`, `scope`, `updated_at` を持つ。
 空配列の場合はこのステップをスキップする。
 
-## Step 1e: COREドキュメントの内容取得
+### 1d-2. メモスコープのドキュメント一覧 (ms-43 e-564)
+
+前セッション末で memo scope に昇格させた重要メモを引き継ぐため、memo scope も一覧する:
+```bash
+beacon doc list --scope memo --json
+```
+
+memo は CORE と違って常時参照ではないので、**取得するのは「直近 7 日以内に作成/更新された memo」のみ**。古い memo は無視する (ノイズ削減)。
+
+`updated_at` を ISO8601 でパースし、今日からの差分日数で 7 日以内を残す。3件を超える場合は最新 3 件に絞る。
+
+## Step 1e: COREドキュメントの内容取得 (要約モード)
 
 Step 1d の結果が空でなければ、各ドキュメントの内容を **Bash ツール** で **並列に** 取得する:
 
@@ -100,6 +111,40 @@ beacon doc show <doc_id>
 ```
 
 stdout にドキュメント本文（Markdown）が返る。frontmatter（`---` で囲まれた部分）は除去して本文のみ使う。
+
+### ms-43 e-566: 出力情報量の最適化
+
+CORE doc は **全文を Step 3 出力に展開しない** (トークン浪費)。代わりに以下の戦略を取る:
+
+1. 各 CORE doc に対し、AI が「**1 行サマリー**」を生成する (元本文の見出し・冒頭段落・タイトルから推定。50〜80 文字目安)
+2. Step 3 では `[CORE] [title]: [1行サマリー]` のみを出力する
+3. 詳細が必要な場合の参照経路をフッタで明示:
+   - Web UI を開いている場合 → 「Documents タブで全文閲覧可能」
+   - CLI 派の場合 → `beacon doc show <doc_id>` でいつでも展開できる旨を末尾に 1 行添える
+
+例 (旧出力):
+```
+[CORE] doc-classification:
+（500 トークン分の本文全文…）
+```
+
+例 (新出力):
+```
+[CORE] doc-classification: ドキュメントを core/spec/memo/report の 4 つで分類する原則。
+```
+
+**例外**: ユーザーが `/beacon-session-start --verbose` 引数で呼んだ場合、または対象 CORE doc が 200 文字以下なら全文を出してよい。
+**スコープ MS 指定時**は、その MS に関連すると AI が判断した CORE doc のみ全文展開してよい (作業に直結するため)。
+
+### Step 1e-2: memo scope の取得 (ms-43 e-564)
+
+Step 1d-2 で 1 件以上残っていれば、各 memo doc も **Bash ツール** で **並列に** 取得:
+
+```bash
+beacon doc show <doc_id>
+```
+
+CORE と同じく **1 行サマリー** に圧縮して Step 3 出力に含める。「前セッションからの引き継ぎメモ」セクションとして提示する。
 
 ## Step 1f: アクティブMSおよびアクティブOperationのSPECドキュメント取得
 
@@ -471,6 +516,35 @@ fi
 取得した URL は Step 3 の出力ヘッダに表示する。  
 local mode（cloud.json 無し）の場合はこのステップをスキップ。
 
+## Step 2.9: 次セッション最初の作業の特定 (ms-43 e-568)
+
+Step 3 の出力末尾に「**次の一手**」を **AI が決定的に選ぶ** ためのロジック。
+これまで session-start は「何から始めますか？」とユーザーに丸投げしていたが、文脈情報を全部持っているのは AI なので、AI が **最有力候補を 1 つ提案** し、ユーザーは承認 or 別案で応答するだけにする。
+
+### 優先順位 (上から順に評価し、最初にヒットしたものを採用)
+
+1. **未解決 Incident がある** → `/beacon-incident-report` で close + report 作成
+2. **レビュー待ち PR がある** → `/review <pr_number>`
+3. **`beacon trigger check` で active なトリガーがある** → そのトリガーの推奨アクション
+4. **アクティブ MS に未消化タスクが 1 つ以上ある**
+   - そのうち `priority == "highest"` があればそれを最優先
+   - 次に `in_progress` 状態のタスク
+   - 次に `assignee` が自分 (current member) のタスク
+   - それも無ければ todo 状態の先頭タスク
+5. **アクティブ MS の SPEC が無い** → `/beacon-spec <ms-id>` で SPEC 作成
+6. **アクティブ MS が無い** → 「次のマイルストーンを決めましょう」(コンサルタントモード Step 2.5 と同じ)
+7. **どれも該当しない** → 「観察モード: 直近 retro を見直すか、cleanup 作業に着手するか」
+
+### 出力フォーマット
+
+```
+次の一手: [推奨アクション (短く、1 行)]
+  根拠: [なぜこれを推奨するか — 上記優先順位のどれにヒットしたか]
+  別の選択肢: [候補 2 つを箇条書き、なければ省略]
+```
+
+「別の選択肢」は同じ優先度の他タスク・next MS 提案など。**断定し過ぎず、ユーザーが override しやすい** 余地を残す。
+
 ## Step 3: 照合と提示
 
 Step 1〜2 の結果を組み合わせて、以下のフォーマットで **テキスト出力** する。
@@ -487,11 +561,13 @@ Beacon: [name]
   → /beacon-operation-review でも close 誘導が走ります。
 
 ドキュメント (core=設計原則・常時参照 / spec=仕様・技術詳細 / memo=検討メモ):
-  [CORE] [title]: [本文（短ければ全文、長ければ要約）]
+  [CORE] [title]: [1行サマリー (ms-43 e-566)]
   ...
   [SPEC] [title] (ms-xx): [要約]
   [SPEC] [title] (op-x): [要約]
   ...
+  [MEMO] [title] ([N日前]): [1行サマリー]   ← ms-43 e-564 / 直近7日以内のみ
+  ※ 詳細は Web UI Documents タブ または `beacon doc show <doc_id>` で。
 
 前回の経緯: [summary]
 
@@ -524,7 +600,11 @@ SPEC 無し active MS (warning):     ← Step 1f で検出した SPEC 無しacti
 未記録のコミット: [git logのハッシュがbeaconエントリに存在しないもの]
 uncommitted changes: [git statusの結果があれば]
 ---
-何から始めますか？
+次の一手 (ms-43 e-568): [Step 2.9 で決定した推奨アクション]
+  根拠: [なぜこれを推奨するか]
+  別の選択肢: [候補 1] / [候補 2]  ← 任意
+
+どうしますか？（このまま進めるなら「OK」「進めて」、別の作業なら指示ください）
 ```
 
 **未解決 Incident セクション (e-595):**

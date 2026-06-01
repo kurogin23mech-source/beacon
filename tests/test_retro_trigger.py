@@ -206,3 +206,55 @@ def test_created_at_preserved_across_daily_refresh(project_with_retro, monkeypat
     t2 = _read_trigger(project_with_retro)
     assert t2["created_at"] == "2026-05-29"  # unchanged
     assert t2["refreshed_at"] == "2026-05-30"
+
+
+# ---------------------------------------------------------------------------
+# ms-43 e-570: retro_default_since handles delayed retros correctly.
+# ---------------------------------------------------------------------------
+
+def test_default_since_uses_next_monday_after_last_reviewed_week(
+    project_with_retro, monkeypatch, capsys
+):
+    """If `.reviewed` says W21 was reviewed, the next retro's default since
+    should be W22 Monday (not "this Monday" which would miss most of W22 and
+    all of W21's tail)."""
+    import commands  # type: ignore
+    reviewed_path = project_with_retro / ".beacon" / "retro" / ".reviewed"
+    reviewed_path.write_text("2026-W21\n", encoding="utf-8")
+
+    # 2026-05-26 = Tuesday of W22 (delayed retro scenario).
+    _set_today(monkeypatch, 2026, 5, 26)
+    commands.cmd_retro_default_since()
+    out = capsys.readouterr().out.strip()
+    # W22 Monday = 2026-05-25
+    assert out == "2026-05-25", out
+
+
+def test_default_since_falls_back_to_retro_day_anchor_without_marker(
+    project_with_retro, monkeypatch, capsys
+):
+    """No `.reviewed` marker: anchor on most recent retro_day (Friday) and
+    cover the prior 7 days."""
+    import commands  # type: ignore
+    # 2026-05-26 Tuesday → most recent Friday on/before = 2026-05-22 (W21).
+    # since should be 2026-05-22 - 6 days = 2026-05-16 (Sat of W20).
+    _set_today(monkeypatch, 2026, 5, 26)
+    commands.cmd_retro_default_since()
+    out = capsys.readouterr().out.strip()
+    assert out == "2026-05-16", out
+
+
+def test_default_since_delayed_two_weeks_covers_both(
+    project_with_retro, monkeypatch, capsys
+):
+    """If the last reviewed week is W20 and today is W22 Tuesday, the default
+    since should be W21 Monday so both unreviewed weeks (W21+W22 partial) are
+    captured. Naive "this Monday" would lose W21 entirely."""
+    import commands  # type: ignore
+    reviewed_path = project_with_retro / ".beacon" / "retro" / ".reviewed"
+    reviewed_path.write_text("2026-W20\n", encoding="utf-8")
+    _set_today(monkeypatch, 2026, 5, 26)  # W22 Tuesday
+    commands.cmd_retro_default_since()
+    out = capsys.readouterr().out.strip()
+    # W21 Monday = 2026-05-18
+    assert out == "2026-05-18", out

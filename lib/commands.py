@@ -1755,6 +1755,60 @@ def cmd_retro_prepare():
     print(json.dumps(output, ensure_ascii=False))
 
 
+def cmd_retro_default_since():
+    """Print the recommended default `--since` date for `beacon retro`.
+
+    ms-43 e-570: when the user delays a retro past the configured retro_day,
+    the previous default ("this Monday") covers too short a window and misses
+    the actual unreviewed period. Logic:
+
+      1. Read `.reviewed` for the most recent reviewed ISO week (if any).
+      2. If found, return the Monday of the **next** ISO week after that.
+      3. Otherwise fall back to the most recent retro_day on or before today,
+         minus 6 days (= the start of the slot being reviewed).
+      4. Final fallback: this Monday.
+
+    Output is a YYYY-MM-DD line; empty on error (the shell wrapper has its
+    own date-arithmetic fallback so older installs still function).
+    """
+    import datetime
+    try:
+        today = datetime.date.today()
+        # 1. Try the .reviewed marker first.
+        reviewed = _last_reviewed_week()
+        if reviewed:
+            # ISO week format: YYYY-WNN. The Monday of the NEXT week begins
+            # the period we still owe a retro for.
+            try:
+                year_str, wk_str = reviewed.split("-W")
+                year = int(year_str); wk = int(wk_str)
+                # ISO week's Monday: use isocalendar inverse.
+                # week N's Monday = first ISO date with isocalendar() == (year, wk, 1)
+                jan4 = datetime.date(year, 1, 4)  # Always in ISO week 1
+                week1_mon = jan4 - datetime.timedelta(days=jan4.weekday())
+                last_reviewed_mon = week1_mon + datetime.timedelta(weeks=wk - 1)
+                next_mon = last_reviewed_mon + datetime.timedelta(days=7)
+                # Don't let it go past today.
+                if next_mon <= today:
+                    print(next_mon.strftime("%Y-%m-%d"))
+                    return
+            except (ValueError, IndexError):
+                pass  # malformed marker, fall through
+
+        # 2. No marker: anchor on the most recent retro_day.
+        retro_day = _get_retro_day()
+        anchor = _most_recent_retro_day_on_or_before(today, retro_day)
+        # Cover the week ending on the anchor day.
+        since = anchor - datetime.timedelta(days=6)
+        # But not past today (defensive).
+        if since > today:
+            since = today
+        print(since.strftime("%Y-%m-%d"))
+    except Exception:
+        # Empty output → shell wrapper falls back to its own date math.
+        pass
+
+
 def cmd_retro_done():
     import datetime
     today = datetime.date.today()
@@ -5301,6 +5355,7 @@ if __name__ == "__main__":
         "milestone_graph": cmd_milestone_graph,
         "retro_prepare": cmd_retro_prepare,
         "retro_done": cmd_retro_done,
+        "retro_default_since": cmd_retro_default_since,
         "trigger_fire": cmd_trigger_fire,
         "trigger_check": cmd_trigger_check,
         "trigger_clear": cmd_trigger_clear,
