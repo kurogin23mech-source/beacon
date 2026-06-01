@@ -1,0 +1,38 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+
+PackageIdentifier: BeaconAI.BeaconDesktop
+PackageVersion: 0.1.0
+PackageLocale: en-US
+
+Publisher: Beacon AI
+PublisherUrl: https://github.com/r-kida2/beacon
+PublisherSupportUrl: https://github.com/r-kida2/beacon/issues
+Author: r-kida2
+
+PackageName: Beacon Desktop
+PackageUrl: https://github.com/r-kida2/beacon
+License: MIT
+LicenseUrl: https://github.com/r-kida2/beacon/blob/main/LICENSE
+Copyright: Copyright (c) 2026 r-kida2
+
+ShortDescription: AI-driven milestone tracker for Claude Code sessions.
+Description: |-
+  Beacon is a milestone-driven project tracker designed for Claude Code (and
+  any AI agent) workflows. It records commits, decisions, and AI-evaluated
+  progress so that sessions can hand off cleanly without losing context.
+
+  Beacon Desktop is the local-mode UI for projects that don't need cloud sync.
+  It bundles the Beacon CLI so non-developers never have to touch a terminal.
+
+Tags:
+  - ai
+  - claude-code
+  - milestone
+  - project-management
+  - productivity
+  - developer-tools
+
+ReleaseNotesUrl: https://github.com/r-kida2/beacon/releases
+
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

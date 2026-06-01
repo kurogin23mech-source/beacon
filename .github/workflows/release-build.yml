@@ -1,0 +1,197 @@
+name: Release Build (CLI + Desktop, all OS)
+
+# ============================================================================
+# DRAFT — ms-44 e-696
+#
+# Cross-platform release pipeline. This workflow builds the Beacon Desktop
+# app (Tauri) AND the Beacon CLI Python package on macOS / Windows / Linux
+# runners, then uploads the artifacts to a GitHub Release.
+#
+# It is intentionally NOT triggered automatically yet. Trigger manually
+# (`workflow_dispatch`) for the first dry-run, or push a `release-v*` tag
+# once the pipeline is verified.
+#
+# Existing `desktop-release.yml` handles `desktop-v*` tags for Desktop only.
+# This workflow is the "all-in-one" successor; the two will be consolidated
+# once cli-only PyPI publishing is confirmed.
+# ============================================================================
+
+on:
+  push:
+    tags:
+      - 'release-v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry-run (skip GitHub Release creation)'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+permissions:
+  contents: write
+
+jobs:
+  # --------------------------------------------------------------------------
+  # CLI: sdist + wheel on a single runner (pure Python)
+  # --------------------------------------------------------------------------
+  build-cli:
+    name: Build CLI (sdist + wheel)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+
+      - name: Build sdist + wheel
+        run: python -m build
+
+      - name: Upload CLI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: beacon-cli-dist
+          path: dist/*
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # Desktop: per-OS Tauri build (matches existing desktop-release.yml matrix)
+  # --------------------------------------------------------------------------
+  build-desktop:
+    name: Build Desktop (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            label: macOS-arm64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            label: macOS-x64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            label: Windows-x64
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            label: Linux-x64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Tauri CLI
+        run: npm install -g @tauri-apps/cli@2
+
+      - name: Build Desktop App
+        working-directory: desktop
+        run: tauri build --target ${{ matrix.target }}
+
+      - name: Compute artifact SHA-256
+        shell: bash
+        working-directory: desktop/src-tauri/target/${{ matrix.target }}/release/bundle
+        run: |
+          for f in $(find . -type f \( -name '*.dmg' -o -name '*.msi' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' \) 2>/dev/null); do
+            if command -v shasum >/dev/null 2>&1; then
+              shasum -a 256 "$f" > "$f.sha256"
+            else
+              sha256sum "$f" > "$f.sha256"
+            fi
+          done
+        continue-on-error: true
+
+      - name: Upload Desktop artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: beacon-desktop-${{ matrix.label }}
+          path: |
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.sha256
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.sha256
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.sha256
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.sha256
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.sha256
+          if-no-files-found: ignore
+
+  # --------------------------------------------------------------------------
+  # Aggregate: upload all artifacts to a GitHub Release
+  # --------------------------------------------------------------------------
+  release:
+    name: Create GitHub Release
+    needs: [build-cli, build-desktop]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event.inputs.dry_run == 'false'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Beacon ${{ github.ref_name }}
+          draft: true   # Maintainer reviews artifacts before publishing
+          prerelease: false
+          files: artifacts/**/*
+          generate_release_notes: true
+
+  # --------------------------------------------------------------------------
+  # (future) PyPI publish — disabled by default, requires API token
+  # --------------------------------------------------------------------------
+  # publish-pypi:
+  #   name: Publish CLI to PyPI
+  #   needs: build-cli
+  #   runs-on: ubuntu-latest
+  #   if: startsWith(github.ref, 'refs/tags/release-v')
+  #   environment: pypi
+  #   permissions:
+  #     id-token: write   # trusted publishing
+  #   steps:
+  #     - uses: actions/download-artifact@v4
+  #       with:
+  #         name: beacon-cli-dist
+  #         path: dist
+  #     - uses: pypa/gh-action-pypi-publish@release/v1
