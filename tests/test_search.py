@@ -251,3 +251,90 @@ def test_snippet_centers_on_match():
     out = search.search_project(project, q="5xx")
     inc = next(r for r in out["results"] if r["id"] == "e-300")
     assert "5xx" in inc["snippet"]
+
+
+# ---------------------------------------------------------------------------
+# ms-43 e-631: cross-entity search returns documents/push/deploy/operation
+# alongside milestones/tasks/commits in a single response.
+# ---------------------------------------------------------------------------
+
+def test_cross_entity_search_covers_all_types():
+    """A single search with a shared keyword across multiple entity types must
+    return results from every contributing entity, so the Web UI can render a
+    grouped view (e-631)."""
+    project = {
+        "milestones": [
+            {"id": "ms-1", "title": "Authentication overhaul",
+             "objective": "redo auth", "status": "in_progress",
+             "created_at": "2026-05-01T00:00:00Z",
+             "entries": [
+                 {"id": "e-1", "type": "task", "status": "todo",
+                  "description": "Add auth middleware",
+                  "created_at": "2026-05-02T00:00:00Z"},
+                 {"id": "e-2", "type": "commit", "status": "done",
+                  "description": "fix(auth): token refresh",
+                  "meta": {"hash": "abc1234", "message": "fix(auth): token refresh"},
+                  "created_at": "2026-05-03T00:00:00Z"},
+             ]},
+        ],
+        "operations": [
+            {"id": "op-1", "title": "Auth monitor",
+             "status": "open", "created_at": "2026-05-04T00:00:00Z",
+             "entries": [
+                 {"id": "e-3", "type": "incident", "status": "open",
+                  "title": "Auth 5xx surge", "description": "auth 5xx spike",
+                  "created_at": "2026-05-05T00:00:00Z"},
+             ]},
+        ],
+        "pushes": [
+            {"id": "p-1", "summary": "deploy auth fix",
+             "pushed_at": "2026-05-06T00:00:00Z", "ms_id": "ms-1"},
+        ],
+        "deployments": [
+            {"id": "d-1", "description": "rolled out auth middleware",
+             "deployed_at": "2026-05-07T00:00:00Z", "status": "success"},
+        ],
+    }
+    docs = [{"doc_id": "spec-auth", "title": "Auth SPEC",
+             "scope": "spec", "content": "auth design",
+             "updated_at": "2026-05-08T00:00:00Z"}]
+
+    out = search.search_project(project, docs, q="auth")
+    found_types = {r["entity_type"] for r in out["results"]}
+
+    # All five contributing types must appear in the unified result set.
+    assert "milestone" in found_types
+    assert "task" in found_types
+    assert "commit" in found_types
+    assert "operation" in found_types
+    assert "incident" in found_types
+    assert "push" in found_types
+    assert "deploy" in found_types
+    assert "document" in found_types
+
+
+def test_cross_entity_facets_count_per_type():
+    """Facets must aggregate cross-entity counts so the Web UI can render
+    the grouping chips with totals (e-631)."""
+    project = _make_project()
+    docs = _make_docs()
+    out = search.search_project(project, docs)  # empty q → all recent
+
+    type_facet = out["facets"]["type"]
+    # We added milestones / tasks / commits / operation / incident / run / push / deploy / document.
+    assert type_facet.get("milestone", 0) >= 1
+    assert type_facet.get("task", 0) >= 1
+    assert type_facet.get("commit", 0) >= 1
+    assert type_facet.get("operation", 0) >= 1
+    assert type_facet.get("document", 0) >= 1
+    assert type_facet.get("push", 0) >= 1
+
+
+def test_document_scope_filter_excludes_other_scopes():
+    """e-616: Documents-tab fulltext+scope filtering. Asking for scope=spec
+    must not leak core/memo documents."""
+    project = _make_project()
+    docs = _make_docs()
+    out = search.search_project(project, docs, type=["document"], scope="spec")
+    scopes = {r.get("scope") for r in out["results"]}
+    assert scopes == {"spec"}, scopes

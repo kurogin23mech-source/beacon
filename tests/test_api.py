@@ -38,6 +38,16 @@ firestore_client.get_project = mock_get_project
 firestore_client.save_project = mock_save_project
 firestore_client.list_projects = mock_list_projects
 
+# ms-43 e-631: documents are queried by the search endpoint via list_documents.
+_docs_store: dict[str, list[dict]] = {}
+
+
+def mock_list_documents(project_id: str):
+    return copy.deepcopy(_docs_store.get(project_id, []))
+
+
+firestore_client.list_documents = mock_list_documents
+
 from fastapi.testclient import TestClient
 import app as app_module
 
@@ -354,3 +364,83 @@ def test_health_no_auth():
         assert r.json()["status"] == "ok"
     finally:
         app_module._auth_enabled = original
+
+
+# ---------------------------------------------------------------------------
+# ms-43 e-631: unified cross-entity search endpoint
+# ---------------------------------------------------------------------------
+
+def test_search_endpoint_returns_unified_results():
+    """/api/projects/{id}/search should return milestones, tasks, commits,
+    documents, etc. in a single response with facets."""
+    # Add a document so we can verify cross-entity coverage.
+    _docs_store[PROJECT_ID] = [
+        {"doc_id": "spec-1", "title": "First milestone SPEC",
+         "scope": "spec", "milestone": "ms-1",
+         "content": "Design doc for first milestone.",
+         "updated_at": "2026-05-11T00:00:00Z"},
+    ]
+
+    r = client.get(f"/api/projects/{PROJECT_ID}/search", params={"q": "first"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "results" in body
+    assert "facets" in body
+    assert "total" in body
+
+    types = {r["entity_type"] for r in body["results"]}
+    # "First milestone" matches the milestone title; "First milestone SPEC"
+    # matches the document title. Both must appear.
+    assert "milestone" in types, types
+    assert "document" in types, types
+
+
+def test_search_endpoint_type_filter():
+    """type=document should restrict to documents only."""
+    _docs_store[PROJECT_ID] = [
+        {"doc_id": "spec-1", "title": "Auth SPEC",
+         "scope": "spec", "milestone": "ms-1",
+         "content": "Auth design", "updated_at": "2026-05-11T00:00:00Z"},
+    ]
+    r = client.get(f"/api/projects/{PROJECT_ID}/search",
+                   params={"q": "auth", "type": "document"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    types = {x["entity_type"] for x in body["results"]}
+    assert types <= {"document"}, types
+
+
+def test_search_endpoint_empty_query_returns_recent():
+    """Empty q + no filters should return recent activity (≤ limit), not 400."""
+    r = client.get(f"/api/projects/{PROJECT_ID}/search")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total"] >= 0
+    assert isinstance(body["results"], list)
+
+
+def test_search_endpoint_facets_present():
+    """Facets must be returned so the Web UI can render filter chips."""
+    r = client.get(f"/api/projects/{PROJECT_ID}/search", params={"q": "milestone"})
+    assert r.status_code == 200
+    body = r.json()
+    assert "type" in body["facets"]
+    assert "status" in body["facets"]
+
+
+def test_search_endpoint_scope_filter_documents():
+    """e-616: scope filter restricts documents to a single scope."""
+    _docs_store[PROJECT_ID] = [
+        {"doc_id": "core-1", "title": "Memory layer principle",
+         "scope": "core", "content": "Memory layer is passive",
+         "updated_at": "2026-05-01T00:00:00Z"},
+        {"doc_id": "spec-1", "title": "Auth SPEC",
+         "scope": "spec", "milestone": "ms-1",
+         "content": "Auth design", "updated_at": "2026-05-11T00:00:00Z"},
+    ]
+    r = client.get(f"/api/projects/{PROJECT_ID}/search",
+                   params={"type": "document", "scope": "spec"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    scopes = {x.get("scope") for x in body["results"]}
+    assert scopes == {"spec"}, scopes
