@@ -35,7 +35,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / "server" / "static" / "index.html"
-TAURI = ROOT / "desktop" / "layer.js"
+# Post-e-743: tabs / action emissions live in SHARED (flows into dist via
+# build.py). Compare against the final Tauri artifact, not layer.js — that's
+# what the user actually sees.
+TAURI = ROOT / "desktop" / "dist" / "index.html"
+TAURI_LAYER = ROOT / "desktop" / "layer.js"  # kept for messages only
 
 # Intentional platform-specific differences.
 # Adding/removing an item here is itself a reviewable change.
@@ -75,8 +79,10 @@ def main() -> int:
     issues: list[str] = []
 
     # --- 1. tabs ---
-    # Match data-tab="value" in both files. Web has SKIP+SHARED both included
-    # because tab declarations live in SKIP currently.
+    # Post-e-743: tabs are declared in SHARED's renderShell (server/static/index.html).
+    # dist absorbs SHARED via build.py, so web vs dist tabs should match by
+    # construction. Mismatch here means: (a) dist is stale (run build.py), or
+    # (b) someone added a Tauri-only tab in layer.js (allow-list intentionally).
     web_tabs = extract(r'data-tab="([a-z-]+)"', web)
     tauri_tabs = extract(r'data-tab="([a-z-]+)"', tauri)
 
@@ -85,13 +91,15 @@ def main() -> int:
 
     if only_web:
         issues.append(
-            f"  [tabs] Web has tabs that Tauri lacks: {sorted(only_web)}\n"
-            f"         → Add to desktop/layer.js render() or to WEB_ONLY_TABS allowlist."
+            f"  [tabs] Web has tabs that Tauri dist lacks: {sorted(only_web)}\n"
+            f"         → Probably stale dist. Run: python3 desktop/build.py\n"
+            f"         → If intentionally Web-only, add to WEB_ONLY_TABS allowlist."
         )
     if only_tauri:
         issues.append(
-            f"  [tabs] Tauri has tabs that Web lacks: {sorted(only_tauri)}\n"
-            f"         → Add to server/static/index.html or to TAURI_ONLY_TABS allowlist."
+            f"  [tabs] Tauri dist has tabs that Web lacks: {sorted(only_tauri)}\n"
+            f"         → Add to renderShell in server/static/index.html, or\n"
+            f"         → add to TAURI_ONLY_TABS allowlist (Tauri-only feature)."
         )
 
     # --- 2. actions ---
@@ -139,8 +147,8 @@ def main() -> int:
         )
     if tauri_unhandled:
         issues.append(
-            f"  [actions/tauri] dist emits actions that no Tauri handler covers: {sorted(tauri_unhandled)}\n"
-            f"                  → Add to handleAction in desktop/layer.js or move to handleCommonAction."
+            f"  [actions/tauri] Tauri dist emits actions that no handler covers: {sorted(tauri_unhandled)}\n"
+            f"                  → Add to handleAction in desktop/layer.js, or move to handleCommonAction in SHARED."
         )
 
     # Cross-layer coverage: actions that Web emits but Tauri handler doesn't
@@ -174,10 +182,10 @@ def main() -> int:
 
     # --- report ---
     if not issues:
-        print("[drift] OK: server/static and desktop/layer.js are in sync.")
+        print("[drift] OK: server/static and desktop/dist are in sync.")
         return 0
 
-    print("[drift] Frontend drift detected between server/static and desktop/layer.js:")
+    print("[drift] Frontend drift detected between server/static and desktop/dist:")
     for i in issues:
         print(i)
     print()

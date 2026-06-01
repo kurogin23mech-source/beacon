@@ -381,81 +381,23 @@ async function renderProjectSelector() {
 
 // ---- Render ----
 
+// Platform hooks for renderShell (ms-46 e-743). Web equivalent lives in
+// server/static/index.html SKIP block. renderShell itself is shared.
+const PLATFORM = {
+  headerTag: 'beacon desktop',
+  getConnectionTitle: () => cloudMode ? 'live = cloud API watcher' : 'live = local file watcher',
+  versionBadgeHTML: () => '',
+  getFooterLeftHTML: () => `<div>${cloudMode ? 'cloud' : 'local'}</div>`,
+  getArchiveButtonHTML: (p) => cloudMode
+    ? `<button class="sort-toggle" data-action="archive-cloud-project" style="font-size:0.65rem;color:var(--text-dim);">Archive</button>`
+    : '',
+  footerStaggerClass: 'stagger-3',
+};
+
 function render() {
   const app = document.getElementById('app');
   if (!state.project) return;
-  const scrollY = window.scrollY;
-  const p = state.project;
-  const sorted = sortMilestones(p.milestones || []);
-  const filtered = filterMilestones(sorted);
-  const activeCount = (p.milestones || []).filter(m => m.status === 'in_progress').length;
-  const doneCount = (p.milestones || []).filter(m => m.status === 'done').length;
-  const retro = nextRetroDate(p.retro_day);
-
-  app.innerHTML = `
-    <header class="header fade-in">
-      <div class="header-top">
-        <button class="hamburger-btn" data-action="open-menu" title="Menu"><span></span><span></span><span></span></button>
-        <span class="project-name">${esc(p.name)}</span>
-        <span class="header-tag">beacon desktop</span>
-        <div class="connection-status" title="${cloudMode ? 'live = cloud API watcher' : 'live = local file watcher'}">
-          <div class="status-dot ${state.connected ? '' : 'offline'}"></div>
-          <span>${state.connected ? 'live' : 'offline'}</span>
-        </div>
-      </div>
-    </header>
-
-    ${(p.objective || retro) ? `
-    <div class="project-info fade-in stagger-1">
-      ${p.objective ? `<div class="project-info-item"><span class="project-info-label">Objective</span><span class="project-info-value">${esc(p.objective)}</span></div>` : ''}
-      ${retro ? `<div class="project-info-item${retro.isToday ? ' review-due' : ''}"><span class="project-info-label">${retro.isToday ? '⚠ Review Due Today' : 'Next Review'}</span><span class="project-info-value">${retro.date} (${esc(p.retro_day || 'friday')})</span></div>` : ''}
-    </div>` : ''}
-
-    <div class="tab-bar fade-in stagger-1">
-      <button class="tab-btn ${state.activeTab === 'dashboard' ? 'active' : ''}" data-action="switch-tab" data-tab="dashboard">Milestones</button>
-      <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
-      <button class="tab-btn ${state.activeTab === 'releases' ? 'active' : ''}" data-action="switch-tab" data-tab="releases">Releases</button>
-      <button class="tab-btn ${state.activeTab === 'operations' ? 'active' : ''}" data-action="switch-tab" data-tab="operations">Operations</button>
-      <button class="tab-btn ${state.activeTab === 'notes' ? 'active' : ''}" data-action="switch-tab" data-tab="notes">Notes</button>
-    </div>
-
-    ${state.activeTab === 'dashboard' ? (state.showGraph ? renderGraphSection() : `
-      ${p.summary ? `<section class="summary-block fade-in"><div class="summary-label">Session Context</div><div class="summary-text">${esc(p.summary)}</div></section>` : ''}
-      <section class="milestones fade-in">
-        <div class="milestones-header">
-          <span class="milestones-title">Milestones</span>
-          <span class="milestones-count">${activeCount} active · ${doneCount}/${(p.milestones || []).length} done</span>
-          <input class="ms-search-inline" id="search-input" type="search" placeholder="Search milestones, tasks, commits..." value="${esc(state.searchQuery)}" autocomplete="off">
-          <button class="sort-toggle" data-action="show-graph">Graph →</button>
-        </div>
-        <div id="ms-list-container">${state.searchQuery.trim() ? renderSearchResults() : `
-          <div class="filter-bar">
-            <button class="filter-btn f-all ${state.hiddenStatuses.size === 0 ? 'on' : 'off'}" data-action="filter-all">all</button>
-            ${FILTER_ORDER.map(s => `<button class="filter-btn ${!state.hiddenStatuses.has(s) ? 'on' : 'off'} ${FILTER_CSS_CLASS[s] || ''}" data-action="filter-status" data-status="${s}">${STATUS_LABELS[s] || s}</button>`).join('')}
-            <button class="sort-toggle" data-action="toggle-sort">${state.sortAsc ? '↑ ms-1 first' : '↓ latest first'}</button>
-          </div>
-          ${filtered.map(ms => renderMilestoneCard(ms, 0)).join('')}
-        `}</div>
-      </section>`) : ''}
-
-    ${state.activeTab === 'documents' ? renderDocumentsSection() : ''}
-    ${state.activeTab === 'releases' ? renderReleasesSection() : ''}
-    ${state.activeTab === 'operations' ? renderOperationsSection() : ''}
-    ${state.activeTab === 'notes' ? renderNotesSection() : ''}
-
-    <footer class="footer fade-in stagger-3">
-      <div class="footer-left">
-        <div>${cloudMode ? 'cloud' : 'local'}</div>
-        <div class="footer-tagline">Where humans and AI are bound together.</div>
-      </div>
-      <div class="footer-right" style="display:flex;align-items:center;gap:12px;">
-        ${state.lastUpdate ? formatTime(state.lastUpdate) : ''}
-        ${cloudMode ? `<button class="sort-toggle" data-action="archive-cloud-project" style="font-size:0.65rem;color:var(--text-dim);">Archive</button>` : ''}
-        <button class="sort-toggle" data-action="export-json" style="font-size:0.65rem;">Export JSON</button>
-      </div>
-    </footer>
-  `;
-  bindEvents();
+  renderShell(app);
 }
 
 // ---- Menu ----

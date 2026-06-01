@@ -2113,22 +2113,14 @@ function nextRetroDate(retroDay) {
 
 // ---- Render ----
 
-// @BUILD:SKIP-START
-function render() {
-  const app = document.getElementById('app');
-
-  if (state.error && !state.project) {
-    app.innerHTML = `<div class="error-state"><div class="error-icon">\u26a0</div><div>${esc(state.error)}</div></div>`;
-    return;
-  }
-
-  if (!state.project && state.projects.length === 0) return;
-
-  if (!state.project && state.projects.length > 0) {
-    renderProjectSelector(app);
-    return;
-  }
-
+/**
+ * renderShell (ms-46 e-743): single-source-of-truth shell HTML.
+ * Tab-bar, section dispatch, header/footer are defined here once and used
+ * by both Web (this file) and Tauri (desktop/dist/index.html via build.py).
+ * Platform-specific differences are read from `PLATFORM` declared in the
+ * SKIP block (Web) or in desktop/layer.js (Tauri).
+ */
+function renderShell(app) {
   const p = state.project;
   const sorted = sortMilestones(p.milestones || []);
   const filtered = filterMilestones(sorted);
@@ -2143,9 +2135,9 @@ function render() {
           <span></span><span></span><span></span>
         </button>
         <span class="project-name">${esc(p.name)}</span>
-        <span class="header-tag">beacon</span>
-        ${renderVersionBadge()}
-        <div class="connection-status" title="live = WebSocket push from server">
+        <span class="header-tag">${esc(PLATFORM.headerTag)}</span>
+        ${PLATFORM.versionBadgeHTML()}
+        <div class="connection-status" title="${esc(PLATFORM.getConnectionTitle())}">
           <div class="status-dot ${state.connected ? '' : 'offline'}"></div>
           <span class="connection-label">${state.connected ? 'live' : 'offline'}</span>
         </div>
@@ -2155,7 +2147,7 @@ function render() {
     ${(p.objective || retro) ? `
     <div class="project-info fade-in stagger-1">
       ${p.objective ? `<div class="project-info-item"><span class="project-info-label">Objective</span><span class="project-info-value">${esc(p.objective)}</span></div>` : ''}
-      ${retro ? `<div class="project-info-item${retro.isToday ? ' review-due' : ''}"><span class="project-info-label">${retro.isToday ? '\u26a0 Review Due Today' : 'Next Review'}</span><span class="project-info-value">${retro.date} (${esc(p.retro_day || 'friday')})</span></div>` : ''}
+      ${retro ? `<div class="project-info-item${retro.isToday ? ' review-due' : ''}"><span class="project-info-label">${retro.isToday ? '⚠ Review Due Today' : 'Next Review'}</span><span class="project-info-value">${retro.date} (${esc(p.retro_day || 'friday')})</span></div>` : ''}
     </div>
     ` : ''}
 
@@ -2177,9 +2169,9 @@ function render() {
     <section class="milestones fade-in">
       <div class="milestones-header">
         <span class="milestones-title">Milestones</span>
-        <span class="milestones-count">${activeCount} active \u00b7 ${doneCount}/${(p.milestones||[]).length} done</span>
+        <span class="milestones-count">${activeCount} active · ${doneCount}/${(p.milestones||[]).length} done</span>
         <input class="ms-search-inline" id="search-input" type="search" placeholder="Search milestones, tasks, commits..." value="${esc(state.searchQuery)}" autocomplete="off">
-        <button class="sort-toggle" data-action="show-graph">Graph \u2192</button>
+        <button class="sort-toggle" data-action="show-graph">Graph →</button>
       </div>
       <div id="ms-list-container">${state.searchQuery.trim() ? renderSearchResults() : `
       <div class="filter-bar">
@@ -2188,7 +2180,7 @@ function render() {
           const isOn = !state.hiddenStatuses.has(s);
           return `<button class="filter-btn ${isOn ? 'on' : 'off'} ${FILTER_CSS_CLASS[s] || ''}" data-action="filter-status" data-status="${s}">${STATUS_LABELS[s] || s}</button>`;
         }).join('')}
-        <button class="sort-toggle" data-action="toggle-sort">${state.sortAsc ? '\u2191 ms-1 first' : '\u2193 latest first'}</button>
+        <button class="sort-toggle" data-action="toggle-sort">${state.sortAsc ? '↑ ms-1 first' : '↓ latest first'}</button>
       </div>
       ${filtered.map((ms, i) => renderMilestoneCard(ms, i)).join('')}
       `}</div>
@@ -2201,13 +2193,13 @@ function render() {
     ${state.activeTab === 'operations' ? renderOperationsSection() : ''}
     ${state.activeTab === 'notes' ? renderNotesSection() : ''}
 
-    <footer class="footer fade-in stagger-4">
+    <footer class="footer fade-in ${PLATFORM.footerStaggerClass || 'stagger-3'}">
       <div class="footer-left">
-        <div>${esc(state.projectId)}</div>
+        ${PLATFORM.getFooterLeftHTML()}
         <div class="footer-tagline">Where humans and AI are bound together.</div>
       </div>
       <div class="footer-right">
-        ${state.projectId ? `<button class="sort-toggle" data-action="archive-project" style="font-size:0.65rem;color:var(--text-dim);">Archive</button>` : ''}
+        ${PLATFORM.getArchiveButtonHTML(p)}
         <button class="sort-toggle" data-action="export-json" style="font-size:0.65rem;">Export JSON</button>
         <span>${state.lastUpdate ? formatTime(state.lastUpdate) : ''}</span>
       </div>
@@ -2215,6 +2207,38 @@ function render() {
   `;
 
   bindEvents();
+}
+
+// @BUILD:SKIP-START
+
+// Platform hooks for renderShell (ms-46 e-743). Tauri equivalent in desktop/layer.js.
+const PLATFORM = {
+  headerTag: 'beacon',
+  getConnectionTitle: () => 'live = WebSocket push from server',
+  versionBadgeHTML: () => renderVersionBadge(),
+  getFooterLeftHTML: () => `<div>${esc(state.projectId)}</div>`,
+  getArchiveButtonHTML: (p) => state.projectId
+    ? `<button class="sort-toggle" data-action="archive-project" style="font-size:0.65rem;color:var(--text-dim);">Archive</button>`
+    : '',
+  footerStaggerClass: 'stagger-4',
+};
+
+function render() {
+  const app = document.getElementById('app');
+
+  if (state.error && !state.project) {
+    app.innerHTML = `<div class="error-state"><div class="error-icon">\u26a0</div><div>${esc(state.error)}</div></div>`;
+    return;
+  }
+
+  if (!state.project && state.projects.length === 0) return;
+
+  if (!state.project && state.projects.length > 0) {
+    renderProjectSelector(app);
+    return;
+  }
+
+  renderShell(app);
 }
 
 function renderProjectSelector(app) {
