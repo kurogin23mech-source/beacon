@@ -187,6 +187,8 @@ body::after {
 }
 .ms-search-inline:focus { border-color: var(--accent-dim); }
 .ms-search-inline::placeholder { color: var(--text-dim); }
+.global-search { display: flex; padding: 0 0 8px; }
+.global-search .ms-search-inline { padding: 6px 12px; font-size: 0.8rem; }
 .search-results { margin-top: 4px; }
 .search-result-item {
   display: grid;
@@ -1755,9 +1757,9 @@ let state = {
   searchTypeFilter: new Set(),
   searchLoading: false,
   searchToken: 0,
-  // ms-43 e-616: Documents tab — internal fulltext filter (independent of global searchQuery)
-  documentsFilter: '',
-  documentsScopeFilter: '', // '' = all scopes; otherwise core/spec/memo/retro/report
+  // Documents tab: scope chip filter (single-select; '' = all scopes).
+  // Fulltext title/body search is handled by the global searchQuery instead.
+  documentsScopeFilter: '',
   // Release graph
   showReleaseGraph: false,
   // Expanded deploy card id
@@ -2130,6 +2132,70 @@ function nextRetroDate(retroDay) {
 // ---- Render ----
 
 /**
+ * renderMainContent (ms-43 follow-up): swappable inner content.
+ * The global search input lives in renderShell, so only this block changes
+ * between "search results view" and "tabbed view" — no header/search-box
+ * animation restart on every keystroke.
+ */
+function renderMainContent() {
+  const p = state.project;
+  if (!p) return '';
+  if (state.searchQuery.trim()) {
+    return renderSearchResults();
+  }
+  const sorted = sortMilestones(p.milestones || []);
+  const filtered = filterMilestones(sorted);
+  const activeCount = (p.milestones || []).filter(m => m.status === 'in_progress').length;
+  const doneCount = (p.milestones || []).filter(m => m.status === 'done').length;
+  return `
+    <div class="tab-bar fade-in stagger-1">
+      <button class="tab-btn ${state.activeTab === 'dashboard' ? 'active' : ''}" data-action="switch-tab" data-tab="dashboard">Milestones</button>
+      <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
+      <button class="tab-btn ${state.activeTab === 'releases' ? 'active' : ''}" data-action="switch-tab" data-tab="releases">Releases</button>
+      <button class="tab-btn ${state.activeTab === 'operations' ? 'active' : ''}" data-action="switch-tab" data-tab="operations">Operations</button>
+      <button class="tab-btn ${state.activeTab === 'notes' ? 'active' : ''}" data-action="switch-tab" data-tab="notes">Notes</button>
+    </div>
+    ${state.activeTab === 'dashboard' ? (state.showGraph ? renderGraphSection() : `
+    ${p.summary ? `
+    <section class="summary-block fade-in">
+      <div class="summary-label">Session Context</div>
+      <div class="summary-text">${esc(p.summary)}</div>
+    </section>
+    ` : ''}
+    <section class="milestones fade-in">
+      <div class="milestones-header">
+        <span class="milestones-title">Milestones</span>
+        <span class="milestones-count">${activeCount} active · ${doneCount}/${(p.milestones||[]).length} done</span>
+        <button class="sort-toggle" data-action="show-graph">Graph →</button>
+      </div>
+      <div id="ms-list-container">
+      <div class="filter-bar">
+        <button class="filter-btn f-all ${state.hiddenStatuses.size === 0 ? 'on' : 'off'}" data-action="filter-all">all</button>
+        ${FILTER_ORDER.map(s => {
+          const isOn = !state.hiddenStatuses.has(s);
+          return `<button class="filter-btn ${isOn ? 'on' : 'off'} ${FILTER_CSS_CLASS[s] || ''}" data-action="filter-status" data-status="${s}">${STATUS_LABELS[s] || s}</button>`;
+        }).join('')}
+        <button class="sort-toggle" data-action="toggle-sort">${state.sortAsc ? '↑ ms-1 first' : '↓ latest first'}</button>
+      </div>
+      ${filtered.map((ms, i) => renderMilestoneCard(ms, i)).join('')}
+      </div>
+    </section>
+    `) : ''}
+    ${state.activeTab === 'documents' ? `<div id="documents-container">${renderDocumentsSection()}</div>` : ''}
+    ${state.activeTab === 'releases' ? renderReleasesSection() : ''}
+    ${state.activeTab === 'operations' ? renderOperationsSection() : ''}
+    ${state.activeTab === 'notes' ? renderNotesSection() : ''}
+  `;
+}
+
+function renderMainContentArea() {
+  const el = document.getElementById('main-content');
+  if (!el) return;
+  el.innerHTML = renderMainContent();
+  el.querySelectorAll('[data-action]').forEach(node => node.addEventListener('click', handleAction));
+}
+
+/**
  * renderShell (ms-46 e-743): single-source-of-truth shell HTML.
  * Tab-bar, section dispatch, header/footer are defined here once and used
  * by both Web (this file) and Tauri (desktop/dist/index.html via build.py).
@@ -2167,47 +2233,13 @@ function renderShell(app) {
     </div>
     ` : ''}
 
-    <div class="tab-bar fade-in stagger-1">
-      <button class="tab-btn ${state.activeTab === 'dashboard' ? 'active' : ''}" data-action="switch-tab" data-tab="dashboard">Milestones</button>
-      <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
-      <button class="tab-btn ${state.activeTab === 'releases' ? 'active' : ''}" data-action="switch-tab" data-tab="releases">Releases</button>
-      <button class="tab-btn ${state.activeTab === 'operations' ? 'active' : ''}" data-action="switch-tab" data-tab="operations">Operations</button>
-      <button class="tab-btn ${state.activeTab === 'notes' ? 'active' : ''}" data-action="switch-tab" data-tab="notes">Notes</button>
+    <div class="global-search fade-in stagger-1">
+      <input class="ms-search-inline" id="search-input" type="search"
+             placeholder="Search everything: milestones, tasks, commits, documents, pushes, deploys..."
+             value="${esc(state.searchQuery)}" autocomplete="off">
     </div>
 
-    ${state.activeTab === 'dashboard' ? (state.showGraph ? renderGraphSection() : `
-    ${p.summary ? `
-    <section class="summary-block fade-in">
-      <div class="summary-label">Session Context</div>
-      <div class="summary-text">${esc(p.summary)}</div>
-    </section>
-    ` : ''}
-    <section class="milestones fade-in">
-      <div class="milestones-header">
-        <span class="milestones-title">Milestones</span>
-        <span class="milestones-count">${activeCount} active · ${doneCount}/${(p.milestones||[]).length} done</span>
-        <input class="ms-search-inline" id="search-input" type="search" placeholder="Search milestones, tasks, commits..." value="${esc(state.searchQuery)}" autocomplete="off">
-        <button class="sort-toggle" data-action="show-graph">Graph →</button>
-      </div>
-      <div id="ms-list-container">${state.searchQuery.trim() ? renderSearchResults() : `
-      <div class="filter-bar">
-        <button class="filter-btn f-all ${state.hiddenStatuses.size === 0 ? 'on' : 'off'}" data-action="filter-all">all</button>
-        ${FILTER_ORDER.map(s => {
-          const isOn = !state.hiddenStatuses.has(s);
-          return `<button class="filter-btn ${isOn ? 'on' : 'off'} ${FILTER_CSS_CLASS[s] || ''}" data-action="filter-status" data-status="${s}">${STATUS_LABELS[s] || s}</button>`;
-        }).join('')}
-        <button class="sort-toggle" data-action="toggle-sort">${state.sortAsc ? '↑ ms-1 first' : '↓ latest first'}</button>
-      </div>
-      ${filtered.map((ms, i) => renderMilestoneCard(ms, i)).join('')}
-      `}</div>
-    </section>
-    `) : ''}
-
-    ${state.activeTab === 'documents' ? `<div id="documents-container">${renderDocumentsSection()}</div>` : ''}
-
-    ${state.activeTab === 'releases' ? renderReleasesSection() : ''}
-    ${state.activeTab === 'operations' ? renderOperationsSection() : ''}
-    ${state.activeTab === 'notes' ? renderNotesSection() : ''}
+    <div id="main-content">${renderMainContent()}</div>
 
     <footer class="footer fade-in ${PLATFORM.footerStaggerClass || 'stagger-3'}">
       <div class="footer-left">
@@ -2635,20 +2667,10 @@ function renderDocumentsSection() {
     return `<section class="retro-section fade-in"><div class="retro-empty">No documents yet.</div></section>`;
   }
 
-  // ms-43 e-616: Documents-tab fulltext filter + scope chips.
-  // Filtering happens client-side over the already-loaded titles. Body match is
-  // available via the unified search bar in the dashboard (cross-entity).
-  const filter = (state.documentsFilter || '').toLowerCase().trim();
+  // Scope chips (exclusive). Body / title search is handled by the global
+  // search bar at the top of the shell; this section just helps users browse
+  // a single scope at a time.
   const scopeFilter = state.documentsScopeFilter || '';
-  const isMatch = (d) => {
-    if (scopeFilter && (d.scope || 'memo') !== scopeFilter) return false;
-    if (!filter) return true;
-    const t = (d.title || '').toLowerCase();
-    const id = (d.doc_id || '').toLowerCase();
-    return t.includes(filter) || id.includes(filter);
-  };
-
-  // Group by scope
   const order = ['core', 'spec', 'memo', 'report'];
   const grouped = {};
   for (const s of order) grouped[s] = [];
@@ -2657,12 +2679,11 @@ function renderDocumentsSection() {
     const s = d.scope || 'memo';
     scopeCounts[s] = (scopeCounts[s] || 0) + 1;
     if (!grouped[s]) grouped[s] = [];
-    if (isMatch(d)) grouped[s].push(d);
+    if (!scopeFilter || s === scopeFilter) grouped[s].push(d);
   }
   const totalMatches = Object.values(grouped).reduce((a, b) => a + b.length, 0);
   const labels = { core: '\u2605 CORE', spec: '\u25CB SPEC', memo: '\u25CB MEMO', report: '\u25CB REPORT' };
 
-  // Filter bar (search input + scope chips). Always visible to teach the feature.
   const scopeChip = (s) => {
     const c = scopeCounts[s] || 0;
     if (!c) return '';
@@ -2675,8 +2696,7 @@ function renderDocumentsSection() {
     <section class="retro-section fade-in" style="margin-bottom: 8px;">
       <div class="milestones-header" style="margin-bottom: 4px;">
         <span class="milestones-title">Documents</span>
-        <span class="milestones-count">${state.documents.length} total${filter || scopeFilter ? ` / ${totalMatches} shown` : ''}</span>
-        <input class="ms-search-inline" id="documents-filter" type="search" placeholder="Filter documents..." value="${esc(state.documentsFilter || '')}" autocomplete="off">
+        <span class="milestones-count">${state.documents.length} total${scopeFilter ? ` / ${totalMatches} shown` : ''}</span>
       </div>
       <div class="filter-bar" style="margin: 4px 0 0;">
         ${allChip}${order.map(scopeChip).join('')}
@@ -2699,8 +2719,8 @@ function renderDocumentsSection() {
         </ul>
       </section>`;
   }
-  if (totalMatches === 0 && (filter || scopeFilter)) {
-    html += `<section class="retro-section fade-in"><div class="retro-empty">No documents match "${esc(filter || scopeFilter)}".</div></section>`;
+  if (totalMatches === 0 && scopeFilter) {
+    html += `<section class="retro-section fade-in"><div class="retro-empty">No documents in scope "${esc(scopeFilter)}".</div></section>`;
   }
   // Reviews section (retros)
   if (state.retroContent) {
@@ -3345,26 +3365,6 @@ function renderMsListArea() {
   container.querySelectorAll('[data-action]').forEach(el => el.addEventListener('click', handleAction));
 }
 
-// ms-43 e-616: partial-render for Documents tab — preserves input focus while typing.
-function renderDocumentsArea() {
-  const container = document.getElementById('documents-container');
-  if (!container || !state.project) return;
-  // Preserve focus/caret position across innerHTML rebuild.
-  const focused = document.activeElement;
-  const wasFilterFocused = focused && focused.id === 'documents-filter';
-  const caretStart = wasFilterFocused ? focused.selectionStart : 0;
-  const caretEnd = wasFilterFocused ? focused.selectionEnd : 0;
-  container.innerHTML = renderDocumentsSection();
-  container.querySelectorAll('[data-action]').forEach(el => el.addEventListener('click', handleAction));
-  if (wasFilterFocused) {
-    const input = document.getElementById('documents-filter');
-    if (input) {
-      input.focus();
-      try { input.setSelectionRange(caretStart, caretEnd); } catch (_) {}
-    }
-  }
-}
-
 // Smart re-render on data updates from WS / file watcher.
 // (1) On the MS tab (non-graph), use renderMsListArea() (partial) so the outer
 //     scroll container is not rebuilt.
@@ -3401,17 +3401,19 @@ document.addEventListener('touchmove', _markUserScrolling, { passive: true });
 
 function renderOnDataChange() {
   const doRender = () => {
-    // The MS list tab is internally called 'dashboard' (see tab-btn data-tab="dashboard").
-    // Use renderMsListArea (partial) on that tab to keep the outer scroll container
-    // intact and avoid restarting fade-in animations on every WS update.
-    if (state.activeTab === 'dashboard' && !state.showGraph && !state.documentContent && !state.retroContent) {
+    // Use the partial #main-content swap (no header/search-box re-render)
+    // whenever the project is loaded. When showing the dashboard MS list,
+    // prefer the even narrower renderMsListArea so the outer scroll container
+    // stays intact.
+    if (state.searchQuery.trim()) {
+      renderMainContentArea();
+    } else if (state.activeTab === 'dashboard' && !state.showGraph && !state.documentContent && !state.retroContent) {
       renderMsListArea();
     } else {
       render();
     }
   };
   if (_userScrolling) {
-    // Coalesce — keep only the latest pending render; state has the freshest data
     _pendingDataRender = doRender;
     return;
   }
@@ -3427,49 +3429,43 @@ function _runUnifiedSearch() {
     state.searchFacets = { type: {}, status: {}, priority: {}, scope: {} };
     state.searchTotal = 0;
     state.searchLoading = false;
-    renderMsListArea();
+    renderMainContentArea();
     return;
   }
   if (!dataSource.searchProject) {
-    // Tauri (not yet wired) or older clients: local fallback only.
     state.searchResults = null;
-    renderMsListArea();
+    renderMainContentArea();
     return;
   }
   state.searchLoading = true;
   const myToken = ++state.searchToken;
-  renderMsListArea();
+  renderMainContentArea();
   dataSource.searchProject({ q, limit: 200 })
     .then(resp => {
-      if (myToken !== state.searchToken) return; // stale response
+      if (myToken !== state.searchToken) return;
       state.searchResults = resp?.results || [];
       state.searchFacets = resp?.facets || { type: {}, status: {}, priority: {}, scope: {} };
       state.searchTotal = resp?.total || 0;
       state.searchLoading = false;
-      renderMsListArea();
+      renderMainContentArea();
     })
     .catch(() => {
       if (myToken !== state.searchToken) return;
-      // Fall back to local on error so the UI is still usable.
       state.searchResults = null;
       state.searchLoading = false;
-      renderMsListArea();
+      renderMainContentArea();
     });
 }
 
 document.addEventListener('input', e => {
   if (e.target.id === 'search-input') {
     state.searchQuery = e.target.value;
-    // Reset client-side type filter when query changes substantially.
     state.searchTypeFilter = new Set();
-    // Local-render immediately for responsiveness; debounce the API call.
-    renderMsListArea();
+    // Swap #main-content immediately so the user sees "searching..." right away;
+    // the actual cross-entity API call is debounced.
+    renderMainContentArea();
     clearTimeout(_searchDebounceTimer);
     _searchDebounceTimer = setTimeout(_runUnifiedSearch, 200);
-  } else if (e.target.id === 'documents-filter') {
-    // ms-43 e-616: independent Documents-tab filter.
-    state.documentsFilter = e.target.value;
-    renderDocumentsArea();
   }
 });
 document.addEventListener('keydown', e => {
@@ -3478,8 +3474,10 @@ document.addEventListener('keydown', e => {
     state.searchResults = null;
     state.searchTypeFilter = new Set();
     state.searchLoading = false;
-    renderMsListArea();
-    document.getElementById('search-input')?.focus();
+    const input = document.getElementById('search-input');
+    if (input) input.value = '';
+    renderMainContentArea();
+    input?.focus();
   }
 });
 
@@ -3541,14 +3539,12 @@ function handleCommonAction(action, el) {
       render(); return true;
     }
     case 'search-goto': {
+      // Click on a search result: keep the search query/state intact so the
+      // user can come back to it. For tasks/commits/saves, pop the entry
+      // detail modal (no tab switch, no scroll). For milestones, switch to
+      // the dashboard tab and scroll — they don't have a modal.
       const msId = el.dataset.msId;
       const entryId = el.dataset.entryId;
-      state.searchQuery = '';
-      state.searchResults = null;
-      state.searchTypeFilter = new Set();
-      state.activeTab = 'dashboard';
-      if (msId) state.expanded.add(msId);
-      // ms-43 e-618: deep-link hash on click so the URL bar can be shared.
       if (typeof history !== 'undefined' && history.pushState) {
         if (entryId && entryId !== msId) {
           history.pushState(null, '', '#entry/' + entryId);
@@ -3556,36 +3552,52 @@ function handleCommonAction(action, el) {
           history.pushState(null, '', '#ms/' + msId);
         }
       }
-      render();
-      if (entryId && entryId !== msId) {
-        setTimeout(() => document.querySelector(`[data-entry-id="${entryId}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 100);
+      if (entryId && entryId !== msId && typeof openEntryDetail === 'function') {
+        openEntryDetail(entryId);
       } else if (msId) {
+        state.searchQuery = '';
+        state.searchResults = null;
+        state.searchTypeFilter = new Set();
+        state.activeTab = 'dashboard';
+        state.expanded.add(msId);
+        const input = document.getElementById('search-input');
+        if (input) input.value = '';
+        render();
         setTimeout(() => document.getElementById(`ms-${msId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
       }
       return true;
     }
     case 'search-filter-type': {
-      // ms-43 e-631: toggle facet chip.
+      // Facet chip: exclusive selection. Clicking the same chip again clears.
       const t = el.dataset.type || '';
-      if (!t) state.searchTypeFilter = new Set();
-      else if (state.searchTypeFilter.has(t)) state.searchTypeFilter.delete(t);
-      else state.searchTypeFilter.add(t);
-      renderMsListArea();
+      if (!t) {
+        state.searchTypeFilter = new Set();
+      } else if (state.searchTypeFilter.size === 1 && state.searchTypeFilter.has(t)) {
+        state.searchTypeFilter = new Set();
+      } else {
+        state.searchTypeFilter = new Set([t]);
+      }
+      renderMainContentArea();
       return true;
     }
     case 'search-open-document': {
-      // Document hit in unified search results → open the doc directly.
+      // Document hit: switch to Documents tab + load content. Documents don't
+      // have a modal, so we leave search mode here. Clicking back returns to
+      // the Documents list; the user can re-issue the search if needed.
       const docId = el.dataset.docId;
-      state.searchQuery = '';
-      state.searchResults = null;
-      state.searchTypeFilter = new Set();
-      state.activeTab = 'documents';
-      if (docId) openDocument(docId);
-      else render();
+      if (docId) {
+        state.searchQuery = '';
+        state.searchResults = null;
+        state.searchTypeFilter = new Set();
+        state.activeTab = 'documents';
+        const input = document.getElementById('search-input');
+        if (input) input.value = '';
+        openDocument(docId);
+      }
       return true;
     }
     case 'documents-filter-scope': {
-      // ms-43 e-616: Documents-tab scope chip toggle.
+      // Documents-tab scope chip: exclusive (clicking same chip clears).
       const s = el.dataset.scope || '';
       state.documentsScopeFilter = (state.documentsScopeFilter === s) ? '' : s;
       render();
