@@ -2189,8 +2189,14 @@ function renderMainContent() {
 }
 
 function renderMainContentArea() {
+  if (!state.project) return;
   const el = document.getElementById('main-content');
-  if (!el) return;
+  if (!el) {
+    // Shell not mounted yet — fall back to a full render so the user doesn't
+    // stay stuck on the loading screen when search triggers before the shell.
+    render();
+    return;
+  }
   el.innerHTML = renderMainContent();
   el.querySelectorAll('[data-action]').forEach(node => node.addEventListener('click', handleAction));
 }
@@ -3348,8 +3354,16 @@ function renderGraphSection() {
 // ---- Shared search partial-update (both Web and Desktop) ----
 
 function renderMsListArea() {
+  if (!state.project) return;
   const container = document.getElementById('ms-list-container');
-  if (!container || !state.project) return;
+  if (!container) {
+    // The shell hasn't been mounted yet (e.g. WS pushed project data while
+    // we're still on the loading screen). Promote to a full render so the
+    // UI catches up; partial render alone would silently no-op and leave
+    // the user stranded on "loading".
+    render();
+    return;
+  }
   const filtered = filterMilestones(sortMilestones(state.project.milestones || []));
   container.innerHTML = state.searchQuery.trim() ? renderSearchResults() : `
     <div class="filter-bar">
