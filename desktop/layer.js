@@ -8,6 +8,16 @@ let pollTimer = null;
 let lastProjectJson = null;
 let cloudMode = false;
 
+// Cloud WS live-update state (e-738). Web UI has equivalent in index.html;
+// Tauri previously left this as "別タスク" comment in doSelectCloudProject
+// after 3cebae5 removed the 2s polling, leaving cloud Tauri permanently stale.
+let cloudWs = null;
+let cloudWsReconnectTimer = null;
+let cloudWsPingInterval = null;
+let cloudWsReconnectAttempts = 0;
+const CLOUD_WS_RECONNECT_MAX_MS = 30000;
+const CLOUD_WS_API_HOST = 'beacon-ai.dev';
+
 let state = {
   project: null, expanded: new Set(), lastUpdate: null, connected: false, error: null,
   activeTab: 'dashboard',
@@ -119,6 +129,123 @@ async function loadDocumentContent(docId) {
 function startPolling() { if (!pollTimer) pollTimer = setInterval(loadProject, 2000); }
 function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
 
+// ---- Cloud WebSocket (live updates) ----
+// e-738: Tauri cloud mode previously had no live updates after 3cebae5
+// removed the 2s polling. This subscribes to the server's project broadcast,
+// mirroring Web UI behaviour in server/static/index.html.
+
+async function connectCloudWebSocket(projectId) {
+  closeCloudWebSocket();
+  if (!projectId) return;
+
+  let token;
+  try {
+    token = await invoke('cloud_get_auth_token');
+  } catch (e) {
+    state.connected = false;
+    state.error = String(e);
+    render();
+    return;
+  }
+
+  const url = `wss://${CLOUD_WS_API_HOST}/ws/projects/${encodeURIComponent(projectId)}?token=${encodeURIComponent(token)}`;
+  let ws;
+  try {
+    ws = new WebSocket(url);
+  } catch (e) {
+    state.connected = false;
+    state.error = `WS construct failed: ${e}`;
+    render();
+    return;
+  }
+  cloudWs = ws;
+
+  ws.onopen = () => {
+    cloudWsReconnectAttempts = 0;
+    state.connected = true;
+    state.error = null;
+    if (state.project) render();
+    if (cloudWsPingInterval) clearInterval(cloudWsPingInterval);
+    cloudWsPingInterval = setInterval(() => {
+      if (cloudWs && cloudWs.readyState === WebSocket.OPEN) cloudWs.send('ping');
+    }, 30000);
+  };
+
+  ws.onmessage = (event) => {
+    let msg;
+    try { msg = JSON.parse(event.data); } catch (_) { return; }
+    if (msg.type !== 'project') return;
+    const data = msg.data || {};
+    const newJson = JSON.stringify(data);
+    if (newJson === lastProjectJson) return;
+    lastProjectJson = newJson;
+    state.project = data;
+    state.lastUpdate = new Date();
+    state.connected = true;
+    state.error = null;
+    renderOnDataChange();
+  };
+
+  ws.onerror = () => {
+    state.connected = false;
+    if (state.project) render();
+  };
+
+  ws.onclose = async (ev) => {
+    if (cloudWsPingInterval) { clearInterval(cloudWsPingInterval); cloudWsPingInterval = null; }
+    cloudWs = null;
+    state.connected = false;
+
+    // 4401: token missing (we never sent one), 4403: token expired/invalid.
+    // For 4403 attempt one silent refresh + immediate reconnect (no backoff
+    // counter increment); for 4401 surface a clear "sign in" message.
+    if (ev && ev.code === 4401) {
+      state.error = 'Not signed in. Run `beacon auth login` to enable live updates.';
+      if (state.project) render();
+      return;
+    }
+    if (ev && ev.code === 4403) {
+      try {
+        await invoke('cloud_refresh_auth_token');
+        // Reset attempts since refresh succeeded; reconnect immediately.
+        cloudWsReconnectAttempts = 0;
+        connectCloudWebSocket(projectId);
+        return;
+      } catch (e) {
+        state.error = 'Session expired. Run `beacon auth login` to sign in again.';
+        if (state.project) render();
+        return;
+      }
+    }
+
+    // Generic close (network blip, server restart): exponential backoff capped
+    // at 30s, matching lib/store_api.py.
+    if (!cloudMode || state.cloudProjectId !== projectId) return;
+    cloudWsReconnectAttempts += 1;
+    const delay = Math.min(1000 * (2 ** (cloudWsReconnectAttempts - 1)), CLOUD_WS_RECONNECT_MAX_MS);
+    if (state.project) render();
+    cloudWsReconnectTimer = setTimeout(() => {
+      cloudWsReconnectTimer = null;
+      if (cloudMode && state.cloudProjectId === projectId) {
+        connectCloudWebSocket(projectId);
+      }
+    }, delay);
+  };
+}
+
+function closeCloudWebSocket() {
+  if (cloudWsReconnectTimer) { clearTimeout(cloudWsReconnectTimer); cloudWsReconnectTimer = null; }
+  if (cloudWsPingInterval) { clearInterval(cloudWsPingInterval); cloudWsPingInterval = null; }
+  if (cloudWs) {
+    // Suppress reconnect: clear handler before close.
+    cloudWs.onclose = null;
+    cloudWs.onerror = null;
+    try { cloudWs.close(); } catch (_) {}
+    cloudWs = null;
+  }
+  cloudWsReconnectAttempts = 0;
+}
+
 let unlistenWatcher = null;
 async function startWatcher() {
   if (unlistenWatcher) return;
@@ -138,6 +265,7 @@ async function startProjectSwitchListener() {
     unlistenProjectSwitch = await window.__TAURI__.event.listen('project-changed', async () => {
       // Clear in-flight watcher / state from previous project
       stopWatcher();
+      closeCloudWebSocket();
       state.project = null;
       state.expanded.clear();
       lastProjectJson = '';
@@ -154,6 +282,7 @@ async function startProjectSwitchListener() {
 }
 
 async function doSelectCloudProject(projectId) {
+  closeCloudWebSocket();
   cloudMode = true;
   state.cloudProjectId = projectId;
   state.error = null; state.project = null; state.expanded.clear();
@@ -168,10 +297,11 @@ async function doSelectCloudProject(projectId) {
         if (ms.status === 'in_progress') state.expanded.add(ms.id);
       }
       render();
-      // Polling 撤去: 2s setInterval が main thread を JSON parse でブロックして
-      // scroll を catch していた。Cloud の live 更新は Web UI 側 (WS) で見る。
-      // Tauri cloud の live は別タスクで Tauri-side WS を入れる方針。
     }
+    // e-738: subscribe to live updates via WS. Polling was removed in 3cebae5
+    // because the 2s setInterval blocked the main thread; WS pushes instead
+    // arrive on data change only, so no constant CPU/JSON-parse cost.
+    connectCloudWebSocket(projectId);
   } catch (e) { state.error = String(e); renderProjectSelector(); }
 }
 
@@ -179,6 +309,7 @@ async function doSelectProject(path) {
   try {
     cloudMode = false;
     state.cloudProjectId = null;
+    closeCloudWebSocket();
     stopPolling(); stopWatcher();
     await invoke('set_project_dir', { dir: path });
     state.error = null; state.project = null; state.expanded.clear();
