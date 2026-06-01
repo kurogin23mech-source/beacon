@@ -2197,10 +2197,17 @@ async function exportProject() {
 function _tryReconnect() {
   if (!state.project) return;
   if (cloudMode) {
-    // Polling 撤去 (上記 doSelectCloudProject 同様)。focus 復帰時に
-    // 1 回だけ loadProject を呼んでスナップショットを取り直す。以降は静音。
-    loadProject();
+    // ms-46 e-755: cloud mode の focus 復帰では WS を主軸にする (Web と同じ
+    // パターン)。loadProject() を呼ぶと REST が生データを返して state.project
+    // (WS 経由で届いた enriched 版 — total_tasks/done_tasks 等を含む) を
+    // 上書きしてしまう。WS が生きていれば何もしない。落ちていれば WS で
+    // 再接続すると server が initial enriched data を改めて送り直してくれる。
+    if (cloudWs && cloudWs.readyState === WebSocket.OPEN) return;
+    connectCloudWebSocket(state.cloudProjectId);
   } else {
+    // local mode は invoke('load_project_json') + file watcher 経由で、
+    // server enrichment とは別経路 (CLI の count_task_status を後段で再現する
+    // 必要はあるが本タスク範囲外)。
     startWatcher();
     loadProject();
   }
@@ -2511,12 +2518,40 @@ function renderShell(app) {
 }
 
 
+// ms-46 e-757: client-side fallback for task counts. Mirrors server-side
+// `count_task_status` (lib/core.py). Cloud WS / REST normally arrive with
+// `total_tasks` / `done_tasks` already populated by `_enrich_project`, but
+// Tauri local mode reads project.json directly via invoke and gets no
+// enrichment. Computing here ensures the count always renders.
+function countTasksRecursive(entries) {
+  let total = 0, done = 0;
+  for (const e of entries || []) {
+    if (e.type === 'task' || e.type === 'commit' || e.type === 'pr') {
+      total++;
+      if (e.status === 'done' || e.status === 'cancelled') done++;
+    }
+    if (e.entries && e.entries.length) {
+      const sub = countTasksRecursive(e.entries);
+      total += sub.total;
+      done += sub.done;
+    }
+  }
+  return { total, done };
+}
+
 function renderMilestoneCard(ms, index) {
   const isExpanded = state.expanded.has(ms.id);
   const entries = ms.entries || [];
   const activeClass = ms.status === 'in_progress' ? ' active' : '';
   const expandedClass = isExpanded ? ' expanded' : '';
-  const tasksLabel = ms.total_tasks > 0 ? `${ms.done_tasks}/${ms.total_tasks}` : '';
+  let msTotal = ms.total_tasks;
+  let msDone = ms.done_tasks;
+  if (msTotal == null) {
+    const c = countTasksRecursive(entries);
+    msTotal = c.total;
+    msDone = c.done;
+  }
+  const tasksLabel = msTotal > 0 ? `${msDone}/${msTotal}` : '';
 
   let bodyHtml = '';
   if (isExpanded && (entries.length > 0 || ms.description)) {

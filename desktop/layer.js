@@ -495,10 +495,17 @@ async function exportProject() {
 function _tryReconnect() {
   if (!state.project) return;
   if (cloudMode) {
-    // Polling 撤去 (上記 doSelectCloudProject 同様)。focus 復帰時に
-    // 1 回だけ loadProject を呼んでスナップショットを取り直す。以降は静音。
-    loadProject();
+    // ms-46 e-755: cloud mode の focus 復帰では WS を主軸にする (Web と同じ
+    // パターン)。loadProject() を呼ぶと REST が生データを返して state.project
+    // (WS 経由で届いた enriched 版 — total_tasks/done_tasks 等を含む) を
+    // 上書きしてしまう。WS が生きていれば何もしない。落ちていれば WS で
+    // 再接続すると server が initial enriched data を改めて送り直してくれる。
+    if (cloudWs && cloudWs.readyState === WebSocket.OPEN) return;
+    connectCloudWebSocket(state.cloudProjectId);
   } else {
+    // local mode は invoke('load_project_json') + file watcher 経由で、
+    // server enrichment とは別経路 (CLI の count_task_status を後段で再現する
+    // 必要はあるが本タスク範囲外)。
     startWatcher();
     loadProject();
   }

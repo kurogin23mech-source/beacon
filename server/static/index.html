@@ -2273,12 +2273,40 @@ function renderProjectSelector(app) {
 }
 // @BUILD:SKIP-END
 
+// ms-46 e-757: client-side fallback for task counts. Mirrors server-side
+// `count_task_status` (lib/core.py). Cloud WS / REST normally arrive with
+// `total_tasks` / `done_tasks` already populated by `_enrich_project`, but
+// Tauri local mode reads project.json directly via invoke and gets no
+// enrichment. Computing here ensures the count always renders.
+function countTasksRecursive(entries) {
+  let total = 0, done = 0;
+  for (const e of entries || []) {
+    if (e.type === 'task' || e.type === 'commit' || e.type === 'pr') {
+      total++;
+      if (e.status === 'done' || e.status === 'cancelled') done++;
+    }
+    if (e.entries && e.entries.length) {
+      const sub = countTasksRecursive(e.entries);
+      total += sub.total;
+      done += sub.done;
+    }
+  }
+  return { total, done };
+}
+
 function renderMilestoneCard(ms, index) {
   const isExpanded = state.expanded.has(ms.id);
   const entries = ms.entries || [];
   const activeClass = ms.status === 'in_progress' ? ' active' : '';
   const expandedClass = isExpanded ? ' expanded' : '';
-  const tasksLabel = ms.total_tasks > 0 ? `${ms.done_tasks}/${ms.total_tasks}` : '';
+  let msTotal = ms.total_tasks;
+  let msDone = ms.done_tasks;
+  if (msTotal == null) {
+    const c = countTasksRecursive(entries);
+    msTotal = c.total;
+    msDone = c.done;
+  }
+  const tasksLabel = msTotal > 0 ? `${msDone}/${msTotal}` : '';
 
   let bodyHtml = '';
   if (isExpanded && (entries.length > 0 || ms.description)) {

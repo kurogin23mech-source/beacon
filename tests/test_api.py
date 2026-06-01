@@ -129,6 +129,21 @@ def test_get_project():
     assert len(r.json()["milestones"]) == 2
 
 
+def test_get_project_enriches_task_counts():
+    # ms-46 e-756: REST must return enriched milestones (total_tasks /
+    # done_tasks) so that focus-reconnect on Tauri doesn't blank the counts
+    # by overwriting WS-enriched state with raw REST data.
+    r = client.get(f"/api/projects/{PROJECT_ID}")
+    assert r.status_code == 200
+    ms_by_id = {m["id"]: m for m in r.json()["milestones"]}
+    # ms-1 has 1 todo task
+    assert ms_by_id["ms-1"]["total_tasks"] == 1
+    assert ms_by_id["ms-1"]["done_tasks"] == 0
+    # ms-2 has no entries
+    assert ms_by_id["ms-2"]["total_tasks"] == 0
+    assert ms_by_id["ms-2"]["done_tasks"] == 0
+
+
 def test_get_project_not_found():
     r = client.get("/api/projects/nonexistent")
     assert r.status_code == 404

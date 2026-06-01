@@ -521,7 +521,10 @@ def create_project(project_id: str, body: ProjectCreate,
 
 @app.get("/api/projects/{project_id}")
 def get_project(project_id: str, user: dict = Depends(require_auth)):
-    return _load(project_id, user)
+    # ms-46 e-756: REST もWS pushと同じ enriched shape を返す
+    # (total_tasks / done_tasks / entries_to_json)。client がどの経路で
+    # データを取っても counts が落ちないように対称化する。
+    return _enrich_project(_load(project_id, user))
 
 
 @app.put("/api/projects/{project_id}")
