@@ -180,6 +180,41 @@ def main() -> int:
     # etc.). If state drift becomes a real problem, write a proper JS parser
     # check or rely on TypeScript migration. For now: not checked.
 
+    # --- 4. SHARED region purity (ms-46 e-728) ---
+    # SHARED must not reference platform-specific data-fetching primitives:
+    # `api(...)` is Web-only (defined outside SHARED) and `invoke(...)` is
+    # Tauri-only. All data fetching from SHARED must go through `dataSource`.
+    # `invoke('...')` legitimately appears in `loadDocumentContent: async (docId)
+    # => { ... await invoke(...) ... }` inside the Tauri dataSource impl — but
+    # that lives in desktop/layer.js, not in SHARED. SHARED stays pure.
+    shared_match = re.search(
+        r'// @BUILD:SHARED-START\n(.*?)// @BUILD:SHARED-END',
+        web, re.DOTALL,
+    )
+    if shared_match:
+        shared = shared_match.group(1)
+        # Strip SKIP regions (Web-only) so we only inspect what flows to Tauri.
+        shared_pure = re.sub(
+            r'// @BUILD:SKIP-START\n.*?// @BUILD:SKIP-END\n?',
+            '', shared, flags=re.DOTALL,
+        )
+        # Look for orphan api( / invoke( calls. Allow `dataSource.api` etc.
+        # by requiring a word-boundary on the left.
+        api_calls = re.findall(r'(?<![\w.])api\(', shared_pure)
+        invoke_calls = re.findall(r'(?<![\w.])invoke\(', shared_pure)
+        if api_calls:
+            issues.append(
+                f"  [shared/purity] SHARED region contains {len(api_calls)} `api(...)` call(s).\n"
+                f"                  → SHARED must not call platform-specific fetch primitives.\n"
+                f"                  → Route through `dataSource.loadX()` instead (ms-46 e-728)."
+            )
+        if invoke_calls:
+            issues.append(
+                f"  [shared/purity] SHARED region contains {len(invoke_calls)} `invoke(...)` call(s).\n"
+                f"                  → SHARED must not call Tauri invoke directly.\n"
+                f"                  → Route through `dataSource.loadX()` instead (ms-46 e-728)."
+            )
+
     # --- report ---
     if not issues:
         print("[drift] OK: server/static and desktop/dist are in sync.")

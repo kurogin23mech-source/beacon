@@ -2223,6 +2223,17 @@ const PLATFORM = {
   footerStaggerClass: 'stagger-4',
 };
 
+// DataSource (ms-46 e-728): Web implementation (fetch via api() helper).
+// Tauri equivalent in desktop/layer.js. SHARED switchTab/openDocument/openRetro
+// only see this interface — no api() or invoke() leaks out of the SHARED region.
+const dataSource = {
+  loadDocuments: async () => { state.documents = await api(`/api/projects/${state.projectId}/documents`); },
+  loadRetros: async () => { state.retros = await api(`/api/projects/${state.projectId}/retros`); },
+  loadRetroContent: async (week) => { state.retroContent = await api(`/api/projects/${state.projectId}/retros/${week}`); },
+  loadSessionNotes: async () => { state.sessionNotes = await api(`/api/projects/${state.projectId}/notes`); },
+  loadDocumentContent: async (docId) => { state.documentContent = await api(`/api/projects/${state.projectId}/documents/${docId}`); },
+};
+
 function render() {
   const app = document.getElementById('app');
 
@@ -2355,20 +2366,18 @@ async function switchTab(tab) {
   state.documentContent = null;
   if (tab === 'documents') {
     const loads = [];
-    if (state.documents.length === 0)
-      loads.push(api(`/api/projects/${state.projectId}/documents`).then(r => { state.documents = r; }).catch(() => {}));
-    if (state.retros.length === 0)
-      loads.push(api(`/api/projects/${state.projectId}/retros`).then(r => { state.retros = r; }).catch(() => {}));
+    if (state.documents.length === 0) loads.push(dataSource.loadDocuments().catch(() => {}));
+    if (state.retros.length === 0) loads.push(dataSource.loadRetros().catch(() => {}));
     await Promise.all(loads);
   }
   if (tab === 'notes') {
-    api(`/api/projects/${state.projectId}/notes`).then(r => { state.sessionNotes = r; render(); }).catch(() => {});
+    dataSource.loadSessionNotes().then(() => render()).catch(() => {});
   }
   render();
 }
 
 async function openRetro(week) {
-  try { state.retroContent = await api(`/api/projects/${state.projectId}/retros/${week}`); }
+  try { await dataSource.loadRetroContent(week); }
   catch (e) { state.retroContent = { week, content: 'Failed to load retro document.' }; }
   render();
 }
@@ -2491,9 +2500,9 @@ function renderDocumentsSection() {
 }
 
 async function openDocument(docId) {
-  try { state.documentContent = await api(`/api/projects/${state.projectId}/documents/${docId}`); }
+  try { await dataSource.loadDocumentContent(docId); }
   catch (e) { state.documentContent = { doc_id: docId, title: 'Error', content: 'Failed to load document.' }; }
-  history.pushState(null, '', '#doc/' + docId);
+  if (typeof history !== 'undefined' && history.pushState) history.pushState(null, '', '#doc/' + docId);
   render();
 }
 
@@ -3254,6 +3263,14 @@ function handleCommonAction(action, el) {
       openEntryDetail(el.dataset.entryId); return true;
     case 'close-entry-modal':
       closeEntryModal(); return true;
+    // ms-46 e-728: data-fetching actions now route through SHARED via DataSource.
+    // Each platform supplies `dataSource` (Web SKIP: fetch/api; Tauri layer.js: invoke).
+    case 'switch-tab':
+      switchTab(el.dataset.tab); return true;
+    case 'open-document':
+      openDocument(el.dataset.docId); return true;
+    case 'open-retro':
+      openRetro(el.dataset.week); return true;
   }
   return false;
 }
@@ -3657,10 +3674,8 @@ async function handleAction(e) {
   if (handleCommonAction(action, el)) return;
 
   switch (action) {
-    // ---- Data fetching (Web: fetch / WS; e-728 で Tauri と統一予定) ----
-    case 'switch-tab': await switchTab(el.dataset.tab); break;
-    case 'open-retro': await openRetro(el.dataset.week); break;
-    case 'open-document': await openDocument(el.dataset.docId); break;
+    // Note: switch-tab / open-document / open-retro are handled by
+    // handleCommonAction (SHARED) via `dataSource`. See ms-46 e-728.
 
     // ---- Web-specific clipboard URL (window.location 依存) ----
     case 'copy-doc-link': {

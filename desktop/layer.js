@@ -73,77 +73,53 @@ async function loadProject() {
   }
 }
 
-async function loadDocuments() {
-  try {
-    if (cloudMode) {
-      state.documents = JSON.parse(await invoke('cloud_list_documents'));
-    } else {
-      state.documents = JSON.parse(await invoke('get_documents', { scope: '' }));
-    }
-  } catch (e) { state.documents = []; }
-}
-
-async function loadRetros() {
-  try {
-    if (cloudMode) {
-      state.retros = JSON.parse(await invoke('cloud_list_retros'));
-    } else {
-      state.retros = JSON.parse(await invoke('list_retros'));
-    }
-  } catch (e) { state.retros = []; }
-}
-
-async function loadRetroContent(week) {
-  try {
-    if (cloudMode) {
-      state.retroContent = JSON.parse(await invoke('cloud_get_retro', { week }));
-    } else {
-      state.retroContent = JSON.parse(await invoke('get_retro_content', { week }));
-    }
-  } catch (e) { state.retroContent = { week, content: 'Failed to load.' }; }
-  render();
-}
-
-// ms-46 e-745: session notes loader for Notes tab.
-// Cloud mode: API 経由。Local mode は将来 beacon CLI 経由を追加するが、
-// 現状 cloud のみサポート (band-aid)。
-async function loadSessionNotes() {
-  try {
-    if (cloudMode) {
-      state.sessionNotes = JSON.parse(await invoke('cloud_list_notes'));
-    } else {
-      state.sessionNotes = [];  // local mode は未対応 (e-745 follow-up)
-    }
-  } catch (e) {
-    state.sessionNotes = [];
-  }
-}
-
-async function loadDocumentContent(docId) {
-  try {
+// DataSource (ms-46 e-728): Tauri implementation (Tauri invoke).
+// Web equivalent in server/static/index.html SKIP block. SHARED switchTab /
+// openDocument / openRetro only see this interface.
+const dataSource = {
+  loadDocuments: async () => {
+    state.documents = cloudMode
+      ? JSON.parse(await invoke('cloud_list_documents'))
+      : JSON.parse(await invoke('get_documents', { scope: '' }));
+  },
+  loadRetros: async () => {
+    state.retros = cloudMode
+      ? JSON.parse(await invoke('cloud_list_retros'))
+      : JSON.parse(await invoke('list_retros'));
+  },
+  loadRetroContent: async (week) => {
+    state.retroContent = cloudMode
+      ? JSON.parse(await invoke('cloud_get_retro', { week }))
+      : JSON.parse(await invoke('get_retro_content', { week }));
+  },
+  // ms-46 e-745: cloud mode のみ。Local mode は CLI 経由が未配線 (band-aid)。
+  loadSessionNotes: async () => {
+    state.sessionNotes = cloudMode
+      ? JSON.parse(await invoke('cloud_list_notes'))
+      : [];
+  },
+  loadDocumentContent: async (docId) => {
     if (cloudMode) {
       state.documentContent = JSON.parse(await invoke('cloud_get_document', { docId }));
-    } else {
-      const content = await invoke('get_document_content', { docId });
-      let title = docId, scope = 'memo', body = content;
-      if (content.startsWith('---')) {
-        const parts = content.split('---', 3);
-        if (parts.length >= 3) {
-          for (const line of parts[1].trim().split('\n')) {
-            if (line.startsWith('scope:')) scope = line.split(':', 2)[1].trim();
-          }
-          body = parts[2].trim();
-        }
-      }
-      const m = body.match(/^# (.+)/m);
-      if (m) title = m[1];
-      state.documentContent = { doc_id: docId, title, scope, content: body };
+      return;
     }
-  } catch (e) {
-    state.documentContent = { doc_id: docId, title: 'Error', scope: 'memo', content: String(e) };
-  }
-  render();
-}
+    // Local mode: CLI returns raw markdown; parse frontmatter for scope/title.
+    const content = await invoke('get_document_content', { docId });
+    let title = docId, scope = 'memo', body = content;
+    if (content.startsWith('---')) {
+      const parts = content.split('---', 3);
+      if (parts.length >= 3) {
+        for (const line of parts[1].trim().split('\n')) {
+          if (line.startsWith('scope:')) scope = line.split(':', 2)[1].trim();
+        }
+        body = parts[2].trim();
+      }
+    }
+    const m = body.match(/^# (.+)/m);
+    if (m) title = m[1];
+    state.documentContent = { doc_id: docId, title, scope, content: body };
+  },
+};
 
 function startPolling() { if (!pollTimer) pollTimer = setInterval(loadProject, 2000); }
 function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
@@ -456,24 +432,8 @@ async function handleAction(e) {
     case 'menu-select-project': closeMenu(); await doSelectProject(el.dataset.path); break;
     case 'menu-select-cloud-project': closeMenu(); await doSelectCloudProject(el.dataset.projectId); break;
 
-    // ---- Data fetching (Tauri invoke; e-728 DataSource adapter で統一予定) ----
-    case 'switch-tab': {
-      state.activeTab = el.dataset.tab;
-      state.showGraph = false;
-      state.documentContent = null; state.retroContent = null;
-      if (state.activeTab === 'documents') {
-        const loads = [];
-        if (state.documents.length === 0) loads.push(loadDocuments());
-        if (state.retros.length === 0) loads.push(loadRetros());
-        await Promise.all(loads);
-      }
-      if (state.activeTab === 'notes') {
-        loadSessionNotes().then(() => render()).catch(() => {});
-      }
-      render(); break;
-    }
-    case 'open-document': await loadDocumentContent(el.dataset.docId); break;
-    case 'open-retro': await loadRetroContent(el.dataset.week); break;
+    // Note: switch-tab / open-document / open-retro are handled by
+    // handleCommonAction (SHARED) via `dataSource`. See ms-46 e-728.
 
     // ---- Tauri-specific: clipboard URL format / commands ----
     case 'copy-doc-link': {
