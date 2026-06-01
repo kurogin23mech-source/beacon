@@ -312,6 +312,25 @@ fn is_authenticated(_state: State<AppState>) -> bool {
     load_auth_token().is_some()
 }
 
+/// Return the current id_token for live-update WebSocket auth. Caller embeds
+/// it in the `?token=` query param to /ws/projects/{id}. We do NOT pre-refresh
+/// here — refresh only triggers on a 401-equivalent (server WS close 4403), at
+/// which point JS calls `cloud_refresh_auth_token` and reconnects. Mirrors the
+/// HTTP path in cloud_get(), keeping the live cycle deterministic instead of
+/// hidden behind a silent always-refresh.
+#[tauri::command]
+fn cloud_get_auth_token() -> Result<String, String> {
+    load_auth_token().ok_or_else(|| "Not authenticated. Run: beacon auth login".to_string())
+}
+
+/// Force a token refresh and return the new id_token. Called by JS when the
+/// WebSocket is closed with code 4403 (token expired). Returns Err if refresh
+/// fails (user must sign in again).
+#[tauri::command]
+fn cloud_refresh_auth_token() -> Result<String, String> {
+    refresh_id_token().ok_or_else(|| "Token expired and refresh failed. Run: beacon auth login".to_string())
+}
+
 /// Run a beacon CLI command and return its JSON output
 fn run_beacon(project_dir: &str, args: &[&str]) -> Result<String, String> {
     let output = Command::new("beacon")
@@ -591,6 +610,8 @@ pub fn run() {
             cloud_diagnose,
             cloud_archive_project,
             cloud_unarchive_project,
+            cloud_get_auth_token,
+            cloud_refresh_auth_token,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
