@@ -3222,8 +3222,88 @@ function handleCommonAction(action, el) {
     case 'close-menu':
       if (typeof closeMenu === 'function') closeMenu();
       return true;
+    case 'open-entry-detail':
+      openEntryDetail(el.dataset.entryId); return true;
+    case 'close-entry-modal':
+      closeEntryModal(); return true;
   }
   return false;
+}
+
+// ---- Entry detail modal (ms-46 e-740: moved into SHARED so Tauri can use it too) ----
+
+function findEntryById(id, entries) {
+  for (const e of entries || []) {
+    if (e.id === id) return e;
+    const found = findEntryById(id, e.entries);
+    if (found) return found;
+  }
+  return null;
+}
+
+function findEntryInProject(id) {
+  for (const ms of state.project?.milestones || []) {
+    const found = findEntryById(id, ms.entries || []);
+    if (found) return { entry: found, ms };
+  }
+  for (const op of state.project?.operations || []) {
+    const found = findEntryById(id, op.entries || []);
+    if (found) return { entry: found, op };
+  }
+  return null;
+}
+
+function openEntryDetail(entryId) {
+  const result = findEntryInProject(entryId);
+  if (!result) return;
+  state.openEntryId = entryId;
+  renderEntryModal(result.entry, result.ms || result.op);
+}
+
+function renderEntryModal(entry, parent) {
+  const overlay = document.getElementById('entry-detail-modal');
+  if (!overlay) return;
+
+  const priority = entry.meta?.priority;
+  const priorityBadge = priority ? `<span class="priority-badge priority-${priority}">${priority}</span>` : '';
+  const hash = entry.meta?.hash ? `<span class="entry-hash">${entry.meta.hash.slice(0, 7)}</span>` : '';
+
+  const motivation = entry.motivation
+    ? `<div class="entry-modal-field modal-field-why"><div class="entry-modal-field-label">why</div>${esc(entry.motivation)}</div>` : '';
+  const ac = entry.acceptance_criteria
+    ? `<div class="entry-modal-field modal-field-ac"><div class="entry-modal-field-label">done when</div>${esc(entry.acceptance_criteria)}</div>` : '';
+  const behavior = entry.behavior
+    ? `<div class="entry-modal-field modal-field-behavior"><div class="entry-modal-field-label">behavior</div>${esc(entry.behavior)}</div>` : '';
+  const resolves = entry.meta?.resolves
+    ? `<div class="entry-modal-field modal-field-resolves"><div class="entry-modal-field-label">resolves</div>${esc(entry.meta.resolves)}</div>` : '';
+  const detail = entry.detail
+    ? `<div class="entry-modal-field modal-field-detail"><div class="entry-modal-field-label">detail</div>${esc(entry.detail)}</div>` : '';
+
+  const statusText = entryStatusText(entry);
+  const msLabel = parent ? `<span style="color:var(--text-dim);font-size:11px;">${esc(parent.id)}</span>` : '';
+
+  overlay.innerHTML = `
+    <div class="entry-modal" onclick="event.stopPropagation()">
+      <div class="entry-modal-header">
+        ${entryTypeBadge(entry.type)}
+        <span class="entry-modal-title">${esc(entry.id)}${hash} ${msLabel}</span>
+        <button class="entry-modal-close" data-action="close-entry-modal">✕</button>
+      </div>
+      <div class="entry-modal-body">
+        <div class="entry-modal-desc">${esc(entry.description)}</div>
+        <div class="entry-modal-meta">${priorityBadge}${statusText}</div>
+        ${motivation}${ac}${behavior}${resolves}${detail}
+      </div>
+    </div>
+  `;
+  overlay.style.display = 'flex';
+  overlay.querySelector('[data-action="close-entry-modal"]')?.addEventListener('click', closeEntryModal);
+}
+
+function closeEntryModal() {
+  state.openEntryId = null;
+  const overlay = document.getElementById('entry-detail-modal');
+  if (overlay) overlay.style.display = 'none';
 }
 // @BUILD:SHARED-END
 
@@ -3503,80 +3583,6 @@ function toggleMilestone(msId) {
   render();
 }
 
-function findEntryById(id, entries) {
-  for (const e of entries || []) {
-    if (e.id === id) return e;
-    const found = findEntryById(id, e.entries);
-    if (found) return found;
-  }
-  return null;
-}
-
-function findEntryInProject(id) {
-  for (const ms of state.project?.milestones || []) {
-    const found = findEntryById(id, ms.entries || []);
-    if (found) return { entry: found, ms };
-  }
-  for (const op of state.project?.operations || []) {
-    const found = findEntryById(id, op.entries || []);
-    if (found) return { entry: found, op };
-  }
-  return null;
-}
-
-function openEntryDetail(entryId) {
-  const result = findEntryInProject(entryId);
-  if (!result) return;
-  state.openEntryId = entryId;
-  renderEntryModal(result.entry, result.ms || result.op);
-}
-
-function renderEntryModal(entry, parent) {
-  const overlay = document.getElementById('entry-detail-modal');
-  if (!overlay) return;
-
-  const priority = entry.meta?.priority;
-  const priorityBadge = priority ? `<span class="priority-badge priority-${priority}">${priority}</span>` : '';
-  const hash = entry.meta?.hash ? `<span class="entry-hash">${entry.meta.hash.slice(0, 7)}</span>` : '';
-
-  const motivation = entry.motivation
-    ? `<div class="entry-modal-field modal-field-why"><div class="entry-modal-field-label">why</div>${esc(entry.motivation)}</div>` : '';
-  const ac = entry.acceptance_criteria
-    ? `<div class="entry-modal-field modal-field-ac"><div class="entry-modal-field-label">done when</div>${esc(entry.acceptance_criteria)}</div>` : '';
-  const behavior = entry.behavior
-    ? `<div class="entry-modal-field modal-field-behavior"><div class="entry-modal-field-label">behavior</div>${esc(entry.behavior)}</div>` : '';
-  const resolves = entry.meta?.resolves
-    ? `<div class="entry-modal-field modal-field-resolves"><div class="entry-modal-field-label">resolves</div>${esc(entry.meta.resolves)}</div>` : '';
-  const detail = entry.detail
-    ? `<div class="entry-modal-field modal-field-detail"><div class="entry-modal-field-label">detail</div>${esc(entry.detail)}</div>` : '';
-
-  const statusText = entryStatusText(entry);
-  const msLabel = parent ? `<span style="color:var(--text-dim);font-size:11px;">${esc(parent.id)}</span>` : '';
-
-  overlay.innerHTML = `
-    <div class="entry-modal" onclick="event.stopPropagation()">
-      <div class="entry-modal-header">
-        ${entryTypeBadge(entry.type)}
-        <span class="entry-modal-title">${esc(entry.id)}${hash} ${msLabel}</span>
-        <button class="entry-modal-close" data-action="close-entry-modal">✕</button>
-      </div>
-      <div class="entry-modal-body">
-        <div class="entry-modal-desc">${esc(entry.description)}</div>
-        <div class="entry-modal-meta">${priorityBadge}${statusText}</div>
-        ${motivation}${ac}${behavior}${resolves}${detail}
-      </div>
-    </div>
-  `;
-  overlay.style.display = 'flex';
-  overlay.querySelector('[data-action="close-entry-modal"]')?.addEventListener('click', closeEntryModal);
-}
-
-function closeEntryModal() {
-  state.openEntryId = null;
-  const overlay = document.getElementById('entry-detail-modal');
-  if (overlay) overlay.style.display = 'none';
-}
-
 function toggleEntry(entryId, event) {
   // Don't toggle when clicking on links etc inside entry
   if (event.target.closest('.entry-children')) return;
@@ -3627,12 +3633,6 @@ async function handleAction(e) {
     case 'switch-tab': await switchTab(el.dataset.tab); break;
     case 'open-retro': await openRetro(el.dataset.week); break;
     case 'open-document': await openDocument(el.dataset.docId); break;
-
-    // ---- Entry detail modal (Web only currently; openEntryDetail/closeEntryModal
-    //      lives outside SHARED. Move to SHARED + add modal HTML to dist で
-    //      Tauri にも展開可能、follow-up task として) ----
-    case 'open-entry-detail': openEntryDetail(el.dataset.entryId); break;
-    case 'close-entry-modal': closeEntryModal(); break;
 
     // ---- Web-specific clipboard URL (window.location 依存) ----
     case 'copy-doc-link': {

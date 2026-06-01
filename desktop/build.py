@@ -57,6 +57,8 @@ def build(web: str, layer: str) -> str:
   <div class="loading"><div class="loading-bar"></div><div class="loading-text">Loading</div></div>
 </div>
 <div id="menu-root"></div>
+<!-- Entry detail modal overlay (ms-46 e-740: shared with Web UI body L3695) -->
+<div id="entry-detail-modal" class="entry-modal-overlay" style="display:none;" onclick="closeEntryModal()"></div>
 
 <script>
 // ============================================================
