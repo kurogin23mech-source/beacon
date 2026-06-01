@@ -72,7 +72,18 @@ if echo "$STAGED" | grep -qE "^server/static/index\.html$|^desktop/layer\.js$"; 
 fi
 
 # ==============================================================================
-# Check 3: Tauri source change warning (added 2026-06-01, ms-46 e-735)
+# Check 3: Frontend drift detector (added 2026-06-01, ms-46 e-744)
+# ==============================================================================
+# Detect tab / action mismatches between server/static (Web) and
+# desktop/layer.js (Tauri). Currently warn-only — once e-743 (render() SHARED)
+# lands, the underlying duplication goes away and this check moves to strict
+# in CI.
+if [ -f scripts/check-frontend-drift.py ]; then
+  python3 scripts/check-frontend-drift.py 2>&1 | sed 's/^/[pre-commit] /' || true
+fi
+
+# ==============================================================================
+# Check 4: Tauri source change warning (added 2026-06-01, ms-46 e-735)
 # ==============================================================================
 # desktop/src-tauri/ 配下 (Rust / tauri.conf.json) が変わったら Tauri 本体の
 # rebuild が必要。これは frequency 低いので自動化はせず、warning で通知のみ。
