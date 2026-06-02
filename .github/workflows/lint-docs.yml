@@ -1,0 +1,54 @@
+name: Lint docs (ms-10 e-722)
+
+# Verifies that the three "doc drift" guards stay green on every PR/push:
+#   1. scripts/check-skill-drift.py     — repo skills/ vs ~/.claude/skills/.
+#                                          On CI there is no installed copy,
+#                                          so this runs in --warn mode only
+#                                          and asserts the *script itself*
+#                                          doesn't crash.
+#   2. scripts/check-cli-help-drift.py  — bin/beacon vs cmd_help_json vs
+#                                          README ## CLI Commands tables.
+#   3. scripts/check-install-md.py      — INSTALL.md bash blocks must not
+#                                          contain deprecated flags (e.g.
+#                                          gcloud `--build-arg`).
+#
+# Drift here means: a feature commit landed but the matching doc / Skill
+# surface wasn't updated. Strict mode (exit 1) blocks the PR.
+
+on:
+  pull_request:
+    paths:
+      - 'bin/beacon'
+      - 'lib/commands.py'
+      - 'beacon_cli/dispatch.py'
+      - 'README.md'
+      - 'INSTALL.md'
+      - 'skills/**'
+      - 'scripts/check-*.py'
+      - '.github/workflows/lint-docs.yml'
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  lint-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: CLI help drift
+        run: python3 scripts/check-cli-help-drift.py --strict
+
+      - name: INSTALL.md static validation
+        run: python3 scripts/check-install-md.py --strict
+
+      - name: Skill drift (sanity — no installed skills on CI)
+        # CI has no ~/.claude/skills/, so we expect "not installed" findings.
+        # The check here is that the script runs to completion and emits
+        # valid JSON, not that drift is zero.
+        run: |
+          python3 scripts/check-skill-drift.py --json > /tmp/skill-drift.json
+          python3 -c "import json; d=json.load(open('/tmp/skill-drift.json')); assert 'drift' in d and 'ok' in d, d"
