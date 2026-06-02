@@ -512,6 +512,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_skill_install.add_argument("--force", action="store_true")
     p_skill_install.add_argument("--settings-path", dest="settings_path", default="")
 
+    # ---- auth login / logout / status (cloud OAuth) ----
+    # `beacon auth login` opens a browser and signs in with Google so the
+    # cloud project APIs (firestore / WS) become reachable. commands.py
+    # delegates straight to the `auth` module — no env vars in play, the
+    # interactive flow is owned by `auth.login()` itself.
+    p_auth = sub.add_parser("auth", help="Cloud authentication", add_help=False)
+    p_auth.add_argument("--help", "-h", action="store_true", dest="show_help")
+    auth_sub = p_auth.add_subparsers(dest="auth_cmd", metavar="<subcmd>")
+    auth_sub.add_parser("login", add_help=False)
+    auth_sub.add_parser("logout", add_help=False)
+    auth_sub.add_parser("status", add_help=False)
+
     sub.add_parser("help", add_help=False)
 
     return p
@@ -1227,6 +1239,23 @@ def _handle_doctor(root: Path, args: argparse.Namespace) -> int:
     return _run_commands_py(root, "doctor", {})
 
 
+def _handle_auth(root: Path, args: argparse.Namespace) -> int:
+    """`beacon auth login|logout|status` — Google OAuth for cloud projects.
+
+    commands.py routes each to the `auth` module which opens a browser
+    (login), revokes the local token (logout), or prints the current
+    state (status). No env vars are forwarded because the auth module
+    owns its own state (token cache under ~/.beacon/).
+    """
+    if args.show_help or args.auth_cmd is None:
+        print("Usage: beacon auth [login|logout|status]")
+        return 0 if args.show_help else 2
+    if args.auth_cmd not in ("login", "logout", "status"):
+        print(f"Unknown auth subcommand: {args.auth_cmd}")
+        return 2
+    return _run_commands_py(root, f"auth_{args.auth_cmd}", {})
+
+
 def _handle_skill(root: Path, args: argparse.Namespace) -> int:
     """`beacon skill install [--force] [--settings-path PATH]`.
 
@@ -1277,6 +1306,7 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "project": _handle_project,
     "doctor": _handle_doctor,
     "skill": _handle_skill,
+    "auth": _handle_auth,
 }
 
 
