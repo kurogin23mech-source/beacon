@@ -369,6 +369,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_ms_update.add_argument("--assignee", default="")
     p_ms_update.add_argument("-r", "--reason", default="")
 
+    # Dependency graph + worktree lifecycle (used by /beacon-dispatch). These
+    # exist in commands.py but were missing from the PowerShell-native dispatch
+    # (e-842), making /beacon-dispatch unusable on Windows/OSS.
+    p_ms_graph = ms_sub.add_parser("graph", add_help=False)
+    p_ms_graph.add_argument("--json", action="store_true")
+
+    p_ms_workspace = ms_sub.add_parser("workspace", add_help=False)
+    p_ms_workspace.add_argument("ms_id", nargs="?", default="")
+    p_ms_workspace.add_argument("--executor", default="")
+    p_ms_workspace.add_argument("--workspace", "--dir", dest="workspace", default="")
+    p_ms_workspace.add_argument("--clear", action="store_true")
+    p_ms_workspace.add_argument("--no-git", dest="no_git", action="store_true")
+    p_ms_workspace.add_argument("--json", action="store_true")
+
+    p_ms_wscleanup = ms_sub.add_parser("workspace-cleanup", add_help=False)
+    p_ms_wscleanup.add_argument("ms_id", nargs="?", default="")
+    p_ms_wscleanup.add_argument("--merge-to", dest="merge_to", default="")
+    p_ms_wscleanup.add_argument("--json", action="store_true")
+
     # ---- doc ----
     p_doc = sub.add_parser("doc", aliases=["document"], help="Document operations", add_help=False)
     p_doc.add_argument("--help", "-h", action="store_true", dest="show_help")
@@ -996,7 +1015,8 @@ def _handle_milestone(root: Path, args: argparse.Namespace) -> int:
     if args.show_help or args.ms_cmd is None:
         print(
             "Usage: beacon milestone "
-            "[add|list|start|done|close|observe|show|update] [options]"
+            "[add|list|start|done|close|observe|show|update|graph|workspace|"
+            "workspace-cleanup] [options]"
         )
         return 0 if args.show_help else 2
     if (rc := _ensure_project()) is not None:
@@ -1076,6 +1096,42 @@ def _handle_milestone(root: Path, args: argparse.Namespace) -> int:
             "BEACON_REASON": args.reason or "",
         }
         return _run_commands_py(root, "milestone_update", env)
+
+    if cmd == "graph":
+        return _run_commands_py(
+            root, "milestone_graph", {"BEACON_JSON": "1" if args.json else ""}
+        )
+
+    if cmd == "workspace":
+        if not args.ms_id:
+            print(
+                "Usage: beacon milestone workspace <ms-id> "
+                "[--executor ai|human] [--dir <path>] [--clear] [--no-git] [--json]"
+            )
+            return 1
+        env = {
+            "BEACON_MS_ID": args.ms_id,
+            "BEACON_EXECUTOR": args.executor or "",
+            "BEACON_WORKSPACE": args.workspace or "",
+            "BEACON_CLEAR": "1" if args.clear else "",
+            "BEACON_NO_GIT": "1" if args.no_git else "",
+            "BEACON_JSON": "1" if args.json else "",
+        }
+        return _run_commands_py(root, "milestone_workspace", env)
+
+    if cmd == "workspace-cleanup":
+        if not args.ms_id:
+            print(
+                "Usage: beacon milestone workspace-cleanup <ms-id> "
+                "[--merge-to <branch>] [--json]"
+            )
+            return 1
+        env = {
+            "BEACON_MS_ID": args.ms_id,
+            "BEACON_MERGE_TO": args.merge_to or "",
+            "BEACON_JSON": "1" if args.json else "",
+        }
+        return _run_commands_py(root, "milestone_workspace_cleanup", env)
 
     print(f"Unknown milestone subcommand: {cmd}")
     return 1
@@ -1814,6 +1870,7 @@ def _print_top_help() -> None:
         "  beacon task update <entry-id> [--description T] [--status S] ...\n"
         "  beacon milestone add \"title\" [--priority P] [--objective O] [--ac A]\n"
         "  beacon milestone list | start <id> | done <id> | observe <id> | show <id>\n"
+        "  beacon milestone graph [--json] | workspace <id> | workspace-cleanup <id>\n"
         "  beacon doc add \"title\" [--scope core|spec|memo] [--ms id]\n"
         "  beacon doc list [--scope S] [--ms id]\n"
         "  beacon doc show <doc-id>\n"

@@ -863,3 +863,66 @@ def test_dispatch_invokes_python_executable(project_dir, no_bash, captured_call)
     assert captured_call["cmd"][0] == sys.executable
     assert captured_call["cmd"][1].endswith("commands.py")
     assert captured_call["cmd"][2] == "milestone_list"
+
+
+# ---------------------------------------------------------------------------
+# milestone graph / workspace / workspace-cleanup (e-842)
+#
+# These power /beacon-dispatch. They exist in commands.py and the legacy
+# dispatch table but were missing from the PowerShell-native dispatcher, so
+# /beacon-dispatch was unusable on Windows/OSS. Verify they now route.
+# ---------------------------------------------------------------------------
+
+
+def test_milestone_graph_json(project_dir, no_bash, captured_call):
+    rc = main_mod.main(["milestone", "graph", "--json"])
+    assert rc == 0
+    assert captured_call["cmd"][-1] == "milestone_graph"
+    assert captured_call["env"]["BEACON_JSON"] == "1"
+
+
+def test_milestone_ms_alias_graph(project_dir, no_bash, captured_call):
+    rc = main_mod.main(["ms", "graph"])
+    assert rc == 0
+    assert captured_call["cmd"][-1] == "milestone_graph"
+    assert captured_call["env"]["BEACON_JSON"] == ""
+
+
+def test_milestone_workspace_routes_with_executor(project_dir, no_bash, captured_call):
+    rc = main_mod.main(
+        ["milestone", "workspace", "ms-1", "--executor", "ai", "--json"]
+    )
+    assert rc == 0
+    assert captured_call["cmd"][-1] == "milestone_workspace"
+    env = captured_call["env"]
+    assert env["BEACON_MS_ID"] == "ms-1"
+    assert env["BEACON_EXECUTOR"] == "ai"
+    assert env["BEACON_JSON"] == "1"
+
+
+def test_milestone_workspace_dir_and_no_git(project_dir, no_bash, captured_call):
+    rc = main_mod.main(
+        ["milestone", "workspace", "ms-3", "--dir", "/tmp/ws", "--no-git", "--clear"]
+    )
+    assert rc == 0
+    env = captured_call["env"]
+    assert env["BEACON_WORKSPACE"] == "/tmp/ws"
+    assert env["BEACON_NO_GIT"] == "1"
+    assert env["BEACON_CLEAR"] == "1"
+
+
+def test_milestone_workspace_requires_ms_id(project_dir, no_bash, captured_call):
+    rc = main_mod.main(["milestone", "workspace"])
+    assert rc == 1
+    assert captured_call["cmd"] is None  # never reached commands.py
+
+
+def test_milestone_workspace_cleanup_routes(project_dir, no_bash, captured_call):
+    rc = main_mod.main(
+        ["milestone", "workspace-cleanup", "ms-2", "--merge-to", "main"]
+    )
+    assert rc == 0
+    assert captured_call["cmd"][-1] == "milestone_workspace_cleanup"
+    env = captured_call["env"]
+    assert env["BEACON_MS_ID"] == "ms-2"
+    assert env["BEACON_MERGE_TO"] == "main"
