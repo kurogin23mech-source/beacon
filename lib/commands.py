@@ -250,7 +250,9 @@ def _install_claude_hook():
             "matcher": "Bash",
             "hooks": [{
                 "type": "command",
-                "command": CLAUDE_HOOK_SCRIPT,
+                # ms-44 e-853: resolve cross-platform (entry-point / python -m)
+                # so Windows never gets a non-executable .sh commit hook.
+                "command": _resolve_hook_command("beacon-post-commit-hook.sh"),
                 "timeout": 10,
                 "statusMessage": "Beacon: checking commit...",
             }],
@@ -270,7 +272,7 @@ def _install_claude_hook():
             "matcher": "mcp__",
             "hooks": [{
                 "type": "command",
-                "command": CLAUDE_SAVE_HOOK_SCRIPT,
+                "command": _resolve_hook_command("beacon-save-hook.sh"),
                 "timeout": 10,
                 "statusMessage": "Beacon: checking MCP operation...",
             }],
@@ -284,16 +286,24 @@ def _install_claude_hook():
     for entry in post_compact:
         for h in entry.get("hooks", []):
             cmd = h.get("command", "")
-            if "beacon-postcompact" in cmd:
+            if (
+                "beacon-postcompact" in cmd
+                or "beacon-hook-postcompact" in cmd
+                or "beacon_cli.hooks.postcompact" in cmd
+            ):
                 postcompact_hook_exists = True
                 break
         if postcompact_hook_exists:
             break
-    if not postcompact_hook_exists and os.path.exists(CLAUDE_POSTCOMPACT_HOOK_SCRIPT):
+    # ms-44 e-853: resolve cross-platform; the command may be a ``python -m``
+    # form (not a path), so guard path-existence only for path commands.
+    _pc_cmd = _resolve_hook_command("beacon-postcompact.sh")
+    _pc_ok = bool(_pc_cmd) and (not _is_path_command(_pc_cmd) or os.path.exists(_pc_cmd))
+    if not postcompact_hook_exists and _pc_ok:
         post_compact.append({
             "hooks": [{
                 "type": "command",
-                "command": CLAUDE_POSTCOMPACT_HOOK_SCRIPT,
+                "command": _pc_cmd,
                 "timeout": 10,
                 "statusMessage": "Beacon: post-compaction orientation...",
             }],
@@ -3584,6 +3594,18 @@ def _resolve_skills_src() -> str:
     return ""
 
 
+def _hook_unusable_on_windows(cmd: str) -> bool:
+    """True if ``cmd`` is a bare ``.sh`` script while running on Windows.
+
+    Claude Code's hook runner cannot execute a ``.sh`` on Windows (there is no
+    shell association that yields the expected stdout JSON), so such a hook
+    silently no-ops and ``/beacon-log`` never fires. Used to (a) keep
+    ``_resolve_hook_command`` from resolving to a ``.sh`` on Windows and
+    (b) let ``beacon doctor`` flag an already-broken config. (ms-44 e-853)
+    """
+    return os.name == "nt" and cmd.strip().lower().endswith(".sh")
+
+
 def _resolve_hook_command(hook_basename: str) -> str:
     """Return a cross-platform command string for the named hook.
 
@@ -3636,12 +3658,12 @@ def _resolve_hook_command(hook_basename: str) -> str:
     # test_install_hooks.py contracts continue to hold).
     if const_name:
         const_val = globals().get(const_name, "")
-        if const_val and os.path.exists(const_val):
+        if const_val and os.path.exists(const_val) and not _hook_unusable_on_windows(const_val):
             return const_val
 
     # Source / brew: bash next to the launcher.
     bash_path = _find_hook(hook_basename)
-    if bash_path and os.path.exists(bash_path):
+    if bash_path and os.path.exists(bash_path) and not _hook_unusable_on_windows(bash_path):
         return bash_path
 
     # Final fallback: invoke the module via the current interpreter.
@@ -5041,6 +5063,7 @@ def cmd_doctor():
     # ------------------------------------------------------------------ #
     settings_path = os.path.join(home, ".claude", "settings.json")
     hook_ok = False
+    hook_broken_cmd = ""  # ms-44 e-853: beacon hook present but not runnable here
     if os.path.exists(settings_path):
         try:
             with open(settings_path, "r", encoding="utf-8") as _f:
@@ -5048,14 +5071,31 @@ def cmd_doctor():
             _post_tool = _settings.get("hooks", {}).get("PostToolUse", [])
             for _entry in _post_tool:
                 for _h in _entry.get("hooks", []):
-                    if "beacon" in _h.get("command", ""):
-                        hook_ok = True
-                        break
+                    _cmd = _h.get("command", "")
+                    if "beacon" not in _cmd:
+                        continue
+                    # A beacon hook is configured — but is it runnable on this
+                    # OS? A .sh on Windows (or a path that no longer exists)
+                    # silently no-ops, so /beacon-log never fires. (e-853)
+                    if _hook_unusable_on_windows(_cmd) or (
+                        _is_path_command(_cmd) and not os.path.exists(_cmd)
+                    ):
+                        hook_broken_cmd = _cmd
+                        continue
+                    hook_ok = True
+                    break
                 if hook_ok:
                     break
         except Exception:
             pass
-    if not hook_ok:
+    if not hook_ok and hook_broken_cmd:
+        warnings.append(
+            "WARN [hooks] PostToolUse hook is configured but not executable on this OS:\n"
+            f"       {hook_broken_cmd}\n"
+            "       (a .sh hook does not run on Windows; commit -> /beacon-log will not fire.)\n"
+            "       Run: beacon skill install   (re-points it to the cross-platform hook)"
+        )
+    elif not hook_ok:
         warnings.append(
             "WARN [hooks] PostToolUse hook not configured in ~/.claude/settings.json.\n"
             "       Run: beacon skill install"
