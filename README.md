@@ -398,6 +398,30 @@ All project state lives in `.beacon/project.json`. See [SPEC.md](docs/SPEC.md) f
   triggers/       # Async message queue (dashboard <-> Claude Code)
 ```
 
+## Doc & Skill auto-sync scope (ms-10 e-722)
+
+To prevent doc drift, three guards run automatically (pre-commit hook + CI
+`lint-docs` workflow):
+
+| Guard | What it checks |
+|-------|----------------|
+| `scripts/check-skill-drift.py` | `skills/*.md` in the repo matches `~/.claude/skills/<name>/SKILL.md`. Repair: `beacon skill install` (or set `BEACON_AUTO_SKILL_INSTALL=1` to auto-run from the hook). Also surfaced by `beacon doctor` check #6. |
+| `scripts/check-cli-help-drift.py` | The set of `(subcommand, subsubcommand)` pairs is consistent across `bin/beacon` usage, `cmd_help_json` (`beacon help --json`), and the README `## CLI Commands` tables. Intentional asymmetries are listed inline as allowlists. |
+| `scripts/check-install-md.py` | `INSTALL.md` bash blocks don't use deprecated flags (e.g. `gcloud run deploy --build-arg` — gcloud wants `--set-build-env-vars`). Brew / pipx commands have a package positional. |
+
+**Explicitly out of scope** (these still need a human reviewer):
+
+- Whether a CLI flag's **description text** is accurate — the guard only
+  checks that the flag exists in `--help`, not what it means.
+- Whether the README's prose paragraphs (Why Beacon?, Quick Start, etc.)
+  reflect the latest behavior — only the CLI tables are diffed.
+- Skill body content review — drift detection only catches "you forgot to
+  run `beacon skill install`", not "this Skill's instructions became wrong".
+
+Catch-up sweeps (manual doc audits) are still useful when the scope
+above misses something, but the day-to-day drift surface should now stay
+clean by construction.
+
 ## License
 
 [MIT](LICENSE)
