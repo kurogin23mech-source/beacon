@@ -100,6 +100,17 @@ def _run_commands_py(
     env.setdefault("BEACON_PROJECT_FILE", ".beacon/project.json")
     env["BEACON_DIR"] = str(root)
 
+    # #19 follow-up: main.py reconfigures sys.stdout in *this* process at
+    # import time, but commands.py runs in a fresh child process where that
+    # reconfigure never executes. Force PYTHONUTF8 + PYTHONIOENCODING so
+    # Windows cp932 / cp1252 consoles still get UTF-8 stdout/stderr for
+    # every subcommand (status, milestone list, search results, …) and
+    # not just --help / --version. PEP 540 UTF-8 mode also makes the
+    # default open() encoding UTF-8 inside the child, which is a
+    # belt-and-suspenders companion to the explicit encoding= audit (#21).
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+
     # commands.py uses flat imports (``from store import ...``). Inject
     # the directory that actually holds ``commands.py`` so those resolve
     # in both the source layout (``lib/``) and the wheel layout

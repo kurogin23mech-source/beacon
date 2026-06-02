@@ -1968,7 +1968,9 @@ def _auto_fire_retro_trigger():
                 existing = json.load(f)
             if isinstance(existing.get("created_at"), str):
                 created_at = existing["created_at"]
-        except (json.JSONDecodeError, IOError):
+        except (json.JSONDecodeError, IOError, UnicodeDecodeError):
+            # #21 follow-up: legacy retro trigger from pre-fix builds is cp932
+            # — skip and let the new write below replace it with UTF-8.
             pass
 
     trigger_data = {
@@ -2198,8 +2200,16 @@ def cmd_trigger_check():
         try:
             with open(fpath, "r", encoding="utf-8") as f:
                 triggers.append(json.load(f))
-        except (json.JSONDecodeError, IOError):
-            pass
+        except (json.JSONDecodeError, IOError, UnicodeDecodeError) as exc:
+            # #21 follow-up: legacy trigger files written by pre-encoding-fix
+            # builds on Windows are persisted in cp932 and fail UTF-8 decode.
+            # We silently skip so `beacon trigger check` keeps working; the
+            # bad file stays on disk until the user clears it explicitly
+            # (or the firing code overwrites it with valid UTF-8).
+            sys.stderr.write(
+                f"[beacon] skipping malformed trigger file "
+                f"{os.path.basename(fpath)}: {type(exc).__name__}\n"
+            )
     print(json.dumps(triggers, ensure_ascii=False))
 
 
@@ -4034,7 +4044,8 @@ def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
         try:
             with open(settings_path, "r", encoding="utf-8") as f:
                 settings = json.load(f)
-        except (json.JSONDecodeError, IOError):
+        except (json.JSONDecodeError, IOError, UnicodeDecodeError):
+            # #21 follow-up: tolerate cp932 settings.json from legacy builds.
             pass
 
     hooks = settings.setdefault("hooks", {})
