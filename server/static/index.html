@@ -2192,8 +2192,12 @@ function renderMainContentArea() {
   if (!state.project) return;
   const el = document.getElementById('main-content');
   if (!el) {
-    // Shell not mounted yet — fall back to a full render so the user doesn't
-    // stay stuck on the loading screen when search triggers before the shell.
+    // Shell not mounted — promote to full render. Skip during IME composition
+    // so we don't blow away the search input mid-stroke.
+    if (_isComposing) {
+      _pendingDataRender = render;
+      return;
+    }
     render();
     return;
   }
@@ -3361,6 +3365,14 @@ function renderMsListArea() {
     // we're still on the loading screen). Promote to a full render so the
     // UI catches up; partial render alone would silently no-op and leave
     // the user stranded on "loading".
+    //
+    // Exception: if the user is mid-IME composition, a full render would
+    // destroy the search input and force-confirm what they've typed. Defer
+    // until compositionend.
+    if (_isComposing) {
+      _pendingDataRender = render;
+      return;
+    }
     render();
     return;
   }
@@ -3427,7 +3439,10 @@ function renderOnDataChange() {
       render();
     }
   };
-  if (_userScrolling) {
+  // Defer renders while the user is scrolling (jitter avoidance) or composing
+  // text in the search input (re-rendering the shell would destroy the input
+  // mid-stroke and force-confirm partial IME composition).
+  if (_userScrolling || _isComposing) {
     _pendingDataRender = doRender;
     return;
   }
@@ -3471,16 +3486,44 @@ function _runUnifiedSearch() {
     });
 }
 
-document.addEventListener('input', e => {
+// IME composition handling: while the user is mid-composition (Japanese,
+// Chinese, etc.), the `input` event fires for every interim character. If we
+// updated state.searchQuery from those intermediate values and a re-render
+// touched the input.value attribute, the IME's composition state would be
+// destroyed, forcing the user to confirm partial characters.
+//
+// Strategy: ignore `input` while composing; sync state once on `compositionend`.
+let _isComposing = false;
+
+function _kickSearchAfterInput(value) {
+  state.searchQuery = value;
+  state.searchTypeFilter = new Set();
+  renderMainContentArea();
+  clearTimeout(_searchDebounceTimer);
+  _searchDebounceTimer = setTimeout(_runUnifiedSearch, 200);
+}
+
+document.addEventListener('compositionstart', e => {
+  if (e.target.id === 'search-input') _isComposing = true;
+});
+document.addEventListener('compositionend', e => {
   if (e.target.id === 'search-input') {
-    state.searchQuery = e.target.value;
-    state.searchTypeFilter = new Set();
-    // Swap #main-content immediately so the user sees "searching..." right away;
-    // the actual cross-entity API call is debounced.
-    renderMainContentArea();
-    clearTimeout(_searchDebounceTimer);
-    _searchDebounceTimer = setTimeout(_runUnifiedSearch, 200);
+    _isComposing = false;
+    _kickSearchAfterInput(e.target.value);
+    // Drain any render that was deferred while composing (e.g. a WS push
+    // that came in during typing).
+    if (_pendingDataRender) {
+      const fn = _pendingDataRender;
+      _pendingDataRender = null;
+      fn();
+    }
   }
+});
+document.addEventListener('input', e => {
+  if (e.target.id !== 'search-input') return;
+  if (_isComposing) return;       // ← skip interim IME events
+  if (e.isComposing) return;       // ← belt-and-suspenders for browsers that set this directly
+  _kickSearchAfterInput(e.target.value);
 });
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && state.searchQuery) {
