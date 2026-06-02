@@ -179,6 +179,51 @@ def _ensure_project() -> Optional[int]:
     return None
 
 
+def _find_beacon_root(start: Path) -> Optional[Path]:
+    """Walk up from ``start`` looking for ``.beacon/project.json``.
+
+    Returns the directory that contains ``.beacon/`` (the project root), or
+    None if no ancestor has one. Same contract as the bash ``find_beacon_root``
+    and the postcompact hook's ``_find_beacon_root``: beacon commands should
+    work from any subdirectory of the project, just like ``git`` does (e-862).
+    """
+    cur = start.resolve()
+    while True:
+        if (cur / ".beacon" / "project.json").is_file():
+            return cur
+        if cur.parent == cur:
+            return None
+        cur = cur.parent
+
+
+def _relocate_to_project_root(command: str) -> None:
+    """chdir to the project root when invoked from a subdirectory (e-862).
+
+    Without this, every project-scoped command fails with
+    "No .beacon/project.json found" the moment the user cd's into a
+    subdirectory, even though the project root is right above them. We walk
+    up like git and relocate so all relative ``.beacon/...`` paths (and the
+    commands.py subprocess that inherits this cwd) resolve correctly.
+
+    Exemptions:
+      * ``init`` / ``setup`` intentionally create/operate on the *current*
+        directory — never relocate them.
+      * An explicit ``BEACON_PROJECT_FILE`` pointing at an existing file
+        (tests, fixtures, advanced users) wins — leave cwd untouched.
+      * If ``.beacon/project.json`` already exists in cwd, nothing to do.
+    """
+    if command in ("init", "setup"):
+        return
+    explicit = os.environ.get("BEACON_PROJECT_FILE")
+    if explicit and Path(explicit).exists():
+        return
+    if Path(".beacon/project.json").exists():
+        return
+    root = _find_beacon_root(Path.cwd())
+    if root is not None:
+        os.chdir(root)
+
+
 # ---------------------------------------------------------------------------
 # Parser construction
 # ---------------------------------------------------------------------------
@@ -1927,6 +1972,11 @@ def dispatch(root: Optional[Path], argv: Sequence[str]) -> int:
     if not args.command:
         _print_top_help()
         return 0
+
+    # Locate the project root by walking up from CWD so beacon works from
+    # any subdirectory (e-862). Must happen before the handler runs and
+    # before commands.py is spawned (it inherits this cwd).
+    _relocate_to_project_root(args.command)
 
     handler = _HANDLERS.get(args.command)
     if handler is None:
