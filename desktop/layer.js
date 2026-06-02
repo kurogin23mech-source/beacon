@@ -24,7 +24,7 @@ let state = {
   showGraph: false, graphFilterDeps: true,
   retros: [], retroContent: null,
   documents: [], documentContent: null,
-  hiddenStatuses: new Set(),
+  hiddenStatuses: new Set(['cancelled']),
   hideEntryDone: new Set(),
   collapsedEntries: new Set(),
   sortAsc: true,
