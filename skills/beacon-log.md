@@ -211,6 +211,21 @@ cd "$PROJECT_DIR" && beacon task add "残: <未達 AC 項目を具体化>" -m <m
 4. **AC が定義されていないタスクは保守的に扱う**。HIGH のみ done、MID は SKIP。
 5. **AI が自律判断する**。ユーザーに「このタスク done にしていいですか？」と対話介入しない。ユーザーは Step 5 報告と done_reason で事後監査する。
 
+### AI 未検証の側面を done_reason に併記する
+
+DONE する fix について、AI が物理確認できなかった側面（実行できない環境、spawn される subprocess の挙動、別 entry-point の影響、別 OS、別ブラウザ等）があれば、`done_reason` の末尾に「**(未検証: <側面>)**」と 1 行で添える。
+
+これは Skill が AI に完璧を求めるためではなく、**ユーザーが監査時に「ここを見ればギャップが catch しやすい」というポインターを残すため**。「動かしながら考える」philosophy に従い、列挙できなくても DONE 自体は妨げない（フィルタでなくフラグ）。
+
+例:
+```
+--reason "AC『stdout reconfigure』を main.py 追加で満たした。
+          entry-id 明示 + 強一致で HIGH。
+          (未検証: subprocess child process での効果、Windows 実機での動作)"
+```
+
+「全て」「すべての」「process-wide」「entry-point」「グローバル」「全 OS で動く」などの語が AC に含まれているとき、fix が触ったコード経路以外の発火点（subprocess / 別 entry-point / hook 経由 / fork 後 / 別 OS 等）を 1 つ思い浮かべて、未検証なら必ずこのタグで明示する。思い浮かばない場合は無理に書かなくてよい（過剰な adversarial thinking は philosophy 違反）。
+
 ## Step 2: 進捗率の評価
 
 Step 1 (+ Step 1.5) で特定した MS の情報を読み、以下の基準で **進捗率（0-100の整数）** を決定する:
@@ -265,9 +280,13 @@ Summary: [更新したサマリーの要約]
   ✓ DONE:    [e-id] <description 短縮> — <done_reason 短縮>
   △ PARTIAL: [e-id] <description 短縮> → follow-up [新規 e-id] <残作業>
   ✗ SKIP:    [e-id] <description 短縮> — <skip 理由>
+
+AI が物理確認できなかった側面 (user 監査推奨):   ← done_reason に「(未検証: ...)」があれば
+  - [e-id]: <未検証の側面>
 ```
 
 判定対象がなかった（pending_tasks が空、または LOW 信頼度しかなかった）場合は「タスク判定」セクションごと省略する。
+「AI が物理確認できなかった側面」セクションは、DONE 判定したタスクの `done_reason` に「**(未検証: ...)**」が含まれている場合のみ表示する。ユーザーはここを見て監査ポイントを把握する。
 
 ## Step 5.5: MS完了判定（e-550 / UC3-G4）
 
