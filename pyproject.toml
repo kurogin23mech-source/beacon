@@ -75,6 +75,12 @@ Issues = "https://github.com/r-kida2/beacon/issues"
 # (bash) when present so existing behaviour is identical; on Windows (no bash)
 # it falls back to the Python dispatch in `beacon_cli/main.py`.
 beacon = "beacon_cli.main:main"
+# Cross-platform PostToolUse / PostCompact hook entry-points (ms-44 e-777).
+# Translated from bin/*.sh so Claude Code on Windows can register them by
+# absolute path in ~/.claude/settings.json without needing a bash interpreter.
+beacon-hook-post-commit = "beacon_cli.hooks.post_commit:main"
+beacon-hook-postcompact = "beacon_cli.hooks.postcompact:main"
+beacon-hook-save = "beacon_cli.hooks.save_hook:main"
 
 # -----------------------------------------------------------------------------
 # Packaging layout
@@ -87,14 +93,23 @@ beacon = "beacon_cli.main:main"
 #     __init__.py
 #     main.py            # entry-point dispatcher (bash shim + Python fallback)
 #     _version.py        # source of truth for __version__
-#     _bundled/          # populated at install time with copies of lib/ + bin/
+#     dispatch.py        # PowerShell-native command tree
+#     hooks/             # Python translations of bin/*.sh (cross-platform)
+#     _bundled_lib/      # populated at install time with copies of lib/
+#     _bundled_skills/   # populated at install time with copies of skills/
 #
-# `lib/` and `bin/` are remapped into the package via setuptools `package_dir`
-# so a wheel install carries everything `commands.py` needs.
+# `lib/` and `skills/` are remapped into the package via setuptools
+# `package_dir` so a wheel install carries everything `commands.py` /
+# `cmd_skill_install` needs.
 # -----------------------------------------------------------------------------
 
 [tool.setuptools]
-packages = ["beacon_cli", "beacon_cli._bundled_lib"]
+packages = [
+    "beacon_cli",
+    "beacon_cli.hooks",
+    "beacon_cli._bundled_lib",
+    "beacon_cli._bundled_skills",
+]
 include-package-data = true
 
 [tool.setuptools.dynamic]
@@ -102,12 +117,18 @@ version = { attr = "beacon_cli._version.__version__" }
 
 [tool.setuptools.package-dir]
 "beacon_cli._bundled_lib" = "lib"
+"beacon_cli._bundled_skills" = "skills"
 
 [tool.setuptools.package-data]
 "beacon_cli._bundled_lib" = [
     "*.py",
     "*.json",
     "*.example",
+]
+"beacon_cli._bundled_skills" = [
+    "*.md",
+    "_*.md",
+    "**/*.md",
 ]
 beacon_cli = [
     "_bundled_bin/beacon",
