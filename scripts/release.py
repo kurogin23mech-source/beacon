@@ -256,15 +256,30 @@ def main():
 
     version_str = v.lstrip("v")
 
-    # ---- Bump __version__ in lib/commands.py ----
-    print("=> Updating __version__ in lib/commands.py")
-    commands_path = os.path.join(beacon_root, "lib", "commands.py")
-    cmds_src = open(commands_path, encoding="utf-8").read()
-    new_cmds = re.sub(r'(__version__\s*=\s*)"[^"]+"', f'\\1"{version_str}"', cmds_src, count=1)
-    if new_cmds != cmds_src and not dry:
-        with open(commands_path, "w", encoding="utf-8") as f:
-            f.write(new_cmds)
-        run(["git", "add", "lib/commands.py"], cwd=beacon_root, dry_run=dry)
+    # ---- Bump __version__ in BOTH source-of-truth files ----
+    # lib/commands.py: bash dispatch entry-point reads it
+    # beacon_cli/_version.py: pipx-installed Python wheel entry-point reads it
+    # They MUST be kept in lockstep; the drift was missed for v0.5.0→v0.6.0
+    # because release.py only knew about lib/commands.py — the wheel still
+    # reported the old version after `beacon update`.
+    print("=> Updating __version__ in lib/commands.py and beacon_cli/_version.py")
+    bump_targets = [
+        ("lib/commands.py", os.path.join(beacon_root, "lib", "commands.py")),
+        ("beacon_cli/_version.py", os.path.join(beacon_root, "beacon_cli", "_version.py")),
+    ]
+    bumped_files = []
+    for rel, abs_path in bump_targets:
+        if not os.path.exists(abs_path):
+            continue
+        src = open(abs_path, encoding="utf-8").read()
+        new = re.sub(r'(__version__\s*=\s*)"[^"]+"', f'\\1"{version_str}"', src, count=1)
+        if new != src and not dry:
+            with open(abs_path, "w", encoding="utf-8") as f:
+                f.write(new)
+            bumped_files.append(rel)
+    if bumped_files and not dry:
+        for rel in bumped_files:
+            run(["git", "add", rel], cwd=beacon_root, dry_run=dry)
         run(["git", "commit", "-m", f"chore(release): bump __version__ to {version_str}"],
             cwd=beacon_root, dry_run=dry)
 
