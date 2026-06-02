@@ -217,15 +217,24 @@ def test_resolve_hook_command_prefers_entry_point(monkeypatch, tmp_path):
 
 def test_resolve_hook_command_falls_back_to_bash_when_no_entry_point(monkeypatch):
     """Source / brew install: no console-script on PATH, but the .sh is
-    present in bin/. We must return the bash path so existing macOS users
-    keep their working hook."""
+    present in bin/.
+
+    - Off Windows: return the bash path so existing macOS/Linux users keep
+      their working hook.
+    - On Windows: a bare .sh cannot be executed by Claude Code's hook runner,
+      so resolution skips it and returns the ``python -m`` form instead
+      (ms-44 e-853)."""
     import commands  # type: ignore
 
     monkeypatch.setattr(commands.shutil, "which", lambda name: None)
     cmd = commands._resolve_hook_command("beacon-post-commit-hook.sh")
-    # In this repo the .sh lives at bin/beacon-post-commit-hook.sh
-    assert cmd.endswith("beacon-post-commit-hook.sh")
-    assert os.path.exists(cmd)
+    if os.name == "nt":
+        assert "beacon_cli.hooks.post_commit" in cmd
+        assert not cmd.lower().endswith(".sh")
+    else:
+        # In this repo the .sh lives at bin/beacon-post-commit-hook.sh
+        assert cmd.endswith("beacon-post-commit-hook.sh")
+        assert os.path.exists(cmd)
 
 
 def _force_wheel_only(monkeypatch, commands_mod):
@@ -428,7 +437,9 @@ def test_cmd_skill_install_source_layout_unchanged(tmp_path, monkeypatch):
     assert "beacon-log" in installed, installed
     assert "beacon-session-start" in installed, installed
 
-    # settings.json written with the bash entry (source layout fallback).
+    # settings.json written with a beacon commit hook. Off Windows this is the
+    # bash .sh (source layout); on Windows the .sh is skipped in favor of the
+    # ``python -m`` form (ms-44 e-853) — accept either.
     settings = json.loads((fake_home / ".claude" / "settings.json").read_text())
     bash_cmds = [
         h.get("command")
@@ -436,7 +447,10 @@ def test_cmd_skill_install_source_layout_unchanged(tmp_path, monkeypatch):
         if entry.get("matcher") == "Bash"
         for h in entry.get("hooks", [])
     ]
-    assert any("beacon-post-commit-hook" in c for c in bash_cmds), bash_cmds
+    assert any(
+        "beacon-post-commit-hook" in c or "beacon_cli.hooks.post_commit" in c
+        for c in bash_cmds
+    ), bash_cmds
 
 
 # ---------------------------------------------------------------------------
