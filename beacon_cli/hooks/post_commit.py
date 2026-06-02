@@ -120,9 +120,16 @@ def _resolve_command_cwd(tool_cwd: str) -> Path:
     ``tool_input.cwd`` (legacy contract).
     """
     if tool_cwd:
-        # bash expands ~ only at the start of the path; mimic that.
+        # bash expands ~ only at the start of the path; mimic that. The cwd
+        # originates from the Bash tool (git-bash), where ``~`` means ``$HOME``.
+        # os.path.expanduser ignores HOME on Windows (it keys off USERPROFILE),
+        # so honor HOME explicitly when it resolves to a real directory; else
+        # fall back to expanduser. (ms-44 e-844)
         if tool_cwd.startswith("~"):
-            tool_cwd = os.path.expanduser(tool_cwd)
+            home = os.environ.get("HOME")
+            if not (home and os.path.isabs(home) and os.path.isdir(home)):
+                home = os.path.expanduser("~")
+            tool_cwd = home + tool_cwd[1:]
         return Path(tool_cwd)
     return Path(os.getcwd())
 

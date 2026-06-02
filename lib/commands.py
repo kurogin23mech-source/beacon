@@ -23,6 +23,21 @@ def get_project_file():
     return os.environ.get("BEACON_PROJECT_FILE", ".beacon/project.json")
 
 
+def _user_home():
+    """Resolve the user home directory, honoring an explicit HOME override.
+
+    os.path.expanduser('~') on Windows keys off USERPROFILE/HOMEDRIVE+HOMEPATH
+    and ignores HOME, which breaks env-overridden contexts (tests, sandboxes)
+    and any setup where HOME != USERPROFILE. Prefer HOME when it resolves to a
+    real absolute directory (so a leftover msys-style '/c/...' value can't send
+    writes to a bogus path); otherwise fall back to expanduser. (ms-44 e-844)
+    """
+    home = os.environ.get("HOME")
+    if home and os.path.isabs(home) and os.path.isdir(home):
+        return home
+    return os.path.expanduser("~")
+
+
 def load_project():
     store = get_store()
     data = store.load_project()
@@ -211,7 +226,7 @@ CLAUDE_POSTCOMPACT_HOOK_SCRIPT = _find_hook("beacon-postcompact.sh")
 
 
 def _install_claude_hook():
-    settings_path = os.path.expanduser("~/.claude/settings.json")
+    settings_path = os.path.join(_user_home(), ".claude", "settings.json")
     settings_dir = os.path.dirname(settings_path)
     os.makedirs(settings_dir, exist_ok=True)
     settings = {}
@@ -298,7 +313,7 @@ def _install_skills():
     )
     if not os.path.isdir(skills_src):
         return
-    skills_dst = os.path.expanduser("~/.claude/skills")
+    skills_dst = os.path.join(_user_home(), ".claude", "skills")
     os.makedirs(skills_dst, exist_ok=True)
     installed = []
     for fname in os.listdir(skills_src):
@@ -3647,7 +3662,7 @@ def cmd_skill_install():
     beacon_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     # Destination: ~/.claude/skills/
-    home = os.path.expanduser("~")
+    home = _user_home()
     claude_skills = os.path.join(home, ".claude", "skills")
     os.makedirs(claude_skills, exist_ok=True)
 
@@ -5008,7 +5023,7 @@ def cmd_doctor():
     import shutil as _shutil
     import time as _time
 
-    home = os.path.expanduser("~")
+    home = _user_home()
     warnings: list[str] = []
 
     # ------------------------------------------------------------------ #
