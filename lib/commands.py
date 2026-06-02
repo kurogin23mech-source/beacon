@@ -50,7 +50,17 @@ def _append_changelog(op: dict) -> None:
 def save_project(data, op=None):
     core.validate_project(data)
     store = get_store()
-    store.save_project(data)
+    try:
+        store.save_project(data)
+    except RuntimeError as e:
+        # Lost-update guard tripped (cloud mode only): the cloud changed since
+        # we loaded it. Surface a clear message instead of a traceback so the
+        # user knows to re-run rather than silently losing a concurrent edit.
+        from store_api import ConflictError
+        if isinstance(e, ConflictError):
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        raise
     if op:
         _append_changelog(op)
 
