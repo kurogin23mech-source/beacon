@@ -535,11 +535,14 @@ def build_parser() -> argparse.ArgumentParser:
     auth_sub.add_parser("logout", add_help=False)
     auth_sub.add_parser("status", add_help=False)
 
-    # ---- cloud list / status / open / join / off (#20) ----
-    # Authenticated users (Windows pipx) need a way to discover and bind
-    # to existing cloud projects. push / pull are intentionally still
-    # deferred — those are destructive and need ms-24-level safety
-    # consideration; the read-and-bind subcommands here are not.
+    # ---- cloud list / status / open / join / off / push / pull (#20) ----
+    # Authenticated users (Windows pipx) need a full path to migrate local
+    # projects to cloud and sync the other way. The architectural concern
+    # behind cloud push (= two-master divergence) is already handled in
+    # commands.py: cloud_push auto-switches to cloud mode after the
+    # initial upload (ms-36 cloud-first cache design), and a SECOND push
+    # while already in cloud mode is refused unless --force is given and
+    # logged to the changelog (ms-24). We can wire push/pull safely.
     p_cloud = sub.add_parser("cloud", help="Cloud project navigation", add_help=False)
     p_cloud.add_argument("--help", "-h", action="store_true", dest="show_help")
     cloud_sub = p_cloud.add_subparsers(dest="cloud_cmd", metavar="<subcmd>")
@@ -552,6 +555,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_cloud_open.add_argument("project_id", nargs="?", default="")
     p_cloud_open.add_argument("--no-browser", action="store_true",
                               help="Don't auto-launch the browser/desktop UI")
+    p_cloud_push = cloud_sub.add_parser("push", add_help=False)
+    p_cloud_push.add_argument("-f", "--force", action="store_true",
+                              help="Override the cloud-mode safety block")
+    cloud_sub.add_parser("pull", add_help=False)
 
     # ---- pr show / add / close / approve / reject / create / request-review / request-changes / review / merge ----
     p_pr = sub.add_parser("pr", help="Pull-request operations", add_help=False)
@@ -1579,15 +1586,14 @@ def _handle_cloud(root: Path, args: argparse.Namespace) -> int:
     """
     if args.show_help or args.cloud_cmd is None:
         print(
-            "Usage: beacon cloud [list|status|open <id>|join <id>|off]\n"
+            "Usage: beacon cloud [list|status|open <id>|join <id>|off|push|pull]\n"
             "  list                 List cloud projects\n"
             "  status               Show current cloud mode + project_id\n"
             "  open <project-id>    Bind cwd to a cloud project + open Web UI\n"
             "  join <project-id>    Bind cwd to a cloud project (no UI launch)\n"
             "  off                  Switch back to local mode (writes config.json)\n"
-            "\n"
-            "Not yet available on bash-less systems: push, pull "
-            "(destructive — tracked under ms-44/ms-24 follow-ups)."
+            "  push [-f|--force]    Upload local project (local mode → cloud + auto switch)\n"
+            "  pull                 Sync cloud state into the local read-only cache"
         )
         return 0 if args.show_help else 2
 
@@ -1622,6 +1628,17 @@ def _handle_cloud(root: Path, args: argparse.Namespace) -> int:
             print("Usage: beacon cloud open <project-id>")
             return 1
         return _do_cloud_open(root, args.project_id, args.no_browser)
+    if cmd == "push":
+        # cmd_cloud_push reads BEACON_FORCE from env. It already enforces the
+        # ms-24 cloud-mode block (refuses without --force) and ms-36 auto-
+        # switch (config.json mode -> cloud after initial migration), so the
+        # dispatch handler is intentionally thin.
+        return _run_commands_py(
+            root, "cloud_push",
+            {"BEACON_FORCE": "1" if args.force else ""},
+        )
+    if cmd == "pull":
+        return _run_commands_py(root, "cloud_pull", {})
 
     print(f"Unknown cloud subcommand: {cmd}")
     return 1
