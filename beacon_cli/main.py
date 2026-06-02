@@ -100,72 +100,42 @@ def _find_bin_beacon(root: Path) -> Optional[Path]:
 
 
 def _python_dispatch(root: Optional[Path], argv: list[str]) -> int:
-    """Minimal Python dispatch for environments without bash.
+    """Bash-less dispatcher.
 
-    Currently handles:
-      - `beacon --version` / `beacon -V` / `beacon version`
-      - `beacon help` / `beacon --help` / `beacon -h`
-      - Any subcommand mapped to a Python entry in `lib/commands.py` via the
-        legacy `python3 commands.py <subcmd>` convention.
+    The Phase-1 (PowerShell Day-1) commands are implemented as a proper
+    argparse tree in ``beacon_cli.dispatch`` — that module parses the
+    bash-equivalent flags, builds the ``BEACON_*`` env var payload, and
+    spawns ``python3 lib/commands.py <subcmd>`` so business logic stays
+    in commands.py. We delegate to it here.
 
-    Returns the exit code.
+    The top-level ``--version`` / ``--help`` fast-path stays in this
+    function so they keep working even when ``commands.py`` is unreachable
+    (e.g. partial wheel install).
     """
-    if not argv or argv[0] in ("--version", "-V", "version"):
+    # Local import: keeps ``main.py`` light when nobody calls into the
+    # PowerShell path, and avoids a top-level cycle if dispatch grows.
+    from . import dispatch as _dispatch
+
+    if not argv:
+        return _dispatch.dispatch(root, argv)
+    if argv[0] in ("--version", "-V", "version"):
         print(f"beacon {__version__}")
         return 0
-
     if argv[0] in ("--help", "-h", "help"):
+        # Prefer the Python-native help so users on Windows can read it
+        # before any bash dispatch is attempted.
         _print_help()
         return 0
-
-    if root is None:
-        _eprint(
-            "Error: beacon installation is incomplete — could not locate the "
-            "`lib/` directory. Reinstall with `pipx reinstall beacon` or "
-            "ensure the source checkout includes lib/commands.py."
-        )
-        return 2
-
-    # Native Python dispatch for the subset that commands.py already handles
-    # directly. We invoke commands.py the same way bin/beacon does, but with
-    # the correct lib/ directory injected into PYTHONPATH so legacy flat
-    # imports (`from store import ...`) work in both source and wheel layouts.
-    commands_py = _resolve_commands_py(root)
-    lib_dir = _resolve_lib_dir(root)
-    if commands_py is None or lib_dir is None:
-        _eprint(f"Error: cannot locate commands.py under {root}")
-        return 2
-
-    cmd = [sys.executable, str(commands_py), *argv]
-    env = os.environ.copy()
-    env.setdefault("BEACON_PROJECT_FILE", ".beacon/project.json")
-    env["BEACON_DIR"] = str(root)
-    existing_pp = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = (
-        f"{lib_dir}{os.pathsep}{existing_pp}" if existing_pp else str(lib_dir)
-    )
-    try:
-        return subprocess.call(cmd, env=env)
-    except OSError as exc:
-        _eprint(f"Error launching python dispatch: {exc}")
-        return 2
+    return _dispatch.dispatch(root, argv)
 
 
 def _print_help() -> None:
-    print(
-        f"beacon {__version__} — AI-driven milestone tracker for Claude Code\n"
-        "\n"
-        "Common commands (cross-platform):\n"
-        "  beacon --version              Show version\n"
-        "  beacon status                 Show current milestone status\n"
-        "  beacon init                   Initialize .beacon/ in current dir\n"
-        "  beacon milestone list         List milestones\n"
-        "  beacon task add \"desc\"        Add a task\n"
-        "\n"
-        "Full command list is shown by `beacon help` once the legacy bash\n"
-        "dispatcher is available (macOS / Linux only at the moment).\n"
-        "Windows full support is tracked under ms-44 task e-695.\n"
-    )
+    # Delegate to the dispatcher's help so we have one source of truth for
+    # the Phase-1 command list. Keep this function as a thin shim so the
+    # existing tests that import `_print_help` keep working.
+    from . import dispatch as _dispatch
+
+    _dispatch._print_top_help()
 
 
 # ---------------------------------------------------------------------------
