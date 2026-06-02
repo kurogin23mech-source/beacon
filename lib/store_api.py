@@ -12,12 +12,29 @@ import threading
 import time
 
 
+class ConflictError(RuntimeError):
+    """Raised when the cloud project changed between load and save.
+
+    The CLI mutates the whole project document and PUTs it back wholesale
+    (PUT /api/projects/{id}). If another writer (another CLI, the Web UI)
+    changed the cloud document after we loaded it, a blind PUT would silently
+    overwrite that change (lost update). save_project() raises this instead so
+    the caller can abort and re-run against fresh state. (e-841)
+    """
+
+
 class StoreApi:
     """Store implementation backed by Beacon API.
 
     Supports WebSocket-based change notification for the dashboard.
     Call start_watching() to receive push updates instead of polling.
     """
+
+    # Per-project hash captured at load time, keyed by project_id. Used by
+    # save_project() to detect concurrent cloud changes within a single CLI
+    # invocation (load -> mutate -> save). Class-level so it survives across the
+    # separate get_store() instances that load_project() and save_project() use.
+    _load_baseline: dict = {}
 
     # HTTP polling interval when WebSocket is unavailable (seconds)
     _POLL_INTERVAL = 5.0
@@ -51,14 +68,32 @@ class StoreApi:
                 data = self._ws_data
                 self._ws_data = None
                 self._last_hash = self._hash(data)
+                StoreApi._load_baseline[self._project_id] = self._last_hash
                 return data
         data = self._client.get_project(self._project_id)
         self._last_hash = self._hash(data)
+        StoreApi._load_baseline[self._project_id] = self._last_hash
         return data
 
     def save_project(self, data: dict) -> None:
+        # Lost-update guard (e-841): if the cloud document changed since we
+        # loaded it, a blind whole-document PUT would clobber the concurrent
+        # change. Detect and abort so the caller re-runs against fresh state.
+        baseline = StoreApi._load_baseline.get(self._project_id)
+        if baseline is not None:
+            try:
+                current = self._client.get_project(self._project_id)
+            except (RuntimeError, ConnectionError):
+                current = None  # cannot verify (offline/error) — fall through
+            if current is not None and self._hash(current) != baseline:
+                raise ConflictError(
+                    "Cloud project changed since it was read — aborting to "
+                    "avoid overwriting another writer's changes. "
+                    "Re-run the command."
+                )
         self._client.put_project(self._project_id, data)
         self._last_hash = self._hash(data)
+        StoreApi._load_baseline[self._project_id] = self._last_hash
 
     def has_changed(self) -> bool:
         """Check if the project has changed since last load/save.
