@@ -4812,6 +4812,8 @@ def cmd_doctor():
       3. Required Skills are installed in ~/.claude/skills/
       4. Token expiry (JWT decode — no network required)
       5. .beacon/cloud.json exists and has api_url set (if project is cloud-mode)
+      6. Repo skills/ content matches installed ~/.claude/skills/ content
+         (ms-10 e-722; only when running from a beacon source checkout).
 
     Only prints warnings for problems found. Exits 0 if all checks pass,
     exits 1 if at least one warning was emitted.
@@ -4933,6 +4935,36 @@ def cmd_doctor():
                         )
         except Exception:
             pass  # config.json unreadable — not a fatal error
+
+    # ------------------------------------------------------------------ #
+    # 6. Repo skills/ vs installed ~/.claude/skills/ drift (ms-10 e-722)
+    # ------------------------------------------------------------------ #
+    # This check only runs when we can find the drift script — i.e. running
+    # from a beacon source checkout. brew / pipx users don't have scripts/
+    # in their install tree and would get nothing meaningful from the check.
+    _beacon_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _drift_script = os.path.join(_beacon_root, "scripts", "check-skill-drift.py")
+    if os.path.isfile(_drift_script):
+        try:
+            _r = subprocess.run(
+                ["python3", _drift_script, "--json"],
+                capture_output=True, text=True, timeout=10,
+            )
+            _report = json.loads(_r.stdout) if _r.stdout.strip() else {"ok": True, "drift": []}
+            if not _report.get("ok", True):
+                _drift = _report.get("drift", [])
+                _names = [d.get("name", "?") for d in _drift]
+                _summary = ", ".join(_names[:5])
+                if len(_names) > 5:
+                    _summary += f", +{len(_names) - 5} more"
+                warnings.append(
+                    "WARN [skills-drift] repo skills/ and ~/.claude/skills/ differ.\n"
+                    f"       Affected: {_summary}\n"
+                    "       Run: beacon skill install"
+                )
+        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+            # Drift check is best-effort; never let it block doctor.
+            pass
 
     # ------------------------------------------------------------------ #
     # Summary
