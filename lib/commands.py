@@ -3522,18 +3522,109 @@ def cmd_issue_sync():
 # Skill install
 # ---------------------------------------------------------------------------
 
+def _resolve_skills_src() -> str:
+    """Locate the skills source directory.
+
+    Resolution order (first existing wins):
+      1. ``<beacon_root>/skills/`` — source / editable / brew layouts.
+         beacon_root = directory two parents up from commands.py.
+      2. ``<beacon_cli>/_bundled_skills/`` — wheel/pipx layout where this
+         file is at ``<site-packages>/beacon_cli/_bundled_lib/commands.py``
+         and skills were remapped via ``setuptools.package-dir`` into
+         ``<site-packages>/beacon_cli/_bundled_skills/``.
+
+    Returns empty string when neither exists so the caller can produce a
+    targeted error.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    # 1) source layout: <repo>/skills/
+    candidate = os.path.join(os.path.dirname(here), "skills")
+    if os.path.isdir(candidate):
+        return candidate
+    # 2) wheel layout: <site-packages>/beacon_cli/_bundled_skills/
+    candidate = os.path.join(here, "..", "_bundled_skills")
+    candidate = os.path.normpath(candidate)
+    if os.path.isdir(candidate):
+        return candidate
+    return ""
+
+
+def _resolve_hook_command(hook_basename: str) -> str:
+    """Return a cross-platform command string for the named hook.
+
+    Resolution order:
+      1. ``shutil.which("beacon-hook-<name>")`` — the console-script entry-point
+         installed by pipx / setuptools. Absolute path so Claude Code can
+         spawn it without PATH dependence.
+      2. Module-level ``CLAUDE_*_HOOK_SCRIPT`` constant when it points at an
+         existing file. This preserves the bash-installed source/brew layout
+         AND honors test-time ``monkeypatch.setattr(commands, "CLAUDE_…", …)``.
+      3. ``<beacon_root>/bin/<hook_basename>`` — source / brew layout where
+         the bash script lives next to the bin/beacon launcher.
+      4. ``python -m beacon_cli.hooks.<name>`` — last-resort fallback that
+         works as long as the Python interpreter that ran setup can still
+         import the module. Used inside CI / wheel install when entry-points
+         haven't been added to PATH yet (rare).
+
+    ``hook_basename`` is the bash filename (e.g. ``beacon-post-commit-hook.sh``);
+    we map it to the matching entry-point / module name.
+    """
+    # bash filename → (entry-point name, module name, module constant name)
+    mapping = {
+        "beacon-post-commit-hook.sh": (
+            "beacon-hook-post-commit",
+            "beacon_cli.hooks.post_commit",
+            "CLAUDE_HOOK_SCRIPT",
+        ),
+        "beacon-postcompact.sh": (
+            "beacon-hook-postcompact",
+            "beacon_cli.hooks.postcompact",
+            "CLAUDE_POSTCOMPACT_HOOK_SCRIPT",
+        ),
+        "beacon-save-hook.sh": (
+            "beacon-hook-save",
+            "beacon_cli.hooks.save_hook",
+            "CLAUDE_SAVE_HOOK_SCRIPT",
+        ),
+    }
+    entry_name, module_name, const_name = mapping.get(
+        hook_basename, ("", "", "")
+    )
+
+    if entry_name:
+        resolved = shutil.which(entry_name)
+        if resolved:
+            return resolved
+
+    # Honor the module-level constant (set at import time, but tests
+    # routinely monkeypatch them — keeping this lookup means existing
+    # test_install_hooks.py contracts continue to hold).
+    if const_name:
+        const_val = globals().get(const_name, "")
+        if const_val and os.path.exists(const_val):
+            return const_val
+
+    # Source / brew: bash next to the launcher.
+    bash_path = _find_hook(hook_basename)
+    if bash_path and os.path.exists(bash_path):
+        return bash_path
+
+    # Final fallback: invoke the module via the current interpreter.
+    if module_name:
+        return f"{sys.executable} -m {module_name}"
+    return ""
+
+
 def cmd_skill_install():
     """Install beacon Claude Code Skills into ~/.claude/skills/, update CLAUDE.md, and configure hooks."""
     import shutil
     _append_claude_md()
 
-    # Find skills source relative to this file: <beacon_root>/skills/
-    beacon_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    skills_src = os.path.join(beacon_root, "skills")
-
-    if not os.path.isdir(skills_src):
-        print(f"Error: skills directory not found at {skills_src}")
+    skills_src = _resolve_skills_src()
+    if not skills_src:
+        print("Error: skills directory not found (looked in source layout and wheel _bundled_skills).")
         sys.exit(1)
+    beacon_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     # Destination: ~/.claude/skills/
     home = os.path.expanduser("~")
@@ -3601,9 +3692,15 @@ def cmd_skill_install():
         for path in companion_installed:
             print(f"  {path}")
 
-    # Configure Claude Code PostToolUse hooks
-    hook_script = _find_hook("beacon-post-commit-hook.sh")
-    settings_path = os.path.join(home, ".claude", "settings.json")
+    # Configure Claude Code PostToolUse hooks.
+    # ms-44 e-777: cross-platform — _resolve_hook_command returns a console-
+    # script entry-point path (pipx install) or the bash .sh path (source /
+    # brew layout) or a `python -m beacon_cli.hooks.<name>` fallback.
+    hook_script = _resolve_hook_command("beacon-post-commit-hook.sh")
+    settings_path = (
+        os.environ.get("BEACON_SETTINGS_PATH", "")
+        or os.path.join(home, ".claude", "settings.json")
+    )
     _install_claude_hooks(hook_script, settings_path)
 
     # ms-46 e-725 follow-up: install git pre-commit hook for beacon dev clones.
@@ -3875,6 +3972,18 @@ def cmd_update():
     sys.exit(1)
 
 
+def _is_path_command(cmd: str) -> bool:
+    """Return True when ``cmd`` looks like a single executable path.
+
+    ms-44 e-777: ``_install_claude_hooks`` originally received a bash .sh
+    path and gated registration on ``os.path.exists``. The cross-platform
+    refactor may pass back a multi-token command like
+    ``/usr/bin/python3 -m beacon_cli.hooks.post_commit`` — that's not a
+    file path, so we skip the existence check for those.
+    """
+    return bool(cmd) and " " not in cmd.strip()
+
+
 def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
     """Add beacon PostToolUse + PostCompact hooks to Claude Code settings.json.
 
@@ -3883,8 +3992,15 @@ def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
     PostCompact orientation hook (registered by the legacy `_install_claude_hook`
     code path used by `beacon init`). The two install paths must produce the
     same end state.
+
+    ms-44 e-777: ``hook_script`` may now be a console-script absolute path
+    (pipx install) or a ``python -m ...`` fallback command, not just a .sh.
+    We only run the disk-existence guard for single-token commands.
     """
-    if not os.path.exists(hook_script):
+    if not hook_script:
+        print("Warning: could not resolve a PostToolUse hook command.")
+        return
+    if _is_path_command(hook_script) and not os.path.exists(hook_script):
         print(f"Warning: hook script not found at {hook_script}")
         return
 
@@ -3900,17 +4016,38 @@ def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
     hooks = settings.setdefault("hooks", {})
     post_tool_use = hooks.setdefault("PostToolUse", [])
 
-    # Dedup by basename: remove stale entries pointing to old install paths
-    # (e.g. previous brew Cellar versions that no longer exist after upgrade).
-    hook_basename = os.path.basename(hook_script)
+    # Dedup by hook *identity*: remove stale entries pointing to old install
+    # paths (e.g. previous brew Cellar versions that no longer exist after
+    # upgrade) or the obsolete bash .sh path after a pipx-style upgrade to the
+    # Python entry-point.
+    #
+    # Identity rules:
+    #   - Same basename (e.g. ``beacon-post-commit-hook.sh``) and different
+    #     full path → stale.
+    #   - Same "kind" — either references ``beacon-post-commit-hook`` /
+    #     ``beacon-hook-post-commit`` / ``beacon_cli.hooks.post_commit`` —
+    #     and different full command → stale.
+    hook_basename = (
+        os.path.basename(hook_script) if _is_path_command(hook_script) else hook_script
+    )
+    identity_substrings = (
+        "beacon-post-commit-hook",
+        "beacon-hook-post-commit",
+        "beacon_cli.hooks.post_commit",
+    )
     removed_stale = False
     cleaned_post = []
     for entry in post_tool_use:
         new_hooks_in_entry = []
         for h in entry.get("hooks", []):
             existing = h.get("command", "")
-            same_name = os.path.basename(existing) == hook_basename
-            if same_name and existing != hook_script:
+            same_basename = (
+                _is_path_command(existing)
+                and os.path.basename(existing) == hook_basename
+            )
+            same_kind = any(s in existing for s in identity_substrings)
+            stale = (same_basename or same_kind) and existing != hook_script
+            if stale:
                 removed_stale = True
                 continue  # drop stale
             new_hooks_in_entry.append(h)
@@ -3940,13 +4077,20 @@ def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
         })
         posttooluse_dirty = True
 
-    # ms-43 e-672: also register the PostCompact hook so this code path has
-    # parity with `_install_claude_hook` (used by `beacon init`).
+    # ms-43 e-672 / ms-44 e-777: register the PostCompact hook with the
+    # cross-platform resolver so wheel installs (no bash .sh on disk) still
+    # land on the Python entry-point.
     postcompact_dirty = False
-    if CLAUDE_POSTCOMPACT_HOOK_SCRIPT and os.path.exists(CLAUDE_POSTCOMPACT_HOOK_SCRIPT):
+    postcompact_cmd = _resolve_hook_command("beacon-postcompact.sh")
+    pc_ok = bool(postcompact_cmd) and (
+        not _is_path_command(postcompact_cmd) or os.path.exists(postcompact_cmd)
+    )
+    if pc_ok:
         post_compact = hooks.setdefault("PostCompact", [])
         already_pc = any(
-            "beacon-postcompact" in h.get("command", "")
+            ("beacon-postcompact" in h.get("command", ""))
+            or ("beacon-hook-postcompact" in h.get("command", ""))
+            or ("beacon_cli.hooks.postcompact" in h.get("command", ""))
             for entry in post_compact
             for h in entry.get("hooks", [])
         )
@@ -3954,7 +4098,7 @@ def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
             post_compact.append({
                 "hooks": [{
                     "type": "command",
-                    "command": CLAUDE_POSTCOMPACT_HOOK_SCRIPT,
+                    "command": postcompact_cmd,
                     "timeout": 10,
                     "statusMessage": "Beacon: post-compaction orientation...",
                 }],

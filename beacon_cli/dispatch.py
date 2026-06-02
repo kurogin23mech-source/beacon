@@ -499,6 +499,19 @@ def build_parser() -> argparse.ArgumentParser:
     project_sub.add_parser("archive", add_help=False)
     project_sub.add_parser("unarchive", add_help=False)
 
+    # ---- skill install (ms-44 e-777) ----
+    # `beacon skill install` is the cross-platform install path used by
+    # `beacon update` and the `/beacon-init` flow. Bash dispatches it via
+    # `python3 commands.py skill_install`; we mirror that with no flags
+    # — commands.py reads BEACON_FORCE / BEACON_SETTINGS_PATH from env if
+    # present, so we forward those untouched.
+    p_skill = sub.add_parser("skill", help="Skill operations", add_help=False)
+    p_skill.add_argument("--help", "-h", action="store_true", dest="show_help")
+    skill_sub = p_skill.add_subparsers(dest="skill_cmd", metavar="<subcmd>")
+    p_skill_install = skill_sub.add_parser("install", add_help=False)
+    p_skill_install.add_argument("--force", action="store_true")
+    p_skill_install.add_argument("--settings-path", dest="settings_path", default="")
+
     sub.add_parser("help", add_help=False)
 
     return p
@@ -1214,6 +1227,29 @@ def _handle_doctor(root: Path, args: argparse.Namespace) -> int:
     return _run_commands_py(root, "doctor", {})
 
 
+def _handle_skill(root: Path, args: argparse.Namespace) -> int:
+    """`beacon skill install [--force] [--settings-path PATH]`.
+
+    Delegates to ``commands.py skill_install`` after surfacing optional
+    flags as ``BEACON_*`` env vars. The bash path uses
+    ``python3 commands.py skill_install`` with no env, so the Python
+    path stays env-superset-compatible.
+    """
+    if args.show_help or args.skill_cmd is None:
+        print("Usage: beacon skill install [--force] [--settings-path PATH]")
+        return 0 if args.show_help else 2
+    if args.skill_cmd != "install":
+        print(f"Unknown skill subcommand: {args.skill_cmd}")
+        return 2
+    env: Dict[str, str] = {}
+    if getattr(args, "force", False):
+        env["BEACON_FORCE"] = "1"
+    settings_path = getattr(args, "settings_path", "") or ""
+    if settings_path:
+        env["BEACON_SETTINGS_PATH"] = settings_path
+    return _run_commands_py(root, "skill_install", env)
+
+
 # ---------------------------------------------------------------------------
 # Top-level entry — argv parse + dispatch
 # ---------------------------------------------------------------------------
@@ -1240,6 +1276,7 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "entry": _handle_entry,
     "project": _handle_project,
     "doctor": _handle_doctor,
+    "skill": _handle_skill,
 }
 
 
@@ -1271,11 +1308,12 @@ def _print_top_help() -> None:
         "  beacon entry move <entry-id> [-t task-id | -m ms-id]\n"
         "  beacon project archive|unarchive\n"
         "  beacon doctor\n"
+        "  beacon skill install [--force]\n"
         "\n"
         "Not yet available on bash-less systems (tracked under ms-44):\n"
         "  beacon setup, dashboard (tmux), beacon update, beacon pr review,\n"
         "  beacon cloud open/launch (tmux dashboard), beacon retro (interactive),\n"
-        "  beacon operation/run/incident/member, beacon skill install (hooks).\n"
+        "  beacon operation/run/incident/member.\n"
     )
 
 
