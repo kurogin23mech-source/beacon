@@ -1,0 +1,42 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+
+PackageIdentifier: BeaconAI.BeaconDesktop
+PackageVersion: 0.1.0
+
+# Tauri emits MSI by default on Windows (via WiX).
+InstallerType: wix
+
+# Scope: per-user install (no admin required). Override to `machine` if we
+# ever publish a per-machine installer.
+Scope: user
+
+# Languages supported by the UI.
+InstallModes:
+  - interactive
+  - silent
+  - silentWithProgress
+
+# Allow uninstall via Windows Settings > Apps as well as `winget uninstall`.
+UpgradeBehavior: install
+
+# ProductCode comes from the Tauri/WiX build — it is generated per-version
+# unless we hard-code an `UpgradeCode`. Fill in after the first MSI is built
+# (extract from the .msi with `msiinfo` or PowerShell `Get-AppxPackage`).
+# ProductCode: '{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}'
+
+ReleaseDate: 2026-06-02
+
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/r-kida2/beacon/releases/download/desktop-v0.1.0/Beacon-0.1.0-x64.msi
+    # 64-zero placeholder — REPLACE before submission with the real SHA-256
+    # from the .msi.sha256 sidecar on the GitHub Release.
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+
+# (future) Add arm64 once we publish Windows ARM builds:
+#  - Architecture: arm64
+#    InstallerUrl: https://github.com/r-kida2/beacon/releases/download/desktop-v0.1.0/Beacon-0.1.0-arm64.msi
+#    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+
+ManifestType: installer
+ManifestVersion: 1.6.0

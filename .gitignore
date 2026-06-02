@@ -4,3 +4,9 @@ __pycache__/
 .beacon/
 lib/firebase_config.json
 .worktrees/
+
+# Python packaging build artifacts (ms-44 e-695)
+build/
+dist/
+*.egg-info/
+.pytest_cache/

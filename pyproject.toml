@@ -1,0 +1,115 @@
+# =============================================================================
+#  Beacon - Python packaging manifest
+# =============================================================================
+#
+#  This file enables `pipx install beacon` (and `pip install -e .`) so Beacon
+#  can be installed across all OSes — including Windows, where the legacy
+#  `bin/beacon` bash entry-point does not work.
+#
+#  STATUS: ms-44 e-695 scaffold — the Python entry-point currently delegates
+#  to the existing `bin/beacon` shell script when bash is available, and falls
+#  back to a direct `lib/commands.py` dispatch for the subset of commands that
+#  are already Python-native (`--version`, `status`, `help`).
+#
+#  Full bash-to-Python conversion is tracked under e-695 and will land in a
+#  later session. This scaffold is enough for:
+#    - PyPI publishing  (CI: .github/workflows/release-build.yml)
+#    - `pipx install beacon` succeeding on macOS / Linux / Windows
+#    - `beacon --version` returning the version on all OSes
+# =============================================================================
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "beacon"
+# Sourced dynamically from lib/commands.py:__version__ to keep a single source
+# of truth. Update there to bump the version.
+dynamic = ["version"]
+description = "AI-driven milestone tracker for Claude Code sessions"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+    { name = "r-kida2", email = "kurogin23mech@gmail.com" },
+]
+keywords = ["ai", "claude-code", "milestone", "project-management", "productivity"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+]
+# Core mode has no Python deps. Cloud features pull in google-auth via the
+# `cloud` extra (`pipx install 'beacon[cloud]'`).
+dependencies = []
+
+[project.optional-dependencies]
+cloud = [
+    "google-auth-oauthlib>=1.2.0",
+    "google-auth>=2.29.0",
+]
+dev = [
+    "build>=1.0",
+    "pytest>=7.0",
+    "ruff>=0.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/r-kida2/beacon"
+Repository = "https://github.com/r-kida2/beacon"
+Issues = "https://github.com/r-kida2/beacon/issues"
+
+[project.scripts]
+# Cross-platform entry-point. On macOS/Linux this delegates to `bin/beacon`
+# (bash) when present so existing behaviour is identical; on Windows (no bash)
+# it falls back to the Python dispatch in `beacon_cli/main.py`.
+beacon = "beacon_cli.main:main"
+
+# -----------------------------------------------------------------------------
+# Packaging layout
+# -----------------------------------------------------------------------------
+# Beacon's legacy layout has `lib/*.py` files (NOT a Python package — no
+# __init__.py) plus `bin/beacon` (bash). We introduce a thin `beacon_cli/`
+# Python package on top of this without disturbing the existing layout.
+#
+#   beacon_cli/
+#     __init__.py
+#     main.py            # entry-point dispatcher (bash shim + Python fallback)
+#     _version.py        # source of truth for __version__
+#     _bundled/          # populated at install time with copies of lib/ + bin/
+#
+# `lib/` and `bin/` are remapped into the package via setuptools `package_dir`
+# so a wheel install carries everything `commands.py` needs.
+# -----------------------------------------------------------------------------
+
+[tool.setuptools]
+packages = ["beacon_cli", "beacon_cli._bundled_lib"]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = { attr = "beacon_cli._version.__version__" }
+
+[tool.setuptools.package-dir]
+"beacon_cli._bundled_lib" = "lib"
+
+[tool.setuptools.package-data]
+"beacon_cli._bundled_lib" = [
+    "*.py",
+    "*.json",
+    "*.example",
+]
+beacon_cli = [
+    "_bundled_bin/beacon",
+    "_bundled_bin/*.sh",
+]
