@@ -30,38 +30,34 @@ Beaconが想定するワークフローは**コミット駆動・マイルスト
 
 ## Requirements
 
-- Python 3.8+
-- tmux
-- Git
+- **Python 3.9+** (CLI core)
+- **Git** (for commit tracking and worktree dispatch)
+- *Optional:* tmux (for the curses dashboard on macOS/Linux) — not needed on Windows or with Tauri Desktop / Web UI
 
 ## Installation
 
-### Homebrew (macOS — recommended)
+Beacon ships in two forms that work independently:
+
+- **Beacon Desktop** — Tauri-based UI app (`.dmg` / `.msi` / `.AppImage`) you double-click. CLI is bundled inside.
+- **Beacon CLI** — command-line tool (`beacon`) for terminal users, AI agents, and CI.
+
+### Quick install — pick your OS
+
+| OS | Beacon Desktop | Beacon CLI |
+|---|---|---|
+| **macOS** | `brew install --cask beacon-desktop`<br>or download `.dmg` from [Releases](https://github.com/r-kida2/beacon/releases) | `brew install r-kida2/beacon/beacon`<br>or `pipx install beacon` |
+| **Windows** | `winget install BeaconAI.BeaconDesktop`<br>or download `.msi` from [Releases](https://github.com/r-kida2/beacon/releases) | `pipx install beacon` |
+| **Linux** | Download `.AppImage` from [Releases](https://github.com/r-kida2/beacon/releases) and `chmod +x` | `pipx install beacon`<br>or Homebrew on Linux |
+
+`pipx install beacon` works natively on all three OSes — PowerShell-only Windows users get the full CLI without WSL2.
+
+For cloud features (Google auth, team collaboration), add the `cloud` extra:
 
 ```bash
-brew tap kurogin23mech-source/beacon
-brew install beacon
+pipx install 'beacon[cloud]'
 ```
 
-### Manual
-
-```bash
-# Clone the repository
-git clone https://github.com/kurogin23mech-source/beacon.git
-
-# Add to PATH
-export PATH="$PATH:$(pwd)/beacon/bin"
-```
-
-Add the `export` line to your `~/.zshrc` or `~/.bashrc` to make it permanent.
-
-For cloud features (Google auth, team collaboration), also install:
-
-```bash
-pip install google-auth-oauthlib google-auth
-```
-
-See [INSTALL.md](INSTALL.md) for full details including tap setup for maintainers.
+See [INSTALL.md](INSTALL.md) for full details: tap setup for maintainers, code-signing status, SmartScreen workarounds, troubleshooting per OS.
 
 ## Quick Start
 
