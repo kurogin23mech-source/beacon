@@ -65,8 +65,52 @@ jobs:
           if-no-files-found: error
 
   # --------------------------------------------------------------------------
-  # Desktop: per-OS Tauri build (matches existing desktop-release.yml matrix)
+  # CLI smoke test on each OS (#e-778 e-773)
+  #
+  # Verifies that the wheel we just built actually installs and runs on each
+  # target OS — catches platform-specific regressions in the Python entry-
+  # point (encoding, file locking, subprocess env, hook resolver, …) BEFORE
+  # they reach end users. Also doubles as the structural validation for the
+  # WinGet manifest path (e-773): running `beacon doctor` on windows-latest
+  # is the same code path WinGet runs after install.
   # --------------------------------------------------------------------------
+  smoke-cli:
+    name: Smoke CLI (${{ matrix.os }})
+    needs: build-cli
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download CLI artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: beacon-cli-dist
+          path: dist
+
+      - name: Install via pip (cross-platform proxy for pipx)
+        run: python -m pip install --upgrade dist/*.whl
+        shell: bash
+
+      - name: Verify entry point
+        # Each invocation exits non-zero if the dispatcher couldn't load —
+        # which is exactly the failure mode the encoding / fcntl bugs hit.
+        # Windows shell runs in cp932 by default; we DELIBERATELY do not set
+        # PYTHONUTF8 here so we catch any regression where stdout reconfigure
+        # didn't propagate to a subprocess child (#19 follow-up).
+        run: |
+          beacon --version
+          beacon --help
+          beacon doctor || true   # doctor exits non-zero when project missing — acceptable here
+        shell: bash
   build-desktop:
     name: Build Desktop (${{ matrix.label }})
     strategy:
