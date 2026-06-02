@@ -200,6 +200,7 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 | `beacon task update <id> [options]` | Update fields / 更新 |
 | `beacon task delete <id>` | Logical delete / 論理削除 |
 | `beacon entry move <id> -t <task-id>` | Move entry under a task / タスク配下に移動 |
+| `beacon entry purge <e-id> --reason "..." [--index <n>]` | Hard delete an entry record — recovery for duplicate-ID corruption (e-863) / ハード削除（重複ID復旧用） |
 
 ### Pull Requests
 
@@ -285,6 +286,7 @@ Operations track recurring operational workloads (daily batch jobs, incident man
 |---------|-------------|
 | `beacon operation open "title" [--schedule daily\|weekdays\|weekly] [--log-source name]` | Start a new Operation cycle / 新しいOperationを開始 |
 | `beacon operation close <op-id>` | Close an Operation cycle / クローズ |
+| `beacon operation purge <op-id> --reason "..." [--index <n>]` | Hard delete an operation record — recovery for duplicate-ID corruption (e-863) / ハード削除（重複ID復旧用） |
 | `beacon operation list [--json]` | List Operations / 一覧 |
 | `beacon operation show <op-id> [--json]` | Show Operation with entries / 詳細表示 |
 | `beacon run record -o <op-id> --batch <name> --status ok\|warning\|error --desc "..."` | Record a batch run result / バッチ実行結果を記録 |
