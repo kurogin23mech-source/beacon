@@ -1644,6 +1644,35 @@ cmd_pr() {
     esac
 }
 
+# --- Locate the project root by walking up from CWD (like git) so beacon
+#     works from any subdirectory, not just the dir that holds .beacon/ (e-862).
+find_beacon_root() {
+    local dir="$PWD"
+    while [ -n "$dir" ]; do
+        if [ -f "$dir/.beacon/project.json" ]; then
+            printf '%s\n' "$dir"
+            return 0
+        fi
+        [ "$dir" = "/" ] && break
+        dir="$(dirname "$dir")"
+    done
+    return 1
+}
+
+# Relocate to the project root before dispatch. `setup`/`init` operate on the
+# current directory by design, so they are exempt.
+case "${1:-}" in
+    setup|init) ;;
+    *)
+        if [ ! -f "$BEACON_PROJECT_FILE" ]; then
+            _beacon_root="$(find_beacon_root || true)"
+            if [ -n "${_beacon_root:-}" ]; then
+                cd "$_beacon_root"
+            fi
+        fi
+        ;;
+esac
+
 # --- Main dispatch ---
 case "${1:-}" in
     ""|start)
