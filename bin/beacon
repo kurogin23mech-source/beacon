@@ -43,6 +43,7 @@ Tasks & Progress:
   beacon task list [-m <ms-id>]         List tasks
   beacon task update <entry-id>         Update task description/status
   beacon task cancel <entry-id>         Cancel a task
+  beacon entry purge <e-id> --reason <text> [--index <n>]   Hard delete an entry (recovery; e-863)
   beacon log [message]                  Record HEAD commit to active milestone
   beacon save "desc" [-m <ms-id>]       Record a manual progress note
   beacon sync                           Auto-sync recent git commits
@@ -68,6 +69,7 @@ Documents:
 Operations:
   beacon operation open "<title>" [--schedule daily|weekdays|weekly] [--log-source <name>]
   beacon operation close <op-id>
+  beacon operation purge <op-id> --reason <text> [--index <n>]   Hard delete an operation (recovery; e-863)
   beacon operation list [--json]
   beacon operation show <op-id> [--json]
   beacon run record -o <op-id> --batch <name> --status ok|warning|error --desc "..."
@@ -560,6 +562,53 @@ cmd_milestone_purge() {
     BEACON_MS_ID="$ms_id" BEACON_REASON="$reason" \
         BEACON_INDEX="$index" BEACON_JSON="$json_flag" \
         python3 "$COMMANDS_PY" milestone_purge
+}
+
+cmd_entry_purge() {
+    # e-863: hard-delete recovery for duplicate entry-ID corruption.
+    # Like cmd_milestone_purge, intentionally does NOT call ensure_project.
+    local entry_id="" reason="" index="" json_flag=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json)      json_flag="1";    shift   ;;
+            -r|--reason) reason="${2:-}";  shift 2 ;;
+            --index)     index="${2:-}";   shift 2 ;;
+            *)           entry_id="$1";    shift   ;;
+        esac
+    done
+    if [ -z "$entry_id" ] || [ -z "$reason" ]; then
+        echo "Usage: beacon entry purge <e-id> --reason <text> [--index <n>] [--json]"
+        echo
+        echo "Hard-deletes an entry record (recovery for duplicate-ID corruption; e-863)."
+        echo "Use --index <n> when the same e-id appears more than once."
+        exit 1
+    fi
+    BEACON_ENTRY_ID="$entry_id" BEACON_REASON="$reason" \
+        BEACON_INDEX="$index" BEACON_JSON="$json_flag" \
+        python3 "$COMMANDS_PY" entry_purge
+}
+
+cmd_operation_purge() {
+    # e-863: hard-delete recovery for duplicate operation-ID corruption.
+    local op_id="" reason="" index="" json_flag=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json)      json_flag="1";    shift   ;;
+            -r|--reason) reason="${2:-}";  shift 2 ;;
+            --index)     index="${2:-}";   shift 2 ;;
+            *)           op_id="$1";       shift   ;;
+        esac
+    done
+    if [ -z "$op_id" ] || [ -z "$reason" ]; then
+        echo "Usage: beacon operation purge <op-id> --reason <text> [--index <n>] [--json]"
+        echo
+        echo "Hard-deletes an operation record (recovery for duplicate-ID corruption; e-863)."
+        echo "Use --index <n> when the same op-id appears more than once."
+        exit 1
+    fi
+    BEACON_OP_ID="$op_id" BEACON_REASON="$reason" \
+        BEACON_INDEX="$index" BEACON_JSON="$json_flag" \
+        python3 "$COMMANDS_PY" operation_purge
 }
 
 cmd_milestone_depends() {
@@ -1780,8 +1829,13 @@ case "${1:-}" in
                 shift 2
                 cmd_entry_move "$@"
                 ;;
+            purge)
+                shift 2
+                cmd_entry_purge "$@"
+                ;;
             *)
                 echo "Usage: beacon entry move <entry-id> -t <task-id> | -m <ms-id>"
+                echo "       beacon entry purge <e-id> --reason <text> [--index <n>]"
                 ;;
         esac
         ;;
@@ -1818,8 +1872,16 @@ case "${1:-}" in
         esac
         ;;
     operation)
-        ensure_project
+        # purge is a recovery path — it must run even on a project that fails
+        # validation, so it skips ensure_project (like milestone purge).
+        if [ "${2:-}" != "purge" ]; then
+            ensure_project
+        fi
         case "${2:-}" in
+            purge)
+                shift 2
+                cmd_operation_purge "$@"
+                ;;
             open)
                 shift 2
                 title="" schedule="weekdays" log_source="" status="open"

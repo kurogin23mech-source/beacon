@@ -573,6 +573,127 @@ def milestone_purge(data: dict, ms_id: str, *, reason: str,
     return target_ms
 
 
+# ---------------------------------------------------------------------------
+# Entry / Operation purge — recovery for duplicate entry / operation IDs.
+# These are the e-N / op-N analogues of milestone_purge (Issue #14 / e-863):
+# validate_project rejects loading a project with duplicate IDs of ANY kind,
+# but the only hard-delete recovery path was for milestones. Without these,
+# a duplicate entry/operation ID would lock the whole CLI with no structural
+# way out (doctor could only say "contact maintainers"). Allocators are
+# already max-id based so duplicates shouldn't arise in normal use, but the
+# recovery path must be symmetric or the asymmetry re-creates Issue #14 one
+# level down.
+# ---------------------------------------------------------------------------
+
+def find_operations(data: dict, op_id: str) -> list[dict]:
+    """Return ALL operation records whose id matches `op_id` (0, 1, or >1)."""
+    return [op for op in data.get("operations", []) if op.get("id") == op_id]
+
+
+def _collect_entry_matches(entries: list, entry_id: str, out: list) -> None:
+    """Append (parent_list, index, entry) for every match, recursing into
+    nested entries. parent_list + index is what a caller needs to pop()."""
+    for i, entry in enumerate(entries):
+        if entry.get("id") == entry_id:
+            out.append((entries, i, entry))
+        _collect_entry_matches(entry.get("entries", []), entry_id, out)
+
+
+def find_entries(data: dict, entry_id: str) -> list[dict]:
+    """Return ALL entry records matching `entry_id` across milestones and
+    operations, including nested entries (normally 0 or 1)."""
+    matches: list = []
+    for ms in data.get("milestones", []):
+        _collect_entry_matches(ms.get("entries", []), entry_id, matches)
+    for op in data.get("operations", []):
+        _collect_entry_matches(op.get("entries", []), entry_id, matches)
+    return [entry for (_lst, _i, entry) in matches]
+
+
+def entry_purge(data: dict, entry_id: str, *, reason: str,
+                index: int | None = None) -> dict:
+    """Physically remove an entry record (e-N). Returns the removed entry.
+
+    The entry-level analogue of milestone_purge (e-863). Entries may be
+    nested inside milestones or operations; this searches all of them.
+    `reason` is required (data-immutability-principle); `index` (1-based)
+    disambiguates duplicates. Soft delete (`status="cancelled"`) cannot help
+    a duplicate-ID corruption because both records keep the same id.
+    """
+    if not reason:
+        raise ValueError("entry_purge requires a reason")
+    matches: list[tuple[list, int, dict]] = []
+    for ms in data.get("milestones", []):
+        _collect_entry_matches(ms.get("entries", []), entry_id, matches)
+    for op in data.get("operations", []):
+        _collect_entry_matches(op.get("entries", []), entry_id, matches)
+    if not matches:
+        raise ValueError(f"Entry not found: {entry_id}")
+    if len(matches) == 1:
+        if index is not None and index != 1:
+            raise ValueError(
+                f"Entry '{entry_id}' has only 1 record but --index {index} was given."
+            )
+        parent_list, pos, target = matches[0]
+    else:
+        if index is None:
+            raise ValueError(
+                f"Entry '{entry_id}' has {len(matches)} records. "
+                f"Specify which to purge with --index <n> (1..{len(matches)})."
+            )
+        if index < 1 or index > len(matches):
+            raise ValueError(
+                f"--index {index} is out of range for '{entry_id}' (valid: 1..{len(matches)})."
+            )
+        parent_list, pos, target = matches[index - 1]
+    meta = target.setdefault("meta", {})
+    meta["purged_at"] = _now_iso()
+    meta["purged_by"] = _get_actor()
+    meta["purge_reason"] = reason
+    parent_list.pop(pos)
+    return target
+
+
+def operation_purge(data: dict, op_id: str, *, reason: str,
+                    index: int | None = None) -> dict:
+    """Physically remove an operation record (op-N). Returns the removed op.
+
+    The operation-level analogue of milestone_purge (e-863). `reason` is
+    required; `index` (1-based) disambiguates duplicate op-ids.
+    """
+    if not reason:
+        raise ValueError("operation_purge requires a reason")
+    matches: list[tuple[int, dict]] = [
+        (i, op) for i, op in enumerate(data.get("operations", []))
+        if op.get("id") == op_id
+    ]
+    if not matches:
+        raise ValueError(f"Operation not found: {op_id}")
+    if len(matches) == 1:
+        if index is not None and index != 1:
+            raise ValueError(
+                f"Operation '{op_id}' has only 1 record but --index {index} was given."
+            )
+        target_pos, target_op = matches[0]
+    else:
+        if index is None:
+            raise ValueError(
+                f"Operation '{op_id}' has {len(matches)} records. "
+                f"Specify which to purge with --index <n> (1..{len(matches)})."
+            )
+        if index < 1 or index > len(matches):
+            raise ValueError(
+                f"--index {index} is out of range for '{op_id}' (valid: 1..{len(matches)})."
+            )
+        target_pos, target_op = matches[index - 1]
+    meta = target_op.setdefault("meta", {})
+    meta["purged_at"] = _now_iso()
+    meta["purged_by"] = _get_actor()
+    meta["purge_reason"] = reason
+    data["operations"].pop(target_pos)
+    return target_op
+
+
 def milestone_delete(data: dict, ms_id: str, *, reason: str = "") -> dict:
     """Cancel a milestone (soft delete). Returns the milestone."""
     for ms in data["milestones"]:

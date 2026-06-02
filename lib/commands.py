@@ -890,6 +890,181 @@ def cmd_milestone_purge():
             print("  Run `beacon doctor` to inspect and purge the next one.")
 
 
+def _print_residual_dups(dup_report: dict) -> None:
+    """Shared tail for *_purge commands: report duplicates still present."""
+    remaining: list[str] = []
+    for category, dupes in dup_report.items():
+        for did, n in dupes.items():
+            remaining.append(f"{category[:-1]} '{did}' x{n}")
+    print("  Note: residual duplicates remain — " + ", ".join(remaining))
+    print("  Run `beacon doctor` to inspect and purge the next one.")
+
+
+def cmd_entry_purge():
+    """Hard-delete an entry record (e-N) — duplicate-ID recovery (e-863).
+
+    The entry-level analogue of cmd_milestone_purge. Loads via
+    load_project_unsafe so it works on a project that fails validation, and
+    falls back to an unsafe save while residual duplicates remain.
+    """
+    entry_id = os.environ.get("BEACON_ENTRY_ID", "")
+    reason = os.environ.get("BEACON_REASON", "")
+    index_str = os.environ.get("BEACON_INDEX", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not entry_id:
+        print("Error: entry-id is required.", file=sys.stderr)
+        print("  Usage: beacon entry purge <e-id> --reason \"...\" [--index <n>]",
+              file=sys.stderr)
+        sys.exit(1)
+    if not reason:
+        print("Error: --reason is required for entry purge "
+              "(audit trail per CORE doc data-immutability-principle).",
+              file=sys.stderr)
+        sys.exit(1)
+    index: Optional[int] = None
+    if index_str:
+        try:
+            index = int(index_str)
+        except ValueError:
+            print(f"Error: --index must be an integer, got '{index_str}'.",
+                  file=sys.stderr)
+            sys.exit(1)
+
+    data = load_project_unsafe()
+    matches = core.find_entries(data, entry_id)
+    if not matches:
+        print(f"Entry not found: {entry_id}", file=sys.stderr)
+        sys.exit(1)
+    if len(matches) > 1 and index is None:
+        print(f"Entry '{entry_id}' has {len(matches)} duplicate records. "
+              "Re-run with --index <n>:", file=sys.stderr)
+        for i, e in enumerate(matches, 1):
+            desc = e.get("description", "(no description)")
+            etype = e.get("type", "?")
+            print(f"  --index {i}  type={etype}  desc={desc[:60]}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        purged = core.entry_purge(data, entry_id, reason=reason, index=index)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    dup_report = core.find_duplicate_ids(data)
+    still_dirty = any(dup_report.values())
+    op = {
+        "op": "entry_purge",
+        "entry_id": entry_id,
+        "index": index,
+        "reason": reason,
+        "purged_desc": purged.get("description", ""),
+    }
+    if still_dirty:
+        save_project_unsafe(data, op=op)
+    else:
+        try:
+            save_project(data, op=op)
+        except ValueError as e:
+            save_project_unsafe(data, op=op)
+            print(f"Warning: post-purge validation failed: {e}", file=sys.stderr)
+
+    if json_mode:
+        print(json.dumps({
+            "id": purged.get("id", entry_id),
+            "description": purged.get("description", ""),
+            "purged": True,
+            "still_dirty": still_dirty,
+        }, ensure_ascii=False))
+    else:
+        print(f"Purged entry: [{purged.get('id', entry_id)}] "
+              f"{purged.get('description', '')[:80]}")
+        print(f"  Reason: {reason}")
+        if still_dirty:
+            _print_residual_dups(dup_report)
+
+
+def cmd_operation_purge():
+    """Hard-delete an operation record (op-N) — duplicate-ID recovery (e-863).
+
+    The operation-level analogue of cmd_milestone_purge.
+    """
+    op_id = os.environ.get("BEACON_OP_ID", "")
+    reason = os.environ.get("BEACON_REASON", "")
+    index_str = os.environ.get("BEACON_INDEX", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not op_id:
+        print("Error: op-id is required.", file=sys.stderr)
+        print("  Usage: beacon operation purge <op-id> --reason \"...\" [--index <n>]",
+              file=sys.stderr)
+        sys.exit(1)
+    if not reason:
+        print("Error: --reason is required for operation purge "
+              "(audit trail per CORE doc data-immutability-principle).",
+              file=sys.stderr)
+        sys.exit(1)
+    index: Optional[int] = None
+    if index_str:
+        try:
+            index = int(index_str)
+        except ValueError:
+            print(f"Error: --index must be an integer, got '{index_str}'.",
+                  file=sys.stderr)
+            sys.exit(1)
+
+    data = load_project_unsafe()
+    matches = core.find_operations(data, op_id)
+    if not matches:
+        print(f"Operation not found: {op_id}", file=sys.stderr)
+        sys.exit(1)
+    if len(matches) > 1 and index is None:
+        print(f"Operation '{op_id}' has {len(matches)} duplicate records. "
+              "Re-run with --index <n>:", file=sys.stderr)
+        for i, o in enumerate(matches, 1):
+            title = o.get("title", "(no title)")
+            status = o.get("status", "?")
+            print(f"  --index {i}  status={status}  title={title}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        purged = core.operation_purge(data, op_id, reason=reason, index=index)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    dup_report = core.find_duplicate_ids(data)
+    still_dirty = any(dup_report.values())
+    op = {
+        "op": "operation_purge",
+        "op_id": op_id,
+        "index": index,
+        "reason": reason,
+        "purged_title": purged.get("title", ""),
+    }
+    if still_dirty:
+        save_project_unsafe(data, op=op)
+    else:
+        try:
+            save_project(data, op=op)
+        except ValueError as e:
+            save_project_unsafe(data, op=op)
+            print(f"Warning: post-purge validation failed: {e}", file=sys.stderr)
+
+    if json_mode:
+        print(json.dumps({
+            "id": purged.get("id", op_id),
+            "title": purged.get("title", ""),
+            "purged": True,
+            "still_dirty": still_dirty,
+        }, ensure_ascii=False))
+    else:
+        print(f"Purged operation: [{purged.get('id', op_id)}] {purged.get('title', '')}")
+        print(f"  Reason: {reason}")
+        if still_dirty:
+            _print_residual_dups(dup_report)
+
+
 # ---------------------------------------------------------------------------
 # Log commands
 # ---------------------------------------------------------------------------
@@ -5341,11 +5516,14 @@ def cmd_doctor():
             ("operation", "operations"),
         ):
             for did, n in dup_report.get(key, {}).items():
-                fix_cmd = (
-                    f"beacon milestone purge {did} --reason \"...\" --index <n>"
-                    if category_label == "milestone"
-                    else f"contact maintainers / hand-edit if recoverable (corrupt {category_label})"
-                )
+                if category_label == "milestone":
+                    fix_cmd = f"beacon milestone purge {did} --reason \"...\" --index <n>"
+                elif category_label == "entry":
+                    fix_cmd = f"beacon entry purge {did} --reason \"...\" --index <n>"
+                elif category_label == "operation":
+                    fix_cmd = f"beacon operation purge {did} --reason \"...\" --index <n>"
+                else:
+                    fix_cmd = f"contact maintainers (corrupt {category_label})"
                 warnings.append(
                     f"WARN [dup-id] Duplicate {category_label} ID '{did}' "
                     f"appears {n} times (Issue #14).\n"
@@ -5410,6 +5588,8 @@ def cmd_help_json():
         {"command": "beacon milestone rename <id> <title>", "flags": [], "description": "Rename a milestone"},
         {"command": "beacon milestone depends <id> --on <id>", "flags": [], "description": "Declare milestone dependency"},
         {"command": "beacon milestone purge <id> --reason <text>", "flags": ["--index <n>", "--json"], "description": "Hard-delete a milestone record (recovery for duplicate-ID corruption; Issue #14)"},
+        {"command": "beacon entry purge <e-id> --reason <text>", "flags": ["--index <n>", "--json"], "description": "Hard-delete an entry record (recovery for duplicate-ID corruption; e-863)"},
+        {"command": "beacon operation purge <op-id> --reason <text>", "flags": ["--index <n>", "--json"], "description": "Hard-delete an operation record (recovery for duplicate-ID corruption; e-863)"},
         {"command": "beacon milestone graph", "flags": ["--json"], "description": "Show dependency graph"},
         {"command": "beacon task add <desc>", "flags": ["-m <ms-id>"], "description": "Add a task to a milestone"},
         {"command": "beacon task done <entry-id>", "flags": [], "description": "Mark task as done"},
@@ -5816,6 +5996,8 @@ if __name__ == "__main__":
         "milestone_update": cmd_milestone_update,
         "milestone_delete": cmd_milestone_delete,
         "milestone_purge": cmd_milestone_purge,
+        "entry_purge": cmd_entry_purge,
+        "operation_purge": cmd_operation_purge,
         "log": cmd_log,
         "log_prepare": cmd_log_prepare,
         "log_finalize": cmd_log_finalize,
