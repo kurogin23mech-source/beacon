@@ -134,28 +134,82 @@ Step 1.9 のタスク自動完了と **同じ高信頼度の基準** でマッ�
 
 ---
 
-## Step 1.9: タスク自動完了（pending_tasksがある場合のみ）
+## Step 1.9: タスク自動完了（pending_tasksがある場合のみ） — AC ベース自己判断
 
-メインMSの `pending_tasks` と `commit.message` を照合し、このコミットで解決されたタスクを特定する。
+メインMSの `pending_tasks` の中から、このコミットで解決されたタスクを **AI が AC を物理的に照合して** 判定する。
+キーワード一致や entry-id 明示だけで done にしない。判断軌跡は `done_reason` に必ず残し、後から監査できるようにする。
 
-### 照合基準
+> この振る舞いは CORE doc `task-done-judgment-principle`（タスク完了判定の AI 自律原則）に従う。違反する判定をしてはならない。
 
-**自動done（高信頼度のみ実行）**:
-- コミットメッセージにタスクIDが明示されている（例: `e-256`, `(e-256)`, `e-256:`）
-- コミットメッセージがタスクの description の主要キーワードと明確に一致する（例: タスク「beacon setup コマンド実装」に対してコミット「Add beacon setup wizard」）
+### 参照する材料
 
-**スキップ（中〜低信頼度）**:
-- 関連しそうだが確信が持てない → 何もしない。誤った done を避けることを優先する。
+タスク側（pending_tasks の各エントリから）:
+- `description` / `motivation` / `acceptance_criteria`
+- 紐づく MS の SPEC ドキュメント（`beacon doc list --scope spec --ms <ms-id>` で関連 doc があれば `beacon doc show <doc_id>`）
+- 紐づく親エントリや depends_on があればそれも参照
 
-### 自動done の実行
+コミット側:
+- `commit.message`（Step 1 で取得済）
+- 必要に応じて `git show <hash> --stat`（どのファイルがどれだけ変わったか）
+- AC が具体的でファイルパス言及がある場合は `git show <hash> -- <path>` で実 diff を確認
 
-高信頼度のマッチが1件以上ある場合、Bash ツールで実行:
+### 判定ロジック
 
+**1. 候補抽出 → 信頼度評価**
+
+各 pending_task について:
+- **HIGH**: コミットメッセージに entry-id が明示（`e-XXX` / `(e-XXX)` / `e-XXX:`）かつ description キーワードと意味的に一致
+- **MID**: description / AC のキーワードがコミットメッセージと意味的に一致（entry-id 明示はないが、内容で関連が確信できる）
+- **LOW**: 関連はあるが弱い（同じファイル領域だが目的が違う、近い話題だが別実装、等）
+
+**LOW のタスクは最初から skip**（DONE/PARTIAL/SKIP の判定にも進まない、Step 5 の報告にも載せない）。HIGH/MID のみ次の AC 照合に進む。
+
+**2. AC 照合 → 3 通り判定**
+
+AC が定義されている場合（acceptance_criteria が空でない）:
+- 各 AC 項目を 1 つずつコミット（message + 必要なら diff）と照合
+- **全項目達成 → ✓ DONE**
+- **一部達成（AC の一部のみ満たす）→ △ PARTIAL**
+- **未達（コミットは関連するが AC は満たさない）→ ✗ SKIP**
+
+AC が空 かつ motivation が空 の場合（旧フォーマットのタスク）:
+- `description` のキーワード照合のみで判断
+- **HIGH なら ✓ DONE**、**MID なら ✗ SKIP**（保守的に）
+- done_reason に「AC 未定義のため description で判断」と注記
+
+AC が空だが motivation がある場合:
+- motivation を「達成すべき目的」として扱い、上の AC 照合と同じロジックを適用
+
+### 3 通り判定後のアクション
+
+**✓ DONE**: Bash ツールで実行
 ```bash
-cd "$PROJECT_DIR" && beacon task done <entry-id>
+cd "$PROJECT_DIR" && beacon task done <entry-id> --reason "<判断軌跡 1〜2 文>"
 ```
 
-複数マッチした場合はそれぞれ実行する。Step 5 の報告に含める。
+`--reason` の書き方:
+- AC を明示参照する形式: 「AC『○○ができる』をコミット <hash:7> の <file:func> 改修で満たした」
+- AC 未定義のとき: 「AC 未定義。description『○○』とコミット内容が一致、entry-id 明示で HIGH 確信」
+- 複数 AC を 1 コミットで満たす場合: 「AC 全 N 項目（○○・△△・▲▲）をコミット <hash:7> で達成」
+
+**△ PARTIAL**: done を実行 **しない**。代わりに follow-up task を起票:
+```bash
+cd "$PROJECT_DIR" && beacon task add "残: <未達 AC 項目を具体化>" -m <ms-id> \
+  --motivation "<元タスク description> の AC のうち <未達項目> が未達" \
+  --acceptance-criteria "<未達項目を測定可能な形で>"
+```
+
+元タスク（PARTIAL 判定されたほう）は `todo` のまま残す。Step 5 報告に「e-XXX: 部分達成、follow-up e-YYY 起票」と明示。
+
+**✗ SKIP**: 何もしない。done も follow-up も書き込まない。Step 5 報告に「e-XXX: AC 未達のため done 保留（理由: <1 行>）」と明示。
+
+### 守るべき原則
+
+1. **AC を物理的に照合する**。キーワード一致や entry-id 明示だけで done にしてはならない。
+2. **判断軌跡を done_reason に必ず残す**。「なぜこの判断で done になったか」が後から辿れる形にする。
+3. **部分達成は隠さず follow-up task として可視化する**。サイレントな AC 未達を作らない。
+4. **AC が定義されていないタスクは保守的に扱う**。HIGH のみ done、MID は SKIP。
+5. **AI が自律判断する**。ユーザーに「このタスク done にしていいですか？」と対話介入しない。ユーザーは Step 5 報告と done_reason で事後監査する。
 
 ## Step 2: 進捗率の評価
 
@@ -201,12 +255,19 @@ cd "$PROJECT_DIR" && beacon log --finalize -m <選定したms-id> --progress <St
 
 ## Step 5: 結果の提示
 
-finalize の stdout を確認し、ユーザーに結果を簡潔に報告:
+finalize の stdout と Step 1.9 の判定結果を組み合わせ、ユーザーに結果を簡潔に報告:
 
 ```
 Beacon: [hash] → [ms-id] [紐づけ先] (progress%)
 Summary: [更新したサマリーの要約]
+
+タスク判定 (Step 1.9):              ← 判定対象が 1 件以上ある場合のみ
+  ✓ DONE:    [e-id] <description 短縮> — <done_reason 短縮>
+  △ PARTIAL: [e-id] <description 短縮> → follow-up [新規 e-id] <残作業>
+  ✗ SKIP:    [e-id] <description 短縮> — <skip 理由>
 ```
+
+判定対象がなかった（pending_tasks が空、または LOW 信頼度しかなかった）場合は「タスク判定」セクションごと省略する。
 
 ## Step 5.5: MS完了判定（e-550 / UC3-G4）
 
