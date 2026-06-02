@@ -1819,7 +1819,7 @@ def cmd_retro_done():
     retro_dir = os.path.join(project_dir, "retro")
     os.makedirs(retro_dir, exist_ok=True)
     reviewed_path = os.path.join(retro_dir, ".reviewed")
-    with open(reviewed_path, "w") as f:
+    with open(reviewed_path, "w", encoding="utf-8") as f:
         f.write(current_week + "\n")
 
     triggers_dir = os.path.join(project_dir, "triggers")
@@ -1863,7 +1863,7 @@ def _last_reviewed_week() -> Optional[str]:
     project_dir = os.path.dirname(get_project_file())
     reviewed_path = os.path.join(project_dir, "retro", ".reviewed")
     try:
-        with open(reviewed_path, "r") as f:
+        with open(reviewed_path, "r", encoding="utf-8") as f:
             return f.read().strip() or None
     except (FileNotFoundError, IOError):
         return None
@@ -1964,7 +1964,7 @@ def _auto_fire_retro_trigger():
     created_at = today.isoformat()
     if os.path.exists(trigger_path):
         try:
-            with open(trigger_path, "r") as f:
+            with open(trigger_path, "r", encoding="utf-8") as f:
                 existing = json.load(f)
             if isinstance(existing.get("created_at"), str):
                 created_at = existing["created_at"]
@@ -1980,7 +1980,7 @@ def _auto_fire_retro_trigger():
         "created_at": created_at,
         "refreshed_at": today.isoformat(),
     }
-    with open(trigger_path, "w") as f:
+    with open(trigger_path, "w", encoding="utf-8") as f:
         json.dump(trigger_data, f, ensure_ascii=False)
         f.write("\n")
 
@@ -2013,7 +2013,7 @@ def _fire_spec_needed_trigger(ms_id: str, ms_title: str) -> None:
                    f"`/beacon-spec {ms_id}` で作成すると、サブエージェントや retrospection が機能しやすくなります。",
         "created_at": datetime.datetime.now().isoformat(),
     }
-    with open(trigger_path, "w") as f:
+    with open(trigger_path, "w", encoding="utf-8") as f:
         json.dump(trigger_data, f, ensure_ascii=False)
         f.write("\n")
 
@@ -2098,7 +2098,7 @@ def _cleanup_stale_triggers():
             continue
         fpath = os.path.join(triggers_dir, fname)
         try:
-            with open(fpath, "r") as f:
+            with open(fpath, "r", encoding="utf-8") as f:
                 trigger = json.load(f)
             created = datetime.date.fromisoformat(trigger["created_at"][:10])
             if today > created:
@@ -2155,7 +2155,7 @@ def _auto_fire_operation_triggers():
             "message": f"{op_id} ({log_source}) のバッチ確認が必要です{spec_ref}。/beacon-operation-review で記録してください。",
             "created_at": today_str,
         }
-        with open(trigger_path, "w") as f:
+        with open(trigger_path, "w", encoding="utf-8") as f:
             json.dump(trigger_data, f, ensure_ascii=False)
             f.write("\n")
 
@@ -2177,7 +2177,7 @@ def cmd_trigger_fire():
         "message": trigger_message,
         "created_at": datetime.datetime.now().isoformat(),
     }
-    with open(trigger_path, "w") as f:
+    with open(trigger_path, "w", encoding="utf-8") as f:
         json.dump(trigger_data, f, ensure_ascii=False)
         f.write("\n")
 
@@ -2196,7 +2196,7 @@ def cmd_trigger_check():
             continue
         fpath = os.path.join(triggers_dir, fname)
         try:
-            with open(fpath, "r") as f:
+            with open(fpath, "r", encoding="utf-8") as f:
                 triggers.append(json.load(f))
         except (json.JSONDecodeError, IOError):
             pass
@@ -5044,7 +5044,7 @@ def cmd_doctor():
     from auth import CREDENTIALS_PATH, _decode_jwt_expiry
     if CREDENTIALS_PATH.exists():
         try:
-            with open(CREDENTIALS_PATH, "r") as _f:
+            with open(CREDENTIALS_PATH, "r", encoding="utf-8") as _f:
                 _creds = json.load(_f)
             _token = _creds.get("token") or _creds.get("id_token") or ""
             if _token:
@@ -5077,7 +5077,7 @@ def cmd_doctor():
     config_json_path = os.path.join(".beacon", "config.json")
     if os.path.exists(config_json_path):
         try:
-            with open(config_json_path, "r") as _f:
+            with open(config_json_path, "r", encoding="utf-8") as _f:
                 _config = json.load(_f)
             if _config.get("mode") == "cloud":
                 if not os.path.exists(cloud_json_path):
@@ -5087,7 +5087,7 @@ def cmd_doctor():
                     )
                 else:
                     try:
-                        with open(cloud_json_path, "r") as _f:
+                        with open(cloud_json_path, "r", encoding="utf-8") as _f:
                             _cloud = json.load(_f)
                         if not _cloud.get("api_url"):
                             warnings.append(
