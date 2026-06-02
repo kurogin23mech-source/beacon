@@ -30,6 +30,18 @@ def load_project():
     return data
 
 
+def load_project_unsafe():
+    """Load project data WITHOUT running validate_project.
+
+    Reserved for recovery flows (`beacon doctor`, `beacon milestone purge`)
+    that must keep working when the data already violates invariants —
+    e.g. duplicate IDs from a hand-edit (Issue #14). All other code paths
+    must continue to use load_project() so corruption is surfaced early.
+    """
+    store = get_store()
+    return store.load_project()
+
+
 def _append_changelog(op: dict) -> None:
     """Append an operation entry to .beacon/changelog.jsonl."""
     import json as _json
@@ -49,6 +61,20 @@ def _append_changelog(op: dict) -> None:
 
 def save_project(data, op=None):
     core.validate_project(data)
+    store = get_store()
+    store.save_project(data)
+    if op:
+        _append_changelog(op)
+
+
+def save_project_unsafe(data, op=None):
+    """Save project data WITHOUT validate_project.
+
+    Reserved for the recovery flow where a single purge cannot make the
+    project entirely clean (e.g. 3 duplicates of the same ms-id — the
+    first purge leaves 2 dups, still invalid). Callers MUST run
+    `beacon doctor` afterwards to confirm cleanup.
+    """
     store = get_store()
     store.save_project(data)
     if op:
@@ -709,6 +735,124 @@ def cmd_milestone_delete():
     else:
         print(f"Cancelled: [{ms['id']}] {ms['title']}")
         print(f"  Reason: {reason}")
+
+
+def cmd_milestone_purge():
+    """Hard-delete a milestone record (Issue #14 recovery path).
+
+    Unlike `beacon milestone delete` (soft / status=cancelled), purge
+    physically removes the record from the array. This exists only for
+    data-corruption recovery and is not a substitute for soft delete.
+
+    Loads via load_project_unsafe so it can recover from a project that
+    already fails validation (the whole point of the command). The save
+    path also bypasses validation when residual duplicates remain so
+    the operator can purge them one at a time; once clean, validation
+    passes naturally on the next normal load.
+    """
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    reason = os.environ.get("BEACON_REASON", "")
+    index_str = os.environ.get("BEACON_INDEX", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not ms_id:
+        print("Error: ms-id is required.", file=sys.stderr)
+        print(
+            "  Usage: beacon milestone purge <ms-id> --reason \"...\" [--index <n>]",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not reason:
+        print(
+            "Error: --reason is required for milestone purge "
+            "(audit trail per CORE doc data-immutability-principle).",
+            file=sys.stderr,
+        )
+        print(
+            "  Example: beacon milestone purge ms-13 "
+            "--reason \"duplicate ID — Issue #14 recovery\" --index 2",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    index: Optional[int] = None
+    if index_str:
+        try:
+            index = int(index_str)
+        except ValueError:
+            print(f"Error: --index must be an integer, got '{index_str}'.",
+                  file=sys.stderr)
+            sys.exit(1)
+
+    data = load_project_unsafe()
+    # Pre-flight: if the operator did not pass --index but duplicates
+    # exist, show a helpful summary before the core raises. The
+    # core.milestone_purge already raises with a clear message; we just
+    # add a list of the duplicates for context.
+    matches = core.find_milestones(data, ms_id)
+    if not matches:
+        print(f"Milestone not found: {ms_id}", file=sys.stderr)
+        sys.exit(1)
+    if len(matches) > 1 and index is None:
+        print(
+            f"Milestone '{ms_id}' has {len(matches)} duplicate records. "
+            "Re-run with --index <n>:",
+            file=sys.stderr,
+        )
+        for i, m in enumerate(matches, 1):
+            title = m.get("title", "(no title)")
+            status = m.get("status", "?")
+            print(f"  --index {i}  status={status}  title={title}",
+                  file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        purged = core.milestone_purge(data, ms_id, reason=reason, index=index)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # After purge, check whether the project is now clean. If still dirty,
+    # save via unsafe path and warn; otherwise normal save (with validation).
+    dup_report = core.find_duplicate_ids(data)
+    still_dirty = any(dup_report.values())
+    op = {
+        "op": "milestone_purge",
+        "ms_id": ms_id,
+        "index": index,
+        "reason": reason,
+        "purged_title": purged.get("title", ""),
+    }
+    if still_dirty:
+        save_project_unsafe(data, op=op)
+    else:
+        try:
+            save_project(data, op=op)
+        except ValueError as e:
+            # Shouldn't happen — purge invariants should leave a valid
+            # project — but if it does, fall back to unsafe save so the
+            # purge isn't lost, and surface the issue.
+            save_project_unsafe(data, op=op)
+            print(f"Warning: post-purge validation failed: {e}", file=sys.stderr)
+
+    if json_mode:
+        out = {
+            "id": purged["id"],
+            "title": purged.get("title", ""),
+            "purged": True,
+            "still_dirty": still_dirty,
+        }
+        print(json.dumps(out, ensure_ascii=False))
+    else:
+        print(f"Purged: [{purged['id']}] {purged.get('title', '')}")
+        print(f"  Reason: {reason}")
+        if still_dirty:
+            remaining: list[str] = []
+            for category, dupes in dup_report.items():
+                for did, n in dupes.items():
+                    remaining.append(f"{category[:-1]} '{did}' x{n}")
+            print("  Note: residual duplicates remain — "
+                  + ", ".join(remaining))
+            print("  Run `beacon doctor` to inspect and purge the next one.")
 
 
 # ---------------------------------------------------------------------------
@@ -4935,6 +5079,36 @@ def cmd_doctor():
             pass  # config.json unreadable — not a fatal error
 
     # ------------------------------------------------------------------ #
+    # 6. Duplicate IDs (Issue #14)
+    # ------------------------------------------------------------------ #
+    # We use load_project_unsafe so doctor can still surface the very
+    # problem strict load refuses to load. If we can't load at all (no
+    # project, network error in cloud mode, etc.), we silently skip this
+    # check — doctor is best-effort for environment health, not a
+    # project linter.
+    try:
+        _data = load_project_unsafe()
+        dup_report = core.find_duplicate_ids(_data)
+        for category_label, key in (
+            ("milestone", "milestones"),
+            ("entry", "entries"),
+            ("operation", "operations"),
+        ):
+            for did, n in dup_report.get(key, {}).items():
+                fix_cmd = (
+                    f"beacon milestone purge {did} --reason \"...\" --index <n>"
+                    if category_label == "milestone"
+                    else f"contact maintainers / hand-edit if recoverable (corrupt {category_label})"
+                )
+                warnings.append(
+                    f"WARN [dup-id] Duplicate {category_label} ID '{did}' "
+                    f"appears {n} times (Issue #14).\n"
+                    f"       Recovery: {fix_cmd}"
+                )
+    except Exception:
+        pass  # Project not loadable from this CWD — skip dup check.
+
+    # ------------------------------------------------------------------ #
     # Summary
     # ------------------------------------------------------------------ #
     if warnings:
@@ -4959,6 +5133,7 @@ def cmd_help_json():
         {"command": "beacon milestone observe <id>", "flags": [], "description": "Set milestone to observing"},
         {"command": "beacon milestone rename <id> <title>", "flags": [], "description": "Rename a milestone"},
         {"command": "beacon milestone depends <id> --on <id>", "flags": [], "description": "Declare milestone dependency"},
+        {"command": "beacon milestone purge <id> --reason <text>", "flags": ["--index <n>", "--json"], "description": "Hard-delete a milestone record (recovery for duplicate-ID corruption; Issue #14)"},
         {"command": "beacon milestone graph", "flags": ["--json"], "description": "Show dependency graph"},
         {"command": "beacon task add <desc>", "flags": ["-m <ms-id>"], "description": "Add a task to a milestone"},
         {"command": "beacon task done <entry-id>", "flags": [], "description": "Mark task as done"},
@@ -5364,6 +5539,7 @@ if __name__ == "__main__":
         "milestone_show": cmd_milestone_show,
         "milestone_update": cmd_milestone_update,
         "milestone_delete": cmd_milestone_delete,
+        "milestone_purge": cmd_milestone_purge,
         "log": cmd_log,
         "log_prepare": cmd_log_prepare,
         "log_finalize": cmd_log_finalize,
