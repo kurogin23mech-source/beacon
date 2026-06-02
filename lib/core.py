@@ -71,7 +71,21 @@ SCHEDULE_DAYS = {
 # ---------------------------------------------------------------------------
 
 def validate_project(data: dict) -> None:
-    """Validate project.json schema. Raises ValueError on invalid data."""
+    """Validate project.json schema. Raises ValueError on invalid data.
+
+    Issue #14: This also rejects duplicate milestone / entry / operation IDs.
+    Allowing duplicates makes the entire CLI surface ambiguous — every
+    "first match" operation silently picks the same target and the other
+    record becomes unreachable. We fail fast at load time so the data
+    corruption is surfaced before any "successful" no-op write happens.
+
+    Recovery path when duplicates are found:
+      1. `beacon doctor` lists which IDs are duplicated and how many times
+      2. `beacon milestone purge <ms-id> --index <n> --reason "..."`
+         physically removes one record at a time
+      3. Allocator now uses max(existing ids) + 1 so future adds will not
+         silently re-collide.
+    """
     if not isinstance(data, dict):
         raise ValueError("project.json must be a JSON object")
     for key in ("name", "milestones"):
@@ -80,6 +94,8 @@ def validate_project(data: dict) -> None:
     if not isinstance(data["milestones"], list):
         raise ValueError("milestones must be an array")
 
+    seen_ms_ids: dict[str, int] = {}
+    seen_entry_ids: dict[str, int] = {}
     for ms in data["milestones"]:
         ms_id = ms.get("id", "")
         if ms_id and not MS_ID_RE.match(ms_id):
@@ -87,6 +103,8 @@ def validate_project(data: dict) -> None:
                 f"Milestone ID '{ms_id}' does not match required format 'ms-{{N}}'. "
                 "IDs must be ms-1, ms-2, etc."
             )
+        if ms_id:
+            seen_ms_ids[ms_id] = seen_ms_ids.get(ms_id, 0) + 1
         if "tasks" in ms:
             raise ValueError(
                 f"Milestone '{ms_id or '?'}' uses 'tasks' field. "
@@ -98,8 +116,9 @@ def validate_project(data: dict) -> None:
                 f"Valid: {', '.join(sorted(VALID_STATUSES))}"
             )
         for entry in ms.get("entries", []):
-            _validate_entry(entry, ms.get("id", "?"))
+            _validate_entry(entry, ms.get("id", "?"), seen_entry_ids)
 
+    seen_op_ids: dict[str, int] = {}
     for op in data.get("operations", []):
         op_id = op.get("id", "")
         if op_id and not OP_ID_RE.match(op_id):
@@ -107,21 +126,101 @@ def validate_project(data: dict) -> None:
                 f"Operation ID '{op_id}' does not match required format 'op-{{N}}'. "
                 "IDs must be op-1, op-2, etc."
             )
+        if op_id:
+            seen_op_ids[op_id] = seen_op_ids.get(op_id, 0) + 1
         if op.get("status") and op["status"] not in VALID_OPERATION_STATUSES:
             raise ValueError(
                 f"Operation '{op_id or '?'}' has invalid status '{op['status']}'. "
                 f"Valid: {', '.join(sorted(VALID_OPERATION_STATUSES))}"
             )
+        for entry in op.get("entries", []):
+            _validate_entry(entry, op_id or "?", seen_entry_ids)
+
+    # Aggregate duplicate-ID report. Reporting all dupes at once is more
+    # actionable than failing on the first one — the operator can run
+    # `beacon milestone purge` for each ID in one pass.
+    duplicates: list[str] = []
+    for ms_id, n in seen_ms_ids.items():
+        if n > 1:
+            duplicates.append(f"milestone '{ms_id}' appears {n} times")
+    for eid, n in seen_entry_ids.items():
+        if n > 1:
+            duplicates.append(f"entry '{eid}' appears {n} times")
+    for oid, n in seen_op_ids.items():
+        if n > 1:
+            duplicates.append(f"operation '{oid}' appears {n} times")
+    if duplicates:
+        raise ValueError(
+            "Duplicate IDs in project data — data corruption. "
+            + "; ".join(duplicates)
+            + ". Use `beacon doctor` to inspect and "
+              "`beacon milestone purge <ms-id> --index <n> --reason \"...\"` "
+              "to remove the duplicate record."
+        )
 
 
-def _validate_entry(entry: dict, ms_id: str) -> None:
-    """Recursively validate an entry and its children."""
+def find_duplicate_ids(data: dict) -> dict[str, dict[str, int]]:
+    """Return a report of duplicate IDs in the project data (no exception).
+
+    Returns a dict shaped like:
+      {
+        "milestones": {"ms-13": 2, ...},
+        "entries":    {"e-5": 2, ...},
+        "operations": {"op-3": 2, ...},
+      }
+    Only IDs that appear more than once are included. Empty subdicts mean
+    no duplicates for that category.
+
+    This is the read-only counterpart of validate_project's duplicate
+    detection — useful for `beacon doctor` which wants to *report* rather
+    than refuse to load.
+    """
+    ms_counts: dict[str, int] = {}
+    entry_counts: dict[str, int] = {}
+    op_counts: dict[str, int] = {}
+
+    def _walk_entry(entry: dict) -> None:
+        eid = entry.get("id", "")
+        if eid:
+            entry_counts[eid] = entry_counts.get(eid, 0) + 1
+        for child in entry.get("entries", []):
+            _walk_entry(child)
+
+    for ms in data.get("milestones", []):
+        mid = ms.get("id", "")
+        if mid:
+            ms_counts[mid] = ms_counts.get(mid, 0) + 1
+        for entry in ms.get("entries", []):
+            _walk_entry(entry)
+    for op in data.get("operations", []):
+        oid = op.get("id", "")
+        if oid:
+            op_counts[oid] = op_counts.get(oid, 0) + 1
+        for entry in op.get("entries", []):
+            _walk_entry(entry)
+
+    return {
+        "milestones": {k: n for k, n in ms_counts.items() if n > 1},
+        "entries":    {k: n for k, n in entry_counts.items() if n > 1},
+        "operations": {k: n for k, n in op_counts.items() if n > 1},
+    }
+
+
+def _validate_entry(entry: dict, ms_id: str, seen_entry_ids: dict[str, int] | None = None) -> None:
+    """Recursively validate an entry and its children.
+
+    If `seen_entry_ids` is provided, increment the count for each entry ID
+    seen — the caller uses this to detect duplicates across the whole
+    project (validate_project). Left as `None` for legacy callers.
+    """
     eid = entry.get("id", "")
     if eid and not ENTRY_ID_RE.match(eid):
         raise ValueError(
             f"Entry ID '{eid}' in {ms_id} does not match required format 'e-{{N}}'. "
             "IDs must be e-1, e-2, etc."
         )
+    if eid and seen_entry_ids is not None:
+        seen_entry_ids[eid] = seen_entry_ids.get(eid, 0) + 1
     if entry.get("type") and entry["type"] not in VALID_ENTRY_TYPES:
         raise ValueError(
             f"Entry '{entry.get('id', '?')}' in {ms_id} has invalid type '{entry['type']}'. "
@@ -133,23 +232,59 @@ def _validate_entry(entry: dict, ms_id: str) -> None:
             f"Valid: {', '.join(sorted(VALID_STATUSES))}"
         )
     for child in entry.get("entries", []):
-        _validate_entry(child, ms_id)
+        _validate_entry(child, ms_id, seen_entry_ids)
 
 
 # ---------------------------------------------------------------------------
 # Lookups
 # ---------------------------------------------------------------------------
 
-def find_target_milestone(data: dict, ms_id: str = "") -> dict:
+def find_milestones(data: dict, ms_id: str) -> list[dict]:
+    """Return ALL milestone records whose id matches `ms_id`.
+
+    Normally returns 0 or 1 records. Returns >1 only when the project data
+    has duplicate IDs (Issue #14 — should now be prevented by
+    validate_project, but the helper still works on raw/unvalidated data).
+    """
+    return [ms for ms in data.get("milestones", []) if ms.get("id") == ms_id]
+
+
+def find_target_milestone(data: dict, ms_id: str = "", *, index: int | None = None) -> dict:
     """Find target milestone by id or auto-select if only one is active.
 
-    Raises ValueError if not found or ambiguous.
+    Raises ValueError if not found, ambiguous, or duplicated.
+
+    `index` (1-based) disambiguates duplicate IDs when validate_project is
+    bypassed (e.g. doctor-style recovery flows). When duplicates exist and
+    index is None, this raises with the count so the caller can prompt
+    for --index <n>. CORE doc data-immutability-principle treats this as
+    a refused write rather than a silent first-match write.
     """
     if ms_id:
-        for ms in data["milestones"]:
-            if ms["id"] == ms_id:
-                return ms
-        raise ValueError(f"Milestone not found: {ms_id}")
+        matches = find_milestones(data, ms_id)
+        if not matches:
+            raise ValueError(f"Milestone not found: {ms_id}")
+        if len(matches) == 1:
+            if index is not None and index != 1:
+                raise ValueError(
+                    f"Milestone '{ms_id}' has only 1 record but --index {index} was given."
+                )
+            return matches[0]
+        # Duplicate IDs: require explicit --index <n>.
+        if index is None:
+            raise ValueError(
+                f"Ambiguous milestone '{ms_id}': {len(matches)} records exist "
+                "(data corruption — Issue #14). Specify which one with "
+                f"`--index <n>` where n is 1..{len(matches)}. Use "
+                "`beacon milestone purge <ms-id> --index <n> --reason \"...\"` "
+                "to remove the duplicate."
+            )
+        if index < 1 or index > len(matches):
+            raise ValueError(
+                f"--index {index} is out of range for '{ms_id}' "
+                f"(valid: 1..{len(matches)})."
+            )
+        return matches[index - 1]
 
     active_list = [ms for ms in data["milestones"] if ms["status"] == "in_progress"]
     if len(active_list) == 0:
@@ -229,13 +364,48 @@ def _find_entry_in(entries: list, entry_id: str, ms: dict):
 # Milestone operations
 # ---------------------------------------------------------------------------
 
+def next_milestone_id(data: dict) -> str:
+    """Generate the next milestone id using max(existing ids) + 1.
+
+    Issue #14: the previous implementation used `len(milestones) + 1`, which
+    silently re-issues IDs of physically-removed milestones (e.g. if a
+    project.json hand-edit drops one). The max-id allocator is the only
+    structural fix — cancelled / done / observing milestones all stay in
+    the array and contribute to the max, so the new ID is monotonic
+    forever (until the int counter literally rolls over).
+    """
+    max_id = 0
+    for ms in data.get("milestones", []):
+        mid = ms.get("id", "")
+        if mid.startswith("ms-"):
+            try:
+                max_id = max(max_id, int(mid[3:]))
+            except ValueError:
+                pass
+    return f"ms-{max_id + 1}"
+
+
 def milestone_add(data: dict, title: str, target_date: str = "",
                    description: str = "", priority: str = "",
                    objective: str = "", acceptance_criteria: str = "",
                    owner: str = "", assignee: str = "") -> str:
-    """Add a milestone. Returns the new ms_id."""
-    ms_id_num = len(data["milestones"]) + 1
-    ms_id = f"ms-{ms_id_num}"
+    """Add a milestone. Returns the new ms_id.
+
+    Issue #14: the ID is computed via `next_milestone_id` (max + 1) and we
+    re-check for collisions before appending. The collision check is
+    belt-and-suspenders: if validate_project ran during load and the data
+    already has duplicate IDs, raising here prevents us from compounding
+    the corruption.
+    """
+    ms_id = next_milestone_id(data)
+    # Collision guard — should be unreachable when next_milestone_id is
+    # correct, but kept as a structural invariant so future allocator
+    # changes can't silently re-introduce the bug.
+    if any(ms.get("id") == ms_id for ms in data.get("milestones", [])):
+        raise ValueError(
+            f"Milestone ID collision: {ms_id} already exists. "
+            "This indicates corrupted milestone IDs — run `beacon doctor`."
+        )
     ms = {
         "id": ms_id,
         "title": title,
@@ -344,6 +514,63 @@ def milestone_update(data: dict, ms_id: str, *,
                     meta[f"{status}_reason"] = reason
             return ms
     raise ValueError(f"Milestone not found: {ms_id}")
+
+
+def milestone_purge(data: dict, ms_id: str, *, reason: str,
+                     index: int | None = None) -> dict:
+    """Physically remove a milestone record. Returns the removed milestone.
+
+    Issue #14: this is the recovery path for duplicate IDs and for hand-
+    corrupted data — soft delete (`status="cancelled"`) cannot help here
+    because the record remains in the array and every `first match` op
+    continues to hit it.
+
+    Constraints:
+      • `reason` is required (CORE doc data-immutability-principle). The
+        physical delete is recorded as a `milestone.purge` operation in
+        the changelog so the trail isn't lost.
+      • When duplicate IDs exist, `index` (1-based) is required to pick
+        which copy to remove. With a single record, `index` may be omitted
+        or set to 1.
+
+    This is intentionally a different code path from `milestone_delete`
+    (soft). The two are not interchangeable — soft delete preserves the
+    record for retrospection; purge removes it because the record itself
+    is the bug.
+    """
+    if not reason:
+        raise ValueError("milestone_purge requires a reason")
+    matches: list[tuple[int, dict]] = [
+        (i, ms) for i, ms in enumerate(data.get("milestones", []))
+        if ms.get("id") == ms_id
+    ]
+    if not matches:
+        raise ValueError(f"Milestone not found: {ms_id}")
+    if len(matches) == 1:
+        if index is not None and index != 1:
+            raise ValueError(
+                f"Milestone '{ms_id}' has only 1 record but --index {index} was given."
+            )
+        target_pos, target_ms = matches[0]
+    else:
+        if index is None:
+            raise ValueError(
+                f"Milestone '{ms_id}' has {len(matches)} records. "
+                f"Specify which to purge with --index <n> (1..{len(matches)})."
+            )
+        if index < 1 or index > len(matches):
+            raise ValueError(
+                f"--index {index} is out of range for '{ms_id}' (valid: 1..{len(matches)})."
+            )
+        target_pos, target_ms = matches[index - 1]
+    # Annotate before removal — the returned dict reflects the purge
+    # decision so callers / changelog writers see the reason context.
+    meta = target_ms.setdefault("meta", {})
+    meta["purged_at"] = _now_iso()
+    meta["purged_by"] = _get_actor()
+    meta["purge_reason"] = reason
+    data["milestones"].pop(target_pos)
+    return target_ms
 
 
 def milestone_delete(data: dict, ms_id: str, *, reason: str = "") -> dict:

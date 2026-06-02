@@ -25,6 +25,7 @@ Milestones:
   beacon milestone observe <id> Set milestone to observing
   beacon milestone update <id>  Update title/progress/status/description/priority/objective/ac
   beacon milestone delete <id>  Delete (soft) a milestone
+  beacon milestone purge <id> --reason <text> [--index <n>]   Hard delete (recovery only; Issue #14)
   beacon milestone depends <id> Set milestone dependencies
   beacon milestone graph        Show dependency graph
   beacon milestone add ... [--owner U] [--assignee U]   Set owner/assignee at creation
@@ -528,6 +529,37 @@ cmd_milestone_delete() {
     fi
     BEACON_MS_ID="$ms_id" BEACON_REASON="$reason" BEACON_JSON="$json_flag" \
         python3 "$COMMANDS_PY" milestone_delete
+}
+
+cmd_milestone_purge() {
+    # Issue #14: hard-delete recovery path for duplicate-ID corruption.
+    # Intentionally does NOT call ensure_project so it can run even when
+    # the project fails validation (which is the whole point).
+    local ms_id=""
+    local reason=""
+    local index=""
+    local json_flag=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json)      json_flag="1";    shift   ;;
+            -r|--reason) reason="${2:-}";  shift 2 ;;
+            --index)     index="${2:-}";   shift 2 ;;
+            *)           ms_id="$1";       shift   ;;
+        esac
+    done
+
+    if [ -z "$ms_id" ] || [ -z "$reason" ]; then
+        echo "Usage: beacon milestone purge <ms-id> --reason <text> [--index <n>] [--json]"
+        echo
+        echo "Hard-deletes a milestone record (recovery path for Issue #14)."
+        echo "Soft delete (preserves history) is 'beacon milestone delete'."
+        echo "Use --index <n> when the same ms-id appears more than once."
+        exit 1
+    fi
+    BEACON_MS_ID="$ms_id" BEACON_REASON="$reason" \
+        BEACON_INDEX="$index" BEACON_JSON="$json_flag" \
+        python3 "$COMMANDS_PY" milestone_purge
 }
 
 cmd_milestone_depends() {
@@ -1651,11 +1683,12 @@ case "${1:-}" in
             update) shift 2; cmd_milestone_update "$@" ;;
             rename) BEACON_MS_ID="${3:-}" BEACON_TITLE="${4:-}" python3 "$COMMANDS_PY" milestone_update ;;
             delete|cancel) shift 2; cmd_milestone_delete "$@" ;;
+            purge) shift 2; cmd_milestone_purge "$@" ;;
             depends) shift 2; cmd_milestone_depends "$@" ;;
             workspace) shift 2; cmd_milestone_workspace "$@" ;;
             workspace-cleanup) shift 2; cmd_milestone_workspace_cleanup "$@" ;;
             graph) shift 2; cmd_milestone_graph "$@" ;;
-            *)      echo "Usage: beacon milestone [add|list|start|close|observe|done|show|update|rename|delete|depends|workspace|workspace-cleanup|graph]" ;;
+            *)      echo "Usage: beacon milestone [add|list|start|close|observe|done|show|update|rename|delete|purge|depends|workspace|workspace-cleanup|graph]" ;;
         esac
         ;;
     log)

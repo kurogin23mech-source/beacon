@@ -536,6 +536,7 @@ body::after {
 .filter-btn.on.f-observing { color: var(--observing); border-color: rgba(167,139,250,0.4); background: rgba(167,139,250,0.08); }
 .filter-btn.on.f-done { color: var(--done); border-color: var(--accent-dim); background: var(--accent-glow); }
 .filter-btn.on.f-waiting { color: var(--waiting); border-color: rgba(249,115,22,0.4); background: rgba(249,115,22,0.08); }
+.filter-btn.on.f-cancelled { color: var(--cancelled); border-color: rgba(239,68,68,0.4); background: rgba(239,68,68,0.08); }
 
 /* Off (hidden) state */
 .filter-btn.off {
@@ -1732,8 +1733,8 @@ let state = {
   retroContent: null,
   documents: [],
   documentContent: null,  // { doc_id, title, content }
-  // Filter: hidden statuses (empty = show all)
-  hiddenStatuses: new Set(),
+  // Filter: hidden statuses (cancelled is hidden by default)
+  hiddenStatuses: new Set(['cancelled']),
   // Entry done filter (per milestone)
   hideEntryDone: new Set(),
   // Collapsed nested entries
@@ -1963,8 +1964,8 @@ const STATUS_LABELS = {
   in_review: 'in review', approved: 'approved',
 };
 
-const FILTER_ORDER = ['todo', 'in_progress', 'observing', 'waiting', 'done'];
-const FILTER_CSS_CLASS = { todo: 'f-todo', in_progress: 'f-active', observing: 'f-observing', waiting: 'f-waiting', done: 'f-done' };
+const FILTER_ORDER = ['todo', 'in_progress', 'observing', 'waiting', 'done', 'cancelled'];
+const FILTER_CSS_CLASS = { todo: 'f-todo', in_progress: 'f-active', observing: 'f-observing', waiting: 'f-waiting', done: 'f-done', cancelled: 'f-cancelled' };
 
 function statusBadge(status) {
   const label = STATUS_LABELS[status] || status;
@@ -3978,7 +3979,7 @@ async function menuSelectProject(projectId) {
   if (projectId !== state.projectId) {
     state.project = null;
     state.expanded.clear();
-    state.hiddenStatuses.clear();
+    state.hiddenStatuses = new Set(['cancelled']);
     state.hideEntryDone.clear();
     state.collapsedEntries.clear();
     state.activeTab = 'dashboard';
@@ -4000,7 +4001,7 @@ async function selectProject(projectId) {
   state.retroContent = null;
   state.documents = [];
   state.documentContent = null;
-  state.hiddenStatuses.clear();
+  state.hiddenStatuses = new Set(['cancelled']);
   state.projectVersion = null;
   lastProjectJson = null;
 

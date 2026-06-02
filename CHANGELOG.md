@@ -2,6 +2,55 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.7.0] - 2026-06-03
+
+## [v0.6.0] - 2026-06-02
+
+- docs(readme): cross-OS install matrix + pipx + Tauri Desktop guidance (ms-44)
+- feat(skill,ci): OS-specific Tauri install hint + cross-OS CLI smoke job (ms-44 e-778 e-779)
+- feat(cli): wire 'beacon cloud push' / 'cloud pull' on PowerShell (ms-44)
+- feat(skill): beacon-log Step 1.9 adds "unverified facets" tag for audit pointers (ms-5)
+- fix(windows): UTF-8 follow-up for subprocess + legacy trigger files (ms-44 #19 #21)
+- fix(windows): force UTF-8 on stdout + all open() + wire bash-less cloud nav (ms-44 #19 #20 #21)
+- fix(windows): cross-platform file locking + symlink-with-copy-fallback for pre-commit hook (ms-44)
+- feat(cli): wire pr / issue / member subcommands through PowerShell dispatch (ms-44)
+- feat(cli): wire 'beacon auth login|logout|status' through PowerShell dispatch (ms-44)
+- Merge pull request #17 from kurogin23mech-source/ms-44/work
+- feat(skill): AC-based self-judgment in beacon-log Step 1.9 (ms-5 e-791)
+- feat(cli,dispatch): wire 'beacon skill install' for PowerShell + wheel layout (ms-44 e-777 e-813)
+- feat(packaging,hooks): bundle skills in wheel + cross-platform Python hooks (ms-44 e-777 e-811 e-812)
+- Merge pull request #15 from kurogin23mech-source/ms-44/work
+- feat(cli): PowerShell-native dispatch for Day-1 commands (ms-44 e-695)
+- Merge pull request #13 from kurogin23mech-source/ms-44/work
+- fix(ui): preserve IME composition in the global search box
+- fix(ui): partial-render falls back to full render when shell isn't mounted
+- feat(ui): move search to shell header, exclusive facet chips, preserve search on result click
+- fix(ui): preserve loading state instead of bouncing back to project selector
+- Merge pull request #12 from kurogin23mech-source/ms-43/work
+- feat(ui,cli): deep-link hashes + milestone done/observe --reason + skill install PostCompact (ms-43 e-618 e-672 e-674)
+- feat(skill): session-start/end + retro magic (ms-43 e-564 e-566 e-567 e-568 e-570)
+- feat(ui): cross-entity search + Documents tab filter (ms-43 e-616 e-631)
+- feat(packaging): scaffold pyproject.toml + Python entry-point for cross-OS install (ms-44 e-695)
+- fix(hook): post-commit-hook drops heredoc bodies before pattern match (ms-43 e-613)
+- feat(packaging): scaffold cross-platform release pipeline + WinGet/cask manifests (ms-44 e-696)
+- docs(install): rewrite INSTALL.md OS-by-OS for cross-platform distribution (ms-44 e-697/e-730)
+- fix(cli): task update accepts motivation/ac/behavior/priority (ms-43 e-553)
+- docs(deploy): fix gcloud flag — --build-arg → --set-build-env-vars (ms-46)
+- fix(arch): task counts disappear in Tauri — 3-layer defense (ms-46 e-755/756/757)
+- feat(arch): DataSource adapter — SHARED data fetching through interface (ms-46 e-728)
+- feat(arch): renderShell to SHARED — single-source tab-bar/section dispatch (ms-46 e-743)
+- feat(arch,skill): Tauri Operations/Notes tab + browser-explicit open (ms-46)
+- fix(arch): entry-detail-modal default to display:none in CSS (ms-46)
+- feat(arch): frontend drift detector + pre-commit integration (ms-46 e-744)
+- feat(tauri): cloud WS live-update client for cloud mode (e-738 / e-723)
+- feat(tauri): cloud auth token commands + CSP for WS connect (prep for e-723)
+- refactor(arch): move entry-detail-modal into SHARED for Tauri parity (ms-46)
+- refactor(arch): handleCommonAction in SHARED + auto-install dev hook (ms-46)
+- feat(arch): unify connection indicator + add Tauri rebuild warning hook (ms-46)
+- feat(desktop,arch): kill Tauri 2s polling + add pre-commit dist sync hook (ms-46)
+- docs(release): update README/CHANGELOG for v0.5.0
+- chore(release): bump formula to 0.5.0
+
 ## [v0.5.0] - 2026-05-30
 
 - feat(skill,desktop): UC1/UC2 polish — Tauri scroll fix, /beacon-init v2.2, session-start v0.7, single-instance plugin

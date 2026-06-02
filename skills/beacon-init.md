@@ -181,6 +181,44 @@ if [ -z "$TAURI_OPENED" ]; then
 fi
 ```
 
+#### TAURI_NOT_INSTALLED の場合の案内 (e-779)
+
+Tauri Desktop App が見つからなかった場合、ユーザーの OS を `uname -s` で判定して **その OS 向けの install コマンドを 1〜2 行で提示** する。コマンドを書いて見せるだけで、Skill 側からは自動 install しない (ユーザーが意思を持って install する流れを尊重する)。
+
+```bash
+# OS 別 install 案内 (TAURI_NOT_INSTALLED 検出時のみ表示)
+OS_NAME=$(uname -s 2>/dev/null || echo "Unknown")
+case "$OS_NAME" in
+  Darwin)
+    echo "  Beacon Desktop は未インストールです。以下で入ります (macOS):"
+    echo "    brew install --cask beacon-desktop"
+    echo "  または: GitHub Releases から .dmg を直接ダウンロード"
+    ;;
+  Linux)
+    echo "  Beacon Desktop は未インストールです。以下で入ります (Linux):"
+    echo "    curl -LO https://github.com/r-kida2/beacon/releases/latest/download/Beacon-x86_64.AppImage"
+    echo "    chmod +x Beacon-x86_64.AppImage && ./Beacon-x86_64.AppImage"
+    ;;
+  MINGW*|MSYS*|CYGWIN*|Windows_NT)
+    echo "  Beacon Desktop は未インストールです。以下で入ります (Windows):"
+    echo "    winget install BeaconAI.BeaconDesktop"
+    echo "  または: GitHub Releases から .msi を直接ダウンロード"
+    echo "  (SmartScreen 警告が出たら『詳細情報』→『実行』)"
+    ;;
+  *)
+    echo "  Beacon Desktop は未インストールです。INSTALL.md を参照:"
+    echo "    https://github.com/r-kida2/beacon/blob/main/INSTALL.md"
+    ;;
+esac
+
+echo ""
+echo "  install 後にもう一度 /beacon-init を叩けば、自動で起動します。"
+echo "  (今すぐ Web UI で見るなら https://beacon-ai.dev/?project=... を開く"
+echo "   ※ cloud mode で初期化した場合のみ)"
+```
+
+この案内はユーザーが自分で install する選択肢を残しつつ、必要なコマンドを目の前に出すことで「次に何をすれば動くか」を明確にする。
+
 **前提**: Beacon.app v0.1+ (tauri-plugin-single-instance 同梱、F27 で導入)。古い Beacon.app では warm start 時に args が再処理されず、引数なし起動と同等の挙動になる。その場合 Beacon.app を最新ビルドに差し替える。
 
 #### cloud mode (明示的 opt-in、cloud.json あり)

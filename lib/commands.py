@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Beacon CLI commands - thin adapter over core.py logic."""
 
-__version__ = "0.5.0"
+__version__ = "0.7.0"
 
 import json
 import os
@@ -23,11 +23,38 @@ def get_project_file():
     return os.environ.get("BEACON_PROJECT_FILE", ".beacon/project.json")
 
 
+def _user_home():
+    """Resolve the user home directory, honoring an explicit HOME override.
+
+    os.path.expanduser('~') on Windows keys off USERPROFILE/HOMEDRIVE+HOMEPATH
+    and ignores HOME, which breaks env-overridden contexts (tests, sandboxes)
+    and any setup where HOME != USERPROFILE. Prefer HOME when it resolves to a
+    real absolute directory (so a leftover msys-style '/c/...' value can't send
+    writes to a bogus path); otherwise fall back to expanduser. (ms-44 e-844)
+    """
+    home = os.environ.get("HOME")
+    if home and os.path.isabs(home) and os.path.isdir(home):
+        return home
+    return os.path.expanduser("~")
+
+
 def load_project():
     store = get_store()
     data = store.load_project()
     core.validate_project(data)
     return data
+
+
+def load_project_unsafe():
+    """Load project data WITHOUT running validate_project.
+
+    Reserved for recovery flows (`beacon doctor`, `beacon milestone purge`)
+    that must keep working when the data already violates invariants —
+    e.g. duplicate IDs from a hand-edit (Issue #14). All other code paths
+    must continue to use load_project() so corruption is surfaced early.
+    """
+    store = get_store()
+    return store.load_project()
 
 
 def _append_changelog(op: dict) -> None:
@@ -49,6 +76,30 @@ def _append_changelog(op: dict) -> None:
 
 def save_project(data, op=None):
     core.validate_project(data)
+    store = get_store()
+    try:
+        store.save_project(data)
+    except RuntimeError as e:
+        # Lost-update guard tripped (cloud mode only): the cloud changed since
+        # we loaded it. Surface a clear message instead of a traceback so the
+        # user knows to re-run rather than silently losing a concurrent edit.
+        from store_api import ConflictError
+        if isinstance(e, ConflictError):
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        raise
+    if op:
+        _append_changelog(op)
+
+
+def save_project_unsafe(data, op=None):
+    """Save project data WITHOUT validate_project.
+
+    Reserved for the recovery flow where a single purge cannot make the
+    project entirely clean (e.g. 3 duplicates of the same ms-id — the
+    first purge leaves 2 dups, still invalid). Callers MUST run
+    `beacon doctor` afterwards to confirm cleanup.
+    """
     store = get_store()
     store.save_project(data)
     if op:
@@ -201,7 +252,7 @@ CLAUDE_POSTCOMPACT_HOOK_SCRIPT = _find_hook("beacon-postcompact.sh")
 
 
 def _install_claude_hook():
-    settings_path = os.path.expanduser("~/.claude/settings.json")
+    settings_path = os.path.join(_user_home(), ".claude", "settings.json")
     settings_dir = os.path.dirname(settings_path)
     os.makedirs(settings_dir, exist_ok=True)
     settings = {}
@@ -225,7 +276,9 @@ def _install_claude_hook():
             "matcher": "Bash",
             "hooks": [{
                 "type": "command",
-                "command": CLAUDE_HOOK_SCRIPT,
+                # ms-44 e-853: resolve cross-platform (entry-point / python -m)
+                # so Windows never gets a non-executable .sh commit hook.
+                "command": _resolve_hook_command("beacon-post-commit-hook.sh"),
                 "timeout": 10,
                 "statusMessage": "Beacon: checking commit...",
             }],
@@ -245,7 +298,7 @@ def _install_claude_hook():
             "matcher": "mcp__",
             "hooks": [{
                 "type": "command",
-                "command": CLAUDE_SAVE_HOOK_SCRIPT,
+                "command": _resolve_hook_command("beacon-save-hook.sh"),
                 "timeout": 10,
                 "statusMessage": "Beacon: checking MCP operation...",
             }],
@@ -259,16 +312,24 @@ def _install_claude_hook():
     for entry in post_compact:
         for h in entry.get("hooks", []):
             cmd = h.get("command", "")
-            if "beacon-postcompact" in cmd:
+            if (
+                "beacon-postcompact" in cmd
+                or "beacon-hook-postcompact" in cmd
+                or "beacon_cli.hooks.postcompact" in cmd
+            ):
                 postcompact_hook_exists = True
                 break
         if postcompact_hook_exists:
             break
-    if not postcompact_hook_exists and os.path.exists(CLAUDE_POSTCOMPACT_HOOK_SCRIPT):
+    # ms-44 e-853: resolve cross-platform; the command may be a ``python -m``
+    # form (not a path), so guard path-existence only for path commands.
+    _pc_cmd = _resolve_hook_command("beacon-postcompact.sh")
+    _pc_ok = bool(_pc_cmd) and (not _is_path_command(_pc_cmd) or os.path.exists(_pc_cmd))
+    if not postcompact_hook_exists and _pc_ok:
         post_compact.append({
             "hooks": [{
                 "type": "command",
-                "command": CLAUDE_POSTCOMPACT_HOOK_SCRIPT,
+                "command": _pc_cmd,
                 "timeout": 10,
                 "statusMessage": "Beacon: post-compaction orientation...",
             }],
@@ -288,7 +349,7 @@ def _install_skills():
     )
     if not os.path.isdir(skills_src):
         return
-    skills_dst = os.path.expanduser("~/.claude/skills")
+    skills_dst = os.path.join(_user_home(), ".claude", "skills")
     os.makedirs(skills_dst, exist_ok=True)
     installed = []
     for fname in os.listdir(skills_src):
@@ -709,6 +770,124 @@ def cmd_milestone_delete():
     else:
         print(f"Cancelled: [{ms['id']}] {ms['title']}")
         print(f"  Reason: {reason}")
+
+
+def cmd_milestone_purge():
+    """Hard-delete a milestone record (Issue #14 recovery path).
+
+    Unlike `beacon milestone delete` (soft / status=cancelled), purge
+    physically removes the record from the array. This exists only for
+    data-corruption recovery and is not a substitute for soft delete.
+
+    Loads via load_project_unsafe so it can recover from a project that
+    already fails validation (the whole point of the command). The save
+    path also bypasses validation when residual duplicates remain so
+    the operator can purge them one at a time; once clean, validation
+    passes naturally on the next normal load.
+    """
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    reason = os.environ.get("BEACON_REASON", "")
+    index_str = os.environ.get("BEACON_INDEX", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not ms_id:
+        print("Error: ms-id is required.", file=sys.stderr)
+        print(
+            "  Usage: beacon milestone purge <ms-id> --reason \"...\" [--index <n>]",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not reason:
+        print(
+            "Error: --reason is required for milestone purge "
+            "(audit trail per CORE doc data-immutability-principle).",
+            file=sys.stderr,
+        )
+        print(
+            "  Example: beacon milestone purge ms-13 "
+            "--reason \"duplicate ID — Issue #14 recovery\" --index 2",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    index: Optional[int] = None
+    if index_str:
+        try:
+            index = int(index_str)
+        except ValueError:
+            print(f"Error: --index must be an integer, got '{index_str}'.",
+                  file=sys.stderr)
+            sys.exit(1)
+
+    data = load_project_unsafe()
+    # Pre-flight: if the operator did not pass --index but duplicates
+    # exist, show a helpful summary before the core raises. The
+    # core.milestone_purge already raises with a clear message; we just
+    # add a list of the duplicates for context.
+    matches = core.find_milestones(data, ms_id)
+    if not matches:
+        print(f"Milestone not found: {ms_id}", file=sys.stderr)
+        sys.exit(1)
+    if len(matches) > 1 and index is None:
+        print(
+            f"Milestone '{ms_id}' has {len(matches)} duplicate records. "
+            "Re-run with --index <n>:",
+            file=sys.stderr,
+        )
+        for i, m in enumerate(matches, 1):
+            title = m.get("title", "(no title)")
+            status = m.get("status", "?")
+            print(f"  --index {i}  status={status}  title={title}",
+                  file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        purged = core.milestone_purge(data, ms_id, reason=reason, index=index)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # After purge, check whether the project is now clean. If still dirty,
+    # save via unsafe path and warn; otherwise normal save (with validation).
+    dup_report = core.find_duplicate_ids(data)
+    still_dirty = any(dup_report.values())
+    op = {
+        "op": "milestone_purge",
+        "ms_id": ms_id,
+        "index": index,
+        "reason": reason,
+        "purged_title": purged.get("title", ""),
+    }
+    if still_dirty:
+        save_project_unsafe(data, op=op)
+    else:
+        try:
+            save_project(data, op=op)
+        except ValueError as e:
+            # Shouldn't happen — purge invariants should leave a valid
+            # project — but if it does, fall back to unsafe save so the
+            # purge isn't lost, and surface the issue.
+            save_project_unsafe(data, op=op)
+            print(f"Warning: post-purge validation failed: {e}", file=sys.stderr)
+
+    if json_mode:
+        out = {
+            "id": purged["id"],
+            "title": purged.get("title", ""),
+            "purged": True,
+            "still_dirty": still_dirty,
+        }
+        print(json.dumps(out, ensure_ascii=False))
+    else:
+        print(f"Purged: [{purged['id']}] {purged.get('title', '')}")
+        print(f"  Reason: {reason}")
+        if still_dirty:
+            remaining: list[str] = []
+            for category, dupes in dup_report.items():
+                for did, n in dupes.items():
+                    remaining.append(f"{category[:-1]} '{did}' x{n}")
+            print("  Note: residual duplicates remain — "
+                  + ", ".join(remaining))
+            print("  Run `beacon doctor` to inspect and purge the next one.")
 
 
 # ---------------------------------------------------------------------------
@@ -1819,7 +1998,7 @@ def cmd_retro_done():
     retro_dir = os.path.join(project_dir, "retro")
     os.makedirs(retro_dir, exist_ok=True)
     reviewed_path = os.path.join(retro_dir, ".reviewed")
-    with open(reviewed_path, "w") as f:
+    with open(reviewed_path, "w", encoding="utf-8") as f:
         f.write(current_week + "\n")
 
     triggers_dir = os.path.join(project_dir, "triggers")
@@ -1863,7 +2042,7 @@ def _last_reviewed_week() -> Optional[str]:
     project_dir = os.path.dirname(get_project_file())
     reviewed_path = os.path.join(project_dir, "retro", ".reviewed")
     try:
-        with open(reviewed_path, "r") as f:
+        with open(reviewed_path, "r", encoding="utf-8") as f:
             return f.read().strip() or None
     except (FileNotFoundError, IOError):
         return None
@@ -1964,11 +2143,13 @@ def _auto_fire_retro_trigger():
     created_at = today.isoformat()
     if os.path.exists(trigger_path):
         try:
-            with open(trigger_path, "r") as f:
+            with open(trigger_path, "r", encoding="utf-8") as f:
                 existing = json.load(f)
             if isinstance(existing.get("created_at"), str):
                 created_at = existing["created_at"]
-        except (json.JSONDecodeError, IOError):
+        except (json.JSONDecodeError, IOError, UnicodeDecodeError):
+            # #21 follow-up: legacy retro trigger from pre-fix builds is cp932
+            # — skip and let the new write below replace it with UTF-8.
             pass
 
     trigger_data = {
@@ -1980,7 +2161,7 @@ def _auto_fire_retro_trigger():
         "created_at": created_at,
         "refreshed_at": today.isoformat(),
     }
-    with open(trigger_path, "w") as f:
+    with open(trigger_path, "w", encoding="utf-8") as f:
         json.dump(trigger_data, f, ensure_ascii=False)
         f.write("\n")
 
@@ -2013,7 +2194,7 @@ def _fire_spec_needed_trigger(ms_id: str, ms_title: str) -> None:
                    f"`/beacon-spec {ms_id}` で作成すると、サブエージェントや retrospection が機能しやすくなります。",
         "created_at": datetime.datetime.now().isoformat(),
     }
-    with open(trigger_path, "w") as f:
+    with open(trigger_path, "w", encoding="utf-8") as f:
         json.dump(trigger_data, f, ensure_ascii=False)
         f.write("\n")
 
@@ -2098,7 +2279,7 @@ def _cleanup_stale_triggers():
             continue
         fpath = os.path.join(triggers_dir, fname)
         try:
-            with open(fpath, "r") as f:
+            with open(fpath, "r", encoding="utf-8") as f:
                 trigger = json.load(f)
             created = datetime.date.fromisoformat(trigger["created_at"][:10])
             if today > created:
@@ -2155,7 +2336,7 @@ def _auto_fire_operation_triggers():
             "message": f"{op_id} ({log_source}) のバッチ確認が必要です{spec_ref}。/beacon-operation-review で記録してください。",
             "created_at": today_str,
         }
-        with open(trigger_path, "w") as f:
+        with open(trigger_path, "w", encoding="utf-8") as f:
             json.dump(trigger_data, f, ensure_ascii=False)
             f.write("\n")
 
@@ -2177,7 +2358,7 @@ def cmd_trigger_fire():
         "message": trigger_message,
         "created_at": datetime.datetime.now().isoformat(),
     }
-    with open(trigger_path, "w") as f:
+    with open(trigger_path, "w", encoding="utf-8") as f:
         json.dump(trigger_data, f, ensure_ascii=False)
         f.write("\n")
 
@@ -2196,10 +2377,18 @@ def cmd_trigger_check():
             continue
         fpath = os.path.join(triggers_dir, fname)
         try:
-            with open(fpath, "r") as f:
+            with open(fpath, "r", encoding="utf-8") as f:
                 triggers.append(json.load(f))
-        except (json.JSONDecodeError, IOError):
-            pass
+        except (json.JSONDecodeError, IOError, UnicodeDecodeError) as exc:
+            # #21 follow-up: legacy trigger files written by pre-encoding-fix
+            # builds on Windows are persisted in cp932 and fail UTF-8 decode.
+            # We silently skip so `beacon trigger check` keeps working; the
+            # bad file stays on disk until the user clears it explicitly
+            # (or the firing code overwrites it with valid UTF-8).
+            sys.stderr.write(
+                f"[beacon] skipping malformed trigger file "
+                f"{os.path.basename(fpath)}: {type(exc).__name__}\n"
+            )
     print(json.dumps(triggers, ensure_ascii=False))
 
 
@@ -3549,6 +3738,18 @@ def _resolve_skills_src() -> str:
     return ""
 
 
+def _hook_unusable_on_windows(cmd: str) -> bool:
+    """True if ``cmd`` is a bare ``.sh`` script while running on Windows.
+
+    Claude Code's hook runner cannot execute a ``.sh`` on Windows (there is no
+    shell association that yields the expected stdout JSON), so such a hook
+    silently no-ops and ``/beacon-log`` never fires. Used to (a) keep
+    ``_resolve_hook_command`` from resolving to a ``.sh`` on Windows and
+    (b) let ``beacon doctor`` flag an already-broken config. (ms-44 e-853)
+    """
+    return os.name == "nt" and cmd.strip().lower().endswith(".sh")
+
+
 def _resolve_hook_command(hook_basename: str) -> str:
     """Return a cross-platform command string for the named hook.
 
@@ -3601,12 +3802,12 @@ def _resolve_hook_command(hook_basename: str) -> str:
     # test_install_hooks.py contracts continue to hold).
     if const_name:
         const_val = globals().get(const_name, "")
-        if const_val and os.path.exists(const_val):
+        if const_val and os.path.exists(const_val) and not _hook_unusable_on_windows(const_val):
             return const_val
 
     # Source / brew: bash next to the launcher.
     bash_path = _find_hook(hook_basename)
-    if bash_path and os.path.exists(bash_path):
+    if bash_path and os.path.exists(bash_path) and not _hook_unusable_on_windows(bash_path):
         return bash_path
 
     # Final fallback: invoke the module via the current interpreter.
@@ -3627,7 +3828,7 @@ def cmd_skill_install():
     beacon_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     # Destination: ~/.claude/skills/
-    home = os.path.expanduser("~")
+    home = _user_home()
     claude_skills = os.path.join(home, ".claude", "skills")
     os.makedirs(claude_skills, exist_ok=True)
 
@@ -3757,17 +3958,41 @@ def _install_dev_precommit_hook(beacon_root: str) -> None:
         except OSError:
             return
 
-    # Make sure source is executable (chmod 0o755)
+    # Make sure source is executable (chmod 0o755). No-op on Windows where
+    # file modes aren't used in the Unix sense; safe to ignore failures.
     try:
         os.chmod(src_abs, 0o755)
     except OSError:
         pass
 
+    # Try symlink first (POSIX, atomic, tracks source updates automatically).
+    # On Windows without Developer Mode / admin, symlink() raises OSError —
+    # fall back to a plain file copy so the hook still fires. The copy
+    # version becomes stale if the source is updated later; print a hint so
+    # the user knows to re-run `beacon skill install` after pulling.
     try:
         os.symlink(link_target, target)
         print(f"  [hook] installed pre-commit hook (symlink → {src_rel})")
+        return
     except OSError as e:
-        print(f"  [hook] WARN: couldn't create pre-commit symlink: {e}")
+        symlink_err = e
+
+    try:
+        import shutil as _shutil
+        _shutil.copyfile(src_abs, target)
+        try:
+            os.chmod(target, 0o755)
+        except OSError:
+            pass
+        print(
+            f"  [hook] installed pre-commit hook (copy → {src_rel}; "
+            f"re-run 'beacon skill install' after updating the hook source)"
+        )
+    except OSError as copy_err:
+        print(
+            f"  [hook] WARN: couldn't install pre-commit hook — "
+            f"symlink: {symlink_err}; copy: {copy_err}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -4010,7 +4235,8 @@ def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
         try:
             with open(settings_path, "r", encoding="utf-8") as f:
                 settings = json.load(f)
-        except (json.JSONDecodeError, IOError):
+        except (json.JSONDecodeError, IOError, UnicodeDecodeError):
+            # #21 follow-up: tolerate cp932 settings.json from legacy builds.
             pass
 
     hooks = settings.setdefault("hooks", {})
@@ -4965,7 +5191,7 @@ def cmd_doctor():
     import shutil as _shutil
     import time as _time
 
-    home = os.path.expanduser("~")
+    home = _user_home()
     warnings: list[str] = []
 
     # ------------------------------------------------------------------ #
@@ -4983,6 +5209,7 @@ def cmd_doctor():
     # ------------------------------------------------------------------ #
     settings_path = os.path.join(home, ".claude", "settings.json")
     hook_ok = False
+    hook_broken_cmd = ""  # ms-44 e-853: beacon hook present but not runnable here
     if os.path.exists(settings_path):
         try:
             with open(settings_path, "r", encoding="utf-8") as _f:
@@ -4990,14 +5217,31 @@ def cmd_doctor():
             _post_tool = _settings.get("hooks", {}).get("PostToolUse", [])
             for _entry in _post_tool:
                 for _h in _entry.get("hooks", []):
-                    if "beacon" in _h.get("command", ""):
-                        hook_ok = True
-                        break
+                    _cmd = _h.get("command", "")
+                    if "beacon" not in _cmd:
+                        continue
+                    # A beacon hook is configured — but is it runnable on this
+                    # OS? A .sh on Windows (or a path that no longer exists)
+                    # silently no-ops, so /beacon-log never fires. (e-853)
+                    if _hook_unusable_on_windows(_cmd) or (
+                        _is_path_command(_cmd) and not os.path.exists(_cmd)
+                    ):
+                        hook_broken_cmd = _cmd
+                        continue
+                    hook_ok = True
+                    break
                 if hook_ok:
                     break
         except Exception:
             pass
-    if not hook_ok:
+    if not hook_ok and hook_broken_cmd:
+        warnings.append(
+            "WARN [hooks] PostToolUse hook is configured but not executable on this OS:\n"
+            f"       {hook_broken_cmd}\n"
+            "       (a .sh hook does not run on Windows; commit -> /beacon-log will not fire.)\n"
+            "       Run: beacon skill install   (re-points it to the cross-platform hook)"
+        )
+    elif not hook_ok:
         warnings.append(
             "WARN [hooks] PostToolUse hook not configured in ~/.claude/settings.json.\n"
             "       Run: beacon skill install"
@@ -5022,7 +5266,7 @@ def cmd_doctor():
     from auth import CREDENTIALS_PATH, _decode_jwt_expiry
     if CREDENTIALS_PATH.exists():
         try:
-            with open(CREDENTIALS_PATH, "r") as _f:
+            with open(CREDENTIALS_PATH, "r", encoding="utf-8") as _f:
                 _creds = json.load(_f)
             _token = _creds.get("token") or _creds.get("id_token") or ""
             if _token:
@@ -5055,7 +5299,7 @@ def cmd_doctor():
     config_json_path = os.path.join(".beacon", "config.json")
     if os.path.exists(config_json_path):
         try:
-            with open(config_json_path, "r") as _f:
+            with open(config_json_path, "r", encoding="utf-8") as _f:
                 _config = json.load(_f)
             if _config.get("mode") == "cloud":
                 if not os.path.exists(cloud_json_path):
@@ -5065,7 +5309,7 @@ def cmd_doctor():
                     )
                 else:
                     try:
-                        with open(cloud_json_path, "r") as _f:
+                        with open(cloud_json_path, "r", encoding="utf-8") as _f:
                             _cloud = json.load(_f)
                         if not _cloud.get("api_url"):
                             warnings.append(
@@ -5081,7 +5325,37 @@ def cmd_doctor():
             pass  # config.json unreadable — not a fatal error
 
     # ------------------------------------------------------------------ #
-    # 6. Repo skills/ vs installed ~/.claude/skills/ drift (ms-10 e-722)
+    # 6. Duplicate IDs (Issue #14)
+    # ------------------------------------------------------------------ #
+    # We use load_project_unsafe so doctor can still surface the very
+    # problem strict load refuses to load. If we can't load at all (no
+    # project, network error in cloud mode, etc.), we silently skip this
+    # check — doctor is best-effort for environment health, not a
+    # project linter.
+    try:
+        _data = load_project_unsafe()
+        dup_report = core.find_duplicate_ids(_data)
+        for category_label, key in (
+            ("milestone", "milestones"),
+            ("entry", "entries"),
+            ("operation", "operations"),
+        ):
+            for did, n in dup_report.get(key, {}).items():
+                fix_cmd = (
+                    f"beacon milestone purge {did} --reason \"...\" --index <n>"
+                    if category_label == "milestone"
+                    else f"contact maintainers / hand-edit if recoverable (corrupt {category_label})"
+                )
+                warnings.append(
+                    f"WARN [dup-id] Duplicate {category_label} ID '{did}' "
+                    f"appears {n} times (Issue #14).\n"
+                    f"       Recovery: {fix_cmd}"
+                )
+    except Exception:
+        pass  # Project not loadable from this CWD — skip dup check.
+
+    # ------------------------------------------------------------------ #
+    # 7. Repo skills/ vs installed ~/.claude/skills/ drift (ms-10 e-722)
     # ------------------------------------------------------------------ #
     # This check only runs when we can find the drift script — i.e. running
     # from a beacon source checkout. brew / pipx users don't have scripts/
@@ -5135,6 +5409,7 @@ def cmd_help_json():
         {"command": "beacon milestone observe <id>", "flags": [], "description": "Set milestone to observing"},
         {"command": "beacon milestone rename <id> <title>", "flags": [], "description": "Rename a milestone"},
         {"command": "beacon milestone depends <id> --on <id>", "flags": [], "description": "Declare milestone dependency"},
+        {"command": "beacon milestone purge <id> --reason <text>", "flags": ["--index <n>", "--json"], "description": "Hard-delete a milestone record (recovery for duplicate-ID corruption; Issue #14)"},
         {"command": "beacon milestone graph", "flags": ["--json"], "description": "Show dependency graph"},
         {"command": "beacon task add <desc>", "flags": ["-m <ms-id>"], "description": "Add a task to a milestone"},
         {"command": "beacon task done <entry-id>", "flags": [], "description": "Mark task as done"},
@@ -5540,6 +5815,7 @@ if __name__ == "__main__":
         "milestone_show": cmd_milestone_show,
         "milestone_update": cmd_milestone_update,
         "milestone_delete": cmd_milestone_delete,
+        "milestone_purge": cmd_milestone_purge,
         "log": cmd_log,
         "log_prepare": cmd_log_prepare,
         "log_finalize": cmd_log_finalize,

@@ -145,16 +145,18 @@ def _append_changelog(project_id: str, op_name: str, actor: str,
 def _apply_local(project_file: str, op: Op) -> Any:
     """Apply op atomically to a local JSON project file.
 
-    Uses fcntl LOCK_EX so the read-modify-write window is serialized across
-    processes on the same machine. The Store layer (LocalStore) also uses
-    fcntl for individual load/save, but here we hold the lock across the
-    whole read→op→write window — that's the key difference.
+    Uses cross-platform exclusive locking (fcntl LOCK_EX on POSIX,
+    msvcrt.locking on Windows) so the read-modify-write window is
+    serialized across processes on the same machine. The Store layer
+    (LocalStore) also locks individual load/save, but here we hold the
+    lock across the whole read→op→write window — that's the key
+    difference.
     """
-    import fcntl
+    from _file_lock import lock_exclusive, unlock
 
     # Open r+ so we can lock and seek-rewrite in place.
     with open(project_file, "r+", encoding="utf-8") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        lock_exclusive(f)
         try:
             f.seek(0)
             raw = f.read()
@@ -174,7 +176,7 @@ def _apply_local(project_file: str, op: Op) -> Any:
             f.write("\n")
             f.flush()
         finally:
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            unlock(f)
 
     return result
 

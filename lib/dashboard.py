@@ -135,7 +135,7 @@ class Dashboard:
         import datetime
         project_dir = os.path.dirname(self.project_path)
         try:
-            with open(self.project_path, "r") as f:
+            with open(self.project_path, "r", encoding="utf-8") as f:
                 data = j.load(f)
         except (IOError, j.JSONDecodeError):
             return
@@ -149,7 +149,7 @@ class Dashboard:
         current_week = f"{year}-W{week:02d}"
         reviewed_path = os.path.join(project_dir, "retro", ".reviewed")
         try:
-            with open(reviewed_path, "r") as f:
+            with open(reviewed_path, "r", encoding="utf-8") as f:
                 if f.read().strip() >= current_week:
                     return
         except (FileNotFoundError, IOError):
@@ -164,7 +164,7 @@ class Dashboard:
             "message": f"今週の振り返りがまだです（{current_week}）。/beacon-retro で開始しますか？",
             "created_at": today.isoformat(),
         }
-        with open(trigger_path, "w") as f:
+        with open(trigger_path, "w", encoding="utf-8") as f:
             j.dump(trigger_data, f, ensure_ascii=False)
             f.write("\n")
 
@@ -182,7 +182,7 @@ class Dashboard:
             if not fname.endswith(".json"):
                 continue
             try:
-                with open(os.path.join(triggers_dir, fname), "r") as f:
+                with open(os.path.join(triggers_dir, fname), "r", encoding="utf-8") as f:
                     data = j.load(f)
                 msg = data.get("message", "")
                 if msg:

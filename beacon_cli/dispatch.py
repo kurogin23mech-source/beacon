@@ -100,6 +100,17 @@ def _run_commands_py(
     env.setdefault("BEACON_PROJECT_FILE", ".beacon/project.json")
     env["BEACON_DIR"] = str(root)
 
+    # #19 follow-up: main.py reconfigures sys.stdout in *this* process at
+    # import time, but commands.py runs in a fresh child process where that
+    # reconfigure never executes. Force PYTHONUTF8 + PYTHONIOENCODING so
+    # Windows cp932 / cp1252 consoles still get UTF-8 stdout/stderr for
+    # every subcommand (status, milestone list, search results, …) and
+    # not just --help / --version. PEP 540 UTF-8 mode also makes the
+    # default open() encoding UTF-8 inside the child, which is a
+    # belt-and-suspenders companion to the explicit encoding= audit (#21).
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+
     # commands.py uses flat imports (``from store import ...``). Inject
     # the directory that actually holds ``commands.py`` so those resolve
     # in both the source layout (``lib/``) and the wheel layout
@@ -358,6 +369,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_ms_update.add_argument("--assignee", default="")
     p_ms_update.add_argument("-r", "--reason", default="")
 
+    # Dependency graph + worktree lifecycle (used by /beacon-dispatch). These
+    # exist in commands.py but were missing from the PowerShell-native dispatch
+    # (e-842), making /beacon-dispatch unusable on Windows/OSS.
+    p_ms_graph = ms_sub.add_parser("graph", add_help=False)
+    p_ms_graph.add_argument("--json", action="store_true")
+
+    p_ms_workspace = ms_sub.add_parser("workspace", add_help=False)
+    p_ms_workspace.add_argument("ms_id", nargs="?", default="")
+    p_ms_workspace.add_argument("--executor", default="")
+    p_ms_workspace.add_argument("--workspace", "--dir", dest="workspace", default="")
+    p_ms_workspace.add_argument("--clear", action="store_true")
+    p_ms_workspace.add_argument("--no-git", dest="no_git", action="store_true")
+    p_ms_workspace.add_argument("--json", action="store_true")
+
+    p_ms_wscleanup = ms_sub.add_parser("workspace-cleanup", add_help=False)
+    p_ms_wscleanup.add_argument("ms_id", nargs="?", default="")
+    p_ms_wscleanup.add_argument("--merge-to", dest="merge_to", default="")
+    p_ms_wscleanup.add_argument("--json", action="store_true")
+
     # ---- doc ----
     p_doc = sub.add_parser("doc", aliases=["document"], help="Document operations", add_help=False)
     p_doc.add_argument("--help", "-h", action="store_true", dest="show_help")
@@ -511,6 +541,137 @@ def build_parser() -> argparse.ArgumentParser:
     p_skill_install = skill_sub.add_parser("install", add_help=False)
     p_skill_install.add_argument("--force", action="store_true")
     p_skill_install.add_argument("--settings-path", dest="settings_path", default="")
+
+    # ---- auth login / logout / status (cloud OAuth) ----
+    # `beacon auth login` opens a browser and signs in with Google so the
+    # cloud project APIs (firestore / WS) become reachable. commands.py
+    # delegates straight to the `auth` module — no env vars in play, the
+    # interactive flow is owned by `auth.login()` itself.
+    p_auth = sub.add_parser("auth", help="Cloud authentication", add_help=False)
+    p_auth.add_argument("--help", "-h", action="store_true", dest="show_help")
+    auth_sub = p_auth.add_subparsers(dest="auth_cmd", metavar="<subcmd>")
+    auth_sub.add_parser("login", add_help=False)
+    auth_sub.add_parser("logout", add_help=False)
+    auth_sub.add_parser("status", add_help=False)
+
+    # ---- cloud list / status / open / join / off / push / pull (#20) ----
+    # Authenticated users (Windows pipx) need a full path to migrate local
+    # projects to cloud and sync the other way. The architectural concern
+    # behind cloud push (= two-master divergence) is already handled in
+    # commands.py: cloud_push auto-switches to cloud mode after the
+    # initial upload (ms-36 cloud-first cache design), and a SECOND push
+    # while already in cloud mode is refused unless --force is given and
+    # logged to the changelog (ms-24). We can wire push/pull safely.
+    p_cloud = sub.add_parser("cloud", help="Cloud project navigation", add_help=False)
+    p_cloud.add_argument("--help", "-h", action="store_true", dest="show_help")
+    cloud_sub = p_cloud.add_subparsers(dest="cloud_cmd", metavar="<subcmd>")
+    cloud_sub.add_parser("list", add_help=False)
+    cloud_sub.add_parser("status", add_help=False)
+    cloud_sub.add_parser("off", add_help=False)
+    p_cloud_join = cloud_sub.add_parser("join", add_help=False)
+    p_cloud_join.add_argument("project_id", nargs="?", default="")
+    p_cloud_open = cloud_sub.add_parser("open", add_help=False)
+    p_cloud_open.add_argument("project_id", nargs="?", default="")
+    p_cloud_open.add_argument("--no-browser", action="store_true",
+                              help="Don't auto-launch the browser/desktop UI")
+    p_cloud_push = cloud_sub.add_parser("push", add_help=False)
+    p_cloud_push.add_argument("-f", "--force", action="store_true",
+                              help="Override the cloud-mode safety block")
+    cloud_sub.add_parser("pull", add_help=False)
+
+    # ---- pr show / add / close / approve / reject / create / request-review / request-changes / review / merge ----
+    p_pr = sub.add_parser("pr", help="Pull-request operations", add_help=False)
+    p_pr.add_argument("--help", "-h", action="store_true", dest="show_help")
+    pr_sub = p_pr.add_subparsers(dest="pr_cmd", metavar="<subcmd>")
+
+    p_pr_show = pr_sub.add_parser("show", add_help=False)
+    p_pr_show.add_argument("ident", nargs="?", default="")
+    p_pr_show.add_argument("--json", action="store_true")
+
+    p_pr_add = pr_sub.add_parser("add", add_help=False)
+    p_pr_add.add_argument("url", nargs="?", default="")
+    p_pr_add.add_argument("-m", "--ms", dest="ms_id", default="")
+    p_pr_add.add_argument("--intent", default="")
+    p_pr_add.add_argument("--author", default="")
+    p_pr_add.add_argument("--json", action="store_true")
+
+    p_pr_close = pr_sub.add_parser("close", add_help=False)
+    p_pr_close.add_argument("entry_id", nargs="?", default="")
+    p_pr_close.add_argument("--json", action="store_true")
+
+    p_pr_approve = pr_sub.add_parser("approve", add_help=False)
+    p_pr_approve.add_argument("entry_id", nargs="?", default="")
+    p_pr_approve.add_argument("--rationale", default="")
+    p_pr_approve.add_argument("--json", action="store_true")
+
+    p_pr_reject = pr_sub.add_parser("reject", add_help=False)
+    p_pr_reject.add_argument("entry_id", nargs="?", default="")
+    p_pr_reject.add_argument("--rationale", default="")
+    p_pr_reject.add_argument("--json", action="store_true")
+
+    p_pr_create = pr_sub.add_parser("create", add_help=False)
+    p_pr_create.add_argument("-m", "--ms", dest="ms_id", default="")
+    p_pr_create.add_argument("--intent", default="")
+    p_pr_create.add_argument("gh_args", nargs=argparse.REMAINDER)
+
+    p_pr_rr = pr_sub.add_parser("request-review", add_help=False)
+    p_pr_rr.add_argument("entry_id", nargs="?", default="")
+    p_pr_rr.add_argument("--json", action="store_true")
+
+    p_pr_rc = pr_sub.add_parser("request-changes", add_help=False)
+    p_pr_rc.add_argument("entry_id", nargs="?", default="")
+    p_pr_rc.add_argument("--rationale", default="")
+    p_pr_rc.add_argument("--json", action="store_true")
+
+    pr_sub.add_parser("review", add_help=False)  # prints "use /review Skill"
+
+    p_pr_merge = pr_sub.add_parser("merge", add_help=False)
+    p_pr_merge.add_argument("entry_id", nargs="?", default="")
+    p_pr_merge.add_argument("--json", action="store_true")
+
+    # ---- issue import / sync / list ----
+    p_issue = sub.add_parser("issue", help="GitHub Issue import", add_help=False)
+    p_issue.add_argument("--help", "-h", action="store_true", dest="show_help")
+    issue_sub = p_issue.add_subparsers(dest="issue_cmd", metavar="<subcmd>")
+
+    p_issue_import = issue_sub.add_parser("import", add_help=False)
+    p_issue_import.add_argument("issue_number", nargs="?", default="")
+    p_issue_import.add_argument("-m", "--ms", dest="ms_id", default="")
+    p_issue_import.add_argument("--json", action="store_true")
+
+    p_issue_sync = issue_sub.add_parser("sync", add_help=False)
+    p_issue_sync.add_argument("-m", "--ms", dest="ms_id", default="")
+
+    p_issue_list = issue_sub.add_parser("list", add_help=False)
+    p_issue_list.add_argument("--json", action="store_true")
+
+    # ---- member add / list / remove / role ----
+    p_member = sub.add_parser("member", help="Project member management", add_help=False)
+    p_member.add_argument("--help", "-h", action="store_true", dest="show_help")
+    member_sub = p_member.add_subparsers(dest="member_cmd", metavar="<subcmd>")
+
+    p_member_add = member_sub.add_parser("add", add_help=False)
+    p_member_add.add_argument("member_id", nargs="?", default="")
+    p_member_add.add_argument("--name", dest="member_name", default="")
+    p_member_add.add_argument("--email", dest="member_email", default="")
+    p_member_add.add_argument(
+        "--role", dest="member_role", default="contributor"
+    )
+    p_member_add.add_argument("--json", action="store_true")
+
+    for alias in ("list", "ls"):
+        p_member_list = member_sub.add_parser(alias, add_help=False)
+        p_member_list.add_argument("--json", action="store_true")
+
+    for alias in ("remove", "rm"):
+        p_member_remove = member_sub.add_parser(alias, add_help=False)
+        p_member_remove.add_argument("member_id", nargs="?", default="")
+        p_member_remove.add_argument("-r", "--reason", default="")
+        p_member_remove.add_argument("--json", action="store_true")
+
+    p_member_role = member_sub.add_parser("role", add_help=False)
+    p_member_role.add_argument("member_id", nargs="?", default="")
+    p_member_role.add_argument("new_role", nargs="?", default="")
 
     sub.add_parser("help", add_help=False)
 
@@ -854,7 +1015,8 @@ def _handle_milestone(root: Path, args: argparse.Namespace) -> int:
     if args.show_help or args.ms_cmd is None:
         print(
             "Usage: beacon milestone "
-            "[add|list|start|done|close|observe|show|update] [options]"
+            "[add|list|start|done|close|observe|show|update|graph|workspace|"
+            "workspace-cleanup] [options]"
         )
         return 0 if args.show_help else 2
     if (rc := _ensure_project()) is not None:
@@ -934,6 +1096,42 @@ def _handle_milestone(root: Path, args: argparse.Namespace) -> int:
             "BEACON_REASON": args.reason or "",
         }
         return _run_commands_py(root, "milestone_update", env)
+
+    if cmd == "graph":
+        return _run_commands_py(
+            root, "milestone_graph", {"BEACON_JSON": "1" if args.json else ""}
+        )
+
+    if cmd == "workspace":
+        if not args.ms_id:
+            print(
+                "Usage: beacon milestone workspace <ms-id> "
+                "[--executor ai|human] [--dir <path>] [--clear] [--no-git] [--json]"
+            )
+            return 1
+        env = {
+            "BEACON_MS_ID": args.ms_id,
+            "BEACON_EXECUTOR": args.executor or "",
+            "BEACON_WORKSPACE": args.workspace or "",
+            "BEACON_CLEAR": "1" if args.clear else "",
+            "BEACON_NO_GIT": "1" if args.no_git else "",
+            "BEACON_JSON": "1" if args.json else "",
+        }
+        return _run_commands_py(root, "milestone_workspace", env)
+
+    if cmd == "workspace-cleanup":
+        if not args.ms_id:
+            print(
+                "Usage: beacon milestone workspace-cleanup <ms-id> "
+                "[--merge-to <branch>] [--json]"
+            )
+            return 1
+        env = {
+            "BEACON_MS_ID": args.ms_id,
+            "BEACON_MERGE_TO": args.merge_to or "",
+            "BEACON_JSON": "1" if args.json else "",
+        }
+        return _run_commands_py(root, "milestone_workspace_cleanup", env)
 
     print(f"Unknown milestone subcommand: {cmd}")
     return 1
@@ -1227,6 +1425,377 @@ def _handle_doctor(root: Path, args: argparse.Namespace) -> int:
     return _run_commands_py(root, "doctor", {})
 
 
+def _handle_pr(root: Path, args: argparse.Namespace) -> int:
+    """Mirror of bash cmd_pr (10 subcommands).
+
+    Each branch sets the env vars bash uses, then delegates to commands.py.
+    `review` is a stub that points to the /review Skill (same as bash).
+    """
+    if args.show_help or args.pr_cmd is None:
+        print(
+            "Usage: beacon pr [create|add|show|review|approve|request-changes|reject|merge|close|request-review]"
+        )
+        return 0 if args.show_help else 2
+    if (rc := _ensure_project()) is not None:
+        return rc
+    cmd = args.pr_cmd
+    json_env = "1" if getattr(args, "json", False) else ""
+
+    if cmd == "show":
+        if not args.ident:
+            print("Usage: beacon pr show <entry-id|pr-number|url> [--json]")
+            return 1
+        return _run_commands_py(
+            root, "pr_show", {"BEACON_PR_IDENT": args.ident, "BEACON_JSON": json_env}
+        )
+    if cmd == "add":
+        if not args.url:
+            print(
+                "Usage: beacon pr add <github-url> [-m <ms-id>] "
+                "[--intent \"text\"] [--author user]"
+            )
+            return 1
+        return _run_commands_py(
+            root,
+            "pr_add",
+            {
+                "BEACON_URL": args.url,
+                "BEACON_MS_ID": args.ms_id or "",
+                "BEACON_INTENT": args.intent or "",
+                "BEACON_AUTHOR": args.author or "",
+                "BEACON_DATE": _today(),
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd == "close":
+        if not args.entry_id:
+            print("Usage: beacon pr close <entry-id> [--json]")
+            return 1
+        return _run_commands_py(
+            root, "pr_close",
+            {"BEACON_ENTRY_ID": args.entry_id, "BEACON_JSON": json_env},
+        )
+    if cmd in ("approve", "reject", "request-changes"):
+        if not args.entry_id:
+            print(f"Usage: beacon pr {cmd} <entry-id> [--rationale \"text\"]")
+            return 1
+        subcmd = "pr_" + cmd.replace("-", "_")
+        return _run_commands_py(
+            root, subcmd,
+            {
+                "BEACON_ENTRY_ID": args.entry_id,
+                "BEACON_RATIONALE": args.rationale or "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd == "create":
+        # gh_args is a REMAINDER list — bash forwards via printf %q. We
+        # join with shell-safe quoting; commands.py:cmd_pr_create reads
+        # BEACON_GH_ARGS as a pre-quoted single string.
+        import shlex
+        gh_args = " ".join(shlex.quote(a) for a in (args.gh_args or []))
+        return _run_commands_py(
+            root, "pr_create",
+            {
+                "BEACON_MS_ID": args.ms_id or "",
+                "BEACON_INTENT": args.intent or "",
+                "BEACON_GH_ARGS": gh_args,
+            },
+        )
+    if cmd == "request-review":
+        if not args.entry_id:
+            print("Usage: beacon pr request-review <entry-id> [--json]")
+            return 1
+        return _run_commands_py(
+            root, "pr_request_review",
+            {"BEACON_ENTRY_ID": args.entry_id, "BEACON_JSON": json_env},
+        )
+    if cmd == "review":
+        print("beacon pr review is now handled by the /review Claude Code Skill.")
+        print("Use: /review <PR-number>")
+        return 0
+    if cmd == "merge":
+        if not args.entry_id:
+            print("Usage: beacon pr merge <entry-id> [--json]")
+            return 1
+        return _run_commands_py(
+            root, "pr_merge",
+            {"BEACON_ENTRY_ID": args.entry_id, "BEACON_JSON": json_env},
+        )
+    print(f"Unknown pr subcommand: {cmd}")
+    return 1
+
+
+def _handle_issue(root: Path, args: argparse.Namespace) -> int:
+    """`beacon issue import|sync|list` — GitHub Issue → beacon task."""
+    if args.show_help or args.issue_cmd is None:
+        print(
+            "Usage: beacon issue import <number> [-m <ms-id>]\n"
+            "       beacon issue sync [-m <ms-id>]\n"
+            "       beacon issue list [--json]"
+        )
+        return 0 if args.show_help else 2
+    if (rc := _ensure_project()) is not None:
+        return rc
+    cmd = args.issue_cmd
+    json_env = "1" if getattr(args, "json", False) else ""
+
+    if cmd == "import":
+        if not args.issue_number:
+            print("Usage: beacon issue import <number> [-m <ms-id>] [--json]")
+            return 1
+        return _run_commands_py(
+            root, "issue_import",
+            {
+                "BEACON_ISSUE_NUMBER": args.issue_number,
+                "BEACON_MS_ID": args.ms_id or "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd == "sync":
+        return _run_commands_py(
+            root, "issue_sync", {"BEACON_MS_ID": args.ms_id or ""}
+        )
+    if cmd == "list":
+        return _run_commands_py(root, "issue_list", {"BEACON_JSON": json_env})
+    print(f"Unknown issue subcommand: {cmd}")
+    return 1
+
+
+def _handle_member(root: Path, args: argparse.Namespace) -> int:
+    """`beacon member add|list|remove|role` — project members."""
+    if args.show_help or args.member_cmd is None:
+        print(
+            "Usage: beacon member [add|list|remove|role]\n"
+            "  add <id> [--name N] [--email E] [--role R]\n"
+            "  list [--json]\n"
+            "  remove <id> --reason <text>\n"
+            "  role <id> <owner|maintainer|contributor|viewer>"
+        )
+        return 0 if args.show_help else 2
+    if (rc := _ensure_project()) is not None:
+        return rc
+    cmd = args.member_cmd
+    json_env = "1" if getattr(args, "json", False) else ""
+
+    if cmd == "add":
+        if not args.member_id:
+            print(
+                "Usage: beacon member add <id> [--name N] [--email E] "
+                "[--role owner|maintainer|contributor|viewer] [--json]"
+            )
+            return 1
+        return _run_commands_py(
+            root, "member_add",
+            {
+                "BEACON_MEMBER_ID": args.member_id,
+                "BEACON_MEMBER_NAME": args.member_name or "",
+                "BEACON_MEMBER_EMAIL": args.member_email or "",
+                "BEACON_MEMBER_ROLE": args.member_role or "contributor",
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd in ("list", "ls"):
+        return _run_commands_py(root, "member_list", {"BEACON_JSON": json_env})
+    if cmd in ("remove", "rm"):
+        if not args.member_id:
+            print("Usage: beacon member remove <id> --reason <text> [--json]")
+            return 1
+        return _run_commands_py(
+            root, "member_remove",
+            {
+                "BEACON_MEMBER_ID": args.member_id,
+                "BEACON_REASON": args.reason or "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd == "role":
+        if not args.member_id or not args.new_role:
+            print(
+                "Usage: beacon member role <id> "
+                "<owner|maintainer|contributor|viewer>"
+            )
+            return 1
+        return _run_commands_py(
+            root, "member_role",
+            {
+                "BEACON_MEMBER_ID": args.member_id,
+                "BEACON_MEMBER_ROLE": args.new_role,
+            },
+        )
+    print(f"Unknown member subcommand: {cmd}")
+    return 1
+
+
+def _handle_cloud(root: Path, args: argparse.Namespace) -> int:
+    """`beacon cloud list|status|join|open|off` — cloud project navigation.
+
+    `push` / `pull` deliberately stay deferred (Phase 2/3 — destructive
+    operations need ms-24-level safety review and a PowerShell-native
+    confirmation flow). The five subcommands implemented here are all
+    read-or-bind operations safe for non-interactive use.
+
+    `open` is the only one that involves opening a UI; on bash-less
+    systems we open the Web UI in the system browser (Tauri Desktop
+    can be launched manually if the user has it installed — there's
+    no portable cross-platform way to detect+launch it from Python).
+    """
+    if args.show_help or args.cloud_cmd is None:
+        print(
+            "Usage: beacon cloud [list|status|open <id>|join <id>|off|push|pull]\n"
+            "  list                 List cloud projects\n"
+            "  status               Show current cloud mode + project_id\n"
+            "  open <project-id>    Bind cwd to a cloud project + open Web UI\n"
+            "  join <project-id>    Bind cwd to a cloud project (no UI launch)\n"
+            "  off                  Switch back to local mode (writes config.json)\n"
+            "  push [-f|--force]    Upload local project (local mode → cloud + auto switch)\n"
+            "  pull                 Sync cloud state into the local read-only cache"
+        )
+        return 0 if args.show_help else 2
+
+    cmd = args.cloud_cmd
+    if cmd == "list":
+        return _run_commands_py(root, "cloud_list", {})
+    if cmd == "status":
+        return _run_commands_py(root, "cloud_status", {})
+    if cmd == "join":
+        if not args.project_id:
+            print("Usage: beacon cloud join <project-id>")
+            return 1
+        return _run_commands_py(
+            root, "cloud_join", {"BEACON_CLOUD_PROJECT_ID": args.project_id}
+        )
+    if cmd == "off":
+        # Local Python-side write (no commands.py handler exists for `off` —
+        # bash does it inline). Mirror the bash behaviour byte-for-byte.
+        config_path = Path(".beacon/config.json")
+        if not config_path.exists():
+            print("No .beacon/config.json found.")
+            return 0
+        try:
+            config_path.write_text('{"mode": "local"}\n', encoding="utf-8")
+            print("Switched to local mode.")
+            return 0
+        except OSError as exc:
+            _eprint(f"Error writing config.json: {exc}")
+            return 1
+    if cmd == "open":
+        if not args.project_id:
+            print("Usage: beacon cloud open <project-id>")
+            return 1
+        return _do_cloud_open(root, args.project_id, args.no_browser)
+    if cmd == "push":
+        # cmd_cloud_push reads BEACON_FORCE from env. It already enforces the
+        # ms-24 cloud-mode block (refuses without --force) and ms-36 auto-
+        # switch (config.json mode -> cloud after initial migration), so the
+        # dispatch handler is intentionally thin.
+        return _run_commands_py(
+            root, "cloud_push",
+            {"BEACON_FORCE": "1" if args.force else ""},
+        )
+    if cmd == "pull":
+        return _run_commands_py(root, "cloud_pull", {})
+
+    print(f"Unknown cloud subcommand: {cmd}")
+    return 1
+
+
+def _do_cloud_open(root: Path, project_id: str, no_browser: bool) -> int:
+    """Non-interactive port of bash `cmd_cloud_launch`.
+
+    Differences from bash:
+      - No interactive `read -rp` prompts — project_id is required.
+      - No tmux + curses dashboard (impossible without bash on Windows;
+        also curses doesn't ship on stock Windows Python).
+      - UI launch is just `webbrowser.open(beacon-ai.dev/?project=…)`
+        instead of trying to spawn Tauri. Users with Beacon Desktop
+        installed can launch it manually.
+    """
+    # 1. Verify the project exists (and the user can see it).
+    rc = _run_commands_py(
+        root, "cloud_check_project", {}, extra_args=[project_id]
+    )
+    if rc != 0:
+        _eprint(
+            f"Error: project {project_id!r} not found in cloud "
+            f"(or you don't have access). Try `beacon cloud list`."
+        )
+        return rc
+
+    # 2. Warn if cloud.json points elsewhere (no interactive confirm —
+    #    --force semantics belong on a separate flag if we want them).
+    cloud_path = Path(".beacon/cloud.json")
+    existing_id = ""
+    if cloud_path.exists():
+        try:
+            import json as _json
+            existing_id = _json.loads(
+                cloud_path.read_text(encoding="utf-8")
+            ).get("project_id", "")
+        except (OSError, ValueError):
+            existing_id = ""
+    if existing_id and existing_id != project_id:
+        _eprint(
+            f"Warning: .beacon/cloud.json already points to "
+            f"{existing_id!r}; overwriting with {project_id!r}."
+        )
+
+    # 3. Write the cloud / config / project skeleton.
+    Path(".beacon").mkdir(exist_ok=True)
+    cloud_path.write_text(
+        '{\n  "project_id": "' + project_id + '",\n'
+        '  "api_url": "https://beacon-ai.dev"\n}\n',
+        encoding="utf-8",
+    )
+    Path(".beacon/config.json").write_text(
+        '{"mode": "cloud"}\n', encoding="utf-8"
+    )
+    project_file = os.environ.get(
+        "BEACON_PROJECT_FILE", ".beacon/project.json"
+    )
+    if not Path(project_file).exists():
+        Path(project_file).write_text(
+            '{"name":"cloud","milestones":[]}\n', encoding="utf-8"
+        )
+
+    print(f"Bound this directory to cloud project {project_id!r}.")
+
+    # 4. Launch the Web UI in the system browser unless suppressed.
+    web_url = f"https://beacon-ai.dev/?project={project_id}"
+    if no_browser:
+        print(f"Web UI: {web_url}")
+        return 0
+    try:
+        import webbrowser
+        opened = webbrowser.open(web_url)
+        if opened:
+            print(f"Opened {web_url} in your default browser.")
+        else:
+            print(f"Web UI: {web_url}  (open it manually in your browser)")
+    except Exception as exc:
+        # Never let UI launch failure break the bind.
+        _eprint(f"(couldn't auto-launch browser: {exc})")
+        print(f"Web UI: {web_url}")
+    return 0
+
+
+def _handle_auth(root: Path, args: argparse.Namespace) -> int:
+    """`beacon auth login|logout|status` — Google OAuth for cloud projects.
+
+    commands.py routes each to the `auth` module which opens a browser
+    (login), revokes the local token (logout), or prints the current
+    state (status). No env vars are forwarded because the auth module
+    owns its own state (token cache under ~/.beacon/).
+    """
+    if args.show_help or args.auth_cmd is None:
+        print("Usage: beacon auth [login|logout|status]")
+        return 0 if args.show_help else 2
+    if args.auth_cmd not in ("login", "logout", "status"):
+        print(f"Unknown auth subcommand: {args.auth_cmd}")
+        return 2
+    return _run_commands_py(root, f"auth_{args.auth_cmd}", {})
+
+
 def _handle_skill(root: Path, args: argparse.Namespace) -> int:
     """`beacon skill install [--force] [--settings-path PATH]`.
 
@@ -1277,6 +1846,11 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "project": _handle_project,
     "doctor": _handle_doctor,
     "skill": _handle_skill,
+    "auth": _handle_auth,
+    "cloud": _handle_cloud,
+    "pr": _handle_pr,
+    "issue": _handle_issue,
+    "member": _handle_member,
 }
 
 
@@ -1296,6 +1870,7 @@ def _print_top_help() -> None:
         "  beacon task update <entry-id> [--description T] [--status S] ...\n"
         "  beacon milestone add \"title\" [--priority P] [--objective O] [--ac A]\n"
         "  beacon milestone list | start <id> | done <id> | observe <id> | show <id>\n"
+        "  beacon milestone graph [--json] | workspace <id> | workspace-cleanup <id>\n"
         "  beacon doc add \"title\" [--scope core|spec|memo] [--ms id]\n"
         "  beacon doc list [--scope S] [--ms id]\n"
         "  beacon doc show <doc-id>\n"

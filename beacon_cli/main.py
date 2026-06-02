@@ -22,6 +22,32 @@ from ._version import __version__
 
 
 # ---------------------------------------------------------------------------
+# stdout/stderr encoding — force UTF-8 (#19)
+# ---------------------------------------------------------------------------
+#
+# Windows PowerShell / cmd default to the system code page (cp932 on a JP
+# locale, cp1252 on en-US, …). Printing non-ASCII characters then either
+# crashes with `UnicodeEncodeError` (em dash in --help, anything past ASCII
+# in Japanese commits) or produces mojibake. Python 3.7+ exposes
+# `sys.stdout.reconfigure(encoding=...)` on TextIOWrapper streams, so we
+# normalise to UTF-8 once at import time. `errors="replace"` is a safety
+# net for the rare terminal that can't render a character: the user sees
+# `?` instead of crashing.
+#
+# This runs at *import* time so every entry-point (the console script,
+# `python -m beacon_cli.hooks.post_commit`, test harnesses that import
+# main) gets the fix without each call site remembering to repeat it.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError, OSError):
+        # AttributeError: stream wasn't a TextIOWrapper (rare embedding).
+        # ValueError/OSError: stream already closed or detached.
+        # We silently skip rather than break startup.
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Layout resolution
 # ---------------------------------------------------------------------------
 

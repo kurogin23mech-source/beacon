@@ -8,5 +8,6 @@ lib/firebase_config.json
 # Python packaging build artifacts (ms-44 e-695)
 build/
 dist/
+!desktop/dist/
 *.egg-info/
 .pytest_cache/

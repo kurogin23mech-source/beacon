@@ -38,7 +38,7 @@ def _get_api_url() -> str:
     """Get API URL from cloud.json if available."""
     cloud_json = Path(".beacon/cloud.json")
     if cloud_json.exists():
-        with open(cloud_json, "r") as f:
+        with open(cloud_json, "r", encoding="utf-8") as f:
             return json.load(f).get("api_url") or "https://beacon-ai.dev"
     return "https://beacon-ai.dev"
 
@@ -49,7 +49,7 @@ def _load_firebase_config() -> dict:
         print(f"Error: Firebase config not found at {FIREBASE_CONFIG_PATH}")
         print("Use 'beacon auth login --web' for web-mediated login (no config file needed).")
         sys.exit(1)
-    with open(FIREBASE_CONFIG_PATH, "r") as f:
+    with open(FIREBASE_CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -82,7 +82,7 @@ def login():
         "client_secret": credentials.client_secret,
         "scopes": list(credentials.scopes or SCOPES),
     }
-    with open(CREDENTIALS_PATH, "w") as f:
+    with open(CREDENTIALS_PATH, "w", encoding="utf-8") as f:
         json.dump(creds_data, f, indent=2)
 
     email = _get_user_email(credentials)
@@ -143,7 +143,7 @@ def login_web():
                     creds_data["token_expiry"] = _decode_jwt_expiry(id_token)
                 if result.get("refresh_token"):
                     creds_data["refresh_token"] = result["refresh_token"]
-                with open(CREDENTIALS_PATH, "w") as f:
+                with open(CREDENTIALS_PATH, "w", encoding="utf-8") as f:
                     json.dump(creds_data, f, indent=2)
                 print(f"Logged in as: {result.get('email', '?')}")
                 print(f"Credentials saved to: {CREDENTIALS_PATH}")
@@ -249,7 +249,7 @@ def _refresh_web_auth_token(creds_data: dict) -> dict | None:
         updated["refresh_token"] = result["refresh_token"]
 
     try:
-        with open(CREDENTIALS_PATH, "w") as f:
+        with open(CREDENTIALS_PATH, "w", encoding="utf-8") as f:
             json.dump(updated, f, indent=2)
     except OSError:
         pass  # best-effort; return the updated dict even if write fails
@@ -265,7 +265,7 @@ def _get_firebase_api_key_from_token(token: str) -> str | None:
     """
     if FIREBASE_CONFIG_PATH.exists():
         try:
-            with open(FIREBASE_CONFIG_PATH, "r") as f:
+            with open(FIREBASE_CONFIG_PATH, "r", encoding="utf-8") as f:
                 config = json.load(f)
             # Accept both top-level and nested {"web": {...}} formats
             web = config.get("web", config)
@@ -280,7 +280,7 @@ def load_credentials():
     if not CREDENTIALS_PATH.exists():
         return None
 
-    with open(CREDENTIALS_PATH, "r") as f:
+    with open(CREDENTIALS_PATH, "r", encoding="utf-8") as f:
         creds_data = json.load(f)
 
     # Web auth mode: check expiry
@@ -328,7 +328,7 @@ def load_credentials():
             creds_data["token"] = credentials.token
             if credentials.id_token:
                 creds_data["id_token"] = credentials.id_token
-            with open(CREDENTIALS_PATH, "w") as f:
+            with open(CREDENTIALS_PATH, "w", encoding="utf-8") as f:
                 json.dump(creds_data, f, indent=2)
         except Exception as e:
             print(f"Warning: Could not refresh token: {e}")
