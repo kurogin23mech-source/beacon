@@ -97,4 +97,49 @@ if echo "$STAGED" | grep -qE "^desktop/src-tauri/(Cargo\.toml|src/|tauri\.conf\.
   echo ""
 fi
 
+# ==============================================================================
+# Check 5: Skill drift detection (added 2026-06-02, ms-10 e-722)
+# ==============================================================================
+# Any change under skills/ should be mirrored into ~/.claude/skills/ via
+# `beacon skill install`. Warn only — set BEACON_AUTO_SKILL_INSTALL=1 to
+# run the installer automatically.
+if echo "$STAGED" | grep -qE "^skills/.*\.md$"; then
+  if [ -f scripts/check-skill-drift.py ]; then
+    OUT=$(python3 scripts/check-skill-drift.py 2>&1 || true)
+    if echo "$OUT" | grep -q "Drift detected\|not installed\|does not exist"; then
+      echo "$OUT" | sed 's/^/[pre-commit] /'
+      if [ "${BEACON_AUTO_SKILL_INSTALL:-0}" = "1" ]; then
+        echo "[pre-commit] BEACON_AUTO_SKILL_INSTALL=1 — running 'beacon skill install'"
+        if command -v beacon >/dev/null 2>&1; then
+          beacon skill install || true
+        else
+          echo "[pre-commit] WARN: beacon not on PATH; skipping auto-install."
+        fi
+      else
+        echo "[pre-commit] HINT: set BEACON_AUTO_SKILL_INSTALL=1 to auto-run 'beacon skill install'."
+      fi
+    fi
+  fi
+fi
+
+# ==============================================================================
+# Check 6: CLI help drift detection (added 2026-06-02, ms-10 e-722)
+# ==============================================================================
+# When bin/beacon, lib/commands.py, or README.md change, verify that the
+# subcommand sets across the three surfaces stay aligned. Warn-only.
+if echo "$STAGED" | grep -qE "^(bin/beacon|lib/commands\.py|README\.md|beacon_cli/dispatch\.py)$"; then
+  if [ -f scripts/check-cli-help-drift.py ]; then
+    python3 scripts/check-cli-help-drift.py 2>&1 | sed 's/^/[pre-commit] /' || true
+  fi
+fi
+
+# ==============================================================================
+# Check 7: INSTALL.md static validation (added 2026-06-02, ms-10 e-722)
+# ==============================================================================
+if echo "$STAGED" | grep -q "^INSTALL\.md$"; then
+  if [ -f scripts/check-install-md.py ]; then
+    python3 scripts/check-install-md.py 2>&1 | sed 's/^/[pre-commit] /' || true
+  fi
+fi
+
 exit 0
