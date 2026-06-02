@@ -3757,17 +3757,41 @@ def _install_dev_precommit_hook(beacon_root: str) -> None:
         except OSError:
             return
 
-    # Make sure source is executable (chmod 0o755)
+    # Make sure source is executable (chmod 0o755). No-op on Windows where
+    # file modes aren't used in the Unix sense; safe to ignore failures.
     try:
         os.chmod(src_abs, 0o755)
     except OSError:
         pass
 
+    # Try symlink first (POSIX, atomic, tracks source updates automatically).
+    # On Windows without Developer Mode / admin, symlink() raises OSError —
+    # fall back to a plain file copy so the hook still fires. The copy
+    # version becomes stale if the source is updated later; print a hint so
+    # the user knows to re-run `beacon skill install` after pulling.
     try:
         os.symlink(link_target, target)
         print(f"  [hook] installed pre-commit hook (symlink → {src_rel})")
+        return
     except OSError as e:
-        print(f"  [hook] WARN: couldn't create pre-commit symlink: {e}")
+        symlink_err = e
+
+    try:
+        import shutil as _shutil
+        _shutil.copyfile(src_abs, target)
+        try:
+            os.chmod(target, 0o755)
+        except OSError:
+            pass
+        print(
+            f"  [hook] installed pre-commit hook (copy → {src_rel}; "
+            f"re-run 'beacon skill install' after updating the hook source)"
+        )
+    except OSError as copy_err:
+        print(
+            f"  [hook] WARN: couldn't install pre-commit hook — "
+            f"symlink: {symlink_err}; copy: {copy_err}"
+        )
 
 
 # ---------------------------------------------------------------------------
