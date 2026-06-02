@@ -524,6 +524,100 @@ def build_parser() -> argparse.ArgumentParser:
     auth_sub.add_parser("logout", add_help=False)
     auth_sub.add_parser("status", add_help=False)
 
+    # ---- pr show / add / close / approve / reject / create / request-review / request-changes / review / merge ----
+    p_pr = sub.add_parser("pr", help="Pull-request operations", add_help=False)
+    p_pr.add_argument("--help", "-h", action="store_true", dest="show_help")
+    pr_sub = p_pr.add_subparsers(dest="pr_cmd", metavar="<subcmd>")
+
+    p_pr_show = pr_sub.add_parser("show", add_help=False)
+    p_pr_show.add_argument("ident", nargs="?", default="")
+    p_pr_show.add_argument("--json", action="store_true")
+
+    p_pr_add = pr_sub.add_parser("add", add_help=False)
+    p_pr_add.add_argument("url", nargs="?", default="")
+    p_pr_add.add_argument("-m", "--ms", dest="ms_id", default="")
+    p_pr_add.add_argument("--intent", default="")
+    p_pr_add.add_argument("--author", default="")
+    p_pr_add.add_argument("--json", action="store_true")
+
+    p_pr_close = pr_sub.add_parser("close", add_help=False)
+    p_pr_close.add_argument("entry_id", nargs="?", default="")
+    p_pr_close.add_argument("--json", action="store_true")
+
+    p_pr_approve = pr_sub.add_parser("approve", add_help=False)
+    p_pr_approve.add_argument("entry_id", nargs="?", default="")
+    p_pr_approve.add_argument("--rationale", default="")
+    p_pr_approve.add_argument("--json", action="store_true")
+
+    p_pr_reject = pr_sub.add_parser("reject", add_help=False)
+    p_pr_reject.add_argument("entry_id", nargs="?", default="")
+    p_pr_reject.add_argument("--rationale", default="")
+    p_pr_reject.add_argument("--json", action="store_true")
+
+    p_pr_create = pr_sub.add_parser("create", add_help=False)
+    p_pr_create.add_argument("-m", "--ms", dest="ms_id", default="")
+    p_pr_create.add_argument("--intent", default="")
+    p_pr_create.add_argument("gh_args", nargs=argparse.REMAINDER)
+
+    p_pr_rr = pr_sub.add_parser("request-review", add_help=False)
+    p_pr_rr.add_argument("entry_id", nargs="?", default="")
+    p_pr_rr.add_argument("--json", action="store_true")
+
+    p_pr_rc = pr_sub.add_parser("request-changes", add_help=False)
+    p_pr_rc.add_argument("entry_id", nargs="?", default="")
+    p_pr_rc.add_argument("--rationale", default="")
+    p_pr_rc.add_argument("--json", action="store_true")
+
+    pr_sub.add_parser("review", add_help=False)  # prints "use /review Skill"
+
+    p_pr_merge = pr_sub.add_parser("merge", add_help=False)
+    p_pr_merge.add_argument("entry_id", nargs="?", default="")
+    p_pr_merge.add_argument("--json", action="store_true")
+
+    # ---- issue import / sync / list ----
+    p_issue = sub.add_parser("issue", help="GitHub Issue import", add_help=False)
+    p_issue.add_argument("--help", "-h", action="store_true", dest="show_help")
+    issue_sub = p_issue.add_subparsers(dest="issue_cmd", metavar="<subcmd>")
+
+    p_issue_import = issue_sub.add_parser("import", add_help=False)
+    p_issue_import.add_argument("issue_number", nargs="?", default="")
+    p_issue_import.add_argument("-m", "--ms", dest="ms_id", default="")
+    p_issue_import.add_argument("--json", action="store_true")
+
+    p_issue_sync = issue_sub.add_parser("sync", add_help=False)
+    p_issue_sync.add_argument("-m", "--ms", dest="ms_id", default="")
+
+    p_issue_list = issue_sub.add_parser("list", add_help=False)
+    p_issue_list.add_argument("--json", action="store_true")
+
+    # ---- member add / list / remove / role ----
+    p_member = sub.add_parser("member", help="Project member management", add_help=False)
+    p_member.add_argument("--help", "-h", action="store_true", dest="show_help")
+    member_sub = p_member.add_subparsers(dest="member_cmd", metavar="<subcmd>")
+
+    p_member_add = member_sub.add_parser("add", add_help=False)
+    p_member_add.add_argument("member_id", nargs="?", default="")
+    p_member_add.add_argument("--name", dest="member_name", default="")
+    p_member_add.add_argument("--email", dest="member_email", default="")
+    p_member_add.add_argument(
+        "--role", dest="member_role", default="contributor"
+    )
+    p_member_add.add_argument("--json", action="store_true")
+
+    for alias in ("list", "ls"):
+        p_member_list = member_sub.add_parser(alias, add_help=False)
+        p_member_list.add_argument("--json", action="store_true")
+
+    for alias in ("remove", "rm"):
+        p_member_remove = member_sub.add_parser(alias, add_help=False)
+        p_member_remove.add_argument("member_id", nargs="?", default="")
+        p_member_remove.add_argument("-r", "--reason", default="")
+        p_member_remove.add_argument("--json", action="store_true")
+
+    p_member_role = member_sub.add_parser("role", add_help=False)
+    p_member_role.add_argument("member_id", nargs="?", default="")
+    p_member_role.add_argument("new_role", nargs="?", default="")
+
     sub.add_parser("help", add_help=False)
 
     return p
@@ -1239,6 +1333,208 @@ def _handle_doctor(root: Path, args: argparse.Namespace) -> int:
     return _run_commands_py(root, "doctor", {})
 
 
+def _handle_pr(root: Path, args: argparse.Namespace) -> int:
+    """Mirror of bash cmd_pr (10 subcommands).
+
+    Each branch sets the env vars bash uses, then delegates to commands.py.
+    `review` is a stub that points to the /review Skill (same as bash).
+    """
+    if args.show_help or args.pr_cmd is None:
+        print(
+            "Usage: beacon pr [create|add|show|review|approve|request-changes|reject|merge|close|request-review]"
+        )
+        return 0 if args.show_help else 2
+    if (rc := _ensure_project()) is not None:
+        return rc
+    cmd = args.pr_cmd
+    json_env = "1" if getattr(args, "json", False) else ""
+
+    if cmd == "show":
+        if not args.ident:
+            print("Usage: beacon pr show <entry-id|pr-number|url> [--json]")
+            return 1
+        return _run_commands_py(
+            root, "pr_show", {"BEACON_PR_IDENT": args.ident, "BEACON_JSON": json_env}
+        )
+    if cmd == "add":
+        if not args.url:
+            print(
+                "Usage: beacon pr add <github-url> [-m <ms-id>] "
+                "[--intent \"text\"] [--author user]"
+            )
+            return 1
+        return _run_commands_py(
+            root,
+            "pr_add",
+            {
+                "BEACON_URL": args.url,
+                "BEACON_MS_ID": args.ms_id or "",
+                "BEACON_INTENT": args.intent or "",
+                "BEACON_AUTHOR": args.author or "",
+                "BEACON_DATE": _today(),
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd == "close":
+        if not args.entry_id:
+            print("Usage: beacon pr close <entry-id> [--json]")
+            return 1
+        return _run_commands_py(
+            root, "pr_close",
+            {"BEACON_ENTRY_ID": args.entry_id, "BEACON_JSON": json_env},
+        )
+    if cmd in ("approve", "reject", "request-changes"):
+        if not args.entry_id:
+            print(f"Usage: beacon pr {cmd} <entry-id> [--rationale \"text\"]")
+            return 1
+        subcmd = "pr_" + cmd.replace("-", "_")
+        return _run_commands_py(
+            root, subcmd,
+            {
+                "BEACON_ENTRY_ID": args.entry_id,
+                "BEACON_RATIONALE": args.rationale or "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd == "create":
+        # gh_args is a REMAINDER list — bash forwards via printf %q. We
+        # join with shell-safe quoting; commands.py:cmd_pr_create reads
+        # BEACON_GH_ARGS as a pre-quoted single string.
+        import shlex
+        gh_args = " ".join(shlex.quote(a) for a in (args.gh_args or []))
+        return _run_commands_py(
+            root, "pr_create",
+            {
+                "BEACON_MS_ID": args.ms_id or "",
+                "BEACON_INTENT": args.intent or "",
+                "BEACON_GH_ARGS": gh_args,
+            },
+        )
+    if cmd == "request-review":
+        if not args.entry_id:
+            print("Usage: beacon pr request-review <entry-id> [--json]")
+            return 1
+        return _run_commands_py(
+            root, "pr_request_review",
+            {"BEACON_ENTRY_ID": args.entry_id, "BEACON_JSON": json_env},
+        )
+    if cmd == "review":
+        print("beacon pr review is now handled by the /review Claude Code Skill.")
+        print("Use: /review <PR-number>")
+        return 0
+    if cmd == "merge":
+        if not args.entry_id:
+            print("Usage: beacon pr merge <entry-id> [--json]")
+            return 1
+        return _run_commands_py(
+            root, "pr_merge",
+            {"BEACON_ENTRY_ID": args.entry_id, "BEACON_JSON": json_env},
+        )
+    print(f"Unknown pr subcommand: {cmd}")
+    return 1
+
+
+def _handle_issue(root: Path, args: argparse.Namespace) -> int:
+    """`beacon issue import|sync|list` — GitHub Issue → beacon task."""
+    if args.show_help or args.issue_cmd is None:
+        print(
+            "Usage: beacon issue import <number> [-m <ms-id>]\n"
+            "       beacon issue sync [-m <ms-id>]\n"
+            "       beacon issue list [--json]"
+        )
+        return 0 if args.show_help else 2
+    if (rc := _ensure_project()) is not None:
+        return rc
+    cmd = args.issue_cmd
+    json_env = "1" if getattr(args, "json", False) else ""
+
+    if cmd == "import":
+        if not args.issue_number:
+            print("Usage: beacon issue import <number> [-m <ms-id>] [--json]")
+            return 1
+        return _run_commands_py(
+            root, "issue_import",
+            {
+                "BEACON_ISSUE_NUMBER": args.issue_number,
+                "BEACON_MS_ID": args.ms_id or "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd == "sync":
+        return _run_commands_py(
+            root, "issue_sync", {"BEACON_MS_ID": args.ms_id or ""}
+        )
+    if cmd == "list":
+        return _run_commands_py(root, "issue_list", {"BEACON_JSON": json_env})
+    print(f"Unknown issue subcommand: {cmd}")
+    return 1
+
+
+def _handle_member(root: Path, args: argparse.Namespace) -> int:
+    """`beacon member add|list|remove|role` — project members."""
+    if args.show_help or args.member_cmd is None:
+        print(
+            "Usage: beacon member [add|list|remove|role]\n"
+            "  add <id> [--name N] [--email E] [--role R]\n"
+            "  list [--json]\n"
+            "  remove <id> --reason <text>\n"
+            "  role <id> <owner|maintainer|contributor|viewer>"
+        )
+        return 0 if args.show_help else 2
+    if (rc := _ensure_project()) is not None:
+        return rc
+    cmd = args.member_cmd
+    json_env = "1" if getattr(args, "json", False) else ""
+
+    if cmd == "add":
+        if not args.member_id:
+            print(
+                "Usage: beacon member add <id> [--name N] [--email E] "
+                "[--role owner|maintainer|contributor|viewer] [--json]"
+            )
+            return 1
+        return _run_commands_py(
+            root, "member_add",
+            {
+                "BEACON_MEMBER_ID": args.member_id,
+                "BEACON_MEMBER_NAME": args.member_name or "",
+                "BEACON_MEMBER_EMAIL": args.member_email or "",
+                "BEACON_MEMBER_ROLE": args.member_role or "contributor",
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd in ("list", "ls"):
+        return _run_commands_py(root, "member_list", {"BEACON_JSON": json_env})
+    if cmd in ("remove", "rm"):
+        if not args.member_id:
+            print("Usage: beacon member remove <id> --reason <text> [--json]")
+            return 1
+        return _run_commands_py(
+            root, "member_remove",
+            {
+                "BEACON_MEMBER_ID": args.member_id,
+                "BEACON_REASON": args.reason or "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd == "role":
+        if not args.member_id or not args.new_role:
+            print(
+                "Usage: beacon member role <id> "
+                "<owner|maintainer|contributor|viewer>"
+            )
+            return 1
+        return _run_commands_py(
+            root, "member_role",
+            {
+                "BEACON_MEMBER_ID": args.member_id,
+                "BEACON_MEMBER_ROLE": args.new_role,
+            },
+        )
+    print(f"Unknown member subcommand: {cmd}")
+    return 1
+
+
 def _handle_auth(root: Path, args: argparse.Namespace) -> int:
     """`beacon auth login|logout|status` — Google OAuth for cloud projects.
 
@@ -1307,6 +1603,9 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "doctor": _handle_doctor,
     "skill": _handle_skill,
     "auth": _handle_auth,
+    "pr": _handle_pr,
+    "issue": _handle_issue,
+    "member": _handle_member,
 }
 
 
