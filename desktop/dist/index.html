@@ -1730,6 +1730,7 @@ let state = {
   retros: [], retroContent: null,
   documents: [], documentContent: null,
   hiddenStatuses: new Set(['cancelled']),
+  projectVersion: null,
   hideEntryDone: new Set(),
   collapsedEntries: new Set(),
   sortAsc: true,
@@ -2067,7 +2068,10 @@ async function renderProjectSelector() {
 const PLATFORM = {
   headerTag: 'beacon desktop',
   getConnectionTitle: () => cloudMode ? 'live = cloud API watcher' : 'live = local file watcher',
-  versionBadgeHTML: () => '',
+  versionBadgeHTML: () => {
+    state.projectVersion = computeProjectVersion(state.project);
+    return renderVersionBadge();
+  },
   getFooterLeftHTML: () => `<div>${cloudMode ? 'cloud' : 'local'}</div>`,
   getArchiveButtonHTML: (p) => cloudMode
     ? `<button class="sort-toggle" data-action="archive-cloud-project" style="font-size:0.65rem;color:var(--text-dim);">Archive</button>`
@@ -2372,6 +2376,31 @@ function renderVersionBadge() {
     ? `<span class="vb-diff" title="${diff} commits pushed since this release">+${diff}</span>`
     : '';
   return `<span class="version-badge" title="Latest released semver per push records">${tag}${diffPart}</span>`;
+}
+
+// Client-side derivation of project version from pushes — mirrors
+// server/app.py:get_project_version. Used by Tauri (which has no API fetch
+// path for /version) and works for any caller that has state.project loaded.
+function computeProjectVersion(project) {
+  if (!project) return { tag: '', commits_since_release: 0, total_pushes: 0 };
+  const pushes = Array.isArray(project.pushes) ? project.pushes : [];
+  const sortable = pushes
+    .filter(p => p && typeof p === 'object')
+    .map(p => [p.pushed_at || '', p])
+    .sort((a, b) => (a[0] < b[0] ? 1 : a[0] > b[0] ? -1 : 0));
+  let tag = '', latestAt = '', commitsSince = 0;
+  for (const [, p] of sortable) {
+    const sem = p.semver || (p.meta && p.meta.semver) || '';
+    if (sem) { tag = sem; latestAt = p.pushed_at || ''; break; }
+    commitsSince += p.commit_count || 0;
+  }
+  return {
+    latest_pushed_semver: tag,
+    latest_pushed_at: latestAt,
+    commits_since_release: commitsSince,
+    total_pushes: pushes.length,
+    tag,
+  };
 }
 
 function formatTime(date) {
