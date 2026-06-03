@@ -2259,6 +2259,14 @@ const STATUS_LABELS = {
 const FILTER_ORDER = ['todo', 'in_progress', 'observing', 'waiting', 'done', 'cancelled'];
 const FILTER_CSS_CLASS = { todo: 'f-todo', in_progress: 'f-active', observing: 'f-observing', waiting: 'f-waiting', done: 'f-done', cancelled: 'f-cancelled' };
 
+// UTC ISO ('...Z' / '...+09:00') → viewer's local YYYY-MM-DD. Empty/invalid passes through.
+function localDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso).slice(0, 10);
+  return d.toLocaleDateString('sv-SE');
+}
+
 function statusBadge(status) {
   const label = STATUS_LABELS[status] || status;
   return `<div class="ms-status-badge"><div class="ms-status-icon ${status}"></div><span class="ms-status-text ${status}">${label}</span></div>`;
@@ -3335,7 +3343,7 @@ function renderOperationsSection() {
         ${runs.length ? runs.map(r => `
           <div class="op-run-row">
             <span style="color:${runColor(r.status)};font-size:0.85em;">${runIcon(r.status)}</span>
-            <span class="op-run-date">${(r.date||'').slice(0,10)}</span>
+            <span class="op-run-date">${localDate(r.date)}</span>
             <span class="op-run-batch">${esc(r.batch||'')}</span>
             <span class="op-run-desc">${esc(r.description||'')}</span>
           </div>`).join('') : '<div class="op-empty">まだ記録なし</div>'}

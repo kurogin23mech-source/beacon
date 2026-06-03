@@ -57,6 +57,22 @@ def load_project_unsafe():
     return store.load_project()
 
 
+def _local_date(iso_str: str) -> str:
+    """Convert a UTC ISO8601 timestamp (e.g. '2026-05-24T23:30:00Z') to the
+    operator's local YYYY-MM-DD. Empty/invalid input passes through (best-effort)."""
+    import datetime as _dt
+    if not iso_str:
+        return ""
+    try:
+        s = iso_str.replace("Z", "+00:00")
+        dt = _dt.datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_dt.timezone.utc)
+        return dt.astimezone().strftime("%Y-%m-%d")
+    except (ValueError, TypeError):
+        return iso_str[:10]
+
+
 def _append_changelog(op: dict) -> None:
     """Append an operation entry to .beacon/changelog.jsonl."""
     import json as _json
@@ -607,7 +623,7 @@ def cmd_milestone_list():
             open_incidents = [e for e in entries if e.get("type") == "incident" and e.get("status") == "open"]
             recent_runs = []
             for r in runs[-3:]:
-                recent_runs.append({"date": r.get("date", "")[:10], "status": r.get("status", "")})
+                recent_runs.append({"date": _local_date(r.get("date", "")), "status": r.get("status", "")})
             output["operations"].append({
                 "id": op["id"],
                 "title": op.get("title", ""),
@@ -5784,7 +5800,7 @@ def cmd_operation_list():
         entries = op.get("entries", [])
         runs = [e for e in entries if e.get("type") == "run_record"]
         incidents = [e for e in entries if e.get("type") == "incident" and e.get("status") == "open"]
-        last_run = f" last: {runs[-1]['date'][:10]} {runs[-1]['status']}" if runs else ""
+        last_run = f" last: {_local_date(runs[-1]['date'])} {runs[-1]['status']}" if runs else ""
         incident_info = f" ⚠ {len(incidents)} incident(s)" if incidents else ""
         print(f"{status_icon} {op['id']} \"{op.get('title', '')}\" [{op.get('schedule', {}).get('frequency', '')}]{last_run}{incident_info}")
 
@@ -5851,7 +5867,7 @@ def cmd_run_list():
             else:
                 for e in runs:
                     icon = {"ok": "✓", "warning": "⚠", "error": "✗"}.get(e.get("status", ""), "?")
-                    print(f"{icon} {e['date'][:10]} {e.get('batch', '')} — {e.get('description', '')}")
+                    print(f"{icon} {_local_date(e['date'])} {e.get('batch', '')} — {e.get('description', '')}")
             return
     print(f"Operation not found: {op_id}")
     sys.exit(1)
