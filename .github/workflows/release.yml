@@ -1,0 +1,88 @@
+name: Release (CLI metadata + Homebrew tap)
+
+# Runs scripts/release.py in CI: bump __version__ (lib/commands.py +
+# beacon_cli/_version.py), push main, tag, create the GitHub release, update the
+# Homebrew formula sha256, mirror it to the homebrew-beacon tap, and prepend a
+# CHANGELOG entry. This was the last maintainer-side manual step in the release
+# CORE doc (工程 13/14) — see docs/RELEASE_CI_SETUP.md.
+#
+# Relationship to the other release workflows (release CORE doc propagation map):
+#   * release-build.yml    — builds CLI wheel + Desktop bundles (Tauri) on
+#                            `release-v*` tags. Artifacts.
+#   * deploy-cloud-run.yml — deploys server / Web UI to Cloud Run (工程 12).
+#   * THIS workflow        — version/tag/formula/tap/CHANGELOG metadata (工程 13/14).
+#
+# SAFE TO MERGE: `workflow_dispatch` only, so it never fires on its own. It also
+# requires the TAP_PUSH_TOKEN secret (a PAT with write access to the
+# homebrew-beacon tap repo); without it the run fails fast with a clear message.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Explicit version tag (e.g. v0.7.3). Blank = auto-detect from commit prefixes.'
+        required: false
+        default: ''
+      dry_run:
+        description: 'Dry-run (no commits / tags / pushes / tap mirror)'
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write   # push the bump commit + tag, create the GitHub release
+
+concurrency:
+  group: beacon-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main (full history for version auto-detection)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          # persist-credentials (default true) keeps the GITHUB_TOKEN on the
+          # origin remote so release.py's `git push origin main` + tag push work.
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "beacon-release-bot"
+          git config user.email "beacon-release-bot@users.noreply.github.com"
+
+      - name: Guard — TAP_PUSH_TOKEN must be set
+        env:
+          TAP_PUSH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
+        run: |
+          if [ -z "$TAP_PUSH_TOKEN" ]; then
+            echo "::error::TAP_PUSH_TOKEN secret is not set — cannot mirror the Homebrew formula. See docs/RELEASE_CI_SETUP.md."
+            exit 1
+          fi
+
+      - name: Clone Homebrew tap with write credentials
+        env:
+          TAP_PUSH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
+        run: |
+          git clone "https://x-access-token:${TAP_PUSH_TOKEN}@github.com/kurogin23mech-source/homebrew-beacon.git" .tap
+          git -C .tap config user.name  "beacon-release-bot"
+          git -C .tap config user.email "beacon-release-bot@users.noreply.github.com"
+
+      - name: Run release pipeline
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # used by `gh release create`
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          args=(--tap-path "$PWD/.tap" -y)
+          if [ -n "$INPUT_VERSION" ]; then args+=(--version "$INPUT_VERSION"); fi
+          if [ "$INPUT_DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          echo "Running: scripts/release.py ${args[*]}"
+          python scripts/release.py "${args[@]}"
