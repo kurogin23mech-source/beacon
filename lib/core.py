@@ -226,11 +226,27 @@ def _validate_entry(entry: dict, ms_id: str, seen_entry_ids: dict[str, int] | No
             f"Entry '{entry.get('id', '?')}' in {ms_id} has invalid type '{entry['type']}'. "
             f"Valid: {', '.join(sorted(VALID_ENTRY_TYPES))}"
         )
-    if entry.get("status") and entry["status"] not in VALID_STATUSES:
-        raise ValueError(
-            f"Entry '{entry.get('id', '?')}' in {ms_id} has invalid status '{entry['status']}'. "
-            f"Valid: {', '.join(sorted(VALID_STATUSES))}"
-        )
+    # Status validity is type-dependent: run_record uses ok/warning/error and
+    # incident uses open/resolved, NOT the general task-style statuses. The
+    # writers (run_record_add / incident_*) already enforce their own enum, so
+    # validate must dispatch by type or it rejects data it just wrote — the
+    # write-read inconsistency reported in Issue #29 (regression from the
+    # operation-entry validation added for Issue #14).
+    status = entry.get("status")
+    if status:
+        entry_type = entry.get("type")
+        if entry_type == "run_record":
+            valid_statuses = VALID_RUN_STATUSES
+        elif entry_type == "incident":
+            valid_statuses = VALID_INCIDENT_STATUSES
+        else:
+            valid_statuses = VALID_STATUSES
+        if status not in valid_statuses:
+            raise ValueError(
+                f"Entry '{entry.get('id', '?')}' in {ms_id} has invalid status "
+                f"'{status}' for type '{entry_type or 'unknown'}'. "
+                f"Valid: {', '.join(sorted(valid_statuses))}"
+            )
     for child in entry.get("entries", []):
         _validate_entry(child, ms_id, seen_entry_ids)
 
