@@ -25,6 +25,7 @@ let state = {
   retros: [], retroContent: null,
   documents: [], documentContent: null,
   hiddenStatuses: new Set(['cancelled']),
+  projectVersion: null,
   hideEntryDone: new Set(),
   collapsedEntries: new Set(),
   sortAsc: true,
@@ -362,7 +363,10 @@ async function renderProjectSelector() {
 const PLATFORM = {
   headerTag: 'beacon desktop',
   getConnectionTitle: () => cloudMode ? 'live = cloud API watcher' : 'live = local file watcher',
-  versionBadgeHTML: () => '',
+  versionBadgeHTML: () => {
+    state.projectVersion = computeProjectVersion(state.project);
+    return renderVersionBadge();
+  },
   getFooterLeftHTML: () => `<div>${cloudMode ? 'cloud' : 'local'}</div>`,
   getArchiveButtonHTML: (p) => cloudMode
     ? `<button class="sort-toggle" data-action="archive-cloud-project" style="font-size:0.65rem;color:var(--text-dim);">Archive</button>`
