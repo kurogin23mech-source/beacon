@@ -20,7 +20,8 @@ Usage:
 Milestones:
   beacon milestone add "title" [--priority P] [--objective O] [--ac A]   Add a new milestone
   beacon milestone list         List milestones
-  beacon milestone start <id>   Set milestone as active
+  beacon milestone start <id>   Activate + auto-create ms-XX-<slug> branch + self-add as assignee
+  beacon milestone join <id> [--checkout]  Add self as assignee (and optionally switch branch)
   beacon milestone close <id>   Close milestone (keeps current progress)
   beacon milestone observe <id> Set milestone to observing
   beacon milestone update <id>  Update title/progress/status/description/priority/objective/ac
@@ -457,6 +458,26 @@ cmd_milestone_done() {
         exit 1
     fi
     BEACON_MS_ID="$ms_id" BEACON_REASON="$reason" python3 "$COMMANDS_PY" milestone_done
+}
+
+cmd_milestone_join() {
+    ensure_project
+    local ms_id=""
+    local checkout=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --checkout) checkout="1"; shift ;;
+            *)          ms_id="$1";   shift ;;
+        esac
+    done
+
+    if [ -z "$ms_id" ]; then
+        echo "Usage: beacon ms join <ms-id> [--checkout]"
+        exit 1
+    fi
+    BEACON_MS_ID="$ms_id" BEACON_CHECKOUT="$checkout" \
+        python3 "$COMMANDS_PY" milestone_join
 }
 
 cmd_milestone_observe() {
@@ -1793,6 +1814,7 @@ case "${1:-}" in
             add)    shift 2; cmd_milestone_add "$@" ;;
             list|ls) cmd_milestone_list ;;
             start)  shift 2; cmd_milestone_start "$@" ;;
+            join)   shift 2; cmd_milestone_join "$@" ;;
             done|close) shift 2; cmd_milestone_done "$@" ;;
             observe)    shift 2; cmd_milestone_observe "$@" ;;
             show)   shift 2; cmd_milestone_show "$@" ;;
@@ -1804,7 +1826,7 @@ case "${1:-}" in
             workspace) shift 2; cmd_milestone_workspace "$@" ;;
             workspace-cleanup) shift 2; cmd_milestone_workspace_cleanup "$@" ;;
             graph) shift 2; cmd_milestone_graph "$@" ;;
-            *)      echo "Usage: beacon milestone [add|list|start|close|observe|done|show|update|rename|delete|purge|depends|workspace|workspace-cleanup|graph]" ;;
+            *)      echo "Usage: beacon milestone [add|list|start|join|close|observe|done|show|update|rename|delete|purge|depends|workspace|workspace-cleanup|graph]" ;;
         esac
         ;;
     log)

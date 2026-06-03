@@ -174,7 +174,8 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 |---------|-------------|
 | `beacon milestone add "title" [-d date]` | Add milestone / 追加 |
 | `beacon milestone list` | List milestones / 一覧 |
-| `beacon milestone start <id>` | Set as active (in_progress) / アクティブ化 |
+| `beacon milestone start <id>` | Activate + auto-create `ms-XX-<slug>` branch + self-add as assignee (use `--no-branch` / `--no-assignee` to opt out) / アクティブ化＋ブランチ自動作成＋自己 assignee 登録 |
+| `beacon milestone join <id> [--checkout]` | Add self as assignee (and optionally switch branch) / 他の MS に参加 |
 | `beacon milestone done <id>` | Mark as done / 完了 |
 | `beacon milestone close <id>` | Close milestone / クローズ |
 | `beacon milestone observe <id>` | Set to observing / 監視中に設定 |
