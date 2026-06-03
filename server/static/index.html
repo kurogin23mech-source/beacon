@@ -1070,6 +1070,10 @@ body::after {
   overflow-y: auto;
   box-shadow: 0 8px 40px rgba(0,0,0,0.7);
 }
+.entry-modal.entry-modal-wide {
+  max-width: 880px;
+  max-height: 88vh;
+}
 .entry-modal-header {
   display: flex;
   align-items: center;
@@ -1733,6 +1737,7 @@ let state = {
   retroContent: null,
   documents: [],
   documentContent: null,  // { doc_id, title, content }
+  documentOverlay: null,  // { doc_id, title, content, scope } — overlay for search hits (ms-43 e-796)
   // Filter: hidden statuses (cancelled is hidden by default)
   hiddenStatuses: new Set(['cancelled']),
   // Entry done filter (per milestone)
@@ -3672,21 +3677,14 @@ function handleCommonAction(action, el) {
       return true;
     }
     case 'search-open-document': {
-      // Document hit: switch to Documents tab + load content. Documents don't
-      // have a modal, so we leave search mode here. Clicking back returns to
-      // the Documents list; the user can re-issue the search if needed.
+      // Document hit: open in overlay so the search query / filters / scroll
+      // position are preserved when the user closes it (ms-43 e-796).
       const docId = el.dataset.docId;
-      if (docId) {
-        state.searchQuery = '';
-        state.searchResults = null;
-        state.searchTypeFilter = new Set();
-        state.activeTab = 'documents';
-        const input = document.getElementById('search-input');
-        if (input) input.value = '';
-        openDocument(docId);
-      }
+      if (docId) openDocumentOverlay(docId);
       return true;
     }
+    case 'close-document-overlay':
+      closeDocumentOverlay(); return true;
     case 'documents-filter-scope': {
       // Documents-tab scope chip: exclusive (clicking same chip clears).
       const s = el.dataset.scope || '';
@@ -3795,6 +3793,46 @@ function closeEntryModal() {
   state.openEntryId = null;
   const overlay = document.getElementById('entry-detail-modal');
   if (overlay) overlay.style.display = 'none';
+}
+
+// Document overlay (ms-43 e-796): open Markdown doc on top of current view
+// without disturbing search / Documents list state. Used by search hits.
+async function openDocumentOverlay(docId) {
+  try {
+    await dataSource.loadDocumentContent(docId);
+    state.documentOverlay = state.documentContent;
+    state.documentContent = null;
+  } catch (e) {
+    state.documentOverlay = { doc_id: docId, title: 'Error', content: 'Failed to load document.', scope: 'memo' };
+  }
+  renderDocumentOverlay();
+}
+
+function renderDocumentOverlay() {
+  const overlay = document.getElementById('document-overlay-modal');
+  if (!overlay) return;
+  const d = state.documentOverlay;
+  if (!d) { overlay.style.display = 'none'; overlay.innerHTML = ''; return; }
+  const scope = d.scope || 'memo';
+  overlay.innerHTML = `
+    <div class="entry-modal entry-modal-wide" onclick="event.stopPropagation()">
+      <div class="entry-modal-header">
+        <span class="entry-modal-title">${scopeBadge(scope)}${esc(d.title || d.doc_id)}</span>
+        <button class="entry-modal-close" data-action="close-document-overlay">✕</button>
+      </div>
+      <div class="entry-modal-body">
+        <div class="doc-content">${marked.parse(d.content || '')}</div>
+      </div>
+    </div>
+  `;
+  overlay.style.display = 'flex';
+  overlay.querySelector('[data-action="close-document-overlay"]')?.addEventListener('click', closeDocumentOverlay);
+}
+
+function closeDocumentOverlay() {
+  state.documentOverlay = null;
+  const overlay = document.getElementById('document-overlay-modal');
+  if (overlay) { overlay.style.display = 'none'; overlay.innerHTML = ''; }
 }
 // @BUILD:SHARED-END
 
@@ -4020,6 +4058,8 @@ async function menuSelectProject(projectId) {
     state.retroContent = null;
     state.documents = [];
     state.documentContent = null;
+    state.documentOverlay = null;
+    closeDocumentOverlay();
     lastProjectJson = null;
     await selectProject(projectId);
   }
@@ -4034,6 +4074,8 @@ async function selectProject(projectId) {
   state.retroContent = null;
   state.documents = [];
   state.documentContent = null;
+  state.documentOverlay = null;
+  closeDocumentOverlay();
   state.hiddenStatuses = new Set(['cancelled']);
   state.projectVersion = null;
   lastProjectJson = null;
@@ -4311,7 +4353,9 @@ async function init() {
 }
 
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && state.openEntryId) closeEntryModal();
+  if (e.key !== 'Escape') return;
+  if (state.documentOverlay) { closeDocumentOverlay(); return; }
+  if (state.openEntryId) closeEntryModal();
 });
 
 init();
@@ -4319,6 +4363,9 @@ init();
 
 <!-- Entry detail modal (outside #app to prevent re-render wipe) -->
 <div id="entry-detail-modal" class="entry-modal-overlay" style="display:none;" onclick="closeEntryModal()"></div>
+
+<!-- Document overlay modal (ms-43 e-796): keeps search/list context intact -->
+<div id="document-overlay-modal" class="entry-modal-overlay" style="display:none;" onclick="closeDocumentOverlay()"></div>
 
 <!-- Persistent footer: outside #app so JS never overwrites it. -->
 <!-- Provides semantic signals for Google OAuth branding verification. -->
