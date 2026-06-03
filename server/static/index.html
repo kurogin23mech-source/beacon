@@ -1758,6 +1758,9 @@ let state = {
   hiddenStatuses: new Set(['cancelled']),
   // Entry done filter (per milestone)
   hideEntryDone: new Set(),
+  // Entry cancelled filter (per milestone). Cancelled is hidden by default;
+  // Set contains MS IDs where the user toggled "show cancelled" ON.
+  showCancelled: new Set(),
   // Collapsed nested entries
   collapsedEntries: new Set(),
   // Sort
@@ -2015,7 +2018,12 @@ function entryStatusText(entry) {
 let _currentMsId = null; // set during milestone card render
 
 function renderEntry(entry) {
-  if (_currentMsId && state.hideEntryDone.has(_currentMsId) && (entry.status === 'done' || entry.status === 'cancelled')) return '';
+  if (_currentMsId) {
+    // Hide done if user toggled "hide done" ON
+    if (state.hideEntryDone.has(_currentMsId) && entry.status === 'done') return '';
+    // Hide cancelled by default; show if user toggled "show cancelled" ON
+    if (entry.status === 'cancelled' && !state.showCancelled.has(_currentMsId)) return '';
+  }
 
   const statusClass = entry.status === 'done' ? ' done' : '';
   const hash = entry.meta?.hash ? `<span class="entry-hash">${entry.meta.hash.slice(0, 7)}</span>` : '';
@@ -2481,21 +2489,31 @@ function renderMilestoneCard(ms, index) {
     _currentMsId = ms.id;
     const renderedEntries = entries.map(renderEntry).join('');
     _currentMsId = null;
-    const hasDone = entries.some(e => e.status === 'done' || e.status === 'cancelled' || (e.entries || []).some(c => c.status === 'done' || c.status === 'cancelled'));
+    const hasDoneEntries = entries.some(e => e.status === 'done' || (e.entries || []).some(c => c.status === 'done'));
+    const hasCancelledEntries = entries.some(e => e.status === 'cancelled' || (e.entries || []).some(c => c.status === 'cancelled'));
     const msHideDone = state.hideEntryDone.has(ms.id);
+    const msShowCancelled = state.showCancelled.has(ms.id);
     const msObjective = ms.objective
       ? `<div class="ms-objective">${esc(ms.objective)}</div>`
       : '';
     const msAc = ms.acceptance_criteria
       ? `<div class="ms-ac"><div class="ms-ac-label">done when</div>${esc(ms.acceptance_criteria)}</div>`
       : '';
+    const showToolbar = hasDoneEntries || hasCancelledEntries;
     bodyHtml = `
       <div class="ms-entries">
-        ${hasDone ? `
+        ${showToolbar ? `
         <div class="ms-entries-toolbar">
+          ${hasDoneEntries ? `
           <button class="entry-filter-btn ${msHideDone ? 'active' : ''}" data-action="toggle-hide-done" data-ms-id="${ms.id}">
             ${msHideDone ? 'show done' : 'hide done'}
           </button>
+          ` : ''}
+          ${hasCancelledEntries ? `
+          <button class="entry-filter-btn ${msShowCancelled ? 'active' : ''}" data-action="toggle-show-cancelled" data-ms-id="${ms.id}">
+            ${msShowCancelled ? 'hide cancelled' : 'show cancelled'}
+          </button>
+          ` : ''}
         </div>
         ` : ''}
         ${msObjective}${msAc}
@@ -3651,6 +3669,11 @@ function handleCommonAction(action, el) {
       state.hideEntryDone.has(mid) ? state.hideEntryDone.delete(mid) : state.hideEntryDone.add(mid);
       render(); return true;
     }
+    case 'toggle-show-cancelled': {
+      const mid = el.dataset.msId;
+      state.showCancelled.has(mid) ? state.showCancelled.delete(mid) : state.showCancelled.add(mid);
+      render(); return true;
+    }
     case 'filter-status': {
       const s = el.dataset.status;
       state.hiddenStatuses.has(s) ? state.hiddenStatuses.delete(s) : state.hiddenStatuses.add(s);
@@ -4100,6 +4123,7 @@ async function menuSelectProject(projectId) {
     state.expanded.clear();
     state.hiddenStatuses = new Set(['cancelled']);
     state.hideEntryDone.clear();
+    state.showCancelled.clear();
     state.collapsedEntries.clear();
     state.activeTab = 'dashboard';
     state.retros = [];

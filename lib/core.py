@@ -1697,11 +1697,16 @@ def entries_to_json(entries: list) -> list:
 
 
 def count_task_status(entries: list) -> tuple[int, int]:
-    """Count total and done tasks/commits/PRs recursively. Returns (total, done)."""
+    """Count total and done tasks/commits/PRs/saves recursively. Returns (total, done).
+
+    Note: `save` entries are intrinsically completed artifacts (doc adds, etc.)
+    so they always count as done. Including them makes MS progress reflect
+    save-heavy work (research / design MSs) that would otherwise show 0%.
+    """
     total = 0
     done = 0
     for e in entries:
-        if e.get("type") in ("task", "commit", "pr"):
+        if e.get("type") in ("task", "commit", "pr", "save"):
             total += 1
             if e.get("status") in ("done", "cancelled"):
                 done += 1
