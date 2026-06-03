@@ -978,6 +978,22 @@ body::after {
 .priority-low     { background: rgba(148,163,184,0.2); color: #94a3b8; border: 1px solid rgba(148,163,184,0.3); }
 .priority-lowest  { background: rgba(100,116,139,0.15); color: #64748b; border: 1px solid rgba(100,116,139,0.2); }
 
+/* Member badges on milestone cards (ms-43 e-767). */
+.member-badge {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  margin-left: 6px;
+  vertical-align: middle;
+  color: #94a3b8;
+  background: rgba(148,163,184,0.12);
+  border: 1px solid rgba(148,163,184,0.25);
+  letter-spacing: 0.02em;
+}
+.member-badge .mb-label { color: #64748b; margin-right: 4px; text-transform: uppercase; font-size: 9px; }
+.member-badge.is-self { color: var(--accent); background: var(--accent-glow); border-color: var(--accent-dim); }
+
 /* Entry info blocks (motivation / acceptance_criteria / behavior) */
 .entry-info-block {
   margin-top: 6px;
@@ -2076,6 +2092,37 @@ function esc(s) {
  * The badge is informational only — clicking it does nothing yet (clickable
  * UI is a separate future task to drill into the releases tab).
  */
+// Current viewer's email. Set in Web via OAuth (state.auth.email); Tauri has
+// no per-user concept yet — returns '' so the "is self" highlight just doesn't
+// activate there (graceful degradation; the bare badges still render).
+function currentUserEmail() {
+  return (state && state.auth && state.auth.email) || '';
+}
+
+// Trim an email for compact display ("alice@example.com" → "alice").
+// Falls back to the original string when it's not an email-like value.
+function shortName(value) {
+  if (!value) return '';
+  const s = String(value);
+  const at = s.indexOf('@');
+  return at > 0 ? s.slice(0, at) : s;
+}
+
+function renderMemberBadges(ms) {
+  if (!ms) return '';
+  const me = currentUserEmail();
+  const parts = [];
+  if (ms.owner) {
+    const selfCls = me && ms.owner === me ? ' is-self' : '';
+    parts.push(`<span class="member-badge${selfCls}" title="owner: ${esc(ms.owner)}"><span class="mb-label">owner</span>${esc(shortName(ms.owner))}</span>`);
+  }
+  if (ms.assignee && ms.assignee !== ms.owner) {
+    const selfCls = me && ms.assignee === me ? ' is-self' : '';
+    parts.push(`<span class="member-badge${selfCls}" title="assignee: ${esc(ms.assignee)}"><span class="mb-label">→</span>${esc(shortName(ms.assignee))}</span>`);
+  }
+  return parts.join('');
+}
+
 function renderVersionBadge() {
   const v = state.projectVersion;
   if (!v || !v.tag) return '';
@@ -2459,13 +2506,14 @@ function renderMilestoneCard(ms, index) {
   }
 
   const msPriorityBadge = ms.priority ? `<span class="priority-badge priority-${ms.priority}">${ms.priority}</span>` : '';
+  const msMemberBadges = renderMemberBadges(ms);
   return `
     <div class="ms-card${activeClass}${expandedClass}">
       <div class="ms-card-header" data-action="toggle-ms" data-ms-id="${ms.id}">
         ${statusBadge(ms.status)}
         <div class="ms-title-row">
           <span class="ms-id">${ms.id}</span>
-          <span class="ms-title">${esc(ms.title)}${msPriorityBadge}</span>
+          <span class="ms-title">${esc(ms.title)}${msPriorityBadge}${msMemberBadges}</span>
         </div>
         <div class="ms-meta">
           ${tasksLabel ? `<span class="ms-tasks-text">${tasksLabel}</span>` : ''}
