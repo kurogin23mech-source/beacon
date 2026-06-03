@@ -1,0 +1,74 @@
+name: Deploy API to Cloud Run
+
+# Deploys the server (FastAPI) + Web UI to Cloud Run — release CORE doc 工程 12,
+# previously the only fully-manual production-reflection step. See
+# docs/RELEASE_CI_SETUP.md for the one-time GCP Workload Identity Federation
+# setup (no long-lived service-account keys are stored).
+#
+# SAFE TO MERGE: the deploy job is gated on the `GCP_PROJECT` repo *variable*
+# being set, so it is skipped (no-op) until the maintainer configures GCP.
+# CACHE_BUST is keyed on the commit SHA so Cloud Build never reuses a stale
+# `lib/` copy layer (the e-712 class of bug where Python changes silently don't
+# reach the image).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'server/**'
+      - 'lib/**'
+      - 'pyproject.toml'
+      - 'Dockerfile'
+      - '.github/workflows/deploy-cloud-run.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write   # required for Workload Identity Federation
+
+concurrency:
+  group: deploy-cloud-run
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    # Gate: skip entirely until GCP is configured. `vars.GCP_PROJECT` is a repo
+    # variable (Settings → Secrets and variables → Actions → Variables).
+    if: ${{ vars.GCP_PROJECT != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to Cloud Run
+        # Canonical command from the release CORE doc. --build-arg is NOT valid
+        # for gcloud (Docker-CLI flag); --set-build-env-vars is the correct one.
+        # CACHE_BUST is mandatory — see the workflow header.
+        run: |
+          gcloud run deploy beacon-api-prod \
+            --source . \
+            --project "${{ vars.GCP_PROJECT }}" \
+            --region asia-northeast1 \
+            --set-build-env-vars=CACHE_BUST=${{ github.sha }} \
+            --quiet
+
+      - name: Health check
+        run: |
+          for i in $(seq 1 10); do
+            if curl -fsS https://beacon-ai.dev/health | grep -q '"status"'; then
+              echo "health OK"
+              exit 0
+            fi
+            echo "waiting for health... ($i/10)"
+            sleep 6
+          done
+          echo "::error::health check did not pass after deploy"
+          exit 1
