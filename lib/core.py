@@ -465,6 +465,58 @@ def milestone_start(data: dict, ms_id: str) -> dict:
     return found
 
 
+def _split_assignees(value) -> list[str]:
+    """Normalise the assignee field (str or list) into a list of names.
+
+    Per ms-42 the field is historically a single string. ms-51 introduces
+    multi-assignee semantics via "name1,name2" — we keep wire-compat with
+    a list-aware split so legacy single-string projects don't need migration.
+
+    Empty strings and whitespace-only tokens are dropped.
+    """
+    if not value:
+        return []
+    if isinstance(value, list):
+        items = value
+    else:
+        items = str(value).split(",")
+    return [s.strip() for s in items if s and s.strip()]
+
+
+def milestone_assignee_add(data: dict, ms_id: str, actor: str) -> tuple[dict, bool]:
+    """Add ``actor`` to the milestone's assignee list (ms-51 / e-932, e-933).
+
+    Returns ``(milestone, added)`` where ``added`` is False if the actor was
+    already present (caller treats as no-op per SPEC AC). The wire format
+    stays string-shaped: a single assignee remains ``"alice"``, two become
+    ``"alice,bob"``. This preserves backward compatibility with the Web UI
+    badge code (ms-43 / e-767) which currently reads a single string.
+
+    Raises ValueError if the MS doesn't exist or is done/cancelled (per
+    e-933 AC-4 — joining a finished MS is rejected).
+    """
+    actor = (actor or "").strip()
+    if not actor:
+        raise ValueError("actor must be a non-empty string")
+    for ms in data["milestones"]:
+        if ms["id"] != ms_id:
+            continue
+        # SPEC e-933 AC-4: refuse to join a done/cancelled MS.
+        status = ms.get("status", "todo")
+        if status in ("done", "cancelled"):
+            raise ValueError(
+                f"Milestone {ms_id} is {status}; cannot add assignee."
+            )
+        current = _split_assignees(ms.get("assignee", ""))
+        if actor in current:
+            return ms, False
+        current.append(actor)
+        # Single-element list stays as a bare string for backward compat.
+        ms["assignee"] = current[0] if len(current) == 1 else ",".join(current)
+        return ms, True
+    raise ValueError(f"Milestone not found: {ms_id}")
+
+
 def milestone_done(data: dict, ms_id: str, *, reason: str = "") -> dict:
     """Mark a milestone as done. Returns the milestone."""
     for ms in data["milestones"]:
@@ -1044,8 +1096,16 @@ def check_duplicate_commit(entries: list, commit_hash: str) -> bool:
 def log_commit(data: dict, *, ms_id: str = "", commit_hash: str,
                message: str, date: str, summary: str = "",
                progress: str = "", behavior: str = "",
-               resolves: str = "") -> dict:
-    """Record a commit to the target milestone. Returns result info dict."""
+               resolves: str = "", actor: dict | None = None) -> dict:
+    """Record a commit to the target milestone. Returns result info dict.
+
+    ``actor`` (ms-51 / e-934): optional ``{"machine": ..., "agent": ...}``
+    dict attached to ``meta.actor``. Callers should pass the result of
+    :func:`lib.agent.get_actor`. Kept as a parameter (not auto-fetched
+    inside core) because ``core.py`` is meant to be pure I/O-free
+    business logic; the agent identity lookup involves filesystem and
+    env reads, which belongs in the CLI layer.
+    """
     target = find_target_milestone(data, ms_id)
     entries = target.setdefault("entries", [])
 
@@ -1059,6 +1119,16 @@ def log_commit(data: dict, *, ms_id: str = "", commit_hash: str,
     meta = {"hash": commit_hash, "message": message}
     if resolves:
         meta["resolves"] = resolves
+    if actor:
+        # Defensive: only persist the expected keys, drop any extra fields
+        # callers might tack on. Keeps the meta shape stable for the Web UI.
+        clean = {}
+        if actor.get("machine"):
+            clean["machine"] = actor["machine"]
+        if actor.get("agent"):
+            clean["agent"] = actor["agent"]
+        if clean:
+            meta["actor"] = clean
     commit_entry = {
         "id": next_entry_id(data),
         "type": "commit",

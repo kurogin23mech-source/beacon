@@ -407,10 +407,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ms_start = ms_sub.add_parser("start", add_help=False)
     p_ms_start.add_argument("ms_id", nargs="?", default="")
+    p_ms_start.add_argument("--no-branch", dest="no_branch", action="store_true")
+    p_ms_start.add_argument("--no-assignee", dest="no_assignee", action="store_true")
 
     p_ms_done = ms_sub.add_parser("done", aliases=["close"], add_help=False)
     p_ms_done.add_argument("ms_id", nargs="?", default="")
     p_ms_done.add_argument("-r", "--reason", default="")
+
+    p_ms_join = ms_sub.add_parser("join", add_help=False)
+    p_ms_join.add_argument("ms_id", nargs="?", default="")
+    p_ms_join.add_argument("--checkout", dest="checkout", action="store_true")
 
     p_ms_observe = ms_sub.add_parser("observe", add_help=False)
     p_ms_observe.add_argument("ms_id", nargs="?", default="")
@@ -1140,9 +1146,14 @@ def _handle_milestone(root: Path, args: argparse.Namespace) -> int:
 
     if cmd == "start":
         if not args.ms_id:
-            print("Usage: beacon milestone start <ms-id>")
+            print("Usage: beacon milestone start <ms-id> [--no-branch] [--no-assignee]")
             return 1
-        return _run_commands_py(root, "milestone_start", {"BEACON_MS_ID": args.ms_id})
+        env = {
+            "BEACON_MS_ID": args.ms_id,
+            "BEACON_NO_BRANCH": "1" if getattr(args, "no_branch", False) else "",
+            "BEACON_NO_ASSIGNEE": "1" if getattr(args, "no_assignee", False) else "",
+        }
+        return _run_commands_py(root, "milestone_start", env)
 
     if cmd in ("done", "close"):
         if not args.ms_id:
@@ -1153,6 +1164,16 @@ def _handle_milestone(root: Path, args: argparse.Namespace) -> int:
             "BEACON_REASON": args.reason or "",
         }
         return _run_commands_py(root, "milestone_done", env)
+
+    if cmd == "join":
+        if not args.ms_id:
+            print("Usage: beacon milestone join <ms-id> [--checkout]")
+            return 1
+        env = {
+            "BEACON_MS_ID": args.ms_id,
+            "BEACON_CHECKOUT": "1" if getattr(args, "checkout", False) else "",
+        }
+        return _run_commands_py(root, "milestone_join", env)
 
     if cmd == "observe":
         if not args.ms_id:

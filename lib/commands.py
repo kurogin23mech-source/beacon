@@ -647,11 +647,146 @@ def cmd_milestone_list():
 
 
 def cmd_milestone_start():
+    """Activate an MS, auto-create its branch, and self-add as assignee.
+
+    ms-51 / e-932 layers three behaviours on top of the original (set
+    status=in_progress):
+
+      1. Auto-branch: ``ms-XX-<slug>`` is checked out from current HEAD
+         if it doesn't exist, else switched-to. ``main`` is *not* touched
+         — branching is the whole point.
+      2. Self-assignee: the actor (``lib/agent.get_actor()``) is added to
+         the MS's assignee list (no-op if already present).
+      3. Skip when not a git repo: dispatch contexts (tests, scaffolds)
+         where there is no .git transparently fall back to "just flip
+         status" so existing flows are unaffected.
+
+    Suppression knobs:
+      * ``BEACON_NO_BRANCH=1`` skips the git checkout (used by tests and
+        by callers that manage their own branching, e.g. worktree mode).
+      * ``BEACON_NO_ASSIGNEE=1`` skips the assignee auto-add.
+    """
     ms_id = os.environ.get("BEACON_MS_ID", "")
+    no_branch = os.environ.get("BEACON_NO_BRANCH", "") == "1"
+    no_assignee = os.environ.get("BEACON_NO_ASSIGNEE", "") == "1"
+
     data = load_project()
     ms = core.milestone_start(data, ms_id)
+
+    # ---- 1. assignee auto-add (lib/agent.py is the single source) ----
+    actor_str = ""
+    if not no_assignee:
+        try:
+            import agent as _agent
+            actor = _agent.get_actor()
+            # Wire-format: prefer the agent name (it's the unique writer
+            # identifier — machine is implicit). If the machine should
+            # ever be needed for disambiguation it's still in the commit
+            # metadata (e-934). For the assignee badge a clean handle
+            # reads better.
+            actor_str = actor.get("agent", "") or actor.get("machine", "")
+            if actor_str:
+                _ms_unused, _added = core.milestone_assignee_add(
+                    data, ms_id, actor_str
+                )
+        except Exception as e:  # pragma: no cover - defensive
+            print(f"  warning: could not auto-add assignee: {e}", file=sys.stderr)
+
+    # ---- 2. auto-branch ----
+    branch_name = ""
+    branch_msg = ""
+    if not no_branch:
+        try:
+            import branch as _branch
+            branch_name = _branch.ms_branch_name(ms_id, ms.get("title", ""))
+            branch_msg = _ensure_on_branch(branch_name)
+        except _NotAGitRepoError:
+            # Quiet skip: scaffolds / tests / fresh projects without git
+            # should still be able to start a milestone.
+            branch_name = ""
+        except Exception as e:  # pragma: no cover - defensive
+            print(f"  warning: could not create/switch branch: {e}", file=sys.stderr)
+
     save_project(data)
     print(f"Activated: {ms['title']}")
+    if actor_str and not no_assignee:
+        print(f"  assignee: {actor_str}")
+    if branch_name and branch_msg:
+        print(f"  branch: {branch_name} ({branch_msg})")
+
+
+class _NotAGitRepoError(RuntimeError):
+    """Raised by :func:`_ensure_on_branch` when we are not inside a git repo.
+
+    Distinct from generic ``RuntimeError`` so callers can swallow only this
+    case (transparent skip) without hiding real git errors.
+    """
+
+
+def _ensure_on_branch(branch_name: str) -> str:
+    """Make sure HEAD is on ``branch_name``; create it from HEAD if missing.
+
+    Returns a short human-readable status string used by the CLI to tell
+    the user what happened ("created", "switched", "already on it",
+    "preserved", or empty). Raises :class:`_NotAGitRepoError` if the
+    working directory is not inside a git repository.
+
+    The function intentionally does NOT touch ``main`` (or any upstream)
+    — it creates the new branch *from current HEAD*. Callers that want
+    a fresh base from origin/main should run ``git fetch && git
+    checkout main`` first; this helper is just the safe local step.
+    """
+    try:
+        # First confirm we're in a git repo. `rev-parse --is-inside-work-tree`
+        # exits 0 + "true" on success, non-zero otherwise.
+        check = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, OSError) as e:
+        raise _NotAGitRepoError("git not available") from e
+    if check.returncode != 0 or check.stdout.strip() != "true":
+        raise _NotAGitRepoError("not inside a git work tree")
+
+    # Where are we now?
+    cur = subprocess.run(
+        ["git", "branch", "--show-current"],
+        capture_output=True, text=True, timeout=5,
+    )
+    current = cur.stdout.strip() if cur.returncode == 0 else ""
+    if current == branch_name:
+        return "already on it"
+
+    # Does the branch already exist locally?
+    exists = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet",
+         f"refs/heads/{branch_name}"],
+        capture_output=True, text=True, timeout=5,
+    )
+    if exists.returncode == 0:
+        # Switch to it; refuse if there are uncommitted changes (let git
+        # handle the safety check — we don't want to overwrite work).
+        sw = subprocess.run(
+            ["git", "checkout", branch_name],
+            capture_output=True, text=True, timeout=10,
+        )
+        if sw.returncode != 0:
+            err = sw.stderr.strip() or "checkout failed"
+            print(f"  warning: branch {branch_name} exists but checkout failed: {err}",
+                  file=sys.stderr)
+            return "preserved"
+        return "switched"
+
+    # Create it from current HEAD.
+    create = subprocess.run(
+        ["git", "checkout", "-b", branch_name],
+        capture_output=True, text=True, timeout=10,
+    )
+    if create.returncode != 0:
+        err = create.stderr.strip() or "create failed"
+        print(f"  warning: could not create {branch_name}: {err}", file=sys.stderr)
+        return "preserved"
+    return "created"
 
 
 def cmd_milestone_done():
@@ -664,6 +799,109 @@ def cmd_milestone_done():
     ms = core.milestone_done(data, ms_id, reason=reason)
     save_project(data, op={"op": "milestone_done", "ms_id": ms_id, "reason": reason})
     print(f"Completed: {ms['title']}\n  Reason: {reason}")
+
+
+def cmd_milestone_join():
+    """Add the current actor as an assignee on an MS (ms-51 / e-933).
+
+    Mirror of the assignee-add step of ``ms start``, but without flipping
+    status (the MS is presumed already active or otherwise in a healthy
+    state). With ``--checkout`` (BEACON_CHECKOUT=1) the MS branch is also
+    switched-to, with a fetch-from-origin fallback if the branch only
+    exists on the remote.
+
+    Per SPEC AC-3, duplicate joins are a warned no-op rather than a
+    hard error — joining a board you're already on is a benign user
+    intent ("am I on this?") and a hard error would be hostile.
+    Per SPEC AC-4, done / cancelled milestones refuse the join; that
+    rejection is raised by core.milestone_assignee_add.
+    """
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    do_checkout = os.environ.get("BEACON_CHECKOUT", "") == "1"
+
+    if not ms_id:
+        print("Usage: beacon ms join <ms-id> [--checkout]", file=sys.stderr)
+        sys.exit(1)
+
+    data = load_project()
+
+    # Find the MS up front so we can read its title (needed for slug + the
+    # human-facing "joined X" message) and so we can fail fast with a
+    # clearer error than "Milestone not found" from the deep helper.
+    ms = next((m for m in data.get("milestones", []) if m.get("id") == ms_id), None)
+    if ms is None:
+        print(f"Error: Milestone not found: {ms_id}", file=sys.stderr)
+        sys.exit(1)
+
+    # Resolve the actor name through the same lib/agent.py contract used
+    # by ms start; keeps the two paths trivially consistent.
+    import agent as _agent
+    actor = _agent.get_actor()
+    actor_str = actor.get("agent", "") or actor.get("machine", "")
+    if not actor_str:
+        print("Error: could not resolve agent identity (lib/agent.py)",
+              file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        _ms, added = core.milestone_assignee_add(data, ms_id, actor_str)
+    except ValueError as e:
+        # done / cancelled MS or other validation failure — surface as 1.
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    save_project(data)
+
+    if added:
+        print(f"Joined: [{ms_id}] {ms.get('title','')} as {actor_str}")
+    else:
+        print(f"Already on [{ms_id}] as {actor_str} (no-op)")
+
+    # ---- optional --checkout ----
+    if not do_checkout:
+        return
+
+    try:
+        import branch as _branch
+        branch_name = _branch.ms_branch_name(ms_id, ms.get("title", ""))
+    except Exception as e:
+        print(f"  warning: could not derive branch name: {e}", file=sys.stderr)
+        return
+
+    try:
+        # 1. Try a local-only ensure first. If the branch is here we just
+        #    switch; nothing else to do.
+        msg = _ensure_on_branch(branch_name)
+        print(f"  branch: {branch_name} ({msg})")
+        return
+    except _NotAGitRepoError:
+        print("  warning: not in a git repo; --checkout skipped",
+              file=sys.stderr)
+        return
+    except Exception:
+        # Fall through to remote fetch attempt.
+        pass
+
+    # 2. Local create failed (most likely the branch only exists on origin).
+    #    Try to fetch + checkout the remote branch.
+    fetch = subprocess.run(
+        ["git", "fetch", "origin", branch_name],
+        capture_output=True, text=True, timeout=30,
+    )
+    if fetch.returncode != 0:
+        print(f"  warning: fetch origin {branch_name} failed; "
+              f"branch may not exist yet on remote", file=sys.stderr)
+        return
+    co = subprocess.run(
+        ["git", "checkout", "-B", branch_name,
+         f"origin/{branch_name}"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if co.returncode == 0:
+        print(f"  branch: {branch_name} (tracked from origin)")
+    else:
+        print(f"  warning: checkout {branch_name} failed: "
+              f"{co.stderr.strip()}", file=sys.stderr)
 
 
 def cmd_milestone_show():
@@ -1096,11 +1334,20 @@ def cmd_log():
     resolves = os.environ.get("BEACON_RESOLVES", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
+    # ms-51 / e-934: attach actor (see cmd_log_finalize for the matching
+    # detail). Done in both entry points because beacon log is exposed
+    # directly to users (`beacon log "msg"`) and via the post-commit hook.
+    try:
+        import agent as _agent
+        actor = _agent.get_actor()
+    except Exception:
+        actor = None
+
     data = load_project()
     result = core.log_commit(
         data, ms_id=ms_id, commit_hash=commit_hash,
         message=message, date=date, summary=summary, progress=progress,
-        behavior=behavior, resolves=resolves,
+        behavior=behavior, resolves=resolves, actor=actor,
     )
     save_project(data)
 
@@ -1163,11 +1410,20 @@ def cmd_log_finalize():
     resolves = os.environ.get("BEACON_RESOLVES", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
+    # ms-51 / e-934: attach actor metadata so multi-machine commits are
+    # distinguishable downstream. lib.agent.get_actor is the single source
+    # of truth for this (configured via .beacon/agent.json + env vars).
+    try:
+        import agent as _agent
+        actor = _agent.get_actor()
+    except Exception:
+        actor = None
+
     data = load_project()
     result = core.log_commit(
         data, ms_id=ms_id, commit_hash=commit_hash,
         message=message, date=date, summary=summary_text, progress=progress,
-        behavior=behavior, resolves=resolves,
+        behavior=behavior, resolves=resolves, actor=actor,
     )
 
     if new_summary:
@@ -5651,7 +5907,8 @@ def cmd_help_json():
         {"command": "beacon status", "flags": ["--json", "--ms <id>"], "description": "Show current status"},
         {"command": "beacon milestone add", "flags": [], "description": "Add a new milestone (interactive)"},
         {"command": "beacon milestone list", "flags": ["--json"], "description": "List milestones"},
-        {"command": "beacon milestone start <id>", "flags": [], "description": "Set milestone as active (in_progress)"},
+        {"command": "beacon milestone start <id>", "flags": ["--no-branch", "--no-assignee"], "description": "Activate milestone + auto-create ms-XX-<slug> branch + self-add as assignee"},
+        {"command": "beacon milestone join <id>", "flags": ["--checkout"], "description": "Add self as assignee on a milestone (and optionally switch to its branch)"},
         {"command": "beacon milestone close <id>", "flags": [], "description": "Close milestone"},
         {"command": "beacon milestone observe <id>", "flags": [], "description": "Set milestone to observing"},
         {"command": "beacon milestone rename <id> <title>", "flags": [], "description": "Rename a milestone"},
@@ -6061,6 +6318,7 @@ if __name__ == "__main__":
         "milestone_list": cmd_milestone_list,
         "milestone_start": cmd_milestone_start,
         "milestone_done": cmd_milestone_done,
+        "milestone_join": cmd_milestone_join,
         "milestone_show": cmd_milestone_show,
         "milestone_update": cmd_milestone_update,
         "milestone_delete": cmd_milestone_delete,
