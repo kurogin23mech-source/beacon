@@ -23,7 +23,7 @@ let state = {
   activeTab: 'dashboard',
   showGraph: false, graphFilterDeps: true,
   retros: [], retroContent: null,
-  documents: [], documentContent: null,
+  documents: [], documentContent: null, documentOverlay: null,
   hiddenStatuses: new Set(['cancelled']),
   projectVersion: null,
   hideEntryDone: new Set(),
