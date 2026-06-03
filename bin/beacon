@@ -418,12 +418,26 @@ cmd_milestone_list() {
 
 cmd_milestone_start() {
     ensure_project
-    local ms_id="${1:-}"
+    local ms_id=""
+    local no_branch=""
+    local no_assignee=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --no-branch)   no_branch="1"; shift ;;
+            --no-assignee) no_assignee="1"; shift ;;
+            *)             ms_id="$1"; shift ;;
+        esac
+    done
+
     if [ -z "$ms_id" ]; then
-        echo "Usage: beacon milestone start <ms-id>"
+        echo "Usage: beacon milestone start <ms-id> [--no-branch] [--no-assignee]"
         exit 1
     fi
-    BEACON_MS_ID="$ms_id" python3 "$COMMANDS_PY" milestone_start
+    BEACON_MS_ID="$ms_id" \
+        BEACON_NO_BRANCH="$no_branch" \
+        BEACON_NO_ASSIGNEE="$no_assignee" \
+        python3 "$COMMANDS_PY" milestone_start
 }
 
 cmd_milestone_done() {
@@ -1778,7 +1792,7 @@ case "${1:-}" in
         case "${2:-}" in
             add)    shift 2; cmd_milestone_add "$@" ;;
             list|ls) cmd_milestone_list ;;
-            start)  cmd_milestone_start "${3:-}" ;;
+            start)  shift 2; cmd_milestone_start "$@" ;;
             done|close) shift 2; cmd_milestone_done "$@" ;;
             observe)    shift 2; cmd_milestone_observe "$@" ;;
             show)   shift 2; cmd_milestone_show "$@" ;;

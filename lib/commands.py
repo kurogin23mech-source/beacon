@@ -647,11 +647,146 @@ def cmd_milestone_list():
 
 
 def cmd_milestone_start():
+    """Activate an MS, auto-create its branch, and self-add as assignee.
+
+    ms-51 / e-932 layers three behaviours on top of the original (set
+    status=in_progress):
+
+      1. Auto-branch: ``ms-XX-<slug>`` is checked out from current HEAD
+         if it doesn't exist, else switched-to. ``main`` is *not* touched
+         — branching is the whole point.
+      2. Self-assignee: the actor (``lib/agent.get_actor()``) is added to
+         the MS's assignee list (no-op if already present).
+      3. Skip when not a git repo: dispatch contexts (tests, scaffolds)
+         where there is no .git transparently fall back to "just flip
+         status" so existing flows are unaffected.
+
+    Suppression knobs:
+      * ``BEACON_NO_BRANCH=1`` skips the git checkout (used by tests and
+        by callers that manage their own branching, e.g. worktree mode).
+      * ``BEACON_NO_ASSIGNEE=1`` skips the assignee auto-add.
+    """
     ms_id = os.environ.get("BEACON_MS_ID", "")
+    no_branch = os.environ.get("BEACON_NO_BRANCH", "") == "1"
+    no_assignee = os.environ.get("BEACON_NO_ASSIGNEE", "") == "1"
+
     data = load_project()
     ms = core.milestone_start(data, ms_id)
+
+    # ---- 1. assignee auto-add (lib/agent.py is the single source) ----
+    actor_str = ""
+    if not no_assignee:
+        try:
+            import agent as _agent
+            actor = _agent.get_actor()
+            # Wire-format: prefer the agent name (it's the unique writer
+            # identifier — machine is implicit). If the machine should
+            # ever be needed for disambiguation it's still in the commit
+            # metadata (e-934). For the assignee badge a clean handle
+            # reads better.
+            actor_str = actor.get("agent", "") or actor.get("machine", "")
+            if actor_str:
+                _ms_unused, _added = core.milestone_assignee_add(
+                    data, ms_id, actor_str
+                )
+        except Exception as e:  # pragma: no cover - defensive
+            print(f"  warning: could not auto-add assignee: {e}", file=sys.stderr)
+
+    # ---- 2. auto-branch ----
+    branch_name = ""
+    branch_msg = ""
+    if not no_branch:
+        try:
+            import branch as _branch
+            branch_name = _branch.ms_branch_name(ms_id, ms.get("title", ""))
+            branch_msg = _ensure_on_branch(branch_name)
+        except _NotAGitRepoError:
+            # Quiet skip: scaffolds / tests / fresh projects without git
+            # should still be able to start a milestone.
+            branch_name = ""
+        except Exception as e:  # pragma: no cover - defensive
+            print(f"  warning: could not create/switch branch: {e}", file=sys.stderr)
+
     save_project(data)
     print(f"Activated: {ms['title']}")
+    if actor_str and not no_assignee:
+        print(f"  assignee: {actor_str}")
+    if branch_name and branch_msg:
+        print(f"  branch: {branch_name} ({branch_msg})")
+
+
+class _NotAGitRepoError(RuntimeError):
+    """Raised by :func:`_ensure_on_branch` when we are not inside a git repo.
+
+    Distinct from generic ``RuntimeError`` so callers can swallow only this
+    case (transparent skip) without hiding real git errors.
+    """
+
+
+def _ensure_on_branch(branch_name: str) -> str:
+    """Make sure HEAD is on ``branch_name``; create it from HEAD if missing.
+
+    Returns a short human-readable status string used by the CLI to tell
+    the user what happened ("created", "switched", "already on it",
+    "preserved", or empty). Raises :class:`_NotAGitRepoError` if the
+    working directory is not inside a git repository.
+
+    The function intentionally does NOT touch ``main`` (or any upstream)
+    — it creates the new branch *from current HEAD*. Callers that want
+    a fresh base from origin/main should run ``git fetch && git
+    checkout main`` first; this helper is just the safe local step.
+    """
+    try:
+        # First confirm we're in a git repo. `rev-parse --is-inside-work-tree`
+        # exits 0 + "true" on success, non-zero otherwise.
+        check = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, OSError) as e:
+        raise _NotAGitRepoError("git not available") from e
+    if check.returncode != 0 or check.stdout.strip() != "true":
+        raise _NotAGitRepoError("not inside a git work tree")
+
+    # Where are we now?
+    cur = subprocess.run(
+        ["git", "branch", "--show-current"],
+        capture_output=True, text=True, timeout=5,
+    )
+    current = cur.stdout.strip() if cur.returncode == 0 else ""
+    if current == branch_name:
+        return "already on it"
+
+    # Does the branch already exist locally?
+    exists = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet",
+         f"refs/heads/{branch_name}"],
+        capture_output=True, text=True, timeout=5,
+    )
+    if exists.returncode == 0:
+        # Switch to it; refuse if there are uncommitted changes (let git
+        # handle the safety check — we don't want to overwrite work).
+        sw = subprocess.run(
+            ["git", "checkout", branch_name],
+            capture_output=True, text=True, timeout=10,
+        )
+        if sw.returncode != 0:
+            err = sw.stderr.strip() or "checkout failed"
+            print(f"  warning: branch {branch_name} exists but checkout failed: {err}",
+                  file=sys.stderr)
+            return "preserved"
+        return "switched"
+
+    # Create it from current HEAD.
+    create = subprocess.run(
+        ["git", "checkout", "-b", branch_name],
+        capture_output=True, text=True, timeout=10,
+    )
+    if create.returncode != 0:
+        err = create.stderr.strip() or "create failed"
+        print(f"  warning: could not create {branch_name}: {err}", file=sys.stderr)
+        return "preserved"
+    return "created"
 
 
 def cmd_milestone_done():
