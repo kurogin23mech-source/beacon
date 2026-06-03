@@ -129,6 +129,27 @@ ensure_project() {
     fi
 }
 
+# Guard a free-text positional (title / description) against flag-like tokens.
+# Without this, the `*)` catch-all in add-style commands swallows any unknown
+# flag as the value — so `beacon milestone add --help` silently stores
+# "--help" as the title. This was observed as Claude Code creating bogus
+# "--help" milestones across projects (e-902). Called only with tokens that
+# already matched `-?*` (a dash followed by at least one char), so a lone "-"
+# is still a valid value. $1 = the token, $2 = a usage line to show.
+_guard_positional() {
+    case "$1" in
+        -h|--help)
+            echo "$2"
+            exit 0
+            ;;
+        *)
+            echo "Error: '$1' looks like a flag, not a value." >&2
+            echo "$2" >&2
+            exit 1
+            ;;
+    esac
+}
+
 cmd_init() {
     if [ -f "$BEACON_PROJECT_FILE" ]; then
         echo ".beacon/project.json already exists."
@@ -367,6 +388,7 @@ cmd_milestone_add() {
             --acceptance-criteria|--ac) acceptance_criteria="${2:-}";  shift 2 ;;
             --owner)                    owner="${2:-}";                shift 2 ;;
             --assignee)                 assignee="${2:-}";             shift 2 ;;
+            -?*)                        _guard_positional "$1" "Usage: beacon milestone add \"<title>\" [-d <date>] [--priority P] [--objective O] [--ac A] [--owner U] [--assignee U]" ;;
             *)                          title="$1";                    shift   ;;
         esac
     done
@@ -730,6 +752,7 @@ cmd_save() {
             --hash)        hash="${2:-}"; shift 2 ;;
             -p|--progress) progress="${2:-}"; shift 2 ;;
             --json)        json_flag="1"; shift ;;
+            -?*)           _guard_positional "$1" "Usage: beacon save \"<description>\" [-m <ms-id>]" ;;
             *)             description="$1"; shift ;;
         esac
     done
@@ -896,6 +919,7 @@ cmd_task_add() {
             --priority)                 priority="${2:-}";             shift 2 ;;
             --motivation|--why)         motivation="${2:-}";           shift 2 ;;
             --acceptance-criteria|--ac) acceptance_criteria="${2:-}";  shift 2 ;;
+            -?*)                        _guard_positional "$1" "Usage: beacon task add \"<description>\" [-m <ms-id>] [-t <type>] [-d <detail>] [--priority P] [--motivation W] [--ac A]" ;;
             *)                          description="$1";              shift   ;;
         esac
     done
