@@ -1334,11 +1334,20 @@ def cmd_log():
     resolves = os.environ.get("BEACON_RESOLVES", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
+    # ms-51 / e-934: attach actor (see cmd_log_finalize for the matching
+    # detail). Done in both entry points because beacon log is exposed
+    # directly to users (`beacon log "msg"`) and via the post-commit hook.
+    try:
+        import agent as _agent
+        actor = _agent.get_actor()
+    except Exception:
+        actor = None
+
     data = load_project()
     result = core.log_commit(
         data, ms_id=ms_id, commit_hash=commit_hash,
         message=message, date=date, summary=summary, progress=progress,
-        behavior=behavior, resolves=resolves,
+        behavior=behavior, resolves=resolves, actor=actor,
     )
     save_project(data)
 
@@ -1401,11 +1410,20 @@ def cmd_log_finalize():
     resolves = os.environ.get("BEACON_RESOLVES", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
+    # ms-51 / e-934: attach actor metadata so multi-machine commits are
+    # distinguishable downstream. lib.agent.get_actor is the single source
+    # of truth for this (configured via .beacon/agent.json + env vars).
+    try:
+        import agent as _agent
+        actor = _agent.get_actor()
+    except Exception:
+        actor = None
+
     data = load_project()
     result = core.log_commit(
         data, ms_id=ms_id, commit_hash=commit_hash,
         message=message, date=date, summary=summary_text, progress=progress,
-        behavior=behavior, resolves=resolves,
+        behavior=behavior, resolves=resolves, actor=actor,
     )
 
     if new_summary:

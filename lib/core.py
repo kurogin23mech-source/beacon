@@ -1096,8 +1096,16 @@ def check_duplicate_commit(entries: list, commit_hash: str) -> bool:
 def log_commit(data: dict, *, ms_id: str = "", commit_hash: str,
                message: str, date: str, summary: str = "",
                progress: str = "", behavior: str = "",
-               resolves: str = "") -> dict:
-    """Record a commit to the target milestone. Returns result info dict."""
+               resolves: str = "", actor: dict | None = None) -> dict:
+    """Record a commit to the target milestone. Returns result info dict.
+
+    ``actor`` (ms-51 / e-934): optional ``{"machine": ..., "agent": ...}``
+    dict attached to ``meta.actor``. Callers should pass the result of
+    :func:`lib.agent.get_actor`. Kept as a parameter (not auto-fetched
+    inside core) because ``core.py`` is meant to be pure I/O-free
+    business logic; the agent identity lookup involves filesystem and
+    env reads, which belongs in the CLI layer.
+    """
     target = find_target_milestone(data, ms_id)
     entries = target.setdefault("entries", [])
 
@@ -1111,6 +1119,16 @@ def log_commit(data: dict, *, ms_id: str = "", commit_hash: str,
     meta = {"hash": commit_hash, "message": message}
     if resolves:
         meta["resolves"] = resolves
+    if actor:
+        # Defensive: only persist the expected keys, drop any extra fields
+        # callers might tack on. Keeps the meta shape stable for the Web UI.
+        clean = {}
+        if actor.get("machine"):
+            clean["machine"] = actor["machine"]
+        if actor.get("agent"):
+            clean["agent"] = actor["agent"]
+        if clean:
+            meta["actor"] = clean
     commit_entry = {
         "id": next_entry_id(data),
         "type": "commit",
