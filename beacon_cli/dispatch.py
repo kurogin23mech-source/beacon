@@ -179,6 +179,31 @@ def _ensure_project() -> Optional[int]:
     return None
 
 
+def _purge_dispatch(root: Path, subcmd: str, *, id_value: str, id_env: str,
+                    reason: str, index: str, json_flag: bool, usage: str) -> int:
+    """Shared driver for the *purge recovery commands (e-893).
+
+    purge is a recovery path: it must run even when the project fails
+    validation, so — unlike every other handler — it does NOT call
+    _ensure_project. commands.py loads via load_project_unsafe. ``reason``
+    is mandatory (audit trail per data-immutability-principle).
+    """
+    if not id_value:
+        print(f"Usage: {usage}")
+        return 1
+    if not reason:
+        print(f"Error: --reason is required for {subcmd.replace('_', ' ')} "
+              "(audit trail per data-immutability-principle).")
+        return 1
+    env = {
+        id_env: id_value,
+        "BEACON_REASON": reason or "",
+        "BEACON_INDEX": index or "",
+        "BEACON_JSON": "1" if json_flag else "",
+    }
+    return _run_commands_py(root, subcmd, env)
+
+
 def _find_beacon_root(start: Path) -> Optional[Path]:
     """Walk up from ``start`` looking for ``.beacon/project.json``.
 
@@ -433,6 +458,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_ms_wscleanup.add_argument("--merge-to", dest="merge_to", default="")
     p_ms_wscleanup.add_argument("--json", action="store_true")
 
+    p_ms_purge = ms_sub.add_parser("purge", add_help=False)
+    p_ms_purge.add_argument("ms_id", nargs="?", default="")
+    p_ms_purge.add_argument("-r", "--reason", default="")
+    p_ms_purge.add_argument("--index", default="")
+    p_ms_purge.add_argument("--json", action="store_true")
+
     # ---- doc ----
     p_doc = sub.add_parser("doc", aliases=["document"], help="Document operations", add_help=False)
     p_doc.add_argument("--help", "-h", action="store_true", dest="show_help")
@@ -565,6 +596,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_entry_move.add_argument("entry_id", nargs="?", default="")
     p_entry_move.add_argument("-t", "--task", dest="task_id", default="")
     p_entry_move.add_argument("-m", "--ms", dest="ms_id", default="")
+
+    p_entry_purge = entry_sub.add_parser("purge", add_help=False)
+    p_entry_purge.add_argument("entry_id", nargs="?", default="")
+    p_entry_purge.add_argument("-r", "--reason", default="")
+    p_entry_purge.add_argument("--index", default="")
+    p_entry_purge.add_argument("--json", action="store_true")
+
+    # ---- operation (purge only — full operation CRUD remains bash-only) ----
+    p_op = sub.add_parser("operation", help="Operation operations (purge)", add_help=False)
+    p_op.add_argument("--help", "-h", action="store_true", dest="show_help")
+    op_sub = p_op.add_subparsers(dest="op_cmd", metavar="<subcmd>")
+    p_op_purge = op_sub.add_parser("purge", add_help=False)
+    p_op_purge.add_argument("op_id", nargs="?", default="")
+    p_op_purge.add_argument("-r", "--reason", default="")
+    p_op_purge.add_argument("--index", default="")
+    p_op_purge.add_argument("--json", action="store_true")
 
     # ---- doctor / project / help ----
     sub.add_parser("doctor", add_help=False)
@@ -1064,10 +1111,17 @@ def _handle_milestone(root: Path, args: argparse.Namespace) -> int:
             "workspace-cleanup] [options]"
         )
         return 0 if args.show_help else 2
+    cmd = args.ms_cmd
+    if cmd == "purge":
+        return _purge_dispatch(
+            root, "milestone_purge", id_value=args.ms_id, id_env="BEACON_MS_ID",
+            reason=args.reason, index=args.index, json_flag=args.json,
+            usage="beacon milestone purge <ms-id> --reason <text> [--index <n>] [--json]",
+        )
+
     if (rc := _ensure_project()) is not None:
         return rc
 
-    cmd = args.ms_cmd
     if cmd == "add":
         env = {
             "BEACON_TITLE": args.title or "",
@@ -1440,7 +1494,14 @@ def _handle_deploy(root: Path, args: argparse.Namespace) -> int:
 def _handle_entry(root: Path, args: argparse.Namespace) -> int:
     if args.show_help or args.entry_cmd is None:
         print("Usage: beacon entry move <entry-id> -t <task-id> | -m <ms-id>")
+        print("       beacon entry purge <e-id> --reason <text> [--index <n>]")
         return 0 if args.show_help else 2
+    if args.entry_cmd == "purge":
+        return _purge_dispatch(
+            root, "entry_purge", id_value=args.entry_id, id_env="BEACON_ENTRY_ID",
+            reason=args.reason, index=args.index, json_flag=args.json,
+            usage="beacon entry purge <e-id> --reason <text> [--index <n>] [--json]",
+        )
     if (rc := _ensure_project()) is not None:
         return rc
     if args.entry_cmd == "move":
@@ -1450,6 +1511,26 @@ def _handle_entry(root: Path, args: argparse.Namespace) -> int:
             "BEACON_MS_ID": args.ms_id or "",
         }
         return _run_commands_py(root, "entry_move", env)
+    return 1
+
+
+def _handle_operation(root: Path, args: argparse.Namespace) -> int:
+    """Operation dispatch — only `purge` is implemented natively (e-893).
+
+    Full operation management (open/close/list/show/run/incident) is still
+    bash-only; we expose just the duplicate-ID recovery path here because
+    that is what must work when the project won't load and bash is absent.
+    """
+    if args.show_help or args.op_cmd is None:
+        print("Usage: beacon operation purge <op-id> --reason <text> [--index <n>]")
+        print("  (Full operation management is available via the bash CLI.)")
+        return 0 if args.show_help else 2
+    if args.op_cmd == "purge":
+        return _purge_dispatch(
+            root, "operation_purge", id_value=args.op_id, id_env="BEACON_OP_ID",
+            reason=args.reason, index=args.index, json_flag=args.json,
+            usage="beacon operation purge <op-id> --reason <text> [--index <n>] [--json]",
+        )
     return 1
 
 
@@ -1888,6 +1969,7 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "push": _handle_push,
     "deploy": _handle_deploy,
     "entry": _handle_entry,
+    "operation": _handle_operation,
     "project": _handle_project,
     "doctor": _handle_doctor,
     "skill": _handle_skill,
