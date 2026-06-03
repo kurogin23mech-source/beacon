@@ -11,3 +11,6 @@ dist/
 !desktop/dist/
 *.egg-info/
 .pytest_cache/
+
+# Internal work area for design/pitch decks (ms-50 営業資料 etc.) — generated content, not part of the product
+.beacon-design/
