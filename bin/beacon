@@ -2214,6 +2214,28 @@ case "${1:-}" in
             done)
                 python3 "$COMMANDS_PY" retro_done
                 ;;
+            save)
+                shift
+                _retro_week=""
+                _retro_content=""
+                _retro_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --week)    _retro_week="${2:-}"; shift 2 ;;
+                        --content) _retro_content="${2:-}"; shift 2 ;;
+                        --json)    _retro_json="1"; shift ;;
+                        --stdin)   shift ;;
+                        *) shift ;;
+                    esac
+                done
+                if [ -z "$_retro_week" ]; then
+                    echo "Usage: beacon retro save --week YYYY-WNN [--content text | --stdin] [--json]"
+                    echo "  Content can be piped via stdin."
+                    exit 1
+                fi
+                BEACON_RETRO_WEEK="$_retro_week" BEACON_CONTENT="$_retro_content" \
+                    BEACON_JSON="$_retro_json" python3 "$COMMANDS_PY" retro_save
+                ;;
             *)
                 cmd_retro "$@"
                 ;;

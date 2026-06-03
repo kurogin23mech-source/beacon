@@ -2179,6 +2179,59 @@ def cmd_retro_default_since():
         pass
 
 
+def cmd_retro_save():
+    """Persist a retro markdown document for a given ISO week.
+
+    Cloud mode: pushes to the cloud retros subcollection (the source of truth
+    for the Web UI Reviews tab). Local mode: writes `.beacon/retro/{week}.md`.
+
+    /beacon-retro Skill MUST call this instead of writing the file directly.
+    The legacy Write-tool path orphaned retros in cloud mode because the only
+    push path was the initial `beacon cloud push` migration.
+    """
+    week = os.environ.get("BEACON_RETRO_WEEK", "")
+    content = os.environ.get("BEACON_CONTENT", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not week:
+        print("Error: --week required (e.g. 2026-W23)")
+        sys.exit(1)
+
+    import re
+    if not re.match(r"^\d{4}-W\d{2}$", week):
+        print(f"Error: week must be in YYYY-WNN format (got {week!r})")
+        sys.exit(1)
+
+    if not content and not sys.stdin.isatty():
+        content = sys.stdin.read()
+
+    if not content:
+        print("Error: content required (pass via BEACON_CONTENT or stdin)")
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        client, config = _get_api_client()
+        try:
+            client.save_retro(config["project_id"], week, content)
+        except RuntimeError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+        location = f"cloud:projects/{config['project_id']}/retros/{week}"
+    else:
+        project_dir = os.path.dirname(get_project_file())
+        retro_dir = os.path.join(project_dir, "retro")
+        os.makedirs(retro_dir, exist_ok=True)
+        fpath = os.path.join(retro_dir, f"{week}.md")
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(content)
+        location = fpath
+
+    if json_mode:
+        print(json.dumps({"week": week, "location": location}, ensure_ascii=False))
+    else:
+        print(f"Saved retro: {week} -> {location}")
+
+
 def cmd_retro_done():
     import datetime
     today = datetime.date.today()
@@ -6034,6 +6087,7 @@ if __name__ == "__main__":
         "milestone_workspace_cleanup": cmd_milestone_workspace_cleanup,
         "milestone_graph": cmd_milestone_graph,
         "retro_prepare": cmd_retro_prepare,
+        "retro_save": cmd_retro_save,
         "retro_done": cmd_retro_done,
         "retro_default_since": cmd_retro_default_since,
         "trigger_fire": cmd_trigger_fire,

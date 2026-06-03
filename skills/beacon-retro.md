@@ -87,12 +87,18 @@ Step 1 のデータを元に、以下の構造でマークダウンドキュメ�
 
 ## Step 3: ドキュメントの保存
 
-生成したドキュメントを Write ツールで保存:
+生成したドキュメントを **Bash ツール経由で `beacon retro save` CLI に渡す**:
+
+```bash
+cd "$PROJECT_DIR" && beacon retro save --week YYYY-WNN --stdin <<'EOF'
+[本文]
+EOF
 ```
-.beacon/retro/YYYY-WNN.md
-```
-- `YYYY` は年、`WNN` は ISO 週番号（例: `2026-W19.md`）
-- `.beacon/retro/` ディレクトリが存在しない場合は作成する
+
+- `YYYY-WNN` は ISO 週番号（例: `2026-W23`）
+- CLI が cloud mode を判別し、cloud subcollection または `.beacon/retro/YYYY-WNN.md` に書き込む
+
+⚠️ **Write ツールで `.beacon/retro/*.md` を直接書かないこと**。cloud mode では Web UI Reviews タブに反映されず、retro が orphan になる。local/cloud の判定は CLI 層に任せ、Skill は本文生成だけに専念する。
 
 ## Step 4: ディスカッションの開始
 
@@ -173,7 +179,7 @@ cd "$PROJECT_DIR" && beacon retro done
 ## 制約
 
 - データ取得は Bash ツール経由の beacon CLI のみ。project.json を直接読まない。
-- ドキュメント生成は Write ツールで `.beacon/retro/` に保存する。
+- ドキュメント保存は `beacon retro save --week YYYY-WNN --stdin` 経由のみ。`.beacon/retro/*.md` を Write ツールで直接書かない（cloud 反映漏れの原因になる）。
 - 振り返りは提案であり、CLAUDE.md の更新やタスク操作は **ユーザーの合意を得てから** 行う。
 - CORE doc 昇格は **必ず user 承認後**。AI 単独で `beacon doc add --scope core` を叩かない。
 - 全 Bash 呼び出しに `cd "$PROJECT_DIR" && ...` を前置する。

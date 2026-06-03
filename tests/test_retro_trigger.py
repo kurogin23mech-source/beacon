@@ -258,3 +258,51 @@ def test_default_since_delayed_two_weeks_covers_both(
     out = capsys.readouterr().out.strip()
     # W21 Monday = 2026-05-18
     assert out == "2026-05-18", out
+
+
+def test_retro_save_writes_local_file_in_local_mode(
+    project_with_retro, monkeypatch, capsys
+):
+    """In local mode, `beacon retro save` writes .beacon/retro/{week}.md.
+
+    Regression guard: the Skill previously bypassed the CLI by calling Write
+    directly, which orphaned retros in cloud mode. The CLI must own the
+    persistence so local/cloud routing is uniform.
+    """
+    import commands  # type: ignore
+    monkeypatch.setenv("BEACON_RETRO_WEEK", "2026-W23")
+    monkeypatch.setenv("BEACON_CONTENT", "# W23 retro\nhello")
+    commands.cmd_retro_save()
+    fpath = project_with_retro / ".beacon" / "retro" / "2026-W23.md"
+    assert fpath.exists()
+    assert fpath.read_text(encoding="utf-8") == "# W23 retro\nhello"
+    out = capsys.readouterr().out
+    assert "2026-W23" in out
+
+
+def test_retro_save_rejects_bad_week_format(
+    project_with_retro, monkeypatch, capsys
+):
+    """Week must match YYYY-WNN. Anything else is rejected before persistence."""
+    import commands  # type: ignore
+    monkeypatch.setenv("BEACON_RETRO_WEEK", "not-a-week")
+    monkeypatch.setenv("BEACON_CONTENT", "x")
+    with pytest.raises(SystemExit) as exc:
+        commands.cmd_retro_save()
+    assert exc.value.code == 1
+    err = capsys.readouterr().out
+    assert "YYYY-WNN" in err
+
+
+def test_retro_save_requires_content(project_with_retro, monkeypatch, capsys):
+    """Empty content must fail loudly rather than silently writing an empty file."""
+    import commands  # type: ignore
+    monkeypatch.setenv("BEACON_RETRO_WEEK", "2026-W23")
+    monkeypatch.setenv("BEACON_CONTENT", "")
+    # Simulate non-tty stdin returning empty (interactive case is the same)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    with pytest.raises(SystemExit) as exc:
+        commands.cmd_retro_save()
+    assert exc.value.code == 1
+    err = capsys.readouterr().out
+    assert "content required" in err
