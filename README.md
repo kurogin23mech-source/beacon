@@ -360,6 +360,12 @@ Beacon ships with [Claude Code Skills](https://docs.anthropic.com/en/docs/claude
 | `beacon-note` | Record an ephemeral session memo (auto-triggered by "メモして") / セッションメモ記録 |
 | `beacon-operation-setup` | Conversational Operation setup with auto-generated SPEC doc / 会話形式でOperation作成+SPEC自動生成 |
 | `beacon-operation-review` | Fetch logs per SPEC, interpret, and record run result / SPECに従いログ取得→解釈→run record記録 |
+| `beacon-spec` | Conversational SPEC (requirements / decision trail) authoring + task breakdown / 対話駆動SPEC作成+タスク一括起票 |
+| `beacon-retrospect` | Query project history in natural language ("did we build X? how?") / プロジェクト史を自然言語で検索 |
+| `beacon-vision` | Refine a fuzzy idea into a structured project vision (CORE doc) / ふわっとした構想をビジョンに精緻化 |
+| `beacon-roadmap` | Design a set of milestones (3–7) toward the project vision / 大目的に向けたマイルストーン群を設計 |
+| `beacon-pr-create` | Conversational PR creation (intent capture + branch/commit checks) / 対話形式でPR作成 |
+| `beacon-incident-report` | Close an incident and save a cause/response/prevention report / インシデントclose+レポート作成 |
 
 ### Two-phase workflow
 
