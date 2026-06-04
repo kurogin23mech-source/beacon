@@ -2699,6 +2699,161 @@ def _fire_spec_needed_trigger(ms_id: str, ms_title: str) -> None:
         f.write("\n")
 
 
+# release-due trigger thresholds (ms-52 e-958, SPEC 設計方針 2).
+# feat-primary + fix-supplementary surfaces both "feature accumulation"
+# and "fix accumulation" rhythms; see CORE doc rMlHx9n0LYFJ2kWIQELi.
+_RELEASE_DUE_FEAT_THRESHOLD = 3
+_RELEASE_DUE_FIX_THRESHOLD = 5
+
+
+def _release_due_trigger_path() -> str:
+    return os.path.join(_get_triggers_dir(), "release-due.json")
+
+
+def _clear_release_due_trigger_if_exists() -> None:
+    path = _release_due_trigger_path()
+    if os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _auto_fire_release_due_trigger() -> None:
+    """Surface a 'release-due' trigger when feat / fix commits since the
+    last v* tag cross the threshold defined in CORE doc rMlHx9n0LYFJ2kWIQELi.
+
+    Trigger lifecycle:
+      - If repo has no v* tag yet, skip (no baseline to compare against).
+      - If commits since tag fall below threshold (e.g. after squash),
+        clear any stale trigger and skip.
+      - If a trigger already exists for the same since_tag, keep its
+        created_at (so users see "this has been pending since YYYY-MM-DD")
+        but refresh counts / next_version_hint / refreshed_at.
+      - If a trigger exists but since_tag != current tag (a release happened),
+        clear it so the rewrite below uses today's created_at.
+
+    Failures (no git / no version_rules / IOError) degrade silently so
+    trigger check stays usable even outside a git repo.
+    """
+    try:
+        import version_rules
+    except Exception:
+        return
+
+    project_dir = os.path.dirname(get_project_file())
+    repo_root = os.path.dirname(project_dir) or "."
+
+    try:
+        current_tag = version_rules.get_current_tag(prefix="v", repo_path=repo_root)
+    except Exception:
+        return
+    if not current_tag:
+        # No baseline tag → no signal to compute. Don't fire (would be noisy
+        # for fresh repos that haven't shipped anything yet).
+        return
+
+    rev_range = f"{current_tag}..HEAD"
+    try:
+        result = subprocess.run(
+            ["git", "log", rev_range, "--pretty=format:%H%x00%s%x00%b%x1e"],
+            capture_output=True, text=True, cwd=repo_root, check=False,
+        )
+    except (FileNotFoundError, OSError):
+        return
+    if result.returncode != 0:
+        return
+    log_output = result.stdout
+
+    commits = []
+    for entry in log_output.split("\x1e"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        parts = entry.split("\x00")
+        if len(parts) >= 2:
+            subject = parts[1]
+            body = parts[2] if len(parts) > 2 else ""
+            full_message = subject + ("\n\n" + body if body else "")
+            commits.append({"hash": parts[0][:7], "message": full_message})
+
+    if not commits:
+        _clear_release_due_trigger_if_exists()
+        return
+
+    try:
+        info = version_rules.propose_next_version(
+            commits, axis="push", repo_path=repo_root
+        )
+    except Exception:
+        return
+    counts = info.get("counts", {})
+    feat = int(counts.get("feat", 0) or 0)
+    fix = int(counts.get("fix", 0) or 0)
+
+    above_threshold = (
+        feat >= _RELEASE_DUE_FEAT_THRESHOLD
+        or fix >= _RELEASE_DUE_FIX_THRESHOLD
+    )
+    if not above_threshold:
+        _clear_release_due_trigger_if_exists()
+        return
+
+    triggers_dir = _get_triggers_dir()
+    os.makedirs(triggers_dir, exist_ok=True)
+    trigger_path = _release_due_trigger_path()
+
+    existing = None
+    if os.path.exists(trigger_path):
+        try:
+            with open(trigger_path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except (json.JSONDecodeError, IOError, UnicodeDecodeError):
+            existing = None
+
+    import datetime
+    now_iso = datetime.datetime.now().isoformat()
+    # Preserve created_at only if the existing trigger references the same
+    # baseline tag (otherwise a release happened and the next "since" date
+    # should reset).
+    if existing and existing.get("since_tag") == current_tag:
+        created_at = existing.get("created_at", now_iso)
+    else:
+        created_at = now_iso
+
+    next_version = info.get("next") or ""
+    summary_parts = []
+    if feat:
+        summary_parts.append(f"feat {feat} 件")
+    if fix:
+        summary_parts.append(f"fix {fix} 件")
+    summary = " / ".join(summary_parts) if summary_parts else f"{len(commits)} 件"
+
+    hint_path = "`gh workflow run release.yml -f dry_run=true` または `/beacon-push`"
+    message = (
+        f"前回 release {current_tag} 以降 {summary} が積み上がっています "
+        f"(合計 {len(commits)} commits)。次バージョン候補: {next_version}。"
+        f"{hint_path} で release.yml 経路の起動を検討してください "
+        f"(CORE doc rMlHx9n0LYFJ2kWIQELi: 5 配信チャネル整合の原則)。"
+    )
+
+    trigger_data = {
+        "name": "release-due",
+        "kind": "release-due",
+        "since_tag": current_tag,
+        "next_version_hint": next_version,
+        "feat_count": feat,
+        "fix_count": fix,
+        "commit_count": len(commits),
+        "message": message,
+        "created_at": created_at,
+        "refreshed_at": now_iso,
+    }
+    with open(trigger_path, "w", encoding="utf-8") as f:
+        json.dump(trigger_data, f, ensure_ascii=False)
+        f.write("\n")
+
+
 def _spec_exists_for_ms(ms_id: str) -> bool:
     """Return True if any spec-scoped document is attached to ms_id.
 
@@ -2866,6 +3021,7 @@ def cmd_trigger_fire():
 def cmd_trigger_check():
     _auto_fire_retro_trigger()
     _auto_fire_operation_triggers()
+    _auto_fire_release_due_trigger()
     _cleanup_stale_triggers()
     triggers_dir = _get_triggers_dir()
     if not os.path.isdir(triggers_dir):
