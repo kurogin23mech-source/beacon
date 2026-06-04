@@ -50,43 +50,98 @@ Step 1 の情報を読み、**日本語で1〜3文の説明文**を生成する�
 
 悪い例: 「beacon-init Skill・Project Archaeology強化・beacon initフラグ対応・CLIコマンド安全性修正・ms-26 worktreeDispatch・ms-5安定化（16コミット）」
 
-## Step 2.5: バージョン判定（オプション）
+## Step 2.5: リリース判定と起動経路 (forcing function — ms-52 e-959)
 
-プロジェクトが **opt-in している場合のみ** 実行する。判定基準:
+`release.yml` の有無で経路を分岐する。CORE doc `rMlHx9n0LYFJ2kWIQELi`
+(リリース 5 配信チャネル整合の原則) が定める「5 配信チャネル (Web UI / Server
+/ CLI / Skill / Desktop) が揃った時にだけリリース完了」原則を、Skill 層から
+構造的に支える forcing function。
 
+### Step 2.5a: release.yml 検知 + opt-in 確認
+
+Bash ツールで実行:
 ```bash
-beacon doc show version-rules 2>/dev/null
+test -f .github/workflows/release.yml && echo "RELEASE_YML_EXISTS" || echo "NO_RELEASE_YML"
+beacon doc show version-rules 2>/dev/null | head -1
 ```
 
-stdoutに本文があれば opt-in。空（exit code非ゼロ含む）ならこのStepをスキップしてStep 3へ。
+- 1 行目に `RELEASE_YML_EXISTS` → **経路 A (Step 2.5b)** に進む
+- `NO_RELEASE_YML` で かつ `version-rules` doc が空 → Step 3 へスキップ (release 体験未 opt-in)
+- `NO_RELEASE_YML` で `version-rules` doc が存在 → **経路 B (Step 2.5c, fallback)** に進む
 
-### 判定ロジック
+### Step 2.5b: 経路 A — `release.yml` が存在 (第一推奨)
 
-opt-inしている場合、Bash ツールで以下を実行:
+これが **forcing function の正規経路**。`release.yml` が semver bump → tag → formula
+→ homebrew tap mirror を実行し、最終 step で `deploy-cloud-run.yml` (await) と
+`release-build.yml` (fire-and-forget) を fan-out する (ms-52 e-953/e-954)。**手動で
+`git tag` + `gh release create` を打たない** — 同じ tag に対する GitHub Release
+の二重作成 / workflow fan-out 抜けが起きる。
 
+#### release-due trigger の確認
+
+Bash ツールで実行:
 ```bash
-python3 -c "
-import sys, json
-sys.path.insert(0, '$(beacon --help 2>&1 | head -1 | grep -oE '/[^ ]+' | head -1)')
-# (実際には beacon インストール先の lib/ を sys.path に追加)
-" 2>/dev/null || true
-
-# 簡易版: git tag + 未push commits から判定
-CURRENT_TAG=$(git describe --tags --abbrev=0 --match='v[0-9]*' 2>/dev/null || echo "v0.0.0")
-COMMITS=$(echo '<Step1のJSON>' | python3 -c "import json,sys; d=json.load(sys.stdin); print('\n'.join(c['message'] for c in d['commits']))")
+beacon trigger check 2>/dev/null | python3 -c "import json,sys
+ts = json.load(sys.stdin)
+due = [t for t in ts if t.get('kind') == 'release-due']
+for t in due:
+    print(f\"- {t['message']}\")
+"
 ```
 
-`version-rules` ドキュメントの内容を読み、commits を分類して次バージョンを判定する:
+release-due トリガー (ms-52 e-958: feat 3+ または fix 5+ で fire) が出ていれば
+「リリースの頃合い」のシグナル。fire していなくても、ユーザー意志での release
+判断は妨げない (閾値はあくまで promotion であって gate ではない)。
 
-1. **MAJOR候補**: `BREAKING CHANGE` / `BREAKING:` を含むメッセージ、または `feat!:` / `fix!:` プレフィックス
-2. **MINOR候補**: `feat:` / `feat(...):` プレフィックス
-3. **PATCH候補**: その他すべて
-
-最大の昇格度を採用し、`git describe --tags --abbrev=0 --match='v[0-9]*'` で取得した現tagをbumpする。
-
-### ユーザーへの提示
+#### ユーザーへの提示
 
 ```
+このプロジェクトは release.yml を持っています (5 配信チャネル整合 forcing function 完備)。
+[release-due trigger があれば その message を 1 行で添える]
+
+リリース起動経路 (推奨):
+  1) Dry-run: `gh workflow run release.yml -f dry_run=true` 
+     計画 (bump 判定 / 対象 commits) を確認する。
+  2) 本番: `gh workflow run release.yml -f dry_run=false`
+     bump → tag → formula → tap mirror → deploy-cloud-run.yml (await) → release-build.yml (fan-out)。
+
+このタイミングで release を切りますか？ [dry-run / 本番 / skip]
+```
+
+#### 承認時の処理
+
+- `dry-run` → `gh workflow run release.yml -f dry_run=true` を実行、結果は Actions UI / 
+  `gh run watch` で見る (release は記録されない)
+- `本番` → `gh workflow run release.yml -f dry_run=false` を実行。release.yml の終了後
+  (deploy-cloud-run.yml の health check pass + release-build.yml が fan-out 起動済) に
+  `beacon trigger check` を再実行すると `release-X.Y.Z` トリガーが立つ
+- `skip` → 何もせず Step 3 へ
+
+### Step 2.5c: 経路 B (fallback) — `release.yml` が存在しない
+
+> **⚠ これは `release.yml` 不存在時の fallback です。**
+> 多くのプロジェクトでは経路 A が正解。Beacon 自身や 5 配信チャネル整合の雛形
+> (CORE doc `rMlHx9n0LYFJ2kWIQELi` 参照) を採用しているプロジェクトには `release.yml`
+> があるはずなので、まず A 経路を検討してください。手動経路は誤って bypass された場合、
+> workflow fan-out (deploy + Tauri build) が走らない / GitHub Release が release.yml の
+> 出力と二重化する等のリスクがあります。
+
+`version-rules` doc が opt-in されているが `release.yml` が無い場合のみ、以下を実行:
+
+#### 判定ロジック
+
+`version-rules` doc の内容と `git log <last-tag>..HEAD` の commit 群から:
+1. **MAJOR**: `BREAKING CHANGE` / `BREAKING:` を含む、または `feat!:` / `fix!:` prefix
+2. **MINOR**: `feat:` / `feat(...):` prefix
+3. **PATCH**: その他
+
+最大の昇格度を採用し、現 tag (`git describe --tags --abbrev=0 --match='v[0-9]*'`) を bump。
+
+#### ユーザーへの提示 (fallback 明示)
+
+```
+⚠ release.yml が無いプロジェクトの fallback 経路です (本来は release.yml を整備して経路 A を使う)。
+
 バージョン判定:
   現tag: v0.1.0
   次:    v0.2.0  (MINOR bump)
@@ -95,9 +150,7 @@ COMMITS=$(echo '<Step1のJSON>' | python3 -c "import json,sys; d=json.load(sys.s
 このpushにタグを切ってGitHub Releaseを作成しますか？ [y/N]
 ```
 
-### 承認時の処理
-
-ユーザーが承認したら Bash ツールで実行:
+#### 承認時の処理
 
 ```bash
 git tag vX.Y.Z
