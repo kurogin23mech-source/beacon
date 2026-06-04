@@ -2854,6 +2854,116 @@ def _auto_fire_release_due_trigger() -> None:
         f.write("\n")
 
 
+def _count_commits_between_tags(repo_root: str, prev_tag: str, tag: str) -> int:
+    """Count commits between `prev_tag..tag`. If prev_tag is empty, count
+    commits up to and including `tag`. Returns 0 on any git failure."""
+    try:
+        if prev_tag:
+            rev_range = f"{prev_tag}..{tag}"
+        else:
+            rev_range = tag
+        result = subprocess.run(
+            ["git", "log", rev_range, "--oneline"],
+            capture_output=True, text=True, cwd=repo_root, check=False,
+        )
+        if result.returncode != 0:
+            return 0
+        return len([line for line in result.stdout.splitlines() if line.strip()])
+    except (FileNotFoundError, OSError):
+        return 0
+
+
+def _previous_v_tag(repo_root: str, tag: str) -> str:
+    """Return the v* tag immediately preceding `tag`, or '' if none."""
+    try:
+        result = subprocess.run(
+            ["git", "tag", "--list", "v*", "--sort=v:refname"],
+            capture_output=True, text=True, cwd=repo_root, check=False,
+        )
+        if result.returncode != 0:
+            return ""
+        prev = ""
+        for line in result.stdout.splitlines():
+            t = line.strip()
+            if not t:
+                continue
+            if t == tag:
+                return prev
+            prev = t
+        return prev  # tag not found — return last seen as best effort
+    except (FileNotFoundError, OSError):
+        return ""
+
+
+def _auto_fire_release_marker_trigger() -> None:
+    """Surface a 'release-<version>' trigger for the latest v* tag if not
+    already present locally (ms-52 e-952).
+
+    Rationale: release.yml runs in GitHub Actions and fires
+    `beacon trigger fire release-X.Y.Z` against the *ephemeral CI runner*
+    filesystem, so the maintainer's local cloud-mode session never sees
+    the trigger. Instead we derive it from git state (which IS synced via
+    `git pull`): if the latest v* tag has no matching local trigger file,
+    create one with the same payload release.py would have written
+    (commit count + /discord-post hint).
+
+    Lifecycle: this fires only for the *latest* tag. Older missed releases
+    require explicit `beacon trigger fire release-vX.Y.Z "<message>"` (AC 3
+    listed this catchup as optional). The trigger file persists until the
+    user explicitly clears it (the standard release-marker contract).
+
+    Silent failures: any git / version_rules error -> no-op.
+    """
+    try:
+        import version_rules
+    except Exception:
+        return
+
+    project_dir = os.path.dirname(get_project_file())
+    repo_root = os.path.dirname(project_dir) or "."
+
+    try:
+        latest_tag = version_rules.get_current_tag(prefix="v", repo_path=repo_root)
+    except Exception:
+        return
+    if not latest_tag:
+        return
+
+    # Use the bare version (without leading 'v') in the trigger name to match
+    # the convention scripts/release.py established (release-0.8.0, not
+    # release-v0.8.0). Trigger payload keeps the full tag for clarity.
+    version_str = latest_tag[1:] if latest_tag.startswith("v") else latest_tag
+    trigger_name = f"release-{version_str}"
+
+    triggers_dir = _get_triggers_dir()
+    trigger_path = os.path.join(triggers_dir, f"{trigger_name}.json")
+    if os.path.exists(trigger_path):
+        return  # Already fired (locally or via this auto-derivation earlier).
+
+    prev_tag = _previous_v_tag(repo_root, latest_tag)
+    commit_count = _count_commits_between_tags(repo_root, prev_tag, latest_tag)
+
+    os.makedirs(triggers_dir, exist_ok=True)
+    import datetime
+    message = (
+        f"beacon {latest_tag} released ({commit_count} commits). "
+        f"Use /discord-post to share."
+    )
+    trigger_data = {
+        "name": trigger_name,
+        "kind": "release-marker",
+        "tag": latest_tag,
+        "previous_tag": prev_tag,
+        "commit_count": commit_count,
+        "message": message,
+        "created_at": datetime.datetime.now().isoformat(),
+        "source": "auto-from-tag",
+    }
+    with open(trigger_path, "w", encoding="utf-8") as f:
+        json.dump(trigger_data, f, ensure_ascii=False)
+        f.write("\n")
+
+
 def _spec_exists_for_ms(ms_id: str) -> bool:
     """Return True if any spec-scoped document is attached to ms_id.
 
@@ -3022,6 +3132,7 @@ def cmd_trigger_check():
     _auto_fire_retro_trigger()
     _auto_fire_operation_triggers()
     _auto_fire_release_due_trigger()
+    _auto_fire_release_marker_trigger()
     _cleanup_stale_triggers()
     triggers_dir = _get_triggers_dir()
     if not os.path.isdir(triggers_dir):
