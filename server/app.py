@@ -1308,7 +1308,18 @@ async def ws_project(websocket: WebSocket, project_id: str):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "env": os.environ.get("BEACON_ENV", "dev")}
+    # version is exposed so release.yml can assert that the bump commit has
+    # actually reached the Cloud Run revision (e-953 AC 2): without this the
+    # downstream deploy could "succeed" while still serving the old image.
+    try:
+        from lib.commands import __version__ as _beacon_version
+    except Exception:
+        _beacon_version = "unknown"
+    return {
+        "status": "ok",
+        "env": os.environ.get("BEACON_ENV", "dev"),
+        "version": _beacon_version,
+    }
 
 
 @app.get("/api/auth/config")

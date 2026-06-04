@@ -35,10 +35,12 @@ deploys the server. The user side stays a single `beacon update`.
 | `deploy-cloud-run.yml` (e-910) | push to `main` (server/lib/…) / dispatch | `gcloud run deploy` + health check |
 
 > **Run order for a full release:** trigger `release.yml` (dry-run first, then
-> `dry_run=false`). It tags `vX.Y.Z`. Cloud Run deploy fires automatically from
-> the bump commit landing on `main`. Desktop/CLI artifacts: push a matching
-> `release-v*` tag (or dispatch `release-build.yml`). Tag-trigger unification is
-> a tracked follow-up — see "Not yet automated".
+> `dry_run=false`). It tags `vX.Y.Z` **and now explicitly dispatches
+> `deploy-cloud-run.yml`, waits for its completion, and asserts `/health`
+> reports the new version** (ms-52 e-953 — GITHUB_TOKEN-pushed bumps do not
+> chain workflow runs, so the dispatch is mandatory). Desktop/CLI artifacts:
+> push a matching `release-v*` tag (or dispatch `release-build.yml`).
+> Tag-trigger unification is a tracked follow-up — see "Not yet automated".
 
 ## One-time setup
 
@@ -108,8 +110,9 @@ Until `GCP_PROJECT` is set, `deploy-cloud-run.yml` skips (safe to merge).
    `dry_run=true` → inspect the plan.
 2. Re-run with `dry_run=false` (optionally pin `version: vX.Y.Z`; blank
    auto-detects from commit prefixes per `version-rules`).
-3. `deploy-cloud-run.yml` deploys the server automatically when the bump commit
-   lands on `main` (or dispatch it).
+3. `release.yml`'s final step dispatches `deploy-cloud-run.yml` and blocks on
+   its completion + a `/health` version assertion. No separate maintainer
+   action is needed for the server reflection (ms-52 e-953).
 4. For Desktop/CLI binaries, push a `release-v*` tag or dispatch `release-build.yml`.
 5. Users run `beacon update`.
 
