@@ -19,6 +19,11 @@ name: Release Build (CLI + Desktop, all OS)
 on:
   push:
     tags:
+      # ms-52 e-954: release.yml creates `v*` tags (semver convention), so
+      # this workflow must accept them — otherwise the artifact build chain
+      # is silently skipped on every release. `release-v*` is kept for
+      # backward compatibility with explicit all-build tag pushes.
+      - 'v*'
       - 'release-v*'
   workflow_dispatch:
     inputs:

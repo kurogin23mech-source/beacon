@@ -86,3 +86,88 @@ jobs:
           if [ "$INPUT_DRY_RUN" = "true" ]; then args+=(--dry-run); fi
           echo "Running: scripts/release.py ${args[*]}"
           python scripts/release.py "${args[@]}"
+
+      - name: Fan out to downstream workflows (deploy-cloud-run)
+        # GitHub deliberately suppresses workflow runs for pushes made with
+        # GITHUB_TOKEN (loop guard). release.yml just pushed the version bump
+        # + tag with GITHUB_TOKEN, so deploy-cloud-run.yml does NOT fire on
+        # its own — production API would still serve the previous version
+        # (e-953). Dispatch it explicitly and wait for completion so this run
+        # surfaces deploy failures instead of silently succeeding.
+        if: ${{ inputs.dry_run == false }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          NEW_VERSION="$(python -c 'from lib.commands import __version__; print(__version__)')"
+          echo "Released CLI version: ${NEW_VERSION}"
+
+          # Capture the existing latest deploy run id (so we can wait on the NEW one).
+          PREV_DEPLOY_ID="$(gh run list --workflow=deploy-cloud-run.yml --limit 1 --json databaseId -q '.[0].databaseId // 0')"
+
+          echo "::group::Dispatch deploy-cloud-run.yml on main"
+          gh workflow run deploy-cloud-run.yml --ref main
+          echo "::endgroup::"
+
+          # Poll for the newly dispatched run to appear (gh workflow run is async).
+          NEW_DEPLOY_ID=""
+          for i in $(seq 1 20); do
+            sleep 3
+            CANDIDATE="$(gh run list --workflow=deploy-cloud-run.yml --limit 1 --json databaseId -q '.[0].databaseId // 0')"
+            if [ "$CANDIDATE" != "$PREV_DEPLOY_ID" ] && [ "$CANDIDATE" != "0" ]; then
+              NEW_DEPLOY_ID="$CANDIDATE"
+              break
+            fi
+          done
+          if [ -z "$NEW_DEPLOY_ID" ]; then
+            echo "::warning::deploy-cloud-run.yml dispatch did not surface a new run within 60s. Maintainer should re-trigger manually."
+            exit 0
+          fi
+          echo "Watching deploy-cloud-run.yml run #${NEW_DEPLOY_ID}"
+          gh run watch "$NEW_DEPLOY_ID" --exit-status || {
+            echo "::error::deploy-cloud-run.yml run #${NEW_DEPLOY_ID} failed. Cloud Run deploy did not reach the new version."
+            exit 1
+          }
+
+          # Confirm the bump actually reached production (CACHE_BUST 連携 — the
+          # deploy uses the commit SHA so a successful run guarantees the new
+          # image was built, but we double-check /health version to surface
+          # rare misroutes / cache anomalies).
+          HEALTH_OK=0
+          for i in $(seq 1 20); do
+            CURRENT="$(curl -fsS https://beacon-ai.dev/health | python -c 'import sys,json; print(json.load(sys.stdin).get("version","unknown"))')" || CURRENT="unreachable"
+            if [ "$CURRENT" = "$NEW_VERSION" ]; then
+              echo "production /health reports version ${CURRENT} — release reached prod"
+              HEALTH_OK=1
+              break
+            fi
+            echo "waiting for /health=${NEW_VERSION} (got '${CURRENT}', $i/20)"
+            sleep 6
+          done
+          if [ "$HEALTH_OK" != "1" ]; then
+            echo "::error::/health never reported version ${NEW_VERSION}. Investigate Cloud Run revision routing."
+            exit 1
+          fi
+
+      - name: Fan out to downstream workflows (release-build, Tauri + wheel)
+        # Same GITHUB_TOKEN loop-guard story as the deploy fan-out: the v* tag
+        # was created with GITHUB_TOKEN so release-build.yml does NOT fire on
+        # its tag-push trigger. Dispatch is the equivalent path (ms-52 e-954).
+        # FIRE-AND-FORGET: the matrix builds Tauri on 4 OS targets and takes
+        # ~10–30 min, so we don't block release.yml on it. Release artifacts
+        # attach to the draft GitHub Release whenever release-build.yml
+        # finishes; if it fails the maintainer can re-dispatch from Actions.
+        if: ${{ inputs.dry_run == false }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          NEW_VERSION="$(python -c 'from lib.commands import __version__; print(__version__)')"
+          NEW_TAG="v${NEW_VERSION}"
+          echo "::group::Dispatch release-build.yml on ${NEW_TAG} (fire-and-forget)"
+          if gh workflow run release-build.yml --ref "${NEW_TAG}" -f dry_run=false; then
+            echo "release-build.yml dispatched on ${NEW_TAG}. Artifacts will appear on the draft GitHub Release when the matrix completes."
+          else
+            echo "::warning::Failed to dispatch release-build.yml on ${NEW_TAG}. Maintainer should run it manually from Actions."
+          fi
+          echo "::endgroup::"

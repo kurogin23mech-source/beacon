@@ -30,15 +30,17 @@ deploys the server. The user side stays a single `beacon update`.
 
 | Workflow | Trigger | Does |
 |----------|---------|------|
-| `release.yml` (e-909) | manual `workflow_dispatch` | runs `scripts/release.py`: bump `__version__`, tag `vX.Y.Z`, GitHub release, formula sha256, **mirror to homebrew-beacon tap**, CHANGELOG |
-| `release-build.yml` (e-696) | `release-v*` tag / dispatch | builds CLI wheel + Desktop bundles for all OS, uploads to a draft GitHub release |
+| `release.yml` (e-909) | manual `workflow_dispatch` | runs `scripts/release.py`: bump `__version__`, tag `vX.Y.Z`, GitHub release, formula sha256, **mirror to homebrew-beacon tap**, CHANGELOG; **then fans out to `deploy-cloud-run.yml` (await) + `release-build.yml` (fire-and-forget)** — ms-52 e-953/e-954 |
+| `release-build.yml` (e-696) | `v*` or `release-v*` tag / dispatch | builds CLI wheel + Desktop bundles for all OS, uploads to a draft GitHub release (ms-52 e-954: tag prefix broadened to `v*`) |
 | `deploy-cloud-run.yml` (e-910) | push to `main` (server/lib/…) / dispatch | `gcloud run deploy` + health check |
 
 > **Run order for a full release:** trigger `release.yml` (dry-run first, then
-> `dry_run=false`). It tags `vX.Y.Z`. Cloud Run deploy fires automatically from
-> the bump commit landing on `main`. Desktop/CLI artifacts: push a matching
-> `release-v*` tag (or dispatch `release-build.yml`). Tag-trigger unification is
-> a tracked follow-up — see "Not yet automated".
+> `dry_run=false`). It tags `vX.Y.Z` **and now explicitly dispatches
+> `deploy-cloud-run.yml`, waits for its completion, and asserts `/health`
+> reports the new version** (ms-52 e-953 — GITHUB_TOKEN-pushed bumps do not
+> chain workflow runs, so the dispatch is mandatory). Desktop/CLI artifacts:
+> push a matching `release-v*` tag (or dispatch `release-build.yml`).
+> Tag-trigger unification is a tracked follow-up — see "Not yet automated".
 
 ## One-time setup
 
@@ -108,18 +110,26 @@ Until `GCP_PROJECT` is set, `deploy-cloud-run.yml` skips (safe to merge).
    `dry_run=true` → inspect the plan.
 2. Re-run with `dry_run=false` (optionally pin `version: vX.Y.Z`; blank
    auto-detects from commit prefixes per `version-rules`).
-3. `deploy-cloud-run.yml` deploys the server automatically when the bump commit
-   lands on `main` (or dispatch it).
-4. For Desktop/CLI binaries, push a `release-v*` tag or dispatch `release-build.yml`.
+3. `release.yml`'s final step dispatches `deploy-cloud-run.yml` and blocks on
+   its completion + a `/health` version assertion. No separate maintainer
+   action is needed for the server reflection (ms-52 e-953).
+4. Desktop/CLI binaries: `release.yml` now also fan-out dispatches
+   `release-build.yml` on the new `v*` tag (fire-and-forget — the matrix takes
+   ~10–30 min). Push a `release-v*` tag or dispatch `release-build.yml`
+   manually only as a re-build path (ms-52 e-954).
 5. Users run `beacon update`.
 
 ## Not yet automated (tracked follow-ups)
 
-- **Single trigger / tag unification.** Today `v*` (metadata), `release-v*`
-  (artifacts) and the Cloud Run deploy fire on different events. A single
-  `workflow_dispatch` fanning out to all three needs care: `release.py` and
-  `release-build.yml` both create a GitHub Release for the same tag, which must
-  be de-conflicted first.
+- **GitHub Release asset de-conflict.** `release.py` (invoked by `release.yml`)
+  publishes the GitHub Release for `vX.Y.Z`, and `release-build.yml` then
+  updates the *same* tag's release with wheel + Tauri artifacts via
+  `softprops/action-gh-release@v2`. The update is generally additive but the
+  conflict resolution (draft state, release notes overwrite) is not yet
+  pinned down. Watch the next dogfood release closely (ms-52 e-960). The
+  earlier "single trigger / tag unification" follow-up is now partially
+  resolved by ms-52 e-953/e-954 (release.yml fans out to both downstream
+  workflows); only this asset de-conflict remains.
 - **CLAUDE.md fragment propagation.** The snippet `beacon init` writes into a
   user's `CLAUDE.md` is not versioned/auto-updated in existing projects.
 - **Desktop auto-install.** Users still reinstall the `.dmg`/`.msi` by hand
