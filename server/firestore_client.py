@@ -150,7 +150,10 @@ def delete_project(project_id: str) -> bool:
         return False
     # Delete known subcollections first (Firestore does not cascade).
     # Use literal names here to avoid forward-reference issues with the constants.
-    for subcol_name in ("documents", "retros", "members", "triggers", "notes"):
+    # Changelog is project-scoped: when the project is deleted, the audit
+    # trail goes with it (no orphan access path).
+    for subcol_name in ("documents", "retros", "members", "triggers", "notes",
+                        "changelog"):
         _delete_subcollection(doc_ref.collection(subcol_name))
     doc_ref.delete()
     return True
@@ -436,6 +439,48 @@ def restore_document(project_id: str, doc_id: str, restored_by: str = "unknown",
     return True
 
 
+def sweep_trashed_documents(project_id: str, *, days: int = 30,
+                            dry_run: bool = False) -> list[str]:
+    """Hard-delete soft-deleted docs older than ``days`` (ms-14 e-991).
+
+    Companion to ``core.sweep_trashed_in_project`` for the milestone /
+    task case — docs live in this subcollection rather than in the
+    project json blob so they need their own sweep path.
+
+    Returns the list of ``doc_id`` that were (or would be) deleted.
+    ``dry_run=true`` returns ids without removing.
+
+    Docs with ``deleted=true`` but missing ``deleted_at`` are NOT swept
+    (mirrors the MS / task rule — no timestamp, no proof the window has
+    passed). Operator can purge them manually.
+    """
+    import datetime
+    cutoff_iso = (datetime.datetime.now()
+                  - datetime.timedelta(days=max(1, days))).isoformat()
+    col = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(DOCS_SUBCOLLECTION)
+    )
+    snaps = col.where("deleted", "==", True).stream()
+    purged: list[str] = []
+    for snap in snaps:
+        data = snap.to_dict() or {}
+        deleted_at = data.get("deleted_at", "")
+        if not deleted_at or deleted_at >= cutoff_iso:
+            continue
+        purged.append(snap.id)
+        if not dry_run:
+            # Also remove the doc's revisions subcollection so we don't
+            # orphan storage. Firestore has no cascade.
+            _delete_subcollection(
+                snap.reference.collection(DOC_REVISIONS_SUBCOLLECTION)
+            )
+            snap.reference.delete()
+    return purged
+
+
 def list_trashed_documents(project_id: str, days: int | None = 30) -> list[dict]:
     """Return soft-deleted docs within the last ``days`` window (ms-14 e-991).
 
@@ -487,6 +532,111 @@ def list_trashed_documents(project_id: str, days: int | None = 30) -> list[dict]
             item["milestone"] = milestone
         out.append(item)
     out.sort(key=lambda x: x["trashed_at"] or "", reverse=True)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Changelog (subcollection: projects/{project_id}/changelog/{doc_id})
+# ---------------------------------------------------------------------------
+#
+# Append-only audit trail of mutating operations (ms-14 e-825). Every
+# write that crosses the API boundary should also land an entry here so
+# that:
+#
+#   - data-destructive operations (purge, delete, sweep) are traceable
+#     beyond the lifetime of the data they removed,
+#   - multi-user projects can show "who did what" in the Web UI, and
+#   - the 30-day soft-delete window (e-826 / e-991) has a permanent
+#     companion record after the trashed item itself ages out.
+#
+# Document IDs are millisecond-prefixed iso8601 timestamps with a random
+# suffix so:
+#   - they sort naturally in Firestore ASC ordering, and
+#   - two writes in the same millisecond don't collide.
+#
+# No DELETE function exists. Removal must go through Firestore Admin SDK
+# (maintainer-only, leaves an admin audit trail of its own).
+
+CHANGELOG_SUBCOLLECTION = "changelog"
+
+
+def append_changelog(project_id: str, entry: dict) -> str:
+    """Append one structured entry to the project's changelog subcollection.
+
+    Best-effort: returns the document id on success, empty string on
+    failure. Callers MUST NOT raise on failure — the audit trail is a
+    non-functional concern that must never break the actual write.
+
+    The caller controls the entry's contents. Recommended fields (none
+    are enforced here so the schema can evolve without breaking older
+    readers):
+        ts          ISO8601 UTC timestamp
+        op          short action key (\"milestone.delete\", \"trash.sweep\", ...)
+        actor       user sub (or \"system\" for cron-driven sweeps)
+        email       resolved email of the actor
+        reason      human-readable explanation, optional
+        target      {\"type\": ..., \"id\": ...}, optional
+        ip          requester IP if available
+        user_agent  HTTP UA if available
+        payload     free-form dict for extra context (small)
+    """
+    import datetime
+    import secrets
+
+    # Millisecond-resolution ISO timestamp + 4 hex chars to break ties
+    # between concurrent writes. The Firestore SDK orders string IDs
+    # lexicographically so this gives us natural time-ordering.
+    now = datetime.datetime.now(datetime.timezone.utc)
+    doc_id = now.strftime("%Y%m%dT%H%M%S.%f") + "-" + secrets.token_hex(2)
+
+    # Ensure ts is always present, even if the caller forgot.
+    payload = dict(entry)
+    payload.setdefault("ts", now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
+
+    try:
+        (
+            get_db()
+            .collection(COLLECTION)
+            .document(project_id)
+            .collection(CHANGELOG_SUBCOLLECTION)
+            .document(doc_id)
+            .set(payload)
+        )
+        return doc_id
+    except Exception:  # noqa: BLE001 - best-effort write; never propagate.
+        return ""
+
+
+def list_changelog(project_id: str, *, since: str | None = None,
+                   limit: int = 100) -> list[dict]:
+    """Return changelog entries for a project, newest first.
+
+    ``since`` (ISO8601 string) filters to entries with ``ts > since`` —
+    useful for incremental polling. ``limit`` is capped at 500 to keep
+    pagination payloads bounded.
+    """
+    limit = max(1, min(500, int(limit)))
+    col = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(CHANGELOG_SUBCOLLECTION)
+    )
+    query = col.order_by("ts", direction=firestore.Query.DESCENDING).limit(limit)
+    if since:
+        # Use string comparison since `ts` is ISO8601 and lexicographically
+        # ordered. The composite query with order_by + where on different
+        # fields would require a Firestore index; staying single-field.
+        query = (
+            col.where("ts", ">", since)
+            .order_by("ts", direction=firestore.Query.DESCENDING)
+            .limit(limit)
+        )
+    out = []
+    for doc in query.stream():
+        data = doc.to_dict() or {}
+        data["id"] = doc.id
+        out.append(data)
     return out
 
 

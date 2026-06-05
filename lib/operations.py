@@ -37,11 +37,49 @@ Contracts the caller MUST keep:
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
 import time
 from typing import Any, Callable, Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Per-request audit context (ms-14 e-825)
+# ---------------------------------------------------------------------------
+#
+# Endpoint handlers run synchronously inside FastAPI's threadpool / async
+# loop, then call into operations.apply_operation. Threading ip/email/
+# user_agent through every call site would touch dozens of files; using
+# a ContextVar lets the middleware set it once and have apply_operation
+# pick it up implicitly. The vars are scoped to the current task so
+# concurrent requests don't bleed into each other's audit records.
+
+_current_ip: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "beacon_audit_ip", default=""
+)
+_current_user_agent: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "beacon_audit_user_agent", default=""
+)
+_current_email: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "beacon_audit_email", default=""
+)
+
+
+def set_audit_context(*, ip: str = "", user_agent: str = "", email: str = "") -> None:
+    """Stash request metadata so the changelog writer can pick it up.
+
+    Called from AuditLogMiddleware on each mutating request. CLI / local
+    callers can ignore it — defaults are empty strings and the field is
+    omitted from the changelog entry when empty.
+    """
+    if ip:
+        _current_ip.set(ip)
+    if user_agent:
+        _current_user_agent.set(user_agent)
+    if email:
+        _current_email.set(email)
 
 # ---------------------------------------------------------------------------
 # Type aliases
@@ -110,19 +148,29 @@ def _changelog_path(project_id: str) -> Optional[str]:
 
 def _append_changelog(project_id: str, op_name: str, actor: str,
                       reason: str = "", extra: Optional[dict] = None) -> None:
-    """Append one operation record to changelog.jsonl (local mode).
+    """Append one operation record to changelog (ms-14 e-825).
 
-    Format matches CORE doc `data-immutability-principle`:
-      {"ts":..., "op":..., "actor":..., "reason":..., ...extra}
+    Two sinks, both best-effort:
 
-    Failures here MUST NOT propagate — operation logging is best-effort and
-    must never break the actual write path.
+    - Local mode: ``.beacon/changelog.jsonl`` next to project.json. This
+      is the path that has existed since the CORE doc
+      ``data-immutability-principle`` was written.
+    - Cloud mode (running inside the API server): the
+      ``projects/{id}/changelog`` Firestore subcollection. Picked up via
+      ``firestore_client.append_changelog``. ip / user_agent / email are
+      threaded in from the request via the ``set_audit_context``
+      ContextVars so endpoint handlers don't have to plumb them through
+      every call site.
+
+    Format matches CORE doc ``data-immutability-principle``:
+      ``{"ts":..., "op":..., "actor":..., "reason":..., ...extra}``
+
+    Failures here MUST NOT propagate — operation logging is best-effort
+    and must never break the actual write path.
     """
-    path = _changelog_path(project_id)
-    if path is None:
-        return
-    entry = {
-        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    entry: dict = {
+        "ts": ts,
         "op": op_name,
         "actor": actor,
         "project_id": project_id,
@@ -131,11 +179,39 @@ def _append_changelog(project_id: str, op_name: str, actor: str,
         entry["reason"] = reason
     if extra:
         entry.update(extra)
+
+    # Local sink: append to the jsonl file (no-op when not in local mode).
+    path = _changelog_path(project_id)
+    if path is not None:
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except OSError as e:
+            _op_logger.warning("Failed to append changelog: %s", e)
+
+    # Cloud sink: persist to Firestore changelog subcollection. Only fires
+    # when firestore_client is available (= we're inside the API server).
+    # Includes the per-request audit context if any was set.
+    if "firestore_client" not in __import__("sys").modules:
+        return
     try:
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except OSError as e:
-        _op_logger.warning("Failed to append changelog: %s", e)
+        import firestore_client as db  # type: ignore[import-not-found]
+    except ImportError:
+        return
+    cloud_entry = dict(entry)
+    email = _current_email.get()
+    if email:
+        cloud_entry["email"] = email
+    ip = _current_ip.get()
+    if ip:
+        cloud_entry["ip"] = ip
+    ua = _current_user_agent.get()
+    if ua:
+        cloud_entry["user_agent"] = ua
+    try:
+        db.append_changelog(project_id, cloud_entry)
+    except Exception as e:  # noqa: BLE001 - audit must never break the write
+        _op_logger.warning("Failed to persist cloud changelog: %s", e)
 
 
 # ---------------------------------------------------------------------------
