@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.9.1] - 2026-06-05
+
+- Merge pull request #36 from kurogin23mech-source/ms-52-fix-fanout-pyimport
+- fix(ms-52): release.yml fan-out + /health import-safe version source (e-960 finding)
+- docs(release): update README/CHANGELOG for v0.9.0
+- chore(release): bump formula to 0.9.0
+
 ## [v0.9.0] - 2026-06-05
 
 - Merge pull request #35 from kurogin23mech-source/ms-52-forcing-function-release-pipeline-ai
