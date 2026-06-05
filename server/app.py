@@ -129,6 +129,16 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
         if request.method not in _AUDIT_METHODS or not _AUDIT_PATHS.match(request.url.path):
             return await call_next(request)
 
+        # Surface request metadata into the operations layer's audit
+        # ContextVars so the changelog writer can pick up ip / ua without
+        # each endpoint plumbing them through (ms-14 e-825).
+        request_ip = request.headers.get(
+            "x-forwarded-for",
+            request.client.host if request.client else "",
+        )
+        request_ua = request.headers.get("user-agent", "")
+        operations.set_audit_context(ip=request_ip, user_agent=request_ua)
+
         start = time.time()
         response: Response = await call_next(request)
         elapsed_ms = int((time.time() - start) * 1000)
@@ -136,6 +146,10 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
         # Extract user info from request state (set by require_auth if called)
         user_id = getattr(request.state, "audit_user_id", "")
         email = getattr(request.state, "audit_email", "")
+        # require_auth fires inside call_next, so email is now known —
+        # propagate it for the changelog writer too.
+        if email:
+            operations.set_audit_context(email=email)
         path = request.url.path
 
         log_entry = {
@@ -951,6 +965,26 @@ def list_trash(project_id: str,
     }
 
 
+@app.get("/api/projects/{project_id}/changelog")
+def list_changelog_endpoint(project_id: str,
+                            since: Optional[str] = None,
+                            limit: int = 100,
+                            user: dict = Depends(require_auth)):
+    """Project audit trail — append-only changelog (ms-14 e-825).
+
+    Returns entries newest-first. ``since`` is an ISO8601 timestamp; only
+    entries with ``ts > since`` are returned, which makes incremental
+    polling cheap. ``limit`` is capped at 500 server-side.
+    """
+    _load(project_id, user)  # access check
+    entries = db.list_changelog(project_id, since=since, limit=limit)
+    # ``next_since`` is the oldest ts in this page — pass it back as the
+    # cursor for the NEXT older page when the UI scrolls. Empty result
+    # means there is nothing further back.
+    next_since = entries[-1]["ts"] if entries else None
+    return {"entries": entries, "next_since": next_since, "limit": limit}
+
+
 # ---------------------------------------------------------------------------
 # Members (invite / remove)
 # ---------------------------------------------------------------------------
@@ -1120,6 +1154,90 @@ def admin_delete_project(project_id: str, user: dict = Depends(require_auth)):
     if not db.delete_project(project_id):
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
     return {"project_id": project_id, "status": "deleted"}
+
+
+@app.post("/api/admin/trash/sweep")
+def admin_trash_sweep(days: int = 30,
+                      dry_run: bool = False,
+                      user: dict = Depends(require_auth)):
+    """30-day soft-delete auto-purge for the whole instance (ms-14 e-826/e-991).
+
+    Walks every project and hard-deletes milestones / tasks / documents
+    whose ``cancelled_at`` (or ``deleted_at`` for docs) is older than
+    ``days``. For each project we write ONE changelog entry summarising
+    the swept ids so the audit trail survives the data being gone.
+
+    Intended caller: a Cloud Scheduler job firing daily. Admin role is
+    required so a stolen user token can't trigger destructive sweeps.
+
+    ``dry_run=true`` returns the would-be counts without writing.
+    """
+    _require_admin(user)
+    days = max(1, days)
+    summary = {
+        "days": days,
+        "dry_run": dry_run,
+        "projects_scanned": 0,
+        "ms_purged": 0,
+        "task_purged": 0,
+        "doc_purged": 0,
+        "projects": [],
+    }
+    for proj in db.list_all_projects():
+        pid = proj["project_id"]
+        summary["projects_scanned"] += 1
+        # MS + task sweep: in dry_run we read once and compute counts;
+        # in apply mode we mutate the project doc transactionally so
+        # concurrent writes can't tear the array.
+        if dry_run:
+            data_now = db.get_project(pid) or {}
+            per_proj_result = core.sweep_trashed_in_project(
+                data_now, days=days, apply=False,
+            )
+        else:
+            def _sweep_op(data, _days=days):
+                result = core.sweep_trashed_in_project(
+                    data, days=_days, apply=True,
+                )
+                return data, result
+            per_proj_result = operations.apply_operation(
+                pid, _sweep_op,
+                op_name="trash.sweep",
+                actor="system",
+                reason=f"{days}d auto-purge",
+            )
+        # Doc sweep: docs live in the subcollection, separate path.
+        doc_purged = db.sweep_trashed_documents(pid, days=days, dry_run=dry_run)
+        ms_ids = per_proj_result.get("ms_purged_ids", [])
+        task_ids = per_proj_result.get("task_purged_ids", [])
+        summary["ms_purged"] += len(ms_ids)
+        summary["task_purged"] += len(task_ids)
+        summary["doc_purged"] += len(doc_purged)
+        if ms_ids or task_ids or doc_purged:
+            # Audit entry per project. The standard apply_operation hook
+            # already wrote a 'trash.sweep' entry without ids; this adds
+            # the item-level detail so a later reader can answer
+            # "what was purged from project X on YYYY-MM-DD?".
+            if not dry_run:
+                db.append_changelog(pid, {
+                    "op": "trash.sweep.detail",
+                    "actor": "system",
+                    "reason": f"{days}d auto-purge",
+                    "project_id": pid,
+                    "payload": {
+                        "days": days,
+                        "milestone_ids": ms_ids,
+                        "task_ids": task_ids,
+                        "doc_ids": doc_purged,
+                    },
+                })
+            summary["projects"].append({
+                "project_id": pid,
+                "ms_purged": ms_ids,
+                "task_purged": task_ids,
+                "doc_purged": doc_purged,
+            })
+    return summary
 
 
 class AdminOwnerTransfer(BaseModel):
@@ -1520,6 +1638,12 @@ def cli_auth_poll_get(code: str = ""):
 # ---------------------------------------------------------------------------
 
 from trailnode import make_router as _make_trailnode_router
+from trailnode_orgs import make_router as _make_trailnode_orgs_router
+
+# Org router mounts under /api/trailnode/orgs (ms-6). It must be included
+# before the capabilities router so that /orgs paths win over the more
+# permissive `{capability_id:path}` matcher.
+app.include_router(_make_trailnode_orgs_router(require_auth))
 app.include_router(_make_trailnode_router(require_auth))
 
 

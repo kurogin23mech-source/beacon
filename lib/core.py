@@ -1085,6 +1085,79 @@ def list_trashed_milestones(data: dict, *, since_days: int | None = 30) -> list[
     return out
 
 
+def sweep_trashed_in_project(data: dict, *, days: int = 30,
+                             apply: bool = True) -> dict:
+    """Hard-delete cancelled milestones / tasks older than ``days`` (ms-14 e-826).
+
+    Pure data transform — caller is responsible for persisting the result.
+    When ``apply=False`` the data is left untouched but the would-be ids
+    are still returned, supporting a dry-run preview from the sweep API.
+
+    Returns ``{ms_purged_ids, task_purged_ids}`` so the caller can
+    attach the ids to a changelog entry before the items vanish.
+
+    Items missing ``cancelled_at`` (legacy soft-deletes from before the
+    meta was standardized) are intentionally NOT swept — without the
+    timestamp we can't prove they're past the window. They surface in
+    the trash listing and an operator can purge them manually.
+    """
+    cutoff = _days_ago_iso(days)
+    ms_purged: list[str] = []
+    task_purged: list[str] = []
+
+    # MS sweep: cancelled milestones with cancelled_at < cutoff.
+    keep_ms: list[dict] = []
+    for ms in data.get("milestones", []) or []:
+        meta = ms.get("meta", {}) or {}
+        cancelled_at = meta.get("cancelled_at", "")
+        if (
+            ms.get("status") == "cancelled"
+            and cancelled_at
+            and cancelled_at < cutoff
+        ):
+            ms_purged.append(ms.get("id", ""))
+            continue
+        keep_ms.append(ms)
+    if apply:
+        data["milestones"] = keep_ms
+
+    # Task sweep: walk every milestone's entries (including nested) and
+    # drop cancelled tasks past the window. We modify the *kept* MS
+    # entries; the swept MS array doesn't have them anymore.
+    def _filter_entries(entries: list[dict]) -> list[dict]:
+        out: list[dict] = []
+        for e in entries or []:
+            meta = e.get("meta", {}) or {}
+            cancelled_at = meta.get("cancelled_at", "")
+            if (
+                e.get("type") == "task"
+                and e.get("status") == "cancelled"
+                and cancelled_at
+                and cancelled_at < cutoff
+            ):
+                task_purged.append(e.get("id", ""))
+                continue
+            # Recurse into nested entries; replace the children list with
+            # the filtered version (in-place mutation under the kept entry).
+            children = e.get("entries")
+            if children:
+                e_children = _filter_entries(children)
+                if apply:
+                    e["entries"] = e_children
+            out.append(e)
+        return out
+
+    for ms in keep_ms:
+        filtered = _filter_entries(ms.get("entries", []) or [])
+        if apply:
+            ms["entries"] = filtered
+
+    return {
+        "ms_purged_ids": [i for i in ms_purged if i],
+        "task_purged_ids": [i for i in task_purged if i],
+    }
+
+
 def list_trashed_entries(data: dict, *, since_days: int | None = 30,
                          entry_type: str = "task") -> list[dict]:
     """Return cancelled entries (default: tasks) within the window.
