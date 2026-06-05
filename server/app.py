@@ -1311,8 +1311,15 @@ def health():
     # version is exposed so release.yml can assert that the bump commit has
     # actually reached the Cloud Run revision (e-953 AC 2): without this the
     # downstream deploy could "succeed" while still serving the old image.
+    #
+    # Use the standalone beacon_cli/_version.py file — importing lib.commands
+    # transitively pulls peer modules (`from store import get_store` etc.)
+    # that bin/beacon normally places on sys.path; in the FastAPI runtime the
+    # uvicorn worker doesn't, so the import raises ModuleNotFoundError and
+    # /health silently reports "unknown" forever. Caught by the v0.9.0 dogfood
+    # (ms-52 e-960 finding).
     try:
-        from lib.commands import __version__ as _beacon_version
+        from beacon_cli._version import __version__ as _beacon_version
     except Exception:
         _beacon_version = "unknown"
     return {
