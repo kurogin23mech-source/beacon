@@ -51,16 +51,26 @@ class Beacon < Formula
       For cloud features (auth, team collaboration), install the optional dependencies:
         pip install google-auth-oauthlib google-auth
 
-      To get started, run the one-time setup wizard from inside a project directory:
-        cd your-project
-        beacon setup
+      Getting started (Claude Code + Skill driven):
 
-      Or initialise a project without cloud features:
-        beacon init
-        beacon milestone add "First milestone"
-        beacon milestone start ms-1
+        1. (optional, only if you want cloud sync) Run the setup wizard:
+             beacon setup
+           This signs you in to Beacon Cloud and creates / joins a project.
 
-      For Claude Code integration, Skills are installed automatically by:
+        2. Open Claude Code in your project directory and start a session:
+             cd your-project
+             claude
+           Then in Claude Code, talk to /beacon-init:
+             > /beacon-init
+           This walks you through naming the project and stating its
+           high-level objective in a conversational form.
+
+        3. Keep exploring direction with the same chat-driven flow:
+             > /beacon-vision     # deepen the project's why / who / done-state
+             > /beacon-roadmap    # propose a milestone sequence toward the goal
+
+      Skills are installed automatically the first time you run `beacon setup`,
+      or you can install them on demand with:
         beacon skill install
 
       Full documentation: https://github.com/kurogin23mech-source/beacon

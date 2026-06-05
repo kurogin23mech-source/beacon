@@ -366,7 +366,19 @@ else:
     fi
 
     echo ""
-    echo "Done! Run 'beacon' any time to open the dashboard."
+    echo "✅ Setup complete!"
+    echo ""
+    echo "Next step:"
+    echo "  Start Claude Code in this project directory and talk to /beacon-init."
+    echo "  It will guide you through naming the project and shaping milestones"
+    echo "  in a conversational form."
+    echo ""
+    echo "  Example:"
+    echo "    cd ~/projects/your-project"
+    echo "    claude          # launch Claude Code"
+    echo "    > /beacon-init"
+    echo ""
+    echo "Tip: run 'beacon' any time to open the dashboard."
 }
 
 cmd_milestone_add() {
