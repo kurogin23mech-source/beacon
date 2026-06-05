@@ -120,6 +120,41 @@ class ApiClient:
             body,
         )
 
+    # Purge operations (owner-only, hard-delete for duplicate-ID recovery — e-1030)
+
+    def purge_milestone(self, project_id: str, ms_id: str, *,
+                        reason: str, index: int | None = None) -> dict:
+        body: dict = {"reason": reason}
+        if index is not None:
+            body["index"] = index
+        return self.post(
+            f"/api/projects/{project_id}/milestones/"
+            f"{urllib.parse.quote(ms_id, safe='')}/purge",
+            body,
+        )
+
+    def purge_entry(self, project_id: str, entry_id: str, *,
+                    reason: str, index: int | None = None) -> dict:
+        body: dict = {"reason": reason}
+        if index is not None:
+            body["index"] = index
+        return self.post(
+            f"/api/projects/{project_id}/entries/"
+            f"{urllib.parse.quote(entry_id, safe='')}/purge",
+            body,
+        )
+
+    def purge_operation(self, project_id: str, op_id: str, *,
+                        reason: str, index: int | None = None) -> dict:
+        body: dict = {"reason": reason}
+        if index is not None:
+            body["index"] = index
+        return self.post(
+            f"/api/projects/{project_id}/operations/"
+            f"{urllib.parse.quote(op_id, safe='')}/purge",
+            body,
+        )
+
     # Retro operations
 
     def save_retro(self, project_id: str, week: str, content: str) -> dict:

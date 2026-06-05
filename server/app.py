@@ -308,6 +308,18 @@ def _require_write(data: dict, user: dict) -> None:
         raise HTTPException(status_code=403, detail="Write access required (editor or owner)")
 
 
+def _require_owner(data: dict, user: dict) -> None:
+    """Raise 403 if user is not the project owner.
+
+    Used by destructive operations (purge) where editor-level access is
+    deliberately insufficient — only the owner can hard-delete records.
+    Mirrors `_require_write` shape (data, user) → raises 403.
+    """
+    role = _get_role(data, user)
+    if role != "owner":
+        raise HTTPException(status_code=403, detail="Owner access required")
+
+
 def _save(project_id: str, data: dict) -> None:
     core.validate_project(data)
     db.save_project(project_id, data)
@@ -377,6 +389,16 @@ class DocumentSave(BaseModel):
 
 class DeleteRequest(BaseModel):
     reason: str = ""
+
+class PurgeRequest(BaseModel):
+    """Body for destructive hard-delete endpoints (milestone/entry/operation purge).
+
+    `reason` is required (audit trail per CORE doc data-immutability-principle).
+    `index` (1-based) disambiguates when duplicate IDs exist — set to None when
+    only a single record matches.
+    """
+    reason: str
+    index: Optional[int] = None
 
 class MemberInvite(BaseModel):
     email: str
@@ -679,6 +701,39 @@ def delete_milestone(project_id: str, ms_id: str,
     )
 
 
+@app.post("/api/projects/{project_id}/milestones/{ms_id}/purge")
+def purge_milestone(project_id: str, ms_id: str,
+                    body: PurgeRequest,
+                    user: dict = Depends(require_auth)):
+    """Hard-delete a milestone record — owner-only (e-1030).
+
+    Unlike soft delete (`DELETE /milestones/{id}`), this physically removes
+    the record from the array (Issue #14 duplicate-ID recovery path). Restricted
+    to project owner to protect against accidental destruction by editors.
+    """
+    if not body.reason:
+        raise HTTPException(
+            status_code=400,
+            detail="reason is required for purge (audit trail per "
+                   "data-immutability-principle)",
+        )
+    def op(data: dict):
+        _require_owner(data, user)
+        try:
+            ms = core.milestone_purge(
+                data, ms_id, reason=body.reason, index=body.index,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return data, {
+            "id": ms["id"], "title": ms.get("title", ""), "purged": True,
+        }
+    return operations.apply_operation(
+        project_id, op, op_name="milestone.purge", actor=user.get("sub", ""),
+        reason=body.reason,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Entries (tasks / commits / notes)
 # ---------------------------------------------------------------------------
@@ -752,6 +807,75 @@ def delete_entry(project_id: str, entry_id: str,
         return data, {"entry_id": entry_id, "status": "cancelled"}
     return operations.apply_operation(
         project_id, op, op_name="entry.delete", actor=user.get("sub", ""),
+    )
+
+
+@app.post("/api/projects/{project_id}/entries/{entry_id}/purge")
+def purge_entry(project_id: str, entry_id: str,
+                body: PurgeRequest,
+                user: dict = Depends(require_auth)):
+    """Hard-delete an entry record — owner-only (e-1030).
+
+    Entry-level analogue of milestone purge — Issue #14 / e-863 recovery for
+    duplicate entry IDs. Editors cannot purge; only the project owner can.
+    """
+    if not body.reason:
+        raise HTTPException(
+            status_code=400,
+            detail="reason is required for purge (audit trail per "
+                   "data-immutability-principle)",
+        )
+    def op(data: dict):
+        _require_owner(data, user)
+        try:
+            entry = core.entry_purge(
+                data, entry_id, reason=body.reason, index=body.index,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return data, {
+            "entry_id": entry.get("id", entry_id),
+            "description": entry.get("description", ""),
+            "purged": True,
+        }
+    return operations.apply_operation(
+        project_id, op, op_name="entry.purge", actor=user.get("sub", ""),
+        reason=body.reason,
+    )
+
+
+@app.post("/api/projects/{project_id}/operations/{op_id}/purge")
+def purge_operation(project_id: str, op_id: str,
+                    body: PurgeRequest,
+                    user: dict = Depends(require_auth)):
+    """Hard-delete an operation record — owner-only (e-1030).
+
+    Operation-level analogue of milestone purge — Issue #14 / e-863 recovery
+    for duplicate operation IDs. Editors cannot purge; only the project owner
+    can.
+    """
+    if not body.reason:
+        raise HTTPException(
+            status_code=400,
+            detail="reason is required for purge (audit trail per "
+                   "data-immutability-principle)",
+        )
+    def op(data: dict):
+        _require_owner(data, user)
+        try:
+            purged = core.operation_purge(
+                data, op_id, reason=body.reason, index=body.index,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return data, {
+            "id": purged.get("id", op_id),
+            "title": purged.get("title", ""),
+            "purged": True,
+        }
+    return operations.apply_operation(
+        project_id, op, op_name="operation.purge", actor=user.get("sub", ""),
+        reason=body.reason,
     )
 
 
