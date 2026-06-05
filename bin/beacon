@@ -1133,104 +1133,6 @@ cmd_task_cancel() {
         python3 "$COMMANDS_PY" task_cancel
 }
 
-# ---------------------------------------------------------------------------
-# Trash + restore (ms-14 e-826)
-# ---------------------------------------------------------------------------
-
-cmd_milestone_trash() {
-    ensure_project
-    local days=""
-    local all_flag=""
-    local json_flag=""
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --days) days="${2:-}"; shift 2 ;;
-            --all)  all_flag="1"; shift ;;
-            --json) json_flag="1"; shift ;;
-            *)      echo "Unknown flag: $1"; exit 1 ;;
-        esac
-    done
-
-    local days_env="30"
-    if [ -n "$all_flag" ]; then
-        days_env="all"
-    elif [ -n "$days" ]; then
-        days_env="$days"
-    fi
-    BEACON_DAYS="$days_env" BEACON_JSON="$json_flag" \
-        python3 "$COMMANDS_PY" milestone_trash
-}
-
-cmd_milestone_restore() {
-    ensure_project
-    local ms_id=""
-    local reason=""
-    local json_flag=""
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --json)      json_flag="1";    shift   ;;
-            -r|--reason) reason="${2:-}";  shift 2 ;;
-            *)           ms_id="$1";       shift   ;;
-        esac
-    done
-
-    if [ -z "$ms_id" ]; then
-        echo "Usage: beacon milestone restore <ms-id> [--reason <text>] [--json]"
-        exit 1
-    fi
-    BEACON_MS_ID="$ms_id" BEACON_REASON="$reason" BEACON_JSON="$json_flag" \
-        python3 "$COMMANDS_PY" milestone_restore
-}
-
-cmd_task_trash() {
-    ensure_project
-    local days=""
-    local all_flag=""
-    local json_flag=""
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --days) days="${2:-}"; shift 2 ;;
-            --all)  all_flag="1"; shift ;;
-            --json) json_flag="1"; shift ;;
-            *)      echo "Unknown flag: $1"; exit 1 ;;
-        esac
-    done
-
-    local days_env="30"
-    if [ -n "$all_flag" ]; then
-        days_env="all"
-    elif [ -n "$days" ]; then
-        days_env="$days"
-    fi
-    BEACON_DAYS="$days_env" BEACON_JSON="$json_flag" \
-        python3 "$COMMANDS_PY" task_trash
-}
-
-cmd_task_restore() {
-    ensure_project
-    local entry_id=""
-    local reason=""
-    local json_flag=""
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --json)      json_flag="1";    shift   ;;
-            -r|--reason) reason="${2:-}";  shift 2 ;;
-            *)           entry_id="$1";    shift   ;;
-        esac
-    done
-
-    if [ -z "$entry_id" ]; then
-        echo "Usage: beacon task restore <entry-id> [--reason <text>] [--json]"
-        exit 1
-    fi
-    BEACON_ENTRY_ID="$entry_id" BEACON_REASON="$reason" BEACON_JSON="$json_flag" \
-        python3 "$COMMANDS_PY" task_restore
-}
-
 cmd_task_list() {
     ensure_project
     local ms_id=""
@@ -1642,21 +1544,6 @@ cmd_doc() {
             BEACON_DOC_ID="$doc_id" BEACON_REASON="$doc_reason" BEACON_JSON="$json_flag" \
                 python3 "$COMMANDS_PY" doc_delete
             ;;
-        trash)
-            shift
-            local trash_days="30"
-            local trash_json=""
-            while [[ $# -gt 0 ]]; do
-                case "$1" in
-                    --days)  trash_days="${2:-}"; shift 2 ;;
-                    --all)   trash_days="all"; shift ;;
-                    --json)  trash_json="1"; shift ;;
-                    *) shift ;;
-                esac
-            done
-            BEACON_DAYS="$trash_days" BEACON_JSON="$trash_json" \
-                python3 "$COMMANDS_PY" doc_trash
-            ;;
         history)
             ensure_project
             BEACON_DOC_ID="${3:-}" python3 "$COMMANDS_PY" doc_history
@@ -1666,27 +1553,23 @@ cmd_doc() {
             shift
             local doc_id=""
             local rev=""
-            local doc_reason=""
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --rev)       rev="${2:-}"; shift 2 ;;
-                    -r|--reason) doc_reason="${2:-}"; shift 2 ;;
                     *)           [[ -z "$doc_id" ]] && doc_id="$1"; shift ;;
                 esac
             done
-            BEACON_DOC_ID="$doc_id" BEACON_REV="$rev" BEACON_REASON="$doc_reason" \
+            BEACON_DOC_ID="$doc_id" BEACON_REV="$rev" \
                 python3 "$COMMANDS_PY" doc_restore
             ;;
         *)
-            echo "Usage: beacon doc [add|list|show|update|delete|trash|restore|history]"
+            echo "Usage: beacon doc [add|list|show|update|delete|restore|history]"
             echo "  add    \"title\" --scope core|spec|memo [--ms ms-id]  Create a document"
             echo "  update <doc-id> [--title text] [--content text]     Update a document"
             echo "  list   [--scope core|spec|memo] [--ms ms-id] [--include-trashed]"
             echo "  show   <doc-id>                                      Show document content"
             echo "  delete <doc-id> [--reason \"text\"]                    Soft-delete to trash"
-            echo "  trash  [--days N] [--all] [--json]                   List trashed docs"
             echo "  history <doc-id>                                     Show revision history"
-            echo "  restore <doc-id>                                     Restore from trash"
             echo "  restore <doc-id> --rev <n>                           Restore to a revision"
             ;;
     esac
@@ -1973,13 +1856,11 @@ case "${1:-}" in
             rename) BEACON_MS_ID="${3:-}" BEACON_TITLE="${4:-}" python3 "$COMMANDS_PY" milestone_update ;;
             delete|cancel) shift 2; cmd_milestone_delete "$@" ;;
             purge) shift 2; cmd_milestone_purge "$@" ;;
-            trash)   shift 2; cmd_milestone_trash "$@" ;;
-            restore) shift 2; cmd_milestone_restore "$@" ;;
             depends) shift 2; cmd_milestone_depends "$@" ;;
             workspace) shift 2; cmd_milestone_workspace "$@" ;;
             workspace-cleanup) shift 2; cmd_milestone_workspace_cleanup "$@" ;;
             graph) shift 2; cmd_milestone_graph "$@" ;;
-            *)      echo "Usage: beacon milestone [add|list|start|join|close|observe|done|show|update|rename|delete|purge|trash|restore|depends|workspace|workspace-cleanup|graph]" ;;
+            *)      echo "Usage: beacon milestone [add|list|start|join|close|observe|done|show|update|rename|delete|purge|depends|workspace|workspace-cleanup|graph]" ;;
         esac
         ;;
     log)
@@ -2031,16 +1912,8 @@ case "${1:-}" in
                 shift 2
                 cmd_task_delete "$@"
                 ;;
-            trash)
-                shift 2
-                cmd_task_trash "$@"
-                ;;
-            restore)
-                shift 2
-                cmd_task_restore "$@"
-                ;;
             *)
-                echo "Usage: beacon task [add|done|list|show|detail|update|cancel|delete|trash|restore] [-m <ms-id>] [-t <type>] [-d <detail>] [description]"
+                echo "Usage: beacon task [add|done|list|show|detail|update|cancel|delete] [-m <ms-id>] [-t <type>] [-d <detail>] [description]"
                 ;;
         esac
         ;;

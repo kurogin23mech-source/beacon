@@ -1541,109 +1541,6 @@ body::after {
   font-size: 0.85rem;
 }
 
-/* ---- Trash tab (ms-14 e-826 / e-991) ---- */
-
-.trash-section {
-  padding-top: 8px;
-}
-
-.trash-group-heading {
-  font-size: 0.75rem;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-dim);
-  margin: 18px 0 8px;
-  font-weight: 600;
-}
-
-.trash-list {
-  list-style: none;
-  margin: 0 0 12px;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.trash-row {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 10px 12px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 6px;
-  background: var(--surface-subtle, rgba(255,255,255,0.02));
-}
-
-.trash-row-main {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.trash-row-foot {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  font-size: 0.72rem;
-  color: var(--text-dim);
-}
-
-.trash-id {
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 0.7rem;
-  color: var(--text-dim);
-  background: rgba(255,255,255,0.04);
-  padding: 1px 5px;
-  border-radius: 3px;
-}
-
-.trash-title {
-  flex: 1;
-  font-size: 0.85rem;
-  color: var(--text-primary);
-}
-
-.trash-meta {
-  font-size: 0.7rem;
-  color: var(--text-dim);
-}
-
-.trash-when, .trash-by {
-  white-space: nowrap;
-}
-
-.trash-reason {
-  flex: 1;
-  font-style: italic;
-  color: var(--text-secondary, var(--text-dim));
-  min-width: 120px;
-}
-
-.restore-btn {
-  margin-left: auto;
-  background: transparent;
-  border: 1px solid var(--border-subtle);
-  color: var(--text-secondary, var(--text-dim));
-  padding: 3px 10px;
-  border-radius: 4px;
-  font-size: 0.72rem;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-
-.restore-btn:hover:not(:disabled) {
-  border-color: var(--accent, #5a8);
-  color: var(--accent, #5a8);
-}
-
-.restore-btn:disabled {
-  opacity: 0.5;
-  cursor: wait;
-}
-
 /* ---- Footer ---- */
 
 .footer {
@@ -1881,7 +1778,7 @@ let state = {
   lastUpdate: null,
   connected: false,
   error: null,
-  activeTab: 'dashboard', // 'dashboard' | 'documents' | 'releases' | 'operations' | 'notes' | 'trash'
+  activeTab: 'dashboard', // 'dashboard' | 'documents' | 'releases' | 'operations' | 'notes'
   sessionNotes: [],
   showGraph: false,
   graphFilterDeps: true,
@@ -1932,13 +1829,6 @@ let state = {
   // Per-project version info (e-587) — {latest_pushed_semver, commits_since_release, ...}
   // null until first fetch; {} if no push records exist (silently hides badge)
   projectVersion: null,
-  // Trash tab (ms-14 e-826 / e-991): unified soft-deleted items.
-  // Loaded lazily on first switch to the Trash tab. trash.days is the
-  // active filter window (0 = no filter). loaded is a one-shot flag so
-  // we don't re-fetch on every render — explicit refresh button drives
-  // updates after that.
-  trash: { milestones: [], tasks: [], documents: [], days: 30, loaded: false },
-  trashTypeFilter: 'all', // 'all' | 'milestone' | 'task' | 'document'
   auth: {
     token: localStorage.getItem('beacon_token'),
     email: localStorage.getItem('beacon_email'),
@@ -2461,7 +2351,6 @@ function renderMainContent() {
       <button class="tab-btn ${state.activeTab === 'releases' ? 'active' : ''}" data-action="switch-tab" data-tab="releases">Releases</button>
       <button class="tab-btn ${state.activeTab === 'operations' ? 'active' : ''}" data-action="switch-tab" data-tab="operations">Operations</button>
       <button class="tab-btn ${state.activeTab === 'notes' ? 'active' : ''}" data-action="switch-tab" data-tab="notes">Notes</button>
-      <button class="tab-btn ${state.activeTab === 'trash' ? 'active' : ''}" data-action="switch-tab" data-tab="trash">Trash</button>
     </div>
     ${state.activeTab === 'dashboard' ? (state.showGraph ? renderGraphSection() : `
     ${p.summary ? `
@@ -2493,7 +2382,6 @@ function renderMainContent() {
     ${state.activeTab === 'releases' ? renderReleasesSection() : ''}
     ${state.activeTab === 'operations' ? renderOperationsSection() : ''}
     ${state.activeTab === 'notes' ? renderNotesSection() : ''}
-    ${state.activeTab === 'trash' ? renderTrashSection() : ''}
   `;
 }
 
@@ -2599,35 +2487,6 @@ const dataSource = {
   loadRetroContent: async (week) => { state.retroContent = await api(`/api/projects/${state.projectId}/retros/${week}`); },
   loadSessionNotes: async () => { state.sessionNotes = await api(`/api/projects/${state.projectId}/notes`); },
   loadDocumentContent: async (docId) => { state.documentContent = await api(`/api/projects/${state.projectId}/documents/${docId}`); },
-  loadTrash: async (days) => {
-    const d = days != null ? days : (state.trash?.days ?? 30);
-    const payload = await api(`/api/projects/${state.projectId}/trash?days=${d}`);
-    state.trash = {
-      milestones: payload.milestones || [],
-      tasks: payload.tasks || [],
-      documents: payload.documents || [],
-      days: d,
-      loaded: true,
-    };
-  },
-  restoreMilestone: async (msId, reason) => {
-    await api(`/api/projects/${state.projectId}/milestones/${msId}/restore`, {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ reason: reason || '' }),
-    });
-  },
-  restoreEntry: async (entryId, reason) => {
-    await api(`/api/projects/${state.projectId}/entries/${entryId}/restore`, {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ reason: reason || '' }),
-    });
-  },
-  restoreDocument: async (docId, reason) => {
-    await api(`/api/projects/${state.projectId}/documents/${docId}/restore`, {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ reason: reason || '' }),
-    });
-  },
   // ms-43 e-631: unified cross-entity search.
   // Returns {results, total, facets, limit, offset}. Caller manages state.search* fields.
   searchProject: async (params) => {
@@ -2832,129 +2691,7 @@ async function switchTab(tab) {
   if (tab === 'notes') {
     dataSource.loadSessionNotes().then(() => render()).catch(() => {});
   }
-  if (tab === 'trash' && !state.trash.loaded) {
-    dataSource.loadTrash().then(() => render()).catch((e) => {
-      state.trash = { ...state.trash, loaded: true, error: e.message };
-      render();
-    });
-  }
   render();
-}
-
-// ---- Trash (ms-14 e-826 / e-991) ----
-//
-// Unified soft-delete recovery surface. MS / task / doc trash all live
-// here with restore buttons; the type filter chips let the operator
-// narrow down. Window default is 30 days (matches CLI `beacon *_trash
-// --days 30` and the unified GET /api/projects/{id}/trash?days=30).
-
-function renderTrashSection() {
-  const t = state.trash || { milestones: [], tasks: [], documents: [], days: 30, loaded: false };
-  if (!t.loaded) {
-    return `<section class="trash-section fade-in"><div class="loading-text" style="padding:24px;">Loading trash…</div></section>`;
-  }
-  if (t.error) {
-    return `<section class="trash-section fade-in"><div class="error-state"><div class="error-icon">⚠</div><div>${esc(t.error)}</div></div></section>`;
-  }
-  const f = state.trashTypeFilter || 'all';
-  const counts = {
-    milestone: t.milestones.length,
-    task: t.tasks.length,
-    document: t.documents.length,
-  };
-  const total = counts.milestone + counts.task + counts.document;
-  const filterBtn = (key, label, count) =>
-    `<button class="filter-btn ${f === key ? 'on' : 'off'}" data-action="trash-filter" data-filter="${key}">${label} (${count})</button>`;
-
-  const dayBtn = (n, label) =>
-    `<button class="filter-btn ${t.days === n ? 'on' : 'off'}" data-action="trash-days" data-days="${n}">${label}</button>`;
-
-  let body = '';
-  if (total === 0) {
-    body = `<div class="retro-empty">No trashed items in the last ${t.days === 0 ? '∞' : t.days} days.</div>`;
-  } else {
-    const sections = [];
-    if ((f === 'all' || f === 'milestone') && counts.milestone > 0) {
-      sections.push(`
-        <h3 class="trash-group-heading">Milestones (${counts.milestone})</h3>
-        <ul class="trash-list">
-          ${t.milestones.map(m => renderTrashRow({
-            kind: 'milestone', id: m.id, title: m.title,
-            when: m.cancelled_at, by: m.cancelled_by,
-            days_ago: m.days_ago, reason: m.cancel_reason,
-          })).join('')}
-        </ul>
-      `);
-    }
-    if ((f === 'all' || f === 'task') && counts.task > 0) {
-      sections.push(`
-        <h3 class="trash-group-heading">Tasks (${counts.task})</h3>
-        <ul class="trash-list">
-          ${t.tasks.map(e => renderTrashRow({
-            kind: 'task', id: e.id, title: e.description,
-            ms_id: e.ms_id, when: e.cancelled_at, by: e.cancelled_by,
-            days_ago: e.days_ago, reason: e.cancel_reason,
-          })).join('')}
-        </ul>
-      `);
-    }
-    if ((f === 'all' || f === 'document') && counts.document > 0) {
-      sections.push(`
-        <h3 class="trash-group-heading">Documents (${counts.document})</h3>
-        <ul class="trash-list">
-          ${t.documents.map(d => renderTrashRow({
-            kind: 'document', id: d.doc_id, title: d.title,
-            scope: d.scope, when: d.trashed_at, by: d.trashed_by,
-            days_ago: d.days_ago, reason: d.trash_reason,
-          })).join('')}
-        </ul>
-      `);
-    }
-    body = sections.join('');
-  }
-
-  return `
-    <section class="trash-section fade-in">
-      <div class="milestones-header">
-        <span class="milestones-title">Trash</span>
-        <span class="milestones-count">${total} item${total === 1 ? '' : 's'} · window ${t.days === 0 ? '∞' : t.days + 'd'}</span>
-        <button class="sort-toggle" data-action="trash-refresh">refresh</button>
-      </div>
-      <div class="filter-bar">
-        ${filterBtn('all', 'all', total)}
-        ${filterBtn('milestone', 'milestone', counts.milestone)}
-        ${filterBtn('task', 'task', counts.task)}
-        ${filterBtn('document', 'doc', counts.document)}
-        <span style="flex:1"></span>
-        ${dayBtn(7, '7d')}
-        ${dayBtn(30, '30d')}
-        ${dayBtn(0, 'all')}
-      </div>
-      ${body}
-    </section>
-  `;
-}
-
-function renderTrashRow(row) {
-  const when = row.when ? new Date(row.when).toLocaleString() : 'unknown date';
-  const ago = row.days_ago != null ? `${row.days_ago}d ago` : '';
-  const byParts = [row.by ? `by ${row.by}` : '', ago].filter(Boolean).join(' · ');
-  const meta = [row.kind === 'task' && row.ms_id ? row.ms_id : '', row.scope || ''].filter(Boolean).join(' · ');
-  return `
-    <li class="trash-row">
-      <div class="trash-row-main">
-        <span class="trash-id">${esc(row.id)}</span>
-        <span class="trash-title">${esc(row.title || row.id)}</span>
-        ${meta ? `<span class="trash-meta">${esc(meta)}</span>` : ''}
-      </div>
-      <div class="trash-row-foot">
-        <span class="trash-when" title="${esc(when)}">${esc(ago || when)}</span>
-        ${byParts ? `<span class="trash-by">${esc(byParts)}</span>` : ''}
-        ${row.reason ? `<span class="trash-reason">${esc(row.reason)}</span>` : ''}
-        <button class="restore-btn" data-action="restore-${row.kind}" data-id="${esc(row.id)}">restore</button>
-      </div>
-    </li>
-  `;
 }
 
 async function openRetro(week) {
@@ -4127,44 +3864,6 @@ function handleCommonAction(action, el) {
       const s = el.dataset.scope || '';
       state.documentsScopeFilter = (state.documentsScopeFilter === s) ? '' : s;
       render();
-      return true;
-    }
-    // ms-14 e-826 / e-991: Trash tab actions.
-    case 'trash-filter': {
-      state.trashTypeFilter = el.dataset.filter || 'all';
-      render(); return true;
-    }
-    case 'trash-days': {
-      const d = parseInt(el.dataset.days, 10);
-      state.trash = { ...state.trash, days: d, loaded: false };
-      dataSource.loadTrash(d).then(() => render()).catch((e) => {
-        state.trash = { ...state.trash, loaded: true, error: e.message };
-        render();
-      });
-      render(); // show loading state immediately
-      return true;
-    }
-    case 'trash-refresh':
-      dataSource.loadTrash(state.trash.days).then(() => render()).catch((e) => {
-        state.trash = { ...state.trash, loaded: true, error: e.message };
-        render();
-      });
-      return true;
-    case 'restore-milestone':
-    case 'restore-task':
-    case 'restore-document': {
-      const id = el.dataset.id;
-      const kind = action.slice('restore-'.length);
-      const reason = window.prompt(`Restore reason (optional, recorded in audit log):`, '') ?? null;
-      if (reason === null) return true; // user cancelled
-      const fn = kind === 'milestone' ? dataSource.restoreMilestone
-        : kind === 'task' ? dataSource.restoreEntry
-        : dataSource.restoreDocument;
-      el.disabled = true;
-      fn(id, reason)
-        .then(() => dataSource.loadTrash(state.trash.days))
-        .then(() => render())
-        .catch((e) => { alert(`Restore failed: ${e.message}`); el.disabled = false; });
       return true;
     }
     // close-* / close-menu: each platform supplies its own helper
