@@ -346,7 +346,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_task_done = task_sub.add_parser("done", add_help=False)
     p_task_done.add_argument("entry_id", nargs="?", default="")
     p_task_done.add_argument("-p", "--progress", default="")
-    p_task_done.add_argument("-r", "--reason", default="")
+    # e-976: default=None — see p_ms_observe.
+    p_task_done.add_argument("-r", "--reason", default=None)
 
     p_task_list = task_sub.add_parser("list", aliases=["ls"], add_help=False)
     p_task_list.add_argument("-m", "--ms", dest="ms_id", default="")
@@ -412,7 +413,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ms_done = ms_sub.add_parser("done", aliases=["close"], add_help=False)
     p_ms_done.add_argument("ms_id", nargs="?", default="")
-    p_ms_done.add_argument("-r", "--reason", default="")
+    # e-976: default=None — see p_ms_observe.
+    p_ms_done.add_argument("-r", "--reason", default=None)
 
     p_ms_join = ms_sub.add_parser("join", add_help=False)
     p_ms_join.add_argument("ms_id", nargs="?", default="")
@@ -420,7 +422,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ms_observe = ms_sub.add_parser("observe", add_help=False)
     p_ms_observe.add_argument("ms_id", nargs="?", default="")
-    p_ms_observe.add_argument("-r", "--reason", default="")
+    # e-976: default=None so the env builder can tell --reason omitted
+    # ('refuse') apart from --reason "" (explicit waiver).
+    p_ms_observe.add_argument("-r", "--reason", default=None)
 
     p_ms_show = ms_sub.add_parser("show", add_help=False)
     p_ms_show.add_argument("ms_id", nargs="?", default="")
@@ -1021,13 +1025,17 @@ def _handle_task(root: Path, args: argparse.Namespace) -> int:
 
     if cmd == "done":
         if not args.entry_id:
-            print("Usage: beacon task done <entry-id> [-p <progress>] [--reason <text>]")
+            print("Usage: beacon task done <entry-id> --reason <text> [-p <progress>]")
             return 1
+        # e-976: only inject BEACON_REASON when --reason was passed
+        # (parser default=None), so the python gate (_require_reason_or_skip)
+        # can refuse missing-env and accept explicit "".
         env = {
             "BEACON_ENTRY_ID": args.entry_id,
             "BEACON_PROGRESS": args.progress or "",
-            "BEACON_REASON": args.reason or "",
         }
+        if args.reason is not None:
+            env["BEACON_REASON"] = args.reason
         return _run_commands_py(root, "task_done", env)
 
     if cmd in ("list", "ls"):
@@ -1157,12 +1165,12 @@ def _handle_milestone(root: Path, args: argparse.Namespace) -> int:
 
     if cmd in ("done", "close"):
         if not args.ms_id:
-            print("Usage: beacon milestone done <ms-id> [--reason <text>]")
+            print("Usage: beacon milestone done <ms-id> --reason <text>")
             return 1
-        env = {
-            "BEACON_MS_ID": args.ms_id,
-            "BEACON_REASON": args.reason or "",
-        }
+        # e-976: BEACON_REASON only when --reason was passed (parser default=None).
+        env = {"BEACON_MS_ID": args.ms_id}
+        if args.reason is not None:
+            env["BEACON_REASON"] = args.reason
         return _run_commands_py(root, "milestone_done", env)
 
     if cmd == "join":
@@ -1177,14 +1185,17 @@ def _handle_milestone(root: Path, args: argparse.Namespace) -> int:
 
     if cmd == "observe":
         if not args.ms_id:
-            print("Usage: beacon milestone observe <ms-id> [--reason <text>]")
+            print("Usage: beacon milestone observe <ms-id> --reason <text>")
             return 1
-        env = {
-            "BEACON_MS_ID": args.ms_id,
-            "BEACON_STATUS": "observing",
-            "BEACON_REASON": args.reason or "",
-        }
-        return _run_commands_py(root, "milestone_update", env)
+        # e-976: route to the dedicated milestone_observe handler with the
+        # --reason gate. Only forward BEACON_REASON when --reason was
+        # explicitly passed (default=None in the parser), so the python gate
+        # can distinguish "flag missing" (refuse) from "--reason ''"
+        # (explicit waiver, accepted but discouraged).
+        env = {"BEACON_MS_ID": args.ms_id}
+        if args.reason is not None:
+            env["BEACON_REASON"] = args.reason
+        return _run_commands_py(root, "milestone_observe", env)
 
     if cmd == "show":
         if not args.ms_id:

@@ -90,6 +90,39 @@ def _append_changelog(op: dict) -> None:
         pass  # changelog is best-effort; never block operations
 
 
+def _require_reason_or_skip(verb: str) -> str:
+    """Gate state-transition verbs (done / observe / restore / etc.) on a
+    written reason being present in the BEACON_REASON env var (e-976).
+
+    Three cases:
+
+    - ``BEACON_REASON`` not in environ → refuse with exit 1. The CLI dispatcher
+      only sets this env var when ``--reason`` is passed, so a missing var
+      means the operator did not pass the flag at all.
+    - ``BEACON_REASON`` present but empty (``--reason ""``) → accept. The
+      operator has explicitly waived the gate. Discouraged but allowed so the
+      audit trail records a deliberate "no reason" rather than silently going
+      back to the pre-gate behavior.
+    - Any non-empty value → accept and return it unchanged.
+
+    Args:
+        verb: Human-facing verb for the error message (e.g. ``"task done"``).
+
+    Returns:
+        The reason string (possibly empty when explicitly waived).
+    """
+    if "BEACON_REASON" not in os.environ:
+        print(
+            f"Error: --reason is required for `{verb}`. "
+            f"Pass --reason \"...\" to record why, or --reason \"\" to "
+            f"acknowledge the action without a written reason "
+            f"(discouraged — retro becomes harder).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return os.environ.get("BEACON_REASON", "")
+
+
 def save_project(data, op=None):
     core.validate_project(data)
     store = get_store()
@@ -791,14 +824,45 @@ def _ensure_on_branch(branch_name: str) -> str:
 
 def cmd_milestone_done():
     ms_id = os.environ.get("BEACON_MS_ID", "")
-    reason = os.environ.get("BEACON_REASON", "")
-    if not reason:
-        print("Error: --reason is required. Record what was achieved (decision trail must be complete).", file=sys.stderr)
-        sys.exit(1)
+    reason = _require_reason_or_skip("milestone done")
     data = load_project()
     ms = core.milestone_done(data, ms_id, reason=reason)
     save_project(data, op={"op": "milestone_done", "ms_id": ms_id, "reason": reason})
-    print(f"Completed: {ms['title']}\n  Reason: {reason}")
+    print(f"Completed: {ms['title']}")
+    if reason:
+        print(f"  Reason: {reason}")
+
+
+def cmd_milestone_observe():
+    """Transition a milestone to ``observing`` status with --reason gating
+    (e-976).
+
+    Previously `beacon milestone observe` dispatched to ``milestone_update``
+    with ``BEACON_STATUS=observing`` and accepted an optional reason. With
+    the gate, observing is now a first-class transition verb that must record
+    why the work paused (so retro can reconstruct the decision). The reason
+    is forwarded through ``core.milestone_update`` and ends up at
+    ``meta.observing_reason``, identical to the previous path; only the gate
+    is new.
+    """
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    reason = _require_reason_or_skip("milestone observe")
+    if not ms_id:
+        print("Usage: beacon milestone observe <ms-id> --reason <text>",
+              file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    try:
+        ms = core.milestone_update(data, ms_id, status="observing",
+                                   reason=reason)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"op": "milestone_observe", "ms_id": ms_id,
+                           "reason": reason})
+    print(f"Observing: [{ms['id']}] {ms['title']}")
+    if reason:
+        print(f"  Reason: {reason}")
 
 
 def cmd_milestone_join():
@@ -1526,10 +1590,7 @@ def cmd_task_add():
 def cmd_task_done():
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
     progress = os.environ.get("BEACON_PROGRESS", "")
-    reason = os.environ.get("BEACON_REASON", "")
-    if not reason:
-        print("Error: --reason is required. Record completion evidence (decision trail must be complete).", file=sys.stderr)
-        sys.exit(1)
+    reason = _require_reason_or_skip("task done")
     import datetime
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -1553,7 +1614,6 @@ def cmd_task_done():
                 print(f"  Progress: {ms.get('progress', 0)}%")
             save_project(data)
             return
-    reason = os.environ.get("BEACON_REASON", "")
     ms, entry = core.task_done(data, entry_id, date=today, reason=reason)
     print(f"Done: [{entry_id}] {entry['description']}")
     if reason:
@@ -7116,6 +7176,7 @@ if __name__ == "__main__":
         "milestone_list": cmd_milestone_list,
         "milestone_start": cmd_milestone_start,
         "milestone_done": cmd_milestone_done,
+        "milestone_observe": cmd_milestone_observe,
         "milestone_join": cmd_milestone_join,
         "milestone_show": cmd_milestone_show,
         "milestone_update": cmd_milestone_update,

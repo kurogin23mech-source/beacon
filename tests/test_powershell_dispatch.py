@@ -250,14 +250,46 @@ def test_milestone_done(project_dir, no_bash, captured_call):
     assert captured_call["cmd"][-1] == "milestone_done"
 
 
-def test_milestone_observe_maps_to_update(project_dir, no_bash, captured_call):
+def test_milestone_done_without_reason_omits_env_var(project_dir, no_bash, captured_call):
+    """e-976: dispatcher must NOT inject BEACON_REASON without --reason."""
+    rc = main_mod.main(["milestone", "done", "ms-7"])
+    assert rc == 0
+    env = captured_call["env"]
+    assert env["BEACON_MS_ID"] == "ms-7"
+    assert "BEACON_REASON" not in env
+
+
+def test_milestone_observe_routes_to_dedicated_handler(project_dir, no_bash, captured_call):
+    """e-976: ``milestone observe`` now dispatches to ``milestone_observe``
+    (a python handler with the --reason gate), not the generic
+    ``milestone_update`` route. The handler still calls
+    ``core.milestone_update`` internally with status='observing', so on-disk
+    behavior other than the gate is unchanged. The env no longer carries
+    BEACON_STATUS because the handler sets it.
+    """
     rc = main_mod.main(["milestone", "observe", "ms-7", "-r", "watching"])
     assert rc == 0
     env = captured_call["env"]
     assert env["BEACON_MS_ID"] == "ms-7"
-    assert env["BEACON_STATUS"] == "observing"
     assert env["BEACON_REASON"] == "watching"
-    assert captured_call["cmd"][-1] == "milestone_update"
+    # Old contract pushed BEACON_STATUS=observing; the new handler hardcodes it.
+    assert "BEACON_STATUS" not in env
+    assert captured_call["cmd"][-1] == "milestone_observe"
+
+
+def test_milestone_observe_without_reason_omits_env_var(project_dir, no_bash, captured_call):
+    """e-976: without --reason, the dispatcher must NOT inject BEACON_REASON
+    (so the python gate can refuse). Pins parser default=None against
+    accidental regression to ``or ""``.
+    """
+    rc = main_mod.main(["milestone", "observe", "ms-7"])
+    assert rc == 0
+    env = captured_call["env"]
+    assert env["BEACON_MS_ID"] == "ms-7"
+    assert "BEACON_REASON" not in env, (
+        "Dispatcher leaked BEACON_REASON without --reason; commands.py gate "
+        "would silently accept this as 'explicit waiver'."
+    )
 
 
 def test_milestone_show(project_dir, no_bash, captured_call):
@@ -320,6 +352,27 @@ def test_task_done(project_dir, no_bash, captured_call):
     assert env["BEACON_ENTRY_ID"] == "e-123"
     assert env["BEACON_REASON"] == "completed"
     assert captured_call["cmd"][-1] == "task_done"
+
+
+def test_task_done_without_reason_omits_env_var(project_dir, no_bash, captured_call):
+    """e-976: without --reason, dispatcher must NOT inject BEACON_REASON.
+    Pins parser default=None against regression to ``or ""``.
+    """
+    rc = main_mod.main(["task", "done", "e-123"])
+    assert rc == 0
+    env = captured_call["env"]
+    assert env["BEACON_ENTRY_ID"] == "e-123"
+    assert "BEACON_REASON" not in env
+
+
+def test_task_done_explicit_empty_reason_forwarded(project_dir, no_bash, captured_call):
+    """e-976: ``--reason ""`` must reach the env as empty string (operator's
+    explicit waiver; commands.py gate accepts present-but-empty).
+    """
+    rc = main_mod.main(["task", "done", "e-123", "--reason", ""])
+    assert rc == 0
+    env = captured_call["env"]
+    assert env["BEACON_REASON"] == ""
 
 
 def test_task_done_requires_id(project_dir, no_bash, captured_call, capsys):
@@ -777,9 +830,13 @@ _EQUIVALENCE_CASES: List[Tuple[List[str], str, Dict[str, str]]] = [
         {"BEACON_ENTRY_ID": "e-9", "BEACON_REASON": "shipped"},
     ),
     (
+        # e-976: milestone observe routes to its dedicated handler
+        # ("milestone_observe") with the --reason gate. The handler hardcodes
+        # status='observing' internally, so the env no longer carries
+        # BEACON_STATUS.
         ["milestone", "observe", "ms-1", "-r", "watching"],
-        "milestone_update",
-        {"BEACON_MS_ID": "ms-1", "BEACON_STATUS": "observing", "BEACON_REASON": "watching"},
+        "milestone_observe",
+        {"BEACON_MS_ID": "ms-1", "BEACON_REASON": "watching"},
     ),
     (
         ["doc", "add", "T", "--scope", "spec", "--ms", "ms-7"],
