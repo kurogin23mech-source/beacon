@@ -44,6 +44,23 @@ let state = {
   // ms-14 e-826 / e-991: Trash tab state (mirrors server/static/index.html).
   trash: { milestones: [], tasks: [], documents: [], days: 30, loaded: false },
   trashTypeFilter: 'all',
+  // SHARED state slots that Tauri also needs (Web initializes these in its
+  // own SKIP block; Tauri must mirror them or render() throws on the first
+  // expanded milestone — state.showCancelled.has() blows up if undefined,
+  // which bounces the user back to the project selector. (ms-43 follow-up)
+  showCancelled: new Set(),
+  searchResults: null,
+  searchFacets: { type: {}, status: {}, priority: {}, scope: {} },
+  searchTotal: 0,
+  searchLoading: false,
+  searchToken: 0,
+  searchTypeFilter: 'all',
+  menuOpen: false,
+  openEntryId: null,
+  documentsScopeFilter: 'all',
+  selectedDeployEnv: 'all',
+  auth: {},
+  projects: [],
 };
 
 // ---- Data loading (Tauri invoke) ----
@@ -192,7 +209,15 @@ async function connectCloudWebSocket(projectId) {
     cloudWsReconnectAttempts = 0;
     state.connected = true;
     state.error = null;
-    if (state.project) render();
+    // Targeted DOM update for the offline → live indicator. A full render()
+    // here repaints the entire shell right after the initial dashboard
+    // render, which the user sees as a 1-frame flash. The connection dot is
+    // the only thing that actually changes on open, so update it directly
+    // and leave the rest of the DOM untouched. (ms-43 follow-up)
+    const dot = document.querySelector('.status-dot');
+    if (dot) dot.classList.remove('offline');
+    const label = document.querySelector('.connection-label');
+    if (label) label.textContent = 'live';
     if (cloudWsPingInterval) clearInterval(cloudWsPingInterval);
     cloudWsPingInterval = setInterval(() => {
       if (cloudWs && cloudWs.readyState === WebSocket.OPEN) cloudWs.send('ping');
