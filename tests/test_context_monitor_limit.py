@@ -140,3 +140,65 @@ def test_no_skip_at_300k_with_1m_model(project_dir, tmp_path):
     out = _run_monitor(transcript, project_dir)
     assert "percent=30%" in out
     assert "post-compaction" not in out  # must NOT have skipped
+
+
+# ---------------------------------------------------------------------------
+# Notification payload (ms-31 follow-up)
+# ---------------------------------------------------------------------------
+
+
+def _run_monitor_split(transcript: Path, project_dir: Path,
+                       env_extra: dict | None = None) -> subprocess.CompletedProcess:
+    """Like _run_monitor but returns the raw CompletedProcess so callers can
+    parse stdout (the hook-output JSON) and stderr (logs) independently."""
+    env = os.environ.copy()
+    env.pop("BEACON_CONTEXT_LIMIT", None)
+    if env_extra:
+        env.update(env_extra)
+    payload = json.dumps({
+        "session_id": "test-session",
+        "transcript_path": str(transcript),
+    })
+    return subprocess.run(
+        ["bash", str(SCRIPT)],
+        input=payload,
+        capture_output=True,
+        text=True,
+        cwd=str(project_dir),
+        env=env,
+        timeout=20,
+    )
+
+
+def test_threshold_notification_uses_hook_specific_output(project_dir, tmp_path):
+    """The Stop hook must surface its template instruction via
+    `hookSpecificOutput.additionalContext`. `systemMessage` is terminal-only
+    and Claude never reads it, which is what caused the auto-recorded notes
+    to remain unfilled templates (ms-31). Lock the contract in a test so a
+    silent regression to `systemMessage` is impossible.
+    """
+    transcript = tmp_path / "transcript.jsonl"
+    # 200K / 1M = 20% — hits the first threshold and triggers the notification.
+    _write_transcript(transcript, model="claude-opus-4-7[1m]", input_tokens=200000)
+
+    result = _run_monitor_split(transcript, project_dir)
+    assert result.returncode == 0
+    # stdout interleaves `beacon note`'s confirmation echo and the hook JSON.
+    # The hook JSON is always the last well-formed `{...}` block (single line).
+    json_line = next(
+        (ln for ln in reversed(result.stdout.splitlines()) if ln.startswith("{")),
+        "",
+    )
+    assert json_line, f"no JSON payload found on stdout:\n{result.stdout}"
+
+    payload = json.loads(json_line)
+    assert "systemMessage" not in payload, (
+        "systemMessage is terminal-only; Claude won't see it. "
+        "Use hookSpecificOutput.additionalContext instead."
+    )
+    assert "hookSpecificOutput" in payload
+    hso = payload["hookSpecificOutput"]
+    assert hso.get("hookEventName") == "Stop"
+    assert "/beacon-note" in hso.get("additionalContext", ""), (
+        "additionalContext should instruct Claude to fill the template via /beacon-note"
+    )

@@ -172,12 +172,6 @@ CONTEXT_APPROX="$CURRENT_CONTEXT"
 # 表示用に CONTEXT_LIMIT を 3-digit カンマ区切りで整形 (Bash 内で完結)
 CONTEXT_LIMIT_FMT=$(python3 -c "print(f'{int($CONTEXT_LIMIT):,}')")
 
-if [ "$TRIGGERED_THRESHOLD" -ge 80 ]; then
-  ADVICE="BEACON [⚠️ コンテキスト ${PERCENT}%] ${CONTEXT_APPROX}/${CONTEXT_LIMIT_FMT} tokens — beacon noteに自動記録済み。必要なら /beacon-note で詳細サマリーを追加してください。"
-else
-  ADVICE="BEACON [コンテキスト ${PERCENT}%] ${CONTEXT_APPROX}/${CONTEXT_LIMIT_FMT} tokens — beacon noteに自動記録済み。"
-fi
-
 # ─── 状態ファイルの更新 ────────────────────────────────────────────────────────
 # 現在 % 以下の全閾値を notified にマーク（スキップした閾値も含む）
 CROSSED_JSON=$(python3 -c "
@@ -279,6 +273,16 @@ ${LOCATION_TEXT:-（取得失敗）}
 
 python3 - "$TEMPLATE_INSTRUCTION" <<'PYEOF'
 import json, sys
-output = {"systemMessage": sys.argv[1]}
+# Stop hook: additionalContext は次の Claude turn 開始時に自動注入される。
+# systemMessage は terminal にしか出ず Claude には届かないため、
+# /beacon-note を「実行してほしい」依頼が Claude に届かず空テンプレートの
+# まま放置される問題があった (ms-31)。hookSpecificOutput.additionalContext
+# で渡すと、ユーザーが次に何か発言した瞬間 Claude のコンテキストに乗る。
+output = {
+    "hookSpecificOutput": {
+        "hookEventName": "Stop",
+        "additionalContext": sys.argv[1],
+    }
+}
 print(json.dumps(output, ensure_ascii=False))
 PYEOF
