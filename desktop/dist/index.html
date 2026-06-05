@@ -976,6 +976,39 @@ body::after {
 .priority-low     { background: rgba(148,163,184,0.2); color: #94a3b8; border: 1px solid rgba(148,163,184,0.3); }
 .priority-lowest  { background: rgba(100,116,139,0.15); color: #64748b; border: 1px solid rgba(100,116,139,0.2); }
 
+/* e-976: reason auto-link + missing-reason marker styling.
+ * Goal: stay subtle in the entry row (no layout jolt) and slightly more
+ * legible inside the modal where the reason text actually shows.
+ */
+.entry-reason-missing {
+  display: inline-block;
+  font-size: 10px;
+  color: #b45309;
+  background: rgba(180, 83, 9, 0.12);
+  border: 1px solid rgba(180, 83, 9, 0.3);
+  padding: 1px 6px;
+  border-radius: 3px;
+  margin-left: 6px;
+  vertical-align: middle;
+  letter-spacing: 0.02em;
+}
+.entry-reason-text {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.entry-reason-text a {
+  color: var(--accent, #60a5fa);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.entry-reason-text a.entry-link {
+  color: var(--accent, #60a5fa);
+  cursor: pointer;
+}
+
 /* Member badges on milestone cards (ms-43 e-767). */
 .member-badge {
   display: inline-block;
@@ -2336,6 +2369,8 @@ function renderEntry(entry) {
   }
   const priority = entry.meta?.priority;
   const priorityBadge = priority ? `<span class="priority-badge priority-${priority}">${priority}</span>` : '';
+  // e-976: warn-marker for done/cancelled entries with no reason recorded.
+  const reasonMissing = reasonMissingBadge(entry);
 
   const hasDetail = !!(entry.motivation || entry.acceptance_criteria || entry.behavior || entry.detail
     || entry.meta?.resolves || entry.meta?.hash);
@@ -2369,7 +2404,7 @@ function renderEntry(entry) {
     <div class="entry entry-type-${entry.type}${statusClass}${toggleClass}" ${rowAction}>
       ${entryTypeBadge(entry.type)}
       <span class="entry-id">${entry.id}</span>
-      <span class="entry-desc">${esc(entry.description)}${hash}${statusText}${childBadge}${priorityBadge}${infoBtn}</span>
+      <span class="entry-desc">${esc(entry.description)}${hash}${statusText}${reasonMissing}${childBadge}${priorityBadge}${infoBtn}</span>
       <span class="entry-date">${entry.created_at || ''}</span>
       ${prMeta}
       ${children}
@@ -2382,6 +2417,74 @@ function esc(s) {
   const el = document.createElement('span');
   el.textContent = s;
   return el.innerHTML;
+}
+
+/* e-976: auto-link `PR #N` and `e-XXX` patterns inside reason strings
+ * (done_reason / cancel_reason / restore_reason).
+ *
+ * Contract:
+ *   1. The input is treated as untrusted plain text. We HTML-escape FIRST,
+ *      then apply link substitutions to the escaped string. The patterns
+ *      `PR #N` and `e-XXX` survive HTML escape unchanged (no &/</> in them)
+ *      so the substitution is safe; never reverse the order or XSS slips in.
+ *   2. `PR #N` → external GitHub pull URL. Repo URL is best-effort: prefers
+ *      `window.BEACON_REPO_URL` when the server wires it in (TODO), else
+ *      defaults to the Beacon repo. Owner/repo plumbing is a follow-up task.
+ *   3. `e-XXX` → in-app entry link. Uses `data-entry-id` so the existing
+ *      entry-modal handler can pick it up via delegated click. When the
+ *      handler isn't on this page, the anchor degrades gracefully (the
+ *      hash navigates but nothing happens — acceptable for now).
+ */
+function autoLinkReason(text) {
+  if (!text) return '';
+  // 1. HTML-escape (untrusted input → safe HTML).
+  let html = esc(text);
+  // 2. PR #N → GitHub PR link.
+  //    TODO(e-976 follow-up): plumb BEACON_REPO_URL through server config so
+  //    per-project repos work correctly; current default is the Beacon repo.
+  const repoUrl = (window.BEACON_REPO_URL || 'https://github.com/kurogin23mech-source/beacon')
+    .replace(/\/$/, '');
+  html = html.replace(/\b(PR\s*#?)(\d+)\b/g, (_m, prefix, num) =>
+    `<a href="${repoUrl}/pull/${num}" target="_blank" rel="noopener">${prefix}${num}</a>`
+  );
+  // 3. e-XXX → in-app entry link (handled by existing open-entry-detail
+  //    delegation when present; bare anchor otherwise).
+  html = html.replace(/\b(e-\d+)\b/g, (_m, id) =>
+    `<a href="#entry/${id}" data-action="open-entry-detail" data-entry-id="${id}" class="entry-link">${id}</a>`
+  );
+  return html;
+}
+
+/* e-976: render a single reason field (done/cancel/restore) on entry modal.
+ * Returns empty string when the entry has no matching reason; the caller
+ * decides whether to show the "reason missing" badge instead.
+ */
+function renderReasonField(entry, key, label) {
+  const reason = entry?.meta?.[key];
+  if (!reason) return '';
+  return (
+    `<div class="entry-modal-field modal-field-reason">` +
+    `<div class="entry-modal-field-label">${label}</div>` +
+    `<div class="entry-reason-text">${autoLinkReason(reason)}</div>` +
+    `</div>`
+  );
+}
+
+/* e-976: small marker for done/cancelled entries whose reason is empty —
+ * surfaces historic gaps without breaking layout. Returns empty string
+ * when the entry has a reason or isn't in a status that requires one.
+ */
+function reasonMissingBadge(entry) {
+  if (!entry) return '';
+  const status = entry.status;
+  const meta = entry.meta || {};
+  if (status === 'done' && !meta.done_reason) {
+    return `<span class="entry-reason-missing" title="done_reason 未記録">⚠ 理由未記録</span>`;
+  }
+  if (status === 'cancelled' && !meta.cancel_reason) {
+    return `<span class="entry-reason-missing" title="cancel_reason 未記録">⚠ 理由未記録</span>`;
+  }
+  return '';
 }
 
 /* e-587: header version badge.
@@ -4043,6 +4146,11 @@ function renderEntryModal(entry, parent) {
     ? `<div class="entry-modal-field modal-field-resolves"><div class="entry-modal-field-label">resolves</div>${esc(entry.meta.resolves)}</div>` : '';
   const detail = entry.detail
     ? `<div class="entry-modal-field modal-field-detail"><div class="entry-modal-field-label">detail</div>${esc(entry.detail)}</div>` : '';
+  // e-976: surface done/cancel/restore reasons in modal with PR #N / e-XXX auto-links.
+  const doneReason = renderReasonField(entry, 'done_reason', 'done reason');
+  const cancelReason = renderReasonField(entry, 'cancel_reason', 'cancel reason');
+  const restoreReason = renderReasonField(entry, 'restore_reason', 'restore reason');
+  const reasonMissing = reasonMissingBadge(entry);
 
   const statusText = entryStatusText(entry);
   const msLabel = parent ? `<span style="color:var(--text-dim);font-size:11px;">${esc(parent.id)}</span>` : '';
@@ -4056,8 +4164,8 @@ function renderEntryModal(entry, parent) {
       </div>
       <div class="entry-modal-body">
         <div class="entry-modal-desc">${esc(entry.description)}</div>
-        <div class="entry-modal-meta">${priorityBadge}${statusText}</div>
-        ${motivation}${ac}${behavior}${resolves}${detail}
+        <div class="entry-modal-meta">${priorityBadge}${statusText}${reasonMissing}</div>
+        ${motivation}${ac}${behavior}${resolves}${detail}${doneReason}${cancelReason}${restoreReason}
       </div>
     </div>
   `;

@@ -445,19 +445,27 @@ cmd_milestone_done() {
     ensure_project
     local ms_id=""
     local reason=""
+    local reason_set=0
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -r|--reason) reason="${2:-}"; shift 2 ;;
+            -r|--reason) reason="${2:-}"; reason_set=1; shift 2 ;;
             *)           ms_id="$1";     shift   ;;
         esac
     done
 
     if [ -z "$ms_id" ]; then
-        echo "Usage: beacon milestone done <ms-id> [--reason <text>]"
+        echo "Usage: beacon milestone done <ms-id> --reason <text>"
         exit 1
     fi
-    BEACON_MS_ID="$ms_id" BEACON_REASON="$reason" python3 "$COMMANDS_PY" milestone_done
+    # e-976: forward BEACON_REASON only when --reason was passed. The python
+    # gate (_require_reason_or_skip) refuses missing env, so the dispatcher
+    # must not silently set an empty default.
+    if [ "$reason_set" = "1" ]; then
+        BEACON_MS_ID="$ms_id" BEACON_REASON="$reason" python3 "$COMMANDS_PY" milestone_done
+    else
+        BEACON_MS_ID="$ms_id" python3 "$COMMANDS_PY" milestone_done
+    fi
 }
 
 cmd_milestone_join() {
@@ -484,20 +492,29 @@ cmd_milestone_observe() {
     ensure_project
     local ms_id=""
     local reason=""
+    local reason_set=0
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -r|--reason) reason="${2:-}"; shift 2 ;;
+            -r|--reason) reason="${2:-}"; reason_set=1; shift 2 ;;
             *)           ms_id="$1";     shift   ;;
         esac
     done
 
     if [ -z "$ms_id" ]; then
-        echo "Usage: beacon milestone observe <ms-id> [--reason <text>]"
+        echo "Usage: beacon milestone observe <ms-id> --reason <text>"
         exit 1
     fi
-    BEACON_MS_ID="$ms_id" BEACON_STATUS="observing" BEACON_REASON="$reason" \
-        python3 "$COMMANDS_PY" milestone_update
+    # e-976: route observe to the dedicated milestone_observe handler so the
+    # --reason gate applies. The handler still forwards to core.milestone_update
+    # internally, so behavior other than the gate is identical.
+    if [ "$reason_set" = "1" ]; then
+        BEACON_MS_ID="$ms_id" BEACON_REASON="$reason" \
+            python3 "$COMMANDS_PY" milestone_observe
+    else
+        BEACON_MS_ID="$ms_id" \
+            python3 "$COMMANDS_PY" milestone_observe
+    fi
 }
 
 cmd_milestone_show() {
@@ -1070,21 +1087,30 @@ cmd_task_done() {
     local entry_id=""
     local progress=""
     local reason=""
+    local reason_set=0
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -p|--progress) progress="${2:-}"; shift 2 ;;
-            -r|--reason)   reason="${2:-}";   shift 2 ;;
+            -r|--reason)   reason="${2:-}";   reason_set=1; shift 2 ;;
             *)             entry_id="$1";     shift   ;;
         esac
     done
 
     if [ -z "$entry_id" ]; then
-        echo "Usage: beacon task done <entry-id> [-p <progress>] [--reason <text>]"
+        echo "Usage: beacon task done <entry-id> --reason <text> [-p <progress>]"
         exit 1
     fi
-    BEACON_ENTRY_ID="$entry_id" BEACON_PROGRESS="$progress" BEACON_REASON="$reason" \
-        python3 "$COMMANDS_PY" task_done
+    # e-976: forward BEACON_REASON only when --reason was passed so the python
+    # gate can distinguish "operator omitted the flag" (refuse) from
+    # "operator passed --reason ''" (explicit waiver, accepted but discouraged).
+    if [ "$reason_set" = "1" ]; then
+        BEACON_ENTRY_ID="$entry_id" BEACON_PROGRESS="$progress" BEACON_REASON="$reason" \
+            python3 "$COMMANDS_PY" task_done
+    else
+        BEACON_ENTRY_ID="$entry_id" BEACON_PROGRESS="$progress" \
+            python3 "$COMMANDS_PY" task_done
+    fi
 }
 
 cmd_task_cancel() {
