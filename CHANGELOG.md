@@ -2,6 +2,24 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.12.0] - 2026-06-05
+
+- Merge pull request #55 from kurogin23mech-source/ms-37-onboarding-polish
+- feat(ms-37): onboarding polish — brew caveats / setup output / init defaults (e-519/520/539/540)
+- Merge pull request #54 from kurogin23mech-source/ci-drop-macos-x64
+- ci: drop macOS-x64 from Desktop build matrix
+- Merge pull request #53 from kurogin23mech-source/trailnode/ms-3-manifest-fields-e30
+- Merge pull request #51 from kurogin23mech-source/ms-37-windows-hook-path
+- fix(ms-37): migrate stale PostCompact hook path too (e-1043 follow-up)
+- Merge pull request #52 from kurogin23mech-source/ms-14-purge-owner-only
+- fix(ms-37): write bash-safe hook paths on Windows (e-1043)
+- feat(ms-14): purge endpoints owner-only — defense against multi-user misops (e-1030)
+- feat(trailnode): manifest に updated_at + deleted_at field を追加 (ms-3 e-30)
+- Merge pull request #50 from kurogin23mech-source/remove-trash-tab-and-restore
+- refactor(ms-14): remove Trash tab + restore endpoints (e-1006/e-1011/e-827 cancel)
+- docs(release): update README/CHANGELOG for v0.11.1
+- chore(release): bump formula to 0.11.1
+
 ## [v0.11.1] - 2026-06-05
 
 - Merge pull request #49 from kurogin23mech-source/fix-ms43-tauri-state-init
