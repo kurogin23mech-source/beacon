@@ -26,6 +26,10 @@ Searchable entities and their `q` fields:
   run:             description, batch
   incident:        title, description, resolution
 
+Every entity's own id (e-XXX / ms-XX / op-X) and a document's doc_id are also
+matched by `q` as a substring, so users can find an entry by number — e.g.
+"e-1005" or a partial "1005" (ms-43 e-1010).
+
 Metadata filters (specified separately from `q`, not part of fulltext):
   type[], status[], priority[], scope, ms, op, id (exact),
   assignee, owner, from (created_at ≥), to (created_at ≤),
@@ -374,9 +378,12 @@ def _entity_matches(entity_type: str, e: dict, *, q_lower: str,
     if to_date and created_at and created_at > to_date:
         return False
 
-    # fulltext q
+    # fulltext q — also match the entity's own id (e-XXX / ms-XX / op-X) so a
+    # query like "e-1005" or a partial "1005" finds the entry by number. Users
+    # routinely refer to entries by id ("what was e-1005 again?") (ms-43 e-1010).
     if q_lower:
-        if not _matches_fulltext(entity_type, e, q_lower):
+        eid = (e.get("id") or "").lower()
+        if q_lower not in eid and not _matches_fulltext(entity_type, e, q_lower):
             return False
 
     return True
@@ -419,9 +426,10 @@ def _document_matches(doc: dict, *, q_lower: str, type_filter,
     if to_date and updated and updated > to_date:
         return False
     if q_lower:
+        did = (doc.get("doc_id") or doc.get("id") or "").lower()
         title = (doc.get("title") or "").lower()
         content = (doc.get("content") or "").lower()
-        if q_lower not in title and q_lower not in content:
+        if q_lower not in did and q_lower not in title and q_lower not in content:
             return False
     return True
 
