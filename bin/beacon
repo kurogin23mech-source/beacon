@@ -2261,6 +2261,82 @@ case "${1:-}" in
                 ;;
         esac
         ;;
+    session)
+        ensure_project
+        case "${2:-}" in
+            end)
+                shift 2
+                _se_summary=""
+                _se_session_id=""
+                _se_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --summary)    _se_summary="${2:-}"; shift 2 ;;
+                        --session-id) _se_session_id="${2:-}"; shift 2 ;;
+                        --json)       _se_json="1"; shift ;;
+                        *) shift ;;
+                    esac
+                done
+                BEACON_SUMMARY="$_se_summary" BEACON_SESSION_ID="$_se_session_id" \
+                    BEACON_JSON="$_se_json" python3 "$COMMANDS_PY" session_end
+                ;;
+            rescue)
+                shift 2
+                _sr_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) _sr_json="1"; shift ;;
+                        *) shift ;;
+                    esac
+                done
+                BEACON_JSON="$_sr_json" python3 "$COMMANDS_PY" session_rescue
+                ;;
+            log)
+                case "${3:-}" in
+                    list|ls)
+                        shift 3
+                        _sl_limit="0"
+                        _sl_json=""
+                        while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                --limit) _sl_limit="${2:-0}"; shift 2 ;;
+                                --json)  _sl_json="1"; shift ;;
+                                *) shift ;;
+                            esac
+                        done
+                        BEACON_LIMIT="$_sl_limit" BEACON_JSON="$_sl_json" \
+                            python3 "$COMMANDS_PY" session_log_list
+                        ;;
+                    show|get)
+                        shift 3
+                        _ss_id=""
+                        _ss_json=""
+                        while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                --json) _ss_json="1"; shift ;;
+                                *) _ss_id="$1"; shift ;;
+                            esac
+                        done
+                        BEACON_SESSION_ID="$_ss_id" BEACON_JSON="$_ss_json" \
+                            python3 "$COMMANDS_PY" session_log_show
+                        ;;
+                    *)
+                        echo "Usage: beacon session log [list|show]"
+                        ;;
+                esac
+                ;;
+            "")
+                echo "Usage: beacon session end [--summary <text>] [--session-id <id>] [--json]"
+                echo "       beacon session rescue [--json]"
+                echo "       beacon session log list [--limit N] [--json]"
+                echo "       beacon session log show <session-id> [--json]"
+                ;;
+            *)
+                echo "Unknown session subcommand: ${2:-}"
+                echo "Usage: beacon session [end|rescue|log]"
+                ;;
+        esac
+        ;;
     note)
         ensure_project
         case "${2:-}" in

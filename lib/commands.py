@@ -2130,6 +2130,355 @@ def cmd_note_clear():
 
 
 # ---------------------------------------------------------------------------
+# Session log (ms-57 / e-1038 + e-1039)
+# ---------------------------------------------------------------------------
+
+def _session_logs_dir() -> str:
+    """Local cache dir for session log entries (mirrors the cloud subcollection).
+
+    In cloud mode the authoritative store is Firestore; we still write a
+    local copy so list/show work offline. In local-only mode this is the
+    primary store.
+    """
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    return os.path.join(beacon_dir, "session_logs")
+
+
+def _session_log_path(session_id: str) -> str:
+    """Slug-safe path for a session log file. Doc-id-safe characters only."""
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", session_id) or "unknown"
+    return os.path.join(_session_logs_dir(), f"{safe}.json")
+
+
+def _read_local_session_log(session_id: str) -> Optional[dict]:
+    path = _session_log_path(session_id)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _write_local_session_log(payload: dict) -> None:
+    """Merge-write a session log entry to the local cache.
+
+    We merge (read-modify-write) so a partial rescue payload doesn't wipe
+    fields a richer session-end already produced — mirrors the server's
+    merge=True semantics on the cache layer too.
+    """
+    sid = payload.get("session_id", "")
+    if not sid:
+        return
+    path = _session_log_path(sid)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    existing = _read_local_session_log(sid) or {}
+    existing.update(payload)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(existing, f, ensure_ascii=False, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def _push_session_log_to_cloud(payload: dict) -> bool:
+    """Best-effort upsert to the cloud session log endpoint.
+
+    Returns True on success, False on any failure (network / auth / etc.).
+    Mirrors the failure-swallowing contract of session._cloud_sync — the
+    session log primary truth is the local cache when cloud is unreachable;
+    a later run will re-aggregate and resync.
+    """
+    if not _is_cloud_mode():
+        return False
+    try:
+        from auth import load_credentials
+        if load_credentials() is None:
+            return False
+        client, config = _get_api_client()
+        sid = payload.get("session_id", "")
+        if not sid:
+            return False
+        body = {k: v for k, v in payload.items() if k != "session_id" and v is not None}
+        client.upsert_session_log(config["project_id"], sid, body)
+        return True
+    except BaseException:
+        if os.environ.get("BEACON_DEBUG") == "1":
+            import traceback as _tb
+            _tb.print_exc()
+        return False
+
+
+def _list_other_session_ids() -> list:
+    """Return session_ids (other than the current one) that have entries
+    associated with them in the project data or local notes.
+
+    Used by rescue (e-1039). Walks project entries' meta.session_id and
+    the local notes jsonl. In cloud mode we additionally fetch the cloud
+    session registry so cross-machine orphans are discovered.
+    """
+    seen = set()
+    try:
+        import session as _session
+        current = _session.get_session_id()
+    except Exception:
+        current = ""
+
+    try:
+        data = load_project()
+    except Exception:
+        data = {"milestones": []}
+
+    def _walk(entries):
+        for e in entries or []:
+            sid = (e.get("meta") or {}).get("session_id")
+            if sid and sid != current:
+                seen.add(sid)
+            _walk(e.get("entries", []))
+
+    for ms in data.get("milestones", []) or []:
+        _walk(ms.get("entries", []))
+
+    notes_path = _get_notes_path()
+    if os.path.exists(notes_path):
+        try:
+            with open(notes_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        note = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    sid = note.get("session_id")
+                    if sid and sid != current:
+                        seen.add(sid)
+        except OSError:
+            pass
+
+    if _is_cloud_mode():
+        try:
+            from auth import load_credentials
+            if load_credentials() is not None:
+                client, config = _get_api_client()
+                for s in client.list_sessions(config["project_id"]) or []:
+                    sid = s.get("session_id")
+                    if sid and sid != current:
+                        seen.add(sid)
+        except BaseException:
+            if os.environ.get("BEACON_DEBUG") == "1":
+                import traceback as _tb
+                _tb.print_exc()
+
+    return sorted(seen)
+
+
+def _aggregate_and_persist(session_id: str, *, recovered: bool,
+                            summary_override: Optional[str] = None) -> dict:
+    """Run the aggregation core, write the local cache, push to cloud.
+
+    Returns the persisted payload. Single helper used by both cmd_session_end
+    (recovered=False) and cmd_session_rescue (recovered=True) so the
+    idempotency / merge semantics live in one place.
+    """
+    import session_log as _slog
+    from pathlib import Path as _Path
+    beacon_dir = _Path(os.path.dirname(get_project_file()) or ".beacon")
+
+    data = load_project()
+    existing_local = _read_local_session_log(session_id)
+
+    cloud_client = None
+    cloud_pid = ""
+    if _is_cloud_mode():
+        try:
+            from auth import load_credentials
+            if load_credentials() is not None:
+                cloud_client, cfg = _get_api_client()
+                cloud_pid = cfg.get("project_id", "")
+                try:
+                    remote = cloud_client.get_session_log(cloud_pid, session_id)
+                    # Server returns the persisted dict on success; on 404 the
+                    # api_client raises RuntimeError("API error 404: ..."), which
+                    # we treat as "no existing entry".
+                except RuntimeError:
+                    remote = None
+                if remote and (not existing_local
+                               or remote.get("last_aggregated_at", "")
+                                  >= existing_local.get("last_aggregated_at", "")):
+                    existing_local = remote
+        except BaseException:
+            if os.environ.get("BEACON_DEBUG") == "1":
+                import traceback as _tb
+                _tb.print_exc()
+
+    payload = _slog.aggregate_session(
+        project_data=data,
+        beacon_dir=beacon_dir,
+        session_id=session_id,
+        recovered=recovered,
+        summary_override=summary_override,
+        cloud_client=cloud_client,
+        cloud_project_id=cloud_pid,
+        existing_log=existing_local,
+    )
+    _write_local_session_log(payload)
+    _push_session_log_to_cloud(payload)
+    return payload
+
+
+def cmd_session_end():
+    """Finalize the current session: aggregate its entries into the session log.
+
+    Idempotent per SPEC §3: running twice on the same session produces the
+    same logical result. Callers (typically /beacon-session-end Skill) may
+    supply an AI-generated summary via BEACON_SUMMARY; otherwise the
+    mechanical fallback in session_log.aggregate_session is used.
+    """
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    summary_override = os.environ.get("BEACON_SUMMARY", "").strip() or None
+    explicit_sid = os.environ.get("BEACON_SESSION_ID", "").strip()
+    try:
+        import session as _session
+        sid = explicit_sid or _session.get_session_id()
+    except Exception:
+        sid = explicit_sid
+    if not sid:
+        print("Error: no session id (no .beacon/session.json and BEACON_SESSION_ID unset)",
+              file=sys.stderr)
+        sys.exit(1)
+
+    payload = _aggregate_and_persist(sid, recovered=False,
+                                      summary_override=summary_override)
+    if json_mode:
+        print(json.dumps(payload, ensure_ascii=False))
+    else:
+        print(f"Session log upserted: {sid}")
+        print(f"  notes: {len(payload.get('note_ids', []))}, "
+              f"commits: {len(payload.get('commit_ids', []))}, "
+              f"prs: {len(payload.get('pr_ids', []))}")
+
+
+def cmd_session_rescue():
+    """Aggregate all sessions other than the current one.
+
+    Per SPEC §7 the rescue path does NOT gate on heartbeat freshness — the
+    aggregation is idempotent, so even rescuing an alive session is safe:
+    the alive side's session-end will overwrite us later with a richer
+    summary. ``recovered=True`` is set on first creation so forensics can
+    distinguish rescue-born entries.
+    """
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    sids = _list_other_session_ids()
+    results = []
+    for sid in sids:
+        try:
+            payload = _aggregate_and_persist(sid, recovered=True)
+            results.append({"session_id": sid, "status": "ok",
+                            "notes": len(payload.get("note_ids", [])),
+                            "commits": len(payload.get("commit_ids", [])),
+                            "prs": len(payload.get("pr_ids", [])),
+                            "recovered": payload.get("recovered", False)})
+        except BaseException as e:
+            results.append({"session_id": sid, "status": "error", "error": str(e)})
+    if json_mode:
+        print(json.dumps(results, ensure_ascii=False))
+    else:
+        if not results:
+            print("No other sessions to rescue.")
+        else:
+            for r in results:
+                if r["status"] == "ok":
+                    print(f"  {r['session_id']}: rescued "
+                          f"(notes={r['notes']}, commits={r['commits']}, prs={r['prs']}, "
+                          f"recovered={r['recovered']})")
+                else:
+                    print(f"  {r['session_id']}: error — {r.get('error','')}")
+
+
+def cmd_session_log_list():
+    """List recent session log entries. Used by /beacon-session-start."""
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    try:
+        limit = int(os.environ.get("BEACON_LIMIT", "0") or 0)
+    except ValueError:
+        limit = 0
+
+    entries: list[dict] = []
+    if _is_cloud_mode():
+        try:
+            from auth import load_credentials
+            if load_credentials() is not None:
+                client, config = _get_api_client()
+                entries = client.list_session_logs(config["project_id"], limit=limit) or []
+        except BaseException:
+            entries = []
+    if not entries:
+        # Local cache fallback
+        d = _session_logs_dir()
+        if os.path.isdir(d):
+            for name in os.listdir(d):
+                if name.endswith(".json"):
+                    try:
+                        with open(os.path.join(d, name), "r", encoding="utf-8") as f:
+                            entries.append(json.load(f))
+                    except (OSError, json.JSONDecodeError):
+                        continue
+            entries.sort(key=lambda e: e.get("last_aggregated_at", ""), reverse=True)
+            if limit:
+                entries = entries[:limit]
+
+    if json_mode:
+        print(json.dumps(entries, ensure_ascii=False))
+        return
+    if not entries:
+        print("(no session logs)")
+        return
+    for e in entries:
+        sid = e.get("session_id", "?")
+        when = e.get("last_aggregated_at", "")
+        summary = (e.get("summary") or "")[:120]
+        print(f"  {sid} [{when}]: {summary}")
+
+
+def cmd_session_log_show():
+    """Show a single session log entry by session_id."""
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    sid = os.environ.get("BEACON_SESSION_ID", "").strip()
+    if not sid:
+        print("Error: session id required", file=sys.stderr)
+        sys.exit(1)
+    entry = _read_local_session_log(sid)
+    if entry is None and _is_cloud_mode():
+        try:
+            from auth import load_credentials
+            if load_credentials() is not None:
+                client, config = _get_api_client()
+                try:
+                    entry = client.get_session_log(config["project_id"], sid)
+                except RuntimeError:
+                    entry = None
+        except BaseException:
+            entry = None
+    if entry is None:
+        print(f"Session log not found: {sid}", file=sys.stderr)
+        sys.exit(1)
+    if json_mode:
+        print(json.dumps(entry, ensure_ascii=False))
+    else:
+        print(f"Session: {entry.get('session_id','')}")
+        print(f"Aggregated: {entry.get('last_aggregated_at','')}")
+        print(f"Summary: {entry.get('summary','')}")
+        print(f"Notes: {len(entry.get('note_ids', []))}")
+        print(f"Commits: {len(entry.get('commit_ids', []))}")
+        print(f"PRs: {len(entry.get('pr_ids', []))}")
+        if entry.get("recovered"):
+            print("(recovered)")
+
+
+# ---------------------------------------------------------------------------
 # Member management (e-624)
 # ---------------------------------------------------------------------------
 #
@@ -7512,6 +7861,10 @@ if __name__ == "__main__":
         "note_add": cmd_note_add,
         "note_list": cmd_note_list,
         "note_clear": cmd_note_clear,
+        "session_end": cmd_session_end,
+        "session_rescue": cmd_session_rescue,
+        "session_log_list": cmd_session_log_list,
+        "session_log_show": cmd_session_log_show,
         "member_add": cmd_member_add,
         "member_list": cmd_member_list,
         "member_remove": cmd_member_remove,
