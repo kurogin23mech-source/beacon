@@ -18,6 +18,12 @@ Design summary (see trailnode/docs/manifest-schema.md, ms-2 SPEC, ms-6 SPEC):
   user). Push/pull authz now goes through `trailnode_orgs.is_member()`
   and `trailnode_orgs.require_org_member()` — endpoints never touch the
   `orgs` / `memberships` collections directly.
+- **ms-3 change (e-30)**: Manifest docs carry `updated_at` (last write
+  timestamp, used as diff-sync frontier by the list endpoint) and
+  `deleted_at` (soft-delete sentinel; `None` = active). Soft-delete is the
+  convention going forward — the list endpoint will filter by
+  `deleted_at == None` for active docs and read `deleted_at >= since`
+  for the deleted-ids tail. Push always resets `deleted_at` to `None`.
 """
 
 from __future__ import annotations
@@ -165,6 +171,12 @@ def make_router(require_auth) -> APIRouter:
 
         from google.cloud import firestore as fs
         manifest_data["uploaded_at"] = fs.SERVER_TIMESTAMP
+        # ms-3 e-30: updated_at is the diff-sync frontier (server returns
+        # docs where updated_at >= since). Re-push always bumps it, so a
+        # soft-deleted manifest re-pushed under the same id is implicitly
+        # un-deleted: deleted_at goes back to None.
+        manifest_data["updated_at"] = fs.SERVER_TIMESTAMP
+        manifest_data["deleted_at"] = None
 
         slug = _slug(capability_id)
         db.get_db().collection(_CAPABILITIES_COLLECTION).document(slug).set(manifest_data)
