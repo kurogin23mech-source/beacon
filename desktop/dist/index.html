@@ -1799,6 +1799,9 @@ let state = {
   // Operations は state.project.operations から read (追加 loader 不要)。
   // Notes はサーバー / CLI 経由で取得する必要があるため state に持つ。
   sessionNotes: [],
+  // ms-57 e-1041: Session tab sub-view + session log list (mirror of Web state).
+  sessionView: 'notes',
+  sessionLogs: [],
   // SHARED state slots that Tauri also needs (Web initializes these in its
   // own SKIP block; Tauri must mirror them or render() throws on the first
   // expanded milestone — state.showCancelled.has() blows up if undefined,
@@ -1873,6 +1876,18 @@ const dataSource = {
     state.sessionNotes = cloudMode
       ? JSON.parse(await invoke('cloud_list_notes'))
       : [];
+  },
+  // ms-57 e-1041: session log list. Cloud Rust binding (`cloud_list_session_logs`)
+  // will be wired in a follow-up; until then we fail-soft to an empty list so
+  // the Session Log sub-view simply shows "no entries" instead of crashing.
+  loadSessionLogs: async () => {
+    try {
+      state.sessionLogs = cloudMode && typeof invoke === 'function'
+        ? JSON.parse(await invoke('cloud_list_session_logs', { limit: 5 }))
+        : [];
+    } catch (_e) {
+      state.sessionLogs = [];
+    }
   },
   loadDocumentContent: async (docId) => {
     if (cloudMode) {
@@ -2667,7 +2682,7 @@ function renderMainContent() {
       <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
       <button class="tab-btn ${state.activeTab === 'releases' ? 'active' : ''}" data-action="switch-tab" data-tab="releases">Releases</button>
       <button class="tab-btn ${state.activeTab === 'operations' ? 'active' : ''}" data-action="switch-tab" data-tab="operations">Operations</button>
-      <button class="tab-btn ${state.activeTab === 'notes' ? 'active' : ''}" data-action="switch-tab" data-tab="notes">Notes</button>
+      <button class="tab-btn ${state.activeTab === 'notes' ? 'active' : ''}" data-action="switch-tab" data-tab="notes">Session</button>
     </div>
     ${state.activeTab === 'dashboard' ? (state.showGraph ? renderGraphSection() : `
     <section class="milestones fade-in">
@@ -2692,7 +2707,7 @@ function renderMainContent() {
     ${state.activeTab === 'documents' ? `<div id="documents-container">${renderDocumentsSection()}</div>` : ''}
     ${state.activeTab === 'releases' ? renderReleasesSection() : ''}
     ${state.activeTab === 'operations' ? renderOperationsSection() : ''}
-    ${state.activeTab === 'notes' ? renderNotesSection() : ''}
+    ${state.activeTab === 'notes' ? renderSessionSection() : ''}
   `;
 }
 
@@ -2913,7 +2928,12 @@ async function switchTab(tab) {
     await Promise.all(loads);
   }
   if (tab === 'notes') {
-    dataSource.loadSessionNotes().then(() => render()).catch(() => {});
+    // ms-57 e-1041: Session tab carries two sub-views (notes/logs). Kick
+    // off both loads in parallel so toggling between them is instant.
+    Promise.all([
+      dataSource.loadSessionNotes(),
+      dataSource.loadSessionLogs(),
+    ]).then(() => render()).catch(() => {});
   }
   render();
 }
@@ -3630,6 +3650,60 @@ function renderOperationsSection() {
 }
 
 
+function renderSessionSection() {
+  // ms-57 e-1041: the Session tab is a 2-view container — Notes (live
+  // scratch within the current session) and Session Log (per-session
+  // aggregated entries, decision-trail of past sessions). Sharing one
+  // tab makes the "where did that hand-off go?" mental model coherent.
+  const view = state.sessionView === 'logs' ? 'logs' : 'notes';
+  const toggle = `<div class="op-tabs" style="display:flex;gap:6px;margin-bottom:12px;">
+    <button class="tab-btn ${view === 'notes' ? 'active' : ''}"
+            data-action="set-session-view" data-view="notes">Notes</button>
+    <button class="tab-btn ${view === 'logs' ? 'active' : ''}"
+            data-action="set-session-view" data-view="logs">Session Log</button>
+  </div>`;
+  const body = view === 'logs' ? renderSessionLogsSection() : renderNotesSection();
+  return `<section class="retro-section fade-in">${toggle}${body}</section>`;
+}
+
+
+function renderSessionLogsSection() {
+  const logs = state.sessionLogs || [];
+  if (!logs.length) {
+    return `<div class="op-empty" style="padding:16px 0;">
+      まだセッションログがありません。<br>
+      <span style="font-size:0.72rem;color:var(--text-dim);">
+        セッション終了時 (<code>beacon session end</code> または /beacon-session-end Skill) に
+        当該セッションの notes/commits/PRs が集約されてここに残ります。
+      </span>
+    </div>`;
+  }
+  const rows = logs.map(l => {
+    const sid = esc(l.session_id || '');
+    const when = (l.last_aggregated_at || '').slice(0, 16).replace('T', ' ');
+    const counts = `notes:${(l.note_ids || []).length} · commits:${(l.commit_ids || []).length} · prs:${(l.pr_ids || []).length}`;
+    const recovered = l.recovered
+      ? '<span style="color:var(--text-dim);font-size:0.7rem;">(recovered)</span>'
+      : '';
+    const summary = esc(l.summary || '');
+    return `<div class="note-row" style="flex-direction:column;align-items:flex-start;gap:4px;padding:8px 0;border-bottom:1px solid var(--border);">
+      <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;">
+        <span class="note-time">${when}</span>
+        <span style="font-size:0.7rem;color:var(--text-dim);font-family:monospace;">${sid}</span>
+        ${recovered}
+      </div>
+      <div style="font-size:0.78rem;color:var(--text-secondary);">${counts}</div>
+      <div class="note-text" style="font-size:0.85rem;">${summary}</div>
+    </div>`;
+  }).join('');
+  return `<div class="op-section-label" style="margin-bottom:10px;">
+    セッションログ（per-session 集約、意思決定の軌跡）
+  </div>
+  ${rows}
+  <div style="margin-top:12px;font-size:0.7rem;color:var(--text-dim);">${logs.length}件 · 直近のみ</div>`;
+}
+
+
 function renderNotesSection() {
   const notes = state.sessionNotes || [];
   const noteRows = notes.map(n => {
@@ -4109,6 +4183,12 @@ function handleCommonAction(action, el) {
     // Each platform supplies `dataSource` (Web SKIP: fetch/api; Tauri layer.js: invoke).
     case 'switch-tab':
       switchTab(el.dataset.tab); return true;
+    case 'set-session-view':
+      // ms-57 e-1041: in-tab toggle between Notes (live scratch) and
+      // Session Log (per-session aggregated entries).
+      state.sessionView = el.dataset.view === 'logs' ? 'logs' : 'notes';
+      render();
+      return true;
     case 'open-document':
       openDocument(el.dataset.docId); return true;
     case 'open-retro':

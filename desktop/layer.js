@@ -41,6 +41,9 @@ let state = {
   // Operations は state.project.operations から read (追加 loader 不要)。
   // Notes はサーバー / CLI 経由で取得する必要があるため state に持つ。
   sessionNotes: [],
+  // ms-57 e-1041: Session tab sub-view + session log list (mirror of Web state).
+  sessionView: 'notes',
+  sessionLogs: [],
   // SHARED state slots that Tauri also needs (Web initializes these in its
   // own SKIP block; Tauri must mirror them or render() throws on the first
   // expanded milestone — state.showCancelled.has() blows up if undefined,
@@ -115,6 +118,18 @@ const dataSource = {
     state.sessionNotes = cloudMode
       ? JSON.parse(await invoke('cloud_list_notes'))
       : [];
+  },
+  // ms-57 e-1041: session log list. Cloud Rust binding (`cloud_list_session_logs`)
+  // will be wired in a follow-up; until then we fail-soft to an empty list so
+  // the Session Log sub-view simply shows "no entries" instead of crashing.
+  loadSessionLogs: async () => {
+    try {
+      state.sessionLogs = cloudMode && typeof invoke === 'function'
+        ? JSON.parse(await invoke('cloud_list_session_logs', { limit: 5 }))
+        : [];
+    } catch (_e) {
+      state.sessionLogs = [];
+    }
   },
   loadDocumentContent: async (docId) => {
     if (cloudMode) {
