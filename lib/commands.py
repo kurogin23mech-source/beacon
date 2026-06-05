@@ -3799,20 +3799,23 @@ def _doc_restore_revision(doc_id: str, rev: str) -> None:
 
 
 def _doc_restore_from_trash(doc_id: str, *, reason: str = "") -> None:
-    """Reverse a soft-delete of a local doc (ms-14 e-973).
+    """Reverse a soft-delete of a doc.
 
-    Cloud mode is not yet supported — the server still hard-deletes
-    via ``client.delete_document``; that path is tracked as a separate
-    follow-up. Raising here keeps the local / cloud divergence visible
-    rather than silently doing nothing.
+    Local mode rewrites the file's frontmatter. Cloud mode calls the
+    server restore endpoint (ms-14 e-991), keeping the two paths
+    behaviorally symmetric.
     """
     if _is_cloud_mode():
-        print(
-            "Error: doc trash restore is not yet supported in cloud mode "
-            "(server API still hard-deletes; follow-up task tracks this).",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        client, config = _get_api_client()
+        try:
+            client.restore_document(config["project_id"], doc_id, reason=reason)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Restored from trash: {doc_id}")
+        if reason:
+            print(f"  Reason: {reason}")
+        return
     docs_dir = _get_docs_dir()
     fpath = os.path.join(docs_dir, f"{doc_id}.md")
     if not os.path.exists(fpath):
@@ -3848,16 +3851,12 @@ def _doc_restore_from_trash(doc_id: str, *, reason: str = "") -> None:
 def cmd_doc_delete():
     """Soft-delete a document.
 
-    Local mode flips the frontmatter to ``status: cancelled`` and stamps
-    ``trashed_at`` / ``trashed_by`` / optional ``trash_reason`` instead
-    of unlinking the file (ms-14 e-973). The file stays at the canonical
-    path so a restore is a frontmatter rewrite rather than an undelete
-    from version control.
-
-    Cloud mode is intentionally still a hard delete via the API. The
-    server-side soft-delete (plus a Web UI trash tab) is tracked as a
-    follow-up task; keeping the divergence loud avoids pretending the
-    paths are symmetric.
+    Both modes set ``status: cancelled`` and stamp ``trashed_at`` /
+    ``trashed_by`` / optional ``trash_reason``. Local rewrites the file
+    frontmatter (ms-14 e-973); cloud calls the server's soft-delete
+    endpoint and stores the same fields on the Firestore document
+    (ms-14 e-991). Restore is a status flip in both modes — no version
+    control undelete required.
     """
     doc_id = os.environ.get("BEACON_DOC_ID", "")
     reason = os.environ.get("BEACON_REASON", "")
@@ -3868,19 +3867,21 @@ def cmd_doc_delete():
         sys.exit(1)
 
     if _is_cloud_mode():
-        # TODO(e-973 follow-up): replace this with API soft-delete once the
-        # server supports a status field on documents. The Web UI Trash tab
-        # depends on the same endpoint, so the two land together.
         client, config = _get_api_client()
         try:
-            client.delete_document(config["project_id"], doc_id)
+            client.delete_document(config["project_id"], doc_id, reason=reason)
         except Exception as e:
             print(f"Error: {e}")
             sys.exit(1)
         if json_mode:
-            print(json.dumps({"doc_id": doc_id, "deleted": True}, ensure_ascii=False))
+            print(json.dumps(
+                {"doc_id": doc_id, "status": "cancelled"},
+                ensure_ascii=False,
+            ))
         else:
-            print(f"Deleted: {doc_id}")
+            print(f"Trashed: {doc_id}")
+            if reason:
+                print(f"  Reason: {reason}")
         return
 
     docs_dir = _get_docs_dir()
@@ -3923,18 +3924,11 @@ def cmd_doc_delete():
 
 
 def cmd_doc_trash():
-    """List soft-deleted docs within an N-day window (ms-14 e-973).
+    """List soft-deleted docs within an N-day window (ms-14 e-973 / e-991).
 
-    Local mode only. Cloud mode refuses loudly until the server adds a
-    status field — see cmd_doc_delete's follow-up note.
+    Local mode reads docs/*.md frontmatter; cloud mode hits the unified
+    GET /trash endpoint and filters to the documents slice.
     """
-    if _is_cloud_mode():
-        print(
-            "Error: doc trash listing is not yet supported in cloud mode "
-            "(server API still hard-deletes; follow-up task tracks this).",
-            file=sys.stderr,
-        )
-        sys.exit(1)
     days_env = os.environ.get("BEACON_DAYS", "30")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     if days_env in ("", "all", "0"):
@@ -3945,6 +3939,33 @@ def cmd_doc_trash():
         except ValueError:
             print(f"Error: invalid --days value: {days_env}", file=sys.stderr)
             sys.exit(1)
+
+    if _is_cloud_mode():
+        client, config = _get_api_client()
+        # The unified /trash endpoint accepts days=0 for "no time filter"
+        # to mirror the local CLI's --days all behavior.
+        days_arg = 0 if since_days is None else since_days
+        try:
+            payload = client.list_trash(config["project_id"], days=days_arg)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        out = payload.get("documents", [])
+        if json_mode:
+            print(json.dumps(out, ensure_ascii=False))
+            return
+        if not out:
+            window = "all time" if since_days is None else f"last {since_days} days"
+            print(f"No trashed docs in {window}.")
+            return
+        for item in out:
+            when = item.get("trashed_at") or "unknown date"
+            by = item.get("trashed_by", "") or "?"
+            scope = item.get("scope", "")
+            print(f"[{item['doc_id']}] ({scope}, trashed {when} by {by}) {item['title']}")
+            if item.get("trash_reason"):
+                print(f"  reason: {item['trash_reason']}")
+        return
 
     import datetime as _dt
     cutoff = None

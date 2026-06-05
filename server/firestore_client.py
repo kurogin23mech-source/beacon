@@ -213,8 +213,13 @@ DOCS_SUBCOLLECTION = "documents"
 DOC_REVISIONS_SUBCOLLECTION = "document_revisions"
 
 
-def list_documents(project_id: str) -> list[dict]:
-    """List all documents for a project."""
+def list_documents(project_id: str, include_trashed: bool = False) -> list[dict]:
+    """List all documents for a project.
+
+    By default soft-deleted docs are filtered out. ``include_trashed=True``
+    keeps them in the list with a ``trashed: true`` marker so the Web UI
+    Trash tab can render them without a second roundtrip (ms-14 e-991).
+    """
     docs = (
         get_db()
         .collection(COLLECTION)
@@ -226,8 +231,8 @@ def list_documents(project_id: str) -> list[dict]:
     result = []
     for doc in docs:
         data = doc.to_dict()
-        # Filter out soft-deleted documents
-        if data.get("deleted"):
+        is_trashed = bool(data.get("deleted"))
+        if is_trashed and not include_trashed:
             continue
         # milestone: Firestore field first, fallback to frontmatter
         milestone = data.get("milestone") or _extract_frontmatter_field(
@@ -241,6 +246,12 @@ def list_documents(project_id: str) -> list[dict]:
         }
         if milestone:
             entry["milestone"] = milestone
+        if is_trashed:
+            entry["trashed"] = True
+            entry["trashed_at"] = data.get("deleted_at", "")
+            entry["trashed_by"] = data.get("deleted_by", "")
+            if data.get("trash_reason"):
+                entry["trash_reason"] = data["trash_reason"]
         result.append(entry)
     return result
 
@@ -355,8 +366,13 @@ def get_document_revision(project_id: str, doc_id: str, rev: int) -> dict | None
     return None
 
 
-def delete_document(project_id: str, doc_id: str, deleted_by: str = "unknown") -> bool:
-    """Soft-delete a document (sets deleted flag, never physically removes). Returns True if existed."""
+def delete_document(project_id: str, doc_id: str, deleted_by: str = "unknown",
+                    reason: str = "") -> bool:
+    """Soft-delete a document (sets deleted flag, never physically removes).
+
+    Optional ``reason`` is stored as ``trash_reason`` for audit symmetry
+    with local mode's frontmatter (ms-14 e-991). Returns True if existed.
+    """
     import datetime
     doc_ref = (
         get_db()
@@ -367,12 +383,111 @@ def delete_document(project_id: str, doc_id: str, deleted_by: str = "unknown") -
     doc = doc_ref.get()
     if not doc.exists:
         return False
-    doc_ref.update({
+    update = {
         "deleted": True,
         "deleted_at": datetime.datetime.now().isoformat(),
         "deleted_by": deleted_by,
-    })
+        # Clear any prior restore stamps so audit fields reflect the
+        # current trash event.
+        "restored_at": firestore.DELETE_FIELD,
+        "restored_by": firestore.DELETE_FIELD,
+        "restore_reason": firestore.DELETE_FIELD,
+    }
+    if reason:
+        update["trash_reason"] = reason
+    else:
+        update["trash_reason"] = firestore.DELETE_FIELD
+    doc_ref.update(update)
     return True
+
+
+def restore_document(project_id: str, doc_id: str, restored_by: str = "unknown",
+                     reason: str = "") -> bool:
+    """Reverse a soft-delete (ms-14 e-991).
+
+    Clears ``deleted`` + trash audit fields and stamps ``restored_at`` /
+    ``restored_by``. Returns ``False`` if the doc doesn't exist or isn't
+    currently trashed (no silent no-op).
+    """
+    import datetime
+    doc_ref = (
+        get_db()
+        .collection(COLLECTION).document(project_id)
+        .collection(DOCS_SUBCOLLECTION)
+        .document(doc_id)
+    )
+    doc = doc_ref.get()
+    if not doc.exists:
+        return False
+    data = doc.to_dict() or {}
+    if not data.get("deleted"):
+        return False
+    update = {
+        "deleted": firestore.DELETE_FIELD,
+        "deleted_at": firestore.DELETE_FIELD,
+        "deleted_by": firestore.DELETE_FIELD,
+        "trash_reason": firestore.DELETE_FIELD,
+        "restored_at": datetime.datetime.now().isoformat(),
+        "restored_by": restored_by,
+    }
+    if reason:
+        update["restore_reason"] = reason
+    doc_ref.update(update)
+    return True
+
+
+def list_trashed_documents(project_id: str, days: int | None = 30) -> list[dict]:
+    """Return soft-deleted docs within the last ``days`` window (ms-14 e-991).
+
+    ``days=None`` returns the full set (no time filter). Items are
+    ordered by ``deleted_at`` descending so the most recent trash shows
+    first. ``days_ago`` is computed for convenience in the Web UI.
+    """
+    import datetime
+    cutoff_iso = None
+    if days is not None:
+        cutoff_iso = (datetime.datetime.now()
+                      - datetime.timedelta(days=days)).isoformat()
+    now = datetime.datetime.now()
+    docs = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(DOCS_SUBCOLLECTION)
+        .where("deleted", "==", True)
+        .stream()
+    )
+    out = []
+    for doc in docs:
+        data = doc.to_dict() or {}
+        deleted_at = data.get("deleted_at", "")
+        if cutoff_iso and deleted_at and deleted_at < cutoff_iso:
+            continue
+        days_ago = None
+        if deleted_at:
+            try:
+                # deleted_at is local-tz iso (no Z suffix); reuse it as-is.
+                dt = datetime.datetime.fromisoformat(deleted_at)
+                days_ago = max(0, (now - dt).days)
+            except (ValueError, TypeError):
+                days_ago = None
+        milestone = data.get("milestone") or _extract_frontmatter_field(
+            data.get("content", ""), "milestone"
+        )
+        item = {
+            "doc_id": doc.id,
+            "title": data.get("title", "") or doc.id,
+            "scope": data.get("scope", "memo"),
+            "trashed_at": deleted_at or None,
+            "trashed_by": data.get("deleted_by", ""),
+            "trash_reason": data.get("trash_reason", ""),
+            "days_ago": days_ago,
+        }
+        if milestone:
+            item["milestone"] = milestone
+        out.append(item)
+    out.sort(key=lambda x: x["trashed_at"] or "", reverse=True)
+    return out
 
 
 # ---------------------------------------------------------------------------
