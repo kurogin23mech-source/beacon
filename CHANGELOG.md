@@ -2,6 +2,31 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.11.0] - 2026-06-05
+
+- Merge pull request #48 from kurogin23mech-source/ms-43-entry-id-search
+- Merge pull request #45 from kurogin23mech-source/ms-14-changelog-sweep
+- Merge pull request #47 from kurogin23mech-source/ms-53/orgs
+- feat(ms-43): search q matches entry id / doc_id by number (e-1010)
+- feat(trailnode): organization scope — server-side OrgService + capability authz (TrailNode ms-6)
+- Merge pull request #44 from kurogin23mech-source/ms-31-stop-hook-fix
+- Merge pull request #43 from kurogin23mech-source/ms-14-cloud-trash-restore
+- Merge pull request #46 from kurogin23mech-source/ms-39-hook-observability
+- fix(ms-39): flatten newlines in bash hook debug log (review nit, e-940)
+- feat(ms-39): BEACON_HOOK_DEBUG observability for post-commit hook (e-940)
+- feat(ms-14): cloud changelog persistence + 30-day trash sweep (e-825 + e-826/e-991 retention)
+- fix(ms-31): Stop hook must use hookSpecificOutput.additionalContext
+- feat(ms-14): cloud doc trash/restore + unified Trash tab (e-826 / e-991)
+- Merge pull request #42 from kurogin23mech-source/ms-14-doc-trash-restore
+- feat(ms-14): doc trash + restore in local mode (e-973)
+- Merge pull request #41 from kurogin23mech-source/ms-32-done-reason-required
+- feat(ms-32): require --reason on done/observe + Web UI auto-link reasons (e-976)
+- Merge pull request #40 from kurogin23mech-source/ms-14-trash-export
+- feat(ms-14): trash + restore for milestones and tasks (e-826)
+- feat(ms-14): project export/import — full snapshot ZIP backup (e-828)
+- docs(release): update README/CHANGELOG for v0.10.0
+- chore(release): bump formula to 0.10.0
+
 ## [v0.10.0] - 2026-06-05
 
 - Merge pull request #39 from kurogin23mech-source/ms-52-remove-health-assertion
