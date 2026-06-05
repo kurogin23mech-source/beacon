@@ -23,6 +23,22 @@ def get_project_file():
     return os.environ.get("BEACON_PROJECT_FILE", ".beacon/project.json")
 
 
+def _resolve_session_id() -> str:
+    """Get the current beacon session_id, or "" if it can't be resolved.
+
+    Returns "" on any failure so that commit/PR recording never fails just
+    because session.py is misbehaving (corrupt session.json, missing .beacon/,
+    test sandboxes that don't run the heartbeat). The empty string is
+    the documented "no session" sentinel in core.log_commit / core.pr_add —
+    those entries simply won't appear in session-log aggregation queries.
+    """
+    try:
+        import session as _session
+        return _session.get_session_id()
+    except Exception:
+        return ""
+
+
 def _user_home():
     """Resolve the user home directory, honoring an explicit HOME override.
 
@@ -1591,11 +1607,14 @@ def cmd_log():
     except Exception:
         actor = None
 
+    session_id = _resolve_session_id()  # ms-57 / e-1062
+
     data = load_project()
     result = core.log_commit(
         data, ms_id=ms_id, commit_hash=commit_hash,
         message=message, date=date, summary=summary, progress=progress,
         behavior=behavior, resolves=resolves, actor=actor,
+        session_id=session_id,
     )
     save_project(data)
 
@@ -1667,11 +1686,14 @@ def cmd_log_finalize():
     except Exception:
         actor = None
 
+    session_id = _resolve_session_id()  # ms-57 / e-1062
+
     data = load_project()
     result = core.log_commit(
         data, ms_id=ms_id, commit_hash=commit_hash,
         message=message, date=date, summary=summary_text, progress=progress,
         behavior=behavior, resolves=resolves, actor=actor,
+        session_id=session_id,
     )
 
     if new_summary:
@@ -4236,7 +4258,8 @@ def cmd_pr_add():
     data = load_project()
     try:
         eid = core.pr_add(data, ms_id=ms_id, url=url, author=author,
-                          intent=intent, date=date, title=title, commits=commits)
+                          intent=intent, date=date, title=title, commits=commits,
+                          session_id=_resolve_session_id())  # ms-57 / e-1062
     except ValueError as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
@@ -4669,7 +4692,8 @@ def cmd_pr_create():
     data = load_project()
     try:
         eid = core.pr_add(data, ms_id=ms_id, url=pr_url, intent=intent, date=date,
-                          title=title, commits=commits)
+                          title=title, commits=commits,
+                          session_id=_resolve_session_id())  # ms-57 / e-1062
     except ValueError as e:
         print(f"Warning: beacon pr record failed: {e}", file=sys.stderr)
         return
