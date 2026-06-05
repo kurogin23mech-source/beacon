@@ -1090,6 +1090,165 @@ def cmd_milestone_delete():
         print(f"  Reason: {reason}")
 
 
+# ---------------------------------------------------------------------------
+# Cloud-mode purge helpers (e-1030)
+#
+# Local purge mutates `.beacon/project.json` directly via load_project_unsafe
+# + save_project_unsafe. Cloud purge instead calls the server's `POST
+# .../purge` endpoint, which enforces owner-only access. The pre-flight
+# duplicate listing is kept symmetric with local UX so the operator sees the
+# same "re-run with --index <n>" hint regardless of mode.
+# ---------------------------------------------------------------------------
+
+def _cloud_purge_403_message(role_word: str) -> str:
+    """Translate a server 403 into a CLI-friendly error string."""
+    return (
+        f"Error: only the project owner can purge {role_word} "
+        "(owner access required). Ask the project owner to run "
+        "this command, or transfer ownership first."
+    )
+
+
+def _cloud_fetch_project_or_exit(client, project_id: str) -> dict:
+    """Fetch the cloud project for pre-flight; exit 1 on error."""
+    try:
+        return client.get_project(project_id)
+    except (RuntimeError, ConnectionError) as e:
+        print(f"Error: cannot read cloud project: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _cloud_purge_dispatch(action_label: str, fn, *,
+                          json_mode: bool, success_fmt) -> None:
+    """Call a purge API method and render success / failure output.
+
+    Args:
+        action_label: short label for error messages ("milestone", etc).
+        fn: zero-arg callable that performs the API request.
+        json_mode: BEACON_JSON=1 toggle.
+        success_fmt: callable(result) → list[str] of lines for human output.
+    """
+    try:
+        result = fn()
+    except RuntimeError as e:
+        msg = str(e)
+        if "403" in msg:
+            print(_cloud_purge_403_message(action_label + "s"), file=sys.stderr)
+            sys.exit(1)
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except ConnectionError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    if json_mode:
+        out = dict(result)
+        out["purged"] = True
+        print(json.dumps(out, ensure_ascii=False))
+    else:
+        for line in success_fmt(result):
+            print(line)
+
+
+def _cloud_milestone_purge(ms_id: str, *, reason: str,
+                            index: Optional[int], json_mode: bool) -> None:
+    client, config = _get_api_client()
+    project_id = config["project_id"]
+    data = _cloud_fetch_project_or_exit(client, project_id)
+    matches = core.find_milestones(data, ms_id)
+    if not matches:
+        print(f"Milestone not found: {ms_id}", file=sys.stderr)
+        sys.exit(1)
+    if len(matches) > 1 and index is None:
+        print(
+            f"Milestone '{ms_id}' has {len(matches)} duplicate records. "
+            "Re-run with --index <n>:",
+            file=sys.stderr,
+        )
+        for i, m in enumerate(matches, 1):
+            title = m.get("title", "(no title)")
+            status = m.get("status", "?")
+            print(f"  --index {i}  status={status}  title={title}",
+                  file=sys.stderr)
+        sys.exit(1)
+    _cloud_purge_dispatch(
+        "milestone",
+        lambda: client.purge_milestone(
+            project_id, ms_id, reason=reason, index=index),
+        json_mode=json_mode,
+        success_fmt=lambda r: [
+            f"Purged: [{r.get('id', ms_id)}] {r.get('title', '')}",
+            f"  Reason: {reason}",
+        ],
+    )
+
+
+def _cloud_entry_purge(entry_id: str, *, reason: str,
+                        index: Optional[int], json_mode: bool) -> None:
+    client, config = _get_api_client()
+    project_id = config["project_id"]
+    data = _cloud_fetch_project_or_exit(client, project_id)
+    matches = core.find_entries(data, entry_id)
+    if not matches:
+        print(f"Entry not found: {entry_id}", file=sys.stderr)
+        sys.exit(1)
+    if len(matches) > 1 and index is None:
+        print(
+            f"Entry '{entry_id}' has {len(matches)} duplicate records. "
+            "Re-run with --index <n>:",
+            file=sys.stderr,
+        )
+        for i, e in enumerate(matches, 1):
+            desc = e.get("description", "(no description)")
+            etype = e.get("type", "?")
+            print(f"  --index {i}  type={etype}  desc={desc[:60]}",
+                  file=sys.stderr)
+        sys.exit(1)
+    _cloud_purge_dispatch(
+        "entry",
+        lambda: client.purge_entry(
+            project_id, entry_id, reason=reason, index=index),
+        json_mode=json_mode,
+        success_fmt=lambda r: [
+            f"Purged entry: [{r.get('entry_id', entry_id)}] "
+            f"{r.get('description', '')[:80]}",
+            f"  Reason: {reason}",
+        ],
+    )
+
+
+def _cloud_operation_purge(op_id: str, *, reason: str,
+                            index: Optional[int], json_mode: bool) -> None:
+    client, config = _get_api_client()
+    project_id = config["project_id"]
+    data = _cloud_fetch_project_or_exit(client, project_id)
+    matches = core.find_operations(data, op_id)
+    if not matches:
+        print(f"Operation not found: {op_id}", file=sys.stderr)
+        sys.exit(1)
+    if len(matches) > 1 and index is None:
+        print(
+            f"Operation '{op_id}' has {len(matches)} duplicate records. "
+            "Re-run with --index <n>:",
+            file=sys.stderr,
+        )
+        for i, o in enumerate(matches, 1):
+            title = o.get("title", "(no title)")
+            status = o.get("status", "?")
+            print(f"  --index {i}  status={status}  title={title}",
+                  file=sys.stderr)
+        sys.exit(1)
+    _cloud_purge_dispatch(
+        "operation",
+        lambda: client.purge_operation(
+            project_id, op_id, reason=reason, index=index),
+        json_mode=json_mode,
+        success_fmt=lambda r: [
+            f"Purged operation: [{r.get('id', op_id)}] {r.get('title', '')}",
+            f"  Reason: {reason}",
+        ],
+    )
+
+
 def cmd_milestone_purge():
     """Hard-delete a milestone record (Issue #14 recovery path).
 
@@ -1102,6 +1261,10 @@ def cmd_milestone_purge():
     path also bypasses validation when residual duplicates remain so
     the operator can purge them one at a time; once clean, validation
     passes naturally on the next normal load.
+
+    Cloud mode (e-1030): routes through the server `POST .../purge` endpoint
+    which enforces owner-only access. Editors get a clear 403 instead of
+    silently mutating the local cache and pushing.
     """
     ms_id = os.environ.get("BEACON_MS_ID", "")
     reason = os.environ.get("BEACON_REASON", "")
@@ -1135,6 +1298,11 @@ def cmd_milestone_purge():
             print(f"Error: --index must be an integer, got '{index_str}'.",
                   file=sys.stderr)
             sys.exit(1)
+
+    if _is_cloud_mode():
+        _cloud_milestone_purge(ms_id, reason=reason, index=index,
+                               json_mode=json_mode)
+        return
 
     data = load_project_unsafe()
     # Pre-flight: if the operator did not pass --index but duplicates
@@ -1224,6 +1392,9 @@ def cmd_entry_purge():
     The entry-level analogue of cmd_milestone_purge. Loads via
     load_project_unsafe so it works on a project that fails validation, and
     falls back to an unsafe save while residual duplicates remain.
+
+    Cloud mode (e-1030): routes through the server purge endpoint, which is
+    owner-only.
     """
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
     reason = os.environ.get("BEACON_REASON", "")
@@ -1248,6 +1419,11 @@ def cmd_entry_purge():
             print(f"Error: --index must be an integer, got '{index_str}'.",
                   file=sys.stderr)
             sys.exit(1)
+
+    if _is_cloud_mode():
+        _cloud_entry_purge(entry_id, reason=reason, index=index,
+                           json_mode=json_mode)
+        return
 
     data = load_project_unsafe()
     matches = core.find_entries(data, entry_id)
@@ -1306,6 +1482,9 @@ def cmd_operation_purge():
     """Hard-delete an operation record (op-N) — duplicate-ID recovery (e-863).
 
     The operation-level analogue of cmd_milestone_purge.
+
+    Cloud mode (e-1030): routes through the server purge endpoint, which is
+    owner-only.
     """
     op_id = os.environ.get("BEACON_OP_ID", "")
     reason = os.environ.get("BEACON_REASON", "")
@@ -1330,6 +1509,11 @@ def cmd_operation_purge():
             print(f"Error: --index must be an integer, got '{index_str}'.",
                   file=sys.stderr)
             sys.exit(1)
+
+    if _is_cloud_mode():
+        _cloud_operation_purge(op_id, reason=reason, index=index,
+                               json_mode=json_mode)
+        return
 
     data = load_project_unsafe()
     matches = core.find_operations(data, op_id)
