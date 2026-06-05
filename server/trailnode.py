@@ -130,6 +130,19 @@ def _validate_manifest(
         raise HTTPException(400, detail="artifact_url must be an array if provided")
 
 
+def _filter_manifests_by_membership(
+    manifests: list[dict], member_slugs: set
+) -> list[dict]:
+    """Drop manifests whose `org_slug` is not in the caller's `member_slugs`.
+
+    ms-3 e-32: pure function so the cross-org leak guard is unit-testable
+    without a Firestore stub. Manifests without an `org_slug` field are
+    excluded conservatively (legacy docs predate ms-6's org concept and
+    should never be served on the new endpoint).
+    """
+    return [m for m in manifests if m.get("org_slug") in member_slugs]
+
+
 def make_router(require_auth) -> APIRouter:
     """Wire the TrailNode router with the host app's auth dependency."""
     router = APIRouter(prefix="/api/trailnode", tags=["trailnode"])
@@ -145,16 +158,16 @@ def make_router(require_auth) -> APIRouter:
         # Diff-sync endpoint. AI agents call this at session-start (via
         # SessionStart hook) to refresh the local manifest cache.
         #
-        # since=None → return every active manifest (first sync).
+        # since=None → return every visible active manifest (first sync).
         # since=ISO8601 → return manifests where updated_at >= since
         #   (composite index `deleted_at == None AND updated_at`) plus
         #   `deleted_ids` for the soft-delete frontier since the same
         #   point in time.
         #
-        # ms-3 e-32 will add org-scope filtering — currently the response
-        # surfaces every active manifest the auth layer lets through
-        # (which today is the entire collection because we have no per-
-        # user authz yet beyond require_auth).
+        # ms-3 e-32: results are filtered to org slugs the caller is a
+        # member of (`orgs.list_org_slugs_for_user`). A non-member can
+        # never see another org's manifest — neither in `manifests` nor
+        # as a bare id in `deleted_ids`.
         from datetime import datetime, timezone
 
         since_dt = None
@@ -169,25 +182,33 @@ def make_router(require_auth) -> APIRouter:
             if since_dt.tzinfo is None:
                 since_dt = since_dt.replace(tzinfo=timezone.utc)
 
+        member_slugs = orgs.list_org_slugs_for_user(user.get("sub", ""))
+
         collection = db.get_db().collection(_CAPABILITIES_COLLECTION)
 
         active_query = collection.where("deleted_at", "==", None)
         if since_dt is not None:
             active_query = active_query.where("updated_at", ">=", since_dt)
 
-        manifests = []
+        active_raw: list[dict] = []
         for doc in active_query.stream():
             data = doc.to_dict()
             for ts_field in ("uploaded_at", "updated_at", "deleted_at"):
                 val = data.get(ts_field)
                 if val is not None and hasattr(val, "isoformat"):
                     data[ts_field] = val.isoformat()
-            manifests.append(data)
+            active_raw.append(data)
+
+        manifests = _filter_manifests_by_membership(active_raw, member_slugs)
 
         deleted_ids: list[str] = []
         if since_dt is not None:
-            for doc in collection.where("deleted_at", ">=", since_dt).stream():
-                cap_id = doc.to_dict().get("id")
+            deleted_raw = [
+                doc.to_dict()
+                for doc in collection.where("deleted_at", ">=", since_dt).stream()
+            ]
+            for data in _filter_manifests_by_membership(deleted_raw, member_slugs):
+                cap_id = data.get("id")
                 if cap_id:
                     deleted_ids.append(cap_id)
 

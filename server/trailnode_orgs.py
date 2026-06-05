@@ -162,6 +162,30 @@ def require_org_member(slug: str, user_sub: str) -> None:
         )
 
 
+def list_org_slugs_for_user(user_sub: str) -> set[str]:
+    """Set of org slugs `user_sub` is a member of.
+
+    Lightweight variant of list_orgs_for_user that skips the org doc
+    fetch — used by manifest list authz (ms-3 e-32) where we only need
+    the slug set to filter cross-org results, not the full org payload.
+    Empty user_sub yields an empty set (defensive: caller may pass
+    unauthenticated default).
+    """
+    if not user_sub:
+        return set()
+    docs = (
+        db.get_db()
+        .collection(_MEMBERSHIPS_COLLECTION)
+        .where("user_sub", "==", user_sub)
+        .stream()
+    )
+    return {
+        slug
+        for slug in (m.to_dict().get("org_slug") for m in docs)
+        if slug
+    }
+
+
 def list_orgs_for_user(user_sub: str) -> list[dict]:
     """Every org `user_sub` is a member of. Used by GET /api/trailnode/orgs."""
     membership_docs = (
