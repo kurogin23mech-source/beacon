@@ -5725,6 +5725,418 @@ def cmd_project_unarchive():
     print(f"Unarchived: [{data.get('name', '')}]")
 
 
+# ---------------------------------------------------------------------------
+# Project export / import (ms-14 e-828): full-snapshot backup
+# ---------------------------------------------------------------------------
+#
+# Local-mode export reads the .beacon/ tree directly. Cloud-mode export
+# fetches via the API so the snapshot reflects authoritative state, not the
+# read-only local cache (CORE doc: cloud project.json is a cache). Both
+# write the same ZIP layout so a round-trip is possible.
+#
+# ZIP layout (schema_version=1):
+#   manifest.json   — required, describes source / version / entry counts
+#   project.json    — authoritative project state
+#   documents/<doc_id>.md (zero or more)
+#   changelog.jsonl (optional)
+#   retro/<file>.md (zero or more)
+#   config.json     (optional, project-level)
+#
+# Import is local-mode-only in this iteration: extract → write to a fresh
+# .beacon/ directory. Cloud import (push to API) is a follow-up.
+
+_BACKUP_SCHEMA_VERSION = 1
+
+
+def cmd_project_export():
+    """Pack the current project into a backup ZIP (ms-14 e-828).
+
+    Env-driven CLI surface (matches the rest of the dispatcher):
+      BEACON_OUTPUT   path to the ZIP to write (required)
+      BEACON_BACKUP   "1" to flag this as a full backup snapshot
+                     (currently the only mode; accepted for forward-compat
+                     with --backup CLI flag)
+      BEACON_JSON     "1" to emit a JSON receipt instead of human text
+    """
+    import zipfile
+    output = os.environ.get("BEACON_OUTPUT", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not output:
+        print("Error: --output <path> is required.", file=sys.stderr)
+        print(
+            "  Example: beacon project export --backup -o ~/Backups/myproj.zip",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Refuse to silently overwrite an existing file — backups should be
+    # append-only from the operator's POV.
+    if os.path.exists(output):
+        print(
+            f"Error: output already exists: {output}\n"
+            "  Choose a different path or remove the file first.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Collect contents based on mode.
+    if _is_cloud_mode():
+        snapshot = _collect_export_cloud()
+    else:
+        snapshot = _collect_export_local()
+
+    # Build manifest (entry_counts gives a quick integrity hash without
+    # parsing the whole project).
+    project_data = snapshot["project"]
+    ms_list = project_data.get("milestones", []) or []
+    op_list = project_data.get("operations", []) or []
+
+    def _count_entries(ms):
+        total = 0
+        for e in ms.get("entries", []) or []:
+            total += 1
+            for nested in e.get("entries", []) or []:
+                total += 1
+        return total
+
+    entry_counts = {
+        "milestones": len(ms_list),
+        "operations": len(op_list),
+        "top_level_entries": sum(_count_entries(ms) for ms in ms_list),
+        "documents": len(snapshot["documents"]),
+        "changelog_lines": snapshot["changelog_lines"],
+        "retro_files": len(snapshot["retros"]),
+    }
+
+    import datetime
+    manifest = {
+        "schema_version": _BACKUP_SCHEMA_VERSION,
+        "export_ts": datetime.datetime.now().isoformat(),
+        "project_name": project_data.get("name", ""),
+        "project_id": snapshot.get("project_id", ""),
+        "beacon_version": __version__,
+        "source_mode": "cloud" if _is_cloud_mode() else "local",
+        "entry_counts": entry_counts,
+    }
+
+    # Stream into ZIP. zipfile is in stdlib so no extra deps; DEFLATED
+    # keeps the size small for text-heavy beacon dumps.
+    written_paths: list[str] = []
+    try:
+        with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(
+                "manifest.json",
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            )
+            written_paths.append("manifest.json")
+
+            zf.writestr(
+                "project.json",
+                json.dumps(project_data, ensure_ascii=False, indent=2) + "\n",
+            )
+            written_paths.append("project.json")
+
+            for doc_id, doc_body in snapshot["documents"].items():
+                # doc_id is a Firestore-style ID or local slug; both are
+                # filesystem-safe (alphanumeric / hyphen).
+                zf.writestr(f"documents/{doc_id}.md", doc_body)
+                written_paths.append(f"documents/{doc_id}.md")
+
+            if snapshot["changelog"] is not None:
+                zf.writestr("changelog.jsonl", snapshot["changelog"])
+                written_paths.append("changelog.jsonl")
+
+            for retro_name, retro_body in snapshot["retros"].items():
+                zf.writestr(f"retro/{retro_name}", retro_body)
+                written_paths.append(f"retro/{retro_name}")
+
+            if snapshot["config"] is not None:
+                zf.writestr("config.json", snapshot["config"])
+                written_paths.append("config.json")
+    except (OSError, zipfile.BadZipFile) as e:
+        print(f"Error writing ZIP: {e}", file=sys.stderr)
+        # Best-effort cleanup so a half-written backup isn't mistaken for a
+        # complete one.
+        if os.path.exists(output):
+            try:
+                os.remove(output)
+            except OSError:
+                pass
+        sys.exit(1)
+
+    size_bytes = os.path.getsize(output)
+    if json_mode:
+        print(json.dumps({
+            "output": output,
+            "size_bytes": size_bytes,
+            "manifest": manifest,
+            "entries_written": len(written_paths),
+        }, ensure_ascii=False))
+    else:
+        print(f"Exported [{manifest['project_name']}] -> {output}")
+        print(f"  size: {size_bytes} bytes ({len(written_paths)} files)")
+        print(f"  milestones: {entry_counts['milestones']}, "
+              f"docs: {entry_counts['documents']}, "
+              f"changelog: {entry_counts['changelog_lines']} lines")
+
+
+def _collect_export_local() -> dict:
+    """Gather export contents from the local .beacon/ tree."""
+    data = load_project()
+    project_dir = os.path.dirname(get_project_file())
+
+    documents: dict[str, str] = {}
+    docs_dir = os.path.join(project_dir, "documents")
+    if os.path.isdir(docs_dir):
+        for fname in sorted(os.listdir(docs_dir)):
+            if not fname.endswith(".md"):
+                continue
+            try:
+                with open(os.path.join(docs_dir, fname), "r", encoding="utf-8") as f:
+                    documents[fname[:-3]] = f.read()
+            except (OSError, UnicodeDecodeError):
+                # Skip unreadable docs (cp932 cruft, etc.) — don't fail the
+                # whole export. The manifest count reflects what we got.
+                continue
+
+    changelog: Optional[str] = None
+    changelog_lines = 0
+    changelog_path = os.path.join(project_dir, "changelog.jsonl")
+    if os.path.isfile(changelog_path):
+        try:
+            with open(changelog_path, "r", encoding="utf-8") as f:
+                changelog = f.read()
+            changelog_lines = sum(
+                1 for line in changelog.splitlines() if line.strip()
+            )
+        except (OSError, UnicodeDecodeError):
+            changelog = None
+
+    retros: dict[str, str] = {}
+    retro_dir = os.path.join(project_dir, "retro")
+    if os.path.isdir(retro_dir):
+        for fname in sorted(os.listdir(retro_dir)):
+            if fname.startswith("."):
+                continue
+            fpath = os.path.join(retro_dir, fname)
+            if not os.path.isfile(fpath):
+                continue
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    retros[fname] = f.read()
+            except (OSError, UnicodeDecodeError):
+                continue
+
+    config_body: Optional[str] = None
+    config_path = os.path.join(project_dir, "config.json")
+    if os.path.isfile(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config_body = f.read()
+        except (OSError, UnicodeDecodeError):
+            config_body = None
+
+    return {
+        "project": data,
+        "project_id": data.get("id", "") or data.get("name", ""),
+        "documents": documents,
+        "changelog": changelog,
+        "changelog_lines": changelog_lines,
+        "retros": retros,
+        "config": config_body,
+    }
+
+
+def _collect_export_cloud() -> dict:
+    """Gather export contents via the Beacon API (authoritative)."""
+    client, config = _get_api_client()
+    project_id = config["project_id"]
+
+    project_data = client.get_project(project_id)
+
+    documents: dict[str, str] = {}
+    try:
+        doc_index = client.list_documents(project_id)
+    except Exception:
+        doc_index = []
+    for entry in doc_index:
+        doc_id = entry.get("doc_id") or entry.get("id") or ""
+        if not doc_id:
+            continue
+        try:
+            full = client.get_document(project_id, doc_id)
+        except Exception:
+            continue
+        # Reconstruct the .md body with frontmatter the same way
+        # `beacon doc show` does, so a local import sees identical files.
+        body = _reconstruct_doc_markdown(full)
+        documents[doc_id] = body
+
+    # Changelog and retros are not yet exposed by the API (e-825 covers
+    # changelog persistence). Snapshot what we can from the local cache
+    # if present — better than nothing for now, and the manifest records
+    # source_mode=cloud so future imports can recognize the gap.
+    project_dir = os.path.dirname(get_project_file())
+    changelog: Optional[str] = None
+    changelog_lines = 0
+    changelog_path = os.path.join(project_dir, "changelog.jsonl")
+    if os.path.isfile(changelog_path):
+        try:
+            with open(changelog_path, "r", encoding="utf-8") as f:
+                changelog = f.read()
+            changelog_lines = sum(
+                1 for line in changelog.splitlines() if line.strip()
+            )
+        except (OSError, UnicodeDecodeError):
+            changelog = None
+
+    retros: dict[str, str] = {}
+    retro_dir = os.path.join(project_dir, "retro")
+    if os.path.isdir(retro_dir):
+        for fname in sorted(os.listdir(retro_dir)):
+            if fname.startswith("."):
+                continue
+            fpath = os.path.join(retro_dir, fname)
+            if not os.path.isfile(fpath):
+                continue
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    retros[fname] = f.read()
+            except (OSError, UnicodeDecodeError):
+                continue
+
+    return {
+        "project": project_data,
+        "project_id": project_id,
+        "documents": documents,
+        "changelog": changelog,
+        "changelog_lines": changelog_lines,
+        "retros": retros,
+        "config": None,
+    }
+
+
+def _reconstruct_doc_markdown(full: dict) -> str:
+    """Rebuild the on-disk .md body (frontmatter + content) for an API doc."""
+    frontmatter_keys = ("scope", "milestone", "operation", "title")
+    fm_lines = ["---"]
+    for k in frontmatter_keys:
+        v = full.get(k)
+        if v not in (None, ""):
+            fm_lines.append(f"{k}: {v}")
+    fm_lines.append("---")
+    content = full.get("content", "")
+    if content and not content.startswith("\n"):
+        content = "\n" + content
+    return "\n".join(fm_lines) + content
+
+
+def cmd_project_import():
+    """Extract a backup ZIP into a target .beacon/ directory (local mode).
+
+    Env-driven CLI surface:
+      BEACON_INPUT    path to the ZIP to read (required)
+      BEACON_TARGET   directory to create / write into (required).
+                     The .beacon/ subdir is created here; refusal if it
+                     already exists with content unless --force.
+      BEACON_FORCE    "1" to allow overwriting an existing .beacon/
+                     (destructive — operator confirmation surface).
+      BEACON_JSON     "1" to emit a JSON receipt.
+    """
+    import zipfile
+    inp = os.environ.get("BEACON_INPUT", "").strip()
+    target = os.environ.get("BEACON_TARGET", "").strip()
+    force = os.environ.get("BEACON_FORCE", "") == "1"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not inp or not target:
+        print(
+            "Error: --input <zip> and --target <dir> are both required.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not os.path.isfile(inp):
+        print(f"Error: backup not found: {inp}", file=sys.stderr)
+        sys.exit(1)
+
+    target = os.path.abspath(target)
+    target_beacon = os.path.join(target, ".beacon")
+    if os.path.exists(target_beacon) and not force:
+        print(
+            f"Error: {target_beacon} already exists.\n"
+            "  Use --force to overwrite (destructive).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        with zipfile.ZipFile(inp, "r") as zf:
+            names = zf.namelist()
+            if "manifest.json" not in names or "project.json" not in names:
+                print(
+                    "Error: not a valid backup ZIP "
+                    "(missing manifest.json or project.json).",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            try:
+                manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                print(f"Error: malformed manifest.json: {e}", file=sys.stderr)
+                sys.exit(1)
+            if manifest.get("schema_version") != _BACKUP_SCHEMA_VERSION:
+                print(
+                    f"Error: backup schema_version={manifest.get('schema_version')} "
+                    f"is not supported by this beacon (expects {_BACKUP_SCHEMA_VERSION}).",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+            os.makedirs(target_beacon, exist_ok=True)
+            written = 0
+            for name in names:
+                if name == "manifest.json":
+                    continue  # don't litter the destination; we keep it
+                              # alongside as .manifest.json for trace
+                # Refuse any path attempting to escape the target via
+                # absolute paths or ".." segments.
+                norm = os.path.normpath(name)
+                if norm.startswith(("..", "/")) or os.path.isabs(norm):
+                    print(f"Error: refusing unsafe path in backup: {name}",
+                          file=sys.stderr)
+                    sys.exit(1)
+                dest = os.path.join(target_beacon, norm)
+                os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+                with zf.open(name) as src, open(dest, "wb") as out:
+                    out.write(src.read())
+                written += 1
+
+            # Drop the manifest beside the data as a trace marker —
+            # future operators / tooling can see how the dir was created.
+            manifest_marker = os.path.join(target_beacon, ".import_manifest.json")
+            with open(manifest_marker, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+    except zipfile.BadZipFile as e:
+        print(f"Error: corrupt backup ZIP: {e}", file=sys.stderr)
+        sys.exit(1)
+    except OSError as e:
+        print(f"Error writing target: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps({
+            "target": target_beacon,
+            "files_written": written,
+            "manifest": manifest,
+        }, ensure_ascii=False))
+    else:
+        print(f"Imported [{manifest.get('project_name', '?')}] -> {target_beacon}")
+        print(f"  files: {written}, exported at {manifest.get('export_ts', '?')}")
+        print(f"  source: {manifest.get('source_mode', '?')}, "
+              f"beacon {manifest.get('beacon_version', '?')}")
+
+
 def cmd_cycle_status():
     """Emit a per-cycle activation snapshot for the current project.
 
@@ -6649,6 +7061,8 @@ if __name__ == "__main__":
         "push_record": cmd_push_record,
         "push_list": cmd_push_list,
         "project_unarchive": cmd_project_unarchive,
+        "project_export": cmd_project_export,
+        "project_import": cmd_project_import,
         "pr_add": cmd_pr_add,
         "pr_close": cmd_pr_close,
         "pr_approve": cmd_pr_approve,
