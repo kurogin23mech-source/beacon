@@ -204,8 +204,13 @@ def make_router(require_auth) -> APIRouter:
         if not doc.exists:
             raise HTTPException(404, detail=f"capability '{capability_id}' not found")
         manifest_data = doc.to_dict()
-        if hasattr(manifest_data.get("uploaded_at"), "isoformat"):
-            manifest_data["uploaded_at"] = manifest_data["uploaded_at"].isoformat()
+        # Firestore returns Timestamp fields as DatetimeWithNanoseconds which
+        # JSONResponse can't serialize. Stringify any timestamp field; skip
+        # None (deleted_at is None for active docs).
+        for ts_field in ("uploaded_at", "updated_at", "deleted_at"):
+            val = manifest_data.get(ts_field)
+            if val is not None and hasattr(val, "isoformat"):
+                manifest_data[ts_field] = val.isoformat()
         return JSONResponse(manifest_data)
 
     @router.get("/artifacts/{capability_id:path}")
