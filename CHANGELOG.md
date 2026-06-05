@@ -2,6 +2,19 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.9.0] - 2026-06-05
+
+- Merge pull request #35 from kurogin23mech-source/ms-52-forcing-function-release-pipeline-ai
+- feat(ms-52): auto-derive release-<version> trigger from latest v* tag (e-952)
+- feat(ms-52): /beacon-push routes release.yml-first, demotes manual tag (e-959)
+- feat(ms-52): release-due trigger fires on feat 3+ or fix 5+ since last v* tag (e-958)
+- fix(ms-52): release-build.yml accepts v* tags + release.yml fans out (e-954)
+- fix(ms-52): release.yml fans out to deploy-cloud-run.yml + /health version (e-953)
+- docs(ms-43): list ms-40/41 skills in README Skills table (e-682)
+- chore: gitignore .beacon-design/ (internal pitch deck work area)
+- docs(release): update README/CHANGELOG for v0.8.0
+- chore(release): bump formula to 0.8.0
+
 ## [v0.8.0] - 2026-06-03
 
 ## [v0.7.2] - 2026-06-03
