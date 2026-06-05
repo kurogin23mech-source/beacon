@@ -4862,6 +4862,23 @@ def _hook_unusable_on_windows(cmd: str) -> bool:
     return os.name == "nt" and cmd.strip().lower().endswith(".sh")
 
 
+def _bash_safe(path: str) -> str:
+    """Normalize a path for use inside a Claude Code hook command (e-1043).
+
+    Claude Code runs hook commands through bash (``/usr/bin/bash``) even on
+    Windows. A backslash absolute path like
+    ``C:\\Users\\me\\.local\\bin\\beacon-hook-post-commit.EXE`` has its
+    backslashes eaten as escapes by bash, yielding
+    ``C:Usersme.localbin...: command not found`` — so the hook silently fails
+    on every Bash tool call. Forward slashes with the drive letter
+    (``C:/Users/...``) are interpreted correctly by bash/msys, so rewrite them
+    on Windows. POSIX paths are returned unchanged.
+    """
+    if os.name == "nt" and path:
+        return path.replace("\\", "/")
+    return path
+
+
 def _resolve_hook_command(hook_basename: str) -> str:
     """Return a cross-platform command string for the named hook.
 
@@ -4904,10 +4921,12 @@ def _resolve_hook_command(hook_basename: str) -> str:
         hook_basename, ("", "", "")
     )
 
+    # NOTE: every path-returning branch below goes through _bash_safe() so the
+    # command written into settings.json is bash-safe on Windows (e-1043).
     if entry_name:
         resolved = shutil.which(entry_name)
         if resolved:
-            return resolved
+            return _bash_safe(resolved)
 
     # Honor the module-level constant (set at import time, but tests
     # routinely monkeypatch them — keeping this lookup means existing
@@ -4915,16 +4934,16 @@ def _resolve_hook_command(hook_basename: str) -> str:
     if const_name:
         const_val = globals().get(const_name, "")
         if const_val and os.path.exists(const_val) and not _hook_unusable_on_windows(const_val):
-            return const_val
+            return _bash_safe(const_val)
 
     # Source / brew: bash next to the launcher.
     bash_path = _find_hook(hook_basename)
     if bash_path and os.path.exists(bash_path) and not _hook_unusable_on_windows(bash_path):
-        return bash_path
+        return _bash_safe(bash_path)
 
     # Final fallback: invoke the module via the current interpreter.
     if module_name:
-        return f"{sys.executable} -m {module_name}"
+        return f"{_bash_safe(sys.executable)} -m {module_name}"
     return ""
 
 
@@ -5425,10 +5444,33 @@ def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
     )
     if pc_ok:
         post_compact = hooks.setdefault("PostCompact", [])
+        pc_identity = (
+            "beacon-postcompact",
+            "beacon-hook-postcompact",
+            "beacon_cli.hooks.postcompact",
+        )
+        # Drop stale PostCompact entries (same kind, different command) so an
+        # old backslash path is rewritten with the freshly-resolved one. The
+        # PostToolUse branch above already did this; PostCompact previously only
+        # checked presence-by-kind and skipped, leaving the bad path in place
+        # on re-doctor (e-1043 migration gap).
+        cleaned_pc = []
+        for entry in post_compact:
+            kept = []
+            for h in entry.get("hooks", []):
+                existing = h.get("command", "")
+                same_kind = any(s in existing for s in pc_identity)
+                if same_kind and existing != postcompact_cmd:
+                    removed_stale = True
+                    continue  # drop stale
+                kept.append(h)
+            entry["hooks"] = kept
+            if kept:
+                cleaned_pc.append(entry)
+        post_compact[:] = cleaned_pc
+
         already_pc = any(
-            ("beacon-postcompact" in h.get("command", ""))
-            or ("beacon-hook-postcompact" in h.get("command", ""))
-            or ("beacon_cli.hooks.postcompact" in h.get("command", ""))
+            h.get("command", "") == postcompact_cmd
             for entry in post_compact
             for h in entry.get("hooks", [])
         )

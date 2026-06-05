@@ -65,9 +65,92 @@ def test_resolve_hook_command_allows_sh_off_windows(monkeypatch, tmp_path):
 
 def test_resolve_hook_command_prefers_entrypoint(monkeypatch):
     """The installed entry-point exe (shutil.which) always wins."""
-    monkeypatch.setattr(commands.shutil, "which", lambda name: "C:\\bin\\" + name + ".EXE")
+    monkeypatch.setattr(commands.os, "name", "posix")
+    monkeypatch.setattr(commands.shutil, "which", lambda name: "/bin/" + name)
     cmd = commands._resolve_hook_command("beacon-post-commit-hook.sh")
-    assert cmd == "C:\\bin\\beacon-hook-post-commit.EXE"
+    assert cmd == "/bin/beacon-hook-post-commit"
+
+
+# ---------------------------------------------------------------------------
+# bash-safe hook paths on Windows (e-1043)
+#
+# Claude Code runs hooks via bash even on Windows; a backslash absolute path
+# gets its separators eaten as escapes → "command not found" on every Bash
+# call. The resolver must emit forward slashes on Windows.
+# ---------------------------------------------------------------------------
+
+def test_bash_safe_forward_slashes_on_windows(monkeypatch):
+    monkeypatch.setattr(commands.os, "name", "nt")
+    assert commands._bash_safe("C:\\Users\\me\\.local\\bin\\beacon-hook-post-commit.EXE") == \
+        "C:/Users/me/.local/bin/beacon-hook-post-commit.EXE"
+
+
+def test_bash_safe_noop_on_posix(monkeypatch):
+    monkeypatch.setattr(commands.os, "name", "posix")
+    assert commands._bash_safe("/home/me/.local/bin/beacon-hook-post-commit") == \
+        "/home/me/.local/bin/beacon-hook-post-commit"
+
+
+def test_resolve_hook_command_entrypoint_bash_safe_on_windows(monkeypatch):
+    """The entry-point exe wins, but its path must be forward-slashed on Windows."""
+    monkeypatch.setattr(commands.os, "name", "nt")
+    monkeypatch.setattr(commands.shutil, "which",
+                        lambda name: "C:\\Users\\me\\.local\\bin\\" + name + ".EXE")
+    cmd = commands._resolve_hook_command("beacon-post-commit-hook.sh")
+    assert cmd == "C:/Users/me/.local/bin/beacon-hook-post-commit.EXE"
+    assert "\\" not in cmd
+
+
+def test_resolve_hook_fallback_bash_safe_on_windows(monkeypatch):
+    """The `python -m` fallback must forward-slash sys.executable on Windows."""
+    monkeypatch.setattr(commands.os, "name", "nt")
+    monkeypatch.setattr(commands.shutil, "which", lambda name: None)
+    monkeypatch.setattr(commands, "CLAUDE_HOOK_SCRIPT", "")
+    monkeypatch.setattr(commands, "_find_hook", lambda b: None)
+    monkeypatch.setattr(commands.sys, "executable", "C:\\py\\python.exe")
+    cmd = commands._resolve_hook_command("beacon-post-commit-hook.sh")
+    assert cmd == "C:/py/python.exe -m beacon_cli.hooks.post_commit"
+    assert "\\" not in cmd
+
+
+def test_install_migrates_stale_backslash_both_hooks(monkeypatch, tmp_path):
+    """e-1043 migration: re-running install rewrites a pre-existing backslash
+    entry with the forward-slash one for BOTH PostToolUse and PostCompact.
+
+    PostCompact previously only checked presence-by-kind and skipped, so the
+    stale backslash path survived re-doctor — this pins the fix.
+    """
+    import json
+    monkeypatch.setattr(commands.os, "name", "nt")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("beacon-hook-post-commit", "beacon-hook-postcompact"):
+        (bindir / (name + ".EXE")).write_text("x")
+    # shutil.which returns a backslash path (os.path.join on Windows runner).
+    monkeypatch.setattr(commands.shutil, "which",
+                        lambda name: str(bindir / (name + ".EXE")))
+
+    commit_cmd = commands._resolve_hook_command("beacon-post-commit-hook.sh")
+    pc_cmd = commands._resolve_hook_command("beacon-postcompact.sh")
+    # Seed settings with STALE backslash entries (pre-fix install output).
+    stale_commit = commit_cmd.replace("/", "\\")
+    stale_pc = pc_cmd.replace("/", "\\")
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({"hooks": {
+        "PostToolUse": [{"matcher": "Bash", "hooks": [
+            {"type": "command", "command": stale_commit, "timeout": 10}]}],
+        "PostCompact": [{"hooks": [
+            {"type": "command", "command": stale_pc, "timeout": 10}]}],
+    }}), encoding="utf-8")
+
+    commands._install_claude_hooks(commit_cmd, str(settings_path))
+
+    s = json.loads(settings_path.read_text(encoding="utf-8"))
+    ptu = [h["command"] for e in s["hooks"]["PostToolUse"] for h in e["hooks"]]
+    pc = [h["command"] for e in s["hooks"]["PostCompact"] for h in e["hooks"]]
+    # Each hook present exactly once, forward-slashed, no stale backslash dup.
+    assert ptu == [commit_cmd] and "\\" not in ptu[0]
+    assert pc == [pc_cmd] and "\\" not in pc[0]
 
 
 def test_init_hook_install_writes_no_sh_on_windows(monkeypatch, tmp_path):
