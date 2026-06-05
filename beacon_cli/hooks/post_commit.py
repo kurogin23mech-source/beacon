@@ -202,6 +202,44 @@ def _emit(message: str, beacon_root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Observability (e-940)
+# ---------------------------------------------------------------------------
+
+
+def _debug_log(decision: str, beacon_root: Optional[Path], cmd: str) -> None:
+    """When ``BEACON_HOOK_DEBUG=1``, append a one-line decision record to
+    ``~/.beacon/hook-debug.log``.
+
+    The hook's fail-safe contract collapses three distinct outcomes
+    (no-match / malformed / error) into the same silent ``exit 0, no output``,
+    which makes "why didn't my commit get logged?" impossible to diagnose after
+    the fact. This makes those outcomes inspectable — but ONLY when the env var
+    is set. Default (unset): no file, no stderr, nothing — identical to before.
+    Mirrors ``bin/beacon-post-commit-hook.sh``'s ``_hook_debug``.
+    """
+    if os.environ.get("BEACON_HOOK_DEBUG") != "1":
+        return
+    try:
+        # Honor HOME explicitly (Windows expanduser keys off USERPROFILE), same
+        # contract as _resolve_command_cwd.
+        home = os.environ.get("HOME")
+        if not (home and os.path.isabs(home) and os.path.isdir(home)):
+            home = os.path.expanduser("~")
+        from datetime import datetime, timezone
+
+        log_dir = Path(home) / ".beacon"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        root = str(beacon_root) if beacon_root else "-"
+        snippet = (cmd or "").replace("\n", " ")[:80]
+        with (log_dir / "hook-debug.log").open("a", encoding="utf-8") as f:
+            f.write(f"{ts} post-commit {decision} root={root} cmd={snippet}\n")
+    except Exception:
+        # Debug logging must never break the hook.
+        return
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -218,6 +256,7 @@ def main(argv: Optional[list] = None) -> int:
         try:
             payload = json.loads(raw) if raw.strip() else {}
         except json.JSONDecodeError:
+            _debug_log("malformed", None, raw)
             return 0  # Malformed payload — fail-safe silent exit.
 
         tool_input = payload.get("tool_input") or {}
@@ -227,17 +266,21 @@ def main(argv: Optional[list] = None) -> int:
         cwd = _resolve_command_cwd(tool_cwd)
         beacon_root = _find_beacon_root(cwd)
         if beacon_root is None:
+            _debug_log("no-root", None, cmd)
             return 0
 
         bare = _bare_command(cmd)
         classified = _classify(bare)
         if classified is None:
+            _debug_log("no-match", beacon_root, cmd)
             return 0
-        _, message = classified
+        skill, message = classified
         _emit(message, beacon_root)
+        _debug_log(f"matched:{skill}", beacon_root, cmd)
         return 0
     except Exception:
         # Last-ditch: never let a hook bug propagate to Claude Code.
+        _debug_log("error", None, "")
         return 0
 
 

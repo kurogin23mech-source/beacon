@@ -249,3 +249,72 @@ def test_tilde_cwd_expanded(beacon_project_dir, monkeypatch):
     )
     assert result.returncode == 0
     assert "Commit detected" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Observability: BEACON_HOOK_DEBUG (e-940)
+#
+# The fail-safe contract collapses no-match / malformed / matched into the
+# same silent exit-0. BEACON_HOOK_DEBUG=1 makes them inspectable in
+# ~/.beacon/hook-debug.log WITHOUT changing the default (off) behavior.
+# ---------------------------------------------------------------------------
+
+
+def _run_debug(cwd, command, home: Path, debug: bool):
+    """Run the hook with HOME redirected to a tmp dir so the debug log lands
+    in an isolated location. ``command=None`` sends malformed (non-JSON) stdin.
+    """
+    env = _env_with_path()
+    env["HOME"] = str(home)
+    if debug:
+        env["BEACON_HOOK_DEBUG"] = "1"
+    else:
+        env.pop("BEACON_HOOK_DEBUG", None)
+    stdin = "not valid json {" if command is None else json.dumps(
+        {"tool_input": {"command": command, "cwd": str(cwd)}}
+    )
+    result = subprocess.run(
+        [sys.executable, "-m", "beacon_cli.hooks.post_commit"],
+        input=stdin,
+        capture_output=True,
+        text=True,
+        cwd=str(_REPO_ROOT),
+        env=env,
+        timeout=15,
+    )
+    return result, home / ".beacon" / "hook-debug.log"
+
+
+def test_debug_off_writes_no_log(beacon_project_dir, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    result, log = _run_debug(beacon_project_dir, "git commit -m x", home, debug=False)
+    assert result.returncode == 0
+    assert "Commit detected" in result.stdout  # behavior unchanged
+    assert not log.exists()  # default: no file, ever
+
+
+def test_debug_on_logs_matched_and_keeps_stdout(beacon_project_dir, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    result, log = _run_debug(beacon_project_dir, "git commit -m x", home, debug=True)
+    assert "Commit detected" in result.stdout  # stdout contract preserved
+    assert log.exists()
+    assert "matched:/beacon-log" in log.read_text(encoding="utf-8")
+
+
+def test_debug_on_logs_no_match_still_silent_stdout(beacon_project_dir, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    result, log = _run_debug(beacon_project_dir, "ls -la", home, debug=True)
+    assert result.stdout.strip() == ""  # still silent on stdout
+    assert "no-match" in log.read_text(encoding="utf-8")
+
+
+def test_debug_on_logs_malformed(beacon_project_dir, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    result, log = _run_debug(beacon_project_dir, None, home, debug=True)
+    assert result.returncode == 0
+    assert result.stdout.strip() == ""
+    assert "malformed" in log.read_text(encoding="utf-8")
