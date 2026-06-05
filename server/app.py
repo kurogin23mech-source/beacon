@@ -1520,6 +1520,12 @@ def cli_auth_poll_get(code: str = ""):
 # ---------------------------------------------------------------------------
 
 from trailnode import make_router as _make_trailnode_router
+from trailnode_orgs import make_router as _make_trailnode_orgs_router
+
+# Org router mounts under /api/trailnode/orgs (ms-6). It must be included
+# before the capabilities router so that /orgs paths win over the more
+# permissive `{capability_id:path}` matcher.
+app.include_router(_make_trailnode_orgs_router(require_auth))
 app.include_router(_make_trailnode_router(require_auth))
 
 
