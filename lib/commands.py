@@ -2063,6 +2063,13 @@ def cmd_note_add():
     }
     if context:
         note["context"] = context
+    # ms-57 / e-1036: tag the note with the current session_id so session-end
+    # / rescue can aggregate it (notes WHERE session_id == X). Forward-only —
+    # past notes stay untagged. Empty session_id is the "no session" sentinel
+    # and is omitted, mirroring the commit/PR tagging convention (e-1062).
+    session_id = _resolve_session_id()
+    if session_id:
+        note["session_id"] = session_id
     path = _get_notes_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:

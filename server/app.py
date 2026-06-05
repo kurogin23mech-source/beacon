@@ -381,6 +381,11 @@ class NoteCreate(BaseModel):
     text: str
     context: str = ""
     ts: str = ""
+    # ms-57 / e-1036: per-session attribution for the session-log
+    # aggregation query. Empty string = "no session" (older clients,
+    # pre-ms-57 CLI) and is dropped server-side so Firestore docs stay
+    # either "tagged with a real id" or "no field at all".
+    session_id: str = ""
 
 class SessionUpsert(BaseModel):
     """Body for PUT /api/projects/{project_id}/sessions/{session_id}.
@@ -1346,6 +1351,8 @@ def add_note(project_id: str, body: NoteCreate, user: dict = Depends(require_aut
     }
     if body.context:
         note["context"] = body.context
+    if body.session_id:
+        note["session_id"] = body.session_id
     note_id = db.add_note(project_id, note)
     return {"note_id": note_id, **note}
 
