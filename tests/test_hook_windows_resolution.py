@@ -65,9 +65,52 @@ def test_resolve_hook_command_allows_sh_off_windows(monkeypatch, tmp_path):
 
 def test_resolve_hook_command_prefers_entrypoint(monkeypatch):
     """The installed entry-point exe (shutil.which) always wins."""
-    monkeypatch.setattr(commands.shutil, "which", lambda name: "C:\\bin\\" + name + ".EXE")
+    monkeypatch.setattr(commands.os, "name", "posix")
+    monkeypatch.setattr(commands.shutil, "which", lambda name: "/bin/" + name)
     cmd = commands._resolve_hook_command("beacon-post-commit-hook.sh")
-    assert cmd == "C:\\bin\\beacon-hook-post-commit.EXE"
+    assert cmd == "/bin/beacon-hook-post-commit"
+
+
+# ---------------------------------------------------------------------------
+# bash-safe hook paths on Windows (e-1043)
+#
+# Claude Code runs hooks via bash even on Windows; a backslash absolute path
+# gets its separators eaten as escapes → "command not found" on every Bash
+# call. The resolver must emit forward slashes on Windows.
+# ---------------------------------------------------------------------------
+
+def test_bash_safe_forward_slashes_on_windows(monkeypatch):
+    monkeypatch.setattr(commands.os, "name", "nt")
+    assert commands._bash_safe("C:\\Users\\me\\.local\\bin\\beacon-hook-post-commit.EXE") == \
+        "C:/Users/me/.local/bin/beacon-hook-post-commit.EXE"
+
+
+def test_bash_safe_noop_on_posix(monkeypatch):
+    monkeypatch.setattr(commands.os, "name", "posix")
+    assert commands._bash_safe("/home/me/.local/bin/beacon-hook-post-commit") == \
+        "/home/me/.local/bin/beacon-hook-post-commit"
+
+
+def test_resolve_hook_command_entrypoint_bash_safe_on_windows(monkeypatch):
+    """The entry-point exe wins, but its path must be forward-slashed on Windows."""
+    monkeypatch.setattr(commands.os, "name", "nt")
+    monkeypatch.setattr(commands.shutil, "which",
+                        lambda name: "C:\\Users\\me\\.local\\bin\\" + name + ".EXE")
+    cmd = commands._resolve_hook_command("beacon-post-commit-hook.sh")
+    assert cmd == "C:/Users/me/.local/bin/beacon-hook-post-commit.EXE"
+    assert "\\" not in cmd
+
+
+def test_resolve_hook_fallback_bash_safe_on_windows(monkeypatch):
+    """The `python -m` fallback must forward-slash sys.executable on Windows."""
+    monkeypatch.setattr(commands.os, "name", "nt")
+    monkeypatch.setattr(commands.shutil, "which", lambda name: None)
+    monkeypatch.setattr(commands, "CLAUDE_HOOK_SCRIPT", "")
+    monkeypatch.setattr(commands, "_find_hook", lambda b: None)
+    monkeypatch.setattr(commands.sys, "executable", "C:\\py\\python.exe")
+    cmd = commands._resolve_hook_command("beacon-post-commit-hook.sh")
+    assert cmd == "C:/py/python.exe -m beacon_cli.hooks.post_commit"
+    assert "\\" not in cmd
 
 
 def test_init_hook_install_writes_no_sh_on_windows(monkeypatch, tmp_path):
