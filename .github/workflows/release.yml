@@ -99,7 +99,24 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          NEW_VERSION="$(python -c 'from lib.commands import __version__; print(__version__)')"
+          # Read the version from the tag scripts/release.py just created.
+          # NOTE: an earlier version of this step did
+          #   python -c 'from lib.commands import __version__; print(__version__)'
+          # which fails in CI because lib/commands.py imports a peer module
+          # (`from store import get_store`) that bin/beacon normally puts on
+          # sys.path. The bare `python -c` invocation does not, so the import
+          # raises ModuleNotFoundError and the entire fan-out aborts after
+          # the metadata release already published the tag — exactly the
+          # 5-channel mismatch CORE doc rMlHx9n0LYFJ2kWIQELi P1 warns about
+          # (caught by the v0.9.0 dogfood, ms-52 e-960).
+          # `git describe` is dependency-free and reads the very tag that
+          # release.py just pushed.
+          set -o pipefail
+          NEW_VERSION="$(git describe --tags --abbrev=0 --match='v[0-9]*' | sed 's/^v//')"
+          if [ -z "$NEW_VERSION" ]; then
+            echo "::error::Could not read released version from git describe — fan-out cannot proceed."
+            exit 1
+          fi
           echo "Released CLI version: ${NEW_VERSION}"
 
           # Capture the existing latest deploy run id (so we can wait on the NEW one).
@@ -162,7 +179,19 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          NEW_VERSION="$(python -c 'from lib.commands import __version__; print(__version__)')"
+          # Read the version from the tag scripts/release.py just created.
+          # NOTE: an earlier version of this step did
+          #   python -c 'from lib.commands import __version__; print(__version__)'
+          # which fails in CI because lib/commands.py imports a peer module
+          # (`from store import get_store`) that bin/beacon normally puts on
+          # sys.path. The bare `python -c` invocation does not, so the import
+          # raises ModuleNotFoundError and the entire fan-out aborts after
+          # the metadata release already published the tag — exactly the
+          # 5-channel mismatch CORE doc rMlHx9n0LYFJ2kWIQELi P1 warns about
+          # (caught by the v0.9.0 dogfood, ms-52 e-960).
+          # `git describe` is dependency-free and reads the very tag that
+          # release.py just pushed.
+          NEW_VERSION="$(git describe --tags --abbrev=0 --match='v[0-9]*' | sed 's/^v//')"
           NEW_TAG="v${NEW_VERSION}"
           echo "::group::Dispatch release-build.yml on ${NEW_TAG} (fire-and-forget)"
           if gh workflow run release-build.yml --ref "${NEW_TAG}" -f dry_run=false; then
