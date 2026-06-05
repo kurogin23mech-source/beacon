@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import re
+from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -132,6 +133,71 @@ def _validate_manifest(
 def make_router(require_auth) -> APIRouter:
     """Wire the TrailNode router with the host app's auth dependency."""
     router = APIRouter(prefix="/api/trailnode", tags=["trailnode"])
+
+    # ms-3 e-31: list endpoint. Must be declared BEFORE the path catch-all
+    # GET below — otherwise `/capabilities/manifests` would be swallowed by
+    # `/capabilities/{capability_id:path}` and fail id validation.
+    @router.get("/capabilities/manifests")
+    async def list_manifests(
+        since: Optional[str] = None,
+        user: dict = Depends(require_auth),
+    ) -> JSONResponse:
+        # Diff-sync endpoint. AI agents call this at session-start (via
+        # SessionStart hook) to refresh the local manifest cache.
+        #
+        # since=None → return every active manifest (first sync).
+        # since=ISO8601 → return manifests where updated_at >= since
+        #   (composite index `deleted_at == None AND updated_at`) plus
+        #   `deleted_ids` for the soft-delete frontier since the same
+        #   point in time.
+        #
+        # ms-3 e-32 will add org-scope filtering — currently the response
+        # surfaces every active manifest the auth layer lets through
+        # (which today is the entire collection because we have no per-
+        # user authz yet beyond require_auth).
+        from datetime import datetime, timezone
+
+        since_dt = None
+        if since:
+            try:
+                since_dt = datetime.fromisoformat(since)
+            except ValueError:
+                raise HTTPException(
+                    400, detail=f"invalid since (expected ISO8601): {since!r}"
+                )
+            # Firestore Timestamps are UTC-aware; naive `since` is treated as UTC.
+            if since_dt.tzinfo is None:
+                since_dt = since_dt.replace(tzinfo=timezone.utc)
+
+        collection = db.get_db().collection(_CAPABILITIES_COLLECTION)
+
+        active_query = collection.where("deleted_at", "==", None)
+        if since_dt is not None:
+            active_query = active_query.where("updated_at", ">=", since_dt)
+
+        manifests = []
+        for doc in active_query.stream():
+            data = doc.to_dict()
+            for ts_field in ("uploaded_at", "updated_at", "deleted_at"):
+                val = data.get(ts_field)
+                if val is not None and hasattr(val, "isoformat"):
+                    data[ts_field] = val.isoformat()
+            manifests.append(data)
+
+        deleted_ids: list[str] = []
+        if since_dt is not None:
+            for doc in collection.where("deleted_at", ">=", since_dt).stream():
+                cap_id = doc.to_dict().get("id")
+                if cap_id:
+                    deleted_ids.append(cap_id)
+
+        return JSONResponse(
+            {
+                "manifests": manifests,
+                "deleted_ids": deleted_ids,
+                "synced_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
 
     @router.put("/capabilities/{capability_id:path}")
     async def push_capability(
