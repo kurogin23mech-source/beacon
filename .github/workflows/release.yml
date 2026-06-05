@@ -154,25 +154,20 @@ jobs:
             exit 1
           }
 
-          # Confirm the bump actually reached production (CACHE_BUST 連携 — the
-          # deploy uses the commit SHA so a successful run guarantees the new
-          # image was built, but we double-check /health version to surface
-          # rare misroutes / cache anomalies).
-          HEALTH_OK=0
-          for i in $(seq 1 20); do
-            CURRENT="$(curl -fsS https://beacon-ai.dev/health | python -c 'import sys,json; print(json.load(sys.stdin).get("version","unknown"))')" || CURRENT="unreachable"
-            if [ "$CURRENT" = "$NEW_VERSION" ]; then
-              echo "production /health reports version ${CURRENT} — release reached prod"
-              HEALTH_OK=1
-              break
-            fi
-            echo "waiting for /health=${NEW_VERSION} (got '${CURRENT}', $i/20)"
-            sleep 6
-          done
-          if [ "$HEALTH_OK" != "1" ]; then
-            echo "::error::/health never reported version ${NEW_VERSION}. Investigate Cloud Run revision routing."
-            exit 1
-          fi
+          # NOTE: an earlier version of this step polled
+          #   curl https://beacon-ai.dev/health | jq .version
+          # and asserted equality with $NEW_VERSION, on the assumption that
+          # /health would expose the released CLI version. That assertion
+          # was retired (ms-52 e-960 follow-up) because the version field
+          # would have required adding beacon_cli/ to the production image
+          # (Dockerfile change rejected by the maintainer for unrelated
+          # reasons). The deploy-cloud-run.yml `gh run watch --exit-status`
+          # above already surfaces a real deploy failure; treating /health
+          # version as a release gate produced false negatives that blocked
+          # otherwise-fine releases. If a stronger end-to-end signal is
+          # needed later, see the pre-release-smoke design discussion
+          # (would build the image locally + curl /health BEFORE tagging).
+          echo "deploy-cloud-run.yml succeeded; /health version assertion intentionally skipped (ms-52 e-960 retro)."
 
       - name: Fan out to downstream workflows (release-build, Tauri + wheel)
         # Same GITHUB_TOKEN loop-guard story as the deploy fan-out: the v* tag
