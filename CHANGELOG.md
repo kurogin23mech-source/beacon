@@ -2,6 +2,15 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.10.0] - 2026-06-05
+
+- Merge pull request #39 from kurogin23mech-source/ms-52-remove-health-assertion
+- fix(ms-52): drop /health version assertion from release.yml fan-out (e-960 retro)
+- Merge pull request #38 from kurogin23mech-source/ms-53-trailnode-capability-registry-beacon
+- feat(ms-53): TrailNode capability registry on beacon-api-prod (e-978/979/980)
+- docs(release): update README/CHANGELOG for v0.9.2
+- chore(release): bump formula to 0.9.2
+
 ## [v0.9.2] - 2026-06-05
 
 - Merge pull request #37 from kurogin23mech-source/ms-52-fix-fanout-perms
