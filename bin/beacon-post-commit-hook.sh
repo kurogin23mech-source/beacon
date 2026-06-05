@@ -20,6 +20,9 @@ _hook_debug() {
   mkdir -p "$logdir" 2>/dev/null || return 0
   local ts
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
+  # Flatten newlines so each record stays on one line (matches the Python
+  # version's cmd.replace("\n", " )); heredoc commit bodies contain newlines.
+  cmd=$(printf '%s' "$cmd" | tr '\r\n' '  ')
   printf '%s post-commit %s root=%s cmd=%.80s\n' \
     "$ts" "$decision" "${root:--}" "$cmd" >> "$logdir/hook-debug.log" 2>/dev/null
 }
