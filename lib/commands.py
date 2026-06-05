@@ -7490,6 +7490,19 @@ if __name__ == "__main__":
         "doctor": cmd_doctor,
     }
     fn = commands.get(cmd)
+    # ms-57 e-1035: bump session heartbeat before dispatch so every CLI
+    # invocation refreshes .beacon/session.json. Skip commands that may run
+    # before .beacon/ exists or that have no project context.
+    if cmd not in {"init", "version", "help_json", "auth_login", "auth_logout", "auth_status"}:
+        try:
+            import session as _session
+            _session.update_last_active()
+        except Exception:
+            # Heartbeat must never break user-facing commands; surface only
+            # in BEACON_DEBUG mode so a regression is visible in testing.
+            if os.environ.get("BEACON_DEBUG") == "1":
+                import traceback as _tb
+                _tb.print_exc()
     if fn:
         fn()
     else:
