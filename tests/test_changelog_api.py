@@ -75,9 +75,9 @@ def mock_list_changelog(project_id: str, *, since: str | None = None,
 
 
 def _rebind_firestore_mocks():
-    """Mirror test_trash_api.py's pattern: re-attach mocks via app.db so
-    cross-file collection order doesn't strand us with a different module
-    object (other test files `sys.modules.pop("firestore_client", None)`)."""
+    """Re-attach mocks via app.db so cross-file collection order doesn't
+    strand us with a different module object (other test files
+    `sys.modules.pop("firestore_client", None)`)."""
     import app as _app
     db_module = _app.db
     db_module.get_project = mock_get_project

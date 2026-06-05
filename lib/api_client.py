@@ -120,32 +120,6 @@ class ApiClient:
             body,
         )
 
-    def restore_document(self, project_id: str, doc_id: str, reason: str = "") -> dict:
-        return self.post(
-            f"/api/projects/{project_id}/documents/{urllib.parse.quote(doc_id, safe='')}/restore",
-            {"reason": reason},
-        )
-
-    def list_documents_with_trashed(self, project_id: str) -> list:
-        return self.get(f"/api/projects/{project_id}/documents?include_trashed=true")
-
-    # Trash / Restore (ms-14 e-826 / e-991)
-
-    def list_trash(self, project_id: str, days: int = 30) -> dict:
-        return self.get(f"/api/projects/{project_id}/trash?days={days}")
-
-    def restore_milestone(self, project_id: str, ms_id: str, reason: str = "") -> dict:
-        return self.post(
-            f"/api/projects/{project_id}/milestones/{ms_id}/restore",
-            {"reason": reason},
-        )
-
-    def restore_entry(self, project_id: str, entry_id: str, reason: str = "") -> dict:
-        return self.post(
-            f"/api/projects/{project_id}/entries/{entry_id}/restore",
-            {"reason": reason},
-        )
-
     # Retro operations
 
     def save_retro(self, project_id: str, week: str, content: str) -> dict:

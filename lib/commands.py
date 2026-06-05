@@ -1786,125 +1786,6 @@ def cmd_task_cancel():
             print(f"  Reason: {reason}")
 
 
-# ---------------------------------------------------------------------------
-# Trash + restore (ms-14 e-826)
-# ---------------------------------------------------------------------------
-# Soft-delete recovery: surface cancelled milestones / tasks and flip them
-# back to todo. The cancel path (cmd_milestone_delete / cmd_task_cancel)
-# already writes meta.cancelled_at/_by/_reason; these handlers read those
-# records and produce the inverse operation.
-#
-# Doc trash is intentionally out of scope here — cmd_doc_delete is currently
-# HARD delete, and the existing cmd_doc_restore name is taken by revision
-# restore (history walk). Filed as a follow-up task on ms-14.
-
-def _parse_days_env() -> Optional[int]:
-    """Translate BEACON_DAYS env into a since_days argument.
-
-    Empty / 'all' / '0' all disable the window; anything else is parsed as
-    an integer. Returns -1 on parse error so the caller can emit the
-    user-facing error and exit (we deliberately don't sys.exit from this
-    helper so it stays testable in isolation)."""
-    days_env = os.environ.get("BEACON_DAYS", "30")
-    if days_env in ("", "all", "0"):
-        return None
-    try:
-        return int(days_env)
-    except ValueError:
-        return -1
-
-
-def cmd_milestone_restore():
-    ms_id = os.environ.get("BEACON_MS_ID", "")
-    reason = os.environ.get("BEACON_REASON", "")
-    json_mode = os.environ.get("BEACON_JSON", "") == "1"
-    if not ms_id:
-        print("Error: ms-id required")
-        sys.exit(1)
-    data = load_project()
-    try:
-        ms = core.milestone_restore(data, ms_id, reason=reason)
-    except ValueError as e:
-        print(str(e))
-        sys.exit(1)
-    save_project(data, op={"op": "milestone_restore", "ms_id": ms_id, "reason": reason})
-    if json_mode:
-        print(json.dumps({"id": ms["id"], "status": ms["status"]}, ensure_ascii=False))
-    else:
-        print(f"Restored: [{ms['id']}] {ms.get('title','')} -> status={ms['status']}")
-        if reason:
-            print(f"  Reason: {reason}")
-
-
-def cmd_milestone_trash():
-    json_mode = os.environ.get("BEACON_JSON", "") == "1"
-    since_days = _parse_days_env()
-    if since_days == -1:
-        print(f"Error: invalid --days value: {os.environ.get('BEACON_DAYS', '')}")
-        sys.exit(1)
-    data = load_project()
-    trash = core.list_trashed_milestones(data, since_days=since_days)
-    if json_mode:
-        print(json.dumps(trash, ensure_ascii=False))
-        return
-    if not trash:
-        window = "all time" if since_days is None else f"last {since_days} days"
-        print(f"No cancelled milestones in {window}.")
-        return
-    for item in trash:
-        when = f"{item['days_ago']}d ago" if item['days_ago'] is not None else "unknown date"
-        by = item.get("cancelled_by", "") or "?"
-        print(f"[{item['id']}] (cancelled {when} by {by}) {item['title']}")
-        if item.get("cancel_reason"):
-            print(f"  reason: {item['cancel_reason']}")
-
-
-def cmd_task_restore():
-    entry_id = os.environ.get("BEACON_ENTRY_ID", "")
-    reason = os.environ.get("BEACON_REASON", "")
-    json_mode = os.environ.get("BEACON_JSON", "") == "1"
-    if not entry_id:
-        print("Error: entry-id required")
-        sys.exit(1)
-    data = load_project()
-    try:
-        entry = core.entry_restore(data, entry_id, reason=reason)
-    except ValueError as e:
-        print(str(e))
-        sys.exit(1)
-    save_project(data, op={"op": "task_restore", "entry_id": entry_id, "reason": reason})
-    if json_mode:
-        print(json.dumps({"id": entry_id, "status": entry["status"]}, ensure_ascii=False))
-    else:
-        print(f"Restored: [{entry_id}] {entry.get('description','')} -> status={entry['status']}")
-        if reason:
-            print(f"  Reason: {reason}")
-
-
-def cmd_task_trash():
-    json_mode = os.environ.get("BEACON_JSON", "") == "1"
-    since_days = _parse_days_env()
-    if since_days == -1:
-        print(f"Error: invalid --days value: {os.environ.get('BEACON_DAYS', '')}")
-        sys.exit(1)
-    data = load_project()
-    trash = core.list_trashed_entries(data, since_days=since_days, entry_type="task")
-    if json_mode:
-        print(json.dumps(trash, ensure_ascii=False))
-        return
-    if not trash:
-        window = "all time" if since_days is None else f"last {since_days} days"
-        print(f"No cancelled tasks in {window}.")
-        return
-    for item in trash:
-        when = f"{item['days_ago']}d ago" if item['days_ago'] is not None else "unknown date"
-        by = item.get("cancelled_by", "") or "?"
-        ms = item.get("ms_id", "?")
-        print(f"[{item['id']}] ({ms}, cancelled {when} by {by}) {item['description']}")
-        if item.get("cancel_reason"):
-            print(f"  reason: {item['cancel_reason']}")
-
-
 def cmd_entry_move():
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
     task_id = os.environ.get("BEACON_TASK_ID", "")
@@ -3457,8 +3338,8 @@ def _read_local_doc(fpath):
         result["milestone"] = milestone
     if operation:
         result["operation"] = operation
-    # Soft-delete fields surface so callers (cmd_doc_list, cmd_doc_trash)
-    # can filter without re-parsing the frontmatter (ms-14 e-973).
+    # Soft-delete fields surface so cmd_doc_list can filter without
+    # re-parsing the frontmatter (ms-14 e-973).
     if meta.get("status"):
         result["status"] = meta["status"]
     for k in ("trashed_at", "trashed_by", "trash_reason"):
@@ -3473,8 +3354,7 @@ def cmd_doc_list():
     ms_filter = os.environ.get("BEACON_MS", "")
     op_filter = os.environ.get("BEACON_OP", "")
     # Trashed docs are hidden by default — pass --include-trashed to see
-    # them in line with active ones (ms-14 e-973). Use the dedicated
-    # `beacon doc trash` listing for trash-only operations.
+    # them in line with active ones (ms-14 e-973).
     include_trashed = os.environ.get("BEACON_INCLUDE_TRASHED", "") == "1"
 
     if _is_cloud_mode():
@@ -3732,8 +3612,8 @@ def _rewrite_doc_frontmatter(fpath: str, *,
     Reads the on-disk content, parses frontmatter via the existing
     parser, applies ``updates`` (key → str value) and ``removes`` (list
     of keys to drop), and writes back. Body is preserved exactly. Used
-    by the doc trash / restore paths (ms-14 e-973) so we don't bypass
-    the canonical frontmatter shape.
+    by the doc soft-delete path (ms-14 e-973) so we don't bypass the
+    canonical frontmatter shape.
     """
     with open(fpath, "r", encoding="utf-8") as f:
         content = f.read()
@@ -3754,31 +3634,20 @@ def _rewrite_doc_frontmatter(fpath: str, *,
 
 
 def cmd_doc_restore():
-    """Restore a document.
+    """Restore a document to a historical revision.
 
-    Polymorphic on BEACON_REV (ms-14 e-973):
-
-    - When ``--rev N`` is passed (BEACON_REV is non-empty), restore the
-      doc to historical revision N. This is the cloud-only revision
-      history path that existed before e-973.
-    - When ``--rev`` is omitted (BEACON_REV missing or empty), lift the
-      trash marker placed by ``cmd_doc_delete`` and re-activate the doc
-      (local mode only; cloud mode is a follow-up).
-
-    Splitting on the env var rather than introducing a new verb keeps
-    the existing ``beacon doc restore <id> --rev N`` muscle memory
-    working while the new bare-id form becomes the trash restore.
+    Requires ``--rev N`` (BEACON_REV). Trash-restore was removed; cancelled
+    docs are reactivated via ``beacon doc update`` or equivalent edits.
     """
     doc_id = os.environ.get("BEACON_DOC_ID", "")
     rev = os.environ.get("BEACON_REV", "")
     if not doc_id:
         print("Error: doc_id required", file=sys.stderr)
         sys.exit(1)
-    if rev:
-        _doc_restore_revision(doc_id, rev)
-    else:
-        reason = os.environ.get("BEACON_REASON", "")
-        _doc_restore_from_trash(doc_id, reason=reason)
+    if not rev:
+        print("Usage: beacon doc restore <doc-id> --rev <N>", file=sys.stderr)
+        sys.exit(1)
+    _doc_restore_revision(doc_id, rev)
 
 
 def _doc_restore_revision(doc_id: str, rev: str) -> None:
@@ -3796,56 +3665,6 @@ def _doc_restore_revision(doc_id: str, rev: str) -> None:
         print(f"Error restoring: {e}")
         sys.exit(1)
     print(f"Restored '{doc_id}' to rev-{rev}")
-
-
-def _doc_restore_from_trash(doc_id: str, *, reason: str = "") -> None:
-    """Reverse a soft-delete of a doc.
-
-    Local mode rewrites the file's frontmatter. Cloud mode calls the
-    server restore endpoint (ms-14 e-991), keeping the two paths
-    behaviorally symmetric.
-    """
-    if _is_cloud_mode():
-        client, config = _get_api_client()
-        try:
-            client.restore_document(config["project_id"], doc_id, reason=reason)
-        except RuntimeError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
-        print(f"Restored from trash: {doc_id}")
-        if reason:
-            print(f"  Reason: {reason}")
-        return
-    docs_dir = _get_docs_dir()
-    fpath = os.path.join(docs_dir, f"{doc_id}.md")
-    if not os.path.exists(fpath):
-        print(f"Document not found: {doc_id}", file=sys.stderr)
-        sys.exit(1)
-    with open(fpath, "r", encoding="utf-8") as f:
-        content = f.read()
-    meta, _ = _parse_frontmatter(content)
-    if meta.get("status") != "cancelled":
-        print(
-            f"Error: doc {doc_id} is not in trash (status="
-            f"{meta.get('status', 'active')!r}); nothing to restore.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    import core as _core
-    now_iso = _core._now_iso()
-    actor = _core._get_actor()
-    updates = {"restored_at": now_iso, "restored_by": actor}
-    if reason:
-        updates["restore_reason"] = reason
-    _rewrite_doc_frontmatter(
-        fpath,
-        updates=updates,
-        removes=["status", "trashed_at", "trashed_by", "trash_reason"],
-    )
-    _append_changelog({"op": "doc_restore", "doc_id": doc_id, "reason": reason})
-    print(f"Restored from trash: {doc_id}")
-    if reason:
-        print(f"  Reason: {reason}")
 
 
 def cmd_doc_delete():
@@ -3921,99 +3740,6 @@ def cmd_doc_delete():
         print(f"Trashed: {doc_id}")
         if reason:
             print(f"  Reason: {reason}")
-
-
-def cmd_doc_trash():
-    """List soft-deleted docs within an N-day window (ms-14 e-973 / e-991).
-
-    Local mode reads docs/*.md frontmatter; cloud mode hits the unified
-    GET /trash endpoint and filters to the documents slice.
-    """
-    days_env = os.environ.get("BEACON_DAYS", "30")
-    json_mode = os.environ.get("BEACON_JSON", "") == "1"
-    if days_env in ("", "all", "0"):
-        since_days = None
-    else:
-        try:
-            since_days = int(days_env)
-        except ValueError:
-            print(f"Error: invalid --days value: {days_env}", file=sys.stderr)
-            sys.exit(1)
-
-    if _is_cloud_mode():
-        client, config = _get_api_client()
-        # The unified /trash endpoint accepts days=0 for "no time filter"
-        # to mirror the local CLI's --days all behavior.
-        days_arg = 0 if since_days is None else since_days
-        try:
-            payload = client.list_trash(config["project_id"], days=days_arg)
-        except RuntimeError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
-        out = payload.get("documents", [])
-        if json_mode:
-            print(json.dumps(out, ensure_ascii=False))
-            return
-        if not out:
-            window = "all time" if since_days is None else f"last {since_days} days"
-            print(f"No trashed docs in {window}.")
-            return
-        for item in out:
-            when = item.get("trashed_at") or "unknown date"
-            by = item.get("trashed_by", "") or "?"
-            scope = item.get("scope", "")
-            print(f"[{item['doc_id']}] ({scope}, trashed {when} by {by}) {item['title']}")
-            if item.get("trash_reason"):
-                print(f"  reason: {item['trash_reason']}")
-        return
-
-    import datetime as _dt
-    cutoff = None
-    if since_days is not None:
-        cutoff = (_dt.datetime.now(_dt.timezone.utc)
-                  - _dt.timedelta(days=since_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    docs_dir = _get_docs_dir()
-    out: list = []
-    if os.path.isdir(docs_dir):
-        for fname in sorted(os.listdir(docs_dir)):
-            if not fname.endswith(".md"):
-                continue
-            fpath = os.path.join(docs_dir, fname)
-            try:
-                with open(fpath, "r", encoding="utf-8") as f:
-                    text = f.read()
-            except (OSError, UnicodeDecodeError):
-                continue
-            meta, _body = _parse_frontmatter(text)
-            if meta.get("status") != "cancelled":
-                continue
-            trashed_at = meta.get("trashed_at", "")
-            if cutoff and trashed_at and trashed_at < cutoff:
-                continue
-            out.append({
-                "doc_id": fname[:-3],
-                "title": meta.get("title", "") or fname[:-3],
-                "scope": meta.get("scope", ""),
-                "trashed_at": trashed_at or None,
-                "trashed_by": meta.get("trashed_by", ""),
-                "trash_reason": meta.get("trash_reason", ""),
-            })
-    out.sort(key=lambda x: x["trashed_at"] or "", reverse=True)
-
-    if json_mode:
-        print(json.dumps(out, ensure_ascii=False))
-        return
-    if not out:
-        window = "all time" if since_days is None else f"last {since_days} days"
-        print(f"No trashed docs in {window}.")
-        return
-    for item in out:
-        when = item["trashed_at"] or "unknown date"
-        by = item.get("trashed_by", "") or "?"
-        print(f"[{item['doc_id']}] ({item.get('scope','')}, trashed {when} by {by}) {item['title']}")
-        if item.get("trash_reason"):
-            print(f"  reason: {item['trash_reason']}")
 
 
 # ---------------------------------------------------------------------------
@@ -7473,7 +7199,6 @@ if __name__ == "__main__":
         "doc_delete": cmd_doc_delete,
         "doc_history": cmd_doc_history,
         "doc_restore": cmd_doc_restore,
-        "doc_trash": cmd_doc_trash,
         "cloud_list": cmd_cloud_list,
         "cloud_push": cmd_cloud_push,
         "cloud_pull": cmd_cloud_pull,
@@ -7500,10 +7225,6 @@ if __name__ == "__main__":
         "project_unarchive": cmd_project_unarchive,
         "project_export": cmd_project_export,
         "project_import": cmd_project_import,
-        "milestone_trash": cmd_milestone_trash,
-        "milestone_restore": cmd_milestone_restore,
-        "task_trash": cmd_task_trash,
-        "task_restore": cmd_task_restore,
         "pr_add": cmd_pr_add,
         "pr_close": cmd_pr_close,
         "pr_approve": cmd_pr_approve,

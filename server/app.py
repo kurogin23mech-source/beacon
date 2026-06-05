@@ -378,9 +378,6 @@ class DocumentSave(BaseModel):
 class DeleteRequest(BaseModel):
     reason: str = ""
 
-class RestoreRequest(BaseModel):
-    reason: str = ""
-
 class MemberInvite(BaseModel):
     email: str
     role: str = "viewer"  # viewer | editor
@@ -682,24 +679,6 @@ def delete_milestone(project_id: str, ms_id: str,
     )
 
 
-@app.post("/api/projects/{project_id}/milestones/{ms_id}/restore")
-def restore_milestone(project_id: str, ms_id: str,
-                      body: Optional[RestoreRequest] = None,
-                      user: dict = Depends(require_auth)):
-    """Reverse a soft-delete of a milestone (ms-14 e-826)."""
-    reason = (body.reason if body else "") or ""
-    def op(data: dict):
-        _require_write(data, user)
-        try:
-            ms = core.milestone_restore(data, ms_id, reason=reason)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        return data, {"id": ms["id"], "status": ms["status"]}
-    return operations.apply_operation(
-        project_id, op, op_name="milestone.restore", actor=user.get("sub", ""),
-    )
-
-
 # ---------------------------------------------------------------------------
 # Entries (tasks / commits / notes)
 # ---------------------------------------------------------------------------
@@ -776,24 +755,6 @@ def delete_entry(project_id: str, entry_id: str,
     )
 
 
-@app.post("/api/projects/{project_id}/entries/{entry_id}/restore")
-def restore_entry(project_id: str, entry_id: str,
-                  body: Optional[RestoreRequest] = None,
-                  user: dict = Depends(require_auth)):
-    """Reverse a soft-delete of an entry (task / commit / save). ms-14 e-826."""
-    reason = (body.reason if body else "") or ""
-    def op(data: dict):
-        _require_write(data, user)
-        try:
-            entry = core.entry_restore(data, entry_id, reason=reason)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        return data, {"entry_id": entry_id, "status": entry["status"]}
-    return operations.apply_operation(
-        project_id, op, op_name="entry.restore", actor=user.get("sub", ""),
-    )
-
-
 # ---------------------------------------------------------------------------
 # Log (commit recording)
 # ---------------------------------------------------------------------------
@@ -839,16 +800,10 @@ def update_summary(project_id: str, body: SummaryUpdate,
 
 @app.get("/api/projects/{project_id}/documents")
 def list_documents(project_id: str,
-                   include_trashed: bool = False,
                    user: dict = Depends(require_auth)):
-    """List all documents for a project.
-
-    ``include_trashed=true`` returns soft-deleted docs as well, each with
-    ``trashed: true`` and trash audit fields, so the Web UI Trash tab
-    can render them without a second request (ms-14 e-991).
-    """
+    """List all documents for a project."""
     _load(project_id, user)  # access check
-    return db.list_documents(project_id, include_trashed=include_trashed)
+    return db.list_documents(project_id)
 
 
 @app.get("/api/projects/{project_id}/documents/{doc_id}")
@@ -913,56 +868,6 @@ def delete_document_endpoint(project_id: str, doc_id: str,
                               reason=reason):
         raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
     return {"doc_id": doc_id, "status": "cancelled"}
-
-
-@app.post("/api/projects/{project_id}/documents/{doc_id}/restore")
-def restore_document_endpoint(project_id: str, doc_id: str,
-                              body: Optional[RestoreRequest] = None,
-                              user: dict = Depends(require_auth)):
-    """Reverse a soft-delete of a document (ms-14 e-991).
-
-    Returns 404 if the doc doesn't exist; 409 if it's not currently
-    trashed (so a stale Web UI restore click surfaces, not silently
-    succeeds).
-    """
-    data = _load(project_id, user)
-    _require_write(data, user)
-    reason = (body.reason if body else "") or ""
-    doc = db.get_document(project_id, doc_id)
-    if doc is None:
-        raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
-    if not doc.get("deleted"):
-        raise HTTPException(
-            status_code=409,
-            detail=f"Document '{doc_id}' is not in trash; nothing to restore.",
-        )
-    if not db.restore_document(project_id, doc_id,
-                               restored_by=user.get("email", "unknown"),
-                               reason=reason):
-        # Should be unreachable given the checks above, but keep the
-        # contract explicit rather than masking a race condition.
-        raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
-    return {"doc_id": doc_id, "status": "restored"}
-
-
-@app.get("/api/projects/{project_id}/trash")
-def list_trash(project_id: str,
-               days: int = 30,
-               user: dict = Depends(require_auth)):
-    """Unified trash listing across milestones / tasks / documents (ms-14 e-826).
-
-    ``days=30`` is the default audit window; pass ``days=0`` to return
-    every soft-deleted item (no time filter).
-    """
-    data = _load(project_id, user)
-    since_days = None if days == 0 else max(1, days)
-    return {
-        "days": days,
-        "milestones": core.list_trashed_milestones(data, since_days=since_days),
-        "tasks": core.list_trashed_entries(data, since_days=since_days,
-                                           entry_type="task"),
-        "documents": db.list_trashed_documents(project_id, days=since_days),
-    }
 
 
 @app.get("/api/projects/{project_id}/changelog")
