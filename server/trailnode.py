@@ -2,18 +2,22 @@
 
 Mounted under /api/trailnode/* on the Beacon Cloud Run service.
 
-Design summary (see trailnode/docs/manifest-schema.md and ms-2 SPEC):
+Design summary (see trailnode/docs/manifest-schema.md, ms-2 SPEC, ms-6 SPEC):
 - Capabilities (manifests) are stored in Firestore collection `capabilities`
   (prod) or `capabilities-dev` (other envs), keyed by slug
-  `<author>__<name>__<version>` (`/` and `@` replaced with `__`).
+  `<org>__<name>__<version>` (`/` and `@` replaced with `__`).
 - Artifacts (tar.gz) are stored in GCS bucket `trailnode-artifacts` under
-  `{env}/{author}/{name}/{version}.tar.gz`.
+  `{env}/{org}/{name}/{version}.tar.gz`.
 - Pull goes through Cloud Run (proxy stream) instead of signed URLs to
   avoid signing-key/IAM complexity in MVP. Revisit in ms-3 if traffic
   shape requires direct GCS reads.
 - Authorization piggybacks on Beacon's existing HTTPBearer + HMAC CLI
   token via the host app's `require_auth` dependency, injected through
   the `make_router` factory to avoid an import cycle with `app.py`.
+- **ms-6 change**: Capability ID first segment is the org slug (was: author
+  user). Push/pull authz now goes through `trailnode_orgs.is_member()`
+  and `trailnode_orgs.require_org_member()` — endpoints never touch the
+  `orgs` / `memberships` collections directly.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from google.cloud import storage as gcs_storage
 
 import firestore_client as db
+import trailnode_orgs as orgs
 
 logger = logging.getLogger(__name__)
 
@@ -36,14 +41,19 @@ _ENV = os.environ.get("BEACON_ENV", "dev")
 _CAPABILITIES_COLLECTION = "capabilities" if _ENV == "prod" else "capabilities-dev"
 _GCS_PREFIX = f"{_ENV}/"  # keep dev/prod artifacts isolated
 
-# <author>/<name>@<semver>, semver allows optional pre-release suffix
+# ms-6: <org>/<name>@<semver>. The first segment used to be the uploader's
+# username (`author`); now it is the organization slug. Same character class
+# (lowercase letters, digits, hyphens) so the regex shape is unchanged —
+# only the semantic name shifts.
 _ID_PATTERN = re.compile(
     r"^([a-z0-9-]+)/([a-z0-9-]+)@(\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?)$"
 )
 
+# `artifact_url` is intentionally NOT required from clients — the server
+# fills it in after the GCS upload. `author` stays required as a free-form
+# label of the human author (decoupled from the org since ms-6).
 _REQUIRED_MANIFEST_FIELDS = (
-    "schema_version", "id", "name", "type", "version",
-    "description", "author", "artifact_url",
+    "schema_version", "id", "name", "type", "version", "description", "author",
 )
 _SUPPORTED_TYPES = ("skill",)  # v0 only; ai-workflow/program/app land in ms-4
 
@@ -58,13 +68,14 @@ def _get_gcs_client() -> gcs_storage.Client:
 
 
 def _parse_capability_id(capability_id: str) -> tuple[str, str, str]:
+    """Return (org_slug, name, version) on success."""
     m = _ID_PATTERN.match(capability_id)
     if not m:
         raise HTTPException(
             status_code=400,
             detail=(
                 f"invalid capability_id '{capability_id}': "
-                "expected <author>/<name>@<semver>"
+                "expected <org>/<name>@<semver>"
             ),
         )
     return m.group(1), m.group(2), m.group(3)
@@ -74,12 +85,12 @@ def _slug(capability_id: str) -> str:
     return capability_id.replace("/", "__").replace("@", "__")
 
 
-def _gcs_object_key(author: str, name: str, version: str) -> str:
-    return f"{_GCS_PREFIX}{author}/{name}/{version}.tar.gz"
+def _gcs_object_key(org_slug: str, name: str, version: str) -> str:
+    return f"{_GCS_PREFIX}{org_slug}/{name}/{version}.tar.gz"
 
 
 def _validate_manifest(
-    data: dict, capability_id: str, author: str, name: str, version: str
+    data: dict, capability_id: str, org_slug: str, name: str, version: str
 ) -> None:
     missing = [f for f in _REQUIRED_MANIFEST_FIELDS if f not in data]
     if missing:
@@ -88,10 +99,11 @@ def _validate_manifest(
         raise HTTPException(
             400, detail=f"manifest.id '{data['id']}' != URL capability_id '{capability_id}'"
         )
-    if data["author"] != author:
-        raise HTTPException(
-            400, detail=f"manifest.author '{data['author']}' != id author '{author}'"
-        )
+    # ms-6: the first id segment is the org, not the user's username. We
+    # still re-derive it from the id (single source of truth) and verify
+    # `name`/`version`. `author` is now a free-form human label and does
+    # not need to match the id; it documents the human author distinct
+    # from the org and from `uploaded_by` (the actual user who ran push).
     if data["name"] != name:
         raise HTTPException(400, detail=f"manifest.name '{data['name']}' != id name '{name}'")
     if data["version"] != version:
@@ -105,8 +117,10 @@ def _validate_manifest(
                 f"v0 only accepts type in {_SUPPORTED_TYPES}, got '{data['type']}'"
             ),
         )
-    if not isinstance(data.get("artifact_url"), list):
-        raise HTTPException(400, detail="artifact_url must be an array")
+    # `artifact_url` is filled in server-side; tolerate absent/empty.
+    au = data.get("artifact_url")
+    if au is not None and not isinstance(au, list):
+        raise HTTPException(400, detail="artifact_url must be an array if provided")
 
 
 def make_router(require_auth) -> APIRouter:
@@ -120,16 +134,23 @@ def make_router(require_auth) -> APIRouter:
         artifact: UploadFile = File(...),
         user: dict = Depends(require_auth),
     ) -> JSONResponse:
-        author, name, version = _parse_capability_id(capability_id)
+        org_slug, name, version = _parse_capability_id(capability_id)
+
+        # ms-6: caller must be a member of `org_slug`. 403 (not 404) is
+        # safe here — they already had to authenticate, and they get a
+        # clearer signal when their `--org` was wrong vs. when the org
+        # doesn't exist.
+        user_sub = user.get("sub", "")
+        orgs.require_org_member(org_slug, user_sub)
 
         try:
             manifest_data = json.loads(manifest)
         except json.JSONDecodeError as e:
             raise HTTPException(400, detail=f"manifest is not valid JSON: {e}")
 
-        _validate_manifest(manifest_data, capability_id, author, name, version)
+        _validate_manifest(manifest_data, capability_id, org_slug, name, version)
 
-        object_key = _gcs_object_key(author, name, version)
+        object_key = _gcs_object_key(org_slug, name, version)
         bucket = _get_gcs_client().bucket(_BUCKET_NAME)
         blob = bucket.blob(object_key)
         content = await artifact.read()
@@ -137,7 +158,9 @@ def make_router(require_auth) -> APIRouter:
 
         artifact_url_canonical = f"gs://{_BUCKET_NAME}/{object_key}"
         manifest_data["artifact_url"] = [artifact_url_canonical]
-        manifest_data["uploaded_by"] = user.get("sub", "")
+        # ms-6: split the org (auth scope) from the user who ran push.
+        manifest_data["org_slug"] = org_slug
+        manifest_data["uploaded_by"] = user_sub
         manifest_data["uploaded_by_email"] = user.get("email", "")
 
         from google.cloud import firestore as fs
@@ -157,7 +180,13 @@ def make_router(require_auth) -> APIRouter:
         capability_id: str,
         user: dict = Depends(require_auth),
     ) -> JSONResponse:
-        _parse_capability_id(capability_id)  # validate format
+        org_slug, _name, _version = _parse_capability_id(capability_id)
+
+        # ms-6: 403 (not 404) on org-mismatch so users get a clearer
+        # diagnostic when their token is fine but the org is wrong. We
+        # still 404 on capability-not-found below.
+        orgs.require_org_member(org_slug, user.get("sub", ""))
+
         slug = _slug(capability_id)
         doc = db.get_db().collection(_CAPABILITIES_COLLECTION).document(slug).get()
         if not doc.exists:
@@ -172,13 +201,18 @@ def make_router(require_auth) -> APIRouter:
         capability_id: str,
         user: dict = Depends(require_auth),
     ) -> StreamingResponse:
-        author, name, version = _parse_capability_id(capability_id)
+        org_slug, name, version = _parse_capability_id(capability_id)
+
+        # ms-6: same authz as manifest GET; artifact bytes must not leak
+        # cross-org even if a URL is shared.
+        orgs.require_org_member(org_slug, user.get("sub", ""))
+
         slug = _slug(capability_id)
         doc = db.get_db().collection(_CAPABILITIES_COLLECTION).document(slug).get()
         if not doc.exists:
             raise HTTPException(404, detail=f"capability '{capability_id}' not found")
 
-        object_key = _gcs_object_key(author, name, version)
+        object_key = _gcs_object_key(org_slug, name, version)
         blob = _get_gcs_client().bucket(_BUCKET_NAME).blob(object_key)
         if not blob.exists():
             raise HTTPException(404, detail=f"artifact missing for '{capability_id}'")
