@@ -382,6 +382,19 @@ class NoteCreate(BaseModel):
     context: str = ""
     ts: str = ""
 
+class SessionUpsert(BaseModel):
+    """Body for PUT /api/projects/{project_id}/sessions/{session_id}.
+
+    Fields mirror lib/session.py's local payload. All optional because heartbeat
+    updates only need to bump last_active; first-mint upserts populate the rest.
+    server/firestore_client.upsert_session uses merge=True so partial bodies
+    are safe.
+    """
+    actor: Optional[dict] = None
+    created_at: Optional[str] = None
+    last_active: Optional[str] = None
+    harness: Optional[str] = None
+
 class DocumentSave(BaseModel):
     title: str
     content: str
@@ -1344,6 +1357,40 @@ def clear_notes(project_id: str, user: dict = Depends(require_auth)):
     _require_write(data, user)
     db.clear_notes(project_id)
     return {"status": "cleared"}
+
+
+# ---------------------------------------------------------------------------
+# Session registry (ms-57 / e-1063)
+# ---------------------------------------------------------------------------
+
+@app.put("/api/projects/{project_id}/sessions/{session_id}")
+def upsert_session(
+    project_id: str,
+    session_id: str,
+    body: SessionUpsert,
+    user: dict = Depends(require_auth),
+):
+    """Upsert a session registry entry.
+
+    Heartbeat path: CLI sends only `last_active` to refresh liveness without
+    overwriting the original mint metadata. Initial mint path: CLI sends the
+    full payload. Firestore merge=True (in db.upsert_session) handles both.
+    """
+    _load(project_id, user)
+    payload = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not payload:
+        # Nothing to write — surface as a no-op rather than a 422, so callers
+        # debouncing client-side don't need to special-case empty bodies.
+        return {"status": "noop"}
+    db.upsert_session(project_id, session_id, payload)
+    return {"status": "ok", "session_id": session_id}
+
+
+@app.get("/api/projects/{project_id}/sessions")
+def list_sessions(project_id: str, user: dict = Depends(require_auth)):
+    """List all sessions for a project (used by rescue + UI 'who is active')."""
+    _load(project_id, user)
+    return db.list_sessions(project_id)
 
 
 @app.get("/api/projects/{project_id}/retros")

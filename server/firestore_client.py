@@ -582,6 +582,49 @@ def clear_notes(project_id: str) -> None:
     _delete_subcollection(col)
 
 
+# ---------------------------------------------------------------------------
+# Session registry (subcollection: projects/{project_id}/sessions/{session_id})
+# ms-57 / e-1063: cloud-visible per-session state, used by Web UI for "who is
+# active right now" and by session-start for cross-machine rescue lookups.
+# Each session document is keyed by session_id (not auto-id) so CLI clients
+# can upsert idempotently from any machine.
+# ---------------------------------------------------------------------------
+
+SESSIONS_SUBCOLLECTION = "sessions"
+
+
+def upsert_session(project_id: str, session_id: str, data: dict) -> None:
+    """Upsert a session document by session_id (merge=True).
+
+    merge=True is critical so that a heartbeat-only update (just last_active)
+    does not wipe other fields written by a previous create call.
+    """
+    (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(SESSIONS_SUBCOLLECTION)
+        .document(session_id)
+        .set(data, merge=True)
+    )
+
+
+def list_sessions(project_id: str) -> list[dict]:
+    """List all session documents for a project, ordered by last_active desc.
+
+    Used by session-start rescue and by the Web UI "active sessions" view.
+    """
+    docs = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(SESSIONS_SUBCOLLECTION)
+        .order_by("last_active", direction=firestore.Query.DESCENDING)
+        .stream()
+    )
+    return [doc.to_dict() for doc in docs]
+
+
 def save_retro(project_id: str, week: str, content: str) -> None:
     """Save a retro document."""
     import datetime

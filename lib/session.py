@@ -47,10 +47,18 @@ import agent as _agent
 # ---------------------------------------------------------------------------
 
 _SESSION_JSON_RELATIVE = Path(".beacon") / "session.json"
+_CLOUD_JSON_RELATIVE = Path(".beacon") / "cloud.json"
+_CONFIG_JSON_RELATIVE = Path(".beacon") / "config.json"
 
 _DEFAULT_FRESHNESS_SECONDS = 3600
+_DEFAULT_CLOUD_DEBOUNCE_SECONDS = 30
 
 _SLUG_NORMALIZE_RE = re.compile(r"-{2,}")
+
+# Cloud-sync-related fields that are excluded from the payload pushed to the
+# server (server treats sessions as opaque, but cloud_synced_at is a
+# client-only debounce marker).
+_LOCAL_ONLY_FIELDS = ("cloud_synced_at",)
 
 
 def _session_json_path() -> Path:
@@ -82,6 +90,18 @@ def _freshness_threshold() -> int:
         except ValueError:
             pass
     return _DEFAULT_FRESHNESS_SECONDS
+
+
+def _cloud_debounce_seconds() -> int:
+    raw = os.environ.get("BEACON_SESSION_CLOUD_DEBOUNCE_SECONDS", "").strip()
+    if raw:
+        try:
+            v = int(raw)
+            if v >= 0:
+                return v
+        except ValueError:
+            pass
+    return _DEFAULT_CLOUD_DEBOUNCE_SECONDS
 
 
 def _slugify(name: str) -> str:
@@ -125,6 +145,39 @@ def _mint_session_id(actor: dict) -> str:
     epoch_ms = int(time.time() * 1000)
     nonce = secrets.token_hex(4)
     return f"{slug}-{epoch_ms}-{nonce}"
+
+
+def _is_cloud_mode() -> bool:
+    """Mirror commands._is_cloud_mode without depending on commands.py.
+
+    Kept in this module so session.py is importable in unit tests without
+    pulling in the commands.py dispatch table. The check is intentionally
+    cheap (no JSON parse on the common no-cloud-config path).
+    """
+    if os.environ.get("BEACON_CLOUD") == "1":
+        return True
+    config_path = Path.cwd() / _CONFIG_JSON_RELATIVE
+    if not config_path.exists():
+        return False
+    try:
+        with config_path.open("r", encoding="utf-8") as f:
+            return json.load(f).get("mode") == "cloud"
+    except (json.JSONDecodeError, OSError):
+        return False
+
+
+def _should_cloud_sync(last_sync_iso: str) -> bool:
+    """True iff cloud sync is due (never synced, or debounce elapsed)."""
+    if not last_sync_iso:
+        return True
+    try:
+        last = datetime.fromisoformat(last_sync_iso.replace("Z", "+00:00"))
+    except ValueError:
+        return True  # corrupt timestamp → resync defensively
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    elapsed = (datetime.now(timezone.utc) - last).total_seconds()
+    return elapsed >= _cloud_debounce_seconds()
 
 
 def _is_fresh(last_active_iso: str, now_iso: str, threshold_seconds: int) -> bool:
@@ -225,17 +278,62 @@ def get_or_mint_session() -> dict:
     return {**payload, "minted": True}
 
 
-def update_last_active() -> dict:
-    """Heartbeat: get-or-mint then bump ``last_active`` to now if reusing.
+def _cloud_sync(payload: dict) -> bool:
+    """Push the session payload to the cloud registry (best-effort).
 
-    Called once per CLI sub-command from the main dispatch. Failures here
-    must never propagate — the caller wraps in try/except.
+    Returns True on success, False on any failure (no exceptions out). The
+    caller uses the return value only to decide whether to record
+    cloud_synced_at — a False here just means the next heartbeat retries.
+
+    Imports are lazy because most local-mode runs never reach this path,
+    and the api_client / auth modules are heavyweight (Google OAuth).
+    """
+    try:
+        from auth import load_credentials  # noqa: WPS433
+        if load_credentials() is None:
+            return False  # not logged in; skip silently
+        # commands._get_api_client resolves cloud.json + token provider; we
+        # piggy-back on it instead of re-implementing config plumbing.
+        import commands as _commands  # noqa: WPS433
+        client, config = _commands._get_api_client()
+        body = {k: v for k, v in payload.items() if k not in _LOCAL_ONLY_FIELDS and v is not None}
+        client.upsert_session(config["project_id"], payload["session_id"], body)
+        return True
+    except BaseException:  # noqa: BLE001 — must contain SystemExit from _get_api_client
+        if os.environ.get("BEACON_DEBUG") == "1":
+            import traceback as _tb
+            _tb.print_exc()
+        return False
+
+
+def update_last_active() -> dict:
+    """Heartbeat: get-or-mint, bump ``last_active``, debounced cloud sync.
+
+    Called once per CLI sub-command from the main dispatch. Failures (file
+    IO or cloud sync) must never propagate — the caller wraps in try/except,
+    and cloud sync uses its own best-effort wrapper.
+
+    Cloud sync is debounced via ``cloud_synced_at`` (default 30s) so a hot
+    CLI loop doesn't slam the API every invocation. The default 30s lag is
+    acceptable because per the SPEC §7 revision, heartbeat is a freshness
+    *signal* not a correctness gate for rescue.
     """
     session = get_or_mint_session()
-    if session.pop("minted", False):
-        return session
-    session["last_active"] = _now_iso()
-    write_session(session)
+    minted = session.pop("minted", False)
+
+    if not minted:
+        session["last_active"] = _now_iso()
+
+    sync_attempted = False
+    if _is_cloud_mode() and _should_cloud_sync(session.get("cloud_synced_at", "")):
+        sync_attempted = True
+        if _cloud_sync(session):
+            session["cloud_synced_at"] = _now_iso()
+
+    # Mint already wrote the file once. Re-persist only if we have new state
+    # to record (heartbeat bump or cloud_synced_at update).
+    if not minted or sync_attempted:
+        write_session(session)
     return session
 
 

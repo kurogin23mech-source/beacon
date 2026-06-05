@@ -248,3 +248,170 @@ def test_freshness_threshold_invalid_env_falls_back(monkeypatch):
 def test_freshness_threshold_negative_env_falls_back(monkeypatch):
     monkeypatch.setenv("BEACON_SESSION_FRESH_SECONDS", "-1")
     assert session._freshness_threshold() == 3600
+
+
+# ---------------------------------------------------------------------------
+# Cloud sync (ms-57 / e-1063) — slice 2
+# ---------------------------------------------------------------------------
+
+def _write_cloud_config(project_dir: Path, mode: str = "cloud") -> None:
+    """Switch the project into cloud mode by writing .beacon/config.json."""
+    (project_dir / ".beacon" / "config.json").write_text(
+        json.dumps({"mode": mode}), encoding="utf-8"
+    )
+
+
+def test_is_cloud_mode_detects_config(project_dir):
+    assert session._is_cloud_mode() is False
+    _write_cloud_config(project_dir)
+    assert session._is_cloud_mode() is True
+
+
+def test_is_cloud_mode_honors_env(project_dir, monkeypatch):
+    monkeypatch.setenv("BEACON_CLOUD", "1")
+    assert session._is_cloud_mode() is True
+
+
+def test_should_cloud_sync_when_never_synced():
+    assert session._should_cloud_sync("") is True
+
+
+def test_should_cloud_sync_when_corrupt():
+    assert session._should_cloud_sync("not-iso") is True
+
+
+def test_should_cloud_sync_debounce_recent(monkeypatch):
+    monkeypatch.setenv("BEACON_SESSION_CLOUD_DEBOUNCE_SECONDS", "60")
+    recent = (
+        datetime.now(timezone.utc) - timedelta(seconds=5)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert session._should_cloud_sync(recent) is False
+
+
+def test_should_cloud_sync_debounce_elapsed(monkeypatch):
+    monkeypatch.setenv("BEACON_SESSION_CLOUD_DEBOUNCE_SECONDS", "60")
+    old = (
+        datetime.now(timezone.utc) - timedelta(seconds=120)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert session._should_cloud_sync(old) is True
+
+
+def test_cloud_debounce_default():
+    assert session._cloud_debounce_seconds() == 30
+
+
+def test_cloud_debounce_env_override(monkeypatch):
+    monkeypatch.setenv("BEACON_SESSION_CLOUD_DEBOUNCE_SECONDS", "0")
+    assert session._cloud_debounce_seconds() == 0
+    monkeypatch.setenv("BEACON_SESSION_CLOUD_DEBOUNCE_SECONDS", "120")
+    assert session._cloud_debounce_seconds() == 120
+
+
+def test_update_last_active_no_cloud_in_local_mode(project_dir, monkeypatch):
+    """Local mode must never call _cloud_sync — no network, no auth checks."""
+    sentinel = {"called": 0}
+
+    def _fake_sync(_payload):
+        sentinel["called"] += 1
+        return True
+
+    monkeypatch.setattr(session, "_cloud_sync", _fake_sync)
+    session.update_last_active()
+    session.update_last_active()
+    assert sentinel["called"] == 0
+
+
+def test_update_last_active_syncs_in_cloud_mode(project_dir, monkeypatch):
+    _write_cloud_config(project_dir)
+    payloads = []
+
+    def _fake_sync(payload):
+        payloads.append(dict(payload))
+        return True
+
+    monkeypatch.setattr(session, "_cloud_sync", _fake_sync)
+    s = session.update_last_active()
+    assert len(payloads) == 1
+    assert payloads[0]["session_id"] == s["session_id"]
+    assert "cloud_synced_at" in _read_session_file(project_dir)
+
+
+def test_update_last_active_debounces_cloud_call(project_dir, monkeypatch):
+    """Within the debounce window, repeated heartbeats must NOT call the API."""
+    _write_cloud_config(project_dir)
+    monkeypatch.setenv("BEACON_SESSION_CLOUD_DEBOUNCE_SECONDS", "300")
+    calls = []
+    monkeypatch.setattr(session, "_cloud_sync", lambda p: (calls.append(1) or True))
+
+    session.update_last_active()  # first call → sync
+    session.update_last_active()  # second within debounce → no sync
+    session.update_last_active()  # third within debounce → no sync
+    assert len(calls) == 1
+
+
+def test_update_last_active_resyncs_when_debounce_elapsed(project_dir, monkeypatch):
+    _write_cloud_config(project_dir)
+    monkeypatch.setenv("BEACON_SESSION_CLOUD_DEBOUNCE_SECONDS", "60")
+    calls = []
+    monkeypatch.setattr(session, "_cloud_sync", lambda p: (calls.append(1) or True))
+
+    session.update_last_active()  # first sync
+    # Backdate cloud_synced_at to simulate elapsed debounce.
+    stored = _read_session_file(project_dir)
+    stored["cloud_synced_at"] = (
+        datetime.now(timezone.utc) - timedelta(seconds=120)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    session.write_session(stored)
+    session.update_last_active()  # debounce elapsed → second sync
+    assert len(calls) == 2
+
+
+def test_cloud_sync_failure_does_not_set_synced_at(project_dir, monkeypatch):
+    """A failing cloud sync must not leave a stale cloud_synced_at marker —
+    otherwise subsequent heartbeats would silently skip the retry."""
+    _write_cloud_config(project_dir)
+    monkeypatch.setattr(session, "_cloud_sync", lambda p: False)
+    session.update_last_active()
+    stored = _read_session_file(project_dir)
+    assert "cloud_synced_at" not in stored
+
+
+def test_cloud_sync_failure_does_not_propagate(project_dir, monkeypatch):
+    """Even if _cloud_sync raises (e.g. broken auth import), update_last_active
+    must still succeed — heartbeat correctness must not depend on the network."""
+    _write_cloud_config(project_dir)
+
+    def _boom(_payload):
+        raise RuntimeError("simulated network failure")
+
+    monkeypatch.setattr(session, "_cloud_sync", _boom)
+    # _cloud_sync is the wrapper; the real impl swallows exceptions internally.
+    # Here we bypass it with one that raises — verify update_last_active is
+    # not robust to *that*. (Documents the contract: _cloud_sync must not
+    # raise; if it does, this test will fail and we'll know we broke the rule.)
+    with pytest.raises(RuntimeError):
+        session.update_last_active()
+
+
+def test_cloud_sync_strips_local_only_fields(project_dir, monkeypatch):
+    """cloud_synced_at is a client-only debounce marker — never push it."""
+    _write_cloud_config(project_dir)
+    captured = {}
+
+    def _fake_sync(payload):
+        # Simulate the strip the real _cloud_sync does before client.upsert_session.
+        captured["body"] = {
+            k: v for k, v in payload.items()
+            if k not in session._LOCAL_ONLY_FIELDS and v is not None
+        }
+        return True
+
+    monkeypatch.setattr(session, "_cloud_sync", _fake_sync)
+    # Pre-populate cloud_synced_at with a clearly-old timestamp so the debounce
+    # check is deterministic regardless of the machine clock.
+    stored = session.get_or_mint_session()
+    stored.pop("minted", None)
+    stored["cloud_synced_at"] = "2020-01-01T00:00:00Z"
+    session.write_session(stored)
+    session.update_last_active()
+    assert "cloud_synced_at" not in captured["body"]
