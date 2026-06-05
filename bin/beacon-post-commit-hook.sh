@@ -7,6 +7,32 @@
 # .beacon/project.json.
 
 INPUT=$(cat /dev/stdin)
+
+# e-940: optional observability. When BEACON_HOOK_DEBUG=1, append a one-line
+# decision record to ~/.beacon/hook-debug.log so the silent fail-safe outcomes
+# (malformed / no-root / no-match / matched) can be diagnosed after the fact.
+# Default (unset): no file, no stderr, exit 0 — existing contract unchanged.
+_hook_debug() {
+  [ "$BEACON_HOOK_DEBUG" = "1" ] || return 0
+  local decision="$1" root="$2" cmd="$3"
+  local home="${HOME:-$(cd ~ 2>/dev/null && pwd)}"
+  local logdir="$home/.beacon"
+  mkdir -p "$logdir" 2>/dev/null || return 0
+  local ts
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
+  # Flatten newlines so each record stays on one line (matches the Python
+  # version's cmd.replace("\n", " )); heredoc commit bodies contain newlines.
+  cmd=$(printf '%s' "$cmd" | tr '\r\n' '  ')
+  printf '%s post-commit %s root=%s cmd=%.80s\n' \
+    "$ts" "$decision" "${root:--}" "$cmd" >> "$logdir/hook-debug.log" 2>/dev/null
+}
+
+# Malformed stdin (not valid JSON) → silent exit, but record under debug.
+if ! printf '%s' "$INPUT" | jq -e . >/dev/null 2>&1; then
+  _hook_debug "malformed" "" "$INPUT"
+  exit 0
+fi
+
 CMD=$(echo "$INPUT" | jq -r '.tool_input.command // ""')
 # Bash tool's cwd parameter (Claude Code passes the cwd argument here when set)
 TOOL_CWD=$(echo "$INPUT" | jq -r '.tool_input.cwd // empty')
@@ -79,7 +105,10 @@ find_beacon_root() {
 }
 
 BEACON_ROOT=$(find_beacon_root "$COMMAND_CWD")
-[ -z "$BEACON_ROOT" ] && exit 0
+if [ -z "$BEACON_ROOT" ]; then
+  _hook_debug "no-root" "" "$CMD"
+  exit 0
+fi
 
 emit() {
   local msg="$1"
@@ -87,16 +116,29 @@ emit() {
     "$msg" "$BEACON_ROOT"
 }
 
+SKILL=""
 if echo "$CMD_BARE" | grep -qE 'git commit '; then
   emit "BEACON: Commit detected. You MUST now run /beacon-log Skill to record this commit."
+  SKILL="/beacon-log"
 elif echo "$CMD_BARE" | grep -qE 'git push'; then
   emit "BEACON: Push detected. You MUST now run /beacon-push Skill to record this push."
+  SKILL="/beacon-push"
 elif echo "$CMD_BARE" | grep -qE 'gcloud run deploy|gcloud app deploy|scripts/deploy\.sh'; then
   emit "BEACON: Deploy detected. You MUST now run /beacon-deploy Skill to record this deployment."
+  SKILL="/beacon-deploy"
 elif echo "$CMD_BARE" | grep -qE 'aws s3 sync.*s3://|terraform apply|aws cloudfront create-invalidation'; then
   emit "BEACON: Deploy detected. You MUST now run /beacon-deploy Skill to record this deployment."
+  SKILL="/beacon-deploy"
 elif echo "$CMD_BARE" | grep -qE 'vercel( --prod| deploy)|firebase deploy|fly deploy|flyctl deploy|netlify deploy'; then
   emit "BEACON: Deploy detected. You MUST now run /beacon-deploy Skill to record this deployment."
+  SKILL="/beacon-deploy"
 elif echo "$CMD_BARE" | grep -qE 'kubectl apply|cdk deploy|serverless deploy|sls deploy|pulumi up|eb deploy|az webapp deploy|az functionapp'; then
   emit "BEACON: Deploy detected. You MUST now run /beacon-deploy Skill to record this deployment."
+  SKILL="/beacon-deploy"
+fi
+
+if [ -n "$SKILL" ]; then
+  _hook_debug "matched:$SKILL" "$BEACON_ROOT" "$CMD"
+else
+  _hook_debug "no-match" "$BEACON_ROOT" "$CMD"
 fi
