@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.9.2] - 2026-06-05
+
+- Merge pull request #37 from kurogin23mech-source/ms-52-fix-fanout-perms
+- fix(ms-52): release.yml fan-out needs `actions: write` permission (e-960 finding #3)
+- docs(release): update README/CHANGELOG for v0.9.1
+- chore(release): bump formula to 0.9.1
+
 ## [v0.9.1] - 2026-06-05
 
 - Merge pull request #36 from kurogin23mech-source/ms-52-fix-fanout-pyimport
