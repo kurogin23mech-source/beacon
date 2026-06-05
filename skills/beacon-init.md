@@ -1,7 +1,7 @@
 ---
 name: beacon-init
 description: Beaconプロジェクトを会話形式で初期化。プロジェクト名と大目的を明示的に聞いてから場所を決める。既存リポはProject Archaeologyへ自動チェイン。
-version: 2.2.0
+version: 2.3.0
 triggers:
   - beacon init
   - プロジェクトをbeaconで管理したい
@@ -57,14 +57,16 @@ cat Cargo.toml 2>/dev/null | grep -m1 '^description'
 
 ## Step 2: name + 大目的を明示的に聞く
 
-ユーザーに対して **1 メッセージで以下のフォーム** を提示する:
+ユーザーに対して **1 メッセージで以下のフォーム** を提示する。
+**name と objective のどちらにも draft をできる限り埋めて出す** (Step 1 で取れた環境情報を最大限活用):
 
 ```
 Beacon プロジェクトとして始めますね。以下を教えてください:
 
-  📛 プロジェクト名:   [name-draft があれば挿入、なければ「(例: kakeibo-app)」]
-  🎯 大目的:           [objective-draft があれば挿入、なければ「1〜2 行で
-                       (このプロジェクトが完成したら何ができるようになるか)」]
+  📛 プロジェクト名:   [name-draft を必ず挿入。デフォルトは現在のディレクトリ名 "$CWD_BASENAME"]
+                       このまま使う場合は Enter (空入力)、別の名前にする場合はその名前を入力してください。
+  🎯 大目的:           [objective-draft があれば挿入し、出どころ ("README から" / "package.json から" 等) を 1 行添える。
+                       何も取れなければ「1〜2 行で (このプロジェクトが完成したら何ができるようになるか)」]
 
   以下は任意 (空でも OK、後で /beacon-vision で深掘りできます):
   👥 ターゲット:        誰のためのプロジェクトか
@@ -73,18 +75,31 @@ Beacon プロジェクトとして始めますね。以下を教えてくださ�
 
 ### draft の組み立て
 
-- **name-draft**:
+- **name-draft** (常に必ず draft を出す):
   - ユーザーの初期発話に明示的な名前があればそれ
-  - そうでなく `$GIT_COMMITS >= 10` (既存リポ) なら `$CWD_BASENAME`
-  - それ以外は draft なし (フォームは例文だけ)
+  - それがなければ常に `$CWD_BASENAME` をデフォルトとして提示する (git commits 数や cwd 種別による出し分けは **しない** / e-539)
+  - 提示する際は「デフォルトとして現在のディレクトリ名 "$CWD_BASENAME" を提案します」と明示し、
+    「このまま使う場合は Enter (空入力)、別の名前にする場合はその名前を入力してください」と添える
+  - 空入力 (= Enter のみ) なら `$CWD_BASENAME` で確定。何か入力されればそれを採用
 
-- **objective-draft** (信頼順に上から拾う):
+- **objective-draft** (信頼順に上から拾い、見つかった時点で確定 / e-540):
   - ユーザーの初期発話 (「家計簿アプリ作りたい」等) があればそれ
-  - `$README_HEAD` の最初の意味ある 1〜2 行 (HTML/Markdown 装飾は除去)
-  - `$PKG_DESC`
-  - 何もなければ draft なし
+  - `$README_HEAD` の最初の意味ある 1〜2 行 (見出し直後の段落。HTML/Markdown 装飾、バッジ、画像リンクは除去)
+  - `$PKG_DESC` (package.json `description` / pyproject.toml `description` / Cargo.toml `description` のいずれか)
+  - どれも取れなければ draft なし → ユーザーに自由記述してもらう
 
-draft を出すときは「README から拾いました、違ったら修正してください」のように **出どころを 1 行添える**。
+draft を出すときは「README から抽出: "<text>"。これで OK ですか? (修正があれば書き換え版を入力)」のように
+**出どころを 1 行添える**。ユーザーが「OK」「これで」と返したら採用、書き換え版を返したらそちらを採用。
+
+### Step 1 への補強 (README / package description 抽出)
+
+Step 1 の並列 Bash 実行で `$README_HEAD` と `$PKG_DESC` を取得済み。draft 抽出時は以下を意識する:
+
+- README の最初の見出し (`# Project Name`) **直後** の段落 1〜2 文を採用する。見出し自身や badge 行
+  (`![...](...)`, `[![...]](...)`) はスキップ
+- 複数のソース (README と package.json) が両方ヒットしたら README を優先 (人間が書いた説明文の方が
+  「大目的」に近いことが多い)
+- 出どころを必ずユーザーに見せる (「README から抽出: ...」「package.json description から: ...」)
 
 ### このステップでは聞かないもの
 
