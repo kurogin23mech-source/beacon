@@ -125,9 +125,12 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             label: macOS-arm64
-          - os: macos-13
-            target: x86_64-apple-darwin
-            label: macOS-x64
+          # macOS-x64 (Intel) is intentionally dropped: GitHub Actions
+          # macos-13 runner availability is extremely scarce (jobs queue for
+          # hours), which blocks the aggregate upload step on every release
+          # and prevents .dmg/.AppImage/.msi from ever attaching to the
+          # GitHub Release on time. Beacon's mac user base is Apple Silicon —
+          # add macOS-x64 back if a real Intel user reports needing it.
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             label: Windows-x64
