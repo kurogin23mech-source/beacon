@@ -31,6 +31,14 @@ on:
 
 permissions:
   contents: write   # push the bump commit + tag, create the GitHub release
+  actions: write    # dispatch downstream workflows (deploy-cloud-run.yml,
+                    # release-build.yml) via `gh workflow run`. Without this
+                    # the workflow_dispatch API returns HTTP 403
+                    # "Resource not accessible by integration" — caught by
+                    # the v0.9.1 dogfood (ms-52 e-960, second iteration).
+                    # Specifying ANY `permissions:` block implicitly drops
+                    # every other scope, so the dispatch perm must be
+                    # listed even though it sounds "obvious".
 
 concurrency:
   group: beacon-release
