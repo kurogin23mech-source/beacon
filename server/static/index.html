@@ -2353,12 +2353,6 @@ function renderMainContent() {
       <button class="tab-btn ${state.activeTab === 'notes' ? 'active' : ''}" data-action="switch-tab" data-tab="notes">Notes</button>
     </div>
     ${state.activeTab === 'dashboard' ? (state.showGraph ? renderGraphSection() : `
-    ${p.summary ? `
-    <section class="summary-block fade-in">
-      <div class="summary-label">Session Context</div>
-      <div class="summary-text">${esc(p.summary)}</div>
-    </section>
-    ` : ''}
     <section class="milestones fade-in">
       <div class="milestones-header">
         <span class="milestones-title">Milestones</span>

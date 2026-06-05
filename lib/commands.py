@@ -2660,10 +2660,25 @@ def cmd_member_role():
 # ---------------------------------------------------------------------------
 
 def cmd_summary():
+    # ms-57 / e-1040: `beacon summary` is being phased out. The single
+    # mutable summary field had three roles (session scratch, cross-session
+    # hand-off, human narrative) and a lost-update history. Writes still
+    # work for legacy callers (auto-update from beacon log, /beacon-log
+    # Skill) but a stderr deprecation note nudges interactive users toward
+    # the session log + project-vision split per SPEC v2.
     text = os.environ.get("BEACON_SUMMARY_TEXT", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     data = load_project()
     if text:
+        # Skip the nag in JSON mode (the /beacon-log Skill calls this
+        # programmatically and shouldn't be lectured every commit).
+        if not json_mode and not os.environ.get("BEACON_SUPPRESS_DEPRECATION"):
+            print(
+                "Note: `beacon summary` is deprecated (ms-57 / e-1040). "
+                "Cross-session hand-off lives in `beacon session log` now, "
+                "and human narrative belongs in the project-vision doc.",
+                file=sys.stderr,
+            )
         data["summary"] = text
         save_project(data)
         print(f"Summary updated.")
