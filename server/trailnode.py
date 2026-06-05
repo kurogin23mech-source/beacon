@@ -62,7 +62,7 @@ _ID_PATTERN = re.compile(
 _REQUIRED_MANIFEST_FIELDS = (
     "schema_version", "id", "name", "type", "version", "description", "author",
 )
-_SUPPORTED_TYPES = ("skill",)  # v0 only; ai-workflow/program/app land in ms-4
+_SUPPORTED_TYPES = ("skill", "app", "program", "ai-workflow")  # ms-5: 4-type gate (client mirror: trailnode src/trailnode/push.py)
 
 _gcs_client: gcs_storage.Client | None = None
 
