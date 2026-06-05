@@ -625,6 +625,68 @@ def list_sessions(project_id: str) -> list[dict]:
     return [doc.to_dict() for doc in docs]
 
 
+# ---------------------------------------------------------------------------
+# Session log (subcollection: projects/{project_id}/session_logs/{session_id})
+# ms-57 / e-1037: per-session aggregated entry. summary is the durable
+# content (decision trail surviving past entry GC); *_ids are best-effort
+# back-references that work only while the linked entries remain. Doc id
+# == session_id so session-end and rescue (e-1038/1039) can upsert
+# idempotently without an ID lookup step.
+# ---------------------------------------------------------------------------
+
+SESSION_LOGS_SUBCOLLECTION = "session_logs"
+
+
+def upsert_session_log(project_id: str, session_id: str, data: dict) -> None:
+    """Upsert a session log entry by session_id.
+
+    Uses merge=True so a rescue-path partial upsert (just summary + recovered
+    flag) does not wipe note_ids / commit_ids / pr_ids written by a richer
+    session-end aggregation that happened earlier — important when both
+    paths race on the same session.
+    """
+    (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(SESSION_LOGS_SUBCOLLECTION)
+        .document(session_id)
+        .set(data, merge=True)
+    )
+
+
+def list_session_logs(project_id: str, limit: int | None = None) -> list[dict]:
+    """List session log entries ordered by last_aggregated_at desc.
+
+    session-start reads the top N (typically 3 per SPEC §10) so the most
+    recent prior sessions surface first. ``limit`` is applied server-side
+    to keep the wire payload small.
+    """
+    q = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(SESSION_LOGS_SUBCOLLECTION)
+        .order_by("last_aggregated_at", direction=firestore.Query.DESCENDING)
+    )
+    if limit:
+        q = q.limit(limit)
+    return [doc.to_dict() for doc in q.stream()]
+
+
+def get_session_log(project_id: str, session_id: str) -> dict | None:
+    """Fetch a single session log entry, or None if absent."""
+    doc = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(SESSION_LOGS_SUBCOLLECTION)
+        .document(session_id)
+        .get()
+    )
+    return doc.to_dict() if doc.exists else None
+
+
 def save_retro(project_id: str, week: str, content: str) -> None:
     """Save a retro document."""
     import datetime
