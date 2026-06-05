@@ -138,6 +138,46 @@ def test_q_matches_incident_title():
 
 
 # ---------------------------------------------------------------------------
+# q matches entity id / doc_id by number (ms-43 e-1010)
+# ---------------------------------------------------------------------------
+
+def test_q_matches_entry_id_exact():
+    project = _make_project()
+    out = search.search_project(project, q="e-100")
+    ids = [r["id"] for r in out["results"]]
+    assert "e-100" in ids
+
+
+def test_q_matches_entry_id_partial_number():
+    project = _make_project()
+    out = search.search_project(project, q="100")
+    ids = [r["id"] for r in out["results"]]
+    assert "e-100" in ids
+
+
+def test_q_matches_milestone_id():
+    project = _make_project()
+    out = search.search_project(project, q="ms-2")
+    ids = [r["id"] for r in out["results"]]
+    assert "ms-2" in ids
+
+
+def test_q_matches_document_doc_id():
+    project = _make_project()
+    out = search.search_project(project, _make_docs(), q="spec-1")
+    ids = [r["id"] for r in out["results"]]
+    assert "spec-1" in ids
+
+
+def test_q_id_match_does_not_break_text_search():
+    """The id match is additive — text queries still work unchanged."""
+    project = _make_project()
+    out = search.search_project(project, q="Onboarding")
+    ids = [r["id"] for r in out["results"]]
+    assert "ms-1" in ids
+
+
+# ---------------------------------------------------------------------------
 # Metadata filters
 # ---------------------------------------------------------------------------
 
