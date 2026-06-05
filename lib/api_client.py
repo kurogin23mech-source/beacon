@@ -65,8 +65,8 @@ class ApiClient:
     def patch(self, path: str, body: dict) -> dict:
         return self._request("PATCH", path, body)
 
-    def delete(self, path: str) -> dict:
-        return self._request("DELETE", path)
+    def delete(self, path: str, body: dict | None = None) -> dict:
+        return self._request("DELETE", path, body)
 
     # Convenience methods for beacon operations
 
@@ -113,8 +113,38 @@ class ApiClient:
             body["scope"] = scope
         return self.put(f"/api/projects/{project_id}/documents/{urllib.parse.quote(doc_id, safe='')}", body)
 
-    def delete_document(self, project_id: str, doc_id: str) -> dict:
-        return self.delete(f"/api/projects/{project_id}/documents/{urllib.parse.quote(doc_id, safe='')}")
+    def delete_document(self, project_id: str, doc_id: str, reason: str = "") -> dict:
+        body = {"reason": reason} if reason else None
+        return self.delete(
+            f"/api/projects/{project_id}/documents/{urllib.parse.quote(doc_id, safe='')}",
+            body,
+        )
+
+    def restore_document(self, project_id: str, doc_id: str, reason: str = "") -> dict:
+        return self.post(
+            f"/api/projects/{project_id}/documents/{urllib.parse.quote(doc_id, safe='')}/restore",
+            {"reason": reason},
+        )
+
+    def list_documents_with_trashed(self, project_id: str) -> list:
+        return self.get(f"/api/projects/{project_id}/documents?include_trashed=true")
+
+    # Trash / Restore (ms-14 e-826 / e-991)
+
+    def list_trash(self, project_id: str, days: int = 30) -> dict:
+        return self.get(f"/api/projects/{project_id}/trash?days={days}")
+
+    def restore_milestone(self, project_id: str, ms_id: str, reason: str = "") -> dict:
+        return self.post(
+            f"/api/projects/{project_id}/milestones/{ms_id}/restore",
+            {"reason": reason},
+        )
+
+    def restore_entry(self, project_id: str, entry_id: str, reason: str = "") -> dict:
+        return self.post(
+            f"/api/projects/{project_id}/entries/{entry_id}/restore",
+            {"reason": reason},
+        )
 
     # Retro operations
 

@@ -41,6 +41,9 @@ let state = {
   // Operations は state.project.operations から read (追加 loader 不要)。
   // Notes はサーバー / CLI 経由で取得する必要があるため state に持つ。
   sessionNotes: [],
+  // ms-14 e-826 / e-991: Trash tab state (mirrors server/static/index.html).
+  trash: { milestones: [], tasks: [], documents: [], days: 30, loaded: false },
+  trashTypeFilter: 'all',
 };
 
 // ---- Data loading (Tauri invoke) ----
@@ -119,6 +122,35 @@ const dataSource = {
     const m = body.match(/^# (.+)/m);
     if (m) title = m[1];
     state.documentContent = { doc_id: docId, title, scope, content: body };
+  },
+  // ms-14 e-826 / e-991: Trash + restore. Cloud routes through new
+  // Tauri commands; local mode is a follow-up (the unified /trash
+  // endpoint and restore semantics still need a local-equivalent
+  // invoke command). For now local Tauri sees an explicit error so
+  // the divergence is loud rather than silent.
+  loadTrash: async (days) => {
+    const d = days != null ? days : (state.trash?.days ?? 30);
+    if (!cloudMode) throw new Error('Trash tab is cloud-mode only on Tauri for now (follow-up: local trash command).');
+    const payload = JSON.parse(await invoke('cloud_list_trash', { days: d }));
+    state.trash = {
+      milestones: payload.milestones || [],
+      tasks: payload.tasks || [],
+      documents: payload.documents || [],
+      days: d,
+      loaded: true,
+    };
+  },
+  restoreMilestone: async (msId, reason) => {
+    if (!cloudMode) throw new Error('Restore is cloud-mode only on Tauri for now.');
+    await invoke('cloud_restore_milestone', { msId, reason: reason || '' });
+  },
+  restoreEntry: async (entryId, reason) => {
+    if (!cloudMode) throw new Error('Restore is cloud-mode only on Tauri for now.');
+    await invoke('cloud_restore_entry', { entryId, reason: reason || '' });
+  },
+  restoreDocument: async (docId, reason) => {
+    if (!cloudMode) throw new Error('Restore is cloud-mode only on Tauri for now.');
+    await invoke('cloud_restore_document', { docId, reason: reason || '' });
   },
 };
 

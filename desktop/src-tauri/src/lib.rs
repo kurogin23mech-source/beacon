@@ -304,6 +304,64 @@ fn cloud_post(path: &str) -> Result<String, String> {
     }
 }
 
+/// POST with a JSON body, mirroring cloud_post's auth + 401 refresh behaviour.
+/// Separate function so cloud_post (no body) callers don't pay the JSON
+/// serialization cost.
+fn cloud_post_json(path: &str, body: &serde_json::Value) -> Result<String, String> {
+    let token = load_auth_token()
+        .ok_or("Not authenticated. Run: beacon auth login")?;
+    let url = format!("{}{}", DEFAULT_API_URL, path);
+    match ureq::post(&url)
+        .set("Authorization", &format!("Bearer {}", token))
+        .set("Content-Type", "application/json")
+        .send_json(body.clone())
+    {
+        Ok(resp) => resp.into_string().map_err(|e| format!("Read error: {}", e)),
+        Err(ureq::Error::Status(401, _)) => {
+            let new_token = refresh_id_token()
+                .ok_or("Token expired and refresh failed. Run: beacon auth login")?;
+            ureq::post(&url)
+                .set("Authorization", &format!("Bearer {}", new_token))
+                .set("Content-Type", "application/json")
+                .send_json(body.clone())
+                .map_err(|e| format!("API error: {}", e))?
+                .into_string()
+                .map_err(|e| format!("Read error: {}", e))
+        }
+        Err(e) => Err(format!("API error: {}", e)),
+    }
+}
+
+// ---- Trash / Restore (ms-14 e-826 / e-991) ----
+
+#[tauri::command]
+fn cloud_list_trash(state: State<AppState>, days: Option<u32>) -> Result<String, String> {
+    let pid = state.cloud_project_id.lock().unwrap().clone().ok_or("No cloud project selected")?;
+    let d = days.unwrap_or(30);
+    cloud_get(&format!("/api/projects/{}/trash?days={}", pid, d))
+}
+
+#[tauri::command]
+fn cloud_restore_milestone(state: State<AppState>, ms_id: String, reason: Option<String>) -> Result<String, String> {
+    let pid = state.cloud_project_id.lock().unwrap().clone().ok_or("No cloud project selected")?;
+    let body = serde_json::json!({ "reason": reason.unwrap_or_default() });
+    cloud_post_json(&format!("/api/projects/{}/milestones/{}/restore", pid, ms_id), &body)
+}
+
+#[tauri::command]
+fn cloud_restore_entry(state: State<AppState>, entry_id: String, reason: Option<String>) -> Result<String, String> {
+    let pid = state.cloud_project_id.lock().unwrap().clone().ok_or("No cloud project selected")?;
+    let body = serde_json::json!({ "reason": reason.unwrap_or_default() });
+    cloud_post_json(&format!("/api/projects/{}/entries/{}/restore", pid, entry_id), &body)
+}
+
+#[tauri::command]
+fn cloud_restore_document(state: State<AppState>, doc_id: String, reason: Option<String>) -> Result<String, String> {
+    let pid = state.cloud_project_id.lock().unwrap().clone().ok_or("No cloud project selected")?;
+    let body = serde_json::json!({ "reason": reason.unwrap_or_default() });
+    cloud_post_json(&format!("/api/projects/{}/documents/{}/restore", pid, doc_id), &body)
+}
+
 #[tauri::command]
 fn cloud_archive_project(state: State<AppState>) -> Result<String, String> {
     let pid = state.cloud_project_id.lock().unwrap().clone().ok_or("No cloud project selected")?;
@@ -622,6 +680,10 @@ pub fn run() {
             cloud_get_auth_token,
             cloud_refresh_auth_token,
             cloud_list_notes,
+            cloud_list_trash,
+            cloud_restore_milestone,
+            cloud_restore_entry,
+            cloud_restore_document,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -11,8 +11,8 @@ Covers:
 - ``cmd_doc_restore`` refuses to restore a non-cancelled doc.
 - ``cmd_doc_list`` hides cancelled docs by default and shows them with
   ``BEACON_INCLUDE_TRASHED=1``.
-- Cloud mode refuses the new trash listing / trash restore so the
-  divergence is loud (it'll be lifted by a follow-up task).
+- Cloud mode delegates trash listing / restore to the API (ms-14
+  e-991: divergence resolved; both CLI paths land equivalent state).
 - ``_append_changelog`` records ``op=doc_delete`` and ``op=doc_restore``.
 
 The revision-history restore path (``BEACON_REV`` present, cloud
@@ -368,28 +368,108 @@ def test_doc_list_include_trashed_shows_all(docs_project, monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------------
-# Cloud mode refusals — divergence is loud, not silent
+# Cloud mode delegation — CLI hands off to the API (ms-14 e-991)
 # ---------------------------------------------------------------------------
 
 
-def test_doc_trash_refuses_cloud_mode(docs_project, monkeypatch, capsys):
+class _FakeClient:
+    """Minimal stand-in for ApiClient capturing the calls the cloud branches make."""
+
+    def __init__(self, *, trash_payload=None):
+        self.calls: list[tuple] = []
+        self._trash_payload = trash_payload or {
+            "days": 30, "milestones": [], "tasks": [], "documents": [],
+        }
+
+    def list_trash(self, project_id, days=30):
+        self.calls.append(("list_trash", project_id, days))
+        return self._trash_payload
+
+    def restore_document(self, project_id, doc_id, reason=""):
+        self.calls.append(("restore_document", project_id, doc_id, reason))
+        return {"doc_id": doc_id, "status": "restored"}
+
+    def delete_document(self, project_id, doc_id, reason=""):
+        self.calls.append(("delete_document", project_id, doc_id, reason))
+        return {"doc_id": doc_id, "status": "cancelled"}
+
+
+def _install_fake_client(commands, monkeypatch, fake):
+    monkeypatch.setattr(
+        commands, "_get_api_client",
+        lambda: (fake, {"project_id": "proj-xyz"}),
+    )
+
+
+def test_doc_trash_in_cloud_mode_hits_unified_endpoint(docs_project, monkeypatch, capsys):
     monkeypatch.setenv("BEACON_CLOUD", "1")
     monkeypatch.setenv("BEACON_DAYS", "30")
+    monkeypatch.setenv("BEACON_JSON", "1")
     commands = _reload_commands()
-    with pytest.raises(SystemExit) as ei:
-        commands.cmd_doc_trash()
-    assert ei.value.code == 1
-    err = capsys.readouterr().err
-    assert "cloud mode" in err
+    fake = _FakeClient(trash_payload={
+        "days": 30,
+        "milestones": [],
+        "tasks": [],
+        "documents": [{
+            "doc_id": "abc", "title": "Notes", "scope": "memo",
+            "trashed_at": "2026-06-04T10:00:00", "trashed_by": "user@example.com",
+            "trash_reason": "obsolete", "days_ago": 1,
+        }],
+    })
+    _install_fake_client(commands, monkeypatch, fake)
+
+    commands.cmd_doc_trash()
+
+    assert fake.calls == [("list_trash", "proj-xyz", 30)]
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+    assert payload[0]["doc_id"] == "abc"
+    assert payload[0]["trash_reason"] == "obsolete"
 
 
-def test_doc_restore_from_trash_refuses_cloud_mode(docs_project, monkeypatch, capsys):
+def test_doc_trash_in_cloud_mode_translates_all_to_zero(docs_project, monkeypatch, capsys):
+    """`--days all` (BEACON_DAYS=all) -> /trash?days=0 so the server returns
+    every soft-deleted doc instead of the 30-day window."""
     monkeypatch.setenv("BEACON_CLOUD", "1")
-    monkeypatch.setenv("BEACON_DOC_ID", "anything")
+    monkeypatch.setenv("BEACON_DAYS", "all")
+    monkeypatch.setenv("BEACON_JSON", "1")
+    commands = _reload_commands()
+    fake = _FakeClient()
+    _install_fake_client(commands, monkeypatch, fake)
+
+    commands.cmd_doc_trash()
+
+    assert fake.calls == [("list_trash", "proj-xyz", 0)]
+
+
+def test_doc_restore_from_trash_in_cloud_mode_calls_api(docs_project, monkeypatch, capsys):
+    monkeypatch.setenv("BEACON_CLOUD", "1")
+    monkeypatch.setenv("BEACON_DOC_ID", "doc-42")
+    monkeypatch.setenv("BEACON_REASON", "false alarm")
     monkeypatch.delenv("BEACON_REV", raising=False)
     commands = _reload_commands()
-    with pytest.raises(SystemExit) as ei:
-        commands.cmd_doc_restore()
-    assert ei.value.code == 1
-    err = capsys.readouterr().err
-    assert "cloud mode" in err
+    fake = _FakeClient()
+    _install_fake_client(commands, monkeypatch, fake)
+
+    commands.cmd_doc_restore()
+
+    assert fake.calls == [("restore_document", "proj-xyz", "doc-42", "false alarm")]
+    out = capsys.readouterr().out
+    assert "Restored from trash: doc-42" in out
+    assert "Reason: false alarm" in out
+
+
+def test_doc_delete_in_cloud_mode_forwards_reason(docs_project, monkeypatch, capsys):
+    monkeypatch.setenv("BEACON_CLOUD", "1")
+    monkeypatch.setenv("BEACON_DOC_ID", "doc-42")
+    monkeypatch.setenv("BEACON_REASON", "duplicate")
+    commands = _reload_commands()
+    fake = _FakeClient()
+    _install_fake_client(commands, monkeypatch, fake)
+
+    commands.cmd_doc_delete()
+
+    assert fake.calls == [("delete_document", "proj-xyz", "doc-42", "duplicate")]
+    out = capsys.readouterr().out
+    assert "Trashed: doc-42" in out
+    assert "Reason: duplicate" in out
