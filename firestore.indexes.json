@@ -1,4 +1,21 @@
 {
-  "indexes": [],
+  "indexes": [
+    {
+      "collectionGroup": "capabilities",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "deleted_at", "order": "ASCENDING"},
+        {"fieldPath": "updated_at", "order": "ASCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "capabilities-dev",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "deleted_at", "order": "ASCENDING"},
+        {"fieldPath": "updated_at", "order": "ASCENDING"}
+      ]
+    }
+  ],
   "fieldOverrides": []
 }
