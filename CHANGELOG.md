@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.11.1] - 2026-06-05
+
+- Merge pull request #49 from kurogin23mech-source/fix-ms43-tauri-state-init
+- fix(ms-43): Tauri cloud project bounce + WS-open flash (e-1024)
+- docs(release): update README/CHANGELOG for v0.11.0
+- chore(release): bump formula to 0.11.0
+
 ## [v0.11.0] - 2026-06-05
 
 - Merge pull request #48 from kurogin23mech-source/ms-43-entry-id-search
