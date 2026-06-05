@@ -1558,17 +1558,21 @@ cmd_doc() {
             local scope_filter=""
             local ms_filter=""
             local op_filter=""
+            local include_trashed=""
             while [[ $# -gt 0 ]]; do
                 case "$1" in
-                    --json)     json_flag="1"; shift ;;
-                    --scope|-s) scope_filter="${2:-}"; shift 2 ;;
-                    --ms)       ms_filter="${2:-}"; shift 2 ;;
-                    --op)       op_filter="${2:-}"; shift 2 ;;
+                    --json)             json_flag="1"; shift ;;
+                    --scope|-s)         scope_filter="${2:-}"; shift 2 ;;
+                    --ms)               ms_filter="${2:-}"; shift 2 ;;
+                    --op)               op_filter="${2:-}"; shift 2 ;;
+                    --include-trashed)  include_trashed="1"; shift ;;
                     *) shift ;;
                 esac
             done
             BEACON_JSON="$json_flag" BEACON_SCOPE="$scope_filter" \
-                BEACON_MS="$ms_filter" BEACON_OP="$op_filter" python3 "$COMMANDS_PY" doc_list
+                BEACON_MS="$ms_filter" BEACON_OP="$op_filter" \
+                BEACON_INCLUDE_TRASHED="$include_trashed" \
+                python3 "$COMMANDS_PY" doc_list
             ;;
         update)
             shift
@@ -1622,18 +1626,36 @@ cmd_doc() {
         delete|rm)
             shift
             local doc_id=""
+            local doc_reason=""
             local json_flag=""
             while [[ $# -gt 0 ]]; do
                 case "$1" in
-                    --json) json_flag="1"; shift ;;
-                    *)      doc_id="$1"; shift ;;
+                    -r|--reason) doc_reason="${2:-}"; shift 2 ;;
+                    --json)      json_flag="1"; shift ;;
+                    *)           doc_id="$1"; shift ;;
                 esac
             done
             if [ -z "$doc_id" ]; then
-                echo "Usage: beacon doc delete <doc-id>"
+                echo "Usage: beacon doc delete <doc-id> [--reason \"text\"] [--json]"
                 exit 1
             fi
-            BEACON_DOC_ID="$doc_id" BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" doc_delete
+            BEACON_DOC_ID="$doc_id" BEACON_REASON="$doc_reason" BEACON_JSON="$json_flag" \
+                python3 "$COMMANDS_PY" doc_delete
+            ;;
+        trash)
+            shift
+            local trash_days="30"
+            local trash_json=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --days)  trash_days="${2:-}"; shift 2 ;;
+                    --all)   trash_days="all"; shift ;;
+                    --json)  trash_json="1"; shift ;;
+                    *) shift ;;
+                esac
+            done
+            BEACON_DAYS="$trash_days" BEACON_JSON="$trash_json" \
+                python3 "$COMMANDS_PY" doc_trash
             ;;
         history)
             ensure_project
@@ -1641,25 +1663,30 @@ cmd_doc() {
             ;;
         restore)
             ensure_project
-            local doc_id="${3:-}"
+            shift
+            local doc_id=""
             local rev=""
-            shift 3 || true
+            local doc_reason=""
             while [[ $# -gt 0 ]]; do
                 case "$1" in
-                    --rev) rev="${2:-}"; shift 2 ;;
-                    *) shift ;;
+                    --rev)       rev="${2:-}"; shift 2 ;;
+                    -r|--reason) doc_reason="${2:-}"; shift 2 ;;
+                    *)           [[ -z "$doc_id" ]] && doc_id="$1"; shift ;;
                 esac
             done
-            BEACON_DOC_ID="$doc_id" BEACON_REV="$rev" python3 "$COMMANDS_PY" doc_restore
+            BEACON_DOC_ID="$doc_id" BEACON_REV="$rev" BEACON_REASON="$doc_reason" \
+                python3 "$COMMANDS_PY" doc_restore
             ;;
         *)
-            echo "Usage: beacon doc [add|list|show|update|delete|history|restore]"
+            echo "Usage: beacon doc [add|list|show|update|delete|trash|restore|history]"
             echo "  add    \"title\" --scope core|spec|memo [--ms ms-id]  Create a document"
             echo "  update <doc-id> [--title text] [--content text]     Update a document"
-            echo "  list   [--scope core|spec|memo] [--ms ms-id]        List documents"
+            echo "  list   [--scope core|spec|memo] [--ms ms-id] [--include-trashed]"
             echo "  show   <doc-id>                                      Show document content"
-            echo "  delete <doc-id>                                      Delete a document"
+            echo "  delete <doc-id> [--reason \"text\"]                    Soft-delete to trash"
+            echo "  trash  [--days N] [--all] [--json]                   List trashed docs"
             echo "  history <doc-id>                                     Show revision history"
+            echo "  restore <doc-id>                                     Restore from trash"
             echo "  restore <doc-id> --rev <n>                           Restore to a revision"
             ;;
     esac

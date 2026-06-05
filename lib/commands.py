@@ -3457,6 +3457,13 @@ def _read_local_doc(fpath):
         result["milestone"] = milestone
     if operation:
         result["operation"] = operation
+    # Soft-delete fields surface so callers (cmd_doc_list, cmd_doc_trash)
+    # can filter without re-parsing the frontmatter (ms-14 e-973).
+    if meta.get("status"):
+        result["status"] = meta["status"]
+    for k in ("trashed_at", "trashed_by", "trash_reason"):
+        if meta.get(k):
+            result[k] = meta[k]
     return result
 
 
@@ -3465,6 +3472,10 @@ def cmd_doc_list():
     scope_filter = os.environ.get("BEACON_SCOPE", "")
     ms_filter = os.environ.get("BEACON_MS", "")
     op_filter = os.environ.get("BEACON_OP", "")
+    # Trashed docs are hidden by default — pass --include-trashed to see
+    # them in line with active ones (ms-14 e-973). Use the dedicated
+    # `beacon doc trash` listing for trash-only operations.
+    include_trashed = os.environ.get("BEACON_INCLUDE_TRASHED", "") == "1"
 
     if _is_cloud_mode():
         client, config = _get_api_client()
@@ -3477,6 +3488,8 @@ def cmd_doc_list():
                 if not fname.endswith(".md"):
                     continue
                 doc = _read_local_doc(os.path.join(docs_dir, fname))
+                if not include_trashed and doc.get("status") == "cancelled":
+                    continue
                 entry = {
                     "doc_id": doc["doc_id"],
                     "title": doc["title"],
@@ -3487,6 +3500,8 @@ def cmd_doc_list():
                     entry["milestone"] = doc["milestone"]
                 if doc.get("operation"):
                     entry["operation"] = doc["operation"]
+                if doc.get("status"):
+                    entry["status"] = doc["status"]
                 docs.append(entry)
 
     if scope_filter:
@@ -3709,13 +3724,65 @@ def cmd_doc_history():
         print(f"  rev-{r['rev']}  {r['ts'][:10]}  {r.get('saved_by', '?')}")
 
 
+def _rewrite_doc_frontmatter(fpath: str, *,
+                              updates: Optional[dict] = None,
+                              removes: Optional[list] = None) -> None:
+    """Rewrite a doc's frontmatter in place.
+
+    Reads the on-disk content, parses frontmatter via the existing
+    parser, applies ``updates`` (key → str value) and ``removes`` (list
+    of keys to drop), and writes back. Body is preserved exactly. Used
+    by the doc trash / restore paths (ms-14 e-973) so we don't bypass
+    the canonical frontmatter shape.
+    """
+    with open(fpath, "r", encoding="utf-8") as f:
+        content = f.read()
+    meta, body = _parse_frontmatter(content)
+    if removes:
+        for k in removes:
+            meta.pop(k, None)
+    if updates:
+        meta.update({k: str(v) for k, v in updates.items()})
+    lines = ["---"]
+    for k, v in meta.items():
+        lines.append(f"{k}: {v}")
+    lines.append("---")
+    lines.append("")
+    new_content = "\n".join(lines) + body
+    with open(fpath, "w", encoding="utf-8") as f:
+        f.write(new_content)
+
+
 def cmd_doc_restore():
-    """Restore a document to a previous revision (creates new save, keeps history)."""
+    """Restore a document.
+
+    Polymorphic on BEACON_REV (ms-14 e-973):
+
+    - When ``--rev N`` is passed (BEACON_REV is non-empty), restore the
+      doc to historical revision N. This is the cloud-only revision
+      history path that existed before e-973.
+    - When ``--rev`` is omitted (BEACON_REV missing or empty), lift the
+      trash marker placed by ``cmd_doc_delete`` and re-activate the doc
+      (local mode only; cloud mode is a follow-up).
+
+    Splitting on the env var rather than introducing a new verb keeps
+    the existing ``beacon doc restore <id> --rev N`` muscle memory
+    working while the new bare-id form becomes the trash restore.
+    """
     doc_id = os.environ.get("BEACON_DOC_ID", "")
     rev = os.environ.get("BEACON_REV", "")
-    if not doc_id or not rev:
-        print("Error: doc ID and --rev required")
+    if not doc_id:
+        print("Error: doc_id required", file=sys.stderr)
         sys.exit(1)
+    if rev:
+        _doc_restore_revision(doc_id, rev)
+    else:
+        reason = os.environ.get("BEACON_REASON", "")
+        _doc_restore_from_trash(doc_id, reason=reason)
+
+
+def _doc_restore_revision(doc_id: str, rev: str) -> None:
+    """Restore a doc to a historical revision. Pre-e-973 behaviour."""
     client, config = _get_api_client()
     project_id = config["project_id"]
     try:
@@ -3731,8 +3798,69 @@ def cmd_doc_restore():
     print(f"Restored '{doc_id}' to rev-{rev}")
 
 
+def _doc_restore_from_trash(doc_id: str, *, reason: str = "") -> None:
+    """Reverse a soft-delete of a local doc (ms-14 e-973).
+
+    Cloud mode is not yet supported — the server still hard-deletes
+    via ``client.delete_document``; that path is tracked as a separate
+    follow-up. Raising here keeps the local / cloud divergence visible
+    rather than silently doing nothing.
+    """
+    if _is_cloud_mode():
+        print(
+            "Error: doc trash restore is not yet supported in cloud mode "
+            "(server API still hard-deletes; follow-up task tracks this).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    docs_dir = _get_docs_dir()
+    fpath = os.path.join(docs_dir, f"{doc_id}.md")
+    if not os.path.exists(fpath):
+        print(f"Document not found: {doc_id}", file=sys.stderr)
+        sys.exit(1)
+    with open(fpath, "r", encoding="utf-8") as f:
+        content = f.read()
+    meta, _ = _parse_frontmatter(content)
+    if meta.get("status") != "cancelled":
+        print(
+            f"Error: doc {doc_id} is not in trash (status="
+            f"{meta.get('status', 'active')!r}); nothing to restore.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    import core as _core
+    now_iso = _core._now_iso()
+    actor = _core._get_actor()
+    updates = {"restored_at": now_iso, "restored_by": actor}
+    if reason:
+        updates["restore_reason"] = reason
+    _rewrite_doc_frontmatter(
+        fpath,
+        updates=updates,
+        removes=["status", "trashed_at", "trashed_by", "trash_reason"],
+    )
+    _append_changelog({"op": "doc_restore", "doc_id": doc_id, "reason": reason})
+    print(f"Restored from trash: {doc_id}")
+    if reason:
+        print(f"  Reason: {reason}")
+
+
 def cmd_doc_delete():
+    """Soft-delete a document.
+
+    Local mode flips the frontmatter to ``status: cancelled`` and stamps
+    ``trashed_at`` / ``trashed_by`` / optional ``trash_reason`` instead
+    of unlinking the file (ms-14 e-973). The file stays at the canonical
+    path so a restore is a frontmatter rewrite rather than an undelete
+    from version control.
+
+    Cloud mode is intentionally still a hard delete via the API. The
+    server-side soft-delete (plus a Web UI trash tab) is tracked as a
+    follow-up task; keeping the divergence loud avoids pretending the
+    paths are symmetric.
+    """
     doc_id = os.environ.get("BEACON_DOC_ID", "")
+    reason = os.environ.get("BEACON_REASON", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not doc_id:
@@ -3740,24 +3868,131 @@ def cmd_doc_delete():
         sys.exit(1)
 
     if _is_cloud_mode():
+        # TODO(e-973 follow-up): replace this with API soft-delete once the
+        # server supports a status field on documents. The Web UI Trash tab
+        # depends on the same endpoint, so the two land together.
         client, config = _get_api_client()
         try:
             client.delete_document(config["project_id"], doc_id)
         except Exception as e:
             print(f"Error: {e}")
             sys.exit(1)
-    else:
-        docs_dir = _get_docs_dir()
-        fpath = os.path.join(docs_dir, f"{doc_id}.md")
-        if not os.path.exists(fpath):
-            print(f"Document not found: {doc_id}")
-            sys.exit(1)
-        os.remove(fpath)
+        if json_mode:
+            print(json.dumps({"doc_id": doc_id, "deleted": True}, ensure_ascii=False))
+        else:
+            print(f"Deleted: {doc_id}")
+        return
+
+    docs_dir = _get_docs_dir()
+    fpath = os.path.join(docs_dir, f"{doc_id}.md")
+    if not os.path.exists(fpath):
+        print(f"Document not found: {doc_id}")
+        sys.exit(1)
+
+    with open(fpath, "r", encoding="utf-8") as f:
+        content = f.read()
+    meta, _ = _parse_frontmatter(content)
+    if meta.get("status") == "cancelled":
+        print(f"Document {doc_id} is already in trash.")
+        sys.exit(1)
+
+    import core as _core
+    now_iso = _core._now_iso()
+    actor = _core._get_actor()
+    updates = {"status": "cancelled", "trashed_at": now_iso, "trashed_by": actor}
+    if reason:
+        updates["trash_reason"] = reason
+    # Drop any restored_* meta from a prior trash → restore cycle so the
+    # only audit fields present reflect the current trash event.
+    _rewrite_doc_frontmatter(
+        fpath,
+        updates=updates,
+        removes=["restored_at", "restored_by", "restore_reason"],
+    )
+    _append_changelog({"op": "doc_delete", "doc_id": doc_id, "reason": reason})
 
     if json_mode:
-        print(json.dumps({"doc_id": doc_id, "deleted": True}, ensure_ascii=False))
+        print(json.dumps(
+            {"doc_id": doc_id, "status": "cancelled", "trashed_at": now_iso},
+            ensure_ascii=False,
+        ))
     else:
-        print(f"Deleted: {doc_id}")
+        print(f"Trashed: {doc_id}")
+        if reason:
+            print(f"  Reason: {reason}")
+
+
+def cmd_doc_trash():
+    """List soft-deleted docs within an N-day window (ms-14 e-973).
+
+    Local mode only. Cloud mode refuses loudly until the server adds a
+    status field — see cmd_doc_delete's follow-up note.
+    """
+    if _is_cloud_mode():
+        print(
+            "Error: doc trash listing is not yet supported in cloud mode "
+            "(server API still hard-deletes; follow-up task tracks this).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    days_env = os.environ.get("BEACON_DAYS", "30")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if days_env in ("", "all", "0"):
+        since_days = None
+    else:
+        try:
+            since_days = int(days_env)
+        except ValueError:
+            print(f"Error: invalid --days value: {days_env}", file=sys.stderr)
+            sys.exit(1)
+
+    import datetime as _dt
+    cutoff = None
+    if since_days is not None:
+        cutoff = (_dt.datetime.now(_dt.timezone.utc)
+                  - _dt.timedelta(days=since_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    docs_dir = _get_docs_dir()
+    out: list = []
+    if os.path.isdir(docs_dir):
+        for fname in sorted(os.listdir(docs_dir)):
+            if not fname.endswith(".md"):
+                continue
+            fpath = os.path.join(docs_dir, fname)
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    text = f.read()
+            except (OSError, UnicodeDecodeError):
+                continue
+            meta, _body = _parse_frontmatter(text)
+            if meta.get("status") != "cancelled":
+                continue
+            trashed_at = meta.get("trashed_at", "")
+            if cutoff and trashed_at and trashed_at < cutoff:
+                continue
+            out.append({
+                "doc_id": fname[:-3],
+                "title": meta.get("title", "") or fname[:-3],
+                "scope": meta.get("scope", ""),
+                "trashed_at": trashed_at or None,
+                "trashed_by": meta.get("trashed_by", ""),
+                "trash_reason": meta.get("trash_reason", ""),
+            })
+    out.sort(key=lambda x: x["trashed_at"] or "", reverse=True)
+
+    if json_mode:
+        print(json.dumps(out, ensure_ascii=False))
+        return
+    if not out:
+        window = "all time" if since_days is None else f"last {since_days} days"
+        print(f"No trashed docs in {window}.")
+        return
+    for item in out:
+        when = item["trashed_at"] or "unknown date"
+        by = item.get("trashed_by", "") or "?"
+        print(f"[{item['doc_id']}] ({item.get('scope','')}, trashed {when} by {by}) {item['title']}")
+        if item.get("trash_reason"):
+            print(f"  reason: {item['trash_reason']}")
 
 
 # ---------------------------------------------------------------------------
@@ -7217,6 +7452,7 @@ if __name__ == "__main__":
         "doc_delete": cmd_doc_delete,
         "doc_history": cmd_doc_history,
         "doc_restore": cmd_doc_restore,
+        "doc_trash": cmd_doc_trash,
         "cloud_list": cmd_cloud_list,
         "cloud_push": cmd_cloud_push,
         "cloud_pull": cmd_cloud_pull,
