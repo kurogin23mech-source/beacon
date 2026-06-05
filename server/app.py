@@ -1409,6 +1409,14 @@ def cli_auth_poll_get(code: str = ""):
 
 
 # ---------------------------------------------------------------------------
+# TrailNode capability registry (sister product, see server/trailnode.py)
+# ---------------------------------------------------------------------------
+
+from trailnode import make_router as _make_trailnode_router
+app.include_router(_make_trailnode_router(require_auth))
+
+
+# ---------------------------------------------------------------------------
 # Static files (Web UI)
 # ---------------------------------------------------------------------------
 
