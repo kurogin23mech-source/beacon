@@ -1,0 +1,202 @@
+"""TrailNode capability registry endpoints.
+
+Mounted under /api/trailnode/* on the Beacon Cloud Run service.
+
+Design summary (see trailnode/docs/manifest-schema.md and ms-2 SPEC):
+- Capabilities (manifests) are stored in Firestore collection `capabilities`
+  (prod) or `capabilities-dev` (other envs), keyed by slug
+  `<author>__<name>__<version>` (`/` and `@` replaced with `__`).
+- Artifacts (tar.gz) are stored in GCS bucket `trailnode-artifacts` under
+  `{env}/{author}/{name}/{version}.tar.gz`.
+- Pull goes through Cloud Run (proxy stream) instead of signed URLs to
+  avoid signing-key/IAM complexity in MVP. Revisit in ms-3 if traffic
+  shape requires direct GCS reads.
+- Authorization piggybacks on Beacon's existing HTTPBearer + HMAC CLI
+  token via the host app's `require_auth` dependency, injected through
+  the `make_router` factory to avoid an import cycle with `app.py`.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import JSONResponse, StreamingResponse
+from google.cloud import storage as gcs_storage
+
+import firestore_client as db
+
+logger = logging.getLogger(__name__)
+
+_BUCKET_NAME = os.environ.get("TRAILNODE_BUCKET", "trailnode-artifacts")
+_ENV = os.environ.get("BEACON_ENV", "dev")
+_CAPABILITIES_COLLECTION = "capabilities" if _ENV == "prod" else "capabilities-dev"
+_GCS_PREFIX = f"{_ENV}/"  # keep dev/prod artifacts isolated
+
+# <author>/<name>@<semver>, semver allows optional pre-release suffix
+_ID_PATTERN = re.compile(
+    r"^([a-z0-9-]+)/([a-z0-9-]+)@(\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?)$"
+)
+
+_REQUIRED_MANIFEST_FIELDS = (
+    "schema_version", "id", "name", "type", "version",
+    "description", "author", "artifact_url",
+)
+_SUPPORTED_TYPES = ("skill",)  # v0 only; ai-workflow/program/app land in ms-4
+
+_gcs_client: gcs_storage.Client | None = None
+
+
+def _get_gcs_client() -> gcs_storage.Client:
+    global _gcs_client
+    if _gcs_client is None:
+        _gcs_client = gcs_storage.Client()
+    return _gcs_client
+
+
+def _parse_capability_id(capability_id: str) -> tuple[str, str, str]:
+    m = _ID_PATTERN.match(capability_id)
+    if not m:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"invalid capability_id '{capability_id}': "
+                "expected <author>/<name>@<semver>"
+            ),
+        )
+    return m.group(1), m.group(2), m.group(3)
+
+
+def _slug(capability_id: str) -> str:
+    return capability_id.replace("/", "__").replace("@", "__")
+
+
+def _gcs_object_key(author: str, name: str, version: str) -> str:
+    return f"{_GCS_PREFIX}{author}/{name}/{version}.tar.gz"
+
+
+def _validate_manifest(
+    data: dict, capability_id: str, author: str, name: str, version: str
+) -> None:
+    missing = [f for f in _REQUIRED_MANIFEST_FIELDS if f not in data]
+    if missing:
+        raise HTTPException(400, detail=f"manifest missing required fields: {missing}")
+    if data["id"] != capability_id:
+        raise HTTPException(
+            400, detail=f"manifest.id '{data['id']}' != URL capability_id '{capability_id}'"
+        )
+    if data["author"] != author:
+        raise HTTPException(
+            400, detail=f"manifest.author '{data['author']}' != id author '{author}'"
+        )
+    if data["name"] != name:
+        raise HTTPException(400, detail=f"manifest.name '{data['name']}' != id name '{name}'")
+    if data["version"] != version:
+        raise HTTPException(
+            400, detail=f"manifest.version '{data['version']}' != id version '{version}'"
+        )
+    if data["type"] not in _SUPPORTED_TYPES:
+        raise HTTPException(
+            400,
+            detail=(
+                f"v0 only accepts type in {_SUPPORTED_TYPES}, got '{data['type']}'"
+            ),
+        )
+    if not isinstance(data.get("artifact_url"), list):
+        raise HTTPException(400, detail="artifact_url must be an array")
+
+
+def make_router(require_auth) -> APIRouter:
+    """Wire the TrailNode router with the host app's auth dependency."""
+    router = APIRouter(prefix="/api/trailnode", tags=["trailnode"])
+
+    @router.put("/capabilities/{capability_id:path}")
+    async def push_capability(
+        capability_id: str,
+        manifest: str = Form(...),
+        artifact: UploadFile = File(...),
+        user: dict = Depends(require_auth),
+    ) -> JSONResponse:
+        author, name, version = _parse_capability_id(capability_id)
+
+        try:
+            manifest_data = json.loads(manifest)
+        except json.JSONDecodeError as e:
+            raise HTTPException(400, detail=f"manifest is not valid JSON: {e}")
+
+        _validate_manifest(manifest_data, capability_id, author, name, version)
+
+        object_key = _gcs_object_key(author, name, version)
+        bucket = _get_gcs_client().bucket(_BUCKET_NAME)
+        blob = bucket.blob(object_key)
+        content = await artifact.read()
+        blob.upload_from_string(content, content_type="application/gzip")
+
+        artifact_url_canonical = f"gs://{_BUCKET_NAME}/{object_key}"
+        manifest_data["artifact_url"] = [artifact_url_canonical]
+        manifest_data["uploaded_by"] = user.get("sub", "")
+        manifest_data["uploaded_by_email"] = user.get("email", "")
+
+        from google.cloud import firestore as fs
+        manifest_data["uploaded_at"] = fs.SERVER_TIMESTAMP
+
+        slug = _slug(capability_id)
+        db.get_db().collection(_CAPABILITIES_COLLECTION).document(slug).set(manifest_data)
+
+        logger.info(
+            "trailnode push: %s by %s (size=%d)",
+            capability_id, user.get("email", "?"), len(content),
+        )
+        return JSONResponse({"id": capability_id, "artifact_url": [artifact_url_canonical]})
+
+    @router.get("/capabilities/{capability_id:path}")
+    async def pull_capability(
+        capability_id: str,
+        user: dict = Depends(require_auth),
+    ) -> JSONResponse:
+        _parse_capability_id(capability_id)  # validate format
+        slug = _slug(capability_id)
+        doc = db.get_db().collection(_CAPABILITIES_COLLECTION).document(slug).get()
+        if not doc.exists:
+            raise HTTPException(404, detail=f"capability '{capability_id}' not found")
+        manifest_data = doc.to_dict()
+        if hasattr(manifest_data.get("uploaded_at"), "isoformat"):
+            manifest_data["uploaded_at"] = manifest_data["uploaded_at"].isoformat()
+        return JSONResponse(manifest_data)
+
+    @router.get("/artifacts/{capability_id:path}")
+    async def get_artifact(
+        capability_id: str,
+        user: dict = Depends(require_auth),
+    ) -> StreamingResponse:
+        author, name, version = _parse_capability_id(capability_id)
+        slug = _slug(capability_id)
+        doc = db.get_db().collection(_CAPABILITIES_COLLECTION).document(slug).get()
+        if not doc.exists:
+            raise HTTPException(404, detail=f"capability '{capability_id}' not found")
+
+        object_key = _gcs_object_key(author, name, version)
+        blob = _get_gcs_client().bucket(_BUCKET_NAME).blob(object_key)
+        if not blob.exists():
+            raise HTTPException(404, detail=f"artifact missing for '{capability_id}'")
+
+        def stream():
+            with blob.open("rb") as f:
+                while True:
+                    chunk = f.read(64 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+
+        return StreamingResponse(
+            stream(),
+            media_type="application/gzip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{name}-{version}.tar.gz"'
+            },
+        )
+
+    return router
