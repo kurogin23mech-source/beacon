@@ -113,6 +113,46 @@ def test_resolve_hook_fallback_bash_safe_on_windows(monkeypatch):
     assert "\\" not in cmd
 
 
+def test_install_migrates_stale_backslash_both_hooks(monkeypatch, tmp_path):
+    """e-1043 migration: re-running install rewrites a pre-existing backslash
+    entry with the forward-slash one for BOTH PostToolUse and PostCompact.
+
+    PostCompact previously only checked presence-by-kind and skipped, so the
+    stale backslash path survived re-doctor — this pins the fix.
+    """
+    import json
+    monkeypatch.setattr(commands.os, "name", "nt")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("beacon-hook-post-commit", "beacon-hook-postcompact"):
+        (bindir / (name + ".EXE")).write_text("x")
+    # shutil.which returns a backslash path (os.path.join on Windows runner).
+    monkeypatch.setattr(commands.shutil, "which",
+                        lambda name: str(bindir / (name + ".EXE")))
+
+    commit_cmd = commands._resolve_hook_command("beacon-post-commit-hook.sh")
+    pc_cmd = commands._resolve_hook_command("beacon-postcompact.sh")
+    # Seed settings with STALE backslash entries (pre-fix install output).
+    stale_commit = commit_cmd.replace("/", "\\")
+    stale_pc = pc_cmd.replace("/", "\\")
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({"hooks": {
+        "PostToolUse": [{"matcher": "Bash", "hooks": [
+            {"type": "command", "command": stale_commit, "timeout": 10}]}],
+        "PostCompact": [{"hooks": [
+            {"type": "command", "command": stale_pc, "timeout": 10}]}],
+    }}), encoding="utf-8")
+
+    commands._install_claude_hooks(commit_cmd, str(settings_path))
+
+    s = json.loads(settings_path.read_text(encoding="utf-8"))
+    ptu = [h["command"] for e in s["hooks"]["PostToolUse"] for h in e["hooks"]]
+    pc = [h["command"] for e in s["hooks"]["PostCompact"] for h in e["hooks"]]
+    # Each hook present exactly once, forward-slashed, no stale backslash dup.
+    assert ptu == [commit_cmd] and "\\" not in ptu[0]
+    assert pc == [pc_cmd] and "\\" not in pc[0]
+
+
 def test_init_hook_install_writes_no_sh_on_windows(monkeypatch, tmp_path):
     """`beacon init`'s _install_claude_hook must not write a .sh commit hook on
     Windows (regression for the bug where it hardcoded CLAUDE_HOOK_SCRIPT)."""

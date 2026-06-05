@@ -5534,10 +5534,33 @@ def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
     )
     if pc_ok:
         post_compact = hooks.setdefault("PostCompact", [])
+        pc_identity = (
+            "beacon-postcompact",
+            "beacon-hook-postcompact",
+            "beacon_cli.hooks.postcompact",
+        )
+        # Drop stale PostCompact entries (same kind, different command) so an
+        # old backslash path is rewritten with the freshly-resolved one. The
+        # PostToolUse branch above already did this; PostCompact previously only
+        # checked presence-by-kind and skipped, leaving the bad path in place
+        # on re-doctor (e-1043 migration gap).
+        cleaned_pc = []
+        for entry in post_compact:
+            kept = []
+            for h in entry.get("hooks", []):
+                existing = h.get("command", "")
+                same_kind = any(s in existing for s in pc_identity)
+                if same_kind and existing != postcompact_cmd:
+                    removed_stale = True
+                    continue  # drop stale
+                kept.append(h)
+            entry["hooks"] = kept
+            if kept:
+                cleaned_pc.append(entry)
+        post_compact[:] = cleaned_pc
+
         already_pc = any(
-            ("beacon-postcompact" in h.get("command", ""))
-            or ("beacon-hook-postcompact" in h.get("command", ""))
-            or ("beacon_cli.hooks.postcompact" in h.get("command", ""))
+            h.get("command", "") == postcompact_cmd
             for entry in post_compact
             for h in entry.get("hooks", [])
         )
