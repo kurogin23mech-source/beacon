@@ -1726,6 +1726,125 @@ def cmd_task_cancel():
             print(f"  Reason: {reason}")
 
 
+# ---------------------------------------------------------------------------
+# Trash + restore (ms-14 e-826)
+# ---------------------------------------------------------------------------
+# Soft-delete recovery: surface cancelled milestones / tasks and flip them
+# back to todo. The cancel path (cmd_milestone_delete / cmd_task_cancel)
+# already writes meta.cancelled_at/_by/_reason; these handlers read those
+# records and produce the inverse operation.
+#
+# Doc trash is intentionally out of scope here — cmd_doc_delete is currently
+# HARD delete, and the existing cmd_doc_restore name is taken by revision
+# restore (history walk). Filed as a follow-up task on ms-14.
+
+def _parse_days_env() -> Optional[int]:
+    """Translate BEACON_DAYS env into a since_days argument.
+
+    Empty / 'all' / '0' all disable the window; anything else is parsed as
+    an integer. Returns -1 on parse error so the caller can emit the
+    user-facing error and exit (we deliberately don't sys.exit from this
+    helper so it stays testable in isolation)."""
+    days_env = os.environ.get("BEACON_DAYS", "30")
+    if days_env in ("", "all", "0"):
+        return None
+    try:
+        return int(days_env)
+    except ValueError:
+        return -1
+
+
+def cmd_milestone_restore():
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    reason = os.environ.get("BEACON_REASON", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not ms_id:
+        print("Error: ms-id required")
+        sys.exit(1)
+    data = load_project()
+    try:
+        ms = core.milestone_restore(data, ms_id, reason=reason)
+    except ValueError as e:
+        print(str(e))
+        sys.exit(1)
+    save_project(data, op={"op": "milestone_restore", "ms_id": ms_id, "reason": reason})
+    if json_mode:
+        print(json.dumps({"id": ms["id"], "status": ms["status"]}, ensure_ascii=False))
+    else:
+        print(f"Restored: [{ms['id']}] {ms.get('title','')} -> status={ms['status']}")
+        if reason:
+            print(f"  Reason: {reason}")
+
+
+def cmd_milestone_trash():
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    since_days = _parse_days_env()
+    if since_days == -1:
+        print(f"Error: invalid --days value: {os.environ.get('BEACON_DAYS', '')}")
+        sys.exit(1)
+    data = load_project()
+    trash = core.list_trashed_milestones(data, since_days=since_days)
+    if json_mode:
+        print(json.dumps(trash, ensure_ascii=False))
+        return
+    if not trash:
+        window = "all time" if since_days is None else f"last {since_days} days"
+        print(f"No cancelled milestones in {window}.")
+        return
+    for item in trash:
+        when = f"{item['days_ago']}d ago" if item['days_ago'] is not None else "unknown date"
+        by = item.get("cancelled_by", "") or "?"
+        print(f"[{item['id']}] (cancelled {when} by {by}) {item['title']}")
+        if item.get("cancel_reason"):
+            print(f"  reason: {item['cancel_reason']}")
+
+
+def cmd_task_restore():
+    entry_id = os.environ.get("BEACON_ENTRY_ID", "")
+    reason = os.environ.get("BEACON_REASON", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not entry_id:
+        print("Error: entry-id required")
+        sys.exit(1)
+    data = load_project()
+    try:
+        entry = core.entry_restore(data, entry_id, reason=reason)
+    except ValueError as e:
+        print(str(e))
+        sys.exit(1)
+    save_project(data, op={"op": "task_restore", "entry_id": entry_id, "reason": reason})
+    if json_mode:
+        print(json.dumps({"id": entry_id, "status": entry["status"]}, ensure_ascii=False))
+    else:
+        print(f"Restored: [{entry_id}] {entry.get('description','')} -> status={entry['status']}")
+        if reason:
+            print(f"  Reason: {reason}")
+
+
+def cmd_task_trash():
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    since_days = _parse_days_env()
+    if since_days == -1:
+        print(f"Error: invalid --days value: {os.environ.get('BEACON_DAYS', '')}")
+        sys.exit(1)
+    data = load_project()
+    trash = core.list_trashed_entries(data, since_days=since_days, entry_type="task")
+    if json_mode:
+        print(json.dumps(trash, ensure_ascii=False))
+        return
+    if not trash:
+        window = "all time" if since_days is None else f"last {since_days} days"
+        print(f"No cancelled tasks in {window}.")
+        return
+    for item in trash:
+        when = f"{item['days_ago']}d ago" if item['days_ago'] is not None else "unknown date"
+        by = item.get("cancelled_by", "") or "?"
+        ms = item.get("ms_id", "?")
+        print(f"[{item['id']}] ({ms}, cancelled {when} by {by}) {item['description']}")
+        if item.get("cancel_reason"):
+            print(f"  reason: {item['cancel_reason']}")
+
+
 def cmd_entry_move():
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
     task_id = os.environ.get("BEACON_TASK_ID", "")
@@ -7063,6 +7182,10 @@ if __name__ == "__main__":
         "project_unarchive": cmd_project_unarchive,
         "project_export": cmd_project_export,
         "project_import": cmd_project_import,
+        "milestone_trash": cmd_milestone_trash,
+        "milestone_restore": cmd_milestone_restore,
+        "task_trash": cmd_task_trash,
+        "task_restore": cmd_task_restore,
         "pr_add": cmd_pr_add,
         "pr_close": cmd_pr_close,
         "pr_approve": cmd_pr_approve,

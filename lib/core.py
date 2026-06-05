@@ -996,6 +996,159 @@ def task_delete(data: dict, entry_id: str, *, reason: str = "") -> dict:
     return entry
 
 
+def milestone_restore(data: dict, ms_id: str, *, reason: str = "") -> dict:
+    """Reverse a soft-delete of a milestone (ms-14 e-826).
+
+    Flips status cancelled -> todo and clears the cancellation metadata,
+    while recording the restoration in audit fields so the trace isn't
+    lost. The caller is expected to also write a changelog entry via
+    save_project's op={...} so the cancelled state remains recoverable
+    later via the audit log even after subsequent edits.
+
+    Raises ValueError if the milestone isn't cancelled (avoid silent
+    no-ops that mask operator mistakes).
+    """
+    for ms in data.get("milestones", []):
+        if ms.get("id") != ms_id:
+            continue
+        if ms.get("status") != "cancelled":
+            raise ValueError(
+                f"Milestone {ms_id} is not cancelled (status={ms.get('status','?')}); nothing to restore."
+            )
+        ms["status"] = "todo"
+        meta = ms.setdefault("meta", {})
+        for k in ("cancelled_at", "cancelled_by", "cancel_reason"):
+            meta.pop(k, None)
+        meta["restored_at"] = _now_iso()
+        meta["restored_by"] = _get_actor()
+        if reason:
+            meta["restore_reason"] = reason
+        return ms
+    raise ValueError(f"Milestone not found: {ms_id}")
+
+
+def entry_restore(data: dict, entry_id: str, *, reason: str = "") -> dict:
+    """Reverse a soft-delete of an entry (task or other type).
+
+    Mirrors milestone_restore: flips status -> todo, clears cancel meta,
+    stamps restored_at/by. Raises if the entry isn't currently cancelled.
+    """
+    result = find_entry(data, entry_id)
+    if not result:
+        raise ValueError(f"Entry not found: {entry_id}")
+    _, _, entry, _ = result
+    if entry.get("status") != "cancelled":
+        raise ValueError(
+            f"Entry {entry_id} is not cancelled (status={entry.get('status','?')}); nothing to restore."
+        )
+    entry["status"] = "todo"
+    meta = entry.setdefault("meta", {})
+    for k in ("cancelled_at", "cancelled_by", "cancel_reason"):
+        meta.pop(k, None)
+    meta["restored_at"] = _now_iso()
+    meta["restored_by"] = _get_actor()
+    if reason:
+        meta["restore_reason"] = reason
+    return entry
+
+
+def list_trashed_milestones(data: dict, *, since_days: int | None = 30) -> list[dict]:
+    """Return cancelled milestones whose cancelled_at falls within the
+    last `since_days` (None = no time filter).
+
+    Each result item is a shallow dict suitable for JSON output:
+      {id, title, cancelled_at, cancelled_by, cancel_reason, days_ago}
+
+    Items missing cancelled_at (legacy soft-deletes before the meta was
+    standardized) are still included with cancelled_at=None and days_ago
+    measured from epoch-zero so they sort *last*; the operator sees them
+    but the window filter can't hide them without losing audit value.
+    """
+    cutoff = _days_ago_iso(since_days) if since_days is not None else None
+    out = []
+    for ms in data.get("milestones", []):
+        if ms.get("status") != "cancelled":
+            continue
+        meta = ms.get("meta", {}) or {}
+        cancelled_at = meta.get("cancelled_at", "")
+        if cutoff is not None and cancelled_at and cancelled_at < cutoff:
+            continue
+        out.append({
+            "id": ms.get("id", ""),
+            "title": ms.get("title", ""),
+            "cancelled_at": cancelled_at or None,
+            "cancelled_by": meta.get("cancelled_by", ""),
+            "cancel_reason": meta.get("cancel_reason", ""),
+            "days_ago": _days_ago_from(cancelled_at) if cancelled_at else None,
+        })
+    out.sort(key=lambda x: x["cancelled_at"] or "", reverse=True)
+    return out
+
+
+def list_trashed_entries(data: dict, *, since_days: int | None = 30,
+                         entry_type: str = "task") -> list[dict]:
+    """Return cancelled entries (default: tasks) within the window.
+
+    Walks both top-level entries and nested ones (entries under a task /
+    operation), so children of an active milestone are still surfaced.
+    Items are returned in cancelled_at-descending order.
+    """
+    cutoff = _days_ago_iso(since_days) if since_days is not None else None
+    out = []
+
+    def _walk(entries, parent_ms_id, parent_entry_id):
+        for e in entries:
+            if e.get("type") == entry_type and e.get("status") == "cancelled":
+                meta = e.get("meta", {}) or {}
+                cancelled_at = meta.get("cancelled_at", "")
+                if not (cutoff is not None and cancelled_at and cancelled_at < cutoff):
+                    out.append({
+                        "id": e.get("id", ""),
+                        "ms_id": parent_ms_id,
+                        "parent_entry_id": parent_entry_id,
+                        "description": e.get("description", ""),
+                        "cancelled_at": cancelled_at or None,
+                        "cancelled_by": meta.get("cancelled_by", ""),
+                        "cancel_reason": meta.get("cancel_reason", ""),
+                        "days_ago": _days_ago_from(cancelled_at) if cancelled_at else None,
+                    })
+            # Walk nested entries regardless of parent's cancelled status
+            # so a cancelled task under an active milestone still surfaces.
+            children = e.get("entries", []) or []
+            if children:
+                _walk(children, parent_ms_id, e.get("id", ""))
+
+    for ms in data.get("milestones", []):
+        _walk(ms.get("entries", []) or [], ms.get("id", ""), None)
+
+    out.sort(key=lambda x: x["cancelled_at"] or "", reverse=True)
+    return out
+
+
+def _days_ago_iso(days: int) -> str:
+    """ISO timestamp for `days` days before now. Used as a string cutoff
+    so the comparison stays a plain lexicographic check on ISO 8601."""
+    import datetime
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=int(days))
+    return cutoff.isoformat()
+
+
+def _days_ago_from(iso_ts: str) -> int | None:
+    """Return integer days between iso_ts and now (positive = in the past).
+    Returns None on parse failure."""
+    if not iso_ts:
+        return None
+    import datetime
+    try:
+        # Truncate any trailing tz info we don't handle here.
+        clean = iso_ts.split("+")[0].split("Z")[0]
+        when = datetime.datetime.fromisoformat(clean)
+    except (ValueError, TypeError):
+        return None
+    delta = datetime.datetime.now() - when
+    return max(0, delta.days)
+
+
 def entry_move(data: dict, entry_id: str, *,
                task_id: str = "", ms_id: str = "") -> None:
     """Move an entry under a task or to another milestone's top level."""
