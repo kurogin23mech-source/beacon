@@ -49,6 +49,10 @@ def project_dir(monkeypatch):
         monkeypatch.delenv("BEACON_SESSION_FRESH_SECONDS", raising=False)
         monkeypatch.delenv("BEACON_AGENT_PARENT", raising=False)
         monkeypatch.delenv("BEACON_AGENT_CHILD_ID", raising=False)
+        # ms-57 e-1035 merge: ensure the env-var-first path is disabled in
+        # tests that assert the mint format / freshness reuse path.
+        # env-var-first behaviour is covered in tests/test_session.py.
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
         yield Path(tmp)
 
 

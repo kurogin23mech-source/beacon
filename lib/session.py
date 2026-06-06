@@ -1,31 +1,33 @@
 """Beacon Session Identification (ms-57 / e-1035).
 
-ms-57 SPEC § 1〜3: 情報を3層に分離する設計の前提となるセッション識別基盤。
+Merged design (Mac + Windows e-1035 part 1):
 
-なぜ独立モジュールか:
-* harness session_id (Claude Code 等) は素の CLI に届かないことを e-1035 で
-  検証済 — 環境変数には CLAUDECODE / AI_AGENT のような presence flag しか無く、
-  会話インスタンス単位で一意な ID は露出していない。
-* したがって beacon 自身が session_id を *mint* する必要があり、その mint
-  ロジックを 1 箇所に集約する。
-* 後続タスク (e-1036 notes scoping / e-1037 session log / e-1039 孤児救済)
-  すべてがこの session_id に依存するので、early に固める価値がある。
+* Identity resolution priority:
+    1. ``CLAUDE_CODE_SESSION_ID`` env var — Claude Code sets this in **hook
+       contexts** (post-commit, postcompact, stop, etc) per the official
+       docs (https://code.claude.com/docs/en/hooks.md). When present we
+       adopt it as-is so beacon's session boundary aligns with Claude
+       Code's own. Verified absent from the Bash-tool path on macOS
+       2.1.128; verified present from hook subprocess (Windows side).
+    2. Existing ``.beacon/session.json`` with fresh ``last_active``
+       (default < 60 min) — reuse so sequential CLI calls in one shell
+       share an id.
+    3. Mint new: ``{agent_slug}-{epoch_ms}-{nonce8}`` so cross-machine
+       collisions are statistically impossible.
 
-設計 (SPEC § 7 と整合):
+* ``.beacon/session.json`` is still maintained even when (1) supplies the
+  id — runtime state (heartbeat ``last_active``, cloud ``cloud_synced_at``)
+  needs a persistent home regardless of where the id came from.
 
-* mint 鍵 = ``{agent_slug}-{epoch_ms}-{nonce8}``
-  * agent_slug: ``lib.agent.get_actor().agent`` を URL-safe にスラグ化
-  * epoch_ms: ミリ秒精度の単調増加成分 (ソート可能)
-  * nonce8: ``secrets.token_hex(4)`` で 8 hex char (同 ms 内の衝突予防)
-* 再利用判定 (= 同一セッション扱い): ``.beacon/session.json`` の ``last_active``
-  が freshness threshold (既定 60 分) 以内なら既存 session を返す。
-  stale (= dead) なら新規 mint。
-* freshness threshold = ``BEACON_SESSION_FRESH_SECONDS`` 環境変数で上書き可能
-  (テスト・dispatch 用)。既定 3600 秒。
-* 永続化: ``.beacon/session.json`` (atomic write via tmp+rename) のみ。
-  cloud session registry は本 MS の次タスクで層を分けて追加する。
+* The ``source`` field on the payload (``claude_code_env`` / ``minted``)
+  is forensic-only — never used for control flow. Lets an operator
+  inspecting ``.beacon/session.json`` tell which path produced the id.
 
-side-effect-free at import — 全副作用は ``update_last_active()`` 呼び出し時のみ。
+* Heartbeat / cloud sync details (freshness window, debounce, atomic
+  write) are the Mac-side design from earlier slice 1 / slice 2.
+
+side-effect-free at import — all IO is inside ``update_last_active`` /
+``get_or_mint_session`` / ``write_session``.
 """
 
 from __future__ import annotations
@@ -45,6 +47,11 @@ import agent as _agent
 # ---------------------------------------------------------------------------
 # Constants & paths
 # ---------------------------------------------------------------------------
+
+# Claude Code sets this env var in hook subprocess environments per the
+# official docs. Verified empirically (ms-57 e-1035, Mac + Windows audit):
+# present in hook contexts, absent from the Bash-tool subprocess path.
+ENV_SESSION_ID = "CLAUDE_CODE_SESSION_ID"
 
 _SESSION_JSON_RELATIVE = Path(".beacon") / "session.json"
 _CLOUD_JSON_RELATIVE = Path(".beacon") / "cloud.json"
@@ -105,11 +112,7 @@ def _cloud_debounce_seconds() -> int:
 
 
 def _slugify(name: str) -> str:
-    """Lower-case, alnum + hyphen only; collapse runs of hyphens; strip edges.
-
-    Empty / all-non-alnum input degrades to ``'unknown'`` so that mint never
-    produces an id that starts or ends with a hyphen.
-    """
+    """Lower-case, alnum + hyphen only; collapse runs of hyphens; strip edges."""
     s = (name or "").lower().strip()
     cleaned = "".join(c if c.isalnum() else "-" for c in s)
     cleaned = _SLUG_NORMALIZE_RE.sub("-", cleaned).strip("-")
@@ -117,12 +120,7 @@ def _slugify(name: str) -> str:
 
 
 def _detect_harness() -> str:
-    """Best-effort label for the calling harness — recorded for forensics only.
-
-    Not used in any logic; purely diagnostic so that a future operator
-    inspecting .beacon/session.json can tell whether the session was started
-    from Claude Code, a bare shell, etc.
-    """
+    """Best-effort label for the calling harness (diagnostic only)."""
     if os.environ.get("CLAUDECODE") == "1":
         version = os.environ.get("AI_AGENT", "").strip()
         return version or "claude-code"
@@ -133,13 +131,7 @@ def _detect_harness() -> str:
 
 
 def _mint_session_id(actor: dict) -> str:
-    """Pure mint: ``{agent_slug}-{epoch_ms}-{8 hex nonce}``.
-
-    Pure so unit tests can lock the format without monkey-patching the
-    clock — we accept a dict and use the current time / secrets module
-    directly (those are the only impure bits) but the *shape* is asserted
-    purely from inputs.
-    """
+    """Pure mint: ``{agent_slug}-{epoch_ms}-{8 hex nonce}``."""
     agent_name = (actor or {}).get("agent") or (actor or {}).get("machine") or "unknown"
     slug = _slugify(agent_name)
     epoch_ms = int(time.time() * 1000)
@@ -148,12 +140,7 @@ def _mint_session_id(actor: dict) -> str:
 
 
 def _is_cloud_mode() -> bool:
-    """Mirror commands._is_cloud_mode without depending on commands.py.
-
-    Kept in this module so session.py is importable in unit tests without
-    pulling in the commands.py dispatch table. The check is intentionally
-    cheap (no JSON parse on the common no-cloud-config path).
-    """
+    """Mirror commands._is_cloud_mode without depending on commands.py."""
     if os.environ.get("BEACON_CLOUD") == "1":
         return True
     config_path = Path.cwd() / _CONFIG_JSON_RELATIVE
@@ -173,7 +160,7 @@ def _should_cloud_sync(last_sync_iso: str) -> bool:
     try:
         last = datetime.fromisoformat(last_sync_iso.replace("Z", "+00:00"))
     except ValueError:
-        return True  # corrupt timestamp → resync defensively
+        return True
     if last.tzinfo is None:
         last = last.replace(tzinfo=timezone.utc)
     elapsed = (datetime.now(timezone.utc) - last).total_seconds()
@@ -181,13 +168,7 @@ def _should_cloud_sync(last_sync_iso: str) -> bool:
 
 
 def _is_fresh(last_active_iso: str, now_iso: str, threshold_seconds: int) -> bool:
-    """Return True iff ``last_active`` is within ``threshold_seconds`` of ``now``.
-
-    Defensively tolerant of: missing input (False), trailing 'Z', and naive
-    timestamps (treated as UTC — old payloads predate the timezone discipline).
-    Any parse failure returns False so a corrupt timestamp cannot accidentally
-    keep a dead session alive.
-    """
+    """Return True iff ``last_active`` is within ``threshold_seconds`` of ``now``."""
     if not last_active_iso:
         return False
     try:
@@ -203,17 +184,23 @@ def _is_fresh(last_active_iso: str, now_iso: str, threshold_seconds: int) -> boo
     return 0 <= delta <= threshold_seconds
 
 
+def _env_session_id() -> str:
+    """Return CLAUDE_CODE_SESSION_ID stripped, or '' if absent / blank.
+
+    Centralised so all entry points apply the same trim semantics
+    (Windows tests pinned that whitespace-only values fall through to mint).
+    """
+    raw = os.environ.get(ENV_SESSION_ID, "")
+    stripped = raw.strip() if raw else ""
+    return stripped
+
+
 # ---------------------------------------------------------------------------
 # Storage IO
 # ---------------------------------------------------------------------------
 
 def read_session() -> dict:
-    """Read .beacon/session.json or return ``{}`` on absence / parse failure.
-
-    Swallow IO and JSON errors instead of raising — heartbeat must never
-    break a user-facing command. A corrupt file is treated the same as
-    "no session yet" and will be overwritten by the next mint.
-    """
+    """Read .beacon/session.json or return ``{}`` on absence / parse failure."""
     path = _session_json_path()
     if not path.exists():
         return {}
@@ -228,12 +215,7 @@ def read_session() -> dict:
 
 
 def write_session(data: dict) -> None:
-    """Atomically write ``data`` to .beacon/session.json (tmp + rename).
-
-    Raises on IO failure — the caller (update_last_active) wraps in try/except
-    so the CLI doesn't crash, but we don't want to silently lose writes when
-    debugging: surface the error to the immediate caller.
-    """
+    """Atomically write ``data`` to .beacon/session.json (tmp + rename)."""
     path = _session_json_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -248,17 +230,42 @@ def write_session(data: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def get_or_mint_session() -> dict:
-    """Return the current session payload, minting a new one if needed.
+    """Return the current session payload, minting / adopting as needed.
+
+    Priority (per module docstring):
+      1. CLAUDE_CODE_SESSION_ID env var (hook context) — adopt as-is.
+      2. Fresh existing .beacon/session.json — reuse.
+      3. Mint new.
 
     Returned dict always contains: session_id, actor, created_at,
-    last_active, harness. The transient ``minted`` key (True iff this call
-    produced a new session) is *not* persisted — it's an in-memory signal
-    for ``update_last_active`` to decide whether to bump ``last_active``.
+    last_active, harness, source. The transient ``minted`` key (True iff
+    this call produced a NEW session — including first adoption of an
+    env id) is in-memory only and not persisted.
     """
     existing = read_session()
     now = _now_iso()
-    threshold = _freshness_threshold()
+    actor = _agent.get_actor()
 
+    # 1. Claude Code hook context — env var takes precedence over any
+    #    stale marker. If the marker already tracks the same env id, treat
+    #    this as a normal reuse (no remint signal).
+    env_sid = _env_session_id()
+    if env_sid:
+        if existing and existing.get("session_id") == env_sid:
+            return {**existing, "minted": False}
+        payload = {
+            "session_id": env_sid,
+            "actor": actor,
+            "created_at": now,
+            "last_active": now,
+            "harness": _detect_harness(),
+            "source": "claude_code_env",
+        }
+        write_session(payload)
+        return {**payload, "minted": True}
+
+    # 2. Existing fresh marker
+    threshold = _freshness_threshold()
     if (
         existing
         and existing.get("session_id")
@@ -266,40 +273,31 @@ def get_or_mint_session() -> dict:
     ):
         return {**existing, "minted": False}
 
-    actor = _agent.get_actor()
+    # 3. Mint new
     payload = {
         "session_id": _mint_session_id(actor),
         "actor": actor,
         "created_at": now,
         "last_active": now,
         "harness": _detect_harness(),
+        "source": "minted",
     }
     write_session(payload)
     return {**payload, "minted": True}
 
 
 def _cloud_sync(payload: dict) -> bool:
-    """Push the session payload to the cloud registry (best-effort).
-
-    Returns True on success, False on any failure (no exceptions out). The
-    caller uses the return value only to decide whether to record
-    cloud_synced_at — a False here just means the next heartbeat retries.
-
-    Imports are lazy because most local-mode runs never reach this path,
-    and the api_client / auth modules are heavyweight (Google OAuth).
-    """
+    """Push the session payload to the cloud registry (best-effort)."""
     try:
         from auth import load_credentials  # noqa: WPS433
         if load_credentials() is None:
-            return False  # not logged in; skip silently
-        # commands._get_api_client resolves cloud.json + token provider; we
-        # piggy-back on it instead of re-implementing config plumbing.
+            return False
         import commands as _commands  # noqa: WPS433
         client, config = _commands._get_api_client()
         body = {k: v for k, v in payload.items() if k not in _LOCAL_ONLY_FIELDS and v is not None}
         client.upsert_session(config["project_id"], payload["session_id"], body)
         return True
-    except BaseException:  # noqa: BLE001 — must contain SystemExit from _get_api_client
+    except BaseException:
         if os.environ.get("BEACON_DEBUG") == "1":
             import traceback as _tb
             _tb.print_exc()
@@ -309,14 +307,9 @@ def _cloud_sync(payload: dict) -> bool:
 def update_last_active() -> dict:
     """Heartbeat: get-or-mint, bump ``last_active``, debounced cloud sync.
 
-    Called once per CLI sub-command from the main dispatch. Failures (file
-    IO or cloud sync) must never propagate — the caller wraps in try/except,
-    and cloud sync uses its own best-effort wrapper.
-
-    Cloud sync is debounced via ``cloud_synced_at`` (default 30s) so a hot
-    CLI loop doesn't slam the API every invocation. The default 30s lag is
-    acceptable because per the SPEC §7 revision, heartbeat is a freshness
-    *signal* not a correctness gate for rescue.
+    Called once per CLI sub-command from the main dispatch. Failures must
+    not propagate (the caller wraps in try/except, and _cloud_sync swallows
+    its own errors).
     """
     session = get_or_mint_session()
     minted = session.pop("minted", False)
@@ -330,23 +323,18 @@ def update_last_active() -> dict:
         if _cloud_sync(session):
             session["cloud_synced_at"] = _now_iso()
 
-    # Mint already wrote the file once. Re-persist only if we have new state
-    # to record (heartbeat bump or cloud_synced_at update).
     if not minted or sync_attempted:
         write_session(session)
     return session
 
 
 def get_session_id() -> str:
-    """Convenience: return the current (mint-if-needed) session_id.
-
-    Does NOT bump heartbeat — that is ``update_last_active``'s job. Use this
-    when a downstream caller only needs the id (e.g. to tag a note).
-    """
+    """Convenience: return the current session_id (mints / adopts if needed)."""
     return get_or_mint_session()["session_id"]
 
 
 __all__ = [
+    "ENV_SESSION_ID",
     "get_or_mint_session",
     "get_session_id",
     "read_session",
