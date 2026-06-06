@@ -30,6 +30,8 @@ import firestore_client  # noqa: E402
 # server-side fields). Order of insertion is preserved.
 _bus_store: dict[str, list[dict]] = {}
 _event_seq = [0]
+# Per-(project, recipient) cursor store mirroring the bus_cursors subcollection.
+_cursor_store: dict[tuple[str, str], dict] = {}
 
 
 def _mock_append_bus_event(project_id: str, data: dict) -> str:
@@ -54,8 +56,30 @@ def _mock_list_bus_events(project_id: str, since: str = "", channel: str = "",
     return copy.deepcopy(items)
 
 
+def _mock_get_bus_cursor(project_id: str, recipient_id: str) -> dict:
+    return copy.deepcopy(_cursor_store.get((project_id, recipient_id), {}))
+
+
+def _mock_advance_bus_cursor(project_id: str, recipient_id: str,
+                             last_seen_at: str) -> dict:
+    """Forward-only mirror of firestore_client.advance_bus_cursor."""
+    import datetime
+    key = (project_id, recipient_id)
+    existing = _cursor_store.get(key)
+    if existing and last_seen_at <= existing.get("last_seen_at", ""):
+        return copy.deepcopy(existing)
+    now = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    data = {"last_seen_at": last_seen_at, "updated_at": now}
+    _cursor_store[key] = data
+    return copy.deepcopy(data)
+
+
 firestore_client.append_bus_event = _mock_append_bus_event
 firestore_client.list_bus_events = _mock_list_bus_events
+firestore_client.get_bus_cursor = _mock_get_bus_cursor
+firestore_client.advance_bus_cursor = _mock_advance_bus_cursor
 
 
 # Stubs for the existing _load auth/loader hooks so the bus endpoints don't
@@ -85,9 +109,11 @@ PROJECT_ID = "bus-test"
 @pytest.fixture(autouse=True)
 def reset_store():
     _bus_store.clear()
+    _cursor_store.clear()
     _event_seq[0] = 0
     yield
     _bus_store.clear()
+    _cursor_store.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +270,162 @@ def test_post_without_subscribers_is_not_an_error():
     })
     assert resp.status_code == 200
     assert resp.json()["event_id"]
+
+
+# ---------------------------------------------------------------------------
+# Per-recipient cursor (e-998)
+# ---------------------------------------------------------------------------
+
+def test_unread_returns_all_events_when_cursor_unset():
+    _seed_events([
+        {"channel": "c", "payload": {"n": 1}},
+        {"channel": "c", "payload": {"n": 2}},
+    ])
+    resp = client.get(
+        f"/api/projects/{PROJECT_ID}/bus/unread?recipient_id=R1"
+    ).json()
+    assert [e["payload"]["n"] for e in resp] == [1, 2]
+
+
+def test_advance_then_unread_only_returns_newer_events():
+    """After advancing the cursor past event 2, /unread must return only event 3.
+    Without this, the cursor wouldn't satisfy 'each recipient sees each event
+    exactly once' (重複配信が起きない)."""
+    _seed_events([
+        {"channel": "c", "payload": {"n": 1}},
+        {"channel": "c", "payload": {"n": 2}},
+    ])
+    first = client.get(f"/api/projects/{PROJECT_ID}/bus/unread?recipient_id=R1").json()
+    cursor_ts = first[-1]["created_at"]
+    ack = client.post(
+        f"/api/projects/{PROJECT_ID}/bus/cursors/R1",
+        json={"last_seen_at": cursor_ts},
+    )
+    assert ack.status_code == 200
+    assert ack.json()["last_seen_at"] == cursor_ts
+
+    _seed_events([{"channel": "c", "payload": {"n": 3}}])
+    catch_up = client.get(
+        f"/api/projects/{PROJECT_ID}/bus/unread?recipient_id=R1"
+    ).json()
+    assert [e["payload"]["n"] for e in catch_up] == [3]
+
+
+def test_advance_is_forward_only_against_stale_clients():
+    """A stale client that POSTs an older cursor must NOT rewind another live
+    client's progress. This is the structural defense against the lost-update
+    class of bugs that ms-39 cured for project.json."""
+    _seed_events([
+        {"channel": "c", "payload": {"n": 1}},
+        {"channel": "c", "payload": {"n": 2}},
+        {"channel": "c", "payload": {"n": 3}},
+    ])
+    listed = client.get(f"/api/projects/{PROJECT_ID}/bus").json()
+    fresh = listed[-1]["created_at"]
+    stale = listed[0]["created_at"]
+
+    client.post(
+        f"/api/projects/{PROJECT_ID}/bus/cursors/R1",
+        json={"last_seen_at": fresh},
+    )
+    resp = client.post(
+        f"/api/projects/{PROJECT_ID}/bus/cursors/R1",
+        json={"last_seen_at": stale},
+    )
+    assert resp.status_code == 200
+    # Cursor must still be at `fresh` — the stale commit is a silent no-op.
+    assert resp.json()["last_seen_at"] == fresh
+
+    catch_up = client.get(
+        f"/api/projects/{PROJECT_ID}/bus/unread?recipient_id=R1"
+    ).json()
+    assert catch_up == []
+
+
+def test_recipients_have_independent_cursors():
+    """A's commit must not advance B's cursor — otherwise the bus collapses
+    into a single shared inbox instead of per-recipient delivery."""
+    _seed_events([
+        {"channel": "c", "payload": {"n": 1}},
+        {"channel": "c", "payload": {"n": 2}},
+    ])
+    full = client.get(f"/api/projects/{PROJECT_ID}/bus").json()
+    client.post(
+        f"/api/projects/{PROJECT_ID}/bus/cursors/A",
+        json={"last_seen_at": full[-1]["created_at"]},
+    )
+    a_next = client.get(f"/api/projects/{PROJECT_ID}/bus/unread?recipient_id=A").json()
+    b_view = client.get(f"/api/projects/{PROJECT_ID}/bus/unread?recipient_id=B").json()
+    assert a_next == []
+    assert [e["payload"]["n"] for e in b_view] == [1, 2]
+
+
+def test_get_cursor_returns_current_state():
+    """Round-trip the cursor so a restarting consumer can recover its position
+    without replaying every event first."""
+    _seed_events([{"channel": "c", "payload": {"n": 1}}])
+    full = client.get(f"/api/projects/{PROJECT_ID}/bus").json()
+    ts = full[-1]["created_at"]
+    client.post(
+        f"/api/projects/{PROJECT_ID}/bus/cursors/R1",
+        json={"last_seen_at": ts},
+    )
+    got = client.get(f"/api/projects/{PROJECT_ID}/bus/cursors/R1").json()
+    assert got["last_seen_at"] == ts
+
+
+def test_unread_channel_filter_combines_with_cursor():
+    """Channel filter must still apply on the /unread path — otherwise a
+    consumer subscribed to one channel would lose ordering when noise on
+    other channels advanced its cursor."""
+    _seed_events([
+        {"channel": "ch1", "payload": {"n": 1}},
+        {"channel": "ch2", "payload": {"n": 2}},
+        {"channel": "ch1", "payload": {"n": 3}},
+    ])
+    resp = client.get(
+        f"/api/projects/{PROJECT_ID}/bus/unread?recipient_id=R1&channel=ch1"
+    ).json()
+    assert [e["payload"]["n"] for e in resp] == [1, 3]
+
+
+def test_no_duplicate_delivery_across_acks():
+    """Read → ack → read again must produce zero duplicates over many rounds.
+    This is the literal phrasing of the AC: 重複配信が起きない."""
+    seen: set[tuple[int, ...]] = set()
+    for i in range(5):
+        _seed_events([{"channel": "c", "payload": {"n": i}}])
+        batch = client.get(
+            f"/api/projects/{PROJECT_ID}/bus/unread?recipient_id=R1"
+        ).json()
+        ids = tuple(e["event_id"] for e in batch)
+        assert all((eid,) not in seen for eid in ids), \
+            f"duplicate delivery at round {i}: {ids}"
+        for eid in ids:
+            seen.add((eid,))
+        if batch:
+            client.post(
+                f"/api/projects/{PROJECT_ID}/bus/cursors/R1",
+                json={"last_seen_at": batch[-1]["created_at"]},
+            )
+    # All 5 events should have been delivered exactly once.
+    assert len(seen) == 5
+
+
+def test_api_client_cursor_round_trip():
+    import api_client as ac
+    fake = ac.ApiClient("http://testserver", token="")
+    fake._request = lambda method, path, body=None: (
+        client.post(path, json=body).json() if method == "POST"
+        else client.get(path).json()
+    )
+    _seed_events([{"channel": "c", "payload": {"n": 1}}])
+    unread = fake.list_unread_bus_events(PROJECT_ID, "R1")
+    assert len(unread) == 1
+    ts = unread[0]["created_at"]
+    fake.advance_bus_cursor(PROJECT_ID, "R1", ts)
+    assert fake.get_bus_cursor(PROJECT_ID, "R1")["last_seen_at"] == ts
+    assert fake.list_unread_bus_events(PROJECT_ID, "R1") == []
 
 
 def test_api_client_post_bus_event_round_trip():

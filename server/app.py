@@ -415,6 +415,17 @@ class BusEventCreate(BaseModel):
     payload: dict = {}
 
 
+class BusCursorAdvance(BaseModel):
+    """Body for POST /api/projects/{project_id}/bus/cursors/{recipient_id}.
+
+    ms-54 / e-998. Consumers commit ``last_seen_at`` after successfully
+    processing a batch. The server enforces forward-only semantics, so a
+    stale client that sends an older value gets a silent no-op rather than
+    rewinding the cursor for everyone else.
+    """
+    last_seen_at: str
+
+
 class SessionLogUpsert(BaseModel):
     """Body for PUT /api/projects/{project_id}/session_logs/{session_id}.
 
@@ -1537,6 +1548,60 @@ def list_bus_events(
     for polling-style catch-up; ``channel`` for server-side routing filter."""
     _load(project_id, user)
     return db.list_bus_events(project_id, since=since, channel=channel, limit=limit)
+
+
+@app.get("/api/projects/{project_id}/bus/unread")
+def list_unread_bus_events(
+    project_id: str,
+    recipient_id: str,
+    channel: str = "",
+    limit: int = 100,
+    user: dict = Depends(require_auth),
+):
+    """List events the recipient has not yet acknowledged via their cursor.
+
+    Identical to ``GET /bus`` except ``since`` is resolved server-side from
+    ``bus_cursors/{recipient_id}``. The endpoint **does not advance** the
+    cursor — callers POST to ``/bus/cursors/{recipient_id}`` after processing.
+    Splitting read and acknowledge lets crashing consumers get at-least-once
+    delivery (events stay readable until acknowledged) while structurally
+    preventing duplicate delivery once they acknowledge.
+    """
+    _load(project_id, user)
+    cursor = db.get_bus_cursor(project_id, recipient_id)
+    since = cursor.get("last_seen_at", "")
+    return db.list_bus_events(
+        project_id, since=since, channel=channel, limit=limit,
+    )
+
+
+@app.post("/api/projects/{project_id}/bus/cursors/{recipient_id}")
+def advance_bus_cursor(
+    project_id: str,
+    recipient_id: str,
+    body: BusCursorAdvance,
+    user: dict = Depends(require_auth),
+):
+    """Forward-only acknowledge of bus events for ``recipient_id``.
+
+    The server discards advance requests that would rewind the cursor (see
+    firestore_client.advance_bus_cursor for the structural reasoning). The
+    response is the cursor state *after* the call, so the client can verify
+    its commit landed.
+    """
+    _load(project_id, user)
+    return db.advance_bus_cursor(project_id, recipient_id, body.last_seen_at)
+
+
+@app.get("/api/projects/{project_id}/bus/cursors/{recipient_id}")
+def get_bus_cursor(
+    project_id: str,
+    recipient_id: str,
+    user: dict = Depends(require_auth),
+):
+    """Return the current cursor for ``recipient_id`` ({} if unset)."""
+    _load(project_id, user)
+    return db.get_bus_cursor(project_id, recipient_id)
 
 
 @app.get("/api/projects/{project_id}/retros")

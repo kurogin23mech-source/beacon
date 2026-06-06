@@ -616,6 +616,67 @@ def append_bus_event(project_id: str, data: dict) -> str:
     return ref[1].id
 
 
+# ---------------------------------------------------------------------------
+# Bus cursors (subcollection: projects/{project_id}/bus_cursors/{recipient_id})
+# ms-54 / e-998: per-recipient read cursor. Together with the append-only event
+# log this gives "受信者ごとに既読位置が保持され、重複配信が起きない" — see ms-39 lost
+# update教訓: cursors are advance-only so a stale client can never rewind another
+# client's progress. recipient_id is opaque (session_id is the typical value).
+# ---------------------------------------------------------------------------
+
+BUS_CURSORS_SUBCOLLECTION = "bus_cursors"
+
+
+def get_bus_cursor(project_id: str, recipient_id: str) -> dict:
+    """Return the cursor doc for ``recipient_id`` or an empty dict when unset.
+
+    Schema (when set): ``{"last_seen_at": "<ISO8601>", "updated_at": "<ISO8601>"}``.
+    Empty dict means "never seen anything" — callers should treat that as
+    cursor=epoch (i.e. return all events).
+    """
+    doc = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(BUS_CURSORS_SUBCOLLECTION)
+        .document(recipient_id)
+        .get()
+    )
+    return doc.to_dict() or {} if doc.exists else {}
+
+
+def advance_bus_cursor(project_id: str, recipient_id: str,
+                       last_seen_at: str) -> dict:
+    """Forward-only cursor advance. Returns the resulting cursor.
+
+    If the request's ``last_seen_at`` is *not* strictly greater than the
+    existing cursor, the existing one is preserved (no rewind, no overwrite).
+    This is the structural defense against "stale client commits older
+    cursor and replays events for live clients" — same lost-update class as
+    ms-39's project.json overwrite bug.
+    """
+    import datetime
+    ref = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(BUS_CURSORS_SUBCOLLECTION)
+        .document(recipient_id)
+    )
+    snap = ref.get()
+    existing = snap.to_dict() if snap.exists else None
+    existing_seen = (existing or {}).get("last_seen_at", "")
+    if existing_seen and last_seen_at <= existing_seen:
+        # Idempotent no-op; return what's already stored.
+        return dict(existing or {})
+    now = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    data = {"last_seen_at": last_seen_at, "updated_at": now}
+    ref.set(data, merge=True)
+    return data
+
+
 def list_bus_events(project_id: str, since: str = "", channel: str = "",
                     limit: int = 100) -> list[dict]:
     """List bus events ordered by created_at.

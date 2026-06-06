@@ -222,3 +222,24 @@ class ApiClient:
             qs.append(f"limit={limit}")
         suffix = "?" + "&".join(qs) if qs else ""
         return self.get(f"/api/projects/{project_id}/bus{suffix}")
+
+    # Bus cursors (ms-54 / e-998) — per-recipient at-least-once delivery.
+
+    def list_unread_bus_events(self, project_id: str, recipient_id: str, *,
+                               channel: str = "", limit: int = 100) -> list:
+        qs = [f"recipient_id={urllib.parse.quote(recipient_id)}"]
+        if channel:
+            qs.append(f"channel={urllib.parse.quote(channel)}")
+        if limit:
+            qs.append(f"limit={limit}")
+        return self.get(f"/api/projects/{project_id}/bus/unread?" + "&".join(qs))
+
+    def advance_bus_cursor(self, project_id: str, recipient_id: str,
+                           last_seen_at: str) -> dict:
+        return self.post(
+            f"/api/projects/{project_id}/bus/cursors/{recipient_id}",
+            {"last_seen_at": last_seen_at},
+        )
+
+    def get_bus_cursor(self, project_id: str, recipient_id: str) -> dict:
+        return self.get(f"/api/projects/{project_id}/bus/cursors/{recipient_id}")
