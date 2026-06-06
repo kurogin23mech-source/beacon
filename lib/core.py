@@ -1193,7 +1193,8 @@ def check_duplicate_commit(entries: list, commit_hash: str) -> bool:
 def log_commit(data: dict, *, ms_id: str = "", commit_hash: str,
                message: str, date: str, summary: str = "",
                progress: str = "", behavior: str = "",
-               resolves: str = "", actor: dict | None = None) -> dict:
+               resolves: str = "", actor: dict | None = None,
+               session_id: str = "") -> dict:
     """Record a commit to the target milestone. Returns result info dict.
 
     ``actor`` (ms-51 / e-934): optional ``{"machine": ..., "agent": ...}``
@@ -1202,6 +1203,13 @@ def log_commit(data: dict, *, ms_id: str = "", commit_hash: str,
     inside core) because ``core.py`` is meant to be pure I/O-free
     business logic; the agent identity lookup involves filesystem and
     env reads, which belongs in the CLI layer.
+
+    ``session_id`` (ms-57 / e-1062): optional opaque session identifier
+    persisted as ``meta.session_id``. Powers the session-log aggregation
+    query (``WHERE meta.session_id == X``) used by session-end and rescue.
+    Forward-only: past commits without it stay untagged. Empty string
+    is the documented "no session" sentinel — those entries simply won't
+    appear in aggregation results.
     """
     target = find_target_milestone(data, ms_id)
     entries = target.setdefault("entries", [])
@@ -1226,6 +1234,8 @@ def log_commit(data: dict, *, ms_id: str = "", commit_hash: str,
             clean["agent"] = actor["agent"]
         if clean:
             meta["actor"] = clean
+    if session_id:
+        meta["session_id"] = session_id
     commit_entry = {
         "id": next_entry_id(data),
         "type": "commit",
@@ -1364,10 +1374,13 @@ def issue_import(data: dict, *, ms_id: str = "", number: int, url: str,
 
 def pr_add(data: dict, *, ms_id: str = "", url: str, author: str = "",
            intent: str = "", date: str = "", title: str = "",
-           commits: list = None) -> str:
+           commits: list = None, session_id: str = "") -> str:
     """Add a PR entry to a milestone. Returns the new entry id.
 
     commits: list of {"oid": "<sha>", "messageHeadline": "<msg>"} from gh pr view.
+    session_id (ms-57 / e-1062): opaque session identifier persisted as
+        meta.session_id so session-log aggregation can pull PRs created in
+        a given session. Forward-only — empty string means "no session".
     """
     import re as _re
     target = find_target_milestone(data, ms_id)
@@ -1397,6 +1410,17 @@ def pr_add(data: dict, *, ms_id: str = "", url: str, author: str = "",
             "meta": {"hash": sha[:7] if sha else ""},
         })
 
+    meta = {
+        "url": url,
+        "author": author,
+        "pr_number": pr_number,
+        "pr_status": "in_review",
+        "review_status": "pending",
+        "intent": intent,
+        "review_rationale": None,
+    }
+    if session_id:
+        meta["session_id"] = session_id
     entry = {
         "id": eid,
         "type": "pr",
@@ -1405,15 +1429,7 @@ def pr_add(data: dict, *, ms_id: str = "", url: str, author: str = "",
         "created_at": date,
         "done_at": None,
         "status": "in_review",
-        "meta": {
-            "url": url,
-            "author": author,
-            "pr_number": pr_number,
-            "pr_status": "in_review",
-            "review_status": "pending",
-            "intent": intent,
-            "review_rationale": None,
-        },
+        "meta": meta,
     }
     if child_entries:
         entry["entries"] = child_entries

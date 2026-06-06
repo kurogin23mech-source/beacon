@@ -381,6 +381,44 @@ class NoteCreate(BaseModel):
     text: str
     context: str = ""
     ts: str = ""
+    # ms-57 / e-1036: per-session attribution for the session-log
+    # aggregation query. Empty string = "no session" (older clients,
+    # pre-ms-57 CLI) and is dropped server-side so Firestore docs stay
+    # either "tagged with a real id" or "no field at all".
+    session_id: str = ""
+
+class SessionUpsert(BaseModel):
+    """Body for PUT /api/projects/{project_id}/sessions/{session_id}.
+
+    Fields mirror lib/session.py's local payload. All optional because heartbeat
+    updates only need to bump last_active; first-mint upserts populate the rest.
+    server/firestore_client.upsert_session uses merge=True so partial bodies
+    are safe.
+    """
+    actor: Optional[dict] = None
+    created_at: Optional[str] = None
+    last_active: Optional[str] = None
+    harness: Optional[str] = None
+
+
+class SessionLogUpsert(BaseModel):
+    """Body for PUT /api/projects/{project_id}/session_logs/{session_id}.
+
+    ms-57 / e-1037 schema. `summary` is the durable decision-trail content
+    (survives entry GC); `*_ids` are best-effort back-references. `recovered`
+    is set True only on the first upsert from the rescue path (session-start
+    seeing an orphan session) so forensics can tell rescue-born entries from
+    session-end ones. All fields optional because rescue and session-end
+    write different subsets; firestore_client.upsert_session_log uses
+    merge=True so partials are safe.
+    """
+    summary: Optional[str] = None
+    note_ids: Optional[list[str]] = None
+    commit_ids: Optional[list[str]] = None
+    pr_ids: Optional[list[str]] = None
+    created_at: Optional[str] = None
+    last_aggregated_at: Optional[str] = None
+    recovered: Optional[bool] = None
 
 class DocumentSave(BaseModel):
     title: str
@@ -1333,6 +1371,8 @@ def add_note(project_id: str, body: NoteCreate, user: dict = Depends(require_aut
     }
     if body.context:
         note["context"] = body.context
+    if body.session_id:
+        note["session_id"] = body.session_id
     note_id = db.add_note(project_id, note)
     return {"note_id": note_id, **note}
 
@@ -1344,6 +1384,90 @@ def clear_notes(project_id: str, user: dict = Depends(require_auth)):
     _require_write(data, user)
     db.clear_notes(project_id)
     return {"status": "cleared"}
+
+
+# ---------------------------------------------------------------------------
+# Session registry (ms-57 / e-1063)
+# ---------------------------------------------------------------------------
+
+@app.put("/api/projects/{project_id}/sessions/{session_id}")
+def upsert_session(
+    project_id: str,
+    session_id: str,
+    body: SessionUpsert,
+    user: dict = Depends(require_auth),
+):
+    """Upsert a session registry entry.
+
+    Heartbeat path: CLI sends only `last_active` to refresh liveness without
+    overwriting the original mint metadata. Initial mint path: CLI sends the
+    full payload. Firestore merge=True (in db.upsert_session) handles both.
+    """
+    _load(project_id, user)
+    payload = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not payload:
+        # Nothing to write — surface as a no-op rather than a 422, so callers
+        # debouncing client-side don't need to special-case empty bodies.
+        return {"status": "noop"}
+    db.upsert_session(project_id, session_id, payload)
+    return {"status": "ok", "session_id": session_id}
+
+
+@app.get("/api/projects/{project_id}/sessions")
+def list_sessions(project_id: str, user: dict = Depends(require_auth)):
+    """List all sessions for a project (used by rescue + UI 'who is active')."""
+    _load(project_id, user)
+    return db.list_sessions(project_id)
+
+
+# ---------------------------------------------------------------------------
+# Session log (ms-57 / e-1037)
+# ---------------------------------------------------------------------------
+
+@app.put("/api/projects/{project_id}/session_logs/{session_id}")
+def upsert_session_log(
+    project_id: str,
+    session_id: str,
+    body: SessionLogUpsert,
+    user: dict = Depends(require_auth),
+):
+    """Upsert a session log entry keyed by session_id (merge=True).
+
+    Both session-end (e-1038) and rescue (e-1039) call this with their own
+    subset of fields; merge semantics make the calls commutative — last
+    writer wins per field, but no field gets nulled by a partial body.
+    """
+    _load(project_id, user)
+    payload = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not payload:
+        return {"status": "noop"}
+    db.upsert_session_log(project_id, session_id, payload)
+    return {"status": "ok", "session_id": session_id}
+
+
+@app.get("/api/projects/{project_id}/session_logs/{session_id}")
+def get_session_log(
+    project_id: str,
+    session_id: str,
+    user: dict = Depends(require_auth),
+):
+    """Fetch a single session log entry. Returns 404 if absent."""
+    _load(project_id, user)
+    doc = db.get_session_log(project_id, session_id)
+    if doc is None:
+        raise HTTPException(404, detail=f"session_log not found: {session_id}")
+    return doc
+
+
+@app.get("/api/projects/{project_id}/session_logs")
+def list_session_logs(
+    project_id: str,
+    limit: int = 0,
+    user: dict = Depends(require_auth),
+):
+    """List session logs by last_aggregated_at desc. ``limit=0`` means all."""
+    _load(project_id, user)
+    return db.list_session_logs(project_id, limit=limit or None)
 
 
 @app.get("/api/projects/{project_id}/retros")

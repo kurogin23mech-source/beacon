@@ -171,3 +171,32 @@ class ApiClient:
 
     def clear_notes(self, project_id: str) -> dict:
         return self.delete(f"/api/projects/{project_id}/notes")
+
+    # Session registry operations (ms-57 / e-1063)
+
+    def upsert_session(self, project_id: str, session_id: str, data: dict) -> dict:
+        """Upsert a session document by session_id (server uses merge=True)."""
+        return self.put(
+            f"/api/projects/{project_id}/sessions/{urllib.parse.quote(session_id, safe='')}",
+            data,
+        )
+
+    def list_sessions(self, project_id: str) -> list:
+        return self.get(f"/api/projects/{project_id}/sessions")
+
+    # Session log operations (ms-57 / e-1037)
+
+    def upsert_session_log(self, project_id: str, session_id: str, data: dict) -> dict:
+        return self.put(
+            f"/api/projects/{project_id}/session_logs/{urllib.parse.quote(session_id, safe='')}",
+            data,
+        )
+
+    def get_session_log(self, project_id: str, session_id: str) -> dict:
+        return self.get(
+            f"/api/projects/{project_id}/session_logs/{urllib.parse.quote(session_id, safe='')}"
+        )
+
+    def list_session_logs(self, project_id: str, limit: int = 0) -> list:
+        suffix = f"?limit={limit}" if limit else ""
+        return self.get(f"/api/projects/{project_id}/session_logs{suffix}")
