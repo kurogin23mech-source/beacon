@@ -41,7 +41,13 @@ def project_dir(monkeypatch):
         monkeypatch.chdir(tmp)
         monkeypatch.delenv("BEACON_JSON", raising=False)
         monkeypatch.delenv("BEACON_SUPPRESS_DEPRECATION", raising=False)
-        yield Path(tmp)
+        try:
+            yield Path(tmp)
+        finally:
+            # Windows can't remove a directory that is the process CWD, so the
+            # TemporaryDirectory cleanup would raise WinError 32. Step out of the
+            # temp project before cleanup (no-op on POSIX). ms-57.
+            os.chdir(tempfile.gettempdir())
 
 
 def test_summary_write_still_persists(project_dir, monkeypatch):

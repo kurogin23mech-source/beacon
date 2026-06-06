@@ -41,7 +41,13 @@ def project_dir(monkeypatch):
         monkeypatch.delenv("BEACON_NOTE_TEXT", raising=False)
         monkeypatch.delenv("BEACON_NOTE_CONTEXT", raising=False)
         monkeypatch.delenv("BEACON_CLOUD", raising=False)
-        yield Path(tmp)
+        try:
+            yield Path(tmp)
+        finally:
+            # Windows can't remove a directory that is the process CWD, so the
+            # TemporaryDirectory cleanup would raise WinError 32. Step out of the
+            # temp project before cleanup (no-op on POSIX). ms-57.
+            os.chdir(tempfile.gettempdir())
 
 
 def _read_notes(project_dir: Path) -> list[dict]:

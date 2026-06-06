@@ -53,7 +53,13 @@ def project_dir(monkeypatch):
         # tests that assert the mint format / freshness reuse path.
         # env-var-first behaviour is covered in tests/test_session.py.
         monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
-        yield Path(tmp)
+        try:
+            yield Path(tmp)
+        finally:
+            # Windows can't remove a directory that is the process CWD, so the
+            # TemporaryDirectory cleanup would raise WinError 32. Step out of the
+            # temp project before cleanup (no-op on POSIX). ms-57.
+            os.chdir(tempfile.gettempdir())
 
 
 def _read_session_file(project_dir: Path) -> dict:

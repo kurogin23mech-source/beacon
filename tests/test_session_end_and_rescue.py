@@ -46,7 +46,13 @@ def project_dir(monkeypatch):
         monkeypatch.delenv("BEACON_CLOUD", raising=False)
         # Silence cloud-push attempts even if anything leaks through.
         monkeypatch.setattr(commands, "_push_session_log_to_cloud", lambda p: False)
-        yield Path(tmp)
+        try:
+            yield Path(tmp)
+        finally:
+            # Windows can't remove a directory that is the process CWD, so the
+            # TemporaryDirectory cleanup would raise WinError 32. Step out of the
+            # temp project before cleanup (no-op on POSIX). ms-57.
+            os.chdir(tempfile.gettempdir())
 
 
 _next_eid = [100]
