@@ -21,6 +21,17 @@
 
 set -euo pipefail
 
+# Hermeticity: this script forces specific session_ids by rewriting
+# .beacon/session.json (see set_session). That mechanism only works when
+# CLAUDE_CODE_SESSION_ID is ABSENT. When it's present — e.g. running inside
+# Claude Code, notably on Windows where the var reaches the Bash-tool
+# subprocess (the macOS audit found it absent there, but Windows differs) —
+# session.py resolves env-var-first and overrides session.json, so every
+# entry gets tagged with the live Claude id instead of our synthetic
+# SID_A/SID_B and step 2 fails. Unset it so the test is deterministic
+# regardless of harness. (ms-57 e-1042 Windows finding.)
+unset CLAUDE_CODE_SESSION_ID
+
 # Resolve the project root (so the script runs from anywhere).
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
