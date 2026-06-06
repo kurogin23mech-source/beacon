@@ -2,6 +2,38 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.13.0] - 2026-06-06
+
+- Merge pull request #63 from kurogin23mech-source/ms-58-beacon-trailnode-dogfood
+- Merge pull request #62 from kurogin23mech-source/ms-57-e2e-hermetic-fix
+- fix(ms-57): make e2e script hermetic vs CLAUDE_CODE_SESSION_ID (e-1042)
+- feat(ms-58): add TrailNode manifest.json for org-internal distribution (e-1128)
+- Merge pull request #61 from kurogin23mech-source/fix/auto-note-content-enrichment
+- fix(monitor): auto-enrich threshold notes so they aren't empty templates
+- Merge pull request #60 from kurogin23mech-source/ms-57-notes-session-log-summary
+- test(ms-57): fix Windows teardown — restore CWD before TemporaryDirectory cleanup
+- merge: integrate Windows ms-57 e-1035 part 1 (env-var-first session id)
+- test(ms-57): single-host e2e script for session log flow (e-1042 partial)
+- feat(ms-57): Session tab with Notes/Session Log toggle (e-1041)
+- feat(ms-57): deprecate beacon summary + drop Session Context banner (e-1040)
+- feat(ms-57): session-end + rescue CLI commands (e-1038 + e-1039)
+- feat(ms-57): session log collection + aggregation core (e-1037)
+- feat(ms-57): tag session notes with session_id (e-1036)
+- feat(ms-57): tag commit / PR entries with meta.session_id (e-1062)
+- feat(ms-57): cloud session registry + debounced heartbeat sync (e-1063)
+- Merge pull request #59 from kurogin23mech-source/ms-5/server-app-type-gate
+- feat(ms-57): mint local session_id + heartbeat per CLI exec (e-1035 slice 1)
+- feat(trailnode/ms-5): accept 4 capability types in server push gate
+- Merge pull request #58 from kurogin23mech-source/trailnode/ms-3-e32-org-authz
+- feat(trailnode): manifests endpoint に org 越境防止認可を追加 (ms-3 e-32)
+- Merge pull request #57 from kurogin23mech-source/trailnode/ms-3-e31-list-endpoint
+- feat(trailnode): manifests 一覧 endpoint で差分同期を提供 (ms-3 e-31)
+- Merge pull request #56 from kurogin23mech-source/trailnode/ms-3-pull-timestamp-fix
+- fix(trailnode): pull endpoint で updated_at / deleted_at の Timestamp 変換漏れ (ms-3 e-30 hotfix)
+- docs(release): update README/CHANGELOG for v0.12.0
+- chore(release): bump formula to 0.12.0
+- feat(ms-57): session identity primitive (e-1035 part 1)
+
 ## [v0.12.0] - 2026-06-05
 
 - Merge pull request #55 from kurogin23mech-source/ms-37-onboarding-polish
