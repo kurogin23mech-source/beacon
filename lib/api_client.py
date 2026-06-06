@@ -200,3 +200,25 @@ class ApiClient:
     def list_session_logs(self, project_id: str, limit: int = 0) -> list:
         suffix = f"?limit={limit}" if limit else ""
         return self.get(f"/api/projects/{project_id}/session_logs{suffix}")
+
+    # Bus events (ms-54 / e-996)
+
+    def post_bus_event(self, project_id: str, channel: str, *,
+                       sender_session_id: str = "", payload: dict | None = None) -> dict:
+        return self.post(f"/api/projects/{project_id}/bus", {
+            "channel": channel,
+            "sender_session_id": sender_session_id,
+            "payload": payload or {},
+        })
+
+    def list_bus_events(self, project_id: str, *, since: str = "",
+                        channel: str = "", limit: int = 100) -> list:
+        qs = []
+        if since:
+            qs.append(f"since={urllib.parse.quote(since)}")
+        if channel:
+            qs.append(f"channel={urllib.parse.quote(channel)}")
+        if limit:
+            qs.append(f"limit={limit}")
+        suffix = "?" + "&".join(qs) if qs else ""
+        return self.get(f"/api/projects/{project_id}/bus{suffix}")

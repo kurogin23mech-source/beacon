@@ -401,6 +401,20 @@ class SessionUpsert(BaseModel):
     harness: Optional[str] = None
 
 
+class BusEventCreate(BaseModel):
+    """Body for POST /api/projects/{project_id}/bus.
+
+    ms-54 / e-996 minimal schema. The recipient_session_id / delivery /
+    subscribe filter fields land in later tasks (e-1134 directory query,
+    e-1135 delivery policy, §9 subscribe filter); at this slice the bus
+    is pure transport — anyone can post, anyone can read with the channel
+    filter.
+    """
+    channel: str
+    sender_session_id: str = ""
+    payload: dict = {}
+
+
 class SessionLogUpsert(BaseModel):
     """Body for PUT /api/projects/{project_id}/session_logs/{session_id}.
 
@@ -1468,6 +1482,47 @@ def list_session_logs(
     """List session logs by last_aggregated_at desc. ``limit=0`` means all."""
     _load(project_id, user)
     return db.list_session_logs(project_id, limit=limit or None)
+
+
+# ---------------------------------------------------------------------------
+# Bus events (ms-54 / e-996)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/projects/{project_id}/bus")
+def post_bus_event(
+    project_id: str,
+    body: BusEventCreate,
+    user: dict = Depends(require_auth),
+):
+    """Append a bus event. Server stamps ``created_at`` so all clients agree
+    on the wall-clock ordering (clients' local clocks would diverge across
+    machines, defeating the cursor semantics)."""
+    import datetime
+    _load(project_id, user)
+    data = {
+        "channel": body.channel,
+        "sender_session_id": body.sender_session_id,
+        "payload": body.payload,
+        "created_at": datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        ),
+    }
+    event_id = db.append_bus_event(project_id, data)
+    return {"event_id": event_id, **data}
+
+
+@app.get("/api/projects/{project_id}/bus")
+def list_bus_events(
+    project_id: str,
+    since: str = "",
+    channel: str = "",
+    limit: int = 100,
+    user: dict = Depends(require_auth),
+):
+    """List bus events ordered by created_at. Use ``since=<last_seen_iso>``
+    for polling-style catch-up; ``channel`` for server-side routing filter."""
+    _load(project_id, user)
+    return db.list_bus_events(project_id, since=since, channel=channel, limit=limit)
 
 
 @app.get("/api/projects/{project_id}/retros")
