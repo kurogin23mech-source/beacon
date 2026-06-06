@@ -220,56 +220,102 @@ PYEOF
 )
 fi
 
-# ─── 自動ノート記録（テンプレート形式）─────────────────────────────────────────
+# ─── 自動ノート記録（auto-enriched template, ms-31 follow-up）────────────────
+#
+# 元の設計では「Claude が後で /beacon-note で埋める」前提だったが、85994cf で
+# decision:block → systemMessage に降格したことで、Claude が応じる保証が消えた。
+# 結果: 残された note が template-only の空骨組みになる問題。
+#
+# Fix: script 側で取得可能な情報 (recent commits / pending tasks) を自動で
+# 埋める。Claude が追記しないケースでも note 自体は意味のある状態スナップショット
+# になる。Claude 追記用 section は「任意」と明示して compaction cascade の元と
+# なる "必ず埋めて" 圧を下げる。
 NOTE_DATE=$(date +"%Y-%m-%d %H:%M")
-NOTE_BODY="## コンテキストサマリー（自動記録 ${PERCENT}% / ${NOTE_DATE})
+
+# 直近コミット (過去 6 時間 — 1 セッションがその辺りに収まる目安)
+# set -euo pipefail が効いているので、git が失敗するケース (cwd が git repo
+# でない、git 自体未インストール等) でもパイプ全体を fail させないように
+# || true を最後に置く。空でもフォールバックメッセージを出す。
+RECENT_COMMITS_TEXT="$(
+  { git log --since="6 hours ago" --pretty=format:"- %h: %s" 2>/dev/null || true; } | head -10
+)"
+if [ -z "$RECENT_COMMITS_TEXT" ]; then
+  RECENT_COMMITS_TEXT="（直近6時間にコミットなし）"
+fi
+
+# Active MS の未消化タスク (priority 順、最大 8 件)
+PENDING_TASKS_TEXT=$(
+  STATUS_JSON_FOR_TASKS=$(beacon status --json 2>/dev/null || echo "")
+  if [ -n "$STATUS_JSON_FOR_TASKS" ]; then
+    python3 - "$STATUS_JSON_FOR_TASKS" <<'PYEOF' 2>/dev/null
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+    active = next((ms for ms in d.get("milestones", []) if ms.get("status") == "in_progress"), None)
+    if not active:
+        print("（active MS なし）")
+        sys.exit(0)
+    import subprocess
+    out = subprocess.run(["beacon", "task", "list", "--ms", active["id"], "--json"],
+                          capture_output=True, text=True, timeout=5)
+    if out.returncode != 0:
+        print("（タスク取得失敗）")
+        sys.exit(0)
+    tasks = json.loads(out.stdout)
+    pending = []
+    def walk(entries):
+        for e in entries or []:
+            if e.get("type") == "task" and e.get("status") != "done":
+                p = (e.get("meta") or {}).get("priority", "-")
+                pending.append((p, e.get("id",""), e.get("description","")[:120]))
+            walk(e.get("entries", []))
+    walk(tasks.get("entries", []))
+    order = {"highest":0,"high":1,"middle":2,"low":3,"lowest":4,"-":5}
+    pending.sort(key=lambda t: order.get(t[0], 9))
+    if not pending:
+        print("（未消化タスクなし）")
+    else:
+        for p, eid, desc in pending[:8]:
+            print(f"- [{p:7}] {eid}: {desc}")
+except Exception as e:
+    print(f"（取得エラー: {type(e).__name__}）")
+PYEOF
+  else
+    echo "（beacon status 取得失敗）"
+  fi
+)
+
+NOTE_BODY="## コンテキストサマリー（自動記録 ${PERCENT}% / ${NOTE_DATE}）
 
 ### 現在地（自動取得）
 ${LOCATION_TEXT:-（取得失敗）}
 
-### 取り組んでいること
-（Claudeが記述してください）
+### 直近のコミット（過去 6 時間 / 自動取得）
+${RECENT_COMMITS_TEXT}
 
-### このセッションで決めたこと
-（Claudeが記述してください）
+### Active MS の未消化タスク（優先度順 / 自動取得）
+${PENDING_TASKS_TEXT}
 
-### 定量情報
-（Claudeが記述してください）
+### このセッションで決めたこと（任意 — Claude が追記）
+（残りはコンテキスト次第で Claude が追記。空欄でも note 自体は状態スナップショットとして有効。）
 
-### 未解決の課題
-（Claudeが記述してください）
-
-### 次のアクション
-（Claudeが記述してください）"
+### 次のアクション（任意 — Claude が追記）
+"
 
 beacon note "$NOTE_BODY" 2>/dev/null || true
 
-# ─── Claude への通知出力（残りブロックの記述を依頼）────────────────────────────
+# ─── Claude への通知出力（追記は任意トーン）────────────────────────────
+# ms-31 follow-up: 元は「必ず /beacon-note で埋めて」という強制トーンだったが、
+# script 側で recent commits + pending tasks まで埋めるようになったので
+# Claude 追記は任意。「会話特有の判断軌跡があれば beacon note で追記してください」
+# 程度の suggestion にとどめ、compaction cascade のリスクを下げる。
 TEMPLATE_INSTRUCTION="BEACON [コンテキスト ${PERCENT}% / ${CURRENT_CONTEXT}/${CONTEXT_LIMIT_FMT} tokens]
-閾値 ${TRIGGERED_THRESHOLD}% 到達。現在地ブロックを自動記録しました。
-以下のフォーマットで /beacon-note を実行し、残りのブロックを上書き補完してください:
+閾値 ${TRIGGERED_THRESHOLD}% 到達。session note を自動記録しました
+(現在地 / 直近コミット / 未消化タスク を script が自動取得済)。
 
-## コンテキストサマリー（${PERCENT}% / ${NOTE_DATE}）
-
-### 現在地（自動取得）
-${LOCATION_TEXT:-（取得失敗）}
-
-### 取り組んでいること
-[1〜3文]
-
-### このセッションで決めたこと
-[箇条書き]
-
-### 定量情報
-[数値・件数・率・閾値など、再現に必要な数字を全て]
-
-### 未解決の課題
-[次のターンまたは次セッションで再開すべき論点]
-
-### 次のアクション
-[直後にやること]
-
-コンパクション後のClaudeがこのノートだけで文脈を完全復元できる精度で書くこと。"
+beacon note list で内容を確認できます。会話特有の判断軌跡（例: なぜこの設計を選んだか、
+次セッションで知っておくべき非自明なコンテキスト）があれば、
+\`beacon note \"text\"\` で追記してください — 任意です。"
 
 python3 - "$TEMPLATE_INSTRUCTION" <<'PYEOF'
 import json, sys
