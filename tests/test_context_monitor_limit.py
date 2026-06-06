@@ -199,6 +199,11 @@ def test_threshold_notification_uses_hook_specific_output(project_dir, tmp_path)
     assert "hookSpecificOutput" in payload
     hso = payload["hookSpecificOutput"]
     assert hso.get("hookEventName") == "Stop"
-    assert "/beacon-note" in hso.get("additionalContext", ""), (
-        "additionalContext should instruct Claude to fill the template via /beacon-note"
+    # ms-31 follow-up: the message no longer demands a Skill call. After the
+    # auto-content enrichment, the additionalContext just *mentions* beacon
+    # note so Claude can optionally append nuance. Either `/beacon-note` (the
+    # Skill form) or `beacon note` (the CLI form) counts.
+    add_ctx = hso.get("additionalContext", "")
+    assert "beacon note" in add_ctx, (
+        "additionalContext should still surface beacon note as an optional path"
     )
