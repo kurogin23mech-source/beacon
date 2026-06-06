@@ -1489,14 +1489,21 @@ def list_session_logs(
 # ---------------------------------------------------------------------------
 
 @app.post("/api/projects/{project_id}/bus")
-def post_bus_event(
+async def post_bus_event(
     project_id: str,
     body: BusEventCreate,
     user: dict = Depends(require_auth),
 ):
     """Append a bus event. Server stamps ``created_at`` so all clients agree
     on the wall-clock ordering (clients' local clocks would diverge across
-    machines, defeating the cursor semantics)."""
+    machines, defeating the cursor semantics).
+
+    Async handler so we can `await` the WS fan-out on the same event loop
+    instead of bouncing through `run_coroutine_threadsafe` (e-997). The
+    Firestore call is sync-blocking but bus posts are low-frequency, so the
+    event-loop stall is acceptable at this slice; promote to `asyncio.to_thread`
+    if/when traffic justifies it.
+    """
     import datetime
     _load(project_id, user)
     data = {
@@ -1508,7 +1515,14 @@ def post_bus_event(
         ),
     }
     event_id = db.append_bus_event(project_id, data)
-    return {"event_id": event_id, **data}
+    event = {"event_id": event_id, **data}
+    # e-997: push to all WS subscribers of this project. Multi-replica delivery
+    # (events posted on another Cloud Run instance) is out of scope here —
+    # Firestore on_snapshot or a pub/sub layer would solve it but adds cost;
+    # the single-replica path covers UC1/UC2 dogfood.
+    if _ws_connections.get(project_id):
+        await _broadcast_bus_event(project_id, event)
+    return event
 
 
 @app.get("/api/projects/{project_id}/bus")
@@ -1649,6 +1663,25 @@ async def _broadcast(project_id: str, data: dict):
         return
     enriched = _enrich_project(data)
     msg = {"type": "project", "data": enriched}
+    for ws in clients:
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            _ws_connections.get(project_id, set()).discard(ws)
+
+
+async def _broadcast_bus_event(project_id: str, event: dict):
+    """Push a single bus event to all WS clients subscribed to this project.
+
+    ms-54 / e-997: per-channel/per-recipient subscribe filtering lives client-
+    side at this slice — every connected client sees every event for the
+    project and decides what to do with it. Server-side filtering arrives
+    with e-1134 (directory query) + §9 subscribe filter.
+    """
+    clients = _ws_connections.get(project_id, set()).copy()
+    if not clients:
+        return
+    msg = {"type": "bus_event", "data": event}
     for ws in clients:
         try:
             await ws.send_json(msg)

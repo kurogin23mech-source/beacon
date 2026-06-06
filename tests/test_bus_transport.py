@@ -69,6 +69,14 @@ from fastapi.testclient import TestClient  # noqa: E402
 import app as app_module  # noqa: E402
 
 app_module._auth_enabled = False
+
+# The WS endpoint starts a Firestore on_snapshot watcher on accept and stops
+# it on disconnect. That path needs a real Firestore client; for these tests
+# we stub it out so WS push can be exercised in isolation without standing up
+# Firestore (and without surfacing pre-existing watcher cleanup quirks).
+app_module._start_watcher = lambda project_id: None
+app_module._stop_watcher = lambda project_id: None
+
 client = TestClient(app_module.app)
 
 PROJECT_ID = "bus-test"
@@ -191,6 +199,52 @@ def test_get_empty_returns_empty_array():
 # ---------------------------------------------------------------------------
 # api_client contract (lib/api_client.py shape)
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# WS push (e-997)
+# ---------------------------------------------------------------------------
+
+def test_ws_push_delivers_bus_event_to_subscribers():
+    """A POST to /bus should fan out to all open WS connections of the project
+    as a {type: "bus_event", data: {...}} frame, in addition to being persisted.
+    Without this, consumers have to poll GET /bus, which defeats the point of
+    UC1/UC2 (real-time DM / push-driven Operation alerts)."""
+    with client.websocket_connect(f"/ws/projects/{PROJECT_ID}") as ws:
+        # The initial frame is the project snapshot (type=project). Drain it
+        # so the next receive sees the bus event we trigger below.
+        first = ws.receive_json()
+        assert first["type"] == "project"
+
+        resp = client.post(f"/api/projects/{PROJECT_ID}/bus", json={
+            "channel": "session-dm",
+            "sender_session_id": "sess-A",
+            "payload": {"text": "hello via ws"},
+        })
+        assert resp.status_code == 200
+
+        pushed = ws.receive_json()
+        assert pushed["type"] == "bus_event"
+        body = pushed["data"]
+        assert body["channel"] == "session-dm"
+        assert body["sender_session_id"] == "sess-A"
+        assert body["payload"] == {"text": "hello via ws"}
+        # event_id and server-stamped created_at must round-trip on the WS
+        # frame so subscribers can advance their cursor without a follow-up
+        # GET (otherwise WS push provides no advantage over polling).
+        assert body["event_id"] == resp.json()["event_id"]
+        assert body["created_at"] == resp.json()["created_at"]
+
+
+def test_post_without_subscribers_is_not_an_error():
+    """Posting to a project with no live WS subscribers must still succeed —
+    the bus persists the event for later catch-up via GET. WS push is a
+    convenience, not a precondition."""
+    resp = client.post(f"/api/projects/{PROJECT_ID}/bus", json={
+        "channel": "ch", "sender_session_id": "A", "payload": {},
+    })
+    assert resp.status_code == 200
+    assert resp.json()["event_id"]
+
 
 def test_api_client_post_bus_event_round_trip():
     """The api_client method shape must match the server's accept body."""
