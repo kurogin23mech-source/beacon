@@ -2501,14 +2501,84 @@ def cmd_session_id():
         sys.exit(1)
 
 
+def _resolve_channel_root() -> "Path | None":
+    """Find the directory containing channel/bus.mjs across all install paths.
+
+    Walks a fixed candidate list in priority order so dev clone, Homebrew, and
+    pypi (pipx/pip) installs all locate the bundled channel assets without a
+    hard-coded layout. Returns None if no candidate exists (caller surfaces a
+    clean error). ms-54 e-1169.
+
+    Candidates tried in order:
+      1. ``$BEACON_CHANNEL_DIR`` (env override — used by tests / Win users
+         who manually copied channel/ to a non-standard location).
+      2. ``<commands.py>/../../channel``           — dev clone layout
+         (lib/commands.py + channel/ siblings under <repo>).
+      3. ``<commands.py>/../channel``              — Homebrew libexec layout
+         (libexec/commands.py + libexec/channel/).
+      4. ``<commands.py>/../../_bundled_channel``  — pypi wheel layout
+         (beacon_cli/_bundled_lib/commands.py + beacon_cli/_bundled_channel/).
+    """
+    from pathlib import Path  # local import — pathlib not yet at module level
+    import os as _os
+    override = _os.environ.get("BEACON_CHANNEL_DIR", "").strip()
+    if override:
+        cand = Path(override).resolve()
+        if (cand / "bus.mjs").exists():
+            return cand
+    commands_path = Path(__file__).resolve()
+    candidates = [
+        commands_path.parent.parent / "channel",           # dev clone
+        commands_path.parent / "channel",                  # Homebrew libexec
+        commands_path.parent.parent / "_bundled_channel",  # pypi wheel
+    ]
+    for c in candidates:
+        if (c / "bus.mjs").exists():
+            return c
+    return None
+
+
+def _ensure_channel_node_modules(channel_root: "Path") -> bool:
+    """Make sure channel/node_modules/ exists (run `npm install` if not).
+
+    Most install paths leave node_modules to runtime first-use because:
+      - dev clone: contributor never runs npm install
+      - pypi wheel: shipping node_modules in a wheel is platform-fragile
+      - Homebrew: depends_on "node" + brew's install step should generate it,
+        but a partial install / brew formula bug can leave it missing
+    Returns True if node_modules is present (existed or created); False if
+    install failed. ms-54 e-1169.
+    """
+    import subprocess as _subprocess
+    nm = channel_root / "node_modules"
+    if nm.exists():
+        return True
+    pkg_json = channel_root / "package.json"
+    if not pkg_json.exists():
+        return False
+    print(f"channel/node_modules not found — running `npm install` in {channel_root}",
+          file=sys.stderr)
+    try:
+        rc = _subprocess.call(["npm", "install", "--silent"], cwd=str(channel_root))
+    except FileNotFoundError:
+        print("Error: `node` / `npm` not found on PATH.", file=sys.stderr)
+        print("Install Node.js (e.g. `brew install node` or via nvm) and retry.",
+              file=sys.stderr)
+        return False
+    if rc != 0:
+        print(f"Error: `npm install` exited {rc}.", file=sys.stderr)
+        return False
+    return nm.exists()
+
+
 def cmd_channel_install():
     """Write .mcp.json with the Beacon bus Channel MCP server entry.
 
-    Project-level opt-in for ms-54 channel/bus.mjs. Discovers the bundled
-    bus.mjs absolute path by walking back from this commands.py location
-    (works for both dev clone and Homebrew layout). Refuses to overwrite an
-    existing .mcp.json that already has unrelated mcpServers entries; merges
-    instead when safe. ms-54 e-1152 follow-up.
+    Project-level opt-in for ms-54 channel/bus.mjs. Resolves the bundled
+    bus.mjs absolute path via _resolve_channel_root() so dev clone /
+    Homebrew / pypi installs all work. Refuses to overwrite an existing
+    .mcp.json that already has unrelated mcpServers entries; merges
+    instead when safe. ms-54 e-1152 / e-1169.
     """
     from pathlib import Path  # local import — pathlib not yet at module level
     cwd = Path.cwd()
@@ -2517,14 +2587,28 @@ def cmd_channel_install():
               file=sys.stderr)
         sys.exit(1)
 
-    # commands.py is at <root>/lib/commands.py — bus.mjs is at <root>/channel/bus.mjs
-    commands_path = Path(__file__).resolve()
-    root = commands_path.parent.parent
-    bus_path = root / "channel" / "bus.mjs"
-    if not bus_path.exists():
-        print(f"Error: channel/bus.mjs not found at {bus_path}", file=sys.stderr)
-        print("This Beacon install may be missing the channel module.", file=sys.stderr)
+    channel_root = _resolve_channel_root()
+    if channel_root is None:
+        print("Error: channel/bus.mjs not found in any expected location.", file=sys.stderr)
+        print("Looked for:", file=sys.stderr)
+        print("  - $BEACON_CHANNEL_DIR (env override)", file=sys.stderr)
+        print("  - <repo>/channel        (dev clone)", file=sys.stderr)
+        print("  - <libexec>/channel     (Homebrew)", file=sys.stderr)
+        print("  - <beacon_cli>/_bundled_channel  (pypi wheel)", file=sys.stderr)
+        print("Reinstall Beacon (brew reinstall / pipx reinstall) or set "
+              "BEACON_CHANNEL_DIR to point at your channel/ directory.",
+              file=sys.stderr)
         sys.exit(1)
+    bus_path = channel_root / "bus.mjs"
+
+    # Ensure node_modules so the MCP server actually starts on first launch.
+    # Best-effort: surface a warning if missing but still write .mcp.json so
+    # the user sees the next-steps text and can fix node manually.
+    if not _ensure_channel_node_modules(channel_root):
+        print(f"Warning: channel/node_modules at {channel_root} is missing or "
+              f"`npm install` failed.", file=sys.stderr)
+        print("The beacon-bus MCP server will fail to start until this is "
+              "resolved.", file=sys.stderr)
 
     server_entry = {
         "command": "node",

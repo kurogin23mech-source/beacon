@@ -109,6 +109,7 @@ packages = [
     "beacon_cli.hooks",
     "beacon_cli._bundled_lib",
     "beacon_cli._bundled_skills",
+    "beacon_cli._bundled_channel",
 ]
 include-package-data = true
 
@@ -118,6 +119,11 @@ version = { attr = "beacon_cli._version.__version__" }
 [tool.setuptools.package-dir]
 "beacon_cli._bundled_lib" = "lib"
 "beacon_cli._bundled_skills" = "skills"
+# ms-54 e-1169: ship channel/ bus.mjs + package.json so pipx users can run
+# `beacon channel install`. node_modules is generated at runtime via
+# _ensure_channel_node_modules() — shipping it in the wheel would be
+# platform-fragile (native deps, symlinks, large size).
+"beacon_cli._bundled_channel" = "channel"
 
 [tool.setuptools.package-data]
 "beacon_cli._bundled_lib" = [
@@ -129,6 +135,11 @@ version = { attr = "beacon_cli._version.__version__" }
     "*.md",
     "_*.md",
     "**/*.md",
+]
+"beacon_cli._bundled_channel" = [
+    "*.mjs",
+    "package.json",
+    "package-lock.json",
 ]
 beacon_cli = [
     "_bundled_bin/beacon",
