@@ -1,0 +1,11 @@
+{
+  "name": "beacon-channel",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Beacon-side Claude Code channel MCP servers (bus, ...)",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ws": "^8.18.0"
+  }
+}

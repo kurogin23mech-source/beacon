@@ -1,0 +1,282 @@
+#!/usr/bin/env node
+// Beacon bus channel MCP server (ms-54 e-1152).
+//
+// Bridges Beacon Cloud /bus events into the local Claude Code session via the
+// Channels MCP protocol, so an idle session wakes up on incoming DMs without
+// requiring the user to type anything.
+//
+// Flow:
+//   [Beacon Cloud /bus]
+//     ↑ POST  (reply tool — supports cross-project)
+//     ↓ poll  /api/projects/{id}/bus/unread?recipient_id=<my session_id>
+//   [channel/bus.mjs] ─stdio─ [Claude Code session]
+//
+// Discovery (env wins, falls back to local files):
+//   BEACON_API_URL          ← .beacon/cloud.json.api_url   ← https://beacon-ai.dev
+//   BEACON_PROJECT_ID       ← .beacon/cloud.json.project_id
+//   BEACON_SESSION_ID       ← .beacon/session.json.session_id
+//   BEACON_AUTH_TOKEN       ← ~/.beacon/credentials.json.token
+//   BEACON_CHANNEL_ALLOWLIST (csv, default "dm")
+//   BEACON_BUS_POLL_MS      (default 2000)
+//   BEACON_BUS_LOG          (default /tmp/beacon-bus-channel.log)
+
+import { Server } from '@modelcontextprotocol/sdk/server/index.js'
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
+import fs from 'node:fs'
+import path from 'node:path'
+import os from 'node:os'
+
+// --- Config discovery --------------------------------------------------------
+
+const BEACON_HOME = process.env.BEACON_HOME || path.join(os.homedir(), '.beacon')
+const CREDS_JSON = path.join(BEACON_HOME, 'credentials.json')
+const CWD = process.cwd()
+const CLOUD_JSON = path.join(CWD, '.beacon', 'cloud.json')
+const SESSION_JSON = path.join(CWD, '.beacon', 'session.json')
+
+const LOG = process.env.BEACON_BUS_LOG || '/tmp/beacon-bus-channel.log'
+const log = (msg) => {
+  try { fs.appendFileSync(LOG, `[${new Date().toISOString()}] ${msg}\n`) } catch {}
+}
+
+function loadJSON(p) {
+  return JSON.parse(fs.readFileSync(p, 'utf8'))
+}
+
+function safeLoadJSON(p) {
+  try { return loadJSON(p) } catch { return {} }
+}
+
+function loadToken() {
+  if (process.env.BEACON_AUTH_TOKEN) return process.env.BEACON_AUTH_TOKEN
+  const c = safeLoadJSON(CREDS_JSON)
+  return c.token || c.id_token || ''
+}
+
+const cloud = safeLoadJSON(CLOUD_JSON)
+const session = safeLoadJSON(SESSION_JSON)
+
+const API_URL = (process.env.BEACON_API_URL || cloud.api_url || 'https://beacon-ai.dev').replace(/\/$/, '')
+const PROJECT_ID = process.env.BEACON_PROJECT_ID || cloud.project_id || ''
+const SESSION_ID = process.env.BEACON_SESSION_ID || session.session_id || ''
+const ALLOWED_CHANNELS = (process.env.BEACON_CHANNEL_ALLOWLIST || 'dm')
+  .split(',').map(s => s.trim()).filter(Boolean)
+const POLL_INTERVAL = parseInt(process.env.BEACON_BUS_POLL_MS || '2000', 10)
+
+log(`=== beacon-bus channel starting ===`)
+log(`  api=${API_URL} project=${PROJECT_ID} session=${SESSION_ID}`)
+log(`  allow=[${ALLOWED_CHANNELS.join(',')}] poll=${POLL_INTERVAL}ms cwd=${CWD}`)
+
+// --- HTTPS helpers -----------------------------------------------------------
+
+async function apiGet(p) {
+  const r = await fetch(`${API_URL}${p}`, {
+    headers: { Authorization: `Bearer ${loadToken()}` },
+  })
+  if (!r.ok) throw new Error(`GET ${p} → ${r.status}: ${(await r.text()).slice(0, 200)}`)
+  return r.json()
+}
+
+async function apiPost(p, body) {
+  const r = await fetch(`${API_URL}${p}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${loadToken()}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+  if (!r.ok) throw new Error(`POST ${p} → ${r.status}: ${(await r.text()).slice(0, 200)}`)
+  return r.json()
+}
+
+// --- MCP server --------------------------------------------------------------
+
+const mcp = new Server(
+  { name: 'beacon-bus', version: '0.0.1' },
+  {
+    capabilities: {
+      experimental: { 'claude/channel': {} },
+      tools: {},
+    },
+    instructions: [
+      `You are connected to the Beacon bus.`,
+      `Your session_id is ${SESSION_ID || '(not set)'} in project ${PROJECT_ID || '(not set)'}.`,
+      `Incoming events arrive as <channel source="beacon-bus" event_id="..." channel="..." from_session="..." from_project="..." created_at="...">payload</channel>.`,
+      `Only DMs addressed to this session in channels [${ALLOWED_CHANNELS.join(',')}] reach you.`,
+      `To reply: call the reply tool with recipient_project_id=from_project, recipient_session_id=from_session, channel=channel, in_reply_to=event_id, and your text. Cross-project replies are supported — the tool posts directly to the target project's bus.`,
+    ].join('\n'),
+  },
+)
+
+mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: [
+    {
+      name: 'reply',
+      description: 'Post a message to the Beacon bus, optionally as a reply to an inbound event.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          recipient_project_id: { type: 'string', description: 'Target Beacon project_id (use from_project of the inbound event for replies)' },
+          recipient_session_id: { type: 'string', description: 'Target session_id (use from_session of the inbound event for replies)' },
+          channel: { type: 'string', description: 'Bus channel (e.g. "dm")' },
+          text: { type: 'string', description: 'Message body shown to the recipient' },
+          in_reply_to: { type: 'string', description: 'event_id of the inbound event this is a reply to (engages budget gate)' },
+        },
+        required: ['recipient_project_id', 'recipient_session_id', 'channel', 'text'],
+      },
+    },
+  ],
+}))
+
+mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
+  if (req.params.name !== 'reply') {
+    throw new Error(`unknown tool: ${req.params.name}`)
+  }
+  const args = req.params.arguments || {}
+  const { recipient_project_id, recipient_session_id, channel, text, in_reply_to } = args
+  const payload = { recipient_session_id, text, source_project: PROJECT_ID }
+  if (in_reply_to) payload.in_reply_to = in_reply_to
+  try {
+    const result = await apiPost(`/api/projects/${recipient_project_id}/bus`, {
+      channel,
+      sender_session_id: SESSION_ID,
+      payload,
+      delivery: 'propose-to-ai',
+    })
+    log(`reply sent: event_id=${result.event_id} → ${recipient_project_id}/${recipient_session_id}`)
+    return { content: [{ type: 'text', text: `sent ${result.event_id}` }] }
+  } catch (e) {
+    log(`reply ERROR: ${e.message}`)
+    return { content: [{ type: 'text', text: `error: ${e.message}` }], isError: true }
+  }
+})
+
+await mcp.connect(new StdioServerTransport())
+log('mcp connected via stdio')
+
+// --- Polling loop ------------------------------------------------------------
+
+if (!PROJECT_ID || !SESSION_ID) {
+  log(`FATAL: PROJECT_ID and SESSION_ID must be discoverable. Aborting poll loop.`)
+} else {
+  let stopping = false
+  process.on('SIGINT', () => { stopping = true; log('SIGINT received') })
+  process.on('SIGTERM', () => { stopping = true; log('SIGTERM received') })
+
+  // First-run cursor catchup: if this session has never read the bus before
+  // (no cursor or cursor at epoch zero), advance to "now" without dispatching
+  // any events. Prevents flooding the AI with historical DMs that predate this
+  // session.
+  async function ensureCursorPrimed() {
+    try {
+      const cur = await apiGet(
+        `/api/projects/${PROJECT_ID}/bus/cursors/${encodeURIComponent(SESSION_ID)}`,
+      )
+      const last = cur && typeof cur === 'object' ? cur.last_seen_at || '' : ''
+      const isUnset = !last || last.startsWith('1970-') || last === '0'
+      if (isUnset) {
+        const now = new Date().toISOString()
+        await apiPost(
+          `/api/projects/${PROJECT_ID}/bus/cursors/${encodeURIComponent(SESSION_ID)}`,
+          { last_seen_at: now },
+        )
+        log(`first-run: cursor primed to ${now} (no historical dispatch)`)
+      } else {
+        log(`cursor already primed (last_seen_at=${last})`)
+      }
+    } catch (e) {
+      // Cursor endpoint may 404 when no cursor exists yet; treat as first-run.
+      const msg = String(e?.message || e)
+      if (/\b404\b/.test(msg)) {
+        const now = new Date().toISOString()
+        try {
+          await apiPost(
+            `/api/projects/${PROJECT_ID}/bus/cursors/${encodeURIComponent(SESSION_ID)}`,
+            { last_seen_at: now },
+          )
+          log(`first-run: cursor created at ${now} (no historical dispatch)`)
+        } catch (e2) {
+          log(`first-run cursor create failed: ${e2.message}`)
+        }
+      } else {
+        log(`cursor prime check failed: ${msg}`)
+      }
+    }
+  }
+
+  async function pollOnce() {
+    const events = await apiGet(
+      `/api/projects/${PROJECT_ID}/bus/unread?recipient_id=${encodeURIComponent(SESSION_ID)}`,
+    )
+    if (!Array.isArray(events) || events.length === 0) return
+    let latestSeen = null
+    for (const evt of events) {
+      const ch = evt.channel || ''
+      const sender = String(evt.sender_session_id || '')
+      const payload = evt.payload || {}
+      const intendedRecipient = String(payload.recipient_session_id || '')
+
+      // Filter 1: never push events we sent ourselves (self-loop guard).
+      if (sender === SESSION_ID) {
+        log(`drop (self-sent): id=${evt.event_id}`)
+      }
+      // Filter 2: skip DMs explicitly addressed to someone else.
+      // recipient_session_id is the convention for DM events; events without
+      // it are treated as broadcast and pass through (still subject to channel
+      // allowlist).
+      else if (intendedRecipient && intendedRecipient !== SESSION_ID) {
+        log(`drop (not addressed to us): id=${evt.event_id} recipient=${intendedRecipient}`)
+      }
+      // Filter 3: channel allowlist.
+      else if (!ALLOWED_CHANNELS.includes(ch)) {
+        log(`drop (channel not in allowlist): id=${evt.event_id} ch=${ch}`)
+      } else {
+        const content = typeof payload.text === 'string' && payload.text.length > 0
+          ? payload.text
+          : JSON.stringify(payload)
+        await mcp.notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content,
+            meta: {
+              event_id: String(evt.event_id || ''),
+              channel: ch,
+              from_session: sender,
+              from_project: String(payload.source_project || PROJECT_ID),
+              created_at: String(evt.created_at || ''),
+            },
+          },
+        })
+        log(`pushed event_id=${evt.event_id} ch=${ch} from=${sender}`)
+      }
+      latestSeen = evt.created_at || latestSeen
+    }
+    if (latestSeen) {
+      try {
+        await apiPost(
+          `/api/projects/${PROJECT_ID}/bus/cursors/${encodeURIComponent(SESSION_ID)}`,
+          { last_seen_at: latestSeen },
+        )
+        log(`cursor advanced to ${latestSeen}`)
+      } catch (e) {
+        log(`cursor advance failed: ${e.message}`)
+      }
+    }
+  }
+
+  async function loop() {
+    await ensureCursorPrimed()
+    while (!stopping) {
+      try {
+        await pollOnce()
+      } catch (e) {
+        log(`poll error: ${e.message}`)
+      }
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL))
+    }
+    log('poll loop exiting')
+  }
+  setTimeout(loop, 500)
+}
