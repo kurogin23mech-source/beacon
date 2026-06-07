@@ -200,7 +200,14 @@ def test_resolve_skills_src_returns_empty_when_neither_exists(tmp_path, monkeypa
 
 
 def test_resolve_hook_command_prefers_entry_point(monkeypatch, tmp_path):
-    """When ``beacon-hook-post-commit`` is on PATH, use it (pipx layout)."""
+    """When ``beacon-hook-post-commit`` is on PATH, return bare name (e-1170).
+
+    Pre-e-1170 this test asserted the absolute resolved path. The new
+    contract: shutil.which is used to *validate* that the entry-point
+    exists at install time, but settings.json gets only the bare name so
+    Claude Code re-resolves via PATH at hook fire time (survives install
+    relocation: pipx → pip --user, ~/.local/bin → AppData/.../Scripts, etc).
+    """
     import commands  # type: ignore
 
     fake_entry = tmp_path / "beacon-hook-post-commit"
@@ -212,7 +219,7 @@ def test_resolve_hook_command_prefers_entry_point(monkeypatch, tmp_path):
         lambda name: str(fake_entry) if name == "beacon-hook-post-commit" else None,
     )
     cmd = commands._resolve_hook_command("beacon-post-commit-hook.sh")
-    assert cmd == str(fake_entry)
+    assert cmd == "beacon-hook-post-commit"
 
 
 def test_resolve_hook_command_falls_back_to_bash_when_no_entry_point(monkeypatch):
@@ -284,8 +291,15 @@ def test_resolve_hook_command_handles_postcompact_and_save(monkeypatch):
 
 
 def test_install_claude_hooks_writes_cross_platform_command(tmp_path, monkeypatch):
-    """When the resolved hook is a pipx-style absolute entry-point path,
-    that exact path lands in settings.json (not the bash .sh)."""
+    """When the resolved hook is a pipx-style entry-point present on PATH,
+    the bare entry-point name lands in settings.json (e-1170).
+
+    Pre-e-1170 this asserted the absolute path of the resolved entry-point.
+    The new contract: shutil.which is used to *validate* presence at install
+    time, but settings.json carries only the bare name so Claude Code re-
+    resolves via PATH at hook fire time. Survives install relocation
+    (pipx → pip --user, ~/.local/bin → AppData/.../Scripts, etc.).
+    """
     import commands  # type: ignore
 
     # Simulate pipx-installed entry-points
@@ -315,14 +329,15 @@ def test_install_claude_hooks_writes_cross_platform_command(tmp_path, monkeypatc
         if entry.get("matcher") == "Bash"
         for h in entry.get("hooks", [])
     ]
-    assert str(fake_post) in bash_cmds, data
+    # e-1170: bare entry-point name, not absolute path.
+    assert "beacon-hook-post-commit" in bash_cmds, data
 
     pc_cmds = [
         h.get("command")
         for entry in data["hooks"].get("PostCompact", [])
         for h in entry.get("hooks", [])
     ]
-    assert str(fake_pc) in pc_cmds, data
+    assert "beacon-hook-postcompact" in pc_cmds, data
 
 
 def test_install_claude_hooks_dedups_stale_bash_path_on_upgrade(tmp_path, monkeypatch):
@@ -370,7 +385,9 @@ def test_install_claude_hooks_dedups_stale_bash_path_on_upgrade(tmp_path, monkey
     ]
     # Stale dropped, new added.
     assert "/old/path/beacon-post-commit-hook.sh" not in bash_cmds
-    assert str(fake_entry) in bash_cmds
+    # e-1170: bare entry-point name lands in settings.json (not the
+    # absolute path), so on next upgrade we don't have to dedup-by-path.
+    assert "beacon-hook-post-commit" in bash_cmds
 
 
 def test_install_claude_hooks_accepts_python_m_command(tmp_path, monkeypatch):

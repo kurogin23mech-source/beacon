@@ -2601,23 +2601,64 @@ def _ensure_channel_node_modules(channel_root: "Path") -> bool:
       - Homebrew: depends_on "node" + brew's install step should generate it,
         but a partial install / brew formula bug can leave it missing
     Returns True if node_modules is present (existed or created); False if
-    install failed. ms-54 e-1169.
+    install failed. ms-54 e-1169 + e-1191.
+
+    Windows PATHEXT semantics (e-1191): the npm CLI on Windows ships as
+    ``npm.cmd`` (a batch shim around node), not ``npm.exe``. Python's
+    ``subprocess`` without ``shell=True`` does NOT consult PATHEXT, so
+    ``subprocess.call(["npm", ...])`` raises FileNotFoundError on Windows
+    even when Node.js is installed and ``shutil.which("node")`` finds it.
+    The fix: resolve the absolute path via ``shutil.which`` (which DOES
+    consult PATHEXT) FIRST, then call subprocess with the resolved path.
     """
     import subprocess as _subprocess
+    import shutil as _shutil
+    import platform as _platform
+
     nm = channel_root / "node_modules"
     if nm.exists():
         return True
     pkg_json = channel_root / "package.json"
     if not pkg_json.exists():
         return False
+
+    is_windows = _platform.system() == "Windows"
+    # Try canonical names first, then Windows-specific extensions. shutil.which
+    # consults PATHEXT so on Win it will pick up npm.cmd via the bare "npm"
+    # form too, but listing the explicit extensions makes the contract clear.
+    candidates = ["npm"]
+    if is_windows:
+        candidates += ["npm.cmd", "npm.exe", "npm.bat"]
+    npm_path = None
+    for cand in candidates:
+        resolved = _shutil.which(cand)
+        if resolved:
+            npm_path = resolved
+            break
+
+    if not npm_path:
+        print("Error: `npm` not found on PATH.", file=sys.stderr)
+        if is_windows:
+            print("Install Node.js on Windows: `winget install OpenJS.NodeJS.LTS`",
+                  file=sys.stderr)
+            print("  or download from https://nodejs.org/ (LTS Windows Installer).",
+                  file=sys.stderr)
+        elif _platform.system() == "Darwin":
+            print("Install Node.js on macOS: `brew install node` (or via nvm).",
+                  file=sys.stderr)
+        else:
+            print("Install Node.js: your package manager (e.g. `apt install nodejs npm`)",
+                  file=sys.stderr)
+            print("  or via nvm (https://github.com/nvm-sh/nvm).", file=sys.stderr)
+        return False
+
     print(f"channel/node_modules not found — running `npm install` in {channel_root}",
           file=sys.stderr)
+    print(f"  using npm at: {npm_path}", file=sys.stderr)
     try:
-        rc = _subprocess.call(["npm", "install", "--silent"], cwd=str(channel_root))
-    except FileNotFoundError:
-        print("Error: `node` / `npm` not found on PATH.", file=sys.stderr)
-        print("Install Node.js (e.g. `brew install node` or via nvm) and retry.",
-              file=sys.stderr)
+        rc = _subprocess.call([npm_path, "install", "--silent"], cwd=str(channel_root))
+    except OSError as e:
+        print(f"Error: failed to launch npm at {npm_path}: {e}", file=sys.stderr)
         return False
     if rc != 0:
         print(f"Error: `npm install` exited {rc}.", file=sys.stderr)
@@ -5599,7 +5640,14 @@ def _resolve_hook_command(hook_basename: str) -> str:
     if entry_name:
         resolved = shutil.which(entry_name)
         if resolved:
-            return _bash_safe(resolved)
+            # e-1170: write the bare entry-point name (not the absolute
+            # path) so the hook command survives `beacon` upgrades that
+            # relocate the binary (e.g. pipx → pip --user, ~/.local/bin →
+            # AppData/Roaming/Python/.../Scripts). Claude Code re-resolves
+            # via PATH at hook fire time. We still call shutil.which here
+            # to *validate* the entry-point exists at install time — if it
+            # doesn't, we fall through to the bash / module fallback.
+            return entry_name
 
     # Honor the module-level constant (set at import time, but tests
     # routinely monkeypatch them — keeping this lookup means existing
@@ -6009,8 +6057,20 @@ def _is_path_command(cmd: str) -> bool:
     refactor may pass back a multi-token command like
     ``/usr/bin/python3 -m beacon_cli.hooks.post_commit`` — that's not a
     file path, so we skip the existence check for those.
+
+    ms-44 e-1170: distinguish absolute / relative paths (which have
+    separators or a leading ``./``) from bare entry-point names (which
+    are PATH-resolved by the shell, not file-existence-checked). After
+    e-1170 we write the bare ``beacon-hook-post-commit`` to settings.json
+    rather than the absolute path so the hook survives install relocation.
     """
-    return bool(cmd) and " " not in cmd.strip()
+    if not cmd or " " in cmd.strip():
+        return False
+    s = cmd.strip()
+    # Path-like if it contains separators or starts with relative-path prefix.
+    has_sep = "/" in s or "\\" in s
+    has_dot_prefix = s.startswith(("./", ".\\"))
+    return has_sep or has_dot_prefix
 
 
 def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
@@ -7412,6 +7472,46 @@ def _load_local_documents() -> list[dict]:
     return docs
 
 
+def _find_all_on_path(name: str) -> list[str]:
+    """Return every executable named ``name`` on PATH (across all PATH dirs).
+
+    Unlike ``shutil.which`` which returns only the first hit, this walks
+    every PATH directory and collects all matches. On Windows it also
+    consults ``PATHEXT`` to find ``.exe`` / ``.cmd`` / ``.bat`` variants.
+
+    Used by ``cmd_doctor`` to surface install-location shadowing (ms-44
+    e-1170): e.g. an old ``~/.local/bin/beacon`` 0.11.1 silently shadowing
+    a newer ``AppData/.../Scripts/beacon.exe`` 0.19.0.
+    """
+    path_env = os.environ.get("PATH", "")
+    if not path_env:
+        return []
+    dirs = path_env.split(os.pathsep)
+    if os.name == "nt":
+        pathext_raw = os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+        exts = [""] + [e.lower() for e in pathext_raw.split(os.pathsep) if e]
+    else:
+        exts = [""]
+    found: list[str] = []
+    seen: set[str] = set()
+    for d in dirs:
+        d = d.strip()
+        if not d:
+            continue
+        for ext in exts:
+            cand = os.path.join(d, name + ext)
+            if cand in seen:
+                continue
+            seen.add(cand)
+            try:
+                if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                    found.append(cand)
+                    break  # one hit per directory is enough
+            except OSError:
+                continue
+    return found
+
+
 def cmd_doctor():
     """Lightweight environment health check for Beacon.
 
@@ -7434,13 +7534,40 @@ def cmd_doctor():
     warnings: list[str] = []
 
     # ------------------------------------------------------------------ #
-    # 1. beacon on PATH
+    # 1. beacon on PATH (+ e-1170 version shadowing detect)
     # ------------------------------------------------------------------ #
-    if not _shutil.which("beacon"):
+    beacon_paths = _find_all_on_path("beacon")
+    if not beacon_paths:
         warnings.append(
             "WARN [PATH] `beacon` not found on PATH.\n"
             "       Add the beacon bin/ directory to your PATH, or use\n"
             "       the full path to the beacon script."
+        )
+    elif len(beacon_paths) > 1:
+        # e-1170: multiple beacon binaries on PATH = potential version
+        # shadowing. Today's Win user case: stale ~/.local/bin 0.11.1
+        # shadowing AppData/.../Scripts 0.19.0, so `beacon --version`
+        # returned the old value silently and post-install confusion was
+        # massive. Surface the shadow chain with versions for each.
+        import subprocess as _subprocess
+        version_lines = []
+        for bp in beacon_paths:
+            try:
+                v = _subprocess.run(
+                    [bp, "--version"], capture_output=True, text=True, timeout=3
+                ).stdout.strip() or "?"
+            except Exception:
+                v = "?"
+            version_lines.append(f"         {bp}  →  {v}")
+        primary = beacon_paths[0]
+        warnings.append(
+            f"WARN [PATH] Multiple `beacon` binaries on PATH ({len(beacon_paths)} found):\n"
+            + "\n".join(version_lines)
+            + f"\n       Primary (will be used): {primary}\n"
+            "       This is usually fine, but if `beacon --version` looks stale\n"
+            "       relative to your last upgrade, the entry earlier on PATH is\n"
+            "       shadowing a newer install. Remove or reorder PATH to put the\n"
+            "       intended install first."
         )
 
     # ------------------------------------------------------------------ #

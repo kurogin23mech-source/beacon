@@ -65,17 +65,22 @@ const cloud = safeLoadJSON(CLOUD_JSON)
 // the CLI's stdout directly rather than re-reading .beacon/session.json
 // from cwd (those can disagree when bus.mjs runs from a sandbox subdir).
 function discoverSessionIdViaCLI() {
+  // ms-54 e-1191: route through log() (which wraps appendFileSync in
+  // try/catch) instead of bare appendFileSync. The bare path crashes the
+  // whole MCP server if LOG points at an unwritable location (e.g. a
+  // path that didn't exist before e-1159's OS detect, or a read-only
+  // mount). log() fails soft.
   try {
     const sid = execSync('beacon session id', {
       cwd: CWD, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', timeout: 10000,
     }).trim()
     if (sid) {
-      fs.appendFileSync(LOG, `[${new Date().toISOString()}] session id resolved via CLI: ${sid}\n`)
+      log(`session id resolved via CLI: ${sid}`)
       return sid
     }
   } catch (e) {
     const tail = String(e?.message || e).slice(0, 200)
-    fs.appendFileSync(LOG, `[${new Date().toISOString()}] beacon session id failed: ${tail}\n`)
+    log(`beacon session id failed: ${tail}`)
   }
   return ''
 }

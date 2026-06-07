@@ -1,15 +1,15 @@
 {
   "schema_version": "0.1",
-  "id": "example-org/beacon@0.12.0",
+  "id": "example-org/beacon@0.21.0",
   "name": "beacon",
   "type": "app",
-  "version": "0.12.0",
+  "version": "0.21.0",
   "description": "AI-driven milestone tracker for Claude Code sessions",
   "author": "r-kida2",
   "tags": ["beacon", "milestone", "cli", "ai", "claude-code"],
   "install": {
     "recipe": [
-      "pip install --user .",
+      "python3 -m pip install --user .",
       "beacon skill install --force"
     ]
   }
