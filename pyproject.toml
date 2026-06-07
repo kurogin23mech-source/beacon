@@ -81,6 +81,10 @@ beacon = "beacon_cli.main:main"
 beacon-hook-post-commit = "beacon_cli.hooks.post_commit:main"
 beacon-hook-postcompact = "beacon_cli.hooks.postcompact:main"
 beacon-hook-save = "beacon_cli.hooks.save_hook:main"
+# Stop hook: context-usage threshold monitor (ms-44 e-854). Bash original is
+# bin/context-usage-monitor.sh; the Python entry-point unblocks Windows where
+# bash/jq are unavailable.
+beacon-hook-context-monitor = "beacon_cli.hooks.context_monitor:main"
 
 # -----------------------------------------------------------------------------
 # Packaging layout

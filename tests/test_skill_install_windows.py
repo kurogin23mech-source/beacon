@@ -254,6 +254,10 @@ def _force_wheel_only(monkeypatch, commands_mod):
     monkeypatch.setattr(commands_mod, "CLAUDE_HOOK_SCRIPT", "/nonexistent/x.sh")
     monkeypatch.setattr(commands_mod, "CLAUDE_POSTCOMPACT_HOOK_SCRIPT", "/nonexistent/y.sh")
     monkeypatch.setattr(commands_mod, "CLAUDE_SAVE_HOOK_SCRIPT", "/nonexistent/z.sh")
+    # ms-44 e-854: Stop hook (context-usage monitor) added to the mapping.
+    monkeypatch.setattr(
+        commands_mod, "CLAUDE_CONTEXT_MONITOR_HOOK_SCRIPT", "/nonexistent/ctx.sh"
+    )
 
 
 def test_resolve_hook_command_python_module_fallback(monkeypatch):
@@ -277,6 +281,8 @@ def test_resolve_hook_command_handles_postcompact_and_save(monkeypatch):
     for base, mod in [
         ("beacon-postcompact.sh", "beacon_cli.hooks.postcompact"),
         ("beacon-save-hook.sh", "beacon_cli.hooks.save_hook"),
+        # ms-44 e-854: Stop hook (context-usage monitor) Python port.
+        ("context-usage-monitor.sh", "beacon_cli.hooks.context_monitor"),
     ]:
         cmd = commands._resolve_hook_command(base)
         assert mod in cmd
@@ -338,6 +344,55 @@ def test_install_claude_hooks_writes_cross_platform_command(tmp_path, monkeypatc
         for h in entry.get("hooks", [])
     ]
     assert "beacon-hook-postcompact" in pc_cmds, data
+
+
+def test_install_claude_hooks_registers_stop_hook_cross_platform(tmp_path, monkeypatch):
+    """ms-44 e-854: the Stop hook (context-usage threshold monitor) must be
+    registered when `beacon skill install` runs, just like PostToolUse and
+    PostCompact. Without this, Windows users have to manually configure
+    settings.json — the previous gap that left context-usage notifications
+    silently broken on Win.
+
+    The cross-platform contract: when ``beacon-hook-context-monitor`` is
+    available as an entry-point, settings.json carries the bare name
+    (Claude Code re-resolves via PATH). On a bash-only source layout it
+    carries the absolute .sh path. On Windows .sh resolution is BLOCKED by
+    _hook_unusable_on_windows() so the resolver always falls through to
+    the Python module — no .sh ever leaks into Win settings.json."""
+    import commands  # type: ignore
+
+    # Simulate pipx-installed entry-points for all three hook flavors.
+    fake_post = tmp_path / "beacon-hook-post-commit"
+    fake_post.write_text("#!/usr/bin/env python\n")
+    fake_post.chmod(0o755)
+    fake_pc = tmp_path / "beacon-hook-postcompact"
+    fake_pc.write_text("#!/usr/bin/env python\n")
+    fake_pc.chmod(0o755)
+    fake_ctx = tmp_path / "beacon-hook-context-monitor"
+    fake_ctx.write_text("#!/usr/bin/env python\n")
+    fake_ctx.chmod(0o755)
+
+    which_map = {
+        "beacon-hook-post-commit": str(fake_post),
+        "beacon-hook-postcompact": str(fake_pc),
+        "beacon-hook-context-monitor": str(fake_ctx),
+    }
+    monkeypatch.setattr(
+        commands.shutil, "which", lambda name: which_map.get(name)
+    )
+
+    settings_path = tmp_path / "settings.json"
+    cmd = commands._resolve_hook_command("beacon-post-commit-hook.sh")
+    commands._install_claude_hooks(cmd, str(settings_path))
+
+    data = json.loads(settings_path.read_text())
+    stop_cmds = [
+        h.get("command")
+        for entry in data["hooks"].get("Stop", [])
+        for h in entry.get("hooks", [])
+    ]
+    # e-1170 contract: bare entry-point name, not absolute path.
+    assert "beacon-hook-context-monitor" in stop_cmds, data
 
 
 def test_install_claude_hooks_dedups_stale_bash_path_on_upgrade(tmp_path, monkeypatch):

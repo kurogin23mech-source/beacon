@@ -115,6 +115,8 @@ Other:
   beacon auth logout                Remove cached credentials
   beacon auth status                Show login status
   beacon skill install              Install Claude Code Skills
+  beacon monitor context [--dry-run]
+                                    Stop hook: context-usage threshold monitor (e-854)
   beacon update [--check] [--skill-only] [--yes]
                                     Self-update: brew upgrade + skill install (one shot)
   beacon help                       Show this help
@@ -2638,6 +2640,31 @@ EOF
             install) python3 "$COMMANDS_PY" channel_install ;;
             "")      echo "Usage: beacon channel install" ;;
             *)       echo "Unknown channel subcommand: ${2:-}"; echo "Usage: beacon channel install" ;;
+        esac
+        ;;
+    monitor)
+        # ms-44 e-854: context-usage Stop hook discoverable from the CLI.
+        # The Stop hook itself is registered via beacon-hook-context-monitor
+        # (entry-point) or bin/context-usage-monitor.sh / .py — this verb is
+        # the same code path so users can dry-run the threshold logic.
+        case "${2:-}" in
+            context)
+                shift 2
+                dry=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --dry-run) dry="1"; shift ;;
+                        *)         shift ;;
+                    esac
+                done
+                if [[ -n "$dry" ]]; then
+                    BEACON_CONTEXT_MONITOR_DRY_RUN=1 python3 -m beacon_cli.hooks.context_monitor
+                else
+                    python3 -m beacon_cli.hooks.context_monitor
+                fi
+                ;;
+            "")  echo "Usage: beacon monitor context [--dry-run]" ;;
+            *)   echo "Unknown monitor subcommand: ${2:-}"; echo "Usage: beacon monitor context [--dry-run]" ;;
         esac
         ;;
     member)
