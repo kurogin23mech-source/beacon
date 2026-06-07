@@ -1,9 +1,9 @@
 class Beacon < Formula
   desc "AI-driven milestone tracker for Claude Code sessions"
   homepage "https://github.com/kurogin23mech-source/beacon"
-  url "https://github.com/kurogin23mech-source/beacon/archive/refs/tags/v0.18.0.tar.gz"
-  sha256 "6cab1b211d2460d4131fe8e62f1f3a3b5c0e07e2e3b96f8a6a251e83c66b4e13"
-  version "0.18.0"
+  url "https://github.com/kurogin23mech-source/beacon/archive/refs/tags/v0.19.0.tar.gz"
+  sha256 "5eeafd6b77b9f1852078620256a4a594b06d6f3a8390ce440d0db6bd06fa58ab"
+  version "0.19.0"
   license "MIT"
 
   # Python 3.11 is recommended; 3.9+ is supported
