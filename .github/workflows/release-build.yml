@@ -231,19 +231,55 @@ jobs:
           generate_release_notes: true
 
   # --------------------------------------------------------------------------
-  # (future) PyPI publish — disabled by default, requires API token
-  # --------------------------------------------------------------------------
-  # publish-pypi:
-  #   name: Publish CLI to PyPI
-  #   needs: build-cli
-  #   runs-on: ubuntu-latest
-  #   if: startsWith(github.ref, 'refs/tags/release-v')
-  #   environment: pypi
-  #   permissions:
-  #     id-token: write   # trusted publishing
-  #   steps:
-  #     - uses: actions/download-artifact@v4
-  #       with:
-  #         name: beacon-cli-dist
-  #         path: dist
-  #     - uses: pypa/gh-action-pypi-publish@release/v1
+  # PyPI publish — ms-44 e-1190
+  #
+  # Publishes the CLI wheel + sdist to PyPI so `pipx upgrade beacon` works on
+  # Windows / Linux end-user machines (the existing dogfood path on macOS is
+  # Homebrew, which already mirrors via release.yml + the tap repo). Before
+  # this job existed, every release shipped CLI changes to brew but left
+  # pip/pipx users on the previous version — Win 351910cd hit exactly this
+  # gap on 2026-06-07 when verifying ead9d5d.
+  #
+  # Trigger: `v*` tags created by release.yml. The legacy `release-v*` is
+  # kept compatible by the same wildcard on `on.push.tags` above; this gate
+  # narrows to `v*` because release.yml is the canonical 1-button path.
+  #
+  # Auth: uses PyPI Trusted Publishing (OIDC) — no long-lived token to
+  # rotate. Requires a one-time registration on PyPI:
+  #   pypi.org → Account settings → Publishing → Add a new pending publisher
+  #     Owner:    kurogin23mech-source
+  #     Repo:     beacon
+  #     Workflow: release-build.yml
+  #     Env:      pypi
+  #
+  # Safety: depends on BOTH `build-cli` AND `smoke-cli`. `smoke-cli` installs
+  # the just-built wheel and runs `beacon doctor` on ubuntu/macos/windows
+  # before this job is allowed to publish. A broken wheel can't reach PyPI
+  # (which is irreversible — published artifacts can be yanked but not
+  # re-uploaded for the same version).
+  publish-pypi:
+    name: Publish CLI to PyPI
+    needs: [build-cli, smoke-cli]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment: pypi   # GitHub Environment is where the maintainer pins
+                        # protection rules (required reviewers, branch gates)
+                        # to PyPI's trusted publisher contract.
+    permissions:
+      id-token: write   # Trusted Publishing exchanges this for a short-lived
+                        # PyPI upload token. NO long-lived secret in the repo.
+    steps:
+      - name: Download CLI artifacts (sdist + wheel from build-cli)
+        uses: actions/download-artifact@v4
+        with:
+          name: beacon-cli-dist
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # Default settings push to https://upload.pypi.org/legacy/.
+        # If a future test should land on TestPyPI first, set:
+        #   with:
+        #     repository-url: https://test.pypi.org/legacy/
+        # in a separate `publish-pypi-test` job gated on a different tag
+        # prefix (e.g. `testpypi-v*`).

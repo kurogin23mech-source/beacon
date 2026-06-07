@@ -63,7 +63,9 @@ class _Document:
         self._collection = collection
         self.id = doc_id
 
-    def get(self) -> _Snapshot:
+    def get(self, transaction: Optional[Any] = None) -> _Snapshot:
+        # `transaction` kwarg is accepted (real SDK signature) but ignored
+        # by the in-memory stub — single-threaded tests don't need MVCC.
         return _Snapshot(self.id, self._collection._docs.get(self.id))
 
     def set(self, data: dict) -> None:
@@ -141,12 +143,25 @@ class _Collection:
         return _Query(self).where(field, op, value)
 
 
+class _FakeTxn:
+    """Minimal stand-in for a Firestore transaction. The real SDK provides
+    atomic read/write; the stub just forwards `set` to the underlying doc.
+    Used by ms-53 e-1163 concurrency hardening tests.
+    """
+
+    def set(self, ref: "_Document", data: dict) -> None:
+        ref.set(data)
+
+
 class _FakeDB:
     def __init__(self):
         self._collections: dict[str, _Collection] = {}
 
     def collection(self, name: str) -> _Collection:
         return self._collections.setdefault(name, _Collection())
+
+    def transaction(self) -> _FakeTxn:
+        return _FakeTxn()
 
 
 def _materialize_sentinels(data: dict) -> dict:
@@ -219,6 +234,13 @@ def fake_app(monkeypatch):
     monkeypatch.setattr(db, "get_db", lambda: fake_db)
     monkeypatch.setattr(trailnode, "_gcs_client", fake_gcs)
     monkeypatch.setattr(trailnode, "_get_gcs_client", lambda: fake_gcs)
+
+    # ms-53 e-1163: replace `firestore.transactional` with a no-op decorator
+    # so the SDK doesn't reject our `_FakeTxn` for not being a real
+    # `Transaction` instance. The fake passes itself through; the wrapped
+    # function still receives a transaction-shaped object via the stub.
+    from google.cloud import firestore as fs
+    monkeypatch.setattr(fs, "transactional", lambda fn: fn)
 
     # Org membership: only OWNER_SUB belongs to ORG_SLUG. Calls to
     # require_org_member from any other identity (e.g. spoofed branch
@@ -397,3 +419,57 @@ def test_pull_without_version_returns_400_pointing_at_e86(fake_app, monkeypatch)
     assert resp.status_code == 400
     assert "version is required" in resp.json()["detail"]
     assert "e-86" in resp.json()["detail"]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# ms-53 e-1163: concurrency hardening — version race produces 409
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_push_returns_409_when_version_slot_already_taken(fake_app, monkeypatch):
+    """If a concurrent push wrote the target doc_slug between version compute
+    and our doc write, the transactional check refuses to overwrite and
+    surfaces 409 so the client can retry. This guards against the
+    `_query_existing_versions → _compute_next_version_from_existing → set`
+    race window where two pushes silently overwrote each other.
+    """
+    app, fake_db, _ = fake_app
+    monkeypatch.setattr(trailnode, "_today_utc_str", lambda: "2026-06-07")
+    client = TestClient(app)
+
+    # Simulate the concurrent push having already written the doc_slug
+    # that our upcoming push will compute. `_slug_for(trunk)` is
+    # `<org>__<name>__<version>`.
+    existing_slug = f"{ORG_SLUG}__foo__2026-06-07.1"
+    fake_db.collection(trailnode._CAPABILITIES_COLLECTION).document(
+        existing_slug
+    ).set(
+        {
+            "id": f"{ORG_SLUG}/foo@2026-06-07.1",
+            "name": "foo",
+            "org_slug": ORG_SLUG,
+            "version": "2026-06-07.1",
+            "branch": None,
+            "type": "skill",
+            "deleted_at": None,
+        }
+    )
+    # But the namespace doc is NOT created yet (the owner hasn't been
+    # established). That way our push thinks it's the first to push, computes
+    # 2026-06-07.1, hits the same doc_slug, and the transaction guard fires.
+    # (In real concurrency the namespace would be set by whichever push commits
+    # first; here we just simulate the doc-slug clash that the guard catches.)
+
+    # The pre-populated doc DOES exist for the _query_existing_versions
+    # query — which means the real flow would compute 2026-06-07.2 and not
+    # collide. To exercise the guard we need a slot collision where the
+    # post-upload write hits an already-occupied doc. Force _today_utc_str
+    # and the existing version list so this happens.
+    monkeypatch.setattr(
+        trailnode, "_query_existing_versions",
+        lambda org, name, branch: [],  # pretend no existing → compute .1
+    )
+
+    resp = _push(client, f"{ORG_SLUG}/foo", _bare_manifest())
+    assert resp.status_code == 409, resp.text
+    assert "concurrent push" in resp.json()["detail"].lower() or "retry" in resp.json()["detail"].lower()
