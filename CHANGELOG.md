@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.14.1] - 2026-06-07
+
+- Merge pull request #68 from kurogin23mech-source/ms-54-directory-fix
+- fix(ms-54): surface session_id in directory query response (e-1134 hotfix)
+- docs(release): update README/CHANGELOG for v0.14.0
+- chore(release): bump formula to 0.14.0
+
 ## [v0.14.0] - 2026-06-07
 
 - Merge pull request #67 from kurogin23mech-source/ms-54-directory
