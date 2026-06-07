@@ -2,6 +2,19 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.20.0] - 2026-06-07
+
+- Merge pull request #78 from kurogin23mech-source/ms-54-e1159-mcp-json-os-path-final
+- Merge pull request #77 from kurogin23mech-source/ms-54-e1169-channel-packaging
+- Merge pull request #76 from kurogin23mech-source/ms-44-e1171-dispatch-channel-parity
+- Merge pull request #75 from kurogin23mech-source/ms-54-e1173-session-start-mcp-detect
+- feat(ms-54): .mcp.json を OS detect で生成、Windows 経路を成立させる (e-1159)
+- feat(ms-54): channel/ packaging for brew + pypi + install-aware path resolution (e-1169)
+- feat(ms-44): Python dispatch parity for session id / channel install + drift lint (e-1171)
+- feat(ms-54): session-start で beacon-bus channel 未 install を検出 (e-1173)
+- docs(release): update README/CHANGELOG for v0.19.0
+- chore(release): bump formula to 0.19.0
+
 ## [v0.19.0] - 2026-06-07
 
 - Merge pull request #66 from kurogin23mech-source/ms-8-trunk-branch-auto-version
