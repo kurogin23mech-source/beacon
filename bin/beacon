@@ -2366,6 +2366,80 @@ case "${1:-}" in
                 ;;
         esac
         ;;
+    bus)
+        ensure_project
+        _bus_sub="${2:-}"
+        shift 2 || true
+        _bus_channel=""
+        _bus_payload=""
+        _bus_sender=""
+        _bus_recipient=""
+        _bus_delivery=""
+        _bus_interval=""
+        _bus_timeout=""
+        _bus_last_seen=""
+        _bus_once=""
+        _bus_auto_ack=""
+        _bus_json=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --channel)        _bus_channel="${2:-}"; shift 2 ;;
+                --payload)        _bus_payload="${2:-}"; shift 2 ;;
+                --sender)         _bus_sender="${2:-}"; shift 2 ;;
+                --recipient)      _bus_recipient="${2:-}"; shift 2 ;;
+                --delivery)       _bus_delivery="${2:-}"; shift 2 ;;
+                --interval)       _bus_interval="${2:-}"; shift 2 ;;
+                --timeout)        _bus_timeout="${2:-}"; shift 2 ;;
+                --last-seen-at)   _bus_last_seen="${2:-}"; shift 2 ;;
+                --once)           _bus_once="1"; shift ;;
+                --auto-ack)       _bus_auto_ack="1"; shift ;;
+                --json)           _bus_json="1"; shift ;;
+                *)                shift ;;
+            esac
+        done
+        case "$_bus_sub" in
+            send)
+                BEACON_BUS_CHANNEL="$_bus_channel" \
+                    BEACON_BUS_PAYLOAD="$_bus_payload" \
+                    BEACON_BUS_SENDER="$_bus_sender" \
+                    BEACON_BUS_DELIVERY="$_bus_delivery" \
+                    BEACON_JSON="$_bus_json" \
+                    python3 "$COMMANDS_PY" bus_send
+                ;;
+            listen)
+                BEACON_BUS_RECIPIENT="$_bus_recipient" \
+                    BEACON_BUS_CHANNEL="$_bus_channel" \
+                    BEACON_BUS_INTERVAL="$_bus_interval" \
+                    BEACON_BUS_AUTO_ACK="$_bus_auto_ack" \
+                    BEACON_BUS_ONCE="$_bus_once" \
+                    python3 "$COMMANDS_PY" bus_listen
+                ;;
+            receive)
+                BEACON_BUS_RECIPIENT="$_bus_recipient" \
+                    BEACON_BUS_CHANNEL="$_bus_channel" \
+                    BEACON_BUS_INTERVAL="$_bus_interval" \
+                    BEACON_BUS_TIMEOUT="$_bus_timeout" \
+                    BEACON_BUS_AUTO_ACK="$_bus_auto_ack" \
+                    python3 "$COMMANDS_PY" bus_receive
+                ;;
+            ack)
+                BEACON_BUS_RECIPIENT="$_bus_recipient" \
+                    BEACON_BUS_LAST_SEEN_AT="$_bus_last_seen" \
+                    BEACON_JSON="$_bus_json" \
+                    python3 "$COMMANDS_PY" bus_ack
+                ;;
+            *)
+                cat <<'EOF'
+Usage: beacon bus send    --channel <ch> [--payload '<json>'] [--sender <id>] [--delivery <mode>]
+       beacon bus listen  [--recipient <id>] [--channel <ch>] [--interval <sec>] [--auto-ack] [--once]
+       beacon bus receive [--recipient <id>] [--channel <ch>] [--timeout <sec>] [--auto-ack]
+       beacon bus ack     [--recipient <id>] --last-seen-at <iso8601>
+
+delivery: auto-execute | propose-to-ai (default) | notify-user-only
+EOF
+                ;;
+        esac
+        ;;
     retro)
         shift
         case "${1:-}" in

@@ -401,18 +401,35 @@ class SessionUpsert(BaseModel):
     harness: Optional[str] = None
 
 
+_BUS_DELIVERY_MODES = {"auto-execute", "propose-to-ai", "notify-user-only"}
+_BUS_DELIVERY_DEFAULT = "propose-to-ai"
+
+
 class BusEventCreate(BaseModel):
     """Body for POST /api/projects/{project_id}/bus.
 
-    ms-54 / e-996 minimal schema. The recipient_session_id / delivery /
-    subscribe filter fields land in later tasks (e-1134 directory query,
-    e-1135 delivery policy, §9 subscribe filter); at this slice the bus
-    is pure transport — anyone can post, anyone can read with the channel
-    filter.
+    ms-54: starts as e-996 minimal transport, picks up ``delivery`` in e-1135.
+    The recipient_session_id / directory routing / subscribe filter fields
+    arrive in later tasks (e-1134 directory query, §9 subscribe filter).
+
+    ``delivery`` declares how the recipient daemon should treat the event:
+
+      * ``auto-execute``     — run the embedded action without asking. Reserved
+                               for explicit opt-in (e-1136 dogfood enforces it).
+      * ``propose-to-ai``    — inject as a proposal for the receiver AI to
+                               consider. **Default** — mirrors ms-31's
+                               "force is never the default" principle.
+      * ``notify-user-only`` — show in UI/terminal only; never inject into the
+                               AI context.
+
+    Unknown values get coerced to the default rather than rejected so a
+    schema mismatch between an older sender and a newer server never silently
+    upgrades to auto-execute.
     """
     channel: str
     sender_session_id: str = ""
     payload: dict = {}
+    delivery: str = _BUS_DELIVERY_DEFAULT
 
 
 class BusCursorAdvance(BaseModel):
@@ -1517,10 +1534,16 @@ async def post_bus_event(
     """
     import datetime
     _load(project_id, user)
+    # Coerce unknown delivery modes to the safe default rather than 422'ing.
+    # Rationale: a sender ahead of the server (or a typo) MUST NOT trip a wire
+    # error that the calling agent silently retries forever. Coercion to the
+    # conservative default keeps the bus flowing without ever auto-elevating.
+    delivery = body.delivery if body.delivery in _BUS_DELIVERY_MODES else _BUS_DELIVERY_DEFAULT
     data = {
         "channel": body.channel,
         "sender_session_id": body.sender_session_id,
         "payload": body.payload,
+        "delivery": delivery,
         "created_at": datetime.datetime.now(datetime.timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%S.%fZ"
         ),
