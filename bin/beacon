@@ -2381,6 +2381,11 @@ case "${1:-}" in
         _bus_once=""
         _bus_auto_ack=""
         _bus_json=""
+        _bus_user=""
+        _bus_machine=""
+        _bus_agent=""
+        _bus_live=""
+        _bus_since_min=""
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 --channel)        _bus_channel="${2:-}"; shift 2 ;;
@@ -2394,6 +2399,11 @@ case "${1:-}" in
                 --once)           _bus_once="1"; shift ;;
                 --auto-ack)       _bus_auto_ack="1"; shift ;;
                 --json)           _bus_json="1"; shift ;;
+                --user)           _bus_user="${2:-}"; shift 2 ;;
+                --machine)        _bus_machine="${2:-}"; shift 2 ;;
+                --agent)          _bus_agent="${2:-}"; shift 2 ;;
+                --live)           _bus_live="1"; shift ;;
+                --since-min)      _bus_since_min="${2:-}"; shift 2 ;;
                 *)                shift ;;
             esac
         done
@@ -2428,12 +2438,22 @@ case "${1:-}" in
                     BEACON_JSON="$_bus_json" \
                     python3 "$COMMANDS_PY" bus_ack
                 ;;
+            directory|dir)
+                BEACON_DIR_USER="$_bus_user" \
+                    BEACON_DIR_MACHINE="$_bus_machine" \
+                    BEACON_DIR_AGENT="$_bus_agent" \
+                    BEACON_DIR_LIVE="$_bus_live" \
+                    BEACON_DIR_SINCE_MIN="$_bus_since_min" \
+                    BEACON_JSON="$_bus_json" \
+                    python3 "$COMMANDS_PY" bus_directory
+                ;;
             *)
                 cat <<'EOF'
-Usage: beacon bus send    --channel <ch> [--payload '<json>'] [--sender <id>] [--delivery <mode>]
-       beacon bus listen  [--recipient <id>] [--channel <ch>] [--interval <sec>] [--auto-ack] [--once]
-       beacon bus receive [--recipient <id>] [--channel <ch>] [--timeout <sec>] [--auto-ack]
-       beacon bus ack     [--recipient <id>] --last-seen-at <iso8601>
+Usage: beacon bus send      --channel <ch> [--payload '<json>'] [--sender <id>] [--delivery <mode>]
+       beacon bus listen    [--recipient <id>] [--channel <ch>] [--interval <sec>] [--auto-ack] [--once]
+       beacon bus receive   [--recipient <id>] [--channel <ch>] [--timeout <sec>] [--auto-ack]
+       beacon bus ack       [--recipient <id>] --last-seen-at <iso8601>
+       beacon bus directory [--user <email>] [--machine <name>] [--agent <name>] [--live] [--since-min <N>] [--json]
 
 delivery: auto-execute | propose-to-ai (default) | notify-user-only
 EOF

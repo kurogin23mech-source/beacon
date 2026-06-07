@@ -7935,6 +7935,42 @@ def cmd_bus_ack():
         print(f"Cursor: {recipient} → {result.get('last_seen_at', '(unchanged)')}")
 
 
+def cmd_bus_directory():
+    """Look up live sessions for DM target selection (ms-54 / e-1134).
+
+    Wraps GET /sessions with the directory-query filters. The output is
+    intentionally human-pickable (one line per session showing session_id +
+    actor identity + last_active) — a sender reads this, picks a session_id,
+    and passes it as the recipient for `bus send`. JSON mode is for scripts
+    that want to auto-route (e.g. "send to every live agent of user X").
+    """
+    client, config = _get_api_client()
+    project_id = config["project_id"]
+    sessions = client.list_sessions(
+        project_id,
+        user_id=os.environ.get("BEACON_DIR_USER", "").strip(),
+        machine=os.environ.get("BEACON_DIR_MACHINE", "").strip(),
+        agent=os.environ.get("BEACON_DIR_AGENT", "").strip(),
+        live_only=os.environ.get("BEACON_DIR_LIVE", "") == "1",
+        since_minutes=int(os.environ.get("BEACON_DIR_SINCE_MIN", "5") or "5"),
+    )
+    if os.environ.get("BEACON_JSON", "") == "1":
+        print(json.dumps(sessions, ensure_ascii=False))
+        return
+    if not sessions:
+        print("(no matching sessions)")
+        return
+    for s in sessions:
+        actor = s.get("actor") or {}
+        sid = s.get("session_id", "?")
+        email = actor.get("email", "")
+        machine = actor.get("machine", "")
+        agent = actor.get("agent", "")
+        last = (s.get("last_active") or "")[:19]
+        ident = " / ".join(p for p in (email, machine, agent) if p) or "(anon)"
+        print(f"  {sid}  {ident}  last_active={last}")
+
+
 # ---------------------------------------------------------------------------
 # Main dispatch
 # ---------------------------------------------------------------------------
@@ -8048,6 +8084,7 @@ if __name__ == "__main__":
         "bus_listen": cmd_bus_listen,
         "bus_receive": cmd_bus_receive,
         "bus_ack": cmd_bus_ack,
+        "bus_directory": cmd_bus_directory,
         "session_end": cmd_session_end,
         "session_rescue": cmd_session_rescue,
         "session_log_list": cmd_session_log_list,
