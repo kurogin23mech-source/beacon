@@ -266,6 +266,49 @@ beacon issue list --json 2>/dev/null
 
 この Step は **読み取り専用**。自動で `beacon issue import` や `beacon issue sync` を実行してはならない。
 
+## Step 1i: beacon-bus channel install 検知（ms-54 e-1173）
+
+session-start が走った cwd で beacon-bus channel が install されていない場合、ユーザーが `claude --dangerously-load-development-channels server:beacon-bus` で起動しても `no MCP server configured` で channel 不成立になる。Mac でも cwd 移動で黙って壊れる UX 抜け (memo doc `EZtptg0e8qwBUUhlN2aX` で発覚) を構造的に塞ぐため、session-start 時に `.mcp.json` / `beacon-bus` MCP entry の存在を検知する。
+
+Bash ツールで実行（fail-safe、`.beacon/project.json` 存在前提）:
+
+```bash
+python3 - <<'PY' 2>/dev/null || echo "MCP_STATUS=UNKNOWN"
+import json, os
+status = "OK"
+if not os.path.exists(".mcp.json"):
+    status = "NO_MCP_JSON"
+else:
+    try:
+        with open(".mcp.json") as f:
+            d = json.load(f)
+        servers = d.get("mcpServers") or {}
+        if "beacon-bus" not in servers:
+            status = "NO_BEACON_BUS_ENTRY"
+    except Exception:
+        status = "MCP_JSON_MALFORMED"
+print(f"MCP_STATUS={status}")
+PY
+```
+
+結果の解釈:
+
+- `OK` → 何もしない（出力に含めない）
+- `NO_MCP_JSON` → `.mcp.json` が存在しない。この cwd で `beacon channel install` を実行していない可能性が高い
+- `NO_BEACON_BUS_ENTRY` → `.mcp.json` はあるが `beacon-bus` server が登録されていない（他の MCP server だけ install 済み等）
+- `MCP_JSON_MALFORMED` → JSON parse エラー、または `mcpServers` キーが想定外の型
+- `UNKNOWN` → python3 不在等で判定不能（出力に含めない、Bash の `|| echo "MCP_STATUS=UNKNOWN"` でフォールバック）
+
+`OK` / `UNKNOWN` 以外の場合、Step 3 出力に以下のバンドを追加する:
+
+```
+⚠ beacon-bus channel が未 install です (この cwd で `beacon channel install` を実行してください)
+  detail: [NO_MCP_JSON / NO_BEACON_BUS_ENTRY / MCP_JSON_MALFORMED]
+  影響: 他セッションからの DM (channel/bus.mjs 経由) がこの session に届きません
+```
+
+この Step は **読み取り専用**。自動で `beacon channel install` を実行してはならない（session-start 全体の読み取り専用原則に従う）。
+
 ## Step 2: アクティブMSの詳細取得
 
 Step 1a の結果から `status == "in_progress"` のマイルストーンを特定する。
@@ -577,6 +620,10 @@ Beacon: [name]
   - ...
   → 解決済みなら /beacon-incident-report で close + report を作成してください。
   → /beacon-operation-review でも close 誘導が走ります。
+
+⚠ beacon-bus channel が未 install です (この cwd で `beacon channel install` を実行してください)   ← Step 1i / MCP_STATUS が OK/UNKNOWN 以外の場合のみ
+  detail: [NO_MCP_JSON / NO_BEACON_BUS_ENTRY / MCP_JSON_MALFORMED]
+  影響: 他セッションからの DM (channel/bus.mjs 経由) がこの session に届きません
 
 ドキュメント (core=設計原則・常時参照 / spec=仕様・技術詳細 / memo=検討メモ):
   [CORE] [title]: [1行サマリー (ms-43 e-566)]
