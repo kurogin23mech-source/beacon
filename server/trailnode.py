@@ -43,6 +43,15 @@ import trailnode_orgs as orgs
 
 logger = logging.getLogger(__name__)
 
+
+class _VersionRaceError(Exception):
+    """Raised inside the push transaction when another concurrent push has
+    already committed the version slot this push was targeting.
+
+    Caught at the HTTP layer and surfaced as 409 so the client can retry
+    (which naturally picks the next version slot — see ms-53 e-1163).
+    """
+
 _BUCKET_NAME = os.environ.get("TRAILNODE_BUCKET", "trailnode-artifacts")
 _ENV = os.environ.get("BEACON_ENV", "dev")
 _CAPABILITIES_COLLECTION = "capabilities" if _ENV == "prod" else "capabilities-dev"
@@ -641,9 +650,47 @@ def make_router(require_auth) -> APIRouter:
         manifest_data["updated_at"] = fs.SERVER_TIMESTAMP
         manifest_data["deleted_at"] = None
 
-        db.get_db().collection(_CAPABILITIES_COLLECTION).document(doc_slug).set(
-            manifest_data
-        )
+        # ms-53 e-1163 concurrency hardening: wrap the doc write in a
+        # Firestore transaction so two concurrent pushes for the same
+        # (org, name, branch, today) can't both compute the same version
+        # and silently overwrite each other.
+        #
+        # The window we're closing:
+        #   T1: query existing_versions (sees []) → compute v=2026-06-08.1
+        #   T2: query existing_versions (sees []) → compute v=2026-06-08.1
+        #   T1: upload to GCS @ key for v=2026-06-08.1
+        #   T2: upload to GCS @ key for v=2026-06-08.1 (different content)
+        #   T1: doc.set(doc_slug, ...) ← writes
+        #   T2: doc.set(doc_slug, ...) ← silently overwrites T1's manifest
+        #
+        # Inside the transaction we (a) re-read the target doc — registering
+        # it on the transaction's read set so Firestore will Abort+retry on
+        # commit conflict — and (b) refuse to write if it already exists.
+        # The loser of the race gets 409 and is expected to retry the push
+        # from the client side (which re-computes a higher version number
+        # because the winner's doc is now visible in `_query_existing_versions`).
+        # The GCS object uploaded by the loser is orphaned; cleaning that up
+        # is a follow-up (cheap because doc-of-truth never points at it).
+        client = db.get_db()
+        doc_ref = client.collection(_CAPABILITIES_COLLECTION).document(doc_slug)
+
+        @fs.transactional
+        def _commit_doc(transaction):
+            snap = doc_ref.get(transaction=transaction)
+            if snap.exists:
+                # Another push committed first with the same doc_slug.
+                # We deliberately raise here (instead of overwriting) so
+                # the caller can retry and pick the next version slot.
+                raise _VersionRaceError(
+                    f"concurrent push committed '{capability_id}' first "
+                    "while this push was in flight — please retry"
+                )
+            transaction.set(doc_ref, manifest_data)
+
+        try:
+            _commit_doc(client.transaction())
+        except _VersionRaceError as e:
+            raise HTTPException(status_code=409, detail=str(e))
 
         logger.info(
             "trailnode push: %s by %s (branch=%s, base_trunk=%s, size=%d)",
