@@ -181,8 +181,24 @@ class ApiClient:
             data,
         )
 
-    def list_sessions(self, project_id: str) -> list:
-        return self.get(f"/api/projects/{project_id}/sessions")
+    def list_sessions(self, project_id: str, *, user_id: str = "",
+                      machine: str = "", agent: str = "",
+                      live_only: bool = False, since_minutes: int = 5) -> list:
+        """List sessions for a project. Empty filters return everything (the
+        original ms-57 behavior); set filters to do a directory query per
+        ms-54 / e-1134."""
+        qs = []
+        if user_id:
+            qs.append(f"user_id={urllib.parse.quote(user_id)}")
+        if machine:
+            qs.append(f"machine={urllib.parse.quote(machine)}")
+        if agent:
+            qs.append(f"agent={urllib.parse.quote(agent)}")
+        if live_only:
+            qs.append("live_only=true")
+            qs.append(f"since_minutes={since_minutes}")
+        suffix = "?" + "&".join(qs) if qs else ""
+        return self.get(f"/api/projects/{project_id}/sessions{suffix}")
 
     # Session log operations (ms-57 / e-1037)
 

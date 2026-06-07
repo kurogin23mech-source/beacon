@@ -275,3 +275,110 @@ def test_bus_ack_advances_cursor(monkeypatch, capsys, stub):
     assert stub.cursors["R1"] == "2026-06-07T00:00:01.000000Z"
     out = capsys.readouterr().out
     assert "2026-06-07T00:00:01.000000Z" in out
+
+
+# ---------------------------------------------------------------------------
+# directory (e-1134)
+# ---------------------------------------------------------------------------
+
+class _StubDirectoryClient(_StubApiClient):
+    """Add list_sessions to the stub so the directory CLI can be exercised
+    independently of the bus event stub above."""
+
+    def __init__(self):
+        super().__init__()
+        self.sessions: list[dict] = []
+        self.last_query: dict = {}
+
+    def list_sessions(self, project_id, *, user_id="", machine="",
+                      agent="", live_only=False, since_minutes=5):
+        self.last_query = {
+            "user_id": user_id, "machine": machine, "agent": agent,
+            "live_only": live_only, "since_minutes": since_minutes,
+        }
+        out = []
+        for s in self.sessions:
+            actor = s.get("actor") or {}
+            if user_id and actor.get("email") != user_id:
+                continue
+            if machine and actor.get("machine") != machine:
+                continue
+            if agent and actor.get("agent") != agent:
+                continue
+            out.append(s)
+        return out
+
+
+@pytest.fixture
+def dir_stub(monkeypatch):
+    stub = _StubDirectoryClient()
+    monkeypatch.setattr(
+        commands, "_get_api_client",
+        lambda: (stub, {"project_id": "proj-1"}),
+    )
+    return stub
+
+
+def _clear_dir_env(monkeypatch):
+    for k in ("BEACON_DIR_USER", "BEACON_DIR_MACHINE", "BEACON_DIR_AGENT",
+              "BEACON_DIR_LIVE", "BEACON_DIR_SINCE_MIN", "BEACON_JSON"):
+        monkeypatch.delenv(k, raising=False)
+
+
+def test_bus_directory_no_filter_prints_all_sessions(monkeypatch, capsys, dir_stub):
+    """The unfiltered call must show every registered session so a sender
+    can scan the whole list when they don't know who to pick yet."""
+    _clear_dir_env(monkeypatch)
+    dir_stub.sessions = [
+        {"session_id": "s-1",
+         "actor": {"email": "a@x", "machine": "mac", "agent": "claude"},
+         "last_active": "2026-06-07T00:00:01.000000Z"},
+        {"session_id": "s-2",
+         "actor": {"email": "b@x", "machine": "win", "agent": "claude"},
+         "last_active": "2026-06-07T00:00:02.000000Z"},
+    ]
+    commands.cmd_bus_directory()
+    out = capsys.readouterr().out
+    assert "s-1" in out
+    assert "s-2" in out
+    assert "a@x" in out  # identity surfaces so the human can pick
+
+
+def test_bus_directory_forwards_filters_to_api(monkeypatch, capsys, dir_stub):
+    """Every CLI filter must reach api_client unchanged — otherwise the user
+    types --live but the server still returns stale sessions, breaking the
+    picker."""
+    _clear_dir_env(monkeypatch)
+    monkeypatch.setenv("BEACON_DIR_USER", "alice@x")
+    monkeypatch.setenv("BEACON_DIR_MACHINE", "mac")
+    monkeypatch.setenv("BEACON_DIR_AGENT", "claude")
+    monkeypatch.setenv("BEACON_DIR_LIVE", "1")
+    monkeypatch.setenv("BEACON_DIR_SINCE_MIN", "10")
+    commands.cmd_bus_directory()
+    assert dir_stub.last_query == {
+        "user_id": "alice@x", "machine": "mac", "agent": "claude",
+        "live_only": True, "since_minutes": 10,
+    }
+
+
+def test_bus_directory_empty_result_message(monkeypatch, capsys, dir_stub):
+    _clear_dir_env(monkeypatch)
+    commands.cmd_bus_directory()
+    out = capsys.readouterr().out
+    assert "no matching sessions" in out.lower()
+
+
+def test_bus_directory_json_mode(monkeypatch, capsys, dir_stub):
+    """JSON mode is the contract scripts depend on for auto-routing
+    (e.g. send-to-every-live-agent-of-user-X). Format must round-trip."""
+    _clear_dir_env(monkeypatch)
+    dir_stub.sessions = [{
+        "session_id": "s-1", "actor": {"email": "a@x"},
+        "last_active": "2026-06-07T00:00:01.000000Z",
+    }]
+    monkeypatch.setenv("BEACON_JSON", "1")
+    commands.cmd_bus_directory()
+    out = capsys.readouterr().out.strip()
+    parsed = json.loads(out)
+    assert len(parsed) == 1
+    assert parsed[0]["session_id"] == "s-1"

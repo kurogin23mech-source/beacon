@@ -1456,10 +1456,77 @@ def upsert_session(
 
 
 @app.get("/api/projects/{project_id}/sessions")
-def list_sessions(project_id: str, user: dict = Depends(require_auth)):
-    """List all sessions for a project (used by rescue + UI 'who is active')."""
+def list_sessions(
+    project_id: str,
+    user_id: str = "",
+    machine: str = "",
+    agent: str = "",
+    live_only: bool = False,
+    since_minutes: int = 5,
+    user: dict = Depends(require_auth),
+):
+    """List sessions for a project, with optional directory-query filters.
+
+    ms-54 / e-1134: the rendezvous CLI (e-999) needs to look up "which session
+    of this user/machine/agent is currently live" so a sender can pick a DM
+    target without knowing the exact session_id out-of-band.
+
+    Filters (all opt-in; the no-arg call still returns everything, ordered by
+    last_active desc, to preserve the ms-57 rescue and Web UI 'who is active'
+    behavior):
+
+      * ``user_id``       — match ``actor.email`` (user identity surfaces as the
+                            email field per session.py's mint convention).
+      * ``machine``       — match ``actor.machine`` exactly.
+      * ``agent``         — match ``actor.agent`` exactly.
+      * ``live_only``     — drop sessions whose ``last_active`` is older than
+                            ``since_minutes`` ago. Heartbeat-based liveness, so
+                            a session that crashed without session-end is
+                            correctly classified as not-live once its heartbeat
+                            goes stale (≥ ms-57 heartbeat cadence + slack).
+      * ``since_minutes`` — threshold for live_only. Default 5 matches the
+                            session heartbeat cadence; raise it for "active in
+                            last hour" style queries.
+
+    Filtering is in-memory after load. The sessions/ subcollection is bounded
+    (single-digit to a few dozen docs per project in practice), so we avoid
+    Firestore composite-index requirements for what is fundamentally an
+    interactive picker query.
+    """
     _load(project_id, user)
-    return db.list_sessions(project_id)
+    sessions = db.list_sessions(project_id)
+    if not (user_id or machine or agent or live_only):
+        return sessions
+
+    def _matches(s: dict) -> bool:
+        actor = s.get("actor") or {}
+        if user_id and actor.get("email", "") != user_id:
+            return False
+        if machine and actor.get("machine", "") != machine:
+            return False
+        if agent and actor.get("agent", "") != agent:
+            return False
+        return True
+
+    filtered = [s for s in sessions if _matches(s)]
+
+    if live_only:
+        import datetime
+        cutoff = (
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(minutes=since_minutes)
+        )
+        cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+        def _is_live(s: dict) -> bool:
+            la = s.get("last_active", "")
+            # Compare ISO8601 strings lexicographically — same wire format on
+            # both sides (server-stamped UTC microseconds).
+            return bool(la) and la >= cutoff_iso
+
+        filtered = [s for s in filtered if _is_live(s)]
+
+    return filtered
 
 
 # ---------------------------------------------------------------------------
