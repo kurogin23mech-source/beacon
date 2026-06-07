@@ -332,15 +332,21 @@ def build_parser() -> argparse.ArgumentParser:
     task_sub = p_task.add_subparsers(dest="task_cmd", metavar="<subcmd>")
 
     p_task_add = task_sub.add_parser("add", add_help=False)
-    p_task_add.add_argument("description", nargs="?", default="")
-    p_task_add.add_argument("-m", "--ms", dest="ms_id", default="")
-    p_task_add.add_argument("-t", "--type", dest="entry_type", default="task")
-    p_task_add.add_argument("-d", "--detail", default="")
-    p_task_add.add_argument("--from", dest="requested_by", default="")
-    p_task_add.add_argument("--priority", default="")
-    p_task_add.add_argument("--motivation", "--why", dest="motivation", default="")
+    # ms-44 e-1192: default=None so the handler can distinguish
+    # "user supplied --flag" from "user did not supply this flag, fall
+    # through to any pre-set BEACON_* env var". Previously default=""
+    # forced every flag to override the inherited env, which on Windows
+    # silently zeroed BEACON_DESCRIPTION etc when users tried to seed the
+    # values via env var. See _handle_task for the matching read path.
+    p_task_add.add_argument("description", nargs="?", default=None)
+    p_task_add.add_argument("-m", "--ms", dest="ms_id", default=None)
+    p_task_add.add_argument("-t", "--type", dest="entry_type", default=None)
+    p_task_add.add_argument("-d", "--detail", default=None)
+    p_task_add.add_argument("--from", dest="requested_by", default=None)
+    p_task_add.add_argument("--priority", default=None)
+    p_task_add.add_argument("--motivation", "--why", dest="motivation", default=None)
     p_task_add.add_argument(
-        "--acceptance-criteria", "--ac", dest="acceptance_criteria", default=""
+        "--acceptance-criteria", "--ac", dest="acceptance_criteria", default=None
     )
 
     p_task_done = task_sub.add_parser("done", add_help=False)
@@ -1030,17 +1036,30 @@ def _handle_task(root: Path, args: argparse.Namespace) -> int:
 
     cmd = args.task_cmd
     if cmd == "add":
-        env = {
-            "BEACON_DESCRIPTION": args.description or "",
-            "BEACON_MS_ID": args.ms_id or "",
-            "BEACON_TYPE": args.entry_type or "task",
-            "BEACON_DATE": _today(),
-            "BEACON_DETAIL": args.detail or "",
-            "BEACON_REQUESTED_BY": args.requested_by or "",
-            "BEACON_PRIORITY": args.priority or "",
-            "BEACON_MOTIVATION": args.motivation or "",
-            "BEACON_ACCEPTANCE_CRITERIA": args.acceptance_criteria or "",
-        }
+        # e-1192: only override BEACON_* env vars that the user passed via
+        # flag (or positional, for description). args.X is None when the
+        # flag was omitted — in that case keep whatever the caller set in
+        # the surrounding environment so seeding via `set BEACON_X=...`
+        # still works on Windows / cmd.exe / PowerShell.
+        env: Dict[str, str] = {"BEACON_DATE": _today()}
+        if args.description is not None:
+            env["BEACON_DESCRIPTION"] = args.description
+        if args.ms_id is not None:
+            env["BEACON_MS_ID"] = args.ms_id
+        # entry_type defaults to "task" on a true omission so existing
+        # callers that never pass -t keep working without a BEACON_TYPE
+        # env var set in advance.
+        env["BEACON_TYPE"] = args.entry_type if args.entry_type else "task"
+        if args.detail is not None:
+            env["BEACON_DETAIL"] = args.detail
+        if args.requested_by is not None:
+            env["BEACON_REQUESTED_BY"] = args.requested_by
+        if args.priority is not None:
+            env["BEACON_PRIORITY"] = args.priority
+        if args.motivation is not None:
+            env["BEACON_MOTIVATION"] = args.motivation
+        if args.acceptance_criteria is not None:
+            env["BEACON_ACCEPTANCE_CRITERIA"] = args.acceptance_criteria
         return _run_commands_py(root, "task_add", env)
 
     if cmd == "done":

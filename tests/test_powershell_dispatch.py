@@ -345,6 +345,38 @@ def test_task_add_with_priority_motivation_ac(project_dir, no_bash, captured_cal
     assert env["BEACON_ACCEPTANCE_CRITERIA"] == "must pass tests"
 
 
+def test_task_add_omitted_flag_does_not_override_env_var(
+    project_dir, no_bash, captured_call, monkeypatch,
+):
+    """e-1192: when --motivation / --priority etc are not passed, the
+    dispatcher must NOT inject empty-string overrides into the spawn env.
+
+    Pre-e-1192 behavior was ``BEACON_MOTIVATION = args.motivation or ""``
+    which silently zeroed any value the user had seeded via
+    ``set BEACON_MOTIVATION=foo`` on Windows (where flag-based passing is
+    often unreliable). The fix: arg defaults flip to ``None`` and the
+    handler only injects the env var when the user explicitly supplied it.
+    """
+    monkeypatch.setenv("BEACON_DESCRIPTION", "seeded desc")
+    monkeypatch.setenv("BEACON_PRIORITY", "seeded prio")
+    monkeypatch.setenv("BEACON_MOTIVATION", "seeded mot")
+    monkeypatch.setenv("BEACON_ACCEPTANCE_CRITERIA", "seeded ac")
+
+    # User-typed: just `beacon task add -m ms-7` — no positional, no flags.
+    rc = main_mod.main(["task", "add", "-m", "ms-7"])
+    assert rc == 0
+    env = captured_call["env"]
+    # MS comes from the flag (always supplied).
+    assert env["BEACON_MS_ID"] == "ms-7"
+    # The seeded env vars must survive into the spawn (preserved by
+    # os.environ.copy() inside _run_commands_py because the handler did
+    # not inject an override).
+    assert env["BEACON_DESCRIPTION"] == "seeded desc"
+    assert env["BEACON_PRIORITY"] == "seeded prio"
+    assert env["BEACON_MOTIVATION"] == "seeded mot"
+    assert env["BEACON_ACCEPTANCE_CRITERIA"] == "seeded ac"
+
+
 def test_task_done(project_dir, no_bash, captured_call):
     rc = main_mod.main(["task", "done", "e-123", "-r", "completed"])
     assert rc == 0
