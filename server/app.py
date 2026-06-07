@@ -1700,6 +1700,61 @@ def list_bus_events(
     return db.list_bus_events(project_id, since=since, channel=channel, limit=limit)
 
 
+# e-1209: DM channels are 1:1 unicast by default. Without server-side
+# enforcement, a `dm` event posted to project P fans out to every session in
+# P that subscribes to `dm` — the receiver-side filter in channel/bus.mjs
+# treated missing `payload.recipient_session_id` as "broadcast", and the
+# sender path (cmd_bus_send) never stamped that field. Net effect: every DM
+# was a broadcast to all dm-subscribed sessions in the project.
+#
+# Fix is server-authoritative (not just receiver-side) because:
+#   1. older receiver builds in the wild still treat missing recipient as
+#      broadcast; the server is the only point where every client converges.
+#   2. defense-in-depth — a bug in any single receiver shouldn't be able to
+#      smuggle DMs to the wrong session.
+#
+# Routing rules below are intentionally channel-aware:
+#   * ``dm`` channel: missing recipient → drop (legacy senders that don't
+#     stamp must be treated as malformed rather than broadcast). Mismatched
+#     recipient → drop. Matching recipient → pass.
+#   * other channels (default broadcast semantics for non-DM): missing
+#     recipient → pass (broadcast), mismatched recipient → drop, matching
+#     recipient → pass. This keeps `notify`/`ops`/etc broadcast-friendly
+#     until ms-54 follow-ups give them their own routing rules.
+#
+# Self-loop guard (sender == recipient → drop) is also enforced here so
+# even a buggy or absent receiver-side filter cannot deliver an event to
+# its own author.
+_DM_CHANNELS = {"dm"}
+
+
+def _bus_event_addressed_to(event: dict, recipient_id: str) -> bool:
+    """Return True iff ``event`` should be delivered to ``recipient_id``.
+
+    See the module-level rationale on _DM_CHANNELS above. This helper is
+    the single source of truth for DM routing; both the /unread endpoint
+    and any future WS fan-out filter must funnel through it.
+    """
+    sender = str(event.get("sender_session_id") or "")
+    if sender and sender == recipient_id:
+        # Self-sent: never deliver to the author. Receivers also guard
+        # against this, but we drop server-side too so a misconfigured
+        # consumer can't echo-loop itself into the budget gate.
+        return False
+    channel = event.get("channel") or ""
+    payload = event.get("payload") or {}
+    if not isinstance(payload, dict):
+        # Malformed payload (non-dict) cannot encode a recipient — treat as
+        # broadcast for non-DM channels and as malformed-drop for DM.
+        return channel not in _DM_CHANNELS
+    intended = str(payload.get("recipient_session_id") or "")
+    if intended:
+        return intended == recipient_id
+    # No recipient stamp: DM channels require explicit unicast, others
+    # default to broadcast.
+    return channel not in _DM_CHANNELS
+
+
 @app.get("/api/projects/{project_id}/bus/unread")
 def list_unread_bus_events(
     project_id: str,
@@ -1710,19 +1765,33 @@ def list_unread_bus_events(
 ):
     """List events the recipient has not yet acknowledged via their cursor.
 
-    Identical to ``GET /bus`` except ``since`` is resolved server-side from
-    ``bus_cursors/{recipient_id}``. The endpoint **does not advance** the
+    Like ``GET /bus`` except ``since`` is resolved server-side from
+    ``bus_cursors/{recipient_id}`` AND results are filtered through
+    :func:`_bus_event_addressed_to` so DM channels do not fan out to
+    every subscriber (e-1209). The endpoint **does not advance** the
     cursor — callers POST to ``/bus/cursors/{recipient_id}`` after processing.
     Splitting read and acknowledge lets crashing consumers get at-least-once
     delivery (events stay readable until acknowledged) while structurally
     preventing duplicate delivery once they acknowledge.
+
+    We over-fetch from the store (``limit * 4`` capped at 400) before applying
+    the recipient filter so a high-volume channel doesn't starve the
+    requested recipient when most of the window is addressed to others.
+    The cursor still advances by ``created_at`` across the full set, so
+    skipped events are not redelivered on the next round.
     """
     _load(project_id, user)
     cursor = db.get_bus_cursor(project_id, recipient_id)
     since = cursor.get("last_seen_at", "")
-    return db.list_bus_events(
-        project_id, since=since, channel=channel, limit=limit,
+    # Over-fetch so the recipient filter does not blank out a noisy window.
+    raw_limit = min(max(limit * 4, limit), 400) if limit else 400
+    raw = db.list_bus_events(
+        project_id, since=since, channel=channel, limit=raw_limit,
     )
+    filtered = [e for e in raw if _bus_event_addressed_to(e, recipient_id)]
+    if limit:
+        filtered = filtered[:limit]
+    return filtered
 
 
 @app.post("/api/projects/{project_id}/bus/cursors/{recipient_id}")

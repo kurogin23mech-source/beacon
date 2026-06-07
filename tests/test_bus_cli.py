@@ -95,7 +95,8 @@ def stub(monkeypatch, capsys):
 def _clear_bus_env(monkeypatch):
     for key in ("BEACON_BUS_CHANNEL", "BEACON_BUS_PAYLOAD", "BEACON_BUS_SENDER",
                 "BEACON_BUS_DELIVERY", "BEACON_BUS_ONCE", "BEACON_BUS_AUTO_ACK",
-                "BEACON_BUS_TIMEOUT", "BEACON_BUS_LAST_SEEN_AT", "BEACON_JSON"):
+                "BEACON_BUS_TIMEOUT", "BEACON_BUS_LAST_SEEN_AT", "BEACON_JSON",
+                "BEACON_BUS_RECIPIENT_SESSION", "BEACON_BUS_IN_REPLY_TO"):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -157,6 +158,79 @@ def test_bus_send_json_mode(monkeypatch, capsys, stub):
     out = capsys.readouterr().out.strip()
     parsed = json.loads(out)
     assert parsed["channel"] == "x"
+
+
+# ---------------------------------------------------------------------------
+# --to (e-1209): the sender CLI must stamp payload.recipient_session_id so
+# the server-side filter can route the event to a single recipient. Before
+# this, dm events fanned out to every dm-subscribed session because nothing
+# in the pipeline stamped the recipient.
+# ---------------------------------------------------------------------------
+
+def test_bus_send_to_stamps_recipient_session_id(monkeypatch, capsys, stub):
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
+    monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target-session")
+    commands.cmd_bus_send()
+    assert stub.events[-1]["payload"]["recipient_session_id"] == "target-session"
+
+
+def test_bus_send_to_overrides_payload_recipient(monkeypatch, capsys, stub):
+    """If both --to and --payload supply a recipient_session_id, --to wins.
+    The flag is the unambiguous source of truth for routing — letting
+    --payload override would mean a typo in JSON silently changes the
+    delivery destination."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
+    monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "flag-target")
+    monkeypatch.setenv(
+        "BEACON_BUS_PAYLOAD",
+        json.dumps({"recipient_session_id": "payload-target", "text": "hi"}),
+    )
+    commands.cmd_bus_send()
+    p = stub.events[-1]["payload"]
+    assert p["recipient_session_id"] == "flag-target"
+    assert p["text"] == "hi"  # other payload fields preserved
+
+
+def test_bus_send_dm_without_to_warns(monkeypatch, capsys, stub):
+    """Sending to dm without --to triggers a stderr warning because the
+    server now drops unaddressed dm events (e-1209). The send still goes
+    through — we don't hard-error so existing scripts surface the issue
+    via the warning rather than disappearing into silent failures."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
+    commands.cmd_bus_send()
+    err = capsys.readouterr().err
+    assert "dm" in err and "--to" in err
+    # The event was still posted (the warning is advisory, not a refuse).
+    assert len(stub.events) == 1
+
+
+def test_bus_send_dm_with_payload_recipient_does_not_warn(monkeypatch, capsys, stub):
+    """If the user pre-stamped payload.recipient_session_id via --payload,
+    --to is redundant and we must NOT print the warning — that would be
+    noise the user explicitly avoided."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
+    monkeypatch.setenv(
+        "BEACON_BUS_PAYLOAD",
+        json.dumps({"recipient_session_id": "pre-stamped", "text": "hi"}),
+    )
+    commands.cmd_bus_send()
+    err = capsys.readouterr().err
+    assert "--to" not in err
+
+
+def test_bus_send_non_dm_without_to_does_not_warn(monkeypatch, capsys, stub):
+    """Non-DM channels keep broadcast semantics; missing --to is normal."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "notify")
+    commands.cmd_bus_send()
+    err = capsys.readouterr().err
+    assert "--to" not in err
+    # The send did happen and did NOT stamp recipient (broadcast intent).
+    assert "recipient_session_id" not in stub.events[-1]["payload"]
 
 
 # ---------------------------------------------------------------------------

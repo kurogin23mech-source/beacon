@@ -8451,6 +8451,31 @@ def cmd_bus_send():
     sender = os.environ.get("BEACON_BUS_SENDER", "").strip() or _resolve_session_id()
     delivery = os.environ.get("BEACON_BUS_DELIVERY", "").strip() or "propose-to-ai"
     in_reply_to = os.environ.get("BEACON_BUS_IN_REPLY_TO", "").strip()
+    # e-1209: --to <session_id> stamps payload.recipient_session_id so the
+    # server-side filter in /bus/unread can route the event to a single
+    # recipient. Without this, `dm`-channel events fan out to every session
+    # in the project (the historical bug). MCP reply tool (channel/bus.mjs)
+    # already stamps this field; aligning the CLI sender closes the gap.
+    #
+    # The CLI does NOT require --to for non-DM channels — broadcast remains
+    # the default semantics there. For DM the server drops unaddressed events
+    # rather than broadcasting, so a `dm` send without --to is effectively
+    # a no-op (drops everywhere). We surface a warning rather than hard-error
+    # so existing scripts that rely on legacy broadcast behavior get loud
+    # feedback instead of silent message loss.
+    recipient = os.environ.get("BEACON_BUS_RECIPIENT_SESSION", "").strip()
+    if recipient:
+        # Caller-supplied --to overrides any payload.recipient_session_id
+        # set by --payload; the flag is the unambiguous source of truth.
+        payload = {**payload, "recipient_session_id": recipient}
+    elif channel == "dm" and not payload.get("recipient_session_id"):
+        print(
+            "Warning: sending to channel 'dm' without --to <session_id>. "
+            "After e-1209 the server drops unaddressed DM events rather than "
+            "broadcasting them — pass --to or use a different channel for "
+            "broadcasts.",
+            file=sys.stderr,
+        )
 
     # e-1000: budget gate.
     #
