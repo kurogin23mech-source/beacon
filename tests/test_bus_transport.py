@@ -135,6 +135,57 @@ def test_post_returns_event_id_and_stamped_created_at():
     # server-stamped created_at, not client-supplied
     assert body["created_at"]
     assert body["created_at"].endswith("Z")
+    # e-1135: delivery defaults to propose-to-ai when not specified — the
+    # conservative choice so an unaware sender can never accidentally elevate
+    # to auto-execute.
+    assert body["delivery"] == "propose-to-ai"
+
+
+# ---------------------------------------------------------------------------
+# Delivery policy (e-1135)
+# ---------------------------------------------------------------------------
+
+def test_delivery_explicit_modes_round_trip():
+    """All three valid delivery modes must round-trip — propose-to-ai is the
+    default, auto-execute is the explicit-opt-in case, notify-user-only is
+    the silent-to-AI case. If any of these stops round-tripping, the
+    receiving daemon will misinterpret events (e-1136 dogfood depends on it)."""
+    for mode in ("auto-execute", "propose-to-ai", "notify-user-only"):
+        resp = client.post(f"/api/projects/{PROJECT_ID}/bus", json={
+            "channel": "policy",
+            "payload": {},
+            "delivery": mode,
+        })
+        assert resp.status_code == 200
+        assert resp.json()["delivery"] == mode
+
+
+def test_unknown_delivery_mode_coerces_to_default():
+    """A typo (or schema drift between an old sender and a new server) must
+    NEVER silently upgrade to auto-execute. Coerce unknowns to the safe
+    default rather than 422'ing (which would just retry-loop)."""
+    resp = client.post(f"/api/projects/{PROJECT_ID}/bus", json={
+        "channel": "policy",
+        "payload": {},
+        "delivery": "auto-exec",  # near-miss of auto-execute
+    })
+    assert resp.status_code == 200
+    assert resp.json()["delivery"] == "propose-to-ai"
+
+
+def test_delivery_field_flows_to_ws_subscribers():
+    """The delivery mode must reach the WS subscriber — otherwise downstream
+    receivers can't enforce auto-execute opt-in."""
+    with client.websocket_connect(f"/ws/projects/{PROJECT_ID}") as ws:
+        ws.receive_json()  # drain initial project frame
+        client.post(f"/api/projects/{PROJECT_ID}/bus", json={
+            "channel": "policy",
+            "payload": {"op": "run"},
+            "delivery": "notify-user-only",
+        })
+        pushed = ws.receive_json()
+        assert pushed["type"] == "bus_event"
+        assert pushed["data"]["delivery"] == "notify-user-only"
 
 
 def test_post_uses_server_clock_not_client_supplied():

@@ -7768,6 +7768,174 @@ def cmd_incident_list():
 
 
 # ---------------------------------------------------------------------------
+# Bus (ms-54 / e-999 rendezvous client + e-1135 delivery field)
+# ---------------------------------------------------------------------------
+# `beacon bus send / listen / receive / ack` give a CLI surface on top of the
+# /bus + /bus/unread + /bus/cursors API. They are the rendezvous primitive a
+# Claude Code session uses to pause until a peer posts (via harness Monitor or
+# ScheduleWakeup). The CLI keeps the daemon-side simple: events are streamed
+# as JSON lines to stdout, and Claude Code's Monitor tool turns each line into
+# a notification.
+
+def _bus_resolve_recipient(default_fallback: str = "") -> str:
+    """Pick the recipient_id for read-side bus calls.
+
+    Resolution order: CLI flag (BEACON_BUS_RECIPIENT) → current session_id →
+    explicit fallback. Hard-error if all three are empty so a typo doesn't
+    silently read events for an empty-string recipient that lives next to
+    every other empty-string recipient.
+    """
+    rid = os.environ.get("BEACON_BUS_RECIPIENT", "").strip()
+    if rid:
+        return rid
+    sid = _resolve_session_id()
+    if sid:
+        return sid
+    if default_fallback:
+        return default_fallback
+    print(
+        "bus: no recipient_id. Pass --recipient <id> or run inside a session.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def cmd_bus_send():
+    channel = os.environ.get("BEACON_BUS_CHANNEL", "").strip()
+    if not channel:
+        print("Error: --channel <name> required", file=sys.stderr)
+        sys.exit(1)
+    payload_raw = os.environ.get("BEACON_BUS_PAYLOAD", "")
+    payload: dict = {}
+    if payload_raw:
+        try:
+            parsed = json.loads(payload_raw)
+        except json.JSONDecodeError as e:
+            print(f"Error: --payload must be JSON ({e})", file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(parsed, dict):
+            print("Error: --payload must be a JSON object", file=sys.stderr)
+            sys.exit(1)
+        payload = parsed
+    sender = os.environ.get("BEACON_BUS_SENDER", "").strip() or _resolve_session_id()
+    delivery = os.environ.get("BEACON_BUS_DELIVERY", "").strip() or "propose-to-ai"
+
+    client, config = _get_api_client()
+    project_id = config["project_id"]
+    event = client.post_bus_event(
+        project_id, channel,
+        sender_session_id=sender,
+        payload=payload,
+        delivery=delivery,
+    )
+    if os.environ.get("BEACON_JSON", "") == "1":
+        print(json.dumps(event, ensure_ascii=False))
+        return
+    print(
+        f"Sent: [{event.get('event_id', '?')}] {channel} "
+        f"from={sender or '(anonymous)'} delivery={event.get('delivery', delivery)}"
+    )
+
+
+def cmd_bus_listen():
+    """Long-poll /bus/unread and stream each event as one JSON line on stdout.
+
+    Designed for Claude Code's Monitor tool: each stdout line becomes one
+    notification. Without explicit acknowledgement (``--auto-ack``) events
+    stay readable so a crashing consumer can replay; with auto-ack, the
+    cursor advances to the last event of each batch after print.
+
+    The loop ends only on SIGINT or when the optional ``--once`` mode has
+    delivered a batch. There is no implicit timeout — callers wanting one
+    should use ``beacon bus receive --timeout`` instead.
+    """
+    import time
+    recipient = _bus_resolve_recipient()
+    channel = os.environ.get("BEACON_BUS_CHANNEL", "").strip()
+    auto_ack = os.environ.get("BEACON_BUS_AUTO_ACK", "") == "1"
+    once = os.environ.get("BEACON_BUS_ONCE", "") == "1"
+    interval = float(os.environ.get("BEACON_BUS_INTERVAL", "2") or "2")
+    if interval < 0.25:
+        interval = 0.25  # don't hammer the server
+
+    client, config = _get_api_client()
+    project_id = config["project_id"]
+
+    try:
+        while True:
+            events = client.list_unread_bus_events(
+                project_id, recipient, channel=channel,
+            )
+            if events:
+                for ev in events:
+                    print(json.dumps(ev, ensure_ascii=False), flush=True)
+                if auto_ack:
+                    last_ts = events[-1].get("created_at", "")
+                    if last_ts:
+                        client.advance_bus_cursor(project_id, recipient, last_ts)
+                if once:
+                    return
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        return
+
+
+def cmd_bus_receive():
+    """Block until a single batch of events arrives (or ``--timeout`` elapses)."""
+    import time
+    recipient = _bus_resolve_recipient()
+    channel = os.environ.get("BEACON_BUS_CHANNEL", "").strip()
+    auto_ack = os.environ.get("BEACON_BUS_AUTO_ACK", "") == "1"
+    timeout_raw = os.environ.get("BEACON_BUS_TIMEOUT", "0")
+    try:
+        timeout = float(timeout_raw or "0")
+    except ValueError:
+        timeout = 0.0
+    interval = float(os.environ.get("BEACON_BUS_INTERVAL", "2") or "2")
+    if interval < 0.25:
+        interval = 0.25
+
+    client, config = _get_api_client()
+    project_id = config["project_id"]
+
+    started = time.monotonic()
+    while True:
+        events = client.list_unread_bus_events(
+            project_id, recipient, channel=channel,
+        )
+        if events:
+            for ev in events:
+                print(json.dumps(ev, ensure_ascii=False))
+            if auto_ack:
+                last_ts = events[-1].get("created_at", "")
+                if last_ts:
+                    client.advance_bus_cursor(project_id, recipient, last_ts)
+            return
+        if timeout > 0 and (time.monotonic() - started) >= timeout:
+            # Exit 2 distinguishes "timeout, no events" from "error" (1) and
+            # "got events" (0) so a calling script can branch on the outcome.
+            sys.exit(2)
+        time.sleep(interval)
+
+
+def cmd_bus_ack():
+    """Advance the recipient's cursor explicitly. Forward-only — older values
+    are silent no-ops on the server side."""
+    recipient = _bus_resolve_recipient()
+    last_seen_at = os.environ.get("BEACON_BUS_LAST_SEEN_AT", "").strip()
+    if not last_seen_at:
+        print("Error: --last-seen-at <iso8601> required", file=sys.stderr)
+        sys.exit(1)
+    client, config = _get_api_client()
+    project_id = config["project_id"]
+    result = client.advance_bus_cursor(project_id, recipient, last_seen_at)
+    if os.environ.get("BEACON_JSON", "") == "1":
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(f"Cursor: {recipient} → {result.get('last_seen_at', '(unchanged)')}")
+
+
+# ---------------------------------------------------------------------------
 # Main dispatch
 # ---------------------------------------------------------------------------
 
@@ -7876,6 +8044,10 @@ if __name__ == "__main__":
         "note_add": cmd_note_add,
         "note_list": cmd_note_list,
         "note_clear": cmd_note_clear,
+        "bus_send": cmd_bus_send,
+        "bus_listen": cmd_bus_listen,
+        "bus_receive": cmd_bus_receive,
+        "bus_ack": cmd_bus_ack,
         "session_end": cmd_session_end,
         "session_rescue": cmd_session_rescue,
         "session_log_list": cmd_session_log_list,

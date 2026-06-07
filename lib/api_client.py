@@ -204,11 +204,13 @@ class ApiClient:
     # Bus events (ms-54 / e-996)
 
     def post_bus_event(self, project_id: str, channel: str, *,
-                       sender_session_id: str = "", payload: dict | None = None) -> dict:
+                       sender_session_id: str = "", payload: dict | None = None,
+                       delivery: str = "propose-to-ai") -> dict:
         return self.post(f"/api/projects/{project_id}/bus", {
             "channel": channel,
             "sender_session_id": sender_session_id,
             "payload": payload or {},
+            "delivery": delivery,
         })
 
     def list_bus_events(self, project_id: str, *, since: str = "",
