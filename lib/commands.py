@@ -2538,6 +2538,60 @@ def _resolve_channel_root() -> "Path | None":
     return None
 
 
+def _build_channel_server_entry(bus_path: "Path") -> dict:
+    """Construct the `.mcp.json` `beacon-bus` server entry, OS-aware.
+
+    Cross-platform pitfalls this handles (ms-54 e-1159):
+
+    - **Windows ``node`` bare command**: Claude Code on Windows shells out
+      via CreateProcess (not cmd.exe), so a bare ``"node"`` fails to spawn
+      when node.exe is on PATH but not in CWD. We resolve the absolute
+      node.exe path via ``shutil.which("node")`` and fall back to
+      ``cmd.exe /c node`` so the shell does the PATH lookup. Mac/Linux
+      keep the bare ``"node"`` form (shell does fork+exec lookup).
+    - **`/tmp` log path**: ``/tmp`` doesn't exist on Windows; the file is
+      silently never written and bus.mjs loses its diagnostic log. We use
+      ``%TEMP%\\beacon-bus-channel.log`` on Windows (via ``tempfile.
+      gettempdir()`` which resolves env vars cross-platform). Mac/Linux
+      keep ``/tmp/beacon-bus-channel.log`` for compatibility with the
+      existing dogfood debug pipeline.
+    """
+    from pathlib import Path  # local import — pathlib not yet at module level
+    import platform as _platform
+    import shutil as _shutil
+    import tempfile as _tempfile
+    is_windows = _platform.system() == "Windows"
+
+    if is_windows:
+        node_abs = _shutil.which("node") or _shutil.which("node.exe")
+        if node_abs:
+            command = node_abs
+            args = [str(bus_path)]
+        else:
+            # Fallback: have cmd.exe walk PATH. Works even if node was
+            # installed after this .mcp.json was generated.
+            command = "cmd.exe"
+            args = ["/c", "node", str(bus_path)]
+        log_path = str(Path(_tempfile.gettempdir()) / "beacon-bus-channel.log")
+    else:
+        command = "node"
+        args = [str(bus_path)]
+        # Keep /tmp on Unix so existing dogfood log paths (e.g.
+        # `/tmp/beacon-bus-channel.log` referenced in memo docs) stay
+        # stable; tempfile.gettempdir() would return /var/folders/... on
+        # macOS which breaks the muscle-memory `tail -f /tmp/...` flow.
+        log_path = "/tmp/beacon-bus-channel.log"
+
+    return {
+        "command": command,
+        "args": args,
+        "env": {
+            "BEACON_CHANNEL_ALLOWLIST": "dm",
+            "BEACON_BUS_LOG": log_path,
+        },
+    }
+
+
 def _ensure_channel_node_modules(channel_root: "Path") -> bool:
     """Make sure channel/node_modules/ exists (run `npm install` if not).
 
@@ -2610,14 +2664,7 @@ def cmd_channel_install():
         print("The beacon-bus MCP server will fail to start until this is "
               "resolved.", file=sys.stderr)
 
-    server_entry = {
-        "command": "node",
-        "args": [str(bus_path)],
-        "env": {
-            "BEACON_CHANNEL_ALLOWLIST": "dm",
-            "BEACON_BUS_LOG": "/tmp/beacon-bus-channel.log",
-        },
-    }
+    server_entry = _build_channel_server_entry(bus_path)
 
     mcp_path = cwd / ".mcp.json"
     config: dict
