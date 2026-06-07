@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.19.0] - 2026-06-07
+
+- Merge pull request #66 from kurogin23mech-source/ms-8-trunk-branch-auto-version
+- docs(release): update README/CHANGELOG for v0.18.0
+- chore(release): bump formula to 0.18.0
+- feat(trailnode/ms-8): auto-version + trunk/branch routing at push time (e-85)
+
 ## [v0.18.0] - 2026-06-07
 
 - Merge pull request #74 from kurogin23mech-source/ms-54-trigger-bus-dogfood
