@@ -150,14 +150,32 @@ def test_auto_note_includes_pending_tasks_section(project_dir, tmp_path):
     assert body.index("e-1") < body.index("e-2")
 
 
-def test_auto_note_marks_claude_addition_as_optional(project_dir, tmp_path):
-    """Avoid the compaction cascade: don't pressure Claude to respond
-    every threshold. The optional-mark is the contract."""
+def test_auto_note_body_contains_only_auto_captured_state(project_dir, tmp_path):
+    """ms-57 e-1195: the script-written note must contain ONLY auto-captured
+    state (現在地 / 直近コミット / 未消化タスク). The 'decision / discussion /
+    next action' section is split out and Claude is asked to add it as a
+    SEPARATE note via the Stop hook prompt. This avoids the legacy 'placeholder
+    sections that nobody fills' anti-pattern that TrailNode collaborator
+    criticized 2026-06-07.
+
+    Pre-e-1195 the script-written note had '### このセッションで決めたこと
+    （任意 — Claude が追記）' as a placeholder that Claude rarely filled in.
+    """
     transcript = tmp_path / "transcript.jsonl"
     _write_transcript(transcript, model="claude-sonnet-4-5", input_tokens=40000)
     _run_monitor(transcript, project_dir)
     body = _read_notes(project_dir)[-1]["text"]
-    assert "任意" in body, "Claude addition sections must be marked as optional"
+    # The script note must have the 3 auto-captured sections.
+    assert "### 現在地" in body
+    assert "### 直近のコミット" in body
+    assert "### Active MS の未消化タスク" in body
+    # The script note must NOT have placeholder Claude sections (they get
+    # asked via the Stop hook prompt instead, written to a separate note).
+    assert "決めたこと（任意" not in body, (
+        "Stale optional-marked placeholder regressed; remove or rename — "
+        "the script note must not invite empty fills"
+    )
+    assert "次のアクション（任意" not in body
 
 
 def test_auto_note_fires_once_per_threshold(project_dir, tmp_path):
