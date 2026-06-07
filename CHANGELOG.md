@@ -2,6 +2,16 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.20.1] - 2026-06-07
+
+- Merge pull request #79 from kurogin23mech-source/ms-44-v0.21.0-bugfix
+- fix(ms-44): Win の beacon task add でフィールド永続化、env var 経由パスを修復 (e-1192)
+- fix(ms-44): hook command を install-location 非依存に + doctor で shadow 検知 (e-1170)
+- fix(ms-54): Win subprocess の npm 解決 + bus.mjs ログ fail-soft 化 (e-1191)
+- fix(ms-44): manifest.json recipe を python3 -m pip に + version 0.21.0 同期
+- docs(release): update README/CHANGELOG for v0.20.0
+- chore(release): bump formula to 0.20.0
+
 ## [v0.20.0] - 2026-06-07
 
 - Merge pull request #78 from kurogin23mech-source/ms-54-e1159-mcp-json-os-path-final
