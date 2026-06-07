@@ -2601,23 +2601,64 @@ def _ensure_channel_node_modules(channel_root: "Path") -> bool:
       - Homebrew: depends_on "node" + brew's install step should generate it,
         but a partial install / brew formula bug can leave it missing
     Returns True if node_modules is present (existed or created); False if
-    install failed. ms-54 e-1169.
+    install failed. ms-54 e-1169 + e-1191.
+
+    Windows PATHEXT semantics (e-1191): the npm CLI on Windows ships as
+    ``npm.cmd`` (a batch shim around node), not ``npm.exe``. Python's
+    ``subprocess`` without ``shell=True`` does NOT consult PATHEXT, so
+    ``subprocess.call(["npm", ...])`` raises FileNotFoundError on Windows
+    even when Node.js is installed and ``shutil.which("node")`` finds it.
+    The fix: resolve the absolute path via ``shutil.which`` (which DOES
+    consult PATHEXT) FIRST, then call subprocess with the resolved path.
     """
     import subprocess as _subprocess
+    import shutil as _shutil
+    import platform as _platform
+
     nm = channel_root / "node_modules"
     if nm.exists():
         return True
     pkg_json = channel_root / "package.json"
     if not pkg_json.exists():
         return False
+
+    is_windows = _platform.system() == "Windows"
+    # Try canonical names first, then Windows-specific extensions. shutil.which
+    # consults PATHEXT so on Win it will pick up npm.cmd via the bare "npm"
+    # form too, but listing the explicit extensions makes the contract clear.
+    candidates = ["npm"]
+    if is_windows:
+        candidates += ["npm.cmd", "npm.exe", "npm.bat"]
+    npm_path = None
+    for cand in candidates:
+        resolved = _shutil.which(cand)
+        if resolved:
+            npm_path = resolved
+            break
+
+    if not npm_path:
+        print("Error: `npm` not found on PATH.", file=sys.stderr)
+        if is_windows:
+            print("Install Node.js on Windows: `winget install OpenJS.NodeJS.LTS`",
+                  file=sys.stderr)
+            print("  or download from https://nodejs.org/ (LTS Windows Installer).",
+                  file=sys.stderr)
+        elif _platform.system() == "Darwin":
+            print("Install Node.js on macOS: `brew install node` (or via nvm).",
+                  file=sys.stderr)
+        else:
+            print("Install Node.js: your package manager (e.g. `apt install nodejs npm`)",
+                  file=sys.stderr)
+            print("  or via nvm (https://github.com/nvm-sh/nvm).", file=sys.stderr)
+        return False
+
     print(f"channel/node_modules not found — running `npm install` in {channel_root}",
           file=sys.stderr)
+    print(f"  using npm at: {npm_path}", file=sys.stderr)
     try:
-        rc = _subprocess.call(["npm", "install", "--silent"], cwd=str(channel_root))
-    except FileNotFoundError:
-        print("Error: `node` / `npm` not found on PATH.", file=sys.stderr)
-        print("Install Node.js (e.g. `brew install node` or via nvm) and retry.",
-              file=sys.stderr)
+        rc = _subprocess.call([npm_path, "install", "--silent"], cwd=str(channel_root))
+    except OSError as e:
+        print(f"Error: failed to launch npm at {npm_path}: {e}", file=sys.stderr)
         return False
     if rc != 0:
         print(f"Error: `npm install` exited {rc}.", file=sys.stderr)
