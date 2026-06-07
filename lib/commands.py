@@ -5640,7 +5640,14 @@ def _resolve_hook_command(hook_basename: str) -> str:
     if entry_name:
         resolved = shutil.which(entry_name)
         if resolved:
-            return _bash_safe(resolved)
+            # e-1170: write the bare entry-point name (not the absolute
+            # path) so the hook command survives `beacon` upgrades that
+            # relocate the binary (e.g. pipx → pip --user, ~/.local/bin →
+            # AppData/Roaming/Python/.../Scripts). Claude Code re-resolves
+            # via PATH at hook fire time. We still call shutil.which here
+            # to *validate* the entry-point exists at install time — if it
+            # doesn't, we fall through to the bash / module fallback.
+            return entry_name
 
     # Honor the module-level constant (set at import time, but tests
     # routinely monkeypatch them — keeping this lookup means existing
@@ -6050,8 +6057,20 @@ def _is_path_command(cmd: str) -> bool:
     refactor may pass back a multi-token command like
     ``/usr/bin/python3 -m beacon_cli.hooks.post_commit`` — that's not a
     file path, so we skip the existence check for those.
+
+    ms-44 e-1170: distinguish absolute / relative paths (which have
+    separators or a leading ``./``) from bare entry-point names (which
+    are PATH-resolved by the shell, not file-existence-checked). After
+    e-1170 we write the bare ``beacon-hook-post-commit`` to settings.json
+    rather than the absolute path so the hook survives install relocation.
     """
-    return bool(cmd) and " " not in cmd.strip()
+    if not cmd or " " in cmd.strip():
+        return False
+    s = cmd.strip()
+    # Path-like if it contains separators or starts with relative-path prefix.
+    has_sep = "/" in s or "\\" in s
+    has_dot_prefix = s.startswith(("./", ".\\"))
+    return has_sep or has_dot_prefix
 
 
 def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
@@ -7453,6 +7472,46 @@ def _load_local_documents() -> list[dict]:
     return docs
 
 
+def _find_all_on_path(name: str) -> list[str]:
+    """Return every executable named ``name`` on PATH (across all PATH dirs).
+
+    Unlike ``shutil.which`` which returns only the first hit, this walks
+    every PATH directory and collects all matches. On Windows it also
+    consults ``PATHEXT`` to find ``.exe`` / ``.cmd`` / ``.bat`` variants.
+
+    Used by ``cmd_doctor`` to surface install-location shadowing (ms-44
+    e-1170): e.g. an old ``~/.local/bin/beacon`` 0.11.1 silently shadowing
+    a newer ``AppData/.../Scripts/beacon.exe`` 0.19.0.
+    """
+    path_env = os.environ.get("PATH", "")
+    if not path_env:
+        return []
+    dirs = path_env.split(os.pathsep)
+    if os.name == "nt":
+        pathext_raw = os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+        exts = [""] + [e.lower() for e in pathext_raw.split(os.pathsep) if e]
+    else:
+        exts = [""]
+    found: list[str] = []
+    seen: set[str] = set()
+    for d in dirs:
+        d = d.strip()
+        if not d:
+            continue
+        for ext in exts:
+            cand = os.path.join(d, name + ext)
+            if cand in seen:
+                continue
+            seen.add(cand)
+            try:
+                if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                    found.append(cand)
+                    break  # one hit per directory is enough
+            except OSError:
+                continue
+    return found
+
+
 def cmd_doctor():
     """Lightweight environment health check for Beacon.
 
@@ -7475,13 +7534,40 @@ def cmd_doctor():
     warnings: list[str] = []
 
     # ------------------------------------------------------------------ #
-    # 1. beacon on PATH
+    # 1. beacon on PATH (+ e-1170 version shadowing detect)
     # ------------------------------------------------------------------ #
-    if not _shutil.which("beacon"):
+    beacon_paths = _find_all_on_path("beacon")
+    if not beacon_paths:
         warnings.append(
             "WARN [PATH] `beacon` not found on PATH.\n"
             "       Add the beacon bin/ directory to your PATH, or use\n"
             "       the full path to the beacon script."
+        )
+    elif len(beacon_paths) > 1:
+        # e-1170: multiple beacon binaries on PATH = potential version
+        # shadowing. Today's Win user case: stale ~/.local/bin 0.11.1
+        # shadowing AppData/.../Scripts 0.19.0, so `beacon --version`
+        # returned the old value silently and post-install confusion was
+        # massive. Surface the shadow chain with versions for each.
+        import subprocess as _subprocess
+        version_lines = []
+        for bp in beacon_paths:
+            try:
+                v = _subprocess.run(
+                    [bp, "--version"], capture_output=True, text=True, timeout=3
+                ).stdout.strip() or "?"
+            except Exception:
+                v = "?"
+            version_lines.append(f"         {bp}  →  {v}")
+        primary = beacon_paths[0]
+        warnings.append(
+            f"WARN [PATH] Multiple `beacon` binaries on PATH ({len(beacon_paths)} found):\n"
+            + "\n".join(version_lines)
+            + f"\n       Primary (will be used): {primary}\n"
+            "       This is usually fine, but if `beacon --version` looks stale\n"
+            "       relative to your last upgrade, the entry earlier on PATH is\n"
+            "       shadowing a newer install. Remove or reorder PATH to put the\n"
+            "       intended install first."
         )
 
     # ------------------------------------------------------------------ #
