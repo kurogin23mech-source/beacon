@@ -206,3 +206,22 @@ def test_session_with_missing_last_active_is_never_live():
         f"/api/projects/{PROJECT_ID}/sessions?live_only=true"
     )
     assert resp.json() == []
+
+
+def test_session_id_is_surfaced_in_every_directory_row():
+    """The directory query is only useful if each row identifies *which*
+    session it is — otherwise a sender can't address the picked target via
+    `bus send --sender <session_id>`. Catches the regression where
+    firestore_client.list_sessions returned doc.to_dict() without merging
+    doc.id (production hit this in the v0.14.0 deploy: rows appeared
+    anonymous in the picker)."""
+    _seed([
+        {"session_id": "s-A", "actor": {"machine": "M1"},
+         "last_active": "2026-06-07T01:00:00.000000Z"},
+        {"session_id": "s-B", "actor": {"machine": "M2"},
+         "last_active": "2026-06-07T01:00:01.000000Z"},
+    ])
+    body = client.get(f"/api/projects/{PROJECT_ID}/sessions").json()
+    assert {s.get("session_id") for s in body} == {"s-A", "s-B"}, body
+    # No row should be unaddressable (None / "" / missing key).
+    assert all(s.get("session_id") for s in body), body
