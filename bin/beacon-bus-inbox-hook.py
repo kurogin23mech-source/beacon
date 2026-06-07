@@ -192,12 +192,50 @@ def _format_event(ev: dict) -> str:
     )
 
 
+def _read_bus_budget(root: Path) -> dict | None:
+    """Read .beacon/bus-budget.json if it exists. Same schema as the CLI's
+    _read_bus_budget — duplicated here to avoid importing the heavy
+    lib/commands module from the hot path."""
+    path = root / ".beacon" / "bus-budget.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _format_budget_line(budget: dict | None) -> str:
+    """Render the budget summary line for the inject body, or empty when not
+    armed. Surfacing the remaining count is the "残りターン X" piece of the
+    user's autonomous-DM vision — without it, the agent has no way to know
+    when to slow down."""
+    if budget is None:
+        return ""
+    total = int(budget.get("total", 0) or 0)
+    used = int(budget.get("used", 0) or 0)
+    if total <= 0:
+        return ""
+    remaining = max(total - used, 0)
+    state = "exhausted" if remaining == 0 else "armed"
+    return (
+        f"BUDGET ({state}): {used}/{total} used, **{remaining} 回送信可能**. "
+        "返信して send したらそのぶん残数が減る。0 になると "
+        "`beacon bus send` が refuse する。"
+    )
+
+
 def _render_context(events: list[dict], notify_only_count: int,
-                    monitor_suggested: bool) -> str:
+                    monitor_suggested: bool,
+                    budget: dict | None = None) -> str:
     """Build the additionalContext markdown for AI inject."""
     parts: list[str] = []
     parts.append("BEACON BUS INBOX — 新着 event があります")
     parts.append("")
+    budget_line = _format_budget_line(budget)
+    if budget_line:
+        parts.append(budget_line)
+        parts.append("")
     parts.append(f"AI コンテキスト inject 対象: {len(events)} 件")
     if notify_only_count:
         parts.append(
@@ -209,12 +247,26 @@ def _render_context(events: list[dict], notify_only_count: int,
         parts.append(_format_event(ev))
         parts.append("")
     parts.append("--- 取り扱いガイド ---")
-    parts.append("- propose-to-ai: 内容を読んで、必要なら `beacon bus send` で返信。")
-    parts.append("  送信元 session_id を `--sender` に指定すれば DM の継続になる。")
-    parts.append("- auto-execute: 今は propose-to-ai と同等扱い。"
-                 "今後 project 設定で channel/operation 単位の opt-in 強制が入る予定。")
-    parts.append("- notify-user-only: AI context には流していない (この一覧にも含まれない)。"
-                 "対応はユーザーが端末/UI から行う前提。")
+    parts.append(
+        "- 返信する場合: `beacon bus send --channel <ch> --payload '<json>' "
+        "--in-reply-to <event_id>` を使う。"
+    )
+    parts.append(
+        "  **`--in-reply-to <event_id>` を必ず付ける**: これが付くと AI 返答と認定され "
+        "budget gate (e-1000) が効く。budget 未付与の状態では refuse される "
+        "(default は人間承認必須)。"
+    )
+    parts.append(
+        "- 送信元 session_id を `--sender` で指定すれば DM の継続になる。"
+    )
+    parts.append(
+        "- auto-execute: 今は propose-to-ai と同等扱い。"
+        "今後 project 設定で channel/operation 単位の opt-in 強制が入る予定。"
+    )
+    parts.append(
+        "- notify-user-only: AI context には流していない (この一覧にも含まれない)。"
+        "対応はユーザーが端末/UI から行う前提。"
+    )
     if monitor_suggested:
         parts.append("")
         parts.append("--- 真の autonomous 化への提案 ---")
@@ -225,8 +277,8 @@ def _render_context(events: list[dict], notify_only_count: int,
         )
         parts.append("    beacon bus listen --auto-ack")
         parts.append(
-            "1 セッション 1 Monitor で十分。budget gate (e-1000) が無いと暴走の恐れがあるため、"
-            "1 ターンの返信ごとに往復回数を意識すること。"
+            "1 セッション 1 Monitor で十分。budget gate (`bus budget grant <N>`) を "
+            "先に grant しておくと N 往復で必ず止まる。"
         )
     return "\n".join(parts)
 
@@ -340,8 +392,13 @@ def main() -> None:
     # later prompts it's noise.
     monitor_suggested = hook_event_name == "SessionStart"
 
+    # Read the budget gate state so the AI knows how many sends it has left
+    # before refuse. The hook never mutates the budget — only `bus send`
+    # decrements; the hook is read-only.
+    budget = _read_bus_budget(root)
+
     _emit(hook_event_name, _render_context(inject, len(notify_only),
-                                            monitor_suggested))
+                                            monitor_suggested, budget))
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
     _log(f"surfaced {len(inject)} event(s) ({elapsed_ms} ms)")
