@@ -644,6 +644,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_skill_install.add_argument("--force", action="store_true")
     p_skill_install.add_argument("--settings-path", dest="settings_path", default="")
 
+    # ---- session id (ms-54 e-1150 / e-1152 / ms-44 e-1171) ----
+    # `beacon session id` mints/refreshes .beacon/session.json and prints
+    # the current session_id. Used by channel/bus.mjs at startup and by
+    # /beacon-session-start for the bus heartbeat. Wired here so Windows
+    # pipx users (Python entry-point) get the same command as bash users
+    # (was previously bash-only — Win cross-machine DM blocker #4).
+    p_session = sub.add_parser("session", help="Session id / lifecycle", add_help=False)
+    p_session.add_argument("--help", "-h", action="store_true", dest="show_help")
+    session_sub = p_session.add_subparsers(dest="session_cmd", metavar="<subcmd>")
+    session_sub.add_parser("id", add_help=False)
+
+    # ---- channel install (ms-54 e-1152 / ms-44 e-1171) ----
+    # `beacon channel install` writes a project-level .mcp.json that
+    # wires the Claude Code beacon-bus MCP server to channel/bus.mjs.
+    # Wired here for Win parity — same reason as `session id` above.
+    p_channel = sub.add_parser("channel", help="Claude Code Channel install", add_help=False)
+    p_channel.add_argument("--help", "-h", action="store_true", dest="show_help")
+    channel_sub = p_channel.add_subparsers(dest="channel_cmd", metavar="<subcmd>")
+    channel_sub.add_parser("install", add_help=False)
+
     # ---- auth login / logout / status (cloud OAuth) ----
     # `beacon auth login` opens a browser and signs in with Google so the
     # cloud project APIs (firestore / WS) become reachable. commands.py
@@ -1977,6 +1997,36 @@ def _handle_skill(root: Path, args: argparse.Namespace) -> int:
     return _run_commands_py(root, "skill_install", env)
 
 
+def _handle_session(root: Path, args: argparse.Namespace) -> int:
+    """`beacon session id` — mint + print session_id (ms-44 e-1171).
+
+    Bash path: `python3 COMMANDS_PY session_id` with no env.
+    Mirror that exactly so Windows pipx users get the same behavior.
+    """
+    if args.show_help or args.session_cmd is None:
+        print("Usage: beacon session id")
+        return 0 if args.show_help else 2
+    if args.session_cmd != "id":
+        print(f"Unknown session subcommand: {args.session_cmd}")
+        return 2
+    return _run_commands_py(root, "session_id", {})
+
+
+def _handle_channel(root: Path, args: argparse.Namespace) -> int:
+    """`beacon channel install` — write project-level .mcp.json (ms-44 e-1171).
+
+    Bash path: `python3 COMMANDS_PY channel_install` with no env.
+    Mirror that exactly so Windows pipx users get the same behavior.
+    """
+    if args.show_help or args.channel_cmd is None:
+        print("Usage: beacon channel install")
+        return 0 if args.show_help else 2
+    if args.channel_cmd != "install":
+        print(f"Unknown channel subcommand: {args.channel_cmd}")
+        return 2
+    return _run_commands_py(root, "channel_install", {})
+
+
 # ---------------------------------------------------------------------------
 # Top-level entry — argv parse + dispatch
 # ---------------------------------------------------------------------------
@@ -2010,6 +2060,8 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "pr": _handle_pr,
     "issue": _handle_issue,
     "member": _handle_member,
+    "session": _handle_session,
+    "channel": _handle_channel,
 }
 
 
@@ -2043,6 +2095,8 @@ def _print_top_help() -> None:
         "  beacon project archive|unarchive\n"
         "  beacon doctor\n"
         "  beacon skill install [--force]\n"
+        "  beacon session id\n"
+        "  beacon channel install\n"
         "\n"
         "Not yet available on bash-less systems (tracked under ms-44):\n"
         "  beacon setup, dashboard (tmux), beacon update, beacon pr review,\n"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""CLI help drift detector for Beacon (ms-10 e-722).
+"""CLI help drift detector for Beacon (ms-10 e-722, ms-44 e-1171).
 
-Checks alignment between three independent "lists of subcommands":
+Checks alignment between four independent "lists of subcommands":
 
   1. ``bin/beacon``                — the bash dispatcher's usage() text
                                      (what `beacon --help` prints).
@@ -9,11 +9,22 @@ Checks alignment between three independent "lists of subcommands":
                                      (what `beacon help --json` prints).
   3. ``README.md``                  — the ``### <Section>`` tables under
                                      ``## CLI Commands``.
+  4. ``beacon_cli/dispatch.py``    — top-level verbs in the ``_HANDLERS``
+                                     dict (what Windows pipx users get).
+                                     Drift here = `argparse invalid choice`
+                                     on Windows (ms-44 e-1171). Compared
+                                     against the bash main case switch.
 
-When a maintainer adds a subcommand, all three must be kept in sync. This
-script extracts the "noun" pair (subcommand + subsubcommand, e.g.
-``milestone add``) from each source and reports any source that is
+When a maintainer adds a subcommand, all four surfaces must be kept in
+sync. This script extracts the "noun" pair (subcommand + subsubcommand,
+e.g. ``milestone add``) from each source and reports any source that is
 missing one.
+
+The fourth check (dispatch parity) catches the specific drift that broke
+Windows cross-machine DM in 2026-06-07: PR #74 added ``session id`` and
+``channel install`` to bin/beacon (bash) only, so Windows pipx users hit
+``argparse invalid choice: 'session'``. Adding to this lint forces both
+sides to stay in step.
 
 It deliberately ignores positional arg shape and flag spelling — those
 are too noisy to diff and are checked elsewhere (the dispatcher itself
@@ -59,6 +70,7 @@ ROOT = Path(__file__).resolve().parent.parent
 BIN_BEACON = ROOT / "bin" / "beacon"
 COMMANDS_PY = ROOT / "lib" / "commands.py"
 README = ROOT / "README.md"
+PYTHON_DISPATCH = ROOT / "beacon_cli" / "dispatch.py"
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +161,36 @@ ALLOW_MISSING_FROM_HELP_JSON: set[str] = {
     "reset",
     "update",
 }
+
+# Top-level verbs intentionally available in bin/beacon (bash) but NOT in
+# beacon_cli/dispatch.py (Python). These rely on tmux / interactive curses
+# / bash-only features that don't translate to Windows pipx (the Python
+# entry-point). Documented in dispatch._print_top_help "Not yet available".
+#
+# Adding to this list = explicit decision to keep a verb bash-only.
+# Removing = the verb is now expected to work via Python dispatch too.
+# Source of truth for the asymmetry baseline as of ms-44 e-1171.
+ALLOW_BASH_ONLY_DISPATCH: set[str] = {
+    "setup",       # interactive shell setup (tmux/zsh detection)
+    "bus",         # bus CLI uses ws+python subprocess wiring not yet ported
+    "retro",       # interactive curses retro flow
+    "update",      # self-update via brew/curl, bash-specific
+    "reset",       # destructive admin op, bash-only
+    "run",         # operation run record (member-aware, not in Python yet)
+    "incident",    # incident open/close (operation-coupled, not in Python yet)
+    # `help` is handled in dispatch.py BEFORE _HANDLERS is consulted
+    # (early return in `dispatch()`), so it intentionally doesn't appear
+    # as a key in the dict — but it IS handled. The `-h`/`--help` flag
+    # forms are filtered at parse time (they don't pass the verb regex).
+    "help",
+    # NOTE: Once any of these grow Python parity, REMOVE the entry here.
+}
+
+# Top-level verbs in beacon_cli/dispatch.py but NOT in bin/beacon (bash).
+# Empty by design: every Python verb must also exist in bash, since bash
+# is the primary surface on macOS/Linux. Add only if a verb is genuinely
+# Win-only (e.g. a future ``beacon win-only-thing``).
+ALLOW_PYTHON_ONLY_DISPATCH: set[str] = set()
 
 # Verbs that the README CLI Commands tables don't currently list. Usually
 # because they're documented in a different section (Cloud Mode, INSTALL.md
@@ -320,10 +362,122 @@ def parse_readme(path: Path = README) -> set[str]:
     return verbs
 
 
+# ---------------------------------------------------------------------------
+# ms-44 e-1171: bash main case / Python _HANDLERS parity
+# ---------------------------------------------------------------------------
+
+# Top-level case branches in the bash dispatcher's MAIN switch (the one at
+# the bottom of bin/beacon, not the helper switches inside ensure_project
+# etc.). Match a line that is exactly 4 spaces + lowercase verb + ``)``.
+# Also handles union pattern like ``    milestone|ms)`` — splits on ``|``
+# and yields every verb in the union.
+_BIN_CASE_RE = re.compile(r"^    ([a-z][a-z0-9_|-]*)\)\s*$")
+
+# Top-level handler keys in beacon_cli/dispatch.py's _HANDLERS dict.
+# Source of truth for "what Windows pipx users can invoke". Match lines
+# like ``    "milestone": _handle_milestone,`` (4-space indent inside dict).
+_PY_HANDLER_RE = re.compile(r'^    "([a-z][a-z0-9_-]*)"\s*:\s*_handle_')
+
+
+def parse_bin_main_cases(path: Path = BIN_BEACON) -> set[str]:
+    """Extract top-level verbs from the bash dispatcher's MAIN case switch.
+
+    bin/beacon has multiple ``case`` blocks; only the bottom one (at column
+    0 with branches at 4-space indent) is the user-facing dispatcher. The
+    helper switches inside functions are indented deeper.
+    """
+    if not path.exists():
+        return set()
+    verbs: set[str] = set()
+    in_main_case = False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line == 'case "${1:-}" in':
+            # Column-0 top-level switch (the main dispatcher).
+            in_main_case = True
+            continue
+        if in_main_case and line == "esac":
+            in_main_case = False
+            continue
+        if not in_main_case:
+            continue
+        m = _BIN_CASE_RE.match(line)
+        if m:
+            # Split union patterns: ``milestone|ms`` -> {milestone, ms}.
+            # Also drop flag-shaped aliases like ``-h`` / ``--help`` that
+            # appear inside unions but aren't real command verbs.
+            for verb in m.group(1).split("|"):
+                if verb and not verb.startswith("-"):
+                    verbs.add(verb)
+    return verbs
+
+
+def parse_python_handlers(path: Path = PYTHON_DISPATCH) -> set[str]:
+    """Extract top-level verbs from beacon_cli/dispatch.py's _HANDLERS dict.
+
+    We scope to the literal dict definition and pull every ``"verb":
+    _handle_xxx,`` row. Aliases are intentionally included (e.g. ``ms``
+    aliases ``milestone``) — bash should expose them too.
+    """
+    if not path.exists():
+        return set()
+    text = path.read_text(encoding="utf-8")
+    # Find _HANDLERS dict literal start.
+    m = re.search(r"^_HANDLERS:.*\{\s*$", text, re.MULTILINE)
+    if m is None:
+        return set()
+    rest = text[m.end():]
+    # Find matching closing brace at column 0.
+    end = re.search(r"^\}\s*$", rest, re.MULTILINE)
+    body = rest if end is None else rest[: end.start()]
+
+    verbs: set[str] = set()
+    for line in body.splitlines():
+        m2 = _PY_HANDLER_RE.match(line)
+        if m2:
+            verbs.add(m2.group(1))
+    return verbs
+
+
+def collect_dispatch_drift(
+    bin_path: Path = BIN_BEACON,
+    python_dispatch_path: Path = PYTHON_DISPATCH,
+) -> dict:
+    """Compare bash main case branches vs Python _HANDLERS keys.
+
+    Returns dict with:
+      - bash_verbs / python_verbs (sorted lists)
+      - missing_from_python (in bash but not Python, excluding allowlist)
+      - missing_from_bash (in Python but not bash, excluding allowlist)
+      - ok (both missing sets empty)
+    """
+    bash_verbs = parse_bin_main_cases(bin_path)
+    python_verbs = parse_python_handlers(python_dispatch_path)
+
+    # Strip noise: catch-all and empty-string clauses, aliases that the
+    # bash side surfaces through the same case (we treat them as parity).
+    def _norm(s: set[str]) -> set[str]:
+        return {v for v in s if v and v != "*"}
+
+    bash_verbs = _norm(bash_verbs)
+    python_verbs = _norm(python_verbs)
+
+    missing_from_python = (bash_verbs - python_verbs) - ALLOW_BASH_ONLY_DISPATCH
+    missing_from_bash = (python_verbs - bash_verbs) - ALLOW_PYTHON_ONLY_DISPATCH
+
+    return {
+        "ok": not (missing_from_python or missing_from_bash),
+        "bash_verbs": sorted(bash_verbs),
+        "python_verbs": sorted(python_verbs),
+        "missing_from_python_dispatch": sorted(missing_from_python),
+        "missing_from_bash_dispatch": sorted(missing_from_bash),
+    }
+
+
 def collect_drift(
     bin_path: Path = BIN_BEACON,
     commands_path: Path = COMMANDS_PY,
     readme_path: Path = README,
+    python_dispatch_path: Path = PYTHON_DISPATCH,
 ) -> dict:
     """Return a structured drift report (see module docstring)."""
     bin_verbs = parse_bin_beacon(bin_path)
@@ -351,21 +505,37 @@ def collect_drift(
         if not in_readme and v not in ALLOW_MISSING_FROM_README:
             readme_missing.add(v)
 
+    # ms-44 e-1171: bash main case vs Python _HANDLERS parity.
+    dispatch_drift = collect_dispatch_drift(bin_path, python_dispatch_path)
+
     report = {
-        "ok": not (bin_missing or json_missing or readme_missing),
+        "ok": not (
+            bin_missing
+            or json_missing
+            or readme_missing
+            or not dispatch_drift["ok"]
+        ),
         "bin_verbs": sorted(bin_verbs),
         "json_verbs": sorted(json_verbs),
         "readme_verbs": sorted(readme_verbs),
         "missing_from_bin_help": sorted(bin_missing),
         "missing_from_help_json": sorted(json_missing),
         "missing_from_readme": sorted(readme_missing),
+        # ms-44 e-1171 surface (bash main case vs Python _HANDLERS):
+        "bash_dispatch_verbs": dispatch_drift["bash_verbs"],
+        "python_dispatch_verbs": dispatch_drift["python_verbs"],
+        "missing_from_python_dispatch": dispatch_drift["missing_from_python_dispatch"],
+        "missing_from_bash_dispatch": dispatch_drift["missing_from_bash_dispatch"],
     }
     return report
 
 
 def _format_text(report: dict) -> str:
     if report["ok"]:
-        return "[cli-drift] OK: bin/beacon, cmd_help_json, and README CLI tables are aligned.\n"
+        return (
+            "[cli-drift] OK: bin/beacon, cmd_help_json, README CLI tables, "
+            "and bash↔Python dispatch are aligned.\n"
+        )
     lines = ["[cli-drift] Drift detected between CLI source-of-truth surfaces:", ""]
     if report["missing_from_bin_help"]:
         lines.append("  - missing from bin/beacon usage() (not shown by `beacon --help`):")
@@ -382,9 +552,24 @@ def _format_text(report: dict) -> str:
         for v in report["missing_from_readme"]:
             lines.append(f"      beacon {v}")
         lines.append("    -> add a row to the matching ### subsection in README.md.")
+    if report.get("missing_from_python_dispatch"):
+        lines.append("  - in bash dispatch but missing from beacon_cli/dispatch.py _HANDLERS:")
+        for v in report["missing_from_python_dispatch"]:
+            lines.append(f"      beacon {v}")
+        lines.append("    -> Windows pipx users hit `argparse invalid choice` for these.")
+        lines.append("    -> add `_handle_<verb>` + `sub.add_parser('<verb>', ...)` in")
+        lines.append("       beacon_cli/dispatch.py and register in _HANDLERS, OR add")
+        lines.append("       the verb to ALLOW_BASH_ONLY_DISPATCH if intentionally bash-only.")
+    if report.get("missing_from_bash_dispatch"):
+        lines.append("  - in beacon_cli/dispatch.py _HANDLERS but missing from bin/beacon main case:")
+        for v in report["missing_from_bash_dispatch"]:
+            lines.append(f"      beacon {v}")
+        lines.append("    -> macOS/Linux users won't see these (bash is the default path).")
+        lines.append("    -> add the verb to bin/beacon's main case, OR add it to")
+        lines.append("       ALLOW_PYTHON_ONLY_DISPATCH if intentionally Python-only.")
     lines.append("")
     lines.append("Allowlists for intentional asymmetries live in scripts/check-cli-help-drift.py.")
-    lines.append("This guard is part of ms-10 e-722 (doc & skill auto-sync).")
+    lines.append("This guard is part of ms-10 e-722 (doc & skill auto-sync) + ms-44 e-1171 (dispatch parity).")
     lines.append("")
     return "\n".join(lines)
 
@@ -396,12 +581,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bin", default=str(BIN_BEACON))
     parser.add_argument("--commands", default=str(COMMANDS_PY))
     parser.add_argument("--readme", default=str(README))
+    parser.add_argument("--python-dispatch", default=str(PYTHON_DISPATCH))
     args = parser.parse_args(argv)
 
     report = collect_drift(
         bin_path=Path(args.bin),
         commands_path=Path(args.commands),
         readme_path=Path(args.readme),
+        python_dispatch_path=Path(args.python_dispatch),
     )
 
     if args.json:
