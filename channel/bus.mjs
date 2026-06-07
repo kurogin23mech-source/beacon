@@ -23,6 +23,7 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
+import { execSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
@@ -55,11 +56,35 @@ function loadToken() {
 }
 
 const cloud = safeLoadJSON(CLOUD_JSON)
+
+// Cold-start fix: Claude Code does not pass CLAUDE_CODE_SESSION_ID to MCP
+// subprocesses (verified empirically 2026-06-07). The single reliable
+// refresh path is `beacon session id`, which calls
+// lib/session.update_last_active() and prints the materialised id. The
+// bash wrapper may walk up to find a parent .beacon/project.json, so use
+// the CLI's stdout directly rather than re-reading .beacon/session.json
+// from cwd (those can disagree when bus.mjs runs from a sandbox subdir).
+function discoverSessionIdViaCLI() {
+  try {
+    const sid = execSync('beacon session id', {
+      cwd: CWD, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', timeout: 10000,
+    }).trim()
+    if (sid) {
+      fs.appendFileSync(LOG, `[${new Date().toISOString()}] session id resolved via CLI: ${sid}\n`)
+      return sid
+    }
+  } catch (e) {
+    const tail = String(e?.message || e).slice(0, 200)
+    fs.appendFileSync(LOG, `[${new Date().toISOString()}] beacon session id failed: ${tail}\n`)
+  }
+  return ''
+}
+const cliSessionId = discoverSessionIdViaCLI()
 const session = safeLoadJSON(SESSION_JSON)
 
 const API_URL = (process.env.BEACON_API_URL || cloud.api_url || 'https://beacon-ai.dev').replace(/\/$/, '')
 const PROJECT_ID = process.env.BEACON_PROJECT_ID || cloud.project_id || ''
-const SESSION_ID = process.env.BEACON_SESSION_ID || session.session_id || ''
+const SESSION_ID = process.env.BEACON_SESSION_ID || cliSessionId || session.session_id || ''
 const ALLOWED_CHANNELS = (process.env.BEACON_CHANNEL_ALLOWLIST || 'dm')
   .split(',').map(s => s.trim()).filter(Boolean)
 const POLL_INTERVAL = parseInt(process.env.BEACON_BUS_POLL_MS || '2000', 10)
@@ -67,6 +92,7 @@ const POLL_INTERVAL = parseInt(process.env.BEACON_BUS_POLL_MS || '2000', 10)
 log(`=== beacon-bus channel starting ===`)
 log(`  api=${API_URL} project=${PROJECT_ID} session=${SESSION_ID}`)
 log(`  allow=[${ALLOWED_CHANNELS.join(',')}] poll=${POLL_INTERVAL}ms cwd=${CWD}`)
+log(`  session.json source=[${session.source || ''}] last_active=[${session.last_active || ''}]`)
 
 // --- HTTPS helpers -----------------------------------------------------------
 

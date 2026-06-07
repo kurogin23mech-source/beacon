@@ -2325,15 +2325,23 @@ case "${1:-}" in
                         ;;
                 esac
                 ;;
+            id)
+                # ms-54 e-1150 / e-1152: print the current session_id, minting
+                # and persisting .beacon/session.json as a side effect. Used by
+                # channel/bus.mjs at startup and /beacon-session-start Skill
+                # for explicit heartbeat.
+                python3 "$COMMANDS_PY" session_id
+                ;;
             "")
                 echo "Usage: beacon session end [--summary <text>] [--session-id <id>] [--json]"
                 echo "       beacon session rescue [--json]"
                 echo "       beacon session log list [--limit N] [--json]"
                 echo "       beacon session log show <session-id> [--json]"
+                echo "       beacon session id"
                 ;;
             *)
                 echo "Unknown session subcommand: ${2:-}"
-                echo "Usage: beacon session [end|rescue|log]"
+                echo "Usage: beacon session [end|rescue|log|id]"
                 ;;
         esac
         ;;
@@ -2611,6 +2619,15 @@ EOF
         case "${2:-}" in
             install) python3 "$COMMANDS_PY" skill_install ;;
             *)       echo "Usage: beacon skill install" ;;
+        esac
+        ;;
+    channel)
+        # ms-54 e-1152: project-level Channel install. ensure_project is run by
+        # cmd_channel_install on the python side so a clearer error surfaces.
+        case "${2:-}" in
+            install) python3 "$COMMANDS_PY" channel_install ;;
+            "")      echo "Usage: beacon channel install" ;;
+            *)       echo "Unknown channel subcommand: ${2:-}"; echo "Usage: beacon channel install" ;;
         esac
         ;;
     member)

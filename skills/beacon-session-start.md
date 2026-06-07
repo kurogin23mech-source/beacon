@@ -54,6 +54,24 @@ beacon doctor 2>&1
 
 スコープMSが指定された場合、Step 1a のコマンドが変わる。
 
+## Step 0b: bus heartbeat (ms-54 e-1150)
+
+Bash ツールで実行:
+```bash
+beacon session id > /dev/null 2>&1 || true
+```
+
+これだけ。`beacon session id` は `lib/session.update_last_active()` を叩いて以下を起こす:
+- `.beacon/session.json` を mint / 更新 (last_active bump)
+- cloud mode なら sessions/ subcollection に push (debounce 内)
+
+これにより:
+- 起動した session が `beacon bus directory --live` で discoverable になる
+- 同プロジェクトの他 session から DM を打つ宛先として現れる
+- channel/bus.mjs が起動時に走らせる経路と同じものを idempotent に補完 (channel 未 install の session でも heartbeat が成立)
+
+失敗 (`.beacon/project.json` 不在等) しても無視。session-start 全体は止めない。
+
 ## Step 1: プロジェクト状態の取得（並列実行可）
 
 以下の3つを **Bash ツール** で **並列に** 実行する:
