@@ -2,6 +2,15 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.17.0] - 2026-06-07
+
+- Merge pull request #73 from kurogin23mech-source/ms-54-trigger-bus-dogfood
+- feat(ms-54): mirror trigger fires to the bus — UC2 dogfood (e-1136)
+- Merge pull request #72 from kurogin23mech-source/ms-54-bus-armed-skill
+- feat(ms-54): /beacon-bus-armed Skill — autonomous DM mode setup
+- docs(release): update README/CHANGELOG for v0.16.0
+- chore(release): bump formula to 0.16.0
+
 ## [v0.16.0] - 2026-06-07
 
 - Merge pull request #71 from kurogin23mech-source/ms-54-bus-budget
