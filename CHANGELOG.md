@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.16.0] - 2026-06-07
+
+- Merge pull request #71 from kurogin23mech-source/ms-54-bus-budget
+- feat(ms-54): bus budget gate — replies require human approval by default (e-1000)
+- docs(release): update README/CHANGELOG for v0.15.0
+- chore(release): bump formula to 0.15.0
+
 ## [v0.15.0] - 2026-06-07
 
 - Merge pull request #70 from kurogin23mech-source/ms-54-bus-inbox
