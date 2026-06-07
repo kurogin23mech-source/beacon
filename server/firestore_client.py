@@ -687,6 +687,15 @@ def list_bus_events(project_id: str, since: str = "", channel: str = "",
     ``limit``: cap to keep wire payload bounded. Default 100 — callers that
     fall behind will iterate by advancing ``since`` to the last seen
     ``created_at`` until they catch up.
+
+    Firestore needs a composite index for ``where(channel ==) + where(created_at >)
+    + order_by(created_at)``, which is operational work to provision per
+    project. Until the bus reaches a scale that justifies the index, we keep
+    the channel filter **in-memory** post-fetch and only push ``since`` +
+    ``order_by`` to Firestore (single-field, no composite index needed). The
+    ``limit`` is applied after the in-memory filter so a heavy unrelated-channel
+    burst doesn't starve the requested channel — at the cost of fetching
+    slightly more rows than necessary in the worst case.
     """
     q = (
         get_db()
@@ -697,11 +706,19 @@ def list_bus_events(project_id: str, since: str = "", channel: str = "",
     )
     if since:
         q = q.where("created_at", ">", since)
+    # Fetch a bit more than `limit` so the post-filter still satisfies the
+    # caller's bound when most rows belong to other channels. 5x is a soft
+    # guard; if a single project ever exceeds that ratio we should provision
+    # the composite index and push the channel filter to Firestore.
+    fetch_cap = (limit * 5) if (limit and channel) else limit
+    if fetch_cap:
+        q = q.limit(fetch_cap)
+    rows = [{"event_id": doc.id, **doc.to_dict()} for doc in q.stream()]
     if channel:
-        q = q.where("channel", "==", channel)
+        rows = [r for r in rows if r.get("channel") == channel]
     if limit:
-        q = q.limit(limit)
-    return [{"event_id": doc.id, **doc.to_dict()} for doc in q.stream()]
+        rows = rows[:limit]
+    return rows
 
 
 # ---------------------------------------------------------------------------
