@@ -2478,6 +2478,97 @@ def cmd_session_log_show():
             print("(recovered)")
 
 
+def cmd_session_id():
+    """Print the current session_id (mint/adopt as side effect).
+
+    Public helper used by channel/bus.mjs and /beacon-session-start Skill to
+    ensure .beacon/session.json is materialised and bumped before the caller
+    reads it. ms-54 e-1150 / e-1152.
+    """
+    try:
+        import session as _session
+        # update_last_active() = get_or_mint_session() + bump last_active.
+        # Side effects: writes .beacon/session.json (mint path) and pushes to
+        # cloud sessions/ subcollection (cloud mode + debounce window).
+        result = _session.update_last_active()
+        sid = result.get("session_id", "")
+        if not sid:
+            print("Error: failed to materialise session_id", file=sys.stderr)
+            sys.exit(1)
+        print(sid)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_channel_install():
+    """Write .mcp.json with the Beacon bus Channel MCP server entry.
+
+    Project-level opt-in for ms-54 channel/bus.mjs. Discovers the bundled
+    bus.mjs absolute path by walking back from this commands.py location
+    (works for both dev clone and Homebrew layout). Refuses to overwrite an
+    existing .mcp.json that already has unrelated mcpServers entries; merges
+    instead when safe. ms-54 e-1152 follow-up.
+    """
+    from pathlib import Path  # local import — pathlib not yet at module level
+    cwd = Path.cwd()
+    if not (cwd / ".beacon" / "project.json").exists():
+        print("Error: no .beacon/project.json in this directory. Run `beacon init` first.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    # commands.py is at <root>/lib/commands.py — bus.mjs is at <root>/channel/bus.mjs
+    commands_path = Path(__file__).resolve()
+    root = commands_path.parent.parent
+    bus_path = root / "channel" / "bus.mjs"
+    if not bus_path.exists():
+        print(f"Error: channel/bus.mjs not found at {bus_path}", file=sys.stderr)
+        print("This Beacon install may be missing the channel module.", file=sys.stderr)
+        sys.exit(1)
+
+    server_entry = {
+        "command": "node",
+        "args": [str(bus_path)],
+        "env": {
+            "BEACON_CHANNEL_ALLOWLIST": "dm",
+            "BEACON_BUS_LOG": "/tmp/beacon-bus-channel.log",
+        },
+    }
+
+    mcp_path = cwd / ".mcp.json"
+    config: dict
+    if mcp_path.exists():
+        try:
+            with mcp_path.open("r", encoding="utf-8") as f:
+                config = json.load(f) or {}
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"Error: existing .mcp.json is not valid JSON ({e}).", file=sys.stderr)
+            print("Resolve the file by hand, or remove it and re-run.", file=sys.stderr)
+            sys.exit(1)
+    else:
+        config = {}
+
+    mcp_servers = config.setdefault("mcpServers", {})
+    existed = "beacon-bus" in mcp_servers
+    mcp_servers["beacon-bus"] = server_entry
+
+    with mcp_path.open("w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+    print(f"{'Updated' if existed else 'Created'} {mcp_path.relative_to(cwd)}")
+    print(f"  beacon-bus server → {bus_path}")
+    print()
+    print("Next steps:")
+    print("  1. Start Claude Code with the channel enabled (research preview):")
+    print("     claude --dangerously-load-development-channels server:beacon-bus")
+    print("  2. Optional shell alias:")
+    print("     alias bclaude='claude --dangerously-load-development-channels server:beacon-bus'")
+    print()
+    print("Channels are research preview. See:")
+    print("  https://code.claude.com/docs/en/channels.md")
+
+
 # ---------------------------------------------------------------------------
 # Member management (e-624)
 # ---------------------------------------------------------------------------
@@ -8348,6 +8439,8 @@ if __name__ == "__main__":
         "session_rescue": cmd_session_rescue,
         "session_log_list": cmd_session_log_list,
         "session_log_show": cmd_session_log_show,
+        "session_id": cmd_session_id,
+        "channel_install": cmd_channel_install,
         "member_add": cmd_member_add,
         "member_list": cmd_member_list,
         "member_remove": cmd_member_remove,
