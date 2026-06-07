@@ -327,3 +327,278 @@ def test_apply_operation_raises_lookup_when_cloud_project_missing(monkeypatch):
 
     with pytest.raises(LookupError):
         operations.apply_operation("p-missing", lambda d: (d, None), actor="tester")
+
+
+# ---------------------------------------------------------------------------
+# v1 → v2 migration (ms-tbd: Firestore 1 MiB unblock)
+# ---------------------------------------------------------------------------
+
+class _FakeFirestoreClient:
+    """In-memory Firestore double for migration / v2 replace tests.
+
+    Models just enough of the SDK surface used by _replace_cloud_v2 and
+    migrate_v1_to_v2: a collection/document tree, transactional set/delete,
+    and stream() over a subcollection. Transactions are not really atomic
+    here (single-threaded tests), but the call sequence is preserved so
+    behavioural assertions on writes are meaningful.
+    """
+
+    def __init__(self):
+        # docs[(collection, doc_id)] = data
+        self.docs: dict[tuple, dict] = {}
+        # subdocs[(collection, doc_id, subcollection, sub_doc_id)] = data
+        self.subdocs: dict[tuple, dict] = {}
+
+    # --- collection / document refs ---
+    def collection(self, name):
+        return _FakeCollectionRef(self, name)
+
+    def transaction(self):
+        return _FakeTransaction(self)
+
+
+class _FakeCollectionRef:
+    def __init__(self, client, name, parent=None):
+        self.client = client
+        self.name = name
+        self.parent = parent  # (collection, doc_id) tuple if subcollection
+
+    def document(self, doc_id):
+        return _FakeDocumentRef(self.client, self.name, doc_id, self.parent)
+
+    def stream(self, transaction=None):
+        if self.parent is None:
+            keys = [k for k in self.client.docs if k[0] == self.name]
+            for col, did in keys:
+                yield _FakeDocSnap(did, self.client.docs[(col, did)])
+        else:
+            pcol, pdid = self.parent
+            keys = [
+                k for k in self.client.subdocs
+                if k[0] == pcol and k[1] == pdid and k[2] == self.name
+            ]
+            for col, did, sub, sdid in keys:
+                yield _FakeDocSnap(sdid, self.client.subdocs[(col, did, sub, sdid)])
+
+
+class _FakeDocumentRef:
+    def __init__(self, client, collection, doc_id, parent=None):
+        self.client = client
+        self.collection_name = collection
+        self.doc_id = doc_id
+        self.parent = parent
+
+    @property
+    def id(self):
+        return self.doc_id
+
+    def collection(self, name):
+        return _FakeCollectionRef(self.client, name, parent=(self.collection_name, self.doc_id))
+
+    def get(self, transaction=None):
+        if self.parent is None:
+            data = self.client.docs.get((self.collection_name, self.doc_id))
+        else:
+            pcol, pdid = self.parent
+            data = self.client.subdocs.get((pcol, pdid, self.collection_name, self.doc_id))
+        return _FakeDocSnap(self.doc_id, data)
+
+
+class _FakeDocSnap:
+    def __init__(self, doc_id, data):
+        self.id = doc_id
+        self._data = data
+
+    @property
+    def exists(self):
+        return self._data is not None
+
+    def to_dict(self):
+        return None if self._data is None else dict(self._data)
+
+
+class _FakeTransaction:
+    def __init__(self, client):
+        self.client = client
+
+    def set(self, ref, data):
+        if ref.parent is None:
+            self.client.docs[(ref.collection_name, ref.doc_id)] = dict(data)
+        else:
+            pcol, pdid = ref.parent
+            self.client.subdocs[(pcol, pdid, ref.collection_name, ref.doc_id)] = dict(data)
+
+    def delete(self, ref):
+        if ref.parent is None:
+            self.client.docs.pop((ref.collection_name, ref.doc_id), None)
+        else:
+            pcol, pdid = ref.parent
+            self.client.subdocs.pop((pcol, pdid, ref.collection_name, ref.doc_id), None)
+
+
+def _install_fake_firestore(monkeypatch, client: _FakeFirestoreClient):
+    """Wire a fake firestore_client + google.cloud.firestore into sys.modules.
+
+    Mimics enough of the SDK that operations.migrate_v1_to_v2 /
+    _replace_cloud_v2 can run unmodified against the in-memory store.
+    """
+    monkeypatch.setenv("BEACON_OPERATIONS_BACKEND", "cloud")
+
+    fake_db = type("FakeDb", (), {})()
+    fake_db.get_db = lambda: client
+    fake_db.COLLECTION = "projects"
+    fake_db.get_project = lambda pid: (
+        dict(client.docs.get(("projects", pid))) if ("projects", pid) in client.docs else None
+    )
+    monkeypatch.setitem(sys.modules, "firestore_client", fake_db)
+
+    # google.cloud.firestore.transactional must accept a function and return
+    # a callable that, when invoked with (transaction), runs the function
+    # passing transaction through. The real SDK retries on conflict; the
+    # fake just runs once.
+    fake_firestore_module = type("FakeGoogleCloudFirestoreModule", (), {})()
+
+    def transactional(fn):
+        def run(transaction):
+            return fn(transaction)
+        return run
+
+    fake_firestore_module.transactional = transactional
+
+    fake_google = type("FakeGoogleNS", (), {})()
+    fake_google_cloud = type("FakeGoogleCloud", (), {})()
+    fake_google_cloud.firestore = fake_firestore_module
+    fake_google.cloud = fake_google_cloud
+
+    monkeypatch.setitem(sys.modules, "google", fake_google)
+    monkeypatch.setitem(sys.modules, "google.cloud", fake_google_cloud)
+    monkeypatch.setitem(sys.modules, "google.cloud.firestore", fake_firestore_module)
+
+
+def test_migrate_v1_to_v2_decomposes_milestones_into_subcollection(monkeypatch):
+    """Migration moves each milestone into projects/{id}/milestones/{ms_id}
+    and trims the meta doc to drop milestones[]."""
+    client = _FakeFirestoreClient()
+    client.docs[("projects", "p1")] = {
+        "name": "p1", "owner": "u1", "milestones": [
+            {"id": "ms-1", "title": "first", "entries": []},
+            {"id": "ms-2", "title": "second", "entries": [{"id": "e-1"}]},
+        ],
+    }
+    _install_fake_firestore(monkeypatch, client)
+
+    result = operations.migrate_v1_to_v2("p1")
+
+    assert result["status"] == "migrated"
+    assert result["milestone_count"] == 2
+    # Meta doc no longer has milestones[] and is stamped v2.
+    meta = client.docs[("projects", "p1")]
+    assert "milestones" not in meta
+    assert meta["schema_version"] == operations.SCHEMA_V2_BETA
+    assert meta["name"] == "p1"
+    # Subcollection has both MS docs.
+    assert ("projects", "p1", "milestones", "ms-1") in client.subdocs
+    assert ("projects", "p1", "milestones", "ms-2") in client.subdocs
+    assert client.subdocs[("projects", "p1", "milestones", "ms-2")]["entries"] == [
+        {"id": "e-1"},
+    ]
+
+
+def test_migrate_v1_to_v2_is_idempotent_on_already_v2(monkeypatch):
+    client = _FakeFirestoreClient()
+    # Already v2: only meta in the project doc, no milestones[].
+    client.docs[("projects", "p1")] = {
+        "name": "p1", "owner": "u1", "schema_version": operations.SCHEMA_V2_BETA,
+    }
+    client.subdocs[("projects", "p1", "milestones", "ms-1")] = {"id": "ms-1", "title": "x"}
+    _install_fake_firestore(monkeypatch, client)
+
+    result = operations.migrate_v1_to_v2("p1")
+
+    assert result["status"] == "already_v2"
+    # Meta untouched; subdocs untouched.
+    assert client.docs[("projects", "p1")]["schema_version"] == operations.SCHEMA_V2_BETA
+    assert client.subdocs[("projects", "p1", "milestones", "ms-1")] == {"id": "ms-1", "title": "x"}
+
+
+def test_migrate_v1_to_v2_raises_lookup_when_project_missing(monkeypatch):
+    client = _FakeFirestoreClient()
+    _install_fake_firestore(monkeypatch, client)
+
+    with pytest.raises(LookupError):
+        operations.migrate_v1_to_v2("does-not-exist")
+
+
+def test_migrate_v1_to_v2_skips_milestones_without_id(monkeypatch):
+    """Defensive: a malformed milestone without an id can't have a doc id in
+    the subcollection. Count it as skipped instead of silently aborting the
+    whole migration."""
+    client = _FakeFirestoreClient()
+    client.docs[("projects", "p1")] = {
+        "name": "p1", "owner": "u1", "milestones": [
+            {"id": "ms-1", "title": "ok"},
+            {"title": "missing id"},
+        ],
+    }
+    _install_fake_firestore(monkeypatch, client)
+
+    result = operations.migrate_v1_to_v2("p1")
+
+    assert result["status"] == "migrated"
+    assert result.get("skipped_no_id") == 1
+    assert ("projects", "p1", "milestones", "ms-1") in client.subdocs
+    # No subdoc was created for the id-less milestone.
+    assert len([k for k in client.subdocs if k[2] == "milestones"]) == 1
+
+
+def test_replace_project_dispatches_v2_when_schema_v2(monkeypatch):
+    """replace_project must detect a v2 project and route through
+    _replace_cloud_v2 (decompose) rather than blindly setting the whole doc."""
+    client = _FakeFirestoreClient()
+    # Existing v2 project with one MS in the subcollection.
+    client.docs[("projects", "p1")] = {
+        "name": "p1", "owner": "u1", "schema_version": operations.SCHEMA_V2_BETA,
+    }
+    client.subdocs[("projects", "p1", "milestones", "ms-1")] = {
+        "id": "ms-1", "title": "old", "entries": [],
+    }
+    _install_fake_firestore(monkeypatch, client)
+
+    new_data = {
+        "name": "p1",
+        "owner": "u1",
+        "milestones": [
+            {"id": "ms-1", "title": "updated", "entries": [{"id": "e-1"}]},
+            {"id": "ms-2", "title": "added", "entries": []},
+        ],
+    }
+
+    operations.replace_project("p1", new_data, actor="tester", reason="test")
+
+    # Meta doc should NOT contain milestones[] (would re-grow toward 1 MiB).
+    meta = client.docs[("projects", "p1")]
+    assert "milestones" not in meta
+    assert meta["schema_version"] == operations.SCHEMA_V2_BETA
+    # ms-1 updated, ms-2 created in subcollection.
+    assert client.subdocs[("projects", "p1", "milestones", "ms-1")]["title"] == "updated"
+    assert client.subdocs[("projects", "p1", "milestones", "ms-2")]["title"] == "added"
+
+
+def test_replace_project_v2_deletes_removed_milestones(monkeypatch):
+    """Whole-replace semantics: an MS not present in new_data is removed
+    from the subcollection."""
+    client = _FakeFirestoreClient()
+    client.docs[("projects", "p1")] = {
+        "name": "p1", "owner": "u1", "schema_version": operations.SCHEMA_V2_BETA,
+    }
+    client.subdocs[("projects", "p1", "milestones", "ms-1")] = {"id": "ms-1", "title": "keep"}
+    client.subdocs[("projects", "p1", "milestones", "ms-2")] = {"id": "ms-2", "title": "drop"}
+    _install_fake_firestore(monkeypatch, client)
+
+    operations.replace_project("p1", {
+        "name": "p1", "owner": "u1",
+        "milestones": [{"id": "ms-1", "title": "keep"}],
+    }, actor="tester", reason="test")
+
+    assert ("projects", "p1", "milestones", "ms-1") in client.subdocs
+    assert ("projects", "p1", "milestones", "ms-2") not in client.subdocs
