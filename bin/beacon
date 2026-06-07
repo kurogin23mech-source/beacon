@@ -2370,6 +2370,13 @@ case "${1:-}" in
         ensure_project
         _bus_sub="${2:-}"
         shift 2 || true
+        # `budget` has a 2nd-level subcommand (grant/show/clear) — extract it
+        # before the generic arg-parsing loop eats it as an unknown positional.
+        _bud_sub=""
+        if [[ "$_bus_sub" == "budget" ]]; then
+            _bud_sub="${1:-}"
+            shift || true
+        fi
         _bus_channel=""
         _bus_payload=""
         _bus_sender=""
@@ -2386,6 +2393,8 @@ case "${1:-}" in
         _bus_agent=""
         _bus_live=""
         _bus_since_min=""
+        _bud_turns=""
+        _bus_in_reply_to=""
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 --channel)        _bus_channel="${2:-}"; shift 2 ;;
@@ -2404,6 +2413,8 @@ case "${1:-}" in
                 --agent)          _bus_agent="${2:-}"; shift 2 ;;
                 --live)           _bus_live="1"; shift ;;
                 --since-min)      _bus_since_min="${2:-}"; shift 2 ;;
+                --turns|-n)       _bud_turns="${2:-}"; shift 2 ;;
+                --in-reply-to)    _bus_in_reply_to="${2:-}"; shift 2 ;;
                 *)                shift ;;
             esac
         done
@@ -2413,6 +2424,7 @@ case "${1:-}" in
                     BEACON_BUS_PAYLOAD="$_bus_payload" \
                     BEACON_BUS_SENDER="$_bus_sender" \
                     BEACON_BUS_DELIVERY="$_bus_delivery" \
+                    BEACON_BUS_IN_REPLY_TO="$_bus_in_reply_to" \
                     BEACON_JSON="$_bus_json" \
                     python3 "$COMMANDS_PY" bus_send
                 ;;
@@ -2447,15 +2459,41 @@ case "${1:-}" in
                     BEACON_JSON="$_bus_json" \
                     python3 "$COMMANDS_PY" bus_directory
                 ;;
+            budget)
+                case "$_bud_sub" in
+                    grant)
+                        BEACON_BUS_BUDGET_N="$_bud_turns" \
+                            BEACON_JSON="$_bus_json" \
+                            python3 "$COMMANDS_PY" bus_budget_grant
+                        ;;
+                    show)
+                        BEACON_JSON="$_bus_json" \
+                            python3 "$COMMANDS_PY" bus_budget_show
+                        ;;
+                    clear)
+                        python3 "$COMMANDS_PY" bus_budget_clear
+                        ;;
+                    *)
+                        cat <<'EOF'
+Usage: beacon bus budget grant --turns <N> [--json]
+       beacon bus budget show [--json]
+       beacon bus budget clear
+EOF
+                        ;;
+                esac
+                ;;
             *)
                 cat <<'EOF'
-Usage: beacon bus send      --channel <ch> [--payload '<json>'] [--sender <id>] [--delivery <mode>]
+Usage: beacon bus send      --channel <ch> [--payload '<json>'] [--sender <id>] [--delivery <mode>] [--in-reply-to <event_id>]
        beacon bus listen    [--recipient <id>] [--channel <ch>] [--interval <sec>] [--auto-ack] [--once]
        beacon bus receive   [--recipient <id>] [--channel <ch>] [--timeout <sec>] [--auto-ack]
        beacon bus ack       [--recipient <id>] --last-seen-at <iso8601>
        beacon bus directory [--user <email>] [--machine <name>] [--agent <name>] [--live] [--since-min <N>] [--json]
+       beacon bus budget    grant --turns <N>  |  show  |  clear
 
 delivery: auto-execute | propose-to-ai (default) | notify-user-only
+--in-reply-to: mark as AI-authored reply. Requires `bus budget grant N` first.
+               Without it, sends bypass the budget gate (manual mode).
 EOF
                 ;;
         esac

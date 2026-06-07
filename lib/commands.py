@@ -7800,6 +7800,139 @@ def _bus_resolve_recipient(default_fallback: str = "") -> str:
     sys.exit(1)
 
 
+# ---------------------------------------------------------------------------
+# Bus budget (ms-54 / e-1000) — outbound send-rate gate.
+# ---------------------------------------------------------------------------
+# The autonomous-DM scenario is "agent gets woken by a Monitor, sees a DM,
+# composes a reply, sends, and goes back to sleep — repeat indefinitely".
+# Without a structural gate that loop runs until token exhaustion or a runaway
+# back-and-forth between two agents. The budget is the gate: a granted
+# allowance of N outbound sends, consumed one per `beacon bus send`. When the
+# count hits 0, `bus send` refuses with a non-zero exit until a human reissues
+# `bus budget grant`.
+#
+# Storage is intentionally a local file (.beacon/bus-budget.json) rather than
+# a Firestore field. Reasons:
+#   * the gate is per-machine: if Mac's budget runs out, Windows shouldn't be
+#     dragged into the same halt.
+#   * a local file lets the harness check/decrement atomically without a
+#     cloud round-trip on the hot path (every send would otherwise pay 100ms+).
+#   * tamper resistance is a feature of *humans* re-granting the budget, not
+#     of the file's storage — see CORE doc data-immutability-principle.
+#
+# Schema:
+#   {"total": N, "used": M, "granted_at": "<ISO>", "channels": ["<ch>", ...]}
+# `channels` is reserved for a future per-channel gate; today it's stored as
+# an empty list and the budget gates all outbound sends.
+
+def _get_bus_budget_path() -> str:
+    """Resolve .beacon/bus-budget.json under the current project root."""
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    return os.path.join(beacon_dir, "bus-budget.json")
+
+
+def _read_bus_budget() -> Optional[dict]:
+    path = _get_bus_budget_path()
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        # Treat a corrupted budget file as "no budget granted" — the gate
+        # is fail-closed: sends refused until a human re-grants.
+        return None
+
+
+def _write_bus_budget(data: dict) -> None:
+    path = _get_bus_budget_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _bus_budget_consume_one() -> tuple[bool, dict]:
+    """Decrement the budget for a single outbound send.
+
+    Returns (allowed, budget_after). When ``allowed`` is False the caller
+    must NOT issue the send. ``budget_after`` is the post-decrement state,
+    or the unchanged refuse-state when the budget is exhausted/missing.
+    """
+    b = _read_bus_budget()
+    if b is None:
+        # No budget file at all == autonomous mode never armed → allow
+        # sends (the gate only applies when armed). Manual one-off DMs from
+        # the CLI should not require granting first.
+        return True, {"total": 0, "used": 0, "armed": False}
+    total = int(b.get("total", 0))
+    used = int(b.get("used", 0))
+    if total <= 0:
+        return True, {**b, "armed": False}
+    if used >= total:
+        return False, {**b, "armed": True}
+    b["used"] = used + 1
+    _write_bus_budget(b)
+    return True, {**b, "armed": True}
+
+
+def cmd_bus_budget_grant():
+    """Set or refresh the outbound-send budget for autonomous mode."""
+    import datetime
+    raw = os.environ.get("BEACON_BUS_BUDGET_N", "").strip()
+    try:
+        total = int(raw)
+    except ValueError:
+        print(f"Error: --turns must be an integer (got: {raw!r})",
+              file=sys.stderr)
+        sys.exit(1)
+    if total <= 0:
+        print("Error: --turns must be > 0 (use `bus budget clear` to revoke)",
+              file=sys.stderr)
+        sys.exit(1)
+    data = {
+        "total": total,
+        "used": 0,
+        "granted_at": datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"),
+        "channels": [],
+    }
+    _write_bus_budget(data)
+    if os.environ.get("BEACON_JSON", "") == "1":
+        print(json.dumps(data, ensure_ascii=False))
+    else:
+        print(f"Budget granted: {total} outbound sends "
+              f"(armed). Use `bus budget show` to inspect.")
+
+
+def cmd_bus_budget_show():
+    b = _read_bus_budget()
+    if os.environ.get("BEACON_JSON", "") == "1":
+        print(json.dumps(b or {"armed": False}, ensure_ascii=False))
+        return
+    if b is None:
+        print("Budget: not granted (autonomous mode disabled).")
+        return
+    total = int(b.get("total", 0))
+    used = int(b.get("used", 0))
+    remaining = max(total - used, 0)
+    state = "exhausted (re-grant required)" if total > 0 and used >= total else "armed"
+    print(f"Budget: {used}/{total} used  →  {remaining} remaining  ({state})")
+    if b.get("granted_at"):
+        print(f"  granted_at: {b['granted_at']}")
+
+
+def cmd_bus_budget_clear():
+    """Revoke the budget — disables autonomous outbound sends until re-granted."""
+    path = _get_bus_budget_path()
+    if os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError as e:
+            print(f"Error removing budget file: {e}", file=sys.stderr)
+            sys.exit(1)
+    print("Budget cleared.")
+
+
 def cmd_bus_send():
     channel = os.environ.get("BEACON_BUS_CHANNEL", "").strip()
     if not channel:
@@ -7819,6 +7952,57 @@ def cmd_bus_send():
         payload = parsed
     sender = os.environ.get("BEACON_BUS_SENDER", "").strip() or _resolve_session_id()
     delivery = os.environ.get("BEACON_BUS_DELIVERY", "").strip() or "propose-to-ai"
+    in_reply_to = os.environ.get("BEACON_BUS_IN_REPLY_TO", "").strip()
+
+    # e-1000: budget gate.
+    #
+    # The gate applies ONLY when `--in-reply-to` is set, i.e. this send is an
+    # AI-authored reply to a specific incoming event. The inbox hook
+    # instructs the AI to always include the flag when replying, so any
+    # autonomous loop necessarily passes through the gate. Manual one-off
+    # CLI sends (no --in-reply-to) bypass the gate — the human typing the
+    # command IS the approval.
+    #
+    # When the gate applies:
+    #   * no budget granted at all → REFUSE. Default state is "AI cannot
+    #     auto-reply"; the human must explicitly `bus budget grant N` to
+    #     authorize N auto-replies. This matches the user's safety stance:
+    #     "until a turn limit is explicitly set, replies require human
+    #     approval."
+    #   * budget granted but exhausted → REFUSE. Same path as above; the
+    #     human must re-grant.
+    #   * budget granted and remaining > 0 → decrement, then send. The
+    #     decrement happens *before* the cloud call so a network failure
+    #     can't smuggle an extra send past the gate.
+    budget: dict = {"armed": False}
+    if in_reply_to:
+        b = _read_bus_budget()
+        if b is None:
+            print(
+                "Error: this is a reply (--in-reply-to set) but no auto-reply "
+                "budget is granted. Default state requires human approval per "
+                "reply. Run `beacon bus budget grant <N>` to authorize N "
+                "auto-replies, or omit --in-reply-to for a manual send.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        allowed, budget = _bus_budget_consume_one()
+        if not allowed:
+            total = int(budget.get("total", 0))
+            used = int(budget.get("used", 0))
+            print(
+                f"Error: auto-reply budget exhausted ({used}/{total} used). "
+                "Run `beacon bus budget grant <N>` to re-grant before "
+                "sending again.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    if in_reply_to:
+        # Thread the reply by stamping the parent event_id on the payload.
+        # Server-side schema treats payload as opaque; this is a convention
+        # the inbox hook can present back to the AI on subsequent rounds.
+        payload = {**payload, "in_reply_to": in_reply_to}
 
     client, config = _get_api_client()
     project_id = config["project_id"]
@@ -7829,12 +8013,28 @@ def cmd_bus_send():
         delivery=delivery,
     )
     if os.environ.get("BEACON_JSON", "") == "1":
-        print(json.dumps(event, ensure_ascii=False))
+        # Augment the event JSON with the post-decrement budget so scripted
+        # callers can decide whether to keep the autonomous loop running.
+        out = dict(event)
+        if budget.get("armed"):
+            out["_budget"] = {
+                "total": int(budget.get("total", 0)),
+                "used": int(budget.get("used", 0)),
+                "remaining": max(int(budget.get("total", 0))
+                                  - int(budget.get("used", 0)), 0),
+            }
+        print(json.dumps(out, ensure_ascii=False))
         return
-    print(
+    line = (
         f"Sent: [{event.get('event_id', '?')}] {channel} "
         f"from={sender or '(anonymous)'} delivery={event.get('delivery', delivery)}"
     )
+    if budget.get("armed"):
+        total = int(budget.get("total", 0))
+        used = int(budget.get("used", 0))
+        remaining = max(total - used, 0)
+        line += f"  (budget: {used}/{total}, {remaining} remaining)"
+    print(line)
 
 
 def cmd_bus_listen():
@@ -8085,6 +8285,9 @@ if __name__ == "__main__":
         "bus_receive": cmd_bus_receive,
         "bus_ack": cmd_bus_ack,
         "bus_directory": cmd_bus_directory,
+        "bus_budget_grant": cmd_bus_budget_grant,
+        "bus_budget_show": cmd_bus_budget_show,
+        "bus_budget_clear": cmd_bus_budget_clear,
         "session_end": cmd_session_end,
         "session_rescue": cmd_session_rescue,
         "session_log_list": cmd_session_log_list,

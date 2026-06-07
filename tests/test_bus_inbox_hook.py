@@ -114,6 +114,37 @@ def test_render_context_monitor_suggestion_only_at_session_start(hook_module):
     assert "bus listen --auto-ack" not in out_without
 
 
+def test_render_context_surfaces_budget_when_armed(hook_module):
+    """The "残ターン" piece of the autonomous-DM vision — without surfacing
+    the count the AI has no way to know it's about to be cut off."""
+    budget = {"total": 5, "used": 2, "granted_at": "2026-06-07T01:50:00Z"}
+    out = hook_module._render_context(
+        [_make_event("ev-1")], notify_only_count=0,
+        monitor_suggested=False, budget=budget)
+    assert "BUDGET" in out
+    assert "2/5 used" in out
+    assert "3" in out  # remaining
+
+
+def test_render_context_no_budget_line_when_not_armed(hook_module):
+    """No budget file → no budget line. Prevents noisy output for ordinary
+    one-off sends from CLI users who haven't opted into autonomous mode."""
+    out = hook_module._render_context(
+        [_make_event("ev-1")], notify_only_count=0,
+        monitor_suggested=False, budget=None)
+    assert "BUDGET" not in out
+
+
+def test_render_context_marks_budget_exhausted(hook_module):
+    """When the count is already 0 the inject must say so — even if events
+    arrive, the AI can't reply until the budget is re-granted."""
+    budget = {"total": 5, "used": 5}
+    out = hook_module._render_context(
+        [_make_event("ev-1")], notify_only_count=0,
+        monitor_suggested=False, budget=budget)
+    assert "exhausted" in out
+
+
 # ---------------------------------------------------------------------------
 # Delivery mode dispatch — full main() with HTTP patched
 # ---------------------------------------------------------------------------
