@@ -2,6 +2,19 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.14.0] - 2026-06-07
+
+- Merge pull request #67 from kurogin23mech-source/ms-54-directory
+- Merge pull request #65 from kurogin23mech-source/ms-54-rendezvous
+- Merge pull request #64 from kurogin23mech-source/ms-54-ws-push
+- feat(ms-54): bus directory query — pick DM target by user/machine/agent (e-1134)
+- feat(ms-54): rendezvous CLI + delivery field (e-999 + e-1135 minimal)
+- feat(ms-54): per-recipient bus cursor — at-least-once + forward-only ack (e-998)
+- feat(ms-54): WS push for /bus events (e-997)
+- feat(ms-54): minimal /bus transport — POST + append-only + cursor read (e-996)
+- docs(release): update README/CHANGELOG for v0.13.0
+- chore(release): bump formula to 0.13.0
+
 ## [v0.13.0] - 2026-06-06
 
 - Merge pull request #63 from kurogin23mech-source/ms-58-beacon-trailnode-dogfood
