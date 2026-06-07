@@ -314,6 +314,10 @@ def _find_hook(name):
 CLAUDE_HOOK_SCRIPT = _find_hook("beacon-post-commit-hook.sh")
 CLAUDE_SAVE_HOOK_SCRIPT = _find_hook("beacon-save-hook.sh")
 CLAUDE_POSTCOMPACT_HOOK_SCRIPT = _find_hook("beacon-postcompact.sh")
+# ms-44 e-854: Stop hook bash script (Mac/Linux). Python port lives at
+# beacon_cli.hooks.context_monitor and is resolved via _resolve_hook_command
+# when the user is on Windows or has the wheel installed.
+CLAUDE_CONTEXT_MONITOR_HOOK_SCRIPT = _find_hook("context-usage-monitor.sh")
 
 
 def _install_claude_hook():
@@ -400,10 +404,39 @@ def _install_claude_hook():
             }],
         })
 
+    # ms-44 e-854: register the Stop hook (context-usage threshold monitor)
+    # so Mac/Linux + Win all get a Python or bash hook that actually fires.
+    # OS branching is implicit via _resolve_hook_command + _hook_unusable_on_windows.
+    stop_hooks = hooks.setdefault("Stop", [])
+    stop_hook_exists = False
+    for entry in stop_hooks:
+        for h in entry.get("hooks", []):
+            cmd = h.get("command", "")
+            if (
+                "context-usage-monitor" in cmd
+                or "beacon-hook-context-monitor" in cmd
+                or "beacon_cli.hooks.context_monitor" in cmd
+            ):
+                stop_hook_exists = True
+                break
+        if stop_hook_exists:
+            break
+    _ctx_cmd = _resolve_hook_command("context-usage-monitor.sh")
+    _ctx_ok = bool(_ctx_cmd) and (not _is_path_command(_ctx_cmd) or os.path.exists(_ctx_cmd))
+    if not stop_hook_exists and _ctx_ok:
+        stop_hooks.append({
+            "hooks": [{
+                "type": "command",
+                "command": _ctx_cmd,
+                "timeout": 10,
+                "statusMessage": "Beacon: checking context-usage threshold...",
+            }],
+        })
+
     with open(settings_path, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2, ensure_ascii=False)
         f.write("\n")
-    print("Installed Claude Code PostToolUse + PostCompact hooks")
+    print("Installed Claude Code PostToolUse + PostCompact + Stop hooks")
 
 
 def _install_skills():
@@ -5630,6 +5663,14 @@ def _resolve_hook_command(hook_basename: str) -> str:
             "beacon_cli.hooks.save_hook",
             "CLAUDE_SAVE_HOOK_SCRIPT",
         ),
+        # ms-44 e-854: Stop hook (context-usage threshold monitor). Python
+        # port lives at beacon_cli.hooks.context_monitor; bash stays at
+        # bin/context-usage-monitor.sh for Mac/Linux source / brew users.
+        "context-usage-monitor.sh": (
+            "beacon-hook-context-monitor",
+            "beacon_cli.hooks.context_monitor",
+            "CLAUDE_CONTEXT_MONITOR_HOOK_SCRIPT",
+        ),
     }
     entry_name, module_name, const_name = mapping.get(
         hook_basename, ("", "", "")
@@ -6218,10 +6259,59 @@ def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
             })
             postcompact_dirty = True
 
-    if removed_stale or posttooluse_dirty or postcompact_dirty:
+    # ms-44 e-854: register the Stop hook (context-usage threshold monitor)
+    # via _resolve_hook_command so Mac/Linux source/brew users land on the
+    # bash .sh, while Windows / wheel users land on the Python entry-point
+    # (or `python -m beacon_cli.hooks.context_monitor` fallback). Critically,
+    # _hook_unusable_on_windows() inside the resolver prevents a .sh path
+    # from being written into Win settings.json — that was the e-854 bug.
+    stop_hook_dirty = False
+    stop_cmd = _resolve_hook_command("context-usage-monitor.sh")
+    stop_ok = bool(stop_cmd) and (
+        not _is_path_command(stop_cmd) or os.path.exists(stop_cmd)
+    )
+    if stop_ok:
+        stop_hooks = hooks.setdefault("Stop", [])
+        stop_identity = (
+            "context-usage-monitor",   # bash basename, Mac/Linux
+            "beacon-hook-context-monitor",  # console-script entry-point (pipx)
+            "beacon_cli.hooks.context_monitor",  # python -m fallback
+        )
+        cleaned_stop = []
+        for entry in stop_hooks:
+            kept = []
+            for h in entry.get("hooks", []):
+                existing = h.get("command", "")
+                same_kind = any(s in existing for s in stop_identity)
+                if same_kind and existing != stop_cmd:
+                    removed_stale = True
+                    continue  # drop stale
+                kept.append(h)
+            entry["hooks"] = kept
+            if kept:
+                cleaned_stop.append(entry)
+        stop_hooks[:] = cleaned_stop
+
+        already_stop = any(
+            h.get("command", "") == stop_cmd
+            for entry in stop_hooks
+            for h in entry.get("hooks", [])
+        )
+        if not already_stop:
+            stop_hooks.append({
+                "hooks": [{
+                    "type": "command",
+                    "command": stop_cmd,
+                    "timeout": 10,
+                    "statusMessage": "Beacon: checking context-usage threshold...",
+                }],
+            })
+            stop_hook_dirty = True
+
+    if removed_stale or posttooluse_dirty or postcompact_dirty or stop_hook_dirty:
         with open(settings_path, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=2, ensure_ascii=False)
-        if removed_stale and not posttooluse_dirty:
+        if removed_stale and not (posttooluse_dirty or postcompact_dirty or stop_hook_dirty):
             print(f"Hooks: cleaned stale {hook_basename} entries; current path active")
         else:
             parts = []
@@ -6229,6 +6319,8 @@ def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
                 parts.append("PostToolUse")
             if postcompact_dirty:
                 parts.append("PostCompact")
+            if stop_hook_dirty:
+                parts.append("Stop")
             print(f"Hooks: registered {' + '.join(parts) or 'nothing new'} in {settings_path}")
     else:
         print("Hooks: already configured in ~/.claude/settings.json")
@@ -7809,6 +7901,7 @@ def cmd_help_json():
         {"command": "beacon auth logout", "flags": [], "description": "Remove cached credentials"},
         {"command": "beacon auth status", "flags": [], "description": "Show login status"},
         {"command": "beacon skill install", "flags": [], "description": "Install Claude Code Skills to ~/.claude/skills/"},
+        {"command": "beacon monitor context", "flags": ["--dry-run"], "description": "Stop hook: context-usage threshold monitor (e-854); --dry-run skips note/state writes"},
         {"command": "beacon help", "flags": ["--json"], "description": "Show help (--json for machine-readable output)"},
     ]
     print(json.dumps({"version": __version__, "commands": commands}, ensure_ascii=False, indent=2))

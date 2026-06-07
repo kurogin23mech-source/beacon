@@ -670,6 +670,22 @@ def build_parser() -> argparse.ArgumentParser:
     channel_sub = p_channel.add_subparsers(dest="channel_cmd", metavar="<subcmd>")
     channel_sub.add_parser("install", add_help=False)
 
+    # ---- monitor (ms-44 e-854) ----
+    # `beacon monitor context` invokes the Stop hook context-usage monitor on
+    # the current cwd's transcript payload, mirroring the bash entrypoint
+    # `bin/context-usage-monitor.sh` so Win users can register a Python-only
+    # hook command. `--dry-run` skips the side effects (note/state write) for
+    # diagnostic use.
+    p_monitor = sub.add_parser(
+        "monitor",
+        help="Context-usage Stop hook (e-854)",
+        add_help=False,
+    )
+    p_monitor.add_argument("--help", "-h", action="store_true", dest="show_help")
+    monitor_sub = p_monitor.add_subparsers(dest="monitor_cmd", metavar="<subcmd>")
+    p_monitor_ctx = monitor_sub.add_parser("context", add_help=False)
+    p_monitor_ctx.add_argument("--dry-run", action="store_true", dest="dry_run")
+
     # ---- bus (ms-54 e-1151) ----
     # `beacon bus send / listen / receive / ack / directory / budget`.
     # Before e-1151 the `bus` subcommand was bash-only (ALLOW_BASH_ONLY_DISPATCH).
@@ -2106,6 +2122,38 @@ def _handle_channel(root: Path, args: argparse.Namespace) -> int:
     return _run_commands_py(root, "channel_install", {})
 
 
+def _handle_monitor(root: Path, args: argparse.Namespace) -> int:
+    """`beacon monitor context [--dry-run]` (ms-44 e-854).
+
+    Delegates to ``beacon_cli.hooks.context_monitor.main`` so the same
+    code that Claude Code's Stop hook calls can be invoked from the CLI
+    (useful for one-shot debugging on Windows where users can't easily
+    pipe a JSON payload through Bash). ``--dry-run`` toggles the env var
+    the module reads to skip note/state writes.
+
+    Note: in normal operation, Claude Code calls
+    ``beacon-hook-context-monitor`` (the console-script entry-point)
+    directly — this CLI subcommand is the discoverable equivalent for
+    users who want to test the hook without configuring it.
+    """
+    if args.show_help or args.monitor_cmd is None:
+        print("Usage: beacon monitor context [--dry-run]")
+        return 0 if args.show_help else 2
+    if args.monitor_cmd != "context":
+        print(f"Unknown monitor subcommand: {args.monitor_cmd}")
+        return 2
+
+    if getattr(args, "dry_run", False):
+        os.environ["BEACON_CONTEXT_MONITOR_DRY_RUN"] = "1"
+
+    try:
+        from beacon_cli.hooks.context_monitor import main as _cm_main
+    except Exception as exc:  # pragma: no cover — defensive only
+        _eprint(f"context-monitor entry-point not importable: {exc}")
+        return 0
+    return _cm_main()
+
+
 # ms-54 e-1151: bus subcommand handler. Each branch mirrors the bash dispatcher's
 # env layout exactly (BEACON_BUS_* family) so commands.py reads the same
 # variables regardless of which entry point spawned it. The --project flag on
@@ -2259,6 +2307,7 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "session": _handle_session,
     "channel": _handle_channel,
     "bus": _handle_bus,
+    "monitor": _handle_monitor,
 }
 
 
@@ -2294,6 +2343,7 @@ def _print_top_help() -> None:
         "  beacon skill install [--force]\n"
         "  beacon session id\n"
         "  beacon channel install\n"
+        "  beacon monitor context [--dry-run]\n"
         "\n"
         "Not yet available on bash-less systems (tracked under ms-44):\n"
         "  beacon setup, dashboard (tmux), beacon update, beacon pr review,\n"

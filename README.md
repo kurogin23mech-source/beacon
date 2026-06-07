@@ -165,6 +165,7 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 | `beacon init [--name n] [--objective o] [--storage local\|cloud]` | Initialize `.beacon/` (flags for non-interactive use) / プロジェクト作成 |
 | `beacon status [--json]` | Show project status / ステータス表示 |
 | `beacon skill install` | Install Claude Code Skills / Skillインストール |
+| `beacon monitor context [--dry-run]` | Run the Stop hook context-usage threshold monitor (debug / 動作確認) |
 | `beacon doctor` | Check PATH, hooks, Skills, auth, and cloud config / 環境ヘルスチェック |
 | `beacon reset` | Move `.beacon/` to a timestamped backup (local only) / ローカルデータのリセット |
 
