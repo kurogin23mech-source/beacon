@@ -1015,3 +1015,120 @@ def test_milestone_workspace_cleanup_routes(project_dir, no_bash, captured_call)
     env = captured_call["env"]
     assert env["BEACON_MS_ID"] == "ms-2"
     assert env["BEACON_MERGE_TO"] == "main"
+
+
+# ---------------------------------------------------------------------------
+# bus subcommand (ms-54 e-1151)
+# ---------------------------------------------------------------------------
+
+
+def test_bus_directory_routes_to_commands_py(project_dir, no_bash, captured_call):
+    """`beacon bus directory --json` dispatches to bus_directory."""
+    rc = main_mod.main(["bus", "directory", "--json"])
+    assert rc == 0
+    assert captured_call["cmd"][-1] == "bus_directory"
+    env = captured_call["env"]
+    assert env["BEACON_JSON"] == "1"
+
+
+def test_bus_directory_with_project_flag_sets_env(
+    project_dir, no_bash, captured_call,
+):
+    """e-1151: --project <id> propagates as BEACON_BUS_PROJECT_ID so
+    commands.py:_resolve_bus_project_id can override the cwd cloud.json.
+    """
+    rc = main_mod.main([
+        "bus", "directory",
+        "--project", "trailnode-cd652b",
+        "--machine", "DESKTOP-CHG6PAT",
+        "--json",
+    ])
+    assert rc == 0
+    env = captured_call["env"]
+    assert env["BEACON_BUS_PROJECT_ID"] == "trailnode-cd652b"
+    assert env["BEACON_DIR_MACHINE"] == "DESKTOP-CHG6PAT"
+    assert env["BEACON_JSON"] == "1"
+
+
+def test_bus_directory_without_project_flag_omits_env(
+    project_dir, no_bash, captured_call,
+):
+    """Bare `beacon bus directory` must NOT inject BEACON_BUS_PROJECT_ID so
+    commands.py falls back to the cwd's config["project_id"].
+    """
+    rc = main_mod.main(["bus", "directory"])
+    assert rc == 0
+    env = captured_call["env"]
+    assert "BEACON_BUS_PROJECT_ID" not in env
+
+
+def test_bus_send_routes_with_in_reply_to(project_dir, no_bash, captured_call):
+    rc = main_mod.main([
+        "bus", "send",
+        "--channel", "dm",
+        "--payload", '{"text":"hi"}',
+        "--sender", "sess-abc",
+        "--in-reply-to", "evt-123",
+    ])
+    assert rc == 0
+    assert captured_call["cmd"][-1] == "bus_send"
+    env = captured_call["env"]
+    assert env["BEACON_BUS_CHANNEL"] == "dm"
+    assert env["BEACON_BUS_PAYLOAD"] == '{"text":"hi"}'
+    assert env["BEACON_BUS_SENDER"] == "sess-abc"
+    assert env["BEACON_BUS_IN_REPLY_TO"] == "evt-123"
+
+
+def test_bus_send_with_project_flag(project_dir, no_bash, captured_call):
+    """Cross-project send: --project <id> + --in-reply-to."""
+    rc = main_mod.main([
+        "bus", "send",
+        "--channel", "dm",
+        "--payload", '{"text":"hi"}',
+        "--in-reply-to", "evt-x",
+        "--project", "trailnode-cd652b",
+    ])
+    assert rc == 0
+    env = captured_call["env"]
+    assert env["BEACON_BUS_PROJECT_ID"] == "trailnode-cd652b"
+
+
+def test_bus_listen_propagates_flags(project_dir, no_bash, captured_call):
+    rc = main_mod.main([
+        "bus", "listen",
+        "--recipient", "sess-r",
+        "--channel", "dm",
+        "--auto-ack",
+        "--once",
+    ])
+    assert rc == 0
+    assert captured_call["cmd"][-1] == "bus_listen"
+    env = captured_call["env"]
+    assert env["BEACON_BUS_RECIPIENT"] == "sess-r"
+    assert env["BEACON_BUS_AUTO_ACK"] == "1"
+    assert env["BEACON_BUS_ONCE"] == "1"
+
+
+def test_bus_budget_grant_routes(project_dir, no_bash, captured_call):
+    rc = main_mod.main(["bus", "budget", "grant", "--turns", "5", "--json"])
+    assert rc == 0
+    assert captured_call["cmd"][-1] == "bus_budget_grant"
+    env = captured_call["env"]
+    assert env["BEACON_BUS_BUDGET_N"] == "5"
+    assert env["BEACON_JSON"] == "1"
+
+
+def test_bus_budget_show_routes(project_dir, no_bash, captured_call):
+    rc = main_mod.main(["bus", "budget", "show", "--json"])
+    assert rc == 0
+    assert captured_call["cmd"][-1] == "bus_budget_show"
+
+
+def test_bus_help_shows_project_flag(project_dir, no_bash, captured_call, capsys):
+    """`beacon bus` (no subcommand) prints usage that includes --project."""
+    rc = main_mod.main(["bus"])
+    # bare bus prints usage and returns 2 (no subcommand selected)
+    assert rc == 2
+    out = capsys.readouterr().out
+    # The usage block must mention --project as a flag for cross-project ops.
+    assert "--project" in out

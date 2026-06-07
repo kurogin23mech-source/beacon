@@ -2403,6 +2403,7 @@ case "${1:-}" in
         _bus_since_min=""
         _bud_turns=""
         _bus_in_reply_to=""
+        _bus_project_id=""
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 --channel)        _bus_channel="${2:-}"; shift 2 ;;
@@ -2423,6 +2424,7 @@ case "${1:-}" in
                 --since-min)      _bus_since_min="${2:-}"; shift 2 ;;
                 --turns|-n)       _bud_turns="${2:-}"; shift 2 ;;
                 --in-reply-to)    _bus_in_reply_to="${2:-}"; shift 2 ;;
+                --project)        _bus_project_id="${2:-}"; shift 2 ;;
                 *)                shift ;;
             esac
         done
@@ -2433,6 +2435,7 @@ case "${1:-}" in
                     BEACON_BUS_SENDER="$_bus_sender" \
                     BEACON_BUS_DELIVERY="$_bus_delivery" \
                     BEACON_BUS_IN_REPLY_TO="$_bus_in_reply_to" \
+                    BEACON_BUS_PROJECT_ID="$_bus_project_id" \
                     BEACON_JSON="$_bus_json" \
                     python3 "$COMMANDS_PY" bus_send
                 ;;
@@ -2442,6 +2445,7 @@ case "${1:-}" in
                     BEACON_BUS_INTERVAL="$_bus_interval" \
                     BEACON_BUS_AUTO_ACK="$_bus_auto_ack" \
                     BEACON_BUS_ONCE="$_bus_once" \
+                    BEACON_BUS_PROJECT_ID="$_bus_project_id" \
                     python3 "$COMMANDS_PY" bus_listen
                 ;;
             receive)
@@ -2450,11 +2454,13 @@ case "${1:-}" in
                     BEACON_BUS_INTERVAL="$_bus_interval" \
                     BEACON_BUS_TIMEOUT="$_bus_timeout" \
                     BEACON_BUS_AUTO_ACK="$_bus_auto_ack" \
+                    BEACON_BUS_PROJECT_ID="$_bus_project_id" \
                     python3 "$COMMANDS_PY" bus_receive
                 ;;
             ack)
                 BEACON_BUS_RECIPIENT="$_bus_recipient" \
                     BEACON_BUS_LAST_SEEN_AT="$_bus_last_seen" \
+                    BEACON_BUS_PROJECT_ID="$_bus_project_id" \
                     BEACON_JSON="$_bus_json" \
                     python3 "$COMMANDS_PY" bus_ack
                 ;;
@@ -2464,6 +2470,7 @@ case "${1:-}" in
                     BEACON_DIR_AGENT="$_bus_agent" \
                     BEACON_DIR_LIVE="$_bus_live" \
                     BEACON_DIR_SINCE_MIN="$_bus_since_min" \
+                    BEACON_BUS_PROJECT_ID="$_bus_project_id" \
                     BEACON_JSON="$_bus_json" \
                     python3 "$COMMANDS_PY" bus_directory
                 ;;
@@ -2492,16 +2499,19 @@ EOF
                 ;;
             *)
                 cat <<'EOF'
-Usage: beacon bus send      --channel <ch> [--payload '<json>'] [--sender <id>] [--delivery <mode>] [--in-reply-to <event_id>]
-       beacon bus listen    [--recipient <id>] [--channel <ch>] [--interval <sec>] [--auto-ack] [--once]
-       beacon bus receive   [--recipient <id>] [--channel <ch>] [--timeout <sec>] [--auto-ack]
-       beacon bus ack       [--recipient <id>] --last-seen-at <iso8601>
-       beacon bus directory [--user <email>] [--machine <name>] [--agent <name>] [--live] [--since-min <N>] [--json]
+Usage: beacon bus send      --channel <ch> [--payload '<json>'] [--sender <id>] [--delivery <mode>] [--in-reply-to <event_id>] [--project <id>]
+       beacon bus listen    [--recipient <id>] [--channel <ch>] [--interval <sec>] [--auto-ack] [--once] [--project <id>]
+       beacon bus receive   [--recipient <id>] [--channel <ch>] [--timeout <sec>] [--auto-ack] [--project <id>]
+       beacon bus ack       [--recipient <id>] --last-seen-at <iso8601> [--project <id>]
+       beacon bus directory [--user <email>] [--machine <name>] [--agent <name>] [--live] [--since-min <N>] [--project <id>] [--json]
        beacon bus budget    grant --turns <N>  |  show  |  clear
 
 delivery: auto-execute | propose-to-ai (default) | notify-user-only
 --in-reply-to: mark as AI-authored reply. Requires `bus budget grant N` first.
                Without it, sends bypass the budget gate (manual mode).
+--project:     override the cwd's project_id (e-1151) for cross-project DM/directory.
+               Auth + API URL still come from the current project; only the
+               target project_id in the API call changes.
 EOF
                 ;;
         esac

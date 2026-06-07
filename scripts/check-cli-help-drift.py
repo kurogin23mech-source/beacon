@@ -172,7 +172,6 @@ ALLOW_MISSING_FROM_HELP_JSON: set[str] = {
 # Source of truth for the asymmetry baseline as of ms-44 e-1171.
 ALLOW_BASH_ONLY_DISPATCH: set[str] = {
     "setup",       # interactive shell setup (tmux/zsh detection)
-    "bus",         # bus CLI uses ws+python subprocess wiring not yet ported
     "retro",       # interactive curses retro flow
     "update",      # self-update via brew/curl, bash-specific
     "reset",       # destructive admin op, bash-only

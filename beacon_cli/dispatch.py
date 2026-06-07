@@ -670,6 +670,66 @@ def build_parser() -> argparse.ArgumentParser:
     channel_sub = p_channel.add_subparsers(dest="channel_cmd", metavar="<subcmd>")
     channel_sub.add_parser("install", add_help=False)
 
+    # ---- bus (ms-54 e-1151) ----
+    # `beacon bus send / listen / receive / ack / directory / budget`.
+    # Before e-1151 the `bus` subcommand was bash-only (ALLOW_BASH_ONLY_DISPATCH).
+    # That left Windows pipx users unable to `beacon bus directory` (no way to
+    # discover cross-project DM targets) and unable to grant budget without
+    # bash. Wired here for parity + `--project <id>` flag for cross-project
+    # operations (writes BEACON_BUS_PROJECT_ID which commands.py honors).
+    p_bus = sub.add_parser("bus", help="Bus / event channel ops", add_help=False)
+    p_bus.add_argument("--help", "-h", action="store_true", dest="show_help")
+    bus_sub = p_bus.add_subparsers(dest="bus_cmd", metavar="<subcmd>")
+
+    p_bus_send = bus_sub.add_parser("send", add_help=False)
+    p_bus_send.add_argument("--channel", default="")
+    p_bus_send.add_argument("--payload", default="")
+    p_bus_send.add_argument("--sender", default="")
+    p_bus_send.add_argument("--delivery", default="")
+    p_bus_send.add_argument("--in-reply-to", dest="in_reply_to", default="")
+    p_bus_send.add_argument("--project", dest="bus_project_id", default="")
+    p_bus_send.add_argument("--json", action="store_true")
+
+    p_bus_listen = bus_sub.add_parser("listen", add_help=False)
+    p_bus_listen.add_argument("--recipient", default="")
+    p_bus_listen.add_argument("--channel", default="")
+    p_bus_listen.add_argument("--interval", default="")
+    p_bus_listen.add_argument("--auto-ack", dest="auto_ack", action="store_true")
+    p_bus_listen.add_argument("--once", action="store_true")
+    p_bus_listen.add_argument("--project", dest="bus_project_id", default="")
+
+    p_bus_receive = bus_sub.add_parser("receive", add_help=False)
+    p_bus_receive.add_argument("--recipient", default="")
+    p_bus_receive.add_argument("--channel", default="")
+    p_bus_receive.add_argument("--interval", default="")
+    p_bus_receive.add_argument("--timeout", default="")
+    p_bus_receive.add_argument("--auto-ack", dest="auto_ack", action="store_true")
+    p_bus_receive.add_argument("--project", dest="bus_project_id", default="")
+
+    p_bus_ack = bus_sub.add_parser("ack", add_help=False)
+    p_bus_ack.add_argument("--recipient", default="")
+    p_bus_ack.add_argument("--last-seen-at", dest="last_seen_at", default="")
+    p_bus_ack.add_argument("--project", dest="bus_project_id", default="")
+    p_bus_ack.add_argument("--json", action="store_true")
+
+    p_bus_dir = bus_sub.add_parser("directory", aliases=["dir"], add_help=False)
+    p_bus_dir.add_argument("--user", default="")
+    p_bus_dir.add_argument("--machine", default="")
+    p_bus_dir.add_argument("--agent", default="")
+    p_bus_dir.add_argument("--live", action="store_true")
+    p_bus_dir.add_argument("--since-min", dest="since_min", default="")
+    p_bus_dir.add_argument("--project", dest="bus_project_id", default="")
+    p_bus_dir.add_argument("--json", action="store_true")
+
+    p_bus_budget = bus_sub.add_parser("budget", add_help=False)
+    bus_budget_sub = p_bus_budget.add_subparsers(dest="bus_budget_cmd", metavar="<subcmd>")
+    p_bus_budget_grant = bus_budget_sub.add_parser("grant", add_help=False)
+    p_bus_budget_grant.add_argument("--turns", "-n", dest="turns", default="")
+    p_bus_budget_grant.add_argument("--json", action="store_true")
+    p_bus_budget_show = bus_budget_sub.add_parser("show", add_help=False)
+    p_bus_budget_show.add_argument("--json", action="store_true")
+    bus_budget_sub.add_parser("clear", add_help=False)
+
     # ---- auth login / logout / status (cloud OAuth) ----
     # `beacon auth login` opens a browser and signs in with Google so the
     # cloud project APIs (firestore / WS) become reachable. commands.py
@@ -2046,6 +2106,123 @@ def _handle_channel(root: Path, args: argparse.Namespace) -> int:
     return _run_commands_py(root, "channel_install", {})
 
 
+# ms-54 e-1151: bus subcommand handler. Each branch mirrors the bash dispatcher's
+# env layout exactly (BEACON_BUS_* family) so commands.py reads the same
+# variables regardless of which entry point spawned it. The --project flag on
+# every bus_X subparser is collapsed here into BEACON_BUS_PROJECT_ID which
+# commands.py:_resolve_bus_project_id consumes; cross-project sends/receives
+# become possible without flipping cwd.
+def _handle_bus(root: Path, args: argparse.Namespace) -> int:
+    if args.show_help or args.bus_cmd is None:
+        print("Usage: beacon bus send      --channel <ch> [--payload '<json>'] "
+              "[--sender <id>] [--delivery <mode>] [--in-reply-to <event_id>] "
+              "[--project <id>]")
+        print("       beacon bus listen    [--recipient <id>] [--channel <ch>] "
+              "[--interval <sec>] [--auto-ack] [--once] [--project <id>]")
+        print("       beacon bus receive   [--recipient <id>] [--channel <ch>] "
+              "[--timeout <sec>] [--auto-ack] [--project <id>]")
+        print("       beacon bus ack       [--recipient <id>] "
+              "--last-seen-at <iso8601> [--project <id>]")
+        print("       beacon bus directory [--user <email>] [--machine <name>] "
+              "[--agent <name>] [--live] [--since-min <N>] [--project <id>] [--json]")
+        print("       beacon bus budget    grant --turns <N>  |  show  |  clear")
+        print("")
+        print("delivery: auto-execute | propose-to-ai (default) | notify-user-only")
+        print("--in-reply-to: mark as AI-authored reply. Requires `bus budget "
+              "grant N` first.")
+        print("--project: override the cwd's project_id (e-1151) for cross-"
+              "project DM/directory.")
+        return 0 if args.show_help else 2
+
+    cmd = args.bus_cmd
+    # Common: --project propagates to commands.py via BEACON_BUS_PROJECT_ID.
+    project_id = getattr(args, "bus_project_id", "") or ""
+
+    if cmd == "send":
+        env: Dict[str, str] = {
+            "BEACON_BUS_CHANNEL": args.channel or "",
+            "BEACON_BUS_PAYLOAD": args.payload or "",
+            "BEACON_BUS_SENDER": args.sender or "",
+            "BEACON_BUS_DELIVERY": args.delivery or "",
+            "BEACON_BUS_IN_REPLY_TO": args.in_reply_to or "",
+            "BEACON_JSON": "1" if args.json else "",
+        }
+        if project_id:
+            env["BEACON_BUS_PROJECT_ID"] = project_id
+        return _run_commands_py(root, "bus_send", env)
+
+    if cmd == "listen":
+        env = {
+            "BEACON_BUS_RECIPIENT": args.recipient or "",
+            "BEACON_BUS_CHANNEL": args.channel or "",
+            "BEACON_BUS_INTERVAL": args.interval or "",
+            "BEACON_BUS_AUTO_ACK": "1" if args.auto_ack else "",
+            "BEACON_BUS_ONCE": "1" if args.once else "",
+        }
+        if project_id:
+            env["BEACON_BUS_PROJECT_ID"] = project_id
+        return _run_commands_py(root, "bus_listen", env)
+
+    if cmd == "receive":
+        env = {
+            "BEACON_BUS_RECIPIENT": args.recipient or "",
+            "BEACON_BUS_CHANNEL": args.channel or "",
+            "BEACON_BUS_INTERVAL": args.interval or "",
+            "BEACON_BUS_TIMEOUT": args.timeout or "",
+            "BEACON_BUS_AUTO_ACK": "1" if args.auto_ack else "",
+        }
+        if project_id:
+            env["BEACON_BUS_PROJECT_ID"] = project_id
+        return _run_commands_py(root, "bus_receive", env)
+
+    if cmd == "ack":
+        env = {
+            "BEACON_BUS_RECIPIENT": args.recipient or "",
+            "BEACON_BUS_LAST_SEEN_AT": args.last_seen_at or "",
+            "BEACON_JSON": "1" if args.json else "",
+        }
+        if project_id:
+            env["BEACON_BUS_PROJECT_ID"] = project_id
+        return _run_commands_py(root, "bus_ack", env)
+
+    if cmd in ("directory", "dir"):
+        env = {
+            "BEACON_DIR_USER": args.user or "",
+            "BEACON_DIR_MACHINE": args.machine or "",
+            "BEACON_DIR_AGENT": args.agent or "",
+            "BEACON_DIR_LIVE": "1" if args.live else "",
+            "BEACON_DIR_SINCE_MIN": args.since_min or "",
+            "BEACON_JSON": "1" if args.json else "",
+        }
+        if project_id:
+            env["BEACON_BUS_PROJECT_ID"] = project_id
+        return _run_commands_py(root, "bus_directory", env)
+
+    if cmd == "budget":
+        bsub = getattr(args, "bus_budget_cmd", None)
+        if bsub is None:
+            print("Usage: beacon bus budget grant --turns <N> [--json]")
+            print("       beacon bus budget show [--json]")
+            print("       beacon bus budget clear")
+            return 2
+        if bsub == "grant":
+            return _run_commands_py(root, "bus_budget_grant", {
+                "BEACON_BUS_BUDGET_N": args.turns or "",
+                "BEACON_JSON": "1" if args.json else "",
+            })
+        if bsub == "show":
+            return _run_commands_py(root, "bus_budget_show", {
+                "BEACON_JSON": "1" if args.json else "",
+            })
+        if bsub == "clear":
+            return _run_commands_py(root, "bus_budget_clear", {})
+        print(f"Unknown bus budget subcommand: {bsub}")
+        return 2
+
+    print(f"Unknown bus subcommand: {cmd}")
+    return 2
+
+
 # ---------------------------------------------------------------------------
 # Top-level entry — argv parse + dispatch
 # ---------------------------------------------------------------------------
@@ -2081,6 +2258,7 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "member": _handle_member,
     "session": _handle_session,
     "channel": _handle_channel,
+    "bus": _handle_bus,
 }
 
 

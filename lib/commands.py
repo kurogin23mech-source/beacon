@@ -8410,7 +8410,7 @@ def cmd_bus_send():
         payload = {**payload, "in_reply_to": in_reply_to}
 
     client, config = _get_api_client()
-    project_id = config["project_id"]
+    project_id = _resolve_bus_project_id(config)  # e-1151: --project override
     event = client.post_bus_event(
         project_id, channel,
         sender_session_id=sender,
@@ -8464,7 +8464,7 @@ def cmd_bus_listen():
         interval = 0.25  # don't hammer the server
 
     client, config = _get_api_client()
-    project_id = config["project_id"]
+    project_id = _resolve_bus_project_id(config)  # e-1151: --project override
 
     try:
         while True:
@@ -8501,7 +8501,7 @@ def cmd_bus_receive():
         interval = 0.25
 
     client, config = _get_api_client()
-    project_id = config["project_id"]
+    project_id = _resolve_bus_project_id(config)  # e-1151: --project override
 
     started = time.monotonic()
     while True:
@@ -8532,7 +8532,7 @@ def cmd_bus_ack():
         print("Error: --last-seen-at <iso8601> required", file=sys.stderr)
         sys.exit(1)
     client, config = _get_api_client()
-    project_id = config["project_id"]
+    project_id = _resolve_bus_project_id(config)  # e-1151: --project override
     result = client.advance_bus_cursor(project_id, recipient, last_seen_at)
     if os.environ.get("BEACON_JSON", "") == "1":
         print(json.dumps(result, ensure_ascii=False))
@@ -8540,17 +8540,39 @@ def cmd_bus_ack():
         print(f"Cursor: {recipient} → {result.get('last_seen_at', '(unchanged)')}")
 
 
+def _resolve_bus_project_id(config: dict) -> str:
+    """Return the project_id the bus call should target.
+
+    Resolution order (ms-54 e-1151):
+      1. ``BEACON_BUS_PROJECT_ID`` env var — set by the dispatcher when
+         the user passed ``--project <id>``. This lets a Beacon session
+         post into / read from another project's bus (e.g. Mac Beacon
+         session DMs a TrailNode session) without flipping cwd.
+      2. ``config["project_id"]`` — the default, derived from
+         ``.beacon/cloud.json`` of the current project.
+    """
+    override = os.environ.get("BEACON_BUS_PROJECT_ID", "").strip()
+    if override:
+        return override
+    return config.get("project_id", "")
+
+
 def cmd_bus_directory():
-    """Look up live sessions for DM target selection (ms-54 / e-1134).
+    """Look up live sessions for DM target selection (ms-54 / e-1134 / e-1151).
 
     Wraps GET /sessions with the directory-query filters. The output is
     intentionally human-pickable (one line per session showing session_id +
     actor identity + last_active) — a sender reads this, picks a session_id,
     and passes it as the recipient for `bus send`. JSON mode is for scripts
     that want to auto-route (e.g. "send to every live agent of user X").
+
+    ``--project <id>`` (env ``BEACON_BUS_PROJECT_ID``) lets the caller list
+    sessions of a different project. The auth + API URL still come from
+    the current project's cloud.json; only the project_id in the API call
+    changes.
     """
     client, config = _get_api_client()
-    project_id = config["project_id"]
+    project_id = _resolve_bus_project_id(config)
     sessions = client.list_sessions(
         project_id,
         user_id=os.environ.get("BEACON_DIR_USER", "").strip(),
