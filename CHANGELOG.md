@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.15.0] - 2026-06-07
+
+- Merge pull request #70 from kurogin23mech-source/ms-54-bus-inbox
+- feat(ms-54): bus inbox hook — auto-surface unread DMs in AI context (e-1140)
+- docs(release): update README/CHANGELOG for v0.14.2
+- chore(release): bump formula to 0.14.2
+
 ## [v0.14.2] - 2026-06-07
 
 - Merge pull request #69 from kurogin23mech-source/ms-54-bus-index-fix
