@@ -734,7 +734,13 @@ def upsert_session(project_id: str, session_id: str, data: dict) -> None:
 def list_sessions(project_id: str) -> list[dict]:
     """List all session documents for a project, ordered by last_active desc.
 
-    Used by session-start rescue and by the Web UI "active sessions" view.
+    Used by session-start rescue, by the Web UI "active sessions" view, and
+    by ms-54 / e-1134 directory query. The Firestore doc ID **is** the
+    session_id, so we merge ``doc.id`` into each returned dict — otherwise
+    the directory picker has no way to address a chosen row in
+    ``beacon bus send --sender <session_id>``. Existing keys win, so this
+    is purely additive for callers that already had session_id from another
+    source.
     """
     docs = (
         get_db()
@@ -744,7 +750,9 @@ def list_sessions(project_id: str) -> list[dict]:
         .order_by("last_active", direction=firestore.Query.DESCENDING)
         .stream()
     )
-    return [doc.to_dict() for doc in docs]
+    # doc.id is the authoritative session_id; put it last so it wins over
+    # any stray same-named field that might appear in older docs.
+    return [{**doc.to_dict(), "session_id": doc.id} for doc in docs]
 
 
 # ---------------------------------------------------------------------------
