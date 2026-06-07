@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.14.2] - 2026-06-07
+
+- Merge pull request #69 from kurogin23mech-source/ms-54-bus-index-fix
+- fix(ms-54): drop Firestore composite-index requirement for bus channel filter
+- docs(release): update README/CHANGELOG for v0.14.1
+- chore(release): bump formula to 0.14.1
+
 ## [v0.14.1] - 2026-06-07
 
 - Merge pull request #68 from kurogin23mech-source/ms-54-directory-fix
