@@ -479,6 +479,170 @@ def test_api_client_cursor_round_trip():
     assert fake.list_unread_bus_events(PROJECT_ID, "R1") == []
 
 
+# ---------------------------------------------------------------------------
+# e-1209: DM server-side recipient filter
+#
+# Before e-1209, /bus/unread returned every event in the project to whichever
+# session asked for them, with routing happening only at the receiver
+# (channel/bus.mjs Filter 2). That meant a `dm` event meant for session A
+# fanned out to every dm-subscribed session in the project, because the
+# sender CLI never stamped payload.recipient_session_id and the receiver
+# treated missing-recipient as broadcast.
+#
+# The fix moves authoritative routing into the server: /bus/unread now drops
+# events whose payload.recipient_session_id doesn't match the caller, and
+# treats `dm`-channel events without any recipient stamp as malformed-drop
+# rather than broadcast. Non-DM channels keep broadcast semantics for events
+# without a recipient stamp so notify/ops/etc still work unchanged.
+# ---------------------------------------------------------------------------
+
+def test_dm_with_recipient_stamp_routes_only_to_target():
+    """A dm event addressed to A must reach A and only A — the original
+    e-1209 symptom (multi-delivery to every dm-subscribed session)."""
+    _seed_events([
+        {"channel": "dm", "sender_session_id": "sender",
+         "payload": {"recipient_session_id": "A", "text": "hi A"}},
+    ])
+    a_view = client.get(
+        f"/api/projects/{PROJECT_ID}/bus/unread?recipient_id=A"
+    ).json()
+    b_view = client.get(
+        f"/api/projects/{PROJECT_ID}/bus/unread?recipient_id=B"
+    ).json()
+    assert [e["payload"]["text"] for e in a_view] == ["hi A"]
+    assert b_view == []
+
+
+def test_dm_without_recipient_stamp_is_dropped_not_broadcast():
+    """Legacy senders that don't stamp recipient_session_id on dm channel
+    used to broadcast to everyone (the e-1209 bug). After the fix, those
+    events are dropped server-side so the bug class becomes structurally
+    impossible — there's no way to express 'dm broadcast' anymore."""
+    _seed_events([
+        {"channel": "dm", "sender_session_id": "sender",
+         "payload": {"text": "unaddressed dm"}},
+    ])
+    a = client.get(f"/api/projects/{PROJECT_ID}/bus/unread?recipient_id=A").json()
+    b = client.get(f"/api/projects/{PROJECT_ID}/bus/unread?recipient_id=B").json()
+    assert a == []
+    assert b == []
+
+
+def test_non_dm_without_recipient_stamp_still_broadcasts():
+    """Non-DM channels (notify, ops, ping) must retain broadcast semantics
+    when no recipient is stamped. Otherwise every existing operation alert
+    or trigger ping breaks on this deploy."""
+    _seed_events([
+        {"channel": "notify", "sender_session_id": "sender",
+         "payload": {"text": "ops alert"}},
+    ])
+    a = client.get(f"/api/projects/{PROJECT_ID}/bus/unread?recipient_id=A").json()
+    b = client.get(f"/api/projects/{PROJECT_ID}/bus/unread?recipient_id=B").json()
+    assert [e["payload"]["text"] for e in a] == ["ops alert"]
+    assert [e["payload"]["text"] for e in b] == ["ops alert"]
+
+
+def test_non_dm_with_explicit_recipient_still_filters():
+    """If a non-DM channel does stamp recipient_session_id, we honor it.
+    This lets a caller scope a notify to one session if they want, without
+    needing a new channel."""
+    _seed_events([
+        {"channel": "notify", "sender_session_id": "sender",
+         "payload": {"recipient_session_id": "A", "text": "only A"}},
+    ])
+    a = client.get(f"/api/projects/{PROJECT_ID}/bus/unread?recipient_id=A").json()
+    b = client.get(f"/api/projects/{PROJECT_ID}/bus/unread?recipient_id=B").json()
+    assert [e["payload"]["text"] for e in a] == ["only A"]
+    assert b == []
+
+
+def test_dm_self_sent_event_not_delivered_to_sender():
+    """Even when the recipient stamp matches the sender (a misconfigured
+    or echoing client), the server must drop it. Otherwise the budget gate
+    on an armed receiver can be tripped by its own outbound message echoing
+    back through the bus."""
+    _seed_events([
+        {"channel": "dm", "sender_session_id": "A",
+         "payload": {"recipient_session_id": "A", "text": "self-echo"}},
+    ])
+    a = client.get(f"/api/projects/{PROJECT_ID}/bus/unread?recipient_id=A").json()
+    assert a == []
+
+
+def test_dm_multi_session_simulate_unicast_end_to_end():
+    """End-to-end simulation of e-1209 AC#3: same project, multiple
+    subscribed sessions, a DM addressed to one of them must reach only
+    that one. This mirrors the real-world multi-laptop scenario without
+    requiring two physical machines."""
+    # Three sessions all interested in the dm channel.
+    sessions = ["mac-host", "win-host", "linux-host"]
+    _seed_events([
+        {"channel": "dm", "sender_session_id": "mac-host",
+         "payload": {"recipient_session_id": "win-host", "text": "ping win"}},
+        {"channel": "dm", "sender_session_id": "win-host",
+         "payload": {"recipient_session_id": "mac-host", "text": "pong mac"}},
+    ])
+    views = {
+        sid: client.get(
+            f"/api/projects/{PROJECT_ID}/bus/unread?recipient_id={sid}"
+        ).json()
+        for sid in sessions
+    }
+    assert [e["payload"]["text"] for e in views["mac-host"]] == ["pong mac"]
+    assert [e["payload"]["text"] for e in views["win-host"]] == ["ping win"]
+    # Crucially: the third session must see neither event despite being
+    # subscribed to the same channel in the same project. This is the
+    # property that was BROKEN before e-1209.
+    assert views["linux-host"] == []
+
+
+def test_dm_channel_filter_combines_with_recipient_filter():
+    """A consumer requesting channel=dm only must still get its addressed
+    events and only those. Combines the existing channel-filter behavior
+    (test_unread_channel_filter_combines_with_cursor) with the new
+    recipient filter."""
+    _seed_events([
+        {"channel": "dm", "sender_session_id": "S",
+         "payload": {"recipient_session_id": "A", "text": "dm-A"}},
+        {"channel": "dm", "sender_session_id": "S",
+         "payload": {"recipient_session_id": "B", "text": "dm-B"}},
+        {"channel": "notify", "sender_session_id": "S",
+         "payload": {"text": "noise"}},
+    ])
+    a = client.get(
+        f"/api/projects/{PROJECT_ID}/bus/unread?recipient_id=A&channel=dm"
+    ).json()
+    assert [e["payload"]["text"] for e in a] == ["dm-A"]
+
+
+def test_dm_routing_does_not_blank_window_when_others_dominate():
+    """If channel=dm traffic is dominated by messages to other sessions,
+    a request for A's events must still surface A's events rather than
+    return empty just because the un-filtered first page was all addressed
+    to B. This is the 'over-fetch then filter' contract."""
+    # Seed 30 dm events to B, then 1 to A, then 30 more to B.
+    events = []
+    for i in range(30):
+        events.append({"channel": "dm", "sender_session_id": "S",
+                       "payload": {"recipient_session_id": "B", "text": f"B-{i}"}})
+    events.append({"channel": "dm", "sender_session_id": "S",
+                   "payload": {"recipient_session_id": "A", "text": "for-A"}})
+    for i in range(30):
+        events.append({"channel": "dm", "sender_session_id": "S",
+                       "payload": {"recipient_session_id": "B",
+                                   "text": f"B-{i + 30}"}})
+    _seed_events(events)
+    a = client.get(
+        f"/api/projects/{PROJECT_ID}/bus/unread?recipient_id=A&limit=10"
+    ).json()
+    # A's lone event must survive the filter even though it's surrounded
+    # by other-addressed events in the raw page.
+    assert any(e["payload"]["text"] == "for-A" for e in a)
+    assert all(
+        e["payload"].get("recipient_session_id") == "A" for e in a
+    ), "no event addressed to anyone else should leak into A's view"
+
+
 def test_api_client_post_bus_event_round_trip():
     """The api_client method shape must match the server's accept body."""
     import api_client as ac

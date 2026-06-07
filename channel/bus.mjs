@@ -249,16 +249,39 @@ if (!PROJECT_ID || !SESSION_ID) {
       const payload = evt.payload || {}
       const intendedRecipient = String(payload.recipient_session_id || '')
 
+      // DM routing context (e-1209). Pre-computed so the if/else chain stays
+      // a single declarative ladder — sticking a `const` between two else
+      // branches would break the chain.
+      const isDmChannel = ch === 'dm'
+
       // Filter 1: never push events we sent ourselves (self-loop guard).
       if (sender === SESSION_ID) {
         log(`drop (self-sent): id=${evt.event_id}`)
       }
-      // Filter 2: skip DMs explicitly addressed to someone else.
-      // recipient_session_id is the convention for DM events; events without
-      // it are treated as broadcast and pass through (still subject to channel
-      // allowlist).
+      // Filter 2a: DM addressed to someone else (or non-DM with explicit
+      // recipient that isn't us). The server's /bus/unread filter already
+      // drops mis-addressed events before we see them, but we double-check
+      // here because:
+      //   * an older Beacon server that hasn't been deployed yet still
+      //     fans out every dm event to all subscribers
+      //   * a third-party sender posting raw JSON to /bus could omit the
+      //     stamp; only the receiver knows its own SESSION_ID
       else if (intendedRecipient && intendedRecipient !== SESSION_ID) {
         log(`drop (not addressed to us): id=${evt.event_id} recipient=${intendedRecipient}`)
+      }
+      // Filter 2b: DM channel without recipient stamp. e-1209 made dm a
+      // 1:1-unicast-only channel; an unaddressed dm event is treated as
+      // malformed-drop here instead of the legacy broadcast pass-through.
+      //
+      // Rules (must stay in lockstep with server/app.py:_bus_event_addressed_to):
+      //   * dm channel + recipient empty       → drop (was: pass as broadcast)
+      //   * dm channel + recipient != self     → drop (Filter 2a)
+      //   * dm channel + recipient === self    → pass
+      //   * non-dm + recipient empty           → pass (broadcast)
+      //   * non-dm + recipient !== self        → drop (Filter 2a)
+      //   * non-dm + recipient === self        → pass
+      else if (isDmChannel && !intendedRecipient) {
+        log(`drop (dm without recipient_session_id, e-1209): id=${evt.event_id} from=${sender}`)
       }
       // Filter 3: channel allowlist.
       else if (!ALLOWED_CHANNELS.includes(ch)) {
