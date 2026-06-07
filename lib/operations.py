@@ -397,6 +397,162 @@ def _apply_cloud_v2(project_id: str, op: Op) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Cloud-mode whole-document replace for v2 (subcollection-aware)
+# ---------------------------------------------------------------------------
+
+def _replace_cloud_v2(project_id: str, new_data: dict) -> None:
+    """Whole-document replace on a v2 (subcollection) project.
+
+    Same semantics as the v1 branch of replace_project — the caller has a
+    full project dict and wants the server-side state to match it — but the
+    storage layout is v2: meta lives in the project doc, milestones live as
+    independent subcollection docs. So we decompose new_data into:
+
+      - meta: everything except milestones[]  →  projects/{id}        (set)
+      - per-MS: each milestones[] element     →  projects/{id}/milestones/{ms_id}  (set)
+
+    Milestones not present in new_data are deleted from the subcollection
+    (whole-replace semantics: the caller's view of state wins).
+
+    This exists so that legacy save_project / cloud push paths keep working
+    after a v1→v2 migration without rewriting the 35+ CLI sites that still
+    use whole-document PUT.
+    """
+    import hashlib
+    import firestore_client as db  # type: ignore[import-not-found]
+    from google.cloud import firestore  # type: ignore[import-not-found]
+
+    client = db.get_db()
+    doc_ref = client.collection(db.COLLECTION).document(project_id)
+    ms_col = doc_ref.collection("milestones")
+
+    @firestore.transactional
+    def _txn(transaction):
+        # Read existing MS ids so we can compute deletions.
+        # Firestore requires all reads before any writes in a transaction.
+        existing_snaps = list(ms_col.stream(transaction=transaction))
+        existing_ids = {s.id for s in existing_snaps}
+
+        # Decompose new_data into meta + per-MS subdocs.
+        new_meta = {k: v for k, v in new_data.items() if k != "milestones"}
+        new_meta["schema_version"] = SCHEMA_V2_BETA
+
+        new_milestones = new_data.get("milestones", []) or []
+        new_ids: set[str] = set()
+        for ms in new_milestones:
+            ms_id = ms.get("id", "")
+            if not ms_id:
+                continue
+            new_ids.add(ms_id)
+
+        # Write meta (whole replace of the project doc — much smaller now
+        # since milestones[] is no longer inside).
+        transaction.set(doc_ref, new_meta)
+
+        # Upsert each milestone subdoc.
+        for ms in new_milestones:
+            ms_id = ms.get("id", "")
+            if not ms_id:
+                continue
+            transaction.set(ms_col.document(ms_id), ms)
+
+        # Delete milestones that the caller no longer has.
+        for ms_id in existing_ids - new_ids:
+            transaction.delete(ms_col.document(ms_id))
+
+    _txn(client.transaction())
+
+
+# ---------------------------------------------------------------------------
+# v1 → v2 migration (one-time per project)
+# ---------------------------------------------------------------------------
+
+def migrate_v1_to_v2(project_id: str) -> dict:
+    """Convert a v1 (whole-doc) project to v2 (subcollection) layout in place.
+
+    Reads the current v1 project doc and atomically:
+      1. Writes each milestones[] element as its own doc under
+         projects/{id}/milestones/{ms_id}.
+      2. Trims the project doc to meta-only (removes milestones[]) and
+         stamps schema_version=2.
+
+    The migration write is a *shrink* of the project doc (from ~1.06 MiB
+    down to ~100 KiB for the existing beacon-b95643 project), which is
+    exactly what unblocks projects that have hit the Firestore 1 MiB cap:
+    the write that gets the project below the cap is the migration itself.
+
+    Idempotent: if the project is already v2, returns {"status": "already_v2"}
+    and does nothing.
+
+    Returns a dict with status + milestone_count for the caller (typically
+    the HTTP endpoint).
+
+    Raises:
+      LookupError       — project doesn't exist
+      RuntimeError      — backend is not cloud (migration only makes sense
+                          for Firestore-backed projects)
+    """
+    backend = _detect_backend()
+    if backend != "cloud":
+        raise RuntimeError(
+            f"migrate_v1_to_v2 requires cloud backend, got '{backend}'. "
+            "Local (file-backed) projects don't have the 1 MiB cap problem."
+        )
+
+    import firestore_client as db  # type: ignore[import-not-found]
+    from google.cloud import firestore  # type: ignore[import-not-found]
+
+    client = db.get_db()
+    doc_ref = client.collection(db.COLLECTION).document(project_id)
+    ms_col = doc_ref.collection("milestones")
+
+    result_holder: dict[str, Any] = {}
+
+    @firestore.transactional
+    def _txn(transaction):
+        snap = doc_ref.get(transaction=transaction)
+        if not snap.exists:
+            result_holder["error"] = "not_found"
+            return
+        data = snap.to_dict() or {}
+
+        if data.get("schema_version") == SCHEMA_V2_BETA:
+            result_holder["status"] = "already_v2"
+            result_holder["milestone_count"] = len(data.get("milestones", []) or [])
+            return
+
+        milestones = data.get("milestones", []) or []
+
+        # Decompose: meta (no milestones[]) + per-MS subdocs.
+        new_meta = {k: v for k, v in data.items() if k != "milestones"}
+        new_meta["schema_version"] = SCHEMA_V2_BETA
+
+        # Set trimmed meta (this is the shrink write that escapes 1 MiB).
+        transaction.set(doc_ref, new_meta)
+
+        # Write each MS as an independent subcollection doc.
+        for ms in milestones:
+            ms_id = ms.get("id", "")
+            if not ms_id:
+                # Skip malformed MS without an id; surface count to caller.
+                result_holder.setdefault("skipped_no_id", 0)
+                result_holder["skipped_no_id"] += 1
+                continue
+            transaction.set(ms_col.document(ms_id), ms)
+
+        result_holder["status"] = "migrated"
+        result_holder["milestone_count"] = len(milestones)
+        result_holder["meta_keys"] = sorted(new_meta.keys())
+
+    _txn(client.transaction())
+
+    if result_holder.get("error") == "not_found":
+        raise LookupError(f"Project '{project_id}' not found")
+
+    return {k: v for k, v in result_holder.items() if k != "error"}
+
+
+# ---------------------------------------------------------------------------
 # Mock-mode atomic apply (in-process lock, for unit tests with patched db)
 # ---------------------------------------------------------------------------
 
@@ -607,20 +763,34 @@ def replace_project(
         with _get_mock_lock():
             db.save_project(project_id, new_data)
     else:
+        # Cloud: dispatch by schema version. v2 projects store milestones in
+        # a subcollection, so a naive whole-doc set would (a) put the giant
+        # milestones[] back into the meta doc, re-creating the 1 MiB cap
+        # problem we just solved, and (b) leave stale subcollection docs.
+        # _replace_cloud_v2 handles the decomposition transparently.
         import firestore_client as db  # type: ignore[import-not-found]
         from google.cloud import firestore  # type: ignore[import-not-found]
 
         client = db.get_db()
         doc_ref = client.collection(db.COLLECTION).document(project_id)
 
-        @firestore.transactional
-        def _txn(transaction):
-            # We still read so we have a transactional read-write pair;
-            # whether the doc exists is informational only for replace.
-            doc_ref.get(transaction=transaction)
-            transaction.set(doc_ref, new_data)
+        # Peek at schema version (single doc read, cheap) before deciding path.
+        existing_meta = db.get_project(project_id)
+        existing_schema = (
+            get_schema_version(existing_meta) if existing_meta else SCHEMA_V1_LEGACY
+        )
 
-        _txn(client.transaction())
+        if existing_schema == SCHEMA_V2_BETA:
+            _replace_cloud_v2(project_id, new_data)
+        else:
+            @firestore.transactional
+            def _txn(transaction):
+                # We still read so we have a transactional read-write pair;
+                # whether the doc exists is informational only for replace.
+                doc_ref.get(transaction=transaction)
+                transaction.set(doc_ref, new_data)
+
+            _txn(client.transaction())
 
     _append_changelog(
         project_id, "project.replace", actor,

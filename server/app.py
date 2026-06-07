@@ -291,8 +291,13 @@ def _get_role(data: dict, user: dict) -> str:
 
 
 def _load(project_id: str, user: dict | None = None) -> dict:
-    data = db.get_project(project_id)
-    if data is None:
+    # v2 (subcollection) projects need their milestones hydrated from the
+    # subcollection; load_project_consistent transparently handles both v1
+    # and v2 so callers get a unified dict shape either way. Falling back
+    # to db.get_project here would silently drop milestones[] on v2 docs.
+    try:
+        data = operations.load_project_consistent(project_id)
+    except LookupError:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
     if user and _auth_enabled:
         role = _get_role(data, user)
@@ -606,6 +611,54 @@ def unarchive_project(project_id: str, user: dict = Depends(require_auth)):
     return operations.apply_operation(
         project_id, op, op_name="project.unarchive", actor=user.get("sub", ""),
     )
+
+
+@app.post("/api/projects/{project_id}/migrate-to-v2")
+def migrate_project_to_v2(project_id: str,
+                          user: dict = Depends(require_auth)):
+    """One-time migration from v1 (whole-doc) to v2 (subcollection) layout.
+
+    Why this exists: an unbounded `milestones[]` array on a single Firestore
+    document hits the 1 MiB document size cap. Once over the cap, every
+    growth-direction write (task add / log / new milestone) returns 500
+    because the resulting doc would exceed 1 MiB. The escape hatch is the
+    migration write itself, which moves milestones out to a subcollection
+    and shrinks the project doc to ~100 KiB — well under the cap.
+
+    Restricted to project owner (it is destructive in the sense that it
+    rewrites the storage layout; owner == only person who should approve).
+
+    Idempotent: a project already at schema_version=2 returns
+    {"status": "already_v2"} without doing anything.
+
+    After migration:
+      - Reads via `operations.load_project_consistent` hydrate the project
+        from meta + subcollection (transparent to callers).
+      - Writes via `apply_operation` go through `_apply_cloud_v2` which
+        only touches the affected MS subdoc.
+      - Writes via `replace_project` (legacy whole-doc PUT) detect v2 and
+        dispatch to `_replace_cloud_v2` which decomposes into subdocs.
+    """
+    # Owner check before kicking off the transaction. Reading the meta doc
+    # is cheap (no milestones loaded) and works on both v1 and v2.
+    meta = db.get_project(project_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    if _get_role(meta, user) != "owner":
+        raise HTTPException(
+            status_code=403,
+            detail="Only the project owner can migrate schema",
+        )
+
+    try:
+        result = operations.migrate_v1_to_v2(project_id)
+    except LookupError:
+        # Race: project was deleted between the owner check and the migration.
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return result
 
 
 @app.post("/api/projects/{project_id}")
@@ -1299,7 +1352,14 @@ def admin_trash_sweep(days: int = 30,
         # in apply mode we mutate the project doc transactionally so
         # concurrent writes can't tear the array.
         if dry_run:
-            data_now = db.get_project(pid) or {}
+            # Use load_project_consistent so v2 (subcollection) projects
+            # report accurate counts — db.get_project alone would return
+            # the meta doc with no milestones[] and dry-run would always
+            # report 0 sweepable items.
+            try:
+                data_now = operations.load_project_consistent(pid)
+            except LookupError:
+                data_now = {}
             per_proj_result = core.sweep_trashed_in_project(
                 data_now, days=days, apply=False,
             )
@@ -1906,8 +1966,13 @@ async def ws_project(websocket: WebSocket, project_id: str):
         _ws_connections[project_id] = set()
     _ws_connections[project_id].add(websocket)
 
-    # Send initial enriched data
-    raw = db.get_project(project_id)
+    # Send initial enriched data. load_project_consistent hydrates v2
+    # projects from the subcollection so the client receives the full
+    # milestones[] regardless of schema layout.
+    try:
+        raw = operations.load_project_consistent(project_id)
+    except LookupError:
+        raw = None
     if raw:
         await websocket.send_json({"type": "project", "data": _enrich_project(raw)})
 
