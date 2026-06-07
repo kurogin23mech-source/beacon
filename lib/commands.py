@@ -3763,6 +3763,62 @@ def cmd_trigger_fire():
     with open(trigger_path, "w", encoding="utf-8") as f:
         json.dump(trigger_data, f, ensure_ascii=False)
         f.write("\n")
+    # ms-54 / e-1136: dogfood the bus by also posting the trigger as a bus
+    # event. Every cloud-connected session subscribing through the inbox hook
+    # will see it as a propose-to-ai event and the AI can decide what to do.
+    #
+    # The post is best-effort: a network failure, missing creds, or local-mode
+    # project must NOT prevent the trigger file from being written. Triggers
+    # are the existing single source of truth; the bus event is a propagation
+    # layer on top. _push_trigger_to_bus swallows every error path to stderr.
+    _push_trigger_to_bus(trigger_data)
+
+
+def _push_trigger_to_bus(trigger_data: dict) -> None:
+    """Mirror a fired trigger onto the cloud bus as a propose-to-ai event.
+
+    No-ops for local-mode projects (no cloud.json), missing credentials, or
+    any cloud failure. The user-facing behavior of `beacon trigger fire`
+    is unchanged on the failure path — bus is purely additive.
+    """
+    try:
+        config_path = _get_cloud_config_path()
+        if not os.path.exists(config_path):
+            return
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        project_id = config.get("project_id")
+        if not project_id:
+            return
+        from auth import load_credentials  # local import — heavy module
+        creds = load_credentials()
+        if creds is None:
+            return
+        from api_client import ApiClient
+        api_url = config.get("api_url", DEFAULT_API_URL)
+        client = ApiClient(api_url, _extract_token(creds))
+        # Channel "trigger" is the convention for system-fired bus events,
+        # distinct from "session-dm" used for agent-to-agent chat. Receivers
+        # can filter on it for triage UI, or treat it like any inbox event.
+        # sender_session_id is empty to mark a system-originated event so the
+        # inbox hook can render "from=system" cleanly.
+        client.post_bus_event(
+            project_id, "trigger",
+            sender_session_id="",
+            payload={
+                "trigger_name": trigger_data.get("name", ""),
+                "message": trigger_data.get("message", ""),
+                "created_at": trigger_data.get("created_at", ""),
+            },
+            delivery="propose-to-ai",
+        )
+    except Exception as exc:
+        # stderr keeps the failure visible in BEACON_HOOK_DEBUG=1 traces
+        # without polluting normal CLI output.
+        sys.stderr.write(
+            f"[beacon] trigger bus mirror failed silently: "
+            f"{type(exc).__name__}: {exc}\n"
+        )
 
 
 def cmd_trigger_check():
