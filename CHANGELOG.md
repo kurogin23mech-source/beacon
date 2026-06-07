@@ -2,6 +2,14 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.18.0] - 2026-06-07
+
+- Merge pull request #74 from kurogin23mech-source/ms-54-trigger-bus-dogfood
+- feat(ms-54): beacon channel install + beacon session id + session-start heartbeat (e-1150, e-1152)
+- feat(ms-54): beacon-bus Claude Code Channel MCP server (e-1152)
+- docs(release): update README/CHANGELOG for v0.17.0
+- chore(release): bump formula to 0.17.0
+
 ## [v0.17.0] - 2026-06-07
 
 - Merge pull request #73 from kurogin23mech-source/ms-54-trigger-bus-dogfood
