@@ -583,6 +583,128 @@ def clear_notes(project_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Bus events (subcollection: projects/{project_id}/bus_events/{auto-id})
+# ms-54 / e-996: append-only event log for the agent-to-agent / session-to-
+# session real-time bus. Read API is polling-friendly via ``since`` cursor;
+# WS push is added on top in e-997 (separate task). Schema is intentionally
+# minimal at this slice:
+#   - channel: routing tag (e.g. "session-dm", "operation-due")
+#   - sender_session_id: who emitted (typically from ms-57 session registry)
+#   - payload: arbitrary JSON dict, event-specific
+#   - created_at: server-assigned ISO8601 UTC (cursor key)
+# The recipient/delivery-target fields land in e-1135 (delivery policy task).
+# ---------------------------------------------------------------------------
+
+BUS_EVENTS_SUBCOLLECTION = "bus_events"
+
+
+def append_bus_event(project_id: str, data: dict) -> str:
+    """Append a bus event (auto-id). Returns the generated event_id.
+
+    The Firestore auto-id is lexically sortable but for chronological
+    polling we order by ``created_at`` in :func:`list_bus_events` so the
+    sender can pass any ISO8601 timestamp it last saw as the ``since``
+    cursor without needing to track Firestore's id format.
+    """
+    col = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(BUS_EVENTS_SUBCOLLECTION)
+    )
+    ref = col.add(data)
+    return ref[1].id
+
+
+# ---------------------------------------------------------------------------
+# Bus cursors (subcollection: projects/{project_id}/bus_cursors/{recipient_id})
+# ms-54 / e-998: per-recipient read cursor. Together with the append-only event
+# log this gives "受信者ごとに既読位置が保持され、重複配信が起きない" — see ms-39 lost
+# update教訓: cursors are advance-only so a stale client can never rewind another
+# client's progress. recipient_id is opaque (session_id is the typical value).
+# ---------------------------------------------------------------------------
+
+BUS_CURSORS_SUBCOLLECTION = "bus_cursors"
+
+
+def get_bus_cursor(project_id: str, recipient_id: str) -> dict:
+    """Return the cursor doc for ``recipient_id`` or an empty dict when unset.
+
+    Schema (when set): ``{"last_seen_at": "<ISO8601>", "updated_at": "<ISO8601>"}``.
+    Empty dict means "never seen anything" — callers should treat that as
+    cursor=epoch (i.e. return all events).
+    """
+    doc = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(BUS_CURSORS_SUBCOLLECTION)
+        .document(recipient_id)
+        .get()
+    )
+    return doc.to_dict() or {} if doc.exists else {}
+
+
+def advance_bus_cursor(project_id: str, recipient_id: str,
+                       last_seen_at: str) -> dict:
+    """Forward-only cursor advance. Returns the resulting cursor.
+
+    If the request's ``last_seen_at`` is *not* strictly greater than the
+    existing cursor, the existing one is preserved (no rewind, no overwrite).
+    This is the structural defense against "stale client commits older
+    cursor and replays events for live clients" — same lost-update class as
+    ms-39's project.json overwrite bug.
+    """
+    import datetime
+    ref = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(BUS_CURSORS_SUBCOLLECTION)
+        .document(recipient_id)
+    )
+    snap = ref.get()
+    existing = snap.to_dict() if snap.exists else None
+    existing_seen = (existing or {}).get("last_seen_at", "")
+    if existing_seen and last_seen_at <= existing_seen:
+        # Idempotent no-op; return what's already stored.
+        return dict(existing or {})
+    now = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    data = {"last_seen_at": last_seen_at, "updated_at": now}
+    ref.set(data, merge=True)
+    return data
+
+
+def list_bus_events(project_id: str, since: str = "", channel: str = "",
+                    limit: int = 100) -> list[dict]:
+    """List bus events ordered by created_at.
+
+    ``since``: ISO8601 timestamp; only events with ``created_at > since`` are
+    returned. Empty string returns from the beginning.
+    ``channel``: optional equality filter for routing.
+    ``limit``: cap to keep wire payload bounded. Default 100 — callers that
+    fall behind will iterate by advancing ``since`` to the last seen
+    ``created_at`` until they catch up.
+    """
+    q = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(BUS_EVENTS_SUBCOLLECTION)
+        .order_by("created_at")
+    )
+    if since:
+        q = q.where("created_at", ">", since)
+    if channel:
+        q = q.where("channel", "==", channel)
+    if limit:
+        q = q.limit(limit)
+    return [{"event_id": doc.id, **doc.to_dict()} for doc in q.stream()]
+
+
+# ---------------------------------------------------------------------------
 # Session registry (subcollection: projects/{project_id}/sessions/{session_id})
 # ms-57 / e-1063: cloud-visible per-session state, used by Web UI for "who is
 # active right now" and by session-start for cross-machine rescue lookups.

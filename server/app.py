@@ -401,6 +401,31 @@ class SessionUpsert(BaseModel):
     harness: Optional[str] = None
 
 
+class BusEventCreate(BaseModel):
+    """Body for POST /api/projects/{project_id}/bus.
+
+    ms-54 / e-996 minimal schema. The recipient_session_id / delivery /
+    subscribe filter fields land in later tasks (e-1134 directory query,
+    e-1135 delivery policy, §9 subscribe filter); at this slice the bus
+    is pure transport — anyone can post, anyone can read with the channel
+    filter.
+    """
+    channel: str
+    sender_session_id: str = ""
+    payload: dict = {}
+
+
+class BusCursorAdvance(BaseModel):
+    """Body for POST /api/projects/{project_id}/bus/cursors/{recipient_id}.
+
+    ms-54 / e-998. Consumers commit ``last_seen_at`` after successfully
+    processing a batch. The server enforces forward-only semantics, so a
+    stale client that sends an older value gets a silent no-op rather than
+    rewinding the cursor for everyone else.
+    """
+    last_seen_at: str
+
+
 class SessionLogUpsert(BaseModel):
     """Body for PUT /api/projects/{project_id}/session_logs/{session_id}.
 
@@ -1470,6 +1495,115 @@ def list_session_logs(
     return db.list_session_logs(project_id, limit=limit or None)
 
 
+# ---------------------------------------------------------------------------
+# Bus events (ms-54 / e-996)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/projects/{project_id}/bus")
+async def post_bus_event(
+    project_id: str,
+    body: BusEventCreate,
+    user: dict = Depends(require_auth),
+):
+    """Append a bus event. Server stamps ``created_at`` so all clients agree
+    on the wall-clock ordering (clients' local clocks would diverge across
+    machines, defeating the cursor semantics).
+
+    Async handler so we can `await` the WS fan-out on the same event loop
+    instead of bouncing through `run_coroutine_threadsafe` (e-997). The
+    Firestore call is sync-blocking but bus posts are low-frequency, so the
+    event-loop stall is acceptable at this slice; promote to `asyncio.to_thread`
+    if/when traffic justifies it.
+    """
+    import datetime
+    _load(project_id, user)
+    data = {
+        "channel": body.channel,
+        "sender_session_id": body.sender_session_id,
+        "payload": body.payload,
+        "created_at": datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        ),
+    }
+    event_id = db.append_bus_event(project_id, data)
+    event = {"event_id": event_id, **data}
+    # e-997: push to all WS subscribers of this project. Multi-replica delivery
+    # (events posted on another Cloud Run instance) is out of scope here —
+    # Firestore on_snapshot or a pub/sub layer would solve it but adds cost;
+    # the single-replica path covers UC1/UC2 dogfood.
+    if _ws_connections.get(project_id):
+        await _broadcast_bus_event(project_id, event)
+    return event
+
+
+@app.get("/api/projects/{project_id}/bus")
+def list_bus_events(
+    project_id: str,
+    since: str = "",
+    channel: str = "",
+    limit: int = 100,
+    user: dict = Depends(require_auth),
+):
+    """List bus events ordered by created_at. Use ``since=<last_seen_iso>``
+    for polling-style catch-up; ``channel`` for server-side routing filter."""
+    _load(project_id, user)
+    return db.list_bus_events(project_id, since=since, channel=channel, limit=limit)
+
+
+@app.get("/api/projects/{project_id}/bus/unread")
+def list_unread_bus_events(
+    project_id: str,
+    recipient_id: str,
+    channel: str = "",
+    limit: int = 100,
+    user: dict = Depends(require_auth),
+):
+    """List events the recipient has not yet acknowledged via their cursor.
+
+    Identical to ``GET /bus`` except ``since`` is resolved server-side from
+    ``bus_cursors/{recipient_id}``. The endpoint **does not advance** the
+    cursor — callers POST to ``/bus/cursors/{recipient_id}`` after processing.
+    Splitting read and acknowledge lets crashing consumers get at-least-once
+    delivery (events stay readable until acknowledged) while structurally
+    preventing duplicate delivery once they acknowledge.
+    """
+    _load(project_id, user)
+    cursor = db.get_bus_cursor(project_id, recipient_id)
+    since = cursor.get("last_seen_at", "")
+    return db.list_bus_events(
+        project_id, since=since, channel=channel, limit=limit,
+    )
+
+
+@app.post("/api/projects/{project_id}/bus/cursors/{recipient_id}")
+def advance_bus_cursor(
+    project_id: str,
+    recipient_id: str,
+    body: BusCursorAdvance,
+    user: dict = Depends(require_auth),
+):
+    """Forward-only acknowledge of bus events for ``recipient_id``.
+
+    The server discards advance requests that would rewind the cursor (see
+    firestore_client.advance_bus_cursor for the structural reasoning). The
+    response is the cursor state *after* the call, so the client can verify
+    its commit landed.
+    """
+    _load(project_id, user)
+    return db.advance_bus_cursor(project_id, recipient_id, body.last_seen_at)
+
+
+@app.get("/api/projects/{project_id}/bus/cursors/{recipient_id}")
+def get_bus_cursor(
+    project_id: str,
+    recipient_id: str,
+    user: dict = Depends(require_auth),
+):
+    """Return the current cursor for ``recipient_id`` ({} if unset)."""
+    _load(project_id, user)
+    return db.get_bus_cursor(project_id, recipient_id)
+
+
 @app.get("/api/projects/{project_id}/retros")
 def list_retros(project_id: str, user: dict = Depends(require_auth)):
     """List all retrospective documents for a project."""
@@ -1594,6 +1728,25 @@ async def _broadcast(project_id: str, data: dict):
         return
     enriched = _enrich_project(data)
     msg = {"type": "project", "data": enriched}
+    for ws in clients:
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            _ws_connections.get(project_id, set()).discard(ws)
+
+
+async def _broadcast_bus_event(project_id: str, event: dict):
+    """Push a single bus event to all WS clients subscribed to this project.
+
+    ms-54 / e-997: per-channel/per-recipient subscribe filtering lives client-
+    side at this slice — every connected client sees every event for the
+    project and decides what to do with it. Server-side filtering arrives
+    with e-1134 (directory query) + §9 subscribe filter.
+    """
+    clients = _ws_connections.get(project_id, set()).copy()
+    if not clients:
+        return
+    msg = {"type": "bus_event", "data": event}
     for ws in clients:
         try:
             await ws.send_json(msg)

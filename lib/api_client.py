@@ -200,3 +200,46 @@ class ApiClient:
     def list_session_logs(self, project_id: str, limit: int = 0) -> list:
         suffix = f"?limit={limit}" if limit else ""
         return self.get(f"/api/projects/{project_id}/session_logs{suffix}")
+
+    # Bus events (ms-54 / e-996)
+
+    def post_bus_event(self, project_id: str, channel: str, *,
+                       sender_session_id: str = "", payload: dict | None = None) -> dict:
+        return self.post(f"/api/projects/{project_id}/bus", {
+            "channel": channel,
+            "sender_session_id": sender_session_id,
+            "payload": payload or {},
+        })
+
+    def list_bus_events(self, project_id: str, *, since: str = "",
+                        channel: str = "", limit: int = 100) -> list:
+        qs = []
+        if since:
+            qs.append(f"since={urllib.parse.quote(since)}")
+        if channel:
+            qs.append(f"channel={urllib.parse.quote(channel)}")
+        if limit:
+            qs.append(f"limit={limit}")
+        suffix = "?" + "&".join(qs) if qs else ""
+        return self.get(f"/api/projects/{project_id}/bus{suffix}")
+
+    # Bus cursors (ms-54 / e-998) — per-recipient at-least-once delivery.
+
+    def list_unread_bus_events(self, project_id: str, recipient_id: str, *,
+                               channel: str = "", limit: int = 100) -> list:
+        qs = [f"recipient_id={urllib.parse.quote(recipient_id)}"]
+        if channel:
+            qs.append(f"channel={urllib.parse.quote(channel)}")
+        if limit:
+            qs.append(f"limit={limit}")
+        return self.get(f"/api/projects/{project_id}/bus/unread?" + "&".join(qs))
+
+    def advance_bus_cursor(self, project_id: str, recipient_id: str,
+                           last_seen_at: str) -> dict:
+        return self.post(
+            f"/api/projects/{project_id}/bus/cursors/{recipient_id}",
+            {"last_seen_at": last_seen_at},
+        )
+
+    def get_bus_cursor(self, project_id: str, recipient_id: str) -> dict:
+        return self.get(f"/api/projects/{project_id}/bus/cursors/{recipient_id}")
