@@ -875,7 +875,14 @@ cmd_save() {
 
 cmd_log() {
     ensure_project
-    if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+    # e-1227 (ms-17): resolve git operations from the *original* invocation
+    # cwd, not the post-relocate cwd. When invoked from a worktree where
+    # `.beacon/` lives in the parent repo, the top-level relocate already
+    # cd'd us into the parent. Reading HEAD without `-C` would then capture
+    # the parent's HEAD instead of the worktree's, silently attaching the
+    # wrong commit hash to every beacon entry.
+    local _git_cwd="${BEACON_INVOCATION_CWD:-$PWD}"
+    if ! git -C "$_git_cwd" rev-parse --is-inside-work-tree &>/dev/null; then
         echo "Error: Not a git repository"
         exit 1
     fi
@@ -907,7 +914,7 @@ cmd_log() {
 
     # Block if there are uncommitted changes (staged or unstaged)
     # --prepare is read-only, so skip this check
-    if [ "$mode" != "prepare" ] && ! git diff --quiet HEAD 2>/dev/null; then
+    if [ "$mode" != "prepare" ] && ! git -C "$_git_cwd" diff --quiet HEAD 2>/dev/null; then
         echo "Error: uncommitted changes detected."
         echo "Commit your changes first, then run beacon log."
         echo "  (To record a note without a commit, use: beacon task add \"description\")"
@@ -920,9 +927,9 @@ cmd_log() {
     else
         target_ref="HEAD"
     fi
-    hash=$(git rev-parse --short "$target_ref")
-    message=$(git log -1 --pretty=%s "$target_ref")
-    date_str=$(git log -1 --pretty=%ci "$target_ref" | cut -d' ' -f1)
+    hash=$(git -C "$_git_cwd" rev-parse --short "$target_ref")
+    message=$(git -C "$_git_cwd" log -1 --pretty=%s "$target_ref")
+    date_str=$(git -C "$_git_cwd" log -1 --pretty=%ci "$target_ref" | cut -d' ' -f1)
 
     # Skip beacon-only commits to prevent infinite loop:
     # beacon log → project.json change → commit → hook → beacon log → ...
@@ -930,7 +937,7 @@ cmd_log() {
     # by Skill, so it should always proceed.
     if [ "$mode" != "finalize" ]; then
         local changed_files
-        changed_files=$(git diff-tree --no-commit-id --name-only -r "$target_ref" 2>/dev/null)
+        changed_files=$(git -C "$_git_cwd" diff-tree --no-commit-id --name-only -r "$target_ref" 2>/dev/null)
         if echo "$changed_files" | grep -qE '^\.(beacon)/'; then
             local non_beacon
             non_beacon=$(echo "$changed_files" | grep -vE '^\.(beacon)/' || true)
@@ -1849,6 +1856,14 @@ find_beacon_root() {
     done
     return 1
 }
+
+# e-1227 (ms-17): stash the cwd at invocation time *before* the relocate
+# below changes it. Handlers that need git HEAD from the user's actual
+# location (notably `cmd_log`, which runs inside parallel sub-agent
+# worktrees where .beacon/ lives in the parent repo) consult
+# $BEACON_INVOCATION_CWD via `git -C` so they don't accidentally capture
+# the parent repo's HEAD after the relocate below.
+export BEACON_INVOCATION_CWD="$PWD"
 
 # Relocate to the project root before dispatch. `setup`/`init` operate on the
 # current directory by design, so they are exempt.
