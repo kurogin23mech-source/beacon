@@ -321,3 +321,36 @@ def fallback_directory_cmd_if_no_healthy(
         healthy=False,
         project_id=project_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Local-mode pre-flight check (ms-54 e-1330)
+# ---------------------------------------------------------------------------
+
+
+def check_local_mode_error(cwd_has_cloud_json: bool) -> Optional[str]:
+    """Return a friendly error string when cwd is a local-mode project.
+
+    Local-mode projects (``.beacon/cloud.json`` absent) cannot use the bus
+    at all — the bridge fail-safe-aborts because there is no project_id
+    to write events to. Rather than letting /beacon-dm-send proceed and
+    fail at send time, the Skill should detect this up front and explain
+    the prerequisite + how to switch to cloud mode.
+
+    Args:
+        cwd_has_cloud_json: True iff ``cwd/.beacon/cloud.json`` exists.
+
+    Returns:
+        None when DM is possible (cloud mode), else a multi-line
+        explanation suitable for the Skill to print to the user.
+    """
+    if cwd_has_cloud_json:
+        return None
+    return (
+        "このプロジェクトは local mode (cloud sync 無し) なので、bus DM は使えません。\n"
+        "  理由: bus は cloud project_id を必要とします (DM は cloud 経由で配信されるため)\n"
+        "  cloud mode に切り替えるには:\n"
+        "    1. beacon auth login            # beacon-ai.dev で認証\n"
+        "    2. beacon cloud setup           # cloud project を作成 / リンク\n"
+        "  local CLI / hook 等の操作は cloud mode 切替後も従来通り使えます。"
+    )

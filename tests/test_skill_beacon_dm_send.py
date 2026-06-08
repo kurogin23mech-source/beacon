@@ -402,3 +402,49 @@ def test_quote_argv_handles_spaces_and_quotes():
     import shlex
     re_split = shlex.split(quoted)
     assert re_split == argv
+
+
+# ---------------------------------------------------------------------------
+# Local-mode pre-flight check (ms-54 e-1330)
+# ---------------------------------------------------------------------------
+
+
+def test_check_local_mode_error_returns_none_when_cloud_mode():
+    """cloud-mode cwd (cloud.json present) → no error, DM proceeds."""
+    assert dm_send.check_local_mode_error(cwd_has_cloud_json=True) is None
+
+
+def test_check_local_mode_error_returns_friendly_text_when_local():
+    """local-mode cwd → multi-line friendly explanation + how to switch."""
+    msg = dm_send.check_local_mode_error(cwd_has_cloud_json=False)
+    assert msg is not None
+    # Mentions the prerequisite + the two recovery commands
+    assert "cloud" in msg.lower() or "クラウド" in msg
+    assert "beacon auth login" in msg
+    assert "beacon cloud setup" in msg
+    # Doesn't recommend things that would mislead a user
+    assert "rm" not in msg
+
+
+# ---------------------------------------------------------------------------
+# Cross-project discovery (ms-54 e-1330 / dm_discover)
+# ---------------------------------------------------------------------------
+
+
+def test_dm_discover_module_importable():
+    """The discover helper must import cleanly under the same package."""
+    from beacon_cli.skills_helpers import dm_discover
+    assert hasattr(dm_discover, "discover_and_aggregate")
+    assert hasattr(dm_discover, "discover_local_project_ids")
+    assert hasattr(dm_discover, "list_bus_bridge_processes")
+
+
+def test_dm_discover_aggregate_signature():
+    """discover_and_aggregate must accept healthy + since_min kwargs."""
+    from beacon_cli.skills_helpers import dm_discover
+    import inspect
+
+    sig = inspect.signature(dm_discover.discover_and_aggregate)
+    params = sig.parameters
+    assert "healthy" in params
+    assert "since_min" in params

@@ -46,7 +46,22 @@ Bash ツールで実行:
 ```bash
 test -f .beacon/project.json && test -f .beacon/cloud.json && echo "OK" || echo "NO_BEACON_OR_CLOUD"
 ```
-- `NO_BEACON_OR_CLOUD` の場合、「Beacon プロジェクトのルートで実行してください (cloud mode 必須)」と返して終了。
+
+- ファイル両方とも存在 (`OK`) → 続行
+- どちらか欠落 (`NO_BEACON_OR_CLOUD`) → 以下の親切エラーを返して終了:
+
+  - `.beacon/project.json` が無い → 「Beacon プロジェクトのルートで実行してください」
+  - `.beacon/cloud.json` が無い (= local mode) → 以下を表示:
+    ```
+    このプロジェクトは local mode (cloud sync 無し) なので、bus DM は使えません。
+      理由: bus は cloud project_id を必要とします (DM は cloud 経由で配信されるため)
+      cloud mode に切り替えるには:
+        1. beacon auth login            # beacon-ai.dev で認証
+        2. beacon cloud setup           # cloud project を作成 / リンク
+      local CLI / hook 等の操作は cloud mode 切替後も従来通り使えます。
+    ```
+
+  プログラム的に検出する場合は `beacon_cli.skills_helpers.dm_send.check_local_mode_error(cwd_has_cloud_json)` が同じテキストを返すので、これを使ってもよい。
 
 自分の session_id を控えておく (cross-project 跨ぎ判定や、後で `--verify` するときに使う):
 ```bash
@@ -58,14 +73,26 @@ beacon session id
 python3 -c "import json,sys; print(json.load(open('.beacon/cloud.json')).get('project_id',''))"
 ```
 
-## Step 1: 受信者候補の取得 (live + healthy filter)
+## Step 1: 受信者候補の取得 (cross-project discovery + live + healthy filter)
 
-Bash ツールで実行 (Option C 統合: `--healthy` で「ポーリングで生存確認済み」のみに絞る):
+**v0.25.0 以降**: 同マシン上で動いている全 bridge を ps + lsof で列挙、各 cwd の `.beacon/cloud.json` から project_id を読み、全 project の bus directory を集約する。これで test-beacon のような cwd 以外のプロジェクトに居る session も候補に出る。
+
+Bash ツールで実行:
+```bash
+python3 -m beacon_cli.skills_helpers.dm_discover
+```
+
+JSON 配列が返る。各 session row は `project_id` field annotated 付き。空 (`[]`) の場合は同マシン上に cloud-mode の bridge が動いてないことを意味する → 後段の fallback に進む。
+
+### Step 1a: fallback (discover module 不在 or 0 件)
+
+`python3 -m beacon_cli.skills_helpers.dm_discover` が ModuleNotFoundError 等で失敗、または 0 件で返った場合は、cwd の project だけ query する従来動作にフォールバック:
+
 ```bash
 beacon bus directory --live --healthy --since-min 5 --json
 ```
 
-**`--healthy` がサーバ側で未対応の場合** (CLI が `unknown option` で exit 2、または stderr に "unrecognized" を返す) は、parallel agent の Option C PR が未マージなので、フラグなしで再試行:
+`--healthy` 未対応 CLI の場合 (stderr に "unrecognized" 等):
 ```bash
 beacon bus directory --live --since-min 5 --json
 ```
@@ -74,15 +101,8 @@ beacon bus directory --live --since-min 5 --json
 
 ### Step 1.5: 0 件のときの fallback
 
-`--healthy` で返ってきた sessions 配列が **空** の場合:
-
-```bash
-beacon bus directory --live --since-min 5 --json
-```
-で再取得し、ユーザーに明示警告:
-「healthy filter で生存確認できた受信先が 0 件です。以下は live filter のみで listing。送信しても受け取られない可能性があります」
-
-両方とも空なら「現在 listening 中の受信先がありません。相手側で `beacon bus listen` または MCP 接続が必要です」と伝えて終了。
+最終的に sessions 配列が **空** の場合、ユーザーに明示警告:
+「現在 listening 中の受信先がありません。相手側で `beacon bus listen` または MCP 接続が必要です」と伝えて終了。
 
 ## Step 2: メンバー情報の取得 (best-effort cross-reference)
 

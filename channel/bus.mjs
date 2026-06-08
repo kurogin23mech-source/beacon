@@ -307,7 +307,24 @@ log('mcp connected via stdio')
 // --- Polling loop ------------------------------------------------------------
 
 if (!PROJECT_ID || !SESSION_ID) {
-  log(`FATAL: PROJECT_ID and SESSION_ID must be discoverable. Aborting poll loop.`)
+  // ms-54 e-1330: friendly explanation when the project is local-mode
+  // (no .beacon/cloud.json) and therefore cannot participate in the
+  // cloud bus. This is structurally correct fail-safe (no project_id ⇒
+  // no destination to write events to), but the cryptic message used
+  // to confuse users who didn't know the bus needed cloud-mode.
+  log(`[FATAL] Bus channel cannot start in this directory.`)
+  if (!PROJECT_ID) {
+    log(`[FATAL]   reason: project_id is not set — this is a local-mode Beacon project (no .beacon/cloud.json).`)
+    log(`[FATAL]   The bus (DM / event push) requires cloud sync. To enable:`)
+    log(`[FATAL]     1. beacon auth login            # authenticate against beacon-ai.dev`)
+    log(`[FATAL]     2. beacon cloud setup           # create / link a cloud project_id`)
+    log(`[FATAL]   Local-mode projects remain fully usable for local CLI / hooks; only the bus needs cloud.`)
+  }
+  if (!SESSION_ID) {
+    log(`[FATAL]   reason: session_id could not be resolved (.beacon/session.json missing or invalid).`)
+    log(`[FATAL]   Try: beacon session id   # this mints a session_id and writes session.json`)
+  }
+  log(`[FATAL] Aborting poll loop. Other beacon commands still work; only the bus channel is disabled.`)
 } else {
   let stopping = false
   process.on('SIGINT', () => { stopping = true; log('SIGINT received') })
