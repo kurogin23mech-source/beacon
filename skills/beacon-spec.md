@@ -42,6 +42,21 @@ Read("~/.claude/skills/beacon-spec/methodology.md")
 methodology は SPEC の意味、対話の作法、各セクションの掘り方、タスク分割の基準を定義する。
 読まずに進めると SPEC が「詳細仕様書」化して価値を失う。
 
+## 文章の書き方 (必読)
+
+SPEC 本文 + 起票する各 task の description / motivation / acceptance_criteria は、CORE doc **`entry-writing-principle`** (doc_id `F3ZkqT0pKS6JpR8dn70n`) の **3 層構造 + 横文字 3 段階 + ID 参照ルール** に従う。Beacon のターゲットには非開発者が含まれるため、開発者の癖 (横文字濫用 / 別 task ID への click-through 前提 / 主語省略) は読み手を排除する。原則の要点:
+
+1. **description は読み手目線で 1 行**: 「何が嬉しいか」をユーザー体験の言葉で。横文字最小、価値で書く
+2. **motivation は背景 2-4 文**: 現状の症状 → 放置できない理由 → どう改善されると嬉しいか
+3. **acceptance_criteria は bullet で技術詳細**: 横文字には初出時に日本語注 (`allowlist (= 許可リスト)`)、別 task ID 参照には『何の話か』1 行を添える
+
+横文字 3 段階:
+- そのまま OK: 固有名詞 (`Firestore` / `pipx` / `MCP` / `WebSocket`)
+- 初出時に日本語注: 技術概念 (`allowlist` / `opt-in` / `subcollection`)
+- 日本語化が望ましい: 一般概念 (configure → 設定 / receiver → 受信側 / audit → 監査)
+
+SPEC 自体は Step 4 で記述する時、task は Step 6 で分割する時、両方で必ず参照する。
+
 ## Step 0: 対象 MS の特定
 
 ユーザーが `/beacon-spec ms-XX` のように引数付きで呼んだ場合は `ms-XX` を採用。

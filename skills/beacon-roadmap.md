@@ -13,6 +13,14 @@ triggers:
 
 > プロジェクトビジョンから、最初の MS 1〜2 個 (minimal) または大目的達成までの MS 群 (full) を設計する。
 
+## 文章の書き方 (必読)
+
+MS の title / objective / acceptance_criteria を提案する時は、CORE doc **`entry-writing-principle`** (doc_id `F3ZkqT0pKS6JpR8dn70n`) の 3 層構造 + 横文字 3 段階 + ID 参照ルールに従う。Beacon のターゲットには非開発者が含まれるため、開発者の癖は読み手を排除する。要点:
+
+1. **title は読み手目線で 1 行**: 「何が嬉しいか」をユーザー体験の言葉で。横文字最小、価値で書く (例: ✗「Firestore subcollection migration」→ ✓「データの保存先を整理して、書き込みの上限に当たらないようにする」)
+2. **objective は背景 2-4 文**: 現状の症状 → 放置できない理由 → どう改善されると嬉しいか。開発者でなくても『何が嬉しいか』が分かる粒度
+3. **acceptance_criteria は bullet で技術詳細**: 横文字には初出時に日本語注、別 task ID 参照には『何の話か』1 行を添える
+
 ## モード判定 (重要、CORE doc `4AS5ehyJc8mGU1gsiFvz` 準拠)
 
 CORE doc 「Beacon Onboarding の本質: 最速アウトプット、構造は後から自然発生」に従い、起動時に **mode を判定**:
