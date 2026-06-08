@@ -9166,11 +9166,87 @@ def cmd_bus_send():
 
     client, config = _get_api_client()
     project_id = _resolve_bus_project_id(config)  # e-1151: --project override
+
+    # e-1290: envelope-by-default for CLI sends.
+    #
+    # Tier selection rule: `beacon bus send` is invoked by a human typing a
+    # command in their shell, so every send carries an implicit human
+    # signature → tier T1. `--action <name>` (repeatable, comma-joined by the
+    # bash wrapper) populates actions_authorized; with no flag the list is
+    # empty (T1 with no specific delegations is still a valid envelope and
+    # unlocks `propose-to-ai` delivery on the receive side).
+    #
+    # Fallback strategy:
+    #   * `--no-envelope` (BEACON_BUS_NO_ENVELOPE=1) skips issuance entirely.
+    #     Useful for debugging the server's legacy / backward-compat path.
+    #   * Issuance returns HTTP 404 (older server without /bus/envelope/issue)
+    #     → log + fall back to legacy POST. This keeps newer clients deployable
+    #     against unmigrated servers.
+    #   * Issuance returns HTTP 400 (server rejected our request — e.g. a
+    #     high-risk action under a tier the server forbids, or a wildcard)
+    #     → log + fall back. The user still gets their message through; the
+    #     receiver simply won't auto-execute, which is the safe default.
+    #   * Transport / 5xx errors also fall through silently — bus must not
+    #     break for the user just because the envelope path misbehaves.
+    envelope_obj: dict | None = None
+    requested_action: str | None = None
+    no_envelope = os.environ.get("BEACON_BUS_NO_ENVELOPE", "") == "1"
+    if not no_envelope:
+        actions_raw = os.environ.get("BEACON_BUS_ACTION", "").strip()
+        actions_authorized = [
+            a.strip() for a in actions_raw.split(",") if a.strip()
+        ] if actions_raw else []
+        # When the user passes a single --action we forward it as the
+        # message's requested_action too; the envelope's actions_authorized
+        # is the *capability grant* (what the receiver may auto-run), and
+        # requested_action is the *request* (what this message is asking
+        # for). For T1 these line up; for the wider model they need not.
+        if len(actions_authorized) == 1:
+            requested_action = actions_authorized[0]
+        try:
+            envelope_obj = client.issue_bus_envelope(
+                project_id,
+                tier="T1",
+                actions_authorized=actions_authorized,
+                data_class="free",
+            )
+        except RuntimeError as e:
+            # api_client wraps HTTPError as `RuntimeError("API error CODE: ...")`.
+            # 404 = legacy server, 400 = rejected payload — both fall back to
+            # the legacy POST path. Any other shape (transport, 5xx) also
+            # falls through; we log but don't surface so the user's send
+            # still lands.
+            msg = str(e)
+            if "API error 404" in msg or "API error 400" in msg:
+                print(
+                    f"Note: envelope issuance unavailable ({msg.split(':', 1)[0]});"
+                    " falling back to legacy bus path.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"Note: envelope issuance error, falling back to legacy"
+                    f" bus path: {msg}",
+                    file=sys.stderr,
+                )
+            envelope_obj = None
+            requested_action = None
+        except (ConnectionError, OSError) as e:
+            print(
+                f"Note: envelope issuance network error, falling back to"
+                f" legacy bus path: {e}",
+                file=sys.stderr,
+            )
+            envelope_obj = None
+            requested_action = None
+
     event = client.post_bus_event(
         project_id, channel,
         sender_session_id=sender,
         payload=payload,
         delivery=delivery,
+        envelope=envelope_obj,
+        requested_action=requested_action,
     )
     if os.environ.get("BEACON_JSON", "") == "1":
         # Augment the event JSON with the post-decrement budget so scripted

@@ -184,16 +184,35 @@ class _StubClient:
         self.calls = []
 
     def post_bus_event(self, project_id, channel, *, sender_session_id="",
-                       payload=None, delivery="propose-to-ai"):
+                       payload=None, delivery="propose-to-ai",
+                       envelope=None, requested_action=None):
+        # e-1290: tolerate envelope/requested_action kwargs from the
+        # envelope-by-default CLI path. The budget tests don't assert on
+        # envelope contents — they care about decrement timing — so we just
+        # record them alongside the rest.
         self.calls.append({
             "channel": channel, "sender": sender_session_id,
             "payload": payload or {}, "delivery": delivery,
+            "envelope": envelope, "requested_action": requested_action,
         })
         return {
             "event_id": f"e-{len(self.calls)}",
             "channel": channel, "sender_session_id": sender_session_id,
             "payload": payload or {}, "delivery": delivery,
             "created_at": "2026-06-07T01:50:00.000000Z",
+        }
+
+    def issue_bus_envelope(self, project_id, *, tier, actions_authorized=None,
+                            scope=None, data_class="free",
+                            conversation_id=None, in_reply_to=None,
+                            chain_depth=0, ttl_seconds=3600):
+        # e-1290: in-memory mint so cmd_bus_send's envelope-by-default path
+        # has something to embed without standing up the real server.
+        return {
+            "tier": tier,
+            "actions_authorized": list(actions_authorized or []),
+            "data_class": data_class,
+            "signature": "stub-sig",
         }
 
 
@@ -336,6 +355,14 @@ def test_reply_consumes_even_if_cloud_call_would_fail(project_dir, monkeypatch,
 
     class _Boom:
         def post_bus_event(self, *a, **kw):
+            raise RuntimeError("cloud is down")
+
+        def issue_bus_envelope(self, *a, **kw):
+            # e-1290: envelope-by-default in cmd_bus_send. We make issuance
+            # fail with the same shape as the post — both 5xx-class
+            # RuntimeError. The CLI falls back to no-envelope (logs to
+            # stderr) and *then* the post fails. The test still asserts
+            # the budget was decremented before the cloud-down post.
             raise RuntimeError("cloud is down")
 
     monkeypatch.setattr(commands, "_get_api_client",
