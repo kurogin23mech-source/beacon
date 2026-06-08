@@ -43,17 +43,42 @@ class _StubApiClient:
         self._call_counter = 0
 
     def post_bus_event(self, project_id, channel, *, sender_session_id="",
-                       payload=None, delivery="propose-to-ai"):
+                       payload=None, delivery="propose-to-ai",
+                       envelope=None, requested_action=None):
+        # e-1290: envelope / requested_action are accepted to match the real
+        # api_client signature. The pre-envelope CLI tests don't care about
+        # these fields; they assert payload/channel/delivery only.
         ev = {
             "event_id": f"e-{len(self.events) + 1}",
             "channel": channel,
             "sender_session_id": sender_session_id,
             "payload": payload or {},
             "delivery": delivery,
+            "envelope": envelope,
+            "requested_action": requested_action,
             "created_at": f"2026-06-07T00:00:0{len(self.events)}.000000Z",
         }
         self.events.append(ev)
         return ev
+
+    def issue_bus_envelope(self, project_id, *, tier, actions_authorized=None,
+                            scope=None, data_class="free",
+                            conversation_id=None, in_reply_to=None,
+                            chain_depth=0, ttl_seconds=3600):
+        # e-1290: minimal in-memory mint. Tests that need to verify envelope
+        # contents inspect the recorded event's `envelope` field instead of
+        # checking signatures. Returning a stable dict keeps the post path
+        # exercisable without standing up the real server.
+        return {
+            "tier": tier,
+            "actions_authorized": list(actions_authorized or []),
+            "scope": scope,
+            "data_class": data_class,
+            "conversation_id": conversation_id,
+            "in_reply_to": in_reply_to,
+            "chain_depth": chain_depth,
+            "signature": "stub-sig",
+        }
 
     def list_unread_bus_events(self, project_id, recipient_id, *,
                                 channel="", limit=100):

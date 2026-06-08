@@ -28,6 +28,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { consumeBusBudgetOne, refuseMessage } from './bus-budget.mjs'
+import { selectTierForBridge } from './bus-envelope.mjs'
 
 // --- Config discovery --------------------------------------------------------
 
@@ -119,8 +120,60 @@ async function apiPost(p, body) {
     },
     body: JSON.stringify(body),
   })
-  if (!r.ok) throw new Error(`POST ${p} → ${r.status}: ${(await r.text()).slice(0, 200)}`)
+  if (!r.ok) {
+    // Stamp status on the Error so callers (envelope issuance in particular)
+    // can branch on 404 / 400 vs. transport-level failures. Existing call
+    // sites that just want a message keep working via .message.
+    const text = (await r.text()).slice(0, 200)
+    const err = new Error(`POST ${p} → ${r.status}: ${text}`)
+    err.status = r.status
+    throw err
+  }
   return r.json()
+}
+
+/**
+ * Mint an envelope via the server's /bus/envelope/issue endpoint, returning
+ * { envelope, requested_action } to stamp on a subsequent /bus POST. On any
+ * server-side failure (404 = older server without envelope support, 400 =
+ * tier/payload rejection, transport error) returns null so the caller falls
+ * back to the legacy no-envelope path. The server treats no-envelope events
+ * as T5-equivalent today (e-1136 backward compat), so the fallback is
+ * intentionally invisible to callers — they always get a delivered event,
+ * just sometimes through the legacy lane.
+ *
+ * Tier selection: see channel/bus-envelope.mjs:selectTierForBridge. In
+ * practice this MCP reply tool always carries a `text` field, which puts the
+ * payload outside the T5 short-ping schema, so the chosen tier is T1 with
+ * empty actions_authorized. That still earns the message a signed-T1
+ * envelope, which is what unlocks `propose-to-ai` delivery on the receive
+ * side (vs. the legacy T5-equivalent cap at `notify-user-only`).
+ */
+async function tryIssueEnvelope(projectId, payload, requestedAction) {
+  const { tier, actionsAuthorized, dataClass } = selectTierForBridge(
+    payload, requestedAction,
+  )
+  try {
+    const env = await apiPost(`/api/projects/${projectId}/bus/envelope/issue`, {
+      tier,
+      actions_authorized: actionsAuthorized,
+      data_class: dataClass,
+    })
+    log(`envelope minted tier=${tier} actions=${actionsAuthorized.length}`)
+    return { envelope: env, requestedAction: requestedAction || null, tier }
+  } catch (e) {
+    const status = e?.status
+    if (status === 404 || status === 400) {
+      log(`envelope issuance ${status}, falling back to legacy path: ${e.message}`)
+      return null
+    }
+    // Transport / 5xx: still fall back rather than surface a hard error to
+    // the user. The bus must not break just because the envelope path
+    // misbehaves — that's the deployment-safety contract from the e-1290
+    // task brief.
+    log(`envelope issuance error (non-404/400), falling back: ${e.message}`)
+    return null
+  }
 }
 
 // --- MCP server --------------------------------------------------------------
@@ -199,14 +252,29 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     log(`reply budget consumed: ${gate.budget.used}/${gate.budget.total}`)
   }
 
+  // Envelope-by-default (e-1290). Mint a server-signed envelope before
+  // posting; on any failure fall through to the legacy no-envelope POST so
+  // the bus never breaks for the user. tryIssueEnvelope() does the tier
+  // selection (T5 for short-ping payloads, T1 otherwise) and swallows the
+  // 404/400/5xx failure modes for us.
+  const envInfo = await tryIssueEnvelope(recipient_project_id, payload, null)
+
   try {
-    const result = await apiPost(`/api/projects/${recipient_project_id}/bus`, {
+    const body = {
       channel,
       sender_session_id: SESSION_ID,
       payload,
       delivery: 'propose-to-ai',
-    })
-    log(`reply sent: event_id=${result.event_id} → ${recipient_project_id}/${recipient_session_id}`)
+    }
+    if (envInfo) {
+      body.envelope = envInfo.envelope
+      if (envInfo.requestedAction) {
+        body.requested_action = envInfo.requestedAction
+      }
+    }
+    const result = await apiPost(`/api/projects/${recipient_project_id}/bus`, body)
+    const tag = envInfo ? `tier=${envInfo.tier}` : 'tier=legacy'
+    log(`reply sent: event_id=${result.event_id} ${tag} → ${recipient_project_id}/${recipient_session_id}`)
     return { content: [{ type: 'text', text: `sent ${result.event_id}` }] }
   } catch (e) {
     log(`reply ERROR: ${e.message}`)
