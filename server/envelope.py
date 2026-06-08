@@ -180,6 +180,13 @@ def canonical_bytes(envelope: dict) -> bytes:
                       ensure_ascii=True).encode("utf-8")
 
 
+# Dev fallback for the envelope signing secret. Visible in the public repo, so
+# *production* must never run with this value — production startup checks
+# ``is_using_dev_fallback()`` and refuses to boot when the env var is unset
+# (see ``server/app.py`` startup handler / e-1291).
+_DEV_FALLBACK_SECRET = "dev-envelope-secret-CHANGE-ME"
+
+
 def _server_secret() -> bytes:
     """Return the server HMAC secret for envelope signing.
 
@@ -189,8 +196,29 @@ def _server_secret() -> bytes:
     who recovers one secret can't forge the other.
     """
     return os.environ.get(
-        "BEACON_ENVELOPE_SECRET", "dev-envelope-secret-CHANGE-ME"
+        "BEACON_ENVELOPE_SECRET", _DEV_FALLBACK_SECRET
     ).encode("utf-8")
+
+
+def is_using_dev_fallback() -> bool:
+    """Return True iff envelope signing would use the hard-coded dev secret.
+
+    The dev fallback is fine for unit tests and local dev (``BEACON_API_AUTH=0``
+    posture), but in production it would let anyone with read access to the
+    GitHub repo forge T1 envelopes — i.e. authorize high-risk actions on the
+    bus. Production startup checks this and refuses to boot.
+
+    "Using the dev fallback" means ``BEACON_ENVELOPE_SECRET`` is **unset or
+    empty** in the process env (in which case ``_server_secret()`` returns
+    the hard-coded placeholder). An explicit set of the env var to the same
+    literal placeholder string is still treated as a misconfiguration —
+    forgetting to rotate from the public placeholder is exactly the failure
+    mode this guard exists to catch.
+    """
+    configured = os.environ.get("BEACON_ENVELOPE_SECRET", "")
+    if not configured:
+        return True
+    return configured == _DEV_FALLBACK_SECRET
 
 
 def sign(envelope: dict) -> str:
