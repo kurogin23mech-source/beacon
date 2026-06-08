@@ -518,6 +518,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc_add.add_argument("--json", action="store_true")
     p_doc_add.add_argument("--content", default="")
     p_doc_add.add_argument("--stdin", action="store_true")
+    # ms-54 / e-1293: persistence poisoning defense — callers that took
+    # bus-derived input MUST pass this flag so the handler refuses.
+    p_doc_add.add_argument("--bus-origin", dest="bus_origin",
+                           action="store_true")
 
     p_doc_list = doc_sub.add_parser("list", aliases=["ls"], add_help=False)
     p_doc_list.add_argument("--json", action="store_true")
@@ -538,6 +542,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc_update.add_argument("--op", dest="doc_op", default="")
     p_doc_update.add_argument("--json", action="store_true")
     p_doc_update.add_argument("--stdin", action="store_true")
+    # ms-54 / e-1293: persistence poisoning defense.
+    p_doc_update.add_argument("--bus-origin", dest="bus_origin",
+                              action="store_true")
 
     p_doc_delete = doc_sub.add_parser("delete", aliases=["rm"], add_help=False)
     p_doc_delete.add_argument("doc_id", nargs="?", default="")
@@ -548,6 +555,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_note.add_argument("text_or_sub", nargs="?", default="")
     p_note.add_argument("--context", default="")
     p_note.add_argument("--json", action="store_true")
+    # ms-54 / e-1293: persistence poisoning defense.
+    p_note.add_argument("--bus-origin", dest="bus_origin",
+                        action="store_true")
     p_note.add_argument("--help", "-h", action="store_true", dest="show_help")
 
     # ---- trigger ----
@@ -1433,7 +1443,10 @@ def _handle_doc(root: Path, args: argparse.Namespace) -> int:
         if not args.title:
             print(
                 "Usage: beacon doc add \"title\" [--scope core|spec|memo|retro|report] "
-                "[--ms ms-id] [--op op-id] [--id slug] [--content text] [--json]"
+                "[--ms ms-id] [--op op-id] [--id slug] [--content text] [--json] "
+                "[--bus-origin]\n"
+                "  --bus-origin: refuse the write (persistence poisoning defense, "
+                "ms-54 / e-1293)"
             )
             return 1
         env = {
@@ -1444,6 +1457,7 @@ def _handle_doc(root: Path, args: argparse.Namespace) -> int:
             "BEACON_MS": args.doc_ms or "",
             "BEACON_OP": args.doc_op or "",
             "BEACON_JSON": "1" if args.json else "",
+            "BEACON_BUS_ORIGIN": "1" if getattr(args, "bus_origin", False) else "",
         }
         return _run_commands_py(root, "doc_add", env)
 
@@ -1470,7 +1484,10 @@ def _handle_doc(root: Path, args: argparse.Namespace) -> int:
         if not args.doc_id:
             print(
                 "Usage: beacon doc update <doc-id> [--title text] "
-                "[--scope ...] [--ms ms-id] [--op op-id] [--content text] [--json]"
+                "[--scope ...] [--ms ms-id] [--op op-id] [--content text] [--json] "
+                "[--bus-origin]\n"
+                "  --bus-origin: refuse the write (persistence poisoning defense, "
+                "ms-54 / e-1293)"
             )
             return 1
         env = {
@@ -1481,6 +1498,7 @@ def _handle_doc(root: Path, args: argparse.Namespace) -> int:
             "BEACON_MS": args.doc_ms or "",
             "BEACON_OP": args.doc_op or "",
             "BEACON_JSON": "1" if args.json else "",
+            "BEACON_BUS_ORIGIN": "1" if getattr(args, "bus_origin", False) else "",
         }
         return _run_commands_py(root, "doc_update", env)
 
@@ -1504,9 +1522,10 @@ def _handle_doc(root: Path, args: argparse.Namespace) -> int:
 def _handle_note(root: Path, args: argparse.Namespace) -> int:
     if args.show_help:
         print(
-            "Usage: beacon note \"<text>\" [--context \"<label>\"]\n"
+            "Usage: beacon note \"<text>\" [--context \"<label>\"] [--bus-origin]\n"
             "       beacon note list [--json]\n"
-            "       beacon note clear"
+            "       beacon note clear\n"
+            "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"
         )
         return 0
     if (rc := _ensure_project()) is not None:
@@ -1520,14 +1539,16 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
         return _run_commands_py(root, "note_clear", {})
     if not sub:
         print(
-            "Usage: beacon note \"<text>\" [--context \"<label>\"]\n"
+            "Usage: beacon note \"<text>\" [--context \"<label>\"] [--bus-origin]\n"
             "       beacon note list [--json]\n"
-            "       beacon note clear"
+            "       beacon note clear\n"
+            "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"
         )
         return 1
     env = {
         "BEACON_NOTE_TEXT": sub,
         "BEACON_NOTE_CONTEXT": args.context or "",
+        "BEACON_BUS_ORIGIN": "1" if getattr(args, "bus_origin", False) else "",
     }
     return _run_commands_py(root, "note_add", env)
 
