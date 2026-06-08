@@ -260,6 +260,12 @@ def issue_envelope(
     """
     if tier not in VALID_TIERS:
         raise ValueError(f"unknown tier: {tier!r}")
+    if not isinstance(chain_depth, int) or isinstance(chain_depth, bool) \
+            or chain_depth < 0:
+        # Tighten the invariant at issuance so the server itself can never
+        # mint an envelope with a malformed chain_depth. The verify path
+        # enforces the upper bound (use-case limit); the lower bound is 0.
+        raise ValueError("chain_depth must be >= 0")
     if tier == TIER_T1 and scope is not None:
         raise ValueError("T1 envelope must have scope=None")
     if tier == TIER_T2 and not scope:
@@ -597,12 +603,16 @@ def verify(
         steps["in_reply_to"] = "n/a"
 
     # Step 7: chain_depth within use-case limit
+    # Invariant: 0 <= depth <= limit. Both ends matter — a negative depth
+    # would silently pass a `depth > limit` check and become risky in Phase 2
+    # (token grant) where chain_depth interacts with token-count accounting.
     depth = envelope.get("chain_depth", 0)
     limit = _chain_depth_limit(envelope, cross_project=cross_project)
-    if not isinstance(depth, int) or depth > limit:
-        steps["chain_depth"] = f"depth={depth} > limit={limit}"
+    if (not isinstance(depth, int) or isinstance(depth, bool)
+            or not (0 <= depth <= limit)):
+        steps["chain_depth"] = f"depth={depth} out of [0, {limit}]"
         return _degrade_to_t5(envelope, payload, requested_action, steps,
-                              f"chain_depth {depth} exceeds limit {limit}")
+                              f"chain_depth {depth} out of [0, {limit}]")
     steps["chain_depth"] = f"ok ({depth}/{limit})"
 
     # Step 8: action vs. tier permission matrix
