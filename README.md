@@ -348,6 +348,24 @@ Say "メモして" or "remember this" and Claude will call `/beacon-note` automa
 | `beacon trigger check` | Check pending triggers (JSON) / 未処理トリガー確認 |
 | `beacon trigger clear <name>` | Clear a specific trigger / トリガー消化 |
 
+### DM Channel (multi-session messaging)
+
+Manage the `beacon-bus` MCP channel that powers parallel-session DM. See
+[`docs/getting-started-dm.md`](docs/getting-started-dm.md) for the full
+walkthrough.
+
+| Command | Description |
+|---------|-------------|
+| `beacon channel install` | Install beacon-bus MCP entry into `.mcp.json` / DM 機能を有効化 |
+| `beacon channel uninstall [--purge-files\|--keep-files]` | Remove MCP entry; `--purge-files` also moves `channel/node_modules` to `.trash/` |
+| `beacon channel opt-out [--project\|--global]` | Block install / auto-install (persistent flag) |
+| `beacon channel opt-in [--project\|--global]` | Lift the opt-out flag |
+| `beacon channel status` | Show install / files / opt-out / next-action state |
+
+`bclaude` (shipped alongside `beacon` in Homebrew) launches Claude Code
+with the channel pre-wired, and falls back to plain `claude` when any
+opt-out source is active.
+
 ## Dashboard
 
 The curses-based dashboard runs in the left tmux pane and auto-refreshes when `.beacon/project.json` changes.

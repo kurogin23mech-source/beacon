@@ -8413,6 +8413,12 @@ def cmd_help_json():
         {"command": "beacon auth status", "flags": [], "description": "Show login status"},
         {"command": "beacon skill install", "flags": [], "description": "Install Claude Code Skills to ~/.claude/skills/"},
         {"command": "beacon monitor context", "flags": ["--dry-run"], "description": "Stop hook: context-usage threshold monitor (e-854); --dry-run skips note/state writes"},
+        # ms-54 e-1266: DM channel lifecycle commands (install / uninstall / opt-out / opt-in / status)
+        {"command": "beacon channel install", "flags": [], "description": "Install beacon-bus MCP entry into .mcp.json (DM channel for multi-session messaging)"},
+        {"command": "beacon channel uninstall", "flags": ["--purge-files", "--keep-files"], "description": "Remove beacon-bus MCP entry; --purge-files also wipes channel/node_modules (moved to .trash/)"},
+        {"command": "beacon channel opt-out", "flags": ["--project", "--global"], "description": "Block all install / auto-install attempts (persistent flag)"},
+        {"command": "beacon channel opt-in", "flags": ["--project", "--global"], "description": "Lift the opt-out flag at project or global scope"},
+        {"command": "beacon channel status", "flags": [], "description": "Show install / files / opt-out / next-action state in one screen"},
         {"command": "beacon help", "flags": ["--json"], "description": "Show help (--json for machine-readable output)"},
     ]
     print(json.dumps({"version": __version__, "commands": commands}, ensure_ascii=False, indent=2))

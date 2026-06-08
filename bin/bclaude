@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# bclaude — Claude Code launcher with the Beacon DM channel pre-wired.
+#
+# What this does (ms-54 e-1167):
+#
+#   bclaude [...claude args]
+#
+# is equivalent to:
+#
+#   claude --dangerously-load-development-channels server:beacon-bus [...claude args]
+#
+# …unless the user has opted out of the DM channel, in which case it
+# falls back to plain `claude [...claude args]` and prints a one-line
+# audit message to stderr so the user knows why DM is off.
+#
+# Opt-out is checked from three sources in this order (matches the
+# `_is_bus_opted_out()` gate in lib/commands.py — keep the two in sync):
+#
+#   1. env BEACON_NO_BUS=1            — transient, this shell only
+#   2. .beacon/project.json:bus.disabled  — scoped to this project
+#   3. ~/.beacon/config.json:bus.disabled — global, applies everywhere
+#
+# Any of the three being set → fall back to plain `claude`.
+#
+# Why a bash wrapper rather than a python entry point?
+#
+#   - Speed: zero python startup overhead before exec'ing `claude`.
+#   - Forwarding: `exec "$@"`-style invocation passes argv unchanged,
+#     including odd quoting that python's sys.argv split can mangle.
+#   - Lightness: no dependency on the beacon python lib being on PATH.
+#
+# The opt-out probe uses python3 in a one-liner because three filesystem
+# reads + tiny JSON parsing are simpler in python than pure bash, and
+# we want the read logic to match what commands.py does byte-for-byte.
+# If python3 isn't available (rare on macOS/Linux, but possible on a
+# minimal container), we conservatively fall back to launching the
+# channel-enabled `claude` — the bus.mjs side will degrade gracefully
+# if its env / config is also missing.
+#
+# Windows users: bin/bclaude.cmd is the equivalent wrapper.
+
+set -e
+
+# ---------------------------------------------------------------------------
+# Step 1: Resolve `claude` on PATH. If missing, give a clearer error than
+# the shell's default "command not found".
+# ---------------------------------------------------------------------------
+
+CLAUDE_BIN="$(command -v claude 2>/dev/null || true)"
+if [ -z "$CLAUDE_BIN" ]; then
+    echo "bclaude: 'claude' is not on PATH. Install Claude Code first." >&2
+    echo "  https://docs.claude.com/claude-code/install" >&2
+    exit 127
+fi
+
+# ---------------------------------------------------------------------------
+# Step 2: Probe opt-out sources. If any is set, fall back to plain claude.
+# Keep this logic in lockstep with lib/commands.py:_is_bus_opted_out().
+# ---------------------------------------------------------------------------
+
+opt_out_reason=""
+
+if [ -n "${BEACON_NO_BUS:-}" ] && \
+   [ "$BEACON_NO_BUS" != "0" ] && \
+   [ "$BEACON_NO_BUS" != "false" ] && \
+   [ "$BEACON_NO_BUS" != "no" ] && \
+   [ "$BEACON_NO_BUS" != "off" ] && \
+   [ "$BEACON_NO_BUS" != "" ]; then
+    opt_out_reason="env BEACON_NO_BUS"
+elif command -v python3 >/dev/null 2>&1; then
+    # python3 returns the opt-out source name on stdout, or empty if no
+    # opt-out is active. We use python3 for JSON parsing reliability —
+    # bash + awk would work for trivial JSON but break on indentation
+    # or comments that a future config.json shape might add.
+    opt_out_reason="$(python3 - <<'PY' 2>/dev/null || true
+import json, os, sys
+# Project flag
+p = os.path.join(".beacon", "project.json")
+if os.path.exists(p):
+    try:
+        with open(p, encoding="utf-8") as f:
+            d = json.load(f)
+        if (d.get("bus") or {}).get("disabled"):
+            print("project .beacon/project.json")
+            sys.exit(0)
+    except Exception:
+        pass
+# Global flag
+home = os.environ.get("HOME") or os.environ.get("USERPROFILE") or ""
+g = os.path.join(home, ".beacon", "config.json")
+if os.path.exists(g):
+    try:
+        with open(g, encoding="utf-8") as f:
+            d = json.load(f)
+        if (d.get("bus") or {}).get("disabled"):
+            print("global ~/.beacon/config.json")
+            sys.exit(0)
+    except Exception:
+        pass
+PY
+)"
+fi
+
+# ---------------------------------------------------------------------------
+# Step 3: Exec with or without the channel flag based on opt-out result.
+# ---------------------------------------------------------------------------
+
+if [ -n "$opt_out_reason" ]; then
+    # User has actively declined DM. Honor the decision: launch plain
+    # `claude` and tell the user why on stderr so the audit trail is
+    # clear in tmux logs, shell history, etc.
+    echo "[bclaude] DM opt-out detected ($opt_out_reason), launching plain claude" >&2
+    exec "$CLAUDE_BIN" "$@"
+fi
+
+# Default path: launch with the DM channel preloaded. The exec replaces
+# this shell so signal handling (Ctrl-C, SIGTERM) reaches `claude`
+# directly with no intermediate process.
+exec "$CLAUDE_BIN" --dangerously-load-development-channels server:beacon-bus "$@"

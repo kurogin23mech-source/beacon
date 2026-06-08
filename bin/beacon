@@ -100,6 +100,16 @@ Server (maintainer only):
   gcloud run deploy beacon-api-prod --source . --region asia-northeast1 \
     --build-arg CACHE_BUST=$(date +%s)
 
+DM Channel (multi-session messaging):
+  beacon channel install            Install the beacon-bus MCP entry into .mcp.json
+  beacon channel uninstall [--purge-files|--keep-files]
+                                    Remove MCP entry; --purge-files also wipes channel/node_modules
+  beacon channel opt-out [--project|--global]
+                                    Block install / auto-install (persists across runs)
+  beacon channel opt-in  [--project|--global]
+                                    Lift the opt-out flag
+  beacon channel status             Show install / files / opt-out / next-action state
+
 Other:
   beacon note "<text>" [--context "<label>"]   Add a session note (ephemeral, cleared at session-end)
   beacon note list                             Show session notes
