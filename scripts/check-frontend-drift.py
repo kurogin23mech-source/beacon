@@ -56,6 +56,7 @@ WEB_ONLY_ACTIONS = {
     "invite-member",
     "change-member-role",
     "logout",
+    "join-by-id",
 }
 # Tabs are expected to be 1:1 once e-743 (render() SHARED) completes.
 # Until then, allow-list Web-only tabs that Tauri hasn't caught up to yet.
