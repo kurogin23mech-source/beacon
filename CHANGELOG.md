@@ -2,6 +2,17 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.22.0] - 2026-06-08
+
+- Merge pull request #100 from kurogin23mech-source/ms-54/work
+- feat(ms-54): bclaude wrapper with opt-out gate (e-1167)
+- feat(ms-54): auto-install with opt-out gate (e-1238 部分)
+- feat(ms-54): channel uninstall + opt-out + status (e-1266)
+- Merge pull request #99 from kurogin23mech-source/chore/test-suite-state-pollution-and-stale-tests
+- chore(test): 状態汚染と stale テストを解消、全 suite を green に戻す
+- docs(release): update README/CHANGELOG for v0.21.6
+- chore(release): bump formula to 0.21.6
+
 ## [v0.21.6] - 2026-06-08
 
 - Merge pull request #98 from kurogin23mech-source/ms-39/work
