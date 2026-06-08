@@ -2385,6 +2385,14 @@ case "${1:-}" in
             _bud_sub="${1:-}"
             shift || true
         fi
+        # `auto-execute` mirrors the budget shape: <add|remove|list> as a
+        # 2nd-level subcommand. Extracted up front so --channel still flows
+        # through the generic arg-parsing loop.
+        _ae_sub=""
+        if [[ "$_bus_sub" == "auto-execute" ]]; then
+            _ae_sub="${1:-}"
+            shift || true
+        fi
         _bus_channel=""
         _bus_payload=""
         _bus_sender=""
@@ -2497,21 +2505,53 @@ EOF
                         ;;
                 esac
                 ;;
+            auto-execute)
+                case "$_ae_sub" in
+                    add)
+                        BEACON_BUS_AUTO_EXEC_CHANNEL="$_bus_channel" \
+                            BEACON_JSON="$_bus_json" \
+                            python3 "$COMMANDS_PY" bus_auto_execute_add
+                        ;;
+                    remove)
+                        BEACON_BUS_AUTO_EXEC_CHANNEL="$_bus_channel" \
+                            BEACON_JSON="$_bus_json" \
+                            python3 "$COMMANDS_PY" bus_auto_execute_remove
+                        ;;
+                    list)
+                        BEACON_JSON="$_bus_json" \
+                            python3 "$COMMANDS_PY" bus_auto_execute_list
+                        ;;
+                    *)
+                        cat <<'EOF'
+Usage: beacon bus auto-execute add --channel <name> [--json]
+       beacon bus auto-execute remove --channel <name> [--json]
+       beacon bus auto-execute list [--json]
+
+Default: empty allowlist. Every incoming auto-execute event is downgraded
+to propose-to-ai until you explicitly add its channel.
+EOF
+                        ;;
+                esac
+                ;;
             *)
                 cat <<'EOF'
-Usage: beacon bus send      --channel <ch> [--payload '<json>'] [--sender <id>] [--delivery <mode>] [--in-reply-to <event_id>] [--project <id>]
-       beacon bus listen    [--recipient <id>] [--channel <ch>] [--interval <sec>] [--auto-ack] [--once] [--project <id>]
-       beacon bus receive   [--recipient <id>] [--channel <ch>] [--timeout <sec>] [--auto-ack] [--project <id>]
-       beacon bus ack       [--recipient <id>] --last-seen-at <iso8601> [--project <id>]
-       beacon bus directory [--user <email>] [--machine <name>] [--agent <name>] [--live] [--since-min <N>] [--project <id>] [--json]
-       beacon bus budget    grant --turns <N>  |  show  |  clear
+Usage: beacon bus send         --channel <ch> [--payload '<json>'] [--sender <id>] [--delivery <mode>] [--in-reply-to <event_id>] [--project <id>]
+       beacon bus listen       [--recipient <id>] [--channel <ch>] [--interval <sec>] [--auto-ack] [--once] [--project <id>]
+       beacon bus receive      [--recipient <id>] [--channel <ch>] [--timeout <sec>] [--auto-ack] [--project <id>]
+       beacon bus ack          [--recipient <id>] --last-seen-at <iso8601> [--project <id>]
+       beacon bus directory    [--user <email>] [--machine <name>] [--agent <name>] [--live] [--since-min <N>] [--project <id>] [--json]
+       beacon bus budget       grant --turns <N>  |  show  |  clear
+       beacon bus auto-execute add --channel <name>  |  remove --channel <name>  |  list
 
 delivery: auto-execute | propose-to-ai (default) | notify-user-only
 --in-reply-to: mark as AI-authored reply. Requires `bus budget grant N` first.
                Without it, sends bypass the budget gate (manual mode).
+               The same gate applies via the MCP reply tool (channel/bus.mjs).
 --project:     override the cwd's project_id (e-1151) for cross-project DM/directory.
                Auth + API URL still come from the current project; only the
                target project_id in the API call changes.
+auto-execute:  receiver-side opt-in allowlist. Default empty ⇒ all auto-execute
+               events get downgraded to propose-to-ai by the inbox hook.
 EOF
                 ;;
         esac

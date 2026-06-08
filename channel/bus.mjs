@@ -27,6 +27,7 @@ import { execSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import { consumeBusBudgetOne, refuseMessage } from './bus-budget.mjs'
 
 // --- Config discovery --------------------------------------------------------
 
@@ -161,6 +162,20 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   ],
 }))
 
+// --- Budget gate (e-1193) ---------------------------------------------------
+//
+// The CLI's `beacon bus send --in-reply-to <event_id>` is gated by
+// .beacon/bus-budget.json (lib/commands.py / e-1000), but the MCP reply tool
+// was bypassing the same gate. Every reply through this tool gets an
+// in_reply_to (the inbound event_id), so without a gate here the budget
+// becomes advisory — autonomous loops would happily run forever.
+//
+// To stay a single source of truth we read/write the same budget file the
+// CLI uses. The actual decrement logic lives in bus-budget.mjs so it can be
+// unit-tested without standing up the full MCP server. See that module's
+// docstring for the semantic contract (fail-closed on corruption, default
+// OFF when no file, pessimistic decrement, etc.).
+
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (req.params.name !== 'reply') {
     throw new Error(`unknown tool: ${req.params.name}`)
@@ -169,6 +184,21 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   const { recipient_project_id, recipient_session_id, channel, text, in_reply_to } = args
   const payload = { recipient_session_id, text, source_project: PROJECT_ID }
   if (in_reply_to) payload.in_reply_to = in_reply_to
+
+  // Budget gate fires only when this is a reply (in_reply_to set). A bare
+  // post (no in_reply_to) is a manual send — the human composing the tool
+  // call IS the approval, same as the CLI's manual-send path. Without this
+  // distinction the CLI and MCP semantics diverge again.
+  if (in_reply_to) {
+    const gate = consumeBusBudgetOne(CWD)
+    if (!gate.allowed) {
+      const msg = refuseMessage(gate.reason, gate.budget)
+      log(`reply REFUSED by budget gate: reason=${gate.reason}`)
+      return { content: [{ type: 'text', text: msg }], isError: true }
+    }
+    log(`reply budget consumed: ${gate.budget.used}/${gate.budget.total}`)
+  }
+
   try {
     const result = await apiPost(`/api/projects/${recipient_project_id}/bus`, {
       channel,

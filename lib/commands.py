@@ -8338,6 +8338,126 @@ def cmd_bus_budget_clear():
     print("Budget cleared.")
 
 
+# ---------------------------------------------------------------------------
+# Bus auto-execute allowlist (ms-54 / e-1145) — receiver-side opt-in for the
+# delivery=auto-execute mode.
+# ---------------------------------------------------------------------------
+# Without this allowlist, any sender can post a bus event with
+# delivery=auto-execute and the receiver-side daemon has no structural way to
+# refuse. The safety fallback in beacon-bus-inbox-hook.py treats
+# auto-execute as propose-to-ai today, but the long-term answer the user wants
+# is "default OFF, channel-level opt-in":
+#
+#   * project.json carries `bus_auto_execute_channels: [str, ...]`. Missing or
+#     empty list ⇒ NO channel may auto-execute. Explicit, ordered, audit-able.
+#   * The inbox hook reads the list and downgrades any auto-execute event whose
+#     channel is not in the allowlist to propose-to-ai, while annotating the
+#     context inject so the human sees "this was downgraded for safety".
+#   * Adding a channel to the allowlist is itself a deliberate CLI step. We do
+#     NOT auto-create the field on every save — the absence of the field is
+#     the safe default; presence is the opt-in.
+#
+# The field lives in project.json (NOT a separate file) so it's covered by the
+# v2 meta document migration (e-1209) and synced cross-machine with the rest of
+# the project state.
+
+def _bus_auto_execute_channels(data: dict) -> list:
+    """Read the allowlist from a project.json dict, with type guard.
+
+    Anything other than a list of strings is treated as an empty list — the
+    safe default. We coerce on read rather than on write so a hand-edited
+    project.json with the wrong shape never silently lets auto-execute slip
+    through; the user sees "no channels are armed" until they re-add via CLI.
+    """
+    raw = data.get("bus_auto_execute_channels")
+    if not isinstance(raw, list):
+        return []
+    return [c for c in raw if isinstance(c, str) and c]
+
+
+def cmd_bus_auto_execute_list():
+    """Show the channels allowed to auto-execute incoming bus events.
+
+    Empty list (or field absent) ⇒ NO channel is permitted. This is the
+    secure default and the CLI prints it explicitly so the user is never
+    confused by silence."""
+    data = load_project()
+    channels = _bus_auto_execute_channels(data)
+    if os.environ.get("BEACON_JSON", "") == "1":
+        print(json.dumps({"channels": channels}, ensure_ascii=False))
+        return
+    if not channels:
+        print("Bus auto-execute allowlist: (empty) — every auto-execute event "
+              "will be downgraded to propose-to-ai.")
+        return
+    print("Bus auto-execute allowlist:")
+    for c in channels:
+        print(f"  - {c}")
+
+
+def cmd_bus_auto_execute_add():
+    """Add a channel to the auto-execute allowlist.
+
+    Idempotent: re-adding a channel that's already present is a no-op (no
+    duplicate, no error). The list keeps insertion order so audit logs read
+    naturally."""
+    channel = os.environ.get("BEACON_BUS_AUTO_EXEC_CHANNEL", "").strip()
+    if not channel:
+        print("Error: --channel <name> required", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    channels = _bus_auto_execute_channels(data)
+    if channel in channels:
+        if os.environ.get("BEACON_JSON", "") == "1":
+            print(json.dumps({"channels": channels, "added": False},
+                              ensure_ascii=False))
+        else:
+            print(f"Channel already in allowlist: {channel}")
+        return
+    channels.append(channel)
+    data["bus_auto_execute_channels"] = channels
+    save_project(data, op={
+        "op": "bus_auto_execute_add",
+        "channel": channel,
+    })
+    if os.environ.get("BEACON_JSON", "") == "1":
+        print(json.dumps({"channels": channels, "added": True},
+                          ensure_ascii=False))
+    else:
+        print(f"Added to bus auto-execute allowlist: {channel}")
+
+
+def cmd_bus_auto_execute_remove():
+    """Remove a channel from the auto-execute allowlist.
+
+    Removing a channel that isn't present is also idempotent — the desired
+    end state (channel not allowed) is reached either way."""
+    channel = os.environ.get("BEACON_BUS_AUTO_EXEC_CHANNEL", "").strip()
+    if not channel:
+        print("Error: --channel <name> required", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    channels = _bus_auto_execute_channels(data)
+    if channel not in channels:
+        if os.environ.get("BEACON_JSON", "") == "1":
+            print(json.dumps({"channels": channels, "removed": False},
+                              ensure_ascii=False))
+        else:
+            print(f"Channel not in allowlist (no-op): {channel}")
+        return
+    channels = [c for c in channels if c != channel]
+    data["bus_auto_execute_channels"] = channels
+    save_project(data, op={
+        "op": "bus_auto_execute_remove",
+        "channel": channel,
+    })
+    if os.environ.get("BEACON_JSON", "") == "1":
+        print(json.dumps({"channels": channels, "removed": True},
+                          ensure_ascii=False))
+    else:
+        print(f"Removed from bus auto-execute allowlist: {channel}")
+
+
 def cmd_bus_send():
     channel = os.environ.get("BEACON_BUS_CHANNEL", "").strip()
     if not channel:
@@ -8715,6 +8835,9 @@ if __name__ == "__main__":
         "bus_budget_grant": cmd_bus_budget_grant,
         "bus_budget_show": cmd_bus_budget_show,
         "bus_budget_clear": cmd_bus_budget_clear,
+        "bus_auto_execute_list": cmd_bus_auto_execute_list,
+        "bus_auto_execute_add": cmd_bus_auto_execute_add,
+        "bus_auto_execute_remove": cmd_bus_auto_execute_remove,
         "session_end": cmd_session_end,
         "session_rescue": cmd_session_rescue,
         "session_log_list": cmd_session_log_list,
