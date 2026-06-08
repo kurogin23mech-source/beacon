@@ -210,6 +210,13 @@ async function connectCloudWebSocket(projectId) {
   ws.onmessage = (event) => {
     let msg;
     try { msg = JSON.parse(event.data); } catch (_) { return; }
+    // ms-43 e-809: route document_change frames through the SHARED
+    // applyDocumentChange (built into desktop/dist from server/static/index.html
+    // by desktop/build.py) so Documents tab parity with Web UI is automatic.
+    if (msg.type === 'document_change') {
+      if (typeof applyDocumentChange === 'function') applyDocumentChange(msg.data);
+      return;
+    }
     if (msg.type !== 'project') return;
     const data = msg.data || {};
     const newJson = JSON.stringify(data);

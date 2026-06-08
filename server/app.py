@@ -1075,23 +1075,46 @@ def get_document(project_id: str, doc_id: str,
 
 
 @app.post("/api/projects/{project_id}/documents")
-def create_document(project_id: str, body: DocumentSave,
-                    user: dict = Depends(require_auth)):
-    """Create a new document."""
+async def create_document(project_id: str, body: DocumentSave,
+                          user: dict = Depends(require_auth)):
+    """Create a new document.
+
+    ms-43 e-809: emits a ``document_change`` WS frame after the write so the
+    Documents tab on every live client refreshes without waiting for the user
+    to re-open the tab. Async only because of that broadcast — the DB write
+    itself is sync.
+    """
     data = _load(project_id, user)
     _require_write(data, user)
     doc_id = db.save_document(project_id, "", body.title, body.content, body.scope)
+    await _broadcast_document_change(
+        project_id,
+        _build_document_change_payload(project_id, doc_id, op="add",
+                                       fallback_title=body.title,
+                                       fallback_scope=body.scope),
+    )
     return {"doc_id": doc_id, "title": body.title}
 
 
 @app.put("/api/projects/{project_id}/documents/{doc_id}")
-def update_document(project_id: str, doc_id: str, body: DocumentSave,
-                    user: dict = Depends(require_auth)):
-    """Update an existing document."""
+async def update_document(project_id: str, doc_id: str, body: DocumentSave,
+                          user: dict = Depends(require_auth)):
+    """Update an existing document.
+
+    ms-43 e-809: emits a ``document_change`` WS frame post-write so the open
+    Documents tab on every client picks up the new title / scope / updated_at
+    in-place (instead of staying stale until next tab switch).
+    """
     data = _load(project_id, user)
     _require_write(data, user)
     db.save_document(project_id, doc_id, body.title, body.content, body.scope,
                      updated_by=user.get("email", "unknown"))
+    await _broadcast_document_change(
+        project_id,
+        _build_document_change_payload(project_id, doc_id, op="update",
+                                       fallback_title=body.title,
+                                       fallback_scope=body.scope),
+    )
     return {"doc_id": doc_id, "title": body.title}
 
 
@@ -1113,17 +1136,40 @@ def get_document_revision(project_id: str, doc_id: str, rev: int, user: dict = D
 
 
 @app.delete("/api/projects/{project_id}/documents/{doc_id}")
-def delete_document_endpoint(project_id: str, doc_id: str,
-                             body: Optional[DeleteRequest] = None,
-                             user: dict = Depends(require_auth)):
-    """Soft-delete a document. Optional ``reason`` records why (ms-14 e-991)."""
+async def delete_document_endpoint(project_id: str, doc_id: str,
+                                   body: Optional[DeleteRequest] = None,
+                                   user: dict = Depends(require_auth)):
+    """Soft-delete a document. Optional ``reason`` records why (ms-14 e-991).
+
+    ms-43 e-809: emits a ``document_change`` (op=delete) WS frame so live
+    clients drop the entry from their cached ``state.documents`` without
+    needing a tab switch to re-fetch. We capture title/scope BEFORE the
+    soft-delete because ``list_documents`` filters deleted docs and the
+    client may want to render a brief "X was deleted" toast keyed on scope.
+    """
     data = _load(project_id, user)
     _require_write(data, user)
+    # Snapshot scope/title before delete so the broadcast payload still
+    # carries them — once delete_document flips the soft-delete flag,
+    # list_documents-style fetches filter the row out, leaving the client
+    # without enough context to update its filtered views correctly.
+    prior = db.get_document(project_id, doc_id) or {}
     reason = (body.reason if body else "") or ""
     if not db.delete_document(project_id, doc_id,
                               deleted_by=user.get("email", "unknown"),
                               reason=reason):
         raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
+    payload = {
+        "op": "delete",
+        "doc_id": doc_id,
+        "title": prior.get("title", ""),
+        "scope": prior.get("scope", "memo"),
+        "updated_at": "",
+    }
+    milestone = prior.get("milestone")
+    if milestone:
+        payload["milestone"] = milestone
+    await _broadcast_document_change(project_id, payload)
     return {"doc_id": doc_id, "status": "cancelled"}
 
 
@@ -1897,6 +1943,70 @@ async def _broadcast_bus_event(project_id: str, event: dict):
     if not clients:
         return
     msg = {"type": "bus_event", "data": event}
+    for ws in clients:
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            _ws_connections.get(project_id, set()).discard(ws)
+
+
+def _build_document_change_payload(project_id: str, doc_id: str, op: str,
+                                   fallback_title: str = "",
+                                   fallback_scope: str | None = None) -> dict:
+    """Construct the WS payload for a document add/update event.
+
+    We re-read the saved doc via ``db.get_document`` so the broadcast carries
+    the *post-write* values (especially ``updated_at`` which the server stamps
+    and ``scope`` which may be normalized from frontmatter). If the read
+    fails for any reason — racing delete, transient Firestore error — we
+    degrade to the request body values so clients still get something to
+    insert/update on, rather than silently dropping the event.
+    """
+    saved = db.get_document(project_id, doc_id) or {}
+    scope = saved.get("scope") or fallback_scope or "memo"
+    payload = {
+        "op": op,
+        "doc_id": doc_id,
+        "title": saved.get("title", fallback_title),
+        "scope": scope,
+        "updated_at": saved.get("updated_at", ""),
+    }
+    milestone = saved.get("milestone")
+    if milestone:
+        payload["milestone"] = milestone
+    return payload
+
+
+async def _broadcast_document_change(project_id: str, payload: dict):
+    """Push a document add/update/delete notification to all WS clients of this
+    project (ms-43 e-809).
+
+    Rationale: Documents are not part of the project doc snapshot stream
+    (they live in a Firestore subcollection that ``_on_snapshot`` doesn't
+    watch), so a write here is invisible to clients until they re-open the
+    Documents tab and trigger ``loadDocuments`` from scratch. That breaks
+    parity with Milestones / Tasks which already render reactively via the
+    project broadcast.
+
+    Rather than expand the project snapshot to embed documents (would balloon
+    every WS frame), we mirror the ``_broadcast_bus_event`` pattern with a
+    distinct message type. The payload is a *single-document delta* — clients
+    apply it to ``state.documents`` regardless of whether the Documents tab
+    is currently active, so re-opening the tab shows the latest list with no
+    network round trip.
+
+    Payload schema (locked-in for client compatibility):
+      op        : "add" | "update" | "delete"
+      doc_id    : str — Firestore document id
+      title     : str — current title (empty string on delete is OK)
+      scope     : str — "core" | "spec" | "memo" | "report"
+      updated_at: str — ISO timestamp from the write (empty on delete)
+      milestone : str (optional) — present iff doc has a milestone frontmatter
+    """
+    clients = _ws_connections.get(project_id, set()).copy()
+    if not clients:
+        return
+    msg = {"type": "document_change", "data": payload}
     for ws in clients:
         try:
             await ws.send_json(msg)
