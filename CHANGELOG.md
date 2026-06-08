@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.25.0] - 2026-06-09
+
+- feat(ms-54): cross-project DM discovery + local-mode friendly error (e-1330)
+- chore(trailnode): bump capability version to 2026-06-08.2 (v0.24.0)
+- docs(release): update README/CHANGELOG for v0.24.0
+- chore(release): bump formula to 0.24.0
+
 ## [v0.24.0] - 2026-06-09
 
 - Merge pull request #111 from kurogin23mech-source/feat/ms-54-true-heartbeat-poll-gated
