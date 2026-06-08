@@ -1,0 +1,15 @@
+.git/
+.claude/
+.trash/
+.worktrees/
+.beacon-design/
+.beacon/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+build/
+dist/
+!desktop/dist/
+*.egg-info/
+.DS_Store
