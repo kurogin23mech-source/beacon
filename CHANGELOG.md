@@ -2,6 +2,17 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.21.6] - 2026-06-08
+
+- Merge pull request #98 from kurogin23mech-source/ms-39/work
+- Merge pull request #97 from kurogin23mech-source/ms-46/work
+- Merge pull request #96 from kurogin23mech-source/ms-43/work
+- fix(ms-46): Tauri 検索の local fallback で entry-id 完全一致を拾う (e-1228)
+- fix(ms-39): WS endpoint で他人のプロジェクトが読める穴を塞ぐ + 認可ヘルパー統合 (e-1252 + e-1254)
+- fix(ms-43): empty state から Existing Project セクションを削除 (e-1253)
+- docs(release): update README/CHANGELOG for v0.21.5
+- chore(release): bump formula to 0.21.5
+
 ## [v0.21.5] - 2026-06-08
 
 - Merge pull request #95 from kurogin23mech-source/fix/ms-44-e1250-isTokenExpired-b64url
