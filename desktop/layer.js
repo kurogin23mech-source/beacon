@@ -239,15 +239,32 @@ async function connectCloudWebSocket(projectId) {
     cloudWs = null;
     state.connected = false;
 
-    // 4401: token missing (we never sent one), 4403: token expired/invalid.
-    // For 4403 attempt one silent refresh + immediate reconnect (no backoff
-    // counter increment); for 4401 surface a clear "sign in" message.
+    // Server-side close codes (server/app.py @ ws_project):
+    //   4401: token missing — surface "sign in" message, do not retry.
+    //   4403 reason="token_expired_or_invalid": refresh the token and
+    //        reconnect once. If refresh fails, prompt re-sign-in.
+    //   4403 reason="forbidden": user has no role on this project
+    //        (e-1252). MUST NOT retry — reconnecting is futile and just
+    //        loops against the auth gate.
+    //   4404: the project doesn't exist (e-1252). Stop reconnecting and
+    //        surface a clear "project not found" message.
     if (ev && ev.code === 4401) {
       state.error = 'Not signed in. Run `beacon auth login` to enable live updates.';
       if (state.project) render();
       return;
     }
+    if (ev && ev.code === 4404) {
+      state.error = 'This project does not exist or has been deleted.';
+      if (state.project) render();
+      return;
+    }
     if (ev && ev.code === 4403) {
+      if (ev.reason === 'forbidden') {
+        state.error = 'You do not have access to this project. Ask the owner to invite you.';
+        if (state.project) render();
+        return;
+      }
+      // token_expired_or_invalid: try one silent refresh.
       try {
         await invoke('cloud_refresh_auth_token');
         // Reset attempts since refresh succeeded; reconnect immediately.

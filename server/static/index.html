@@ -2092,24 +2092,44 @@ function connectWebSocket(projectId) {
   };
   ws.onclose = (ev) => {
     state.connected = false;
-    // Server-side auth failure codes (e-639):
+    // Server-side close codes (server/app.py @ ws_project):
     //   4401: token missing (we never sent one or it was stripped)
-    //   4403: token expired or invalid
-    // For 4403, attempt one silent refresh; if the user is on a Google ID
-    // token, prompt them to re-sign-in rather than spin in a reconnect loop.
-    if (ev && (ev.code === 4401 || ev.code === 4403)) {
-      // Stop any pending reconnect — we won't retry until the user reauths.
+    //   4403: either token expired/invalid OR the user has no role on
+    //         this project (e-1252 forbidden). Distinguish via ev.reason:
+    //         "forbidden" = no role; everything else = token state.
+    //   4404: project_id doesn't exist (e-1252 — was previously masked
+    //         as a silent reconnect loop)
+    // For token-state 4403 we used to attempt a silent refresh; we still
+    // surface the same "please sign in again" message. For "forbidden"
+    // and 4404 we MUST NOT retry — the user either lacks access or the
+    // project is gone, and reconnecting just hammers the server.
+    if (ev && (ev.code === 4401 || ev.code === 4403 || ev.code === 4404)) {
+      // Stop any pending reconnect — we won't retry until state changes.
       if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
-      state.error = ev.code === 4403
-        ? 'Session expired. Please sign in again.'
-        : 'Not signed in. Please sign in to enable live updates.';
+      let msg;
+      let label_text;
+      if (ev.code === 4401) {
+        msg = 'Not signed in. Please sign in to enable live updates.';
+        label_text = 'not signed in';
+      } else if (ev.code === 4404) {
+        msg = 'This project does not exist or has been deleted.';
+        label_text = 'project not found';
+      } else if (ev.code === 4403 && ev.reason === 'forbidden') {
+        msg = 'You do not have access to this project. Ask the owner to invite you.';
+        label_text = 'no access';
+      } else {
+        // 4403 token_expired_or_invalid (or any other 4403 we didn't recognise)
+        msg = 'Session expired. Please sign in again.';
+        label_text = 'session expired';
+      }
+      state.error = msg;
       // Surface the message in the connection label so the user sees it
       // without needing to open devtools.
       const label = document.querySelector('.connection-label');
-      if (label) label.textContent = ev.code === 4403 ? 'session expired' : 'not signed in';
+      if (label) label.textContent = label_text;
       const dot = document.querySelector('.status-dot');
       if (dot) dot.className = 'status-dot offline';
-      console.warn('[beacon ws]', state.error, 'close code:', ev.code);
+      console.warn('[beacon ws]', state.error, 'close code:', ev.code, 'reason:', ev.reason);
       return;
     }
     updateConnectionStatus();

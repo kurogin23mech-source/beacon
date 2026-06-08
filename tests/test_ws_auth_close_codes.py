@@ -133,3 +133,73 @@ def test_token_valid_accepts(monkeypatch):
         msg = ws.receive_json()
         assert msg["type"] == "project"
         assert msg["data"]["name"] == "WS Test"
+
+
+def test_unknown_project_closes_with_4404(monkeypatch):
+    """e-1252: a signed-in user requesting a project that doesn't exist
+    must get 4404, not a silent reconnect loop. Without this the client
+    would keep retrying against a non-existent project forever.
+    """
+    monkeypatch.setattr(app_module, "_verify_id_token",
+                        lambda token: {"sub": "user1", "email": "u@x.test"})
+    monkeypatch.setattr(app_module, "_start_watcher", lambda pid: None)
+    monkeypatch.setattr(app_module, "_stop_watcher", lambda pid: None)
+
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect("/ws/projects/does-not-exist?token=valid") as ws:
+            ws.receive_text()
+    assert exc_info.value.code == 4404
+
+
+def test_no_role_closes_with_4403_forbidden(monkeypatch):
+    """e-1252 (= 「サインインさえできれば他人のプロジェクトの中身が誰でも
+    読めてしまう」状態の根本修正): if the project HAS an owner and the
+    requesting user is not the owner / not in members[], the WS must close
+    with 4403 reason="forbidden". Before this change the WS handler skipped
+    the role check entirely and dumped the project contents.
+    """
+    # Seed a project owned by someone else (NOT user2).
+    _store["p2"] = {
+        "name": "Owned by user1",
+        "milestones": [],
+        "owner": "user1",
+        "members": [],
+    }
+
+    monkeypatch.setattr(app_module, "_verify_id_token",
+                        lambda token: {"sub": "user2", "email": "u2@x.test"})
+    monkeypatch.setattr(app_module, "_start_watcher", lambda pid: None)
+    monkeypatch.setattr(app_module, "_stop_watcher", lambda pid: None)
+
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect("/ws/projects/p2?token=valid") as ws:
+            ws.receive_text()
+    assert exc_info.value.code == 4403
+    # Distinguishes "forbidden" from "token_expired_or_invalid" — the
+    # client uses .reason to decide whether to retry (token state) or not
+    # (forbidden / no role).
+    assert exc_info.value.reason == "forbidden"
+
+
+def test_member_role_accepts(monkeypatch):
+    """A signed-in user with a role on the project (viewer is enough) must
+    be allowed through. This guards against an overly tight allowlist in
+    _require_project_role (a regression here would silently lock viewers
+    out of live updates).
+    """
+    _store["p3"] = {
+        "name": "Member project",
+        "milestones": [],
+        "owner": "user1",
+        "members": [{"user_id": "user2", "role": "viewer"}],
+    }
+
+    monkeypatch.setattr(app_module, "_verify_id_token",
+                        lambda token: {"sub": "user2", "email": "u2@x.test"})
+    monkeypatch.setattr(app_module, "_start_watcher", lambda pid: None)
+    monkeypatch.setattr(app_module, "_stop_watcher", lambda pid: None)
+
+    with client.websocket_connect("/ws/projects/p3?token=valid") as ws:
+        msg = ws.receive_json()
+        assert msg["type"] == "project"
+        assert msg["data"]["name"] == "Member project"
