@@ -1934,8 +1934,27 @@ async function loadAuthConfig() {
 }
 
 function handleCredentialResponse(response) {
-  const token = response.credential;
-  const payload = JSON.parse(atob(token.split('.')[1]));
+  // ms-44 e-1246: GIS popup → parent postMessage can be blocked by COOP / FedCM
+  // edge cases, in which case the callback fires but `response.credential` is
+  // empty. Guard the JWT decode so the user gets a visible error instead of a
+  // silent atob() exception that leaves them stuck on the login screen.
+  const token = (response && response.credential) || '';
+  if (!token || token.split('.').length < 2) {
+    console.error('[beacon] sign-in callback fired without a credential', response);
+    const status = document.querySelector('.login-screen .login-note');
+    if (status) {
+      status.textContent = 'サインインに失敗しました。ブラウザを最新版に更新して再度お試しください。問題が続く場合はシークレット/プライベートモードでお試しください。';
+      status.style.color = 'var(--error, #ef4444)';
+    }
+    return;
+  }
+  let payload;
+  try {
+    payload = JSON.parse(atob(token.split('.')[1]));
+  } catch (e) {
+    console.error('[beacon] failed to decode ID token payload', e);
+    return;
+  }
   state.auth.token = token;
   state.auth.email = payload.email || '';
   localStorage.setItem('beacon_token', token);

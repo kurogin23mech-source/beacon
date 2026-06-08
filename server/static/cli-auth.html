@@ -74,8 +74,27 @@ async function loadAuthConfig() {
 }
 
 function handleCredentialResponse(response) {
-  authToken = response.credential;
-  const payload = JSON.parse(atob(authToken.split('.')[1]));
+  // ms-44 e-1246: same defensive guard as index.html — COOP/FedCM edge cases
+  // can fire the callback with no credential, atob() would then throw and the
+  // user would be silently stuck.
+  authToken = (response && response.credential) || '';
+  if (!authToken || authToken.split('.').length < 2) {
+    console.error('[beacon] sign-in callback fired without a credential', response);
+    const s = document.getElementById('status');
+    s.textContent = 'サインインに失敗しました。ブラウザを最新版に更新するか、シークレット/プライベートモードでお試しください。';
+    s.className = 'status error';
+    return;
+  }
+  let payload;
+  try {
+    payload = JSON.parse(atob(authToken.split('.')[1]));
+  } catch (e) {
+    console.error('[beacon] failed to decode ID token payload', e);
+    const s = document.getElementById('status');
+    s.textContent = 'サインインに失敗しました (token decode error)。';
+    s.className = 'status error';
+    return;
+  }
   document.getElementById('status').textContent = `Signed in as ${payload.email}`;
   document.getElementById('status').className = 'status';
 

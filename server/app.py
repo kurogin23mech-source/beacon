@@ -2321,29 +2321,44 @@ from fastapi.responses import FileResponse, HTMLResponse
 _static_dir = Path(__file__).parent / "static"
 
 if _static_dir.exists():
+    # ms-44 e-1246: Google Identity Services (GIS) uses a popup to receive the
+    # ID token via window.postMessage. Modern browsers require the parent page
+    # to advertise Cross-Origin-Opener-Policy: same-origin-allow-popups for
+    # that opener/postMessage relationship to survive cross-origin popups.
+    # Without it, popup → parent postMessage is blocked, the callback fires
+    # with an empty credential, atob() throws, and the user is stuck on the
+    # login screen with no visible error. Applied to every HTML route so a
+    # future page that loads GIS does not silently regress.
+    _GIS_HEADERS = {
+        "Cross-Origin-Opener-Policy": "same-origin-allow-popups",
+    }
+
     @app.get("/")
     def serve_index():
         return FileResponse(
             _static_dir / "index.html",
-            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                **_GIS_HEADERS,
+            },
         )
 
     @app.get("/privacy")
     @app.get("/privacy.html")
     def privacy_policy():
-        return FileResponse(_static_dir / "privacy.html")
+        return FileResponse(_static_dir / "privacy.html", headers=_GIS_HEADERS)
 
     @app.get("/terms")
     @app.get("/terms.html")
     def terms_of_service():
-        return FileResponse(_static_dir / "terms.html")
+        return FileResponse(_static_dir / "terms.html", headers=_GIS_HEADERS)
 
     @app.get("/admin")
     def serve_admin():
-        return FileResponse(_static_dir / "admin.html")
+        return FileResponse(_static_dir / "admin.html", headers=_GIS_HEADERS)
 
     @app.get("/cli-auth")
     def serve_cli_auth():
-        return FileResponse(_static_dir / "cli-auth.html")
+        return FileResponse(_static_dir / "cli-auth.html", headers=_GIS_HEADERS)
 
     app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
