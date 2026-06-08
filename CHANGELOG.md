@@ -2,6 +2,14 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.21.2] - 2026-06-08
+
+- Merge pull request #92 from kurogin23mech-source/fix/ms-43-e1243-empty-state-ui
+- chore(ms-43): add join-by-id to WEB_ONLY_ACTIONS allowlist
+- fix(ms-43): 新規ユーザーの sign-in 後 empty state UI (e-1243)
+- docs(release): update README/CHANGELOG for v0.21.1
+- chore(release): bump formula to 0.21.1
+
 ## [v0.21.1] - 2026-06-08
 
 - Merge pull request #91 from kurogin23mech-source/fix/ms-44-e1240-oauth-verification
