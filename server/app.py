@@ -24,6 +24,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response, JSONResponse
 
 import core
+import envelope as envelope_mod
 import firestore_client as db
 import operations
 
@@ -453,6 +454,42 @@ _BUS_DELIVERY_MODES = {"auto-execute", "propose-to-ai", "notify-user-only"}
 _BUS_DELIVERY_DEFAULT = "propose-to-ai"
 
 
+# ---------------------------------------------------------------------------
+# Envelope verify adapters (ms-54 / e-1155 Phase 1)
+#
+# The envelope module is interface-agnostic; here we bind it to Firestore so
+# nonce-replay protection and in_reply_to parent lookups hit the real store
+# in production. Tests stub these via firestore_client monkey-patching, the
+# same way the existing bus_transport tests do.
+# ---------------------------------------------------------------------------
+
+
+class _FirestoreNonceStore(envelope_mod.NonceStore):
+    """Wrap firestore_client.check_and_record_bus_nonce for the envelope
+    verifier. Computes an ``expires_at`` from the configured nonce TTL so
+    an external sweeper can GC stale entries without hitting the verify
+    hot path."""
+
+    def check_and_record(self, project_id: str, nonce: str) -> bool:
+        import datetime
+        expires = (datetime.datetime.now(datetime.timezone.utc)
+                   + datetime.timedelta(seconds=envelope_mod.NONCE_TTL_SECONDS))
+        return db.check_and_record_bus_nonce(
+            project_id, nonce,
+            expires.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        )
+
+
+def _envelope_nonce_store() -> envelope_mod.NonceStore:
+    """Indirection so tests can override the nonce store."""
+    return _FirestoreNonceStore()
+
+
+def _envelope_parent_lookup() -> envelope_mod.ParentLookup:
+    """Indirection so tests can override the parent lookup."""
+    return envelope_mod.FunctionParentLookup(db.find_bus_event)
+
+
 class BusEventCreate(BaseModel):
     """Body for POST /api/projects/{project_id}/bus.
 
@@ -478,6 +515,39 @@ class BusEventCreate(BaseModel):
     sender_session_id: str = ""
     payload: dict = {}
     delivery: str = _BUS_DELIVERY_DEFAULT
+    # e-1155 Phase 1: AI-to-AI authorization envelope. Optional during the
+    # rollout — events without it are treated as T5-equivalent legacy (no
+    # auto-execute, no info disclosure beyond short ping). Adopting senders
+    # call the issuance endpoint first and stamp the result here.
+    envelope: Optional[dict] = None
+    # Optional structured action declaration. Senders that want auto-execute
+    # OR want the server to enforce the tier permission matrix must declare
+    # the action by name here. The legacy free-text payload path remains
+    # supported for backward compat (no enforced action).
+    requested_action: Optional[str] = None
+
+
+class EnvelopeIssueRequest(BaseModel):
+    """Body for POST /api/projects/{project_id}/bus/envelope/issue.
+
+    e-1155 Phase 1. The server uses the calling user (require_auth) as
+    proof of the human signature for T1, and signs the envelope with the
+    server HMAC secret. T2 envelopes (Operation scope) are also issued
+    here — the caller declares ``scope`` to opt in.
+
+    Issuance discipline (CORE doc § "scope 自然言語の曖昧性"):
+      * ``actions_authorized`` must enumerate concrete action names
+      * wildcards / regex / natural language are rejected at the
+        envelope module boundary
+    """
+    tier: str
+    actions_authorized: list[str] = []
+    scope: Optional[str] = None
+    data_class: str = "free"
+    conversation_id: Optional[str] = None
+    in_reply_to: Optional[str] = None
+    chain_depth: int = 0
+    ttl_seconds: int = 3600
 
 
 class BusCursorAdvance(BaseModel):
@@ -1765,6 +1835,20 @@ async def post_bus_event(
     on the wall-clock ordering (clients' local clocks would diverge across
     machines, defeating the cursor semantics).
 
+    e-1155 Phase 1: every receive now goes through the envelope verify
+    pipeline (9 steps from CORE doc 1UGomhHqCQo0iYSRtCdB). Outcomes:
+
+      * verify pass → original tier permission applies, delivery may stay
+        at auto-execute if the tier supports it.
+      * verify fail → monotonic T5 degrade. If T5 can't carry the payload
+        (action requested OR payload not in T5 short-ping shape) the
+        post is rejected with 403 *and* an audit record is written.
+      * legacy (no envelope) → T5-equivalent; same rejection rule.
+
+    The audit record is written for *every* receive (pass, fail, or
+    rejected) so the e-1168 audit log task is structurally satisfied by
+    Phase 1.
+
     Async handler so we can `await` the WS fan-out on the same event loop
     instead of bouncing through `run_coroutine_threadsafe` (e-997). The
     Firestore call is sync-blocking but bus posts are low-frequency, so the
@@ -1777,17 +1861,89 @@ async def post_bus_event(
     # Rationale: a sender ahead of the server (or a typo) MUST NOT trip a wire
     # error that the calling agent silently retries forever. Coercion to the
     # conservative default keeps the bus flowing without ever auto-elevating.
-    delivery = body.delivery if body.delivery in _BUS_DELIVERY_MODES else _BUS_DELIVERY_DEFAULT
+    requested_delivery = (
+        body.delivery if body.delivery in _BUS_DELIVERY_MODES
+        else _BUS_DELIVERY_DEFAULT
+    )
+
+    # e-1155 step 1: envelope verify. The result drives delivery downgrade
+    # and audit logging regardless of the legacy/with-envelope path.
+    verify_result = envelope_mod.verify(
+        body.envelope,
+        project_id=project_id,
+        payload=body.payload,
+        requested_action=body.requested_action,
+        nonce_store=_envelope_nonce_store(),
+        parent_lookup=_envelope_parent_lookup(),
+        sender_session_id=body.sender_session_id,
+    )
+
+    # Hard reject when verify populates a rejection_reason: that signal is
+    # reserved by the envelope module for "T5 degrade also fails" (action
+    # requested OR signed envelope present + payload not in T5 short-ping
+    # shape). Soft degrade keeps rejection_reason=None so the bus stays
+    # backward-compat for legacy free-text DMs (e-1136 dogfood depends on
+    # this distinction).
+    rejected = verify_result.rejection_reason is not None
+
+    t5_payload_conforms = envelope_mod.validate_t5_payload(
+        body.payload if isinstance(body.payload, dict) else {}
+    ) is None
+    effective_delivery = envelope_mod.decide_delivery(
+        envelope=body.envelope,
+        effective_tier=verify_result.effective_tier,
+        requested_action=body.requested_action,
+        requested_delivery=requested_delivery,
+        t5_payload_conforms=t5_payload_conforms,
+    )
+
+    audit_record = {
+        "received_at": datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        ),
+        "envelope": _envelope_audit_view(body.envelope),
+        "verify": verify_result.to_audit_dict(),
+        "requested_action": body.requested_action,
+        "requested_delivery": requested_delivery,
+        "effective_delivery": effective_delivery if not rejected else None,
+        "sender_session_id": body.sender_session_id,
+        "channel": body.channel,
+        "rejected": rejected,
+        "event_id": None,
+    }
+
+    if rejected:
+        # Audit before raising so the rejection is observable.
+        db.append_bus_audit(project_id, audit_record)
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "envelope_verify_rejected",
+                "reason": verify_result.rejection_reason,
+                "steps": verify_result.steps,
+            },
+        )
+
     data = {
         "channel": body.channel,
         "sender_session_id": body.sender_session_id,
         "payload": body.payload,
-        "delivery": delivery,
+        "delivery": effective_delivery,
         "created_at": datetime.datetime.now(datetime.timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%S.%fZ"
         ),
     }
+    # Persist the envelope alongside the event so receivers can re-verify
+    # (defense in depth) and the audit collection has a back-reference.
+    if body.envelope is not None:
+        data["envelope"] = body.envelope
+    if body.requested_action is not None:
+        data["requested_action"] = body.requested_action
+
     event_id = db.append_bus_event(project_id, data)
+    audit_record["event_id"] = event_id
+    db.append_bus_audit(project_id, audit_record)
+
     event = {"event_id": event_id, **data}
     # e-997: push to all WS subscribers of this project. Multi-replica delivery
     # (events posted on another Cloud Run instance) is out of scope here —
@@ -1796,6 +1952,82 @@ async def post_bus_event(
     if _ws_connections.get(project_id):
         await _broadcast_bus_event(project_id, event)
     return event
+
+
+def _envelope_audit_view(env: Optional[dict]) -> Optional[dict]:
+    """Return a redacted view of the envelope suitable for the audit log.
+
+    Drops the signature (already verified — storing it adds bulk without
+    forensic value) and keeps the field set Phase 2 might extend. None
+    inputs round-trip to None so legacy receives are explicit in the log.
+    """
+    if env is None:
+        return None
+    keep = {"tier", "issuer", "scope", "actions_authorized", "data_class",
+            "issued_at", "expires_at", "project_id", "nonce",
+            "conversation_id", "in_reply_to", "chain_depth"}
+    return {k: env.get(k) for k in keep if k in env}
+
+
+@app.post("/api/projects/{project_id}/bus/envelope/issue")
+def issue_bus_envelope(
+    project_id: str,
+    body: EnvelopeIssueRequest,
+    user: dict = Depends(require_auth),
+):
+    """Issue a server-signed bus envelope (e-1155 Phase 1).
+
+    The signature is HMAC-SHA256 over the canonical envelope, keyed by the
+    server's ``BEACON_ENVELOPE_SECRET``. The Bearer token on this request
+    *is* the proof of human authorization for T1 — the user has explicitly
+    asked the server to mint an envelope, which is the structural primitive
+    behind "T1 = human explicit signature".
+
+    T2 envelopes (Operation scope) are also minted here. A non-empty
+    ``scope`` switches the tier semantics; the envelope module enforces
+    the tier/scope consistency rule.
+
+    Rejects wildcards / regex in ``actions_authorized`` at the module
+    boundary, so callers cannot smuggle a permissive scope by encoding
+    fuzzy intent.
+    """
+    # Membership check: only writers on this project can mint envelopes
+    # against it. Read-only members and unauthenticated callers can't
+    # synthesize T1/T2 signatures.
+    _require_project_role(project_id, user, allowed=("owner", "editor"))
+    issuer = user.get("email") or user.get("sub") or "dev"
+    try:
+        env = envelope_mod.issue_envelope(
+            tier=body.tier,
+            issuer=issuer,
+            project_id=project_id,
+            actions_authorized=body.actions_authorized,
+            data_class=body.data_class,
+            scope=body.scope,
+            conversation_id=body.conversation_id,
+            in_reply_to=body.in_reply_to,
+            chain_depth=body.chain_depth,
+            ttl_seconds=body.ttl_seconds,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400,
+                            detail=f"envelope issuance rejected: {e}")
+    return env
+
+
+@app.get("/api/projects/{project_id}/bus/audit")
+def list_bus_audit(
+    project_id: str,
+    since: str = "",
+    limit: int = 100,
+    user: dict = Depends(require_auth),
+):
+    """List bus envelope audit records for ``project_id`` (e-1155 / e-1168).
+
+    Audit visibility is membership-gated: only project members can read.
+    """
+    _require_project_role(project_id, user)
+    return db.list_bus_audit(project_id, since=since, limit=limit)
 
 
 @app.get("/api/projects/{project_id}/bus")

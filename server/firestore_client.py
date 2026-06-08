@@ -677,6 +677,132 @@ def advance_bus_cursor(project_id: str, recipient_id: str,
     return data
 
 
+# ---------------------------------------------------------------------------
+# Bus envelope nonce store + audit (ms-54 / e-1155 Phase 1)
+#
+# ``bus_nonces``: project-scoped replay-protection store. Each envelope nonce
+# may be consumed at most once per project. Documents are keyed by nonce and
+# carry ``expires_at`` so a sweeper (cron / TTL policy) can GC them; the
+# verify path itself only writes new nonces and reads to check existence.
+#
+# ``bus_audit``: subcollection storing every receive-time verify outcome —
+# pass, fail, or degrade. This is the e-1168 audit log target co-located
+# with the bus events it documents, so a single query yields the full
+# "who signed → what was requested → what we let through" trail.
+# ---------------------------------------------------------------------------
+
+BUS_NONCES_SUBCOLLECTION = "bus_nonces"
+BUS_AUDIT_SUBCOLLECTION = "bus_audit"
+
+
+def check_and_record_bus_nonce(project_id: str, nonce: str,
+                               expires_at: str) -> bool:
+    """Return True iff ``nonce`` is fresh; atomically record it on first use.
+
+    Uses a Firestore transaction so concurrent verify paths on the same
+    nonce can't both see "fresh". On a write collision, the transaction
+    retries and the second caller sees the prior document → returns False.
+
+    ``expires_at`` is informational (used by an external sweeper). The
+    in-flight verify does not GC; production cleanup is operational work
+    (Firestore TTL policy or a scheduled function).
+    """
+    import datetime
+    db = get_db()
+    ref = (
+        db.collection(COLLECTION)
+        .document(project_id)
+        .collection(BUS_NONCES_SUBCOLLECTION)
+        .document(nonce)
+    )
+
+    @firestore.transactional
+    def _txn(tx):
+        snap = ref.get(transaction=tx)
+        if snap.exists:
+            return False
+        tx.set(ref, {
+            "nonce": nonce,
+            "expires_at": expires_at,
+            "recorded_at": datetime.datetime.now(datetime.timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%S.%fZ"
+            ),
+        })
+        return True
+
+    return _txn(db.transaction())
+
+
+def find_bus_event(project_id: str, event_id: str) -> dict | None:
+    """Look up a single bus event by id. Returns None if missing.
+
+    Used by the envelope verify step 6 (in_reply_to parent existence +
+    recipient-of-parent check). Keeps the heavy ``list_bus_events`` query
+    off the verify hot path.
+    """
+    doc = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(BUS_EVENTS_SUBCOLLECTION)
+        .document(event_id)
+        .get()
+    )
+    if not doc.exists:
+        return None
+    return {"event_id": doc.id, **doc.to_dict()}
+
+
+def append_bus_audit(project_id: str, record: dict) -> str:
+    """Append an audit record. Returns the auto-id.
+
+    Schema (Phase 1):
+      {
+        "received_at": ISO8601,
+        "envelope": {tier, issuer, scope, conversation_id, chain_depth, ...},
+        "verify": {passed, effective_tier, steps, rejection_reason},
+        "requested_action": str | None,
+        "requested_delivery": str,
+        "effective_delivery": str,
+        "sender_session_id": str,
+        "channel": str,
+        "event_id": str | None,   # set if the event was persisted
+      }
+
+    Audit records are written for both pass and fail receives so the trail
+    is complete (CORE doc § "監査ログとの統合").
+    """
+    col = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(BUS_AUDIT_SUBCOLLECTION)
+    )
+    ref = col.add(record)
+    return ref[1].id
+
+
+def list_bus_audit(project_id: str, *, since: str = "",
+                   limit: int = 100) -> list[dict]:
+    """List audit records ordered by received_at (most recent at end).
+
+    Used by the Web UI (Phase 2) and by ops queries — "what envelopes have
+    we accepted / rejected in the last hour for this project?".
+    """
+    q = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(BUS_AUDIT_SUBCOLLECTION)
+        .order_by("received_at")
+    )
+    if since:
+        q = q.where("received_at", ">", since)
+    if limit:
+        q = q.limit(limit)
+    return [{"audit_id": doc.id, **doc.to_dict()} for doc in q.stream()]
+
+
 def list_bus_events(project_id: str, since: str = "", channel: str = "",
                     limit: int = 100) -> list[dict]:
     """List bus events ordered by created_at.

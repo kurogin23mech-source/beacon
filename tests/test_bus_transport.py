@@ -82,6 +82,55 @@ firestore_client.get_bus_cursor = _mock_get_bus_cursor
 firestore_client.advance_bus_cursor = _mock_advance_bus_cursor
 
 
+# ms-54 / e-1155 Phase 1: envelope verify + audit hit the same firestore_client
+# module. The bus transport contract pre-dates envelopes, so events posted by
+# this test use the legacy (no envelope) path → T5-equivalent (ping or no-action).
+# Provide in-memory stubs for the new functions so the contract tests run
+# without standing up a Firestore emulator.
+_nonce_store: dict[tuple[str, str], bool] = {}
+_audit_store: dict[str, list[dict]] = {}
+
+
+def _mock_check_and_record_bus_nonce(project_id: str, nonce: str,
+                                     expires_at: str) -> bool:
+    key = (project_id, nonce)
+    if key in _nonce_store:
+        return False
+    _nonce_store[key] = True
+    return True
+
+
+def _mock_append_bus_audit(project_id: str, record: dict) -> str:
+    bucket = _audit_store.setdefault(project_id, [])
+    audit_id = f"audit-{len(bucket) + 1:06d}"
+    bucket.append({"audit_id": audit_id, **copy.deepcopy(record)})
+    return audit_id
+
+
+def _mock_list_bus_audit(project_id: str, *, since: str = "",
+                         limit: int = 100) -> list[dict]:
+    items = list(_audit_store.get(project_id, []))
+    items.sort(key=lambda r: r.get("received_at", ""))
+    if since:
+        items = [r for r in items if r.get("received_at", "") > since]
+    if limit:
+        items = items[:limit]
+    return copy.deepcopy(items)
+
+
+def _mock_find_bus_event(project_id: str, event_id: str) -> dict | None:
+    for ev in _bus_store.get(project_id, []):
+        if ev.get("event_id") == event_id:
+            return copy.deepcopy(ev)
+    return None
+
+
+firestore_client.check_and_record_bus_nonce = _mock_check_and_record_bus_nonce
+firestore_client.append_bus_audit = _mock_append_bus_audit
+firestore_client.list_bus_audit = _mock_list_bus_audit
+firestore_client.find_bus_event = _mock_find_bus_event
+
+
 # Stubs for the existing _load auth/loader hooks so the bus endpoints don't
 # crash trying to fetch a real project.
 firestore_client.get_project = lambda pid: {"name": "test", "milestones": []}
@@ -116,15 +165,23 @@ def reset_store():
     firestore_client.list_bus_events = _mock_list_bus_events
     firestore_client.get_bus_cursor = _mock_get_bus_cursor
     firestore_client.advance_bus_cursor = _mock_advance_bus_cursor
+    firestore_client.check_and_record_bus_nonce = _mock_check_and_record_bus_nonce
+    firestore_client.append_bus_audit = _mock_append_bus_audit
+    firestore_client.list_bus_audit = _mock_list_bus_audit
+    firestore_client.find_bus_event = _mock_find_bus_event
     firestore_client.get_project = lambda pid: {"name": "test", "milestones": []}
     firestore_client.save_project = lambda pid, data: None
     firestore_client.list_projects = lambda: []
     _bus_store.clear()
     _cursor_store.clear()
+    _nonce_store.clear()
+    _audit_store.clear()
     _event_seq[0] = 0
     yield
     _bus_store.clear()
     _cursor_store.clear()
+    _nonce_store.clear()
+    _audit_store.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -146,10 +203,12 @@ def test_post_returns_event_id_and_stamped_created_at():
     # server-stamped created_at, not client-supplied
     assert body["created_at"]
     assert body["created_at"].endswith("Z")
-    # e-1135: delivery defaults to propose-to-ai when not specified — the
-    # conservative choice so an unaware sender can never accidentally elevate
-    # to auto-execute.
-    assert body["delivery"] == "propose-to-ai"
+    # e-1155 Phase 1: legacy (no envelope) + free-text payload gets soft-
+    # degraded to T5 disclosure, which caps delivery at notify-user-only.
+    # Pre-envelope tests asserted propose-to-ai; the rule changed when
+    # the envelope verify pipeline landed (CORE doc 1UGomhHqCQo0iYSRtCdB,
+    # § backward compat: "missing envelope → restricted permissions").
+    assert body["delivery"] == "notify-user-only"
 
 
 # ---------------------------------------------------------------------------
@@ -157,11 +216,12 @@ def test_post_returns_event_id_and_stamped_created_at():
 # ---------------------------------------------------------------------------
 
 def test_delivery_explicit_modes_round_trip():
-    """All three valid delivery modes must round-trip — propose-to-ai is the
-    default, auto-execute is the explicit-opt-in case, notify-user-only is
-    the silent-to-AI case. If any of these stops round-tripping, the
-    receiving daemon will misinterpret events (e-1136 dogfood depends on it)."""
-    for mode in ("auto-execute", "propose-to-ai", "notify-user-only"):
+    """propose-to-ai and notify-user-only round-trip for legacy (no
+    envelope) posts. auto-execute does NOT round-trip on the legacy path
+    after e-1155 — that's the whole point: callers must mint an envelope
+    to elevate to auto-execute. Test in test_envelope_integration.py
+    covers the envelope-bearing path that does round-trip auto-execute."""
+    for mode in ("propose-to-ai", "notify-user-only"):
         resp = client.post(f"/api/projects/{PROJECT_ID}/bus", json={
             "channel": "policy",
             "payload": {},
@@ -169,6 +229,15 @@ def test_delivery_explicit_modes_round_trip():
         })
         assert resp.status_code == 200
         assert resp.json()["delivery"] == mode
+
+    # Legacy auto-execute → downgraded to propose-to-ai (ping-shape empty
+    # payload is safe to expose under T5 propose; only auto-execute is
+    # denied).
+    resp = client.post(f"/api/projects/{PROJECT_ID}/bus", json={
+        "channel": "policy", "payload": {}, "delivery": "auto-execute",
+    })
+    assert resp.status_code == 200
+    assert resp.json()["delivery"] == "propose-to-ai"
 
 
 def test_unknown_delivery_mode_coerces_to_default():
