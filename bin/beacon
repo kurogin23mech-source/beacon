@@ -61,7 +61,7 @@ Pull Requests:
   beacon pr close <entry-id>                   Close PR without merging
 
 Documents:
-  beacon doc add "title" [--scope core|spec|memo]  Create a document
+  beacon doc add "title" [--scope core|spec|memo|retro|report]  Create a document
   beacon doc list [--scope <scope>]                List all documents
   beacon doc show <doc-id>                         Show document content
   beacon doc update <doc-id>                       Update a document
@@ -1494,7 +1494,7 @@ cmd_doc() {
             done
 
             if [ -z "$doc_title" ]; then
-                echo "Usage: beacon doc add \"title\" [--scope core|spec|memo] [--ms ms-id] [--op op-id] [--id slug] [--content text] [--json]"
+                echo "Usage: beacon doc add \"title\" [--scope core|spec|memo|retro|report] [--ms ms-id] [--op op-id] [--id slug] [--content text] [--json]"
                 echo "  Content can also be piped via stdin."
                 exit 1
             fi
@@ -1549,7 +1549,7 @@ cmd_doc() {
             done
 
             if [ -z "$doc_id" ]; then
-                echo "Usage: beacon doc update <doc-id> [--title text] [--scope core|spec|memo] [--ms ms-id] [--op op-id] [--content text] [--json]"
+                echo "Usage: beacon doc update <doc-id> [--title text] [--scope core|spec|memo|retro|report] [--ms ms-id] [--op op-id] [--content text] [--json]"
                 echo "  Content can also be piped via stdin."
                 exit 1
             fi
@@ -1613,9 +1613,9 @@ cmd_doc() {
             ;;
         *)
             echo "Usage: beacon doc [add|list|show|update|delete|restore|history]"
-            echo "  add    \"title\" --scope core|spec|memo [--ms ms-id]  Create a document"
+            echo "  add    \"title\" --scope core|spec|memo|retro|report [--ms ms-id]  Create a document"
             echo "  update <doc-id> [--title text] [--content text]     Update a document"
-            echo "  list   [--scope core|spec|memo] [--ms ms-id] [--include-trashed]"
+            echo "  list   [--scope core|spec|memo|retro|report] [--ms ms-id] [--include-trashed]"
             echo "  show   <doc-id>                                      Show document content"
             echo "  delete <doc-id> [--reason \"text\"]                    Soft-delete to trash"
             echo "  history <doc-id>                                     Show revision history"

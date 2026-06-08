@@ -4677,7 +4677,7 @@ def cmd_trigger_clear():
 # Document commands
 # ---------------------------------------------------------------------------
 
-VALID_SCOPES = ("core", "spec", "memo")
+VALID_SCOPES = ("core", "spec", "memo", "retro", "report")
 DEFAULT_SCOPE = "memo"
 
 
@@ -4837,7 +4837,7 @@ def cmd_doc_list():
         if not docs:
             print("No documents.")
             return
-        scope_icons = {"core": "*", "spec": "+", "memo": "-"}
+        scope_icons = {"core": "*", "spec": "+", "memo": "-", "retro": "~", "report": "!"}
         for doc in docs:
             icon = scope_icons.get(doc.get("scope", "memo"), "?")
             print(f"  {icon} [{doc.get('scope', 'memo')}] {doc['doc_id']}: {doc['title']}")

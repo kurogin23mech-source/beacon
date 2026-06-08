@@ -1399,7 +1399,7 @@ def _handle_doc(root: Path, args: argparse.Namespace) -> int:
     if cmd == "add":
         if not args.title:
             print(
-                "Usage: beacon doc add \"title\" [--scope core|spec|memo] "
+                "Usage: beacon doc add \"title\" [--scope core|spec|memo|retro|report] "
                 "[--ms ms-id] [--op op-id] [--id slug] [--content text] [--json]"
             )
             return 1
@@ -2328,7 +2328,7 @@ def _print_top_help() -> None:
         "  beacon milestone add \"title\" [--priority P] [--objective O] [--ac A]\n"
         "  beacon milestone list | start <id> | done <id> | observe <id> | show <id>\n"
         "  beacon milestone graph [--json] | workspace <id> | workspace-cleanup <id>\n"
-        "  beacon doc add \"title\" [--scope core|spec|memo] [--ms id]\n"
+        "  beacon doc add \"title\" [--scope core|spec|memo|retro|report] [--ms id]\n"
         "  beacon doc list [--scope S] [--ms id]\n"
         "  beacon doc show <doc-id>\n"
         "  beacon note \"<text>\" | note list | note clear\n"
