@@ -211,6 +211,52 @@ def test_doc_add_list_show_e2e(capfd, fresh_dir):
     assert "Smoke Doc" in out
 
 
+def test_doc_add_retro_and_report_scopes_e2e(capfd, fresh_dir):
+    """e-1222: --scope must accept 'retro' and 'report' per the
+    `doc-classification` CORE doc, not just core/spec/memo.
+
+    Drift between CLI and the canonical scope list was rejecting valid
+    scopes; this locks the full 5-scope contract end-to-end.
+    """
+    main_mod.main([
+        "init", "--name", "smoke", "--objective", "obj", "--retro-day", "monday",
+    ])
+    main_mod.main(["milestone", "add", "MS for docs"])
+    capfd.readouterr()
+    rc = main_mod.main(["status", "--json"])
+    assert rc == 0
+    ms_id = json.loads(capfd.readouterr().out)["milestones"][0]["id"]
+    main_mod.main(["milestone", "start", ms_id])
+    capfd.readouterr()
+
+    # retro scope must succeed
+    rc = main_mod.main([
+        "doc", "add", "Weekly Retro",
+        "--scope", "retro",
+        "--ms", ms_id,
+        "--content", "# Weekly Retro\n\nlearnings",
+    ])
+    assert rc == 0, "doc add --scope retro should succeed"
+
+    # report scope must succeed
+    rc = main_mod.main([
+        "doc", "add", "Incident Report",
+        "--scope", "report",
+        "--ms", ms_id,
+        "--content", "# Incident Report\n\nroot cause",
+    ])
+    assert rc == 0, "doc add --scope report should succeed"
+
+    # Both docs are persisted with the right scope
+    capfd.readouterr()
+    rc = main_mod.main(["doc", "list", "--json"])
+    assert rc == 0
+    docs = json.loads(capfd.readouterr().out)
+    scopes_by_title = {d["title"]: d.get("scope") for d in docs}
+    assert scopes_by_title.get("Weekly Retro") == "retro"
+    assert scopes_by_title.get("Incident Report") == "report"
+
+
 def test_note_add_list_clear_e2e(capfd, fresh_dir):
     main_mod.main([
         "init", "--name", "smoke", "--objective", "obj", "--retro-day", "monday",
