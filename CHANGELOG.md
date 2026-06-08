@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.21.1] - 2026-06-08
+
+- Merge pull request #91 from kurogin23mech-source/fix/ms-44-e1240-oauth-verification
+- fix(ms-44): Google OAuth verification 通過の前提整備 (e-1240)
+- docs(release): update README/CHANGELOG for v0.21.0
+- chore(release): bump formula to 0.21.0
+
 ## [v0.21.0] - 2026-06-08
 
 - Merge pull request #90 from kurogin23mech-source/feat/writing-principle-all-skills
