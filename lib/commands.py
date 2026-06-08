@@ -1705,7 +1705,12 @@ def cmd_log_finalize():
     ms_id = os.environ.get("BEACON_MS_ID", "")
     summary_text = os.environ.get("BEACON_SUMMARY", "")
     progress = os.environ.get("BEACON_PROGRESS", "")
-    new_summary = os.environ.get("BEACON_NEW_SUMMARY", "")
+    # e-1040: project-level summary writes are deprecated. We still read
+    # BEACON_NEW_SUMMARY so we can warn the caller (typically the legacy
+    # /beacon-log Skill or a stale script), but we no longer mutate
+    # data["summary"]. Human narrative lives in the project-vision CORE
+    # doc; session-scoped context lives in the session_logs subcollection.
+    legacy_new_summary = os.environ.get("BEACON_NEW_SUMMARY", "")
     behavior = os.environ.get("BEACON_BEHAVIOR", "")
     resolves = os.environ.get("BEACON_RESOLVES", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
@@ -1729,24 +1734,38 @@ def cmd_log_finalize():
         session_id=session_id,
     )
 
-    if new_summary:
-        data["summary"] = new_summary
+    # e-1040 deprecation: don't write data["summary"] anymore. The legacy
+    # path used to set it from BEACON_NEW_SUMMARY; that field is now
+    # ignored at write time. Callers should switch to project-vision
+    # CORE doc updates (human narrative) or rely on session_logs
+    # subcollection (session context).
+    summary_was_ignored = bool(legacy_new_summary)
 
     save_project(data)
 
     if json_mode:
-        result["summary_updated"] = bool(new_summary)
+        result["summary_updated"] = False  # always False post-e-1040
+        if summary_was_ignored:
+            result["summary_deprecated"] = True
         print(json.dumps(result, ensure_ascii=False))
     else:
         if result["status"] == "duplicate":
-            print(f"Already logged: {commit_hash} (updated progress/summary)")
+            print(f"Already logged: {commit_hash} (updated progress)")
         else:
             loc = f"[{result['matched_task']}]" if "matched_task" in result else result["milestone_title"]
             print(f"Logged {commit_hash} → {loc}")
         if progress:
             print(f"  Progress: {result['progress']}%")
-        if new_summary:
-            print(f"  Summary updated.")
+        if summary_was_ignored:
+            # stderr so JSON consumers / pipes don't break; interactive
+            # users still see it. Mirrors the pattern in cmd_summary.
+            sys.stderr.write(
+                "[deprecated] --summary was provided but is no longer written to "
+                "the project. The project summary path was retired in e-1040 — "
+                "use the `project-vision` CORE doc for human narrative and the "
+                "session_logs subcollection for per-session context. This "
+                "argument will be removed in a future release.\n"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -2956,28 +2975,36 @@ def cmd_member_role():
 # ---------------------------------------------------------------------------
 
 def cmd_summary():
-    # ms-57 / e-1040: `beacon summary` is being phased out. The single
-    # mutable summary field had three roles (session scratch, cross-session
-    # hand-off, human narrative) and a lost-update history. Writes still
-    # work for legacy callers (auto-update from beacon log, /beacon-log
-    # Skill) but a stderr deprecation note nudges interactive users toward
-    # the session log + project-vision split per SPEC v2.
+    # ms-57 / e-1040 deprecation completed: `beacon summary "text"` writes
+    # are now a no-op. Reads still work for legacy CLI surfaces that
+    # haven't migrated to project-vision / session_logs yet — they get
+    # whatever was last written before the soft-deprecation ended.
+    # Cross-session hand-off → `beacon session log`. Human narrative →
+    # project-vision CORE doc.
     text = os.environ.get("BEACON_SUMMARY_TEXT", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     data = load_project()
     if text:
-        # Skip the nag in JSON mode (the /beacon-log Skill calls this
-        # programmatically and shouldn't be lectured every commit).
+        # No write. Surface the deprecation so the caller knows their
+        # input was ignored, but keep JSON callers quiet (mirrors the
+        # pattern in cmd_log_finalize).
         if not json_mode and not os.environ.get("BEACON_SUPPRESS_DEPRECATION"):
-            print(
-                "Note: `beacon summary` is deprecated (ms-57 / e-1040). "
-                "Cross-session hand-off lives in `beacon session log` now, "
-                "and human narrative belongs in the project-vision doc.",
-                file=sys.stderr,
+            sys.stderr.write(
+                "[deprecated] `beacon summary <text>` is no longer a write "
+                "(ms-57 / e-1040 completed). Cross-session hand-off → "
+                "`beacon session log`; human narrative → `project-vision` "
+                "CORE doc. Your input was IGNORED. This command will be "
+                "removed in a future release.\n"
             )
-        data["summary"] = text
-        save_project(data)
-        print(f"Summary updated.")
+        if json_mode:
+            print(json.dumps(
+                {"summary": data.get("summary", ""),
+                 "write_ignored": True,
+                 "deprecated_since": "e-1040"},
+                ensure_ascii=False,
+            ))
+        else:
+            print("Summary write ignored (deprecated; see stderr).")
     elif json_mode:
         print(json.dumps({"summary": data.get("summary", "")}, ensure_ascii=False))
     else:

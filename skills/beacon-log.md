@@ -1,6 +1,6 @@
 ---
 name: beacon-log
-description: コミット後にbeaconへ記録し、進捗率とサマリーをAI評価で自動更新する。prepare/finalizeの2段階ワークフロー。
+description: コミット後にbeaconへ記録し、進捗率をAI評価で自動更新する。prepare/finalizeの2段階ワークフロー。
 version: 0.5.0
 triggers:
   - /beacon-log
@@ -11,7 +11,9 @@ triggers:
 
 # Beacon Log
 
-> コミット記録 + MS選定 + 進捗評価 + サマリー更新を1つのワークフローで完結させる。
+> コミット記録 + MS選定 + 進捗評価を1つのワークフローで完結させる。
+>
+> (サマリー更新は e-1040 で廃止 — 人間向けナラティブは `project-vision` CORE doc、セッション単位の経緯は session_logs subcollection が継承する)
 
 ## cwd 解決（最重要）
 
@@ -108,10 +110,17 @@ Step 1（+ Step 1.5）で特定した MS の情報と `commit.message` を読み
 
 **ユーザー視点で** 「このコミットをマージした後、システムはどのように動くか」を1〜2文で記述する。
 
+文章の書き方は CORE doc **`entry-writing-principle`** (doc_id `F3ZkqT0pKS6JpR8dn70n`) に従う。Beacon のターゲットには非開発者が含まれるため、開発者の癖 (横文字濫用 / 別 task ID への click-through 前提 / 主語省略) は読み手を排除する。
+
 - NG: 「○○クラスに□□メソッドを追加した」（実装の話）
 - OK: 「○○画面で□□ボタンを押すと△△が表示されるようになる」（挙動の話）
 - バグ修正の場合: 「以前は□□すると△△が起きたが、修正後は正しく▲▲する」
 - 内部リファクタリングで外部挙動が変わらない場合: 「外部挙動の変化なし（内部実装の整理）」
+
+横文字 3 段階に従う:
+- 固有名詞 (`Firestore` / `pipx` / `MCP`) はそのまま
+- 技術概念 (`allowlist` / `opt-in`) は初出時に日本語注 (例: `allowlist (= 許可リスト)`)
+- 一般概念は日本語化 (configure → 設定 / receiver → 受信側 / audit → 監査)
 
 ### resolves（解決したタスクID）
 
@@ -162,7 +171,7 @@ Step 1.9 のタスク自動完了と **同じ高信頼度の基準** でマッ�
 - **MID**: description / AC のキーワードがコミットメッセージと意味的に一致（entry-id 明示はないが、内容で関連が確信できる）
 - **LOW**: 関連はあるが弱い（同じファイル領域だが目的が違う、近い話題だが別実装、等）
 
-**LOW のタスクは最初から skip**（DONE/PARTIAL/SKIP の判定にも進まない、Step 5 の報告にも載せない）。HIGH/MID のみ次の AC 照合に進む。
+**LOW のタスクは最初から skip**（DONE/PARTIAL/SKIP の判定にも進まない、Step 4 の報告にも載せない）。HIGH/MID のみ次の AC 照合に進む。
 
 **2. AC 照合 → 3 通り判定**
 
@@ -199,9 +208,9 @@ cd "$PROJECT_DIR" && beacon task add "残: <未達 AC 項目を具体化>" -m <m
   --acceptance-criteria "<未達項目を測定可能な形で>"
 ```
 
-元タスク（PARTIAL 判定されたほう）は `todo` のまま残す。Step 5 報告に「e-XXX: 部分達成、follow-up e-YYY 起票」と明示。
+元タスク（PARTIAL 判定されたほう）は `todo` のまま残す。Step 4 報告に「e-XXX: 部分達成、follow-up e-YYY 起票」と明示。
 
-**✗ SKIP**: 何もしない。done も follow-up も書き込まない。Step 5 報告に「e-XXX: AC 未達のため done 保留（理由: <1 行>）」と明示。
+**✗ SKIP**: 何もしない。done も follow-up も書き込まない。Step 4 報告に「e-XXX: AC 未達のため done 保留（理由: <1 行>）」と明示。
 
 ### 守るべき原則
 
@@ -209,7 +218,7 @@ cd "$PROJECT_DIR" && beacon task add "残: <未達 AC 項目を具体化>" -m <m
 2. **判断軌跡を done_reason に必ず残す**。「なぜこの判断で done になったか」が後から辿れる形にする。
 3. **部分達成は隠さず follow-up task として可視化する**。サイレントな AC 未達を作らない。
 4. **AC が定義されていないタスクは保守的に扱う**。HIGH のみ done、MID は SKIP。
-5. **AI が自律判断する**。ユーザーに「このタスク done にしていいですか？」と対話介入しない。ユーザーは Step 5 報告と done_reason で事後監査する。
+5. **AI が自律判断する**。ユーザーに「このタスク done にしていいですか？」と対話介入しない。ユーザーは Step 4 報告と done_reason で事後監査する。
 
 ### AI 未検証の側面を done_reason に併記する
 
@@ -240,41 +249,28 @@ Step 1 (+ Step 1.5) で特定した MS の情報を読み、以下の基準で *
 ### 出力形式
 整数値のみ（例: `55`）。内部で使用するため、説明文は不要。
 
-## Step 3: サマリーの生成
+## Step 3: 書き込み（finalize）
 
-Step 1 の JSON を読み、以下の基準で **サマリーテキスト** を生成する:
-
-### 記載すること
-- なぜ今のタスクに取り組んでいるのか（経緯・背景）
-- どういう判断でこうなったか（技術選定、方針変更など）
-- 次セッションで知っておくべきコンテキスト
-
-### 記載しないこと
-- タスクリストを見ればわかる情報（進捗率、アクティブMS名、完了タスク一覧）
-- コミットメッセージの繰り返し
-
-### 出力形式
-1-3文の日本語テキスト。簡潔に。
-
-## Step 4: 書き込み（finalize）
-
-Step 1.5〜3 の結果と Step 1.8 で生成した補足情報を使って、Bash ツールで実行:
+Step 1.5〜2 の結果と Step 1.8 で生成した補足情報を使って、Bash ツールで実行:
 
 ```bash
-cd "$PROJECT_DIR" && beacon log --finalize -m <選定したms-id> --progress <Step2の値> --summary "<Step3のテキスト>" \
+cd "$PROJECT_DIR" && beacon log --finalize -m <選定したms-id> --progress <Step2の値> \
   --behavior "<Step1.8のbehavior>" --resolves "<Step1.8のresolves（なければ省略）>"
 ```
 
-ユーザーが `/beacon-log` に引数でコミットの概要を渡した場合は `--summary` の前に付加する。
 `resolves` が空の場合は `--resolves` フラグごと省略する。
 
-## Step 5: 結果の提示
+> **e-1040 廃止項目**: かつての Step 3 (サマリー生成) + `--summary` 引数は廃止しました。
+> 人間向けナラティブは `project-vision` CORE doc、セッション経緯は session_logs subcollection を使ってください。
+> ユーザーが `/beacon-log` に引数で説明を渡した場合は finalize に直接渡さず、commit メッセージか behavior に反映してください。
+
+## Step 4: 結果の提示
 
 finalize の stdout と Step 1.9 の判定結果を組み合わせ、ユーザーに結果を簡潔に報告:
 
 ```
 Beacon: [hash] → [ms-id] [紐づけ先] (progress%)
-Summary: [更新したサマリーの要約]
+Behavior: [Step1.8で生成したbehaviorを引用]
 
 タスク判定 (Step 1.9):              ← 判定対象が 1 件以上ある場合のみ
   ✓ DONE:    [e-id] <description 短縮> — <done_reason 短縮>
@@ -288,14 +284,14 @@ AI が物理確認できなかった側面 (user 監査推奨):   ← done_reaso
 判定対象がなかった（pending_tasks が空、または LOW 信頼度しかなかった）場合は「タスク判定」セクションごと省略する。
 「AI が物理確認できなかった側面」セクションは、DONE 判定したタスクの `done_reason` に「**(未検証: ...)**」が含まれている場合のみ表示する。ユーザーはここを見て監査ポイントを把握する。
 
-## Step 5.5: MS完了判定（e-550 / UC3-G4）
+## Step 4.5: MS完了判定（e-550 / UC3-G4）
 
-Step 5 の結果から、以下の条件のいずれかを満たす場合、ユーザーに **MS閉じる提案** を行う:
+Step 4 の結果から、以下の条件のいずれかを満たす場合、ユーザーに **MS閉じる提案** を行う:
 
 1. **全タスク done**: メインMSの `total_tasks > 0` かつ `done_tasks == total_tasks`
 2. **進捗が高水位**: 今回 finalize した進捗率 `>= 95` で、かつ前回より進捗が上がった
 
-判定材料は Step 1 の JSON (`milestone.total_tasks` `milestone.done_tasks`) と Step 4 で finalize に渡した進捗率の値。追加の CLI 呼び出しは不要。
+判定材料は Step 1 の JSON (`milestone.total_tasks` `milestone.done_tasks`) と Step 3 で finalize に渡した進捗率の値。追加の CLI 呼び出しは不要。
 
 ### 提案文（実行は不要、ユーザー判断に委ねる）
 
@@ -310,7 +306,7 @@ Step 5 の結果から、以下の条件のいずれかを満たす場合、ユ�
 
 **重要**: この Skill は **提案だけ** 行う。`beacon milestone done` / `observe` は **直接実行しない** (e-549 規約: コミット前確認と同じく、状態変更は明示承認を経て初めて走る)。
 
-## Step 6: ドキュメント評価
+## Step 5: ドキュメント評価
 
 今回のコミットが **設計判断・方針変更・新しいルール** を含むかを評価する。
 
@@ -326,7 +322,7 @@ Step 5 の結果から、以下の条件のいずれかを満たす場合、ユ�
 3. **仕様として記録すべき技術的決定をした**（例: APIの認証方式を変更）→ spec の新規作成/更新
 
 ### 該当しない場合
-何もせず Step 7 へ進む。大半のコミットはここで終わる。
+何もせず Step 6 へ進む。大半のコミットはここで終わる。
 
 ### 該当する場合
 
@@ -350,11 +346,11 @@ Doc: [既存doc更新 or 新規作成] [scope] "[タイトル]"
 
 5. ユーザーが却下したら何もしない。
 
-## Step 7: リズム提案（e-585 / UC6-K8'）
+## Step 6: リズム提案（e-585 / UC6-K8'）
 
 このプロジェクトが既にサイクル中の場合、push / deploy / release のタイミングを **積極的に提案する**。サイクル外なら沈黙する (Claude Code 本体に教育を委ねる)。
 
-### Step 7a: サイクル活性判定の取得
+### Step 6a: サイクル活性判定の取得
 
 Bash ツールで実行:
 ```bash
@@ -374,7 +370,7 @@ stdout に各サイクルの活性状態 + 直近アクション日が返る:
 
 `beacon cycle status` コマンドが未実装または失敗した場合はこの Step をスキップ (リズム提案無し、サイレントに継続)。
 
-### Step 7b: push 提案
+### Step 6b: push 提案
 
 `push.active == true` で、かつ Step 1 の `commit.hash` 以降の未 push commit が積み上がっている疑いがあれば提案。
 
@@ -389,7 +385,7 @@ push サイクル中のプロジェクトです。未 push commit が N 件溜�
 
 `push.active == false` の場合は **沈黙**。
 
-### Step 7c: deploy 提案
+### Step 6c: deploy 提案
 
 `deploy.active == true` で、かつ直近 push 以降に deploy 記録が無い場合に提案:
 
@@ -401,14 +397,14 @@ deploy サイクル中のプロジェクトです。前回 deploy: [last_action_
 
 `deploy.active == false` の場合は **沈黙**。
 
-### Step 7d: 沈黙ルール
+### Step 6d: 沈黙ルール
 
 - 提案は **1コミットあたり最大1種類** (push 提案を出したら deploy 提案は次の機会に)。鬱陶しさ回避
 - ユーザーが過去に dismiss した場合、その情報は project の `meta.cycle_hint_shown_at` 等に記録される (将来拡張)。本 Step では best-effort で出すだけ
 
-## Step 8: トリガーチェック
+## Step 7: トリガーチェック
 
-Step 5〜7 の報告後、Bash ツールで実行:
+Step 4〜6 の報告後、Bash ツールで実行:
 ```bash
 cd "$PROJECT_DIR" && beacon trigger check
 ```
@@ -422,8 +418,8 @@ Beacon trigger: [message]
 
 ## 制約
 
-- Step 1（prepare）は読み取り専用。書き込みは Step 4（finalize）のみ。
-- 進捗率とサマリーの生成は、Step 1 の JSON に含まれる情報のみで判断する。追加のファイル読み取りやコマンド実行は行わない。
+- Step 1（prepare）は読み取り専用。書き込みは Step 3（finalize）のみ。
+- 進捗率の生成は、Step 1 の JSON に含まれる情報のみで判断する。追加のファイル読み取りやコマンド実行は行わない。
 - project.json を Read ツールで直接読んではならない。
 - **すべての Bash 呼び出しに `cd "$PROJECT_DIR" && ...` を前置する**。hook 経由起動時は hook が渡した project path を使う (ホーム以外を起点に動作させる)。
 - MS 完了化 (`beacon milestone done` / `observe`) は提案のみ。実行はユーザー承認後に別途。

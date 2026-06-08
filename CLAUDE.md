@@ -30,8 +30,8 @@ This project uses [Beacon](https://github.com/r-kida2/beacon) for milestone-driv
   コミット後はPostToolUse hookが自動で `/beacon-log` Skillを起動し、AI評価付きで進捗を記録する。
 - If 2+ commits address the same issue, suggest grouping them into a task.
   同じ課題に2回以上コミットが発生したら、タスクにまとめることを提案する。
-- Update the project summary when direction changes: `beacon summary "text"`
-  方向性が変わった時はサマリーを更新する。書くべきは経緯・判断・背景であり、進捗率やMS名ではない。
+- For human narrative ("why are we doing this", "where is this going"), update the `project-vision` CORE doc. For session-scoped context that should survive into the next session, write to `beacon session log` (via `/beacon-session-end` Skill). The legacy `beacon summary "text"` write was retired in e-1040.
+  人間向けナラティブ (経緯・判断・背景) は `project-vision` CORE doc に書く。セッション単位の引き継ぎは `beacon session log` (`/beacon-session-end` Skill 経由)。`beacon summary "text"` の書き込みは e-1040 で廃止済。
 - When the user hints at ending the session, or before you suggest splitting/ending the session yourself, run `/beacon-session-end` Skill first.
   ユーザーがセッション終了を仄めかしたとき、または自分自身がセッション分割・終了を提案する前に、必ず `/beacon-session-end` Skill を実行する。
 - When the user wants to implement multiple milestones in parallel ("parallel", "sub-agents", "dispatch", etc.), run `/beacon-dispatch` Skill. Do not call the Agent tool directly.
@@ -69,8 +69,10 @@ Proposals should feel like "What if we tried X?" — not directives.
 | `beacon milestone start <id>` | Activate milestone / MS開始 |
 | `beacon task add "desc" -m <ms-id>` | Add task / タスク追加 |
 | `beacon task done <id>` | Complete task / タスク完了 |
-| `beacon log "summary"` | Record commit (auto via hook) / コミット記録（hook経由で自動） |
-| `beacon summary "text"` | Update summary / サマリー更新 |
+| `beacon log [text]` | Record commit (auto via hook) / コミット記録（hook経由で自動） |
+| `beacon summary` | View project summary (read-only; writes retired in e-1040) |
+| `beacon session log list` | List session logs / セッションログ一覧 |
+| `beacon session end` | Aggregate this session's notes/commits/PRs into a session log / セッション集約 |
 | `beacon note "text"` | Add session note (ephemeral, cleared at session-end) / セッションメモ追加 |
 | `beacon note list` | Show session notes / メモ一覧 |
 | `beacon note clear` | Clear all session notes / メモ全削除 |

@@ -133,9 +133,9 @@ Duplicate detection: `source` + (`url` or `revision_id`). `source=manual` skips 
 |---------|-------------|--------|
 | `beacon log [message] [-m ms-id] [-p progress]` | Record HEAD commit | Yes |
 | `beacon log --prepare` | Output evaluation context as JSON (read-only) | Yes |
-| `beacon log --finalize [--progress N] [--summary text]` | Write evaluation results | Yes |
+| `beacon log --finalize [--progress N]` | Write evaluation results (`--summary` retired in e-1040) | Yes |
 | `beacon sync` | Auto-sync recent git commits to active milestone | - |
-| `beacon summary [text]` | View/update project summary | Yes |
+| `beacon summary` | View project summary (read-only; writes retired in e-1040, use `project-vision` doc + `beacon session log`) | Yes |
 
 ### Pull Requests
 

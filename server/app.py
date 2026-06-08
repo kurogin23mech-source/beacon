@@ -1042,13 +1042,36 @@ def log_commit(project_id: str, body: LogCommit,
 @app.patch("/api/projects/{project_id}/summary")
 def update_summary(project_id: str, body: SummaryUpdate,
                    user: dict = Depends(require_auth)):
-    def op(data: dict):
-        _require_write(data, user)
-        data["summary"] = body.text
-        return data, {"summary": body.text}
-    return operations.apply_operation(
-        project_id, op, op_name="project.summary", actor=user.get("sub", ""),
+    """**Deprecated** (e-1040 completed). Writes are no-op.
+
+    Cross-session hand-off → `beacon session log` (session_logs subcollection).
+    Human narrative → `project-vision` CORE doc.
+
+    The endpoint still returns 200 with the currently-stored summary so
+    unknown legacy callers (older CLI / external scripts) don't crash —
+    they just observe their input was ignored. The `Deprecation` /
+    `Sunset` headers signal the contract change machine-readably.
+    """
+    # Permission check is still useful (do not leak read access to
+    # outsiders), but we don't apply the mutation.
+    data = _load(project_id, user)
+    _require_write(data, user)
+    existing = data.get("summary", "")
+    response = JSONResponse(
+        content={
+            "summary": existing,
+            "write_ignored": True,
+            "deprecated_since": "e-1040",
+        }
     )
+    # Standard HTTP deprecation signals.
+    response.headers["Deprecation"] = "true"
+    response.headers["Sunset"] = "see e-1040; endpoint will be removed"
+    response.headers["Link"] = (
+        '<https://github.com/r-kida2/beacon/blob/main/CLAUDE.md>; '
+        'rel="deprecation"; type="text/html"'
+    )
+    return response
 
 
 # ---------------------------------------------------------------------------
