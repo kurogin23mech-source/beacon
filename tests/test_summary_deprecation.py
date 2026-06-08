@@ -1,12 +1,14 @@
-"""Tests for `beacon summary` soft-deprecation (ms-57 / e-1040).
+"""Tests for `beacon summary` deprecation completion (ms-57 / e-1040).
 
 SPEC v2 splits summary's three roles:
   - cross-session hand-off → session log (e-1037)
   - human narrative        → project-vision doc
-The legacy `beacon summary "text"` write path still works (so the
-PostToolUse hook + /beacon-log Skill don't break) but interactive
-calls get a stderr deprecation note, and the Web UI no longer
-renders the summary banner (handled separately in index.html).
+
+After the soft-deprecation period, `beacon summary "text"` writes are
+now a NO-OP: the project's `summary` field is no longer mutated by
+this command, by `beacon log --summary`, or by the /beacon-log Skill.
+Read paths still work so existing session-start displays don't go
+blank on legacy projects that already have a value stored.
 """
 
 from __future__ import annotations
@@ -50,12 +52,40 @@ def project_dir(monkeypatch):
             os.chdir(tempfile.gettempdir())
 
 
-def test_summary_write_still_persists(project_dir, monkeypatch):
-    monkeypatch.setenv("BEACON_SUMMARY_TEXT", "still works")
+def test_summary_write_is_ignored(project_dir, monkeypatch):
+    """e-1040 deprecation completed: `beacon summary "text"` is no-op.
+    The previous text is preserved (empty string in this fixture)."""
+    monkeypatch.setenv("BEACON_SUMMARY_TEXT", "should be ignored")
     with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
         commands.cmd_summary()
     data = json.loads((project_dir / ".beacon" / "project.json").read_text())
-    assert data["summary"] == "still works"
+    assert data["summary"] == ""  # untouched
+
+
+def test_summary_write_existing_value_preserved(project_dir):
+    """Reads through a legacy stored value continue to work even though
+    writes are no-op."""
+    data_path = project_dir / ".beacon" / "project.json"
+    data = json.loads(data_path.read_text())
+    data["summary"] = "legacy stored value"
+    data_path.write_text(json.dumps(data), encoding="utf-8")
+    out = io.StringIO()
+    with redirect_stdout(out), redirect_stderr(io.StringIO()):
+        commands.cmd_summary()  # read mode (no env var)
+    assert "legacy stored value" in out.getvalue()
+
+
+def test_summary_json_write_reports_ignored_flag(project_dir, monkeypatch):
+    """JSON callers (the legacy /beacon-log Skill, scripts) need a
+    machine-readable signal that the write was dropped."""
+    monkeypatch.setenv("BEACON_SUMMARY_TEXT", "attempted")
+    monkeypatch.setenv("BEACON_JSON", "1")
+    out = io.StringIO()
+    with redirect_stderr(io.StringIO()), redirect_stdout(out):
+        commands.cmd_summary()
+    body = json.loads(out.getvalue())
+    assert body.get("write_ignored") is True
+    assert body.get("deprecated_since") == "e-1040"
 
 
 def test_summary_write_prints_deprecation_to_stderr(project_dir, monkeypatch):
