@@ -1933,6 +1933,19 @@ async function loadAuthConfig() {
   } catch (e) {}
 }
 
+// ms-44 e-1247: Google ID tokens are base64url-encoded (RFC 7515), which uses
+// `-` and `_` in place of `+` and `/` and omits padding. Native `atob()` only
+// accepts standard base64 and throws InvalidCharacterError on either, so the
+// JWT payload must be normalized before decoding. Without this, the very first
+// web sign-in via GIS popup silently fails — kurogin23mech happened to skip
+// this code path because a CLI-issued token was already cached in localStorage.
+function decodeJwtPayload(token) {
+  let s = (token || '').split('.')[1] || '';
+  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  return JSON.parse(atob(s));
+}
+
 function handleCredentialResponse(response) {
   // ms-44 e-1246: GIS popup → parent postMessage can be blocked by COOP / FedCM
   // edge cases, in which case the callback fires but `response.credential` is
@@ -1950,7 +1963,7 @@ function handleCredentialResponse(response) {
   }
   let payload;
   try {
-    payload = JSON.parse(atob(token.split('.')[1]));
+    payload = decodeJwtPayload(token);
   } catch (e) {
     console.error('[beacon] failed to decode ID token payload', e);
     return;
