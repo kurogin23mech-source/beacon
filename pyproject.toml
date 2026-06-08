@@ -111,6 +111,7 @@ beacon-hook-context-monitor = "beacon_cli.hooks.context_monitor:main"
 packages = [
     "beacon_cli",
     "beacon_cli.hooks",
+    "beacon_cli.skills_helpers",
     "beacon_cli._bundled_lib",
     "beacon_cli._bundled_skills",
     "beacon_cli._bundled_channel",
