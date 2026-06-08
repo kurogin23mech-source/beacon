@@ -290,19 +290,62 @@ def _get_role(data: dict, user: dict) -> str:
     return ""
 
 
+def _require_project_role(
+    project_id: str,
+    user: dict | None,
+    *,
+    allowed: tuple[str, ...] = ("owner", "editor", "viewer"),
+) -> tuple[dict, str]:
+    """Single source of truth for "can this user read/write this project?".
+
+    Loads the project (404 if missing), then evaluates the caller's role and
+    rejects (403) when the role is empty or not in ``allowed``. Returns
+    ``(project_data, role)`` on success.
+
+    Why this exists (e-1254): authorization used to live in two places —
+    ``_load`` for REST endpoints, and an ad-hoc verify-only path for the
+    WebSocket endpoint. The WS path forgot the role check entirely (e-1252),
+    so any signed-in Beacon user could pull any project's contents over
+    ``/ws/projects/<id>``. Consolidating the rule into one helper makes that
+    failure mode structurally impossible: every caller goes through the same
+    "load + role check" pair, and the only knob is ``allowed`` (used by the
+    handful of endpoints that need owner-only / editor-only access).
+
+    For WS handlers: catch ``HTTPException`` from this helper and translate
+    ``404 → close 4404`` / ``403 → close 4403 (forbidden)``. REST handlers
+    re-raise as-is.
+    """
+    try:
+        data = operations.load_project_consistent(project_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    if not _auth_enabled or user is None:
+        # Auth disabled (dev mode) or anonymous read — _get_role still returns
+        # "owner" in dev, "" with no user. Skip the gate entirely in dev so
+        # local development against `BEACON_AUTH_ENABLED=0` keeps working.
+        return data, ("owner" if not _auth_enabled else "")
+    role = _get_role(data, user)
+    if not role or role not in allowed:
+        raise HTTPException(status_code=403, detail="Access denied")
+    return data, role
+
+
 def _load(project_id: str, user: dict | None = None) -> dict:
     # v2 (subcollection) projects need their milestones hydrated from the
     # subcollection; load_project_consistent transparently handles both v1
     # and v2 so callers get a unified dict shape either way. Falling back
     # to db.get_project here would silently drop milestones[] on v2 docs.
-    try:
-        data = operations.load_project_consistent(project_id)
-    except LookupError:
-        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
-    if user and _auth_enabled:
-        role = _get_role(data, user)
-        if not role:
-            raise HTTPException(status_code=403, detail="Access denied")
+    #
+    # e-1254: delegate to _require_project_role so REST and WS share one
+    # authorization rule. The pre-existing "user is None → skip auth" path
+    # is preserved because some internal callers pass user=None for ops
+    # that already verified ownership upstream.
+    if user is None:
+        try:
+            return operations.load_project_consistent(project_id)
+        except LookupError:
+            raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    data, _role = _require_project_role(project_id, user)
     return data
 
 
@@ -2136,31 +2179,71 @@ def _stop_watcher(project_id: str):
 async def ws_project(websocket: WebSocket, project_id: str):
     """WebSocket endpoint for real-time project monitoring.
 
-    Close codes used by this endpoint (clients must distinguish them — e-639):
+    Close codes used by this endpoint (clients must distinguish them —
+    e-639 introduced 4401/4403 for token state; e-1252 added 4403=forbidden
+    and 4404 for project-level authorization):
 
-      4401  TOKEN MISSING   — no token query param. Client should not retry
-                              silently; redirect to login.
-      4403  TOKEN EXPIRED   — token presented but rejected. Client should
-                              attempt a refresh (where supported) and either
-                              re-connect with a fresh token or surface a
-                              "please log in again" notice.
+      4401  TOKEN MISSING       — no ``?token=`` query param. Client should
+                                  not retry silently; redirect to login.
+      4403  TOKEN INVALID       — token presented but signature/expiry
+            (reason="token_expired_or_invalid")
+                                  rejected. Client should attempt a refresh
+                                  and reconnect, or surface "please sign in
+                                  again" if refresh fails.
+      4403  FORBIDDEN           — token is valid (the user is signed in) but
+            (reason="forbidden")  has no role on this project. Client must
+                                  NOT retry — the user simply isn't a member.
+                                  Differentiated from the expired case via
+                                  the ``reason`` field on ``CloseEvent``.
+      4404  PROJECT NOT FOUND   — the project_id doesn't exist. Client
+            (reason="project_not_found")
+                                  should stop reconnecting and surface a
+                                  clear "this project doesn't exist or has
+                                  been deleted" message.
 
-    Both codes are in the application-private range (4000–4999) so they do
+    All codes are in the application-private range (4000–4999) so they do
     not collide with standard WebSocket close codes. The browser exposes them
     via CloseEvent.code, which makes the retry decision deterministic on the
     client side (no more silent 1008 + infinite reconnect loop).
+
+    e-1252 (= 「サインインさえできれば他人のプロジェクトの中身が誰でも読めて
+    しまう」状態の根本修正): until this change the endpoint only verified the
+    token signature/expiry, then immediately dumped the requested project to
+    the socket. Any authenticated Beacon user could read any project. We now
+    route the load through ``_require_project_role`` (e-1254 / 認可ルールを 1
+    つに集約するヘルパー) so the WS path goes through the exact same role
+    check as REST endpoints.
     """
     token = websocket.query_params.get("token")
+    claims: dict | None = None
     if _auth_enabled:
         if not token:
             # Reason text helps server-side audit logs; clients should rely on code.
             await websocket.close(code=4401, reason="token_missing")
             return
         try:
-            _verify_id_token(token)
+            claims = _verify_id_token(token)
         except HTTPException:
             await websocket.close(code=4403, reason="token_expired_or_invalid")
             return
+
+    # Authorization gate: project must exist AND the authenticated user must
+    # have a role on it. Without this the WS endpoint was a wide-open read
+    # channel (e-1252). We deliberately run the role check BEFORE
+    # ``websocket.accept()`` so the close code reaches the client as a
+    # handshake-failure CloseEvent rather than mid-stream (which some browser
+    # WS stacks coalesce into a generic 1006).
+    try:
+        raw, _role = _require_project_role(project_id, claims)
+    except HTTPException as exc:
+        # Map REST-shaped 403/404 onto WS close codes. Anything else (we
+        # don't expect any) gets a generic 4403 so we never leak project
+        # contents on an unhandled error.
+        if exc.status_code == 404:
+            await websocket.close(code=4404, reason="project_not_found")
+        else:
+            await websocket.close(code=4403, reason="forbidden")
+        return
 
     await websocket.accept()
 
@@ -2168,15 +2251,10 @@ async def ws_project(websocket: WebSocket, project_id: str):
         _ws_connections[project_id] = set()
     _ws_connections[project_id].add(websocket)
 
-    # Send initial enriched data. load_project_consistent hydrates v2
-    # projects from the subcollection so the client receives the full
-    # milestones[] regardless of schema layout.
-    try:
-        raw = operations.load_project_consistent(project_id)
-    except LookupError:
-        raw = None
-    if raw:
-        await websocket.send_json({"type": "project", "data": _enrich_project(raw)})
+    # Send initial enriched data. The role check above already loaded the
+    # project via load_project_consistent (which hydrates v2 subcollection
+    # milestones), so we reuse ``raw`` instead of fetching twice.
+    await websocket.send_json({"type": "project", "data": _enrich_project(raw)})
 
     _start_watcher(project_id)
 
