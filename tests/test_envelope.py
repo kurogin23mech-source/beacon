@@ -219,6 +219,55 @@ def test_verify_step7_chain_depth_exceeded(nonce_store, parent_lookup):
     assert "chain_depth" in res.steps
 
 
+def test_issue_envelope_rejects_negative_chain_depth():
+    # Server must never mint a chain_depth < 0 envelope. The verify-side
+    # check is the second line of defense; this is the first.
+    with pytest.raises(ValueError, match="chain_depth"):
+        env_mod.issue_envelope(
+            tier=env_mod.TIER_T1, issuer="u", project_id=PROJECT_ID,
+            actions_authorized=["status_check"], chain_depth=-1,
+        )
+
+
+def test_verify_step7_rejects_negative_chain_depth(nonce_store, parent_lookup):
+    # Handcraft an envelope with chain_depth=-1 (issue_envelope refuses to
+    # mint one, so we build the dict directly and sign it with the server
+    # secret to reach verify's step 7). Previously the check was only
+    # `depth > limit`, so -1 slipped through. Tightened invariant rejects it.
+    issued_at = env_mod._now_iso()
+    expires_at = env_mod._plus_seconds_iso(3600)
+    body = {
+        "tier": env_mod.TIER_T1,
+        "issuer": "u",
+        "scope": None,
+        "actions_authorized": ["status_check"],
+        "data_class": "free",
+        "issued_at": issued_at,
+        "expires_at": expires_at,
+        "project_id": PROJECT_ID,
+        "nonce": "nonce-negdepth-1",
+        "conversation_id": "c-negdepth",
+        "in_reply_to": None,
+        "chain_depth": -1,
+        "tokens": None,
+        "refill_policy": None,
+    }
+    body["signature"] = env_mod.sign(body)
+    # Sanity check: signature itself is valid, so verify must reach step 7.
+    assert env_mod.verify_signature(body) is True
+
+    res = env_mod.verify(
+        body, project_id=PROJECT_ID, payload={"ping": "ok"},
+        requested_action=None,
+        nonce_store=nonce_store, parent_lookup=parent_lookup,
+        sender_session_id="s",
+    )
+    assert res.passed is False
+    assert "chain_depth" in res.steps
+    assert "-1" in res.steps["chain_depth"]
+    assert res.effective_tier == env_mod.TIER_T5
+
+
 def test_verify_step8_action_not_authorized(nonce_store, parent_lookup):
     e = _t1(actions_authorized=["status_check"])
     res = env_mod.verify(
