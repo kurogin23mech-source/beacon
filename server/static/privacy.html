@@ -21,36 +21,74 @@ p, ul { color: #a1a1aa; margin-bottom: 16px; }
 ul { padding-left: 20px; }
 a { color: #4ade80; }
 .updated { font-size: 0.8rem; color: #71717a; }
+.footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid #27272a; font-size: 0.85rem; color: #71717a; }
 </style>
 </head>
 <body>
 <h1>Privacy Policy</h1>
-<p class="updated">Last updated: 2026-05-13</p>
+<p class="updated">Last updated: 2026-06-08</p>
 
-<h2>What We Collect</h2>
+<p>Beacon ("we", "our", "the service") is a milestone-driven project tracking tool. This Privacy Policy explains what personal information we collect when you use Beacon, how we use it, and the choices you have. By signing in to Beacon, you agree to the practices described below.</p>
+
+<h2>1. Information We Collect</h2>
 <p>When you sign in to Beacon using Google Sign-In, we collect:</p>
 <ul>
-  <li>Your email address (for account identification)</li>
-  <li>Your Google account ID (for authentication)</li>
+  <li><strong>Your email address</strong> — used to identify your account and associate it with the projects you own or are invited to.</li>
+  <li><strong>Your Google account ID</strong> (the OpenID Connect <code>sub</code> claim) — used as a stable internal identifier for your account.</li>
 </ul>
-<p>We do not collect passwords, contacts, or any other personal data from your Google account.</p>
+<p>We do not request access to your Google Drive, Gmail, Contacts, Calendar, or any other Google service. We do not collect your name, profile picture, password, phone number, or location.</p>
+<p>When you actively use Beacon, you may create project content (milestones, tasks, commit metadata, documents, retrospectives). This content is stored in your project and is treated as data you own — see Section 3.</p>
 
-<h2>How We Use Your Data</h2>
+<h2>2. How We Use Your Information</h2>
 <ul>
-  <li>To authenticate you and provide access to your projects</li>
-  <li>To associate projects with their owners and members</li>
+  <li>To authenticate you and grant access to projects you own or have been invited to.</li>
+  <li>To associate project entries (milestones, tasks, commits) with the account that created them.</li>
+  <li>To enforce project membership and permission boundaries.</li>
 </ul>
+<p>We do not use your information for advertising, profiling, or any form of behavioral analysis. We do not sell your data.</p>
 
-<h2>Data Storage</h2>
-<p>Your data is stored in Google Cloud Firestore. Project data you create (milestones, tasks, commits) is stored alongside your account identifier.</p>
+<h2>3. Where Your Data Is Stored</h2>
+<p>Your account information and project data are stored in Google Cloud Firestore (region: <code>us-central1</code>) under the Beacon Google Cloud project. Access is restricted to the Beacon backend service account; no third party has access.</p>
 
-<h2>Third-Party Sharing</h2>
-<p>We do not sell, share, or provide your data to third parties. Your project data is only visible to you and members you explicitly invite.</p>
+<h2>4. Cookies and Tracking</h2>
+<p>The Beacon web application does not use advertising cookies, analytics cookies, or any cross-site tracking technologies. We use a single first-party session token (stored in <code>localStorage</code>) solely to keep you signed in. We do not embed third-party trackers or analytics scripts.</p>
 
-<h2>Data Deletion</h2>
-<p>You may request deletion of your account and associated data by contacting us.</p>
+<h2>5. Third-Party Sharing</h2>
+<p>We do not sell, rent, share, or otherwise disclose your data to third parties for their own purposes. The only third-party processor involved is Google Cloud Platform, which hosts the Beacon backend and database under Google's standard <a href="https://cloud.google.com/terms/data-processing-addendum" target="_blank" rel="noopener">Data Processing Addendum</a>.</p>
 
-<h2>Contact</h2>
-<p>For questions about this privacy policy, please open an issue on our GitHub repository.</p>
+<h2>6. Data Retention</h2>
+<p>We retain your account and project data indefinitely until you delete it, so that the historical record of your project (milestones, tasks, commits, documents) remains intact and useful. You stay in control:</p>
+<ul>
+  <li>You may delete any individual project at any time using the <code>beacon project delete</code> CLI command, which immediately removes all entries for that project from Firestore.</li>
+  <li>You may request deletion of your account and all associated projects by emailing <a href="mailto:kurogin23mech@gmail.com">kurogin23mech@gmail.com</a> (see Section 7). We will action the request within 30 days.</li>
+  <li>OAuth tokens are revoked immediately upon account deletion and may also be revoked by you at any time at <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">https://myaccount.google.com/permissions</a>. Once revoked, Beacon can no longer act on your behalf.</li>
+</ul>
+<p>Backup copies, if any, are purged within 90 days of the deletion request.</p>
+
+<h2>7. How to Contact Us / How to Delete Your Data</h2>
+<p>For any privacy question, data access request, or deletion request, email:</p>
+<p><strong><a href="mailto:kurogin23mech@gmail.com">kurogin23mech@gmail.com</a></strong></p>
+<p>Please include the email address you signed in with so we can locate and remove your account.</p>
+
+<h2>8. Your Rights (GDPR / CCPA)</h2>
+<p>Depending on where you live, you may have the following rights regarding your personal data:</p>
+<ul>
+  <li><strong>Right of access</strong> — request a copy of the personal data we hold about you.</li>
+  <li><strong>Right to rectification</strong> — request correction of inaccurate data.</li>
+  <li><strong>Right to erasure ("right to be forgotten")</strong> — request deletion of your data.</li>
+  <li><strong>Right to data portability</strong> — request an export of your project data (Beacon stores project data as JSON, which we can provide on request).</li>
+  <li><strong>Right to opt out of sale</strong> — Beacon does not sell personal data, so this is always honored by default.</li>
+</ul>
+<p>To exercise any of these rights, contact us at <a href="mailto:kurogin23mech@gmail.com">kurogin23mech@gmail.com</a>. EU/UK users have the right to lodge a complaint with their local data protection authority.</p>
+
+<h2>9. Children's Privacy</h2>
+<p>Beacon is not directed to children under 13, and we do not knowingly collect personal information from children under 13. If you believe a child has provided us with personal information, please contact us and we will delete it.</p>
+
+<h2>10. Changes to This Policy</h2>
+<p>We may update this Privacy Policy from time to time to reflect changes in the service or legal requirements. When we do, we will update the "Last updated" date at the top of this page. Significant changes will additionally be announced via the Beacon project README or release notes. Your continued use of Beacon after a change constitutes acceptance of the updated policy.</p>
+
+<p class="footer">
+See also: <a href="/terms">Terms of Service</a>
+</p>
 </body>
 </html>

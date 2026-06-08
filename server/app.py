@@ -2329,8 +2329,14 @@ if _static_dir.exists():
         )
 
     @app.get("/privacy")
+    @app.get("/privacy.html")
     def privacy_policy():
         return FileResponse(_static_dir / "privacy.html")
+
+    @app.get("/terms")
+    @app.get("/terms.html")
+    def terms_of_service():
+        return FileResponse(_static_dir / "terms.html")
 
     @app.get("/admin")
     def serve_admin():

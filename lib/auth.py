@@ -17,7 +17,6 @@ CREDENTIALS_PATH = BEACON_HOME / "credentials.json"
 FIREBASE_CONFIG_PATH = Path(__file__).parent / "firebase_config.json"
 
 SCOPES = [
-    "https://www.googleapis.com/auth/datastore",
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
 ]
