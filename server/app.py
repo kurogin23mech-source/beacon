@@ -2267,6 +2267,50 @@ async def _capture_event_loop():
     _event_loop = asyncio.get_event_loop()
 
 
+@app.on_event("startup")
+async def _verify_envelope_secret_configured():
+    """Refuse to start in production with the dev envelope-signing fallback (e-1291).
+
+    The envelope HMAC secret (``server/envelope.py``) falls back to a literal
+    placeholder string when ``BEACON_ENVELOPE_SECRET`` is unset. That string
+    is visible in the public repo, so booting production with the fallback
+    would let anyone read the source and forge T1 envelopes (= authorize
+    high-risk actions on the bus).
+
+    Refuse-to-start condition::
+
+        _auth_enabled is True  AND  envelope_mod.is_using_dev_fallback() is True
+
+    ``_auth_enabled`` is the project-wide "production-ish posture" toggle
+    (``BEACON_API_AUTH`` != "0"). When auth is disabled (local dev / unit
+    tests set ``BEACON_API_AUTH=0`` and stub ``_auth_enabled = False``), the
+    fallback is allowed and we only log an INFO so the situation is visible
+    without blocking boot.
+
+    Raising ``RuntimeError`` from a startup handler causes FastAPI to abort
+    the lifespan startup, which makes Cloud Run's health checks fail — the
+    exact behavior we want for a misconfigured deploy (fail fast at boot,
+    not at first forged envelope).
+    """
+    if _auth_enabled and envelope_mod.is_using_dev_fallback():
+        msg = (
+            "BEACON_ENVELOPE_SECRET not configured for production "
+            "(BEACON_API_AUTH=1 but envelope signing would use the dev "
+            "fallback secret visible in the public repo). Set "
+            "BEACON_ENVELOPE_SECRET to a random 32+ byte value in the "
+            "Cloud Run service env before deploying — e.g. "
+            "`gcloud run services update beacon-api-prod "
+            "--update-env-vars BEACON_ENVELOPE_SECRET=<random>`."
+        )
+        _server_logger.error(msg)
+        raise RuntimeError(msg)
+    if envelope_mod.is_using_dev_fallback():
+        _server_logger.info(
+            "envelope signing using dev fallback secret "
+            "(BEACON_API_AUTH=0 — local dev / test posture)"
+        )
+
+
 def _enrich_project(data: dict) -> dict:
     """Add computed fields (total_tasks, done_tasks, entries_to_json) to project."""
     enriched = {**data}
