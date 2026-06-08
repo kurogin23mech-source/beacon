@@ -119,3 +119,72 @@ def test_env_var_bad_path_falls_back():
         assert (root / "lib" / "commands.py").exists() or (
             root / "_bundled_lib" / "commands.py"
         ).exists()
+
+
+# ---------------------------------------------------------------------------
+# Bash-delegation routing (ms-44 e-1311)
+# ---------------------------------------------------------------------------
+#
+# These pin down WHICH dispatch path main() picks. The bug: on Windows,
+# git-bash / WSL put a `bash` on PATH, so the old "bash present => bin/beacon"
+# heuristic delegated to a non-UTF-8 bash script (mojibake) or a WSL bash that
+# couldn't resolve the Windows path (exit 127). main() must now stay on the
+# Python dispatch on Windows, and BEACON_NO_BASH must force it on any OS.
+
+
+def _route_probe(monkeypatch, *, os_name, bash, no_bash_env):
+    """Wire main() with stubbed dispatchers and return which one fires.
+
+    Returns a dict {"bash": bool, "python": bool} after invoking main(["status"]).
+    """
+    from beacon_cli import main as main_mod
+
+    monkeypatch.setattr(main_mod, "_find_bash", lambda: bash)
+    monkeypatch.setattr(main_mod, "_find_bin_beacon", lambda root: Path("bin/beacon"))
+    monkeypatch.setattr(main_mod, "_find_repo_root", lambda: ROOT)
+    monkeypatch.setattr(main_mod.os, "name", os_name)
+    if no_bash_env is None:
+        monkeypatch.delenv("BEACON_NO_BASH", raising=False)
+    else:
+        monkeypatch.setenv("BEACON_NO_BASH", no_bash_env)
+
+    called = {"bash": False, "python": False}
+    monkeypatch.setattr(
+        main_mod, "_bash_dispatch",
+        lambda *a, **k: called.__setitem__("bash", True) or 0,
+    )
+    monkeypatch.setattr(
+        main_mod, "_python_dispatch",
+        lambda *a, **k: called.__setitem__("python", True) or 0,
+    )
+
+    rc = main_mod.main(["status"])
+    assert rc == 0
+    return called
+
+
+def test_windows_never_delegates_to_bash(monkeypatch):
+    """On Windows, main() uses Python dispatch even when bash + bin/beacon exist."""
+    called = _route_probe(
+        monkeypatch, os_name="nt", bash="C:\\fake\\bash.exe", no_bash_env=None
+    )
+    assert called["python"] is True
+    assert called["bash"] is False
+
+
+def test_beacon_no_bash_forces_python_dispatch(monkeypatch):
+    """BEACON_NO_BASH forces the Python path even on a bash-capable POSIX env."""
+    called = _route_probe(
+        monkeypatch, os_name="posix", bash="/bin/bash", no_bash_env="1"
+    )
+    assert called["python"] is True
+    assert called["bash"] is False
+
+
+def test_posix_delegates_to_bash_when_available(monkeypatch):
+    """On POSIX with bash + bin/beacon and no override, bash delegation is unchanged."""
+    called = _route_probe(
+        monkeypatch, os_name="posix", bash="/bin/bash", no_bash_env=None
+    )
+    assert called["bash"] is True
+    assert called["python"] is False

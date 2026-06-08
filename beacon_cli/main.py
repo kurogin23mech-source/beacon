@@ -204,13 +204,28 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"beacon {__version__}")
         return 0
 
-    if root is not None and bash is not None:
+    # ms-44 e-1311: never delegate to bash on Windows. Git for Windows
+    # (...\Git\usr\bin\bash.exe) and WSL (...\System32\bash.exe) put a
+    # `bash` on PATH on most Windows dev machines, so the old "bash present
+    # => use bin/beacon" heuristic mis-fired: the bash script doesn't force
+    # UTF-8 (Japanese output mojibakes) and WSL's bash can't even resolve
+    # the Windows-style path to bin/beacon (exit 127). The Python dispatch
+    # in dispatch.py *is* the Windows-native path and covers every non-TTY
+    # command, so we skip bash entirely here. BEACON_NO_BASH lets power
+    # users on any OS force the same Python path for diagnostics.
+    use_bash = (
+        root is not None
+        and bash is not None
+        and os.name != "nt"
+        and not os.environ.get("BEACON_NO_BASH")
+    )
+    if use_bash:
         bin_beacon = _find_bin_beacon(root)
         if bin_beacon is not None:
             return _bash_dispatch(bash, bin_beacon, argv)
 
-    # Bash unavailable (Windows native) OR bin/beacon missing — fall back
-    # to Python dispatch.
+    # Bash unavailable (Windows native), disabled via BEACON_NO_BASH, or
+    # bin/beacon missing — fall back to Python dispatch.
     return _python_dispatch(root, argv)
 
 
