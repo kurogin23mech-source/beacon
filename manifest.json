@@ -1,9 +1,9 @@
 {
   "schema_version": "0.1",
-  "id": "example-org/beacon@2026-06-08.2",
+  "id": "example-org/beacon@2026-06-08.3",
   "name": "beacon",
   "type": "app",
-  "version": "2026-06-08.2",
+  "version": "2026-06-08.3",
   "description": "AI-driven milestone tracker for Claude Code sessions",
   "author": "r-kida2",
   "tags": ["beacon", "milestone", "cli", "ai", "claude-code"],
