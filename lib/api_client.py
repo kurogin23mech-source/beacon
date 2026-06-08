@@ -221,13 +221,62 @@ class ApiClient:
 
     def post_bus_event(self, project_id: str, channel: str, *,
                        sender_session_id: str = "", payload: dict | None = None,
-                       delivery: str = "propose-to-ai") -> dict:
-        return self.post(f"/api/projects/{project_id}/bus", {
+                       delivery: str = "propose-to-ai",
+                       envelope: dict | None = None,
+                       requested_action: str | None = None) -> dict:
+        body = {
             "channel": channel,
             "sender_session_id": sender_session_id,
             "payload": payload or {},
             "delivery": delivery,
-        })
+        }
+        # e-1155 Phase 1: only include envelope keys when the caller passes
+        # them, so older clients that don't know about envelopes keep working
+        # (their posts will land on the T5-equivalent legacy path).
+        if envelope is not None:
+            body["envelope"] = envelope
+        if requested_action is not None:
+            body["requested_action"] = requested_action
+        return self.post(f"/api/projects/{project_id}/bus", body)
+
+    def issue_bus_envelope(self, project_id: str, *, tier: str,
+                           actions_authorized: list[str] | None = None,
+                           scope: str | None = None,
+                           data_class: str = "free",
+                           conversation_id: str | None = None,
+                           in_reply_to: str | None = None,
+                           chain_depth: int = 0,
+                           ttl_seconds: int = 3600) -> dict:
+        """Mint a server-signed bus envelope (ms-54 / e-1155 Phase 1).
+
+        The returned dict is the full envelope (including ``signature``);
+        callers embed it as the ``envelope`` field on a subsequent
+        ``post_bus_event`` call.
+        """
+        body = {
+            "tier": tier,
+            "actions_authorized": actions_authorized or [],
+            "data_class": data_class,
+            "chain_depth": chain_depth,
+            "ttl_seconds": ttl_seconds,
+        }
+        if scope is not None:
+            body["scope"] = scope
+        if conversation_id is not None:
+            body["conversation_id"] = conversation_id
+        if in_reply_to is not None:
+            body["in_reply_to"] = in_reply_to
+        return self.post(f"/api/projects/{project_id}/bus/envelope/issue", body)
+
+    def list_bus_audit(self, project_id: str, *, since: str = "",
+                       limit: int = 100) -> list:
+        qs = []
+        if since:
+            qs.append(f"since={urllib.parse.quote(since)}")
+        if limit:
+            qs.append(f"limit={limit}")
+        suffix = "?" + "&".join(qs) if qs else ""
+        return self.get(f"/api/projects/{project_id}/bus/audit{suffix}")
 
     def list_bus_events(self, project_id: str, *, since: str = "",
                         channel: str = "", limit: int = 100) -> list:

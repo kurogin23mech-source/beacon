@@ -494,8 +494,17 @@ def verify(
 
     # Backward compat: missing envelope → degrade to T5-equivalent, validate
     # T5 schema, and return. e-1136 dogfood is mid-migration so we cannot
-    # 422 on missing envelope (the dogfood sender hasn't adopted envelopes
-    # yet). Instead we treat the message as if it carried a T5 envelope.
+    # block on missing envelope (the dogfood senders haven't adopted envelopes
+    # yet). Instead we treat the message as if it carried a T5 envelope:
+    #
+    #   * action requested → hard reject (T5 can't carry actions, period)
+    #   * free-text payload (not ping-shape) → soft degrade: the event
+    #     flows so existing readers still see it, but ``passed=False`` so
+    #     the caller caps delivery at notify-user-only and the audit log
+    #     marks it. The CORE doc disclosure rule ("T5 = 情報提供禁止 / 短い
+    #     ping schema only") is enforced by the delivery cap, not by
+    #     dropping the event.
+    #   * ping-shape payload → pass.
     if envelope is None:
         steps["envelope_present"] = "missing → legacy T5"
         if requested_action is not None:
@@ -508,11 +517,16 @@ def verify(
             )
         t5_check = validate_t5_payload(payload if isinstance(payload, dict) else {})
         if t5_check:
+            # Soft degrade. The caller (app.py) treats T5 + payload that
+            # doesn't conform to ping-shape as "deliver as notify-user-only
+            # rather than reject". This keeps legacy DM traffic flowing
+            # during the rollout — see e-1136 / CORE doc § backward compat.
+            steps["legacy_t5_payload"] = t5_check
             return VerifyResult(
                 passed=False,
                 effective_tier=TIER_T5,
                 steps=steps,
-                rejection_reason=f"legacy/missing envelope: {t5_check}",
+                rejection_reason=None,
             )
         steps["legacy_t5_payload"] = "ok"
         return VerifyResult(passed=True, effective_tier=TIER_T5, steps=steps)
@@ -615,9 +629,19 @@ def _degrade_to_t5(envelope: dict, payload: dict,
                    reason: str) -> VerifyResult:
     """Apply T5 degradation rule.
 
-    Per CORE doc: any verify failure → degrade to T5. If T5 itself can't
-    carry this payload (action requested OR payload exceeds T5 short-ping
-    schema) → reject entirely.
+    Per CORE doc: any verify failure → degrade to T5. Outcomes:
+
+      * action requested → **hard reject** (T5 can't carry actions).
+      * payload that doesn't fit T5 short-ping schema → **hard reject**
+        only when the envelope was *present* (a malformed signed envelope
+        is structurally suspicious, so we don't paper over it). For the
+        legacy missing-envelope path the caller handles soft-degrade
+        upstream — this helper is only reached when an envelope exists.
+      * ping-shape payload with no action → **soft degrade**: event still
+        flows but caller caps delivery (e.g. notify-user-only) and the
+        audit trail records ``rejection_reason=reason``-style breadcrumb
+        via the ``steps`` dict, leaving ``rejection_reason`` itself None so
+        the upstream HTTP layer does not 403.
     """
     if requested_action is not None:
         return VerifyResult(
@@ -635,14 +659,16 @@ def _degrade_to_t5(envelope: dict, payload: dict,
             steps=steps,
             rejection_reason=f"{reason} (T5 payload check: {t5_check})",
         )
-    # T5 ping-shape payload is OK to deliver, but we still mark passed=False
-    # so the audit trail shows the degrade and the caller can route to the
-    # restricted delivery mode (notify-user-only at most).
+    # Soft degrade: ping-shape payload, no action requested. The audit log
+    # still gets the failure breadcrumb via ``steps``; ``rejection_reason``
+    # is None so the HTTP layer doesn't 403 (CORE doc backward compat: keep
+    # the bus flowing, downgrade delivery via decide_delivery).
+    steps["soft_degrade_reason"] = reason
     return VerifyResult(
         passed=False,
         effective_tier=TIER_T5,
         steps=steps,
-        rejection_reason=reason,
+        rejection_reason=None,
     )
 
 
@@ -656,36 +682,48 @@ def decide_delivery(
     effective_tier: str,
     requested_action: Optional[str],
     requested_delivery: str,
+    t5_payload_conforms: bool = True,
 ) -> str:
     """Determine the effective delivery mode after envelope-aware downgrade.
 
     Rules (from CORE doc § "4 Tier 定義" combined with §"delivery target"):
 
       * effective_tier == T5: action requests forbidden (caller should have
-        already rejected); otherwise notify-user-only is the cap.
+        already rejected); otherwise notify-user-only is the cap when the
+        payload is *not* in T5 short-ping shape (= free-text disclosure
+        risk), else respect the requested_delivery up to the no-auto cap.
       * effective_tier == T3: any action → propose-to-ai (never auto).
       * effective_tier == T2: in-scope action (in actions_authorized) →
         auto-execute; out-of-scope → propose-to-ai.
       * effective_tier == T1: actions in actions_authorized → auto-execute;
         otherwise the requested_delivery prevails.
-      * Missing envelope (legacy): cap at the requested_delivery but
-        downgrade auto-execute → propose-to-ai (no envelope = no auto).
+      * Missing envelope (legacy) is handled via effective_tier=T5 +
+        t5_payload_conforms: ping-shape → propose-to-ai cap, free-text
+        → notify-user-only cap (because the AI seeing free-text from an
+        unsigned source is exactly the prompt-injection risk we are
+        defending against).
+
+    ``t5_payload_conforms``: pass True iff the payload satisfies
+    :func:`validate_t5_payload` (= ping-shape). Callers compute this once
+    during verify; we pass it through so the decision can downgrade
+    free-text payloads to notify-user-only without re-running validation.
 
     The function is monotonic — it can only *lower* trust, never raise it.
     """
-    # Legacy path (no envelope): never auto-execute.
-    if envelope is None:
-        if requested_delivery == "auto-execute":
-            return "propose-to-ai"
-        return requested_delivery
-
     if effective_tier == TIER_T5:
-        # No action permitted; if caller still tries auto-execute,
-        # downgrade to notify-user-only.
-        if requested_delivery == "auto-execute":
+        # Action requests are forbidden under T5; caller should hard-reject
+        # before reaching this branch. As a defense-in-depth fallback, cap
+        # at notify-user-only when an action is still attached.
+        if requested_action is not None:
             return "notify-user-only"
-        if requested_delivery == "propose-to-ai" and requested_action is not None:
-            # Action requests forbidden under T5; downgrade further.
+        # Auto-execute never allowed under T5.
+        if requested_delivery == "auto-execute":
+            return "notify-user-only" if not t5_payload_conforms else "propose-to-ai"
+        # Free-text payload from an unsigned/legacy sender: prevent the AI
+        # from auto-injecting it (= notify-user-only). Ping-shape payloads
+        # are safe to surface as propose-to-ai (the schema bounds the
+        # disclosure surface).
+        if not t5_payload_conforms:
             return "notify-user-only"
         return requested_delivery
 

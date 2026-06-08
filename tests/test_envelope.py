@@ -165,7 +165,11 @@ def test_verify_step4_expired(nonce_store, parent_lookup):
         sender_session_id="s", now=future,
     )
     assert res.passed is False
-    assert "expired" in (res.rejection_reason or "")
+    # Ping-shape payload + no action → soft degrade. The breadcrumb lives in
+    # the per-step trail (audit-visible) rather than rejection_reason
+    # (HTTP-403 trigger). See _degrade_to_t5 docstring for the split.
+    assert "expired" in res.steps.get("time_window", "")
+    assert res.effective_tier == env_mod.TIER_T5
 
 
 def test_verify_step5_replay_blocked(nonce_store, parent_lookup):
@@ -345,21 +349,51 @@ def test_decide_delivery_t3_action_request_downgrades():
     assert out == "propose-to-ai"
 
 
-def test_decide_delivery_t5_caps_at_notify():
+def test_decide_delivery_t5_freetext_caps_at_notify():
+    """Free-text payload (= not ping-shape) under T5 caps at notify-user-only
+    so the AI never auto-ingests free prose from an unsigned source."""
     e = _t1()
     out = env_mod.decide_delivery(
         envelope=e, effective_tier=env_mod.TIER_T5,
-        requested_action=None, requested_delivery="auto-execute",
+        requested_action=None, requested_delivery="propose-to-ai",
+        t5_payload_conforms=False,
     )
     assert out == "notify-user-only"
 
 
+def test_decide_delivery_t5_pingshape_keeps_propose():
+    """Ping-shape payload is safe to surface as propose-to-ai (bounded
+    disclosure surface) — only auto-execute is denied."""
+    e = _t1()
+    out = env_mod.decide_delivery(
+        envelope=e, effective_tier=env_mod.TIER_T5,
+        requested_action=None, requested_delivery="propose-to-ai",
+        t5_payload_conforms=True,
+    )
+    assert out == "propose-to-ai"
+
+
 def test_decide_delivery_legacy_never_auto_execute():
+    """Legacy (no envelope) treated as T5; auto-execute always downgrades."""
     out = env_mod.decide_delivery(
         envelope=None, effective_tier=env_mod.TIER_T5,
         requested_action=None, requested_delivery="auto-execute",
+        t5_payload_conforms=True,
     )
+    # Auto-execute under T5 + ping-shape → propose-to-ai (one step down).
     assert out == "propose-to-ai"
+
+
+def test_decide_delivery_legacy_freetext_caps_at_notify():
+    """Legacy + free-text → notify-user-only, even if caller asked for
+    propose-to-ai (the AI seeing unsigned free prose is the exact
+    prompt-injection vector e-1155 defends against)."""
+    out = env_mod.decide_delivery(
+        envelope=None, effective_tier=env_mod.TIER_T5,
+        requested_action=None, requested_delivery="propose-to-ai",
+        t5_payload_conforms=False,
+    )
+    assert out == "notify-user-only"
 
 
 # ---------------------------------------------------------------------------
