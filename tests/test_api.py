@@ -82,10 +82,25 @@ SEED_PROJECT = {
 
 @pytest.fixture(autouse=True)
 def reset_store():
+    # Re-apply firestore_client mocks every test in case another test module's
+    # module-level patches have replaced them during collection. Specifically,
+    # tests/test_bus_directory.py:43-45 and tests/test_bus_transport.py:87-89
+    # assign lambdas to firestore_client.get_project / save_project /
+    # list_projects at import time (= pytest collection time), which silently
+    # stomps the mocks we set up at our own module load (lines 37-39 above).
+    # Without this re-application, get_project("new-project") would return
+    # {"name": "test", "milestones": []} from the leaked lambda and
+    # test_create_project would fail with 409 (project already exists).
+    firestore_client.get_project = mock_get_project
+    firestore_client.save_project = mock_save_project
+    firestore_client.list_projects = mock_list_projects
+    firestore_client.list_documents = mock_list_documents
     _store.clear()
     _store[PROJECT_ID] = copy.deepcopy(SEED_PROJECT)
+    _docs_store.clear()
     yield
     _store.clear()
+    _docs_store.clear()
 
 
 # ---------------------------------------------------------------------------
