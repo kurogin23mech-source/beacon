@@ -1742,6 +1742,81 @@ body::after {
   line-height: 1.6;
 }
 
+.empty-state-note {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  max-width: 360px;
+  text-align: center;
+  line-height: 1.7;
+  margin: 4px 0;
+}
+.empty-state-note a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.empty-state-note a:hover {
+  text-decoration: underline;
+}
+.empty-state-code {
+  font-family: var(--font-mono);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 24px;
+  color: var(--accent);
+  font-size: 0.95rem;
+  letter-spacing: 0.02em;
+  margin: 0;
+}
+.empty-state-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.empty-state-input {
+  font-family: var(--font-mono);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 12px;
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  width: 220px;
+}
+.empty-state-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.empty-state-btn {
+  font-family: var(--font-mono);
+  background: var(--accent-glow);
+  border: 1px solid rgba(74, 222, 128, 0.4);
+  border-radius: 4px;
+  padding: 8px 18px;
+  color: var(--accent);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.empty-state-btn:hover {
+  background: rgba(74, 222, 128, 0.18);
+}
+.empty-state-btn-link {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  cursor: pointer;
+  padding: 4px 8px;
+}
+.empty-state-btn-link:hover {
+  color: var(--text-primary);
+  text-decoration: underline;
+}
+
 </style>
 </head>
 <body>
