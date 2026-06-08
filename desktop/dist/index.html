@@ -1968,6 +1968,13 @@ async function connectCloudWebSocket(projectId) {
   ws.onmessage = (event) => {
     let msg;
     try { msg = JSON.parse(event.data); } catch (_) { return; }
+    // ms-43 e-809: route document_change frames through the SHARED
+    // applyDocumentChange (built into desktop/dist from server/static/index.html
+    // by desktop/build.py) so Documents tab parity with Web UI is automatic.
+    if (msg.type === 'document_change') {
+      if (typeof applyDocumentChange === 'function') applyDocumentChange(msg.data);
+      return;
+    }
     if (msg.type !== 'project') return;
     const data = msg.data || {};
     const newJson = JSON.stringify(data);
@@ -2346,6 +2353,54 @@ else document.addEventListener('DOMContentLoaded', () => { if (window.__TAURI__)
 // SHARED RENDERING (from server/static/index.html)
 // ============================================================
 // ---- Render Helpers ----
+
+// ms-43 e-809: apply a single document-change delta emitted by the server's
+// WS broadcast so the Documents tab stays reactive instead of being a
+// "fetch-on-open" snapshot.
+//
+// Two reasons this is its own function (not inlined into ws.onmessage):
+//  1) Tauri (desktop/layer.js) maintains a separate WS connection; both
+//     sides should mutate state identically, so the logic lives in SHARED.
+//  2) The "re-render only when active" check is non-obvious — keeping it
+//     in one place means a future bug fix touches one site, not two.
+//
+// payload schema: { op: "add"|"update"|"delete", doc_id, scope, title,
+//                   updated_at, milestone? }
+function applyDocumentChange(payload) {
+  if (!payload || !payload.doc_id) return;
+  const docs = Array.isArray(state.documents) ? state.documents : [];
+  const idx = docs.findIndex(d => d.doc_id === payload.doc_id);
+  if (payload.op === 'delete') {
+    if (idx >= 0) docs.splice(idx, 1);
+  } else {
+    // The list endpoint returns only the lightweight summary shape
+    // {doc_id, title, scope, updated_at, milestone?}. Mirror that here so
+    // a later loadDocuments() round trip won't reshape entries differently.
+    const entry = {
+      doc_id: payload.doc_id,
+      title: payload.title || '',
+      scope: payload.scope || 'memo',
+      updated_at: payload.updated_at || '',
+    };
+    if (payload.milestone) entry.milestone = payload.milestone;
+    if (idx >= 0) {
+      docs[idx] = entry;
+    } else {
+      // Newest-first ordering matches list_documents (order_by updated_at
+      // DESC); a freshly-saved doc has the latest updated_at so it goes
+      // at the head.
+      docs.unshift(entry);
+    }
+  }
+  state.documents = docs;
+  state.lastUpdate = new Date();
+  // Re-render only when the user is actually looking at the Documents
+  // tab — for any other tab the state mutation is enough; the next
+  // switchTab('documents') will see the fresh list without a fetch.
+  if (state.activeTab === 'documents' && !state.documentContent) {
+    renderOnDataChange();
+  }
+}
 
 const STATUS_LABELS = {
   done: 'done', in_progress: 'active', observing: 'observing',
