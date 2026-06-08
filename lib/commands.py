@@ -2718,6 +2718,165 @@ def _ensure_channel_node_modules(channel_root: "Path") -> bool:
     return nm.exists()
 
 
+# ---------------------------------------------------------------------------
+# Channel lifecycle: opt-out / opt-in / uninstall / status (ms-54 e-1266)
+# ---------------------------------------------------------------------------
+#
+# The DM ("beacon-bus") channel has four user states:
+#   (a) never installed — fresh user
+#   (b) installed and active
+#   (c) installed but paused (MCP entry removed, node_modules retained)
+#   (d) opted out (no install will succeed, env / project / global flag set)
+#
+# The four CLI verbs that move between these states are:
+#   beacon channel install               (a|c|d-without-opt-out) → b
+#   beacon channel uninstall             b → c (default) or a (with --purge-files)
+#   beacon channel opt-out [--global|--project]   any → d
+#   beacon channel opt-in  [--global|--project]   d → previous
+#
+# `beacon channel status` prints the current state and predicts whether the
+# next auto-install attempt will run. The whole surface is designed so that
+# install paths (this CLI, the e-1238 auto-install, the e-1167 bclaude
+# wrapper) all share `_is_bus_opted_out()` as the single gate — if any of
+# (env BEACON_NO_BUS=1, project flag, global flag) is set, install is
+# refused and the user sees a single consistent explanation.
+
+def _user_beacon_config_path() -> str:
+    """Absolute path to the user-global beacon config (~/.beacon/config.json).
+
+    Distinct from project-local .beacon/config.json. We mint the directory
+    on demand so the first `beacon channel opt-out --global` call doesn't
+    fail because ~/.beacon does not yet exist.
+    """
+    return os.path.join(_user_home(), ".beacon", "config.json")
+
+
+def _read_user_beacon_config() -> dict:
+    """Read ~/.beacon/config.json, returning {} if missing or unreadable.
+
+    Unreadable / corrupt files surface as {} so opt-out checks don't crash
+    install paths; the broken file is preserved on disk so the user can
+    diagnose it manually.
+    """
+    p = _user_beacon_config_path()
+    if not os.path.exists(p):
+        return {}
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_user_beacon_config(d: dict) -> None:
+    """Atomically write ~/.beacon/config.json, minting parent dir as needed."""
+    p = _user_beacon_config_path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(d, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+
+def _read_project_bus_disabled() -> bool:
+    """True if the active project sets `bus.disabled` in project.json.
+
+    Project-scoped opt-out lives under a top-level `bus` object:
+        { "bus": {"disabled": true}, ... }
+    This shape mirrors the global config schema so a user inspecting
+    either file sees the same idiom. Missing project file → not opted out
+    (consistent with how install requires .beacon/project.json anyway).
+    """
+    try:
+        pf = get_project_file()
+    except Exception:
+        return False
+    if not os.path.exists(pf):
+        return False
+    try:
+        with open(pf, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    bus = data.get("bus") or {}
+    return bool(bus.get("disabled"))
+
+
+def _write_project_bus_flag(disabled: bool) -> bool:
+    """Set or clear the project-local `bus.disabled` flag.
+
+    Returns True on write. False if no project file exists (caller decides
+    whether to fail or treat as no-op). When `disabled=False`, the bus
+    object is removed entirely if empty so project.json stays minimal.
+    """
+    try:
+        pf = get_project_file()
+    except Exception:
+        return False
+    if not os.path.exists(pf):
+        return False
+    try:
+        with open(pf, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    bus = data.get("bus") or {}
+    if disabled:
+        bus["disabled"] = True
+        data["bus"] = bus
+    else:
+        bus.pop("disabled", None)
+        if not bus:
+            data.pop("bus", None)
+        else:
+            data["bus"] = bus
+    with open(pf, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    return True
+
+
+def _bus_opt_out_status() -> dict:
+    """Probe all three opt-out sources and report which (if any) is active.
+
+    Returns {"env": bool, "project": bool, "global": bool, "any": bool}.
+    The order matches the precedence we present to the user: env wins
+    (transient, easy to flip), project next (scoped intent), global last
+    (broad). `any` is the OR used by install gates.
+    """
+    env_flag = os.environ.get("BEACON_NO_BUS", "").strip() in ("1", "true", "yes", "on")
+    project_flag = _read_project_bus_disabled()
+    user_cfg = _read_user_beacon_config()
+    global_flag = bool((user_cfg.get("bus") or {}).get("disabled"))
+    return {
+        "env": env_flag,
+        "project": project_flag,
+        "global": global_flag,
+        "any": env_flag or project_flag or global_flag,
+    }
+
+
+def _is_bus_opted_out() -> "tuple[bool, str]":
+    """Single gate every install path consults.
+
+    Returns (is_opted_out, human_reason). The reason string is suitable
+    for printing in CLI warnings / audit log lines without further
+    formatting. Designed to be the only check sites need to make so the
+    rule "install never silently overrides opt-out" holds globally.
+    """
+    s = _bus_opt_out_status()
+    if not s["any"]:
+        return False, ""
+    sources = []
+    if s["env"]:
+        sources.append("env BEACON_NO_BUS=1")
+    if s["project"]:
+        sources.append("project (.beacon/project.json bus.disabled)")
+    if s["global"]:
+        sources.append("global (~/.beacon/config.json bus.disabled)")
+    return True, "DM opt-out active: " + " + ".join(sources)
+
+
 def cmd_channel_install():
     """Write .mcp.json with the Beacon bus Channel MCP server entry.
 
@@ -2731,6 +2890,21 @@ def cmd_channel_install():
     cwd = Path.cwd()
     if not (cwd / ".beacon" / "project.json").exists():
         print("Error: no .beacon/project.json in this directory. Run `beacon init` first.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    # ms-54 e-1266: refuse to install if any opt-out source is set. This is
+    # the single gate every install path consults (manual install, e-1238
+    # auto-install, e-1167 bclaude wrapper). Refusing here — rather than
+    # silently no-op'ing — gives the user feedback that opt-out is in force
+    # and tells them how to lift it.
+    opted_out, reason = _is_bus_opted_out()
+    if opted_out:
+        print(f"Refusing to install: {reason}", file=sys.stderr)
+        print("Lift the opt-out first:", file=sys.stderr)
+        print("  beacon channel opt-in [--project|--global]   "
+              "(or unset BEACON_NO_BUS)", file=sys.stderr)
+        print("Or inspect current state with:  beacon channel status",
               file=sys.stderr)
         sys.exit(1)
 
@@ -2784,13 +2958,323 @@ def cmd_channel_install():
     print(f"  beacon-bus server → {bus_path}")
     print()
     print("Next steps:")
-    print("  1. Start Claude Code with the channel enabled (research preview):")
+    # ms-54 e-1167: bclaude wrapper is the recommended launcher because it
+    # hides the long `--dangerously-load-development-channels` flag and
+    # honors the opt-out gate. The raw flag form and shell alias stay as
+    # fallbacks for users who don't have the wrapper on PATH yet.
+    print("  1. Start Claude Code via the bundled wrapper (recommended):")
+    print("     bclaude")
+    print("     (forwards all args to `claude`; refuses the channel flag if "
+          "DM opt-out is active)")
+    print("  2. Or directly with the long flag (research preview):")
     print("     claude --dangerously-load-development-channels server:beacon-bus")
-    print("  2. Optional shell alias:")
+    print("  3. Or define a shell alias:")
     print("     alias bclaude='claude --dangerously-load-development-channels server:beacon-bus'")
     print()
     print("Channels are research preview. See:")
     print("  https://code.claude.com/docs/en/channels.md")
+    print()
+    print("To stop using DM later:")
+    print("  beacon channel uninstall              # remove MCP entry, keep node_modules")
+    print("  beacon channel uninstall --purge-files # also remove channel/node_modules")
+    print("  beacon channel opt-out                # block all future auto-installs")
+    print("  beacon channel status                 # check current state")
+
+
+def cmd_channel_uninstall():
+    """Remove the beacon-bus MCP entry; optionally also wipe node_modules.
+
+    Modes (selected via env from bin/beacon):
+      - default / --keep-files: only remove `beacon-bus` from .mcp.json.
+        node_modules/ stays so a later `beacon channel install` is fast
+        (this is the "pause" path).
+      - --purge-files: remove the MCP entry AND delete channel/node_modules
+        so the next install does a fresh `npm install`. Useful when the
+        user wants the disk back or suspects a corrupt install.
+
+    The MCP-entry removal mirrors install: if other mcpServers entries
+    exist alongside beacon-bus, only beacon-bus is removed and the rest
+    stay intact. If beacon-bus is the only entry, the mcpServers object
+    is left empty (we don't delete .mcp.json itself — other tools may
+    add their own entries later).
+
+    Always prints what was actually removed so the user can audit.
+    """
+    from pathlib import Path
+    cwd = Path.cwd()
+    if not (cwd / ".beacon" / "project.json").exists():
+        print("Error: no .beacon/project.json in this directory. Run from a "
+              "project root.", file=sys.stderr)
+        sys.exit(1)
+
+    purge = os.environ.get("BEACON_CHANNEL_PURGE_FILES", "") == "1"
+    removed_anything = False
+
+    # ---- Phase 1: strip the MCP entry --------------------------------------
+    mcp_path = cwd / ".mcp.json"
+    if mcp_path.exists():
+        try:
+            with mcp_path.open("r", encoding="utf-8") as f:
+                config = json.load(f) or {}
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"Error: .mcp.json is not valid JSON ({e}).", file=sys.stderr)
+            print("Resolve the file by hand, or remove it and re-run.",
+                  file=sys.stderr)
+            sys.exit(1)
+        servers = config.get("mcpServers", {}) or {}
+        if "beacon-bus" in servers:
+            del servers["beacon-bus"]
+            config["mcpServers"] = servers
+            with mcp_path.open("w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+                f.write("\n")
+            print(f"Removed beacon-bus from {mcp_path.relative_to(cwd)}")
+            removed_anything = True
+        else:
+            print(f"(beacon-bus was not present in {mcp_path.relative_to(cwd)})")
+    else:
+        print("(no .mcp.json found — nothing to remove)")
+
+    # ---- Phase 2: optionally wipe node_modules ----------------------------
+    if purge:
+        channel_root = _resolve_channel_root()
+        if channel_root is None:
+            print("Warning: channel/ root not located — skipping node_modules "
+                  "purge.", file=sys.stderr)
+        else:
+            nm = channel_root / "node_modules"
+            if nm.exists():
+                # Move to .trash/ in the project root rather than rm -rf — this
+                # follows the global "no rm" convention and lets the user
+                # restore if --purge-files was a mistake.
+                import time as _time
+                trash_dir = cwd / ".trash"
+                trash_dir.mkdir(exist_ok=True)
+                stamp = _time.strftime("%Y%m%d-%H%M%S")
+                target = trash_dir / f"channel-node_modules-{stamp}"
+                try:
+                    nm.rename(target)
+                    print(f"Moved {nm} → {target.relative_to(cwd)}")
+                    print("  (kept in .trash/ rather than deleted — "
+                          "`mv` it back if you want it restored)")
+                    removed_anything = True
+                except OSError as e:
+                    print(f"Warning: failed to move {nm}: {e}",
+                          file=sys.stderr)
+            else:
+                print(f"(no node_modules at {nm} — nothing to purge)")
+
+    if not removed_anything:
+        print("Nothing to do — beacon-bus was already uninstalled.")
+
+    # ---- Helpful follow-up text --------------------------------------------
+    print()
+    if purge:
+        print("Re-install later with:  beacon channel install")
+        print("  (will trigger a fresh `npm install`)")
+    else:
+        print("Re-install later with:  beacon channel install")
+        print("  (fast — node_modules retained)")
+    print("To block ALL future installs (incl. auto-install): "
+          "beacon channel opt-out")
+
+
+def cmd_channel_opt_out():
+    """Set the persistent opt-out flag at project or global scope.
+
+    Default scope is --project (set via env from bin/beacon). The flag
+    blocks every install path: manual `beacon channel install`, the
+    e-1238 auto-install in `beacon setup` / Skill flows, and the e-1167
+    bclaude wrapper. Idempotent — setting twice is a no-op.
+
+    Env BEACON_NO_BUS=1 is *also* honored (transient, per-shell) but
+    needs no command; it is documented in `beacon channel status`.
+    """
+    scope = os.environ.get("BEACON_CHANNEL_SCOPE", "project")
+
+    if scope == "global":
+        cfg = _read_user_beacon_config()
+        bus = cfg.get("bus") or {}
+        already = bool(bus.get("disabled"))
+        bus["disabled"] = True
+        cfg["bus"] = bus
+        _write_user_beacon_config(cfg)
+        p = _user_beacon_config_path()
+        if already:
+            print(f"Global opt-out already set in {p}")
+        else:
+            print(f"Global opt-out written to {p}")
+            print("  → DM auto-install will be skipped in every project.")
+    else:
+        # project scope (default)
+        try:
+            pf = get_project_file()
+        except Exception:
+            pf = ""
+        if not pf or not os.path.exists(pf):
+            print("Error: no .beacon/project.json in this directory. Run from "
+                  "a project root, or use --global.", file=sys.stderr)
+            sys.exit(1)
+        already = _read_project_bus_disabled()
+        if not _write_project_bus_flag(True):
+            print("Error: failed to write project.json", file=sys.stderr)
+            sys.exit(1)
+        if already:
+            print(f"Project opt-out already set in {pf}")
+        else:
+            print(f"Project opt-out written to {pf}")
+            print("  → DM auto-install will be skipped in this project only.")
+
+    print()
+    print("Lift later with:  beacon channel opt-in "
+          f"[--{scope}]")
+
+
+def cmd_channel_opt_in():
+    """Clear the opt-out flag at project or global scope (idempotent)."""
+    scope = os.environ.get("BEACON_CHANNEL_SCOPE", "project")
+
+    if scope == "global":
+        cfg = _read_user_beacon_config()
+        bus = cfg.get("bus") or {}
+        had = bool(bus.get("disabled"))
+        if had:
+            bus.pop("disabled", None)
+            if bus:
+                cfg["bus"] = bus
+            else:
+                cfg.pop("bus", None)
+            _write_user_beacon_config(cfg)
+            print(f"Global opt-out cleared from {_user_beacon_config_path()}")
+        else:
+            print(f"Global opt-out was not set (nothing to clear).")
+    else:
+        try:
+            pf = get_project_file()
+        except Exception:
+            pf = ""
+        if not pf or not os.path.exists(pf):
+            print("Error: no .beacon/project.json in this directory. Run from "
+                  "a project root, or use --global.", file=sys.stderr)
+            sys.exit(1)
+        had = _read_project_bus_disabled()
+        if had:
+            _write_project_bus_flag(False)
+            print(f"Project opt-out cleared from {pf}")
+        else:
+            print(f"Project opt-out was not set (nothing to clear).")
+
+    # Surface remaining opt-out sources so the user understands why DM may
+    # still be off even after this opt-in.
+    status = _bus_opt_out_status()
+    remaining = [k for k in ("env", "project", "global") if status[k]]
+    if remaining:
+        print()
+        print("Note: opt-out is still active via: " + ", ".join(remaining))
+        print("  (run `beacon channel status` to see details)")
+
+
+def cmd_channel_status():
+    """Print a 4-block summary of the DM channel lifecycle state.
+
+    Blocks (in this order):
+      1. Install state — is `beacon-bus` in .mcp.json?
+      2. Files state — does channel/node_modules/ exist?
+      3. Opt-out state — env / project / global, with source paths.
+      4. Prediction — would the next auto-install run, and why?
+
+    Read-only. Never modifies project.json, .mcp.json, or config.json.
+    Designed so a user troubleshooting "why is DM not working?" gets the
+    full picture in one screen.
+    """
+    from pathlib import Path
+    cwd = Path.cwd()
+
+    # ---- 1. Install state -------------------------------------------------
+    mcp_path = cwd / ".mcp.json"
+    mcp_has_entry = False
+    if mcp_path.exists():
+        try:
+            with mcp_path.open("r", encoding="utf-8") as f:
+                config = json.load(f) or {}
+            mcp_has_entry = "beacon-bus" in (config.get("mcpServers") or {})
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    # ---- 2. Files state ---------------------------------------------------
+    channel_root = _resolve_channel_root()
+    nm_exists = False
+    nm_path_str = "(channel/ root not located)"
+    if channel_root is not None:
+        nm = channel_root / "node_modules"
+        nm_exists = nm.exists()
+        nm_path_str = str(nm)
+
+    # ---- 3. Opt-out state -------------------------------------------------
+    status = _bus_opt_out_status()
+
+    # ---- 4. Prediction ----------------------------------------------------
+    if status["any"]:
+        sources = []
+        if status["env"]:
+            sources.append("env BEACON_NO_BUS")
+        if status["project"]:
+            sources.append("project flag")
+        if status["global"]:
+            sources.append("global flag")
+        prediction = "would be SKIPPED (opt-out via " + ", ".join(sources) + ")"
+    elif mcp_has_entry:
+        prediction = "would be a NO-OP (already installed, MCP entry present)"
+    else:
+        prediction = "would RUN (no opt-out, no MCP entry present)"
+
+    # ---- Render ------------------------------------------------------------
+    print("Beacon DM channel — current state")
+    print("=" * 50)
+    print()
+    print(f"[1] Install state ({mcp_path.relative_to(cwd) if mcp_path.exists() else '.mcp.json'}):")
+    if mcp_has_entry:
+        print("    ✓ beacon-bus MCP entry present")
+    elif mcp_path.exists():
+        print("    × beacon-bus MCP entry missing (.mcp.json exists but no entry)")
+    else:
+        print("    × no .mcp.json (never installed in this project)")
+    print()
+    print(f"[2] Files state:")
+    print(f"    path: {nm_path_str}")
+    if nm_exists:
+        print("    ✓ channel/node_modules/ present")
+    else:
+        print("    × channel/node_modules/ missing")
+    print()
+    print("[3] Opt-out state:")
+    if not status["any"]:
+        print("    (no opt-out set)")
+    else:
+        if status["env"]:
+            print(f"    ✓ env BEACON_NO_BUS=1 (transient, this shell only)")
+        if status["project"]:
+            try:
+                pf = get_project_file()
+            except Exception:
+                pf = ".beacon/project.json"
+            print(f"    ✓ project flag in {pf}")
+        if status["global"]:
+            print(f"    ✓ global flag in {_user_beacon_config_path()}")
+    print()
+    print("[4] Next auto-install:")
+    print(f"    → {prediction}")
+    print()
+
+    # Action hints based on current state.
+    if status["any"]:
+        print("To re-enable DM: beacon channel opt-in [--project|--global] "
+              "(or unset BEACON_NO_BUS)")
+    elif not mcp_has_entry:
+        print("To install: beacon channel install")
+    else:
+        print("To uninstall: beacon channel uninstall [--purge-files]")
+        print("To block future auto-installs: beacon channel opt-out")
 
 
 # ---------------------------------------------------------------------------
@@ -8989,6 +9473,10 @@ if __name__ == "__main__":
         "session_log_show": cmd_session_log_show,
         "session_id": cmd_session_id,
         "channel_install": cmd_channel_install,
+        "channel_uninstall": cmd_channel_uninstall,
+        "channel_opt_out": cmd_channel_opt_out,
+        "channel_opt_in": cmd_channel_opt_in,
+        "channel_status": cmd_channel_status,
         "member_add": cmd_member_add,
         "member_list": cmd_member_list,
         "member_remove": cmd_member_remove,
