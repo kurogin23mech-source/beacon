@@ -73,6 +73,15 @@ async function loadAuthConfig() {
   } catch (e) {}
 }
 
+// ms-44 e-1247: see index.html — JWT payload is base64url and native atob
+// only accepts standard base64.
+function decodeJwtPayload(token) {
+  let s = (token || '').split('.')[1] || '';
+  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  return JSON.parse(atob(s));
+}
+
 function handleCredentialResponse(response) {
   // ms-44 e-1246: same defensive guard as index.html — COOP/FedCM edge cases
   // can fire the callback with no credential, atob() would then throw and the
@@ -87,7 +96,7 @@ function handleCredentialResponse(response) {
   }
   let payload;
   try {
-    payload = JSON.parse(atob(authToken.split('.')[1]));
+    payload = decodeJwtPayload(authToken);
   } catch (e) {
     console.error('[beacon] failed to decode ID token payload', e);
     const s = document.getElementById('status');
