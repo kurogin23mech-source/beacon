@@ -4573,6 +4573,24 @@ async function selectProject(projectId) {
   state.projectVersion = null;
   lastProjectJson = null;
 
+  // ms-43 e-1275: keep window.location.search in sync with the active project
+  // so that Copy link / address bar reflect the project the user is actually
+  // viewing. Without this, switching A → B left ?project=A in the URL and any
+  // shared link pointed at the wrong project. replaceState (not pushState)
+  // because the previous project's URL is not a meaningful "back" target — a
+  // browser Back from project B should leave the app, not silently rebind A.
+  // Hash is preserved so deep links (#doc/..., #ms/..., etc.) survive a switch.
+  try {
+    if (typeof history !== 'undefined' && history.replaceState && projectId) {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('project') !== projectId) {
+        params.set('project', projectId);
+        const newUrl = window.location.pathname + '?' + params.toString() + window.location.hash;
+        history.replaceState(null, '', newUrl);
+      }
+    }
+  } catch (_) { /* non-fatal: URL sync is best-effort */ }
+
   // Fire-and-forget: version info is cosmetic, don't block project load on it.
   api(`/api/projects/${projectId}/version`).then(v => {
     state.projectVersion = v || {};
