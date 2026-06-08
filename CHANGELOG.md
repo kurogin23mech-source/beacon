@@ -2,6 +2,29 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.23.0] - 2026-06-08
+
+- Merge pull request #108 from kurogin23mech-source/feat/ms-54-persistence-poisoning-defense
+- Merge pull request #107 from kurogin23mech-source/feat/ms-54-bus-envelope-client-adoption
+- Merge pull request #106 from kurogin23mech-source/fix/ms-54-envelope-secret-hardening
+- Merge pull request #105 from kurogin23mech-source/fix/ms-54-chain-depth-invariant
+- feat(ms-54): persistence poisoning defense via --bus-origin flag (e-1293)
+- feat(ms-54): bus envelope client-side adoption (e-1290)
+- fix(ms-54): refuse-to-start when BEACON_ENVELOPE_SECRET unset in production (e-1291)
+- fix(ms-54): tighten chain_depth invariant to 0 <= depth <= limit (e-1292)
+- Merge pull request #104 from kurogin23mech-source/feat/ms-54-bus-injection-defense-phase1
+- Merge pull request #103 from kurogin23mech-source/fix/ms-17-prepare-worktree-head
+- Merge pull request #102 from kurogin23mech-source/fix/ms-43-doc-add-scope
+- Merge pull request #101 from kurogin23mech-source/fix/ms-43-copy-link-project-id
+- test(ms-54): end-to-end envelope integration tests (e-1155)
+- feat(ms-54): wire envelope verify + audit into bus receive path (e-1155)
+- fix(ms-17): beacon log --prepare resolves worktree HEAD correctly (e-1227)
+- feat(ms-54): bus envelope schema + 9-step verify pipeline (e-1155)
+- fix(ms-43): doc add --scope accepts report and retro (e-1222)
+- fix(ms-43): Web UI project switch updates URL projectId (e-1275)
+- docs(release): update README/CHANGELOG for v0.22.0
+- chore(release): bump formula to 0.22.0
+
 ## [v0.22.0] - 2026-06-08
 
 - Merge pull request #100 from kurogin23mech-source/ms-54/work
