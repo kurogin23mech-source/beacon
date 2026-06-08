@@ -3113,35 +3113,63 @@ const SEARCH_TYPE_ORDER = [
 ];
 
 function _localSearchFallback(q) {
-  // Old behavior: walk milestones + nested entries. Kept as last-resort when
-  // the server hasn't responded yet (e.g. first keystroke).
+  // ms-46 e-1228: walk milestones + nested entries (incl. Operations) and match
+  // against entry id / ms id / op id alongside description/detail, mirroring
+  // the server-side `lib/search.search_project` "id is also matched by `q` as a
+  // substring" contract. Web UI receives the server response over REST and
+  // rarely hits this path; Tauri (no `dataSource.searchProject`) relies on this
+  // walk for every search, so id-based queries like "e-1228" must resolve here
+  // too, otherwise Task entries silently fall out of Tauri search results.
   const results = [];
-  function walk(entries, msId, msTitle) {
+  function walk(entries, parentScope) {
+    // parentScope: { ms_id, ms_title } or { op_id, op_title } depending on
+    // which container we descended from. Either may be undefined when the
+    // entity has no parent (top-level).
     for (const e of entries) {
       const desc = (e.description || '').toLowerCase();
       const detail = (e.detail || '').toLowerCase();
-      if (desc.includes(q) || detail.includes(q)) {
+      const id = (e.id || '').toLowerCase();
+      if (desc.includes(q) || detail.includes(q) || id.includes(q)) {
         results.push({
           entity_type: e.type || 'task',
           id: e.id, title: e.description || '',
           snippet: e.description || '',
-          ms_id: msId, ms_title: msTitle, status: e.status,
+          ms_id: parentScope?.ms_id, ms_title: parentScope?.ms_title,
+          op_id: parentScope?.op_id, op_title: parentScope?.op_title,
+          status: e.status,
           created_at: e.date || e.created_at || '',
         });
       }
-      if (e.entries) walk(e.entries, msId, msTitle);
+      if (e.entries) walk(e.entries, parentScope);
     }
   }
   for (const ms of (state.project?.milestones || [])) {
     const t = (ms.title || '').toLowerCase();
-    if (t.includes(q)) {
+    const msId = (ms.id || '').toLowerCase();
+    if (t.includes(q) || msId.includes(q)) {
       results.push({
         entity_type: 'milestone', id: ms.id, title: ms.title,
         snippet: ms.title, ms_id: ms.id, ms_title: ms.title,
         status: ms.status, created_at: '',
       });
     }
-    walk(ms.entries || [], ms.id, ms.title || '');
+    walk(ms.entries || [], { ms_id: ms.id, ms_title: ms.title || '' });
+  }
+  // ms-46 e-1228: Operations live in a sibling collection but the server search
+  // walks them too (lib/search.search_project line 129+). Mirror that so id-
+  // based lookups for Operation entries (operation_task / run_record /
+  // incident) also resolve in the Tauri local fallback.
+  for (const op of (state.project?.operations || [])) {
+    const t = (op.title || '').toLowerCase();
+    const opId = (op.id || '').toLowerCase();
+    if (t.includes(q) || opId.includes(q)) {
+      results.push({
+        entity_type: 'operation', id: op.id, title: op.title,
+        snippet: op.title, op_id: op.id, op_title: op.title,
+        status: op.status, created_at: '',
+      });
+    }
+    walk(op.entries || [], { op_id: op.id, op_title: op.title || '' });
   }
   return results;
 }
