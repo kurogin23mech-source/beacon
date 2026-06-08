@@ -59,6 +59,16 @@ PROJECT_ID = "dir-test"
 
 @pytest.fixture(autouse=True)
 def reset_store():
+    # Re-apply firestore_client stubs every test in case another test module
+    # (notably tests/test_api.py) has restored its own mocks at module import
+    # time. Without this re-application, get_project would return whatever the
+    # most recently imported module's mock dictates and the bus directory
+    # tests would see surprise side effects (e.g. 404 instead of 200 because
+    # get_project now returns None for our test project_id).
+    firestore_client.list_sessions = _mock_list_sessions
+    firestore_client.get_project = lambda pid: {"name": "test", "milestones": []}
+    firestore_client.save_project = lambda pid, data: None
+    firestore_client.list_projects = lambda: []
     _sessions_store.clear()
     yield
     _sessions_store.clear()

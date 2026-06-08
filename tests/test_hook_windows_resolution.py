@@ -64,11 +64,20 @@ def test_resolve_hook_command_allows_sh_off_windows(monkeypatch, tmp_path):
 
 
 def test_resolve_hook_command_prefers_entrypoint(monkeypatch):
-    """The installed entry-point exe (shutil.which) always wins."""
+    """The installed entry-point name (validated via shutil.which) wins.
+
+    e-1170 changed the return contract: when the entry-point is on PATH we
+    write the BARE entry-point name (not the absolute path) into
+    settings.json so `beacon` upgrades that relocate the binary (pipx →
+    pip --user, ~/.local/bin → AppData/Roaming/...) don't strand the hook
+    command. Claude Code re-resolves via PATH at hook fire time. We still
+    invoke shutil.which here to validate the entry-point exists at install
+    time — that's why the mock is required.
+    """
     monkeypatch.setattr(commands.os, "name", "posix")
     monkeypatch.setattr(commands.shutil, "which", lambda name: "/bin/" + name)
     cmd = commands._resolve_hook_command("beacon-post-commit-hook.sh")
-    assert cmd == "/bin/beacon-hook-post-commit"
+    assert cmd == "beacon-hook-post-commit"
 
 
 # ---------------------------------------------------------------------------
@@ -92,12 +101,21 @@ def test_bash_safe_noop_on_posix(monkeypatch):
 
 
 def test_resolve_hook_command_entrypoint_bash_safe_on_windows(monkeypatch):
-    """The entry-point exe wins, but its path must be forward-slashed on Windows."""
+    """e-1170 (PATH-resilient entry-point lookup): the bare entry-point name
+    is returned on Windows just like on macOS / Linux — there is no path to
+    forward-slash anymore because we deliberately do not write an absolute
+    path. Claude Code re-resolves via PATH at hook fire time, so future
+    `beacon` upgrades that relocate the binary (pipx → pip → AppData) do
+    not strand the hook command. shutil.which is still invoked to validate
+    the entry-point exists at install time.
+    """
     monkeypatch.setattr(commands.os, "name", "nt")
     monkeypatch.setattr(commands.shutil, "which",
                         lambda name: "C:\\Users\\me\\.local\\bin\\" + name + ".EXE")
     cmd = commands._resolve_hook_command("beacon-post-commit-hook.sh")
-    assert cmd == "C:/Users/me/.local/bin/beacon-hook-post-commit.EXE"
+    assert cmd == "beacon-hook-post-commit"
+    # bare name has no path separator at all, so the bash-safe contract is
+    # trivially satisfied.
     assert "\\" not in cmd
 
 

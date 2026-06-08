@@ -108,6 +108,17 @@ PROJECT_ID = "bus-test"
 
 @pytest.fixture(autouse=True)
 def reset_store():
+    # Re-apply firestore_client stubs every test in case another test module
+    # (notably tests/test_api.py) has restored its own mocks at module import
+    # time. Without this re-application the bus tests would see surprise side
+    # effects from whichever module's get_project mock was last bound.
+    firestore_client.append_bus_event = _mock_append_bus_event
+    firestore_client.list_bus_events = _mock_list_bus_events
+    firestore_client.get_bus_cursor = _mock_get_bus_cursor
+    firestore_client.advance_bus_cursor = _mock_advance_bus_cursor
+    firestore_client.get_project = lambda pid: {"name": "test", "milestones": []}
+    firestore_client.save_project = lambda pid, data: None
+    firestore_client.list_projects = lambda: []
     _bus_store.clear()
     _cursor_store.clear()
     _event_seq[0] = 0

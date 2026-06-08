@@ -146,6 +146,13 @@ def test_task_add_done_list_e2e(capfd, fresh_dir):
 
 
 def test_summary_e2e(capfd, fresh_dir):
+    """e-1040 retired the legacy `beacon summary "text"` write path: human
+    narrative now lives in the `project-vision` CORE doc and per-session
+    context in session_logs. The CLI still accepts the command so existing
+    scripts keep returning 0, but it deliberately does not write anymore.
+    This test pins both halves of that contract — `rc == 0` and the project
+    summary stays empty (no surprise write).
+    """
     main_mod.main([
         "init", "--name", "smoke", "--objective", "obj", "--retro-day", "monday",
     ])
@@ -158,7 +165,9 @@ def test_summary_e2e(capfd, fresh_dir):
     rc = main_mod.main(["status", "--json"])
     out = capfd.readouterr().out
     data = json.loads(out)
-    assert data["summary"] == "new direction for smoke"
+    # e-1040: summary write is a no-op. Anything other than "" here means
+    # the deprecation regressed and the CLI is silently mutating state again.
+    assert data["summary"] == ""
 
 
 def test_doc_add_list_show_e2e(capfd, fresh_dir):
