@@ -133,9 +133,9 @@ stdinからコンテンツを渡す場合: `echo 'content' | beacon doc add "タ
 |---------|------|--------|
 | `beacon log [message] [-m ms-id] [-p progress]` | HEAD コミットを記録 | 対応済 |
 | `beacon log --prepare` | 進捗評価用の判断材料をJSON出力（書き込みしない） | 対応済 |
-| `beacon log --finalize [--progress N] [--summary text]` | 評価結果を受けて書き込み | 対応済 |
+| `beacon log --finalize [--progress N]` | 評価結果を受けて書き込み（`--summary` は e-1040 で廃止） | 対応済 |
 | `beacon sync` | 直近 git コミットをアクティブMSに同期 | - |
-| `beacon summary [text]` | サマリーの表示/更新 | 対応済 |
+| `beacon summary` | サマリーの表示（読み取り専用、書き込みは e-1040 で廃止。`project-vision` doc + `beacon session log` を使用） | 対応済 |
 
 ### pr サブコマンド
 

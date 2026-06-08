@@ -314,6 +314,10 @@ def _find_hook(name):
 CLAUDE_HOOK_SCRIPT = _find_hook("beacon-post-commit-hook.sh")
 CLAUDE_SAVE_HOOK_SCRIPT = _find_hook("beacon-save-hook.sh")
 CLAUDE_POSTCOMPACT_HOOK_SCRIPT = _find_hook("beacon-postcompact.sh")
+# ms-44 e-854: Stop hook bash script (Mac/Linux). Python port lives at
+# beacon_cli.hooks.context_monitor and is resolved via _resolve_hook_command
+# when the user is on Windows or has the wheel installed.
+CLAUDE_CONTEXT_MONITOR_HOOK_SCRIPT = _find_hook("context-usage-monitor.sh")
 
 
 def _install_claude_hook():
@@ -400,10 +404,39 @@ def _install_claude_hook():
             }],
         })
 
+    # ms-44 e-854: register the Stop hook (context-usage threshold monitor)
+    # so Mac/Linux + Win all get a Python or bash hook that actually fires.
+    # OS branching is implicit via _resolve_hook_command + _hook_unusable_on_windows.
+    stop_hooks = hooks.setdefault("Stop", [])
+    stop_hook_exists = False
+    for entry in stop_hooks:
+        for h in entry.get("hooks", []):
+            cmd = h.get("command", "")
+            if (
+                "context-usage-monitor" in cmd
+                or "beacon-hook-context-monitor" in cmd
+                or "beacon_cli.hooks.context_monitor" in cmd
+            ):
+                stop_hook_exists = True
+                break
+        if stop_hook_exists:
+            break
+    _ctx_cmd = _resolve_hook_command("context-usage-monitor.sh")
+    _ctx_ok = bool(_ctx_cmd) and (not _is_path_command(_ctx_cmd) or os.path.exists(_ctx_cmd))
+    if not stop_hook_exists and _ctx_ok:
+        stop_hooks.append({
+            "hooks": [{
+                "type": "command",
+                "command": _ctx_cmd,
+                "timeout": 10,
+                "statusMessage": "Beacon: checking context-usage threshold...",
+            }],
+        })
+
     with open(settings_path, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2, ensure_ascii=False)
         f.write("\n")
-    print("Installed Claude Code PostToolUse + PostCompact hooks")
+    print("Installed Claude Code PostToolUse + PostCompact + Stop hooks")
 
 
 def _install_skills():
@@ -1672,7 +1705,12 @@ def cmd_log_finalize():
     ms_id = os.environ.get("BEACON_MS_ID", "")
     summary_text = os.environ.get("BEACON_SUMMARY", "")
     progress = os.environ.get("BEACON_PROGRESS", "")
-    new_summary = os.environ.get("BEACON_NEW_SUMMARY", "")
+    # e-1040: project-level summary writes are deprecated. We still read
+    # BEACON_NEW_SUMMARY so we can warn the caller (typically the legacy
+    # /beacon-log Skill or a stale script), but we no longer mutate
+    # data["summary"]. Human narrative lives in the project-vision CORE
+    # doc; session-scoped context lives in the session_logs subcollection.
+    legacy_new_summary = os.environ.get("BEACON_NEW_SUMMARY", "")
     behavior = os.environ.get("BEACON_BEHAVIOR", "")
     resolves = os.environ.get("BEACON_RESOLVES", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
@@ -1696,24 +1734,38 @@ def cmd_log_finalize():
         session_id=session_id,
     )
 
-    if new_summary:
-        data["summary"] = new_summary
+    # e-1040 deprecation: don't write data["summary"] anymore. The legacy
+    # path used to set it from BEACON_NEW_SUMMARY; that field is now
+    # ignored at write time. Callers should switch to project-vision
+    # CORE doc updates (human narrative) or rely on session_logs
+    # subcollection (session context).
+    summary_was_ignored = bool(legacy_new_summary)
 
     save_project(data)
 
     if json_mode:
-        result["summary_updated"] = bool(new_summary)
+        result["summary_updated"] = False  # always False post-e-1040
+        if summary_was_ignored:
+            result["summary_deprecated"] = True
         print(json.dumps(result, ensure_ascii=False))
     else:
         if result["status"] == "duplicate":
-            print(f"Already logged: {commit_hash} (updated progress/summary)")
+            print(f"Already logged: {commit_hash} (updated progress)")
         else:
             loc = f"[{result['matched_task']}]" if "matched_task" in result else result["milestone_title"]
             print(f"Logged {commit_hash} → {loc}")
         if progress:
             print(f"  Progress: {result['progress']}%")
-        if new_summary:
-            print(f"  Summary updated.")
+        if summary_was_ignored:
+            # stderr so JSON consumers / pipes don't break; interactive
+            # users still see it. Mirrors the pattern in cmd_summary.
+            sys.stderr.write(
+                "[deprecated] --summary was provided but is no longer written to "
+                "the project. The project summary path was retired in e-1040 — "
+                "use the `project-vision` CORE doc for human narrative and the "
+                "session_logs subcollection for per-session context. This "
+                "argument will be removed in a future release.\n"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -2923,28 +2975,36 @@ def cmd_member_role():
 # ---------------------------------------------------------------------------
 
 def cmd_summary():
-    # ms-57 / e-1040: `beacon summary` is being phased out. The single
-    # mutable summary field had three roles (session scratch, cross-session
-    # hand-off, human narrative) and a lost-update history. Writes still
-    # work for legacy callers (auto-update from beacon log, /beacon-log
-    # Skill) but a stderr deprecation note nudges interactive users toward
-    # the session log + project-vision split per SPEC v2.
+    # ms-57 / e-1040 deprecation completed: `beacon summary "text"` writes
+    # are now a no-op. Reads still work for legacy CLI surfaces that
+    # haven't migrated to project-vision / session_logs yet — they get
+    # whatever was last written before the soft-deprecation ended.
+    # Cross-session hand-off → `beacon session log`. Human narrative →
+    # project-vision CORE doc.
     text = os.environ.get("BEACON_SUMMARY_TEXT", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     data = load_project()
     if text:
-        # Skip the nag in JSON mode (the /beacon-log Skill calls this
-        # programmatically and shouldn't be lectured every commit).
+        # No write. Surface the deprecation so the caller knows their
+        # input was ignored, but keep JSON callers quiet (mirrors the
+        # pattern in cmd_log_finalize).
         if not json_mode and not os.environ.get("BEACON_SUPPRESS_DEPRECATION"):
-            print(
-                "Note: `beacon summary` is deprecated (ms-57 / e-1040). "
-                "Cross-session hand-off lives in `beacon session log` now, "
-                "and human narrative belongs in the project-vision doc.",
-                file=sys.stderr,
+            sys.stderr.write(
+                "[deprecated] `beacon summary <text>` is no longer a write "
+                "(ms-57 / e-1040 completed). Cross-session hand-off → "
+                "`beacon session log`; human narrative → `project-vision` "
+                "CORE doc. Your input was IGNORED. This command will be "
+                "removed in a future release.\n"
             )
-        data["summary"] = text
-        save_project(data)
-        print(f"Summary updated.")
+        if json_mode:
+            print(json.dumps(
+                {"summary": data.get("summary", ""),
+                 "write_ignored": True,
+                 "deprecated_since": "e-1040"},
+                ensure_ascii=False,
+            ))
+        else:
+            print("Summary write ignored (deprecated; see stderr).")
     elif json_mode:
         print(json.dumps({"summary": data.get("summary", "")}, ensure_ascii=False))
     else:
@@ -5630,6 +5690,14 @@ def _resolve_hook_command(hook_basename: str) -> str:
             "beacon_cli.hooks.save_hook",
             "CLAUDE_SAVE_HOOK_SCRIPT",
         ),
+        # ms-44 e-854: Stop hook (context-usage threshold monitor). Python
+        # port lives at beacon_cli.hooks.context_monitor; bash stays at
+        # bin/context-usage-monitor.sh for Mac/Linux source / brew users.
+        "context-usage-monitor.sh": (
+            "beacon-hook-context-monitor",
+            "beacon_cli.hooks.context_monitor",
+            "CLAUDE_CONTEXT_MONITOR_HOOK_SCRIPT",
+        ),
     }
     entry_name, module_name, const_name = mapping.get(
         hook_basename, ("", "", "")
@@ -6218,10 +6286,59 @@ def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
             })
             postcompact_dirty = True
 
-    if removed_stale or posttooluse_dirty or postcompact_dirty:
+    # ms-44 e-854: register the Stop hook (context-usage threshold monitor)
+    # via _resolve_hook_command so Mac/Linux source/brew users land on the
+    # bash .sh, while Windows / wheel users land on the Python entry-point
+    # (or `python -m beacon_cli.hooks.context_monitor` fallback). Critically,
+    # _hook_unusable_on_windows() inside the resolver prevents a .sh path
+    # from being written into Win settings.json — that was the e-854 bug.
+    stop_hook_dirty = False
+    stop_cmd = _resolve_hook_command("context-usage-monitor.sh")
+    stop_ok = bool(stop_cmd) and (
+        not _is_path_command(stop_cmd) or os.path.exists(stop_cmd)
+    )
+    if stop_ok:
+        stop_hooks = hooks.setdefault("Stop", [])
+        stop_identity = (
+            "context-usage-monitor",   # bash basename, Mac/Linux
+            "beacon-hook-context-monitor",  # console-script entry-point (pipx)
+            "beacon_cli.hooks.context_monitor",  # python -m fallback
+        )
+        cleaned_stop = []
+        for entry in stop_hooks:
+            kept = []
+            for h in entry.get("hooks", []):
+                existing = h.get("command", "")
+                same_kind = any(s in existing for s in stop_identity)
+                if same_kind and existing != stop_cmd:
+                    removed_stale = True
+                    continue  # drop stale
+                kept.append(h)
+            entry["hooks"] = kept
+            if kept:
+                cleaned_stop.append(entry)
+        stop_hooks[:] = cleaned_stop
+
+        already_stop = any(
+            h.get("command", "") == stop_cmd
+            for entry in stop_hooks
+            for h in entry.get("hooks", [])
+        )
+        if not already_stop:
+            stop_hooks.append({
+                "hooks": [{
+                    "type": "command",
+                    "command": stop_cmd,
+                    "timeout": 10,
+                    "statusMessage": "Beacon: checking context-usage threshold...",
+                }],
+            })
+            stop_hook_dirty = True
+
+    if removed_stale or posttooluse_dirty or postcompact_dirty or stop_hook_dirty:
         with open(settings_path, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=2, ensure_ascii=False)
-        if removed_stale and not posttooluse_dirty:
+        if removed_stale and not (posttooluse_dirty or postcompact_dirty or stop_hook_dirty):
             print(f"Hooks: cleaned stale {hook_basename} entries; current path active")
         else:
             parts = []
@@ -6229,6 +6346,8 @@ def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
                 parts.append("PostToolUse")
             if postcompact_dirty:
                 parts.append("PostCompact")
+            if stop_hook_dirty:
+                parts.append("Stop")
             print(f"Hooks: registered {' + '.join(parts) or 'nothing new'} in {settings_path}")
     else:
         print("Hooks: already configured in ~/.claude/settings.json")
@@ -7809,6 +7928,7 @@ def cmd_help_json():
         {"command": "beacon auth logout", "flags": [], "description": "Remove cached credentials"},
         {"command": "beacon auth status", "flags": [], "description": "Show login status"},
         {"command": "beacon skill install", "flags": [], "description": "Install Claude Code Skills to ~/.claude/skills/"},
+        {"command": "beacon monitor context", "flags": ["--dry-run"], "description": "Stop hook: context-usage threshold monitor (e-854); --dry-run skips note/state writes"},
         {"command": "beacon help", "flags": ["--json"], "description": "Show help (--json for machine-readable output)"},
     ]
     print(json.dumps({"version": __version__, "commands": commands}, ensure_ascii=False, indent=2))
@@ -8478,6 +8598,31 @@ def cmd_bus_send():
     sender = os.environ.get("BEACON_BUS_SENDER", "").strip() or _resolve_session_id()
     delivery = os.environ.get("BEACON_BUS_DELIVERY", "").strip() or "propose-to-ai"
     in_reply_to = os.environ.get("BEACON_BUS_IN_REPLY_TO", "").strip()
+    # e-1209: --to <session_id> stamps payload.recipient_session_id so the
+    # server-side filter in /bus/unread can route the event to a single
+    # recipient. Without this, `dm`-channel events fan out to every session
+    # in the project (the historical bug). MCP reply tool (channel/bus.mjs)
+    # already stamps this field; aligning the CLI sender closes the gap.
+    #
+    # The CLI does NOT require --to for non-DM channels — broadcast remains
+    # the default semantics there. For DM the server drops unaddressed events
+    # rather than broadcasting, so a `dm` send without --to is effectively
+    # a no-op (drops everywhere). We surface a warning rather than hard-error
+    # so existing scripts that rely on legacy broadcast behavior get loud
+    # feedback instead of silent message loss.
+    recipient = os.environ.get("BEACON_BUS_RECIPIENT_SESSION", "").strip()
+    if recipient:
+        # Caller-supplied --to overrides any payload.recipient_session_id
+        # set by --payload; the flag is the unambiguous source of truth.
+        payload = {**payload, "recipient_session_id": recipient}
+    elif channel == "dm" and not payload.get("recipient_session_id"):
+        print(
+            "Warning: sending to channel 'dm' without --to <session_id>. "
+            "After e-1209 the server drops unaddressed DM events rather than "
+            "broadcasting them — pass --to or use a different channel for "
+            "broadcasts.",
+            file=sys.stderr,
+        )
 
     # e-1000: budget gate.
     #

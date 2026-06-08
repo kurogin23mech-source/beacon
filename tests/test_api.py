@@ -119,10 +119,15 @@ def test_existing_project_remains_legacy_v1():
     # must still route them through the legacy path without errors.
     assert "schema_version" not in _store[PROJECT_ID]
     # A simple mutation should succeed and not implicitly upgrade the schema.
-    r = client.patch(f"/api/projects/{PROJECT_ID}/summary",
-                     json={"text": "still v1"})
+    # e-1040 retired the /summary PATCH endpoint (no-op), so use a milestone
+    # title mutation which still exercises apply_operation on v1.
+    ms_id = _store[PROJECT_ID]["milestones"][0]["id"]
+    r = client.patch(
+        f"/api/projects/{PROJECT_ID}/milestones/{ms_id}",
+        json={"title": "still v1"},
+    )
     assert r.status_code == 200
-    assert _store[PROJECT_ID].get("summary") == "still v1"
+    assert _store[PROJECT_ID]["milestones"][0]["title"] == "still v1"
     assert "schema_version" not in _store[PROJECT_ID]
 
 
@@ -320,11 +325,29 @@ def test_log_with_progress():
 # Summary
 # ---------------------------------------------------------------------------
 
-def test_update_summary():
+def test_update_summary_is_deprecated_no_op():
+    """e-1040 completed: PATCH /summary writes are no-op.
+
+    The endpoint returns 200 with the previously-stored value (so legacy
+    callers don't crash) and a Deprecation header so machine consumers
+    can detect the contract change.
+    """
+    # Seed an existing value to verify it's preserved through the no-op.
+    _store[PROJECT_ID]["summary"] = "previous value"
+
     r = client.patch(f"/api/projects/{PROJECT_ID}/summary",
-                     json={"text": "New summary"})
+                     json={"text": "would-be new summary"})
+
     assert r.status_code == 200
-    assert _store[PROJECT_ID]["summary"] == "New summary"
+    body = r.json()
+    assert body["summary"] == "previous value"  # untouched
+    assert body.get("write_ignored") is True
+    assert body.get("deprecated_since") == "e-1040"
+    # HTTP deprecation signals present.
+    assert r.headers.get("Deprecation") == "true"
+    assert "Sunset" in r.headers
+    # Storage was NOT mutated.
+    assert _store[PROJECT_ID]["summary"] == "previous value"
 
 
 # ---------------------------------------------------------------------------

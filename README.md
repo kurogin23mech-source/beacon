@@ -165,6 +165,7 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 | `beacon init [--name n] [--objective o] [--storage local\|cloud]` | Initialize `.beacon/` (flags for non-interactive use) / プロジェクト作成 |
 | `beacon status [--json]` | Show project status / ステータス表示 |
 | `beacon skill install` | Install Claude Code Skills / Skillインストール |
+| `beacon monitor context [--dry-run]` | Run the Stop hook context-usage threshold monitor (debug / 動作確認) |
 | `beacon doctor` | Check PATH, hooks, Skills, auth, and cloud config / 環境ヘルスチェック |
 | `beacon reset` | Move `.beacon/` to a timestamped backup (local only) / ローカルデータのリセット |
 
@@ -274,8 +275,8 @@ Sources: `manual` (default, AI self-report), `google_docs`, `notion`, `jupyter`,
 |---------|-------------|
 | `beacon log [message] [-m ms-id]` | Record HEAD commit to milestone / コミット記録 |
 | `beacon log --prepare` | Output context as JSON (read-only) / 判断材料出力 |
-| `beacon log --finalize --progress N --summary "text"` | Write evaluation results / 評価結果書き込み |
-| `beacon summary [text] [--json]` | View/update project summary / サマリー更新 |
+| `beacon log --finalize --progress N` | Write evaluation results / 評価結果書き込み (`--summary` was retired in e-1040 — see `project-vision` doc + session log) |
+| `beacon summary [--json]` | View project summary (read-only). Writes retired in e-1040 — use `project-vision` doc + `beacon session log` |
 | `beacon sync` | Auto-sync recent commits / 直近コミットを同期 |
 | `beacon search <query> [-m ms-id] [--json]` | Full-text search across milestones, tasks, commits, PRs, and saves / 全文検索 |
 

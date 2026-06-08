@@ -1968,6 +1968,13 @@ async function connectCloudWebSocket(projectId) {
   ws.onmessage = (event) => {
     let msg;
     try { msg = JSON.parse(event.data); } catch (_) { return; }
+    // ms-43 e-809: route document_change frames through the SHARED
+    // applyDocumentChange (built into desktop/dist from server/static/index.html
+    // by desktop/build.py) so Documents tab parity with Web UI is automatic.
+    if (msg.type === 'document_change') {
+      if (typeof applyDocumentChange === 'function') applyDocumentChange(msg.data);
+      return;
+    }
     if (msg.type !== 'project') return;
     const data = msg.data || {};
     const newJson = JSON.stringify(data);
@@ -2346,6 +2353,54 @@ else document.addEventListener('DOMContentLoaded', () => { if (window.__TAURI__)
 // SHARED RENDERING (from server/static/index.html)
 // ============================================================
 // ---- Render Helpers ----
+
+// ms-43 e-809: apply a single document-change delta emitted by the server's
+// WS broadcast so the Documents tab stays reactive instead of being a
+// "fetch-on-open" snapshot.
+//
+// Two reasons this is its own function (not inlined into ws.onmessage):
+//  1) Tauri (desktop/layer.js) maintains a separate WS connection; both
+//     sides should mutate state identically, so the logic lives in SHARED.
+//  2) The "re-render only when active" check is non-obvious — keeping it
+//     in one place means a future bug fix touches one site, not two.
+//
+// payload schema: { op: "add"|"update"|"delete", doc_id, scope, title,
+//                   updated_at, milestone? }
+function applyDocumentChange(payload) {
+  if (!payload || !payload.doc_id) return;
+  const docs = Array.isArray(state.documents) ? state.documents : [];
+  const idx = docs.findIndex(d => d.doc_id === payload.doc_id);
+  if (payload.op === 'delete') {
+    if (idx >= 0) docs.splice(idx, 1);
+  } else {
+    // The list endpoint returns only the lightweight summary shape
+    // {doc_id, title, scope, updated_at, milestone?}. Mirror that here so
+    // a later loadDocuments() round trip won't reshape entries differently.
+    const entry = {
+      doc_id: payload.doc_id,
+      title: payload.title || '',
+      scope: payload.scope || 'memo',
+      updated_at: payload.updated_at || '',
+    };
+    if (payload.milestone) entry.milestone = payload.milestone;
+    if (idx >= 0) {
+      docs[idx] = entry;
+    } else {
+      // Newest-first ordering matches list_documents (order_by updated_at
+      // DESC); a freshly-saved doc has the latest updated_at so it goes
+      // at the head.
+      docs.unshift(entry);
+    }
+  }
+  state.documents = docs;
+  state.lastUpdate = new Date();
+  // Re-render only when the user is actually looking at the Documents
+  // tab — for any other tab the state mutation is enough; the next
+  // switchTab('documents') will see the fresh list without a fetch.
+  if (state.activeTab === 'documents' && !state.documentContent) {
+    renderOnDataChange();
+  }
+}
 
 const STATUS_LABELS = {
   done: 'done', in_progress: 'active', observing: 'observing',
@@ -3125,8 +3180,22 @@ function renderDocumentsSection() {
         <div class="doc-content">${marked.parse(state.documentContent.content || '')}</div>
       </section>`;
   }
-  if (state.documents.length === 0) {
-    return `<section class="retro-section fade-in"><div class="retro-empty">No documents yet.</div></section>`;
+  // ms-46 e-750: pull the retro detail-view early-return up alongside the
+  // document detail-view above so it can never strand a partially built html
+  // string lower in the function. The Documents tab hosts two independent
+  // collections (state.documents and state.retros); the previous code bailed
+  // out with "No documents yet." the moment state.documents was empty, which
+  // silently hid every retro even after loadRetros had populated
+  // state.retros (the W22 symptom in e-750). Both collections are now peers:
+  // each section is built only when its collection has data, and the empty
+  // placeholder is reserved for the case where *both* are empty.
+  if (state.retroContent) {
+    return `
+      <section class="retro-section fade-in">
+        <span class="retro-back" data-action="close-retro">← back to Documents</span>
+        <h3 style="font-size:1rem;color:var(--text-primary);margin:8px 0 16px;">${esc(state.retroContent.week)}</h3>
+        <div class="retro-content">${esc(state.retroContent.content)}</div>
+      </section>`;
   }
 
   // Scope chips (exclusive). Body / title search is handled by the global
@@ -3154,45 +3223,44 @@ function renderDocumentsSection() {
   };
   const allChip = `<button class="filter-btn ${scopeFilter ? 'off' : 'on'}" data-action="documents-filter-scope" data-scope="">all</button>`;
 
-  let html = `
-    <section class="retro-section fade-in" style="margin-bottom: 8px;">
-      <div class="milestones-header" style="margin-bottom: 4px;">
-        <span class="milestones-title">Documents</span>
-        <span class="milestones-count">${state.documents.length} total${scopeFilter ? ` / ${totalMatches} shown` : ''}</span>
-      </div>
-      <div class="filter-bar" style="margin: 4px 0 0;">
-        ${allChip}${order.map(scopeChip).join('')}
-      </div>
-    </section>
-  `;
+  let html = '';
 
-  for (const s of order) {
-    if (grouped[s].length === 0) continue;
+  if (state.documents.length > 0) {
     html += `
-      <section class="retro-section fade-in" style="margin-bottom: 12px;">
-        <h4 style="font-size: 0.75rem; color: var(--text-secondary); margin: 0 0 6px; letter-spacing: 0.05em;">${labels[s]}</h4>
-        <ul class="retro-list">
-          ${grouped[s].map(d => `
-            <li class="retro-item" data-action="open-document" data-doc-id="${esc(d.doc_id)}">
-              <span class="retro-item-week">${esc(d.title)}</span>
-              <span class="retro-item-date">${d.updated_at ? d.updated_at.slice(0, 10) : ''}</span>
-            </li>
-          `).join('')}
-        </ul>
-      </section>`;
+      <section class="retro-section fade-in" style="margin-bottom: 8px;">
+        <div class="milestones-header" style="margin-bottom: 4px;">
+          <span class="milestones-title">Documents</span>
+          <span class="milestones-count">${state.documents.length} total${scopeFilter ? ` / ${totalMatches} shown` : ''}</span>
+        </div>
+        <div class="filter-bar" style="margin: 4px 0 0;">
+          ${allChip}${order.map(scopeChip).join('')}
+        </div>
+      </section>
+    `;
+
+    for (const s of order) {
+      if (grouped[s].length === 0) continue;
+      html += `
+        <section class="retro-section fade-in" style="margin-bottom: 12px;">
+          <h4 style="font-size: 0.75rem; color: var(--text-secondary); margin: 0 0 6px; letter-spacing: 0.05em;">${labels[s]}</h4>
+          <ul class="retro-list">
+            ${grouped[s].map(d => `
+              <li class="retro-item" data-action="open-document" data-doc-id="${esc(d.doc_id)}">
+                <span class="retro-item-week">${esc(d.title)}</span>
+                <span class="retro-item-date">${d.updated_at ? d.updated_at.slice(0, 10) : ''}</span>
+              </li>
+            `).join('')}
+          </ul>
+        </section>`;
+    }
+    if (totalMatches === 0 && scopeFilter) {
+      html += `<section class="retro-section fade-in"><div class="retro-empty">No documents in scope "${esc(scopeFilter)}".</div></section>`;
+    }
   }
-  if (totalMatches === 0 && scopeFilter) {
-    html += `<section class="retro-section fade-in"><div class="retro-empty">No documents in scope "${esc(scopeFilter)}".</div></section>`;
-  }
-  // Reviews section (retros)
-  if (state.retroContent) {
-    return `
-      <section class="retro-section fade-in">
-        <span class="retro-back" data-action="close-retro">← back to Documents</span>
-        <h3 style="font-size:1rem;color:var(--text-primary);margin:8px 0 16px;">${esc(state.retroContent.week)}</h3>
-        <div class="retro-content">${esc(state.retroContent.content)}</div>
-      </section>`;
-  }
+
+  // Reviews section (retros). Rendered independently of state.documents so a
+  // project with only retros (or one whose loadDocuments race lost to
+  // loadRetros) still surfaces every week.
   if (state.retros.length > 0) {
     html += `
       <section class="retro-section fade-in" style="margin-bottom:12px;">

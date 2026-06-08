@@ -1042,13 +1042,36 @@ def log_commit(project_id: str, body: LogCommit,
 @app.patch("/api/projects/{project_id}/summary")
 def update_summary(project_id: str, body: SummaryUpdate,
                    user: dict = Depends(require_auth)):
-    def op(data: dict):
-        _require_write(data, user)
-        data["summary"] = body.text
-        return data, {"summary": body.text}
-    return operations.apply_operation(
-        project_id, op, op_name="project.summary", actor=user.get("sub", ""),
+    """**Deprecated** (e-1040 completed). Writes are no-op.
+
+    Cross-session hand-off → `beacon session log` (session_logs subcollection).
+    Human narrative → `project-vision` CORE doc.
+
+    The endpoint still returns 200 with the currently-stored summary so
+    unknown legacy callers (older CLI / external scripts) don't crash —
+    they just observe their input was ignored. The `Deprecation` /
+    `Sunset` headers signal the contract change machine-readably.
+    """
+    # Permission check is still useful (do not leak read access to
+    # outsiders), but we don't apply the mutation.
+    data = _load(project_id, user)
+    _require_write(data, user)
+    existing = data.get("summary", "")
+    response = JSONResponse(
+        content={
+            "summary": existing,
+            "write_ignored": True,
+            "deprecated_since": "e-1040",
+        }
     )
+    # Standard HTTP deprecation signals.
+    response.headers["Deprecation"] = "true"
+    response.headers["Sunset"] = "see e-1040; endpoint will be removed"
+    response.headers["Link"] = (
+        '<https://github.com/r-kida2/beacon/blob/main/CLAUDE.md>; '
+        'rel="deprecation"; type="text/html"'
+    )
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -1075,23 +1098,46 @@ def get_document(project_id: str, doc_id: str,
 
 
 @app.post("/api/projects/{project_id}/documents")
-def create_document(project_id: str, body: DocumentSave,
-                    user: dict = Depends(require_auth)):
-    """Create a new document."""
+async def create_document(project_id: str, body: DocumentSave,
+                          user: dict = Depends(require_auth)):
+    """Create a new document.
+
+    ms-43 e-809: emits a ``document_change`` WS frame after the write so the
+    Documents tab on every live client refreshes without waiting for the user
+    to re-open the tab. Async only because of that broadcast — the DB write
+    itself is sync.
+    """
     data = _load(project_id, user)
     _require_write(data, user)
     doc_id = db.save_document(project_id, "", body.title, body.content, body.scope)
+    await _broadcast_document_change(
+        project_id,
+        _build_document_change_payload(project_id, doc_id, op="add",
+                                       fallback_title=body.title,
+                                       fallback_scope=body.scope),
+    )
     return {"doc_id": doc_id, "title": body.title}
 
 
 @app.put("/api/projects/{project_id}/documents/{doc_id}")
-def update_document(project_id: str, doc_id: str, body: DocumentSave,
-                    user: dict = Depends(require_auth)):
-    """Update an existing document."""
+async def update_document(project_id: str, doc_id: str, body: DocumentSave,
+                          user: dict = Depends(require_auth)):
+    """Update an existing document.
+
+    ms-43 e-809: emits a ``document_change`` WS frame post-write so the open
+    Documents tab on every client picks up the new title / scope / updated_at
+    in-place (instead of staying stale until next tab switch).
+    """
     data = _load(project_id, user)
     _require_write(data, user)
     db.save_document(project_id, doc_id, body.title, body.content, body.scope,
                      updated_by=user.get("email", "unknown"))
+    await _broadcast_document_change(
+        project_id,
+        _build_document_change_payload(project_id, doc_id, op="update",
+                                       fallback_title=body.title,
+                                       fallback_scope=body.scope),
+    )
     return {"doc_id": doc_id, "title": body.title}
 
 
@@ -1113,17 +1159,40 @@ def get_document_revision(project_id: str, doc_id: str, rev: int, user: dict = D
 
 
 @app.delete("/api/projects/{project_id}/documents/{doc_id}")
-def delete_document_endpoint(project_id: str, doc_id: str,
-                             body: Optional[DeleteRequest] = None,
-                             user: dict = Depends(require_auth)):
-    """Soft-delete a document. Optional ``reason`` records why (ms-14 e-991)."""
+async def delete_document_endpoint(project_id: str, doc_id: str,
+                                   body: Optional[DeleteRequest] = None,
+                                   user: dict = Depends(require_auth)):
+    """Soft-delete a document. Optional ``reason`` records why (ms-14 e-991).
+
+    ms-43 e-809: emits a ``document_change`` (op=delete) WS frame so live
+    clients drop the entry from their cached ``state.documents`` without
+    needing a tab switch to re-fetch. We capture title/scope BEFORE the
+    soft-delete because ``list_documents`` filters deleted docs and the
+    client may want to render a brief "X was deleted" toast keyed on scope.
+    """
     data = _load(project_id, user)
     _require_write(data, user)
+    # Snapshot scope/title before delete so the broadcast payload still
+    # carries them — once delete_document flips the soft-delete flag,
+    # list_documents-style fetches filter the row out, leaving the client
+    # without enough context to update its filtered views correctly.
+    prior = db.get_document(project_id, doc_id) or {}
     reason = (body.reason if body else "") or ""
     if not db.delete_document(project_id, doc_id,
                               deleted_by=user.get("email", "unknown"),
                               reason=reason):
         raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
+    payload = {
+        "op": "delete",
+        "doc_id": doc_id,
+        "title": prior.get("title", ""),
+        "scope": prior.get("scope", "memo"),
+        "updated_at": "",
+    }
+    milestone = prior.get("milestone")
+    if milestone:
+        payload["milestone"] = milestone
+    await _broadcast_document_change(project_id, payload)
     return {"doc_id": doc_id, "status": "cancelled"}
 
 
@@ -1700,6 +1769,61 @@ def list_bus_events(
     return db.list_bus_events(project_id, since=since, channel=channel, limit=limit)
 
 
+# e-1209: DM channels are 1:1 unicast by default. Without server-side
+# enforcement, a `dm` event posted to project P fans out to every session in
+# P that subscribes to `dm` — the receiver-side filter in channel/bus.mjs
+# treated missing `payload.recipient_session_id` as "broadcast", and the
+# sender path (cmd_bus_send) never stamped that field. Net effect: every DM
+# was a broadcast to all dm-subscribed sessions in the project.
+#
+# Fix is server-authoritative (not just receiver-side) because:
+#   1. older receiver builds in the wild still treat missing recipient as
+#      broadcast; the server is the only point where every client converges.
+#   2. defense-in-depth — a bug in any single receiver shouldn't be able to
+#      smuggle DMs to the wrong session.
+#
+# Routing rules below are intentionally channel-aware:
+#   * ``dm`` channel: missing recipient → drop (legacy senders that don't
+#     stamp must be treated as malformed rather than broadcast). Mismatched
+#     recipient → drop. Matching recipient → pass.
+#   * other channels (default broadcast semantics for non-DM): missing
+#     recipient → pass (broadcast), mismatched recipient → drop, matching
+#     recipient → pass. This keeps `notify`/`ops`/etc broadcast-friendly
+#     until ms-54 follow-ups give them their own routing rules.
+#
+# Self-loop guard (sender == recipient → drop) is also enforced here so
+# even a buggy or absent receiver-side filter cannot deliver an event to
+# its own author.
+_DM_CHANNELS = {"dm"}
+
+
+def _bus_event_addressed_to(event: dict, recipient_id: str) -> bool:
+    """Return True iff ``event`` should be delivered to ``recipient_id``.
+
+    See the module-level rationale on _DM_CHANNELS above. This helper is
+    the single source of truth for DM routing; both the /unread endpoint
+    and any future WS fan-out filter must funnel through it.
+    """
+    sender = str(event.get("sender_session_id") or "")
+    if sender and sender == recipient_id:
+        # Self-sent: never deliver to the author. Receivers also guard
+        # against this, but we drop server-side too so a misconfigured
+        # consumer can't echo-loop itself into the budget gate.
+        return False
+    channel = event.get("channel") or ""
+    payload = event.get("payload") or {}
+    if not isinstance(payload, dict):
+        # Malformed payload (non-dict) cannot encode a recipient — treat as
+        # broadcast for non-DM channels and as malformed-drop for DM.
+        return channel not in _DM_CHANNELS
+    intended = str(payload.get("recipient_session_id") or "")
+    if intended:
+        return intended == recipient_id
+    # No recipient stamp: DM channels require explicit unicast, others
+    # default to broadcast.
+    return channel not in _DM_CHANNELS
+
+
 @app.get("/api/projects/{project_id}/bus/unread")
 def list_unread_bus_events(
     project_id: str,
@@ -1710,19 +1834,33 @@ def list_unread_bus_events(
 ):
     """List events the recipient has not yet acknowledged via their cursor.
 
-    Identical to ``GET /bus`` except ``since`` is resolved server-side from
-    ``bus_cursors/{recipient_id}``. The endpoint **does not advance** the
+    Like ``GET /bus`` except ``since`` is resolved server-side from
+    ``bus_cursors/{recipient_id}`` AND results are filtered through
+    :func:`_bus_event_addressed_to` so DM channels do not fan out to
+    every subscriber (e-1209). The endpoint **does not advance** the
     cursor — callers POST to ``/bus/cursors/{recipient_id}`` after processing.
     Splitting read and acknowledge lets crashing consumers get at-least-once
     delivery (events stay readable until acknowledged) while structurally
     preventing duplicate delivery once they acknowledge.
+
+    We over-fetch from the store (``limit * 4`` capped at 400) before applying
+    the recipient filter so a high-volume channel doesn't starve the
+    requested recipient when most of the window is addressed to others.
+    The cursor still advances by ``created_at`` across the full set, so
+    skipped events are not redelivered on the next round.
     """
     _load(project_id, user)
     cursor = db.get_bus_cursor(project_id, recipient_id)
     since = cursor.get("last_seen_at", "")
-    return db.list_bus_events(
-        project_id, since=since, channel=channel, limit=limit,
+    # Over-fetch so the recipient filter does not blank out a noisy window.
+    raw_limit = min(max(limit * 4, limit), 400) if limit else 400
+    raw = db.list_bus_events(
+        project_id, since=since, channel=channel, limit=raw_limit,
     )
+    filtered = [e for e in raw if _bus_event_addressed_to(e, recipient_id)]
+    if limit:
+        filtered = filtered[:limit]
+    return filtered
 
 
 @app.post("/api/projects/{project_id}/bus/cursors/{recipient_id}")
@@ -1897,6 +2035,70 @@ async def _broadcast_bus_event(project_id: str, event: dict):
     if not clients:
         return
     msg = {"type": "bus_event", "data": event}
+    for ws in clients:
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            _ws_connections.get(project_id, set()).discard(ws)
+
+
+def _build_document_change_payload(project_id: str, doc_id: str, op: str,
+                                   fallback_title: str = "",
+                                   fallback_scope: str | None = None) -> dict:
+    """Construct the WS payload for a document add/update event.
+
+    We re-read the saved doc via ``db.get_document`` so the broadcast carries
+    the *post-write* values (especially ``updated_at`` which the server stamps
+    and ``scope`` which may be normalized from frontmatter). If the read
+    fails for any reason — racing delete, transient Firestore error — we
+    degrade to the request body values so clients still get something to
+    insert/update on, rather than silently dropping the event.
+    """
+    saved = db.get_document(project_id, doc_id) or {}
+    scope = saved.get("scope") or fallback_scope or "memo"
+    payload = {
+        "op": op,
+        "doc_id": doc_id,
+        "title": saved.get("title", fallback_title),
+        "scope": scope,
+        "updated_at": saved.get("updated_at", ""),
+    }
+    milestone = saved.get("milestone")
+    if milestone:
+        payload["milestone"] = milestone
+    return payload
+
+
+async def _broadcast_document_change(project_id: str, payload: dict):
+    """Push a document add/update/delete notification to all WS clients of this
+    project (ms-43 e-809).
+
+    Rationale: Documents are not part of the project doc snapshot stream
+    (they live in a Firestore subcollection that ``_on_snapshot`` doesn't
+    watch), so a write here is invisible to clients until they re-open the
+    Documents tab and trigger ``loadDocuments`` from scratch. That breaks
+    parity with Milestones / Tasks which already render reactively via the
+    project broadcast.
+
+    Rather than expand the project snapshot to embed documents (would balloon
+    every WS frame), we mirror the ``_broadcast_bus_event`` pattern with a
+    distinct message type. The payload is a *single-document delta* — clients
+    apply it to ``state.documents`` regardless of whether the Documents tab
+    is currently active, so re-opening the tab shows the latest list with no
+    network round trip.
+
+    Payload schema (locked-in for client compatibility):
+      op        : "add" | "update" | "delete"
+      doc_id    : str — Firestore document id
+      title     : str — current title (empty string on delete is OK)
+      scope     : str — "core" | "spec" | "memo" | "report"
+      updated_at: str — ISO timestamp from the write (empty on delete)
+      milestone : str (optional) — present iff doc has a milestone frontmatter
+    """
+    clients = _ws_connections.get(project_id, set()).copy()
+    if not clients:
+        return
+    msg = {"type": "document_change", "data": payload}
     for ws in clients:
         try:
             await ws.send_json(msg)

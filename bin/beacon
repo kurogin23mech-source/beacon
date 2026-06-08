@@ -115,6 +115,8 @@ Other:
   beacon auth logout                Remove cached credentials
   beacon auth status                Show login status
   beacon skill install              Install Claude Code Skills
+  beacon monitor context [--dry-run]
+                                    Stop hook: context-usage threshold monitor (e-854)
   beacon update [--check] [--skill-only] [--yes]
                                     Self-update: brew upgrade + skill install (one shot)
   beacon help                       Show this help
@@ -2412,12 +2414,14 @@ case "${1:-}" in
         _bud_turns=""
         _bus_in_reply_to=""
         _bus_project_id=""
+        _bus_to=""
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 --channel)        _bus_channel="${2:-}"; shift 2 ;;
                 --payload)        _bus_payload="${2:-}"; shift 2 ;;
                 --sender)         _bus_sender="${2:-}"; shift 2 ;;
                 --recipient)      _bus_recipient="${2:-}"; shift 2 ;;
+                --to)             _bus_to="${2:-}"; shift 2 ;;
                 --delivery)       _bus_delivery="${2:-}"; shift 2 ;;
                 --interval)       _bus_interval="${2:-}"; shift 2 ;;
                 --timeout)        _bus_timeout="${2:-}"; shift 2 ;;
@@ -2441,6 +2445,7 @@ case "${1:-}" in
                 BEACON_BUS_CHANNEL="$_bus_channel" \
                     BEACON_BUS_PAYLOAD="$_bus_payload" \
                     BEACON_BUS_SENDER="$_bus_sender" \
+                    BEACON_BUS_RECIPIENT_SESSION="$_bus_to" \
                     BEACON_BUS_DELIVERY="$_bus_delivery" \
                     BEACON_BUS_IN_REPLY_TO="$_bus_in_reply_to" \
                     BEACON_BUS_PROJECT_ID="$_bus_project_id" \
@@ -2535,7 +2540,7 @@ EOF
                 ;;
             *)
                 cat <<'EOF'
-Usage: beacon bus send         --channel <ch> [--payload '<json>'] [--sender <id>] [--delivery <mode>] [--in-reply-to <event_id>] [--project <id>]
+Usage: beacon bus send         --channel <ch> [--to <session_id>] [--payload '<json>'] [--sender <id>] [--delivery <mode>] [--in-reply-to <event_id>] [--project <id>]
        beacon bus listen       [--recipient <id>] [--channel <ch>] [--interval <sec>] [--auto-ack] [--once] [--project <id>]
        beacon bus receive      [--recipient <id>] [--channel <ch>] [--timeout <sec>] [--auto-ack] [--project <id>]
        beacon bus ack          [--recipient <id>] --last-seen-at <iso8601> [--project <id>]
@@ -2544,6 +2549,9 @@ Usage: beacon bus send         --channel <ch> [--payload '<json>'] [--sender <id
        beacon bus auto-execute add --channel <name>  |  remove --channel <name>  |  list
 
 delivery: auto-execute | propose-to-ai (default) | notify-user-only
+--to:          (send) stamp payload.recipient_session_id for 1:1 unicast (e-1209).
+               Required for channel=dm; without it the server drops the event
+               rather than broadcasting to every dm-subscribed session.
 --in-reply-to: mark as AI-authored reply. Requires `bus budget grant N` first.
                Without it, sends bypass the budget gate (manual mode).
                The same gate applies via the MCP reply tool (channel/bus.mjs).
@@ -2678,6 +2686,31 @@ EOF
             install) python3 "$COMMANDS_PY" channel_install ;;
             "")      echo "Usage: beacon channel install" ;;
             *)       echo "Unknown channel subcommand: ${2:-}"; echo "Usage: beacon channel install" ;;
+        esac
+        ;;
+    monitor)
+        # ms-44 e-854: context-usage Stop hook discoverable from the CLI.
+        # The Stop hook itself is registered via beacon-hook-context-monitor
+        # (entry-point) or bin/context-usage-monitor.sh / .py — this verb is
+        # the same code path so users can dry-run the threshold logic.
+        case "${2:-}" in
+            context)
+                shift 2
+                dry=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --dry-run) dry="1"; shift ;;
+                        *)         shift ;;
+                    esac
+                done
+                if [[ -n "$dry" ]]; then
+                    BEACON_CONTEXT_MONITOR_DRY_RUN=1 python3 -m beacon_cli.hooks.context_monitor
+                else
+                    python3 -m beacon_cli.hooks.context_monitor
+                fi
+                ;;
+            "")  echo "Usage: beacon monitor context [--dry-run]" ;;
+            *)   echo "Unknown monitor subcommand: ${2:-}"; echo "Usage: beacon monitor context [--dry-run]" ;;
         esac
         ;;
     member)
