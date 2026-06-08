@@ -443,11 +443,34 @@ class SessionUpsert(BaseModel):
     updates only need to bump last_active; first-mint upserts populate the rest.
     server/firestore_client.upsert_session uses merge=True so partial bodies
     are safe.
+
+    ms-54 / e-1318 (Option C true-heartbeat) adds three new fields the bridge
+    (channel/bus.mjs) stamps on every poll iteration:
+
+      * ``last_poll_at``     — ISO8601 UTC of the most recent poll iteration.
+                               Updated *inside* the bridge's poll loop, so a
+                               stale value structurally implies "this bridge
+                               cannot receive events" (not "the heartbeat
+                               code path ran on a process whose poll loop
+                               died long ago").
+      * ``poll_interval_ms`` — bridge's poll cadence. Lets the server compute
+                               a precise "healthy if last_poll_at within
+                               max(30s, 2 × poll_interval_ms)" threshold
+                               rather than guessing.
+      * ``shutdown``         — True iff the bridge wrote this update as part
+                               of a graceful SIGINT/SIGTERM teardown. Used
+                               by the directory ``--healthy`` filter to
+                               immediately classify deliberately-stopped
+                               sessions as not-healthy, instead of waiting
+                               for ``last_poll_at`` to go stale.
     """
     actor: Optional[dict] = None
     created_at: Optional[str] = None
     last_active: Optional[str] = None
     harness: Optional[str] = None
+    last_poll_at: Optional[str] = None
+    poll_interval_ms: Optional[int] = None
+    shutdown: Optional[bool] = None
 
 
 _BUS_DELIVERY_MODES = {"auto-execute", "propose-to-ai", "notify-user-only"}
@@ -1697,6 +1720,87 @@ def upsert_session(
     return {"status": "ok", "session_id": session_id}
 
 
+_POLL_HEALTH_MIN_WINDOW_S = 30
+_POLL_HEALTH_DEFAULT_INTERVAL_MS = 2000
+_POLL_HEALTH_INTERVAL_MULTIPLIER = 2
+
+
+def _compute_poll_health(session: dict, now_dt) -> dict:
+    """Compute the ``poll_health`` block for a session row (e-1318).
+
+    Formula (server-side, no client clock involved):
+
+      threshold_seconds = max(
+          _POLL_HEALTH_MIN_WINDOW_S,                       # floor: 30 s
+          _POLL_HEALTH_INTERVAL_MULTIPLIER * poll_interval # 2× bridge cadence
+      )
+      healthy = (
+          last_poll_at exists
+          AND shutdown != true
+          AND server_now - last_poll_at <= threshold_seconds
+      )
+
+    Returns a dict ALWAYS — the directory consumer (CLI / Skill) reads the
+    field unconditionally. Sessions that have never been touched by the
+    poll-gated bridge get ``healthy=None`` (unknown) so the caller can
+    fall back to ``last_active`` rather than wrongly marking them dead.
+
+    The shutdown short-circuit deliberately classifies a graceful teardown
+    as not-healthy *immediately* — without it, the directory would
+    advertise a session as receive-capable for ~30 s after a clean Ctrl-C.
+    """
+    import datetime
+    last_poll = session.get("last_poll_at", "")
+    interval_ms = session.get("poll_interval_ms") or _POLL_HEALTH_DEFAULT_INTERVAL_MS
+    shutdown = bool(session.get("shutdown", False))
+
+    if not last_poll:
+        return {
+            "last_poll_at": "",
+            "poll_interval_ms": None,
+            "shutdown": False,
+            "healthy": None,
+            "age_seconds": None,
+        }
+
+    threshold = max(
+        _POLL_HEALTH_MIN_WINDOW_S,
+        (_POLL_HEALTH_INTERVAL_MULTIPLIER * int(interval_ms)) // 1000,
+    )
+
+    age_seconds: Optional[float] = None
+    healthy = False
+    try:
+        # Accept both microsecond and millisecond ISO8601, tolerating the
+        # trailing Z. fromisoformat in 3.11+ handles Z natively; replace to
+        # stay portable across the deployment fleet.
+        parsed = datetime.datetime.fromisoformat(last_poll.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+        age_seconds = (now_dt - parsed).total_seconds()
+        healthy = (not shutdown) and (age_seconds <= threshold)
+    except (ValueError, TypeError):
+        # Malformed last_poll_at — treat as unknown rather than dead. A
+        # corrupted stamp on one session must not silently delete it from
+        # the picker; surface it with healthy=null so debug tooling can
+        # see "there's a row here, but its liveness signal is broken".
+        return {
+            "last_poll_at": last_poll,
+            "poll_interval_ms": int(interval_ms),
+            "shutdown": shutdown,
+            "healthy": None,
+            "age_seconds": None,
+        }
+
+    return {
+        "last_poll_at": last_poll,
+        "poll_interval_ms": int(interval_ms),
+        "shutdown": shutdown,
+        "healthy": healthy,
+        "age_seconds": round(age_seconds, 3) if age_seconds is not None else None,
+    }
+
+
 @app.get("/api/projects/{project_id}/sessions")
 def list_sessions(
     project_id: str,
@@ -1705,6 +1809,7 @@ def list_sessions(
     agent: str = "",
     live_only: bool = False,
     since_minutes: int = 5,
+    healthy_only: bool = False,
     user: dict = Depends(require_auth),
 ):
     """List sessions for a project, with optional directory-query filters.
@@ -1726,9 +1831,24 @@ def list_sessions(
                             a session that crashed without session-end is
                             correctly classified as not-live once its heartbeat
                             goes stale (≥ ms-57 heartbeat cadence + slack).
+                            NOTE: ``last_active`` proves only "some heartbeat
+                            code path ran"; for "this bridge can actually
+                            receive DMs right now" use ``healthy_only``.
       * ``since_minutes`` — threshold for live_only. Default 5 matches the
                             session heartbeat cadence; raise it for "active in
                             last hour" style queries.
+      * ``healthy_only``  — e-1318 Option C true-heartbeat. Drop sessions
+                            whose bridge poll loop is stale or shutdown. The
+                            stale window is ``max(30s, 2× poll_interval_ms)``,
+                            so the filter scales with the bridge's own
+                            cadence. Sessions without ``last_poll_at`` (never
+                            polled — likely an older bridge or no bridge at
+                            all) are also dropped under ``healthy_only`` —
+                            unknown-liveness is *not* a healthy receiver.
+
+    Every returned row carries a ``poll_health`` block (e-1318) regardless
+    of filter choice, so the CLI / Skill consumer can display age & shutdown
+    flag in the picker without an extra round-trip.
 
     Filtering is in-memory after load. The sessions/ subcollection is bounded
     (single-digit to a few dozen docs per project in practice), so we avoid
@@ -1737,7 +1857,17 @@ def list_sessions(
     """
     _load(project_id, user)
     sessions = db.list_sessions(project_id)
-    if not (user_id or machine or agent or live_only):
+
+    import datetime
+    now_dt = datetime.datetime.now(datetime.timezone.utc)
+
+    # Always attach poll_health — backward-compat callers that ignore it lose
+    # nothing, but /beacon-dm-send (and any other directory consumer) gets
+    # the structured signal in one round-trip.
+    for s in sessions:
+        s["poll_health"] = _compute_poll_health(s, now_dt)
+
+    if not (user_id or machine or agent or live_only or healthy_only):
         return sessions
 
     def _matches(s: dict) -> bool:
@@ -1753,11 +1883,7 @@ def list_sessions(
     filtered = [s for s in sessions if _matches(s)]
 
     if live_only:
-        import datetime
-        cutoff = (
-            datetime.datetime.now(datetime.timezone.utc)
-            - datetime.timedelta(minutes=since_minutes)
-        )
+        cutoff = now_dt - datetime.timedelta(minutes=since_minutes)
         cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
         def _is_live(s: dict) -> bool:
@@ -1767,6 +1893,14 @@ def list_sessions(
             return bool(la) and la >= cutoff_iso
 
         filtered = [s for s in filtered if _is_live(s)]
+
+    if healthy_only:
+        # Only sessions whose bridge poll loop has stamped a recent
+        # last_poll_at AND is not in graceful shutdown. ``healthy=None``
+        # (unknown — older bridge, no last_poll_at field) is treated as
+        # NOT healthy: the contract is "I am polling right now", and
+        # silence does not satisfy that contract.
+        filtered = [s for s in filtered if s.get("poll_health", {}).get("healthy") is True]
 
     return filtered
 

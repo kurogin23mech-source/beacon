@@ -9539,6 +9539,12 @@ def cmd_bus_directory():
     sessions of a different project. The auth + API URL still come from
     the current project's cloud.json; only the project_id in the API call
     changes.
+
+    ``--healthy`` (env ``BEACON_DIR_HEALTHY``, ms-54 e-1318): only return
+    sessions whose bridge poll loop is actively pumping events into the AI
+    inbox right now. Opt-in so existing callers' wire shape is unchanged.
+    The JSON output ALWAYS includes the ``poll_health`` block per row (even
+    without --healthy) so scripts can decide their own threshold.
     """
     client, config = _get_api_client()
     project_id = _resolve_bus_project_id(config)
@@ -9549,6 +9555,7 @@ def cmd_bus_directory():
         agent=os.environ.get("BEACON_DIR_AGENT", "").strip(),
         live_only=os.environ.get("BEACON_DIR_LIVE", "") == "1",
         since_minutes=int(os.environ.get("BEACON_DIR_SINCE_MIN", "5") or "5"),
+        healthy_only=os.environ.get("BEACON_DIR_HEALTHY", "") == "1",
     )
     if os.environ.get("BEACON_JSON", "") == "1":
         print(json.dumps(sessions, ensure_ascii=False))
@@ -9564,7 +9571,25 @@ def cmd_bus_directory():
         agent = actor.get("agent", "")
         last = (s.get("last_active") or "")[:19]
         ident = " / ".join(p for p in (email, machine, agent) if p) or "(anon)"
-        print(f"  {sid}  {ident}  last_active={last}")
+
+        # e-1318: surface poll_health in the human picker so users can
+        # tell at a glance "this session's bridge is actually polling"
+        # vs. "the heartbeat code path ran but the bridge is dead".
+        ph = s.get("poll_health") or {}
+        healthy = ph.get("healthy")
+        age = ph.get("age_seconds")
+        shutdown = ph.get("shutdown")
+        if shutdown:
+            health_tag = "  health=shutdown"
+        elif healthy is True:
+            age_str = f"{int(age)}s" if isinstance(age, (int, float)) else "?"
+            health_tag = f"  health=ok({age_str})"
+        elif healthy is False:
+            age_str = f"{int(age)}s" if isinstance(age, (int, float)) else "?"
+            health_tag = f"  health=stale({age_str})"
+        else:
+            health_tag = "  health=unknown"
+        print(f"  {sid}  {ident}  last_active={last}{health_tag}")
 
 
 # ---------------------------------------------------------------------------

@@ -2477,6 +2477,7 @@ case "${1:-}" in
         _bus_machine=""
         _bus_agent=""
         _bus_live=""
+        _bus_healthy=""
         _bus_since_min=""
         _bud_turns=""
         _bus_in_reply_to=""
@@ -2502,6 +2503,7 @@ case "${1:-}" in
                 --machine)        _bus_machine="${2:-}"; shift 2 ;;
                 --agent)          _bus_agent="${2:-}"; shift 2 ;;
                 --live)           _bus_live="1"; shift ;;
+                --healthy)        _bus_healthy="1"; shift ;;
                 --since-min)      _bus_since_min="${2:-}"; shift 2 ;;
                 --turns|-n)       _bud_turns="${2:-}"; shift 2 ;;
                 --in-reply-to)    _bus_in_reply_to="${2:-}"; shift 2 ;;
@@ -2564,6 +2566,7 @@ case "${1:-}" in
                     BEACON_DIR_MACHINE="$_bus_machine" \
                     BEACON_DIR_AGENT="$_bus_agent" \
                     BEACON_DIR_LIVE="$_bus_live" \
+                    BEACON_DIR_HEALTHY="$_bus_healthy" \
                     BEACON_DIR_SINCE_MIN="$_bus_since_min" \
                     BEACON_BUS_PROJECT_ID="$_bus_project_id" \
                     BEACON_JSON="$_bus_json" \
@@ -2626,7 +2629,7 @@ Usage: beacon bus send         --channel <ch> [--to <session_id>] [--payload '<j
        beacon bus listen       [--recipient <id>] [--channel <ch>] [--interval <sec>] [--auto-ack] [--once] [--project <id>]
        beacon bus receive      [--recipient <id>] [--channel <ch>] [--timeout <sec>] [--auto-ack] [--project <id>]
        beacon bus ack          [--recipient <id>] --last-seen-at <iso8601> [--project <id>]
-       beacon bus directory    [--user <email>] [--machine <name>] [--agent <name>] [--live] [--since-min <N>] [--project <id>] [--json]
+       beacon bus directory    [--user <email>] [--machine <name>] [--agent <name>] [--live] [--healthy] [--since-min <N>] [--project <id>] [--json]
        beacon bus budget       grant --turns <N>  |  show  |  clear
        beacon bus auto-execute add --channel <name>  |  remove --channel <name>  |  list
 

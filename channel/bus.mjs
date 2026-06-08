@@ -29,6 +29,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { consumeBusBudgetOne, refuseMessage } from './bus-budget.mjs'
 import { selectTierForBridge } from './bus-envelope.mjs'
+import { buildHeartbeatBody } from './bus-heartbeat.mjs'
 
 // --- Config discovery --------------------------------------------------------
 
@@ -126,6 +127,24 @@ async function apiPost(p, body) {
     // sites that just want a message keep working via .message.
     const text = (await r.text()).slice(0, 200)
     const err = new Error(`POST ${p} → ${r.status}: ${text}`)
+    err.status = r.status
+    throw err
+  }
+  return r.json()
+}
+
+async function apiPut(p, body) {
+  const r = await fetch(`${API_URL}${p}`, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${loadToken()}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+  if (!r.ok) {
+    const text = (await r.text()).slice(0, 200)
+    const err = new Error(`PUT ${p} → ${r.status}: ${text}`)
     err.status = r.status
     throw err
   }
@@ -335,6 +354,40 @@ if (!PROJECT_ID || !SESSION_ID) {
     }
   }
 
+  // Option C (e-1318): poll-gated heartbeat. The previous heartbeat path
+  // (PostToolUse hook → `beacon session id` → upsert last_active) only
+  // proved the *heartbeat code path* was running, not that this bridge's
+  // poll loop was actually pumping events into the AI inbox. Today's
+  // dogfood case caught a bridge with healthy heartbeat but a dead poll
+  // loop: DMs accumulated server-side but never reached the AI. By
+  // stamping `last_poll_at` *inside* pollOnce — after each poll completes,
+  // success or no-op — we make stale `last_poll_at` definitively imply
+  // "bridge cannot receive". Consumers (bus directory --healthy) read
+  // this as the canonical liveness signal.
+  //
+  // The legacy `beacon session id` heartbeat keeps working — it is now
+  // the *secondary* signal: useful when the bridge isn't running at all
+  // (e.g. plain Claude Code without the channels feature) but no longer
+  // load-bearing for "can this session receive a DM?".
+  async function writePollHeartbeat({ shutdown = false } = {}) {
+    try {
+      const body = buildHeartbeatBody({
+        nowIso: new Date().toISOString(),
+        pollIntervalMs: POLL_INTERVAL,
+        shutdown,
+      })
+      await apiPut(
+        `/api/projects/${PROJECT_ID}/sessions/${encodeURIComponent(SESSION_ID)}`,
+        body,
+      )
+    } catch (e) {
+      // Heartbeat write failures must NEVER kill the poll loop — the
+      // bridge has to keep trying to deliver events even if the cloud
+      // is temporarily unreachable. Log and move on.
+      log(`heartbeat write failed (non-fatal): ${e.message}`)
+    }
+  }
+
   async function pollOnce() {
     const events = await apiGet(
       `/api/projects/${PROJECT_ID}/bus/unread?recipient_id=${encodeURIComponent(SESSION_ID)}`,
@@ -426,9 +479,21 @@ if (!PROJECT_ID || !SESSION_ID) {
       } catch (e) {
         log(`poll error: ${e.message}`)
       }
+      // e-1318: heartbeat is a *byproduct* of the poll loop. Whether
+      // pollOnce succeeded, no-op'd, or threw (caught above), we got
+      // here, so the loop is alive. Writing here means: if the loop
+      // hangs or crashes, last_poll_at structurally stops advancing
+      // and consumers can detect a dead bridge from cloud state alone.
+      await writePollHeartbeat()
       await new Promise((r) => setTimeout(r, POLL_INTERVAL))
     }
     log('poll loop exiting')
+    // Graceful shutdown signal (e-1318): post one last heartbeat with
+    // shutdown=true so the directory query can immediately classify
+    // this session as "deliberately stopped" vs. "crashed/zombie".
+    // Without this, a clean Ctrl-C would look identical to a hang
+    // until last_poll_at went stale.
+    await writePollHeartbeat({ shutdown: true })
   }
   setTimeout(loop, 500)
 }

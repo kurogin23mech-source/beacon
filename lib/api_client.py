@@ -183,10 +183,18 @@ class ApiClient:
 
     def list_sessions(self, project_id: str, *, user_id: str = "",
                       machine: str = "", agent: str = "",
-                      live_only: bool = False, since_minutes: int = 5) -> list:
+                      live_only: bool = False, since_minutes: int = 5,
+                      healthy_only: bool = False) -> list:
         """List sessions for a project. Empty filters return everything (the
         original ms-57 behavior); set filters to do a directory query per
-        ms-54 / e-1134."""
+        ms-54 / e-1134.
+
+        ``healthy_only`` (ms-54 / e-1318 Option C): drop sessions whose bridge
+        poll loop is stale or has gracefully shut down. Each returned row
+        carries a ``poll_health`` block regardless of this flag, so callers
+        that want to display "stale (45s)" rather than filter can keep
+        ``healthy_only=False`` and inspect the field client-side.
+        """
         qs = []
         if user_id:
             qs.append(f"user_id={urllib.parse.quote(user_id)}")
@@ -197,6 +205,8 @@ class ApiClient:
         if live_only:
             qs.append("live_only=true")
             qs.append(f"since_minutes={since_minutes}")
+        if healthy_only:
+            qs.append("healthy_only=true")
         suffix = "?" + "&".join(qs) if qs else ""
         return self.get(f"/api/projects/{project_id}/sessions{suffix}")
 

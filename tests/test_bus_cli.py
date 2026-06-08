@@ -390,10 +390,12 @@ class _StubDirectoryClient(_StubApiClient):
         self.last_query: dict = {}
 
     def list_sessions(self, project_id, *, user_id="", machine="",
-                      agent="", live_only=False, since_minutes=5):
+                      agent="", live_only=False, since_minutes=5,
+                      healthy_only=False):
         self.last_query = {
             "user_id": user_id, "machine": machine, "agent": agent,
             "live_only": live_only, "since_minutes": since_minutes,
+            "healthy_only": healthy_only,
         }
         out = []
         for s in self.sessions:
@@ -404,6 +406,13 @@ class _StubDirectoryClient(_StubApiClient):
                 continue
             if agent and actor.get("agent") != agent:
                 continue
+            # e-1318: when healthy_only is set, the server drops anything
+            # whose poll_health.healthy is not exactly True. Mirror the
+            # contract so this stub stays an honest stand-in.
+            if healthy_only:
+                ph = s.get("poll_health") or {}
+                if ph.get("healthy") is not True:
+                    continue
             out.append(s)
         return out
 
@@ -420,7 +429,8 @@ def dir_stub(monkeypatch):
 
 def _clear_dir_env(monkeypatch):
     for k in ("BEACON_DIR_USER", "BEACON_DIR_MACHINE", "BEACON_DIR_AGENT",
-              "BEACON_DIR_LIVE", "BEACON_DIR_SINCE_MIN", "BEACON_JSON"):
+              "BEACON_DIR_LIVE", "BEACON_DIR_HEALTHY",
+              "BEACON_DIR_SINCE_MIN", "BEACON_JSON"):
         monkeypatch.delenv(k, raising=False)
 
 
@@ -457,7 +467,20 @@ def test_bus_directory_forwards_filters_to_api(monkeypatch, capsys, dir_stub):
     assert dir_stub.last_query == {
         "user_id": "alice@x", "machine": "mac", "agent": "claude",
         "live_only": True, "since_minutes": 10,
+        # e-1318: --healthy defaults off, but the kwarg must still be wired
+        # through the dispatcher → commands.py → api_client chain.
+        "healthy_only": False,
     }
+
+
+def test_bus_directory_forwards_healthy_filter_to_api(monkeypatch, capsys, dir_stub):
+    """The e-1318 --healthy filter must reach api_client. Catches the
+    regression where the dispatcher reads the flag but commands.py never
+    forwards it — the picker would silently still include stale rows."""
+    _clear_dir_env(monkeypatch)
+    monkeypatch.setenv("BEACON_DIR_HEALTHY", "1")
+    commands.cmd_bus_directory()
+    assert dir_stub.last_query["healthy_only"] is True
 
 
 def test_bus_directory_empty_result_message(monkeypatch, capsys, dir_stub):
@@ -481,3 +504,93 @@ def test_bus_directory_json_mode(monkeypatch, capsys, dir_stub):
     parsed = json.loads(out)
     assert len(parsed) == 1
     assert parsed[0]["session_id"] == "s-1"
+
+
+# ---------------------------------------------------------------------------
+# --healthy filter (e-1318 Option C true-heartbeat)
+# ---------------------------------------------------------------------------
+
+def test_bus_directory_healthy_filter_drops_stale_and_shutdown(
+    monkeypatch, capsys, dir_stub,
+):
+    """Hands the stub three sessions — healthy, stale, shutdown — and
+    pins that --healthy only keeps the healthy one. The stub mirrors the
+    server's poll_health contract, so this test catches CLI-level filter
+    forwarding *and* the consumer-side handling in one shot."""
+    _clear_dir_env(monkeypatch)
+    dir_stub.sessions = [
+        {"session_id": "s-ok", "actor": {},
+         "last_active": "2026-06-07T00:00:01.000000Z",
+         "poll_health": {"healthy": True, "age_seconds": 1, "shutdown": False}},
+        {"session_id": "s-stale", "actor": {},
+         "last_active": "2026-06-07T00:00:01.000000Z",
+         "poll_health": {"healthy": False, "age_seconds": 300, "shutdown": False}},
+        {"session_id": "s-down", "actor": {},
+         "last_active": "2026-06-07T00:00:01.000000Z",
+         "poll_health": {"healthy": False, "age_seconds": 1, "shutdown": True}},
+    ]
+    monkeypatch.setenv("BEACON_DIR_HEALTHY", "1")
+    monkeypatch.setenv("BEACON_JSON", "1")
+    commands.cmd_bus_directory()
+    out = capsys.readouterr().out.strip()
+    parsed = json.loads(out)
+    sids = [s["session_id"] for s in parsed]
+    assert sids == ["s-ok"], parsed
+
+
+def test_bus_directory_json_includes_poll_health_for_every_row(
+    monkeypatch, capsys, dir_stub,
+):
+    """Even without --healthy, every JSON row carries poll_health so the
+    /beacon-dm-send Skill (separate task) can display the age + filter
+    client-side."""
+    _clear_dir_env(monkeypatch)
+    dir_stub.sessions = [
+        {"session_id": "s-1", "actor": {"email": "a@x"},
+         "last_active": "2026-06-07T00:00:01.000000Z",
+         "poll_health": {"healthy": True, "age_seconds": 2,
+                         "shutdown": False, "last_poll_at": "2026-06-07T00:00:01Z",
+                         "poll_interval_ms": 2000}},
+    ]
+    monkeypatch.setenv("BEACON_JSON", "1")
+    commands.cmd_bus_directory()
+    parsed = json.loads(capsys.readouterr().out.strip())
+    assert parsed[0]["poll_health"]["healthy"] is True
+    assert parsed[0]["poll_health"]["age_seconds"] == 2
+
+
+def test_bus_directory_human_output_shows_health_tag(
+    monkeypatch, capsys, dir_stub,
+):
+    """The picker line must show a health tag so a human reviewer can
+    tell at a glance which sessions are receive-capable RIGHT NOW vs.
+    just last-heartbeat-recent. Without this tag, the picker is back
+    to the pre-e-1318 ambiguity."""
+    _clear_dir_env(monkeypatch)
+    dir_stub.sessions = [
+        {"session_id": "s-ok", "actor": {"email": "a@x"},
+         "last_active": "2026-06-07T00:00:01.000000Z",
+         "poll_health": {"healthy": True, "age_seconds": 2,
+                         "shutdown": False}},
+        {"session_id": "s-stale", "actor": {"email": "b@x"},
+         "last_active": "2026-06-07T00:00:01.000000Z",
+         "poll_health": {"healthy": False, "age_seconds": 300,
+                         "shutdown": False}},
+        {"session_id": "s-down", "actor": {"email": "c@x"},
+         "last_active": "2026-06-07T00:00:01.000000Z",
+         "poll_health": {"healthy": False, "age_seconds": 1,
+                         "shutdown": True}},
+        {"session_id": "s-old", "actor": {"email": "d@x"},
+         "last_active": "2026-06-07T00:00:01.000000Z"},  # legacy, no poll_health
+    ]
+    commands.cmd_bus_directory()
+    out = capsys.readouterr().out
+    # Healthy line gets ok tag.
+    assert "s-ok" in out and "health=ok" in out
+    # Stale line gets stale tag with age.
+    assert "s-stale" in out and "health=stale" in out
+    # Shutdown line gets shutdown tag (regardless of age).
+    assert "s-down" in out and "health=shutdown" in out
+    # Legacy row (no poll_health) → unknown, so the user knows liveness
+    # is undecided rather than falsely "ok".
+    assert "s-old" in out and "health=unknown" in out

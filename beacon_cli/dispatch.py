@@ -768,6 +768,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_bus_dir.add_argument("--agent", default="")
     p_bus_dir.add_argument("--live", action="store_true")
     p_bus_dir.add_argument("--since-min", dest="since_min", default="")
+    # e-1318: --healthy filters to sessions whose bridge poll loop is
+    # currently pumping events. Distinct from --live (which checks the
+    # secondary last_active heartbeat).
+    p_bus_dir.add_argument("--healthy", action="store_true")
     p_bus_dir.add_argument("--project", dest="bus_project_id", default="")
     p_bus_dir.add_argument("--json", action="store_true")
 
@@ -2226,7 +2230,8 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
         print("       beacon bus ack       [--recipient <id>] "
               "--last-seen-at <iso8601> [--project <id>]")
         print("       beacon bus directory [--user <email>] [--machine <name>] "
-              "[--agent <name>] [--live] [--since-min <N>] [--project <id>] [--json]")
+              "[--agent <name>] [--live] [--healthy] [--since-min <N>] "
+              "[--project <id>] [--json]")
         print("       beacon bus budget    grant --turns <N>  |  show  |  clear")
         print("")
         print("delivery: auto-execute | propose-to-ai (default) | notify-user-only")
@@ -2294,6 +2299,7 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
             "BEACON_DIR_AGENT": args.agent or "",
             "BEACON_DIR_LIVE": "1" if args.live else "",
             "BEACON_DIR_SINCE_MIN": args.since_min or "",
+            "BEACON_DIR_HEALTHY": "1" if getattr(args, "healthy", False) else "",
             "BEACON_JSON": "1" if args.json else "",
         }
         if project_id:

@@ -235,3 +235,202 @@ def test_session_id_is_surfaced_in_every_directory_row():
     assert {s.get("session_id") for s in body} == {"s-A", "s-B"}, body
     # No row should be unaddressable (None / "" / missing key).
     assert all(s.get("session_id") for s in body), body
+
+
+# ---------------------------------------------------------------------------
+# poll_health — Option C true-heartbeat (ms-54 / e-1318)
+#
+# These tests pin the structural inversion: stale last_poll_at MUST imply
+# the bridge poll loop is dead. The previous last_active signal couldn't
+# distinguish "bridge process alive but poll loop hung" from "session is
+# fine" — today's dogfood case observed exactly that, with DMs piling up
+# server-side while the receiving AI never woke.
+# ---------------------------------------------------------------------------
+
+def test_poll_health_present_on_every_row():
+    """Every directory row carries a poll_health block, even when the
+    session has never been touched by the new bridge. The /beacon-dm-send
+    Skill consumes this unconditionally and must never have to crash on a
+    missing key."""
+    _seed([
+        {"session_id": "s-old", "actor": {"machine": "M1"},
+         "last_active": "2026-06-07T01:00:00.000000Z"},
+    ])
+    body = client.get(f"/api/projects/{PROJECT_ID}/sessions").json()
+    assert len(body) == 1
+    ph = body[0].get("poll_health")
+    assert isinstance(ph, dict), body
+    # Legacy session with no last_poll_at → healthy=None (unknown).
+    assert ph.get("healthy") is None
+    assert ph.get("last_poll_at") == ""
+
+
+def test_poll_health_marks_recent_poll_as_healthy():
+    now = datetime.datetime.now(datetime.timezone.utc)
+    _seed([
+        {"session_id": "s-fresh", "actor": {},
+         "last_active": _iso(now),
+         "last_poll_at": _iso(now - datetime.timedelta(seconds=1)),
+         "poll_interval_ms": 2000},
+    ])
+    body = client.get(f"/api/projects/{PROJECT_ID}/sessions").json()
+    ph = body[0]["poll_health"]
+    assert ph["healthy"] is True, body
+    assert ph["age_seconds"] is not None
+    assert ph["age_seconds"] < 5
+
+
+def test_poll_health_marks_stale_poll_as_unhealthy():
+    """The smoking gun from today's dogfood: bridge process alive,
+    last_active fresh, but poll loop dead → stale last_poll_at.
+    Directory must classify this as healthy=False."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    _seed([
+        {"session_id": "s-zombie", "actor": {},
+         # last_active is fresh (the legacy heartbeat path is still firing)
+         "last_active": _iso(now),
+         # …but the poll loop hasn't stamped itself in 5 minutes.
+         "last_poll_at": _iso(now - datetime.timedelta(minutes=5)),
+         "poll_interval_ms": 2000},
+    ])
+    body = client.get(f"/api/projects/{PROJECT_ID}/sessions").json()
+    ph = body[0]["poll_health"]
+    assert ph["healthy"] is False, body
+    # The age field is what the picker uses to display "stale (300s)".
+    assert ph["age_seconds"] is not None
+    assert ph["age_seconds"] >= 200
+
+
+def test_poll_health_threshold_scales_with_poll_interval():
+    """Threshold = max(30s, 2 × poll_interval_ms). A bridge polling
+    every 10s must still be healthy at age 15s, even though that exceeds
+    the absolute 30s floor only marginally."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    _seed([
+        # Slow bridge: 30s poll interval. At age 50s, 2×interval = 60s,
+        # so still healthy (under the threshold).
+        {"session_id": "s-slow", "actor": {},
+         "last_poll_at": _iso(now - datetime.timedelta(seconds=50)),
+         "poll_interval_ms": 30_000},
+        # Same bridge config, age 70s → exceeds 60s threshold.
+        {"session_id": "s-slow-dead", "actor": {},
+         "last_poll_at": _iso(now - datetime.timedelta(seconds=70)),
+         "poll_interval_ms": 30_000},
+    ])
+    body = client.get(f"/api/projects/{PROJECT_ID}/sessions").json()
+    h = {s["session_id"]: s["poll_health"]["healthy"] for s in body}
+    assert h == {"s-slow": True, "s-slow-dead": False}, body
+
+
+def test_poll_health_shutdown_flag_is_never_healthy():
+    """A bridge that posted last_poll_at=now with shutdown=true is
+    deliberately stopped. Directory must NOT advertise it as healthy
+    even though the timestamp itself is fresh — otherwise senders would
+    keep targeting a session that just hung up."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    _seed([
+        {"session_id": "s-shutdown", "actor": {},
+         "last_poll_at": _iso(now),
+         "poll_interval_ms": 2000,
+         "shutdown": True},
+    ])
+    body = client.get(f"/api/projects/{PROJECT_ID}/sessions").json()
+    ph = body[0]["poll_health"]
+    assert ph["healthy"] is False, body
+    assert ph["shutdown"] is True
+
+
+def test_healthy_only_filter_drops_stale_and_shutdown_and_unknown():
+    """Only sessions with confirmed-healthy poll_health pass the filter."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    _seed([
+        {"session_id": "s-healthy", "actor": {},
+         "last_poll_at": _iso(now), "poll_interval_ms": 2000},
+        {"session_id": "s-stale", "actor": {},
+         "last_poll_at": _iso(now - datetime.timedelta(minutes=5)),
+         "poll_interval_ms": 2000},
+        {"session_id": "s-shutdown", "actor": {},
+         "last_poll_at": _iso(now),
+         "poll_interval_ms": 2000, "shutdown": True},
+        # Legacy session — no last_poll_at field at all.
+        {"session_id": "s-legacy", "actor": {},
+         "last_active": _iso(now)},
+    ])
+    resp = client.get(
+        f"/api/projects/{PROJECT_ID}/sessions?healthy_only=true"
+    )
+    sids = [s["session_id"] for s in resp.json()]
+    assert sids == ["s-healthy"], resp.json()
+
+
+def test_healthy_only_composes_with_user_filter():
+    """healthy_only must AND with other directory filters — the picker
+    asks for "alice's healthy session", not "alice's session OR any
+    healthy session"."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    _seed([
+        {"session_id": "s-alice-healthy", "actor": {"email": "alice@x"},
+         "last_poll_at": _iso(now), "poll_interval_ms": 2000},
+        {"session_id": "s-alice-zombie", "actor": {"email": "alice@x"},
+         "last_poll_at": _iso(now - datetime.timedelta(minutes=10)),
+         "poll_interval_ms": 2000},
+        {"session_id": "s-bob-healthy", "actor": {"email": "bob@x"},
+         "last_poll_at": _iso(now), "poll_interval_ms": 2000},
+    ])
+    resp = client.get(
+        f"/api/projects/{PROJECT_ID}/sessions"
+        f"?user_id=alice@x&healthy_only=true"
+    )
+    sids = [s["session_id"] for s in resp.json()]
+    assert sids == ["s-alice-healthy"]
+
+
+def test_no_filter_call_still_includes_poll_health_for_legacy_rows():
+    """Backward compat: callers that don't pass --healthy still get
+    every row and the new poll_health field, with healthy=None for
+    sessions the new bridge has never touched."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    _seed([
+        {"session_id": "s-modern", "actor": {},
+         "last_poll_at": _iso(now), "poll_interval_ms": 2000},
+        {"session_id": "s-legacy", "actor": {},
+         "last_active": _iso(now)},
+    ])
+    body = client.get(f"/api/projects/{PROJECT_ID}/sessions").json()
+    assert len(body) == 2
+    by_sid = {s["session_id"]: s for s in body}
+    assert by_sid["s-modern"]["poll_health"]["healthy"] is True
+    assert by_sid["s-legacy"]["poll_health"]["healthy"] is None
+
+
+def test_session_upsert_accepts_new_heartbeat_fields():
+    """The bridge writes last_poll_at / poll_interval_ms / shutdown via
+    the existing session upsert endpoint. Pinning that the schema
+    accepts these so a wire-mismatch (older server, newer bridge)
+    surfaces here rather than as silently-dropped fields in prod."""
+    # Capture writes the bridge would do.
+    captured: dict = {}
+
+    def _fake_upsert(project_id, session_id, data):  # noqa: ARG001
+        captured.update(data)
+
+    import firestore_client as fc
+    original = fc.upsert_session
+    fc.upsert_session = _fake_upsert
+    try:
+        now = "2026-06-09T01:00:00.000000Z"
+        resp = client.put(
+            f"/api/projects/{PROJECT_ID}/sessions/s-bridge",
+            json={
+                "last_active": now,
+                "last_poll_at": now,
+                "poll_interval_ms": 2000,
+                "shutdown": False,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert captured.get("last_poll_at") == now
+        assert captured.get("poll_interval_ms") == 2000
+        assert captured.get("shutdown") is False
+    finally:
+        fc.upsert_session = original
