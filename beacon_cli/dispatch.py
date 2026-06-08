@@ -221,6 +221,25 @@ def _find_beacon_root(start: Path) -> Optional[Path]:
         cur = cur.parent
 
 
+# e-1227 (ms-17): the cwd at the time the user invoked ``beacon``. We have
+# to stash this before ``_relocate_to_project_root`` chdirs us up to the
+# beacon project root, because in worktree mode the project root is the
+# *parent* repo (only the parent has ``.beacon/``). Any handler that needs
+# to read git HEAD must use this cwd via ``git -C``, otherwise it captures
+# the parent repo's HEAD instead of the worktree's HEAD — silently
+# attaching the wrong commit hash to beacon entries.
+_invocation_cwd: Optional[Path] = None
+
+
+def get_invocation_cwd() -> Path:
+    """Return the cwd from which the user invoked ``beacon``.
+
+    Falls back to ``Path.cwd()`` if called before ``dispatch()`` had a
+    chance to stash it (e.g. unit tests calling handlers directly).
+    """
+    return _invocation_cwd if _invocation_cwd is not None else Path.cwd()
+
+
 def _relocate_to_project_root(command: str) -> None:
     """chdir to the project root when invoked from a subdirectory (e-862).
 
@@ -236,6 +255,11 @@ def _relocate_to_project_root(command: str) -> None:
       * An explicit ``BEACON_PROJECT_FILE`` pointing at an existing file
         (tests, fixtures, advanced users) wins — leave cwd untouched.
       * If ``.beacon/project.json`` already exists in cwd, nothing to do.
+
+    Note: callers that need to resolve git HEAD from the *original* cwd
+    (e.g. ``beacon log`` from inside a git worktree where ``.beacon/`` lives
+    in the parent repo) should read ``get_invocation_cwd()`` and pass it
+    explicitly to ``git -C`` — see e-1227 / ms-17 / ``_handle_log``.
     """
     if command in ("init", "setup"):
         return
@@ -1007,10 +1031,19 @@ def _handle_log(root: Path, args: argparse.Namespace) -> int:
     if (rc := _ensure_project()) is not None:
         return rc
 
+    # e-1227 (ms-17): resolve git operations from the *original* invocation
+    # cwd, not the post-relocate cwd. When invoked from a worktree where
+    # ``.beacon/`` lives in the parent repo, ``_relocate_to_project_root``
+    # has already chdir'd us into the parent. Reading HEAD without ``-C``
+    # would then capture the parent's HEAD instead of the worktree's,
+    # silently attaching the wrong commit hash to every beacon entry.
+    invocation_cwd = str(get_invocation_cwd())
+    git_C = ["git", "-C", invocation_cwd]
+
     # Mirror bash: require git + read HEAD info via subprocess.
     try:
         subprocess.check_output(
-            ["git", "rev-parse", "--is-inside-work-tree"],
+            git_C + ["rev-parse", "--is-inside-work-tree"],
             stderr=subprocess.STDOUT,
         )
     except (FileNotFoundError, subprocess.CalledProcessError):
@@ -1021,13 +1054,13 @@ def _handle_log(root: Path, args: argparse.Namespace) -> int:
     target_ref = args.explicit_hash or "HEAD"
     try:
         commit_hash = subprocess.check_output(
-            ["git", "rev-parse", "--short", target_ref], text=True
+            git_C + ["rev-parse", "--short", target_ref], text=True
         ).strip()
         commit_msg = subprocess.check_output(
-            ["git", "log", "-1", "--pretty=%s", target_ref], text=True
+            git_C + ["log", "-1", "--pretty=%s", target_ref], text=True
         ).strip()
         commit_date = subprocess.check_output(
-            ["git", "log", "-1", "--pretty=%ci", target_ref], text=True
+            git_C + ["log", "-1", "--pretty=%ci", target_ref], text=True
         ).strip().split(" ", 1)[0]
     except subprocess.CalledProcessError as exc:
         _eprint(f"Error: git lookup for {target_ref} failed: {exc}")
@@ -1039,7 +1072,7 @@ def _handle_log(root: Path, args: argparse.Namespace) -> int:
     if mode != "finalize":
         try:
             changed = subprocess.check_output(
-                ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", target_ref],
+                git_C + ["diff-tree", "--no-commit-id", "--name-only", "-r", target_ref],
                 text=True,
             ).strip().splitlines()
         except subprocess.CalledProcessError:
@@ -2387,6 +2420,16 @@ def dispatch(root: Optional[Path], argv: Sequence[str]) -> int:
     if not args.command:
         _print_top_help()
         return 0
+
+    # e-1227 (ms-17): stash the cwd at invocation time *before* the
+    # relocate below changes it. Handlers that need git HEAD from the
+    # user's actual location (notably ``beacon log``, which runs inside
+    # parallel sub-agent worktrees where .beacon/ lives in the parent
+    # repo) read this via ``get_invocation_cwd()`` and pass it to
+    # ``git -C`` so they don't accidentally capture the parent repo's
+    # HEAD after the relocate.
+    global _invocation_cwd
+    _invocation_cwd = Path.cwd()
 
     # Locate the project root by walking up from CWD so beacon works from
     # any subdirectory (e-862). Must happen before the handler runs and

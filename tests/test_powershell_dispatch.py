@@ -767,6 +767,22 @@ def test_init_in_home_dir_refused(no_bash, captured_call, tmp_path, monkeypatch,
 # ---------------------------------------------------------------------------
 
 
+def _strip_git_C_prefix(args):
+    """Strip the ``git -C <cwd>`` prefix added by e-1227 (ms-17) so the
+    test's mock can key on the semantic subcommand only.
+
+    ``_handle_log`` runs git via ``git -C <invocation_cwd> <subcmd>...``
+    to resolve HEAD from the user's original cwd (the worktree, not the
+    post-relocate parent repo). This helper turns
+    ``["git", "-C", "/tmp/xyz", "rev-parse", "--short", "HEAD"]`` back
+    into ``("git", "rev-parse", "--short", "HEAD")`` so test fixtures
+    stay focused on the git operation, not on the cwd plumbing.
+    """
+    if len(args) >= 3 and args[0] == "git" and args[1] == "-C":
+        return ("git", *args[3:])
+    return tuple(args)
+
+
 def test_log_normal(project_dir, no_bash, captured_call, monkeypatch):
     """log should read HEAD via git and pass commit metadata as env vars."""
     git_responses = {
@@ -780,7 +796,7 @@ def test_log_normal(project_dir, no_bash, captured_call, monkeypatch):
     }
 
     def fake_check_output(args, **kwargs):
-        key = tuple(args)
+        key = _strip_git_C_prefix(args)
         if key not in git_responses:
             raise KeyError(f"unmocked git call: {args}")
         resp = git_responses[key]
@@ -816,7 +832,7 @@ def test_log_skips_beacon_only_commits(project_dir, no_bash, captured_call, monk
     }
 
     def fake_check_output(args, **kwargs):
-        resp = git_responses[tuple(args)]
+        resp = git_responses[_strip_git_C_prefix(args)]
         if isinstance(resp, bytes) and kwargs.get("text"):
             return resp.decode()
         return resp
