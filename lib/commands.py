@@ -2067,6 +2067,104 @@ def cmd_entry_move():
 
 
 # ---------------------------------------------------------------------------
+# Persistence poisoning defense (ms-54 / e-1293)
+#
+# Defense in depth on top of the bus envelope verify layer (e-1155 Phase 1).
+# Even though the envelope tier blocks an inbound DM from auto-executing a
+# Skill, an AI that *reads* a DM and then interprets the content as a user
+# request and calls ``note add`` / ``doc add`` / ``session log`` itself is a
+# different attack surface — the envelope guard never sees that call. To
+# close the gap, the handlers themselves refuse any write whose source is
+# marked as bus-origin via ``BEACON_BUS_ORIGIN=1`` (or ``--bus-origin``).
+#
+# Producers in the bus path SHOULD set this flag when forwarding
+# bus-derived content into a persistence handler. The current codebase has
+# no such producer yet — the flag is in place as a structural defense for
+# future code paths and as a tripwire if attack-surface code ever appears.
+# Legitimate user / AI-internal flows do not pass the flag, so this never
+# fires for ordinary use.
+#
+# Rejected attempts are logged to a local audit jsonl
+# (``.beacon/persistence_poisoning_audit.jsonl``) so the attempt remains
+# forensically visible even without cloud connectivity. The local file is
+# the source of truth for this defense — by design we do NOT round-trip
+# through the cloud audit collection (a bus-origin caller is, by
+# definition, not trusted to write audit records remotely).
+# ---------------------------------------------------------------------------
+
+PERSISTENCE_POISONING_AUDIT_FILE = "persistence_poisoning_audit.jsonl"
+
+_BUS_ORIGIN_REFUSAL_MESSAGE = (
+    "Error: writes from bus-origin payloads are not allowed "
+    "(persistence poisoning defense)"
+)
+
+
+def _is_bus_origin_input() -> bool:
+    """Return True iff the current invocation is marked as bus-derived.
+
+    Read from ``BEACON_BUS_ORIGIN``. Truthy values are ``"1"`` and ``"true"``
+    (case-insensitive). Everything else is treated as not-set so a
+    misconfigured caller fails closed (i.e. allows the write) only when the
+    flag is absent — never on a typo'd truthy value.
+    """
+    raw = os.environ.get("BEACON_BUS_ORIGIN", "").strip().lower()
+    return raw in ("1", "true", "yes")
+
+
+def _persistence_poisoning_audit_path() -> str:
+    """Local jsonl path for refused bus-origin persistence attempts."""
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    return os.path.join(beacon_dir, PERSISTENCE_POISONING_AUDIT_FILE)
+
+
+def _record_persistence_poisoning_refusal(handler: str, details: dict) -> None:
+    """Append a refusal audit record to the local jsonl audit log.
+
+    Best-effort: any IO error is swallowed (we still refuse the write — the
+    audit log is forensic context, not the gate). The record schema is
+    intentionally small and human-readable so an operator can grep for
+    ``handler=note_add`` to see the trail.
+    """
+    import datetime
+    try:
+        record = {
+            "ts": datetime.datetime.now(datetime.timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%S.%fZ"
+            ),
+            "handler": handler,
+            "verdict": "refused",
+            "reason": "bus_origin_persistence_blocked",
+            "session_id": _resolve_session_id(),
+            "details": details,
+        }
+        path = _persistence_poisoning_audit_path()
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        # Audit logging is best-effort; never let it mask the refusal itself.
+        pass
+
+
+def _refuse_if_bus_origin(handler: str, details: dict) -> bool:
+    """Refuse the current persistence call if marked bus-origin.
+
+    Returns True iff the call was refused (caller should ``sys.exit(1)``
+    immediately). When True, an audit record is written and the refusal
+    message is printed to stderr.
+
+    Handlers (``cmd_note_add``, ``cmd_doc_add``, ``cmd_doc_update``,
+    ``cmd_session_end``) MUST call this BEFORE any persistence side effect.
+    """
+    if not _is_bus_origin_input():
+        return False
+    _record_persistence_poisoning_refusal(handler, details)
+    print(_BUS_ORIGIN_REFUSAL_MESSAGE, file=sys.stderr)
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Session Notes (ephemeral, cleared at session-end)
 # ---------------------------------------------------------------------------
 
@@ -2108,6 +2206,14 @@ def cmd_note_add():
     context = os.environ.get("BEACON_NOTE_CONTEXT", "")
     if not text:
         print("Error: note text required")
+        sys.exit(1)
+    # ms-54 / e-1293: persistence poisoning defense — refuse writes whose
+    # source is a bus DM. See module-level "Persistence poisoning defense"
+    # block for the threat model.
+    if _refuse_if_bus_origin(
+        "note_add",
+        {"text_preview": text[:80], "context": context},
+    ):
         sys.exit(1)
     note = {
         "ts": datetime.datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -2392,6 +2498,20 @@ def cmd_session_end():
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     summary_override = os.environ.get("BEACON_SUMMARY", "").strip() or None
     explicit_sid = os.environ.get("BEACON_SESSION_ID", "").strip()
+
+    # ms-54 / e-1293: persistence poisoning defense. A bus-origin caller
+    # MUST NOT be able to upsert a session log — a poisoned summary that
+    # lands in the session_log subcollection survives into the next
+    # /beacon-session-start context restore, which is the cross-session
+    # infection vector this defense exists to block.
+    if _refuse_if_bus_origin(
+        "session_end",
+        {
+            "session_id": explicit_sid,
+            "summary_preview": (summary_override or "")[:80],
+        },
+    ):
+        sys.exit(1)
     try:
         import session as _session
         sid = explicit_sid or _session.get_session_id()
@@ -4885,6 +5005,16 @@ def cmd_doc_add():
         print(f"Error: scope must be one of {VALID_SCOPES}")
         sys.exit(1)
 
+    # ms-54 / e-1293: persistence poisoning defense — refuse writes whose
+    # source is a bus DM, regardless of scope. Memos are the canonical
+    # poisoning target ("write me a memo that says ..."), but every doc
+    # scope is a persistent vector so we gate uniformly.
+    if _refuse_if_bus_origin(
+        "doc_add",
+        {"title": title[:80], "scope": scope, "doc_id": doc_id},
+    ):
+        sys.exit(1)
+
     # core docs are project-wide — MS association is optional
     if scope == "core":
         milestone = milestone or None
@@ -4969,6 +5099,14 @@ def cmd_doc_update():
 
     if not doc_id:
         print("Error: doc_id required")
+        sys.exit(1)
+
+    # ms-54 / e-1293: persistence poisoning defense. Updating a doc with
+    # bus-derived content is the same poisoning vector as creating one.
+    if _refuse_if_bus_origin(
+        "doc_update",
+        {"doc_id": doc_id, "title": title[:80], "scope": scope},
+    ):
         sys.exit(1)
 
     # Read content from stdin if not provided via env

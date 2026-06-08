@@ -66,6 +66,8 @@ Documents:
   beacon doc show <doc-id>                         Show document content
   beacon doc update <doc-id>                       Update a document
   beacon doc delete <doc-id>                       Delete a document
+  (doc add / doc update support --bus-origin to refuse bus-derived
+   writes — persistence poisoning defense, ms-54 / e-1293)
 
 Operations:
   beacon operation open "<title>" [--schedule daily|weekdays|weekly] [--log-source <name>]
@@ -112,6 +114,8 @@ DM Channel (multi-session messaging):
 
 Other:
   beacon note "<text>" [--context "<label>"]   Add a session note (ephemeral, cleared at session-end)
+                                               (also accepts --bus-origin to refuse bus-derived
+                                                writes — persistence poisoning defense, ms-54 / e-1293)
   beacon note list                             Show session notes
   beacon note clear                            Clear all session notes
   beacon trigger fire <name> [msg]  Fire a named trigger
@@ -1486,17 +1490,19 @@ cmd_doc() {
             local json_flag=""
             local doc_ms=""
             local doc_op=""
+            local doc_bus_origin=""
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
-                    --id)       doc_id="${2:-}"; shift 2 ;;
-                    --scope|-s) doc_scope="${2:-}"; shift 2 ;;
-                    --ms)       doc_ms="${2:-}"; shift 2 ;;
-                    --op)       doc_op="${2:-}"; shift 2 ;;
-                    --json)     json_flag="1"; shift ;;
-                    --content)  doc_content="${2:-}"; shift 2 ;;
-                    --stdin)    shift ;;  # stdin is handled by Python side
-                    *)          doc_title="$1"; shift ;;
+                    --id)         doc_id="${2:-}"; shift 2 ;;
+                    --scope|-s)   doc_scope="${2:-}"; shift 2 ;;
+                    --ms)         doc_ms="${2:-}"; shift 2 ;;
+                    --op)         doc_op="${2:-}"; shift 2 ;;
+                    --json)       json_flag="1"; shift ;;
+                    --content)    doc_content="${2:-}"; shift 2 ;;
+                    --bus-origin) doc_bus_origin="1"; shift ;;
+                    --stdin)      shift ;;  # stdin is handled by Python side
+                    *)            doc_title="$1"; shift ;;
                 esac
             done
 
@@ -1508,6 +1514,7 @@ cmd_doc() {
             BEACON_TITLE="$doc_title" BEACON_DOC_ID="$doc_id" \
                 BEACON_CONTENT="$doc_content" BEACON_SCOPE="$doc_scope" \
                 BEACON_MS="$doc_ms" BEACON_OP="$doc_op" BEACON_JSON="$json_flag" \
+                BEACON_BUS_ORIGIN="$doc_bus_origin" \
                 python3 "$COMMANDS_PY" doc_add
             ;;
         list|ls)
@@ -1541,17 +1548,19 @@ cmd_doc() {
             local doc_ms=""
             local doc_op=""
             local json_flag=""
+            local doc_bus_origin=""
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
-                    --content)  doc_content="${2:-}"; shift 2 ;;
-                    --title)    doc_title="${2:-}"; shift 2 ;;
-                    --scope|-s) doc_scope="${2:-}"; shift 2 ;;
-                    --ms)       doc_ms="${2:-}"; shift 2 ;;
-                    --op)       doc_op="${2:-}"; shift 2 ;;
-                    --json)     json_flag="1"; shift ;;
-                    --stdin)    shift ;;
-                    *)          doc_id="$1"; shift ;;
+                    --content)    doc_content="${2:-}"; shift 2 ;;
+                    --title)      doc_title="${2:-}"; shift 2 ;;
+                    --scope|-s)   doc_scope="${2:-}"; shift 2 ;;
+                    --ms)         doc_ms="${2:-}"; shift 2 ;;
+                    --op)         doc_op="${2:-}"; shift 2 ;;
+                    --json)       json_flag="1"; shift ;;
+                    --bus-origin) doc_bus_origin="1"; shift ;;
+                    --stdin)      shift ;;
+                    *)            doc_id="$1"; shift ;;
                 esac
             done
 
@@ -1563,6 +1572,7 @@ cmd_doc() {
             BEACON_DOC_ID="$doc_id" BEACON_TITLE="$doc_title" \
                 BEACON_CONTENT="$doc_content" BEACON_SCOPE="$doc_scope" \
                 BEACON_MS="$doc_ms" BEACON_OP="$doc_op" BEACON_JSON="$json_flag" \
+                BEACON_BUS_ORIGIN="$doc_bus_origin" \
                 python3 "$COMMANDS_PY" doc_update
             ;;
         show|get)
@@ -2321,16 +2331,19 @@ case "${1:-}" in
                 _se_summary=""
                 _se_session_id=""
                 _se_json=""
+                _se_bus_origin=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --summary)    _se_summary="${2:-}"; shift 2 ;;
                         --session-id) _se_session_id="${2:-}"; shift 2 ;;
                         --json)       _se_json="1"; shift ;;
+                        --bus-origin) _se_bus_origin="1"; shift ;;
                         *) shift ;;
                     esac
                 done
                 BEACON_SUMMARY="$_se_summary" BEACON_SESSION_ID="$_se_session_id" \
-                    BEACON_JSON="$_se_json" python3 "$COMMANDS_PY" session_end
+                    BEACON_JSON="$_se_json" BEACON_BUS_ORIGIN="$_se_bus_origin" \
+                    python3 "$COMMANDS_PY" session_end
                 ;;
             rescue)
                 shift 2
@@ -2385,11 +2398,12 @@ case "${1:-}" in
                 python3 "$COMMANDS_PY" session_id
                 ;;
             "")
-                echo "Usage: beacon session end [--summary <text>] [--session-id <id>] [--json]"
+                echo "Usage: beacon session end [--summary <text>] [--session-id <id>] [--json] [--bus-origin]"
                 echo "       beacon session rescue [--json]"
                 echo "       beacon session log list [--limit N] [--json]"
                 echo "       beacon session log show <session-id> [--json]"
                 echo "       beacon session id"
+                echo "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"
                 ;;
             *)
                 echo "Unknown session subcommand: ${2:-}"
@@ -2415,13 +2429,16 @@ case "${1:-}" in
                 shift
                 note_text=""
                 note_context=""
+                note_bus_origin=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
-                        --context) note_context="${2:-}"; shift 2 ;;
+                        --context)    note_context="${2:-}"; shift 2 ;;
+                        --bus-origin) note_bus_origin="1"; shift ;;
                         *) [[ -z "$note_text" ]] && note_text="$1"; shift ;;
                     esac
                 done
                 BEACON_NOTE_TEXT="$note_text" BEACON_NOTE_CONTEXT="$note_context" \
+                    BEACON_BUS_ORIGIN="$note_bus_origin" \
                     python3 "$COMMANDS_PY" note_add
                 ;;
         esac
