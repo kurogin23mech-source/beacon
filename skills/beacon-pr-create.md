@@ -15,6 +15,34 @@ triggers:
 > いまの作業を **PR としてレビュー可能な単位に出す** ための対話Skill。
 > intent（このPRで何を達成したいか・なぜ）を会話で引き出し、`gh pr create + beacon pr add` まで一気に走らせる。1人開発でも体験が冗長にならないように、確認は最小限。
 
+## 文章の書き方 (Beacon 全体の哲学)
+
+Beacon に書き込む全ての文章 (task / マイルストーン / Operation / コミット / PR / レビュー / ドキュメント / ノート / セッションログ / リリース / デプロイ) は、**非開発者を含む読み手** が読めるように書く。これは Skill ごとの方針ではなく Beacon プロジェクト全体の哲学。
+
+### 守ること
+
+1. **読み手目線 1 行から始める**: 「何が嬉しいか」「何が困るか」をユーザー体験の言葉で。技術用語ではなく価値で書く
+2. **横文字 3 段階**:
+   - そのまま OK: 固有名詞 (`Firestore` / `pipx` / `MCP` / `Tauri` / `WebSocket`)
+   - 初出時に日本語注: 技術概念 (`allowlist (= 許可リスト)` / `opt-in (= 個別許可)` / `subcollection (= 子コレクション)`)
+   - 日本語化が望ましい: 一般概念 (configure → 設定 / receiver → 受信側 / audit → 監査 / hit → 一致 / install → 設置 / merge → 取り込み / deploy → 配置)
+3. **ID 参照には文脈**: `e-XXXX` / `UC?` / `ms-XX` は初出に必ず『何の話か』1 行添える。例 ✗「e-1140 の AC のうち」→ ✓「e-1140 (自動応答の受信側挙動を hook で扱う) の受入条件のうち」
+4. **尻切れトンボ禁止**: 主語と述語を省略しない、論理関係を明示
+
+### Self-review (生成直後に必ず)
+
+文章を書いた直後、自分で読み返して以下を自問:
+- (a) 読み手 (非開発者を含む) は 1 度読んで意味が取れるか?
+- (b) 一般概念の横文字 (configure / receiver / audit / hit / install / merge / deploy 等) が残ってないか?
+- (c) ID 参照に『何の話か』1 行添えたか?
+- 違反していたら書き直し。enforce ではないが必須の self-check。
+
+### 詳細
+
+詳しい原則と例 (病理の typology / 例外ケース / 良い例・悪い例) は CORE doc `entry-writing-principle` (doc_id `F3ZkqT0pKS6JpR8dn70n`) 参照。ただし本 Skill では上記 4 項目を **常に top of mind** で適用する (CORE 参照は補足、principal は本文埋め込み)。
+
+---
+
 ## 前提条件チェック
 
 Bash ツールで以下を実行:
