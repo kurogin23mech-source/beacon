@@ -2,6 +2,39 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.21.0] - 2026-06-08
+
+- Merge pull request #90 from kurogin23mech-source/feat/writing-principle-all-skills
+- feat(ms-43): 「平易に書く」を Beacon 全体哲学として 21 Skill に直接埋め込み
+- Merge pull request #86 from kurogin23mech-source/fix/ms-54-bus-guardrails-1145-1193
+- Merge remote-tracking branch 'origin/main' into fix/ms-54-bus-guardrails-1145-1193
+- Merge pull request #89 from kurogin23mech-source/ms-43-e-809-documents-ws-push
+- Merge pull request #88 from kurogin23mech-source/fix/ms-46-e-750-retros-render
+- Merge pull request #87 from kurogin23mech-source/fix/complete-summary-deprecation
+- feat(ms-43): Documents タブを WebSocket push で reactive 化 (e-809)
+- feat(ms-43): entry-writing-principle CORE doc + 4 Skill prompt 参照を追加
+- fix(ms-46): Tauri Documents タブで W22 retro が表示されない問題を修正 (e-750)
+- feat(ms-57): complete summary deprecation — Skill / CLI / API / docs (e-1040)
+- fix(ms-54): bus guardrail を server/CLI/MCP の 3 経路で揃える (e-1145 + e-1193)
+- Merge pull request #83 from kurogin23mech-source/ms-54-dm-server-side-routing
+- Merge pull request #84 from kurogin23mech-source/fix/ms-54-bus-directory-heartbeat-e1189
+- Merge pull request #82 from kurogin23mech-source/fix-e855-local-lock-deadlock-retry
+- Merge pull request #85 from kurogin23mech-source/ms-44/e-854-context-monitor-python-port
+- feat(ms-44): context-usage-monitor を Python port、Windows 環境で動作可能に (e-854)
+- fix(ms-54): bus directory heartbeat を PostToolUse hook で周期化 (e-1189)
+- fix(ms-54): bus DM の 3 層欠陥を server-side enforce で塞ぐ (e-1209)
+- fix(ms-44): local mode file lock の高並行 deadlock を解消 (e-855)
+- Merge pull request #81 from kurogin23mech-source/ms-59-firestore-subcollection-migration-cli
+- feat(ms-44): release.yml fan-out に PyPI publish step を追加 (e-1190)
+- fix(ms-53): TrailNode push の version race を Firestore transaction で塞ぐ (e-1163)
+- Merge pull request #80 from kurogin23mech-source/ms-tbd-firestore-1mib-unblock
+- feat(server): v1→v2 migration endpoint + replace_project v2 hardening (Firestore 1MiB unblock)
+- feat(ms-54): bus subcommand を Python dispatch に port + --project flag で cross-project DM/directory 成立 (e-1151)
+- fix(ms-57): セッションノートを「意思決定の記録」中心に書き換え (e-1195)
+- chore(release): align manifest.json to v0.20.1
+- docs(release): update README/CHANGELOG for v0.20.1
+- chore(release): bump formula to 0.20.1
+
 ## [v0.20.1] - 2026-06-07
 
 - Merge pull request #79 from kurogin23mech-source/ms-44-v0.21.0-bugfix
