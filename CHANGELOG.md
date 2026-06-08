@@ -2,6 +2,18 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.24.0] - 2026-06-09
+
+- Merge pull request #111 from kurogin23mech-source/feat/ms-54-true-heartbeat-poll-gated
+- Merge pull request #110 from kurogin23mech-source/feat/ms-54-beacon-dm-skills
+- Merge pull request #109 from kurogin23mech-source/fix/ms-44-windows-bash-delegation
+- feat(ms-54): /beacon-dm-send + /beacon-dm-reply Skills for stable DM UX
+- feat(ms-54): poll-gated heartbeat for true session liveness (e-1318)
+- fix(ms-44): skip bash delegation on Windows to avoid mojibake (e-1311)
+- chore(trailnode): bump capability version to 2026-06-08.1 + add .trailnodeignore
+- docs(release): update README/CHANGELOG for v0.23.0
+- chore(release): bump formula to 0.23.0
+
 ## [v0.23.0] - 2026-06-08
 
 - Merge pull request #108 from kurogin23mech-source/feat/ms-54-persistence-poisoning-defense
