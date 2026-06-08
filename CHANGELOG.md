@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.21.3] - 2026-06-08
+
+- Merge pull request #93 from kurogin23mech-source/fix/ms-44-e1246-coop-signin
+- fix(ms-44): COOP ヘッダで新規ユーザーの Web サインインを通す (e-1246)
+- docs(release): update README/CHANGELOG for v0.21.2
+- chore(release): bump formula to 0.21.2
+
 ## [v0.21.2] - 2026-06-08
 
 - Merge pull request #92 from kurogin23mech-source/fix/ms-43-e1243-empty-state-ui
