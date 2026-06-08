@@ -382,6 +382,63 @@ session-start 側が consultant mode で内部判定する (init 側で git 履�
 
 CORE doc `4AS5ehyJc8mGU1gsiFvz` (最速アウトプット) と `PU9HG2IVQdW3tLiAJvix` (バイブコーダー Philosophy) に従い、**`/beacon-vision` には自動チェインしない**。深掘りビジョン整理が必要になったら、ユーザーが明示的に `/beacon-vision` を呼ぶ。
 
+## Step 7: DM 機能 (multi-session messaging) の有効化提案 (ms-54 e-1238)
+
+Step 6 で MS 着手の入り口を案内したあと、**最後に 1 回だけ** DM 機能の有効化を提案する。フロー A/B どちらでも同じ扱い。
+
+### Step 7a: opt-out 判定
+
+まず Bash ツールで以下を実行し、ユーザーが既に DM 機能の opt-out を表明していないか確認する:
+
+```bash
+cd "$PROJECT_DIR" && python3 -c "
+import os, json, sys
+# env
+if os.environ.get('BEACON_NO_BUS', '').strip() in ('1','true','yes','on'):
+    print('opted_out'); sys.exit(0)
+# project
+p = os.path.join('.beacon','project.json')
+if os.path.exists(p):
+    try:
+        with open(p) as f: d = json.load(f)
+        if (d.get('bus') or {}).get('disabled'):
+            print('opted_out'); sys.exit(0)
+    except Exception: pass
+# global
+g = os.path.expanduser('~/.beacon/config.json')
+if os.path.exists(g):
+    try:
+        with open(g) as f: d = json.load(f)
+        if (d.get('bus') or {}).get('disabled'):
+            print('opted_out'); sys.exit(0)
+    except Exception: pass
+print('ok')
+"
+```
+
+stdout が `opted_out` の場合は **沈黙**。`beacon channel install` を呼ばない、提案メッセージも出さない。「ユーザーが要らないと宣言した状態を尊重する」のが構造的に正しい振る舞い。
+
+stdout が `ok` の場合のみ Step 7b に進む。
+
+### Step 7b: 提案メッセージ
+
+```
+最後に 1 つ。Beacon には DM 機能 (= 別マシン・別 worktree の Claude Code セッションと
+リアルタイムにメッセージ交換できる仕組み) があります。Mac と Win で同じプロジェクトを
+開いた時、両セッションが互いに会話できます。
+
+有効化しますか？ (Node が要ります)
+  - はい → `beacon channel install` で .mcp.json に登録、bclaude で起動できるようになる
+  - あとで → そのまま続行 (好きな時に `beacon channel install` で有効化)
+  - 要らない → `beacon channel opt-out` で将来の auto-install も止める
+```
+
+### Step 7c: 実行
+
+ユーザーが「はい」と答えたら Bash で `cd "$PROJECT_DIR" && beacon channel install` を実行し、出力をそのまま提示する。失敗時 (Node 未インストール等) は出力に含まれる brew/winget/nvm のヒントを尊重し、追加の弁明はしない。
+
+「あとで」「要らない」を選んだら何もしない。ユーザーは後で明示的に opt-in / install できる。
+
 ## 制約
 
 - **ユーザーをターミナルに戻さない** (CORE doc `ux-principle-no-terminal`)

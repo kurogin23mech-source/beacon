@@ -127,6 +127,28 @@ beacon
 
 The [Desktop App](#desktop-app) provides a native window for monitoring your project alongside your terminal — useful for keeping the dashboard visible without tmux.
 
+### Multi-session DM (preview)
+
+Beacon includes a real-time DM channel that lets parallel Claude Code
+sessions talk to each other — across machines, across worktrees, across
+projects. Open the same project on your Mac and your Windows box, and
+the two sessions can directly hand off context without you copy-pasting.
+
+`beacon setup` enables this automatically; `bclaude` is the recommended
+launcher (it's the regular `claude` command with the DM channel wired
+up). Don't want it? `beacon channel opt-out` keeps it off — globally
+or per-project.
+
+```bash
+bclaude                          # launch Claude Code with DM enabled
+beacon bus directory --live      # see other live sessions in the project
+beacon channel status            # check install / opt-out state
+beacon channel opt-out --global  # disable everywhere, forever
+```
+
+See [`docs/getting-started-dm.md`](docs/getting-started-dm.md) for the
+full walkthrough.
+
 ## Cloud Mode
 
 Beacon can sync to the cloud for Web UI access at **https://beacon-ai.dev** and team collaboration. All CLI commands (`beacon log`, `beacon task`, etc.) automatically work through the cloud API.
@@ -325,6 +347,24 @@ Say "メモして" or "remember this" and Claude will call `/beacon-note` automa
 | `beacon trigger fire <name> [message]` | Fire a trigger (used by dashboard) / トリガー発火 |
 | `beacon trigger check` | Check pending triggers (JSON) / 未処理トリガー確認 |
 | `beacon trigger clear <name>` | Clear a specific trigger / トリガー消化 |
+
+### DM Channel (multi-session messaging)
+
+Manage the `beacon-bus` MCP channel that powers parallel-session DM. See
+[`docs/getting-started-dm.md`](docs/getting-started-dm.md) for the full
+walkthrough.
+
+| Command | Description |
+|---------|-------------|
+| `beacon channel install` | Install beacon-bus MCP entry into `.mcp.json` / DM 機能を有効化 |
+| `beacon channel uninstall [--purge-files\|--keep-files]` | Remove MCP entry; `--purge-files` also moves `channel/node_modules` to `.trash/` |
+| `beacon channel opt-out [--project\|--global]` | Block install / auto-install (persistent flag) |
+| `beacon channel opt-in [--project\|--global]` | Lift the opt-out flag |
+| `beacon channel status` | Show install / files / opt-out / next-action state |
+
+`bclaude` (shipped alongside `beacon` in Homebrew) launches Claude Code
+with the channel pre-wired, and falls back to plain `claude` when any
+opt-out source is active.
 
 ## Dashboard
 
