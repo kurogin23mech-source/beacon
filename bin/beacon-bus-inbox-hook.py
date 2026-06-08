@@ -236,16 +236,29 @@ def _ack_cursor(api_url: str, project_id: str, recipient_id: str,
 # ---------------------------------------------------------------------------
 
 def _format_event(ev: dict) -> str:
-    """Compact, readable one-event block for the AI context."""
+    """Compact, readable one-event block for the AI context.
+
+    A ``_downgraded_from`` marker on the event (set by main when an
+    auto-execute event lands in a channel that isn't in the allowlist) is
+    surfaced inline so the human auditing the inject can see at a glance
+    that the safety net fired.
+    """
     eid = ev.get("event_id", "?")
     channel = ev.get("channel", "?")
     sender = ev.get("sender_session_id", "?")
     payload = ev.get("payload") or {}
     delivery = ev.get("delivery", "propose-to-ai")
+    downgraded_from = ev.get("_downgraded_from", "")
     when = (ev.get("created_at") or "")[:19]
     payload_pretty = json.dumps(payload, ensure_ascii=False, indent=2)
+    delivery_line = f"  - [{eid}] channel={channel} delivery={delivery}"
+    if downgraded_from:
+        delivery_line += (
+            f"  [auto-execute downgraded from '{downgraded_from}'"
+            " — channel not in bus_auto_execute_channels]"
+        )
     return (
-        f"  - [{eid}] channel={channel} delivery={delivery}\n"
+        f"{delivery_line}\n"
         f"    from={sender}  at={when}\n"
         f"    payload:\n"
         + "\n".join(f"      {line}" for line in payload_pretty.splitlines())
@@ -263,6 +276,25 @@ def _read_bus_budget(root: Path) -> dict | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def _read_auto_execute_channels(root: Path) -> list[str]:
+    """Read the project's auto-execute allowlist from .beacon/project.json.
+
+    Fail-closed: any read error (missing file, corrupt JSON, wrong type) is
+    treated as "no channels armed". The receiver-side downgrade in main() is
+    the safety net — an unreadable allowlist must NOT be confused for "allow
+    everything". This mirrors the bus_budget gate's posture.
+    """
+    path = root / ".beacon" / "project.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    raw = data.get("bus_auto_execute_channels")
+    if not isinstance(raw, list):
+        return []
+    return [c for c in raw if isinstance(c, str) and c]
 
 
 def _format_budget_line(budget: dict | None) -> str:
@@ -287,7 +319,8 @@ def _format_budget_line(budget: dict | None) -> str:
 
 def _render_context(events: list[dict], notify_only_count: int,
                     monitor_suggested: bool,
-                    budget: dict | None = None) -> str:
+                    budget: dict | None = None,
+                    auto_execute_downgraded_count: int = 0) -> str:
     """Build the additionalContext markdown for AI inject."""
     parts: list[str] = []
     parts.append("BEACON BUS INBOX — 新着 event があります")
@@ -301,6 +334,12 @@ def _render_context(events: list[dict], notify_only_count: int,
         parts.append(
             f"(notify-user-only として log にだけ流した event: {notify_only_count} 件 "
             "— `.beacon/bus-inbox.log` を参照)"
+        )
+    if auto_execute_downgraded_count:
+        parts.append(
+            f"(安全側降格: auto-execute → propose-to-ai に変換された event: "
+            f"{auto_execute_downgraded_count} 件 — channel が "
+            "`bus_auto_execute_channels` allowlist に無いため)"
         )
     parts.append("")
     for ev in events:
@@ -320,8 +359,10 @@ def _render_context(events: list[dict], notify_only_count: int,
         "- 送信元 session_id を `--sender` で指定すれば DM の継続になる。"
     )
     parts.append(
-        "- auto-execute: 今は propose-to-ai と同等扱い。"
-        "今後 project 設定で channel/operation 単位の opt-in 強制が入る予定。"
+        "- auto-execute: default OFF。`beacon bus auto-execute add --channel <ch>` "
+        "で channel を allowlist に登録した場合のみ auto-execute として扱う。"
+        "それ以外は自動的に propose-to-ai に降格 (人間 audit 可能、上記 "
+        "`[auto-execute downgraded ...]` マーカー参照)。"
     )
     parts.append(
         "- notify-user-only: AI context には流していない (この一覧にも含まれない)。"
@@ -425,12 +466,30 @@ def main() -> None:
     if not isinstance(unread, list) or not unread:
         return
 
+    # Read the receiver-side auto-execute allowlist. Default-empty ⇒ every
+    # auto-execute event gets downgraded to propose-to-ai before it reaches
+    # the AI context (e-1145). The downgrade is annotated on the event itself
+    # so _format_event can surface the safety action inline.
+    allowlist = _read_auto_execute_channels(root)
+
     # Split by delivery. Unknown values fall back to propose-to-ai (matches
     # server-side coercion in BusEventCreate; defense in depth).
     inject: list[dict] = []
     notify_only: list[dict] = []
+    downgraded_count = 0
+    downgraded_audit: list[dict] = []
     for ev in unread:
         delivery = ev.get("delivery") or "propose-to-ai"
+        if delivery == "auto-execute":
+            channel = ev.get("channel") or ""
+            if channel not in allowlist:
+                # Mutate a copy so we don't change the upstream object the
+                # cursor-advance step still inspects for created_at.
+                ev = {**ev, "delivery": "propose-to-ai",
+                       "_downgraded_from": "auto-execute"}
+                downgraded_count += 1
+                downgraded_audit.append(ev)
+                delivery = "propose-to-ai"
         if delivery == "notify-user-only":
             notify_only.append(ev)
         else:
@@ -438,6 +497,11 @@ def main() -> None:
 
     if notify_only:
         _append_to_inbox_log(root, notify_only)
+    if downgraded_audit:
+        # The inbox log doubles as the audit trail: every downgrade is recorded
+        # there with its full payload so a human can review what was forced
+        # into propose-to-ai even when the AI handled it inline.
+        _append_to_inbox_log(root, downgraded_audit)
 
     # Always advance the cursor to the last seen event so neither inject nor
     # notify-only events are replayed; the cursor is delivery-agnostic.
@@ -465,7 +529,8 @@ def main() -> None:
     budget = _read_bus_budget(root)
 
     _emit(hook_event_name, _render_context(inject, len(notify_only),
-                                            monitor_suggested, budget))
+                                            monitor_suggested, budget,
+                                            downgraded_count))
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
     _log(f"surfaced {len(inject)} event(s) ({elapsed_ms} ms)")
