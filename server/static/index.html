@@ -1770,27 +1770,6 @@ body::after {
   letter-spacing: 0.02em;
   margin: 0;
 }
-.empty-state-form {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
-  justify-content: center;
-}
-.empty-state-input {
-  font-family: var(--font-mono);
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 8px 12px;
-  color: var(--text-primary);
-  font-size: 0.85rem;
-  width: 220px;
-}
-.empty-state-input:focus {
-  outline: none;
-  border-color: var(--accent);
-}
 .empty-state-btn {
   font-family: var(--font-mono);
   background: var(--accent-glow);
@@ -2753,41 +2732,10 @@ function renderEmptyState(app) {
 
       <div class="login-divider"></div>
 
-      <div class="summary-label">Existing Project</div>
-      <p class="empty-state-note">
-        招待された / 別端末で作ったプロジェクトに参加するには project ID を入力:
-      </p>
-      <div class="empty-state-form">
-        <input id="empty-state-project-id" type="text" placeholder="project-xxxxxx"
-               class="empty-state-input" autocomplete="off" autocapitalize="none" spellcheck="false">
-        <button type="button" class="empty-state-btn" data-action="join-by-id">Open</button>
-      </div>
-
-      <div class="login-divider"></div>
-
       <button class="empty-state-btn-link" data-action="logout">別のアカウントで Sign in</button>
     </div>
   `;
   bindEvents();
-  const input = document.getElementById('empty-state-project-id');
-  if (input) {
-    input.addEventListener('keydown', e => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        joinProjectById();
-      }
-    });
-    setTimeout(() => input.focus(), 50);
-  }
-}
-
-function joinProjectById() {
-  const input = document.getElementById('empty-state-project-id');
-  const pid = (input && input.value || '').trim();
-  if (!pid) return;
-  const u = new URL(window.location.href);
-  u.searchParams.set('project', pid);
-  window.location.href = u.toString();
 }
 // @BUILD:SKIP-END
 
@@ -4678,7 +4626,6 @@ async function handleAction(e) {
     case 'open-menu': await renderMenu(); break;
     case 'menu-select-project': closeMenu(); await menuSelectProject(el.dataset.projectId); break;
     case 'select-project': await selectProject(el.dataset.projectId); break;
-    case 'join-by-id': joinProjectById(); break;
     case 'logout': logout(); break;
     case 'export-json': await exportProject(); break;
     case 'remove-member': await removeMember(el.dataset.email); break;
