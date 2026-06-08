@@ -249,20 +249,20 @@ cmd_setup() {
 
     # Step 1: Auth
     if python3 "$COMMANDS_PY" auth_check &>/dev/null; then
-        echo "Step 1/4: Already signed in."
+        echo "Step 1/5: Already signed in."
     else
-        echo "Step 1/4: Sign in with Google"
+        echo "Step 1/5: Sign in with Google"
         python3 "$COMMANDS_PY" auth_login
     fi
     echo ""
 
     # Step 2: Claude Code integration
-    echo "Step 2/4: Installing Claude Code hooks and Skills..."
+    echo "Step 2/5: Installing Claude Code hooks and Skills..."
     python3 "$COMMANDS_PY" common_setup
     echo ""
 
     # Step 3: Project
-    echo "Step 3/4: Project setup"
+    echo "Step 3/5: Project setup"
     echo "  1) Create a new local project"
     echo "  2) Join a cloud project (by project ID)"
     echo "  3) Skip (hooks only)"
@@ -355,8 +355,33 @@ else:
     esac
     echo ""
 
-    # Step 4: Launch
-    echo "Step 4/4: Launch dashboard"
+    # Step 4: DM channel auto-install (ms-54 e-1238)
+    # Routes through the same opt-out gate as `beacon channel install`. If
+    # any of (env BEACON_NO_BUS, project flag, global flag) is set we
+    # silently skip + audit-log a single line. If install itself fails
+    # (no node, no .mcp.json writable, etc.), surface the error but do
+    # not block the rest of setup — the user can re-run `beacon channel
+    # install` later.
+    echo "Step 4/5: DM channel (multi-session messaging)"
+    if [ -f "$BEACON_PROJECT_FILE" ]; then
+        # Use a dry probe of the status command to decide whether to attempt.
+        # The python command refuses with exit 1 if opted out, which we treat
+        # as expected and silent.
+        if python3 "$COMMANDS_PY" channel_install 2>&1 | sed 's/^/  /'; then
+            :
+        else
+            # channel_install returns non-zero on opt-out or genuine failure.
+            # We don't differentiate here — the python side already printed
+            # the cause. Setup continues either way.
+            :
+        fi
+    else
+        echo "  (no project initialized — skipping DM channel install)"
+    fi
+    echo ""
+
+    # Step 5: Launch
+    echo "Step 5/5: Launch dashboard"
     read -rp "Launch now? [Y/n]: " launch_choice
     launch_choice="${launch_choice:-Y}"
     if [[ "$launch_choice" =~ ^[Yy] ]]; then

@@ -148,6 +148,53 @@ beacon search "" --from $(date -v-14d +%Y-%m-%d) --limit 20
 何か質問があれば気軽に聞いてください。
 ```
 
+## Step 6: DM 機能 (multi-session messaging) の有効化提案 (ms-54 e-1238)
+
+合流時のオンボーディングが終わったあと、最後に 1 回だけ DM 機能の有効化を提案する。チーム作業ではこの機能がほぼ必須 (オーナーや先輩メンバーとリアルタイムに同期しながら走れる) なので、新メンバーには特に有用。
+
+### Step 6a: opt-out 判定
+
+opt-out が既に立っている場合は **沈黙**。Bash で以下を実行:
+
+```bash
+cd "$PROJECT_DIR" && python3 -c "
+import os, json, sys
+if os.environ.get('BEACON_NO_BUS', '').strip() in ('1','true','yes','on'):
+    print('opted_out'); sys.exit(0)
+p = os.path.join('.beacon','project.json')
+if os.path.exists(p):
+    try:
+        with open(p) as f: d = json.load(f)
+        if (d.get('bus') or {}).get('disabled'):
+            print('opted_out'); sys.exit(0)
+    except Exception: pass
+g = os.path.expanduser('~/.beacon/config.json')
+if os.path.exists(g):
+    try:
+        with open(g) as f: d = json.load(f)
+        if (d.get('bus') or {}).get('disabled'):
+            print('opted_out'); sys.exit(0)
+    except Exception: pass
+print('ok')
+"
+```
+
+stdout が `opted_out` の場合は提案を出さない。`ok` の時のみ Step 6b に進む。
+
+### Step 6b: 提案
+
+```
+最後に 1 つ。Beacon の DM 機能を有効化しますか？
+オーナーや先輩メンバーが同じプロジェクトを別端末で開いていれば、
+今このターミナルから直接「○○について相談したい」と DM を打てます。
+
+  - はい → `beacon channel install` で有効化、bclaude で起動できる
+  - あとで → 好きな時に `beacon channel install` で有効化
+  - 要らない → `beacon channel opt-out` で将来の auto-install も止める
+```
+
+「はい」で `beacon channel install` を実行。「あとで」「要らない」は何もしない。
+
 ## 制約
 
 - **読み取り専用**: project.json への書き込みは一切行わない（自分のアサイン変更も含めて、明示的な beacon milestone update をユーザーに打ってもらう）
