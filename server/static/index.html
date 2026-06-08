@@ -2014,7 +2014,10 @@ function logout() {
 function isTokenExpired(token) {
   if (!token) return true;
   try {
-    const payload = JSON.parse(atob(token.split('.')[1]));
+    // ms-44 e-1248 follow-up: must use the base64url-aware decoder so a freshly
+    // signed-in Google ID token isn't immediately classified as expired and
+    // bouncing the user back to the login screen.
+    const payload = decodeJwtPayload(token);
     return payload.exp * 1000 <= Date.now();
   } catch { return true; }
 }

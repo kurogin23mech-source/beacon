@@ -97,9 +97,19 @@ async function loadAuthConfig() {
   } catch {}
 }
 
+// ms-44 e-1248 follow-up: Google ID tokens are base64url, native atob is not.
+function decodeJwtPayload(token) {
+  let s = (token || '').split('.')[1] || '';
+  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  return JSON.parse(atob(s));
+}
+
 function handleCredentialResponse(response) {
-  token = response.credential;
-  const payload = JSON.parse(atob(token.split('.')[1]));
+  token = (response && response.credential) || '';
+  let payload;
+  try { payload = decodeJwtPayload(token); }
+  catch (e) { console.error('[beacon] failed to decode ID token payload', e); return; }
   localStorage.setItem('beacon_token', token);
   localStorage.setItem('beacon_email', payload.email || '');
   init();
