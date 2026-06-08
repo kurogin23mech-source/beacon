@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.21.5] - 2026-06-08
+
+- Merge pull request #95 from kurogin23mech-source/fix/ms-44-e1250-isTokenExpired-b64url
+- fix(ms-44): isTokenExpired と admin.html も base64url 対応に統一 (e-1250)
+- docs(release): update README/CHANGELOG for v0.21.4
+- chore(release): bump formula to 0.21.4
+
 ## [v0.21.4] - 2026-06-08
 
 - Merge pull request #94 from kurogin23mech-source/fix/ms-44-e1247-base64url-jwt
