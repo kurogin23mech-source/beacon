@@ -99,11 +99,42 @@ def test_t2_requires_scope():
         )
 
 
-def test_wildcards_rejected():
+def test_wildcards_rejected_for_t1():
+    # T1 = human explicit signature. Strict enumeration — wildcards smuggle
+    # scope under a per-message human approval.
     with pytest.raises(ValueError):
         env_mod.issue_envelope(
             tier=env_mod.TIER_T1, issuer="u", project_id=PROJECT_ID,
             actions_authorized=["deploy:*"],
+        )
+
+
+def test_last_segment_wildcards_allowed_for_t2():
+    # ms-60 § 設計方針 4 — T2 (Operation scope) allows last-segment wildcards
+    # because the SPEC author documents the subscope contract in the approve
+    # flow. Middle / verb wildcards remain forbidden (see test below).
+    env = env_mod.issue_envelope(
+        tier=env_mod.TIER_T2, issuer="op-1", project_id=PROJECT_ID,
+        scope="op-1",
+        actions_authorized=["extract:profile:*", "task done:e-*"],
+    )
+    assert env["tier"] == env_mod.TIER_T2
+    assert env["actions_authorized"] == ["extract:profile:*", "task done:e-*"]
+
+
+def test_middle_wildcards_rejected_for_t2():
+    # Carve-out is strict: only the last segment may contain `*`.
+    with pytest.raises(ValueError):
+        env_mod.issue_envelope(
+            tier=env_mod.TIER_T2, issuer="op-1", project_id=PROJECT_ID,
+            scope="op-1",
+            actions_authorized=["*:profile:daily"],
+        )
+    with pytest.raises(ValueError):
+        env_mod.issue_envelope(
+            tier=env_mod.TIER_T2, issuer="op-1", project_id=PROJECT_ID,
+            scope="op-1",
+            actions_authorized=["extract:*:user"],
         )
 
 
