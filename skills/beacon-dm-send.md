@@ -182,31 +182,49 @@ Bash ツールで上記コマンドを実行する。JSON 出力 (`--json`) を�
 
 **注意**: `--payload` の値は Python の `json.dumps({"text": "<本文>"}, ensure_ascii=False, separators=(",", ":"))` 相当で組み立てる。`Bash` ツールの引数に渡すとき、シェルに渡る形にしてエスケープに注意 (改行は `\n` に変換される)。実装上は Python heredoc で payload JSON を構築 → 環境変数経由でコマンドに渡すか、シングルクォートで囲んでそのまま渡す。
 
-## Step 8: 結果報告
+## Step 8: 送信直後の receipt 確認 (ms-54 / e-1348)
 
-stdout の JSON を解析し、ユーザーに簡潔に報告:
+`beacon bus send --json` の stdout から `event_id` を取り出し、送信から **数秒待ってから** `beacon bus status` で 3 段 (sent / delivered / opened) を確認する。これにより「送ったつもりが届いていない」を構造的に検知できる (200 OK と delivery 成立は別物)。
+
+Bash ツールで実行:
+```bash
+sleep 4
+beacon bus status <event_id> [--project <id>]
+```
+
+`sleep 4` の根拠: 受信側 bridge の poll 周期 default 2 秒 + ack 経路 + mcp.notification 完了で 2-3 秒見ておけば opened まで stamp されているケースが多い。それでも (not yet) のままなら 1 回だけ追加で `sleep 8 && beacon bus status` を試して終了 (それ以上は receiver 側が落ちている / 古い bridge である可能性が高く、Skill 内では検証範囲外)。
+
+### Step 8.1: 結果解釈と報告
+
+`beacon bus status` の出力から 3 stage を読み取り、ユーザーに簡潔に報告:
 
 ```
 ✓ DM 送信完了
   event_id: <event_id>
+  to:       <recipient session_id>
   delivery: <propose-to-ai / auto-execute / notify-user-only>
-  to: <session_id>
   envelope: T1 (auto-issued) / なし
+
+receipt (3 段):
+  ✓ sent       <timestamp>
+  <✓ or ✗> delivered  <timestamp or (not yet)>  [by <session_id>]
+  <✓ or ✗> opened     <timestamp or (not yet)>  [by <session_id>]
 ```
 
-### --verify フラグ付き呼び出し (optional)
+### Step 8.2: 解釈ガイド (delivered / opened が立たない時)
 
-ユーザーが `/beacon-dm-send --verify` で起動した場合、送信後に受信側の cursor 進行を確認する:
+| 状態 | 意味 | 次のアクション |
+|---|---|---|
+| sent ✓ / delivered ✗ / opened ✗ | 受信側 bridge が /unread を fetch していない | 相手の `bridge=True` を directory で確認、`channel install` 漏れの可能性 |
+| sent ✓ / delivered ✓ / opened ✗ | bridge は受け取ったが filter chain で drop or mcp.notification 失敗 | 相手の channel allowlist (`BEACON_CHANNEL_ALLOWLIST`) と DM の channel が一致しているか、受信側 session が allowlist に入っているか確認 |
+| sent ✓ / delivered ✓ / opened ✓ | 完全到達 | 完了 |
+| sent ✓ / delivered ✗ / opened ✗ かつ 8 秒待っても変化なし | 受信側 bridge が **古い beacon バージョン** で ack 経路を持たない可能性 | 相手の `actor.agent.version` を directory で確認 (v0.26.0 未満は receipt 非対応)、`pip install --upgrade beacon-cli` を促す |
 
-```bash
-# 送信から 10 秒待って、相手の cursor が created_at を越えたか peek する
-sleep 10
-beacon bus listen --once --channel dm --recipient <相手 session_id> --json
-```
+これにより送信者は「届いていない / 開封されていない」を **送信時に即時** に検知できる (e-1348 設計の本質的価値)。
 
-注: これは MVP では「相手側が auto-ack で消化した」場合のみ正確に検知できる。完全な delivery-receipt は Option A の別タスクなので、ここでは「best-effort peek」と但し書きする。
+### --no-verify オプション (任意)
 
-`--verify` 指定が無い場合は送信後すぐ終了。
+確認 step を skip したい場合 (大量送信 / CI 自動化等)、ユーザーが `/beacon-dm-send --no-verify` で起動したら Step 8 の `bus status` 呼び出しを skip し、Step 8.1 の `receipt (3 段)` セクションも省略する。default は **verify あり** (UX 上、receipt 確認しないと「届いた」と思い込む病理を再生産するため)。
 
 ## エラー時の挙動
 

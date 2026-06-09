@@ -339,3 +339,33 @@ class ApiClient:
             f"/api/projects/{project_id}/bus/{urllib.parse.quote(event_id)}/ack",
             {"stage": stage, "recipient_session_id": recipient_session_id},
         )
+
+    # ms-54 / e-1369 Layer 4: AI-authored intent. Set via `beacon session
+    # focus "<text>"` / `beacon session attention --set true`. Read by the
+    # /beacon-dm-send picker so a sender sees "what is each session doing".
+
+    def upsert_session_intent(self, project_id: str, session_id: str, *,
+                              text: Optional[str] = None,
+                              attention_required: Optional[bool] = None) -> dict:
+        body: dict = {}
+        if text is not None:
+            body["text"] = text
+        if attention_required is not None:
+            body["attention_required"] = attention_required
+        return self.post(
+            f"/api/projects/{project_id}/sessions/{urllib.parse.quote(session_id)}/intent",
+            body,
+        )
+
+    def get_session(self, project_id: str, session_id: str) -> dict:
+        """Fetch a single session by id (used by `beacon session focus --show`).
+
+        The server exposes the full /sessions list endpoint; we filter
+        client-side to keep the helper simple. Adds a dedicated /sessions/{sid}
+        GET when the cost becomes meaningful.
+        """
+        listed = self.list_sessions(project_id)
+        for s in listed:
+            if s.get("session_id") == session_id:
+                return s
+        return {}

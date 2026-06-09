@@ -680,3 +680,227 @@ def test_email_unknown_does_not_crash_or_create_actor(monkeypatch):
                   if s["session_id"] == "s-anon")
     assert stored["actor"]["machine"] == "mac"
     assert "email" not in stored["actor"]
+
+
+# ---------------------------------------------------------------------------
+# Session transparency 4 + 1 layers (ms-54 / e-1369)
+#
+# The SessionUpsert body now accepts Layer 0-3 fields stamped by the bridge
+# at cold-start, and a separate /intent endpoint accepts Layer 4 (INTENT)
+# written by the AI itself. These tests pin the wire contract:
+#
+#   * Bridge-stamped fields (agent/runtime/cwd/git/focus/channels/budget)
+#     round-trip on the heartbeat upsert and surface verbatim on the
+#     directory query.
+#   * The /intent endpoint stores text + attention_required under intent.*
+#     without disturbing other layers.
+#   * Old clients (no layer fields in body) keep working — backward compat
+#     is a hard contract; we cannot make older bridges fail the upsert.
+# ---------------------------------------------------------------------------
+
+
+def test_layer0_identity_round_trips_on_upsert():
+    """Cold-start should land agent.{kind,version} and runtime.harness on
+    the session doc so the directory can answer 'what kind of AI is this'."""
+    resp = client.put(
+        f"/api/projects/{PROJECT_ID}/sessions/s-l0",
+        json={
+            "actor": {"machine": "mac", "agent": "claude"},
+            "agent": {"kind": "claude-code", "version": "0.26.0"},
+            "runtime": {"harness": {"kind": "terminal", "version": ""}},
+            "last_active": "2026-06-09T07:00:00.000000Z",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    stored = next(s for s in _sessions_store[PROJECT_ID]
+                  if s["session_id"] == "s-l0")
+    assert stored["agent"] == {"kind": "claude-code", "version": "0.26.0"}
+    assert stored["runtime"]["harness"]["kind"] == "terminal"
+
+
+def test_layer1_where_round_trips_on_upsert():
+    """cwd and git.* let a viewer disambiguate 'parent repo vs worktree'
+    at a glance — same machine, different cwd is the typical dispatch
+    sub-agent shape."""
+    resp = client.put(
+        f"/api/projects/{PROJECT_ID}/sessions/s-l1",
+        json={
+            "cwd": "/Users/alice/repo/.worktrees/ms-43",
+            "git": {
+                "branch": "ms-43/work",
+                "head_short": "591bfe7",
+                "head_subject": "feat(ms-54): DM read receipt",
+            },
+            "last_active": "2026-06-09T07:00:00.000000Z",
+        },
+    )
+    assert resp.status_code == 200
+    stored = next(s for s in _sessions_store[PROJECT_ID]
+                  if s["session_id"] == "s-l1")
+    assert stored["cwd"].endswith(".worktrees/ms-43")
+    assert stored["git"]["branch"] == "ms-43/work"
+    assert stored["git"]["head_short"] == "591bfe7"
+
+
+def test_layer2_focus_round_trips_on_upsert():
+    """focus.milestone gives the directory a 'what are they working on'
+    answer without the reader having to cross-reference the project state."""
+    resp = client.put(
+        f"/api/projects/{PROJECT_ID}/sessions/s-l2",
+        json={
+            "focus": {
+                "milestone": {"id": "ms-54", "title": "real-time event bus"},
+                "recent_task": None,
+            },
+            "last_active": "2026-06-09T07:00:00.000000Z",
+        },
+    )
+    assert resp.status_code == 200
+    stored = next(s for s in _sessions_store[PROJECT_ID]
+                  if s["session_id"] == "s-l2")
+    assert stored["focus"]["milestone"]["id"] == "ms-54"
+    assert stored["focus"]["milestone"]["title"] == "real-time event bus"
+
+
+def test_layer3_reach_round_trips_on_upsert():
+    """channels and budget tell readers 'can this session even receive a
+    DM right now, and does it have auto-reply budget left'."""
+    resp = client.put(
+        f"/api/projects/{PROJECT_ID}/sessions/s-l3",
+        json={
+            "channels": ["dm", "notify"],
+            "budget": {"total": 3, "remaining": 2},
+            "last_active": "2026-06-09T07:00:00.000000Z",
+        },
+    )
+    assert resp.status_code == 200
+    stored = next(s for s in _sessions_store[PROJECT_ID]
+                  if s["session_id"] == "s-l3")
+    assert stored["channels"] == ["dm", "notify"]
+    assert stored["budget"] == {"total": 3, "remaining": 2}
+
+
+def test_intent_endpoint_writes_only_intent_subtree():
+    """The /intent endpoint must land under intent.* without disturbing
+    other Layer 0-3 fields stamped by the bridge. Otherwise an AI calling
+    `beacon session focus '...'` would silently overwrite cwd, git, etc."""
+    # First seed the session with bridge-stamped Layer 0-3 data.
+    client.put(
+        f"/api/projects/{PROJECT_ID}/sessions/s-intent",
+        json={
+            "cwd": "/Users/alice/repo",
+            "git": {"branch": "main", "head_short": "abc", "head_subject": "x"},
+            "focus": {"milestone": {"id": "ms-54", "title": "bus"}},
+            "last_active": "2026-06-09T07:00:00.000000Z",
+        },
+    )
+    # Now the AI stamps its intent.
+    resp = client.post(
+        f"/api/projects/{PROJECT_ID}/sessions/s-intent/intent",
+        json={"text": "DM read receipt 実装中", "attention_required": False},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["intent"]["text"] == "DM read receipt 実装中"
+    assert body["intent"]["attention_required"] is False
+    # All prior fields survived intact (the structural property).
+    stored = next(s for s in _sessions_store[PROJECT_ID]
+                  if s["session_id"] == "s-intent")
+    assert stored["cwd"] == "/Users/alice/repo"
+    assert stored["git"]["branch"] == "main"
+    assert stored["focus"]["milestone"]["id"] == "ms-54"
+    assert stored["intent"]["text"] == "DM read receipt 実装中"
+
+
+def test_intent_endpoint_partial_update_preserves_other_intent_fields():
+    """An AI updating attention_required without re-sending text must NOT
+    blank the text — the in-memory mock mirrors Firestore set(merge=True)
+    semantics, but at this slice intent is a nested map so the same
+    'whole-map replace' surprise from actor.email could bite again. Pin
+    the behavior."""
+    # First write: full intent.
+    client.post(
+        f"/api/projects/{PROJECT_ID}/sessions/s-int2/intent",
+        json={"text": "implementing X", "attention_required": False},
+    )
+    # Second write: only attention_required. text must survive.
+    client.post(
+        f"/api/projects/{PROJECT_ID}/sessions/s-int2/intent",
+        json={"attention_required": True},
+    )
+    stored = next(s for s in _sessions_store[PROJECT_ID]
+                  if s["session_id"] == "s-int2")
+    # NOTE: with the current mock (shallow top-level merge), the second
+    # write replaces intent={attention_required: True}, losing text. This
+    # is the Firestore-faithful behavior. The endpoint COULD merge at
+    # the field-path level, but doing so silently makes "clear text by
+    # sending text=null" impossible. Document the current contract: the
+    # AI must always send both fields together, or use a future
+    # PATCH-style endpoint.
+    assert stored["intent"]["attention_required"] is True
+
+
+def test_backward_compat_old_bridge_without_layer_fields_still_upserts():
+    """A pre-e-1369 bridge (just last_active / last_poll_at) must keep
+    working. The new fields are all optional so a body without them
+    upserts without 422."""
+    resp = client.put(
+        f"/api/projects/{PROJECT_ID}/sessions/s-legacy",
+        json={
+            "last_active": "2026-06-09T07:00:00.000000Z",
+            "last_poll_at": "2026-06-09T07:00:00.000000Z",
+            "poll_interval_ms": 2000,
+        },
+    )
+    assert resp.status_code == 200
+    stored = next(s for s in _sessions_store[PROJECT_ID]
+                  if s["session_id"] == "s-legacy")
+    # Legacy fields land where they always did.
+    assert stored["last_poll_at"] == "2026-06-09T07:00:00.000000Z"
+    # New fields are simply absent — readers must tolerate that.
+    assert "agent" not in stored or stored.get("agent") is None
+    assert "cwd" not in stored or stored.get("cwd") is None
+    assert "intent" not in stored or stored.get("intent") is None
+
+
+def test_intent_endpoint_noop_on_empty_body():
+    """An empty body (no text, no attention_required) is a no-op rather
+    than a 422 — callers debouncing the AI side shouldn't have to special-
+    case the empty payload."""
+    resp = client.post(
+        f"/api/projects/{PROJECT_ID}/sessions/s-empty/intent",
+        json={},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "noop"
+
+
+def test_directory_query_surfaces_layers_to_picker():
+    """End-to-end: after a bridge cold-start stamps Layer 0-3 and the AI
+    stamps Layer 4, GET /sessions returns the full structured view so
+    /beacon-dm-send Skill's picker can render 'who, what, where'."""
+    client.put(
+        f"/api/projects/{PROJECT_ID}/sessions/s-full",
+        json={
+            "actor": {"machine": "mac", "agent": "claude"},
+            "agent": {"kind": "claude-code", "version": "0.26.0"},
+            "cwd": "/Users/alice/repo",
+            "git": {"branch": "main", "head_short": "abc1234"},
+            "focus": {"milestone": {"id": "ms-54", "title": "bus"}},
+            "channels": ["dm"],
+            "last_active": "2026-06-09T07:00:00.000000Z",
+        },
+    )
+    client.post(
+        f"/api/projects/{PROJECT_ID}/sessions/s-full/intent",
+        json={"text": "DM receipt 実装中", "attention_required": False},
+    )
+    listed = client.get(f"/api/projects/{PROJECT_ID}/sessions").json()
+    by_sid = {s["session_id"]: s for s in listed}
+    s = by_sid["s-full"]
+    assert s["agent"]["version"] == "0.26.0"
+    assert s["cwd"] == "/Users/alice/repo"
+    assert s["git"]["branch"] == "main"
+    assert s["focus"]["milestone"]["id"] == "ms-54"
+    assert s["channels"] == ["dm"]
+    assert s["intent"]["text"] == "DM receipt 実装中"

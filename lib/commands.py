@@ -2676,6 +2676,111 @@ def cmd_session_id():
         sys.exit(1)
 
 
+def _resolve_current_session_id() -> str:
+    """Return the local session_id for `beacon session focus / attention`.
+
+    Mirrors what cmd_session_id prints but without exiting the process so
+    the focus/attention commands can fall back to an error path instead.
+    """
+    try:
+        import session as _session
+        return _session.get_session_id() or ""
+    except Exception:
+        return ""
+
+
+def cmd_session_focus():
+    """Stamp the AI's free-form intent on the current session (ms-54 / e-1369).
+
+    Three modes:
+      * `beacon session focus "<text>"`  — set the intent text
+      * `beacon session focus --clear`   — clear the intent text (sets "")
+      * `beacon session focus --show`    — read the current intent
+
+    The intent is the only narrative field on the session document; Layer
+    0-3 (Identity / Where / What / Reach) are stamped by the bridge from
+    pure machine observation. Intent lets the AI explain *why* in one line,
+    which is what the directory picker shows to a sender deciding "who to
+    DM".
+    """
+    show = os.environ.get("BEACON_SESSION_FOCUS_SHOW", "") == "1"
+    clear = os.environ.get("BEACON_SESSION_FOCUS_CLEAR", "") == "1"
+    text = os.environ.get("BEACON_SESSION_FOCUS_TEXT", "")
+    json_out = os.environ.get("BEACON_JSON", "") == "1"
+
+    client, config = _get_api_client()
+    project_id = _resolve_bus_project_id(config)
+    session_id = _resolve_current_session_id()
+    if not session_id:
+        print("Error: could not resolve current session_id "
+              "(run `beacon session id` first)", file=sys.stderr)
+        sys.exit(1)
+
+    if show:
+        s = client.get_session(project_id, session_id)
+        intent = s.get("intent") or {}
+        if json_out:
+            print(json.dumps(intent, ensure_ascii=False))
+        else:
+            txt = intent.get("text") or "(no intent set)"
+            attn = intent.get("attention_required")
+            print(f"focus: {txt}")
+            if attn is not None:
+                print(f"  attention_required: {attn}")
+        return
+
+    if clear:
+        result = client.upsert_session_intent(
+            project_id, session_id, text="", attention_required=None,
+        )
+    else:
+        if not text:
+            print("Usage: beacon session focus \"<text>\" "
+                  "| --clear | --show [--json]", file=sys.stderr)
+            sys.exit(2)
+        result = client.upsert_session_intent(
+            project_id, session_id, text=text, attention_required=None,
+        )
+
+    if json_out:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        intent = (result.get("intent") or {}).get("text") or "(cleared)"
+        print(f"focus: {intent}")
+
+
+def cmd_session_attention():
+    """Raise / lower the attention_required flag on the current session.
+
+    `beacon session attention --set true` signals "this session is waiting
+    on a human decision" — the directory picker surfaces it prominently
+    so a teammate sees "who needs me" without reading every intent text.
+    Lowered with `--set false` once the human input lands.
+    """
+    set_val = os.environ.get("BEACON_SESSION_ATTENTION_SET", "")
+    json_out = os.environ.get("BEACON_JSON", "") == "1"
+    if set_val not in ("true", "false"):
+        print("Usage: beacon session attention --set true|false [--json]",
+              file=sys.stderr)
+        sys.exit(2)
+
+    client, config = _get_api_client()
+    project_id = _resolve_bus_project_id(config)
+    session_id = _resolve_current_session_id()
+    if not session_id:
+        print("Error: could not resolve current session_id", file=sys.stderr)
+        sys.exit(1)
+
+    flag = (set_val == "true")
+    result = client.upsert_session_intent(
+        project_id, session_id, text=None, attention_required=flag,
+    )
+    if json_out:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(f"attention_required: {flag}")
+
+
 def _resolve_channel_root() -> "Path | None":
     """Find the directory containing channel/bus.mjs across all install paths.
 
@@ -9819,6 +9924,8 @@ if __name__ == "__main__":
         "session_log_list": cmd_session_log_list,
         "session_log_show": cmd_session_log_show,
         "session_id": cmd_session_id,
+        "session_focus": cmd_session_focus,
+        "session_attention": cmd_session_attention,
         "channel_install": cmd_channel_install,
         "channel_uninstall": cmd_channel_uninstall,
         "channel_opt_out": cmd_channel_opt_out,

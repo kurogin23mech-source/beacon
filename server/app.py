@@ -481,6 +481,49 @@ class SessionUpsert(BaseModel):
     poll_interval_ms: Optional[int] = None
     shutdown: Optional[bool] = None
 
+    # ms-54 / e-1369: session transparency in 4 layers (5th is INTENT, written
+    # via a separate endpoint so the bridge never mints narrative text).
+    #
+    #   Layer 0 — Identity     : agent.{kind, version}, harness.{kind, version}
+    #   Layer 1 — Where        : cwd, git.{branch, head_short, head_subject}
+    #   Layer 2 — What         : focus.{milestone, recent_task}
+    #   Layer 3 — Reach        : channels, budget
+    #
+    # All optional. A bridge that only stamps Identity at mint and Where on
+    # heartbeat still serialises correctly via merge=True. The dicts are
+    # shaped (rather than flat fields) so adding a sub-key later doesn't bump
+    # the SessionUpsert surface area, and the JSON wire format reads like a
+    # natural namespace ("agent.version" rather than "agent_version").
+    agent: Optional[dict] = None      # {kind, version}
+    # NOTE: the legacy top-level `harness: str` above is kept for back-compat;
+    # the new structured form lands under runtime.harness instead of replacing
+    # the flat field. A bridge can populate both — readers should prefer the
+    # nested dict when present.
+    runtime: Optional[dict] = None    # {harness: {kind, version}}
+    cwd: Optional[str] = None
+    git: Optional[dict] = None        # {branch, head_short, head_subject}
+    focus: Optional[dict] = None      # {milestone: {id, title}, recent_task: {id, description}}
+    channels: Optional[list[str]] = None
+    budget: Optional[dict] = None     # {remaining, total}
+
+
+class SessionIntentUpsert(BaseModel):
+    """Body for POST /api/projects/{project_id}/sessions/{session_id}/intent
+    (ms-54 / e-1369 Layer 4).
+
+    Intent is the *AI's self-report* of what it is currently doing — the only
+    Layer that depends on natural language rather than machine observation.
+    The bridge does NOT write intent (it has no insight into the AI's goal);
+    the AI stamps it via `beacon session focus "<text>"` or the picker shows
+    "(idle)" when absent.
+
+    `attention_required` is a boolean flag the AI raises when it is waiting
+    on a human decision. Readers (directory picker, Web UI) show it
+    prominently so a teammate sees "who needs me" at a glance.
+    """
+    text: Optional[str] = None
+    attention_required: Optional[bool] = None
+
 
 _BUS_DELIVERY_MODES = {"auto-execute", "propose-to-ai", "notify-user-only"}
 _BUS_DELIVERY_DEFAULT = "propose-to-ai"
@@ -2366,6 +2409,51 @@ def get_bus_cursor(
     """Return the current cursor for ``recipient_id`` ({} if unset)."""
     _load(project_id, user)
     return db.get_bus_cursor(project_id, recipient_id)
+
+
+# ---------------------------------------------------------------------------
+# Session intent (ms-54 / e-1369 Layer 4)
+#
+# Intent is the AI's narrative self-report ("I'm working on X right now").
+# The bridge cannot stamp it because the bridge does not know what the AI is
+# trying to do — only the AI does. We expose a tiny dedicated endpoint so a
+# session can write its own intent without touching the heartbeat upsert
+# (keeps the WHERE/WHAT/REACH bridge writes pristinely machine-observable).
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/projects/{project_id}/sessions/{session_id}/intent")
+def upsert_session_intent(
+    project_id: str,
+    session_id: str,
+    body: SessionIntentUpsert,
+    user: dict = Depends(require_auth),
+):
+    """Stamp the AI's free-form intent on its own session document.
+
+    Two fields, both optional:
+
+      * ``text``               — 1-line description of what this AI is doing
+                                 right now (e.g. "DM read receipt 実装中").
+                                 Empty string clears it.
+      * ``attention_required`` — True when the session is waiting on a human
+                                 decision. The directory picker / Web UI uses
+                                 this to surface "who needs me" at a glance.
+
+    The endpoint does NOT enforce that the calling session_id matches the
+    authenticated user — multi-agent dispatch may stamp on behalf of a
+    sub-session. We do require project membership via _load. The
+    ``actor.email`` already on the session document is the audit trail for
+    who actually owns it.
+    """
+    _load(project_id, user)
+    payload = body.model_dump(exclude_none=True)
+    if not payload:
+        return {"status": "noop"}
+    # Land under a stable nested key so directory readers know exactly where
+    # to look. Avoids the SessionUpsert merge surface entirely.
+    db.upsert_session(project_id, session_id, {"intent": payload})
+    return {"status": "ok", "session_id": session_id, "intent": payload}
 
 
 # ---------------------------------------------------------------------------

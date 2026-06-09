@@ -2342,17 +2342,60 @@ case "${1:-}" in
                 # for explicit heartbeat.
                 python3 "$COMMANDS_PY" session_id
                 ;;
+            focus)
+                # ms-54 / e-1369 Layer 4: AI-authored intent.
+                shift 2
+                _sf_text=""
+                _sf_clear=""
+                _sf_show=""
+                _sf_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --clear) _sf_clear="1"; shift ;;
+                        --show)  _sf_show="1";  shift ;;
+                        --json)  _sf_json="1";  shift ;;
+                        *)
+                            if [[ -z "$_sf_text" && "${1:0:1}" != "-" ]]; then
+                                _sf_text="$1"
+                            fi
+                            shift ;;
+                    esac
+                done
+                BEACON_SESSION_FOCUS_TEXT="$_sf_text" \
+                    BEACON_SESSION_FOCUS_CLEAR="$_sf_clear" \
+                    BEACON_SESSION_FOCUS_SHOW="$_sf_show" \
+                    BEACON_JSON="$_sf_json" \
+                    python3 "$COMMANDS_PY" session_focus
+                ;;
+            attention)
+                # ms-54 / e-1369 Layer 4: AI signals "human input required".
+                shift 2
+                _sa_set=""
+                _sa_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --set)  _sa_set="${2:-}"; shift 2 ;;
+                        --json) _sa_json="1";     shift ;;
+                        *)      shift ;;
+                    esac
+                done
+                BEACON_SESSION_ATTENTION_SET="$_sa_set" \
+                    BEACON_JSON="$_sa_json" \
+                    python3 "$COMMANDS_PY" session_attention
+                ;;
             "")
                 echo "Usage: beacon session end [--summary <text>] [--session-id <id>] [--json] [--bus-origin]"
                 echo "       beacon session rescue [--json]"
                 echo "       beacon session log list [--limit N] [--json]"
                 echo "       beacon session log show <session-id> [--json]"
                 echo "       beacon session id"
+                echo "       beacon session focus \"<text>\" | --clear | --show [--json]"
+                echo "       beacon session attention --set true|false [--json]"
                 echo "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"
                 ;;
             *)
                 echo "Unknown session subcommand: ${2:-}"
-                echo "Usage: beacon session [end|rescue|log|id]"
+                echo "Usage: beacon session [end|rescue|log|id|focus|attention]"
                 ;;
         esac
         ;;

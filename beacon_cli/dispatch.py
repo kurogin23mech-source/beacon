@@ -695,6 +695,23 @@ def build_parser() -> argparse.ArgumentParser:
     session_sub = p_session.add_subparsers(dest="session_cmd", metavar="<subcmd>")
     session_sub.add_parser("id", add_help=False)
 
+    # ms-54 / e-1369 Layer 4: AI-authored intent ("what am I doing right now")
+    # and the attention_required flag. Distinct from the bridge-stamped
+    # Layer 0-3 fields because intent is the only narrative input — the
+    # bridge cannot observe what the AI is trying to accomplish.
+    p_session_focus = session_sub.add_parser("focus", add_help=False)
+    p_session_focus.add_argument("text", nargs="?", default="")
+    p_session_focus.add_argument("--clear", action="store_true",
+                                  help="Clear current intent text")
+    p_session_focus.add_argument("--show", action="store_true",
+                                  help="Show current intent (read-only)")
+    p_session_focus.add_argument("--json", action="store_true")
+
+    p_session_attention = session_sub.add_parser("attention", add_help=False)
+    p_session_attention.add_argument("--set", dest="attention_set",
+                                      choices=["true", "false"], default="")
+    p_session_attention.add_argument("--json", action="store_true")
+
     # ---- channel install (ms-54 e-1152 / ms-44 e-1171) ----
     # `beacon channel install` writes a project-level .mcp.json that
     # wires the Claude Code beacon-bus MCP server to channel/bus.mjs.
@@ -2159,18 +2176,35 @@ def _handle_skill(root: Path, args: argparse.Namespace) -> int:
 
 
 def _handle_session(root: Path, args: argparse.Namespace) -> int:
-    """`beacon session id` — mint + print session_id (ms-44 e-1171).
+    """`beacon session id` / `focus` / `attention` (ms-44 e-1171, ms-54 e-1369).
 
-    Bash path: `python3 COMMANDS_PY session_id` with no env.
-    Mirror that exactly so Windows pipx users get the same behavior.
+    Bash path: `python3 COMMANDS_PY session_id` / `session_focus` /
+    `session_attention` with env vars carrying flag values. Mirror that
+    exactly so Windows pipx users get the same behavior.
     """
     if args.show_help or args.session_cmd is None:
         print("Usage: beacon session id")
+        print("       beacon session focus \"<text>\" | --clear | --show [--json]")
+        print("       beacon session attention --set true|false [--json]")
         return 0 if args.show_help else 2
-    if args.session_cmd != "id":
-        print(f"Unknown session subcommand: {args.session_cmd}")
-        return 2
-    return _run_commands_py(root, "session_id", {})
+    if args.session_cmd == "id":
+        return _run_commands_py(root, "session_id", {})
+    if args.session_cmd == "focus":
+        env: Dict[str, str] = {
+            "BEACON_SESSION_FOCUS_TEXT": args.text or "",
+            "BEACON_SESSION_FOCUS_CLEAR": "1" if args.clear else "",
+            "BEACON_SESSION_FOCUS_SHOW": "1" if args.show else "",
+            "BEACON_JSON": "1" if args.json else "",
+        }
+        return _run_commands_py(root, "session_focus", env)
+    if args.session_cmd == "attention":
+        env = {
+            "BEACON_SESSION_ATTENTION_SET": args.attention_set or "",
+            "BEACON_JSON": "1" if args.json else "",
+        }
+        return _run_commands_py(root, "session_attention", env)
+    print(f"Unknown session subcommand: {args.session_cmd}")
+    return 2
 
 
 def _handle_channel(root: Path, args: argparse.Namespace) -> int:

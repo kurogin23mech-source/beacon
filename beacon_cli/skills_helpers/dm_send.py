@@ -139,6 +139,14 @@ def build_candidates(
         member = resolve_member_for_session(s, index)
         email = (actor.get("email") or "").strip()
         member_email = (member or {}).get("email", "") if member else ""
+        # ms-54 / e-1369: pull through the new 4 + 1 layer fields when the
+        # session document carries them. All optional — a session predating
+        # e-1369 simply omits them and the picker line silently drops the
+        # corresponding bits.
+        agent_meta = s.get("agent") or {}
+        git_meta = s.get("git") or {}
+        focus_meta = (s.get("focus") or {}).get("milestone") or {}
+        intent_meta = s.get("intent") or {}
         rows.append({
             "index": i,
             "session_id": s.get("session_id", ""),
@@ -151,6 +159,22 @@ def build_candidates(
             "age_seconds": age,
             "age_str": _format_age_seconds(age),
             "project_id": actor.get("project_id", ""),
+            # Layer 0 — Identity
+            "agent_kind": agent_meta.get("kind", ""),
+            "agent_version": agent_meta.get("version", ""),
+            # Layer 1 — Where
+            "cwd": s.get("cwd", ""),
+            "git_branch": git_meta.get("branch", ""),
+            "git_head_short": git_meta.get("head_short", ""),
+            # Layer 2 — What
+            "focus_milestone": focus_meta.get("id", "")
+                if focus_meta else "",
+            "focus_milestone_title": focus_meta.get("title", "")
+                if focus_meta else "",
+            # Layer 4 — Intent (Layer 3 reach is consulted separately by
+            # the Skill when deciding whether the session can receive)
+            "intent_text": intent_meta.get("text", "") or "",
+            "attention_required": bool(intent_meta.get("attention_required")),
         })
     return rows
 
@@ -159,7 +183,10 @@ def render_candidate_line(row: dict) -> str:
     """Format one candidate row as a single picker line.
 
     The Skill prints these lines verbatim so the user can copy the
-    session_id or type the index.
+    session_id or type the index. ms-54 / e-1369 adds bridge-stamped
+    Layer 0-3 metadata (cwd basename, git branch, focus.milestone) and
+    AI-authored Layer 4 intent — all rendered when present, all silent
+    when absent so legacy (pre-e-1369) sessions still surface cleanly.
     """
     parts = []
     parts.append(f"{row['index']}.")
@@ -174,6 +201,37 @@ def render_candidate_line(row: dict) -> str:
     parts.append("healthy" if row.get("healthy") else "stale")
     if row.get("age_seconds") is not None:
         parts.append(f"({row['age_str']})")
+    # ms-54 / e-1369 Layer 1 + 2: where (cwd basename + branch) and what
+    # (focus.milestone). The cwd basename alone is the most useful
+    # disambiguator on a single machine — "/tools/beacon" vs
+    # "/tools/beacon/.worktrees/ms-43" tells you immediately which
+    # session is the parent and which is the dispatch sub-agent.
+    cwd = row.get("cwd", "")
+    git_branch = row.get("git_branch", "")
+    if cwd or git_branch:
+        loc_bits = []
+        if cwd:
+            loc_bits.append(_short_cwd(cwd))
+        if git_branch:
+            loc_bits.append(f"@{git_branch}")
+        parts.append("[" + " ".join(loc_bits) + "]")
+    focus_ms = row.get("focus_milestone", "")
+    if focus_ms:
+        parts.append(f"focus={focus_ms}")
+    # Layer 0: agent.version when present — useful for "this session is on
+    # v0.25.x so receipts won't fire" diagnosis.
+    av = row.get("agent_version", "")
+    if av:
+        parts.append(f"v={av}")
+    # Layer 4: AI-authored intent. Last in the line because it's the most
+    # human-readable bit and the reader's eye lands here last.
+    intent_text = row.get("intent_text", "")
+    if intent_text:
+        truncated = intent_text if len(intent_text) <= 60 \
+            else intent_text[:57] + "…"
+        parts.append(f"intent=\"{truncated}\"")
+    if row.get("attention_required"):
+        parts.append("⚠ attention")
     if row.get("email"):
         tail = row["email"]
         if row.get("member_role"):
@@ -182,6 +240,22 @@ def render_candidate_line(row: dict) -> str:
     elif row.get("member_id"):
         parts.append(f"→ member={row['member_id']}")
     return " ".join(parts)
+
+
+def _short_cwd(cwd: str) -> str:
+    """Render a cwd compactly for the picker line.
+
+    Drops home prefix to `~/`, then keeps the last 2 path segments so the
+    line stays scannable even when cwd is buried deep under the home dir.
+    """
+    import os
+    home = os.path.expanduser("~")
+    if cwd.startswith(home):
+        cwd = "~" + cwd[len(home):]
+    parts = cwd.rstrip("/").split("/")
+    if len(parts) <= 3:
+        return cwd
+    return ".../" + "/".join(parts[-2:])
 
 
 # ---------------------------------------------------------------------------

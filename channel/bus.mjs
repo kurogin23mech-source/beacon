@@ -102,6 +102,163 @@ log(`  api=${API_URL} project=${PROJECT_ID} session=${SESSION_ID}`)
 log(`  allow=[${ALLOWED_CHANNELS.join(',')}] poll=${POLL_INTERVAL}ms cwd=${CWD}`)
 log(`  session.json source=[${session.source || ''}] last_active=[${session.last_active || ''}]`)
 
+// --- Layer 0-3 transparency metadata (ms-54 / e-1369) -----------------------
+//
+// The bridge stamps a structured snapshot of "what this session is" at
+// cold-start, so the directory query can answer "which session is which?"
+// with more than just session_id + actor.{machine,agent,email} +
+// last_active. Four layers, all bridge-observable (Layer 4 INTENT is the
+// AI's self-report and goes through a separate /intent endpoint, not via
+// the bridge):
+//
+//   Layer 0 — Identity : agent.{kind, version}, runtime.harness.{kind, version}
+//   Layer 1 — Where    : cwd, git.{branch, head_short, head_subject}
+//   Layer 2 — What     : focus.{milestone, recent_task}  (from .beacon/project.json)
+//   Layer 3 — Reach    : channels, budget                (from local config)
+//
+// Stamped ONCE on cold-start as part of the first heartbeat. Re-stamping on
+// every heartbeat would be wasteful — cwd never changes mid-session, branch
+// rarely does, and the cost of re-reading project.json + spawning git on
+// every 2s poll is not worth the staleness window.
+
+function safeExec(cmd, args, opts = {}) {
+  try {
+    return execSync([cmd, ...args].join(' '), {
+      cwd: CWD,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      encoding: 'utf8',
+      timeout: 3000,
+      ...opts,
+    }).trim()
+  } catch {
+    return ''
+  }
+}
+
+function detectAgentKind() {
+  // Self-report. The bridge runs inside an AI harness; today that's
+  // Claude Code, but the channel is designed to host Codex / Cursor /
+  // Aider / Devin instances too. We surface whichever is the closest
+  // signal in env. Defaults to 'claude-code' since this binary ships
+  // bundled with Beacon's Claude-Code-targeted bclaude wrapper.
+  if (process.env.CODEX_CLI_VERSION) return 'codex'
+  if (process.env.CURSOR_TRACE_ID) return 'cursor'
+  if (process.env.AIDER_VERSION) return 'aider'
+  return 'claude-code'
+}
+
+function detectHarnessKind() {
+  // What's wrapping the AI runtime? Terminal sessions are the most common
+  // (Claude Code default). IDE extensions and the desktop app set their
+  // own env signals.
+  if (process.env.VSCODE_PID || process.env.VSCODE_IPC_HOOK) return 'vscode-ext'
+  if (process.env.JETBRAINS_IDE) return 'jetbrains-ext'
+  if (process.env.TAURI_PLATFORM) return 'desktop-app'
+  if (process.env.TERM_PROGRAM === 'Apple_Terminal') return 'apple-terminal'
+  if (process.env.TERM_PROGRAM) return `terminal:${process.env.TERM_PROGRAM}`
+  return 'terminal'
+}
+
+function collectLayer0Identity() {
+  // agent.version: read beacon CLI's _version.py via a lightweight exec.
+  // Falls back to '' rather than guessing — unknown is more honest than
+  // wrong.
+  const agentVersion = safeExec('beacon', ['--version'])
+    .replace(/^beacon\s+/, '') || ''
+  return {
+    agent: {
+      kind: detectAgentKind(),
+      version: agentVersion,
+    },
+    runtime: {
+      harness: {
+        kind: detectHarnessKind(),
+        version: process.env.CLAUDE_CODE_VERSION || '',
+      },
+    },
+  }
+}
+
+function collectLayer1Where() {
+  const branch = safeExec('git', ['symbolic-ref', '--short', '-q', 'HEAD'])
+  const headShort = safeExec('git', ['rev-parse', '--short', 'HEAD'])
+  const headSubject = safeExec('git', ['log', '-1', '--pretty=%s'])
+  return {
+    cwd: CWD,
+    git: {
+      branch: branch || '',
+      head_short: headShort || '',
+      head_subject: headSubject || '',
+    },
+  }
+}
+
+function collectLayer2What() {
+  // .beacon/project.json holds the active milestone authoritatively. We
+  // read it directly rather than spawning `beacon status --json` because
+  // the cost of forking a Python interpreter per cold-start adds up
+  // (multiple bridges per dev machine in dispatch mode) and the JSON
+  // shape we want is a tiny subset of the full status.
+  try {
+    const projectPath = path.join(CWD, '.beacon', 'project.json')
+    const proj = safeLoadJSON(projectPath)
+    const milestones = Array.isArray(proj.milestones) ? proj.milestones : []
+    const active = milestones.find((m) => m.status === 'in_progress')
+    if (!active) return { focus: { milestone: null, recent_task: null } }
+    return {
+      focus: {
+        milestone: {
+          id: active.id || '',
+          title: active.title || '',
+        },
+        // recent_task is left null at cold-start; a future task may
+        // wire it up by inspecting the most recent in-progress entry
+        // under the active milestone. Keeping the shape stable now.
+        recent_task: null,
+      },
+    }
+  } catch {
+    return { focus: { milestone: null, recent_task: null } }
+  }
+}
+
+function collectLayer3Reach() {
+  // channels: what the bridge subscribes to (ALLOWED_CHANNELS env →
+  // ALLOWED_CHANNELS const above).
+  // budget.remaining: read .beacon/bus-budget.json (the same file the
+  // CLI's budget gate consults). Best-effort; missing file = no budget
+  // grant = unknown (signaled as null rather than 0 so the picker can
+  // distinguish "no grant" from "grant exhausted").
+  let budgetRemaining = null
+  let budgetTotal = null
+  try {
+    const budgetPath = path.join(CWD, '.beacon', 'bus-budget.json')
+    const b = safeLoadJSON(budgetPath)
+    if (typeof b.total === 'number' && typeof b.used === 'number') {
+      budgetTotal = b.total
+      budgetRemaining = Math.max(0, b.total - b.used)
+    }
+  } catch {
+    // leave budget as null
+  }
+  return {
+    channels: [...ALLOWED_CHANNELS],
+    budget: budgetTotal !== null ? {
+      total: budgetTotal,
+      remaining: budgetRemaining,
+    } : null,
+  }
+}
+
+function collectSessionMetadata() {
+  return {
+    ...collectLayer0Identity(),
+    ...collectLayer1Where(),
+    ...collectLayer2What(),
+    ...collectLayer3Reach(),
+  }
+}
+
 // --- HTTPS helpers -----------------------------------------------------------
 
 async function apiGet(p) {
@@ -528,8 +685,46 @@ if (!PROJECT_ID || !SESSION_ID) {
     }
   }
 
+  // ms-54 / e-1369: cold-start session metadata stamp. Layer 0-3 (Identity /
+  // Where / What / Reach) are collected once and POSTed before the poll
+  // loop starts. Subsequent heartbeats keep the minimal body (last_active /
+  // last_poll_at / etc) so we don't repeat the cost of git spawns and
+  // project.json reads on every 2s tick. cwd never changes mid-session and
+  // branch / focus changes are rare enough that "restart bridge to refresh"
+  // is acceptable for v0.
+  //
+  // Also stamps actor.{machine, agent} that was previously missing on the
+  // heartbeat-only path — the directory was showing `mach=-` for any
+  // session whose first write came from the bridge rather than a CLI mint.
+  async function stampColdStartMetadata() {
+    try {
+      const metadata = collectSessionMetadata()
+      // Compose actor from os.hostname() so directory queries get a real
+      // machine label even when no CLI ever upserted actor for this
+      // session. Email is filled in server-side from the bearer token,
+      // so we leave it off here on purpose.
+      const actor = {
+        machine: os.hostname(),
+        agent: os.hostname(),
+      }
+      const body = { actor, ...metadata }
+      await apiPut(
+        `/api/projects/${PROJECT_ID}/sessions/${encodeURIComponent(SESSION_ID)}`,
+        body,
+      )
+      const m = metadata.focus?.milestone
+      log(`cold-start metadata stamped: agent=${metadata.agent.kind}@${metadata.agent.version || '?'} cwd=${metadata.cwd} branch=${metadata.git.branch || '?'} focus=${m ? `${m.id}/${(m.title || '').slice(0, 30)}` : 'none'}`)
+    } catch (e) {
+      // Cold-start metadata is observational, not load-bearing for
+      // delivery. Logging the failure is enough — the poll loop must
+      // still come up and start servicing the AI.
+      log(`cold-start metadata stamp failed (non-fatal): ${e.message}`)
+    }
+  }
+
   async function loop() {
     await ensureCursorPrimed()
+    await stampColdStartMetadata()
     while (!stopping) {
       try {
         await pollOnce()
