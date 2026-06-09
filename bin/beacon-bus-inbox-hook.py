@@ -104,63 +104,26 @@ def _load_session_id(root: Path, hook_input: dict) -> str:
 
 
 def _refresh_session_heartbeat(root: Path) -> None:
-    """Fire-and-forget `beacon session id` to bump last_active.
+    """No-op since ms-54 e-1319 — retained as a deprecation tombstone.
 
-    Problem (ms-54 / e-1189):
-      lib/session.update_last_active() — which writes ``last_active`` into
-      .beacon/session.json and pushes to Firestore ``sessions/`` — only ran
-      via /beacon-session-start Step 0b. Long-running idle sessions drifted
-      out of ``beacon bus directory --since-min 30 --live`` because their
-      timestamp went stale, so DMs failed to discover live recipients.
+    Originally (e-1189) this fire-and-forget'd ``beacon session id`` to bump
+    ``.beacon/session.json.last_active`` and push to the cloud sessions/
+    subcollection on every SessionStart / UserPromptSubmit. The intent was
+    to keep long-running idle sessions visible in
+    ``beacon bus directory --live``.
 
-    This hook (already wired to SessionStart + UserPromptSubmit in
-    ~/.claude/settings.json) is the natural carrier: it fires whenever the
-    user submits a prompt or the session boots, which is exactly when we
-    want to confirm "this session is alive." The refresh is best-effort:
+    Post Option C (PR #111 / commit 78048b6) the bridge's own poll loop
+    stamps ``last_active`` + ``last_poll_at`` per iteration, which is the
+    structural truth source — if the poll loop dies, the directory
+    correctly stops advertising the session as receive-capable. A duplicate
+    CLI-side write let a session appear "alive" while its bridge was dead,
+    so DMs accumulated server-side unread.
 
-      - Backgrounded via subprocess + detached process group so the user's
-        prompt is never blocked by a slow cloud write.
-      - All output discarded; a failed sync must not surface as hook noise
-        on stderr that pollutes the user's UI.
-      - Looks up `beacon` on PATH (matches user shell) with a repo-local
-        fallback for dev clones / test environments.
-      - Silent no-op when no beacon binary is reachable (matches the rest
-        of this hook's "never raise to the harness" posture).
-
-    Recursion: ``beacon session id`` does not itself emit Bash tool calls,
-    so it cannot re-trigger PostToolUse / UserPromptSubmit hooks. The
-    Python dispatcher's ms-57 e-1035 heartbeat path is debounced inside
-    session._should_cloud_sync(), so duplicate fires within the window
-    collapse to a single Firestore write.
+    The function is intentionally left here (not removed) so external
+    callers — should any exist — keep working. It is a no-op. Call sites
+    inside this hook were stripped by e-1319; new code should not call it.
     """
-    import subprocess
-    import shutil
-
-    beacon_bin = shutil.which("beacon")
-    if not beacon_bin:
-        repo_local = root / "bin" / "beacon"
-        if repo_local.exists() and os.access(repo_local, os.X_OK):
-            beacon_bin = str(repo_local)
-        else:
-            return  # no CLI reachable — leave the heartbeat to other paths
-
-    try:
-        # Detach so the child outlives this hook process. start_new_session
-        # gives it its own process group on POSIX (we don't need to be the
-        # leader for backgrounding, but it prevents the child from receiving
-        # the harness's SIGINT if the user Ctrl-C's the prompt).
-        subprocess.Popen(
-            [beacon_bin, "session", "id"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-            cwd=str(root),
-        )
-    except Exception:
-        # Heartbeat must never break the prompt path. The cost of one stale
-        # ``last_active`` is far smaller than a broken inbox check.
-        pass
+    return
 
 
 def _load_cloud_config(root: Path) -> tuple[str, str]:
@@ -436,12 +399,12 @@ def main() -> None:
     if not session_id:
         return
 
-    # ms-54 / e-1189: refresh bus-directory heartbeat. Fire-and-forget so a
-    # slow cloud write never blocks the user's prompt. Runs every hook fire
-    # (SessionStart + UserPromptSubmit), which keeps long-running sessions
-    # visible in `beacon bus directory --since-min 30 --live` as long as the
-    # user is interacting — Step 0b alone only covered the first turn.
-    _refresh_session_heartbeat(root)
+    # ms-54 / e-1319: the CLI heartbeat refresh was retired post Option C.
+    # The bridge's poll loop now stamps both last_active and last_poll_at
+    # per iteration (PR #111 / commit 78048b6), so a parallel CLI write would
+    # only create ambiguity ("which signal is truth?"). The helper is left
+    # as a no-op tombstone in case any external script still imports it.
+    # _refresh_session_heartbeat(root)  # intentionally not called
 
     api_url, project_id = _load_cloud_config(root)
     if not api_url or not project_id:
