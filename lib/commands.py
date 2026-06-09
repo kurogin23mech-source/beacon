@@ -4763,6 +4763,7 @@ def _auto_fire_operation_triggers():
         log_source = op.get("log_source", op_id)
         # Find linked SPEC doc for this operation
         spec_ref = ""
+        spec_doc_id = ""
         try:
             docs_dir = _get_docs_dir()
             if os.path.isdir(docs_dir):
@@ -4771,7 +4772,8 @@ def _auto_fire_operation_triggers():
                         continue
                     doc = _read_local_doc(os.path.join(docs_dir, fname))
                     if doc.get("operation") == op_id and doc.get("scope") == "spec":
-                        spec_ref = f" (doc: {doc['doc_id']} 参照)"
+                        spec_doc_id = doc["doc_id"]
+                        spec_ref = f" (doc: {spec_doc_id} 参照)"
                         break
         except Exception:
             pass
@@ -4784,6 +4786,12 @@ def _auto_fire_operation_triggers():
         with open(trigger_path, "w", encoding="utf-8") as f:
             json.dump(trigger_data, f, ensure_ascii=False)
             f.write("\n")
+        # ms-60 / e-1340: also mirror onto the bus so AI sessions subscribed
+        # via the inbox hook can autonomously run `/beacon-operation-execute`.
+        # Channel "operation-trigger" + delivery="auto-execute" is the autonomous
+        # path; the inbox hook downgrades to propose-to-ai unless the channel
+        # is in bus_auto_execute_channels (opt-in).
+        _push_operation_trigger_to_bus(op_id, log_source, trigger_data, spec_doc_id)
 
 
 def cmd_trigger_fire():
@@ -4860,6 +4868,59 @@ def _push_trigger_to_bus(trigger_data: dict) -> None:
         # without polluting normal CLI output.
         sys.stderr.write(
             f"[beacon] trigger bus mirror failed silently: "
+            f"{type(exc).__name__}: {exc}\n"
+        )
+
+
+def _push_operation_trigger_to_bus(op_id: str, log_source: str,
+                                   trigger_data: dict,
+                                   spec_doc_id: str = "") -> None:
+    """Mirror an operation-check trigger onto the bus (ms-60 / e-1340).
+
+    Distinct from ``_push_trigger_to_bus`` because operation triggers carry
+    structured fields the autonomous Skill needs (op_id, spec_doc_id), and
+    they ride a dedicated channel so the auto-execute allowlist can opt in
+    to operation autonomy without arming every other trigger source.
+
+    Channel ``"operation-trigger"`` + delivery ``"auto-execute"`` means: a
+    project that has opted in (``beacon bus auto-execute add --channel
+    operation-trigger``) lets the inbox hook run ``/beacon-operation-execute``
+    without human review. Without opt-in, the event is downgraded to
+    ``propose-to-ai`` and surfaces in the AI inbox for human review.
+    Best-effort — failures don't break the local trigger file write.
+    """
+    try:
+        config_path = _get_cloud_config_path()
+        if not os.path.exists(config_path):
+            return
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        project_id = config.get("project_id")
+        if not project_id:
+            return
+        from auth import load_credentials
+        creds = load_credentials()
+        if creds is None:
+            return
+        from api_client import ApiClient
+        api_url = config.get("api_url", DEFAULT_API_URL)
+        client = ApiClient(api_url, _extract_token(creds))
+        client.post_bus_event(
+            project_id, "operation-trigger",
+            sender_session_id="",
+            payload={
+                "op_id": op_id,
+                "log_source": log_source,
+                "spec_doc_id": spec_doc_id,
+                "trigger_name": trigger_data.get("name", ""),
+                "message": trigger_data.get("message", ""),
+                "created_at": trigger_data.get("created_at", ""),
+            },
+            delivery="auto-execute",
+        )
+    except Exception as exc:
+        sys.stderr.write(
+            f"[beacon] operation-trigger bus mirror failed silently: "
             f"{type(exc).__name__}: {exc}\n"
         )
 
@@ -8663,6 +8724,7 @@ def cmd_help_json():
         {"command": "beacon operation purge <op-id> --reason <text>", "flags": ["--index <n>", "--json"], "description": "Hard-delete an operation record (recovery for duplicate-ID corruption; e-863)"},
         {"command": "beacon operation approve <op-id> --spec <doc-id>", "flags": ["--expires-at YYYY-MM-DD", "--ttl-seconds N", "--json"], "description": "Mint T2 envelope from SPEC doc's approved_actions list (ms-60 / e-1339)"},
         {"command": "beacon operation revoke <op-id>", "flags": ["--envelope-id ENV", "--reason TEXT", "--json"], "description": "Invalidate the active T2 envelope (auto-picks active if --envelope-id omitted)"},
+        {"command": "beacon operation envelope verify <op-id> <action>", "flags": ["--json"], "description": "AI self-check: is <action> permitted by the active envelope's approved_actions? (ms-60 / e-1340)"},
         {"command": "beacon milestone graph", "flags": ["--json"], "description": "Show dependency graph"},
         {"command": "beacon task add <desc>", "flags": ["-m <ms-id>"], "description": "Add a task to a milestone"},
         {"command": "beacon task done <entry-id>", "flags": [], "description": "Mark task as done"},
@@ -8996,6 +9058,99 @@ def cmd_operation_approve():
     print(f"  approved actions ({len(actions)}):")
     for a in actions:
         print(f"    - {a}")
+
+
+def cmd_operation_envelope_verify():
+    """Check whether a requested action is permitted by the active envelope.
+
+    ms-60 / e-1340 — the AI self-check primitive. Called by the
+    ``/beacon-operation-execute`` Skill before running each action.
+
+    Output (json mode):
+      {"op_id": ..., "action": ..., "envelope_id": ...|null,
+       "active": bool, "permitted": bool,
+       "approved_actions": [...], "reason": "..."}
+
+    Exit codes:
+      0 — permitted (active envelope + action matches approved_actions)
+      1 — not permitted (no active envelope, or action outside scope)
+      2 — usage / cloud error
+
+    Designed to be easy to call from a Skill: ``beacon operation envelope
+    verify op-X "extract:profile:user-1" --json`` returns a one-shot decision.
+    """
+    op_id = os.environ.get("BEACON_OPERATION_ID", "")
+    action = os.environ.get("BEACON_ACTION", "")
+    json_mode = bool(os.environ.get("BEACON_JSON"))
+
+    if not op_id:
+        print("Error: operation id required", file=sys.stderr)
+        sys.exit(2)
+    if not action:
+        print("Error: action required (e.g. 'extract:profile:user-1')",
+              file=sys.stderr)
+        sys.exit(2)
+    if not _is_cloud_mode():
+        print("Error: envelope verify requires cloud mode.", file=sys.stderr)
+        sys.exit(2)
+
+    # Reuse server/approved_actions matcher as single source of truth.
+    sys.path.insert(
+        0, os.path.join(os.path.dirname(__file__), "..", "server")
+    )
+    try:
+        import approved_actions as aa
+    except ImportError as exc:
+        print(f"Error: cannot load approved_actions module: {exc}",
+              file=sys.stderr)
+        sys.exit(2)
+
+    try:
+        client, config = _get_api_client()
+        records = client.list_operation_envelopes(
+            config["project_id"], op_id, status="active"
+        )
+    except Exception as exc:
+        print(f"Error: cannot fetch envelope: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    active = records[0] if records else None
+    if active is None:
+        result = {
+            "op_id": op_id, "action": action,
+            "envelope_id": None, "active": False, "permitted": False,
+            "approved_actions": [],
+            "reason": "no active envelope — operation not approved",
+        }
+    else:
+        approved = active.get("approved_actions", [])
+        permitted = aa.matches(approved, action)
+        result = {
+            "op_id": op_id, "action": action,
+            "envelope_id": active.get("envelope_id"),
+            "active": True, "permitted": permitted,
+            "approved_actions": approved,
+            "reason": (
+                "action matches approved_actions"
+                if permitted
+                else "action outside approved_actions — escalate or refuse"
+            ),
+        }
+
+    if json_mode:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        flag = "✓ permitted" if result["permitted"] else "✗ not permitted"
+        print(f"{flag}: {op_id} action={action!r}")
+        print(f"  reason: {result['reason']}")
+        if result["envelope_id"]:
+            print(f"  envelope: {result['envelope_id']}")
+        if result["approved_actions"]:
+            print(f"  approved actions ({len(result['approved_actions'])}):")
+            for a in result["approved_actions"]:
+                print(f"    - {a}")
+
+    sys.exit(0 if result["permitted"] else 1)
 
 
 def cmd_operation_revoke():
@@ -10062,6 +10217,7 @@ if __name__ == "__main__":
         "operation_show": cmd_operation_show,
         "operation_approve": cmd_operation_approve,
         "operation_revoke": cmd_operation_revoke,
+        "operation_envelope_verify": cmd_operation_envelope_verify,
         "run_record": cmd_run_record,
         "run_list": cmd_run_list,
         "incident_open": cmd_incident_open,

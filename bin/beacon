@@ -76,6 +76,7 @@ Operations:
   beacon operation show <op-id> [--json]
   beacon operation approve <op-id> --spec <doc-id> [--expires-at YYYY-MM-DD]  Mint T2 envelope from SPEC (ms-60)
   beacon operation revoke <op-id> [--envelope-id ENV] [--reason TEXT]         Invalidate the active envelope
+  beacon operation envelope verify <op-id> <action>                           Self-check: is action permitted by the active envelope?
   beacon run record -o <op-id> --batch <name> --status ok|warning|error --desc "..."
   beacon run list -o <op-id> [--json]
   beacon incident open "<title>" -o <op-id> [--desc "..."]
@@ -2139,6 +2140,30 @@ except ValueError as e:
                     BEACON_REASON="$reason" BEACON_JSON="$json_flag" \
                     python3 "$COMMANDS_PY" operation_revoke
                 ;;
+            envelope)
+                # beacon operation envelope verify <op-id> <action> [--json]
+                case "${3:-}" in
+                    verify)
+                        shift 3
+                        op_id="" action="" json_flag=""
+                        while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                --json) json_flag="1"; shift ;;
+                                *) if [[ -z "$op_id" ]]; then op_id="$1"
+                                   elif [[ -z "$action" ]]; then action="$1"
+                                   fi; shift ;;
+                            esac
+                        done
+                        BEACON_OPERATION_ID="$op_id" BEACON_ACTION="$action" \
+                            BEACON_JSON="$json_flag" \
+                            python3 "$COMMANDS_PY" operation_envelope_verify
+                        ;;
+                    *)
+                        echo "Usage: beacon operation envelope verify <op-id> <action> [--json]" >&2
+                        exit 1
+                        ;;
+                esac
+                ;;
             task)
                 case "${3:-}" in
                     add)
@@ -2204,6 +2229,7 @@ except ValueError as e:
                 echo "       beacon operation show <op-id> [--json]"
                 echo "       beacon operation approve <op-id> --spec <doc-id> [--expires-at YYYY-MM-DD] [--json]"
                 echo "       beacon operation revoke <op-id> [--envelope-id ENV] [--reason TEXT] [--json]"
+                echo "       beacon operation envelope verify <op-id> <action> [--json]"
                 echo "       beacon operation task add/done/list ..."
                 ;;
         esac
