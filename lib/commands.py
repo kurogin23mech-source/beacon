@@ -9751,6 +9751,11 @@ def cmd_bus_send():
 
     client, config = _get_api_client()
     project_id = _resolve_bus_project_id(config)  # e-1151: --project override
+    # e-1340 follow-up (= structural defense against the 2026-06-09 silent
+    # cross-project misroute incident): if --to points at a session that
+    # polls a different project than `project_id`, auto-route to that
+    # project. Loud stderr notice keeps the override auditable.
+    project_id = _validate_recipient_project(recipient, project_id, channel)
 
     # e-1290: envelope-by-default for CLI sends.
     #
@@ -10047,6 +10052,109 @@ def _resolve_bus_project_id(config: dict) -> str:
     if override:
         return override
     return config.get("project_id", "")
+
+
+def _validate_recipient_project(
+    recipient: str, target_project_id: str, channel: str,
+):
+    """Cross-project pre-flight for ``beacon bus send --to <recipient>``.
+
+    Today's dogfood (2026-06-09) surfaced a silent-misroute pattern: the
+    sender's CLI posts to its cwd's project bus, but the recipient is
+    polling a different project. The event is stored but never delivered.
+    Without this check, the only signal is the absence of a ``delivered``
+    receipt — a negative signal humans (and AI) routinely miss.
+
+    Resolution policy:
+      * Non-DM channels skip (broadcast semantics, no fixed recipient).
+      * Empty recipient skips (already warned about elsewhere).
+      * If the recipient is found in the target project's local directory
+        — pass through, no change.
+      * If found in a *different* local project — auto-route to that
+        project. Loud stderr warning so the routing decision is auditable.
+      * If not found in any local project — soft warn (might be a remote
+        bridge we can't see locally) but don't refuse.
+
+    Returns the project_id to actually use. May differ from
+    ``target_project_id`` when auto-routing.
+
+    Opt-outs (in this order):
+      * ``BEACON_BUS_SKIP_TO_CHECK=1`` — bypass entirely (CI / scripts
+        that have already validated routing).
+      * ``BEACON_BUS_NO_AUTO_ROUTE=1`` — keep the check, but refuse to
+        auto-route on mismatch (emits a hard error so the script breaks
+        instead of silently switching project).
+    """
+    if channel != "dm" or not recipient:
+        return target_project_id
+    if os.environ.get("BEACON_BUS_SKIP_TO_CHECK", "") == "1":
+        return target_project_id
+
+    # Import lazily so a missing dm_discover module (older install) just
+    # bypasses the check rather than breaking `bus send`.
+    try:
+        # Ensure beacon_cli is importable; pip / dev-clone layouts vary.
+        import importlib
+        helpers = importlib.import_module(
+            "beacon_cli.skills_helpers.dm_discover"
+        )
+    except Exception:
+        return target_project_id
+
+    try:
+        rows = helpers.discover_and_aggregate(healthy=False, since_min=10)
+    except Exception:
+        # Discovery itself failed (psutil missing / network hiccup). Fall
+        # back to no-op rather than refusing the send — defensive guard
+        # mustn't become a footgun for unrelated errors.
+        return target_project_id
+
+    same_project: dict | None = None
+    other_project: dict | None = None
+    for row in rows:
+        if row.get("session_id") != recipient:
+            continue
+        if row.get("project_id") == target_project_id:
+            same_project = row
+            break
+        if other_project is None:
+            other_project = row
+
+    if same_project is not None:
+        return target_project_id
+
+    if other_project is not None:
+        other_pid = other_project.get("project_id", "?")
+        if os.environ.get("BEACON_BUS_NO_AUTO_ROUTE", "") == "1":
+            print(
+                f"Error: recipient session {recipient!r} polls project "
+                f"{other_pid!r}, not the target {target_project_id!r}. "
+                f"Pass --project {other_pid} explicitly, or unset "
+                f"BEACON_BUS_NO_AUTO_ROUTE to let the send auto-route.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(
+            f"⚠ recipient session {recipient[:24]}… polls project "
+            f"{other_pid!r}, not the target {target_project_id!r}. "
+            f"Auto-routing this DM via --project {other_pid}. "
+            f"(Set BEACON_BUS_SKIP_TO_CHECK=1 to bypass this check, "
+            f"or BEACON_BUS_NO_AUTO_ROUTE=1 to make the mismatch a "
+            f"hard error.)",
+            file=sys.stderr,
+        )
+        return other_pid
+
+    # Not found in any locally-visible bridge. Could be a remote session
+    # (different machine) — we can't disprove that here. Soft warn only.
+    print(
+        f"⚠ recipient session {recipient[:24]}… is not visible in any "
+        f"locally-running bridge. Send proceeding against project "
+        f"{target_project_id!r} as-is; verify the receipt afterwards "
+        f"with `beacon bus status <event_id>`.",
+        file=sys.stderr,
+    )
+    return target_project_id
 
 
 def cmd_bus_directory():
