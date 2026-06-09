@@ -2162,6 +2162,16 @@ async function doSelectCloudProject(projectId) {
   state.retros = []; state.retroContent = null;
   state.activeTab = 'dashboard'; lastProjectJson = null;
   state.projectPath = 'cloud:' + projectId;
+  // ms-43 e-1023: reset search state on project switch so a query typed in
+  // project A doesn't silently filter project B.
+  state.searchQuery = '';
+  state.searchResults = null;
+  state.searchFacets = { type: {}, status: {}, priority: {}, scope: {} };
+  state.searchTotal = 0;
+  state.searchLoading = false;
+  state.searchTypeFilter = 'all';
+  const _searchInput = document.getElementById('search-input');
+  if (_searchInput) _searchInput.value = '';
   try {
     await loadProject();
     if (state.project) {
@@ -2189,6 +2199,16 @@ async function doSelectProject(path) {
     state.retros = []; state.retroContent = null;
     state.activeTab = 'dashboard'; lastProjectJson = null;
     state.projectPath = path;
+    // ms-43 e-1023: reset search state on project switch so a query typed in
+    // project A doesn't silently filter project B.
+    state.searchQuery = '';
+    state.searchResults = null;
+    state.searchFacets = { type: {}, status: {}, priority: {}, scope: {} };
+    state.searchTotal = 0;
+    state.searchLoading = false;
+    state.searchTypeFilter = 'all';
+    const _searchInput = document.getElementById('search-input');
+    if (_searchInput) _searchInput.value = '';
     await loadProject();
     if (state.project) {
       for (const ms of state.project.milestones || []) {
@@ -2908,6 +2928,7 @@ function renderShell(app) {
       <div class="footer-right">
         ${PLATFORM.getArchiveButtonHTML(p)}
         <button class="sort-toggle" data-action="export-json" style="font-size:0.65rem;">Export JSON</button>
+        ${state.serverVersion ? `<span title="Running Beacon server version (from /health)">Beacon server v${state.serverVersion.replace(/[<>"'&]/g, '')}</span>` : ''}
         <span>${state.lastUpdate ? formatTime(state.lastUpdate) : ''}</span>
       </div>
     </footer>
@@ -3301,10 +3322,10 @@ function renderDocumentsSection() {
   // search bar at the top of the shell; this section just helps users browse
   // a single scope at a time.
   const scopeFilter = state.documentsScopeFilter || '';
-  const order = ['core', 'spec', 'memo', 'report'];
+  const order = ['core', 'spec', 'memo', 'retro', 'report'];
   const grouped = {};
   for (const s of order) grouped[s] = [];
-  let scopeCounts = { core: 0, spec: 0, memo: 0, report: 0 };
+  let scopeCounts = { core: 0, spec: 0, memo: 0, retro: 0, report: 0 };
   for (const d of state.documents) {
     const s = d.scope || 'memo';
     scopeCounts[s] = (scopeCounts[s] || 0) + 1;
@@ -3312,7 +3333,7 @@ function renderDocumentsSection() {
     if (!scopeFilter || s === scopeFilter) grouped[s].push(d);
   }
   const totalMatches = Object.values(grouped).reduce((a, b) => a + b.length, 0);
-  const labels = { core: '\u2605 CORE', spec: '\u25CB SPEC', memo: '\u25CB MEMO', report: '\u25CB REPORT' };
+  const labels = { core: '\u2605 CORE', spec: '\u25CB SPEC', memo: '\u25CB MEMO', retro: '\u25CB RETRO', report: '\u25CB REPORT' };
 
   const scopeChip = (s) => {
     const c = scopeCounts[s] || 0;

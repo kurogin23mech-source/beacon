@@ -24,7 +24,7 @@ Beaconが想定するワークフローは**コミット駆動・マイルスト
 
 ### Key Features
 
-- **Always-visible dashboard** — tmux split-pane shows live progress alongside your working shell
+- **Always-visible dashboard** — Tauri Desktop App or Web UI shows live progress alongside your working shell
 - **Audit trail** — every commit and task is recorded under a milestone, making AI session handoffs transparent and human-auditable
 - **CLI-first design** — structured JSON output enables seamless integration with Claude Code Skills
 
@@ -32,7 +32,6 @@ Beaconが想定するワークフローは**コミット駆動・マイルスト
 
 - **Python 3.9+** (CLI core)
 - **Git** (for commit tracking and worktree dispatch)
-- *Optional:* tmux (for the curses dashboard on macOS/Linux) — not needed on Windows or with Tauri Desktop / Web UI
 
 ## Installation
 
@@ -72,30 +71,22 @@ beacon setup
 1. **Sign in** with Google (for cloud features)
 2. **Install** Claude Code Skills and hooks
 3. **Initialize** a new local project — or **join** an existing cloud project
-4. **Launch** the dashboard
+4. **Launch** the UI (Tauri Desktop App or Web UI)
 
 ### Path A: New local project
 
-Choose option `1` in step 3. The wizard prompts for a project name and objective, then launches the dashboard.
+Choose option `1` in step 3. The wizard prompts for a project name and objective, then shows your status and UI pointers.
 
 ```bash
 beacon setup
 # → Step 3: Choose [1] New local project
-# → Step 4: Launch dashboard? [Y]
+# → Step 4: Show status + UI pointers? [Y]
 beacon milestone add "First milestone"
 beacon milestone start ms-1
 ```
 
-The dashboard opens as a tmux split — your working shell on the right, live progress on the left:
-
-```
-+------------------+----------------------------------------+
-| Dashboard (33%)  |  Working Shell (67%)                   |
-| live progress    |  $ claude                              |
-| milestones       |                                        |
-| entries          |                                        |
-+------------------+----------------------------------------+
-```
+For live progress visualization, use the [Tauri Desktop App](#desktop-app) or [Web UI](https://beacon-ai.dev) (after `beacon cloud push`).
+The bare `beacon` command prints `beacon status` plus pointers to both front-ends.
 
 To push to cloud later for Web UI access and team collaboration:
 
@@ -125,7 +116,7 @@ beacon
 
 ### Desktop App (optional)
 
-The [Desktop App](#desktop-app) provides a native window for monitoring your project alongside your terminal — useful for keeping the dashboard visible without tmux.
+The [Desktop App](#desktop-app) provides a native window for monitoring your project alongside your terminal.
 
 ### Multi-session DM (preview)
 
@@ -182,7 +173,7 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 
 | Command | Description |
 |---------|-------------|
-| `beacon` | Launch tmux dashboard + shell / ダッシュボード起動 |
+| `beacon` | Show status + pointers to Tauri Desktop App / Web UI / ステータス+UIリンク表示 |
 | `beacon setup` | First-time setup wizard (auth + hooks + project) / 初回セットアップ |
 | `beacon init [--name n] [--objective o] [--storage local\|cloud]` | Initialize `.beacon/` (flags for non-interactive use) / プロジェクト作成 |
 | `beacon status [--json]` | Show project status / ステータス表示 |
@@ -368,20 +359,12 @@ opt-out source is active.
 
 ## Dashboard
 
-The curses-based dashboard runs in the left tmux pane and auto-refreshes when `.beacon/project.json` changes.
+Beacon's visual UI is split across two front-ends:
 
-**Keyboard shortcuts:**
-| Key | Action |
-|-----|--------|
-| `j` / `↓` | Move down / 下移動 |
-| `k` / `↑` | Move up / 上移動 |
-| `Enter` / `Space` | Expand/collapse milestone / 展開・折りたたみ |
-| `d` | Toggle done entries / 完了エントリの表示切替 |
-| `s` | Toggle summary expand / サマリーの展開・折りたたみ |
-| `D` | Toggle documents view / ドキュメントビューの切替 |
-| `r` | Toggle retro view / 振り返り表示の切替 |
-| `h` / `ESC` | Go back (in document detail) / 戻る |
-| `q` | Quit (closes tmux session) / 終了 |
+- **[Tauri Desktop App](#desktop-app)** — cross-platform native window for monitoring milestones, tasks, and entries.
+- **[Web UI](https://beacon-ai.dev)** — browser-based dashboard for cloud-linked projects (after `beacon cloud push`).
+
+The legacy curses dashboard (`lib/dashboard.py`, tmux split-pane) was retired in e-764 and archived to `.trash/lib-dashboard-py-e764/`. The bare `beacon` command now prints status plus pointers to the two supported UIs.
 
 ## Claude Code Integration
 

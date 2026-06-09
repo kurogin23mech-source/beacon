@@ -276,7 +276,16 @@ def _require_admin(user: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _get_role(data: dict, user: dict) -> str:
-    """Return user's role: 'owner', 'editor', 'viewer', or '' (no access)."""
+    """Return user's role: 'owner', 'editor', 'viewer', or '' (no access).
+
+    Internal: this is the role-evaluation primitive. Endpoints MUST NOT call
+    this directly — go through `_require_project_role(project_id, user,
+    allowed=...)` so the load-and-check pair stays atomic from the caller's
+    perspective. See CORE doc "認可判定は 1 か所に集中させる" (e-1257) and
+    e-1252/e-1254 for the history. The only sanctioned callers are
+    `_require_project_role`, `_require_write`, and `_require_owner` — all of
+    which are themselves centralized authorization gates.
+    """
     if not _auth_enabled:
         return "owner"
     uid = user.get("sub", "")
@@ -680,12 +689,17 @@ def get_project_version(project_id: str, user: dict = Depends(require_auth)):
     blank `tag` means the project hasn't started using version-rules yet —
     show nothing rather than a misleading "v?".
     """
-    data = db.get_project(project_id)
-    if not data:
-        raise HTTPException(status_code=404, detail="Project not found")
-    # Permission check — viewers are fine for read.
-    if _get_role(data, user) is None and not user.get("is_admin"):
-        raise HTTPException(status_code=403, detail="No access to this project")
+    # Permission check — viewers are fine for read, admins bypass membership.
+    # e-1257: route through _require_project_role so this endpoint can't drift
+    # away from the WS/REST authorization gate. Admin bypass is preserved by
+    # short-circuiting the membership check when user.is_admin is set.
+    if user.get("is_admin"):
+        try:
+            data = operations.load_project_consistent(project_id)
+        except LookupError:
+            raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    else:
+        data, _role = _require_project_role(project_id, user)
 
     pushes = data.get("pushes") or []
     # `pushes` ordering varies — sort by pushed_at to be safe.
@@ -726,9 +740,11 @@ def list_projects(include_archived: bool = False, user: dict = Depends(require_a
 @app.post("/api/projects/{project_id}/archive")
 def archive_project(project_id: str, user: dict = Depends(require_auth)):
     """Archive a project (soft delete — hidden from default listing)."""
+    # e-1257: owner-only gate via the centralized helper (404 if missing,
+    # 403 if not owner). Pre-check before the transaction mirrors the pattern
+    # used by envelope issuance (L2131) and other owner-gated mutations.
+    _require_project_role(project_id, user, allowed=("owner",))
     def op(data: dict):
-        if _get_role(data, user) != "owner":
-            raise HTTPException(status_code=403, detail="Only the project owner can archive")
         data["archived"] = True
         return data, {"status": "archived", "project_id": project_id}
     return operations.apply_operation(
@@ -739,9 +755,9 @@ def archive_project(project_id: str, user: dict = Depends(require_auth)):
 @app.post("/api/projects/{project_id}/unarchive")
 def unarchive_project(project_id: str, user: dict = Depends(require_auth)):
     """Restore an archived project."""
+    # e-1257: owner-only gate via the centralized helper. See archive_project.
+    _require_project_role(project_id, user, allowed=("owner",))
     def op(data: dict):
-        if _get_role(data, user) != "owner":
-            raise HTTPException(status_code=403, detail="Only the project owner can unarchive")
         data["archived"] = False
         return data, {"status": "unarchived", "project_id": project_id}
     return operations.apply_operation(
@@ -775,16 +791,14 @@ def migrate_project_to_v2(project_id: str,
       - Writes via `replace_project` (legacy whole-doc PUT) detect v2 and
         dispatch to `_replace_cloud_v2` which decomposes into subdocs.
     """
-    # Owner check before kicking off the transaction. Reading the meta doc
-    # is cheap (no milestones loaded) and works on both v1 and v2.
-    meta = db.get_project(project_id)
-    if meta is None:
-        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
-    if _get_role(meta, user) != "owner":
-        raise HTTPException(
-            status_code=403,
-            detail="Only the project owner can migrate schema",
-        )
+    # Owner check before kicking off the transaction.
+    # e-1257: route through the centralized helper. _require_project_role
+    # loads via load_project_consistent which hydrates milestones on v2, but
+    # this endpoint is invoked once per project (or returns "already_v2"
+    # immediately on v2), so the extra subcollection read is acceptable. The
+    # alternative — keeping db.get_project here — would re-fork the auth path
+    # and re-create the L687/L730 family of drift that ms-39 exists to close.
+    _require_project_role(project_id, user, allowed=("owner",))
 
     try:
         result = operations.migrate_v1_to_v2(project_id)
@@ -1864,8 +1878,17 @@ def list_sessions(
     # Always attach poll_health — backward-compat callers that ignore it lose
     # nothing, but /beacon-dm-send (and any other directory consumer) gets
     # the structured signal in one round-trip.
+    #
+    # Also stamp ``bridge: True/False`` (ms-54 e-1319): True iff a bridge
+    # poll loop has ever written ``last_poll_at`` on this session. This is
+    # the structural marker for "has a receive channel at all", distinct
+    # from poll_health.healthy which factors in age + shutdown. Callers
+    # that only want "would a DM have anywhere to land" (e.g. directory
+    # default view) can filter on this without re-implementing the
+    # last_poll_at presence check.
     for s in sessions:
         s["poll_health"] = _compute_poll_health(s, now_dt)
+        s["bridge"] = bool(s.get("last_poll_at"))
 
     if not (user_id or machine or agent or live_only or healthy_only):
         return sessions
@@ -2688,16 +2711,20 @@ def health():
     # actually reached the Cloud Run revision (e-953 AC 2): without this the
     # downstream deploy could "succeed" while still serving the old image.
     #
-    # Use the standalone beacon_cli/_version.py file — importing lib.commands
-    # transitively pulls peer modules (`from store import get_store` etc.)
-    # that bin/beacon normally places on sys.path; in the FastAPI runtime the
-    # uvicorn worker doesn't, so the import raises ModuleNotFoundError and
-    # /health silently reports "unknown" forever. Caught by the v0.9.0 dogfood
-    # (ms-52 e-960 finding).
+    # Resolve __version__ with fallback chain (e-1273):
+    #   1. beacon_cli._version — used in dev (editable install)
+    #   2. commands — works in the Cloud Run image, where Dockerfile copies
+    #      lib/ into PYTHONPATH but NOT beacon_cli/, so step 1 fails and the
+    #      previous implementation reported "unknown" forever (verified at
+    #      https://beacon-ai.dev/health on v0.25.0).
+    _beacon_version = "unknown"
     try:
-        from beacon_cli._version import __version__ as _beacon_version
+        from beacon_cli._version import __version__ as _beacon_version  # type: ignore
     except Exception:
-        _beacon_version = "unknown"
+        try:
+            from commands import __version__ as _beacon_version  # type: ignore
+        except Exception:
+            pass
     return {
         "status": "ok",
         "env": os.environ.get("BEACON_ENV", "dev"),
