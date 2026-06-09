@@ -2,6 +2,22 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.28.0] - 2026-06-09
+
+- Merge pull request #122 from kurogin23mech-source/ms-60-tier-2-envelope-spec-trigger-awake
+- feat(ms-54): structural cross-project DM pre-flight in `bus send` (ms-60 follow-up)
+- fix(ms-17): /beacon-dispatch subagent permission preflight (e-1221)
+- feat(ms-60): inbox autonomous action block + Skill budget gate (e-1384 / e-1340 Phase B)
+- feat(ms-60): operation autonomous wake + execute foundation (e-1340 Phase A)
+- docs(ms-60): document operation approve/revoke in README + cmd_help_json (e-1339 drift follow-up)
+- feat(ms-60): CLI for operation approve/revoke + show envelope section (e-1339 step 3+4)
+- feat(ms-60): server endpoints for operation envelope approve/revoke/list (e-1339 step 2)
+- feat(ms-60): approved_actions syntax module + tier-aware envelope wildcards (e-1339 step 1)
+- fix(ms-54): align CLI session_id with bus.mjs bridge via local claim file (e-1331 quick fix)
+- chore(ms-53): bump TrailNode capability to 2026-06-09.2 (v0.27.0)
+- docs(release): update README/CHANGELOG for v0.27.0
+- chore(release): bump formula to 0.27.0
+
 ## [v0.27.0] - 2026-06-09
 
 - feat(ms-54): session transparency in 4 + 1 layers (e-1369)
