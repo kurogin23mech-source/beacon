@@ -2908,6 +2908,7 @@ function renderShell(app) {
       <div class="footer-right">
         ${PLATFORM.getArchiveButtonHTML(p)}
         <button class="sort-toggle" data-action="export-json" style="font-size:0.65rem;">Export JSON</button>
+        ${state.serverVersion ? `<span title="Running Beacon server version (from /health)">Beacon server v${state.serverVersion.replace(/[<>"'&]/g, '')}</span>` : ''}
         <span>${state.lastUpdate ? formatTime(state.lastUpdate) : ''}</span>
       </div>
     </footer>
