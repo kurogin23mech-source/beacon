@@ -77,16 +77,16 @@ python3 -c "import json,sys; print(json.load(open('.beacon/cloud.json')).get('pr
 
 **v0.25.0 以降**: 同マシン上で動いている全 bridge を ps + lsof で列挙、各 cwd の `.beacon/cloud.json` から project_id を読み、全 project の bus directory を集約する。これで test-beacon のような cwd 以外のプロジェクトに居る session も候補に出る。
 
-Bash ツールで実行:
+Bash ツールで実行 (`PYTHONPATH` を beacon repo root に固定する — raw-source install で site-packages に beacon_cli が無い場合の ModuleNotFoundError を防ぐ):
 ```bash
-python3 -m beacon_cli.skills_helpers.dm_discover
+PYTHONPATH="$(dirname $(dirname $(realpath $(which beacon))))" python3 -m beacon_cli.skills_helpers.dm_discover
 ```
 
 JSON 配列が返る。各 session row は `project_id` field annotated 付き。空 (`[]`) の場合は同マシン上に cloud-mode の bridge が動いてないことを意味する → 後段の fallback に進む。
 
 ### Step 1a: fallback (discover module 不在 or 0 件)
 
-`python3 -m beacon_cli.skills_helpers.dm_discover` が ModuleNotFoundError 等で失敗、または 0 件で返った場合は、cwd の project だけ query する従来動作にフォールバック:
+`PYTHONPATH=... python3 -m beacon_cli.skills_helpers.dm_discover` が ModuleNotFoundError 等で失敗、または 0 件で返った場合は、cwd の project だけ query する従来動作にフォールバック:
 
 ```bash
 beacon bus directory --live --healthy --since-min 5 --json

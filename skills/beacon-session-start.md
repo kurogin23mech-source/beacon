@@ -307,6 +307,30 @@ PY
 
 この Step は **読み取り専用**。自動で `beacon channel install` を実行してはならない（session-start 全体の読み取り専用原則に従う）。
 
+## Step 1j: 前セッションの session log 読み込み（ms-43 e-1360）
+
+前セッション末で `/beacon-session-end` Skill が `beacon session end` で集約した session log には、**「次セッション最優先 / top of queue / 次にやること」セクションが summary 内に明文化されている**ことが多い。これは trigger より優先順位が高い (人間/AI が curate した継続意図そのもの)。
+
+Bash ツールで実行:
+```bash
+beacon session log list --json
+```
+
+JSON 配列の **最新エントリ 1 件** (`created_at` 降順 / 配列先頭) の `summary` フィールドを取得する。
+0 件 (= 新規プロジェクト or session-end 未実行) なら何もしない。
+
+`summary` テキストから、以下のキーワード/見出しを含むセクションを **AI が文脈で抽出** する:
+
+- 「次セッション最優先」「top of queue」「次にやること」「次の一手」
+- 「次の塊」「continue here」「next action」
+- 直後に箇条書き (1. / 2. / - / ▸) で並んでいる task / 作業項目
+
+抽出したものを **「session log 由来 next-action」リスト** として記憶する。これは Step 2.9 の「次の一手」決定ロジックの **最優先入力** になる。
+
+該当セクションが無い場合 (例: `"no entries"` だけの session log) は、このリストは空のまま次へ進む。
+
+この Step は **読み取り専用**。
+
 ## Step 2: アクティブMSの詳細取得
 
 Step 1a の結果から `status == "in_progress"` のマイルストーンを特定する。
@@ -584,15 +608,16 @@ Step 3 の出力末尾に「**次の一手**」を **AI が決定的に選ぶ** 
 
 1. **未解決 Incident がある** → `/beacon-incident-report` で close + report 作成
 2. **レビュー待ち PR がある** → `/review <pr_number>`
-3. **`beacon trigger check` で active なトリガーがある** → そのトリガーの推奨アクション
-4. **アクティブ MS に未消化タスクが 1 つ以上ある**
+3. **Step 1j で抽出した session log 由来 next-action がある** → その先頭項目を推奨アクションにする。**trigger より優先**。前セッションが意図的に積んだ次の塊を見落とさないため (2026-06-09 朝に実害発生、e-1360 で構造化)。
+4. **`beacon trigger check` で active なトリガーがある** → そのトリガーの推奨アクション
+5. **アクティブ MS に未消化タスクが 1 つ以上ある**
    - そのうち `priority == "highest"` があればそれを最優先
    - 次に `in_progress` 状態のタスク
    - 次に `assignee` が自分 (current member) のタスク
    - それも無ければ todo 状態の先頭タスク
-5. **アクティブ MS の SPEC が無い** → `/beacon-spec <ms-id>` で SPEC 作成
-6. **アクティブ MS が無い** → 「次のマイルストーンを決めましょう」(コンサルタントモード Step 2.5 と同じ)
-7. **どれも該当しない** → 「観察モード: 直近 retro を見直すか、cleanup 作業に着手するか」
+6. **アクティブ MS の SPEC が無い** → `/beacon-spec <ms-id>` で SPEC 作成
+7. **アクティブ MS が無い** → 「次のマイルストーンを決めましょう」(コンサルタントモード Step 2.5 と同じ)
+8. **どれも該当しない** → 「観察モード: 直近 retro を見直すか、cleanup 作業に着手するか」
 
 ### 出力フォーマット
 

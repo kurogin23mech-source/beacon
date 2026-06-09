@@ -162,12 +162,18 @@ Step 1 の情報を元に、以下の基準でサマリーを生成:
 ### 出力形式
 2-4文の日本語テキスト。
 
-## Step 4: サマリーの書き込み
+## Step 4: サマリーの書き込み (session log として永続化)
+
+`beacon summary "<text>"` は ms-57 e-1040 で **廃止** (CLI が ignored を返す)。後継は `beacon session end --summary "<text>"`。これは session log を upsert し、`summary` フィールドに引き継ぎ narrative を書き込む。次回の `/beacon-session-start` Step 1j がこの session log を読み「次セッション最優先 / top of queue / 次にやること」セクションを抽出する経路。
 
 Bash ツールで実行:
 ```bash
-beacon summary "<Step3のテキスト>"
+beacon session end --summary "<Step3のテキスト>"
 ```
+
+このコマンドは同時に session 中の notes / commits / PRs も session log に集約する。`beacon session log list` で確認可能。
+
+**重要**: Step 3 で生成したサマリーには、引き継ぎを次セッションが拾えるよう **「次セッション最優先」「次にやること」「top of queue」等の見出し** を含めること (session-start Step 1j の抽出ロジックがこのキーワードでセクションを切り出す)。
 
 ## Step 4.5: セッションメモのレビューと統合昇格
 
@@ -275,6 +281,6 @@ Active: [ms-id] [title] ([progress]%)
 ## 制約
 
 - データ取得は Bash ツール経由の beacon CLI のみ。project.json を直接読まない。
-- サマリーの書き込みは `beacon summary` コマンド経由のみ。
+- サマリーの書き込みは `beacon session end --summary "<text>"` 経由のみ (旧 `beacon summary "<text>"` は ms-57 e-1040 で廃止、ignored を返す)。
 - 未コミット変更がある場合、勝手にコミットしない。ユーザーに判断を委ねる。
 - `beacon note clear` はメモのレビュー後にのみ実行する。スキップしない。
