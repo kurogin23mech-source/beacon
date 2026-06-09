@@ -4572,6 +4572,17 @@ async function selectProject(projectId) {
   state.hiddenStatuses = new Set(['cancelled']);
   state.projectVersion = null;
   lastProjectJson = null;
+  // ms-43 e-1023: reset search state on project switch so a query typed in
+  // project A doesn't silently filter project B. Mirrors the Escape-key reset
+  // at the global keydown handler and the msId case in handleAction.
+  state.searchQuery = '';
+  state.searchResults = null;
+  state.searchTypeFilter = new Set();
+  if (state.searchFacets) state.searchFacets = { type: {}, status: {}, priority: {}, scope: {} };
+  if (typeof state.searchTotal !== 'undefined') state.searchTotal = 0;
+  state.searchLoading = false;
+  const _searchInput = document.getElementById('search-input');
+  if (_searchInput) _searchInput.value = '';
 
   // ms-43 e-1275: keep window.location.search in sync with the active project
   // so that Copy link / address bar reflect the project the user is actually
