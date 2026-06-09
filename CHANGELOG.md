@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.27.0] - 2026-06-09
+
+- feat(ms-54): session transparency in 4 + 1 layers (e-1369)
+- chore(ms-53): bump TrailNode capability version to 2026-06-09.1 (v0.26.0)
+- docs(release): update README/CHANGELOG for v0.26.0
+- chore(release): bump formula to 0.26.0
+
 ## [v0.26.0] - 2026-06-09
 
 - fix(ms-43): Skill drift fixes — session log read, summary path, dm-send PYTHONPATH (e-1360 + e-1364 + e-1362 short-term)
