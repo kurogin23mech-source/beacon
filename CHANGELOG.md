@@ -2,6 +2,45 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.26.0] - 2026-06-09
+
+- fix(ms-43): Skill drift fixes — session log read, summary path, dm-send PYTHONPATH (e-1360 + e-1364 + e-1362 short-term)
+- feat(ms-54): DM read receipt + directory email attribution (e-1348 + e-1349)
+- Merge pull request #121 from kurogin23mech-source/worktree-agent-acac8c87f3d98c8b0
+- Merge remote-tracking branch 'origin/main' into worktree-agent-acac8c87f3d98c8b0
+- Merge pull request #120 from kurogin23mech-source/worktree-agent-a423a1477ff2c7512
+- Merge remote-tracking branch 'origin/main' into worktree-agent-a423a1477ff2c7512
+- Merge pull request #119 from kurogin23mech-source/worktree-agent-aded8b6de59e28147
+- Merge remote-tracking branch 'origin/main' into worktree-agent-aded8b6de59e28147
+- Merge pull request #118 from kurogin23mech-source/worktree-agent-aa74255d527ef97b3
+- Merge remote-tracking branch 'origin/main' into worktree-agent-aa74255d527ef97b3
+- Merge pull request #117 from kurogin23mech-source/worktree-agent-a7444d64d05ceba72
+- Merge remote-tracking branch 'origin/main' into worktree-agent-a7444d64d05ceba72
+- Merge pull request #116 from kurogin23mech-source/worktree-agent-ad8a083d851515c3c
+- Merge remote-tracking branch 'origin/main' into worktree-agent-ad8a083d851515c3c
+- Merge pull request #115 from kurogin23mech-source/worktree-agent-a230f49e94281f3fc
+- Merge remote-tracking branch 'origin/main' into worktree-agent-a230f49e94281f3fc
+- Merge pull request #114 from kurogin23mech-source/worktree-agent-a4f9d65ebf4a08f18
+- Merge remote-tracking branch 'origin/main' into worktree-agent-a4f9d65ebf4a08f18
+- Merge pull request #113 from kurogin23mech-source/worktree-agent-abc3b4842f58001d7
+- Merge remote-tracking branch 'origin/main' into worktree-agent-abc3b4842f58001d7
+- Merge pull request #112 from kurogin23mech-source/worktree-agent-a33a6f112dd4333fc
+- Merge remote-tracking branch 'origin/main' into worktree-agent-a33a6f112dd4333fc
+- refactor(ms-54): heartbeat responsibility separation post Option C (e-1319)
+- refactor(ms-54): T5 allowlist drift prevention via cross-lang probe test (e-1306)
+- feat(ms-52): record version on release/deploy/push entries (e-1274)
+- chore(ms-4): archive legacy tmux/curses dashboard (e-764)
+- feat(ms-43): expose Beacon server version in /health + UI display (e-1273)
+- feat(ms-53): rewrite manifest to TrailNode declarative install schema (e-1329 a+b)
+- refactor(ms-39): unify auth checks via _require_project_role (e-1257)
+- feat(ms-44): pip-installable bclaude entry-point for Win/pip paths (e-1328)
+- fix(ms-43): reset search state on project switch (e-1023)
+- feat(ms-57): Tauri Rust binding for cloud_list_session_logs (e-1073)
+- feat(ms-43): add retro/report to Documents scope filter (e-1277)
+- chore(trailnode): bump capability version to 2026-06-08.3 (v0.25.0)
+- docs(release): update README/CHANGELOG for v0.25.0
+- chore(release): bump formula to 0.25.0
+
 ## [v0.25.0] - 2026-06-09
 
 - feat(ms-54): cross-project DM discovery + local-mode friendly error (e-1330)
