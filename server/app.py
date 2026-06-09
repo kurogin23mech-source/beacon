@@ -2711,16 +2711,20 @@ def health():
     # actually reached the Cloud Run revision (e-953 AC 2): without this the
     # downstream deploy could "succeed" while still serving the old image.
     #
-    # Use the standalone beacon_cli/_version.py file — importing lib.commands
-    # transitively pulls peer modules (`from store import get_store` etc.)
-    # that bin/beacon normally places on sys.path; in the FastAPI runtime the
-    # uvicorn worker doesn't, so the import raises ModuleNotFoundError and
-    # /health silently reports "unknown" forever. Caught by the v0.9.0 dogfood
-    # (ms-52 e-960 finding).
+    # Resolve __version__ with fallback chain (e-1273):
+    #   1. beacon_cli._version — used in dev (editable install)
+    #   2. commands — works in the Cloud Run image, where Dockerfile copies
+    #      lib/ into PYTHONPATH but NOT beacon_cli/, so step 1 fails and the
+    #      previous implementation reported "unknown" forever (verified at
+    #      https://beacon-ai.dev/health on v0.25.0).
+    _beacon_version = "unknown"
     try:
-        from beacon_cli._version import __version__ as _beacon_version
+        from beacon_cli._version import __version__ as _beacon_version  # type: ignore
     except Exception:
-        _beacon_version = "unknown"
+        try:
+            from commands import __version__ as _beacon_version  # type: ignore
+        except Exception:
+            pass
     return {
         "status": "ok",
         "env": os.environ.get("BEACON_ENV", "dev"),

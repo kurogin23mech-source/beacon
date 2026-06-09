@@ -1830,6 +1830,9 @@ let state = {
   project: null,
   expanded: new Set(),
   lastUpdate: null,
+  // e-1273: Beacon server version (from /health). Shown in footer so the
+  // running release can be cross-referenced to screen state. "" until fetched.
+  serverVersion: '',
   connected: false,
   error: null,
   activeTab: 'dashboard', // 'dashboard' | 'documents' | 'releases' | 'operations' | 'notes'
@@ -2622,6 +2625,7 @@ function renderShell(app) {
       <div class="footer-right">
         ${PLATFORM.getArchiveButtonHTML(p)}
         <button class="sort-toggle" data-action="export-json" style="font-size:0.65rem;">Export JSON</button>
+        ${state.serverVersion ? `<span title="Running Beacon server version (from /health)">Beacon server v${state.serverVersion.replace(/[<>"'&]/g, '')}</span>` : ''}
         <span>${state.lastUpdate ? formatTime(state.lastUpdate) : ''}</span>
       </div>
     </footer>
@@ -4853,7 +4857,27 @@ window.addEventListener('focus', _tryReconnect);
 
 // ---- Init ----
 
+// e-1273: fire-and-forget — display the running server version in the footer.
+// /health is unauthenticated, so this works on the login screen too. Any failure
+// (offline, network error) silently leaves serverVersion = '' and the footer
+// span just collapses.
+async function loadServerVersion() {
+  try {
+    const res = await fetch(`${API_BASE}/health`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data && typeof data.version === 'string' && data.version !== 'unknown') {
+      state.serverVersion = data.version;
+      // Re-render only if app shell is already mounted (login screen has its own DOM).
+      if (typeof render === 'function' && state.projectId) {
+        try { render(); } catch (_) { /* shell not ready yet — first init render() will pick it up */ }
+      }
+    }
+  } catch (_) { /* ignore */ }
+}
+
 async function init() {
+  loadServerVersion();  // non-blocking
   await loadAuthConfig();
   if (!isAuthenticated()) {
     function waitForGsi() {
