@@ -25,6 +25,8 @@ triggers:
 
 bus event 経由で起動した場合は **op_id / spec_doc_id を payload から抽出**、コマンド経由なら引数で受け取る。
 
+inbox hook (bin/beacon-bus-inbox-hook.py) は opt-in 済の operation-trigger event に対して `## AUTONOMOUS ACTION — operation autonomy active` という構造ブロックを inject の上段に出す (e-1340 Phase B / e-1384)。`op_id` / `spec_doc_id` / `trigger_name` がそこに既に取り出されているので、Skill は raw event を再解析せずこのブロックを起点にできる。
+
 ## 文章の書き方 (Beacon 全体の哲学)
 
 非開発者を含む読み手向けに書く。横文字は 3 段階 (固有名詞 OK / 技術概念は初出時に日本語注 / 一般概念は日本語化)。詳細は CORE doc `entry-writing-principle`。
@@ -109,7 +111,45 @@ action 表記は SPEC の `approved_actions` と同じ syntax で書く (`<verb>
 - 「e-456 task を done にする」→ `task done:e-456`
 - 「v0.21.x を deploy する」→ `deploy:v0.21.x`
 
-## Step 5: 結果記録 (run_record)
+## Step 4.5: budget gate 事前チェック (safe stop before refuse)
+
+`beacon bus send` の呼び出しは budget gate (e-1000) を消費する。autonomous loop で「枯渇に気付かず refuse を踏む」のは事故と区別しにくい (= log を読まないと違いが分からない)。**送信側 action を打つ前に毎回**残量を確認し、ゼロなら graceful 停止する。
+
+`beacon run record` と `beacon incident open` は **budget 対象外** (= 局所書き込みで bus を経由しない)。ただし audit context は消費するので、Step 5 / 5.5 で必要なものだけ呼ぶ。
+
+### 残量チェックの定型 (毎回これを実行)
+
+```bash
+cd "$PROJECT_DIR" && beacon bus budget show --json
+```
+
+返ってきた JSON の `remaining` を見る:
+
+- `remaining > 0` → `beacon bus send` を続けてよい。
+- `remaining == 0` または key が無い → **autonomous 経路はここで停止**。以下の降格 3 点セットを順に実行して終了する:
+
+```bash
+# 1. 部分実行状態を note に残す (= 人間が次セッションで拾える)
+cd "$PROJECT_DIR" && beacon note add \
+  "op-<op-id> autonomous run halted at SPEC step <step-name>: \
+recorded <what-was-done>, remaining <what-was-not>. \
+budget exhausted, manual continuation required."
+
+# 2. 低優先度 incident を起票 (= session-start surface に出る)
+cd "$PROJECT_DIR" && beacon incident open \
+  "budget exhausted during autonomous run, manual continuation needed" \
+  -o <op-id> \
+  --desc "SPEC step <step-name> までで budget gate が枯渇。run_record は \
+記録済。残りの action は人間レビュー後に再開してください: <remaining-actions>."
+
+# 3. これ以降の bus send / 他 action は呼ばない (= graceful stop)
+```
+
+**重要**: 上記 3 つを実行したら Skill は終了する。Step 5 (run_record) や Step 5.5 (incident open for error) は budget 対象外なので、もし「Step 5 まで進んでから budget 枯渇に気付いた」場合は **Step 5 を先に完了させてから** 降格 3 点セットに入ってよい (= 局所書き込みは autonomous 経路で完結する)。
+
+inject 側 (bus-inbox hook の AUTONOMOUS ACTION block) では budget 事前判定をしない。Skill の責務として閉じている。
+
+
 
 SPEC の「Run Record 記載項目」テンプレに沿って結果を書く:
 
