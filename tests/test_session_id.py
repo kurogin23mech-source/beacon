@@ -151,40 +151,58 @@ def test_corrupt_session_json_is_replaced(project_dir):
 
 
 # ---------------------------------------------------------------------------
-# Heartbeat
+# Heartbeat (deprecated path — see test_session_heartbeat_responsibility.py
+# for the post-e-1319 pure-getter contract)
 # ---------------------------------------------------------------------------
 
-def test_update_last_active_bumps_when_reusing(project_dir):
-    first = session.update_last_active()
-    time.sleep(1.05)  # ensure second-precision ISO timestamp advances
-    second = session.update_last_active()
+def test_update_last_active_does_not_bump_last_active(project_dir):
+    """ms-54 e-1319: update_last_active is now a deprecated no-op shim.
+
+    Pre-e-1319 it bumped ``last_active`` per call so the directory could see
+    a CLI session as live. Post Option C (PR #111) the bridge owns that
+    signal — a CLI bump only creates ambiguity. The function is retained as
+    a shim so external scripts importing the symbol keep working, but it
+    deliberately does NOT mutate last_active anymore.
+    """
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        first = session.update_last_active()
+        time.sleep(1.05)  # ensure second-precision ISO timestamp would advance
+        second = session.update_last_active()
     assert second["session_id"] == first["session_id"]
-    assert second["last_active"] >= first["last_active"]
-    assert second["last_active"] != first["last_active"], (
-        "heartbeat must bump last_active within the freshness window"
-    )
+    # last_active must NOT advance — bridge is the truth source now.
+    assert second["last_active"] == first["last_active"]
 
 
 def test_update_last_active_does_not_re_mint_within_window(project_dir):
-    first_id = session.update_last_active()["session_id"]
-    for _ in range(3):
-        assert session.update_last_active()["session_id"] == first_id
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        first_id = session.update_last_active()["session_id"]
+        for _ in range(3):
+            assert session.update_last_active()["session_id"] == first_id
 
 
 def test_update_last_active_persists_actor_snapshot(project_dir, monkeypatch):
-    """Once minted, the actor recorded in session.json stays stable across heartbeats.
+    """Once minted, the actor recorded in session.json stays stable across calls.
 
     Even if the environment that determines actor identity changes mid-session
-    (e.g. agent.json is rewritten), the heartbeat must not silently rewrite
-    the actor — that would defeat the purpose of session-level attribution.
+    (e.g. agent.json is rewritten), subsequent resolves must not silently
+    rewrite the actor — that would defeat the purpose of session-level
+    attribution. Post e-1319 update_last_active is a shim around the same
+    get_or_mint_session path, so the invariant is unchanged.
     """
-    first = session.update_last_active()
-    original_actor = dict(first["actor"])
-    # Simulate agent.json mutation mid-session: rewrite actor file.
-    (project_dir / ".beacon" / "agent.json").write_text(
-        json.dumps({"name": "different-agent"}), encoding="utf-8"
-    )
-    second = session.update_last_active()
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        first = session.update_last_active()
+        original_actor = dict(first["actor"])
+        # Simulate agent.json mutation mid-session: rewrite actor file.
+        (project_dir / ".beacon" / "agent.json").write_text(
+            json.dumps({"name": "different-agent"}), encoding="utf-8"
+        )
+        second = session.update_last_active()
     assert second["session_id"] == first["session_id"]
     assert second["actor"] == original_actor
 
@@ -318,7 +336,14 @@ def test_cloud_debounce_env_override(monkeypatch):
 
 
 def test_update_last_active_no_cloud_in_local_mode(project_dir, monkeypatch):
-    """Local mode must never call _cloud_sync — no network, no auth checks."""
+    """Local mode: update_last_active must never call _cloud_sync.
+
+    Post e-1319 this is now stronger than before: _cloud_sync is unreachable
+    from update_last_active in *any* mode (the heartbeat-side cloud sync was
+    moved into the bridge in PR #111). The test stays as a regression net —
+    if a future change accidentally re-introduces a CLI-side cloud write,
+    this catches it immediately.
+    """
     sentinel = {"called": 0}
 
     def _fake_sync(_payload):
@@ -326,102 +351,34 @@ def test_update_last_active_no_cloud_in_local_mode(project_dir, monkeypatch):
         return True
 
     monkeypatch.setattr(session, "_cloud_sync", _fake_sync)
-    session.update_last_active()
-    session.update_last_active()
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        session.update_last_active()
+        session.update_last_active()
     assert sentinel["called"] == 0
 
 
-def test_update_last_active_syncs_in_cloud_mode(project_dir, monkeypatch):
+def test_update_last_active_does_not_cloud_sync_post_e1319(project_dir, monkeypatch):
+    """ms-54 e-1319: cloud sync moved out of update_last_active.
+
+    Pre-e-1319 update_last_active triggered _cloud_sync in cloud mode; now
+    the bridge does that via PUT /sessions/{id} on every poll iteration.
+    This test pins the new contract: even with cloud.json present and
+    BEACON_CLOUD=1 forced, update_last_active calls zero _cloud_sync
+    invocations.
+    """
     _write_cloud_config(project_dir)
-    payloads = []
-
-    def _fake_sync(payload):
-        payloads.append(dict(payload))
-        return True
-
-    monkeypatch.setattr(session, "_cloud_sync", _fake_sync)
-    s = session.update_last_active()
-    assert len(payloads) == 1
-    assert payloads[0]["session_id"] == s["session_id"]
-    assert "cloud_synced_at" in _read_session_file(project_dir)
-
-
-def test_update_last_active_debounces_cloud_call(project_dir, monkeypatch):
-    """Within the debounce window, repeated heartbeats must NOT call the API."""
-    _write_cloud_config(project_dir)
-    monkeypatch.setenv("BEACON_SESSION_CLOUD_DEBOUNCE_SECONDS", "300")
+    monkeypatch.setenv("BEACON_CLOUD", "1")
     calls = []
     monkeypatch.setattr(session, "_cloud_sync", lambda p: (calls.append(1) or True))
 
-    session.update_last_active()  # first call → sync
-    session.update_last_active()  # second within debounce → no sync
-    session.update_last_active()  # third within debounce → no sync
-    assert len(calls) == 1
-
-
-def test_update_last_active_resyncs_when_debounce_elapsed(project_dir, monkeypatch):
-    _write_cloud_config(project_dir)
-    monkeypatch.setenv("BEACON_SESSION_CLOUD_DEBOUNCE_SECONDS", "60")
-    calls = []
-    monkeypatch.setattr(session, "_cloud_sync", lambda p: (calls.append(1) or True))
-
-    session.update_last_active()  # first sync
-    # Backdate cloud_synced_at to simulate elapsed debounce.
-    stored = _read_session_file(project_dir)
-    stored["cloud_synced_at"] = (
-        datetime.now(timezone.utc) - timedelta(seconds=120)
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
-    session.write_session(stored)
-    session.update_last_active()  # debounce elapsed → second sync
-    assert len(calls) == 2
-
-
-def test_cloud_sync_failure_does_not_set_synced_at(project_dir, monkeypatch):
-    """A failing cloud sync must not leave a stale cloud_synced_at marker —
-    otherwise subsequent heartbeats would silently skip the retry."""
-    _write_cloud_config(project_dir)
-    monkeypatch.setattr(session, "_cloud_sync", lambda p: False)
-    session.update_last_active()
-    stored = _read_session_file(project_dir)
-    assert "cloud_synced_at" not in stored
-
-
-def test_cloud_sync_failure_does_not_propagate(project_dir, monkeypatch):
-    """Even if _cloud_sync raises (e.g. broken auth import), update_last_active
-    must still succeed — heartbeat correctness must not depend on the network."""
-    _write_cloud_config(project_dir)
-
-    def _boom(_payload):
-        raise RuntimeError("simulated network failure")
-
-    monkeypatch.setattr(session, "_cloud_sync", _boom)
-    # _cloud_sync is the wrapper; the real impl swallows exceptions internally.
-    # Here we bypass it with one that raises — verify update_last_active is
-    # not robust to *that*. (Documents the contract: _cloud_sync must not
-    # raise; if it does, this test will fail and we'll know we broke the rule.)
-    with pytest.raises(RuntimeError):
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
         session.update_last_active()
-
-
-def test_cloud_sync_strips_local_only_fields(project_dir, monkeypatch):
-    """cloud_synced_at is a client-only debounce marker — never push it."""
-    _write_cloud_config(project_dir)
-    captured = {}
-
-    def _fake_sync(payload):
-        # Simulate the strip the real _cloud_sync does before client.upsert_session.
-        captured["body"] = {
-            k: v for k, v in payload.items()
-            if k not in session._LOCAL_ONLY_FIELDS and v is not None
-        }
-        return True
-
-    monkeypatch.setattr(session, "_cloud_sync", _fake_sync)
-    # Pre-populate cloud_synced_at with a clearly-old timestamp so the debounce
-    # check is deterministic regardless of the machine clock.
-    stored = session.get_or_mint_session()
-    stored.pop("minted", None)
-    stored["cloud_synced_at"] = "2020-01-01T00:00:00Z"
-    session.write_session(stored)
-    session.update_last_active()
-    assert "cloud_synced_at" not in captured["body"]
+        session.update_last_active()
+        session.update_last_active()
+    assert calls == [], (
+        "update_last_active must not cloud-sync post e-1319 — bridge owns that path"
+    )

@@ -54,23 +54,21 @@ beacon doctor 2>&1
 
 スコープMSが指定された場合、Step 1a のコマンドが変わる。
 
-## Step 0b: bus heartbeat (ms-54 e-1150)
+## Step 0b: bus heartbeat — 廃止 (ms-54 e-1319)
 
-Bash ツールで実行:
-```bash
-beacon session id > /dev/null 2>&1 || true
-```
+このステップは **何もしない**。
 
-これだけ。`beacon session id` は `lib/session.update_last_active()` を叩いて以下を起こす:
-- `.beacon/session.json` を mint / 更新 (last_active bump)
-- cloud mode なら sessions/ subcollection に push (debounce 内)
+以前は (e-1150) Bash で `beacon session id` を呼び `lib/session.update_last_active()` 経由で `.beacon/session.json.last_active` と cloud sessions/ subcollection を bump し、自セッションを `beacon bus directory --live` に visible にしていた。
 
-これにより:
-- 起動した session が `beacon bus directory --live` で discoverable になる
-- 同プロジェクトの他 session から DM を打つ宛先として現れる
-- channel/bus.mjs が起動時に走らせる経路と同じものを idempotent に補完 (channel 未 install の session でも heartbeat が成立)
+Option C (PR #111 / commit 78048b6) で **bridge の poll loop が真値源** になったため、CLI 側で重ねて書くと「どっちが真実か」あいまいになる。責務分離:
 
-失敗 (`.beacon/project.json` 不在等) しても無視。session-start 全体は止めない。
+- **mint + heartbeat = bridge**: poll iteration ごとに `last_active` + `last_poll_at` を stamp
+- **resolve = CLI**: `beacon session id` は pure getter (mint 1 回だけ、その後は read-only)
+- **lifecycle = `beacon session end`**: graceful close
+
+channel が未 install の session は bus directory に出ない — これは「receive 不可だから出ない」が正しい挙動。
+
+> Note: `beacon session id` 自体は今も呼べる (pure getter)。channel/bus.mjs が cold-start で session_id を materialise するために使う。
 
 ## Step 1: プロジェクト状態の取得（並列実行可）
 
