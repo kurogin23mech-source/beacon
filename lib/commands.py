@@ -8867,18 +8867,60 @@ def cmd_operation_list():
         print(f"{status_icon} {op['id']} \"{op.get('title', '')}\" [{op.get('schedule', {}).get('frequency', '')}]{last_run}{incident_info}")
 
 
+def _fetch_active_operation_envelope(op_id: str):
+    """Cloud-mode helper: fetch the active T2 envelope for ``op_id`` if any.
+
+    Returns ``None`` in local mode, on auth issues, or if the server is not
+    reachable. Used by ``cmd_operation_show`` for the envelope section and
+    by ``cmd_operation_revoke`` to default the envelope id to the active one.
+    """
+    if not _is_cloud_mode():
+        return None
+    try:
+        client, config = _get_api_client()
+        records = client.list_operation_envelopes(
+            config["project_id"], op_id, status="active"
+        )
+    except Exception:
+        return None
+    return records[0] if records else None
+
+
 def cmd_operation_show():
     op_id = os.environ.get("BEACON_OPERATION_ID", "")
     if not op_id:
         print("Error: operation id required")
         sys.exit(1)
     data = load_project()
+    json_mode = bool(os.environ.get("BEACON_JSON"))
     for op in data.get("operations", []):
         if op.get("id") == op_id:
-            if os.environ.get("BEACON_JSON"):
-                print(json.dumps(op, ensure_ascii=False))
+            # Augment with envelope record (cloud mode only).
+            active_env = _fetch_active_operation_envelope(op_id)
+            if json_mode:
+                payload = dict(op)
+                if active_env is not None:
+                    payload["active_envelope"] = active_env
+                print(json.dumps(payload, ensure_ascii=False))
             else:
                 print(f"{op['id']} \"{op.get('title', '')}\" [{op.get('status', '')}]")
+                if active_env:
+                    env = active_env.get("envelope", {})
+                    created = active_env.get("created_at", "")[:10]
+                    expires = env.get("expires_at", "")[:10]
+                    print(f"  Active envelope: {active_env.get('envelope_id', '')[:12]}…  "
+                          f"(issued {created} by {active_env.get('created_by', '')})")
+                    actions = active_env.get("approved_actions", [])
+                    if actions:
+                        print(f"    Approved actions:")
+                        for a in actions:
+                            print(f"      - {a}")
+                    if expires:
+                        print(f"    Expires: {expires}  (revoke to invalidate)")
+                else:
+                    print(f"  Envelope: none active  "
+                          f"(autonomous execution disabled — run "
+                          f"`beacon operation approve {op_id} --spec <doc-id>`)")
                 for e in op.get("entries", []):
                     if e.get("type") == "run_record":
                         icon = {"ok": "✓", "warning": "⚠", "error": "✗"}.get(e.get("status", ""), "?")
@@ -8889,6 +8931,116 @@ def cmd_operation_show():
             return
     print(f"Operation not found: {op_id}")
     sys.exit(1)
+
+
+def cmd_operation_approve():
+    """Mint a T2 envelope from a SPEC doc's ``approved_actions`` (ms-60 / e-1339).
+
+    Cloud-mode only. Local mode is rejected with a clear message — local
+    project.json doesn't have anywhere to put a server-signed envelope
+    record (the security model needs a server signing key).
+    """
+    op_id = os.environ.get("BEACON_OPERATION_ID", "")
+    spec_doc_id = os.environ.get("BEACON_SPEC_DOC_ID", "")
+    ttl_seconds_str = os.environ.get("BEACON_TTL_SECONDS", "")
+    json_mode = bool(os.environ.get("BEACON_JSON"))
+
+    if not op_id:
+        print("Error: operation id required", file=sys.stderr)
+        sys.exit(1)
+    if not spec_doc_id:
+        print("Error: --spec <doc-id> required (the SPEC doc whose "
+              "approved_actions to authorize)", file=sys.stderr)
+        sys.exit(1)
+
+    if not _is_cloud_mode():
+        print("Error: operation approve requires cloud mode "
+              "(envelope signing needs a server key). Run "
+              "'beacon cloud push' first.", file=sys.stderr)
+        sys.exit(1)
+
+    ttl_seconds = None
+    if ttl_seconds_str:
+        try:
+            ttl_seconds = int(ttl_seconds_str)
+            if ttl_seconds <= 0:
+                raise ValueError
+        except ValueError:
+            print(f"Error: --ttl-seconds must be a positive integer "
+                  f"(got {ttl_seconds_str!r})", file=sys.stderr)
+            sys.exit(1)
+
+    client, config = _get_api_client()
+    try:
+        record = client.operation_approve(
+            config["project_id"], op_id,
+            spec_doc_id=spec_doc_id, ttl_seconds=ttl_seconds,
+        )
+    except Exception as exc:
+        print(f"Error: approve failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(record, ensure_ascii=False))
+        return
+    env_id = record.get("envelope_id", "")
+    env = record.get("envelope", {})
+    actions = record.get("approved_actions", [])
+    print(f"Approved: {op_id}")
+    print(f"  envelope: {env_id}")
+    print(f"  spec doc: {record.get('spec_doc_id', '')}")
+    print(f"  issuer:   {record.get('created_by', '')}")
+    print(f"  expires:  {env.get('expires_at', '')[:10]}")
+    print(f"  approved actions ({len(actions)}):")
+    for a in actions:
+        print(f"    - {a}")
+
+
+def cmd_operation_revoke():
+    """Mark the active envelope on ``op_id`` as revoked (ms-60 / e-1339).
+
+    Without ``--envelope-id``, the current active envelope is revoked. If
+    no active envelope exists, this is an error so the caller doesn't
+    silently no-op.
+    """
+    op_id = os.environ.get("BEACON_OPERATION_ID", "")
+    envelope_id = os.environ.get("BEACON_ENVELOPE_ID", "")
+    reason = os.environ.get("BEACON_REASON", "") or "manual revoke"
+    json_mode = bool(os.environ.get("BEACON_JSON"))
+
+    if not op_id:
+        print("Error: operation id required", file=sys.stderr)
+        sys.exit(1)
+
+    if not _is_cloud_mode():
+        print("Error: operation revoke requires cloud mode.", file=sys.stderr)
+        sys.exit(1)
+
+    client, config = _get_api_client()
+    if not envelope_id:
+        active = _fetch_active_operation_envelope(op_id)
+        if not active:
+            print(f"Error: no active envelope for {op_id}. "
+                  f"Pass --envelope-id <id> to revoke a specific one, "
+                  f"or check `beacon operation show {op_id}`.",
+                  file=sys.stderr)
+            sys.exit(1)
+        envelope_id = active.get("envelope_id", "")
+
+    try:
+        record = client.operation_revoke(
+            config["project_id"], op_id, envelope_id, reason=reason,
+        )
+    except Exception as exc:
+        print(f"Error: revoke failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(record, ensure_ascii=False))
+        return
+    print(f"Revoked: {op_id} envelope {envelope_id}")
+    print(f"  reason: {record.get('revoke_reason', reason)}")
+    print(f"  revoked_at: {record.get('revoked_at', '')[:19]}")
 
 
 def cmd_run_record():
@@ -9906,6 +10058,8 @@ if __name__ == "__main__":
         "operation_task_list": cmd_operation_task_list,
         "operation_list": cmd_operation_list,
         "operation_show": cmd_operation_show,
+        "operation_approve": cmd_operation_approve,
+        "operation_revoke": cmd_operation_revoke,
         "run_record": cmd_run_record,
         "run_list": cmd_run_list,
         "incident_open": cmd_incident_open,
