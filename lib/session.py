@@ -305,31 +305,46 @@ def _cloud_sync(payload: dict) -> bool:
 
 
 def update_last_active() -> dict:
-    """Heartbeat: get-or-mint, bump ``last_active``, debounced cloud sync.
+    """DEPRECATED (ms-54 e-1319): CLI-side heartbeat is no longer the truth source.
 
-    Called once per CLI sub-command from the main dispatch. Failures must
-    not propagate (the caller wraps in try/except, and _cloud_sync swallows
-    its own errors).
+    Post Option C (PR #111 / commit 78048b6) the bridge's poll loop owns both
+    mint+heartbeat (``last_active``) and the receive-capability signal
+    (``last_poll_at``). A duplicate write from the CLI created ambiguity:
+    a session could heartbeat ``last_active`` (proves Python ran) while
+    the bridge poll loop was dead, leaving the directory advertising a
+    receiver that could not actually receive.
+
+    Now a thin shim around :func:`get_or_mint_session`: it still materialises
+    ``.beacon/session.json`` on first call so the bridge has an id to read,
+    but does NOT bump ``last_active`` or push to cloud sessions/. Use
+    :func:`get_session_id` (pure getter) for new code.
+
+    Kept callable so any external script that still imports the symbol does
+    not break — the side-effect removal is the structural fix.
     """
+    import warnings
+    warnings.warn(
+        "session.update_last_active is deprecated post Option C (ms-54 e-1319);"
+        " the bridge poll loop is the truth source for heartbeat. Use"
+        " session.get_session_id() for a pure read.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     session = get_or_mint_session()
-    minted = session.pop("minted", False)
-
-    if not minted:
-        session["last_active"] = _now_iso()
-
-    sync_attempted = False
-    if _is_cloud_mode() and _should_cloud_sync(session.get("cloud_synced_at", "")):
-        sync_attempted = True
-        if _cloud_sync(session):
-            session["cloud_synced_at"] = _now_iso()
-
-    if not minted or sync_attempted:
-        write_session(session)
+    session.pop("minted", None)
     return session
 
 
 def get_session_id() -> str:
-    """Convenience: return the current session_id (mints / adopts if needed)."""
+    """Pure getter: return the current session_id, minting once if needed.
+
+    Post Option C (ms-54 e-1319) this is the *only* CLI path for resolving
+    the session_id. No ``last_active`` bump, no cloud sync — the bridge owns
+    both signals via its poll loop (PR #111 / commit 78048b6).
+
+    First-call mint still writes ``.beacon/session.json`` because the bridge
+    reads that file at startup; subsequent calls are pure reads.
+    """
     return get_or_mint_session()["session_id"]
 
 
