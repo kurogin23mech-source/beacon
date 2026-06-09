@@ -3147,10 +3147,10 @@ function renderDocumentsSection() {
   // search bar at the top of the shell; this section just helps users browse
   // a single scope at a time.
   const scopeFilter = state.documentsScopeFilter || '';
-  const order = ['core', 'spec', 'memo', 'report'];
+  const order = ['core', 'spec', 'memo', 'retro', 'report'];
   const grouped = {};
   for (const s of order) grouped[s] = [];
-  let scopeCounts = { core: 0, spec: 0, memo: 0, report: 0 };
+  let scopeCounts = { core: 0, spec: 0, memo: 0, retro: 0, report: 0 };
   for (const d of state.documents) {
     const s = d.scope || 'memo';
     scopeCounts[s] = (scopeCounts[s] || 0) + 1;
@@ -3158,7 +3158,7 @@ function renderDocumentsSection() {
     if (!scopeFilter || s === scopeFilter) grouped[s].push(d);
   }
   const totalMatches = Object.values(grouped).reduce((a, b) => a + b.length, 0);
-  const labels = { core: '\u2605 CORE', spec: '\u25CB SPEC', memo: '\u25CB MEMO', report: '\u25CB REPORT' };
+  const labels = { core: '\u2605 CORE', spec: '\u25CB SPEC', memo: '\u25CB MEMO', retro: '\u25CB RETRO', report: '\u25CB REPORT' };
 
   const scopeChip = (s) => {
     const c = scopeCounts[s] || 0;
@@ -4576,6 +4576,17 @@ async function selectProject(projectId) {
   state.hiddenStatuses = new Set(['cancelled']);
   state.projectVersion = null;
   lastProjectJson = null;
+  // ms-43 e-1023: reset search state on project switch so a query typed in
+  // project A doesn't silently filter project B. Mirrors the Escape-key reset
+  // at the global keydown handler and the msId case in handleAction.
+  state.searchQuery = '';
+  state.searchResults = null;
+  state.searchTypeFilter = new Set();
+  if (state.searchFacets) state.searchFacets = { type: {}, status: {}, priority: {}, scope: {} };
+  if (typeof state.searchTotal !== 'undefined') state.searchTotal = 0;
+  state.searchLoading = false;
+  const _searchInput = document.getElementById('search-input');
+  if (_searchInput) _searchInput.value = '';
 
   // ms-43 e-1275: keep window.location.search in sync with the active project
   // so that Copy link / address bar reflect the project the user is actually

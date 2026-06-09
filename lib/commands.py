@@ -2651,19 +2651,22 @@ def cmd_session_log_show():
 
 
 def cmd_session_id():
-    """Print the current session_id (mint/adopt as side effect).
+    """Print the current session_id — pure getter, no heartbeat (ms-54 e-1319).
 
-    Public helper used by channel/bus.mjs and /beacon-session-start Skill to
-    ensure .beacon/session.json is materialised and bumped before the caller
-    reads it. ms-54 e-1150 / e-1152.
+    Post Option C (PR #111 / commit 78048b6) the bridge poll loop owns
+    mint+heartbeat (``last_active`` + ``last_poll_at``); CLI's role is
+    *resolve only*. This command still mints once on first call so the
+    bridge has an id to read from .beacon/session.json, but never bumps
+    ``last_active`` or pushes to cloud — keeping the bridge as the single
+    truth source for liveness.
+
+    Used by channel/bus.mjs at startup (cold-start session-id discovery)
+    and historically by /beacon-session-start Step 0b (now no-op post
+    e-1319). ms-54 e-1150 / e-1152 / e-1319.
     """
     try:
         import session as _session
-        # update_last_active() = get_or_mint_session() + bump last_active.
-        # Side effects: writes .beacon/session.json (mint path) and pushes to
-        # cloud sessions/ subcollection (cloud mode + debounce window).
-        result = _session.update_last_active()
-        sid = result.get("session_id", "")
+        sid = _session.get_session_id()
         if not sid:
             print("Error: failed to materialise session_id", file=sys.stderr)
             sys.exit(1)
@@ -9731,19 +9734,14 @@ if __name__ == "__main__":
         "doctor": cmd_doctor,
     }
     fn = commands.get(cmd)
-    # ms-57 e-1035: bump session heartbeat before dispatch so every CLI
-    # invocation refreshes .beacon/session.json. Skip commands that may run
-    # before .beacon/ exists or that have no project context.
-    if cmd not in {"init", "version", "help_json", "auth_login", "auth_logout", "auth_status"}:
-        try:
-            import session as _session
-            _session.update_last_active()
-        except Exception:
-            # Heartbeat must never break user-facing commands; surface only
-            # in BEACON_DEBUG mode so a regression is visible in testing.
-            if os.environ.get("BEACON_DEBUG") == "1":
-                import traceback as _tb
-                _tb.print_exc()
+    # ms-54 e-1319: the CLI-side heartbeat (formerly bumped here, ms-57 e-1035)
+    # has been retired. Post Option C (PR #111 / commit 78048b6) the bridge
+    # poll loop is the truth source for both ``last_active`` (proof of life)
+    # and ``last_poll_at`` (proof of receive-capability). A CLI-side write
+    # created ambiguity — a session could "heartbeat" while the bridge poll
+    # was dead, leaving DMs accumulating server-side unread. Resolve stays
+    # in the CLI (`beacon session id` pure getter); mint+heartbeat = bridge;
+    # lifecycle close = `beacon session end`.
     if fn:
         fn()
     else:
