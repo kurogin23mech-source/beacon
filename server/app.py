@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response, JSONResponse
 
+import approved_actions as approved_actions_mod
 import core
 import envelope as envelope_mod
 import firestore_client as db
@@ -625,6 +626,25 @@ class EnvelopeIssueRequest(BaseModel):
     ttl_seconds: int = 3600
 
 
+class OperationApproveRequest(BaseModel):
+    """Body for POST /api/projects/{id}/operations/{op_id}/envelopes (ms-60 / e-1339).
+
+    Mints a T2 envelope from a SPEC doc whose frontmatter declares
+    ``approved_actions``. The SPEC doc must already exist and be linked to
+    ``op_id`` (frontmatter ``operation: op-X``). ``ttl_seconds`` defaults to
+    "effectively forever" (30 years) per ms-60 SPEC § 設計方針 2 —
+    "SPEC 更新まで無期限" with explicit ``beacon operation revoke`` as the
+    escape valve.
+    """
+    spec_doc_id: str
+    ttl_seconds: int = 30 * 365 * 86400  # ~30 years; revoke is the kill-switch
+
+
+class OperationRevokeRequest(BaseModel):
+    """Body for POST /api/projects/{id}/operations/{op_id}/envelopes/{env_id}/revoke."""
+    reason: str = "manual revoke"
+
+
 class BusCursorAdvance(BaseModel):
     """Body for POST /api/projects/{project_id}/bus/cursors/{recipient_id}.
 
@@ -1223,6 +1243,177 @@ def purge_operation(project_id: str, op_id: str,
         project_id, op, op_name="operation.purge", actor=user.get("sub", ""),
         reason=body.reason,
     )
+
+
+# ---------------------------------------------------------------------------
+# Operation envelopes (ms-60 / e-1339)
+#
+# T2 envelope flow: SPEC doc declares approved_actions in YAML frontmatter →
+# beacon operation approve mints a server-signed envelope from that list →
+# the envelope record lives in projects/{id}/operation_envelopes/.
+# Re-approve auto-revokes any prior active envelope for the same op_id.
+# ---------------------------------------------------------------------------
+
+def _spec_doc_for_op(project_id: str, op_id: str, spec_doc_id: str) -> dict:
+    """Load a SPEC doc and verify it's bound to ``op_id``.
+
+    Raises HTTPException with a clear reason on any failure path so the CLI
+    can surface a useful message rather than a generic 500.
+    """
+    doc = db.get_document(project_id, spec_doc_id)
+    if not doc:
+        raise HTTPException(
+            status_code=404, detail=f"SPEC doc not found: {spec_doc_id}"
+        )
+    content = doc.get("content", "") or ""
+    declared_scope = db._extract_frontmatter_field(content, "scope")
+    if declared_scope != "spec":
+        raise HTTPException(
+            status_code=400,
+            detail=(f"doc {spec_doc_id} has scope={declared_scope!r}, "
+                    f"expected 'spec'"),
+        )
+    declared_op = db._extract_frontmatter_field(content, "operation")
+    if declared_op != op_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"SPEC doc {spec_doc_id} is bound to operation "
+                    f"{declared_op!r}, not {op_id!r}"),
+        )
+    return doc
+
+
+@app.post("/api/projects/{project_id}/operations/{op_id}/envelopes")
+def operation_approve(
+    project_id: str,
+    op_id: str,
+    body: OperationApproveRequest,
+    user: dict = Depends(require_auth),
+):
+    """Mint a T2 envelope from a SPEC doc's ``approved_actions``.
+
+    Steps:
+      1. Membership check (writer required — minting an authorization is a
+         privileged action).
+      2. Verify ``op_id`` exists on the project.
+      3. Load the SPEC doc, verify it's scope=spec and bound to ``op_id``.
+      4. Parse + validate ``approved_actions`` (last-segment wildcards OK
+         for T2 per ms-60 SPEC § 設計方針 4).
+      5. Issue server-signed envelope via envelope module.
+      6. Store record (auto-revoking any prior active envelope for the op).
+
+    Returns the stored envelope record.
+    """
+    data, _role = _require_project_role(
+        project_id, user, allowed=("owner", "editor")
+    )
+    if not core.find_operations(data, op_id):
+        raise HTTPException(
+            status_code=404, detail=f"operation not found: {op_id}"
+        )
+    spec_doc = _spec_doc_for_op(project_id, op_id, body.spec_doc_id)
+    content = spec_doc.get("content", "")
+    try:
+        raw_actions = approved_actions_mod.parse_spec_frontmatter(content)
+    except approved_actions_mod.ApprovedActionsError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if raw_actions is None:
+        raise HTTPException(
+            status_code=400,
+            detail=("SPEC doc has no `approved_actions` field in YAML "
+                    "frontmatter; nothing to authorize"),
+        )
+    if not raw_actions:
+        raise HTTPException(
+            status_code=400,
+            detail=("`approved_actions` is empty — an envelope with no "
+                    "authorized actions is meaningless"),
+        )
+    try:
+        approved_actions_mod.validate_actions(
+            raw_actions, allow_last_segment_wildcard=True
+        )
+    except approved_actions_mod.ApprovedActionsError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"invalid approved_actions: {exc}"
+        )
+
+    issuer = user.get("email") or user.get("sub") or "dev"
+    try:
+        envelope_dict = envelope_mod.issue_envelope(
+            tier=envelope_mod.TIER_T2,
+            issuer=issuer,
+            project_id=project_id,
+            scope=op_id,
+            actions_authorized=raw_actions,
+            ttl_seconds=body.ttl_seconds,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    record = db.issue_operation_envelope(
+        project_id=project_id,
+        op_id=op_id,
+        spec_doc_id=body.spec_doc_id,
+        spec_revision_id=spec_doc.get("revision_id", ""),
+        envelope_dict=envelope_dict,
+        approved_actions=raw_actions,
+        created_by=issuer,
+    )
+    return record
+
+
+@app.post(
+    "/api/projects/{project_id}/operations/{op_id}/envelopes/{envelope_id}/revoke"
+)
+def operation_revoke(
+    project_id: str,
+    op_id: str,
+    envelope_id: str,
+    body: OperationRevokeRequest,
+    user: dict = Depends(require_auth),
+):
+    """Mark an envelope as revoked. Idempotent.
+
+    ``op_id`` in the URL is verified against the stored record so a typo'd
+    URL can't revoke an envelope belonging to a different operation.
+    """
+    _require_project_role(project_id, user, allowed=("owner", "editor"))
+    existing = db.get_operation_envelope(project_id, envelope_id)
+    if not existing:
+        raise HTTPException(
+            status_code=404, detail=f"envelope not found: {envelope_id}"
+        )
+    if existing.get("op_id") != op_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"envelope {envelope_id} belongs to operation "
+                    f"{existing.get('op_id')!r}, not {op_id!r}"),
+        )
+    revoked_by = user.get("email") or user.get("sub") or "dev"
+    record = db.revoke_operation_envelope(
+        project_id, envelope_id, revoked_by, body.reason or "manual revoke"
+    )
+    return record
+
+
+@app.get("/api/projects/{project_id}/operations/{op_id}/envelopes")
+def operation_envelopes_list(
+    project_id: str,
+    op_id: str,
+    status: Optional[str] = Query(None, description="active | revoked"),
+    user: dict = Depends(require_auth),
+):
+    """List envelopes for an operation, newest first.
+
+    ``status`` filter is optional. Read-only members can list (audit visibility).
+    """
+    _load(project_id, user)  # membership check (any role)
+    if status and status not in ("active", "revoked"):
+        raise HTTPException(
+            status_code=400, detail="status must be 'active' or 'revoked'"
+        )
+    return db.list_operation_envelopes(project_id, op_id=op_id, status=status)
 
 
 # ---------------------------------------------------------------------------

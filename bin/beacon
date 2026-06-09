@@ -74,6 +74,9 @@ Operations:
   beacon operation purge <op-id> --reason <text> [--index <n>]   Hard delete an operation (recovery; e-863)
   beacon operation list [--json]
   beacon operation show <op-id> [--json]
+  beacon operation approve <op-id> --spec <doc-id> [--expires-at YYYY-MM-DD]  Mint T2 envelope from SPEC (ms-60)
+  beacon operation revoke <op-id> [--envelope-id ENV] [--reason TEXT]         Invalidate the active envelope
+  beacon operation envelope verify <op-id> <action>                           Self-check: is action permitted by the active envelope?
   beacon run record -o <op-id> --batch <name> --status ok|warning|error --desc "..."
   beacon run list -o <op-id> [--json]
   beacon incident open "<title>" -o <op-id> [--desc "..."]
@@ -2087,6 +2090,80 @@ case "${1:-}" in
             show)
                 BEACON_OPERATION_ID="${3:-}" BEACON_JSON="${4:+1}" python3 "$COMMANDS_PY" operation_show
                 ;;
+            approve)
+                # beacon operation approve <op-id> --spec <doc-id> [--expires-at YYYY-MM-DD | --ttl-seconds N] [--json]
+                shift 2
+                op_id="" spec="" expires_at="" ttl_seconds="" json_flag=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --spec) spec="${2:-}"; shift 2 ;;
+                        --expires-at) expires_at="${2:-}"; shift 2 ;;
+                        --ttl-seconds) ttl_seconds="${2:-}"; shift 2 ;;
+                        --json) json_flag="1"; shift ;;
+                        *) [[ -z "$op_id" ]] && op_id="$1"; shift ;;
+                    esac
+                done
+                # Translate --expires-at YYYY-MM-DD into ttl_seconds (the API expects seconds).
+                if [[ -n "$expires_at" && -z "$ttl_seconds" ]]; then
+                    if ! ttl_seconds=$(python3 -c "
+import datetime, sys
+try:
+    target = datetime.datetime.strptime('$expires_at', '%Y-%m-%d').replace(tzinfo=datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    delta = int((target - now).total_seconds())
+    if delta <= 0:
+        sys.exit('Error: --expires-at must be in the future')
+    print(delta)
+except ValueError as e:
+    sys.exit(f'Error: invalid --expires-at format (need YYYY-MM-DD): {e}')
+"); then
+                        exit 1
+                    fi
+                fi
+                BEACON_OPERATION_ID="$op_id" BEACON_SPEC_DOC_ID="$spec" \
+                    BEACON_TTL_SECONDS="$ttl_seconds" BEACON_JSON="$json_flag" \
+                    python3 "$COMMANDS_PY" operation_approve
+                ;;
+            revoke)
+                # beacon operation revoke <op-id> [--envelope-id ENV] [--reason TEXT] [--json]
+                shift 2
+                op_id="" env_id="" reason="" json_flag=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --envelope-id) env_id="${2:-}"; shift 2 ;;
+                        -r|--reason) reason="${2:-}"; shift 2 ;;
+                        --json) json_flag="1"; shift ;;
+                        *) [[ -z "$op_id" ]] && op_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_OPERATION_ID="$op_id" BEACON_ENVELOPE_ID="$env_id" \
+                    BEACON_REASON="$reason" BEACON_JSON="$json_flag" \
+                    python3 "$COMMANDS_PY" operation_revoke
+                ;;
+            envelope)
+                # beacon operation envelope verify <op-id> <action> [--json]
+                case "${3:-}" in
+                    verify)
+                        shift 3
+                        op_id="" action="" json_flag=""
+                        while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                --json) json_flag="1"; shift ;;
+                                *) if [[ -z "$op_id" ]]; then op_id="$1"
+                                   elif [[ -z "$action" ]]; then action="$1"
+                                   fi; shift ;;
+                            esac
+                        done
+                        BEACON_OPERATION_ID="$op_id" BEACON_ACTION="$action" \
+                            BEACON_JSON="$json_flag" \
+                            python3 "$COMMANDS_PY" operation_envelope_verify
+                        ;;
+                    *)
+                        echo "Usage: beacon operation envelope verify <op-id> <action> [--json]" >&2
+                        exit 1
+                        ;;
+                esac
+                ;;
             task)
                 case "${3:-}" in
                     add)
@@ -2150,6 +2227,9 @@ case "${1:-}" in
                 echo "       beacon operation close <op-id>"
                 echo "       beacon operation list [--json]"
                 echo "       beacon operation show <op-id> [--json]"
+                echo "       beacon operation approve <op-id> --spec <doc-id> [--expires-at YYYY-MM-DD] [--json]"
+                echo "       beacon operation revoke <op-id> [--envelope-id ENV] [--reason TEXT] [--json]"
+                echo "       beacon operation envelope verify <op-id> <action> [--json]"
                 echo "       beacon operation task add/done/list ..."
                 ;;
         esac

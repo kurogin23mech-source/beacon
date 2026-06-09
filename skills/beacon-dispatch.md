@@ -1,7 +1,7 @@
 ---
 name: beacon-dispatch
 description: 依存グラフから実行可能なマイルストーンを特定し、サブエージェントを並列起動する。マルチエージェント協奏のオーケストレーター。
-version: 0.2.0
+version: 0.3.0
 triggers:
   - /beacon-dispatch
   - サブエージェントを起動
@@ -21,6 +21,127 @@ Bash ツールで以下を実行:
 test -f .beacon/project.json && echo "OK" || echo "NO_BEACON"
 ```
 - `NO_BEACON` の場合、このSkillは何もせず終了する。
+
+## Step 0.5: サブエージェント permission preflight (e-1221 fix)
+
+> **背景**: サブエージェント harness はプロジェクトの `.claude/settings.local.json` の `permissions.allow` をそのまま継承する。親セッションで会話的に grant された permission は **継承されない**。`.worktrees/` 配下への Edit/Write が allowlist に無いと、サブエージェントは全 Edit/Write で permission-denied を食らい、**設計だけ綺麗に書いてコミット 0 で silently exit する**。2026-06-09 の TrailNode dogfood で 3/3 のサブエージェントがこのモードで失敗し、約 8 分の dispatch が無駄になった事象がある。
+>
+> **glob の罠**: `Edit(<repo-root>/**)` が allowlist にあっても、`<repo-root>/.worktrees/...` には **マッチしない**。`.worktrees/` は隠しディレクトリで、親 glob のワイルドカードはこれをスキップする。明示的に `Edit(<repo-root>/.worktrees/**)` と `Write(<repo-root>/.worktrees/**)` を列挙する必要がある。
+
+### 0.5a. プロジェクトルート絶対パス取得
+
+Bash ツールで:
+```bash
+pwd
+```
+の結果を `<abs-project-root>` として記録する。
+
+### 0.5b. allowlist の検査
+
+Bash ツールで以下を実行し、`.claude/settings.local.json` の `permissions.allow` に **両方のエントリ** が含まれているかを判定する:
+
+```bash
+python3 - <<'PY'
+import json, os, sys
+root = os.getcwd()
+path = os.path.join(root, ".claude", "settings.local.json")
+need_edit = f"Edit({root}/.worktrees/**)"
+need_write = f"Write({root}/.worktrees/**)"
+if not os.path.exists(path):
+    print(f"MISSING_FILE\nNEED:\n  {need_edit}\n  {need_write}")
+    sys.exit(0)
+try:
+    with open(path) as f:
+        data = json.load(f)
+except Exception as e:
+    print(f"MALFORMED_JSON: {e}\nNEED:\n  {need_edit}\n  {need_write}")
+    sys.exit(0)
+allow = data.get("permissions", {}).get("allow", [])
+if not isinstance(allow, list):
+    print(f"NO_ALLOW_KEY\nNEED:\n  {need_edit}\n  {need_write}")
+    sys.exit(0)
+has_edit = need_edit in allow
+has_write = need_write in allow
+if has_edit and has_write:
+    print("OK")
+else:
+    print("MISSING_ENTRIES")
+    if not has_edit:
+        print(f"  - {need_edit}")
+    if not has_write:
+        print(f"  - {need_write}")
+PY
+```
+
+### 0.5c. 判定と分岐
+
+- **`OK`**: 両方揃っている。そのまま Step 1 へ進む。
+- **それ以外** (`MISSING_FILE` / `MALFORMED_JSON` / `NO_ALLOW_KEY` / `MISSING_ENTRIES`): **dispatch をその場で停止** し、ユーザーに以下を提示する:
+
+```
+⚠ Dispatch 中断: サブエージェント permission preflight が失敗しました
+
+理由:
+  サブエージェントの harness はこのプロジェクトの .claude/settings.local.json の
+  permissions.allow をそのまま引き継ぎます。親セッションで会話的に grant された
+  permission は継承されません。`.worktrees/` 配下への Edit/Write が allowlist に
+  無いと、サブエージェントは全 Edit/Write で permission-denied になり、設計だけ
+  書いてコミット 0 で silently exit します (2026-06-09 e-1221 で実測)。
+
+glob の罠:
+  Edit(<root>/**) が allowlist にあっても `.worktrees/` は隠しディレクトリなので
+  ワイルドカードがスキップします。明示的に列挙が必要です。
+
+必要なエントリ:
+  - Edit(<abs-project-root>/.worktrees/**)
+  - Write(<abs-project-root>/.worktrees/**)
+
+現状: [Step 0.5b の python3 出力をそのまま貼る]
+
+このエントリを .claude/settings.local.json に追加してよいですか？ [yes / no]
+  yes → こちらで idempotent に追加して preflight を再実行します
+  no  → dispatch をキャンセルします (手動追加後にもう一度 /beacon-dispatch を呼んでください)
+```
+
+### 0.5d. ユーザー承認後の自動追加 (yes の場合のみ)
+
+ユーザーが明示的に `yes` と答えた場合のみ、Bash ツールで以下を実行する。冪等 — 既にあるエントリは追加しない:
+
+```bash
+python3 - <<'PY'
+import json, os
+root = os.getcwd()
+path = os.path.join(root, ".claude", "settings.local.json")
+need = [
+    f"Edit({root}/.worktrees/**)",
+    f"Write({root}/.worktrees/**)",
+]
+if os.path.exists(path):
+    with open(path) as f:
+        try:
+            data = json.load(f)
+        except Exception:
+            data = {}
+else:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    data = {}
+data.setdefault("permissions", {}).setdefault("allow", [])
+allow = data["permissions"]["allow"]
+added = []
+for entry in need:
+    if entry not in allow:
+        allow.append(entry)
+        added.append(entry)
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+print("ADDED:" if added else "NOOP (already present)")
+for a in added:
+    print(f"  + {a}")
+PY
+```
+
+追加後、**0.5b の検査を必ず再実行** して `OK` が返ることを確認する。`OK` が返ればそのまま Step 1 へ進む。再度失敗した場合は手動修正を依頼して dispatch をキャンセルする。
 
 ## Step 1: 依存グラフの取得
 

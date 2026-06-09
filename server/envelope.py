@@ -300,14 +300,19 @@ def issue_envelope(
         raise ValueError("T2 envelope requires non-empty scope")
     if tier in (TIER_T3, TIER_T5) and scope is not None:
         raise ValueError(f"{tier} envelope must have scope=None")
-    # Enforce enumeration discipline: every action must be a non-empty
-    # string with no wildcard characters. Empty list is allowed (e.g. T5
-    # ping-only).
-    for action in actions_authorized:
-        if not isinstance(action, str) or not action:
-            raise ValueError(f"action must be a non-empty string: {action!r}")
-        if "*" in action or "?" in action or "/" in action[:1]:
-            raise ValueError(f"action wildcards forbidden (enumerate): {action!r}")
+    # Enforce enumeration discipline. T1/T3/T5 require strict enumeration
+    # (no wildcards). T2 (Operation scope) allows last-segment wildcards per
+    # ms-60 SPEC § 設計方針 4 — the SPEC author has documented the subscope
+    # contract in the approve flow, so "extract:profile:*" is meaningful.
+    # See server/approved_actions.py for the syntax grammar.
+    from approved_actions import ApprovedActionsError, validate_actions
+    try:
+        validate_actions(
+            actions_authorized,
+            allow_last_segment_wildcard=(tier == TIER_T2),
+        )
+    except ApprovedActionsError as exc:
+        raise ValueError(str(exc)) from exc
 
     issued_at = _now_iso()
     expires_at = _plus_seconds_iso(ttl_seconds)

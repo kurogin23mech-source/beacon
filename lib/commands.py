@@ -4763,6 +4763,7 @@ def _auto_fire_operation_triggers():
         log_source = op.get("log_source", op_id)
         # Find linked SPEC doc for this operation
         spec_ref = ""
+        spec_doc_id = ""
         try:
             docs_dir = _get_docs_dir()
             if os.path.isdir(docs_dir):
@@ -4771,7 +4772,8 @@ def _auto_fire_operation_triggers():
                         continue
                     doc = _read_local_doc(os.path.join(docs_dir, fname))
                     if doc.get("operation") == op_id and doc.get("scope") == "spec":
-                        spec_ref = f" (doc: {doc['doc_id']} 参照)"
+                        spec_doc_id = doc["doc_id"]
+                        spec_ref = f" (doc: {spec_doc_id} 参照)"
                         break
         except Exception:
             pass
@@ -4784,6 +4786,12 @@ def _auto_fire_operation_triggers():
         with open(trigger_path, "w", encoding="utf-8") as f:
             json.dump(trigger_data, f, ensure_ascii=False)
             f.write("\n")
+        # ms-60 / e-1340: also mirror onto the bus so AI sessions subscribed
+        # via the inbox hook can autonomously run `/beacon-operation-execute`.
+        # Channel "operation-trigger" + delivery="auto-execute" is the autonomous
+        # path; the inbox hook downgrades to propose-to-ai unless the channel
+        # is in bus_auto_execute_channels (opt-in).
+        _push_operation_trigger_to_bus(op_id, log_source, trigger_data, spec_doc_id)
 
 
 def cmd_trigger_fire():
@@ -4860,6 +4868,59 @@ def _push_trigger_to_bus(trigger_data: dict) -> None:
         # without polluting normal CLI output.
         sys.stderr.write(
             f"[beacon] trigger bus mirror failed silently: "
+            f"{type(exc).__name__}: {exc}\n"
+        )
+
+
+def _push_operation_trigger_to_bus(op_id: str, log_source: str,
+                                   trigger_data: dict,
+                                   spec_doc_id: str = "") -> None:
+    """Mirror an operation-check trigger onto the bus (ms-60 / e-1340).
+
+    Distinct from ``_push_trigger_to_bus`` because operation triggers carry
+    structured fields the autonomous Skill needs (op_id, spec_doc_id), and
+    they ride a dedicated channel so the auto-execute allowlist can opt in
+    to operation autonomy without arming every other trigger source.
+
+    Channel ``"operation-trigger"`` + delivery ``"auto-execute"`` means: a
+    project that has opted in (``beacon bus auto-execute add --channel
+    operation-trigger``) lets the inbox hook run ``/beacon-operation-execute``
+    without human review. Without opt-in, the event is downgraded to
+    ``propose-to-ai`` and surfaces in the AI inbox for human review.
+    Best-effort — failures don't break the local trigger file write.
+    """
+    try:
+        config_path = _get_cloud_config_path()
+        if not os.path.exists(config_path):
+            return
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        project_id = config.get("project_id")
+        if not project_id:
+            return
+        from auth import load_credentials
+        creds = load_credentials()
+        if creds is None:
+            return
+        from api_client import ApiClient
+        api_url = config.get("api_url", DEFAULT_API_URL)
+        client = ApiClient(api_url, _extract_token(creds))
+        client.post_bus_event(
+            project_id, "operation-trigger",
+            sender_session_id="",
+            payload={
+                "op_id": op_id,
+                "log_source": log_source,
+                "spec_doc_id": spec_doc_id,
+                "trigger_name": trigger_data.get("name", ""),
+                "message": trigger_data.get("message", ""),
+                "created_at": trigger_data.get("created_at", ""),
+            },
+            delivery="auto-execute",
+        )
+    except Exception as exc:
+        sys.stderr.write(
+            f"[beacon] operation-trigger bus mirror failed silently: "
             f"{type(exc).__name__}: {exc}\n"
         )
 
@@ -8661,6 +8722,9 @@ def cmd_help_json():
         {"command": "beacon milestone purge <id> --reason <text>", "flags": ["--index <n>", "--json"], "description": "Hard-delete a milestone record (recovery for duplicate-ID corruption; Issue #14)"},
         {"command": "beacon entry purge <e-id> --reason <text>", "flags": ["--index <n>", "--json"], "description": "Hard-delete an entry record (recovery for duplicate-ID corruption; e-863)"},
         {"command": "beacon operation purge <op-id> --reason <text>", "flags": ["--index <n>", "--json"], "description": "Hard-delete an operation record (recovery for duplicate-ID corruption; e-863)"},
+        {"command": "beacon operation approve <op-id> --spec <doc-id>", "flags": ["--expires-at YYYY-MM-DD", "--ttl-seconds N", "--json"], "description": "Mint T2 envelope from SPEC doc's approved_actions list (ms-60 / e-1339)"},
+        {"command": "beacon operation revoke <op-id>", "flags": ["--envelope-id ENV", "--reason TEXT", "--json"], "description": "Invalidate the active T2 envelope (auto-picks active if --envelope-id omitted)"},
+        {"command": "beacon operation envelope verify <op-id> <action>", "flags": ["--json"], "description": "AI self-check: is <action> permitted by the active envelope's approved_actions? (ms-60 / e-1340)"},
         {"command": "beacon milestone graph", "flags": ["--json"], "description": "Show dependency graph"},
         {"command": "beacon task add <desc>", "flags": ["-m <ms-id>"], "description": "Add a task to a milestone"},
         {"command": "beacon task done <entry-id>", "flags": [], "description": "Mark task as done"},
@@ -8867,18 +8931,60 @@ def cmd_operation_list():
         print(f"{status_icon} {op['id']} \"{op.get('title', '')}\" [{op.get('schedule', {}).get('frequency', '')}]{last_run}{incident_info}")
 
 
+def _fetch_active_operation_envelope(op_id: str):
+    """Cloud-mode helper: fetch the active T2 envelope for ``op_id`` if any.
+
+    Returns ``None`` in local mode, on auth issues, or if the server is not
+    reachable. Used by ``cmd_operation_show`` for the envelope section and
+    by ``cmd_operation_revoke`` to default the envelope id to the active one.
+    """
+    if not _is_cloud_mode():
+        return None
+    try:
+        client, config = _get_api_client()
+        records = client.list_operation_envelopes(
+            config["project_id"], op_id, status="active"
+        )
+    except Exception:
+        return None
+    return records[0] if records else None
+
+
 def cmd_operation_show():
     op_id = os.environ.get("BEACON_OPERATION_ID", "")
     if not op_id:
         print("Error: operation id required")
         sys.exit(1)
     data = load_project()
+    json_mode = bool(os.environ.get("BEACON_JSON"))
     for op in data.get("operations", []):
         if op.get("id") == op_id:
-            if os.environ.get("BEACON_JSON"):
-                print(json.dumps(op, ensure_ascii=False))
+            # Augment with envelope record (cloud mode only).
+            active_env = _fetch_active_operation_envelope(op_id)
+            if json_mode:
+                payload = dict(op)
+                if active_env is not None:
+                    payload["active_envelope"] = active_env
+                print(json.dumps(payload, ensure_ascii=False))
             else:
                 print(f"{op['id']} \"{op.get('title', '')}\" [{op.get('status', '')}]")
+                if active_env:
+                    env = active_env.get("envelope", {})
+                    created = active_env.get("created_at", "")[:10]
+                    expires = env.get("expires_at", "")[:10]
+                    print(f"  Active envelope: {active_env.get('envelope_id', '')[:12]}…  "
+                          f"(issued {created} by {active_env.get('created_by', '')})")
+                    actions = active_env.get("approved_actions", [])
+                    if actions:
+                        print(f"    Approved actions:")
+                        for a in actions:
+                            print(f"      - {a}")
+                    if expires:
+                        print(f"    Expires: {expires}  (revoke to invalidate)")
+                else:
+                    print(f"  Envelope: none active  "
+                          f"(autonomous execution disabled — run "
+                          f"`beacon operation approve {op_id} --spec <doc-id>`)")
                 for e in op.get("entries", []):
                     if e.get("type") == "run_record":
                         icon = {"ok": "✓", "warning": "⚠", "error": "✗"}.get(e.get("status", ""), "?")
@@ -8889,6 +8995,209 @@ def cmd_operation_show():
             return
     print(f"Operation not found: {op_id}")
     sys.exit(1)
+
+
+def cmd_operation_approve():
+    """Mint a T2 envelope from a SPEC doc's ``approved_actions`` (ms-60 / e-1339).
+
+    Cloud-mode only. Local mode is rejected with a clear message — local
+    project.json doesn't have anywhere to put a server-signed envelope
+    record (the security model needs a server signing key).
+    """
+    op_id = os.environ.get("BEACON_OPERATION_ID", "")
+    spec_doc_id = os.environ.get("BEACON_SPEC_DOC_ID", "")
+    ttl_seconds_str = os.environ.get("BEACON_TTL_SECONDS", "")
+    json_mode = bool(os.environ.get("BEACON_JSON"))
+
+    if not op_id:
+        print("Error: operation id required", file=sys.stderr)
+        sys.exit(1)
+    if not spec_doc_id:
+        print("Error: --spec <doc-id> required (the SPEC doc whose "
+              "approved_actions to authorize)", file=sys.stderr)
+        sys.exit(1)
+
+    if not _is_cloud_mode():
+        print("Error: operation approve requires cloud mode "
+              "(envelope signing needs a server key). Run "
+              "'beacon cloud push' first.", file=sys.stderr)
+        sys.exit(1)
+
+    ttl_seconds = None
+    if ttl_seconds_str:
+        try:
+            ttl_seconds = int(ttl_seconds_str)
+            if ttl_seconds <= 0:
+                raise ValueError
+        except ValueError:
+            print(f"Error: --ttl-seconds must be a positive integer "
+                  f"(got {ttl_seconds_str!r})", file=sys.stderr)
+            sys.exit(1)
+
+    client, config = _get_api_client()
+    try:
+        record = client.operation_approve(
+            config["project_id"], op_id,
+            spec_doc_id=spec_doc_id, ttl_seconds=ttl_seconds,
+        )
+    except Exception as exc:
+        print(f"Error: approve failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(record, ensure_ascii=False))
+        return
+    env_id = record.get("envelope_id", "")
+    env = record.get("envelope", {})
+    actions = record.get("approved_actions", [])
+    print(f"Approved: {op_id}")
+    print(f"  envelope: {env_id}")
+    print(f"  spec doc: {record.get('spec_doc_id', '')}")
+    print(f"  issuer:   {record.get('created_by', '')}")
+    print(f"  expires:  {env.get('expires_at', '')[:10]}")
+    print(f"  approved actions ({len(actions)}):")
+    for a in actions:
+        print(f"    - {a}")
+
+
+def cmd_operation_envelope_verify():
+    """Check whether a requested action is permitted by the active envelope.
+
+    ms-60 / e-1340 — the AI self-check primitive. Called by the
+    ``/beacon-operation-execute`` Skill before running each action.
+
+    Output (json mode):
+      {"op_id": ..., "action": ..., "envelope_id": ...|null,
+       "active": bool, "permitted": bool,
+       "approved_actions": [...], "reason": "..."}
+
+    Exit codes:
+      0 — permitted (active envelope + action matches approved_actions)
+      1 — not permitted (no active envelope, or action outside scope)
+      2 — usage / cloud error
+
+    Designed to be easy to call from a Skill: ``beacon operation envelope
+    verify op-X "extract:profile:user-1" --json`` returns a one-shot decision.
+    """
+    op_id = os.environ.get("BEACON_OPERATION_ID", "")
+    action = os.environ.get("BEACON_ACTION", "")
+    json_mode = bool(os.environ.get("BEACON_JSON"))
+
+    if not op_id:
+        print("Error: operation id required", file=sys.stderr)
+        sys.exit(2)
+    if not action:
+        print("Error: action required (e.g. 'extract:profile:user-1')",
+              file=sys.stderr)
+        sys.exit(2)
+    if not _is_cloud_mode():
+        print("Error: envelope verify requires cloud mode.", file=sys.stderr)
+        sys.exit(2)
+
+    # Reuse server/approved_actions matcher as single source of truth.
+    sys.path.insert(
+        0, os.path.join(os.path.dirname(__file__), "..", "server")
+    )
+    try:
+        import approved_actions as aa
+    except ImportError as exc:
+        print(f"Error: cannot load approved_actions module: {exc}",
+              file=sys.stderr)
+        sys.exit(2)
+
+    try:
+        client, config = _get_api_client()
+        records = client.list_operation_envelopes(
+            config["project_id"], op_id, status="active"
+        )
+    except Exception as exc:
+        print(f"Error: cannot fetch envelope: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    active = records[0] if records else None
+    if active is None:
+        result = {
+            "op_id": op_id, "action": action,
+            "envelope_id": None, "active": False, "permitted": False,
+            "approved_actions": [],
+            "reason": "no active envelope — operation not approved",
+        }
+    else:
+        approved = active.get("approved_actions", [])
+        permitted = aa.matches(approved, action)
+        result = {
+            "op_id": op_id, "action": action,
+            "envelope_id": active.get("envelope_id"),
+            "active": True, "permitted": permitted,
+            "approved_actions": approved,
+            "reason": (
+                "action matches approved_actions"
+                if permitted
+                else "action outside approved_actions — escalate or refuse"
+            ),
+        }
+
+    if json_mode:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        flag = "✓ permitted" if result["permitted"] else "✗ not permitted"
+        print(f"{flag}: {op_id} action={action!r}")
+        print(f"  reason: {result['reason']}")
+        if result["envelope_id"]:
+            print(f"  envelope: {result['envelope_id']}")
+        if result["approved_actions"]:
+            print(f"  approved actions ({len(result['approved_actions'])}):")
+            for a in result["approved_actions"]:
+                print(f"    - {a}")
+
+    sys.exit(0 if result["permitted"] else 1)
+
+
+def cmd_operation_revoke():
+    """Mark the active envelope on ``op_id`` as revoked (ms-60 / e-1339).
+
+    Without ``--envelope-id``, the current active envelope is revoked. If
+    no active envelope exists, this is an error so the caller doesn't
+    silently no-op.
+    """
+    op_id = os.environ.get("BEACON_OPERATION_ID", "")
+    envelope_id = os.environ.get("BEACON_ENVELOPE_ID", "")
+    reason = os.environ.get("BEACON_REASON", "") or "manual revoke"
+    json_mode = bool(os.environ.get("BEACON_JSON"))
+
+    if not op_id:
+        print("Error: operation id required", file=sys.stderr)
+        sys.exit(1)
+
+    if not _is_cloud_mode():
+        print("Error: operation revoke requires cloud mode.", file=sys.stderr)
+        sys.exit(1)
+
+    client, config = _get_api_client()
+    if not envelope_id:
+        active = _fetch_active_operation_envelope(op_id)
+        if not active:
+            print(f"Error: no active envelope for {op_id}. "
+                  f"Pass --envelope-id <id> to revoke a specific one, "
+                  f"or check `beacon operation show {op_id}`.",
+                  file=sys.stderr)
+            sys.exit(1)
+        envelope_id = active.get("envelope_id", "")
+
+    try:
+        record = client.operation_revoke(
+            config["project_id"], op_id, envelope_id, reason=reason,
+        )
+    except Exception as exc:
+        print(f"Error: revoke failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(record, ensure_ascii=False))
+        return
+    print(f"Revoked: {op_id} envelope {envelope_id}")
+    print(f"  reason: {record.get('revoke_reason', reason)}")
+    print(f"  revoked_at: {record.get('revoked_at', '')[:19]}")
 
 
 def cmd_run_record():
@@ -9442,6 +9751,11 @@ def cmd_bus_send():
 
     client, config = _get_api_client()
     project_id = _resolve_bus_project_id(config)  # e-1151: --project override
+    # e-1340 follow-up (= structural defense against the 2026-06-09 silent
+    # cross-project misroute incident): if --to points at a session that
+    # polls a different project than `project_id`, auto-route to that
+    # project. Loud stderr notice keeps the override auditable.
+    project_id = _validate_recipient_project(recipient, project_id, channel)
 
     # e-1290: envelope-by-default for CLI sends.
     #
@@ -9740,6 +10054,109 @@ def _resolve_bus_project_id(config: dict) -> str:
     return config.get("project_id", "")
 
 
+def _validate_recipient_project(
+    recipient: str, target_project_id: str, channel: str,
+):
+    """Cross-project pre-flight for ``beacon bus send --to <recipient>``.
+
+    Today's dogfood (2026-06-09) surfaced a silent-misroute pattern: the
+    sender's CLI posts to its cwd's project bus, but the recipient is
+    polling a different project. The event is stored but never delivered.
+    Without this check, the only signal is the absence of a ``delivered``
+    receipt — a negative signal humans (and AI) routinely miss.
+
+    Resolution policy:
+      * Non-DM channels skip (broadcast semantics, no fixed recipient).
+      * Empty recipient skips (already warned about elsewhere).
+      * If the recipient is found in the target project's local directory
+        — pass through, no change.
+      * If found in a *different* local project — auto-route to that
+        project. Loud stderr warning so the routing decision is auditable.
+      * If not found in any local project — soft warn (might be a remote
+        bridge we can't see locally) but don't refuse.
+
+    Returns the project_id to actually use. May differ from
+    ``target_project_id`` when auto-routing.
+
+    Opt-outs (in this order):
+      * ``BEACON_BUS_SKIP_TO_CHECK=1`` — bypass entirely (CI / scripts
+        that have already validated routing).
+      * ``BEACON_BUS_NO_AUTO_ROUTE=1`` — keep the check, but refuse to
+        auto-route on mismatch (emits a hard error so the script breaks
+        instead of silently switching project).
+    """
+    if channel != "dm" or not recipient:
+        return target_project_id
+    if os.environ.get("BEACON_BUS_SKIP_TO_CHECK", "") == "1":
+        return target_project_id
+
+    # Import lazily so a missing dm_discover module (older install) just
+    # bypasses the check rather than breaking `bus send`.
+    try:
+        # Ensure beacon_cli is importable; pip / dev-clone layouts vary.
+        import importlib
+        helpers = importlib.import_module(
+            "beacon_cli.skills_helpers.dm_discover"
+        )
+    except Exception:
+        return target_project_id
+
+    try:
+        rows = helpers.discover_and_aggregate(healthy=False, since_min=10)
+    except Exception:
+        # Discovery itself failed (psutil missing / network hiccup). Fall
+        # back to no-op rather than refusing the send — defensive guard
+        # mustn't become a footgun for unrelated errors.
+        return target_project_id
+
+    same_project: dict | None = None
+    other_project: dict | None = None
+    for row in rows:
+        if row.get("session_id") != recipient:
+            continue
+        if row.get("project_id") == target_project_id:
+            same_project = row
+            break
+        if other_project is None:
+            other_project = row
+
+    if same_project is not None:
+        return target_project_id
+
+    if other_project is not None:
+        other_pid = other_project.get("project_id", "?")
+        if os.environ.get("BEACON_BUS_NO_AUTO_ROUTE", "") == "1":
+            print(
+                f"Error: recipient session {recipient!r} polls project "
+                f"{other_pid!r}, not the target {target_project_id!r}. "
+                f"Pass --project {other_pid} explicitly, or unset "
+                f"BEACON_BUS_NO_AUTO_ROUTE to let the send auto-route.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(
+            f"⚠ recipient session {recipient[:24]}… polls project "
+            f"{other_pid!r}, not the target {target_project_id!r}. "
+            f"Auto-routing this DM via --project {other_pid}. "
+            f"(Set BEACON_BUS_SKIP_TO_CHECK=1 to bypass this check, "
+            f"or BEACON_BUS_NO_AUTO_ROUTE=1 to make the mismatch a "
+            f"hard error.)",
+            file=sys.stderr,
+        )
+        return other_pid
+
+    # Not found in any locally-visible bridge. Could be a remote session
+    # (different machine) — we can't disprove that here. Soft warn only.
+    print(
+        f"⚠ recipient session {recipient[:24]}… is not visible in any "
+        f"locally-running bridge. Send proceeding against project "
+        f"{target_project_id!r} as-is; verify the receipt afterwards "
+        f"with `beacon bus status <event_id>`.",
+        file=sys.stderr,
+    )
+    return target_project_id
+
+
 def cmd_bus_directory():
     """Look up live sessions for DM target selection (ms-54 / e-1134 / e-1151).
 
@@ -9906,6 +10323,9 @@ if __name__ == "__main__":
         "operation_task_list": cmd_operation_task_list,
         "operation_list": cmd_operation_list,
         "operation_show": cmd_operation_show,
+        "operation_approve": cmd_operation_approve,
+        "operation_revoke": cmd_operation_revoke,
+        "operation_envelope_verify": cmd_operation_envelope_verify,
         "run_record": cmd_run_record,
         "run_list": cmd_run_list,
         "incident_open": cmd_incident_open,

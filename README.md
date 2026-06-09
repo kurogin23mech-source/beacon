@@ -303,7 +303,10 @@ Operations track recurring operational workloads (daily batch jobs, incident man
 | `beacon operation close <op-id>` | Close an Operation cycle / クローズ |
 | `beacon operation purge <op-id> --reason "..." [--index <n>]` | Hard delete an operation record — recovery for duplicate-ID corruption (e-863) / ハード削除（重複ID復旧用） |
 | `beacon operation list [--json]` | List Operations / 一覧 |
-| `beacon operation show <op-id> [--json]` | Show Operation with entries / 詳細表示 |
+| `beacon operation show <op-id> [--json]` | Show Operation with entries + active envelope / 詳細表示（有効な envelope 含む） |
+| `beacon operation approve <op-id> --spec <doc-id> [--expires-at YYYY-MM-DD] [--json]` | Mint T2 envelope from SPEC doc's `approved_actions` (ms-60) / SPEC ドキュメントの許可 action 一覧から T2 envelope を発行 |
+| `beacon operation revoke <op-id> [--envelope-id ENV] [--reason TEXT] [--json]` | Invalidate the active envelope (or a specific one) / 有効な envelope を無効化 |
+| `beacon operation envelope verify <op-id> <action> [--json]` | AI self-check used by `/beacon-operation-execute` — is the action permitted by the active envelope? (ms-60 / e-1340) / 指定 action が envelope の許可範囲か判定 |
 | `beacon run record -o <op-id> --batch <name> --status ok\|warning\|error --desc "..."` | Record a batch run result / バッチ実行結果を記録 |
 | `beacon run list -o <op-id> [--json]` | List run records / 実行記録一覧 |
 | `beacon incident open "title" -o <op-id> [--desc "..."]` | Open an incident / インシデント起票 |

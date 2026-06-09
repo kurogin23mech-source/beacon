@@ -280,14 +280,76 @@ def _format_budget_line(budget: dict | None) -> str:
     )
 
 
+def _format_autonomous_action_block(events: list[dict]) -> str:
+    """Render the "AUTONOMOUS ACTION" inject for armed operation-trigger events
+    (ms-60 / e-1340 Phase B = e-1384).
+
+    Each event in ``events`` is an opted-in auto-execute event on the
+    ``operation-trigger`` channel. The block tells the AI to run
+    ``/beacon-operation-execute`` **autonomously, without asking the user
+    first**, and lifts the op_id / spec_doc_id / trigger_name out of the
+    payload so the Skill can pick them up without re-parsing the raw event
+    list below.
+
+    Visually distinct from the generic propose-to-ai event list (different
+    header, called out with `## AUTONOMOUS ACTION`) so the AI's instruction
+    parser doesn't conflate the two.
+    """
+    if not events:
+        return ""
+    lines: list[str] = []
+    lines.append("## AUTONOMOUS ACTION — operation autonomy active")
+    lines.append("")
+    lines.append(
+        "以下の operation-trigger event は `bus_auto_execute_channels` "
+        "allowlist に登録済 (= 人間 opt-in 済) のため、"
+        "**確認を取らず autonomous に実行する**。"
+    )
+    lines.append("Run this autonomously without asking the user first.")
+    lines.append("")
+    for ev in events:
+        payload = ev.get("payload") or {}
+        op_id = payload.get("op_id", "?")
+        spec_doc_id = payload.get("spec_doc_id", "")
+        trigger_name = payload.get("trigger_name", "")
+        eid = ev.get("event_id", "?")
+        lines.append(f"- event_id: {eid}")
+        lines.append(f"  - op_id: {op_id}")
+        if spec_doc_id:
+            lines.append(f"  - spec_doc_id: {spec_doc_id}")
+        if trigger_name:
+            lines.append(f"  - trigger_name: {trigger_name}")
+        cmd = f"/beacon-operation-execute {op_id}"
+        lines.append(f"  - launch: `{cmd}`  (no confirmation prompt)")
+    lines.append("")
+    lines.append(
+        "budget が枯渇していたら Skill 側 (Step 4.5) が自動で停止 → incident "
+        "open → note 残しに降格する。Skill の責務なのでこの inject 側で "
+        "事前判定はしない。"
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _render_context(events: list[dict], notify_only_count: int,
                     monitor_suggested: bool,
                     budget: dict | None = None,
-                    auto_execute_downgraded_count: int = 0) -> str:
-    """Build the additionalContext markdown for AI inject."""
+                    auto_execute_downgraded_count: int = 0,
+                    autonomous_actions: list[dict] | None = None) -> str:
+    """Build the additionalContext markdown for AI inject.
+
+    ``autonomous_actions`` is the subset of ``events`` that survived the
+    auto-execute allowlist gate AND landed on the ``operation-trigger``
+    channel (ms-60 / e-1340 Phase B). When non-empty, an "AUTONOMOUS ACTION"
+    block is emitted ABOVE the generic event list so the AI sees the
+    instruction before the noise.
+    """
     parts: list[str] = []
     parts.append("BEACON BUS INBOX — 新着 event があります")
     parts.append("")
+    autonomous_block = _format_autonomous_action_block(autonomous_actions or [])
+    if autonomous_block:
+        parts.append(autonomous_block)
     budget_line = _format_budget_line(budget)
     if budget_line:
         parts.append(budget_line)
@@ -439,6 +501,7 @@ def main() -> None:
     # server-side coercion in BusEventCreate; defense in depth).
     inject: list[dict] = []
     notify_only: list[dict] = []
+    autonomous_actions: list[dict] = []
     downgraded_count = 0
     downgraded_audit: list[dict] = []
     for ev in unread:
@@ -453,6 +516,14 @@ def main() -> None:
                 downgraded_count += 1
                 downgraded_audit.append(ev)
                 delivery = "propose-to-ai"
+            elif channel == "operation-trigger":
+                # ms-60 / e-1340 Phase B (e-1384): opted-in operation-trigger
+                # events get a structured "AUTONOMOUS ACTION" block ABOVE the
+                # generic event list, so the AI launches
+                # /beacon-operation-execute without scanning the noise. The
+                # event itself still appears in the regular list (for audit
+                # parity) but the block carries the instruction.
+                autonomous_actions.append(ev)
         if delivery == "notify-user-only":
             notify_only.append(ev)
         else:
@@ -493,7 +564,8 @@ def main() -> None:
 
     _emit(hook_event_name, _render_context(inject, len(notify_only),
                                             monitor_suggested, budget,
-                                            downgraded_count))
+                                            downgraded_count,
+                                            autonomous_actions))
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
     _log(f"surfaced {len(inject)} event(s) ({elapsed_ms} ms)")

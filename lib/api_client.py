@@ -155,6 +155,41 @@ class ApiClient:
             body,
         )
 
+    # Operation T2 envelopes (ms-60 / e-1339).
+    # The SPEC author lists ``approved_actions`` in YAML frontmatter; the
+    # server parses + validates + signs an envelope, stored in the
+    # ``operation_envelopes`` subcollection. ``ttl_seconds`` defaults to
+    # ~30 years per ms-60 SPEC "SPEC 更新まで無期限".
+
+    def operation_approve(self, project_id: str, op_id: str, *,
+                          spec_doc_id: str,
+                          ttl_seconds: int | None = None) -> dict:
+        body: dict = {"spec_doc_id": spec_doc_id}
+        if ttl_seconds is not None:
+            body["ttl_seconds"] = ttl_seconds
+        return self.post(
+            f"/api/projects/{project_id}/operations/"
+            f"{urllib.parse.quote(op_id, safe='')}/envelopes",
+            body,
+        )
+
+    def operation_revoke(self, project_id: str, op_id: str,
+                         envelope_id: str, *, reason: str) -> dict:
+        return self.post(
+            f"/api/projects/{project_id}/operations/"
+            f"{urllib.parse.quote(op_id, safe='')}/envelopes/"
+            f"{urllib.parse.quote(envelope_id, safe='')}/revoke",
+            {"reason": reason},
+        )
+
+    def list_operation_envelopes(self, project_id: str, op_id: str, *,
+                                 status: str | None = None) -> list:
+        suffix = f"?status={urllib.parse.quote(status)}" if status else ""
+        return self.get(
+            f"/api/projects/{project_id}/operations/"
+            f"{urllib.parse.quote(op_id, safe='')}/envelopes{suffix}"
+        )
+
     # Retro operations
 
     def save_retro(self, project_id: str, week: str, content: str) -> dict:

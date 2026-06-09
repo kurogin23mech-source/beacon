@@ -153,7 +153,7 @@ def delete_project(project_id: str) -> bool:
     # Changelog is project-scoped: when the project is deleted, the audit
     # trail goes with it (no orphan access path).
     for subcol_name in ("documents", "retros", "members", "triggers", "notes",
-                        "changelog"):
+                        "changelog", "operation_envelopes"):
         _delete_subcollection(doc_ref.collection(subcol_name))
     doc_ref.delete()
     return True
@@ -1082,3 +1082,189 @@ def save_retro(project_id: str, week: str, content: str) -> None:
             "updated_at": datetime.datetime.now().isoformat(),
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# Operation envelopes (ms-60 / e-1339)
+#
+# T2 envelope = Operation scope envelope. The SPEC author lists
+# ``approved_actions``; ``beacon operation approve`` mints a server-signed
+# envelope from that list. Stored in a subcollection so the audit trail
+# (active + revoked records) doesn't bloat the parent project document
+# and stays under the Firestore 1 MiB cap (ms-59 lesson).
+#
+# Doc id = envelope nonce (already unique per server-issued envelope).
+# Status discipline: at most one ``active`` envelope per ``op_id``. Re-approve
+# auto-revokes the prior active one with ``reason="superseded"``.
+# ---------------------------------------------------------------------------
+
+OPERATION_ENVELOPES_SUBCOLLECTION = "operation_envelopes"
+
+
+def _operation_envelopes_col(project_id: str):
+    return (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(OPERATION_ENVELOPES_SUBCOLLECTION)
+    )
+
+
+def get_active_operation_envelope(
+    project_id: str, op_id: str
+) -> dict | None:
+    """Return the single active T2 envelope for ``op_id``, or None.
+
+    There must be at most one — the issue path auto-revokes any prior
+    active record before writing the new one. If multiple actives are ever
+    observed, returns the most recently created and logs a warning (the
+    issue path's transaction makes the race impossible, but operational
+    repair could leave artifacts).
+    """
+    q = (
+        _operation_envelopes_col(project_id)
+        .where("op_id", "==", op_id)
+        .where("status", "==", "active")
+    )
+    docs = list(q.stream())
+    if not docs:
+        return None
+    if len(docs) > 1:
+        # Pick newest by created_at; this should never happen under the
+        # transactional issue path but we don't want a phantom record to
+        # mask the intended scope.
+        docs.sort(key=lambda d: (d.to_dict() or {}).get("created_at", ""),
+                  reverse=True)
+    return docs[0].to_dict()
+
+
+def issue_operation_envelope(
+    project_id: str,
+    op_id: str,
+    spec_doc_id: str,
+    spec_revision_id: str,
+    envelope_dict: dict,
+    approved_actions: list[str],
+    created_by: str,
+) -> dict:
+    """Store a freshly minted T2 envelope. Auto-revokes any prior active.
+
+    ``envelope_dict`` is the already-signed envelope from
+    ``envelope.issue_envelope``; the doc id is its ``nonce`` (unique by
+    construction). Returns the stored record.
+
+    The auto-revoke + write happens in a single transaction so a concurrent
+    second approve can't leave two actives.
+    """
+    import datetime
+
+    nonce = envelope_dict.get("nonce")
+    if not nonce:
+        raise ValueError("envelope_dict missing nonce")
+    now = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    new_doc = {
+        "envelope_id": nonce,
+        "op_id": op_id,
+        "spec_doc_id": spec_doc_id,
+        "spec_revision_id": spec_revision_id,
+        "envelope": envelope_dict,
+        "approved_actions": list(approved_actions),
+        "status": "active",
+        "created_at": now,
+        "created_by": created_by,
+        "revoked_at": None,
+        "revoked_by": None,
+        "revoke_reason": None,
+    }
+    col = _operation_envelopes_col(project_id)
+    db = get_db()
+
+    @firestore.transactional
+    def _txn(tx):
+        # Find any active for this op_id and mark revoked first.
+        prior = (
+            col.where("op_id", "==", op_id)
+            .where("status", "==", "active")
+        )
+        for snap in prior.stream(transaction=tx):
+            tx.update(snap.reference, {
+                "status": "revoked",
+                "revoked_at": now,
+                "revoked_by": created_by,
+                "revoke_reason": "superseded by new approve",
+            })
+        tx.set(col.document(nonce), new_doc)
+        return new_doc
+
+    return _txn(db.transaction())
+
+
+def revoke_operation_envelope(
+    project_id: str,
+    envelope_id: str,
+    revoked_by: str,
+    reason: str,
+) -> dict | None:
+    """Mark an envelope as revoked. Returns the updated record, or None.
+
+    Idempotent: revoking an already-revoked envelope is a no-op that returns
+    the existing record unchanged (the auditor cares about *who first*
+    revoked it, not the latest no-op).
+    """
+    import datetime
+
+    now = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    ref = _operation_envelopes_col(project_id).document(envelope_id)
+    db = get_db()
+
+    @firestore.transactional
+    def _txn(tx):
+        snap = ref.get(transaction=tx)
+        if not snap.exists:
+            return None
+        cur = snap.to_dict() or {}
+        if cur.get("status") == "revoked":
+            return cur
+        update = {
+            "status": "revoked",
+            "revoked_at": now,
+            "revoked_by": revoked_by,
+            "revoke_reason": reason,
+        }
+        tx.update(ref, update)
+        cur.update(update)
+        return cur
+
+    return _txn(db.transaction())
+
+
+def list_operation_envelopes(
+    project_id: str,
+    op_id: str | None = None,
+    status: str | None = None,
+) -> list[dict]:
+    """List envelopes, optionally filtered by op_id and/or status.
+
+    Ordered by ``created_at`` descending (newest first) — both auditors and
+    the CLI ``operation show`` extension want the current state at top.
+    """
+    q = _operation_envelopes_col(project_id)
+    if op_id:
+        q = q.where("op_id", "==", op_id)
+    if status:
+        q = q.where("status", "==", status)
+    docs = [d.to_dict() for d in q.stream()]
+    docs.sort(key=lambda d: (d or {}).get("created_at", ""), reverse=True)
+    return docs
+
+
+def get_operation_envelope(
+    project_id: str, envelope_id: str
+) -> dict | None:
+    """Fetch a single envelope record by id, or None if absent."""
+    snap = _operation_envelopes_col(project_id).document(envelope_id).get()
+    return snap.to_dict() if snap.exists else None
