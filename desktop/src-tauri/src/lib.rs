@@ -283,6 +283,17 @@ fn cloud_list_notes(state: State<AppState>) -> Result<String, String> {
     cloud_get(&format!("/api/projects/{}/notes", pid))
 }
 
+/// ms-57 e-1073: Tauri cloud mode の Session Log タブ用バインディング。
+/// Web UI と同じく GET /api/projects/{id}/session_logs?limit=N を叩く。
+/// e-1041 で layer.js 側は `invoke('cloud_list_session_logs', { limit })` を
+/// 呼んで fail-soft していたが、Rust 側が未配線で常に空配列だった。
+#[tauri::command]
+fn cloud_list_session_logs(state: State<AppState>, limit: Option<u32>) -> Result<String, String> {
+    let pid = state.cloud_project_id.lock().unwrap().clone().ok_or("No cloud project selected")?;
+    let n = limit.unwrap_or(5);
+    cloud_get(&format!("/api/projects/{}/session_logs?limit={}", pid, n))
+}
+
 fn cloud_post(path: &str) -> Result<String, String> {
     let token = load_auth_token()
         .ok_or("Not authenticated. Run: beacon auth login")?;
@@ -622,6 +633,7 @@ pub fn run() {
             cloud_get_auth_token,
             cloud_refresh_auth_token,
             cloud_list_notes,
+            cloud_list_session_logs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1878,8 +1878,17 @@ def list_sessions(
     # Always attach poll_health — backward-compat callers that ignore it lose
     # nothing, but /beacon-dm-send (and any other directory consumer) gets
     # the structured signal in one round-trip.
+    #
+    # Also stamp ``bridge: True/False`` (ms-54 e-1319): True iff a bridge
+    # poll loop has ever written ``last_poll_at`` on this session. This is
+    # the structural marker for "has a receive channel at all", distinct
+    # from poll_health.healthy which factors in age + shutdown. Callers
+    # that only want "would a DM have anywhere to land" (e.g. directory
+    # default view) can filter on this without re-implementing the
+    # last_poll_at presence check.
     for s in sessions:
         s["poll_health"] = _compute_poll_health(s, now_dt)
+        s["bridge"] = bool(s.get("last_poll_at"))
 
     if not (user_id or machine or agent or live_only or healthy_only):
         return sessions
