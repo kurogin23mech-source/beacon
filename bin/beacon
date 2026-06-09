@@ -3,7 +3,6 @@
 set -euo pipefail
 
 BEACON_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-DASHBOARD_PY="$BEACON_DIR/lib/dashboard.py"
 COMMANDS_PY="$BEACON_DIR/lib/commands.py"
 export BEACON_PROJECT_FILE=".beacon/project.json"
 
@@ -12,10 +11,10 @@ usage() {
 Beacon - Milestone-driven project management
 
 Usage:
-  beacon                        Launch tmux dashboard + shell
+  beacon                        Show status + pointers to Tauri Desktop App / Web UI
   beacon setup                  First-time setup wizard (auth + hooks + project)
   beacon init                   Initialize .beacon/ in current directory
-  beacon status                 Show current milestone status (no tmux)
+  beacon status                 Show current milestone status
 
 Milestones:
   beacon milestone add "title" [--priority P] [--objective O] [--ac A]   Add a new milestone
@@ -395,8 +394,8 @@ else:
     echo ""
 
     # Step 5: Launch
-    echo "Step 5/5: Launch dashboard"
-    read -rp "Launch now? [Y/n]: " launch_choice
+    echo "Step 5/5: Show status + UI pointers"
+    read -rp "Show now? [Y/n]: " launch_choice
     launch_choice="${launch_choice:-Y}"
     if [[ "$launch_choice" =~ ^[Yy] ]]; then
         if [ -f "$BEACON_PROJECT_FILE" ]; then
@@ -1394,88 +1393,34 @@ EOJSON
 }
 
 cmd_launch() {
+    # e-764 (ms-4): legacy tmux/curses dashboard archived to
+    # .trash/lib-dashboard-py-e764/. The bare `beacon` invocation now
+    # prints status plus pointers to the Tauri Desktop App and Web UI,
+    # which are the two supported front-ends going forward.
     ensure_project
 
-    local abs_project
-    abs_project="$(cd "$(dirname "$BEACON_PROJECT_FILE")" && pwd)/$(basename "$BEACON_PROJECT_FILE")"
-    local work_dir
-    work_dir="$(pwd)"
-    # Use full path hash to avoid name collisions between dirs with same basename
-    local dir_hash
-    dir_hash=$(echo -n "$work_dir" | md5 -q 2>/dev/null || echo -n "$work_dir" | md5sum | cut -d' ' -f1)
-    local session_name="beacon-${dir_hash:0:8}"
-    local dashboard_pct="${BEACON_DASHBOARD_WIDTH:-33}"
+    # Show the current status summary (same output as `beacon status`)
+    cmd_status
 
-    # If already inside this beacon session, restart dashboard pane if needed
-    if [ "${TMUX:-}" ]; then
-        local current_session
-        current_session=$(tmux display-message -p '#{session_name}' 2>/dev/null)
-        if [ "$current_session" = "$session_name" ]; then
-            # Already inside this session — check if dashboard pane exists
-            local pane_count
-            pane_count=$(tmux list-panes -t "$session_name" 2>/dev/null | wc -l | tr -d ' ')
-            if [ "$pane_count" -lt 2 ]; then
-                echo "Restarting dashboard pane..."
-                local env_prefix=""
-                [ "${BEACON_CLOUD:-}" = "1" ] && env_prefix="BEACON_CLOUD=1 "
-                tmux split-window -hbd -t "$session_name" -c "$work_dir" \
-                    -l "${dashboard_pct}%" \
-                    "${env_prefix}python3 '$DASHBOARD_PY' '$abs_project'"
-                tmux select-pane -t "$session_name:.1"
-            else
-                echo "Beacon is already running."
-            fi
-            return 0
-        fi
-    fi
+    echo ""
+    echo "UI:"
+    echo "  - Tauri Desktop App: launch the bundled desktop app if installed"
+    echo "    (see README → Desktop App)"
 
-    # If session already exists, just re-attach
-    if tmux has-session -t "$session_name" 2>/dev/null; then
-        echo "Re-attaching to existing beacon session."
-        if [ "${TMUX:-}" ]; then
-            tmux switch-client -t "$session_name"
+    # Show project-specific web URL when the project is cloud-linked.
+    if [ -f .beacon/cloud.json ]; then
+        local cloud_project_id
+        cloud_project_id=$(python3 -c "import json; print(json.load(open('.beacon/cloud.json')).get('project_id',''))" 2>/dev/null || true)
+        if [ -n "$cloud_project_id" ]; then
+            echo "  - Web UI: https://beacon-ai.dev/?project=$cloud_project_id"
         else
-            tmux attach-session -t "$session_name"
+            echo "  - Web UI: https://beacon-ai.dev"
         fi
-        return 0
-    fi
-
-    # Create new session
-    tmux new-session -d -s "$session_name" -c "$work_dir"
-
-    # Session-specific settings (no -g flag to avoid polluting other sessions)
-    tmux set-option -t "$session_name" history-limit 10000
-
-    # Build env prefix for cloud mode
-    local env_prefix=""
-    if [ "${BEACON_CLOUD:-}" = "1" ]; then
-        tmux set-environment -t "$session_name" BEACON_CLOUD 1
-        env_prefix="BEACON_CLOUD=1 "
-    fi
-
-    # Create dashboard pane to the LEFT of the shell pane
-    # When dashboard exits (q), kill the entire session to clean up
-    tmux split-window -hbd -t "$session_name" -c "$work_dir" \
-        -l "${dashboard_pct}%" \
-        "${env_prefix}python3 '$DASHBOARD_PY' '$abs_project'"
-
-    # Re-apply ratio on window resize (no quotes around % value for tmux to parse it)
-    tmux set-hook -t "$session_name" after-resize-window \
-        "resize-pane -t ${session_name}:.0 -x ${dashboard_pct}%"
-
-    # When shell pane exits (exit/ctrl-d), also kill session
-    tmux set-hook -t "$session_name" pane-exited \
-        "kill-session"
-
-    # Focus on the right (working) pane
-    tmux select-pane -t "$session_name:.1"
-
-    # Attach (use switch-client if already inside tmux)
-    if [ "${TMUX:-}" ]; then
-        tmux switch-client -t "$session_name"
     else
-        tmux attach-session -t "$session_name"
+        echo "  - Web UI: https://beacon-ai.dev  (run 'beacon cloud push' to sync this project)"
     fi
+    echo ""
+    echo "Run 'beacon help' for the full command list."
 }
 
 cmd_doc() {
