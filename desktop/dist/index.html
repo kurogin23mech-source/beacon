@@ -3301,10 +3301,10 @@ function renderDocumentsSection() {
   // search bar at the top of the shell; this section just helps users browse
   // a single scope at a time.
   const scopeFilter = state.documentsScopeFilter || '';
-  const order = ['core', 'spec', 'memo', 'report'];
+  const order = ['core', 'spec', 'memo', 'retro', 'report'];
   const grouped = {};
   for (const s of order) grouped[s] = [];
-  let scopeCounts = { core: 0, spec: 0, memo: 0, report: 0 };
+  let scopeCounts = { core: 0, spec: 0, memo: 0, retro: 0, report: 0 };
   for (const d of state.documents) {
     const s = d.scope || 'memo';
     scopeCounts[s] = (scopeCounts[s] || 0) + 1;
@@ -3312,7 +3312,7 @@ function renderDocumentsSection() {
     if (!scopeFilter || s === scopeFilter) grouped[s].push(d);
   }
   const totalMatches = Object.values(grouped).reduce((a, b) => a + b.length, 0);
-  const labels = { core: '\u2605 CORE', spec: '\u25CB SPEC', memo: '\u25CB MEMO', report: '\u25CB REPORT' };
+  const labels = { core: '\u2605 CORE', spec: '\u25CB SPEC', memo: '\u25CB MEMO', retro: '\u25CB RETRO', report: '\u25CB REPORT' };
 
   const scopeChip = (s) => {
     const c = scopeCounts[s] || 0;
