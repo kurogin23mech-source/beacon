@@ -8,6 +8,69 @@
   "author": "r-kida2",
   "tags": ["beacon", "milestone", "cli", "ai", "claude-code"],
   "install": {
+    "files": {
+      "bin/bclaude": {
+        "darwin": "~/.local/bin/bclaude",
+        "linux": "~/.local/bin/bclaude",
+        "windows": null
+      },
+      "bin/bclaude.cmd": {
+        "darwin": null,
+        "linux": null,
+        "windows": "~/.local/bin/bclaude.cmd"
+      },
+      "bin/beacon": {
+        "darwin": "~/.local/bin/beacon",
+        "linux": "~/.local/bin/beacon",
+        "windows": null
+      },
+      "bin/beacon-bus-inbox-hook.py": {
+        "darwin": "~/.local/bin/beacon-bus-inbox-hook.py",
+        "linux": "~/.local/bin/beacon-bus-inbox-hook.py",
+        "windows": "~/.local/bin/beacon-bus-inbox-hook.py"
+      },
+      "bin/beacon-post-commit-hook.sh": {
+        "darwin": "~/.local/bin/beacon-post-commit-hook.sh",
+        "linux": "~/.local/bin/beacon-post-commit-hook.sh",
+        "windows": null
+      },
+      "bin/beacon-postcompact.sh": {
+        "darwin": "~/.local/bin/beacon-postcompact.sh",
+        "linux": "~/.local/bin/beacon-postcompact.sh",
+        "windows": null
+      },
+      "bin/beacon-save-hook.sh": {
+        "darwin": "~/.local/bin/beacon-save-hook.sh",
+        "linux": "~/.local/bin/beacon-save-hook.sh",
+        "windows": null
+      },
+      "bin/beacon-session-heartbeat-hook.sh": {
+        "darwin": "~/.local/bin/beacon-session-heartbeat-hook.sh",
+        "linux": "~/.local/bin/beacon-session-heartbeat-hook.sh",
+        "windows": null
+      },
+      "bin/context-usage-monitor.py": {
+        "darwin": "~/.local/bin/context-usage-monitor.py",
+        "linux": "~/.local/bin/context-usage-monitor.py",
+        "windows": "~/.local/bin/context-usage-monitor.py"
+      },
+      "bin/context-usage-monitor.sh": {
+        "darwin": "~/.local/bin/context-usage-monitor.sh",
+        "linux": "~/.local/bin/context-usage-monitor.sh",
+        "windows": null
+      }
+    },
+    "modes": {
+      "bin/bclaude": "exec",
+      "bin/beacon": "exec",
+      "bin/beacon-bus-inbox-hook.py": "exec",
+      "bin/beacon-post-commit-hook.sh": "exec",
+      "bin/beacon-postcompact.sh": "exec",
+      "bin/beacon-save-hook.sh": "exec",
+      "bin/beacon-session-heartbeat-hook.sh": "exec",
+      "bin/context-usage-monitor.py": "exec",
+      "bin/context-usage-monitor.sh": "exec"
+    },
     "recipe": [
       "python3 -m pip install --user .",
       "beacon skill install --force"
