@@ -7011,6 +7011,11 @@ def cmd_deploy_record():
     mode = os.environ.get("BEACON_MODE", "")          # "prepare" or "finalize" or ""
     revision = os.environ.get("BEACON_REVISION", "")
     semver = os.environ.get("BEACON_SEMVER", "")
+    # version (e-1274): git tag attached to this deploy (e.g. v0.22.0). Recorded
+    # in the entry for cross-referencing with releases. Defaults to --semver
+    # when --version not supplied so existing release flows backfill cleanly
+    # without a CLI change.
+    version = os.environ.get("BEACON_VERSION", "") or semver
     description = os.environ.get("BEACON_DESCRIPTION", "")
     deploy_hash = os.environ.get("BEACON_HASH", "")   # override: specify deployed commit
     deploy_date = os.environ.get("BEACON_DATE", "")   # override: specify deploy datetime
@@ -7178,6 +7183,10 @@ def cmd_deploy_record():
     }
     if revision:
         deploy_entry["cloud_run_revision"] = revision
+    if version:
+        # e-1274: top-level version tag (e.g. v0.22.0). Surfaces in Releases tab
+        # without needing to dereference linked_release → releases[*].semver.
+        deploy_entry["version"] = version
     if links_to:
         deploy_entry["links_to"] = links_to
 
@@ -7192,6 +7201,10 @@ def cmd_deploy_record():
             "deploy_ids": [deploy_id],
             "description": description,
         }
+        # e-1274: also stash the raw tag (e.g. v0.22.0). semver is the bare
+        # number; version preserves the "v" prefix when the workflow passed it.
+        if version and version != semver:
+            release_entry["version"] = version
         deploy_entry["linked_release"] = release_id
         data.setdefault("releases", []).append(release_entry)
         # Create git tag
@@ -7219,7 +7232,8 @@ def cmd_deploy_record():
     else:
         icon = "◉" if deploy_type == "major" else "○"
         ms_str = " ".join(f"[{m}]" for m in affected_ms) or "(no MS detected)"
-        print(f"{icon} {deploy_id} [{deploy_type}] {ms_str}")
+        ver_str = f" {version}" if version and not semver else ""
+        print(f"{icon} {deploy_id}{ver_str} [{deploy_type}] {ms_str}")
         print(f"  {description}")
         if semver:
             print(f"  Release: {release_entry['id']} ({semver})")
@@ -7442,6 +7456,10 @@ def cmd_push_record():
     branch = os.environ.get("BEACON_BRANCH", "")
     description = os.environ.get("BEACON_DESCRIPTION", "")
     ms_id = os.environ.get("BEACON_MS", "")
+    # version (e-1274): git tag attached to this push (e.g. v0.22.0). Stored
+    # alongside branch / commits so later reviews can cross-reference releases
+    # without timestamp guessing.
+    version = os.environ.get("BEACON_VERSION", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     data = load_project()
@@ -7535,6 +7553,9 @@ def cmd_push_record():
         "pushed_at": now,
         "ms_id": ms_id or None,
     }
+    if version:
+        # e-1274: top-level version tag for cross-referencing with releases.
+        push_entry["version"] = version
 
     data.setdefault("pushes", []).append(push_entry)
     save_project(data)
@@ -7542,7 +7563,8 @@ def cmd_push_record():
     if json_mode:
         print(json.dumps({"push": push_entry}, ensure_ascii=False))
     else:
-        print(f"↑ {push_id}  {branch}  {from_hash or '(initial)'}..{to_hash}  ({len(commits)} commits)")
+        ver_str = f"  {version}" if version else ""
+        print(f"↑ {push_id}{ver_str}  {branch}  {from_hash or '(initial)'}..{to_hash}  ({len(commits)} commits)")
         if description:
             print(f"  {description}")
 

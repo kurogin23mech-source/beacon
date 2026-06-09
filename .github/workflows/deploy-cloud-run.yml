@@ -21,6 +21,11 @@ on:
       - 'Dockerfile'
       - '.github/workflows/deploy-cloud-run.yml'
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release tag attached to this deploy (e.g. v0.22.0). Optional; release.yml passes it during fan-out so the beacon deploy record can cross-reference the release (e-1274).'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -47,6 +52,19 @@ jobs:
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
+
+      - name: Record release tag (e-1274)
+        # Surface the release tag (e.g. v0.22.0) into the workflow log + step
+        # summary so reviewers can cross-reference this deploy with the release
+        # without having to guess from timestamps. release.yml passes the tag
+        # via workflow_dispatch input; direct path-trigger pushes leave it
+        # blank (no associated tag — show "(none)" to make the absence loud).
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          VERSION="${RELEASE_VERSION:-(none)}"
+          echo "beacon release tag for this deploy: ${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Deploy to Cloud Run
         # Canonical command from the release CORE doc. --build-arg is NOT valid

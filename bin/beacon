@@ -81,10 +81,10 @@ Operations:
   beacon incident escalate <id> -m <ms-id>
 
 Releases & Deploys:
-  beacon deploy record [--revision <rev>] [--semver <v>] [--desc <text>]
+  beacon deploy record [--revision <rev>] [--semver <v>] [--version <tag>] [--desc <text>]
   beacon deploy list
   beacon deploy void <id> --reason <text>
-  beacon push record [--from <hash>] [--to <hash>] [--desc <text>] [-m <ms-id>]
+  beacon push record [--from <hash>] [--to <hash>] [--desc <text>] [--version <tag>] [-m <ms-id>]
   beacon push list
 
 Cloud:
@@ -2908,13 +2908,14 @@ EOF
         case "${2:-}" in
             record)
                 shift 2
-                revision="" semver="" desc="" hash="" date="" before="" mode="" type="" env=""
+                revision="" semver="" desc="" hash="" date="" before="" mode="" type="" env="" version=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --prepare)       mode="prepare";    shift ;;
                         --finalize)      mode="finalize";   shift ;;
                         --revision)      revision="${2:-}"; shift 2 ;;
                         --semver)        semver="${2:-}";   shift 2 ;;
+                        --version)       version="${2:-}";  shift 2 ;;
                         --desc)          desc="${2:-}";     shift 2 ;;
                         --hash)          hash="${2:-}";     shift 2 ;;
                         --date)          date="${2:-}";     shift 2 ;;
@@ -2925,6 +2926,7 @@ EOF
                     esac
                 done
                 BEACON_MODE="$mode" BEACON_REVISION="$revision" BEACON_SEMVER="$semver" \
+                    BEACON_VERSION="$version" \
                     BEACON_DESCRIPTION="$desc" BEACON_HASH="$hash" \
                     BEACON_DATE="$date" BEACON_INSERT_BEFORE="$before" BEACON_TYPE="$type" \
                     BEACON_ENVIRONMENT="$env" \
@@ -2973,7 +2975,7 @@ EOF
                     python3 "$COMMANDS_PY" deploy_rollback
                 ;;
             *)
-                echo "Usage: beacon deploy record [--env <env>] [--revision <rev>] [--semver <v1.0.0>] [--desc <text>]"
+                echo "Usage: beacon deploy record [--env <env>] [--revision <rev>] [--semver <v1.0.0>] [--version <tag>] [--desc <text>]"
                 echo "       beacon deploy list [--env <env>] [--json]"
                 echo "       beacon deploy void <id> --reason <text>"
                 echo "       beacon deploy rollback --reason <text> [--service <name>] [--execute]"
@@ -2985,7 +2987,7 @@ EOF
         case "${2:-}" in
             record)
                 shift 2
-                from="" to="" branch="" desc="" ms=""
+                from="" to="" branch="" desc="" ms="" version=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --prepare)  mode="prepare"; shift ;;
@@ -2994,18 +2996,20 @@ EOF
                         --to)       to="${2:-}"; shift 2 ;;
                         --branch)   branch="${2:-}"; shift 2 ;;
                         --desc)     desc="${2:-}"; shift 2 ;;
+                        --version)  version="${2:-}"; shift 2 ;;
                         -m|--ms)    ms="${2:-}"; shift 2 ;;
                         *) shift ;;
                     esac
                 done
                 BEACON_MODE="${mode:-}" BEACON_FROM="$from" BEACON_TO="$to" \
                     BEACON_BRANCH="$branch" BEACON_DESCRIPTION="$desc" BEACON_MS="$ms" \
+                    BEACON_VERSION="$version" \
                     python3 "$COMMANDS_PY" push_record
                 ;;
             list)
                 BEACON_JSON="${3:+1}" python3 "$COMMANDS_PY" push_list ;;
             *)
-                echo "Usage: beacon push record [--from <hash>] [--to <hash>] [--desc <text>] [-m <ms-id>]"
+                echo "Usage: beacon push record [--from <hash>] [--to <hash>] [--desc <text>] [--version <tag>] [-m <ms-id>]"
                 echo "       beacon push list [--json]"
                 ;;
         esac
