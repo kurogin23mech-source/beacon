@@ -223,3 +223,142 @@ def test_push_operation_trigger_local_mode_safe(monkeypatch):
                                 "message": "test", "created_at": "2026-06-09"},
         spec_doc_id="doc-1",
     )
+
+
+# ---------------------------------------------------------------------------
+# e-1393: envelope mint contract — without an envelope the server's verify
+# pipeline degrades `auto-execute` to `notify-user-only`, which the inbox
+# hook never injects → autonomous loop silently breaks. Pin the T2 mint
+# call AND its forwarding to post_bus_event so a future refactor can't
+# regress the silent-degrade path.
+# ---------------------------------------------------------------------------
+
+class _EnvelopeCaptureClient:
+    """Records `issue_bus_envelope` + `post_bus_event` calls."""
+    def __init__(self):
+        self.envelope_calls: list[dict] = []
+        self.post_calls: list[dict] = []
+
+    def issue_bus_envelope(self, project_id, *, tier, actions_authorized=None,
+                           scope=None, data_class="free", **_kw):
+        self.envelope_calls.append({
+            "project_id": project_id,
+            "tier": tier,
+            "actions_authorized": list(actions_authorized or []),
+            "scope": scope,
+            "data_class": data_class,
+        })
+        return {"tier": tier, "scope": scope, "signature": "stub-sig",
+                "actions_authorized": list(actions_authorized or [])}
+
+    def post_bus_event(self, project_id, channel, *, sender_session_id="",
+                       payload=None, delivery="propose-to-ai",
+                       envelope=None, requested_action=None):
+        self.post_calls.append({
+            "project_id": project_id, "channel": channel,
+            "sender_session_id": sender_session_id, "payload": payload or {},
+            "delivery": delivery, "envelope": envelope,
+        })
+        return {"event_id": f"e-{len(self.post_calls)}", "delivery": delivery}
+
+
+@pytest.fixture
+def cloud_mode(tmp_path, monkeypatch):
+    """Bare cloud-mode project so `_push_operation_trigger_to_bus` reaches
+    the post path. Caller wires the ApiClient stub via `cloud_client`."""
+    beacon_dir = tmp_path / ".beacon"
+    beacon_dir.mkdir(parents=True)
+    (beacon_dir / "cloud.json").write_text(
+        json.dumps({"api_url": "https://api.test", "project_id": "proj-1"}))
+    monkeypatch.setattr(commands, "_get_cloud_config_path",
+                        lambda: str(beacon_dir / "cloud.json"))
+    fake_auth = type(sys)("auth")
+    fake_auth.load_credentials = lambda: {"token": "fake"}
+    monkeypatch.setitem(sys.modules, "auth", fake_auth)
+    monkeypatch.setattr(commands, "_extract_token", lambda c: "fake-token")
+    return beacon_dir
+
+
+@pytest.fixture
+def cloud_client(monkeypatch, cloud_mode):
+    stub = _EnvelopeCaptureClient()
+    fake_api = type(sys)("api_client")
+    fake_api.ApiClient = lambda url, token: stub
+    monkeypatch.setitem(sys.modules, "api_client", fake_api)
+    return stub
+
+
+def test_push_operation_trigger_mints_t2_envelope(cloud_client):
+    """e-1393: the fire-time bus event must carry a T2 envelope scoped to
+    the op_id. Without it the server degrades delivery to
+    `notify-user-only` and the autonomous loop never starts."""
+    commands._push_operation_trigger_to_bus(
+        "op-2", "envelope-tests",
+        {"name": "operation_check_op-2", "message": "scheduled",
+         "created_at": "2026-06-09"},
+        spec_doc_id="doc-abc",
+    )
+    assert len(cloud_client.envelope_calls) == 1, \
+        "envelope must be minted before posting"
+    env_call = cloud_client.envelope_calls[0]
+    assert env_call["tier"] == "T2"
+    assert env_call["scope"] == "op:op-2", \
+        "T2 envelope requires scope=op:<op_id> per server/envelope.py:299"
+    assert "operation.trigger.fire" in env_call["actions_authorized"]
+
+
+def test_push_operation_trigger_forwards_envelope_to_post(cloud_client):
+    """The minted envelope must be passed to post_bus_event(envelope=...)
+    so the server's verify pipeline keeps delivery=auto-execute. A future
+    refactor that drops the keyword would silently regress to
+    notify-user-only without breaking any other test."""
+    commands._push_operation_trigger_to_bus(
+        "op-2", "envelope-tests",
+        {"name": "operation_check_op-2", "message": "scheduled",
+         "created_at": "2026-06-09"},
+        spec_doc_id="doc-abc",
+    )
+    assert len(cloud_client.post_calls) == 1
+    post = cloud_client.post_calls[0]
+    assert post["channel"] == "operation-trigger"
+    assert post["delivery"] == "auto-execute"
+    assert post["envelope"] is not None
+    assert post["envelope"]["tier"] == "T2"
+    assert post["envelope"]["scope"] == "op:op-2"
+
+
+def test_push_operation_trigger_falls_back_when_envelope_mint_fails(
+        cloud_mode, monkeypatch, capsys):
+    """If envelope issuance raises (e.g. server unreachable, older API),
+    the post still goes out — without an envelope, so the server will
+    degrade delivery. This is the safe failure mode: noisy stderr +
+    notify-user-only (still surfaces via .beacon/bus-inbox.log) beats
+    crashing the trigger fire path."""
+    posts: list[dict] = []
+
+    class _Client:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def issue_bus_envelope(self, *_a, **_kw):
+            raise RuntimeError("API error 404: legacy server")
+
+        def post_bus_event(self, project_id, channel, *,
+                           sender_session_id="", payload=None,
+                           delivery="propose-to-ai", envelope=None,
+                           requested_action=None):
+            posts.append({"envelope": envelope, "delivery": delivery})
+            return {"event_id": "e-1", "delivery": "notify-user-only"}
+
+    fake_api = type(sys)("api_client")
+    fake_api.ApiClient = _Client
+    monkeypatch.setitem(sys.modules, "api_client", fake_api)
+    commands._push_operation_trigger_to_bus(
+        "op-3", "x", {"name": "n", "message": "m", "created_at": "2026-06-09"},
+        spec_doc_id="d",
+    )
+    assert len(posts) == 1
+    assert posts[0]["envelope"] is None  # fell through
+    assert posts[0]["delivery"] == "auto-execute"  # request stays as intent
+    err = capsys.readouterr().err
+    assert "envelope mint failed" in err

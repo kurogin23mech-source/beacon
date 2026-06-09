@@ -4887,6 +4887,13 @@ def _push_operation_trigger_to_bus(op_id: str, log_source: str,
     operation-trigger``) lets the inbox hook run ``/beacon-operation-execute``
     without human review. Without opt-in, the event is downgraded to
     ``propose-to-ai`` and surfaces in the AI inbox for human review.
+
+    The post carries a T2 Operation-scope envelope so the server-side verify
+    pipeline (e-1155) preserves the auto-execute delivery. Without it the
+    server treats the post as legacy (effective_tier=T5) and degrades
+    delivery to notify-user-only, which never injects into AI context —
+    silently breaking the autonomous loop (e-1393).
+
     Best-effort — failures don't break the local trigger file write.
     """
     try:
@@ -4905,6 +4912,31 @@ def _push_operation_trigger_to_bus(op_id: str, log_source: str,
         from api_client import ApiClient
         api_url = config.get("api_url", DEFAULT_API_URL)
         client = ApiClient(api_url, _extract_token(creds))
+
+        # e-1393: mint a T2 Operation-scope envelope so the server's verify
+        # pipeline keeps `delivery="auto-execute"` instead of degrading to
+        # `notify-user-only`. Without an envelope the post is treated as
+        # legacy (effective_tier=T5) and `decide_delivery` caps auto-execute
+        # at notify-user-only, which the inbox hook never injects — breaking
+        # the autonomous loop silently. T2 is the right tier because the
+        # trigger fire is scoped to a single op_id and is initiated by the
+        # autofire system (not a human typing → not T1).
+        envelope_obj = None
+        try:
+            envelope_obj = client.issue_bus_envelope(
+                project_id,
+                tier="T2",
+                actions_authorized=["operation.trigger.fire"],
+                scope=f"op:{op_id}",
+                data_class="free",
+            )
+        except Exception as env_exc:
+            sys.stderr.write(
+                f"[beacon] operation-trigger envelope mint failed "
+                f"({type(env_exc).__name__}: {env_exc}); posting without "
+                "envelope — delivery will be degraded to notify-user-only.\n"
+            )
+
         client.post_bus_event(
             project_id, "operation-trigger",
             sender_session_id="",
@@ -4917,6 +4949,7 @@ def _push_operation_trigger_to_bus(op_id: str, log_source: str,
                 "created_at": trigger_data.get("created_at", ""),
             },
             delivery="auto-execute",
+            envelope=envelope_obj,
         )
     except Exception as exc:
         sys.stderr.write(
