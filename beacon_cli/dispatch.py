@@ -762,6 +762,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_bus_ack.add_argument("--project", dest="bus_project_id", default="")
     p_bus_ack.add_argument("--json", action="store_true")
 
+    # ms-54 / e-1348: per-event receipt status (sent / delivered / opened).
+    # Senders use this to localize where a DM stalled — "did it reach the
+    # bridge? did the AI see it?" — without scraping bus logs.
+    p_bus_status = bus_sub.add_parser("status", add_help=False)
+    p_bus_status.add_argument("event_id", nargs="?", default="")
+    p_bus_status.add_argument("--project", dest="bus_project_id", default="")
+    p_bus_status.add_argument("--json", action="store_true")
+
     p_bus_dir = bus_sub.add_parser("directory", aliases=["dir"], add_help=False)
     p_bus_dir.add_argument("--user", default="")
     p_bus_dir.add_argument("--machine", default="")
@@ -2229,6 +2237,7 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
               "[--timeout <sec>] [--auto-ack] [--project <id>]")
         print("       beacon bus ack       [--recipient <id>] "
               "--last-seen-at <iso8601> [--project <id>]")
+        print("       beacon bus status    <event_id> [--project <id>] [--json]")
         print("       beacon bus directory [--user <email>] [--machine <name>] "
               "[--agent <name>] [--live] [--healthy] [--since-min <N>] "
               "[--project <id>] [--json]")
@@ -2291,6 +2300,15 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
         if project_id:
             env["BEACON_BUS_PROJECT_ID"] = project_id
         return _run_commands_py(root, "bus_ack", env)
+
+    if cmd == "status":
+        env = {
+            "BEACON_BUS_EVENT_ID": args.event_id or "",
+            "BEACON_JSON": "1" if args.json else "",
+        }
+        if project_id:
+            env["BEACON_BUS_PROJECT_ID"] = project_id
+        return _run_commands_py(root, "bus_status", env)
 
     if cmd in ("directory", "dir"):
         env = {

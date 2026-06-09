@@ -733,6 +733,73 @@ def check_and_record_bus_nonce(project_id: str, nonce: str,
     return _txn(db.transaction())
 
 
+def set_bus_event_receipt(project_id: str, event_id: str, stage: str,
+                          recipient_session_id: str) -> dict | None:
+    """Stamp a per-event receipt timestamp (ms-54 / e-1348 DM read receipt).
+
+    ``stage`` ∈ {"delivered", "opened"}. Sets the ``<stage>_at`` (server clock,
+    same ISO8601 µs-precision format as ``created_at``) and ``<stage>_by``
+    (the recipient session that observed the event) fields on the bus event
+    document.
+
+    **First-write-wins per stage**: the receipt is *idempotent*. A second ack
+    of the same stage returns the existing timestamp with ``already_set=True``
+    rather than overwriting. The transaction makes that race-safe so two
+    receivers of the same broadcast event do not produce a flip-flop.
+
+    Returns ``None`` if the event does not exist. Otherwise returns
+    ``{event_id, stage, timestamp, by, already_set}``.
+
+    Why per-event fields instead of reusing the cursor (advance_bus_cursor)?
+    The cursor is per-recipient and tracks the "processed up to here" frontier
+    — it can only express delivery in aggregate. Read-receipt asks the
+    different question "did *this specific event* surface to anyone?". Two
+    fields on the event itself answer that without forcing every recipient to
+    maintain a parallel per-event ack journal.
+    """
+    import datetime
+    if stage not in ("delivered", "opened"):
+        raise ValueError(f"set_bus_event_receipt: invalid stage {stage!r}")
+    ts_field = f"{stage}_at"
+    by_field = f"{stage}_by"
+    db = get_db()
+    ref = (
+        db.collection(COLLECTION)
+        .document(project_id)
+        .collection(BUS_EVENTS_SUBCOLLECTION)
+        .document(event_id)
+    )
+
+    @firestore.transactional
+    def _txn(tx):
+        snap = ref.get(transaction=tx)
+        if not snap.exists:
+            return None
+        data = snap.to_dict() or {}
+        existing_ts = data.get(ts_field)
+        if existing_ts:
+            return {
+                "event_id": event_id,
+                "stage": stage,
+                "timestamp": existing_ts,
+                "by": data.get(by_field, ""),
+                "already_set": True,
+            }
+        now = datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
+        tx.update(ref, {ts_field: now, by_field: recipient_session_id})
+        return {
+            "event_id": event_id,
+            "stage": stage,
+            "timestamp": now,
+            "by": recipient_session_id,
+            "already_set": False,
+        }
+
+    return _txn(db.transaction())
+
+
 def find_bus_event(project_id: str, event_id: str) -> dict | None:
     """Look up a single bus event by id. Returns None if missing.
 
@@ -872,6 +939,48 @@ def upsert_session(project_id: str, session_id: str, data: dict) -> None:
         .document(session_id)
         .set(data, merge=True)
     )
+
+
+def stamp_session_actor_email(project_id: str, session_id: str,
+                              email: str) -> None:
+    """Stamp ``actor.email`` on a session document without touching other
+    ``actor.*`` subfields (ms-54 / e-1349).
+
+    ``set(data, merge=True)`` on a nested map *replaces* the entire map — so
+    if a heartbeat call wrote ``{actor: {email: x}}`` after a mint wrote
+    ``{actor: {machine: m, agent: a}}``, the heartbeat would silently wipe
+    machine/agent. Firestore's ``update`` with a dotted field path
+    (``actor.email``) is the canonical fix: only the named leaf participates
+    in the write, every other ``actor.*`` subfield is left untouched.
+
+    Used by the server-side upsert_session endpoint to attribute the
+    authenticated user's email to the bridge's session, so the directory
+    picker (``/beacon-dm-send``) can show member names alongside machine /
+    agent identity without trusting client-supplied attribution.
+
+    ``update`` raises if the document does not exist. Callers MUST run the
+    main upsert_session(...) write first so the parent doc is materialised
+    before this stamp lands. We fall back to ``set`` with the nested map on
+    NotFound for paranoid robustness — should not normally happen.
+    """
+    if not email:
+        return
+    ref = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(SESSIONS_SUBCOLLECTION)
+        .document(session_id)
+    )
+    try:
+        # Dotted path → server-side merge at the leaf, preserves
+        # actor.machine / actor.agent if a prior mint wrote them.
+        ref.update({"actor.email": email})
+    except Exception:
+        # Parent doc missing (race with upsert) — degrade to a nested set
+        # that creates {actor: {email: ...}} on top of whatever is there.
+        # Loses machine/agent only in the unlikely race window.
+        ref.set({"actor": {"email": email}}, merge=True)
 
 
 def list_sessions(project_id: str) -> list[dict]:

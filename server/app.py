@@ -593,6 +593,26 @@ class BusCursorAdvance(BaseModel):
     last_seen_at: str
 
 
+class BusEventReceiptAck(BaseModel):
+    """Body for POST /api/projects/{project_id}/bus/{event_id}/ack (ms-54 / e-1348).
+
+    Records a per-event read-receipt stage. The cursor (BusCursorAdvance)
+    only tracks the recipient's aggregate frontier; this gives the sender
+    a way to ask "did *this* event surface to anyone?".
+
+    ``stage`` is one of:
+      * ``delivered`` — receiver bridge fetched the event (poll/WS landed)
+      * ``opened``    — receiver dispatched it to the AI/MCP client; the
+                        recipient session has structurally seen the content
+
+    ``recipient_session_id`` is stamped on the event as ``<stage>_by`` so an
+    auditor can answer "who opened it". First-write-wins per stage — repeat
+    acks are idempotent no-ops (returned with ``already_set=True``).
+    """
+    stage: str
+    recipient_session_id: str
+
+
 class SessionLogUpsert(BaseModel):
     """Body for PUT /api/projects/{project_id}/session_logs/{session_id}.
 
@@ -1723,14 +1743,38 @@ def upsert_session(
     Heartbeat path: CLI sends only `last_active` to refresh liveness without
     overwriting the original mint metadata. Initial mint path: CLI sends the
     full payload. Firestore merge=True (in db.upsert_session) handles both.
+
+    ms-54 / e-1349: the authenticated user's email is stamped onto the
+    session's ``actor.email`` field regardless of whether the body included
+    actor. Email lives only on the server (bearer token is its property),
+    so the bridge cannot fabricate or spoof another user's identity. The
+    directory query then surfaces ``actor.email`` so the DM-send Skill
+    picker can show a member-level identity ("alice@…") rather than just
+    ``machine/agent``. See firestore_client.stamp_session_actor_email for
+    the field-path merge that preserves actor.machine/agent in the
+    heartbeat (no-actor) path.
     """
     _load(project_id, user)
     payload = {k: v for k, v in body.model_dump().items() if v is not None}
-    if not payload:
+    email = user.get("email", "")
+
+    # Mint path: body carried actor. Stamp email in-line so the single
+    # db.upsert_session write below lands the complete view atomically.
+    if email and isinstance(payload.get("actor"), dict):
+        payload["actor"] = {**payload["actor"], "email": email}
+
+    if not payload and not email:
         # Nothing to write — surface as a no-op rather than a 422, so callers
         # debouncing client-side don't need to special-case empty bodies.
         return {"status": "noop"}
-    db.upsert_session(project_id, session_id, payload)
+    if payload:
+        db.upsert_session(project_id, session_id, payload)
+    # Heartbeat path: body had no actor. Stamp the authenticated email via
+    # the field-path merge helper so existing actor.machine/agent (from a
+    # prior mint) are not stomped. Idempotent — repeat heartbeats just
+    # re-write the same email leaf.
+    if email and not isinstance(payload.get("actor"), dict):
+        db.stamp_session_actor_email(project_id, session_id, email)
     return {"status": "ok", "session_id": session_id}
 
 
@@ -2322,6 +2366,89 @@ def get_bus_cursor(
     """Return the current cursor for ``recipient_id`` ({} if unset)."""
     _load(project_id, user)
     return db.get_bus_cursor(project_id, recipient_id)
+
+
+# ---------------------------------------------------------------------------
+# Per-event read receipts (ms-54 / e-1348)
+#
+# Two narrow endpoints sit on top of find_bus_event / set_bus_event_receipt:
+#
+#   POST /bus/{event_id}/ack — stamp delivered_at / opened_at
+#   GET  /bus/{event_id}     — fetch one event with its receipt state
+#
+# Declared after every other /bus/* route because FastAPI matches in
+# registration order. Putting the {event_id} catch-all earlier would shadow
+# /bus/audit, /bus/unread, /bus/cursors/..., /bus/envelope/issue.
+# ---------------------------------------------------------------------------
+
+
+_RECEIPT_STAGES = ("delivered", "opened")
+
+
+@app.post("/api/projects/{project_id}/bus/{event_id}/ack")
+def ack_bus_event_receipt(
+    project_id: str,
+    event_id: str,
+    body: BusEventReceiptAck,
+    user: dict = Depends(require_auth),
+):
+    """Idempotent first-write-wins receipt stamping for a single bus event.
+
+    The semantics differ from the cursor advance in
+    :func:`advance_bus_cursor`:
+
+      * Cursor = recipient-side frontier (covers many events at once).
+      * Receipt = sender-visible per-event ack ("did this specific message
+        surface to anyone?"). bus.mjs calls this twice for each DM —
+        ``delivered`` when poll first sees it, ``opened`` after the
+        ``notifications/claude/channel`` push lands.
+
+    Repeat calls for the same stage are no-ops and return the original
+    timestamp with ``already_set=True``. Unknown stages are rejected at the
+    boundary so a typo on the receiver does not accidentally smuggle a new
+    field onto the event document.
+    """
+    _load(project_id, user)
+    stage = body.stage
+    if stage not in _RECEIPT_STAGES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"invalid stage {stage!r}; expected one of "
+                f"{_RECEIPT_STAGES}"
+            ),
+        )
+    result = db.set_bus_event_receipt(
+        project_id, event_id, stage, body.recipient_session_id,
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"bus event {event_id!r} not found",
+        )
+    return result
+
+
+@app.get("/api/projects/{project_id}/bus/{event_id}")
+def get_bus_event(
+    project_id: str,
+    event_id: str,
+    user: dict = Depends(require_auth),
+):
+    """Return one event with its receipt state for ``beacon bus status``.
+
+    Powers the 3-stage display (sent / delivered / opened). The event dict
+    already carries the per-stage timestamp fields when set, so the client
+    only needs to render what's present.
+    """
+    _load(project_id, user)
+    event = db.find_bus_event(project_id, event_id)
+    if event is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"bus event {event_id!r} not found",
+        )
+    return event
 
 
 @app.get("/api/projects/{project_id}/retros")

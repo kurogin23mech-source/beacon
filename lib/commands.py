@@ -9534,6 +9534,82 @@ def cmd_bus_ack():
         print(f"Cursor: {recipient} → {result.get('last_seen_at', '(unchanged)')}")
 
 
+def cmd_bus_status():
+    """Render the 3-stage receipt view for a single bus event (ms-54 / e-1348).
+
+    `sent` is always present (the row exists ⇒ the server stamped created_at).
+    `delivered` and `opened` are set by channel/bus.mjs receipts and may be
+    absent — the renderer marks them as "(not yet)" so the sender can localize
+    exactly where a DM stalled:
+
+      * sent ✓ / delivered ✗ / opened ✗ → bridge never polled / event filtered
+        before /unread returned it (e.g. cursor already past it)
+      * sent ✓ / delivered ✓ / opened ✗ → bridge fetched but the event got
+        dropped at the filter chain (channel allowlist, self-sent, mis-addressed)
+      * sent ✓ / delivered ✓ / opened ✓ → harness saw the channel push; the AI
+        has structurally seen the content
+
+    JSON mode emits the raw event dict — the same shape callers get from
+    GET /api/projects/{id}/bus/{event_id} — so scripts can pivot on the
+    receipt fields directly.
+    """
+    event_id = os.environ.get("BEACON_BUS_EVENT_ID", "").strip()
+    if not event_id:
+        print("Usage: beacon bus status <event_id> [--project <id>] [--json]",
+              file=sys.stderr)
+        sys.exit(2)
+    client, config = _get_api_client()
+    project_id = _resolve_bus_project_id(config)
+    try:
+        event = client.get_bus_event(project_id, event_id)
+    except Exception as e:
+        # api_client raises a plain Exception with the HTTP status message.
+        # 404 is the common case (typo / event GC'd); surface it as a single
+        # line rather than a Python traceback.
+        msg = str(e)
+        if "404" in msg:
+            print(f"Error: bus event {event_id!r} not found in project "
+                  f"{project_id!r}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Error: {msg}", file=sys.stderr)
+        sys.exit(1)
+
+    if os.environ.get("BEACON_JSON", "") == "1":
+        print(json.dumps(event, ensure_ascii=False))
+        return
+
+    # Human view. Stage rows align so a quick eye-scan over multiple events
+    # locks onto the missing checkmark.
+    sent_at = event.get("created_at", "")
+    delivered_at = event.get("delivered_at", "")
+    delivered_by = event.get("delivered_by", "")
+    opened_at = event.get("opened_at", "")
+    opened_by = event.get("opened_by", "")
+
+    def _row(mark, label, ts, by=""):
+        ts_str = ts if ts else "(not yet)"
+        by_str = f"  by {by}" if by else ""
+        return f"  {mark} {label:<10} {ts_str}{by_str}"
+
+    channel = event.get("channel", "")
+    delivery = event.get("delivery", "")
+    sender = event.get("sender_session_id", "")
+    payload = event.get("payload", {})
+
+    print(f"event: {event_id}")
+    print(f"  channel: {channel}  delivery: {delivery}")
+    print(f"  sender:  {sender}")
+    try:
+        print(f"  payload: {json.dumps(payload, ensure_ascii=False)}")
+    except Exception:
+        print(f"  payload: {payload!r}")
+    print("  receipt:")
+    print(_row("✓", "sent", sent_at))
+    print(_row("✓" if delivered_at else "✗", "delivered", delivered_at,
+               delivered_by))
+    print(_row("✓" if opened_at else "✗", "opened", opened_at, opened_by))
+
+
 def _resolve_bus_project_id(config: dict) -> str:
     """Return the project_id the bus call should target.
 
@@ -9730,6 +9806,7 @@ if __name__ == "__main__":
         "bus_listen": cmd_bus_listen,
         "bus_receive": cmd_bus_receive,
         "bus_ack": cmd_bus_ack,
+        "bus_status": cmd_bus_status,
         "bus_directory": cmd_bus_directory,
         "bus_budget_grant": cmd_bus_budget_grant,
         "bus_budget_show": cmd_bus_budget_show,

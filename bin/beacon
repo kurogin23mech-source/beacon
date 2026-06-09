@@ -2407,6 +2407,13 @@ case "${1:-}" in
             _ae_sub="${1:-}"
             shift || true
         fi
+        # ms-54 / e-1348: `status <event_id>` takes a single positional arg.
+        # Extract it up front so the generic flag loop below doesn't drop it.
+        _bus_event_id=""
+        if [[ "$_bus_sub" == "status" && -n "${1:-}" && "${1:0:1}" != "-" ]]; then
+            _bus_event_id="${1:-}"
+            shift || true
+        fi
         _bus_channel=""
         _bus_payload=""
         _bus_sender=""
@@ -2506,6 +2513,13 @@ case "${1:-}" in
                     BEACON_JSON="$_bus_json" \
                     python3 "$COMMANDS_PY" bus_ack
                 ;;
+            status)
+                # ms-54 / e-1348: 3-stage receipt view (sent / delivered / opened).
+                BEACON_BUS_EVENT_ID="$_bus_event_id" \
+                    BEACON_BUS_PROJECT_ID="$_bus_project_id" \
+                    BEACON_JSON="$_bus_json" \
+                    python3 "$COMMANDS_PY" bus_status
+                ;;
             directory|dir)
                 BEACON_DIR_USER="$_bus_user" \
                     BEACON_DIR_MACHINE="$_bus_machine" \
@@ -2574,6 +2588,7 @@ Usage: beacon bus send         --channel <ch> [--to <session_id>] [--payload '<j
        beacon bus listen       [--recipient <id>] [--channel <ch>] [--interval <sec>] [--auto-ack] [--once] [--project <id>]
        beacon bus receive      [--recipient <id>] [--channel <ch>] [--timeout <sec>] [--auto-ack] [--project <id>]
        beacon bus ack          [--recipient <id>] --last-seen-at <iso8601> [--project <id>]
+       beacon bus status       <event_id> [--project <id>] [--json]
        beacon bus directory    [--user <email>] [--machine <name>] [--agent <name>] [--live] [--healthy] [--since-min <N>] [--project <id>] [--json]
        beacon bus budget       grant --turns <N>  |  show  |  clear
        beacon bus auto-execute add --channel <name>  |  remove --channel <name>  |  list

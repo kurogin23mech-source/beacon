@@ -39,7 +39,45 @@ def _mock_list_sessions(project_id: str) -> list[dict]:
     return copy.deepcopy(items)
 
 
+def _mock_upsert_session(project_id: str, session_id: str,
+                         data: dict) -> None:
+    """Mirror Firestore set(merge=True): nested maps are REPLACED, top-level
+    fields are merged. Locks in the same surprise that tripped e-1349 —
+    nested actor map would be wiped on heartbeat without the field-path
+    merge in stamp_session_actor_email."""
+    bucket = _sessions_store.setdefault(project_id, [])
+    for s in bucket:
+        if s.get("session_id") == session_id:
+            for k, v in data.items():
+                s[k] = copy.deepcopy(v)
+            return
+    bucket.append({"session_id": session_id, **copy.deepcopy(data)})
+
+
+def _mock_stamp_session_actor_email(project_id: str, session_id: str,
+                                    email: str) -> None:
+    """Mirror the field-path merge: only actor.email participates in the
+    write, every other actor.* subfield is preserved."""
+    if not email:
+        return
+    bucket = _sessions_store.setdefault(project_id, [])
+    for s in bucket:
+        if s.get("session_id") == session_id:
+            actor = s.get("actor")
+            if not isinstance(actor, dict):
+                actor = {}
+            actor["email"] = email
+            s["actor"] = actor
+            return
+    # Doc didn't exist — create minimal stub with just actor.email so
+    # subsequent merges land in a sane place. Mirrors the fallback in
+    # firestore_client.stamp_session_actor_email.
+    bucket.append({"session_id": session_id, "actor": {"email": email}})
+
+
 firestore_client.list_sessions = _mock_list_sessions
+firestore_client.upsert_session = _mock_upsert_session
+firestore_client.stamp_session_actor_email = _mock_stamp_session_actor_email
 firestore_client.get_project = lambda pid: {"name": "test", "milestones": []}
 firestore_client.save_project = lambda pid, data: None
 firestore_client.list_projects = lambda: []
@@ -66,6 +104,8 @@ def reset_store():
     # tests would see surprise side effects (e.g. 404 instead of 200 because
     # get_project now returns None for our test project_id).
     firestore_client.list_sessions = _mock_list_sessions
+    firestore_client.upsert_session = _mock_upsert_session
+    firestore_client.stamp_session_actor_email = _mock_stamp_session_actor_email
     firestore_client.get_project = lambda pid: {"name": "test", "milestones": []}
     firestore_client.save_project = lambda pid, data: None
     firestore_client.list_projects = lambda: []
@@ -434,3 +474,209 @@ def test_session_upsert_accepts_new_heartbeat_fields():
         assert captured.get("shutdown") is False
     finally:
         fc.upsert_session = original
+
+
+# ---------------------------------------------------------------------------
+# Directory entry email attribution (ms-54 / e-1349)
+#
+# Three properties:
+#   1. Bearer-token email lands on actor.email via the server, NOT the client.
+#      A client cannot impersonate another user just by sending a fake actor.
+#   2. Heartbeat (no-actor body) stamps email without wiping prior
+#      actor.machine / actor.agent set at mint time.
+#   3. The directory query then returns actor.email, so the DM-send picker
+#      can show "alice@…" instead of just "machine/agent".
+# ---------------------------------------------------------------------------
+
+def test_email_stamped_from_bearer_token_on_mint(monkeypatch):
+    """A mint body with actor={machine, agent} must come back with email
+    added — and the email must be the one the SERVER read from the bearer
+    token, never one the client sent in the body."""
+    monkeypatch.setattr(app_module, "_auth_enabled", True)
+    monkeypatch.setattr(
+        app_module, "_verify_id_token",
+        lambda tok: {"sub": "user-1", "email": "alice@x.com"},
+    )
+    # require_auth auto-registers — stub it out for the in-memory store.
+    monkeypatch.setattr(
+        firestore_client, "get_or_create_user", lambda *a, **kw: None,
+    )
+    resp = client.put(
+        f"/api/projects/{PROJECT_ID}/sessions/s-mint",
+        json={"actor": {"machine": "mac-mini", "agent": "claude"},
+              "last_active": "2026-06-09T05:00:00.000000Z"},
+        headers={"Authorization": "Bearer fake-token"},
+    )
+    assert resp.status_code == 200, resp.text
+    stored = next(s for s in _sessions_store[PROJECT_ID]
+                  if s["session_id"] == "s-mint")
+    assert stored["actor"]["machine"] == "mac-mini"
+    assert stored["actor"]["agent"] == "claude"
+    assert stored["actor"]["email"] == "alice@x.com"
+
+
+def test_email_cannot_be_spoofed_by_client_body(monkeypatch):
+    """The server always wins. Even if the client sneaks email=mallory into
+    the actor map, the bearer token's email overrides it. This is the
+    structural property that makes attribution trustworthy — the picker
+    can be sure 'alice@…' really did write that DM."""
+    monkeypatch.setattr(app_module, "_auth_enabled", True)
+    monkeypatch.setattr(
+        app_module, "_verify_id_token",
+        lambda tok: {"sub": "user-1", "email": "alice@x.com"},
+    )
+    monkeypatch.setattr(
+        firestore_client, "get_or_create_user", lambda *a, **kw: None,
+    )
+    resp = client.put(
+        f"/api/projects/{PROJECT_ID}/sessions/s-spoof",
+        json={"actor": {"machine": "mac", "agent": "claude",
+                        "email": "mallory@evil.com"},
+              "last_active": "2026-06-09T05:00:00.000000Z"},
+        headers={"Authorization": "Bearer alice-token"},
+    )
+    assert resp.status_code == 200
+    stored = next(s for s in _sessions_store[PROJECT_ID]
+                  if s["session_id"] == "s-spoof")
+    assert stored["actor"]["email"] == "alice@x.com"
+
+
+def test_heartbeat_stamps_email_without_clobbering_machine_agent(monkeypatch):
+    """The structural reason e-1349 needs field-path merge: a mint sets
+    actor.machine and actor.agent; later heartbeats arrive with no actor in
+    the body. Naive set(merge=True) on a nested map would replace the whole
+    actor with {email: ...} and silently wipe machine/agent. The dotted
+    field-path write in stamp_session_actor_email is what prevents this."""
+    monkeypatch.setattr(app_module, "_auth_enabled", True)
+    monkeypatch.setattr(
+        app_module, "_verify_id_token",
+        lambda tok: {"sub": "user-1", "email": "alice@x.com"},
+    )
+    monkeypatch.setattr(
+        firestore_client, "get_or_create_user", lambda *a, **kw: None,
+    )
+    # Initial mint: full actor including machine + agent.
+    mint = client.put(
+        f"/api/projects/{PROJECT_ID}/sessions/s-bridge",
+        json={"actor": {"machine": "mac-mini", "agent": "claude"},
+              "last_active": "2026-06-09T05:00:00.000000Z"},
+        headers={"Authorization": "Bearer fake-token"},
+    )
+    assert mint.status_code == 200
+    # Heartbeat: no actor, just last_active + last_poll_at.
+    hb = client.put(
+        f"/api/projects/{PROJECT_ID}/sessions/s-bridge",
+        json={"last_active": "2026-06-09T05:00:02.000000Z",
+              "last_poll_at": "2026-06-09T05:00:02.000000Z",
+              "poll_interval_ms": 2000},
+        headers={"Authorization": "Bearer fake-token"},
+    )
+    assert hb.status_code == 200
+    stored = next(s for s in _sessions_store[PROJECT_ID]
+                  if s["session_id"] == "s-bridge")
+    # The headline assertion: machine/agent survive the heartbeat.
+    assert stored["actor"]["machine"] == "mac-mini"
+    assert stored["actor"]["agent"] == "claude"
+    assert stored["actor"]["email"] == "alice@x.com"
+
+
+def test_directory_query_surfaces_actor_email_to_picker(monkeypatch):
+    """End-to-end: after a mint + heartbeat the GET /sessions response
+    carries actor.email, so /beacon-dm-send Skill's picker can render a
+    member-level identity rather than just opaque machine/agent strings."""
+    monkeypatch.setattr(app_module, "_auth_enabled", True)
+    monkeypatch.setattr(
+        app_module, "_verify_id_token",
+        lambda tok: {"sub": "user-1", "email": "alice@x.com"},
+    )
+    monkeypatch.setattr(
+        firestore_client, "get_or_create_user", lambda *a, **kw: None,
+    )
+    client.put(
+        f"/api/projects/{PROJECT_ID}/sessions/s-picker",
+        json={"actor": {"machine": "mac", "agent": "claude"},
+              "last_active": "2026-06-09T05:00:00.000000Z"},
+        headers={"Authorization": "Bearer fake-token"},
+    )
+    listed = client.get(
+        f"/api/projects/{PROJECT_ID}/sessions",
+        headers={"Authorization": "Bearer fake-token"},
+    ).json()
+    by_sid = {s["session_id"]: s for s in listed}
+    assert by_sid["s-picker"]["actor"]["email"] == "alice@x.com"
+
+
+def test_directory_user_filter_uses_stamped_email(monkeypatch):
+    """The /sessions?user_id=alice@x.com filter was designed against
+    actor.email, but pre-e-1349 the field was never populated by anyone.
+    After the server-side stamp lands, the filter actually works — the
+    DM-send Skill's 'sessions of alice' query becomes real."""
+    monkeypatch.setattr(app_module, "_auth_enabled", True)
+    monkeypatch.setattr(
+        app_module, "_verify_id_token",
+        lambda tok: {"sub": "user-1", "email": "alice@x.com"},
+    )
+    monkeypatch.setattr(
+        firestore_client, "get_or_create_user", lambda *a, **kw: None,
+    )
+    client.put(
+        f"/api/projects/{PROJECT_ID}/sessions/s-alice",
+        json={"actor": {"machine": "mac", "agent": "claude"},
+              "last_active": "2026-06-09T05:00:00.000000Z"},
+        headers={"Authorization": "Bearer fake-token"},
+    )
+    # A session that pre-existed without email (legacy / different user).
+    _sessions_store[PROJECT_ID].append({
+        "session_id": "s-other",
+        "actor": {"machine": "win", "agent": "claude", "email": "bob@x.com"},
+        "last_active": "2026-06-09T05:00:01.000000Z",
+    })
+    by_alice = client.get(
+        f"/api/projects/{PROJECT_ID}/sessions?user_id=alice@x.com",
+        headers={"Authorization": "Bearer fake-token"},
+    ).json()
+    sids = [s["session_id"] for s in by_alice]
+    assert sids == ["s-alice"]
+
+
+def test_heartbeat_without_email_still_no_ops_safely(monkeypatch):
+    """Auth disabled → user.email = 'dev@local'. Still stamps so dev
+    environments see a deterministic email landing on actor.email rather
+    than a flaky null. (Also guards against a future regression where
+    require_auth returns email='' for some token shapes.)"""
+    # _auth_enabled is False by default in this test module.
+    resp = client.put(
+        f"/api/projects/{PROJECT_ID}/sessions/s-dev",
+        json={"last_active": "2026-06-09T05:00:00.000000Z"},
+    )
+    assert resp.status_code == 200
+    stored = next(s for s in _sessions_store[PROJECT_ID]
+                  if s["session_id"] == "s-dev")
+    assert stored["actor"]["email"] == "dev@local"
+
+
+def test_email_unknown_does_not_crash_or_create_actor(monkeypatch):
+    """If the bearer token has no email claim (degenerate / dev mode where
+    require_auth returns {}), the endpoint must not crash and must NOT
+    fabricate an empty-string email on actor — that would corrupt the
+    'no email known' signal that the directory uses to render
+    '(anon)' rows."""
+    monkeypatch.setattr(app_module, "_auth_enabled", True)
+    monkeypatch.setattr(
+        app_module, "_verify_id_token",
+        lambda tok: {"sub": "user-1"},  # no email claim
+    )
+    monkeypatch.setattr(
+        firestore_client, "get_or_create_user", lambda *a, **kw: None,
+    )
+    resp = client.put(
+        f"/api/projects/{PROJECT_ID}/sessions/s-anon",
+        json={"actor": {"machine": "mac", "agent": "claude"},
+              "last_active": "2026-06-09T05:00:00.000000Z"},
+        headers={"Authorization": "Bearer fake-token"},
+    )
+    assert resp.status_code == 200
+    stored = next(s for s in _sessions_store[PROJECT_ID]
+                  if s["session_id"] == "s-anon")
+    assert stored["actor"]["machine"] == "mac"
+    assert "email" not in stored["actor"]

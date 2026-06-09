@@ -101,6 +101,24 @@ class _StubApiClient:
             self.cursors[recipient_id] = last_seen_at
         return {"last_seen_at": self.cursors[recipient_id]}
 
+    # ms-54 / e-1348: per-event receipt state. The stub stores receipts as
+    # extra fields on the event dict (mirrors the Firestore document layout).
+    def get_bus_event(self, project_id, event_id):
+        for ev in self.events:
+            if ev["event_id"] == event_id:
+                return ev
+        # Mirror the api_client behavior: raise with the 404 substring so the
+        # CLI's error branch can detect it.
+        raise Exception(f"GET .../bus/{event_id} -> 404: not found")
+
+    def stamp_receipt(self, event_id, *, stage, by, ts):
+        """Test helper: pretend the bridge ack'd `stage` for an event."""
+        for ev in self.events:
+            if ev["event_id"] == event_id:
+                ev[f"{stage}_at"] = ts
+                ev[f"{stage}_by"] = by
+                return
+
 
 @pytest.fixture
 def stub(monkeypatch, capsys):
@@ -121,7 +139,8 @@ def _clear_bus_env(monkeypatch):
     for key in ("BEACON_BUS_CHANNEL", "BEACON_BUS_PAYLOAD", "BEACON_BUS_SENDER",
                 "BEACON_BUS_DELIVERY", "BEACON_BUS_ONCE", "BEACON_BUS_AUTO_ACK",
                 "BEACON_BUS_TIMEOUT", "BEACON_BUS_LAST_SEEN_AT", "BEACON_JSON",
-                "BEACON_BUS_RECIPIENT_SESSION", "BEACON_BUS_IN_REPLY_TO"):
+                "BEACON_BUS_RECIPIENT_SESSION", "BEACON_BUS_IN_REPLY_TO",
+                "BEACON_BUS_EVENT_ID"):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -594,3 +613,131 @@ def test_bus_directory_human_output_shows_health_tag(
     # Legacy row (no poll_health) → unknown, so the user knows liveness
     # is undecided rather than falsely "ok".
     assert "s-old" in out and "health=unknown" in out
+
+
+# ---------------------------------------------------------------------------
+# status (ms-54 / e-1348)
+#
+# The 3-stage view must:
+#   1. Always show sent ✓ (the row exists ⇒ server stamped created_at).
+#   2. Render delivered/opened ✗ as "(not yet)" when missing, so the sender
+#      can localize the stall point at a glance.
+#   3. Render delivered/opened ✓ with the by-attribution when stamped.
+#   4. Emit a clean 1-line error (exit 1) on unknown event_id rather than
+#      a Python traceback.
+#   5. JSON mode returns the raw event dict for scripts.
+# ---------------------------------------------------------------------------
+
+
+def test_bus_status_requires_event_id(monkeypatch, capsys, stub):
+    _clear_bus_env(monkeypatch)
+    with pytest.raises(SystemExit) as exc:
+        commands.cmd_bus_status()
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "Usage:" in err and "bus status" in err
+
+
+def test_bus_status_unknown_event_exits_with_error_line(
+        monkeypatch, capsys, stub):
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_EVENT_ID", "ghost-evt")
+    with pytest.raises(SystemExit) as exc:
+        commands.cmd_bus_status()
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    err = captured.err
+    assert "not found" in err
+    assert "ghost-evt" in err
+    # No traceback ever leaks to the user.
+    assert "Traceback" not in err
+
+
+def test_bus_status_renders_3_stages_with_missing_marked_not_yet(
+        monkeypatch, capsys, stub):
+    """The structurally important case: a DM that was sent but never
+    delivered/opened. The renderer must mark the gap rather than print
+    blank cells — otherwise the sender can't tell 'no stamp yet' from
+    'the field doesn't exist on this build'."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
+    stub.post_bus_event(
+        "proj-1", "dm", sender_session_id="sender-X",
+        payload={"recipient_session_id": "recv-Y", "text": "hi"},
+    )
+    eid = stub.events[-1]["event_id"]
+    monkeypatch.setenv("BEACON_BUS_EVENT_ID", eid)
+    commands.cmd_bus_status()
+    out = capsys.readouterr().out
+    assert f"event: {eid}" in out
+    assert "channel: dm" in out
+    assert "sender:" in out and "sender-X" in out
+    assert "✓ sent" in out
+    # Stages not yet stamped must show ✗ AND "(not yet)".
+    assert "✗ delivered" in out and "(not yet)" in out
+    assert "✗ opened" in out
+
+
+def test_bus_status_renders_full_3_stages_when_all_stamped(
+        monkeypatch, capsys, stub):
+    """The happy path: every stage has a timestamp and a `by` attribution.
+    The renderer must surface the attribution so an auditor can answer
+    'who opened it'."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
+    stub.post_bus_event(
+        "proj-1", "dm", sender_session_id="sender-X",
+        payload={"recipient_session_id": "recv-Y", "text": "hi"},
+    )
+    eid = stub.events[-1]["event_id"]
+    stub.stamp_receipt(
+        eid, stage="delivered", by="bridge-A",
+        ts="2026-06-09T05:00:01.000000Z",
+    )
+    stub.stamp_receipt(
+        eid, stage="opened", by="bridge-A",
+        ts="2026-06-09T05:00:01.234567Z",
+    )
+    monkeypatch.setenv("BEACON_BUS_EVENT_ID", eid)
+    commands.cmd_bus_status()
+    out = capsys.readouterr().out
+    assert "✓ sent" in out
+    assert "✓ delivered" in out and "by bridge-A" in out
+    assert "✓ opened" in out
+    # The bridge identity for `opened` is printed on the opened row, not
+    # collapsed into a single 'by' line — the renderer keeps the rows
+    # independent so a future split-attribution case (delivered=X, opened=Y)
+    # surfaces correctly.
+    delivered_idx = out.index("✓ delivered")
+    opened_idx = out.index("✓ opened")
+    assert delivered_idx < opened_idx
+    # "(not yet)" must NOT appear when every stage is stamped.
+    assert "(not yet)" not in out
+
+
+def test_bus_status_json_emits_raw_event_dict(monkeypatch, capsys, stub):
+    """Scripts should be able to pivot on the receipt fields directly
+    rather than parse the human view. JSON mode returns whatever the
+    server returned, including the stage timestamps when present."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
+    stub.post_bus_event(
+        "proj-1", "dm", sender_session_id="sender-X",
+        payload={"recipient_session_id": "recv-Y"},
+    )
+    eid = stub.events[-1]["event_id"]
+    stub.stamp_receipt(
+        eid, stage="delivered", by="bridge-A",
+        ts="2026-06-09T05:00:01.000000Z",
+    )
+    monkeypatch.setenv("BEACON_BUS_EVENT_ID", eid)
+    monkeypatch.setenv("BEACON_JSON", "1")
+    commands.cmd_bus_status()
+    out = capsys.readouterr().out
+    parsed = json.loads(out)
+    assert parsed["event_id"] == eid
+    assert parsed["channel"] == "dm"
+    assert parsed["delivered_at"] == "2026-06-09T05:00:01.000000Z"
+    assert parsed["delivered_by"] == "bridge-A"
+    # opened was never stamped; field should be absent from the dict.
+    assert "opened_at" not in parsed

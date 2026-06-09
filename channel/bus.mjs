@@ -405,6 +405,34 @@ if (!PROJECT_ID || !SESSION_ID) {
     }
   }
 
+  // ms-54 / e-1348: per-event read receipt. Two stages:
+  //   delivered = this bridge's poll fetched the event (set for every event
+  //               returned by /unread, regardless of whether it survives the
+  //               filter chain below). The sender uses this to distinguish
+  //               "bridge is alive, message reached it" from "still in queue".
+  //   opened    = this bridge dispatched the event into the MCP client (i.e.
+  //               the AI/harness has seen it). Only set after a successful
+  //               mcp.notification call.
+  //
+  // Receipt POSTs are fire-and-forget: failures are logged but never kill
+  // the poll loop. The cursor advance below remains the source-of-truth
+  // for "won't re-deliver" semantics — receipts are an observational
+  // signal that sits on top, not a delivery guarantee.
+  async function ackReceipt(eventId, stage) {
+    if (!eventId) return
+    try {
+      await apiPost(
+        `/api/projects/${PROJECT_ID}/bus/${encodeURIComponent(eventId)}/ack`,
+        { stage, recipient_session_id: SESSION_ID },
+      )
+    } catch (e) {
+      // 404 = event GC'd between poll and ack (rare, harmless). Other
+      // errors (transport, 5xx) likewise mustn't break the loop — the
+      // receipt is observational.
+      log(`receipt ack ${stage} failed (non-fatal): id=${eventId} ${e.message}`)
+    }
+  }
+
   async function pollOnce() {
     const events = await apiGet(
       `/api/projects/${PROJECT_ID}/bus/unread?recipient_id=${encodeURIComponent(SESSION_ID)}`,
@@ -412,6 +440,13 @@ if (!PROJECT_ID || !SESSION_ID) {
     if (!Array.isArray(events) || events.length === 0) return
     let latestSeen = null
     for (const evt of events) {
+      // e-1348: stamp `delivered` BEFORE the filter chain. The bridge
+      // physically received the event; the sender deserves to know that
+      // even if the event ends up filtered out (channel not in allowlist,
+      // self-sent, mis-addressed). Without this we'd silently drop
+      // receipts on filtered events and the sender's "where did it go?"
+      // question would have a gap.
+      await ackReceipt(evt.event_id, 'delivered')
       const ch = evt.channel || ''
       const sender = String(evt.sender_session_id || '')
       const payload = evt.payload || {}
@@ -472,6 +507,11 @@ if (!PROJECT_ID || !SESSION_ID) {
           },
         })
         log(`pushed event_id=${evt.event_id} ch=${ch} from=${sender}`)
+        // e-1348: `opened` is stamped only AFTER mcp.notification resolves
+        // — i.e. the harness accepted the channel push. A dropped/filtered
+        // event will have delivered_at but no opened_at, which is the
+        // signal the sender uses to localize where their DM stalled.
+        await ackReceipt(evt.event_id, 'opened')
       }
       latestSeen = evt.created_at || latestSeen
     }

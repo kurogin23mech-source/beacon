@@ -125,10 +125,45 @@ def _mock_find_bus_event(project_id: str, event_id: str) -> dict | None:
     return None
 
 
+def _mock_set_bus_event_receipt(project_id: str, event_id: str, stage: str,
+                                recipient_session_id: str) -> dict | None:
+    """Mirror firestore_client.set_bus_event_receipt: first-write-wins per stage."""
+    import datetime
+    if stage not in ("delivered", "opened"):
+        raise ValueError(f"invalid stage: {stage!r}")
+    ts_field = f"{stage}_at"
+    by_field = f"{stage}_by"
+    for ev in _bus_store.get(project_id, []):
+        if ev.get("event_id") == event_id:
+            existing_ts = ev.get(ts_field)
+            if existing_ts:
+                return {
+                    "event_id": event_id,
+                    "stage": stage,
+                    "timestamp": existing_ts,
+                    "by": ev.get(by_field, ""),
+                    "already_set": True,
+                }
+            now = datetime.datetime.now(datetime.timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%S.%fZ"
+            )
+            ev[ts_field] = now
+            ev[by_field] = recipient_session_id
+            return {
+                "event_id": event_id,
+                "stage": stage,
+                "timestamp": now,
+                "by": recipient_session_id,
+                "already_set": False,
+            }
+    return None
+
+
 firestore_client.check_and_record_bus_nonce = _mock_check_and_record_bus_nonce
 firestore_client.append_bus_audit = _mock_append_bus_audit
 firestore_client.list_bus_audit = _mock_list_bus_audit
 firestore_client.find_bus_event = _mock_find_bus_event
+firestore_client.set_bus_event_receipt = _mock_set_bus_event_receipt
 
 
 # Stubs for the existing _load auth/loader hooks so the bus endpoints don't
@@ -169,6 +204,7 @@ def reset_store():
     firestore_client.append_bus_audit = _mock_append_bus_audit
     firestore_client.list_bus_audit = _mock_list_bus_audit
     firestore_client.find_bus_event = _mock_find_bus_event
+    firestore_client.set_bus_event_receipt = _mock_set_bus_event_receipt
     firestore_client.get_project = lambda pid: {"name": "test", "milestones": []}
     firestore_client.save_project = lambda pid, data: None
     firestore_client.list_projects = lambda: []
@@ -743,3 +779,171 @@ def test_api_client_post_bus_event_round_trip():
     listed = fake.list_bus_events(PROJECT_ID, channel="ch")
     assert len(listed) == 1
     assert listed[0]["payload"] == {"hi": True}
+
+
+# ---------------------------------------------------------------------------
+# Per-event read receipts (ms-54 / e-1348)
+#
+# Three properties the new endpoints must enforce:
+#   1. Sender can ask "did this event reach anyone?" via GET /bus/{event_id}
+#      and see the 3-stage state (sent / delivered / opened).
+#   2. ack is first-write-wins per stage — repeat calls round-trip the
+#      original timestamp with already_set=True. Otherwise two recipients
+#      racing on a broadcast would produce a flip-flop and the sender
+#      couldn't trust the "opened_at" they saw earlier.
+#   3. The stages are independent: stamping `delivered` does not implicitly
+#      stamp `opened`. The receiver must explicitly ack each transition.
+# ---------------------------------------------------------------------------
+
+
+def _post_one(project_id: str = PROJECT_ID, payload: dict | None = None) -> str:
+    """Helper: create one event and return its event_id."""
+    payload = payload or {"text": "hello"}
+    resp = client.post(f"/api/projects/{project_id}/bus", json={
+        "channel": "dm",
+        "sender_session_id": "sender-A",
+        "payload": {"recipient_session_id": "recv-B", **payload},
+    })
+    assert resp.status_code == 200, resp.text
+    return resp.json()["event_id"]
+
+
+def test_receipt_get_single_event_returns_full_dict():
+    """The GET endpoint must return the event with channel/sender/payload
+    intact so the CLI doesn't need a second round-trip to render it."""
+    eid = _post_one()
+    resp = client.get(f"/api/projects/{PROJECT_ID}/bus/{eid}")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["event_id"] == eid
+    assert body["channel"] == "dm"
+    assert body["sender_session_id"] == "sender-A"
+    assert body["created_at"]
+    # No receipts stamped yet — those fields are simply absent from the doc.
+    assert "delivered_at" not in body
+    assert "opened_at" not in body
+
+
+def test_receipt_get_unknown_event_returns_404():
+    """An unknown event_id must 404 cleanly so the CLI can render
+    a useful 'not found' line instead of mystery-empty output."""
+    resp = client.get(f"/api/projects/{PROJECT_ID}/bus/does-not-exist")
+    assert resp.status_code == 404
+
+
+def test_receipt_ack_delivered_then_opened_records_both_stages():
+    """After two acks the event should carry both delivered_at and opened_at
+    plus the corresponding _by attribution. This is the happy-path that
+    bus.mjs will trigger for every DM it surfaces."""
+    eid = _post_one()
+    delivered = client.post(
+        f"/api/projects/{PROJECT_ID}/bus/{eid}/ack",
+        json={"stage": "delivered", "recipient_session_id": "recv-B"},
+    )
+    assert delivered.status_code == 200
+    d = delivered.json()
+    assert d["stage"] == "delivered"
+    assert d["already_set"] is False
+    assert d["by"] == "recv-B"
+    assert d["timestamp"].endswith("Z")
+
+    opened = client.post(
+        f"/api/projects/{PROJECT_ID}/bus/{eid}/ack",
+        json={"stage": "opened", "recipient_session_id": "recv-B"},
+    )
+    assert opened.status_code == 200
+    o = opened.json()
+    assert o["stage"] == "opened"
+    assert o["already_set"] is False
+
+    # GET reflects the two new fields.
+    fetched = client.get(f"/api/projects/{PROJECT_ID}/bus/{eid}").json()
+    assert fetched["delivered_at"] == d["timestamp"]
+    assert fetched["delivered_by"] == "recv-B"
+    assert fetched["opened_at"] == o["timestamp"]
+    assert fetched["opened_by"] == "recv-B"
+
+
+def test_receipt_ack_is_idempotent_first_write_wins():
+    """A second ack of the same stage must return the ORIGINAL timestamp
+    (already_set=True) rather than overwrite it. Without this, two
+    bus.mjs replicas racing on a broadcast would flip-flop opened_at and
+    the sender couldn't trust the receipt they observed earlier."""
+    eid = _post_one()
+    first = client.post(
+        f"/api/projects/{PROJECT_ID}/bus/{eid}/ack",
+        json={"stage": "delivered", "recipient_session_id": "recv-B"},
+    ).json()
+    second = client.post(
+        f"/api/projects/{PROJECT_ID}/bus/{eid}/ack",
+        json={"stage": "delivered", "recipient_session_id": "other-replica"},
+    ).json()
+    assert second["already_set"] is True
+    assert second["timestamp"] == first["timestamp"]
+    # The 'by' attribution must NOT silently switch to other-replica either.
+    assert second["by"] == "recv-B"
+    assert first["by"] == "recv-B"
+
+
+def test_receipt_ack_stages_are_independent():
+    """Stamping `delivered` must not implicitly stamp `opened`, and vice
+    versa. The CLI relies on this to render a partial 3-stage view (e.g.
+    'sent ✓ / delivered ✓ / opened ✗ (not yet)') without forcing the
+    receiver to ack stages it hasn't reached."""
+    eid = _post_one()
+    client.post(
+        f"/api/projects/{PROJECT_ID}/bus/{eid}/ack",
+        json={"stage": "delivered", "recipient_session_id": "recv-B"},
+    )
+    fetched = client.get(f"/api/projects/{PROJECT_ID}/bus/{eid}").json()
+    assert fetched.get("delivered_at")
+    assert "opened_at" not in fetched
+    assert "opened_by" not in fetched
+
+
+def test_receipt_ack_invalid_stage_is_rejected_at_boundary():
+    """Unknown stage values must 400 rather than silently land as a new
+    field on the event document. Otherwise a typo on the receiver path
+    would smuggle arbitrary fields into the durable event record."""
+    eid = _post_one()
+    bad = client.post(
+        f"/api/projects/{PROJECT_ID}/bus/{eid}/ack",
+        json={"stage": "delivered-typo", "recipient_session_id": "recv-B"},
+    )
+    assert bad.status_code == 400
+    fetched = client.get(f"/api/projects/{PROJECT_ID}/bus/{eid}").json()
+    # No accidental field write occurred.
+    assert "delivered-typo_at" not in fetched
+    assert "delivered_at" not in fetched
+
+
+def test_receipt_ack_unknown_event_returns_404():
+    """ack on a non-existent event must 404 cleanly. The receiver bridge
+    shouldn't crash if it observed an event whose Firestore doc was GCed
+    or never existed (e.g. truncated channel)."""
+    resp = client.post(
+        f"/api/projects/{PROJECT_ID}/bus/does-not-exist/ack",
+        json={"stage": "delivered", "recipient_session_id": "recv-B"},
+    )
+    assert resp.status_code == 404
+
+
+def test_receipt_independent_stage_writers_both_succeed_first_time():
+    """delivered-then-opened by the same receiver and delivered-by-A then
+    opened-by-B both work first-time — neither stage is gated on the
+    other. (Same receiver is the common case; cross-receiver per-stage is
+    rare but exercised here for completeness.)"""
+    eid = _post_one()
+    d = client.post(
+        f"/api/projects/{PROJECT_ID}/bus/{eid}/ack",
+        json={"stage": "delivered", "recipient_session_id": "bridge-X"},
+    ).json()
+    o = client.post(
+        f"/api/projects/{PROJECT_ID}/bus/{eid}/ack",
+        json={"stage": "opened", "recipient_session_id": "harness-Y"},
+    ).json()
+    assert d["already_set"] is False
+    assert o["already_set"] is False
+    fetched = client.get(f"/api/projects/{PROJECT_ID}/bus/{eid}").json()
+    assert fetched["delivered_by"] == "bridge-X"
+    assert fetched["opened_by"] == "harness-Y"

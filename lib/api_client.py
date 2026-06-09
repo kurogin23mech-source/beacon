@@ -320,3 +320,22 @@ class ApiClient:
 
     def get_bus_cursor(self, project_id: str, recipient_id: str) -> dict:
         return self.get(f"/api/projects/{project_id}/bus/cursors/{recipient_id}")
+
+    # Per-event receipts (ms-54 / e-1348). Two callsites:
+    #   * channel/bus.mjs uses these to stamp delivered/opened on receive.
+    #   * `beacon bus status <event_id>` uses get_bus_event to render the
+    #     3-stage view to the sender.
+
+    def get_bus_event(self, project_id: str, event_id: str) -> dict:
+        """Fetch one bus event with its receipt fields. 404 → ApiClientError."""
+        return self.get(
+            f"/api/projects/{project_id}/bus/{urllib.parse.quote(event_id)}"
+        )
+
+    def ack_bus_event_receipt(self, project_id: str, event_id: str, *,
+                              stage: str, recipient_session_id: str) -> dict:
+        """Stamp a receipt stage (delivered|opened). First-write-wins per stage."""
+        return self.post(
+            f"/api/projects/{project_id}/bus/{urllib.parse.quote(event_id)}/ack",
+            {"stage": stage, "recipient_session_id": recipient_session_id},
+        )
