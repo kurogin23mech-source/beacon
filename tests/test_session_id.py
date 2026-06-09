@@ -382,3 +382,78 @@ def test_update_last_active_does_not_cloud_sync_post_e1319(project_dir, monkeypa
     assert calls == [], (
         "update_last_active must not cloud-sync post e-1319 — bridge owns that path"
     )
+
+
+# ---------------------------------------------------------------------------
+# Bridge claim (e-1331 quick fix)
+#
+# When a bus.mjs bridge is running in this cwd, it writes its session_id to
+# .beacon/bridge.json so CLI commands can target the SAME session_id the
+# bridge uses for DM delivery. These tests pin the resolution order:
+#
+#   * live claim ⇒ resolve_active_session_id returns the bridge's value
+#   * stale claim (dead pid) ⇒ fall through to the existing mint path
+#   * absent claim ⇒ identical to get_session_id (back-compat)
+# ---------------------------------------------------------------------------
+
+def _write_bridge_claim(project_dir: Path, session_id: str, pid: int) -> None:
+    (project_dir / ".beacon" / "bridge.json").write_text(json.dumps({
+        "session_id": session_id,
+        "pid": pid,
+        "cwd": str(project_dir),
+        "started_at": "2026-06-09T07:00:00.000000Z",
+    }), encoding="utf-8")
+
+
+def test_resolve_active_session_id_prefers_live_bridge_claim(
+        project_dir, monkeypatch):
+    """A bus.mjs writing .beacon/bridge.json with a live pid is the
+    authoritative source. The CLI must target that session_id, not mint a
+    new one from CLAUDE_CODE_SESSION_ID."""
+    # An env var that WOULD override the existing session.json without
+    # this fix.
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "claude-env-mismatch")
+    _write_bridge_claim(project_dir, "bridge-owned-sid", os.getpid())
+    assert session.resolve_active_session_id() == "bridge-owned-sid"
+
+
+def test_resolve_active_session_id_ignores_dead_pid_claim(
+        project_dir, monkeypatch):
+    """A bridge crash leaves a stale .beacon/bridge.json behind. The pid
+    liveness check drops it so the CLI doesn't address a dead session."""
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    _write_bridge_claim(project_dir, "ghost-bridge-sid", pid=2 ** 30)
+    sid = session.resolve_active_session_id()
+    assert sid != "ghost-bridge-sid"
+    # Falls through to the mint path → produces a fresh session_id.
+    assert SESSION_ID_RE.match(sid), sid
+
+
+def test_resolve_active_session_id_absent_claim_falls_through(project_dir):
+    """No bridge.json → behaves exactly like get_session_id, preserving
+    the existing mint/reuse contract for users who haven't run bus.mjs."""
+    assert not (project_dir / ".beacon" / "bridge.json").exists()
+    sid = session.resolve_active_session_id()
+    assert sid == session.get_session_id()
+
+
+def test_read_bridge_session_returns_empty_on_malformed_json(
+        project_dir):
+    """A torn write (partial JSON) must degrade to 'no claim' rather than
+    raise — the CLI should never blow up on a transient FS state."""
+    (project_dir / ".beacon" / "bridge.json").write_text("{not json")
+    assert session.read_bridge_session() == {}
+    sid = session.resolve_active_session_id()
+    assert SESSION_ID_RE.match(sid), sid
+
+
+def test_read_bridge_session_returns_empty_when_pid_field_missing(
+        project_dir):
+    """A claim without a pid is treated as alive (can't refute liveness).
+    This makes the file backward-compatible if a future bridge omits the
+    field; the CLI still uses the session_id."""
+    (project_dir / ".beacon" / "bridge.json").write_text(json.dumps({
+        "session_id": "no-pid-sid",
+    }))
+    assert session.read_bridge_session().get("session_id") == "no-pid-sid"
+    assert session.resolve_active_session_id() == "no-pid-sid"

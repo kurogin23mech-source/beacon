@@ -696,7 +696,57 @@ if (!PROJECT_ID || !SESSION_ID) {
   // Also stamps actor.{machine, agent} that was previously missing on the
   // heartbeat-only path — the directory was showing `mach=-` for any
   // session whose first write came from the bridge rather than a CLI mint.
+  // ms-54 / e-1331 quick fix: write a local `.beacon/bridge.json` claim
+  // so CLI commands (beacon session focus / attention) can target the SAME
+  // session_id the bridge uses, instead of the CLI minting its own from
+  // CLAUDE_CODE_SESSION_ID and writing it back into .beacon/session.json
+  // (which would clobber what the bridge already wrote).
+  //
+  // The split exists because CLAUDE_CODE_SESSION_ID is NOT propagated to MCP
+  // subprocess env (verified 2026-06-07). The bridge resolves session_id via
+  // `beacon session id` (which mints when no env is visible), but the user's
+  // terminal CLI sees the env var and would otherwise prefer it. Writing the
+  // bridge's authoritative view to bridge.json lets the CLI see it and skip
+  // the env-override path.
+  //
+  // bridge.json schema:
+  //   { session_id: str, pid: number, cwd: str, started_at: ISO8601 }
+  //
+  // The PID lets a stale file (from a crashed bridge) be detected by a
+  // reader checking `os.kill(pid, 0)` — if the bridge died without cleaning
+  // up, the CLI degrades to its own mint path rather than addressing a dead
+  // session.
+  function writeBridgeClaim() {
+    try {
+      const claim = {
+        session_id: SESSION_ID,
+        pid: process.pid,
+        cwd: CWD,
+        started_at: new Date().toISOString(),
+      }
+      const claimPath = path.join(CWD, '.beacon', 'bridge.json')
+      fs.writeFileSync(claimPath, JSON.stringify(claim, null, 2))
+      log(`bridge claim written: pid=${process.pid} session=${SESSION_ID} → ${claimPath}`)
+    } catch (e) {
+      // Best-effort. CLI degrades to mint path if claim isn't writable.
+      log(`bridge claim write failed (non-fatal): ${e.message}`)
+    }
+  }
+
+  function clearBridgeClaim() {
+    try {
+      const claimPath = path.join(CWD, '.beacon', 'bridge.json')
+      if (fs.existsSync(claimPath)) {
+        fs.unlinkSync(claimPath)
+        log(`bridge claim cleared at shutdown`)
+      }
+    } catch (e) {
+      log(`bridge claim clear failed (non-fatal): ${e.message}`)
+    }
+  }
+
   async function stampColdStartMetadata() {
+    writeBridgeClaim()
     try {
       const metadata = collectSessionMetadata()
       // Compose actor from os.hostname() so directory queries get a real
@@ -746,6 +796,11 @@ if (!PROJECT_ID || !SESSION_ID) {
     // Without this, a clean Ctrl-C would look identical to a hang
     // until last_poll_at went stale.
     await writePollHeartbeat({ shutdown: true })
+    // e-1331 quick fix: clear the local bridge claim on graceful exit so
+    // a stale claim doesn't keep pointing CLI commands at a dead
+    // session_id. Crashes / SIGKILL skip this — the CLI's pid-liveness
+    // check in read_bridge_session() handles that case.
+    clearBridgeClaim()
   }
   setTimeout(loop, 500)
 }

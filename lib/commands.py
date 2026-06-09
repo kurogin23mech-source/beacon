@@ -2679,12 +2679,20 @@ def cmd_session_id():
 def _resolve_current_session_id() -> str:
     """Return the local session_id for `beacon session focus / attention`.
 
-    Mirrors what cmd_session_id prints but without exiting the process so
-    the focus/attention commands can fall back to an error path instead.
+    Prefers the bridge's claim (.beacon/bridge.json) when a bus.mjs is
+    actively running here (ms-54 / e-1331 quick fix). Without that step,
+    this CLI call would mint or adopt the env's session_id and silently
+    target a different session document than the bridge writes its
+    heartbeat into — leaving intent stamps invisible to the directory
+    picker.
+
+    Falls back to :func:`session.get_session_id` when no live bridge
+    claim exists. Errors degrade to an empty string so the caller can
+    surface a clean "could not resolve" message rather than a traceback.
     """
     try:
         import session as _session
-        return _session.get_session_id() or ""
+        return _session.resolve_active_session_id() or ""
     except Exception:
         return ""
 

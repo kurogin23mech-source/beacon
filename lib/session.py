@@ -348,11 +348,99 @@ def get_session_id() -> str:
     return get_or_mint_session()["session_id"]
 
 
+# ms-54 / e-1331 quick fix: when a bus.mjs bridge is running in this cwd, it
+# writes its session_id to .beacon/bridge.json. The CLI uses that as the
+# *authoritative* session_id for any "what is the active session" question
+# (focus / attention / future intent stamping) so a CLI call from the user's
+# terminal doesn't write to a different session_id than the bridge is using
+# for DM delivery.
+#
+# Without this, get_or_mint_session() in a terminal that has
+# CLAUDE_CODE_SESSION_ID set would adopt the env value, overwriting whatever
+# the bridge wrote — and the bridge has no way to see CLAUDE_CODE_SESSION_ID
+# (Claude Code does not forward it to MCP subprocesses, verified 2026-06-07).
+
+_BRIDGE_CLAIM_RELATIVE = Path(".beacon") / "bridge.json"
+
+
+def _bridge_claim_path() -> Path:
+    """Resolve .beacon/bridge.json against CWD (same convention as session.json)."""
+    return Path.cwd() / _BRIDGE_CLAIM_RELATIVE
+
+
+def _pid_alive(pid: int) -> bool:
+    """Return True iff ``pid`` is a live process on this host.
+
+    Uses ``os.kill(pid, 0)``: ``ProcessLookupError`` means dead,
+    ``PermissionError`` (the signalling process can't reach the target)
+    counts as alive — the bridge may belong to another user but still
+    legitimately own the claim. Anything else is degraded to "unknown,
+    treat as alive" so the CLI doesn't silently fall through on
+    transient OS quirks.
+    """
+    import os
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return True
+
+
+def read_bridge_session() -> dict:
+    """Return the active bus.mjs bridge's claim, or {} if absent/stale.
+
+    A claim is considered stale (and ignored) when its recorded ``pid`` is
+    no longer alive on this host. The bridge clears the claim file on a
+    graceful shutdown; crashes / SIGKILL leave a stale claim that this
+    pid-liveness check then drops.
+
+    Shape: ``{session_id, pid, cwd, started_at}``.
+    """
+    import json
+    path = _bridge_claim_path()
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    pid = data.get("pid")
+    if isinstance(pid, int) and not _pid_alive(pid):
+        return {}
+    return data
+
+
+def resolve_active_session_id() -> str:
+    """Return the session_id the CLI should treat as the current session.
+
+    Resolution order (e-1331 quick fix):
+      1. Bridge claim (.beacon/bridge.json) — authoritative when a bus.mjs
+         is actively running in this cwd. Skips the env-vs-marker tussle
+         because the bridge wrote this file with its real session_id.
+      2. Fall through to :func:`get_session_id` which applies the existing
+         env / mint / session.json precedence. Used when no bridge is
+         running.
+    """
+    claim = read_bridge_session()
+    if claim.get("session_id"):
+        return claim["session_id"]
+    return get_session_id()
+
+
 __all__ = [
     "ENV_SESSION_ID",
     "get_or_mint_session",
     "get_session_id",
+    "read_bridge_session",
     "read_session",
+    "resolve_active_session_id",
     "update_last_active",
     "write_session",
 ]
