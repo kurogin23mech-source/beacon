@@ -75,6 +75,12 @@ Issues = "https://github.com/r-kida2/beacon/issues"
 # (bash) when present so existing behaviour is identical; on Windows (no bash)
 # it falls back to the Python dispatch in `beacon_cli/main.py`.
 beacon = "beacon_cli.main:main"
+# Cross-platform Claude Code launcher with the Beacon DM channel pre-wired
+# (ms-54 e-1328). Mirrors `bin/bclaude` (bash) and `bin/bclaude.cmd` so
+# `pip install beacon` installs `bclaude` / `bclaude.exe` into the user's
+# Scripts dir — critical for Windows + pipx paths where the bash/cmd
+# wrappers aren't on PATH.
+bclaude = "beacon_cli.bclaude:main"
 # Cross-platform PostToolUse / PostCompact hook entry-points (ms-44 e-777).
 # Translated from bin/*.sh so Claude Code on Windows can register them by
 # absolute path in ~/.claude/settings.json without needing a bash interpreter.
