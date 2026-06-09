@@ -2162,6 +2162,16 @@ async function doSelectCloudProject(projectId) {
   state.retros = []; state.retroContent = null;
   state.activeTab = 'dashboard'; lastProjectJson = null;
   state.projectPath = 'cloud:' + projectId;
+  // ms-43 e-1023: reset search state on project switch so a query typed in
+  // project A doesn't silently filter project B.
+  state.searchQuery = '';
+  state.searchResults = null;
+  state.searchFacets = { type: {}, status: {}, priority: {}, scope: {} };
+  state.searchTotal = 0;
+  state.searchLoading = false;
+  state.searchTypeFilter = 'all';
+  const _searchInput = document.getElementById('search-input');
+  if (_searchInput) _searchInput.value = '';
   try {
     await loadProject();
     if (state.project) {
@@ -2189,6 +2199,16 @@ async function doSelectProject(path) {
     state.retros = []; state.retroContent = null;
     state.activeTab = 'dashboard'; lastProjectJson = null;
     state.projectPath = path;
+    // ms-43 e-1023: reset search state on project switch so a query typed in
+    // project A doesn't silently filter project B.
+    state.searchQuery = '';
+    state.searchResults = null;
+    state.searchFacets = { type: {}, status: {}, priority: {}, scope: {} };
+    state.searchTotal = 0;
+    state.searchLoading = false;
+    state.searchTypeFilter = 'all';
+    const _searchInput = document.getElementById('search-input');
+    if (_searchInput) _searchInput.value = '';
     await loadProject();
     if (state.project) {
       for (const ms of state.project.milestones || []) {
