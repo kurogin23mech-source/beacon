@@ -8661,6 +8661,8 @@ def cmd_help_json():
         {"command": "beacon milestone purge <id> --reason <text>", "flags": ["--index <n>", "--json"], "description": "Hard-delete a milestone record (recovery for duplicate-ID corruption; Issue #14)"},
         {"command": "beacon entry purge <e-id> --reason <text>", "flags": ["--index <n>", "--json"], "description": "Hard-delete an entry record (recovery for duplicate-ID corruption; e-863)"},
         {"command": "beacon operation purge <op-id> --reason <text>", "flags": ["--index <n>", "--json"], "description": "Hard-delete an operation record (recovery for duplicate-ID corruption; e-863)"},
+        {"command": "beacon operation approve <op-id> --spec <doc-id>", "flags": ["--expires-at YYYY-MM-DD", "--ttl-seconds N", "--json"], "description": "Mint T2 envelope from SPEC doc's approved_actions list (ms-60 / e-1339)"},
+        {"command": "beacon operation revoke <op-id>", "flags": ["--envelope-id ENV", "--reason TEXT", "--json"], "description": "Invalidate the active T2 envelope (auto-picks active if --envelope-id omitted)"},
         {"command": "beacon milestone graph", "flags": ["--json"], "description": "Show dependency graph"},
         {"command": "beacon task add <desc>", "flags": ["-m <ms-id>"], "description": "Add a task to a milestone"},
         {"command": "beacon task done <entry-id>", "flags": [], "description": "Mark task as done"},
