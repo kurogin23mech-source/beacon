@@ -93,13 +93,37 @@ const session = safeLoadJSON(SESSION_JSON)
 const API_URL = (process.env.BEACON_API_URL || cloud.api_url || 'https://beacon-ai.dev').replace(/\/$/, '')
 const PROJECT_ID = process.env.BEACON_PROJECT_ID || cloud.project_id || ''
 const SESSION_ID = process.env.BEACON_SESSION_ID || cliSessionId || session.session_id || ''
-const ALLOWED_CHANNELS = (process.env.BEACON_CHANNEL_ALLOWLIST || 'dm')
+// ms-60 / e-1390: the bridge-integrated Operation scheduler fires
+// `beacon trigger check` on a slower cadence (default 60s) so opted-in
+// operation-trigger events surface without waiting for the user to type
+// a CLI command. Also auto-include `operation-trigger` in the allowlist
+// when the project has opted in via `bus_auto_execute_channels`, so the
+// channel push reaches the AI via MCP notification (otherwise the inbox
+// hook would still inject on the next UserPromptSubmit, but the AI
+// wouldn't wake on its own — defeating the autonomy goal).
+const PROJECT_JSON = path.join(CWD, '.beacon', 'project.json')
+function autoExecuteChannelsFromProject() {
+  try {
+    const raw = safeLoadJSON(PROJECT_JSON).bus_auto_execute_channels
+    if (!Array.isArray(raw)) return []
+    return raw.map(s => String(s).trim()).filter(Boolean)
+  } catch { return [] }
+}
+const _envAllow = (process.env.BEACON_CHANNEL_ALLOWLIST || 'dm')
   .split(',').map(s => s.trim()).filter(Boolean)
+const ALLOWED_CHANNELS = Array.from(new Set([
+  ..._envAllow,
+  ...autoExecuteChannelsFromProject(),
+]))
 const POLL_INTERVAL = parseInt(process.env.BEACON_BUS_POLL_MS || '2000', 10)
+const SCHEDULER_INTERVAL_MS = parseInt(
+  process.env.BEACON_BRIDGE_SCHEDULE_INTERVAL_MS || '60000', 10)
+const SCHEDULER_DISABLED = process.env.BEACON_BRIDGE_SCHEDULE_DISABLE === '1'
 
 log(`=== beacon-bus channel starting ===`)
 log(`  api=${API_URL} project=${PROJECT_ID} session=${SESSION_ID}`)
 log(`  allow=[${ALLOWED_CHANNELS.join(',')}] poll=${POLL_INTERVAL}ms cwd=${CWD}`)
+log(`  scheduler=${SCHEDULER_DISABLED ? 'OFF' : SCHEDULER_INTERVAL_MS + 'ms'}`)
 log(`  session.json source=[${session.source || ''}] last_active=[${session.last_active || ''}]`)
 
 // --- Layer 0-3 transparency metadata (ms-54 / e-1369) -----------------------
@@ -772,6 +796,34 @@ if (!PROJECT_ID || !SESSION_ID) {
     }
   }
 
+  // ms-60 / e-1390 Phase 1: bridge-integrated Operation scheduler.
+  // Rate-limited so we don't spam the autofire (idempotent but writes
+  // Firestore once per first-fire-of-the-day). Runs `beacon trigger
+  // check`, which invokes `_auto_fire_operation_triggers()` server-side
+  // and posts a T2-envelope-protected bus event (e-1393). The next
+  // pollOnce() iteration picks the event up via /bus/unread and forwards
+  // to the AI via MCP notification.
+  let lastSchedulerRunAt = 0
+  async function runSchedulerTick() {
+    if (SCHEDULER_DISABLED) return
+    const now = Date.now()
+    if (now - lastSchedulerRunAt < SCHEDULER_INTERVAL_MS) return
+    lastSchedulerRunAt = now
+    try {
+      execSync('beacon trigger check', {
+        cwd: CWD,
+        stdio: ['ignore', 'ignore', 'pipe'],
+        encoding: 'utf8',
+        timeout: 15000,
+      })
+      log('scheduler: trigger check completed')
+    } catch (e) {
+      // Non-zero exit / timeout / spawn fail — log but don't kill the loop.
+      // The autofire path is idempotent so a missed tick recovers next round.
+      log(`scheduler: trigger check failed (non-fatal): ${e.message}`)
+    }
+  }
+
   async function loop() {
     await ensureCursorPrimed()
     await stampColdStartMetadata()
@@ -780,6 +832,14 @@ if (!PROJECT_ID || !SESSION_ID) {
         await pollOnce()
       } catch (e) {
         log(`poll error: ${e.message}`)
+      }
+      // ms-60 / e-1390: rate-limited Operation schedule check.
+      // Sits between pollOnce and heartbeat so a failure here can't
+      // prevent the heartbeat from advancing.
+      try {
+        await runSchedulerTick()
+      } catch (e) {
+        log(`scheduler error (non-fatal): ${e.message}`)
       }
       // e-1318: heartbeat is a *byproduct* of the poll loop. Whether
       // pollOnce succeeded, no-op'd, or threw (caught above), we got
