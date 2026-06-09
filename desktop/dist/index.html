@@ -3606,10 +3606,14 @@ function renderReleasesSection() {
     const isMajor = d.type === 'major';
     const expanded = state.expandedDeployId === d.id;
     const dot = `<span class="deploy-type-dot ${isMajor?'major':'minor'}">${isMajor?'◉':'○'}</span>`;
+    // e-1274: show top-level version tag (e.g. v0.22.0) when present so
+    // reviewers can cross-reference releases without expanding the card.
+    const verBadge = d.version ? `<span class="release-group-semver">${esc(d.version)}</span>` : '';
     let h = `<div class="deploy-card ${isMajor?'is-major':'is-minor'}" data-action="expand-deploy" data-deploy-id="${esc(d.id)}" style="cursor:pointer;">
       <div class="deploy-card-header">
         ${dot}
         <span class="deploy-id">${esc(d.id)}</span>
+        ${verBadge}
         <span class="deploy-env-badge">${esc(d.environment||'prod')}</span>
         <span class="deploy-datetime">${esc(fmtDate(d.date))}</span>
         <span class="deploy-expand-arrow">${expanded?'▲':'▼'}</span>
@@ -3673,10 +3677,13 @@ function renderCodeReleasesTab(p) {
   return pushes.map(push => {
     const expanded = state.expandedPushId === push.id;
     const commits = push.commits || [];
+    // e-1274: top-level version tag (e.g. v0.22.0) when present.
+    const pushVerBadge = push.version ? `<span class="release-group-semver">${esc(push.version)}</span>` : '';
     let h = `<div class="push-card" data-action="expand-push" data-push-id="${esc(push.id)}" style="cursor:pointer;">
       <div class="push-card-header">
         <span class="push-icon">↑</span>
         <span class="push-id">${esc(push.id)}</span>
+        ${pushVerBadge}
         <span class="push-branch-badge">${esc(push.branch || 'main')}</span>
         ${push.pushed_by ? `<span class="push-by">${esc(push.pushed_by)}</span>` : ''}
         <span class="push-commit-count">${push.commit_count || commits.length} commits</span>

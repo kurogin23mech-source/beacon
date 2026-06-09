@@ -130,8 +130,12 @@ jobs:
           # Capture the existing latest deploy run id (so we can wait on the NEW one).
           PREV_DEPLOY_ID="$(gh run list --workflow=deploy-cloud-run.yml --limit 1 --json databaseId -q '.[0].databaseId // 0')"
 
-          echo "::group::Dispatch deploy-cloud-run.yml on main"
-          gh workflow run deploy-cloud-run.yml --ref main
+          # e-1274: pass the released tag (e.g. v0.22.0) to deploy-cloud-run.yml
+          # so the resulting beacon deploy record entry can be cross-referenced
+          # with this release. Without it, the deploy entry has no version
+          # number and reviewers have to guess via timestamp + git log.
+          echo "::group::Dispatch deploy-cloud-run.yml on main (version=v${NEW_VERSION})"
+          gh workflow run deploy-cloud-run.yml --ref main -f version="v${NEW_VERSION}"
           echo "::endgroup::"
 
           # Poll for the newly dispatched run to appear (gh workflow run is async).
