@@ -9603,6 +9603,48 @@ def _bus_auto_execute_channels(data: dict) -> list:
     return [c for c in raw if isinstance(c, str) and c]
 
 
+def _mirror_auto_execute_channels_to_local(channels: list) -> None:
+    """Write-through mirror of the auto-execute allowlist into local
+    ``.beacon/project.json``.
+
+    Why: in cloud mode, ``save_project`` PUTs to the cloud only — the local
+    file is a stale snapshot from ``beacon init`` time and is never refreshed
+    on writes (StoreApi.save_project doesn't mirror). The inbox hook
+    (``bin/beacon-bus-inbox-hook.py``) reads ``bus_auto_execute_channels``
+    from the local file directly (= cheap, no subprocess), so without this
+    mirror the hook always sees an empty allowlist and degrades every
+    opted-in ``operation-trigger`` event to ``propose-to-ai`` — silently
+    breaking the autonomous loop even when the CLI shows the channel as
+    allowed.
+
+    Scoped to this single config field on purpose: a full local mirror is
+    ms-36 territory (cloud-first cache rethink). This is a targeted patch
+    that closes the autonomous-loop UX gap without changing wider semantics.
+
+    Fail-soft: any error (cwd not a beacon project, file unwritable, etc.)
+    is swallowed — the cloud-side write already succeeded, so the user-
+    facing operation is still correct; only the inbox hook's local read
+    stays stale, which is the pre-existing (broken) baseline.
+    """
+    try:
+        project_file = os.environ.get("BEACON_PROJECT_FILE") or os.path.join(
+            ".beacon", "project.json")
+        if not os.path.exists(project_file):
+            return
+        with open(project_file, "r", encoding="utf-8") as f:
+            local = json.load(f)
+        local["bus_auto_execute_channels"] = list(channels)
+        with open(project_file, "w", encoding="utf-8") as f:
+            json.dump(local, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+    except Exception as exc:
+        sys.stderr.write(
+            f"[beacon] local mirror of bus_auto_execute_channels failed "
+            f"(cloud write succeeded; inbox hook may read stale value): "
+            f"{type(exc).__name__}: {exc}\n"
+        )
+
+
 def cmd_bus_auto_execute_list():
     """Show the channels allowed to auto-execute incoming bus events.
 
@@ -9648,6 +9690,7 @@ def cmd_bus_auto_execute_add():
         "op": "bus_auto_execute_add",
         "channel": channel,
     })
+    _mirror_auto_execute_channels_to_local(channels)
     if os.environ.get("BEACON_JSON", "") == "1":
         print(json.dumps({"channels": channels, "added": True},
                           ensure_ascii=False))
@@ -9679,6 +9722,7 @@ def cmd_bus_auto_execute_remove():
         "op": "bus_auto_execute_remove",
         "channel": channel,
     })
+    _mirror_auto_execute_channels_to_local(channels)
     if os.environ.get("BEACON_JSON", "") == "1":
         print(json.dumps({"channels": channels, "removed": True},
                           ensure_ascii=False))

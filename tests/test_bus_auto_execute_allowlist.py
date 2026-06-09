@@ -153,6 +153,54 @@ def test_corrupt_field_treated_as_empty(project_dir, monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------------
+# e-1395: cloud-mode local mirror. In cloud mode `save_project` is a
+# cloud-only PUT, so the inbox hook's local-file read would see a stale
+# allowlist forever (= every opted-in `operation-trigger` event silently
+# downgraded to propose-to-ai, autonomous loop broken). The CLI's add /
+# remove handlers explicitly write the field back to local project.json
+# to close the gap. Pin both branches.
+# ---------------------------------------------------------------------------
+
+def test_add_writes_through_to_local_project_json(project_dir, monkeypatch):
+    """After `bus auto-execute add`, the local project.json must reflect the
+    new allowlist — that's how the inbox hook (which reads local only) sees
+    the opt-in. Without this mirror, the autonomous loop is silently broken
+    in cloud mode even though the CLI shows the channel as allowed."""
+    _clear_ae_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_AUTO_EXEC_CHANNEL", "operation-trigger")
+    commands.cmd_bus_auto_execute_add()
+    local = json.loads(
+        (project_dir / ".beacon" / "project.json").read_text())
+    assert local.get("bus_auto_execute_channels") == ["operation-trigger"]
+
+
+def test_remove_writes_through_to_local_project_json(project_dir, monkeypatch):
+    """Symmetric: removing a channel must clear it from local too."""
+    _clear_ae_env(monkeypatch)
+    # Seed via add so the cloud-side state matches.
+    monkeypatch.setenv("BEACON_BUS_AUTO_EXEC_CHANNEL", "operation-trigger")
+    commands.cmd_bus_auto_execute_add()
+    # Now remove and verify local was updated.
+    commands.cmd_bus_auto_execute_remove()
+    local = json.loads(
+        (project_dir / ".beacon" / "project.json").read_text())
+    assert local.get("bus_auto_execute_channels") == []
+
+
+def test_local_mirror_no_ops_when_local_file_absent(monkeypatch, capsys):
+    """The mirror helper is best-effort: missing local file → silent no-op,
+    no exception bubbles up. The CLI's cloud write is what's load-bearing
+    for correctness; mirror failure just leaves the inbox hook reading the
+    pre-existing stale value (the broken-baseline fallback)."""
+    monkeypatch.chdir("/tmp")  # no .beacon dir here
+    monkeypatch.delenv("BEACON_PROJECT_FILE", raising=False)
+    # Should not raise even though .beacon/project.json doesn't exist.
+    commands._mirror_auto_execute_channels_to_local(["operation-trigger"])
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+
+
+# ---------------------------------------------------------------------------
 # Inbox hook tests — the safety net
 # ---------------------------------------------------------------------------
 
