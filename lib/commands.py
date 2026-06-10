@@ -4138,8 +4138,7 @@ def cmd_retro_save():
         print(f"Error: week must be in YYYY-WNN format (got {week!r})")
         sys.exit(1)
 
-    if not content and not sys.stdin.isatty():
-        content = sys.stdin.read()
+    content = _resolve_content_input(content)
 
     if not content:
         print("Error: content required (pass via BEACON_CONTENT or stdin)")
@@ -5036,10 +5035,35 @@ def _is_cloud_mode():
     return False
 
 
+def _resolve_content_input(content: str) -> str:
+    """Resolve a ``--content`` argument, treating ``"-"`` as stdin.
+
+    PE dogfood 2026-06-10: ``beacon doc update --content -`` was interpreted
+    literally and replaced a 130-line SPEC with the single character ``-``.
+    kubectl / curl convention treats ``-`` as stdin; we follow the same rule
+    and hard-reject the dangerous case where stdin is a tty.
+    """
+    if content == "-":
+        if sys.stdin.isatty():
+            print("Error: --content - は stdin からの読み込みを意味します", file=sys.stderr)
+            print("       pipe で渡してください: cat file.md | beacon doc update <id>", file=sys.stderr)
+            print("       または --content フラグを省略して stdin から渡してください", file=sys.stderr)
+            sys.exit(1)
+        return sys.stdin.read()
+    if not content and not sys.stdin.isatty():
+        return sys.stdin.read()
+    return content
+
+
 def _parse_frontmatter(text):
     """Parse YAML-like frontmatter from markdown text.
 
-    Returns (metadata_dict, body_text).
+    Returns ``(metadata_dict, body_text)``. Block-list values (lines starting
+    with ``- `` immediately after a key with empty value) are returned as
+    ``list[str]``; everything else is ``str``. PE dogfood 2026-06-10:
+    block-list ``approved_actions`` of the form ``- "op:op-2:check_run"`` were
+    silently destroyed by the previous line-based parser which split each
+    ``- "op:...`` row on its first colon.
     """
     if not text.startswith("---"):
         return {}, text
@@ -5049,16 +5073,62 @@ def _parse_frontmatter(text):
     header = text[4:end]
     body = text[end + 4:].lstrip("\n")
     meta = {}
-    for line in header.split("\n"):
-        line = line.strip()
-        if ":" in line:
-            key, val = line.split(":", 1)
-            meta[key.strip()] = val.strip()
+    lines = header.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        i += 1
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("- "):
+            # Orphan list item without a preceding key — ignore.
+            continue
+        if ":" not in stripped:
+            continue
+        key, val = stripped.split(":", 1)
+        key = key.strip()
+        val = val.strip()
+        if val:
+            # Inline list form: ``key: [a, b]`` is parsed to ``list[str]`` so
+            # that block- and inline-list values round-trip identically.
+            if val.startswith("[") and val.endswith("]"):
+                inner = val[1:-1].strip()
+                if not inner:
+                    meta[key] = []
+                else:
+                    meta[key] = [
+                        s.strip().strip('"').strip("'")
+                        for s in inner.split(",")
+                        if s.strip()
+                    ]
+            else:
+                meta[key] = val
+            continue
+        # Empty inline value → look ahead for a block-list.
+        items: list[str] = []
+        while i < len(lines):
+            next_stripped = lines[i].strip()
+            if not next_stripped:
+                i += 1
+                continue
+            if next_stripped.startswith("- "):
+                items.append(next_stripped[2:].strip().strip('"').strip("'"))
+                i += 1
+                continue
+            break
+        meta[key] = items if items else ""
     return meta, body
 
 
 def _add_frontmatter(content, scope, milestone="", operation=""):
-    """Prepend frontmatter to content, or update existing scope/milestone/operation."""
+    """Prepend frontmatter to content, or update existing scope/milestone/operation.
+
+    List values are written as inline YAML arrays (``key: ["a", "b"]``) so
+    they survive the line-based parser on the next round-trip — block-list
+    items containing colons (e.g. ``op:op-2:check_run``) cannot be expressed
+    safely in the line-based format and must be normalised.
+    """
     meta, body = _parse_frontmatter(content)
     meta["scope"] = scope
     if milestone:
@@ -5071,7 +5141,11 @@ def _add_frontmatter(content, scope, milestone="", operation=""):
         pass
     lines = ["---"]
     for k, v in meta.items():
-        lines.append(f"{k}: {v}")
+        if isinstance(v, list):
+            quoted = ", ".join(f'"{item}"' for item in v)
+            lines.append(f"{k}: [{quoted}]")
+        else:
+            lines.append(f"{k}: {v}")
     lines.append("---")
     lines.append("")
     return "\n".join(lines) + body
@@ -5229,9 +5303,7 @@ def cmd_doc_add():
     if scope == "core":
         milestone = milestone or None
 
-    # Read content from stdin if not provided via env
-    if not content and not sys.stdin.isatty():
-        content = sys.stdin.read()
+    content = _resolve_content_input(content)
 
     if not content:
         print("Error: content required (pass via BEACON_CONTENT or stdin)")
@@ -5319,9 +5391,7 @@ def cmd_doc_update():
     ):
         sys.exit(1)
 
-    # Read content from stdin if not provided via env
-    if not content and not sys.stdin.isatty():
-        content = sys.stdin.read()
+    content = _resolve_content_input(content)
 
     # Fetch existing document to merge fields
     if _is_cloud_mode():
@@ -5413,7 +5483,11 @@ def _rewrite_doc_frontmatter(fpath: str, *,
         meta.update({k: str(v) for k, v in updates.items()})
     lines = ["---"]
     for k, v in meta.items():
-        lines.append(f"{k}: {v}")
+        if isinstance(v, list):
+            quoted = ", ".join(f'"{item}"' for item in v)
+            lines.append(f"{k}: [{quoted}]")
+        else:
+            lines.append(f"{k}: {v}")
     lines.append("---")
     lines.append("")
     new_content = "\n".join(lines) + body
