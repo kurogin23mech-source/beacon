@@ -413,6 +413,17 @@ def _render_context(events: list[dict], notify_only_count: int,
 # Main
 # ---------------------------------------------------------------------------
 
+_DEBUG_LOG_PATH = Path("/tmp/beacon-bus-inbox-hook.log")
+
+
+def _persist_debug(line: str) -> None:
+    try:
+        with _DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+
 def _emit(hook_event_name: str, context: str) -> None:
     out = {
         "hookSpecificOutput": {
@@ -420,10 +431,16 @@ def _emit(hook_event_name: str, context: str) -> None:
             "additionalContext": context,
         }
     }
-    print(json.dumps(out, ensure_ascii=False))
+    payload = json.dumps(out, ensure_ascii=False)
+    _persist_debug(
+        f"=== emit ts={time.time():.3f} hook={hook_event_name} "
+        f"ctx_len={len(context)} json_len={len(payload)} ===\n{payload}\n\n"
+    )
+    print(payload)
 
 
 def _log(message: str) -> None:
+    _persist_debug(f"[log ts={time.time():.3f}] {message}\n")
     print(f"[bus-inbox-hook] {message}", file=sys.stderr)
 
 

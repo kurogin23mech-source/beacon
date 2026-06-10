@@ -2540,6 +2540,7 @@ def list_unread_bus_events(
     recipient_id: str,
     channel: str = "",
     limit: int = 100,
+    since: str = "",
     user: dict = Depends(require_auth),
 ):
     """List events the recipient has not yet acknowledged via their cursor.
@@ -2558,10 +2559,19 @@ def list_unread_bus_events(
     requested recipient when most of the window is addressed to others.
     The cursor still advances by ``created_at`` across the full set, so
     skipped events are not redelivered on the next round.
+
+    ``since`` override (ms-60 follow-up): callers can pass an explicit
+    ``since`` to fetch events newer than a client-side high-water mark
+    instead of the server-side recipient cursor. This lets the bridge
+    (channel/bus.mjs) advance its own in-memory watermark per poll without
+    burning the server cursor that the inbox-hook depends on for emitting
+    AUTONOMOUS ACTION blocks. Empty string ⇒ fall back to the server cursor
+    (= legacy behavior, used by /beacon-bus-inbox-hook).
     """
     _load(project_id, user)
-    cursor = db.get_bus_cursor(project_id, recipient_id)
-    since = cursor.get("last_seen_at", "")
+    if not since:
+        cursor = db.get_bus_cursor(project_id, recipient_id)
+        since = cursor.get("last_seen_at", "")
     # Over-fetch so the recipient filter does not blank out a noisy window.
     raw_limit = min(max(limit * 4, limit), 400) if limit else 400
     raw = db.list_bus_events(

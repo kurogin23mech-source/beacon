@@ -511,6 +511,21 @@ if (!PROJECT_ID || !SESSION_ID) {
   process.on('SIGINT', () => { stopping = true; log('SIGINT received') })
   process.on('SIGTERM', () => { stopping = true; log('SIGTERM received') })
 
+  // ms-60 follow-up: per-bridge in-memory high-water mark. The bridge owns
+  // the MCP-notification delivery channel; the inbox-hook owns the
+  // AUTONOMOUS-ACTION-block delivery channel. They were sharing the server
+  // cursor — bus.mjs advanced it after every push and the hook then saw an
+  // empty unread set, so AUTONOMOUS blocks never reached the AI. Fix:
+  // bus.mjs no longer touches the server cursor. It tracks its own watermark
+  // here and passes it as ``?since=`` so the next poll skips events it
+  // already handled. The server cursor is now the inbox-hook's single
+  // source of truth.
+  //
+  // On restart the bridge catches up via ensureCursorPrimed (which reads the
+  // server cursor once) so we don't replay history the hook has already
+  // surfaced.
+  let bridgeLastSeen = ''
+
   // First-run cursor catchup: if this session has never read the bus before
   // (no cursor or cursor at epoch zero), advance to "now" without dispatching
   // any events. Prevents flooding the AI with historical DMs that predate this
@@ -528,8 +543,10 @@ if (!PROJECT_ID || !SESSION_ID) {
           `/api/projects/${PROJECT_ID}/bus/cursors/${encodeURIComponent(SESSION_ID)}`,
           { last_seen_at: now },
         )
+        bridgeLastSeen = now
         log(`first-run: cursor primed to ${now} (no historical dispatch)`)
       } else {
+        bridgeLastSeen = last
         log(`cursor already primed (last_seen_at=${last})`)
       }
     } catch (e) {
@@ -542,6 +559,7 @@ if (!PROJECT_ID || !SESSION_ID) {
             `/api/projects/${PROJECT_ID}/bus/cursors/${encodeURIComponent(SESSION_ID)}`,
             { last_seen_at: now },
           )
+          bridgeLastSeen = now
           log(`first-run: cursor created at ${now} (no historical dispatch)`)
         } catch (e2) {
           log(`first-run cursor create failed: ${e2.message}`)
@@ -615,12 +633,26 @@ if (!PROJECT_ID || !SESSION_ID) {
   }
 
   async function pollOnce() {
-    const events = await apiGet(
-      `/api/projects/${PROJECT_ID}/bus/unread?recipient_id=${encodeURIComponent(SESSION_ID)}`,
-    )
+    // Pass in-memory bridgeLastSeen as ?since so the bridge does not depend on
+    // (and does not perturb) the server cursor. Empty string ⇒ server falls
+    // back to its cursor, which is the legacy path used by inbox-hook.
+    const url = `/api/projects/${PROJECT_ID}/bus/unread`
+      + `?recipient_id=${encodeURIComponent(SESSION_ID)}`
+      + `&since=${encodeURIComponent(bridgeLastSeen)}`
+    const events = await apiGet(url)
     if (!Array.isArray(events) || events.length === 0) return
     let latestSeen = null
     for (const evt of events) {
+      // ms-60 follow-up: defense for the deploy gap. If the server is on an
+      // older build that ignores the ?since query (which FastAPI does
+      // silently for unknown params, so the call still succeeds but resolves
+      // since from the server cursor), the bridge can re-receive the same
+      // events on every poll until the inbox-hook advances the cursor.
+      // Skip anything older than the in-memory watermark to keep MCP pushes
+      // exactly-once during this process's lifetime.
+      if (bridgeLastSeen && (evt.created_at || '') <= bridgeLastSeen) {
+        continue
+      }
       // e-1348: stamp `delivered` BEFORE the filter chain. The bridge
       // physically received the event; the sender deserves to know that
       // even if the event ends up filtered out (channel not in allowlist,
@@ -697,15 +729,11 @@ if (!PROJECT_ID || !SESSION_ID) {
       latestSeen = evt.created_at || latestSeen
     }
     if (latestSeen) {
-      try {
-        await apiPost(
-          `/api/projects/${PROJECT_ID}/bus/cursors/${encodeURIComponent(SESSION_ID)}`,
-          { last_seen_at: latestSeen },
-        )
-        log(`cursor advanced to ${latestSeen}`)
-      } catch (e) {
-        log(`cursor advance failed: ${e.message}`)
-      }
+      // ms-60 follow-up: in-memory only. The server cursor is the
+      // inbox-hook's; the bridge advancing it caused AUTONOMOUS ACTION
+      // blocks to never reach the AI. See bridgeLastSeen comment at top.
+      bridgeLastSeen = latestSeen
+      log(`bridge watermark advanced to ${latestSeen} (in-memory)`)
     }
   }
 
