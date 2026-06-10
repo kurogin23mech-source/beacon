@@ -2,6 +2,14 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.30.0] - 2026-06-10
+
+- feat(ms-54): unify /beacon-dm-send and /beacon-dm-reply into single Skill
+- feat(ms-60): server-side enforce envelope on 5 high-risk endpoints (e-1344)
+- feat(ms-61): bus send --to dead-session live-check gate (e-1402)
+- docs(release): update README/CHANGELOG for v0.29.0
+- chore(release): bump formula to 0.29.0
+
 ## [v0.29.0] - 2026-06-10
 
 - fix(ms-60): separate bridge watermark from inbox cursor (autonomous loop hand-off bug)
