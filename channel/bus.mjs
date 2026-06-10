@@ -30,6 +30,7 @@ import os from 'node:os'
 import { consumeBusBudgetOne, refuseMessage } from './bus-budget.mjs'
 import { selectTierForBridge } from './bus-envelope.mjs'
 import { buildHeartbeatBody } from './bus-heartbeat.mjs'
+import { createLocalSessionHeartbeat } from './bus-local-heartbeat.mjs'
 import {
   buildAutonomousActionContent,
   shouldEmitAutonomousImperative,
@@ -589,10 +590,29 @@ if (!PROJECT_ID || !SESSION_ID) {
   // the *secondary* signal: useful when the bridge isn't running at all
   // (e.g. plain Claude Code without the channels feature) but no longer
   // load-bearing for "can this session receive a DM?".
+  //
+  // e-1424 (ms-54, PE Bug 5 reproduced in Beacon main session): the
+  // contract test test_session_heartbeat_responsibility.py pins
+  // "CLI is pure getter, bridge owns last_active". But before this fix
+  // the bridge only wrote last_active to the CLOUD sessions/{sid} doc —
+  // local .beacon/session.json kept whatever value lib/session.py wrote
+  // at first mint. After _DEFAULT_FRESHNESS_SECONDS (3600s) the next CLI
+  // call would see a stale marker and mint a fresh id, while bus.mjs and
+  // .beacon/bridge.json kept using the original. Two session_ids,
+  // silent. Cause: bridge owned the contract but didn't write the file
+  // it owned. Fix: bridge writes last_active to local session.json too,
+  // debounced so we don't thrash the disk every 2s poll. Details + unit
+  // tests live in channel/bus-local-heartbeat.mjs.
+  const updateLocalSessionLastActive = createLocalSessionHeartbeat({
+    sessionJsonPath: SESSION_JSON,
+    log,
+  })
+
   async function writePollHeartbeat({ shutdown = false } = {}) {
+    const nowIso = new Date().toISOString()
     try {
       const body = buildHeartbeatBody({
-        nowIso: new Date().toISOString(),
+        nowIso,
         pollIntervalMs: POLL_INTERVAL,
         shutdown,
       })
@@ -606,6 +626,11 @@ if (!PROJECT_ID || !SESSION_ID) {
       // is temporarily unreachable. Log and move on.
       log(`heartbeat write failed (non-fatal): ${e.message}`)
     }
+    // e-1424: keep local session.json fresh so CLI's freshness check
+    // (lib/session.py _is_fresh) reuses this id instead of re-minting.
+    // Done after the cloud write — local is the secondary truth source
+    // here, just enough to keep CLI happy.
+    updateLocalSessionLastActive(nowIso, { force: shutdown })
   }
 
   // ms-54 / e-1348: per-event read receipt. Two stages:
