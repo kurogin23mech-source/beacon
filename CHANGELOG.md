@@ -2,6 +2,15 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.29.0] - 2026-06-10
+
+- fix(ms-60): separate bridge watermark from inbox cursor (autonomous loop hand-off bug)
+- fix(ms-60): mirror bus_auto_execute_channels into local project.json (e-1396)
+- feat(ms-60): bus.mjs bridge integrated Operation scheduler (e-1390 Phase 1)
+- fix(ms-60): mint T2 envelope in operation trigger bus push (e-1393)
+- docs(release): update README/CHANGELOG for v0.28.0
+- chore(release): bump formula to 0.28.0
+
 ## [v0.28.0] - 2026-06-09
 
 - Merge pull request #122 from kurogin23mech-source/ms-60-tier-2-envelope-spec-trigger-awake
