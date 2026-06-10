@@ -299,6 +299,8 @@ draft が完成したら **そのまま** Step 5 で `beacon doc add` 実行。�
 
 ## Step 5: SPEC の書き込み (Act)
 
+**heredoc は必ず quoted EOF (`<<'EOF'` または `<< 'EOF'`) を使う**: 非引用 `<<EOF` だと shell が中身の backtick (`` ` ``) を command substitution として展開し、本文が silent corrupt する (2026-06-10 LPS dogfood で観察された病理、e-1401)。
+
 Bash ツールで実行:
 
 ```bash

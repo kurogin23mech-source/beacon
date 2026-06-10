@@ -339,7 +339,22 @@ sleep 4
 beacon bus status <event_id> [--project <id>]
 ```
 
-`sleep 4` の根拠: 受信側 bridge の poll 周期 default 2 秒 + ack 経路 + mcp.notification 完了で 2-3 秒見ておけば opened まで stamp されているケースが多い。それでも `(not yet)` のままなら **1 回だけ** 追加で `sleep 8 && beacon bus status` を試して終了。それ以上は receiver 側が落ちている / 古い bridge である可能性が高く、Skill 内では検証範囲外。
+`sleep 4` の根拠: 受信側 bridge の poll 周期 default 2 秒 + 2 秒のマージンで、ack 経路を持つ受信者 (= bridge v0.26.0 以降) なら opened まで stamp されているケースが多い。
+
+**この `sleep 4` が唯一の verification 待機** — `(not yet)` のままでも **追加で sleep してはならない**。以前は `sleep 8` の retry を入れていたが (e-1400)、ack 経路を持たない受信者 (= 古い bridge < v0.26.0 / 非 bridge subscriber / CI 等の PE-bridge スタイル) では常に空待ちになって 12 秒の死時間を生むだけだった。
+
+`(not yet)` のままなら、状態を **そのまま** ユーザーに報告し、以下のヒントを添える:
+
+```
+delivered / opened がまだ stamp されていません。以下の可能性があります:
+  - 受信側 bridge が古い (< v0.26.0、ack 経路非対応)
+  - 受信側が non-bridge subscriber (= CI / 自動運用 / PE-bridge スタイル)
+  - 単に届くのが遅い (= 数秒以内に手動で `beacon bus status <event_id>` で再確認可)
+
+receipt 不要と分かっている相手なら次回から `/beacon-dm-send --no-verify` を推奨。
+```
+
+「もう一度待ってみる」を Skill 側で勝手にやらない。空待ちを増やすより、状況を honest に出す方が UX として正しい (e-1400)。
 
 ### Step 8.1: 結果解釈と報告
 
@@ -371,9 +386,18 @@ receipt (3 段):
 
 これにより送信者は「届いていない / 開封されていない」を **送信時に即時** に検知できる (e-1348 設計の本質的価値)。
 
-### `--no-verify` オプション (任意)
+### `--no-verify` オプション (= 受信側が ack 経路を持たないと分かっているとき推奨)
 
-確認 step を skip したい場合 (大量送信 / CI 自動化等)、ユーザーが `/beacon-dm-send --no-verify` で起動したら Step 8 の `bus status` 呼び出しを skip し、Step 8.1 の `receipt (3 段)` セクションも省略する。default は **verify あり** (UX 上、receipt 確認しないと「届いた」と思い込む病理を再生産するため)。
+以下のいずれかが事前に分かっている場合、ユーザーに **`/beacon-dm-send --no-verify` の使用を推奨** する:
+
+- 受信側が古い bridge (< v0.26.0、ack 非対応)
+- 受信側が non-bridge subscriber (= CI / 自動運用 / PE-bridge スタイル)
+- 大量送信 / 自動化フローで sleep の累積コストを避けたい
+- 「届いたか」より「送れたか」だけ知りたいケース
+
+`--no-verify` 指定時は Step 8 の `sleep 4 + bus status` を完全 skip し、Step 8.1 の `receipt (3 段)` セクションも省略する。送信完了 (event_id + delivery) だけ報告して終了する。
+
+default は **verify あり** (UX 上、receipt 確認しないと「届いた」と思い込む病理を再生産するため)。ただし「受信側に ack が無い」と判明している局面で毎回 4 秒待つのは無駄なので、Skill 側もユーザーがそういう局面を述べたら積極的に `--no-verify` を提案すること。
 
 ---
 

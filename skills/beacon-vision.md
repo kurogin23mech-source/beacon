@@ -238,6 +238,8 @@ CORE doc `AeN9aPpjvh6URTQlFmb6` の「Act first, confirm next-step」に従い�
 
 ## Step 5: 書き込み (Act)
 
+**heredoc は必ず quoted EOF (`<<'EOF'` または `<< 'EOF'`) を使う**: 非引用 `<<EOF` だと shell が中身の backtick (`` ` ``) を command substitution として展開し、本文が silent corrupt する (2026-06-10 LPS dogfood で観察された病理、e-1401)。
+
 Bash ツールで実行:
 
 ```bash

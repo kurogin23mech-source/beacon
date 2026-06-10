@@ -245,6 +245,8 @@ cd "$PROJECT_DIR" && beacon operation task add "<description>" -o <op-id> \
 
 ### 4c. SPECドキュメント生成
 
+**heredoc は必ず quoted EOF (`<<'EOF'` または `<< 'EOF'`) を使う**: 非引用 `<<EOF` だと shell が中身の backtick (`` ` ``) を command substitution として展開し、本文が silent corrupt する (2026-06-10 LPS dogfood で観察された病理、e-1401)。
+
 ```bash
 cd "$PROJECT_DIR" && beacon doc add "<log_source> ログ取得・解釈手順" --scope spec --op <op-id> --stdin <<'EOF'
 # <log_source> ログ取得・解釈手順

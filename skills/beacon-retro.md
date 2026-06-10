@@ -115,6 +115,8 @@ Step 1 のデータを元に、以下の構造でマークダウンドキュメ�
 
 ## Step 3: ドキュメントの保存
 
+**heredoc は必ず quoted EOF (`<<'EOF'` または `<< 'EOF'`) を使う**: 非引用 `<<EOF` だと shell が中身の backtick (`` ` ``) を command substitution として展開し、本文が silent corrupt する (2026-06-10 LPS dogfood で観察された病理、e-1401)。
+
 生成したドキュメントを **Bash ツール経由で `beacon retro save` CLI に渡す**:
 
 ```bash
