@@ -30,6 +30,10 @@ import os from 'node:os'
 import { consumeBusBudgetOne, refuseMessage } from './bus-budget.mjs'
 import { selectTierForBridge } from './bus-envelope.mjs'
 import { buildHeartbeatBody } from './bus-heartbeat.mjs'
+import {
+  buildAutonomousActionContent,
+  shouldEmitAutonomousImperative,
+} from './bus-autonomous-content.mjs'
 
 // --- Config discovery --------------------------------------------------------
 
@@ -733,9 +737,29 @@ if (!PROJECT_ID || !SESSION_ID) {
               .map(([k, v]) => `${k}=${String(v).slice(0, 30)}`)
               .join(' ')
         const slimPing = `[${ch}] from ${senderShort}: ${previewText}\n(full body は inbox-hook の additionalContext を参照、event_id=${evt.event_id})`
-        const content = process.env.BEACON_BUS_CHANNEL_FULLBODY === '1'
-          ? fullBody
-          : slimPing
+        // e-1417 (ms-60): operation-trigger + auto-execute event を MCP push
+        // 経路でも自律起動指示として届ける検証ルート。現状 (Phase 1) は
+        // AUTONOMOUS ACTION の明示 imperative が UserPromptSubmit hook 経由
+        // (bin/beacon-bus-inbox-hook.py _format_autonomous_action_block)
+        // でしか付与されず、「session 起動 + 最低 1 prompt」が事実上の前提
+        // として残っていた。クライアント側 (bus.mjs) からは DM event と
+        // operation-trigger event を区別なく push できるはずなので、
+        // operation-trigger + auto-execute の場合は MCP notification 自体に
+        // AUTONOMOUS ACTION imperative を含めて AI ハーネスが prompt なし
+        // でも起動できるかを実機で確認する。
+        //
+        // 安全側の opt-out: BEACON_BRIDGE_MCP_AUTONOMOUS_DISABLE=1 で旧挙動
+        // (= slim ping のみ) に戻す。実装由来の副作用 (= 想定外の起動 / AI
+        // 出力崩れ) が観察された場合の即時 rollback 経路。
+        const useAutonomousImperative = shouldEmitAutonomousImperative({
+          channel: ch,
+          delivery: evt.delivery,
+          autonomousImperativeDisabled:
+            process.env.BEACON_BRIDGE_MCP_AUTONOMOUS_DISABLE === '1',
+        })
+        const content = useAutonomousImperative
+          ? buildAutonomousActionContent(evt)
+          : (process.env.BEACON_BUS_CHANNEL_FULLBODY === '1' ? fullBody : slimPing)
         await mcp.notification({
           method: 'notifications/claude/channel',
           params: {
