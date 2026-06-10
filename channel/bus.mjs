@@ -703,9 +703,39 @@ if (!PROJECT_ID || !SESSION_ID) {
       else if (!ALLOWED_CHANNELS.includes(ch)) {
         log(`drop (channel not in allowlist): id=${evt.event_id} ch=${ch}`)
       } else {
-        const content = typeof payload.text === 'string' && payload.text.length > 0
+        // e-1403: slim ping by default. The MCP <channel> notification
+        // exists to wake the AI ("a thing arrived") — the full body +
+        // handling guide is delivered separately by the UserPromptSubmit
+        // inbox-hook (bin/beacon-bus-inbox-hook.py) on the next prompt.
+        // Two routes carrying the same full payload was observed during
+        // 2026-06-10 Plan A dogfood as a redundant "えっ" UX moment
+        // ("why am I reading the same DM twice in two different
+        // formats?"). Splitting the roles — channel = ping, hook =
+        // detail — preserves the redundancy of the dual-route design
+        // (= one route can fail without losing the message) without
+        // making the AI re-read the same content in two shapes.
+        //
+        // BEACON_BUS_CHANNEL_FULLBODY=1 restores legacy behaviour for
+        // callers that don't run the inbox-hook (= the channel must
+        // carry the whole payload itself) or for debugging.
+        const fullBody = typeof payload.text === 'string' && payload.text.length > 0
           ? payload.text
           : JSON.stringify(payload)
+        const senderRaw = String(sender || '')
+        const senderShort = senderRaw.length > 24
+          ? senderRaw.slice(0, 24) + '…'
+          : (senderRaw || '(empty)')
+        const previewText = typeof payload.text === 'string' && payload.text.length > 0
+          ? (payload.text.length > 80 ? payload.text.slice(0, 80) + '…' : payload.text)
+          : Object.entries(payload || {})
+              .filter(([k]) => !['recipient_session_id', 'source_project'].includes(k))
+              .slice(0, 3)
+              .map(([k, v]) => `${k}=${String(v).slice(0, 30)}`)
+              .join(' ')
+        const slimPing = `[${ch}] from ${senderShort}: ${previewText}\n(full body は inbox-hook の additionalContext を参照、event_id=${evt.event_id})`
+        const content = process.env.BEACON_BUS_CHANNEL_FULLBODY === '1'
+          ? fullBody
+          : slimPing
         await mcp.notification({
           method: 'notifications/claude/channel',
           params: {
