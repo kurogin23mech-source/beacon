@@ -140,7 +140,7 @@ def _clear_bus_env(monkeypatch):
                 "BEACON_BUS_DELIVERY", "BEACON_BUS_ONCE", "BEACON_BUS_AUTO_ACK",
                 "BEACON_BUS_TIMEOUT", "BEACON_BUS_LAST_SEEN_AT", "BEACON_JSON",
                 "BEACON_BUS_RECIPIENT_SESSION", "BEACON_BUS_IN_REPLY_TO",
-                "BEACON_BUS_EVENT_ID"):
+                "BEACON_BUS_EVENT_ID", "BEACON_BUS_ACK_EVENT_ID"):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -384,6 +384,8 @@ def test_bus_ack_requires_last_seen_at(monkeypatch, capsys, stub):
     with pytest.raises(SystemExit) as exc:
         commands.cmd_bus_ack()
     assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "--last-seen-at" in err and "--event" in err
 
 
 def test_bus_ack_advances_cursor(monkeypatch, capsys, stub):
@@ -393,6 +395,62 @@ def test_bus_ack_advances_cursor(monkeypatch, capsys, stub):
     assert stub.cursors["R1"] == "2026-06-07T00:00:01.000000Z"
     out = capsys.readouterr().out
     assert "2026-06-07T00:00:01.000000Z" in out
+
+
+# ---------------------------------------------------------------------------
+# e-1423 (ms-54 Bug 4 第 2 層): bus ack --event <event_id>
+# ---------------------------------------------------------------------------
+#
+# Forcing function for /beacon-operation-execute: after a Skill run lands a
+# run_record, ack the triggering operation-trigger event so the next
+# UserPromptSubmit hook doesn't re-inject it. Bug 5 (e-1424) prevents
+# session_id rotation as the structural cause; this ack handles the rare
+# residual case (= cursor advance failed mid-poll, or the event arrived
+# after the bridge's last cursor write).
+
+def test_bus_ack_via_event_id_resolves_created_at(monkeypatch, capsys, stub):
+    """--event <id> looks up the event and advances cursor to its
+    created_at. The Skill never has to format ISO8601 itself."""
+    _clear_bus_env(monkeypatch)
+    stub.events.append({
+        "event_id": "ev-trigger-1",
+        "channel": "operation-trigger",
+        "delivery": "auto-execute",
+        "created_at": "2026-06-10T11:00:00.000000Z",
+        "payload": {"op_id": "op-2"},
+    })
+    monkeypatch.setenv("BEACON_BUS_ACK_EVENT_ID", "ev-trigger-1")
+    commands.cmd_bus_ack()
+    assert stub.cursors["R1"] == "2026-06-10T11:00:00.000000Z"
+    out = capsys.readouterr().out
+    assert "2026-06-10T11:00:00.000000Z" in out
+
+
+def test_bus_ack_via_unknown_event_id_errors(monkeypatch, capsys, stub):
+    """A missing event_id surfaces a clean 1-line error rather than
+    a Python traceback (mirrors `bus status <unknown>`)."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_ACK_EVENT_ID", "ev-does-not-exist")
+    with pytest.raises(SystemExit) as exc:
+        commands.cmd_bus_ack()
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "ev-does-not-exist" in err and "not found" in err
+    # Cursor must remain unset — failed lookup must NOT advance silently.
+    assert "R1" not in stub.cursors
+
+
+def test_bus_ack_rejects_both_event_and_last_seen_at(monkeypatch, capsys, stub):
+    """Passing both inputs is ambiguous — refuse rather than pick one
+    silently (which one the user meant is impossible to guess)."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_LAST_SEEN_AT", "2026-06-07T00:00:01.000000Z")
+    monkeypatch.setenv("BEACON_BUS_ACK_EVENT_ID", "ev-trigger-1")
+    with pytest.raises(SystemExit) as exc:
+        commands.cmd_bus_ack()
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "not both" in err or "both" in err
 
 
 # ---------------------------------------------------------------------------

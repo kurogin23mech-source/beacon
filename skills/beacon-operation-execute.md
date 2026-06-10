@@ -173,6 +173,39 @@ cd "$PROJECT_DIR" && beacon incident open "<title>" -o <op-id> \
 
 incident は人間が次回 session-start で必ず見るので (`/beacon-session-start` の最上位 surface)、autonomous 経路でも遭難しない。
 
+## Step 5.7: triggering event の auto-ack (e-1423 / Bug 4 第 2 層)
+
+bus event 経由で起動された場合 (= `event_id` が分かっている)、run_record が landed した時点で **triggering event を ack** する。これにより次の UserPromptSubmit hook で同じ event が再注入されなくなる (= 同じ Operation の二重起動を構造的に防ぐ)。
+
+```bash
+cd "$PROJECT_DIR" && beacon bus ack --event <event_id>
+```
+
+CLI が server から `created_at` を引いて cursor を advance する。Skill が ISO8601 を組み立てる必要は無い (= 1 つの正しい syntax を間違えるリスクを排除)。
+
+### いつ呼ぶか
+
+- bus event 経由 (= AUTONOMOUS ACTION block に `event_id` が含まれていた) のとき: **必ず呼ぶ**
+- ユーザーが `/beacon-operation-execute op-X` を直接呼んだとき: event_id が無いので skip (= ack 対象が無い)
+- envelope verify が exit 1 で停止したとき: skip (= run_record も書いていない)
+
+### なぜ必要か (= 設計の二層構造)
+
+第 1 層 (root cause): session_id rotation で cursor が空になる問題 (= e-1424 / Bug 5) は bridge が local session.json の last_active を bump するように修正済 (channel/bus-local-heartbeat.mjs)。これにより 1 時間 idle でも session_id が rotate しない。
+
+第 2 層 (defense in depth): 第 1 層が網羅できない edge case を埋める forcing function:
+- cursor advance が transient network 失敗で skip された
+- inbox-hook が走る前にユーザー側で session_id rotation が起きた (= 想定外、ただし発生したら誤動作)
+- 複数 op event がまとめて inbox に入っている場合の cursor 飛び越し
+
+これは「**Skill 完走 = この event は処理済**」という意味的 ack なので、第 1 層が完全に直っていても残しておく価値がある。
+
+```bash
+# error / failed lookup は warn だけ (= run_record は既に landed しているので)
+cd "$PROJECT_DIR" && beacon bus ack --event "$EVENT_ID" 2>&1 || \
+  echo "warn: ack failed (cursor will catch up on next inbox-hook poll)"
+```
+
 ## Step 6: scope 外 action を見つけた時 (escalation)
 
 Step 4 の self-check で `verify` が exit 1 を返した action がある場合、autonomous 経路では停止して **人間に判断を仰ぐ**:

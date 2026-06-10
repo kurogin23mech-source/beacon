@@ -10100,14 +10100,53 @@ def cmd_bus_receive():
 
 def cmd_bus_ack():
     """Advance the recipient's cursor explicitly. Forward-only — older values
-    are silent no-ops on the server side."""
+    are silent no-ops on the server side.
+
+    Two input modes (exactly one required):
+      * ``--last-seen-at <iso8601>``  Pass the cursor target directly.
+      * ``--event <event_id>``        Look up the event server-side and
+        advance the cursor past its ``created_at``. Used by
+        ``/beacon-operation-execute`` as a forcing function (e-1423, ms-54
+        Bug 4 第 2 層): Skill completion structurally clears the triggering
+        event from the next inbox-hook inject, so the same op-X event is
+        never replayed even if the session_id rotates (= Bug 5 root cause).
+    """
     recipient = _bus_resolve_recipient()
     last_seen_at = os.environ.get("BEACON_BUS_LAST_SEEN_AT", "").strip()
-    if not last_seen_at:
-        print("Error: --last-seen-at <iso8601> required", file=sys.stderr)
+    event_id = os.environ.get("BEACON_BUS_ACK_EVENT_ID", "").strip()
+
+    if last_seen_at and event_id:
+        print("Error: pass either --last-seen-at or --event, not both",
+              file=sys.stderr)
         sys.exit(1)
+    if not last_seen_at and not event_id:
+        print("Error: --last-seen-at <iso8601> or --event <event_id> required",
+              file=sys.stderr)
+        sys.exit(1)
+
     client, config = _get_api_client()
     project_id = _resolve_bus_project_id(config)  # e-1151: --project override
+
+    if event_id:
+        # Resolve created_at from the server. The event row carries the
+        # canonical timestamp, so the Skill never has to format ISO8601
+        # itself (= fewer ways to get the ack wrong).
+        try:
+            event = client.get_bus_event(project_id, event_id)
+        except Exception as e:
+            msg = str(e)
+            if "404" in msg:
+                print(f"Error: bus event {event_id!r} not found in project "
+                      f"{project_id!r}", file=sys.stderr)
+                sys.exit(1)
+            print(f"Error: {msg}", file=sys.stderr)
+            sys.exit(1)
+        last_seen_at = (event or {}).get("created_at", "").strip()
+        if not last_seen_at:
+            print(f"Error: bus event {event_id!r} has no created_at "
+                  f"(cannot derive cursor target)", file=sys.stderr)
+            sys.exit(1)
+
     result = client.advance_bus_cursor(project_id, recipient, last_seen_at)
     if os.environ.get("BEACON_JSON", "") == "1":
         print(json.dumps(result, ensure_ascii=False))
