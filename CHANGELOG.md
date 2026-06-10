@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.31.0] - 2026-06-10
+
+- docs(ms-54): /beacon-dm-send receipt sleep 短縮 + heredoc 規約展開 (e-1400 + e-1401)
+- feat(ms-54): slim ping MCP <channel> notification, defer full body to inbox-hook (e-1403)
+- docs(release): update README/CHANGELOG for v0.30.0
+- chore(release): bump formula to 0.30.0
+
 ## [v0.30.0] - 2026-06-10
 
 - feat(ms-54): unify /beacon-dm-send and /beacon-dm-reply into single Skill
