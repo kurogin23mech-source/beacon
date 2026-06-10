@@ -161,7 +161,16 @@ def _inject_dup_ms(project_id: str) -> None:
 
 @pytest.fixture(autouse=True)
 def reset_store():
-    """Per-test isolation: fresh project + clear any dependency override."""
+    """Per-test isolation: fresh project + clear any dependency override.
+
+    e-1344: the purge endpoints now also require a verified envelope via
+    ``require_envelope_for_action`` (X-Beacon-Envelope header). That gate
+    has its own coverage in ``test_server_high_risk_endpoint_enforce.py``;
+    here we want to keep testing the *role* enforcement layer
+    (owner-only / editor-forbidden / etc) without minting envelopes on
+    every call. So we install a wide-open envelope override that mimics
+    "envelope already verified" — same trick we use for ``require_auth``.
+    """
     prior_db, prior_module = _rebind_db()
     _store.clear()
     _store[PROJECT_ID] = _seed_project()
@@ -169,6 +178,9 @@ def reset_store():
     app_module.app.dependency_overrides.clear()
     prior_auth = app_module._auth_enabled
     app_module._auth_enabled = True
+    # Bypass the envelope gate for these role-focused tests. The gate's own
+    # contract is exercised by tests/test_server_high_risk_endpoint_enforce.py.
+    _disable_envelope_gate()
     try:
         yield
     finally:
@@ -176,6 +188,29 @@ def reset_store():
         _store.clear()
         app_module.app.dependency_overrides.clear()
         _restore_db(prior_db, prior_module)
+
+
+def _disable_envelope_gate() -> None:
+    """Install a dependency override that lets every action through.
+
+    The factory ``require_envelope_for_action`` returns a fresh closure per
+    endpoint, so FastAPI registers each as a distinct dependency. Walking the
+    routes and overriding each closure keeps this file decoupled from the
+    list of high-risk endpoints (= no need to mirror that list here).
+    """
+    for route in app_module.app.routes:
+        for dep in getattr(getattr(route, "dependant", None), "dependencies",
+                           []) or []:
+            call = dep.call
+            # The closure was created inside ``require_envelope_for_action``;
+            # its enclosing function exposes ``__qualname__`` like
+            # ``require_envelope_for_action.<locals>.dep``.
+            if (callable(call)
+                    and getattr(call, "__qualname__", "")
+                    .startswith("require_envelope_for_action")):
+                app_module.app.dependency_overrides[call] = (
+                    lambda: {"envelope": None, "verify_result": None}
+                )
 
 
 def _impersonate(uid: str) -> None:

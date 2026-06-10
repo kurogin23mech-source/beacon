@@ -820,8 +820,134 @@ def list_projects(include_archived: bool = False, user: dict = Depends(require_a
     return db.list_projects(user_id=user.get("sub"), include_archived=include_archived)
 
 
+# ---------------------------------------------------------------------------
+# High-risk endpoint envelope enforcement (e-1344 / ms-60)
+#
+# "銃はガラスの向こう" — destructive endpoints get a SECOND wall on the server
+# side, on top of the AI-side self-check in /beacon-operation-execute Skill
+# Step 4. Even if the AI bypasses its own check, the server demands a valid
+# T2 envelope authorizing the exact action before the mutation runs.
+#
+# Header convention: ``X-Beacon-Envelope: <base64-JSON or raw-JSON>``. The
+# envelope arrives in a header (not body) so the gate composes with all HTTP
+# methods/payload shapes uniformly. The existing ``Authorization: Bearer ...``
+# header stays intact for the identity layer; this is a separate authorization
+# layer for action scope.
+#
+# CORE doc enumerating the protected endpoints lives at scope=core (see
+# e-1344 commit message for the doc_id).
+# ---------------------------------------------------------------------------
+
+def require_envelope_for_action(action_name: str):
+    """FastAPI dependency factory: gate a destructive endpoint on a T2 envelope.
+
+    The dependency reuses the same ``envelope_mod.verify(...)`` pipeline used
+    at ``/api/projects/{id}/bus`` (e-1155 Phase 1) — defense in depth, not a
+    reimplementation. After verify passes, the action must also be in
+    ``envelope.actions_authorized`` (with wildcard-aware match via
+    ``approved_actions.matches``).
+
+    Failure modes (all return HTTP 403 with a structured detail dict):
+
+      * Missing header           → ``envelope_required``
+      * Malformed envelope       → ``envelope_malformed``
+      * verify pipeline rejects  → ``envelope_verify_rejected`` (mirrors the
+                                    bus rejection shape)
+      * action not authorized    → ``envelope_action_not_authorized``
+    """
+    async def dep(
+        project_id: str,
+        request: Request,
+        user: dict = Depends(require_auth),
+    ):
+        envelope_raw = request.headers.get("X-Beacon-Envelope")
+        if not envelope_raw:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "envelope_required",
+                    "reason": (
+                        f"action '{action_name}' requires a verified envelope"
+                    ),
+                    "header": "X-Beacon-Envelope",
+                },
+            )
+        # Accept either base64-encoded JSON (common transport) or raw JSON
+        # (easier for ad-hoc curl). Try base64 first because it's the canonical
+        # form for header transport (avoids whitespace/quote escaping pain).
+        try:
+            try:
+                envelope = json.loads(
+                    base64.b64decode(envelope_raw).decode("utf-8")
+                )
+            except Exception:
+                envelope = json.loads(envelope_raw)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "envelope_malformed",
+                    "reason": str(exc),
+                },
+            )
+        if not isinstance(envelope, dict):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "envelope_malformed",
+                    "reason": "envelope must decode to a JSON object",
+                },
+            )
+        # Reuse the e-1155 verify pipeline. The minimal payload below is just
+        # the action descriptor; the bus verify path passes the full message
+        # payload but the REST gate only cares about the envelope's own
+        # validity + action permission (no T5 disclosure path applies here).
+        verify_result = envelope_mod.verify(
+            envelope,
+            project_id=project_id,
+            payload={"action": action_name},
+            requested_action=action_name,
+            nonce_store=_envelope_nonce_store(),
+            parent_lookup=_envelope_parent_lookup(),
+            sender_session_id=None,
+        )
+        if verify_result.rejection_reason is not None:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "envelope_verify_rejected",
+                    "reason": verify_result.rejection_reason,
+                    "steps": verify_result.steps,
+                },
+            )
+        # Even a passing envelope might authorize a different action — the
+        # verify pipeline rejects unknown actions for T1/T2 (step 8) but
+        # T3/T5 don't enumerate, so we re-check explicitly here. We use the
+        # wildcard-aware matcher from approved_actions (e-1339).
+        approved = envelope.get("actions_authorized") or []
+        if not approved_actions_mod.matches(approved, action_name):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "envelope_action_not_authorized",
+                    "reason": (
+                        f"action '{action_name}' not in "
+                        f"envelope.actions_authorized"
+                    ),
+                    "approved_actions": approved,
+                },
+            )
+        return {"envelope": envelope, "verify_result": verify_result}
+
+    return dep
+
+
 @app.post("/api/projects/{project_id}/archive")
-def archive_project(project_id: str, user: dict = Depends(require_auth)):
+def archive_project(
+    project_id: str,
+    user: dict = Depends(require_auth),
+    _envelope: dict = Depends(require_envelope_for_action("project.archive")),
+):
     """Archive a project (soft delete — hidden from default listing)."""
     # e-1257: owner-only gate via the centralized helper (404 if missing,
     # 403 if not owner). Pre-check before the transaction mirrors the pattern
@@ -849,8 +975,13 @@ def unarchive_project(project_id: str, user: dict = Depends(require_auth)):
 
 
 @app.post("/api/projects/{project_id}/migrate-to-v2")
-def migrate_project_to_v2(project_id: str,
-                          user: dict = Depends(require_auth)):
+def migrate_project_to_v2(
+    project_id: str,
+    user: dict = Depends(require_auth),
+    _envelope: dict = Depends(
+        require_envelope_for_action("project.migrate.v2")
+    ),
+):
     """One-time migration from v1 (whole-doc) to v2 (subcollection) layout.
 
     Why this exists: an unbounded `milestones[]` array on a single Firestore
@@ -1068,9 +1199,13 @@ def delete_milestone(project_id: str, ms_id: str,
 
 
 @app.post("/api/projects/{project_id}/milestones/{ms_id}/purge")
-def purge_milestone(project_id: str, ms_id: str,
-                    body: PurgeRequest,
-                    user: dict = Depends(require_auth)):
+def purge_milestone(
+    project_id: str,
+    ms_id: str,
+    body: PurgeRequest,
+    user: dict = Depends(require_auth),
+    _envelope: dict = Depends(require_envelope_for_action("milestone.purge")),
+):
     """Hard-delete a milestone record — owner-only (e-1030).
 
     Unlike soft delete (`DELETE /milestones/{id}`), this physically removes
@@ -1177,9 +1312,13 @@ def delete_entry(project_id: str, entry_id: str,
 
 
 @app.post("/api/projects/{project_id}/entries/{entry_id}/purge")
-def purge_entry(project_id: str, entry_id: str,
-                body: PurgeRequest,
-                user: dict = Depends(require_auth)):
+def purge_entry(
+    project_id: str,
+    entry_id: str,
+    body: PurgeRequest,
+    user: dict = Depends(require_auth),
+    _envelope: dict = Depends(require_envelope_for_action("entry.purge")),
+):
     """Hard-delete an entry record — owner-only (e-1030).
 
     Entry-level analogue of milestone purge — Issue #14 / e-863 recovery for
@@ -1211,9 +1350,13 @@ def purge_entry(project_id: str, entry_id: str,
 
 
 @app.post("/api/projects/{project_id}/operations/{op_id}/purge")
-def purge_operation(project_id: str, op_id: str,
-                    body: PurgeRequest,
-                    user: dict = Depends(require_auth)):
+def purge_operation(
+    project_id: str,
+    op_id: str,
+    body: PurgeRequest,
+    user: dict = Depends(require_auth),
+    _envelope: dict = Depends(require_envelope_for_action("operation.purge")),
+):
     """Hard-delete an operation record — owner-only (e-1030).
 
     Operation-level analogue of milestone purge — Issue #14 / e-863 recovery
