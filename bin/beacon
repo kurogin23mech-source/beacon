@@ -2720,6 +2720,8 @@ delivery: auto-execute | propose-to-ai (default) | notify-user-only
 --to:          (send) stamp payload.recipient_session_id for 1:1 unicast (e-1209).
                Required for channel=dm; without it the server drops the event
                rather than broadcasting to every dm-subscribed session.
+               (e-1402) directory に live+healthy で見えない sid を渡すと stderr に
+               警告 (soft-warn、送信は続行)。BEACON_BUS_NO_LIVE_CHECK=1 で抑制。
 --in-reply-to: mark as AI-authored reply. Requires `bus budget grant N` first.
                Without it, sends bypass the budget gate (manual mode).
                The same gate applies via the MCP reply tool (channel/bus.mjs).

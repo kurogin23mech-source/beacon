@@ -9833,6 +9833,9 @@ def cmd_bus_send():
     # polls a different project than `project_id`, auto-route to that
     # project. Loud stderr notice keeps the override auditable.
     project_id = _validate_recipient_project(recipient, project_id, channel)
+    # e-1402: liveness gate on the sid itself (independent of project
+    # routing). Catches stale session_id reuse when the Skill is bypassed.
+    _check_recipient_live_health(recipient, channel)
 
     # e-1290: envelope-by-default for CLI sends.
     #
@@ -10232,6 +10235,72 @@ def _validate_recipient_project(
         file=sys.stderr,
     )
     return target_project_id
+
+
+def _check_recipient_live_health(recipient: str, channel: str) -> None:
+    """Defense-in-depth gate (e-1402) against stale session_id reuse.
+
+    2026-06-10 LPS dogfood incident: an AI in another project bypassed the
+    /beacon-dm-send Skill (which forces a fresh `dm_discover` lookup per
+    send) and reused a session_id from conversation memory. The target had
+    shutdown 1 hour earlier; the DM landed in a dead session. The Skill's
+    safety net was structural but only effective when the Skill was used.
+
+    This helper closes that hole at the CLI surface: any `--to <sid>` send
+    on the dm channel triggers a live+healthy directory check. If the sid
+    isn't currently held by a polling bridge, emit a loud stderr warning
+    naming the Skill as the recommended remediation. Soft-warn only — the
+    send proceeds, since CLI immediacy is the legitimate use case (CI
+    scripts, automated tooling, debugging). Hard-refuse is an opt-in for
+    future strictness.
+
+    Distinct from ``_validate_recipient_project`` (e-1362) which asks
+    *which project does this sid poll?* — that's about cross-project
+    routing. This one asks *is this sid alive right now?* — that's about
+    session lifecycle. Same directory backend, different semantics, kept
+    as separate helpers per the "thin single-purpose" convention.
+
+    Opt-out:
+      * ``BEACON_BUS_NO_LIVE_CHECK=1`` — bypass entirely (CI / automated
+        scripts that handle their own liveness verification).
+    """
+    if channel != "dm" or not recipient:
+        return
+    if os.environ.get("BEACON_BUS_NO_LIVE_CHECK", "") == "1":
+        return
+
+    try:
+        import importlib
+        helpers = importlib.import_module(
+            "beacon_cli.skills_helpers.dm_discover"
+        )
+    except Exception:
+        # No discovery module available — bypass silently. Mirrors the
+        # defensive posture of _validate_recipient_project; a missing
+        # helper shouldn't break the send.
+        return
+
+    try:
+        rows = helpers.discover_and_aggregate(healthy=True, since_min=10)
+    except Exception:
+        # Discovery raised (network / psutil / auth) — bypass rather than
+        # turning a transient failure into a CLI footgun.
+        return
+
+    for row in rows:
+        if row.get("session_id") == recipient:
+            return  # live + healthy, all good
+
+    # Not in the live+healthy set. The session might be down (= dead) or
+    # simply not visible to this machine's bridge directory. Either way,
+    # the sender should know that the send is best-effort.
+    print(
+        f"⚠ recipient session {recipient[:24]}… is not in the live+healthy "
+        f"directory. The send will proceed, but the target may be dead or "
+        f"unreachable. Consider `/beacon-dm-send` Skill which re-discovers "
+        f"on every send. (Set BEACON_BUS_NO_LIVE_CHECK=1 to suppress.)",
+        file=sys.stderr,
+    )
 
 
 def cmd_bus_directory():
