@@ -81,6 +81,12 @@ beacon = "beacon_cli.main:main"
 # Scripts dir — critical for Windows + pipx paths where the bash/cmd
 # wrappers aren't on PATH.
 bclaude = "beacon_cli.bclaude:main"
+# Cross-platform project-root walk-up helper (ms-62 / e-1512). Mirrors
+# `bin/beacon-find-root` (POSIX shell) so the Skills shipped under
+# `skills/*.md` can call `beacon-find-root` as their bootstrap
+# prerequisite check regardless of how beacon was installed (raw git
+# clone vs `pipx install beacon` vs `pip install --user beacon`).
+beacon-find-root = "beacon_cli.find_root:main"
 # Cross-platform PostToolUse / PostCompact hook entry-points (ms-44 e-777).
 # Translated from bin/*.sh so Claude Code on Windows can register them by
 # absolute path in ~/.claude/settings.json without needing a bash interpreter.
