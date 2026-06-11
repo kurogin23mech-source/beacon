@@ -44,31 +44,53 @@ import sys
 from typing import Any
 
 
-_BUS_MJS_NEEDLE = "channel/bus.mjs"
+# ms-43 follow-up: process discovery needles.
+#
+# ``beacon-bus:`` (NEW): bus.mjs sets ``process.title = beacon-bus:<cwd>``
+#   on startup since ms-60 / e-1466 (commit bb7e9d0). ``pgrep -f`` matches
+#   on the title for these processes, so this is the live needle.
+#
+# ``channel/bus.mjs`` (LEGACY): older bus.mjs builds (pre-e-1466) keep the
+#   raw ``node /path/to/channel/bus.mjs`` command line. Kept as a fallback
+#   so a long-lived bridge still appears in cross-project discovery until
+#   it is restarted.
+#
+# Without the NEW needle, ``pgrep -f`` against the legacy string silently
+# returned 0 processes from the moment e-1466 landed — which is why the
+# Skill-level cross-project enumeration started returning an empty list
+# while everyone assumed it was still working.
+_BUS_MJS_NEEDLES: tuple[str, ...] = ("beacon-bus:", "channel/bus.mjs")
 
 
 def list_bus_bridge_processes() -> list[tuple[str, str]]:
     """Return ``[(pid, cwd), ...]`` for every locally-running bus.mjs bridge.
 
-    Uses ``pgrep -f`` to find the node processes, then ``lsof -p`` to
-    read each one's cwd. Both tools are universally available on macOS
-    and Linux; we don't try to be portable to Windows (Beacon's
-    bus.mjs runs on macOS/Linux dev machines today).
+    Uses ``pgrep -f`` against both the new (``beacon-bus:`` process title)
+    and legacy (``channel/bus.mjs`` raw command line) needles, then
+    ``lsof -p`` to read each pid's cwd. Both tools are universally
+    available on macOS and Linux; we don't try to be portable to Windows
+    (Beacon's bus.mjs runs on macOS/Linux dev machines today).
 
     Failure modes are silenced (returns ``[]`` rather than raising) —
     the worst case for the caller is "discovery found nothing", which
     naturally falls back to cwd-only behavior.
     """
-    try:
-        proc = subprocess.run(
-            ["pgrep", "-f", _BUS_MJS_NEEDLE],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return []
-    pids = [p for p in proc.stdout.strip().split("\n") if p]
+    pids: list[str] = []
+    seen: set[str] = set()
+    for needle in _BUS_MJS_NEEDLES:
+        try:
+            proc = subprocess.run(
+                ["pgrep", "-f", needle],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        for pid in proc.stdout.strip().split("\n"):
+            if pid and pid not in seen:
+                seen.add(pid)
+                pids.append(pid)
     out: list[tuple[str, str]] = []
     for pid in pids:
         try:
