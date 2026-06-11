@@ -307,6 +307,20 @@ PY
 
 この Step は **読み取り専用**。自動で `beacon channel install` を実行してはならない（session-start 全体の読み取り専用原則に従う）。
 
+## Step 1k: branch / workspace 乖離の警告検知 (ms-65 e-1481)
+
+同 cwd で複数 bclaude が並走している状態 + 自セッションが main project root に居て non-default ブランチに乗っている、という **silent な branch share 事故** の温床条件を検知する。構造修正 (= e-1477 cwd-aware milestone start) は事故が起きる経路を狭めているが、ユーザーが手で `git checkout` した残余ケースは捕まえられない。本ステップが検知側 forcing function。
+
+Bash ツールで実行 (fail-safe、出力がそのままユーザーへの警告になる、終了コードは常に 0):
+
+```bash
+python3 scripts/check-branch-focus-divergence.py 2>&1
+```
+
+スクリプトが何も出さなければ安全 (= warning 不要)。**stderr に「⚠ branch / workspace 乖離の警告」が含まれていたら、それを Step 3 の出力ヘッダ部分にそのまま転記する**。
+
+このスクリプトは **block しない** (= session-start を中断しない)。あくまで気付かせるための表示。
+
 ## Step 1j: 前セッションの session log 読み込み（ms-43 e-1360）
 
 前セッション末で `/beacon-session-end` Skill が `beacon session end` で集約した session log には、**「次セッション最優先 / top of queue / 次にやること」セクションが summary 内に明文化されている**ことが多い。これは trigger より優先順位が高い (人間/AI が curate した継続意図そのもの)。
