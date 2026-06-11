@@ -3847,31 +3847,23 @@ def cmd_milestone_workspace():
     # Determine worktree path and branch
     workspace_branch = f"{ms_id}/work"
     workspace_path = os.path.join(".worktrees", ms_id)
-    abs_workspace_path = os.path.abspath(workspace_path)
 
-    # Check if worktree already exists
-    if os.path.exists(abs_workspace_path):
+    # ms-65 e-1476: worktree creation now lives in lib/worktree.py so the
+    # upcoming cwd-aware ``beacon milestone start`` (e-1477) can share the
+    # same retry-on-existing-branch behaviour. The shape of the legacy CLI
+    # output (stderr line on idempotent reuse, exit 1 on failure) is
+    # preserved so existing dispatch flows don't see a change.
+    import worktree as _worktree
+    try:
+        wt = _worktree.create_workspace(workspace_path, workspace_branch)
+    except _worktree.GitNotInstalledError:
+        print("Error: git not found in PATH", file=sys.stderr)
+        sys.exit(1)
+    except _worktree.WorktreeCreateError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+    if not wt["created"]:
         print(f"Worktree already exists at {workspace_path}", file=sys.stderr)
-    else:
-        # git worktree add .worktrees/<ms-id> -b <ms-id>/work
-        try:
-            result = subprocess.run(
-                ["git", "worktree", "add", abs_workspace_path, "-b", workspace_branch],
-                capture_output=True, text=True
-            )
-            if result.returncode != 0:
-                # Branch may already exist; try without -b
-                result2 = subprocess.run(
-                    ["git", "worktree", "add", abs_workspace_path, workspace_branch],
-                    capture_output=True, text=True
-                )
-                if result2.returncode != 0:
-                    print(f"git worktree add failed: {result.stderr.strip()}", file=sys.stderr)
-                    print(f"Retry also failed: {result2.stderr.strip()}", file=sys.stderr)
-                    sys.exit(1)
-        except FileNotFoundError:
-            print("Error: git not found in PATH", file=sys.stderr)
-            sys.exit(1)
 
     assigned_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     effective_executor = executor or "ai"
