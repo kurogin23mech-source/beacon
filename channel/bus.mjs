@@ -69,6 +69,83 @@ function loadToken() {
 
 const cloud = safeLoadJSON(CLOUD_JSON)
 
+// e-1460: per-sid bridge claims live in .beacon/bridges/<sid>.json so
+// multiple bclaude in the same cwd can each own a distinct claim.
+const BRIDGES_DIR = path.join(CWD, '.beacon', 'bridges')
+
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (e) {
+    // EPERM = process exists but belongs to another user → still alive.
+    if (e && e.code === 'EPERM') return true
+    return false
+  }
+}
+
+// e-1460: at cold-start, look at every existing bridge claim in this cwd
+// and decide whether *another* bclaude already owns one. If yes, this
+// bus.mjs belongs to a 2nd+ bclaude and must NOT inherit the existing
+// session_id via session.json freshness reuse — it must mint fresh.
+//
+// "Belongs to another bclaude" = the claim's parent_pid is alive AND
+// is not my own ppid (= my bclaude pid). Legacy single-claim
+// .beacon/bridge.json has no parent_pid; fall back to pid (= bus.mjs
+// pid) liveness to decide whether the legacy owner is still around.
+function detectOtherAliveBridges() {
+  const myPpid = process.ppid
+  const found = []
+  try {
+    if (fs.existsSync(BRIDGES_DIR)) {
+      for (const f of fs.readdirSync(BRIDGES_DIR)) {
+        if (!f.endsWith('.json')) continue
+        let data
+        try {
+          data = JSON.parse(fs.readFileSync(path.join(BRIDGES_DIR, f), 'utf8'))
+        } catch {
+          continue
+        }
+        const pp = data && Number.isInteger(data.parent_pid) ? data.parent_pid : 0
+        const bp = data && Number.isInteger(data.pid) ? data.pid : 0
+        if (pp && pp !== myPpid && isPidAlive(pp)) {
+          found.push(data)
+        } else if (!pp && bp && bp !== process.pid && isPidAlive(bp)) {
+          // Legacy-shaped per-sid file with no parent_pid — fall back to
+          // bridge pid liveness.
+          found.push(data)
+        }
+      }
+    }
+  } catch (e) {
+    log(`bridges scan failed (non-fatal): ${e.message}`)
+  }
+  // Legacy single-claim .beacon/bridge.json — if an alive bus.mjs other
+  // than us still owns it, treat it as another live bridge.
+  try {
+    const legacyPath = path.join(CWD, '.beacon', 'bridge.json')
+    if (fs.existsSync(legacyPath)) {
+      const data = JSON.parse(fs.readFileSync(legacyPath, 'utf8'))
+      const bp = Number.isInteger(data?.pid) ? data.pid : 0
+      if (bp && bp !== process.pid && isPidAlive(bp)) {
+        // Don't double-count if same sid already collected from bridges/.
+        if (!found.some(c => c.session_id === data.session_id)) {
+          found.push(data)
+        }
+      }
+    }
+  } catch {}
+  return found
+}
+
+const otherAliveBridges = detectOtherAliveBridges()
+const FORCE_MINT = otherAliveBridges.length > 0
+if (FORCE_MINT) {
+  const labels = otherAliveBridges.map(c => `sid=${c.session_id} ppid=${c.parent_pid ?? '?'} pid=${c.pid ?? '?'}`).join(', ')
+  log(`force-mint: ${otherAliveBridges.length} other alive bridge(s) detected [${labels}] — this bus.mjs will request a fresh session_id`)
+}
+
 // Cold-start fix: Claude Code does not pass CLAUDE_CODE_SESSION_ID to MCP
 // subprocesses (verified empirically 2026-06-07). The single reliable
 // refresh path is `beacon session id`, which calls
@@ -76,6 +153,9 @@ const cloud = safeLoadJSON(CLOUD_JSON)
 // bash wrapper may walk up to find a parent .beacon/project.json, so use
 // the CLI's stdout directly rather than re-reading .beacon/session.json
 // from cwd (those can disagree when bus.mjs runs from a sandbox subdir).
+//
+// e-1460: when FORCE_MINT is on, propagate BEACON_FORCE_MINT=1 so the
+// CLI's get_or_mint_session skips freshness reuse and mints a fresh sid.
 function discoverSessionIdViaCLI() {
   // ms-54 e-1191: route through log() (which wraps appendFileSync in
   // try/catch) instead of bare appendFileSync. The bare path crashes the
@@ -83,11 +163,14 @@ function discoverSessionIdViaCLI() {
   // path that didn't exist before e-1159's OS detect, or a read-only
   // mount). log() fails soft.
   try {
+    const childEnv = { ...process.env }
+    if (FORCE_MINT) childEnv.BEACON_FORCE_MINT = '1'
     const sid = execSync('beacon session id', {
       cwd: CWD, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', timeout: 10000,
+      env: childEnv,
     }).trim()
     if (sid) {
-      log(`session id resolved via CLI: ${sid}`)
+      log(`session id resolved via CLI: ${sid}${FORCE_MINT ? ' (force-minted)' : ''}`)
       return sid
     }
   } catch (e) {
@@ -844,24 +927,52 @@ if (!PROJECT_ID || !SESSION_ID) {
   // bridge's authoritative view to bridge.json lets the CLI see it and skip
   // the env-override path.
   //
-  // bridge.json schema:
-  //   { session_id: str, pid: number, cwd: str, started_at: ISO8601 }
+  // bridge claim schema (e-1460):
+  //   { session_id: str, pid: number, parent_pid: number, cwd: str,
+  //     started_at: ISO8601 }
   //
-  // The PID lets a stale file (from a crashed bridge) be detected by a
-  // reader checking `os.kill(pid, 0)` — if the bridge died without cleaning
-  // up, the CLI degrades to its own mint path rather than addressing a dead
-  // session.
+  // pid          = this bus.mjs process (used by readers to drop stale
+  //                claims after a crash).
+  // parent_pid   = the bclaude process that spawned this bus.mjs. This is
+  //                the load-bearing field for per-bclaude isolation: a CLI
+  //                running inside a given bclaude walks up its parent
+  //                chain and matches the bclaude pid against parent_pid
+  //                to find its own bridge.
+  //
+  // Files live under .beacon/bridges/<session_id>.json so multiple
+  // bclaude in the same cwd can each own a distinct claim. The legacy
+  // single-claim .beacon/bridge.json is no longer written here; readers
+  // still treat it as a fallback for back-compat. If this cold-start
+  // inherited the legacy file's session_id (single-bclaude case, no
+  // force-mint), clean it up so we don't leave duplicate claims behind.
   function writeBridgeClaim() {
     try {
+      fs.mkdirSync(BRIDGES_DIR, { recursive: true })
       const claim = {
         session_id: SESSION_ID,
         pid: process.pid,
+        parent_pid: process.ppid,
         cwd: CWD,
         started_at: new Date().toISOString(),
       }
-      const claimPath = path.join(CWD, '.beacon', 'bridge.json')
+      const claimPath = path.join(BRIDGES_DIR, `${SESSION_ID}.json`)
       fs.writeFileSync(claimPath, JSON.stringify(claim, null, 2))
-      log(`bridge claim written: pid=${process.pid} session=${SESSION_ID} → ${claimPath}`)
+      log(`bridge claim written: pid=${process.pid} ppid=${process.ppid} session=${SESSION_ID} → ${claimPath}`)
+      // Best-effort legacy cleanup: if .beacon/bridge.json carries our
+      // sid or a dead pid, remove it so future readers don't see two
+      // owners for the same session.
+      try {
+        const legacyPath = path.join(CWD, '.beacon', 'bridge.json')
+        if (fs.existsSync(legacyPath)) {
+          const data = JSON.parse(fs.readFileSync(legacyPath, 'utf8'))
+          const sameSid = data && data.session_id === SESSION_ID
+          const deadOwner = data && Number.isInteger(data.pid) && !isPidAlive(data.pid)
+          if (sameSid || deadOwner) {
+            fs.unlinkSync(legacyPath)
+            log(`legacy bridge.json cleared (sameSid=${sameSid} deadOwner=${deadOwner})`)
+          }
+        }
+      } catch {}
     } catch (e) {
       // Best-effort. CLI degrades to mint path if claim isn't writable.
       log(`bridge claim write failed (non-fatal): ${e.message}`)
@@ -870,7 +981,7 @@ if (!PROJECT_ID || !SESSION_ID) {
 
   function clearBridgeClaim() {
     try {
-      const claimPath = path.join(CWD, '.beacon', 'bridge.json')
+      const claimPath = path.join(BRIDGES_DIR, `${SESSION_ID}.json`)
       if (fs.existsSync(claimPath)) {
         fs.unlinkSync(claimPath)
         log(`bridge claim cleared at shutdown`)
