@@ -44,6 +44,10 @@ const CWD = process.cwd()
 const CLOUD_JSON = path.join(CWD, '.beacon', 'cloud.json')
 const SESSION_JSON = path.join(CWD, '.beacon', 'session.json')
 
+// Tag process by cwd so `pkill -f beacon-bus:<cwd>` targets safely without
+// blasting bus.mjs instances of other projects sharing this script path.
+process.title = `beacon-bus:${CWD}`
+
 const LOG = process.env.BEACON_BUS_LOG || '/tmp/beacon-bus-channel.log'
 const log = (msg) => {
   try { fs.appendFileSync(LOG, `[${new Date().toISOString()}] ${msg}\n`) } catch {}
