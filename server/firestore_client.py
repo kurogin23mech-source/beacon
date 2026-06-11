@@ -1019,6 +1019,230 @@ def list_sessions(project_id: str) -> list[dict]:
 SESSION_LOGS_SUBCOLLECTION = "session_logs"
 
 
+# ---------------------------------------------------------------------------
+# Cloud-first identity (ms-62 / e-1509)
+#
+# Three layers of server-managed identity introduced by ms-62 SPEC:
+#
+#   project_id  — already server-issued at project creation (existing)
+#   machine_id  — server-issued at first heartbeat for (user, machine
+#                 fingerprint). Stored under users/{uid}/machines/{machine_id}
+#                 with the fingerprint as the lookup key. Client caches the
+#                 returned machine_id in ~/.beacon/machine.json so subsequent
+#                 heartbeats can claim "I am machine X" without re-minting.
+#   session_id  — server-issued at first heartbeat for the tuple
+#                 (project_id, machine_id, parent_pid). Stored in the existing
+#                 projects/{p}/sessions/{sid} collection PLUS a small lookup
+#                 doc projects/{p}/session_lookup/{machine_id}_{parent_pid}
+#                 that maps the tuple to the sid. The lookup doc lets us
+#                 answer "what sid did we already mint for this tuple?"
+#                 without compound-where Firestore queries (= no composite
+#                 index to deploy).
+#
+# Session continuity across heartbeat gaps:
+#   1. bclaude starts in terminal T1 → bus.mjs heartbeat carries
+#      (project_id, machine_id, parent_pid=T1.pid). Server mints sid_A and
+#      writes the lookup doc.
+#   2. bclaude restarts in same terminal T1 → same parent_pid → lookup
+#      finds sid_A → server returns it. Continuity preserved.
+#   3. Terminal closes, new terminal T3 opens → parent_pid=T3.pid is new
+#      → lookup miss → server mints sid_B. Semantically correct: a new
+#      terminal session is a new work session.
+#
+# Multi-bclaude in same cwd:
+#   Different terminals → different parent_pids → distinct sids. No
+#   client-side disambiguation needed (= ms-57 e-1460 bridges/<sid>.json
+#   layout is superseded by this server-side tuple lookup).
+# ---------------------------------------------------------------------------
+
+MACHINES_SUBCOLLECTION = "machines"
+SESSION_LOOKUP_SUBCOLLECTION = "session_lookup"
+
+
+def _now_iso() -> str:
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+
+
+def _safe_doc_id(s: str) -> str:
+    """Sanitise a string for use as a Firestore document ID.
+
+    Firestore doc IDs cannot contain "/" and must be non-empty. Hostnames
+    can contain dots and dashes (both OK), but worst-case we hash anything
+    suspicious. Empty input gets a deterministic placeholder so the caller
+    never lands at the collection root.
+    """
+    import hashlib
+    if not s:
+        return "_empty"
+    # Length cap (Firestore allows 1500 bytes but be polite).
+    if "/" in s or len(s) > 200:
+        return "h-" + hashlib.sha256(s.encode("utf-8")).hexdigest()[:32]
+    return s
+
+
+def get_or_mint_machine(
+    user_id: str, fingerprint: str, *, hostname: str = "", agent: str = ""
+) -> tuple[str, bool]:
+    """Get or mint a machine_id for (user_id, fingerprint).
+
+    The fingerprint is used as the lookup key under
+    ``users/{user_id}/machines/`` — same fingerprint always resolves to
+    the same machine_id. Returns ``(machine_id, minted)`` where
+    ``minted`` is True iff this call created the document.
+
+    The mint is deterministic only in the bucket sense (= same
+    fingerprint maps to same doc), but the machine_id value itself is a
+    fresh nonce so the value never leaks the fingerprint.
+    """
+    import secrets
+
+    if not user_id or not fingerprint:
+        raise ValueError("user_id and fingerprint are required")
+    fingerprint_id = _safe_doc_id(fingerprint)
+    ref = (
+        get_db()
+        .collection(USERS_COLLECTION)
+        .document(user_id)
+        .collection(MACHINES_SUBCOLLECTION)
+        .document(fingerprint_id)
+    )
+    doc = ref.get()
+    now = _now_iso()
+    if doc.exists:
+        data = doc.to_dict() or {}
+        ref.update({"last_seen_at": now})
+        return data.get("machine_id", ""), False
+    machine_id = f"mc-{secrets.token_hex(8)}"
+    ref.set({
+        "machine_id": machine_id,
+        "fingerprint": fingerprint,
+        "hostname": hostname or fingerprint,
+        "agent": agent,
+        "created_at": now,
+        "last_seen_at": now,
+    })
+    return machine_id, True
+
+
+def get_or_mint_session_by_tuple(
+    project_id: str,
+    machine_id: str,
+    parent_pid: int,
+    *,
+    user_id: str,
+    cwd: str = "",
+    metadata: dict | None = None,
+) -> dict:
+    """Server-side identity tuple lookup (ms-62 e-1509).
+
+    Resolve ``(project_id, machine_id, parent_pid)`` to a session_id.
+    Existing tuple → return the previously minted sid + refresh
+    last_heartbeat_at. New tuple → mint a fresh sid, register the lookup
+    doc, create the session record, return.
+
+    Returns ``{session_id, minted, last_heartbeat_at, created_at}``.
+
+    The "lookup miss after a long idle" case (= the bclaude was killed and
+    a NEW one happened to inherit the recycled OS pid) collapses naturally:
+    the lookup doc still points at the old sid, but the old sid's
+    last_heartbeat_at is stale. Callers (= the heartbeat endpoint) decide
+    whether to honour the stale lookup or force a re-mint by passing a
+    stale-threshold check at the API layer.
+    """
+    import secrets
+
+    if not project_id or not machine_id or not isinstance(parent_pid, int):
+        raise ValueError("project_id, machine_id, parent_pid are required")
+
+    db = get_db()
+    project_ref = db.collection(COLLECTION).document(project_id)
+    lookup_key = f"{machine_id}_{parent_pid}"
+    lookup_ref = (
+        project_ref
+        .collection(SESSION_LOOKUP_SUBCOLLECTION)
+        .document(_safe_doc_id(lookup_key))
+    )
+    lookup_doc = lookup_ref.get()
+    now = _now_iso()
+
+    if lookup_doc.exists:
+        sid = (lookup_doc.to_dict() or {}).get("session_id", "")
+        if sid:
+            session_ref = (
+                project_ref
+                .collection(SESSIONS_SUBCOLLECTION)
+                .document(sid)
+            )
+            # Refresh last_heartbeat_at on the session doc itself. We use
+            # update() with a dotted path so other heartbeat-tracked fields
+            # (last_active, last_poll_at from the existing bridge writer)
+            # are not clobbered.
+            session_ref.set({
+                "last_heartbeat_at": now,
+                "machine_id": machine_id,
+                "parent_pid": parent_pid,
+                "cwd": cwd,
+                **(metadata or {}),
+            }, merge=True)
+            existing = session_ref.get().to_dict() or {}
+            return {
+                "session_id": sid,
+                "minted": False,
+                "last_heartbeat_at": now,
+                "created_at": existing.get("created_at", ""),
+            }
+
+    # Mint new
+    epoch_ms = int(__import__("time").time() * 1000)
+    new_sid = f"sv-{machine_id[3:11] if machine_id.startswith('mc-') else machine_id[:8]}-{epoch_ms}-{secrets.token_hex(4)}"
+
+    session_ref = (
+        project_ref
+        .collection(SESSIONS_SUBCOLLECTION)
+        .document(new_sid)
+    )
+    session_data = {
+        "session_id": new_sid,
+        "user_id": user_id,
+        "machine_id": machine_id,
+        "parent_pid": parent_pid,
+        "cwd": cwd,
+        "created_at": now,
+        "last_heartbeat_at": now,
+        "last_active": now,
+        "source": "server_minted",
+        **(metadata or {}),
+    }
+    session_ref.set(session_data, merge=True)
+    lookup_ref.set({
+        "session_id": new_sid,
+        "machine_id": machine_id,
+        "parent_pid": parent_pid,
+        "created_at": now,
+    })
+    return {
+        "session_id": new_sid,
+        "minted": True,
+        "last_heartbeat_at": now,
+        "created_at": now,
+    }
+
+
+def list_user_machines(user_id: str) -> list[dict]:
+    """List all machines for a user. Used by the Web UI machine management view."""
+    docs = (
+        get_db()
+        .collection(USERS_COLLECTION)
+        .document(user_id)
+        .collection(MACHINES_SUBCOLLECTION)
+        .stream()
+    )
+    return [doc.to_dict() for doc in docs]
+
+
 def upsert_session_log(project_id: str, session_id: str, data: dict) -> None:
     """Upsert a session log entry by session_id.
 

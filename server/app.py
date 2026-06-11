@@ -821,6 +821,199 @@ def list_projects(include_archived: bool = False, user: dict = Depends(require_a
 
 
 # ---------------------------------------------------------------------------
+# Cloud-first identity (ms-62 / e-1509)
+#
+# Three endpoints under /api/me/ that move identity (project membership,
+# machine_id, session_id) from client-side state to server-side authority:
+#
+#   GET  /api/me/projects   — list the projects the calling user is a member
+#                             of, with role. Identical filter to GET /api/
+#                             projects but emits {id, name, role} so callers
+#                             that want a machine-readable membership shape
+#                             don't have to scrape the broader project listing.
+#
+#   POST /api/me/machine    — get-or-mint a machine_id for the calling user +
+#                             a client-supplied fingerprint (typically the OS
+#                             hostname). First call returns a fresh machine_id;
+#                             subsequent calls with the same fingerprint
+#                             return the same id.
+#
+#   POST /api/me/heartbeat  — get-or-mint a session_id for the identity tuple
+#                             (project_id, machine_id, parent_pid). First call
+#                             for a tuple mints a fresh sid; subsequent calls
+#                             with the same tuple return the same sid and bump
+#                             last_heartbeat_at. This is the cloud-first
+#                             alternative to the client-side mint path in
+#                             lib/session.py — see ms-62 SPEC for the
+#                             judgment trail.
+#
+# These endpoints exist alongside (not replacing) the existing
+# PUT /api/projects/{p}/sessions/{sid} path, so v0.31.0 clients keep working
+# during the compat window. v0.33.0 will hard-cut the legacy path; see
+# ms-62 task e-1513 for the migration plan.
+# ---------------------------------------------------------------------------
+
+class MeMachineUpsert(BaseModel):
+    """Body for POST /api/me/machine (e-1509).
+
+    fingerprint is the client-supplied identifier that buckets "is this the
+    same machine I saw before?". Typically the OS hostname. The server uses
+    it as the lookup key and returns a fresh opaque machine_id on first
+    sight; subsequent calls with the same fingerprint return the same
+    machine_id.
+    """
+    fingerprint: str
+    hostname: Optional[str] = None
+    agent: Optional[str] = None
+
+
+class MeHeartbeat(BaseModel):
+    """Body for POST /api/me/heartbeat (e-1509).
+
+    Identity tuple = (project_id, machine_id, parent_pid). Carries cwd and
+    other heartbeat metadata as observational payload — server stores them
+    on the session record but does not use them for identity lookup.
+    """
+    project_id: str
+    machine_id: str
+    parent_pid: int
+    cwd: Optional[str] = None
+    branch: Optional[str] = None
+    focus_milestone: Optional[str] = None
+    agent: Optional[dict] = None
+
+
+@app.get("/api/me/projects")
+def me_list_projects(user: dict = Depends(require_auth)):
+    """List the calling user's project memberships with role (ms-62 / e-1509).
+
+    Mirrors the filter logic in list_projects but emits a per-project role so
+    callers (= /beacon-dm-send picker, dm_discover) get membership without
+    scraping the broader project listing.
+    """
+    uid = user.get("sub")
+    if not uid:
+        raise HTTPException(status_code=401, detail="user has no sub claim")
+    items = db.list_projects(user_id=uid, include_archived=False)
+    result = []
+    for item in items:
+        pid = item.get("project_id", "")
+        if not pid:
+            continue
+        # Reach into the project doc once to discover the role. list_projects
+        # does the membership filter but doesn't return role; this second
+        # read is cheap because Firestore single-doc reads are fast and the
+        # user typically has <50 projects.
+        project = db.get_project(pid) or {}
+        if project.get("owner") == uid:
+            role = "owner"
+        else:
+            members = project.get("members", []) or []
+            role = ""
+            for m in members:
+                if m.get("user_id") == uid:
+                    role = m.get("role", "member") or "member"
+                    break
+            if not role:
+                # Migration-period projects without owner are visible to all;
+                # treat that as "member" so the picker doesn't have to handle
+                # an empty role.
+                role = "member"
+        result.append({
+            "id": pid,
+            "name": item.get("name", ""),
+            "role": role,
+        })
+    return result
+
+
+@app.post("/api/me/machine")
+def me_upsert_machine(
+    body: MeMachineUpsert, user: dict = Depends(require_auth)
+):
+    """Get or mint a machine_id for (user, fingerprint) (ms-62 / e-1509).
+
+    Returns ``{machine_id, minted, fingerprint}``. ``minted`` is True iff
+    this call created the document (= the client should cache the returned
+    machine_id in ~/.beacon/machine.json).
+    """
+    uid = user.get("sub")
+    if not uid:
+        raise HTTPException(status_code=401, detail="user has no sub claim")
+    if not body.fingerprint:
+        raise HTTPException(
+            status_code=400, detail="fingerprint is required"
+        )
+    machine_id, minted = db.get_or_mint_machine(
+        uid, body.fingerprint,
+        hostname=body.hostname or body.fingerprint,
+        agent=body.agent or "",
+    )
+    return {
+        "machine_id": machine_id,
+        "minted": minted,
+        "fingerprint": body.fingerprint,
+    }
+
+
+@app.post("/api/me/heartbeat")
+def me_heartbeat(body: MeHeartbeat, user: dict = Depends(require_auth)):
+    """Get or mint a session_id for the identity tuple (ms-62 / e-1509).
+
+    Tuple = (project_id, machine_id, parent_pid). Returns
+    ``{session_id, minted, last_heartbeat_at, created_at}``.
+
+    The caller must be a member of project_id, otherwise 403 — this prevents
+    a user from materialising session records in projects they don't
+    belong to (= same membership boundary as the rest of /api/projects).
+    """
+    uid = user.get("sub")
+    if not uid:
+        raise HTTPException(status_code=401, detail="user has no sub claim")
+    if not body.project_id or not body.machine_id:
+        raise HTTPException(
+            status_code=400,
+            detail="project_id and machine_id are required",
+        )
+    if not isinstance(body.parent_pid, int) or body.parent_pid <= 0:
+        raise HTTPException(
+            status_code=400, detail="parent_pid must be a positive integer",
+        )
+    # Reuse the existing project-load + membership check from
+    # /api/projects/{p}/* so we don't drift on the membership rule.
+    project = db.get_project(body.project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="project not found")
+    # _require_project_role would also work here but it raises only on
+    # explicit list_projects empty; the membership rule we want is
+    # "owner OR in members list OR project has no owner (migration)".
+    owner = project.get("owner")
+    members = [m.get("user_id") for m in project.get("members", []) or []]
+    if owner and owner != uid and uid not in members:
+        raise HTTPException(
+            status_code=403,
+            detail="not a member of this project",
+        )
+
+    metadata = {}
+    if body.branch:
+        metadata["git"] = {"branch": body.branch}
+    if body.focus_milestone:
+        metadata["focus"] = {"milestone": {"id": body.focus_milestone}}
+    if body.agent:
+        metadata["agent"] = body.agent
+    result = db.get_or_mint_session_by_tuple(
+        body.project_id,
+        body.machine_id,
+        body.parent_pid,
+        user_id=uid,
+        cwd=body.cwd or "",
+        metadata=metadata,
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
 # High-risk endpoint envelope enforcement (e-1344 / ms-60)
 #
 # "銃はガラスの向こう" — destructive endpoints get a SECOND wall on the server
