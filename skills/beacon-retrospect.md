@@ -48,7 +48,7 @@ Beacon に書き込む全ての文章 (task / マイルストーン / Operation 
 
 Bash ツールで実行（cwd 引数で対象プロジェクトを指定）:
 ```bash
-test -f .beacon/project.json && echo "OK" || echo "NO_BEACON"
+beacon-find-root >/dev/null && echo "OK" || echo "NO_BEACON"
 ```
 - `NO_BEACON` の場合、このSkillは何もせず終了する。
 

@@ -142,4 +142,16 @@ if echo "$STAGED" | grep -q "^INSTALL\.md$"; then
   fi
 fi
 
+# ==============================================================================
+# Check 8: Branch / workspace divergence warning (added 2026-06-11, ms-65 e-1481)
+# ==============================================================================
+# Warn (do NOT block) when this session is in the main project root on a
+# non-default branch while other live bridges share the cwd — the unsafe
+# combination behind the 2026-06-10 same-cwd branch-share incident. The
+# structural fix (e-1477 cwd-aware milestone start) reduces the chance of
+# entering this state accidentally; this hook catches the residual case.
+if [ -f scripts/check-branch-focus-divergence.py ]; then
+  python3 scripts/check-branch-focus-divergence.py 2>&1 | sed 's/^/[pre-commit] /' || true
+fi
+
 exit 0

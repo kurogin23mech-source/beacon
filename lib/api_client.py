@@ -73,6 +73,64 @@ class ApiClient:
     def list_projects(self) -> list:
         return self.get("/api/projects")
 
+    # Cloud-first identity (ms-62 / e-1509)
+
+    def me_list_projects(self) -> list:
+        """List the user's project memberships with role (server-issued).
+
+        Returns ``[{"id": ..., "name": ..., "role": ...}, ...]``. Raises
+        ``RuntimeError`` on 404 (= old server without ms-62 endpoint, the
+        caller should fall back to legacy discovery).
+        """
+        return self.get("/api/me/projects")
+
+    def me_upsert_machine(
+        self, fingerprint: str, *, hostname: str = "", agent: str = ""
+    ) -> dict:
+        """Get-or-mint machine_id for (user, fingerprint).
+
+        Returns ``{"machine_id": ..., "minted": bool, "fingerprint": ...}``.
+        Caller caches machine_id in ``~/.beacon/machine.json``.
+        """
+        body = {"fingerprint": fingerprint}
+        if hostname:
+            body["hostname"] = hostname
+        if agent:
+            body["agent"] = agent
+        return self.post("/api/me/machine", body)
+
+    def me_heartbeat(
+        self,
+        project_id: str,
+        machine_id: str,
+        parent_pid: int,
+        *,
+        cwd: str = "",
+        branch: str = "",
+        focus_milestone: str = "",
+        agent: dict | None = None,
+    ) -> dict:
+        """Get-or-mint session_id for the identity tuple.
+
+        Returns ``{"session_id": ..., "minted": bool, "last_heartbeat_at":
+        ..., "created_at": ...}``. Tuple = (project_id, machine_id,
+        parent_pid).
+        """
+        body: dict = {
+            "project_id": project_id,
+            "machine_id": machine_id,
+            "parent_pid": parent_pid,
+        }
+        if cwd:
+            body["cwd"] = cwd
+        if branch:
+            body["branch"] = branch
+        if focus_milestone:
+            body["focus_milestone"] = focus_milestone
+        if agent:
+            body["agent"] = agent
+        return self.post("/api/me/heartbeat", body)
+
     def get_project(self, project_id: str) -> dict:
         return self.get(f"/api/projects/{project_id}")
 

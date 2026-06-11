@@ -73,6 +73,29 @@ if not defined OPT_OUT_REASON (
 )
 
 rem -------------------------------------------------------------------------
+rem Step 2.5: Stamp BEACON_PARENT_PID (ms-62 / e-1510).
+rem -------------------------------------------------------------------------
+rem
+rem Mirrors the bash wrapper: fix the terminal pid into env so every
+rem subprocess (claude, bus.mjs, beacon CLI inside claude) sees the same
+rem value. Server-side identity tuple = (project_id, machine_id,
+rem BEACON_PARENT_PID).
+rem
+rem Windows cmd.exe has no native $PPID, so we ask python3 (= already a
+rem dependency for the opt-out probe above) for getppid(). If python3
+rem isn't on PATH or fails, skip stamping; bus.mjs will fall back to the
+rem legacy `beacon session id` mint path.
+
+if not defined BEACON_PARENT_PID (
+    where python3 >nul 2>nul
+    if not errorlevel 1 (
+        for /f "delims=" %%i in ('python3 -c "import os; print(os.getppid())" 2^>nul') do (
+            set "BEACON_PARENT_PID=%%i"
+        )
+    )
+)
+
+rem -------------------------------------------------------------------------
 rem Step 3: Dispatch.
 rem -------------------------------------------------------------------------
 

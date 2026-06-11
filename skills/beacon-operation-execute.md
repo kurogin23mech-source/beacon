@@ -39,7 +39,7 @@ inbox hook (bin/beacon-bus-inbox-hook.py) は opt-in 済の operation-trigger ev
 ## 前提条件チェック
 
 ```bash
-cd "$PROJECT_DIR" && test -f .beacon/project.json && echo "OK" || echo "NO_BEACON"
+cd "$PROJECT_DIR" 2>/dev/null; beacon-find-root >/dev/null && echo "OK" || echo "NO_BEACON"
 ```
 
 `NO_BEACON` なら何もせず終了。

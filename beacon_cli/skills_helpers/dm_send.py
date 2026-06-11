@@ -158,7 +158,17 @@ def build_candidates(
             "healthy": bool(healthy),
             "age_seconds": age,
             "age_str": _format_age_seconds(age),
-            "project_id": actor.get("project_id", ""),
+            # project_id: prefer the dm_discover server-first annotation
+            # (set directly on the session dict by ms-62 / e-1502) over the
+            # legacy actor.project_id field. Falls through to the actor
+            # value when only the local discovery path was taken.
+            "project_id": s.get("project_id") or actor.get("project_id", ""),
+            # ms-62 / e-1504: project_name + project_role come from
+            # GET /api/me/projects via dm_discover's invocation-scoped
+            # memo. The picker renders them inline so the user can tell
+            # cross-project candidates apart at a glance.
+            "project_name": s.get("project_name", ""),
+            "project_role": s.get("project_role", ""),
             # Layer 0 — Identity
             "agent_kind": agent_meta.get("kind", ""),
             "agent_version": agent_meta.get("version", ""),
@@ -232,6 +242,20 @@ def render_candidate_line(row: dict) -> str:
         parts.append(f"intent=\"{truncated}\"")
     if row.get("attention_required"):
         parts.append("⚠ attention")
+    # ms-62 / e-1504: project annotation (= cross-project picker
+    # disambiguation). Rendered as "project=<name>" before the email so
+    # the reader sees identity first, then human label. Falls through to
+    # bare project_id when the name isn't available (e.g. local-only
+    # discovery, or the project endpoint returned empty name).
+    proj_name = row.get("project_name", "")
+    proj_id = row.get("project_id", "")
+    if proj_name:
+        proj_label = proj_name
+        if row.get("project_role"):
+            proj_label += f"/{row['project_role']}"
+        parts.append(f"project={proj_label}")
+    elif proj_id:
+        parts.append(f"project={proj_id}")
     if row.get("email"):
         tail = row["email"]
         if row.get("member_role"):

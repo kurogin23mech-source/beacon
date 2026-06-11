@@ -27,7 +27,7 @@ triggers:
 
 Bash ツールで以下を実行:
 ```bash
-test -f .beacon/project.json && test -f .beacon/cloud.json && echo "OK" || echo "NO_BEACON_OR_CLOUD"
+__BEACON_ROOT=$(beacon-find-root) && [ -f "$__BEACON_ROOT/.beacon/cloud.json" ] && echo "OK" || echo "NO_BEACON_OR_CLOUD"
 ```
 - `NO_BEACON_OR_CLOUD` の場合、「beacon project が cloud mode で初期化されていません」と伝えて終了。
 

@@ -47,7 +47,7 @@ Beacon に書き込む全ての文章 (task / マイルストーン / Operation 
 
 Bash ツールで以下を実行:
 ```bash
-test -f .beacon/project.json && echo "OK" || echo "NO_BEACON"
+beacon-find-root >/dev/null && echo "OK" || echo "NO_BEACON"
 ```
 - `NO_BEACON` の場合、このSkillは何もせず終了する。
 - `gh auth status` が失敗する場合、ユーザーに「gh CLI のログインが必要です」と案内して終了。

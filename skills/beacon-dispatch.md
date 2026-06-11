@@ -1,24 +1,39 @@
 ---
 name: beacon-dispatch
-description: 依存グラフから実行可能なマイルストーンを特定し、サブエージェントを並列起動する。マルチエージェント協奏のオーケストレーター。
-version: 0.3.0
+description: 依存グラフから実行可能なマイルストーンまたはタスク群を特定し、サブエージェントを並列起動する。マルチエージェント協奏のオーケストレーター。
+version: 0.4.0
 triggers:
   - /beacon-dispatch
   - サブエージェントを起動
   - 並列で実行
   - dispatch
   - 次に実行可能なMSは
+  - タスクを並列実行
+  - task-level dispatch
 ---
 
 # Beacon Dispatch
 
-> 依存グラフを解析し、実行可能なマイルストーンをサブエージェントに並列委譲する。
+> 依存グラフを解析し、実行可能なマイルストーンまたはタスク群をサブエージェントに並列委譲する。
+
+## Step 0.0: モード判定 (MS-level / Task-level、ms-65 e-1480)
+
+ユーザーの起動文字列を読み、以下のどちらのモードで動くかを決める。
+
+| 起動形式 | モード | 後続フロー |
+|---|---|---|
+| `/beacon-dispatch` (引数なし) | **MS-level** (default) | Step 0.5 permission preflight → Step 1-7 の MS-level dispatch |
+| `/beacon-dispatch --tasks e-XXX e-YYY ...` | **Task-level** (e-1480) | Step 0.5 permission preflight → 本文書末尾の「Task Mode」セクション |
+
+Task-level は **同じ MS 配下の複数 task** を nested worktree で並列起動するためのモード。MS の中で互いに干渉しない task 群があるときに使う (例: ファイル領域が違う 3 task を 3 サブエージェントに振る)。**異なる MS の task を混ぜたい場合は MS-level dispatch を使うこと**。
+
+判定結果を `$DISPATCH_MODE` として保持し、以降の分岐に使う。
 
 ## 前提条件チェック
 
 Bash ツールで以下を実行:
 ```bash
-test -f .beacon/project.json && echo "OK" || echo "NO_BEACON"
+beacon-find-root >/dev/null && echo "OK" || echo "NO_BEACON"
 ```
 - `NO_BEACON` の場合、このSkillは何もせず終了する。
 
@@ -543,3 +558,143 @@ beacon milestone workspace-cleanup <ms-id>
 - **project.json への直接書き込み禁止**: beacon CLI を通じてのみ状態を変更する。
 - **サブエージェント session-start を必ず prompt に強制**: prompt の冒頭に「最初の必須ステップ: `/beacon-session-start <ms-id>`」を明示する。これがないと CORE doc / SPEC のコンテキストが復元されず、実装方針がブレる。
 - **CORE doc / project-vision の参照を明示**: Step 3c/3d で抽出した CORE / 関連 SPEC のリストを prompt に必ず含める。サブエージェントは新セッション扱いなので、自動で読まれることに依存しない。
+
+---
+
+## Task Mode: タスクレベル並列 dispatch (ms-65 e-1480、ms-17 e-1221 を吸収)
+
+`/beacon-dispatch --tasks <task-id>+` で起動した時の専用フロー。**親 MS の worktree の中で nested worktree (= 入れ子) を切り、1 task = 1 サブエージェント** で割り当てる。同 MS の中で互いに干渉しない task 群を一気に消化したい時に使う。
+
+異なる MS の task を混ぜたい場合は **MS-level dispatch を使う** こと (= Task Mode は単一 MS 配下のみ)。
+
+### T1: タスク群の親 MS 検証
+
+引数で渡された各 task ID について Bash ツールで `beacon task show <task-id> --json` を **並列に** 実行し、`milestone_id` (= 親 MS) を確認する。
+
+- 全 task が同じ親 MS → 続行
+- 異なる MS の task が混ざる → エラーで停止し、ユーザーに以下を提示:
+  ```
+  Task Mode: 渡された task は複数の MS にまたがっています。Task Mode は同一 MS 配下のみ対応。
+    ms-A: e-X, e-Y
+    ms-B: e-Z
+  MS-level dispatch (= /beacon-dispatch 引数なし) を使うか、 task 群を MS ごとに分けて再実行してください。
+  ```
+
+親 MS を `$PARENT_MS_ID` として保持。
+
+### T2: 親 MS の worktree 確認 (なければ準備)
+
+Bash ツールで:
+```bash
+beacon milestone show $PARENT_MS_ID --json
+```
+`workspace_path` または `.worktrees/<...>` の実在を確認。
+
+- 親 worktree なし → `beacon milestone start $PARENT_MS_ID` で main project root から起動するよう案内 (= MS の workspace 確保はこの Skill ではなく milestone start の責務、ms-65 e-1477)
+- 親 worktree あり → そのパスを `$MS_WORKTREE` として保持し続行
+
+### T3: 並列可能性の AI 判定
+
+各 task について `beacon task show <task-id> --json` の結果から `description` / `motivation` / `acceptance_criteria` を取り出し、以下の観点で「並列可能か」を AI が判定する:
+
+| 観点 | 直列推奨のシグナル |
+|---|---|
+| ファイル重複の予測 | AC に同じファイルパス / 同じ関数名が複数 task で挙がっている |
+| 設計依存 | task A の AC が task B の output (= 新規ファイル / 関数 / API) を前提にしている |
+| 同 entry-point 改修 | 同じ CLI コマンド / 同じ API endpoint / 同じ Skill の同セクションを触る |
+| 直近 commit の予測衝突 | `git log --stat -10 -- <候補ファイル>` で同領域に変更が走った task が複数 |
+
+判定根拠を bullet で書き出し、「並列 N waves」「直列」「mixed (= 一部並列、一部直列)」のいずれかを推奨として人間に提示。
+
+### T4: 人間承認
+
+```
+タスクレベル dispatch 計画:
+  親 MS: $PARENT_MS_ID "<title>"
+  親 worktree: $MS_WORKTREE
+  
+  判定: [並列可能 / 直列必須 / mixed]
+  根拠:
+    - <task-1 と task-2 はファイル重複なし → 並列可能>
+    - <task-3 は task-1 の lib/foo.py 新設を前提 → task-1 後>
+  
+  実行計画:
+    Wave 1 (並列): <task-1>, <task-2>
+    Wave 2 (直列): <task-3>
+  
+  この計画で進めますか？ [yes / 修正 (= 計画を口頭で指示) / cancel]
+```
+
+`yes` で続行。`修正` ならユーザーの口頭指示で計画を上書き再提示 (= T4 をループ)。`cancel` で中断。
+
+### T5: nested worktree 作成
+
+各 task について Bash ツールで:
+```bash
+cd $MS_WORKTREE && git worktree add .worktrees/<task-id> -b <task-id>/work
+```
+
+(git は worktree の入れ子を許容する。`<task-id>/work` ブランチは task 専用の作業ブランチ。)
+
+エラー時 (= 既存) は drop-in:
+```bash
+cd $MS_WORKTREE && git worktree add .worktrees/<task-id> <task-id>/work   # -b なしで既存ブランチ採用
+```
+
+`$TASK_WORKTREE_<task-id>` として絶対パスを記録。
+
+### T6: サブエージェント prompt (各 task に 1 通)
+
+各 task について Agent tool で起動する。Wave 1 (並列) は **同時並列**、Wave 2 以降は **前 Wave 完了後** に起動。
+
+prompt テンプレート (= 重要な必須セクション):
+```
+## 担当タスク
+<task-id>: <task.description>
+
+motivation: <task.motivation>
+acceptance_criteria: <task.acceptance_criteria>
+
+## 作業ディレクトリ (重要: cwd を必ず明示)
+$TASK_WORKTREE_<task-id>
+
+このディレクトリは親 MS <$PARENT_MS_ID> の worktree 内に nested された、
+本タスク専用の worktree (branch: <task-id>/work) です。
+- ファイル編集は必ずこの cwd 配下で行う
+- commit はこの worktree の中で行う (親 MS の worktree や main repo の HEAD を触らない)
+
+## 親 MS の文脈 (参照のみ、変更しない)
+<親 MS の SPEC 要約 — beacon doc show <ms-spec-doc-id> の本文を入れる>
+
+## 必須セッション開始
+最初に `/beacon-session-start <$PARENT_MS_ID>` を実行して CORE doc / SPEC コンテキストを復元する。
+
+## 完了報告
+最終 commit hash と、AC のうち達成 / 未達 / 未検証側面 を 200 words 以内で報告。
+**push と PR 作成は親 dispatch session が一括で処理するため、サブエージェントは行わない。**
+```
+
+### T7: 結果回収 + 親 MS worktree への merge
+
+全 task サブエージェントが完了したら:
+
+1. 各 nested worktree の最新 commit hash を Bash で回収
+2. 親 MS worktree に戻り (`cd $MS_WORKTREE`)、Wave 順に各 task ブランチを merge:
+   ```bash
+   git merge --no-ff <task-id>/work -m "merge task <task-id> into <ms-branch>"
+   ```
+3. conflict 発生時は Step 7c (= MS-level dispatch と同じ conflict 解消フロー) を流用
+4. merge 完了後、nested worktree を片付け:
+   ```bash
+   git worktree remove .worktrees/<task-id>
+   ```
+   (task ブランチ自体は monorepo の commit 履歴として残す = `git branch -D` はしない)
+5. 結果サマリーをユーザーに報告 (= Step 6c と同じフォーマット、task 単位に分解)
+
+### T8: Task Mode の制約
+
+- task ID 群は全て同じ MS 配下でないとエラー (T1 で gating)
+- 親 MS の worktree が無い場合は本 Skill は worktree を切らず、`beacon milestone start` への誘導で停止 (= worktree 確保は MS 活性化の責務 / e-1477)
+- nested worktree 削除前に親 MS branch への merge を必ず通す (= 子の commit が孤立しないように)
+- 親 MS worktree 自体は Task Mode 完了後も残る (= 親 worktree の状態は dispatch 後も継続作業可能)
+- 並列 Wave のサブエージェント数は通常 2〜3 まで (= harness の permission prompt 大量化を避ける、memory feedback「Parallel Agent dispatch を 8+ で投げない」に従う)

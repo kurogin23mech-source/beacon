@@ -90,10 +90,23 @@ class _R:
 
 
 def _mock_git(monkeypatch, *, in_repo: bool = True, current: str = "main",
-              exists_branches=()):
+              exists_branches=(), in_worktree: bool = True,
+              worktree_add_succeeds: bool = True):
     """Install a fake subprocess.run that emulates the git surface used by
-    ``_ensure_on_branch``. ``exists_branches`` lists local branches that
-    should be reported as already existing.
+    ``_ensure_on_branch`` AND the cwd-detection in ``_is_in_main_project_root``.
+
+    Parameters:
+        in_repo: ``rev-parse --is-inside-work-tree`` reports True/False.
+        current: what ``git branch --show-current`` returns.
+        exists_branches: which refs are reported as already existing.
+        in_worktree: if True, ``--git-dir`` and ``--git-common-dir`` return
+            **different** paths (= we are inside a worktree, in-place
+            checkout is safe). If False, they return the **same** path
+            (= main project root, cwd-aware path engages the worktree
+            helper).
+        worktree_add_succeeds: when ``in_worktree=False`` the worktree
+            helper will invoke ``git worktree add``. Set False to simulate
+            git rejecting the add (used by negative tests).
 
     The fake records each call into ``calls`` so tests can assert on it.
     """
@@ -103,6 +116,13 @@ def _mock_git(monkeypatch, *, in_repo: bool = True, current: str = "main",
         calls.append(list(args))
         if args[:3] == ["git", "rev-parse", "--is-inside-work-tree"]:
             return _R(stdout="true\n" if in_repo else "", returncode=0 if in_repo else 128)
+        if args[:3] == ["git", "rev-parse", "--git-dir"]:
+            # In a worktree, --git-dir points to a per-worktree location;
+            # in the main repo it matches --git-common-dir.
+            gd = "/repo/.git/worktrees/x" if in_worktree else "/repo/.git"
+            return _R(stdout=gd + "\n", returncode=0)
+        if args[:3] == ["git", "rev-parse", "--git-common-dir"]:
+            return _R(stdout="/repo/.git\n", returncode=0)
         if args[:3] == ["git", "branch", "--show-current"]:
             return _R(stdout=current + "\n")
         if args[:3] == ["git", "show-ref", "--verify"]:
@@ -111,9 +131,16 @@ def _mock_git(monkeypatch, *, in_repo: bool = True, current: str = "main",
             return _R(returncode=0 if wanted_branch in exists_branches else 1)
         if args[:2] == ["git", "checkout"]:
             return _R(returncode=0)
+        if args[:3] == ["git", "worktree", "add"]:
+            return _R(returncode=0 if worktree_add_succeeds else 128,
+                      stderr="" if worktree_add_succeeds else "simulated worktree add failure")
         return _R(returncode=1)
 
     monkeypatch.setattr(commands.subprocess, "run", fake_run)
+    # The worktree helper has its own ``subprocess`` import; mirror the
+    # patch there so create_workspace shells out through the same fake.
+    import worktree as _worktree
+    monkeypatch.setattr(_worktree.subprocess, "run", fake_run)
     return calls
 
 
@@ -241,3 +268,121 @@ def test_start_duplicate_actor_is_idempotent(project, monkeypatch):
 
     ms = _ms(project)
     assert ms["assignee"] == "test-claude"
+
+
+# ---------------------------------------------------------------------------
+# ms-65 e-1477: cwd-aware behaviour — main project root creates a worktree
+# instead of switching the main cwd's HEAD. This is the root fix for the
+# 2026-06-10 incident where two sessions in the same cwd silently shared a
+# git HEAD.
+# ---------------------------------------------------------------------------
+
+def test_start_from_main_root_creates_worktree(project, monkeypatch, capsys):
+    """From main repo (not in a worktree), MS start invokes git worktree add."""
+    calls = _mock_git(monkeypatch, in_repo=True, in_worktree=False)
+    monkeypatch.setenv("BEACON_MS_ID", "ms-51")
+
+    commands.cmd_milestone_start()
+
+    # The cwd-aware path must call ``git worktree add`` ...
+    wt_calls = [c for c in calls if c[:3] == ["git", "worktree", "add"]]
+    assert wt_calls, f"expected 'git worktree add' call, got: {calls}"
+    # ... at the canonical .worktrees/<branch>/ path.
+    target = wt_calls[0][3]
+    assert ".worktrees/ms-51-" in target.replace(os.sep, "/")
+    # And must NOT switch the main cwd's HEAD via plain checkout.
+    checkout_calls = [c for c in calls if c[:2] == ["git", "checkout"]]
+    assert not checkout_calls, (
+        "main-root MS start must not run 'git checkout' in the current cwd "
+        "(= the bug ms-65 e-1477 was created to fix); calls were: "
+        + repr(calls)
+    )
+
+    out = capsys.readouterr().out
+    assert "Activated" in out
+    # User-facing guidance: cd into the new worktree before starting bclaude.
+    assert ".worktrees/ms-51-" in out
+    assert "bclaude" in out
+
+
+def test_start_from_main_root_idempotent_when_worktree_exists(project, monkeypatch, capsys):
+    """If .worktrees/<branch>/ already exists, do not crash; do not re-add."""
+    import branch as _branch
+    branch_name = _branch.ms_branch_name("ms-51", "MS への挙手 → 自動 branch + join")
+    # Pre-create the worktree directory on disk so create_workspace returns
+    # the idempotent ``created=False`` path.
+    target_dir = project / ".worktrees" / branch_name
+    target_dir.mkdir(parents=True)
+
+    calls = _mock_git(monkeypatch, in_repo=True, in_worktree=False)
+    monkeypatch.setenv("BEACON_MS_ID", "ms-51")
+
+    commands.cmd_milestone_start()
+
+    # No worktree add call should fire when the path already exists.
+    wt_calls = [c for c in calls if c[:3] == ["git", "worktree", "add"]]
+    assert not wt_calls
+    out = capsys.readouterr().out
+    assert "Activated" in out
+    # Status still flipped + assignee still added.
+    ms = _ms(project)
+    assert ms["status"] == "in_progress"
+    assert ms["assignee"] == "test-claude"
+
+
+def test_start_from_main_root_falls_back_gracefully_on_worktree_failure(
+    project, monkeypatch, capsys
+):
+    """When git worktree add fails (both -b and reuse attempts), warn and continue."""
+    calls = _mock_git(
+        monkeypatch, in_repo=True, in_worktree=False,
+        worktree_add_succeeds=False,
+    )
+    monkeypatch.setenv("BEACON_MS_ID", "ms-51")
+
+    # Should NOT raise; the failure surfaces as a warning + the MS status
+    # still flips. We must not block activation on a worktree problem.
+    commands.cmd_milestone_start()
+
+    ms = _ms(project)
+    assert ms["status"] == "in_progress"
+    captured = capsys.readouterr()
+    assert "could not create worktree" in captured.err or \
+           "could not create worktree" in captured.out
+    # No "next: cd ..." guidance when the worktree failed to materialise.
+    assert "next: cd" not in captured.out
+
+
+def test_is_in_main_project_root_helper_detects_worktree(monkeypatch):
+    """Direct test of the detection helper — git-dir != git-common-dir → worktree."""
+    def fake_run(args, **kwargs):
+        if args[:3] == ["git", "rev-parse", "--git-dir"]:
+            return _R(stdout="/repo/.git/worktrees/feat-x\n", returncode=0)
+        if args[:3] == ["git", "rev-parse", "--git-common-dir"]:
+            return _R(stdout="/repo/.git\n", returncode=0)
+        return _R(returncode=1)
+    monkeypatch.setattr(commands.subprocess, "run", fake_run)
+
+    assert commands._is_in_main_project_root() is False
+
+
+def test_is_in_main_project_root_helper_detects_main(monkeypatch):
+    """Direct test: matching paths → main project root."""
+    def fake_run(args, **kwargs):
+        if args[:3] == ["git", "rev-parse", "--git-dir"]:
+            return _R(stdout="/repo/.git\n", returncode=0)
+        if args[:3] == ["git", "rev-parse", "--git-common-dir"]:
+            return _R(stdout="/repo/.git\n", returncode=0)
+        return _R(returncode=1)
+    monkeypatch.setattr(commands.subprocess, "run", fake_run)
+
+    assert commands._is_in_main_project_root() is True
+
+
+def test_is_in_main_project_root_helper_conservative_on_git_missing(monkeypatch):
+    """No git binary → conservative True (caller's worktree helper will error gracefully)."""
+    def fake_run(args, **kwargs):
+        raise FileNotFoundError("no git")
+    monkeypatch.setattr(commands.subprocess, "run", fake_run)
+
+    assert commands._is_in_main_project_root() is True

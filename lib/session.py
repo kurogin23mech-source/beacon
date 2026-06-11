@@ -232,10 +232,162 @@ def write_session(data: dict) -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
+ENV_USE_CLOUD_FIRST = "BEACON_USE_CLOUD_FIRST_SESSION"
+ENV_PARENT_PID = "BEACON_PARENT_PID"
+
+# ~/.beacon/machine.json — per-user cache of the server-issued machine_id
+# (ms-62 / e-1510). Lives outside the project cwd because machine identity
+# is the same across every Beacon project on this device.
+_MACHINE_JSON_REL = ".beacon/machine.json"
+
+
+def _machine_json_path() -> Path:
+    home = os.environ.get("HOME") or os.environ.get("USERPROFILE") or ""
+    return Path(home) / _MACHINE_JSON_REL
+
+
+def _read_machine_cache() -> dict:
+    p = _machine_json_path()
+    if not p.exists():
+        return {}
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except (json.JSONDecodeError, OSError):
+        pass
+    return {}
+
+
+def _write_machine_cache(machine_id: str, fingerprint: str) -> None:
+    p = _machine_json_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "machine_id": machine_id,
+                "fingerprint": fingerprint,
+                "cached_at": _now_iso(),
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        f.write("\n")
+    os.replace(tmp, p)
+
+
+def _resolve_parent_pid() -> int:
+    """Return the terminal pid that anchors this session (ms-62 / e-1510).
+
+    Preferred source: ``BEACON_PARENT_PID`` env set by ``bin/bclaude`` (=
+    the wrapper that started Claude Code). Mac and Windows bootstrap
+    paths both export it so every subprocess inherits the same value.
+
+    Fallback: ``os.getppid()`` (= immediate parent). Less stable for
+    server-side tuple lookup but at least non-zero.
+    """
+    raw = os.environ.get(ENV_PARENT_PID, "").strip()
+    if raw:
+        try:
+            v = int(raw)
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    return os.getppid()
+
+
+def get_or_mint_session_via_server() -> dict:
+    """Server-first session mint (ms-62 / e-1510).
+
+    Flow:
+      1. Read project_id from ``.beacon/cloud.json``.
+      2. Resolve machine_id from ``~/.beacon/machine.json`` cache; on a
+         miss, call POST /api/me/machine to mint one + write the cache.
+      3. Call POST /api/me/heartbeat with the identity tuple
+         (project_id, machine_id, parent_pid). Server returns the sid
+         (= same tuple → same sid for continuity).
+      4. Materialise .beacon/session.json with the returned sid so the
+         legacy single-claim reader and other non-server-aware paths see
+         the same id.
+
+    Raises on any failure (auth missing, server 404 on old build,
+    network error, malformed response). The caller in
+    get_or_mint_session() catches and falls back to the legacy mint
+    chain so missing server support never breaks the CLI.
+    """
+    cloud_path = Path.cwd() / _CLOUD_JSON_RELATIVE
+    if not cloud_path.exists():
+        raise RuntimeError("cloud.json not found (local-mode project?)")
+    with cloud_path.open("r", encoding="utf-8") as f:
+        cloud_cfg = json.load(f)
+    project_id = (cloud_cfg.get("project_id") or "").strip()
+    if not project_id:
+        raise RuntimeError("project_id missing from cloud.json")
+
+    # Lazy import: commands._get_api_client requires auth + cloud config.
+    import commands as _commands  # noqa: WPS433
+    client, _config = _commands._get_api_client()
+
+    # machine_id: read cache or mint.
+    actor = _agent.get_actor()
+    fingerprint = actor.get("machine") or actor.get("agent") or "unknown"
+    cached = _read_machine_cache()
+    machine_id = (cached.get("machine_id") or "").strip()
+    if not machine_id or cached.get("fingerprint") != fingerprint:
+        resp = client.me_upsert_machine(
+            fingerprint,
+            hostname=actor.get("machine") or "",
+            agent=actor.get("agent") or "",
+        )
+        machine_id = (resp.get("machine_id") or "").strip()
+        if not machine_id:
+            raise RuntimeError("server returned no machine_id")
+        _write_machine_cache(machine_id, fingerprint)
+
+    parent_pid = _resolve_parent_pid()
+    if parent_pid <= 0:
+        raise RuntimeError("could not resolve parent_pid")
+
+    heartbeat = client.me_heartbeat(
+        project_id, machine_id, parent_pid,
+        cwd=str(Path.cwd()),
+        agent={"kind": "claude-code", "machine_id": machine_id},
+    )
+    sid = (heartbeat.get("session_id") or "").strip()
+    if not sid:
+        raise RuntimeError("server returned no session_id")
+
+    now = _now_iso()
+    payload = {
+        "session_id": sid,
+        "actor": actor,
+        "created_at": heartbeat.get("created_at") or now,
+        "last_active": now,
+        "harness": _detect_harness(),
+        "source": "server_minted",
+        "machine_id": machine_id,
+        "parent_pid": parent_pid,
+    }
+    write_session(payload)
+    return {**payload, "minted": bool(heartbeat.get("minted"))}
+
+
 def get_or_mint_session() -> dict:
     """Return the current session payload, minting / adopting as needed.
 
-    Priority (e-1460 pid-tree resolution added on top of e-1035 base):
+    Priority (ms-62 e-1510 cloud-first added on top of e-1460 pid-tree
+    resolution and e-1035 base):
+      -1. BEACON_USE_CLOUD_FIRST_SESSION=1 env — opt in to the
+          server-side identity tuple flow (ms-62). On success, the
+          server-returned sid is the truth; on any failure we silently
+          fall through to the legacy chain so a missing endpoint never
+          breaks the CLI. Default OFF during the v0.32.x compat window
+          (see ms-62 task e-1513 for the migration plan).
       0. BEACON_FORCE_MINT=1 env — bus.mjs cold-start sets this when it
          detects another alive bridge in this cwd (= a 2nd+ bclaude is
          starting). Skips reuse entirely and mints fresh.
@@ -258,6 +410,18 @@ def get_or_mint_session() -> dict:
     existing = read_session()
     now = _now_iso()
     actor = _agent.get_actor()
+
+    # -1. Cloud-first (ms-62 / e-1510). Opt-in until v0.33.0 hard cut.
+    if os.environ.get(ENV_USE_CLOUD_FIRST) == "1":
+        try:
+            return get_or_mint_session_via_server()
+        except BaseException:
+            # Any failure silently falls through to the legacy chain so a
+            # missing endpoint / auth glitch / network failure does not
+            # break the CLI. BEACON_DEBUG=1 surfaces the trace.
+            if os.environ.get("BEACON_DEBUG") == "1":
+                import traceback as _tb
+                _tb.print_exc()
 
     # 0. Force-mint (e-1460): bus.mjs cold-start passes this when it
     #    detected another alive bridge in this cwd. Skips all reuse paths.
@@ -333,7 +497,24 @@ def mint_fresh_session() -> dict:
     ``find_my_bridge_claim`` will still resolve the *correct* per-bclaude
     sid via .beacon/bridges/<sid>.json regardless of which write won the
     session.json race.
+
+    DEPRECATED (ms-62 / e-1511): the client-side mint chain is being
+    replaced by the server-side identity tuple lookup
+    (``get_or_mint_session_via_server``). Scheduled for removal at the
+    v0.33.0 hard cut per ms-62 task e-1513 (migration plan doc_id
+    ``2zQ2J3SUsuVqOLoZVSvA``). In v0.32.x this function is still
+    callable; from v0.33.0 it disappears and the server-side path is
+    the only mint route.
     """
+    if os.environ.get("BEACON_WARN_LEGACY_MINT") == "1":
+        import warnings
+        warnings.warn(
+            "session.mint_fresh_session is scheduled for removal at v0.33.0"
+            " hard cut (ms-62 e-1511). Enable BEACON_USE_CLOUD_FIRST_SESSION=1"
+            " to migrate to the server-side identity tuple path.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     now = _now_iso()
     actor = _agent.get_actor()
     payload = {
@@ -547,7 +728,22 @@ def find_my_bridge_claim() -> dict:
     sharing a cwd each have their own ``bridges/<sid>.json`` written by
     their respective bus.mjs at cold-start; pid-tree match picks the
     right one for the calling CLI.
+
+    DEPRECATED (ms-62 / e-1511): the bridges/<sid>.json + pid-tree
+    resolver is being replaced by the server-side identity tuple lookup
+    (``(project_id, machine_id, parent_pid)`` → ``sid``). Scheduled for
+    removal at the v0.33.0 hard cut per ms-62 task e-1513 (migration plan
+    doc_id ``2zQ2J3SUsuVqOLoZVSvA``).
     """
+    if os.environ.get("BEACON_WARN_LEGACY_MINT") == "1":
+        import warnings
+        warnings.warn(
+            "session.find_my_bridge_claim (pid-tree resolver) is scheduled for"
+            " removal at v0.33.0 hard cut (ms-62 e-1511). The server-side"
+            " identity tuple lookup supersedes it.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     my_ancestors = _get_ancestor_pids()
     for claim in read_all_bridge_claims():
         # Bridge process must be alive — a dead bus.mjs cannot legitimately
@@ -616,9 +812,12 @@ def resolve_active_session_id() -> str:
 
 __all__ = [
     "ENV_FORCE_MINT",
+    "ENV_PARENT_PID",
     "ENV_SESSION_ID",
+    "ENV_USE_CLOUD_FIRST",
     "find_my_bridge_claim",
     "get_or_mint_session",
+    "get_or_mint_session_via_server",
     "get_session_id",
     "mint_fresh_session",
     "read_all_bridge_claims",

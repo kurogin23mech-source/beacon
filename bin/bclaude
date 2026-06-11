@@ -105,6 +105,29 @@ fi
 # Step 3: Exec with or without the channel flag based on opt-out result.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Step 2.5: Stamp BEACON_PARENT_PID (ms-62 / e-1510).
+# ---------------------------------------------------------------------------
+#
+# Fix the terminal pid into env so every subprocess (claude, bus.mjs, beacon
+# CLI calls from inside claude, etc.) sees the SAME value. The server uses
+# (project_id, machine_id, BEACON_PARENT_PID) as the identity tuple for
+# session_id mint/lookup — same terminal → same sid (= continuity across
+# bclaude restarts within the same terminal), different terminal → different
+# sid (= each terminal is a distinct session).
+#
+# $PPID = the pid of the shell that ran "bclaude" (= the terminal). It is
+# stable for the lifetime of that terminal; pid recycling on a long-running
+# machine could in theory collide with an old sid, but server-side
+# created_at + last_heartbeat_at gives us enough info to expire stale
+# tuples before any collision matters.
+#
+# Honour an explicit override: if the caller already set BEACON_PARENT_PID
+# (e.g. a CI script that wants a synthetic session identity), keep it.
+if [ -z "${BEACON_PARENT_PID:-}" ]; then
+    export BEACON_PARENT_PID="$PPID"
+fi
+
 if [ -n "$opt_out_reason" ]; then
     # User has actively declined DM. Honor the decision: launch plain
     # `claude` and tell the user why on stderr so the audit trail is
