@@ -3027,6 +3027,37 @@ async def _verify_envelope_secret_configured():
         )
 
 
+def _hydrate_v2_milestones(project_id: str, data: dict) -> dict:
+    """Re-attach milestones from the v2 subcollection before broadcasting.
+
+    v2 schema stores milestones under projects/{id}/milestones/{ms_id}; the
+    parent doc no longer carries milestones[] (lib/operations._replace_cloud_v2).
+    Firestore on_snapshot only fires for the parent doc, so a meta-only update
+    (summary / members / heartbeat ping) would broadcast {milestones: []} and
+    the WebUI would clear the list until the next reload (ms-43 e-1473).
+
+    Fallback: any read failure returns data unchanged. We never want a broadcast
+    to be dropped on hydration error — stale-but-present beats empty.
+    """
+    if data.get("schema_version") != 2:
+        return data
+    try:
+        ms_ref = (
+            db.get_db()
+            .collection(db.COLLECTION)
+            .document(project_id)
+            .collection("milestones")
+            .stream()
+        )
+        milestones = [snap.to_dict() for snap in ms_ref]
+        return {**data, "milestones": milestones}
+    except Exception as exc:
+        _server_logger.warning(
+            "milestone hydration failed for project=%s: %s", project_id, exc
+        )
+        return data
+
+
 def _enrich_project(data: dict) -> dict:
     """Add computed fields (total_tasks, done_tasks, entries_to_json) to project."""
     enriched = {**data}
@@ -3146,8 +3177,9 @@ def _on_snapshot(project_id: str, doc_snapshot, changes, read_time):
     for doc in doc_snapshot:
         data = doc.to_dict()
         if _event_loop and _ws_connections.get(project_id):
+            hydrated = _hydrate_v2_milestones(project_id, data)
             asyncio.run_coroutine_threadsafe(
-                _broadcast(project_id, data), _event_loop
+                _broadcast(project_id, hydrated), _event_loop
             )
 
 
