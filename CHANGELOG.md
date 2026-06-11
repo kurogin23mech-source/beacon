@@ -2,6 +2,20 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.32.0] - 2026-06-11
+
+- Merge pull request #124 from kurogin23mech-source/fix/ms-57-e1460-per-bclaude-session-id
+- fix(ms-57): per-bclaude session_id via bridges/<sid>.json + pid-tree resolver (e-1460 Phase 1)
+- Merge pull request #123 from kurogin23mech-source/feat/ms-60-bus-process-title-e1466
+- feat(ms-60): tag bus.mjs process.title by cwd for cross-project pkill safety (e-1466)
+- feat(ms-54): bus ack --event + Skill auto-ack forcing function (e-1423)
+- fix(ms-54): bridge writes last_active to local session.json (e-1424)
+- Merge branch 'main' of https://github.com/kurogin23mech-source/beacon
+- feat(ms-60): emit AUTONOMOUS imperative on MCP push route (e-1417 prototype)
+- fix(ms-55): doc CLI 2 bugs found in PE cross-project dogfood (e-1413 follow-up)
+- docs(release): update README/CHANGELOG for v0.31.0
+- chore(release): bump formula to 0.31.0
+
 ## [v0.31.0] - 2026-06-10
 
 - docs(ms-54): /beacon-dm-send receipt sleep 短縮 + heredoc 規約展開 (e-1400 + e-1401)
