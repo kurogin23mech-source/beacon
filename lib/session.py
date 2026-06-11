@@ -497,7 +497,24 @@ def mint_fresh_session() -> dict:
     ``find_my_bridge_claim`` will still resolve the *correct* per-bclaude
     sid via .beacon/bridges/<sid>.json regardless of which write won the
     session.json race.
+
+    DEPRECATED (ms-62 / e-1511): the client-side mint chain is being
+    replaced by the server-side identity tuple lookup
+    (``get_or_mint_session_via_server``). Scheduled for removal at the
+    v0.33.0 hard cut per ms-62 task e-1513 (migration plan doc_id
+    ``2zQ2J3SUsuVqOLoZVSvA``). In v0.32.x this function is still
+    callable; from v0.33.0 it disappears and the server-side path is
+    the only mint route.
     """
+    if os.environ.get("BEACON_WARN_LEGACY_MINT") == "1":
+        import warnings
+        warnings.warn(
+            "session.mint_fresh_session is scheduled for removal at v0.33.0"
+            " hard cut (ms-62 e-1511). Enable BEACON_USE_CLOUD_FIRST_SESSION=1"
+            " to migrate to the server-side identity tuple path.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     now = _now_iso()
     actor = _agent.get_actor()
     payload = {
@@ -711,7 +728,22 @@ def find_my_bridge_claim() -> dict:
     sharing a cwd each have their own ``bridges/<sid>.json`` written by
     their respective bus.mjs at cold-start; pid-tree match picks the
     right one for the calling CLI.
+
+    DEPRECATED (ms-62 / e-1511): the bridges/<sid>.json + pid-tree
+    resolver is being replaced by the server-side identity tuple lookup
+    (``(project_id, machine_id, parent_pid)`` → ``sid``). Scheduled for
+    removal at the v0.33.0 hard cut per ms-62 task e-1513 (migration plan
+    doc_id ``2zQ2J3SUsuVqOLoZVSvA``).
     """
+    if os.environ.get("BEACON_WARN_LEGACY_MINT") == "1":
+        import warnings
+        warnings.warn(
+            "session.find_my_bridge_claim (pid-tree resolver) is scheduled for"
+            " removal at v0.33.0 hard cut (ms-62 e-1511). The server-side"
+            " identity tuple lookup supersedes it.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     my_ancestors = _get_ancestor_pids()
     for claim in read_all_bridge_claims():
         # Bridge process must be alive — a dead bus.mjs cannot legitimately
