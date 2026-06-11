@@ -729,23 +729,31 @@ def cmd_milestone_list():
 
 
 def cmd_milestone_start():
-    """Activate an MS, auto-create its branch, and self-add as assignee.
+    """Activate an MS, auto-create its workspace, and self-add as assignee.
 
-    ms-51 / e-932 layers three behaviours on top of the original (set
-    status=in_progress):
+    Layered behaviour (current):
 
-      1. Auto-branch: ``ms-XX-<slug>`` is checked out from current HEAD
-         if it doesn't exist, else switched-to. ``main`` is *not* touched
-         — branching is the whole point.
-      2. Self-assignee: the actor (``lib/agent.get_actor()``) is added to
+      1. Self-assignee: the actor (``lib/agent.get_actor()``) is added to
          the MS's assignee list (no-op if already present).
+      2. Auto-workspace (ms-65 e-1477, cwd-aware):
+           - Main project root → create a worktree at
+             ``.worktrees/<ms-branch>/`` checked out to ``ms-XX-<slug>``.
+             The main cwd's HEAD is NOT touched. This avoids the
+             2026-06-10 incident where two bclaude sessions in the same
+             cwd silently shared a git HEAD (per CORE doc *MS 活性化 =
+             workspace 確保の根本責務*, see ms-65 SPEC).
+           - Inside an existing worktree (e.g. dispatch-spawned context,
+             or the user manually cd'd into one) → keep the legacy
+             in-place ``git checkout`` behaviour. Switching the worktree's
+             own HEAD does not affect other sessions because each worktree
+             has its own HEAD.
       3. Skip when not a git repo: dispatch contexts (tests, scaffolds)
          where there is no .git transparently fall back to "just flip
          status" so existing flows are unaffected.
 
     Suppression knobs:
-      * ``BEACON_NO_BRANCH=1`` skips the git checkout (used by tests and
-        by callers that manage their own branching, e.g. worktree mode).
+      * ``BEACON_NO_BRANCH=1`` skips the workspace / branch step entirely
+        (used by tests and by callers that manage their own branching).
       * ``BEACON_NO_ASSIGNEE=1`` skips the assignee auto-add.
     """
     ms_id = os.environ.get("BEACON_MS_ID", "")
@@ -774,14 +782,32 @@ def cmd_milestone_start():
         except Exception as e:  # pragma: no cover - defensive
             print(f"  warning: could not auto-add assignee: {e}", file=sys.stderr)
 
-    # ---- 2. auto-branch ----
+    # ---- 2. auto-workspace / auto-branch (cwd-aware) ----
     branch_name = ""
     branch_msg = ""
+    workspace_path = ""
     if not no_branch:
         try:
             import branch as _branch
             branch_name = _branch.ms_branch_name(ms_id, ms.get("title", ""))
-            branch_msg = _ensure_on_branch(branch_name)
+            if _is_in_main_project_root():
+                import worktree as _worktree
+                workspace_path = os.path.join(".worktrees", branch_name)
+                try:
+                    wt = _worktree.create_workspace(workspace_path, branch_name)
+                    branch_msg = "worktree created" if wt["created"] else "worktree exists"
+                except _worktree.GitNotInstalledError:
+                    # No git → fall through silently (status flip already done).
+                    branch_name = ""
+                    workspace_path = ""
+                except _worktree.WorktreeCreateError as exc:
+                    print(f"  warning: could not create worktree: {exc}", file=sys.stderr)
+                    branch_name = ""
+                    workspace_path = ""
+            else:
+                # Already inside a worktree: in-place checkout is safe
+                # because each worktree owns its own HEAD.
+                branch_msg = _ensure_on_branch(branch_name)
         except _NotAGitRepoError:
             # Quiet skip: scaffolds / tests / fresh projects without git
             # should still be able to start a milestone.
@@ -795,6 +821,40 @@ def cmd_milestone_start():
         print(f"  assignee: {actor_str}")
     if branch_name and branch_msg:
         print(f"  branch: {branch_name} ({branch_msg})")
+    if workspace_path:
+        print(f"  next: cd {workspace_path} && bclaude")
+        print(f"        (新しいセッションをこの worktree で開いて作業してください — "
+              f"同 cwd で並走すると別マイルストーンの作業を同じ branch に書く事故が起きるため)")
+
+
+def _is_in_main_project_root() -> bool:
+    """Return True if the cwd is the main project root (not inside a worktree).
+
+    Detection: ``git rev-parse --git-dir`` and ``--git-common-dir`` return
+    the same path at the main checkout, but in a linked worktree the
+    ``--git-dir`` points to ``<main>/.git/worktrees/<name>/`` while
+    ``--git-common-dir`` still points to the shared ``<main>/.git``.
+
+    Conservative default: on any failure (git missing, not a repo, parse
+    error) return True. Treating "unknown environment" as "main root"
+    keeps the cwd-aware path engaged so the worktree creation is at least
+    attempted; if git is genuinely missing the worktree helper will raise
+    GitNotInstalledError and the caller falls back gracefully.
+    """
+    try:
+        gd = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            capture_output=True, text=True, timeout=5,
+        )
+        cd = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, OSError):
+        return True
+    if gd.returncode != 0 or cd.returncode != 0:
+        return True
+    return os.path.abspath(gd.stdout.strip()) == os.path.abspath(cd.stdout.strip())
 
 
 class _NotAGitRepoError(RuntimeError):
