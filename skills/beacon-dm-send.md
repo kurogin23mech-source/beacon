@@ -52,7 +52,7 @@ Beacon に書き込む全ての文章 (task / マイルストーン / Operation 
 
 Bash ツールで実行:
 ```bash
-test -f .beacon/project.json && test -f .beacon/cloud.json && echo "OK" || echo "NO_BEACON_OR_CLOUD"
+__BEACON_ROOT=$(beacon-find-root) && [ -f "$__BEACON_ROOT/.beacon/cloud.json" ] && echo "OK" || echo "NO_BEACON_OR_CLOUD"
 ```
 
 - ファイル両方とも存在 (`OK`) → 続行

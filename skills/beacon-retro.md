@@ -50,7 +50,7 @@ trigger 経由起動時は hook の `(project: ...)` パスを `$PROJECT_DIR` �
 
 Bash ツールで以下を実行:
 ```bash
-cd "$PROJECT_DIR" && test -f .beacon/project.json && echo "OK" || echo "NO_BEACON"
+cd "$PROJECT_DIR" 2>/dev/null; beacon-find-root >/dev/null && echo "OK" || echo "NO_BEACON"
 ```
 - `NO_BEACON` の場合、このSkillは何もせず終了する。
 

@@ -46,7 +46,7 @@ Beacon に書き込む全ての文章 (task / マイルストーン / Operation 
 
 Bash ツールで以下を実行:
 ```bash
-test -f .beacon/project.json && echo "OK" || echo "NO_BEACON"
+beacon-find-root >/dev/null && echo "OK" || echo "NO_BEACON"
 ```
 - `NO_BEACON` の場合、`beacon cloud join <project-id>` でまずプロジェクトに合流するよう案内して終了
 

@@ -32,7 +32,7 @@ triggers:
 
 Bash ツールで以下を実行:
 ```bash
-test -f .beacon/project.json && echo "OK" || echo "NO_BEACON"
+beacon-find-root >/dev/null && echo "OK" || echo "NO_BEACON"
 ```
 - `NO_BEACON` の場合、このSkillは何もせず終了する。
 

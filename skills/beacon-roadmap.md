@@ -68,7 +68,7 @@ full モードでは従来通り 5〜7 MS 一括設計。
 
 Bash ツールで:
 ```bash
-test -f .beacon/project.json && echo "OK" || echo "NO_BEACON"
+beacon-find-root >/dev/null && echo "OK" || echo "NO_BEACON"
 beacon doc show project-vision 2>/dev/null
 ```
 

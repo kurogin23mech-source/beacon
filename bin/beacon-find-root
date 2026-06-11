@@ -1,0 +1,26 @@
+#!/bin/sh
+# beacon-find-root: walk up from cwd to find a Beacon project root.
+#
+# Outputs the absolute path of the directory containing .beacon/project.json
+# and exits 0 if found, exits 1 (with no output) if not.
+#
+# Used by Beacon Skills (= Claude Code Skill files) as the prerequisite
+# check, replacing the cwd-only `test -f .beacon/project.json` pattern.
+# That pattern broke when bclaude was started in a worktree (`.worktrees/<ms>/`
+# has no .beacon/ — only the main repo does). Walking up mirrors what the
+# beacon CLI itself does (lib/commands.py / find_beacon_root).
+#
+# Usage:
+#   beacon-find-root                       # prints root, exits 0/1
+#   beacon-find-root && echo OK || echo NO_BEACON
+#   PROJECT_ROOT=$(beacon-find-root) || { echo NO_BEACON; exit 1; }
+
+d=$(pwd)
+while [ "$d" != "/" ] && [ -n "$d" ]; do
+    if [ -f "$d/.beacon/project.json" ]; then
+        echo "$d"
+        exit 0
+    fi
+    d=$(dirname "$d")
+done
+exit 1
