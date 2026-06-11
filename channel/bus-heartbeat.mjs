@@ -23,6 +23,16 @@
 /**
  * Build the heartbeat body the bridge sends on every poll.
  *
+ * The ``shutdown`` field is **always** included, even when false. Without
+ * this, a graceful exit's ``shutdown=true`` write stays stuck on the
+ * Firestore record (= merge=true keeps the prior value), and a *fresh*
+ * bclaude that restarts in the same terminal — reusing the same sid via
+ * cloud-first tuple lookup — shows ``healthy=False`` in the bus directory
+ * because the server-side health filter reads the stale shutdown flag.
+ * Observed during ms-62 Phase 2 dogfood (2026-06-12): same-terminal sid
+ * continuity worked structurally but the picker dropped the recovered
+ * session because of this stale flag.
+ *
  * @param {object} opts
  * @param {string} opts.nowIso     ISO8601 of the current poll iteration.
  * @param {number} opts.pollIntervalMs
@@ -30,13 +40,12 @@
  * @returns {object}
  */
 export function buildHeartbeatBody({ nowIso, pollIntervalMs, shutdown = false }) {
-  const body = {
+  return {
     last_active: nowIso,
     last_poll_at: nowIso,
     poll_interval_ms: pollIntervalMs,
+    shutdown: !!shutdown,
   }
-  if (shutdown) body.shutdown = true
-  return body
 }
 
 /**

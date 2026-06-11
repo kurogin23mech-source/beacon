@@ -89,13 +89,23 @@ def test_heartbeat_body_has_all_three_timestamp_fields():
         "last_active": "2026-06-09T01:00:00.000Z",
         "last_poll_at": "2026-06-09T01:00:00.000Z",
         "poll_interval_ms": 2000,
+        "shutdown": False,
     }
 
 
-def test_heartbeat_body_omits_shutdown_when_false():
-    """``shutdown=false`` MUST omit the key, not set it to false. Otherwise
-    a routine heartbeat would overwrite a previously-set shutdown flag
-    when Firestore merges the partial body."""
+def test_heartbeat_body_sets_shutdown_false_explicitly():
+    """``shutdown=false`` MUST set the field to ``false`` (not omit it).
+
+    The earlier behaviour omitted the field, intending to "preserve" any
+    previously-written shutdown flag. ms-62 Phase 2 dogfood (2026-06-12)
+    showed this was the wrong call: a bclaude that exits gracefully writes
+    ``shutdown=true``, and a fresh bclaude restarted in the same terminal
+    (= cloud-first tuple lookup recovers the same sid) had its heartbeat
+    body omit ``shutdown`` — so Firestore's merge kept ``shutdown=true``
+    and the bus directory ``--healthy`` filter dropped the recovered
+    session even though it was actively heartbeating. The fix is to
+    always include the field so the merge overwrites the stale flag.
+    """
     script = textwrap.dedent(f"""
         import {{ buildHeartbeatBody }} from '{HEARTBEAT_MJS.as_posix()}'
         const body = buildHeartbeatBody({{
@@ -106,7 +116,24 @@ def test_heartbeat_body_omits_shutdown_when_false():
         process.stdout.write(JSON.stringify(body))
     """)
     body = _run_scenario(script)
-    assert "shutdown" not in body, body
+    assert body.get("shutdown") is False, body
+    assert "shutdown" in body, body
+
+
+def test_heartbeat_body_clears_stale_shutdown_on_default_call():
+    """The default ``shutdown`` value (= not passed) must also produce
+    ``shutdown: false`` so cold-start heartbeats clear any stale flag.
+    """
+    script = textwrap.dedent(f"""
+        import {{ buildHeartbeatBody }} from '{HEARTBEAT_MJS.as_posix()}'
+        const body = buildHeartbeatBody({{
+          nowIso: '2026-06-09T01:00:00.000Z',
+          pollIntervalMs: 2000,
+        }})
+        process.stdout.write(JSON.stringify(body))
+    """)
+    body = _run_scenario(script)
+    assert body.get("shutdown") is False, body
 
 
 def test_heartbeat_body_sets_shutdown_when_true():
