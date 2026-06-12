@@ -140,6 +140,24 @@ beacon channel opt-out --global  # disable everywhere, forever
 See [`docs/getting-started-dm.md`](docs/getting-started-dm.md) for the
 full walkthrough.
 
+#### Forking a parallel session
+
+When you want a second bclaude in a separate worktree — e.g. to give a
+"difficult" milestone its own interactive session while you keep working
+on the current one — use the `/beacon-session-fork` Skill, or call its
+CLI helper directly:
+
+```bash
+beacon session fork ms-12        # creates .worktrees/ms-12-fork-<id>
+                                 # + .beacon/cloud.json + channel install
+                                 # + .beacon/fork.json (parent ↔ child link)
+# then in a new terminal:
+cd .worktrees/ms-12-fork-<id> && bclaude
+```
+
+The Skill (`/beacon-session-fork ms-12`) also auto-opens a new
+Terminal.app / iTerm2 window on macOS and starts `bclaude` for you.
+
 ## Cloud Mode
 
 Beacon can sync to the cloud for Web UI access at **https://beacon-ai.dev** and team collaboration. All CLI commands (`beacon log`, `beacon task`, etc.) automatically work through the cloud API.
