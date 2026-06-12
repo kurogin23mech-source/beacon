@@ -8722,6 +8722,109 @@ def _find_all_on_path(name: str) -> list[str]:
     return found
 
 
+def _canonical_subcommand_set():
+    """Word-tuples for every known `beacon <subcmd>` invocation.
+
+    Auto-discovered from ``cmd_*`` functions in this module, plus a small
+    hardcoded list for dispatch entries that map to lambdas
+    (``version`` / ``auth_login`` / ``auth_logout`` / ``auth_status``).
+
+    Adding a new ``cmd_foo`` function automatically makes ``beacon foo``
+    valid for the Skill drift check — no manual list update required.
+    This is the ms-61 / e-1570 single-source-of-truth principle.
+    """
+    keys = set()
+    for name, obj in list(globals().items()):
+        if name.startswith("cmd_") and callable(obj):
+            keys.add(name[4:])  # strip "cmd_"
+    keys.update(["version", "auth_login", "auth_logout", "auth_status"])
+    return {tuple(k.split("_")) for k in keys}
+
+
+def _doctor_check_skill_cli_drift(home):
+    """Detect Skill markdown that references unknown beacon subcommands.
+
+    Walks ``~/.claude/skills/<name>/*.md`` and extracts every ``beacon X
+    [Y [Z]]`` invocation (regex: leading lowercase words after the literal
+    "beacon"). For each, longest-prefix-matches the word sequence against
+    the canonical set. Unmatched leads -> drift.
+
+    Catches the class of bug behind e-1361 / e-1362 / the retired
+    ``beacon summary`` write path: CLI evolved but dependent Skill markdown
+    still calls the old command name.
+
+    Returns a list of warning strings (one per drifting Skill). Empty list
+    means no drift or no skills directory installed.
+    """
+    import re as _re
+    skills_dir = os.path.join(home, ".claude", "skills")
+    if not os.path.isdir(skills_dir):
+        return []  # CI / new user — silent skip per ms-61 e-1570 AC#5
+
+    canonical = _canonical_subcommand_set()
+    # Match `beacon` followed by 1+ consecutive lowercase command words.
+    # Stops at flags (-foo), placeholders (<id>), pipes, uppercase, digits.
+    pattern = _re.compile(
+        r"\bbeacon\s+([a-z][a-z0-9-]*(?:\s+[a-z][a-z0-9-]*)*)"
+    )
+
+    drift_by_skill = {}  # skill_name -> list[(lineno, phrase)]
+    for skill_name in sorted(os.listdir(skills_dir)):
+        skill_dir = os.path.join(skills_dir, skill_name)
+        if not os.path.isdir(skill_dir):
+            continue
+        for fn in sorted(os.listdir(skill_dir)):
+            if not fn.endswith(".md"):
+                continue
+            fpath = os.path.join(skill_dir, fn)
+            try:
+                with open(fpath, "r", encoding="utf-8") as fh:
+                    lines = fh.readlines()
+            except OSError:
+                continue
+            seen_in_file = set()  # dedupe per file
+            for lineno, line in enumerate(lines, start=1):
+                for m in pattern.finditer(line):
+                    words = m.group(1).split()
+                    matched = False
+                    for i in range(len(words), 0, -1):
+                        if tuple(words[:i]) in canonical:
+                            matched = True
+                            break
+                    if matched:
+                        continue
+                    phrase = f"beacon {m.group(1)}"
+                    key = (phrase,)
+                    if key in seen_in_file:
+                        continue
+                    seen_in_file.add(key)
+                    drift_by_skill.setdefault(skill_name, []).append(
+                        (lineno, phrase)
+                    )
+
+    if not drift_by_skill:
+        return []
+
+    warnings = []
+    for skill_name, drifts in sorted(drift_by_skill.items()):
+        sample = drifts[:3]
+        more = len(drifts) - len(sample)
+        sample_lines = "\n".join(
+            f"       L{ln}: {phrase}" for ln, phrase in sample
+        )
+        more_line = f"\n       (+{more} more unique reference(s))" if more > 0 else ""
+        warnings.append(
+            f"WARN [skill-cli-drift] Skill `{skill_name}` references unknown beacon command(s):\n"
+            f"{sample_lines}{more_line}\n"
+            "       The leading word(s) after `beacon` don't match any known\n"
+            "       subcommand (cmd_* function or lambda dispatch entry).\n"
+            "       Either the CLI dropped that command, or the Skill markdown\n"
+            "       has a typo / out-of-date example. Opt-out: set\n"
+            "       BEACON_DOCTOR_SKIP_SKILL_DRIFT=1."
+        )
+    return warnings
+
+
 def cmd_doctor():
     """Lightweight environment health check for Beacon.
 
@@ -8733,6 +8836,8 @@ def cmd_doctor():
       5. .beacon/cloud.json exists and has api_url set (if project is cloud-mode)
       6. Repo skills/ content matches installed ~/.claude/skills/ content
          (ms-10 e-722; only when running from a beacon source checkout).
+      7. (renumbered) Duplicate IDs (Issue #14)
+      8. Skill markdown references known beacon subcommands (ms-61 / e-1570).
 
     Only prints warnings for problems found. Exits 0 if all checks pass,
     exits 1 if at least one warning was emitted.
@@ -8839,10 +8944,11 @@ def cmd_doctor():
     # ------------------------------------------------------------------ #
     # 4. Token expiry (no network — JWT decode only)
     # ------------------------------------------------------------------ #
-    from auth import CREDENTIALS_PATH, _decode_jwt_expiry
-    if CREDENTIALS_PATH.exists():
+    from auth import _credentials_path, _decode_jwt_expiry
+    _cred_path = _credentials_path()
+    if _cred_path.exists():
         try:
-            with open(CREDENTIALS_PATH, "r", encoding="utf-8") as _f:
+            with open(_cred_path, "r", encoding="utf-8") as _f:
                 _creds = json.load(_f)
             _token = _creds.get("token") or _creds.get("id_token") or ""
             if _token:
@@ -8962,6 +9068,17 @@ def cmd_doctor():
         except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
             # Drift check is best-effort; never let it block doctor.
             pass
+
+    # ------------------------------------------------------------------ #
+    # 8. Skill ↔ CLI command drift (ms-61 / e-1570)
+    # ------------------------------------------------------------------ #
+    # Walk each ~/.claude/skills/<name>/*.md and verify that any
+    # `beacon X [Y ...]` invocation hits a known subcommand. Catches the
+    # case where a CLI command was renamed / removed but dependent Skills
+    # weren't touched (e.g., the retired `beacon summary` write path that
+    # /beacon-session-end was still calling pre-e-1364).
+    if os.environ.get("BEACON_DOCTOR_SKIP_SKILL_DRIFT") != "1":
+        warnings.extend(_doctor_check_skill_cli_drift(home))
 
     # ------------------------------------------------------------------ #
     # Summary

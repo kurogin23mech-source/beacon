@@ -11,15 +11,56 @@ import urllib.error
 import webbrowser
 from pathlib import Path
 
-# Credentials are stored per-user, not per-project
-BEACON_HOME = Path.home() / ".beacon"
-CREDENTIALS_PATH = BEACON_HOME / "credentials.json"
-FIREBASE_CONFIG_PATH = Path(__file__).parent / "firebase_config.json"
+# Path-bundled firebase_config.json — used as fallback when the active
+# profile does not have its own copy. Kept as a constant so test fixtures
+# can compute its location without importing the module twice.
+_BUNDLED_FIREBASE_CONFIG_PATH = Path(__file__).parent / "firebase_config.json"
 
 SCOPES = [
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Path helpers (ms-64 / e-1457: profile-aware resolution)
+# ---------------------------------------------------------------------------
+#
+# These replace the legacy module-level constants. Resolution happens at each
+# call so that switching profile (= ``--profile`` CLI arg or BEACON_PROFILE
+# env var or cwd ``.beacon/cloud.json.profile`` field) is honored inside one
+# process invocation without re-importing the module.
+
+def _active_profile():
+    """Resolve the active Profile for this call.
+
+    Local import avoids any chance of a circular dependency when
+    ``profile.py`` someday needs to look at auth state (it doesn't today).
+    """
+    import profile as _profile
+    return _profile.resolve_active_profile()
+
+
+def _credentials_path() -> Path:
+    """Path to credentials.json under the active profile directory."""
+    return _active_profile().credentials_path
+
+
+def _firebase_config_path() -> Path | None:
+    """Resolve firebase_config.json: prefer profile-local, fall back to bundled.
+
+    Returns the profile-local copy if the active profile has one. Otherwise
+    falls back to the file bundled inside the installed package
+    (``lib/firebase_config.json``). Returns ``None`` if neither exists — the
+    caller is expected to surface a clean error or route the user to the
+    web-mediated login flow that does not need a config file.
+    """
+    profile_fc = _active_profile().firebase_config_path
+    if profile_fc is not None and profile_fc.exists():
+        return profile_fc
+    if _BUNDLED_FIREBASE_CONFIG_PATH.exists():
+        return _BUNDLED_FIREBASE_CONFIG_PATH
+    return None
 
 
 def _ensure_deps():
@@ -43,19 +84,20 @@ def _get_api_url() -> str:
 
 
 def _load_firebase_config() -> dict:
-    """Load Firebase client config from local file."""
-    if not FIREBASE_CONFIG_PATH.exists():
-        print(f"Error: Firebase config not found at {FIREBASE_CONFIG_PATH}")
+    """Load Firebase client config from the active profile (or bundled fallback)."""
+    fc_path = _firebase_config_path()
+    if fc_path is None:
+        print("Error: Firebase config not found in the active profile or bundled with the package.")
         print("Use 'beacon auth login --web' for web-mediated login (no config file needed).")
         sys.exit(1)
-    with open(FIREBASE_CONFIG_PATH, "r", encoding="utf-8") as f:
+    with open(fc_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
 def login():
     """Run Google OAuth flow and save credentials."""
-    # Check if --web flag is passed (or no firebase_config.json)
-    use_web = "--web" in sys.argv or not FIREBASE_CONFIG_PATH.exists()
+    # Check if --web flag is passed (or no firebase_config.json resolvable)
+    use_web = "--web" in sys.argv or _firebase_config_path() is None
 
     if use_web:
         login_web()
@@ -71,8 +113,9 @@ def login():
     print("Opening browser for Google sign-in...")
     credentials = flow.run_local_server(port=0)
 
-    # Save credentials
-    BEACON_HOME.mkdir(parents=True, exist_ok=True)
+    # Save credentials into the active profile dir
+    cred_path = _credentials_path()
+    cred_path.parent.mkdir(parents=True, exist_ok=True)
     creds_data = {
         "token": credentials.token,
         "refresh_token": credentials.refresh_token,
@@ -81,12 +124,12 @@ def login():
         "client_secret": credentials.client_secret,
         "scopes": list(credentials.scopes or SCOPES),
     }
-    with open(CREDENTIALS_PATH, "w", encoding="utf-8") as f:
+    with open(cred_path, "w", encoding="utf-8") as f:
         json.dump(creds_data, f, indent=2)
 
     email = _get_user_email(credentials)
     print(f"Logged in as: {email}")
-    print(f"Credentials saved to: {CREDENTIALS_PATH}")
+    print(f"Credentials saved to: {cred_path}")
 
 
 def login_web():
@@ -126,7 +169,8 @@ def login_web():
             if result.get("status") == "approved":
                 print(" approved!")
                 # Save id_token (and refresh_token if provided by the server)
-                BEACON_HOME.mkdir(parents=True, exist_ok=True)
+                cred_path = _credentials_path()
+                cred_path.parent.mkdir(parents=True, exist_ok=True)
                 id_token = result.get("id_token", "")
                 creds_data: dict = {
                     "token": id_token,
@@ -142,10 +186,10 @@ def login_web():
                     creds_data["token_expiry"] = _decode_jwt_expiry(id_token)
                 if result.get("refresh_token"):
                     creds_data["refresh_token"] = result["refresh_token"]
-                with open(CREDENTIALS_PATH, "w", encoding="utf-8") as f:
+                with open(cred_path, "w", encoding="utf-8") as f:
                     json.dump(creds_data, f, indent=2)
                 print(f"Logged in as: {result.get('email', '?')}")
-                print(f"Credentials saved to: {CREDENTIALS_PATH}")
+                print(f"Credentials saved to: {cred_path}")
                 return
         except urllib.error.HTTPError as e:
             if e.code == 410:
@@ -162,9 +206,10 @@ def login_web():
 
 
 def logout():
-    """Remove cached credentials."""
-    if CREDENTIALS_PATH.exists():
-        CREDENTIALS_PATH.unlink()
+    """Remove cached credentials from the active profile."""
+    cred_path = _credentials_path()
+    if cred_path.exists():
+        cred_path.unlink()
         print("Logged out. Credentials removed.")
     else:
         print("Not logged in.")
@@ -248,7 +293,8 @@ def _refresh_web_auth_token(creds_data: dict) -> dict | None:
         updated["refresh_token"] = result["refresh_token"]
 
     try:
-        with open(CREDENTIALS_PATH, "w", encoding="utf-8") as f:
+        cred_path = _credentials_path()
+        with open(cred_path, "w", encoding="utf-8") as f:
             json.dump(updated, f, indent=2)
     except OSError:
         pass  # best-effort; return the updated dict even if write fails
@@ -260,11 +306,13 @@ def _get_firebase_api_key_from_token(token: str) -> str | None:
     """Extract the Firebase project's web API key stored in the token 'aud'.
 
     Firebase id_tokens have 'aud' = the project ID, not the API key directly.
-    We fall back to reading firebase_config.json if present.
+    We fall back to reading firebase_config.json if present (profile-local
+    first, then bundled).
     """
-    if FIREBASE_CONFIG_PATH.exists():
+    fc_path = _firebase_config_path()
+    if fc_path is not None:
         try:
-            with open(FIREBASE_CONFIG_PATH, "r", encoding="utf-8") as f:
+            with open(fc_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
             # Accept both top-level and nested {"web": {...}} formats
             web = config.get("web", config)
@@ -276,10 +324,11 @@ def _get_firebase_api_key_from_token(token: str) -> str | None:
 
 def load_credentials():
     """Load and refresh cached credentials. Returns credentials or None."""
-    if not CREDENTIALS_PATH.exists():
+    cred_path = _credentials_path()
+    if not cred_path.exists():
         return None
 
-    with open(CREDENTIALS_PATH, "r", encoding="utf-8") as f:
+    with open(cred_path, "r", encoding="utf-8") as f:
         creds_data = json.load(f)
 
     # Web auth mode: check expiry
@@ -327,7 +376,7 @@ def load_credentials():
             creds_data["token"] = credentials.token
             if credentials.id_token:
                 creds_data["id_token"] = credentials.id_token
-            with open(CREDENTIALS_PATH, "w", encoding="utf-8") as f:
+            with open(cred_path, "w", encoding="utf-8") as f:
                 json.dump(creds_data, f, indent=2)
         except Exception as e:
             print(f"Warning: Could not refresh token: {e}")
