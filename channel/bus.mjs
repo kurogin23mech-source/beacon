@@ -12,10 +12,17 @@
 //   [channel/bus.mjs] ─stdio─ [Claude Code session]
 //
 // Discovery (env wins, falls back to local files):
-//   BEACON_API_URL          ← .beacon/cloud.json.api_url   ← https://beacon-ai.dev
+//   BEACON_PROFILE          ← .beacon/cloud.json.profile  ← "default"
+//                             (profile name; see profile-resolver.mjs)
+//   BEACON_API_URL          ← .beacon/cloud.json.api_url
+//                             ← ~/.beacon/profiles/<name>/profile.json.api_url
+//                             ← https://beacon-ai.dev
 //   BEACON_PROJECT_ID       ← .beacon/cloud.json.project_id
 //   BEACON_SESSION_ID       ← .beacon/session.json.session_id
-//   BEACON_AUTH_TOKEN       ← ~/.beacon/credentials.json.token
+//   BEACON_AUTH_TOKEN       ← ~/.beacon/profiles/<name>/credentials.json.token
+//                             (legacy fallback: ~/.beacon/credentials.json
+//                              only when profile == "default" and the new
+//                              path is not yet created by silent migration)
 //   BEACON_CHANNEL_ALLOWLIST (csv, default "dm")
 //   BEACON_BUS_POLL_MS      (default 2000)
 //   BEACON_BUS_LOG          (default /tmp/beacon-bus-channel.log)
@@ -35,14 +42,22 @@ import {
   buildAutonomousActionContent,
   shouldEmitAutonomousImperative,
 } from './bus-autonomous-content.mjs'
+import {
+  resolveActiveProfile,
+  loadToken as loadTokenFromProfile,
+} from './profile-resolver.mjs'
 
 // --- Config discovery --------------------------------------------------------
 
-const BEACON_HOME = process.env.BEACON_HOME || path.join(os.homedir(), '.beacon')
-const CREDS_JSON = path.join(BEACON_HOME, 'credentials.json')
 const CWD = process.cwd()
 const CLOUD_JSON = path.join(CWD, '.beacon', 'cloud.json')
 const SESSION_JSON = path.join(CWD, '.beacon', 'session.json')
+
+// ms-64 / e-1459: profile-aware credentials + api_url resolution.
+// MUST stay behavior-equivalent to lib/profile.py — pinned by
+// tests/test_profile_cross_lang.py as the merge gate. BEACON_HOME env
+// (when set) is honored inside the resolver.
+const PROFILE = resolveActiveProfile({ cwd: CWD })
 
 // Tag process by cwd so `pkill -f beacon-bus:<cwd>` targets safely without
 // blasting bus.mjs instances of other projects sharing this script path.
@@ -62,9 +77,11 @@ function safeLoadJSON(p) {
 }
 
 function loadToken() {
-  if (process.env.BEACON_AUTH_TOKEN) return process.env.BEACON_AUTH_TOKEN
-  const c = safeLoadJSON(CREDS_JSON)
-  return c.token || c.id_token || ''
+  // Read credentials via the resolver (env > profile dir > legacy fallback
+  // for default profile). The profile is resolved once at startup, but the
+  // token is re-read on every call so `beacon auth login` takes effect
+  // without restarting bus.mjs.
+  return loadTokenFromProfile(PROFILE)
 }
 
 const cloud = safeLoadJSON(CLOUD_JSON)
@@ -182,7 +199,9 @@ function discoverSessionIdViaCLI() {
 const cliSessionId = discoverSessionIdViaCLI()
 const session = safeLoadJSON(SESSION_JSON)
 
-const API_URL = (process.env.BEACON_API_URL || cloud.api_url || 'https://beacon-ai.dev').replace(/\/$/, '')
+// ms-64 / e-1459: api_url precedence chain (env > cwd cloud.json > profile.json > default)
+// is owned by the resolver; PROFILE.apiUrl already encodes it.
+const API_URL = PROFILE.apiUrl
 const PROJECT_ID = process.env.BEACON_PROJECT_ID || cloud.project_id || ''
 const SESSION_ID = process.env.BEACON_SESSION_ID || cliSessionId || session.session_id || ''
 // ms-60 / e-1390: the bridge-integrated Operation scheduler fires
