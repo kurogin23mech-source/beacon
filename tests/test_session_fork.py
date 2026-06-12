@@ -166,6 +166,63 @@ def test_fork_workspace_channel_install_failure_recorded_but_not_fatal(parent_re
     assert "no .mcp.json" in record["channel_install"]["stderr"]
 
 
+def test_fork_workspace_runs_status_refresh_in_child(parent_repo: Path):
+    """ms-67 hotfix: after channel install, fork_workspace must run
+    ``beacon status --json`` in the child worktree to force-refresh the
+    project.json from cloud.
+
+    Without this the child bclaude can boot against a parent's stale
+    project.json snapshot — observed during ms-67 e-1554 dogfood when
+    a worktree cwd returned 22 MS while parent cwd returned 62 MS for
+    the same project.
+    """
+    runner = FakeRunner()
+    result = session.fork_workspace(
+        "ms-7", "Status refresh target",
+        parent_session_id="sv-test-ggg",
+        parent_branch="main",
+        parent_repo_path=parent_repo,
+        short_uuid="refrsh",
+        runner=runner,
+    )
+    # call index 0 = git worktree add, 1 = beacon channel install,
+    # 2 = beacon status --json (the new step)
+    assert len(runner.calls) >= 3, (
+        f"expected at least 3 runner calls, got {len(runner.calls)}: "
+        f"{[c[0] for c in runner.calls]}"
+    )
+    args, cwd = runner.calls[2]
+    assert args == ["beacon", "status", "--json"]
+    assert cwd == result["worktree_path"]
+    # Successful refresh recorded in fork.json
+    assert result["fork_record"]["status_refresh"]["ok"] is True
+
+
+def test_fork_workspace_status_refresh_failure_recorded_but_not_fatal(parent_repo: Path):
+    """If `beacon status --json` fails in the child cwd the fork should
+    still succeed — the child will be on a stale view until the next
+    beacon command refreshes it, but the worktree is otherwise usable.
+    """
+    runner = FakeRunner(exits=[
+        (0, "", ""),                  # git worktree add ok
+        (0, "", ""),                  # channel install ok
+        (1, "", "cloud unreachable"), # status --json fails
+    ])
+    result = session.fork_workspace(
+        "ms-9", "Status refresh failure",
+        parent_session_id="sv-test-hhh",
+        parent_branch="main",
+        parent_repo_path=parent_repo,
+        short_uuid="failrf",
+        runner=runner,
+    )
+    record = result["fork_record"]
+    assert record["status_refresh"]["ok"] is False
+    assert "cloud unreachable" in record["status_refresh"]["stderr"]
+    # fork.json still written
+    assert (Path(result["worktree_path"]) / ".beacon" / "fork.json").exists()
+
+
 def test_fork_workspace_git_failure_raises(parent_repo: Path):
     runner = FakeRunner(exits=[
         (128, "", "fatal: already exists"),
