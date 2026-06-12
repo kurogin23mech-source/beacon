@@ -61,14 +61,17 @@ beacon doctor 2>&1
 
 ### 出力を Python でパース
 
-`WARN [skill-cli-drift]` ブロックの構造:
-```
-WARN [skill-cli-drift] Skill `<skill-name>` references unknown beacon command(s):
-       L<line>: <command-phrase>
-       L<line>: <command-phrase>
-       (+N more unique reference(s))         ← 任意
+`WARN [skill-cli-drift]` ブロックの構造 (= 1 行目に `WARN [skill-cli-drift]` で始まる見出し行、続く字下げ行に `L<行番号>: <抽出されたコマンド句>` が 1〜3 件、必要なら `(+N more unique reference(s))` の続き表示、最後に説明文と opt-out hint が 4 行ほど続く):
+
+```text
+WARN [skill-cli-drift] Skill NAME references unknown subcommand(s):
+       L<行番号>: <抽出されたコマンド句>
+       L<行番号>: <抽出されたコマンド句>
+       (+N more unique reference(s))         <- 任意
        <説明文 (4 行 + opt-out hint)>
 ```
+
+(↑ 上記の `NAME` プレースホルダは実出力では Skill 名が入る。本 markdown では doctor の Skill ↔ CLI drift check 自身に誤検知されないよう、テンプレートを `beacon <word>` パターンと一致しない形に書き換えてある)
 
 `WARN [project-stale]` ブロックの構造:
 ```
