@@ -54,12 +54,16 @@ class FakeRunner:
 
 @pytest.fixture
 def parent_repo(tmp_path: Path) -> Path:
-    """Set up a fake parent repo with .beacon/cloud.json."""
+    """Set up a fake parent repo with .beacon/cloud.json + project.json."""
     repo = tmp_path / "parent_repo"
     repo.mkdir()
     (repo / ".beacon").mkdir()
     (repo / ".beacon" / "cloud.json").write_text(
         json.dumps({"project_id": "fake-proj-abc", "api_url": "https://example.com"}),
+        encoding="utf-8",
+    )
+    (repo / ".beacon" / "project.json").write_text(
+        json.dumps({"name": "FakeProject", "milestones": []}),
         encoding="utf-8",
     )
     return repo
@@ -200,6 +204,31 @@ def test_fork_workspace_handles_missing_cloud_json(tmp_path: Path):
     assert not child_cloud.exists()
     # fork.json still written
     assert (Path(result["worktree_path"]) / ".beacon" / "fork.json").exists()
+
+
+def test_fork_workspace_symlinks_project_json(parent_repo: Path):
+    """Child's .beacon/project.json must exist so the SessionStart hook's
+    `test -f .beacon/project.json` check succeeds in the child cwd.
+
+    This is the SessionStart hook integration fix found during the ms-67
+    e-1554 dogfood. Without the symlink the global hook in
+    ~/.claude/settings.json silently skips the auto /beacon-session-start
+    injection and the child boots into an anonymous-feeling session.
+    """
+    runner = FakeRunner()
+    result = session.fork_workspace(
+        "ms-7", "Symlink target",
+        parent_session_id="sv-x",
+        parent_branch="main",
+        parent_repo_path=parent_repo,
+        short_uuid="symlnk",
+        runner=runner,
+    )
+    child_project = Path(result["worktree_path"]) / ".beacon" / "project.json"
+    assert child_project.exists()
+    assert child_project.is_symlink()
+    # symlink target should be the parent's project.json (compare resolved)
+    assert child_project.resolve() == (parent_repo / ".beacon" / "project.json").resolve()
 
 
 def test_fork_workspace_rejects_bad_ms_id(parent_repo: Path):
