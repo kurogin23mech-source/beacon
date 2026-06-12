@@ -2849,6 +2849,84 @@ def cmd_session_attention():
         print(f"attention_required: {flag}")
 
 
+def cmd_session_fork():
+    """Fork a sibling worktree for parallel work on a target milestone (ms-67 / e-1549).
+
+    Creates ``.worktrees/<ms-id>-fork-<short-uuid>``, binds it to the same
+    Beacon project by copying ``.beacon/cloud.json``, runs ``beacon channel
+    install`` so the child worktree can host its own bclaude with a clean
+    MCP server declaration, and records the parent ↔ child link in
+    ``.beacon/fork.json``.
+
+    The actual subprocess work lives in :func:`session.fork_workspace` so
+    the CLI layer here only does arg parsing + lookups + reporting. Tests
+    target the helper directly with a fake runner.
+    """
+    import subprocess as _sp
+
+    ms_id = os.environ.get("BEACON_SESSION_FORK_MS_ID", "").strip()
+    json_out = os.environ.get("BEACON_JSON", "") == "1"
+    if not ms_id:
+        print("Usage: beacon session fork <ms-id> [--json]", file=sys.stderr)
+        sys.exit(2)
+
+    # Resolve ms_title from the local project.json cache (load_project gives
+    # the full project including milestones[]). Surfaces a clean error if
+    # the ms doesn't exist rather than writing fork.json with a blank title.
+    data = load_project()
+    ms_title = ""
+    for ms in data.get("milestones", []):
+        if ms.get("id") == ms_id:
+            ms_title = ms.get("title", "")
+            break
+    if not ms_title:
+        print(f"Error: milestone not found: {ms_id}", file=sys.stderr)
+        sys.exit(1)
+
+    # Parent session info — used by the child's session-start to surface
+    # "you were forked from sv-xxxx". Tolerate missing values: forking
+    # outside a live bclaude session shouldn't be blocked just because
+    # the parent id can't be resolved.
+    import session as _session
+    parent_session_id = _session.resolve_active_session_id() or ""
+
+    parent_repo_path = os.getcwd()  # bin/beacon has already cd'd to project root
+    # git rev-parse runs in the project root; if it fails fall back to empty
+    proc = _sp.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True, text=True, check=False, cwd=parent_repo_path,
+    )
+    parent_branch = proc.stdout.strip() if proc.returncode == 0 else ""
+
+    try:
+        result = _session.fork_workspace(
+            ms_id, ms_title,
+            parent_session_id=parent_session_id,
+            parent_branch=parent_branch,
+            parent_repo_path=parent_repo_path,
+        )
+    except (ValueError, RuntimeError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_out:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        wt = result["worktree_path"]
+        branch = result["branch"]
+        channel_ok = result["fork_record"]["channel_install"]["ok"]
+        print(f"Forked worktree: {wt}")
+        print(f"  branch:        {branch}")
+        print(f"  target_ms:     {ms_id} {ms_title}")
+        print(f"  parent_branch: {parent_branch or '(unresolved)'}")
+        print(f"  parent_sid:    {parent_session_id or '(unresolved)'}")
+        if not channel_ok:
+            print("  channel install failed — re-run `beacon channel install` "
+                  "from the worktree once you cd into it")
+        print("")
+        print(f"  next: cd {wt} && bclaude")
+
+
 def _resolve_channel_root() -> "Path | None":
     """Find the directory containing channel/bus.mjs across all install paths.
 
@@ -10665,6 +10743,7 @@ if __name__ == "__main__":
         "session_id": cmd_session_id,
         "session_focus": cmd_session_focus,
         "session_attention": cmd_session_attention,
+        "session_fork": cmd_session_fork,
         "channel_install": cmd_channel_install,
         "channel_uninstall": cmd_channel_uninstall,
         "channel_opt_out": cmd_channel_opt_out,

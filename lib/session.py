@@ -817,6 +817,7 @@ __all__ = [
     "ENV_USE_CLOUD_FIRST",
     "find_my_bridge_claim",
     "get_or_mint_session",
+    "fork_workspace",
     "get_or_mint_session_via_server",
     "get_session_id",
     "mint_fresh_session",
@@ -827,3 +828,116 @@ __all__ = [
     "update_last_active",
     "write_session",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Workspace fork (ms-67 / e-1549)
+# ---------------------------------------------------------------------------
+
+def _default_worktree_runner(args: list[str], cwd: str | None = None) -> tuple[int, str, str]:
+    """Run a subprocess and return (returncode, stdout, stderr).
+
+    Centralised here so tests can inject a fake runner via the
+    ``runner=`` kwarg on :func:`fork_workspace` without needing to
+    monkey-patch ``subprocess.run`` at module scope.
+    """
+    import subprocess as _sp
+    proc = _sp.run(args, cwd=cwd, capture_output=True, text=True, check=False)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def fork_workspace(
+    ms_id: str,
+    ms_title: str,
+    *,
+    parent_session_id: str,
+    parent_branch: str,
+    parent_repo_path: Path | str,
+    short_uuid: str | None = None,
+    runner=None,
+) -> dict:
+    """Create a sibling worktree for parallel work on ``ms_id``.
+
+    Carries out the 4-step setup that ms-67 (= /beacon-session-fork Skill)
+    folds into one command:
+
+    1. ``git worktree add <wt-path> -b <child-branch>``
+    2. copy ``.beacon/cloud.json`` from the parent repo so the child
+       worktree binds to the same Beacon project
+    3. run ``beacon channel install`` in the child worktree to generate
+       ``.mcp.json`` (= MCP server declaration)
+    4. write ``.beacon/fork.json`` recording the parent ↔ child link so
+       the child's ``/beacon-session-start`` can surface "you were forked
+       from sv-xxxx"
+
+    All side effects flow through ``runner`` so tests can replace it with
+    a fake. ``short_uuid`` is also injectable for deterministic test
+    output; default is 6 hex characters.
+
+    Returns a dict ``{worktree_path, branch, fork_record}`` describing
+    what was created. Raises ``RuntimeError`` on subprocess failure with
+    enough context for the caller to surface a useful message.
+    """
+    if not ms_id or not ms_id.startswith("ms-"):
+        raise ValueError(f"ms_id must look like 'ms-<n>', got {ms_id!r}")
+
+    parent_root = Path(parent_repo_path).resolve()
+    if short_uuid is None:
+        short_uuid = secrets.token_hex(3)  # 6 hex chars
+    branch = f"{ms_id}-fork-{short_uuid}"
+    wt_path = parent_root / ".worktrees" / f"{ms_id}-fork-{short_uuid}"
+
+    if runner is None:
+        runner = _default_worktree_runner
+
+    # Step 1: git worktree add — also creates the branch
+    rc, stdout, stderr = runner(
+        ["git", "worktree", "add", str(wt_path), "-b", branch],
+        str(parent_root),
+    )
+    if rc != 0:
+        raise RuntimeError(
+            f"git worktree add failed (rc={rc}): {stderr.strip() or stdout.strip()}"
+        )
+
+    # Step 2: copy .beacon/cloud.json so the child binds to the same project
+    parent_cloud = parent_root / ".beacon" / "cloud.json"
+    child_beacon_dir = wt_path / ".beacon"
+    child_beacon_dir.mkdir(parents=True, exist_ok=True)
+    if parent_cloud.exists():
+        child_beacon_dir.joinpath("cloud.json").write_bytes(parent_cloud.read_bytes())
+
+    # Step 3: run beacon channel install in the child worktree
+    rc, stdout, stderr = runner(
+        ["beacon", "channel", "install"],
+        str(wt_path),
+    )
+    if rc != 0:
+        # Channel install failure is not fatal for the fork itself — the
+        # child can re-run it later. Record the failure in fork.json so
+        # the child's session-start can surface a hint, but keep going.
+        channel_install_status = {"ok": False, "stderr": stderr.strip()[:500]}
+    else:
+        channel_install_status = {"ok": True}
+
+    # Step 4: write .beacon/fork.json
+    fork_record = {
+        "parent_session_id": parent_session_id,
+        "parent_branch": parent_branch,
+        "parent_repo_path": str(parent_root),
+        "target_ms_id": ms_id,
+        "target_ms_title": ms_title,
+        "child_branch": branch,
+        "created_at": _now_iso(),
+        "channel_install": channel_install_status,
+    }
+    child_beacon_dir.joinpath("fork.json").write_text(
+        json.dumps(fork_record, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    return {
+        "worktree_path": str(wt_path),
+        "branch": branch,
+        "fork_record": fork_record,
+    }
