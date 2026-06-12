@@ -507,7 +507,7 @@ def cmd_cloud_check_project():
     creds = load_credentials()
     if creds is None:
         _sys.exit(1)
-    api_url = os.environ.get("BEACON_API_URL", DEFAULT_API_URL)
+    api_url = _resolve_active_api_url()
     from api_client import ApiClient
     client = ApiClient(api_url, _extract_token(creds))
     try:
@@ -530,7 +530,7 @@ def cmd_cloud_join():
         print("Error: project ID required")
         sys.exit(1)
 
-    api_url = os.environ.get("BEACON_API_URL", DEFAULT_API_URL)
+    api_url = _resolve_active_api_url()
     token = _extract_token(creds)
 
     from api_client import ApiClient
@@ -2242,7 +2242,7 @@ def _push_note_to_cloud(note: dict) -> None:
         with open(config_path, "r", encoding="utf-8") as f:
             config = json.load(f)
         project_id = config.get("project_id", "")
-        api_url = config.get("api_url", DEFAULT_API_URL)
+        api_url = _resolve_active_api_url()
         if not project_id:
             return
         from auth import load_credentials
@@ -2331,7 +2331,7 @@ def cmd_note_clear():
             with open(config_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
             project_id = config.get("project_id", "")
-            api_url = config.get("api_url", DEFAULT_API_URL)
+            api_url = _resolve_active_api_url()
             if project_id:
                 from auth import load_credentials
                 creds = load_credentials()
@@ -5008,7 +5008,7 @@ def _push_trigger_to_bus(trigger_data: dict) -> None:
         if creds is None:
             return
         from api_client import ApiClient
-        api_url = config.get("api_url", DEFAULT_API_URL)
+        api_url = _resolve_active_api_url()
         client = ApiClient(api_url, _extract_token(creds))
         # Channel "trigger" is the convention for system-fired bus events,
         # distinct from "session-dm" used for agent-to-agent chat. Receivers
@@ -5072,7 +5072,7 @@ def _push_operation_trigger_to_bus(op_id: str, log_source: str,
         if creds is None:
             return
         from api_client import ApiClient
-        api_url = config.get("api_url", DEFAULT_API_URL)
+        api_url = _resolve_active_api_url()
         client = ApiClient(api_url, _extract_token(creds))
 
         # e-1393: mint a T2 Operation-scope envelope so the server's verify
@@ -5774,6 +5774,38 @@ def cmd_doc_delete():
 DEFAULT_API_URL = "https://beacon-ai.dev"
 
 
+def _resolve_active_api_url() -> str:
+    """Return the api_url of the active profile (ms-64 / e-1458).
+
+    Replaces the previous ``os.environ.get("BEACON_API_URL", DEFAULT_API_URL)``
+    + ``config.get("api_url", DEFAULT_API_URL)`` chain that was duplicated at
+    11+ sites in this module. The profile resolver already implements the full
+    precedence chain (env > cwd cloud.json > profile.json > default), so all
+    sites now go through it and a single point of truth handles the precedence
+    rules.
+
+    The active profile is determined by (in order): ``--profile`` CLI arg
+    (exported as ``BEACON_PROFILE`` by ``bin/beacon`` top-level), then
+    ``BEACON_PROFILE`` env, then cwd ``.beacon/cloud.json`` ``profile`` field,
+    then the ``default`` profile.
+    """
+    try:
+        import profile as _profile  # type: ignore[import-not-found]
+        return _profile.resolve_active_profile().api_url
+    except Exception:
+        # Best-effort fallback: legacy chain. Keeps CLI usable if profile.py
+        # itself is unimportable for any reason (e.g. partial install).
+        api_url = _resolve_active_api_url()
+        config_path = _get_cloud_config_path()
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    api_url = json.load(f).get("api_url", api_url)
+            except Exception:
+                pass
+        return api_url
+
+
 def _get_cloud_config_path():
     beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
     return os.path.join(beacon_dir, "cloud.json")
@@ -5792,7 +5824,7 @@ def _ensure_cloud_config():
     h = hashlib.md5(os.path.abspath(get_project_file()).encode()).hexdigest()[:6]
     project_id = f"{slug}-{h}"
 
-    api_url = os.environ.get("BEACON_API_URL", DEFAULT_API_URL)
+    api_url = _resolve_active_api_url()
     config = {"project_id": project_id, "api_url": api_url}
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
@@ -5829,7 +5861,7 @@ def _get_api_client():
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
 
-    api_url = config.get("api_url", DEFAULT_API_URL)
+    api_url = _resolve_active_api_url()
 
     # Use a TokenProvider callable so each request picks up a fresh token.
     # load_credentials() refreshes OAuth tokens automatically; web_auth tokens
@@ -5851,13 +5883,10 @@ def cmd_cloud_list():
         print("Not logged in. Run: beacon auth login")
         sys.exit(1)
 
-    # cloud list may be called before cloud.json exists, so read api_url from env
-    api_url = os.environ.get("BEACON_API_URL", DEFAULT_API_URL)
-    config_path = _get_cloud_config_path()
-    if os.path.exists(config_path):
-        with open(config_path, "r", encoding="utf-8") as f:
-            config = json.load(f)
-        api_url = config.get("api_url", api_url)
+    # cloud list may be called before cloud.json exists; the profile resolver
+    # already honors the env > cwd cloud.json > profile.json > default chain,
+    # so we just use it directly here (e-1458).
+    api_url = _resolve_active_api_url()
 
     from api_client import ApiClient
     client = ApiClient(api_url, _extract_token(creds))
@@ -5893,7 +5922,7 @@ def cmd_cloud_push():
 
     config = _ensure_cloud_config()
     project_id = config["project_id"]
-    api_url = config.get("api_url", DEFAULT_API_URL)
+    api_url = _resolve_active_api_url()
 
     # In cloud mode, CLI writes go directly to cloud — local project.json is stale.
     # Pushing it would overwrite cloud state and cause data loss.
@@ -6018,7 +6047,7 @@ def cmd_cloud_status():
     logged_in = creds is not None
 
     print(f"Cloud: {config['project_id']}")
-    print(f"API: {config.get('api_url', DEFAULT_API_URL)}")
+    print(f"API: {_resolve_active_api_url()}")
     print(f"Auth: {'logged in' if logged_in else 'not logged in'}")
 
 
@@ -10950,9 +10979,11 @@ def cmd_sessions_list():
     currently cd'd into, or to diagnose heartbeat-stop incidents
     (e.g. e-1579-style auth-fail-cascade) without cd-ing through each candidate.
 
-    Bootstraps the API client cwd-independently: prefers ``BEACON_API_URL`` /
-    cwd's cloud.json.api_url if present, else falls back to DEFAULT_API_URL.
-    Auth credentials come from the active profile (e-1457).
+    Bootstraps the API client cwd-independently via the profile resolver
+    (ms-64 / e-1458). Auth credentials come from the active profile too
+    (e-1457). The resolver already honors the env > cwd cloud.json >
+    profile.json > default precedence chain, so no extra cloud.json read
+    is needed.
     """
     from auth import load_credentials
     creds = load_credentials()
@@ -10960,13 +10991,7 @@ def cmd_sessions_list():
         print("Not logged in. Run: beacon auth login")
         sys.exit(1)
 
-    # cwd-independent bootstrap: cloud.json is optional here. Same fallback
-    # pattern as cmd_cloud_list (line 5854).
-    api_url = os.environ.get("BEACON_API_URL", DEFAULT_API_URL)
-    config_path = _get_cloud_config_path()
-    if os.path.exists(config_path):
-        with open(config_path, "r", encoding="utf-8") as f:
-            api_url = json.load(f).get("api_url", api_url)
+    api_url = _resolve_active_api_url()
 
     from api_client import ApiClient
     client = ApiClient(api_url, _extract_token(creds))

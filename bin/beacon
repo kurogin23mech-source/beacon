@@ -1823,6 +1823,20 @@ find_beacon_root() {
 # the parent repo's HEAD after the relocate below.
 export BEACON_INVOCATION_CWD="$PWD"
 
+# ms-64 / e-1458: top-level `--profile <name>` flag. Parsed early so it
+# affects all subcommands uniformly. Exported as BEACON_PROFILE which the
+# Python-side profile resolver (lib/profile.py) honors above cwd cloud.json
+# and below an explicit `--profile` passed to a Python entry point. The flag
+# is repeatable but only the last value wins.
+while [ "${1:-}" = "--profile" ]; do
+    if [ -z "${2:-}" ]; then
+        echo "Error: --profile requires a value (profile name)" >&2
+        exit 2
+    fi
+    export BEACON_PROFILE="$2"
+    shift 2
+done
+
 # Relocate to the project root before dispatch. `setup`/`init` operate on the
 # current directory by design, so they are exempt.
 case "${1:-}" in

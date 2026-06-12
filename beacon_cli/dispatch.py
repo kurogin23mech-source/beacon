@@ -296,6 +296,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--version", "-V", action="store_true", help="Show version")
     p.add_argument("--help", "-h", action="store_true", help="Show help")
+    # ms-64 / e-1458: top-level --profile <name>. Exported as BEACON_PROFILE
+    # before any subcommand runs, so the profile resolver (lib/profile.py)
+    # honors it for api_url + credentials path resolution. Parity with
+    # bin/beacon's bash-side parser.
+    p.add_argument("--profile", default="", help="Beacon profile to use (overrides BEACON_PROFILE env)")
 
     sub = p.add_subparsers(dest="command", metavar="<command>")
 
@@ -2543,6 +2548,11 @@ def dispatch(root: Optional[Path], argv: Sequence[str]) -> int:
     if not args.command:
         _print_top_help()
         return 0
+
+    # ms-64 / e-1458: persist --profile into the env before any handler runs
+    # so child processes (commands.py subprocess) inherit it.
+    if getattr(args, "profile", ""):
+        os.environ["BEACON_PROFILE"] = args.profile
 
     # e-1227 (ms-17): stash the cwd at invocation time *before* the
     # relocate below changes it. Handlers that need git HEAD from the
