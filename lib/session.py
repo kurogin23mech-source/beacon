@@ -931,6 +931,21 @@ def fork_workspace(
     else:
         channel_install_status = {"ok": True}
 
+    # Step 3.5: force-refresh the project cache (ms-67 hotfix / 親 fork stale-cache 観測)
+    # beacon status writes back the cloud-fresh project.json so the child's
+    # session-start sees the actual milestone set, not the parent's pre-fork
+    # stale snapshot. Non-fatal — if it fails the child can still operate,
+    # just from a stale view until the next beacon command refreshes.
+    # See docs/memo (ms-36 領域) for root-cause context — this is a band-aid
+    # over a deeper cache/cwd interaction that ms-36 retro should revisit.
+    rc, stdout, stderr = runner(
+        ["beacon", "status", "--json"],
+        str(wt_path),
+    )
+    status_refresh_status = {"ok": rc == 0}
+    if rc != 0:
+        status_refresh_status["stderr"] = stderr.strip()[:500]
+
     # Step 4: write .beacon/fork.json
     fork_record = {
         "parent_session_id": parent_session_id,
@@ -941,6 +956,7 @@ def fork_workspace(
         "child_branch": branch,
         "created_at": _now_iso(),
         "channel_install": channel_install_status,
+        "status_refresh": status_refresh_status,
     }
     child_beacon_dir.joinpath("fork.json").write_text(
         json.dumps(fork_record, ensure_ascii=False, indent=2),
