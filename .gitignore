@@ -14,3 +14,16 @@ dist/
 
 # Internal work area for design/pitch decks (ms-50 営業資料 etc.) — generated content, not part of the product
 .beacon-design/
+
+# Infrastructure-as-code は private repo (kurogin23mech-source/beacon-cloud) で管理する
+# (ms-64 Phase 2 / 組織固有の AWS deploy コードは OSS に乗せない)
+iac/
+
+# Terraform 作業ファイル一般 (万一どこかで terraform を回しても commit されないように)
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+*.tfplan
