@@ -901,12 +901,22 @@ def fork_workspace(
             f"git worktree add failed (rc={rc}): {stderr.strip() or stdout.strip()}"
         )
 
-    # Step 2: copy .beacon/cloud.json so the child binds to the same project
+    # Step 2: copy .beacon/cloud.json so the child binds to the same project,
+    # and symlink .beacon/project.json so the SessionStart hook's
+    # `test -f .beacon/project.json` check passes in the child cwd. Without
+    # this the hook silently skips and the child never auto-runs
+    # /beacon-session-start (= bug found during ms-67 e-1554 dogfood, the hook
+    # is global ~/.claude/settings.json and doesn't walk up).
     parent_cloud = parent_root / ".beacon" / "cloud.json"
+    parent_project = parent_root / ".beacon" / "project.json"
     child_beacon_dir = wt_path / ".beacon"
     child_beacon_dir.mkdir(parents=True, exist_ok=True)
     if parent_cloud.exists():
         child_beacon_dir.joinpath("cloud.json").write_bytes(parent_cloud.read_bytes())
+    if parent_project.exists():
+        symlink_path = child_beacon_dir / "project.json"
+        if not symlink_path.exists() and not symlink_path.is_symlink():
+            symlink_path.symlink_to(parent_project)
 
     # Step 3: run beacon channel install in the child worktree
     rc, stdout, stderr = runner(
