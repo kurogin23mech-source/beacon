@@ -901,12 +901,22 @@ def fork_workspace(
             f"git worktree add failed (rc={rc}): {stderr.strip() or stdout.strip()}"
         )
 
-    # Step 2: copy .beacon/cloud.json so the child binds to the same project
+    # Step 2: copy .beacon/cloud.json so the child binds to the same project,
+    # and symlink .beacon/project.json so the SessionStart hook's
+    # `test -f .beacon/project.json` check passes in the child cwd. Without
+    # this the hook silently skips and the child never auto-runs
+    # /beacon-session-start (= bug found during ms-67 e-1554 dogfood, the hook
+    # is global ~/.claude/settings.json and doesn't walk up).
     parent_cloud = parent_root / ".beacon" / "cloud.json"
+    parent_project = parent_root / ".beacon" / "project.json"
     child_beacon_dir = wt_path / ".beacon"
     child_beacon_dir.mkdir(parents=True, exist_ok=True)
     if parent_cloud.exists():
         child_beacon_dir.joinpath("cloud.json").write_bytes(parent_cloud.read_bytes())
+    if parent_project.exists():
+        symlink_path = child_beacon_dir / "project.json"
+        if not symlink_path.exists() and not symlink_path.is_symlink():
+            symlink_path.symlink_to(parent_project)
 
     # Step 3: run beacon channel install in the child worktree
     rc, stdout, stderr = runner(
@@ -921,6 +931,21 @@ def fork_workspace(
     else:
         channel_install_status = {"ok": True}
 
+    # Step 3.5: force-refresh the project cache (ms-67 hotfix / 親 fork stale-cache 観測)
+    # beacon status writes back the cloud-fresh project.json so the child's
+    # session-start sees the actual milestone set, not the parent's pre-fork
+    # stale snapshot. Non-fatal — if it fails the child can still operate,
+    # just from a stale view until the next beacon command refreshes.
+    # See docs/memo (ms-36 領域) for root-cause context — this is a band-aid
+    # over a deeper cache/cwd interaction that ms-36 retro should revisit.
+    rc, stdout, stderr = runner(
+        ["beacon", "status", "--json"],
+        str(wt_path),
+    )
+    status_refresh_status = {"ok": rc == 0}
+    if rc != 0:
+        status_refresh_status["stderr"] = stderr.strip()[:500]
+
     # Step 4: write .beacon/fork.json
     fork_record = {
         "parent_session_id": parent_session_id,
@@ -931,6 +956,7 @@ def fork_workspace(
         "child_branch": branch,
         "created_at": _now_iso(),
         "channel_install": channel_install_status,
+        "status_refresh": status_refresh_status,
     }
     child_beacon_dir.joinpath("fork.json").write_text(
         json.dumps(fork_record, ensure_ascii=False, indent=2),

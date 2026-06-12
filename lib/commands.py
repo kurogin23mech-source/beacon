@@ -9113,10 +9113,11 @@ def cmd_doctor():
     # ------------------------------------------------------------------ #
     # 4. Token expiry (no network — JWT decode only)
     # ------------------------------------------------------------------ #
-    from auth import CREDENTIALS_PATH, _decode_jwt_expiry
-    if CREDENTIALS_PATH.exists():
+    from auth import _credentials_path, _decode_jwt_expiry
+    _cred_path = _credentials_path()
+    if _cred_path.exists():
         try:
-            with open(CREDENTIALS_PATH, "r", encoding="utf-8") as _f:
+            with open(_cred_path, "r", encoding="utf-8") as _f:
                 _creds = json.load(_f)
             _token = _creds.get("token") or _creds.get("id_token") or ""
             if _token:

@@ -54,12 +54,16 @@ class FakeRunner:
 
 @pytest.fixture
 def parent_repo(tmp_path: Path) -> Path:
-    """Set up a fake parent repo with .beacon/cloud.json."""
+    """Set up a fake parent repo with .beacon/cloud.json + project.json."""
     repo = tmp_path / "parent_repo"
     repo.mkdir()
     (repo / ".beacon").mkdir()
     (repo / ".beacon" / "cloud.json").write_text(
         json.dumps({"project_id": "fake-proj-abc", "api_url": "https://example.com"}),
+        encoding="utf-8",
+    )
+    (repo / ".beacon" / "project.json").write_text(
+        json.dumps({"name": "FakeProject", "milestones": []}),
         encoding="utf-8",
     )
     return repo
@@ -162,6 +166,63 @@ def test_fork_workspace_channel_install_failure_recorded_but_not_fatal(parent_re
     assert "no .mcp.json" in record["channel_install"]["stderr"]
 
 
+def test_fork_workspace_runs_status_refresh_in_child(parent_repo: Path):
+    """ms-67 hotfix: after channel install, fork_workspace must run
+    ``beacon status --json`` in the child worktree to force-refresh the
+    project.json from cloud.
+
+    Without this the child bclaude can boot against a parent's stale
+    project.json snapshot — observed during ms-67 e-1554 dogfood when
+    a worktree cwd returned 22 MS while parent cwd returned 62 MS for
+    the same project.
+    """
+    runner = FakeRunner()
+    result = session.fork_workspace(
+        "ms-7", "Status refresh target",
+        parent_session_id="sv-test-ggg",
+        parent_branch="main",
+        parent_repo_path=parent_repo,
+        short_uuid="refrsh",
+        runner=runner,
+    )
+    # call index 0 = git worktree add, 1 = beacon channel install,
+    # 2 = beacon status --json (the new step)
+    assert len(runner.calls) >= 3, (
+        f"expected at least 3 runner calls, got {len(runner.calls)}: "
+        f"{[c[0] for c in runner.calls]}"
+    )
+    args, cwd = runner.calls[2]
+    assert args == ["beacon", "status", "--json"]
+    assert cwd == result["worktree_path"]
+    # Successful refresh recorded in fork.json
+    assert result["fork_record"]["status_refresh"]["ok"] is True
+
+
+def test_fork_workspace_status_refresh_failure_recorded_but_not_fatal(parent_repo: Path):
+    """If `beacon status --json` fails in the child cwd the fork should
+    still succeed — the child will be on a stale view until the next
+    beacon command refreshes it, but the worktree is otherwise usable.
+    """
+    runner = FakeRunner(exits=[
+        (0, "", ""),                  # git worktree add ok
+        (0, "", ""),                  # channel install ok
+        (1, "", "cloud unreachable"), # status --json fails
+    ])
+    result = session.fork_workspace(
+        "ms-9", "Status refresh failure",
+        parent_session_id="sv-test-hhh",
+        parent_branch="main",
+        parent_repo_path=parent_repo,
+        short_uuid="failrf",
+        runner=runner,
+    )
+    record = result["fork_record"]
+    assert record["status_refresh"]["ok"] is False
+    assert "cloud unreachable" in record["status_refresh"]["stderr"]
+    # fork.json still written
+    assert (Path(result["worktree_path"]) / ".beacon" / "fork.json").exists()
+
+
 def test_fork_workspace_git_failure_raises(parent_repo: Path):
     runner = FakeRunner(exits=[
         (128, "", "fatal: already exists"),
@@ -200,6 +261,31 @@ def test_fork_workspace_handles_missing_cloud_json(tmp_path: Path):
     assert not child_cloud.exists()
     # fork.json still written
     assert (Path(result["worktree_path"]) / ".beacon" / "fork.json").exists()
+
+
+def test_fork_workspace_symlinks_project_json(parent_repo: Path):
+    """Child's .beacon/project.json must exist so the SessionStart hook's
+    `test -f .beacon/project.json` check succeeds in the child cwd.
+
+    This is the SessionStart hook integration fix found during the ms-67
+    e-1554 dogfood. Without the symlink the global hook in
+    ~/.claude/settings.json silently skips the auto /beacon-session-start
+    injection and the child boots into an anonymous-feeling session.
+    """
+    runner = FakeRunner()
+    result = session.fork_workspace(
+        "ms-7", "Symlink target",
+        parent_session_id="sv-x",
+        parent_branch="main",
+        parent_repo_path=parent_repo,
+        short_uuid="symlnk",
+        runner=runner,
+    )
+    child_project = Path(result["worktree_path"]) / ".beacon" / "project.json"
+    assert child_project.exists()
+    assert child_project.is_symlink()
+    # symlink target should be the parent's project.json (compare resolved)
+    assert child_project.resolve() == (parent_repo / ".beacon" / "project.json").resolve()
 
 
 def test_fork_workspace_rejects_bad_ms_id(parent_repo: Path):
