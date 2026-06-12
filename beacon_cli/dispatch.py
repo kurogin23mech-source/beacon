@@ -712,6 +712,25 @@ def build_parser() -> argparse.ArgumentParser:
                                       choices=["true", "false"], default="")
     p_session_attention.add_argument("--json", action="store_true")
 
+    # ---- sessions (ms-54 e-1587) ----
+    # `beacon sessions` is the cross-project counterpart to `bus directory`.
+    # Lists the calling user's live sessions across all their projects in
+    # one shot, so /beacon-dm-send can pick recipients without cd-ing into
+    # each candidate project.
+    p_sessions = sub.add_parser(
+        "sessions",
+        help="Cross-project session directory (e-1587)",
+        add_help=False,
+    )
+    p_sessions.add_argument("--help", "-h", action="store_true", dest="show_help")
+    p_sessions.add_argument("list_arg", nargs="?", default="")
+    p_sessions.add_argument("--live", action="store_true")
+    p_sessions.add_argument("--healthy", action="store_true")
+    p_sessions.add_argument("--since-min", dest="since_min", default="5")
+    p_sessions.add_argument("--machine", default="")
+    p_sessions.add_argument("--agent", default="")
+    p_sessions.add_argument("--json", action="store_true")
+
     # ---- channel install (ms-54 e-1152 / ms-44 e-1171) ----
     # `beacon channel install` writes a project-level .mcp.json that
     # wires the Claude Code beacon-bus MCP server to channel/bus.mjs.
@@ -2260,6 +2279,30 @@ def _handle_monitor(root: Path, args: argparse.Namespace) -> int:
 # every bus_X subparser is collapsed here into BEACON_BUS_PROJECT_ID which
 # commands.py:_resolve_bus_project_id consumes; cross-project sends/receives
 # become possible without flipping cwd.
+def _handle_sessions(root: Path, args: argparse.Namespace) -> int:
+    if args.show_help:
+        print("Usage: beacon sessions [list] [--live] [--healthy] "
+              "[--since-min <N>] [--machine <name>] [--agent <name>] [--json]")
+        print("")
+        print("Cross-project session directory. Lists the calling user's")
+        print("bclaude sessions across ALL projects they own or are a member")
+        print("of. Use this for picking DM recipients (/beacon-dm-send) and")
+        print("diagnosing cross-project heartbeat-stop incidents.")
+        print("")
+        print("For \"who in this project is live\" use `beacon bus directory --live`.")
+        return 0
+
+    env: Dict[str, str] = {
+        "BEACON_SESSIONS_LIVE": "1" if args.live else "",
+        "BEACON_SESSIONS_HEALTHY": "1" if args.healthy else "",
+        "BEACON_SESSIONS_SINCE_MIN": args.since_min or "5",
+        "BEACON_SESSIONS_MACHINE": args.machine or "",
+        "BEACON_SESSIONS_AGENT": args.agent or "",
+        "BEACON_JSON": "1" if args.json else "",
+    }
+    return _run_commands_py(root, "sessions_list", env)
+
+
 def _handle_bus(root: Path, args: argparse.Namespace) -> int:
     if args.show_help or args.bus_cmd is None:
         print("Usage: beacon bus send      --channel <ch> [--payload '<json>'] "
@@ -2417,6 +2460,7 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "issue": _handle_issue,
     "member": _handle_member,
     "session": _handle_session,
+    "sessions": _handle_sessions,
     "channel": _handle_channel,
     "bus": _handle_bus,
     "monitor": _handle_monitor,

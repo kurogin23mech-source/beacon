@@ -927,6 +927,89 @@ def me_list_projects(user: dict = Depends(require_auth)):
     return result
 
 
+@app.get("/api/me/sessions")
+def me_list_sessions(
+    live_only: bool = False,
+    since_minutes: int = 5,
+    healthy_only: bool = False,
+    machine: str = "",
+    agent: str = "",
+    user: dict = Depends(require_auth),
+):
+    """Cross-project session directory for the calling user (ms-54 / e-1587).
+
+    The per-project endpoint /api/projects/{pid}/sessions answers "who in
+    *this* project is live"; what was missing was the cross-project view
+    answering "what bclaude sessions of mine are alive *anywhere* right now".
+    Without it, /beacon-dm-send had to cd into each candidate project to list
+    DM recipients, and incident diagnosis (e.g. the e-1579 heartbeat-stop
+    re-occurrence check) could not see live sessions outside the diagnostician's
+    cwd.
+
+    Same filter contract as the per-project endpoint (live_only, since_minutes,
+    healthy_only, machine, agent). Each returned row carries the project_id +
+    project_name it belongs to, so the dm picker can route the subsequent
+    `bus send --project <pid>` without an extra lookup.
+
+    Membership is enforced via db.list_projects(user_id=uid) — projects the
+    user is neither owner nor member of are excluded. Archived projects are
+    also excluded; resurrecting them is an explicit user action.
+    """
+    uid = user.get("sub")
+    if not uid:
+        raise HTTPException(status_code=401, detail="user has no sub claim")
+
+    import datetime
+    now_dt = datetime.datetime.now(datetime.timezone.utc)
+
+    items = db.list_projects(user_id=uid, include_archived=False)
+
+    all_sessions: list[dict] = []
+    for item in items:
+        pid = item.get("project_id", "")
+        if not pid:
+            continue
+        sessions = db.list_sessions(pid)
+        # Stamp project context + poll_health on every row before filtering so
+        # the consumer can disambiguate by project_id and read health without
+        # a second round-trip. Same shape as the per-project endpoint plus
+        # the new project_id / project_name fields.
+        pname = item.get("name", "")
+        for s in sessions:
+            s["project_id"] = pid
+            s["project_name"] = pname
+            s["poll_health"] = _compute_poll_health(s, now_dt)
+            s["bridge"] = bool(s.get("last_poll_at"))
+        all_sessions.extend(sessions)
+
+    def _matches(s: dict) -> bool:
+        actor = s.get("actor") or {}
+        if machine and actor.get("machine", "") != machine:
+            return False
+        if agent and actor.get("agent", "") != agent:
+            return False
+        return True
+
+    filtered = [s for s in all_sessions if _matches(s)] if (machine or agent) else all_sessions
+
+    if live_only:
+        cutoff = now_dt - datetime.timedelta(minutes=since_minutes)
+        cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        filtered = [
+            s for s in filtered
+            if (la := s.get("last_active", "")) and la >= cutoff_iso
+        ]
+
+    if healthy_only:
+        filtered = [
+            s for s in filtered
+            if s.get("poll_health", {}).get("healthy") is True
+        ]
+
+    filtered.sort(key=lambda s: s.get("last_active", ""), reverse=True)
+    return filtered
+
+
 @app.post("/api/me/machine")
 def me_upsert_machine(
     body: MeMachineUpsert, user: dict = Depends(require_auth)
