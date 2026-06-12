@@ -321,6 +321,31 @@ python3 scripts/check-branch-focus-divergence.py 2>&1
 
 このスクリプトは **block しない** (= session-start を中断しない)。あくまで気付かせるための表示。
 
+## Step 1m: 親セッション情報の取得 (ms-67 e-1551)
+
+このセッションが `/beacon-session-fork` で立ち上げられた子セッションの場合、`.beacon/fork.json` に親 ↔ 子の紐付け情報が記録されている。これを読んで Step 3 の出力ヘッダに親情報を表示する。
+
+Bash ツールで実行 (fail-safe、ファイル無ければ silent skip):
+
+```bash
+test -f .beacon/fork.json && cat .beacon/fork.json
+```
+
+JSON が返れば parse して以下のフィールドを Step 3 で表示するために保持:
+
+- `parent_session_id`: 親セッションの sid
+- `parent_branch`: 親が乗ってた branch
+- `parent_repo_path`: 親 repo の絶対パス
+- `target_ms_id` / `target_ms_title`: この fork で取り組む対象 MS
+- `child_branch`: 自分が乗ってる branch (= `<target_ms_id>-fork-<short>`)
+- `channel_install.ok`: fork 時に親が叩いた `beacon channel install` が成功したか
+
+`channel_install.ok == false` の場合は、Step 3 ヘッダに「fork 時の channel install が失敗、自分で `beacon channel install` を打ち直してください」の警告を添える。
+
+`target_ms_id` が取れたら、それを **Step 2.9 の「次の一手」決定の最優先入力** として扱う。fork の意図は明確 (= その MS を進めるためにこの worktree を立てた) なので、session log の next-action と同等の確信度で推奨できる。
+
+この Step は **読み取り専用**。
+
 ## Step 1j: 前セッションの session log 読み込み（ms-43 e-1360）
 
 前セッション末で `/beacon-session-end` Skill が `beacon session end` で集約した session log には、**「次セッション最優先 / top of queue / 次にやること」セクションが summary 内に明文化されている**ことが多い。これは trigger より優先順位が高い (人間/AI が curate した継続意図そのもの)。
@@ -622,16 +647,17 @@ Step 3 の出力末尾に「**次の一手**」を **AI が決定的に選ぶ** 
 
 1. **未解決 Incident がある** → `/beacon-incident-report` で close + report 作成
 2. **レビュー待ち PR がある** → `/review <pr_number>`
-3. **Step 1j で抽出した session log 由来 next-action がある** → その先頭項目を推奨アクションにする。**trigger より優先**。前セッションが意図的に積んだ次の塊を見落とさないため (2026-06-09 朝に実害発生、e-1360 で構造化)。
-4. **`beacon trigger check` で active なトリガーがある** → そのトリガーの推奨アクション
-5. **アクティブ MS に未消化タスクが 1 つ以上ある**
+3. **Step 1m で .beacon/fork.json から `target_ms_id` が取れた (ms-67 e-1551)** → その MS の最優先タスクを推奨アクションにする。fork は「この MS のために worktree を立てた」という直前の明示的意図そのものなので、session log より新しい強シグナル。
+4. **Step 1j で抽出した session log 由来 next-action がある** → その先頭項目を推奨アクションにする。**trigger より優先**。前セッションが意図的に積んだ次の塊を見落とさないため (2026-06-09 朝に実害発生、e-1360 で構造化)。
+5. **`beacon trigger check` で active なトリガーがある** → そのトリガーの推奨アクション
+6. **アクティブ MS に未消化タスクが 1 つ以上ある**
    - そのうち `priority == "highest"` があればそれを最優先
    - 次に `in_progress` 状態のタスク
    - 次に `assignee` が自分 (current member) のタスク
    - それも無ければ todo 状態の先頭タスク
-6. **アクティブ MS の SPEC が無い** → `/beacon-spec <ms-id>` で SPEC 作成
-7. **アクティブ MS が無い** → 「次のマイルストーンを決めましょう」(コンサルタントモード Step 2.5 と同じ)
-8. **どれも該当しない** → 「観察モード: 直近 retro を見直すか、cleanup 作業に着手するか」
+7. **アクティブ MS の SPEC が無い** → `/beacon-spec <ms-id>` で SPEC 作成
+8. **アクティブ MS が無い** → 「次のマイルストーンを決めましょう」(コンサルタントモード Step 2.5 と同じ)
+9. **どれも該当しない** → 「観察モード: 直近 retro を見直すか、cleanup 作業に着手するか」
 
 ### 出力フォーマット
 
@@ -651,6 +677,10 @@ Step 1〜2 の結果を組み合わせて、以下のフォーマットで **テ
 ```
 Beacon: [name]
 📊 Web UI: $WEBUI_URL  ← cloud mode の場合のみ
+🔗 fork from: [target_ms_id] [target_ms_title]  ← Step 1m / .beacon/fork.json があれば
+   parent: [parent_session_id 短縮] (branch=[parent_branch], repo=[parent_repo_path basename])
+   child:  [child_branch] (この worktree)
+   ⚠ fork 時の channel install が失敗しています — `beacon channel install` を打ち直してください  ← channel_install.ok == false の場合のみ
 ---
 ⚠️  未解決 Incident: [N]件  ← e-595 / 一件でもあれば最上位に出す。無ければセクションごと省略
   - [e-id] "[title]" (op-X) — open since [created_at]

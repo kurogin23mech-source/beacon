@@ -2463,6 +2463,42 @@ except ValueError as e:
                     BEACON_JSON="$_sa_json" \
                     python3 "$COMMANDS_PY" session_attention
                 ;;
+            fork)
+                # ms-67 / e-1549: create a sibling worktree + bclaude-ready
+                # workspace for parallel work on a target milestone.
+                # ms-67 / e-1553: `fork list` sub-sub-command to enumerate
+                # active forks (used by /beacon-session-merge-back picker).
+                shift 2
+                if [[ "${1:-}" == "list" ]]; then
+                    shift
+                    _sfl_json=""
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --json) _sfl_json="1"; shift ;;
+                            *) shift ;;
+                        esac
+                    done
+                    BEACON_JSON="$_sfl_json" \
+                        python3 "$COMMANDS_PY" session_fork_list
+                else
+                    _sfork_ms_id=""
+                    _sfork_json=""
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --json) _sfork_json="1"; shift ;;
+                            ms-*)
+                                if [[ -z "$_sfork_ms_id" ]]; then
+                                    _sfork_ms_id="$1"
+                                fi
+                                shift ;;
+                            *) shift ;;
+                        esac
+                    done
+                    BEACON_SESSION_FORK_MS_ID="$_sfork_ms_id" \
+                        BEACON_JSON="$_sfork_json" \
+                        python3 "$COMMANDS_PY" session_fork
+                fi
+                ;;
             "")
                 echo "Usage: beacon session end [--summary <text>] [--session-id <id>] [--json] [--bus-origin]"
                 echo "       beacon session rescue [--json]"
@@ -2471,11 +2507,13 @@ except ValueError as e:
                 echo "       beacon session id"
                 echo "       beacon session focus \"<text>\" | --clear | --show [--json]"
                 echo "       beacon session attention --set true|false [--json]"
+                echo "       beacon session fork <ms-id> [--json]"
+                echo "       beacon session fork list [--json]"
                 echo "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"
                 ;;
             *)
                 echo "Unknown session subcommand: ${2:-}"
-                echo "Usage: beacon session [end|rescue|log|id|focus|attention]"
+                echo "Usage: beacon session [end|rescue|log|id|focus|attention|fork]"
                 ;;
         esac
         ;;
