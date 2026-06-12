@@ -117,10 +117,8 @@ beacon status --json
 
 ## Step 4: 直近の流れの提示
 
-```bash
-beacon retrospect "直近2週間"
-```
-（`/beacon-retrospect` 相当の検索 — もし重ければ簡略版として:）
+直近の動きは `/beacon-retrospect` Skill (= プロジェクト史を自然言語で問い合わせる Skill) を呼んで取得する。Skill 起動が重い局面では、簡略版として `beacon search` で同等の入力を取れる:
+
 ```bash
 beacon search "" --from $(date -v-14d +%Y-%m-%d) --limit 20
 ```

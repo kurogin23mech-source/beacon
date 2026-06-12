@@ -8722,23 +8722,72 @@ def _find_all_on_path(name: str) -> list[str]:
     return found
 
 
+def _shell_dispatched_subcommands():
+    """Parse ``bin/beacon`` for top-level and 1-level-nested case branches.
+
+    Returns set of word-tuples of subcommand labels. Some subcommands
+    (e.g., ``status`` / ``log`` / ``milestone add``) are dispatched
+    shell-side in ``bin/beacon`` rather than via the Python ``cmd_*``
+    table, so the doctor drift check has to read both surfaces.
+
+    State machine: track the current 4-space subgroup label, then group
+    12-space sub-cases under it. ``milestone|ms)`` adds both forms.
+    """
+    beacon_bin = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "bin", "beacon"
+    )
+    if not os.path.isfile(beacon_bin):
+        return set()
+    import re as _re
+    top_pat = _re.compile(r"^    ([a-z][a-zA-Z0-9|_-]*)\)")
+    sub_pat = _re.compile(r"^            ([a-z][a-zA-Z0-9|_-]*)\)")
+    cases = set()
+    cur_top_alts = []
+    try:
+        with open(beacon_bin, "r", encoding="utf-8") as fh:
+            for line in fh:
+                m = top_pat.match(line)
+                if m:
+                    alts = m.group(1).split("|")
+                    for alt in alts:
+                        cases.add((alt,))
+                    cur_top_alts = alts
+                    continue
+                m = sub_pat.match(line)
+                if m and cur_top_alts:
+                    label = m.group(1)
+                    for sub_alt in label.split("|"):
+                        for top_alt in cur_top_alts:
+                            cases.add((top_alt, sub_alt))
+    except OSError:
+        return set()
+    return cases
+
+
 def _canonical_subcommand_set():
     """Word-tuples for every known `beacon <subcmd>` invocation.
 
-    Auto-discovered from ``cmd_*`` functions in this module, plus a small
-    hardcoded list for dispatch entries that map to lambdas
-    (``version`` / ``auth_login`` / ``auth_logout`` / ``auth_status``).
+    Combines three sources for full coverage:
+    - ``cmd_*`` functions in this module (Python dispatch table)
+    - Top-level and nested case branches in ``bin/beacon`` (shell dispatch
+      — ``status`` / ``log`` etc. are not ``cmd_*`` but plain shell)
+    - Hardcoded entries for lambda-mapped dispatch keys
+      (``version`` / ``auth_login`` / ``auth_logout`` / ``auth_status``)
 
-    Adding a new ``cmd_foo`` function automatically makes ``beacon foo``
-    valid for the Skill drift check — no manual list update required.
-    This is the ms-61 / e-1570 single-source-of-truth principle.
+    Adding a new ``cmd_foo`` function or a new ``foo)`` case in
+    ``bin/beacon`` automatically makes ``beacon foo`` valid for the Skill
+    drift check — no manual list update required. This is the ms-61 /
+    e-1570 single-source-of-truth principle.
     """
     keys = set()
     for name, obj in list(globals().items()):
         if name.startswith("cmd_") and callable(obj):
             keys.add(name[4:])  # strip "cmd_"
     keys.update(["version", "auth_login", "auth_logout", "auth_status"])
-    return {tuple(k.split("_")) for k in keys}
+    result = {tuple(k.split("_")) for k in keys}
+    result.update(_shell_dispatched_subcommands())
+    return result
 
 
 def _doctor_check_skill_cli_drift(home):
@@ -8783,9 +8832,31 @@ def _doctor_check_skill_cli_drift(home):
             except OSError:
                 continue
             seen_in_file = set()  # dedupe per file
+            in_fence = False  # fenced code block state across lines
             for lineno, line in enumerate(lines, start=1):
+                # Toggle fenced state on ``` or ~~~ delimiter lines.
+                stripped = line.lstrip()
+                if stripped.startswith("```") or stripped.startswith("~~~"):
+                    in_fence = not in_fence
+                    continue
                 for m in pattern.finditer(line):
-                    words = m.group(1).split()
+                    # Require command context: in a fenced code block,
+                    # or wrapped in inline backticks. Prose like
+                    # "beacon repo root" is then ignored.
+                    if not in_fence:
+                        prefix = line[:m.start()]
+                        if prefix.count("`") % 2 == 0:
+                            continue
+                    raw_words = m.group(1).split()
+                    # Normalize: hyphenated commands act as underscored
+                    # (e.g., "workspace-cleanup" -> ["workspace", "cleanup"]).
+                    # cmd_milestone_workspace_cleanup -> ("milestone",
+                    # "workspace", "cleanup") in canonical, so the Skill
+                    # form "beacon milestone workspace-cleanup" must
+                    # normalize to the same tuple.
+                    words = []
+                    for w in raw_words:
+                        words.extend(w.split("-"))
                     matched = False
                     for i in range(len(words), 0, -1):
                         if tuple(words[:i]) in canonical:
@@ -8825,6 +8896,103 @@ def _doctor_check_skill_cli_drift(home):
     return warnings
 
 
+def _doctor_check_project_staleness():
+    """Detect when local .beacon/project.json is out of sync with cloud.
+
+    Compares local milestone / operation counts against the cloud copy.
+    Catches the ms-61 P3 case observed in fork worktrees on 2026-06-12:
+    a session sees ms-1..ms-22 locally while cloud already holds ms-43
+    onwards because ``beacon cloud pull`` was never run from this cwd.
+    The CLI surface ``beacon status`` happily returned the stale local
+    snapshot, hiding the cloud's authoritative state.
+
+    Cloud project has no top-level ``updated_at`` field on the response,
+    so we compare counts (= a proxy that captures the common drift case:
+    another session / Web UI added milestones or operations). Same counts
+    but altered state (= same N items, but renames / status changes)
+    are not detected by this check; the milestone count drift is the
+    high-value attack surface.
+
+    Returns a list of warning strings. Empty list = in sync, or skipped.
+
+    Skip cases:
+    - .beacon/project.json absent (= no project in cwd)
+    - .beacon/cloud.json absent (= local mode)
+    - Local mtime < 5 min (= obviously fresh, no network call needed)
+    - BEACON_DOCTOR_SKIP_CLOUD_SYNC=1
+    - Network / auth error fetching cloud (best-effort; doctor must
+      stay usable offline).
+    """
+    if os.environ.get("BEACON_DOCTOR_SKIP_CLOUD_SYNC") == "1":
+        return []
+
+    proj_path = os.path.join(".beacon", "project.json")
+    cloud_cfg = os.path.join(".beacon", "cloud.json")
+    if not os.path.exists(proj_path) or not os.path.exists(cloud_cfg):
+        return []  # not a cloud-mode beacon project from this cwd
+
+    import time as _time
+    try:
+        mtime = os.stat(proj_path).st_mtime
+    except OSError:
+        return []
+    age_sec = _time.time() - mtime
+
+    # AC#3 honor: threshold for "very old" warn even when counts match.
+    threshold_sec = int(os.environ.get("BEACON_DOCTOR_STALENESS_SEC", "1800"))
+
+    # Avoid network call when local activity is recent (= obviously fresh).
+    # 300s = 5 min, far below threshold_sec default 30 min.
+    if age_sec < 300:
+        return []
+
+    try:
+        client, config = _get_api_client()
+        cloud_data = client.get_project(config["project_id"])
+    except Exception:
+        return []  # offline / auth issue — doctor stays usable
+
+    try:
+        with open(proj_path, "r", encoding="utf-8") as f:
+            local_data = json.load(f)
+    except Exception:
+        return []
+
+    cloud_ms = len(cloud_data.get("milestones", []))
+    local_ms = len(local_data.get("milestones", []))
+    cloud_op = len(cloud_data.get("operations", []))
+    local_op = len(local_data.get("operations", []))
+
+    diffs = []
+    if cloud_ms != local_ms:
+        diffs.append(f"milestones: local={local_ms}, cloud={cloud_ms}")
+    if cloud_op != local_op:
+        diffs.append(f"operations: local={local_op}, cloud={cloud_op}")
+
+    if diffs:
+        return [
+            "WARN [project-stale] .beacon/project.json differs from cloud:\n"
+            + "\n".join(f"       {d}" for d in diffs)
+            + f"\n       (local mtime: {int(age_sec / 60)} min ago)\n"
+            "       Run: beacon cloud pull   (to refresh local cache)\n"
+            "       Opt-out: BEACON_DOCTOR_SKIP_CLOUD_SYNC=1"
+        ]
+
+    # Counts match but file is very old — soft warn so external writes
+    # (another session, Web UI) are noticed even when counts coincide.
+    if age_sec > threshold_sec:
+        return [
+            f"WARN [project-stale] .beacon/project.json was last touched "
+            f"{int(age_sec / 60)} minutes ago (threshold {int(threshold_sec / 60)} min).\n"
+            "       Counts match cloud, but external state changes\n"
+            "       (renames / status shifts) may have happened. Run\n"
+            "       `beacon cloud pull` if uncertain.\n"
+            "       Threshold override: BEACON_DOCTOR_STALENESS_SEC=<seconds>"
+        ]
+
+    return []
+
+
 def cmd_doctor():
     """Lightweight environment health check for Beacon.
 
@@ -8836,8 +9004,9 @@ def cmd_doctor():
       5. .beacon/cloud.json exists and has api_url set (if project is cloud-mode)
       6. Repo skills/ content matches installed ~/.claude/skills/ content
          (ms-10 e-722; only when running from a beacon source checkout).
-      7. (renumbered) Duplicate IDs (Issue #14)
+      7. Duplicate IDs (Issue #14).
       8. Skill markdown references known beacon subcommands (ms-61 / e-1570).
+      9. .beacon/project.json staleness vs cloud (ms-61 / e-1571).
 
     Only prints warnings for problems found. Exits 0 if all checks pass,
     exits 1 if at least one warning was emitted.
@@ -9079,6 +9248,16 @@ def cmd_doctor():
     # /beacon-session-end was still calling pre-e-1364).
     if os.environ.get("BEACON_DOCTOR_SKIP_SKILL_DRIFT") != "1":
         warnings.extend(_doctor_check_skill_cli_drift(home))
+
+    # ------------------------------------------------------------------ #
+    # 9. .beacon/project.json staleness vs cloud (ms-61 / e-1571)
+    # ------------------------------------------------------------------ #
+    # Detect when local project cache is out of sync with cloud — the
+    # exact P3 case observed on 2026-06-12 in this fork worktree, where
+    # `beacon status` returned 22 milestones while cloud held 67 because
+    # `beacon cloud pull` had never run from this cwd. Best-effort: skips
+    # on local mode, recent local writes (<5 min), and network errors.
+    warnings.extend(_doctor_check_project_staleness())
 
     # ------------------------------------------------------------------ #
     # Summary

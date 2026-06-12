@@ -240,7 +240,7 @@ beacon trigger check
 
 ### 1 コマンドリリースを目指す未来形
 
-将来的には `beacon release --semver patch --notes "<text>"` のような単一コマンドで、tag切り → GitHub Release → CHANGELOG 更新 → 通知トリガー発火までを 1 ステップで行うコマンドを追加する候補がある。本タスク (e-578) では Skill での opt-in パスを完成させるところまでで止め、CLI 単独コマンドは別タスクで扱う。
+将来的には、たとえば semver bump と notes を引数で渡すだけの単一 CLI コマンドで、tag 切り → GitHub Release → CHANGELOG 更新 → 通知トリガー発火までを 1 ステップで実行する経路を追加する候補がある (= `release` 系の subcommand、現状未実装)。本タスク (e-578) では Skill での opt-in パスを完成させるところまでで止め、CLI 単独コマンドは別タスクで扱う。
 
 ## 制約
 
