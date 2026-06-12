@@ -2,6 +2,54 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.33.0] - 2026-06-12
+
+- Merge pull request #137 from kurogin23mech-source/feat/ms-54-e1587-cross-project-sessions
+- feat(ms-54): cross-project session directory (e-1587)
+- Merge pull request #134 from kurogin23mech-source/ms-61-fork-4aa06a
+- Merge pull request #135 from kurogin23mech-source/fix/gitignore-iac-private-handoff
+- Merge pull request #136 from kurogin23mech-source/feat/ms-64-e1459-bus-profile-aware
+- fix(ms-61): e-1573 memo の 3 件 drift を解消、e-1363 を吸収 (e-1574)
+- feat(ms-64): channel/bus.mjs を profile-aware に書き換え + Python ↔ Node cross-lang probe test (e-1459)
+- feat(ms-61): /beacon-drift-check Skill 新規作成 (e-1572)
+- Merge remote-tracking branch 'origin/main' into ms-61-fork-4aa06a
+- feat(ms-61): beacon doctor に .beacon/project.json staleness check 追加 (e-1571)
+- chore(ms-64): gitignore で iac/ と terraform 作業ファイルを除外 (private 分離)
+- feat(ms-61): beacon doctor に Skill ↔ CLI 整合性 check 追加 (e-1570)
+- Merge pull request #133 from kurogin23mech-source/ms-64-auth-profile-aware
+- feat(ms-64): lib/auth.py profile-aware path resolution (e-1457)
+- Merge pull request #132 from kurogin23mech-source/fix/ms-67-fork-stale-cache
+- fix(ms-67): force-refresh project cache in forked worktree (e-1554 follow-up)
+- Merge pull request #131 from kurogin23mech-source/fix/ms-67-fork-project-json-symlink
+- fix(ms-67): symlink .beacon/project.json into forked worktree (e-1554)
+- Merge pull request #130 from kurogin23mech-source/ms-67-bclaude-1-worktree-fork-skill-beacon
+- feat(ms-67): fork list CLI + /beacon-session-merge-back Skill (e-1553 + e-1552)
+- feat(ms-67): session-start surfaces parent info from .beacon/fork.json (e-1551)
+- feat(ms-67): /beacon-session-fork Skill + README usage (e-1550)
+- feat(ms-67): beacon session fork — 1-command parallel worktree setup (e-1549)
+- Merge pull request #129 from kurogin23mech-source/ms-64-cli-skill-profile-ga-aws-byoc
+- Merge pull request #128 from kurogin23mech-source/fix/ms-54-bus-heartbeat-shutdown-clear
+- fix(ms-54): bus heartbeat body must always include shutdown:false (e-1518)
+- Merge pull request #127 from kurogin23mech-source/ms-62-cwd-dm-dm-discover
+- fix(ms-62): expose beacon-find-root as a Python console_script (e-1512 follow-up)
+- chore(ms-62): mint_fresh_session / find_my_bridge_claim に deprecation warning を追加 (e-1511 phase 1)
+- test(ms-62): E2E in-process tests for cloud-first identity (e-1506)
+- feat(ms-62): bclaude bootstrap + lib/session.py に server-first 経路を追加 (e-1510)
+- feat(ms-62): dm_discover server-first refactor + picker project annotation (e-1502, e-1504)
+- feat(ms-62): server identity endpoints (/api/me/projects, /machine, /heartbeat) (e-1509)
+- feat(ms-62): Skill 群の .beacon/project.json チェックを walk-up に統一 (e-1512)
+- Merge pull request #126 from kurogin23mech-source/fix/ms-43-dm-discover-bus-mjs-needle
+- fix(ms-43): dm_discover dual-needle for cross-project bridge discovery (e-1498)
+- feat(ms-65): branch/workspace 乖離 warning を session-start と pre-commit に追加 (e-1481)
+- feat(ms-65): /beacon-dispatch に Task Mode を追加 (e-1480、e-1221 吸収)
+- feat(ms-65): cwd-aware milestone start: main root → worktree, in worktree → in-place (e-1477)
+- feat(ms-65): worktree creation helper in lib/worktree.py (e-1476)
+- Merge pull request #125 from kurogin23mech-source/fix/ms-43-webui-milestones-disappear-v2-snapshot
+- fix(ms-43): rehydrate milestones from subcollection in _on_snapshot v2 broadcast (e-1473)
+- docs(release): update README/CHANGELOG for v0.32.0
+- chore(release): bump formula to 0.32.0
+- feat(ms-64): profile resolver + silent migration (e-1456)
+
 ## [v0.32.0] - 2026-06-11
 
 - Merge pull request #124 from kurogin23mech-source/fix/ms-57-e1460-per-bclaude-session-id
