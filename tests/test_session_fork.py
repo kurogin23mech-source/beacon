@@ -236,3 +236,70 @@ def test_fork_workspace_generates_short_uuid_when_none(parent_repo: Path):
     assert len(uuid2) == 6
     assert all(c in "0123456789abcdef" for c in uuid1)
     assert uuid1 != uuid2  # vanishingly unlikely to collide
+
+
+# ---------------------------------------------------------------------------
+# list_forks (e-1553)
+# ---------------------------------------------------------------------------
+
+def _make_worktree_with_fork(parent_root: Path, wt_name: str, record: dict) -> Path:
+    """Helper: stage a worktree dir with .beacon/fork.json under parent_root."""
+    wt = parent_root / ".worktrees" / wt_name
+    (wt / ".beacon").mkdir(parents=True)
+    (wt / ".beacon" / "fork.json").write_text(
+        json.dumps(record), encoding="utf-8",
+    )
+    return wt
+
+
+def test_list_forks_returns_only_fork_worktrees(parent_repo: Path):
+    """list_forks ignores worktrees without .beacon/fork.json."""
+    fork_wt = _make_worktree_with_fork(parent_repo, "ms-1-fork-aaaaaa", {
+        "target_ms_id": "ms-1",
+        "target_ms_title": "First",
+        "child_branch": "ms-1-fork-aaaaaa",
+        "parent_session_id": "sv-x",
+        "parent_branch": "main",
+        "created_at": "2026-06-12T03:00:00Z",
+    })
+    # also stage a non-fork worktree (no fork.json) — should be ignored
+    plain_wt = parent_repo / ".worktrees" / "plain-branch"
+    plain_wt.mkdir(parents=True)
+
+    porcelain = (
+        f"worktree {parent_repo}\nHEAD abc\nbranch main\n\n"
+        f"worktree {fork_wt}\nHEAD def\nbranch ms-1-fork-aaaaaa\n\n"
+        f"worktree {plain_wt}\nHEAD ghi\nbranch plain-branch\n\n"
+    )
+    runner = FakeRunner(exits=[(0, porcelain, "")])
+    forks = session.list_forks(parent_repo, runner=runner)
+    assert len(forks) == 1
+    assert forks[0]["target_ms_id"] == "ms-1"
+    assert forks[0]["child_branch"] == "ms-1-fork-aaaaaa"
+    assert forks[0]["worktree_path"] == str(fork_wt)
+
+
+def test_list_forks_empty_when_no_forks(parent_repo: Path):
+    porcelain = f"worktree {parent_repo}\nHEAD abc\nbranch main\n\n"
+    runner = FakeRunner(exits=[(0, porcelain, "")])
+    assert session.list_forks(parent_repo, runner=runner) == []
+
+
+def test_list_forks_skips_invalid_json(parent_repo: Path):
+    """A corrupt fork.json shouldn't crash the listing."""
+    wt = parent_repo / ".worktrees" / "ms-9-fork-xxxxxx"
+    (wt / ".beacon").mkdir(parents=True)
+    (wt / ".beacon" / "fork.json").write_text("not-json", encoding="utf-8")
+    porcelain = (
+        f"worktree {parent_repo}\nHEAD abc\nbranch main\n\n"
+        f"worktree {wt}\nHEAD def\nbranch ms-9-fork-xxxxxx\n\n"
+    )
+    runner = FakeRunner(exits=[(0, porcelain, "")])
+    # corrupted fork.json silently skipped, no exception
+    assert session.list_forks(parent_repo, runner=runner) == []
+
+
+def test_list_forks_git_failure_returns_empty(parent_repo: Path):
+    """If git worktree list fails (e.g. not a repo), return empty list."""
+    runner = FakeRunner(exits=[(128, "", "fatal: not a git repository")])
+    assert session.list_forks(parent_repo, runner=runner) == []

@@ -818,6 +818,7 @@ __all__ = [
     "find_my_bridge_claim",
     "get_or_mint_session",
     "fork_workspace",
+    "list_forks",
     "get_or_mint_session_via_server",
     "get_session_id",
     "mint_fresh_session",
@@ -941,3 +942,62 @@ def fork_workspace(
         "branch": branch,
         "fork_record": fork_record,
     }
+
+
+def list_forks(repo_root: Path | str, runner=None) -> list[dict]:
+    """List active fork worktrees under ``repo_root``.
+
+    A fork is identified by a worktree (anything under
+    ``<repo_root>/.worktrees/`` or any path reported by ``git worktree
+    list``) that has a ``.beacon/fork.json`` file. Returns a list of
+    dicts with the visible fields callers care about:
+
+      worktree_path / target_ms_id / target_ms_title / child_branch /
+      parent_session_id / parent_branch / created_at
+
+    Skips worktrees that don't have ``.beacon/fork.json`` so this is
+    safe to call in any repo, including ones that have non-fork
+    worktrees (e.g., ms-65 cwd-aware milestone start branches).
+
+    Worktrees that ``git`` no longer tracks (= already removed but
+    leftover dir) are filtered out via ``git worktree list``.
+    """
+    repo_root = Path(repo_root).resolve()
+    if runner is None:
+        runner = _default_worktree_runner
+
+    rc, stdout, stderr = runner(
+        ["git", "worktree", "list", "--porcelain"],
+        str(repo_root),
+    )
+    if rc != 0:
+        return []
+
+    # Parse porcelain: blocks separated by blank lines, each block has
+    # a "worktree <path>" line first.
+    wt_paths: list[Path] = []
+    for block in stdout.split("\n\n"):
+        for line in block.splitlines():
+            if line.startswith("worktree "):
+                wt_paths.append(Path(line[len("worktree "):]))
+                break
+
+    forks: list[dict] = []
+    for wt in wt_paths:
+        fj = wt / ".beacon" / "fork.json"
+        if not fj.exists():
+            continue
+        try:
+            record = json.loads(fj.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        forks.append({
+            "worktree_path": str(wt),
+            "target_ms_id": record.get("target_ms_id", ""),
+            "target_ms_title": record.get("target_ms_title", ""),
+            "child_branch": record.get("child_branch", ""),
+            "parent_session_id": record.get("parent_session_id", ""),
+            "parent_branch": record.get("parent_branch", ""),
+            "created_at": record.get("created_at", ""),
+        })
+    return forks

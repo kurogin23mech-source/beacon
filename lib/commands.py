@@ -2927,6 +2927,39 @@ def cmd_session_fork():
         print(f"  next: cd {wt} && bclaude")
 
 
+def cmd_session_fork_list():
+    """List active forked worktrees in this repo (ms-67 / e-1553).
+
+    Walks ``git worktree list`` and, for each worktree, checks for
+    ``.beacon/fork.json``. Only fork-created worktrees show up — this is
+    explicitly *not* a generic worktree listing (use ``git worktree list``
+    for that). Used by ``/beacon-session-merge-back`` (e-1552) as its
+    picker source.
+    """
+    import session as _session
+
+    json_out = os.environ.get("BEACON_JSON", "") == "1"
+    repo_root = os.getcwd()  # bin/beacon already cd'd to project root
+    forks = _session.list_forks(repo_root)
+
+    if json_out:
+        print(json.dumps(forks, ensure_ascii=False))
+        return
+
+    if not forks:
+        print("No active forks")
+        return
+
+    for fk in forks:
+        print(f"{fk['worktree_path']}")
+        print(f"  target:        {fk['target_ms_id']} {fk['target_ms_title']}")
+        print(f"  child_branch:  {fk['child_branch']}")
+        print(f"  parent_sid:    {fk['parent_session_id'] or '(unknown)'}")
+        print(f"  parent_branch: {fk['parent_branch'] or '(unknown)'}")
+        print(f"  created:       {fk['created_at']}")
+        print("")
+
+
 def _resolve_channel_root() -> "Path | None":
     """Find the directory containing channel/bus.mjs across all install paths.
 
@@ -10744,6 +10777,7 @@ if __name__ == "__main__":
         "session_focus": cmd_session_focus,
         "session_attention": cmd_session_attention,
         "session_fork": cmd_session_fork,
+        "session_fork_list": cmd_session_fork_list,
         "channel_install": cmd_channel_install,
         "channel_uninstall": cmd_channel_uninstall,
         "channel_opt_out": cmd_channel_opt_out,
