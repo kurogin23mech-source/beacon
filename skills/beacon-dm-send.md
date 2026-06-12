@@ -107,18 +107,27 @@ UserPromptSubmit hook 経由で DM event が context に inject されている�
 
 ### Step 1-send (send mode のみ)
 
-**v0.25.0 以降**: 同マシン上で動いている全 bridge を ps + lsof で列挙、各 cwd の `.beacon/cloud.json` から project_id を読み、全 project の bus directory を集約する。これで cwd 以外のプロジェクトに居る session も候補に出る。
+**v0.33.0 以降 (ms-54 / e-1587)**: サーバ側 cross-project endpoint `/api/me/sessions` を叩いて、自分が owner / member のすべてのプロジェクトの live session を一発で取得する。マシン跨ぎでも見える (= 旧 dm_discover は同マシン限定だった)。
 
-Bash ツールで実行 (`PYTHONPATH` を beacon repo root に固定する — raw-source install で site-packages に beacon_cli が無い場合の `ModuleNotFoundError` を防ぐ):
+Bash ツールで実行:
+```bash
+beacon sessions --live --healthy --since-min 5 --json
+```
+
+JSON 配列が返る。各 session row は `project_id` + `project_name` field 付き (= 後段で `bus send --project <pid>` に流す)。空 (`[]`) なら fallback へ。
+
+#### Step 1-send-a: fallback A (新 endpoint 未 deploy)
+
+`beacon: unknown command "sessions"` 等が返った場合 (= CLI が v0.33.0 未満)、旧 v0.25.0+ 経路の同マシン bridge スキャンにフォールバック:
 ```bash
 PYTHONPATH="$(dirname $(dirname $(realpath $(which beacon))))" python3 -m beacon_cli.skills_helpers.dm_discover
 ```
 
-JSON 配列が返る。各 session row は `project_id` field annotated 付き。空 (`[]`) の場合は同マシン上に cloud-mode の bridge が動いてないことを意味する → 後段の fallback に進む。
+JSON 配列が返る。各 session row は `project_id` field annotated 付き。
 
-#### Step 1-send-a: fallback (discover module 不在 or 0 件)
+#### Step 1-send-b: fallback B (cwd-scoped 最終手段)
 
-`PYTHONPATH=... python3 -m beacon_cli.skills_helpers.dm_discover` が `ModuleNotFoundError` 等で失敗、または 0 件で返った場合は、cwd の project だけ query する従来動作にフォールバック:
+新 endpoint も dm_discover も失敗または 0 件なら、cwd の project だけ query する最終 fallback:
 
 ```bash
 beacon bus directory --live --healthy --since-min 5 --json
@@ -129,14 +138,14 @@ beacon bus directory --live --healthy --since-min 5 --json
 beacon bus directory --live --since-min 5 --json
 ```
 このフォールバック発生時、ユーザーに 1 行だけ補足:
-「(true-heartbeat filter 未対応、live filter のみで listing)」
+「(cross-project listing 不可、cwd の project のみで listing)」
 
-#### Step 1-send-b: 0 件のときの fallback
+#### Step 1-send-c: 0 件のときの fallback
 
 最終的に sessions 配列が **空** の場合、ユーザーに明示警告:
 「現在 listening 中の受信先がありません。相手側で `beacon bus listen` または MCP 接続が必要です」と伝えて終了。
 
-#### Step 1-send-c: メンバー情報の取得 (best-effort cross-reference)
+#### Step 1-send-d: メンバー情報の取得 (best-effort cross-reference)
 
 Bash ツールで:
 ```bash
@@ -145,7 +154,7 @@ beacon member list --json
 
 session.actor.email がメンバーの email と一致するなら、その人の email + role を picker 行に添える。一致しないなら machine / agent のみで表示する。member list が空でもエラーにせず無視する。
 
-#### Step 1-send-d: 候補表示と選択
+#### Step 1-send-e: 候補表示と選択
 
 各 session を以下のフォーマットで表示する (helpers の `render_candidate_line` と同じ規則):
 

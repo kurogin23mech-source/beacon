@@ -303,6 +303,33 @@ class ApiClient:
         suffix = "?" + "&".join(qs) if qs else ""
         return self.get(f"/api/projects/{project_id}/sessions{suffix}")
 
+    def list_user_sessions(self, *, live_only: bool = False,
+                           since_minutes: int = 5, healthy_only: bool = False,
+                           machine: str = "", agent: str = "") -> list:
+        """List the calling user's sessions across all projects (ms-54 / e-1587).
+
+        Use ``list_sessions(project_id)`` when you know which project to query;
+        use this method when you need the cross-project view — e.g. the
+        /beacon-dm-send picker that spans projects the caller is not currently
+        cd'd into, or cross-project heartbeat watchdogs (op-6).
+
+        Each returned row carries ``project_id`` and ``project_name`` so the
+        consumer can route follow-up calls (``bus send --project <pid>``)
+        without an extra lookup.
+        """
+        qs = []
+        if live_only:
+            qs.append("live_only=true")
+            qs.append(f"since_minutes={since_minutes}")
+        if healthy_only:
+            qs.append("healthy_only=true")
+        if machine:
+            qs.append(f"machine={urllib.parse.quote(machine)}")
+        if agent:
+            qs.append(f"agent={urllib.parse.quote(agent)}")
+        suffix = "?" + "&".join(qs) if qs else ""
+        return self.get(f"/api/me/sessions{suffix}")
+
     # Session log operations (ms-57 / e-1037)
 
     def upsert_session_log(self, project_id: str, session_id: str, data: dict) -> dict:

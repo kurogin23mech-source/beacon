@@ -2517,6 +2517,51 @@ except ValueError as e:
                 ;;
         esac
         ;;
+    sessions)
+        # ms-54 / e-1587: cross-project session directory. Cwd-independent —
+        # no ensure_project here, the API resolves the calling user across
+        # all their project memberships.
+        shift || true
+        _ses_live=""
+        _ses_healthy=""
+        _ses_since_min="5"
+        _ses_machine=""
+        _ses_agent=""
+        _ses_json=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                list)         shift ;;
+                --live)       _ses_live="1"; shift ;;
+                --healthy)    _ses_healthy="1"; shift ;;
+                --since-min)  _ses_since_min="${2:-5}"; shift 2 ;;
+                --machine)    _ses_machine="${2:-}"; shift 2 ;;
+                --agent)      _ses_agent="${2:-}"; shift 2 ;;
+                --json)       _ses_json="1"; shift ;;
+                -h|--help)
+                    cat <<'EOF'
+Usage: beacon sessions [list] [--live] [--healthy] [--since-min <N>] [--machine <name>] [--agent <name>] [--json]
+
+Cross-project session directory. Lists the calling user's bclaude sessions
+across ALL projects they own or are a member of. Use this when you need
+"who is live anywhere right now" — e.g. picking a DM recipient in another
+project (/beacon-dm-send), or diagnosing a heartbeat-stop incident
+(e-1579-style) without cd-ing through each project.
+
+For "who in this project is live" use `beacon bus directory --live` instead.
+EOF
+                    exit 0
+                    ;;
+                *) shift ;;
+            esac
+        done
+        BEACON_SESSIONS_LIVE="$_ses_live" \
+            BEACON_SESSIONS_HEALTHY="$_ses_healthy" \
+            BEACON_SESSIONS_SINCE_MIN="$_ses_since_min" \
+            BEACON_SESSIONS_MACHINE="$_ses_machine" \
+            BEACON_SESSIONS_AGENT="$_ses_agent" \
+            BEACON_JSON="$_ses_json" \
+            python3 "$COMMANDS_PY" sessions_list
+        ;;
     note)
         ensure_project
         case "${2:-}" in
