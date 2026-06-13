@@ -3718,9 +3718,34 @@ def health():
 
 @app.get("/api/auth/config")
 def auth_config():
-    """Return OAuth client ID for Web UI login (no auth required)."""
-    client_id = os.environ.get("BEACON_OAUTH_CLIENT_ID", "")
-    return {"client_id": client_id}
+    """Return identity provider config for Web UI / CLI login.
+
+    Response shape depends on ``BEACON_AUTH_PROVIDER``:
+
+    - **firebase** (default, Cloud Run 既存経路):
+      ``{"provider": "firebase", "client_id": "<google-oauth-client-id>"}``
+      Existing SPA reads ``client_id`` directly for Google Identity Services。
+
+    - **cognito** (AWS GA Lambda 経路, e-1545):
+      ``{"provider": "cognito", "client_id": "<spa-client-id>",
+         "cognito_domain": "<hosted-ui-domain>", "region": "<aws-region>"}``
+      新 SPA / CLI が hosted UI redirect flow を組み立てるのに使う。
+
+    auth 不要 (= ログイン前に叩く endpoint なので)。
+    """
+    provider = _AUTH_PROVIDER
+    if provider == "cognito":
+        return {
+            "provider": "cognito",
+            "client_id": os.environ.get("BEACON_COGNITO_CLIENT_ID", ""),
+            "cognito_domain": os.environ.get("BEACON_COGNITO_HOSTED_UI_DOMAIN", ""),
+            "region": os.environ.get("AWS_REGION", "ap-northeast-1"),
+        }
+    # Firebase / Cloud Run 既存経路 (= 後方互換)
+    return {
+        "provider": "firebase",
+        "client_id": os.environ.get("BEACON_OAUTH_CLIENT_ID", ""),
+    }
 
 
 
