@@ -26,7 +26,7 @@ from starlette.responses import Response, JSONResponse
 import approved_actions as approved_actions_mod
 import core
 import envelope as envelope_mod
-import store as db  # e-1544: BEACON_STORE_BACKEND で firestore / dynamodb を切替
+import store_router as db  # e-1544: BEACON_STORE_BACKEND で firestore / dynamodb を切替
 import operations
 
 # debug=False is the default, but set explicitly to ensure stack traces are
