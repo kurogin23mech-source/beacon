@@ -1,0 +1,13 @@
+# Lambda 用 requirements — Cloud Run (= server/requirements.txt) との差分:
+#   - uvicorn[standard] を除外: Lambda は API Gateway 経由でリクエストを受け取る
+#     ため、ASGI サーバーは不要 (zip サイズと cold start を削るため除外)。
+#   - mangum を追加: API Gateway v2 イベントを ASGI に変換するアダプタ。
+#
+# Firestore backend を引き続き使うため (e-1542 段階)、google-cloud-* は
+# Cloud Run 版と同じものを残す。DynamoDB backend への切替は e-1544 で対応。
+fastapi>=0.115.0
+google-cloud-firestore>=2.19.0
+google-cloud-storage>=2.18.0
+google-auth>=2.36.0
+python-multipart>=0.0.9
+mangum>=0.18.0
