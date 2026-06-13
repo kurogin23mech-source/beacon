@@ -2,6 +2,12 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.34.1] - 2026-06-13
+
+- fix(release): rename PyPI distribution to beacon-ai
+- docs(release): update README/CHANGELOG for v0.34.0
+- chore(release): bump formula to 0.34.0
+
 ## [v0.34.0] - 2026-06-13
 
 - refactor: enforce beacon vs beacon-cloud separation principle
