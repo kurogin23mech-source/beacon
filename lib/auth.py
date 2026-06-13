@@ -75,12 +75,19 @@ def _ensure_deps():
 
 
 def _get_api_url() -> str:
-    """Get API URL from cloud.json if available."""
-    cloud_json = Path(".beacon/cloud.json")
-    if cloud_json.exists():
-        with open(cloud_json, "r", encoding="utf-8") as f:
-            return json.load(f).get("api_url") or "https://beacon-ai.dev"
-    return "https://beacon-ai.dev"
+    """Get API URL via the active profile resolution chain.
+
+    Precedence (= lib/profile.py のドキュメントに従う):
+      1. BEACON_API_URL env var
+      2. cwd .beacon/cloud.json.api_url
+      3. ~/.beacon/profiles/<active>/profile.json.api_url
+      4. DEFAULT_API_URL (= https://beacon-ai.dev)
+
+    旧版は (2) と (4) しか見ておらず、(1)(3) を完全に無視していた。
+    その結果 BEACON_PROFILE=aws-ga で profile を指定しても auth login が
+    https://beacon-ai.dev に向かう regression があった (= e-1627 検証で観測)。
+    """
+    return _active_profile().api_url
 
 
 def _load_firebase_config() -> dict:
@@ -254,10 +261,29 @@ def login_cognito(server_config: dict) -> None:
         )
         sys.exit(1)
 
-    # 1. 空きポート発見
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
+    # 1. Cognito SPA Client の callback_urls に登録されている固定ポートから
+    #    空いてるものを選ぶ。Cognito は redirect_uri の完全一致を要求するため
+    #    ランダムポートだと "redirect_uri does not match" でブロックされる
+    #    (= beacon-cloud terraform module.cognito.callback_urls 参照)。
+    candidate_ports = [5173, 8080]
+    port = None
+    for p in candidate_ports:
+        try:
+            test = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            test.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            test.bind(("127.0.0.1", p))
+            test.close()
+            port = p
+            break
+        except OSError:
+            continue
+    if port is None:
+        print(
+            f"Error: All callback ports {candidate_ports} are in use. "
+            "Stop processes listening on these ports and retry "
+            "(or add another port to Cognito's callback_urls)."
+        )
+        sys.exit(1)
     redirect_uri = f"http://localhost:{port}/"
 
     # 2. callback 受信用 listener
