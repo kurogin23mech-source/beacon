@@ -330,6 +330,156 @@ def test_apply_operation_raises_lookup_when_cloud_project_missing(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# DynamoDB backend dispatch (ms-64 e-1631)
+# ---------------------------------------------------------------------------
+
+def test_backend_cloud_when_store_router_loaded(monkeypatch):
+    """ms-64 e-1631: store_router presence is a valid cloud signal even when
+    firestore_client never gets imported (= pure-AWS Lambda build)."""
+    monkeypatch.delenv("BEACON_OPERATIONS_BACKEND", raising=False)
+    sys.modules.pop("firestore_client", None)
+    sys.modules.pop("store_router", None)
+
+    monkeypatch.setitem(sys.modules, "store_router", type("FakeRouter", (), {})())
+    assert operations._detect_backend() == "cloud"
+
+
+def test_apply_operation_routes_to_dynamodb_when_backend_dynamodb(monkeypatch):
+    """ms-64 e-1631: BEACON_STORE_BACKEND=dynamodb takes the DynamoDB whole-doc
+    apply path, bypassing v1/v2 schema dispatch (which is Firestore-only)."""
+    monkeypatch.setenv("BEACON_OPERATIONS_BACKEND", "cloud")
+    monkeypatch.setenv("BEACON_STORE_BACKEND", "dynamodb")
+
+    called: list[str] = []
+
+    def fake_dynamodb(pid, op):
+        called.append("dynamodb")
+        return op({"name": "n", "milestones": []})[1]
+
+    def fake_v1(*_a, **_kw):
+        called.append("v1")
+        return None
+
+    def fake_v2(*_a, **_kw):
+        called.append("v2")
+        return None
+
+    monkeypatch.setattr(operations, "_apply_cloud_dynamodb", fake_dynamodb)
+    monkeypatch.setattr(operations, "_apply_cloud_v1", fake_v1)
+    monkeypatch.setattr(operations, "_apply_cloud_v2", fake_v2)
+
+    result = operations.apply_operation("p-test", lambda d: (d, "ok"), actor="t")
+    assert result == "ok"
+    assert called == ["dynamodb"]  # NOT v1 or v2
+
+
+def test_apply_operation_routes_to_firestore_when_backend_unset(monkeypatch):
+    """Default (BEACON_STORE_BACKEND unset) must keep the existing Firestore
+    schema-dispatch path — DynamoDB is opt-in."""
+    monkeypatch.setenv("BEACON_OPERATIONS_BACKEND", "cloud")
+    monkeypatch.delenv("BEACON_STORE_BACKEND", raising=False)
+
+    called: list[str] = []
+
+    monkeypatch.setattr(
+        operations, "_apply_cloud_dynamodb",
+        lambda pid, op: (called.append("dynamodb"), op({})[1])[1],
+    )
+    monkeypatch.setattr(
+        operations, "_apply_cloud_v1",
+        lambda pid, op: (called.append("v1"), op({"name": "n", "milestones": []})[1])[1],
+    )
+
+    fake_db = type("FakeDb", (), {})()
+    fake_db.get_project = lambda pid: {"name": "n", "milestones": []}  # no schema_version
+    monkeypatch.setitem(sys.modules, "firestore_client", fake_db)
+
+    operations.apply_operation("p-test", lambda d: (d, "ok"), actor="t")
+    assert "dynamodb" not in called
+    assert "v1" in called
+
+
+def test_apply_cloud_dynamodb_read_op_write(monkeypatch):
+    """_apply_cloud_dynamodb performs: get_project → op(data) → save_project."""
+    store = {"p-test": {"name": "n", "milestones": [], "summary": "old"}}
+
+    def fake_get(pid):
+        return store.get(pid)
+
+    def fake_save(pid, data):
+        store[pid] = data
+
+    fake_router = type("FakeRouter", (), {})()
+    fake_router.get_project = fake_get
+    fake_router.save_project = fake_save
+    monkeypatch.setitem(sys.modules, "store_router", fake_router)
+
+    def op(data):
+        data["summary"] = "new"
+        return data, "ok-result"
+
+    result = operations._apply_cloud_dynamodb("p-test", op)
+    assert result == "ok-result"
+    assert store["p-test"]["summary"] == "new"
+
+
+def test_apply_cloud_dynamodb_raises_lookup_when_missing(monkeypatch):
+    fake_router = type("FakeRouter", (), {})()
+    fake_router.get_project = lambda pid: None
+    fake_router.save_project = lambda *a, **k: None
+    monkeypatch.setitem(sys.modules, "store_router", fake_router)
+
+    with pytest.raises(LookupError):
+        operations._apply_cloud_dynamodb("p-missing", lambda d: (d, None))
+
+
+def test_apply_cloud_dynamodb_validates_before_write(monkeypatch):
+    """Invalid project shape must not reach save_project."""
+    store = {"p-test": {"name": "n", "milestones": []}}
+    save_calls: list[dict] = []
+
+    fake_router = type("FakeRouter", (), {})()
+    fake_router.get_project = lambda pid: store.get(pid)
+    fake_router.save_project = lambda pid, data: save_calls.append(data)
+    monkeypatch.setitem(sys.modules, "store_router", fake_router)
+
+    def bad_op(data):
+        # Remove the required "name" field — core.validate_project rejects this.
+        data.pop("name", None)
+        return data, None
+
+    with pytest.raises(Exception):  # noqa: BLE001 — validate_project raises ValueError
+        operations._apply_cloud_dynamodb("p-test", bad_op)
+    assert save_calls == []  # Write must not have happened
+
+
+def test_append_changelog_uses_store_router_when_available(monkeypatch):
+    """ms-64 e-1631: when store_router is loaded (= API server context, either
+    backend), cloud sink routes through it so DynamoDB build also gets the
+    audit write."""
+    appended: list[tuple[str, dict]] = []
+
+    fake_router = type("FakeRouter", (), {})()
+    fake_router.append_changelog = lambda pid, entry: appended.append((pid, entry))
+    monkeypatch.setitem(sys.modules, "store_router", fake_router)
+    sys.modules.pop("firestore_client", None)  # ensure store_router wins
+
+    operations._append_changelog("p-test", "task.done", "tester", reason="why")
+    assert len(appended) == 1
+    assert appended[0][0] == "p-test"
+    assert appended[0][1]["op"] == "task.done"
+    assert appended[0][1]["actor"] == "tester"
+
+
+def test_append_changelog_silent_when_neither_module_loaded(monkeypatch):
+    """No cloud sink when running pure-local (no API server modules loaded)."""
+    sys.modules.pop("store_router", None)
+    sys.modules.pop("firestore_client", None)
+    # Should simply return without raising.
+    operations._append_changelog("p-test", "task.done", "tester")
+
+
+# ---------------------------------------------------------------------------
 # v1 → v2 migration (ms-tbd: Firestore 1 MiB unblock)
 # ---------------------------------------------------------------------------
 
