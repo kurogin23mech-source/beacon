@@ -2531,6 +2531,40 @@ except ValueError as e:
                 ;;
         esac
         ;;
+    profile)
+        # ms-64 / e-1461: enumerate Beacon profiles under ~/.beacon/profiles/.
+        # cwd-independent: profiles live in the user home, not the project.
+        shift || true
+        _prof_sub="${1:-list}"
+        _prof_json=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                list)     shift ;;
+                --json)   _prof_json="1"; shift ;;
+                -h|--help)
+                    cat <<'EOF'
+Usage: beacon profile list [--json]
+
+List Beacon profiles registered under ~/.beacon/profiles/. The active profile
+(per --profile / BEACON_PROFILE / cwd cloud.json) is marked with `*`. Each row
+also shows whether credentials.json is present and the resolved api_url.
+EOF
+                    exit 0
+                    ;;
+                *) shift ;;
+            esac
+        done
+        case "$_prof_sub" in
+            list|"")
+                BEACON_JSON="$_prof_json" python3 "$COMMANDS_PY" profile_list
+                ;;
+            *)
+                echo "Unknown profile subcommand: $_prof_sub"
+                echo "Usage: beacon profile list [--json]"
+                exit 2
+                ;;
+        esac
+        ;;
     sessions)
         # ms-54 / e-1587: cross-project session directory. Cwd-independent —
         # no ensure_project here, the API resolves the calling user across

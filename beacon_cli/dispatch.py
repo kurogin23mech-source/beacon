@@ -717,6 +717,19 @@ def build_parser() -> argparse.ArgumentParser:
                                       choices=["true", "false"], default="")
     p_session_attention.add_argument("--json", action="store_true")
 
+    # ---- profile (ms-64 e-1461) ----
+    # `beacon profile list` enumerates ~/.beacon/profiles/* with active marker.
+    # Mirrors bin/beacon's bash dispatch for Windows pipx parity.
+    p_profile = sub.add_parser(
+        "profile",
+        help="Beacon profile management (e-1461)",
+        add_help=False,
+    )
+    p_profile.add_argument("--help", "-h", action="store_true", dest="show_help")
+    profile_sub = p_profile.add_subparsers(dest="profile_cmd", metavar="<subcmd>")
+    p_profile_list = profile_sub.add_parser("list", add_help=False)
+    p_profile_list.add_argument("--json", action="store_true")
+
     # ---- sessions (ms-54 e-1587) ----
     # `beacon sessions` is the cross-project counterpart to `bus directory`.
     # Lists the calling user's live sessions across all their projects in
@@ -2120,11 +2133,28 @@ def _do_cloud_open(root: Path, project_id: str, no_browser: bool) -> int:
             f"{existing_id!r}; overwriting with {project_id!r}."
         )
 
+    # ms-64 / e-1461: resolve api_url via the profile resolver so cloud.json
+    # init + Web UI launch URL track the active profile (BEACON_PROFILE env or
+    # --profile flag). Falls back to beacon-ai.dev when profile.py is not
+    # available — keeps the original default behavior for fresh installs.
+    api_url = "https://beacon-ai.dev"
+    try:
+        # lib/ is on sys.path via the entry point's runtime setup, but be
+        # defensive in case this Python entry point runs before that wiring.
+        import sys as _sys
+        _lib_path = str(Path(__file__).resolve().parents[1] / "lib")
+        if _lib_path not in _sys.path:
+            _sys.path.insert(0, _lib_path)
+        import profile as _profile  # type: ignore[import-not-found]
+        api_url = _profile.resolve_active_profile().api_url
+    except Exception:
+        pass
+
     # 3. Write the cloud / config / project skeleton.
     Path(".beacon").mkdir(exist_ok=True)
     cloud_path.write_text(
         '{\n  "project_id": "' + project_id + '",\n'
-        '  "api_url": "https://beacon-ai.dev"\n}\n',
+        '  "api_url": "' + api_url + '"\n}\n',
         encoding="utf-8",
     )
     Path(".beacon/config.json").write_text(
@@ -2141,7 +2171,7 @@ def _do_cloud_open(root: Path, project_id: str, no_browser: bool) -> int:
     print(f"Bound this directory to cloud project {project_id!r}.")
 
     # 4. Launch the Web UI in the system browser unless suppressed.
-    web_url = f"https://beacon-ai.dev/?project={project_id}"
+    web_url = f"{api_url}/?project={project_id}"
     if no_browser:
         print(f"Web UI: {web_url}")
         return 0
@@ -2284,6 +2314,24 @@ def _handle_monitor(root: Path, args: argparse.Namespace) -> int:
 # every bus_X subparser is collapsed here into BEACON_BUS_PROJECT_ID which
 # commands.py:_resolve_bus_project_id consumes; cross-project sends/receives
 # become possible without flipping cwd.
+def _handle_profile(root: Path, args: argparse.Namespace) -> int:
+    if args.show_help or getattr(args, "profile_cmd", None) is None:
+        print("Usage: beacon profile list [--json]")
+        print("")
+        print("List Beacon profiles under ~/.beacon/profiles/. The active")
+        print("profile (per --profile / BEACON_PROFILE / cwd cloud.json) is")
+        print("marked with `*`.")
+        return 0 if args.show_help else 2
+
+    if args.profile_cmd == "list":
+        return _run_commands_py(root, "profile_list", {
+            "BEACON_JSON": "1" if args.json else "",
+        })
+
+    print(f"Unknown profile subcommand: {args.profile_cmd}")
+    return 2
+
+
 def _handle_sessions(root: Path, args: argparse.Namespace) -> int:
     if args.show_help:
         print("Usage: beacon sessions [list] [--live] [--healthy] "
@@ -2466,6 +2514,7 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "member": _handle_member,
     "session": _handle_session,
     "sessions": _handle_sessions,
+    "profile": _handle_profile,
     "channel": _handle_channel,
     "bus": _handle_bus,
     "monitor": _handle_monitor,

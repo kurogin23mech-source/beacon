@@ -1828,7 +1828,28 @@ let cloudWsReconnectTimer = null;
 let cloudWsPingInterval = null;
 let cloudWsReconnectAttempts = 0;
 const CLOUD_WS_RECONNECT_MAX_MS = 30000;
-const CLOUD_WS_API_HOST = 'beacon-ai.dev';
+
+// ms-64 / e-1461: api_url is resolved at runtime via the Tauri command
+// `cloud_get_api_url`, which honors BEACON_API_URL / cwd cloud.json /
+// ~/.beacon/profiles/<name>/profile.json / default precedence. Cached after
+// the first lookup to avoid a per-connect round-trip into Rust. Switching
+// profile requires an app restart, same as switching projects.
+let _cachedApiUrl = null;
+async function getApiUrl() {
+  if (_cachedApiUrl) return _cachedApiUrl;
+  try {
+    _cachedApiUrl = await invoke('cloud_get_api_url');
+  } catch (_e) {
+    _cachedApiUrl = 'https://beacon-ai.dev';
+  }
+  return _cachedApiUrl;
+}
+
+// Strip scheme to derive the WS host (wss://<host>/ws/...). Default profile
+// `https://beacon-ai.dev` → `beacon-ai.dev`. Custom https profiles work too.
+function apiUrlToWsHost(apiUrl) {
+  return apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
+}
 
 let state = {
   project: null, expanded: new Set(), lastUpdate: null, connected: false, error: null,
@@ -1988,7 +2009,9 @@ async function connectCloudWebSocket(projectId) {
     return;
   }
 
-  const url = `wss://${CLOUD_WS_API_HOST}/ws/projects/${encodeURIComponent(projectId)}?token=${encodeURIComponent(token)}`;
+  const apiUrl = await getApiUrl();
+  const wsHost = apiUrlToWsHost(apiUrl);
+  const url = `wss://${wsHost}/ws/projects/${encodeURIComponent(projectId)}?token=${encodeURIComponent(token)}`;
   let ws;
   try {
     ws = new WebSocket(url);
@@ -2337,7 +2360,9 @@ async function handleAction(e) {
 
     // ---- Tauri-specific: clipboard URL format / commands ----
     case 'copy-doc-link': {
-      const url = `https://beacon-ai.dev/?project=${state.cloudProjectId}#doc/${el.dataset.docId}`;
+      // ms-64 / e-1461: profile-aware deep link to the Web UI.
+      const apiUrl = await getApiUrl();
+      const url = `${apiUrl}/?project=${state.cloudProjectId}#doc/${el.dataset.docId}`;
       await navigator.clipboard.writeText(url);
       el.textContent = 'Copied!';
       setTimeout(() => { el.textContent = 'Copy web link'; }, 1500);

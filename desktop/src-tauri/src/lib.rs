@@ -45,6 +45,63 @@ fn start_file_watcher(app_handle: tauri::AppHandle, project_dir: &str) -> Option
 
 const DEFAULT_API_URL: &str = "https://beacon-ai.dev";
 
+/// ms-64 / e-1461: resolve api_url from the active profile so Tauri talks to
+/// whichever backend the user's CLI is currently configured against. Honors
+/// the same precedence chain as lib/profile.py's `_resolve_api_url`:
+///
+///   1. BEACON_API_URL env var
+///   2. cwd .beacon/cloud.json `api_url` field
+///   3. ~/.beacon/profiles/<BEACON_PROFILE | default>/profile.json `api_url`
+///   4. DEFAULT_API_URL
+fn resolve_api_url() -> String {
+    if let Ok(env_url) = std::env::var("BEACON_API_URL") {
+        if !env_url.is_empty() {
+            return env_url.trim_end_matches('/').to_string();
+        }
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        let cloud_json = cwd.join(".beacon").join("cloud.json");
+        if let Ok(content) = std::fs::read_to_string(&cloud_json) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(url) = json.get("api_url").and_then(|v| v.as_str()) {
+                    if !url.is_empty() {
+                        return url.trim_end_matches('/').to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    let profile_name = std::env::var("BEACON_PROFILE").unwrap_or_else(|_| "default".to_string());
+    if let Ok(home) = std::env::var("HOME") {
+        let profile_json = std::path::Path::new(&home)
+            .join(".beacon")
+            .join("profiles")
+            .join(&profile_name)
+            .join("profile.json");
+        if let Ok(content) = std::fs::read_to_string(&profile_json) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(url) = json.get("api_url").and_then(|v| v.as_str()) {
+                    if !url.is_empty() {
+                        return url.trim_end_matches('/').to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    DEFAULT_API_URL.to_string()
+}
+
+/// Tauri command exposing the active profile's api_url to the JS frontend
+/// (layer.js). Used to build WS URLs + Web deep links instead of hardcoding
+/// `beacon-ai.dev`. Returns a String so JS can `await invoke(...)` it.
+#[tauri::command]
+fn cloud_get_api_url() -> String {
+    resolve_api_url()
+}
+
 /// Find a beacon project by checking multiple sources
 fn find_project_dir() -> Option<String> {
     // 1. CLI argument: beacon-desktop /path/to/project
@@ -221,7 +278,7 @@ fn refresh_id_token() -> Option<String> {
 fn cloud_get(path: &str) -> Result<String, String> {
     let token = load_auth_token()
         .ok_or("Not authenticated. Run: beacon auth login")?;
-    let url = format!("{}{}", DEFAULT_API_URL, path);
+    let url = format!("{}{}", resolve_api_url(), path);
 
     match ureq::get(&url).set("Authorization", &format!("Bearer {}", token)).call() {
         Ok(resp) => resp.into_string().map_err(|e| format!("Read error: {}", e)),
@@ -297,7 +354,7 @@ fn cloud_list_session_logs(state: State<AppState>, limit: Option<u32>) -> Result
 fn cloud_post(path: &str) -> Result<String, String> {
     let token = load_auth_token()
         .ok_or("Not authenticated. Run: beacon auth login")?;
-    let url = format!("{}{}", DEFAULT_API_URL, path);
+    let url = format!("{}{}", resolve_api_url(), path);
     match ureq::post(&url).set("Authorization", &format!("Bearer {}", token)).set("Content-Length", "0").call() {
         Ok(resp) => resp.into_string().map_err(|e| format!("Read error: {}", e)),
         Err(ureq::Error::Status(401, _)) => {
@@ -531,7 +588,7 @@ fn cloud_diagnose() -> String {
         None => lines.push("token: None (not authenticated)".into()),
         Some(token) => {
             lines.push(format!("token: {}...", &token[..token.len().min(20)]));
-            let url = format!("{}/api/projects", DEFAULT_API_URL);
+            let url = format!("{}/api/projects", resolve_api_url());
             match ureq::get(&url).set("Authorization", &format!("Bearer {}", token)).call() {
                 Ok(resp) => match resp.into_string() {
                     Ok(body) => lines.push(format!("API OK: {}", &body[..body.len().min(200)])),
@@ -634,6 +691,7 @@ pub fn run() {
             cloud_refresh_auth_token,
             cloud_list_notes,
             cloud_list_session_logs,
+            cloud_get_api_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

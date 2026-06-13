@@ -10970,6 +10970,63 @@ def cmd_bus_directory():
         print(f"  {sid}  {ident}  last_active={last}{health_tag}")
 
 
+def cmd_profile_list():
+    """List Beacon profiles found under ~/.beacon/profiles/ (ms-64 / e-1461).
+
+    Each profile is a directory containing at least a credentials.json (created
+    by ``beacon auth login --profile <name>``) and optionally a profile.json
+    with ``api_url`` + ``backend_type`` overrides. The active profile is
+    starred so the user can confirm which one would be picked by the current
+    --profile / BEACON_PROFILE / cwd .beacon/cloud.json combination.
+
+    Output respects ``BEACON_JSON=1`` for scripting; otherwise prints a
+    human-readable list.
+    """
+    import profile as _profile  # local import: heavy module pulled lazily
+
+    try:
+        names = _profile.list_profiles()
+    except Exception as exc:
+        print(f"Error listing profiles: {exc}")
+        sys.exit(1)
+
+    # Resolve active profile name (does not require credentials to exist).
+    try:
+        active = _profile.resolve_profile_name()
+    except Exception:
+        active = ""
+
+    if os.environ.get("BEACON_JSON", "") == "1":
+        rows = []
+        for name in names:
+            try:
+                p = _profile.load_profile(name)
+                rows.append({
+                    "name": name,
+                    "api_url": p.api_url,
+                    "credentials_exists": p.credentials_exist(),
+                    "active": name == active,
+                })
+            except Exception:
+                rows.append({"name": name, "active": name == active})
+        print(json.dumps(rows, ensure_ascii=False))
+        return
+
+    if not names:
+        print("(no profiles found)")
+        print("Tip: `beacon auth login` will create the 'default' profile.")
+        return
+
+    for name in names:
+        marker = "*" if name == active else " "
+        try:
+            p = _profile.load_profile(name)
+            creds = "✓" if p.credentials_exist() else " "
+            print(f" {marker} {creds} {name:<20} {p.api_url}")
+        except Exception:
+            print(f" {marker}   {name:<20} (could not load)")
+
+
 def cmd_sessions_list():
     """Cross-project session directory (ms-54 / e-1587).
 
@@ -11159,6 +11216,7 @@ if __name__ == "__main__":
         "bus_status": cmd_bus_status,
         "bus_directory": cmd_bus_directory,
         "sessions_list": cmd_sessions_list,
+        "profile_list": cmd_profile_list,
         "bus_budget_grant": cmd_bus_budget_grant,
         "bus_budget_show": cmd_bus_budget_show,
         "bus_budget_clear": cmd_bus_budget_clear,
