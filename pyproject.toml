@@ -23,7 +23,11 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "beacon"
+# PyPI distribution name. ms-64: PyPI 上の "beacon" / "beacon-cli" は無関係の
+# 他作者が先に取得済だったため、我々の公開チャネル (= beacon-ai.dev) と整合する
+# "beacon-ai" を採用。内部の CLI 実体名は引き続き "beacon" (= 利用者は
+# `pipx install beacon-ai` の後に `beacon --help` で叩く形)。
+name = "beacon-ai"
 # Sourced dynamically from lib/commands.py:__version__ to keep a single source
 # of truth. Update there to bump the version.
 dynamic = ["version"]

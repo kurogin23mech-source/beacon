@@ -391,7 +391,7 @@ receipt (3 段):
 | sent ✓ / delivered ✗ / opened ✗ | 受信側 bridge が /unread を fetch していない | 相手の `bridge=True` を directory で確認、`channel install` 漏れの可能性 |
 | sent ✓ / delivered ✓ / opened ✗ | bridge は受け取ったが filter chain で drop or mcp.notification 失敗 | 相手の channel allowlist (`BEACON_CHANNEL_ALLOWLIST`) と DM の channel が一致しているか、受信側 session が allowlist に入っているか確認 |
 | sent ✓ / delivered ✓ / opened ✓ | 完全到達 | 完了 |
-| sent ✓ / delivered ✗ / opened ✗ かつ 8 秒待っても変化なし | 受信側 bridge が **古い beacon バージョン** で ack 経路を持たない可能性 | 相手の `actor.agent.version` を directory で確認 (v0.26.0 未満は receipt 非対応)、`pip install --upgrade beacon-cli` を促す |
+| sent ✓ / delivered ✗ / opened ✗ かつ 8 秒待っても変化なし | 受信側 bridge が **古い beacon バージョン** で ack 経路を持たない可能性 | 相手の `actor.agent.version` を directory で確認 (v0.26.0 未満は receipt 非対応)、`pipx upgrade beacon-ai` (PyPI 名は beacon-ai、内部 CLI は beacon) または `brew upgrade beacon` を促す |
 
 これにより送信者は「届いていない / 開封されていない」を **送信時に即時** に検知できる (e-1348 設計の本質的価値)。
 
