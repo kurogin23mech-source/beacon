@@ -763,34 +763,50 @@ def replace_project(
         with _get_mock_lock():
             db.save_project(project_id, new_data)
     else:
-        # Cloud: dispatch by schema version. v2 projects store milestones in
-        # a subcollection, so a naive whole-doc set would (a) put the giant
-        # milestones[] back into the meta doc, re-creating the 1 MiB cap
-        # problem we just solved, and (b) leave stale subcollection docs.
-        # _replace_cloud_v2 handles the decomposition transparently.
-        import firestore_client as db  # type: ignore[import-not-found]
-        from google.cloud import firestore  # type: ignore[import-not-found]
+        # Cloud: dispatch by store backend then by schema version.
+        #
+        # ms-64 e-1627 注: Firestore (Cloud Run) 経路と DynamoDB (AWS Lambda)
+        # 経路の両方を扱う。store_router 経由でバックエンドが切替わる仕組みは
+        # 既存だが、operations.py には Firestore 固有の transaction / collection
+        # 経路 (= db.get_db().collection().document()) が残っており、
+        # DynamoDB ではそれらが存在しないので別経路で処理する。
+        store_backend = os.environ.get("BEACON_STORE_BACKEND", "firestore").lower()
 
-        client = db.get_db()
-        doc_ref = client.collection(db.COLLECTION).document(project_id)
-
-        # Peek at schema version (single doc read, cheap) before deciding path.
-        existing_meta = db.get_project(project_id)
-        existing_schema = (
-            get_schema_version(existing_meta) if existing_meta else SCHEMA_V1_LEGACY
-        )
-
-        if existing_schema == SCHEMA_V2_BETA:
-            _replace_cloud_v2(project_id, new_data)
+        if store_backend == "dynamodb":
+            # DynamoDB: トランザクションは PK の put_item に集約される
+            # (= DynamoDB は単一 PK 内の put_item が atomic)。v2 schema の
+            # subcollection 分解は dynamodb_client.save_project が PK のみで
+            # サブコレクションは別テーブルに置く設計なので、whole-doc set で
+            # 安全に動く (= Firestore 版で問題だった 1 MiB cap 制約は
+            # DynamoDB に存在しない、subcollection 元の document は別テーブル
+            # で寿命を独立に持つ)。
+            import store_router as db  # type: ignore[import-not-found]
+            db.save_project(project_id, new_data)
         else:
-            @firestore.transactional
-            def _txn(transaction):
-                # We still read so we have a transactional read-write pair;
-                # whether the doc exists is informational only for replace.
-                doc_ref.get(transaction=transaction)
-                transaction.set(doc_ref, new_data)
+            # Firestore: 既存の transaction + schema version dispatch 経路
+            import firestore_client as db  # type: ignore[import-not-found]
+            from google.cloud import firestore  # type: ignore[import-not-found]
 
-            _txn(client.transaction())
+            client = db.get_db()
+            doc_ref = client.collection(db.COLLECTION).document(project_id)
+
+            # Peek at schema version (single doc read, cheap) before deciding path.
+            existing_meta = db.get_project(project_id)
+            existing_schema = (
+                get_schema_version(existing_meta) if existing_meta else SCHEMA_V1_LEGACY
+            )
+
+            if existing_schema == SCHEMA_V2_BETA:
+                _replace_cloud_v2(project_id, new_data)
+            else:
+                @firestore.transactional
+                def _txn(transaction):
+                    # We still read so we have a transactional read-write pair;
+                    # whether the doc exists is informational only for replace.
+                    doc_ref.get(transaction=transaction)
+                    transaction.set(doc_ref, new_data)
+
+                _txn(client.transaction())
 
     _append_changelog(
         project_id, "project.replace", actor,
