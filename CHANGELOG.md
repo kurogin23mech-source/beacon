@@ -2,6 +2,43 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.34.0] - 2026-06-13
+
+- refactor: enforce beacon vs beacon-cloud separation principle
+- feat(ms-64): apply_operation routes to DynamoDB when backend=dynamodb (e-1631)
+- feat(ms-64): prompt profile choice at init / first push when multi-login (e-1633)
+- Merge pull request #150 from kurogin23mech-source/ms-64-e1628-spa-cognito
+- feat(ms-64): SPA に Cognito Hosted UI redirect flow を追加 (e-1628)
+- Merge pull request #149 from kurogin23mech-source/ms-64-cloud-json-profile-auto-switch
+- feat(ms-64): cwd cloud.json.profile で自動 profile 切替 (e-1627 follow-up)
+- Merge pull request #148 from kurogin23mech-source/ms-64-load-project-consistent-dynamodb
+- fix(ms-64): load_project_consistent も DynamoDB に対応 (e-1627 follow-up)
+- Merge pull request #147 from kurogin23mech-source/ms-64-e1627-replace-project-dynamodb
+- fix(ms-64): cloud push (replace_project) を DynamoDB バックエンドに対応 + auth profile precedence (e-1627 follow-up)
+- Merge pull request #146 from kurogin23mech-source/ms-64-e1627-cli-cognito-login
+- feat(ms-64): CLI Cognito login flow + /api/auth/config provider switch (e-1627)
+- Merge pull request #145 from kurogin23mech-source/ms-64-e1545-cognito-auth
+- Merge pull request #144 from kurogin23mech-source/ms-64-e1544-phase2-documents-retros
+- feat(ms-64): Cognito User Pool JWT verification path (e-1545)
+- feat(ms-64): DynamoDB bus + sessions + envelopes CRUD (e-1544 Phase 3+4)
+- feat(ms-64): DynamoDB documents + retros CRUD (e-1544 Phase 2)
+- Merge pull request #143 from kurogin23mech-source/ms-64-e1618-server-lib-drift-check
+- feat(ms-64): server/ ↔ lib/ name collision drift check (e-1618)
+- Merge pull request #142 from kurogin23mech-source/ms-64-e1544-phase1-projects-users
+- Merge branch 'main' into ms-64-e1544-phase1-projects-users
+- Merge pull request #141 from kurogin23mech-source/hotfix-ms-64-store-name-collision
+- hotfix(ms-64): rename server/store.py to store_router (e-1544 follow-up)
+- feat(ms-64): DynamoDB projects + users CRUD (e-1544 Phase 1)
+- Merge pull request #140 from kurogin23mech-source/ms-64-e1544-store-router-scaffold
+- feat(ms-64): store.py router + dynamodb_client skeleton (e-1544 Phase 0)
+- Merge pull request #139 from kurogin23mech-source/ms-64-e1542-lambda-entry
+- feat(ms-64): Lambda entry point + zip build script (e-1542 Phase A)
+- Merge pull request #138 from kurogin23mech-source/feat/ms-64-e1458-profile-url-token-unification
+- feat(ms-64): profile-aware desktop + Web UI launch URL + profile list CLI (e-1461)
+- feat(ms-64): route api_url + token through profile resolver (e-1458)
+- docs(release): update README/CHANGELOG for v0.33.0
+- chore(release): bump formula to 0.33.0
+
 ## [v0.33.0] - 2026-06-12
 
 - Merge pull request #137 from kurogin23mech-source/feat/ms-54-e1587-cross-project-sessions
