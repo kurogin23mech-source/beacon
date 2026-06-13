@@ -23,8 +23,10 @@ from profile import (  # noqa: E402
     MIGRATION_MARKER_NAME,
     Profile,
     ProfileError,
+    list_logged_in_profiles,
     list_profiles,
     load_profile,
+    prompt_choose_profile,
     resolve_active_profile,
     resolve_profile_name,
     validate_profile_name,
@@ -365,3 +367,108 @@ class TestListProfiles:
         (profiles_root / "default").mkdir()
         (profiles_root / "stray-file.txt").write_text("noise")
         assert list_profiles() == ["default"]
+
+
+# --------------------------------------------------------------------------
+# list_logged_in_profiles (ms-64 e-1633)
+# --------------------------------------------------------------------------
+
+
+def _make_profile_with_creds(home: Path, name: str) -> None:
+    pdir = home / "profiles" / name
+    pdir.mkdir(parents=True)
+    (pdir / "credentials.json").write_text('{"id_token": "stub"}')
+
+
+def _make_profile_dir_only(home: Path, name: str) -> None:
+    (home / "profiles" / name).mkdir(parents=True)
+
+
+class TestListLoggedInProfiles:
+    def test_empty_when_nothing_logged_in(self, _isolated_beacon_home):
+        assert list_logged_in_profiles() == []
+
+    def test_returns_only_profiles_with_credentials(self, _isolated_beacon_home):
+        _make_profile_with_creds(_isolated_beacon_home, "aws-ga")
+        _make_profile_with_creds(_isolated_beacon_home, "default")
+        _make_profile_dir_only(_isolated_beacon_home, "stale")  # no credentials.json
+        assert list_logged_in_profiles() == ["aws-ga", "default"]
+
+    def test_legacy_credentials_counts_as_default(self, _isolated_beacon_home):
+        (_isolated_beacon_home / "credentials.json").write_text('{"id_token": "legacy"}')
+        assert list_logged_in_profiles() == ["default"]
+
+    def test_legacy_plus_explicit_profile_no_duplicate(self, _isolated_beacon_home):
+        _make_profile_with_creds(_isolated_beacon_home, "default")
+        (_isolated_beacon_home / "credentials.json").write_text('{"id_token": "legacy"}')
+        # default should appear once even when both layouts coexist
+        assert list_logged_in_profiles() == ["default"]
+
+
+# --------------------------------------------------------------------------
+# prompt_choose_profile (ms-64 e-1633)
+# --------------------------------------------------------------------------
+
+
+class TestPromptChooseProfile:
+    def test_empty_returns_default(self):
+        assert prompt_choose_profile([]) == DEFAULT_PROFILE
+
+    def test_single_skips_prompt(self):
+        # input_fn should never be called when only 1 candidate
+        def boom(prompt):
+            raise AssertionError(f"input_fn was called: {prompt!r}")
+        assert prompt_choose_profile(["only-one"], input_fn=boom, output_fn=lambda *_: None) == "only-one"
+
+    def test_numeric_selection(self):
+        chosen = prompt_choose_profile(
+            ["aws-ga", "default"],
+            input_fn=lambda _prompt: "2",
+            output_fn=lambda *_: None,
+        )
+        assert chosen == "default"
+
+    def test_name_selection(self):
+        chosen = prompt_choose_profile(
+            ["aws-ga", "default"],
+            input_fn=lambda _prompt: "aws-ga",
+            output_fn=lambda *_: None,
+        )
+        assert chosen == "aws-ga"
+
+    def test_empty_input_uses_default_arg(self):
+        chosen = prompt_choose_profile(
+            ["aws-ga", "default"],
+            input_fn=lambda _prompt: "",
+            output_fn=lambda *_: None,
+            default="default",
+        )
+        assert chosen == "default"
+
+    def test_empty_input_falls_back_to_first_when_default_invalid(self):
+        chosen = prompt_choose_profile(
+            ["aws-ga", "default"],
+            input_fn=lambda _prompt: "",
+            output_fn=lambda *_: None,
+            default="not-a-candidate",
+        )
+        assert chosen == "aws-ga"
+
+    def test_invalid_input_falls_back_to_default(self):
+        chosen = prompt_choose_profile(
+            ["aws-ga", "default"],
+            input_fn=lambda _prompt: "bogus",
+            output_fn=lambda *_: None,
+        )
+        assert chosen == "aws-ga"  # default = candidates[0] when no default passed
+
+    def test_eof_treated_as_empty_input(self):
+        def raise_eof(_prompt):
+            raise EOFError()
+        chosen = prompt_choose_profile(
+            ["aws-ga", "default"],
+            input_fn=raise_eof,
+            output_fn=lambda *_: None,
+            default="default",
+        )
+        assert chosen == "default"

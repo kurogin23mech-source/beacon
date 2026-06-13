@@ -290,3 +290,75 @@ def list_profiles() -> list[str]:
     if not profiles_root.exists():
         return []
     return sorted([p.name for p in profiles_root.iterdir() if p.is_dir()])
+
+
+def list_logged_in_profiles() -> list[str]:
+    """Return profile names that have a usable credentials.json on disk, sorted.
+
+    A profile counts as "logged in" if either:
+      - ~/.beacon/profiles/<name>/credentials.json exists, OR
+      - name == DEFAULT_PROFILE and the legacy ~/.beacon/credentials.json
+        exists (silent migration has not run yet but the user IS logged in)
+
+    Used by cmd_init / first-cloud-push to decide whether to ask the user
+    "which backend should this project use?". Single result = no prompt.
+    """
+    out: list[str] = []
+    profiles_root = _beacon_home() / "profiles"
+    if profiles_root.exists():
+        for p in sorted(profiles_root.iterdir()):
+            if p.is_dir() and (p / "credentials.json").exists():
+                out.append(p.name)
+    if DEFAULT_PROFILE not in out and _legacy_credentials_path().exists():
+        out.append(DEFAULT_PROFILE)
+    return sorted(out)
+
+
+def prompt_choose_profile(
+    candidates: list[str],
+    *,
+    input_fn=None,
+    output_fn=print,
+    default: Optional[str] = None,
+) -> str:
+    """Interactively pick a profile from candidates.
+
+    Returns one of:
+      - candidates[0] if len(candidates) == 1
+      - DEFAULT_PROFILE if candidates is empty
+      - the user-selected name otherwise (validated against candidates)
+
+    Empty input picks `default` (or candidates[0] if default not given).
+    Numeric input picks by 1-based index. Invalid input falls back to default.
+
+    input_fn / output_fn are injectable for tests; default uses real stdin / print.
+    """
+    if not candidates:
+        return DEFAULT_PROFILE
+    if len(candidates) == 1:
+        return candidates[0]
+
+    default = default if default in candidates else candidates[0]
+
+    if input_fn is None:
+        input_fn = input
+
+    output_fn("Multiple Beacon profiles are logged in:")
+    for i, name in enumerate(candidates, 1):
+        marker = " (default)" if name == default else ""
+        output_fn(f"  {i}. {name}{marker}")
+    try:
+        raw = input_fn(f"Which profile should this project use? [{default}]: ")
+    except EOFError:
+        raw = ""
+    raw = (raw or "").strip()
+    if not raw:
+        return default
+    if raw.isdigit():
+        idx = int(raw) - 1
+        if 0 <= idx < len(candidates):
+            return candidates[idx]
+    if raw in candidates:
+        return raw
+    output_fn(f"Invalid choice {raw!r}, using {default}")
+    return default

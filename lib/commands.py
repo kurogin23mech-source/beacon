@@ -462,6 +462,62 @@ def _install_skills():
         print(f"Installed skills: {', '.join(sorted(installed))}")
 
 
+def _maybe_prompt_initial_profile() -> Optional[str]:
+    """ms-64 e-1633: When the user has auth-logged into >= 2 Beacon backends
+    and has not already committed this cwd to a profile, ask once which one
+    this project should target. Returns the chosen profile name (or None if
+    the prompt should be skipped — caller falls back to silent default).
+
+    Skip rules (all silent, no prompt):
+      - --profile / BEACON_PROFILE explicitly set (= user already chose)
+      - .beacon/cloud.json already has a `profile` field (= prior choice persisted)
+      - len(logged_in_profiles) < 2 (= no ambiguity)
+      - stdin is not a TTY (= hook / CI / pipe — don't block on input)
+    """
+    if os.environ.get("BEACON_PROFILE"):
+        return None
+    cloud_path = _get_cloud_config_path()
+    if os.path.exists(cloud_path):
+        try:
+            with open(cloud_path, "r", encoding="utf-8") as f:
+                existing = json.load(f) or {}
+            if existing.get("profile"):
+                return None
+        except Exception:
+            pass
+    try:
+        import profile as _profile  # type: ignore[import-not-found]
+        candidates = _profile.list_logged_in_profiles()
+    except Exception:
+        return None
+    if len(candidates) < 2:
+        return None
+    if not sys.stdin.isatty():
+        return None
+    try:
+        return _profile.prompt_choose_profile(candidates)
+    except Exception:
+        return None
+
+
+def _persist_initial_profile_choice(profile_name: str) -> None:
+    """Write {"profile": <name>} to .beacon/cloud.json so that all subsequent
+    commands in this cwd resolve to that profile (= cwd-based auto-switch)."""
+    cloud_path = _get_cloud_config_path()
+    os.makedirs(os.path.dirname(cloud_path) or ".", exist_ok=True)
+    existing: dict = {}
+    if os.path.exists(cloud_path):
+        try:
+            with open(cloud_path, "r", encoding="utf-8") as f:
+                existing = json.load(f) or {}
+        except Exception:
+            existing = {}
+    existing["profile"] = profile_name
+    with open(cloud_path, "w", encoding="utf-8") as f:
+        json.dump(existing, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+
 def cmd_init():
     name = os.environ.get("BEACON_NAME", "")
     objective = os.environ.get("BEACON_OBJECTIVE", "")
@@ -473,6 +529,12 @@ def cmd_init():
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")
     print(f"Created {pf}")
+
+    chosen = _maybe_prompt_initial_profile()
+    if chosen:
+        _persist_initial_profile_choice(chosen)
+        print(f"Profile pinned for this project: {chosen}")
+
     print("Next: beacon milestone add")
 
 
@@ -5813,9 +5875,18 @@ def _get_cloud_config_path():
 
 def _ensure_cloud_config():
     config_path = _get_cloud_config_path()
+    existing: dict = {}
     if os.path.exists(config_path):
-        with open(config_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                existing = json.load(f) or {}
+        except Exception:
+            existing = {}
+        # Fast path: fully materialized cloud.json (= post-first-push state).
+        if existing.get("project_id"):
+            return existing
+        # Partial cloud.json (e.g. init wrote {"profile": <name>} only) falls
+        # through to the materialization step below, preserving existing fields.
 
     data = load_project()
     name = data.get("name", "project")
@@ -5824,21 +5895,35 @@ def _ensure_cloud_config():
     h = hashlib.md5(os.path.abspath(get_project_file()).encode()).hexdigest()[:6]
     project_id = f"{slug}-{h}"
 
+    # ms-64 e-1633: if profile wasn't pinned at init time (= first push without
+    # a prior `beacon init` having materialized a profile field), prompt once
+    # when the user has multi-account auth state. Skip silently if the choice
+    # was already made (existing.profile), explicitly set (env/--profile), or
+    # the env can't take a prompt (non-TTY).
+    profile_name = existing.get("profile")
+    if not profile_name:
+        chosen = _maybe_prompt_initial_profile()
+        if chosen:
+            profile_name = chosen
+            # Persist immediately so _resolve_active_api_url below sees it
+            # via the cwd cloud.json.profile precedence rule (lib/profile._resolve_api_url).
+            _persist_initial_profile_choice(chosen)
+        else:
+            try:
+                import profile as _profile  # type: ignore[import-not-found]
+                profile_name = _profile.resolve_active_profile().name
+            except Exception:
+                profile_name = "default"
+
     api_url = _resolve_active_api_url()
-    # ms-64 e-1627: cwd cloud.json に profile 名も書く。これで以後の
-    # `cd <project>` だけで cloud.json.profile → profile.json.api_url +
-    # profile.json.credentials 経路に自動で切り替わる (= AWS CLI / gcloud と
-    # 同じ「project ディレクトリに居ればその profile」モデル)。
-    try:
-        import profile as _profile  # type: ignore[import-not-found]
-        profile_name = _profile.resolve_active_profile().name
-    except Exception:
-        profile_name = "default"
     config = {
         "project_id": project_id,
         "api_url": api_url,
         "profile": profile_name,
     }
+    # Preserve any unknown fields a partial cloud.json may have already carried.
+    for k, v in existing.items():
+        config.setdefault(k, v)
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
         f.write("\n")
