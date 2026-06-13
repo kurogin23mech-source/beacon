@@ -1911,8 +1911,69 @@ async function loadAuthConfig() {
     if (res.ok) {
       const config = await res.json();
       state.auth.clientId = config.client_id;
+      // e-1628: cognito provider なら hosted UI redirect flow を組み立てる
+      // ための追加メタ (= cognito_domain) を受け取る。firebase 経路では
+      // 値が無い (undefined) ので分岐ロジックがそのまま既存挙動になる。
+      state.auth.provider = config.provider || 'firebase';
+      state.auth.cognitoDomain = config.cognito_domain || '';
+      state.auth.region = config.region || '';
     }
   } catch (e) {}
+}
+
+// e-1628: Cognito Hosted UI からのコールバックで ?code= がついた状態で
+// SPA がロードされたとき、code を Cognito /oauth2/token に交換して
+// id_token を取り出し localStorage に保存する。
+// SPA は redirect_uri に PKCE なしの code flow (= Cognito SPA Client が
+// generate_secret=false で立っている前提) を使う。
+async function handleCognitoCallback() {
+  if (state.auth.provider !== 'cognito') return false;
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get('code');
+  if (!code) return false;
+  if (!state.auth.cognitoDomain || !state.auth.clientId) {
+    console.error('[beacon] cognito callback but config missing', state.auth);
+    return false;
+  }
+  // redirect_uri は code 発行時と完全一致でなければ Cognito が拒否するので、
+  // 現在の origin + path を埋め直す (query string は除去)。
+  const redirectUri = window.location.origin + window.location.pathname;
+  try {
+    const body = new URLSearchParams({
+      grant_type: 'authorization_code',
+      client_id: state.auth.clientId,
+      code,
+      redirect_uri: redirectUri,
+    });
+    const res = await fetch(`https://${state.auth.cognitoDomain}/oauth2/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+    if (!res.ok) {
+      console.error('[beacon] cognito token exchange failed', res.status, await res.text());
+      return false;
+    }
+    const tokens = await res.json();
+    const idToken = tokens.id_token;
+    if (!idToken) {
+      console.error('[beacon] cognito response missing id_token', tokens);
+      return false;
+    }
+    let payload;
+    try { payload = decodeJwtPayload(idToken); }
+    catch (e) { console.error('[beacon] cognito id_token decode failed', e); return false; }
+    state.auth.token = idToken;
+    state.auth.email = payload.email || '';
+    localStorage.setItem('beacon_token', idToken);
+    localStorage.setItem('beacon_email', state.auth.email);
+    // URL から ?code= を消す (= リロードで重複交換を避ける + 履歴汚染防止)
+    window.history.replaceState({}, '', redirectUri);
+    return true;
+  } catch (e) {
+    console.error('[beacon] cognito callback error', e);
+    return false;
+  }
 }
 
 // ms-44 e-1247: Google ID tokens are base64url-encoded (RFC 7515), which uses
@@ -1959,17 +2020,38 @@ function handleCredentialResponse(response) {
 
 function renderLogin() {
   const app = document.getElementById('app');
+  // e-1628: provider が cognito のときはサインインボタンを Cognito Hosted UI
+  // へのリダイレクトに置き換える。
+  const cognitoLoginUrl = (state.auth.provider === 'cognito'
+                           && state.auth.cognitoDomain
+                           && state.auth.clientId)
+    ? `https://${state.auth.cognitoDomain}/login?`
+      + `client_id=${encodeURIComponent(state.auth.clientId)}`
+      + `&response_type=code`
+      + `&scope=${encodeURIComponent('openid email profile')}`
+      + `&redirect_uri=${encodeURIComponent(window.location.origin + window.location.pathname)}`
+    : '';
+
   app.innerHTML = `
     <div class="login-screen fade-in">
       <h1 class="login-logo">Beacon</h1>
       <p class="login-tagline">Where humans and AI are bound together.</p>
       <p class="login-note">Beacon is an AI-driven project monitoring tool.<br>Track milestones, tasks, and commits in real time.</p>
       <div class="login-divider"></div>
-      <div id="g_id_signin"></div>
+      ${cognitoLoginUrl
+        ? `<a class="cognito-signin-button" href="${cognitoLoginUrl}"
+             style="display:inline-block;padding:10px 24px;background:#4285f4;
+                    color:#fff;border-radius:6px;text-decoration:none;
+                    font-weight:600;font-size:14px;">
+             Sign in with Google
+           </a>`
+        : `<div id="g_id_signin"></div>`}
       <div class="login-note">Sign in to view project telemetry</div>
       <div class="login-note"><a href="https://beacon-ai.dev/privacy">Privacy Policy</a> · <a href="https://beacon-ai.dev/terms">Terms of Service</a></div>
     </div>
   `;
+  // Cognito 経路では GIS の初期化はせず、上記 <a> リンクから直接 redirect する
+  if (state.auth.provider === 'cognito') return;
   if (state.auth.clientId && window.google?.accounts) {
     google.accounts.id.initialize({
       client_id: state.auth.clientId,
@@ -4886,7 +4968,17 @@ async function loadServerVersion() {
 async function init() {
   loadServerVersion();  // non-blocking
   await loadAuthConfig();
+  // e-1628: Cognito Hosted UI からの戻り (?code=) を最初に処理する。
+  // 成功すれば state.auth.token がセットされて以降の isAuthenticated() が true。
+  if (state.auth.provider === 'cognito') {
+    await handleCognitoCallback();
+  }
   if (!isAuthenticated()) {
+    // Cognito 経路では GIS を待つ必要なし、直接 renderLogin する
+    if (state.auth.provider === 'cognito') {
+      renderLogin();
+      return;
+    }
     function waitForGsi() {
       if (window.google?.accounts) renderLogin();
       else setTimeout(waitForGsi, 100);
