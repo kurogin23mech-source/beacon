@@ -1823,6 +1823,20 @@ find_beacon_root() {
 # the parent repo's HEAD after the relocate below.
 export BEACON_INVOCATION_CWD="$PWD"
 
+# ms-64 / e-1458: top-level `--profile <name>` flag. Parsed early so it
+# affects all subcommands uniformly. Exported as BEACON_PROFILE which the
+# Python-side profile resolver (lib/profile.py) honors above cwd cloud.json
+# and below an explicit `--profile` passed to a Python entry point. The flag
+# is repeatable but only the last value wins.
+while [ "${1:-}" = "--profile" ]; do
+    if [ -z "${2:-}" ]; then
+        echo "Error: --profile requires a value (profile name)" >&2
+        exit 2
+    fi
+    export BEACON_PROFILE="$2"
+    shift 2
+done
+
 # Relocate to the project root before dispatch. `setup`/`init` operate on the
 # current directory by design, so they are exempt.
 case "${1:-}" in
@@ -2514,6 +2528,40 @@ except ValueError as e:
             *)
                 echo "Unknown session subcommand: ${2:-}"
                 echo "Usage: beacon session [end|rescue|log|id|focus|attention|fork]"
+                ;;
+        esac
+        ;;
+    profile)
+        # ms-64 / e-1461: enumerate Beacon profiles under ~/.beacon/profiles/.
+        # cwd-independent: profiles live in the user home, not the project.
+        shift || true
+        _prof_sub="${1:-list}"
+        _prof_json=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                list)     shift ;;
+                --json)   _prof_json="1"; shift ;;
+                -h|--help)
+                    cat <<'EOF'
+Usage: beacon profile list [--json]
+
+List Beacon profiles registered under ~/.beacon/profiles/. The active profile
+(per --profile / BEACON_PROFILE / cwd cloud.json) is marked with `*`. Each row
+also shows whether credentials.json is present and the resolved api_url.
+EOF
+                    exit 0
+                    ;;
+                *) shift ;;
+            esac
+        done
+        case "$_prof_sub" in
+            list|"")
+                BEACON_JSON="$_prof_json" python3 "$COMMANDS_PY" profile_list
+                ;;
+            *)
+                echo "Unknown profile subcommand: $_prof_sub"
+                echo "Usage: beacon profile list [--json]"
+                exit 2
                 ;;
         esac
         ;;

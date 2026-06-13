@@ -74,7 +74,15 @@ def get_store(project_file: str | None = None) -> Store:
         project_id = cloud_data.get("project_id")
         if not project_id:
             raise ValueError("cloud.json must contain 'project_id'")
-        api_url = cloud_data.get("api_url") or "https://beacon-ai.dev"
+        # ms-64 / e-1458: route api_url through the profile resolver so the
+        # env > cwd cloud.json > profile.json > default precedence chain is
+        # the single source of truth. Falls back to the bare cloud.json read
+        # if profile.py is unimportable for any reason.
+        try:
+            import profile as _profile  # type: ignore[import-not-found]
+            api_url = _profile.resolve_active_profile().api_url
+        except Exception:
+            api_url = cloud_data.get("api_url") or "https://beacon-ai.dev"
         from store_api import StoreApi
 
         def _token_provider():
