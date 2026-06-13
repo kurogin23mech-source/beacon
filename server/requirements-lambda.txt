@@ -11,3 +11,6 @@ google-cloud-storage>=2.18.0
 google-auth>=2.36.0
 python-multipart>=0.0.9
 mangum>=0.18.0
+# e-1544: DynamoDB backend 用 SDK。Cloud Run 用 requirements.txt には入れない
+# (= Cloud Run は Firestore 経路、boto3 を読まないので zip サイズの無駄)。
+boto3>=1.35.0
