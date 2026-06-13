@@ -188,13 +188,34 @@ def _maybe_silent_migrate_default() -> None:
 
 
 def _resolve_api_url(profile_config: dict, cwd: Path) -> str:
-    """Apply the api_url precedence chain. See module docstring for order."""
+    """Apply the api_url precedence chain. See module docstring for order.
+
+    ms-64 e-1627: cwd cloud.json.profile が **default 以外** を指定している
+    とき、その profile が「このディレクトリの帰属先」と宣言したとみなして
+    profile.json.api_url を必ず採用する。cwd cloud.json.api_url の override
+    は無視する (= profile と URL の組合せズレで認証経路が混乱するのを防ぐ
+    構造防御)。
+
+    profile == "default" のとき (= 旧 single-profile 時代の cloud.json
+    フォーマット互換) は従来通り cwd cloud.json.api_url を尊重する。
+    """
     env_url = os.environ.get("BEACON_API_URL")
     if env_url:
         return env_url.rstrip("/")
 
     cloud = _read_cwd_cloud_json(cwd)
-    if cloud.get("api_url"):
+    cloud_profile = cloud.get("profile")
+
+    # profile を明示宣言した cloud.json で、profile == default 以外の場合は
+    # profile.json.api_url を強制採用する (= cloud.json.api_url の override を
+    # スキップ)。これで cd だけで自動切替が確実に動く。
+    profile_is_explicit_non_default = (
+        isinstance(cloud_profile, str)
+        and cloud_profile
+        and cloud_profile != DEFAULT_PROFILE
+    )
+
+    if not profile_is_explicit_non_default and cloud.get("api_url"):
         return str(cloud["api_url"]).rstrip("/")
 
     if profile_config.get("api_url"):
