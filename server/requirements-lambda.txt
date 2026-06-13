@@ -14,3 +14,6 @@ mangum>=0.18.0
 # e-1544: DynamoDB backend 用 SDK。Cloud Run 用 requirements.txt には入れない
 # (= Cloud Run は Firestore 経路、boto3 を読まないので zip サイズの無駄)。
 boto3>=1.35.0
+# e-1545: Cognito User Pool の JWT を RS256 / JWKS で検証する。
+# BEACON_AUTH_PROVIDER=cognito 時のみ import される。
+PyJWT[crypto]>=2.8.0
