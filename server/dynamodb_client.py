@@ -17,9 +17,53 @@ from typing import Optional
 # には入れない)。BEACON_STORE_BACKEND != "dynamodb" 環境では import されないため、
 # Cloud Run 既存経路にコストはかからない。
 try:
-    import boto3  # noqa: F401  (= フェーズ 1+ で resource client を作る)
+    import boto3
+    from boto3.dynamodb.conditions import Attr, Key
 except ImportError:
     boto3 = None  # type: ignore[assignment]
+    Attr = Key = None  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
+# DynamoDB resource (lazy initialization)
+# ---------------------------------------------------------------------------
+# boto3.resource は最初の呼び出しで AWS credentials を解決するので、import 時
+# ではなく初回 _table 呼び出し時まで遅延させる (= Cloud Run で誤って boto3 が
+# import されても credentials 解決を強制しない安全策)。
+_RESOURCE = None
+
+
+def _get_resource():
+    global _RESOURCE
+    if _RESOURCE is None:
+        if boto3 is None:
+            raise RuntimeError("boto3 is not installed (= DynamoDB backend cannot be used)")
+        _RESOURCE = boto3.resource(
+            "dynamodb",
+            region_name=os.environ.get("AWS_REGION", "ap-northeast-1"),
+        )
+    return _RESOURCE
+
+
+def _table(entity_name: str):
+    return _get_resource().Table(TABLES[entity_name])
+
+
+# Subcollection の SK 名 (= terraform locals.dynamodb_tables の各 sk と一致)
+_SUBCOLLECTION_SK_NAMES = {
+    "documents": "doc_id",
+    "document_revisions": "revision_id",
+    "changelog": "change_id",
+    "notes": "note_id",
+    "bus_events": "event_id",
+    "bus_cursors": "cursor_id",
+    "bus_nonces": "nonce",
+    "bus_audit": "audit_id",
+    "sessions": "session_id",
+    "session_logs": "session_id",
+    "operation_envelopes": "envelope_id",
+    "retros": "week",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -63,55 +107,195 @@ def _not_implemented(fn_name: str) -> NotImplementedError:
 
 
 # ---------------------------------------------------------------------------
-# Projects
+# Projects (e-1544 Phase 1)
 # ---------------------------------------------------------------------------
 
 def get_project(project_id: str) -> dict | None:
-    raise _not_implemented("get_project")
+    resp = _table("projects").get_item(Key={"project_id": project_id})
+    return resp.get("Item")
 
 
 def save_project(project_id: str, data: dict) -> None:
-    raise _not_implemented("save_project")
+    # PK は project_id。data 側に同名キーが含まれていても上書きされるだけで害は無い。
+    item = {**data, "project_id": project_id}
+    _table("projects").put_item(Item=item)
 
 
-def list_projects(user_id: str | None = None, include_archived: bool = False) -> list[dict]:
-    raise _not_implemented("list_projects")
+def list_projects(user_id: str | None = None,
+                  include_archived: bool = False) -> list[dict]:
+    # Scan は全件読みで割高。dev 規模では問題なし。将来 user_id 検索を
+    # 多用するようになったら owner / members[].user_id を別 GSI に出して
+    # Query に切替える。
+    items = _scan_all(_table("projects"))
+    result = []
+    for item in items:
+        if not include_archived and item.get("archived"):
+            continue
+        if user_id:
+            owner = item.get("owner")
+            # owner 無し project は migration 期間のため全員に見える (= firestore 同挙動)
+            if owner:
+                members = [m.get("user_id") for m in item.get("members", [])]
+                if owner != user_id and user_id not in members:
+                    continue
+        result.append({
+            "project_id": item.get("project_id", ""),
+            "name": item.get("name", ""),
+            "objective": item.get("objective", ""),
+            "archived": item.get("archived", False),
+        })
+    return result
 
 
 def list_all_projects() -> list[dict]:
-    raise _not_implemented("list_all_projects")
+    items = _scan_all(_table("projects"))
+    return [
+        {
+            "project_id": item.get("project_id", ""),
+            "name": item.get("name", ""),
+            "owner": item.get("owner", ""),
+            "member_count": len(item.get("members", [])),
+            "milestone_count": len(item.get("milestones", [])),
+            "updated_at": item.get("updated_at", ""),
+        }
+        for item in items
+    ]
 
 
 def delete_project(project_id: str) -> bool:
-    raise _not_implemented("delete_project")
+    if get_project(project_id) is None:
+        return False
+    # Cascade delete: 14 個のサブコレクションテーブルから project_id を PK に持つ
+    # アイテムを全部 batch_writer 経由で削除する。Firestore 側 _delete_subcollection
+    # と同等の振る舞い (= Firestore は subcollection auto-cascade しないので明示削除、
+    # DynamoDB も同様)。
+    for entity, sk_name in _SUBCOLLECTION_SK_NAMES.items():
+        table = _table(entity)
+        items = _query_all(table, Key("project_id").eq(project_id))
+        if not items:
+            continue
+        with table.batch_writer() as batch:
+            for item in items:
+                batch.delete_item(Key={
+                    "project_id": project_id,
+                    sk_name: item[sk_name],
+                })
+    _table("projects").delete_item(Key={"project_id": project_id})
+    return True
 
 
 # ---------------------------------------------------------------------------
-# Users
+# Users (e-1544 Phase 1)
 # ---------------------------------------------------------------------------
 
 def get_user(user_id: str) -> dict | None:
-    raise _not_implemented("get_user")
+    resp = _table("users").get_item(Key={"user_id": user_id})
+    return resp.get("Item")
 
 
 def get_or_create_user(user_id: str, email: str) -> dict:
-    raise _not_implemented("get_or_create_user")
+    import datetime
+    existing = get_user(user_id)
+    if existing:
+        if existing.get("email") != email:
+            _table("users").update_item(
+                Key={"user_id": user_id},
+                UpdateExpression="SET email = :e",
+                ExpressionAttributeValues={":e": email},
+            )
+            existing["email"] = email
+        return existing
+    user_data = {
+        "user_id": user_id,
+        "email": email,
+        "role": "user",
+        "created_at": datetime.datetime.now().isoformat(),
+    }
+    _table("users").put_item(Item=user_data)
+    return user_data
 
 
 def list_users() -> list[dict]:
-    raise _not_implemented("list_users")
+    # 戻り値の各 dict は user_id を含む (= DynamoDB item の PK が自然に入る)。
+    # Firestore 版は doc.id を別途差し込んでいたが、DynamoDB は put 時に user_id
+    # を Item に含めているので結果は同等。
+    return _scan_all(_table("users"))
 
 
 def update_user(user_id: str, updates: dict) -> bool:
-    raise _not_implemented("update_user")
+    if get_user(user_id) is None:
+        return False
+    if not updates:
+        return True
+    # UpdateExpression を動的構築。DynamoDB は予約語ガード付きで attribute 名を
+    # ExpressionAttributeNames 経由で渡すと安全。
+    sets = []
+    names = {}
+    values = {}
+    for i, (k, v) in enumerate(updates.items()):
+        np = f"#k{i}"
+        vp = f":v{i}"
+        sets.append(f"{np} = {vp}")
+        names[np] = k
+        values[vp] = v
+    _table("users").update_item(
+        Key={"user_id": user_id},
+        UpdateExpression="SET " + ", ".join(sets),
+        ExpressionAttributeNames=names,
+        ExpressionAttributeValues=values,
+    )
+    return True
 
 
 def delete_user(user_id: str) -> bool:
-    raise _not_implemented("delete_user")
+    if get_user(user_id) is None:
+        return False
+    _table("users").delete_item(Key={"user_id": user_id})
+    return True
 
 
 def find_user_by_email(email: str) -> tuple[str, dict] | None:
-    raise _not_implemented("find_user_by_email")
+    # GSI on email を v1 では作らないので Scan + FilterExpression で代用。
+    # dev 規模 (user 数 < 数百) では問題なし。本番化前に email GSI を追加する。
+    items = _scan_all(_table("users"), filter_expression=Attr("email").eq(email))
+    if not items:
+        return None
+    user = items[0]
+    return user.get("user_id", ""), user
+
+
+# ---------------------------------------------------------------------------
+# Pagination helpers
+# ---------------------------------------------------------------------------
+# DynamoDB Scan / Query は 1MB cap + LastEvaluatedKey 経由でページング。
+# 既存呼び出し側は「全件返る」前提 (= Firestore stream 経由) なので、
+# helper でページング吸収する。
+
+
+def _scan_all(table, filter_expression=None) -> list[dict]:
+    kwargs = {}
+    if filter_expression is not None:
+        kwargs["FilterExpression"] = filter_expression
+    items = []
+    while True:
+        resp = table.scan(**kwargs)
+        items.extend(resp.get("Items", []))
+        last = resp.get("LastEvaluatedKey")
+        if not last:
+            return items
+        kwargs["ExclusiveStartKey"] = last
+
+
+def _query_all(table, key_condition) -> list[dict]:
+    kwargs = {"KeyConditionExpression": key_condition}
+    items = []
+    while True:
+        resp = table.query(**kwargs)
+        items.extend(resp.get("Items", []))
+        last = resp.get("LastEvaluatedKey")
+        if not last:
+            return items
+        kwargs["ExclusiveStartKey"] = last
 
 
 # ---------------------------------------------------------------------------
