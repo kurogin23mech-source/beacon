@@ -8,7 +8,13 @@ from google.cloud import firestore
 
 _db: firestore.Client | None = None
 
-PROJECT_ID = "beacon-cloud-96f5f"
+# ms-64 (beacon-vs-beacon-cloud-separation 原則): 私たちの特定 Beacon Cloud 運用
+# 環境の GCP project ID をハードコードしない。BEACON_GCP_PROJECT_ID で明示的に
+# 渡すか、google-cloud-firestore の auto-detect (GOOGLE_CLOUD_PROJECT env が
+# 設定された Cloud Run / GAE / GKE runtime、または gcloud config / ADC) に
+# 任せる。後方互換: 既存の Cloud Run 環境は GOOGLE_CLOUD_PROJECT が runtime
+# で自動 inject されるので、移行時に挙動が変わらない。
+PROJECT_ID = os.environ.get("BEACON_GCP_PROJECT_ID") or None
 
 # Environment-based collection prefix: dev uses "projects-dev", prod uses "projects"
 _ENV = os.environ.get("BEACON_ENV", "dev")
@@ -19,7 +25,7 @@ USERS_COLLECTION = "users" if _ENV == "prod" else "users-dev"
 def get_db() -> firestore.Client:
     global _db
     if _db is None:
-        _db = firestore.Client(project=PROJECT_ID)
+        _db = firestore.Client(project=PROJECT_ID) if PROJECT_ID else firestore.Client()
     return _db
 
 
