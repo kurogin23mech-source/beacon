@@ -235,7 +235,20 @@ def _save_state(state_path: Path, session_id: str, notified: List[int]) -> None:
 
 
 def _which_beacon() -> Optional[str]:
-    return shutil.which("beacon")
+    """Return path to beacon CLI, with Windows user-install fallback."""
+    found = shutil.which("beacon")
+    if found:
+        return found
+    import glob as _glob
+    patterns = [
+        os.path.expandvars(r"%APPDATA%\Python\Python*\Scripts\beacon.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python*\Scripts\beacon.exe"),
+    ]
+    for pat in patterns:
+        matches = _glob.glob(pat)
+        if matches:
+            return sorted(matches)[-1]
+    return None
 
 
 def _run_capture(args: List[str], timeout: float = 5.0) -> str:
@@ -245,6 +258,7 @@ def _run_capture(args: List[str], timeout: float = 5.0) -> str:
             args,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -284,6 +298,7 @@ def _build_recent_commits_text(cwd: Path) -> str:
             ["git", "log", "--since=6 hours ago", "--pretty=format:- %h: %s"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=str(cwd),
             timeout=5,
         )
@@ -535,6 +550,7 @@ def _main_impl() -> int:
                     [beacon, "note", note_body],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
                     timeout=10,
                 )
             except (OSError, subprocess.TimeoutExpired):
@@ -556,7 +572,7 @@ def _main_impl() -> int:
             "additionalContext": instruction,
         }
     }
-    sys.stdout.write(json.dumps(output, ensure_ascii=False))
+    sys.stdout.buffer.write(json.dumps(output, ensure_ascii=False).encode("utf-8"))
     return 0
 
 
