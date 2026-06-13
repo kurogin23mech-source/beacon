@@ -299,54 +299,270 @@ def _query_all(table, key_condition) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Retros (subcollection: projects/{project_id}/retros/{week})
+# Retros (subcollection: projects/{project_id}/retros/{week})  e-1544 Phase 2
 # ---------------------------------------------------------------------------
+# Table: beacon-{env}-retros, PK=project_id, SK=week ("YYYY-WNN")
 
 def list_retros(project_id: str) -> list[dict]:
-    raise _not_implemented("list_retros")
+    items = _query_all(_table("retros"), Key("project_id").eq(project_id))
+    # week DESC で揃える (= Firestore 版が order_by("week", DESCENDING))
+    items.sort(key=lambda it: it.get("week", ""), reverse=True)
+    return items
 
 
 def get_retro(project_id: str, week: str) -> dict | None:
-    raise _not_implemented("get_retro")
+    resp = _table("retros").get_item(Key={"project_id": project_id, "week": week})
+    return resp.get("Item")
 
 
 def save_retro(project_id: str, week: str, content: str) -> None:
-    raise _not_implemented("save_retro")
+    import datetime
+    _table("retros").put_item(Item={
+        "project_id": project_id,
+        "week": week,
+        "content": content,
+        "updated_at": datetime.datetime.now().isoformat(),
+    })
 
 
 # ---------------------------------------------------------------------------
-# Documents (subcollection: projects/{project_id}/documents/{doc_id})
+# Documents (subcollection: projects/{project_id}/documents/{doc_id})  e-1544 Phase 2
 # ---------------------------------------------------------------------------
+# Tables:
+#   beacon-{env}-documents           PK=project_id, SK=doc_id
+#   beacon-{env}-document_revisions  PK=project_id, SK=revision_id
+#
+# document_revisions は 1 テーブルで全 doc の履歴を持つ。SK 形式を
+# "{doc_id}#{rev:06d}" にすることで:
+#   - begins_with(SK, f"{doc_id}#") で doc 単位の Query が効く
+#   - rev 番号が 06d zero-pad なので SK 辞書順 = rev 昇順
+#   - doc 削除時の cascade も begins_with で拾える
+
+def _extract_frontmatter_field(content: str, field: str, default: str = "") -> str:
+    if not content.startswith("---"):
+        return default
+    end = content.find("\n---", 3)
+    if end == -1:
+        return default
+    for line in content[4:end].split("\n"):
+        line = line.strip()
+        if line.startswith(f"{field}:"):
+            return line.split(":", 1)[1].strip()
+    return default
+
+
+def _extract_scope(content: str) -> str:
+    val = _extract_frontmatter_field(content, "scope", "memo")
+    return val if val in ("core", "spec", "memo") else "memo"
+
+
+def _generate_doc_id() -> str:
+    # Firestore auto-id 互換の 20 文字英数字 (= 既存 UI / DB の見た目を保つ)
+    import secrets
+    import string
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(20))
+
 
 def list_documents(project_id: str) -> list[dict]:
-    raise _not_implemented("list_documents")
+    items = _query_all(_table("documents"), Key("project_id").eq(project_id))
+    result = []
+    for data in items:
+        if data.get("deleted"):
+            continue
+        milestone = data.get("milestone") or _extract_frontmatter_field(
+            data.get("content", ""), "milestone"
+        )
+        entry = {
+            "doc_id": data.get("doc_id", ""),
+            "title": data.get("title", ""),
+            "scope": data.get("scope", "memo"),
+            "updated_at": data.get("updated_at", ""),
+        }
+        if milestone:
+            entry["milestone"] = milestone
+        result.append(entry)
+    result.sort(key=lambda e: e.get("updated_at", ""), reverse=True)
+    return result
 
 
 def get_document(project_id: str, doc_id: str) -> dict | None:
-    raise _not_implemented("get_document")
+    resp = _table("documents").get_item(Key={"project_id": project_id, "doc_id": doc_id})
+    return resp.get("Item")
+
+
+def _last_revision_number(project_id: str, doc_id: str) -> int:
+    # SK begins_with クエリで doc の全 revisions を取って max rev を返す。
+    # ページング吸収のため _query_all を使う (件数が増えても正しい値が返る)。
+    # boto3 / moto は数値を Decimal で返すので int() でまとめてキャスト。
+    items = _query_all(
+        _table("document_revisions"),
+        Key("project_id").eq(project_id) & Key("revision_id").begins_with(f"{doc_id}#"),
+    )
+    last = 0
+    for it in items:
+        try:
+            r = int(it.get("rev", 0))
+        except (TypeError, ValueError):
+            continue
+        if r > last:
+            last = r
+    return last
 
 
 def save_document(project_id: str, doc_id: str, title: str, content: str,
                   scope: str | None = None, updated_by: str = "unknown") -> str:
-    raise _not_implemented("save_document")
+    import datetime
+    resolved_scope = scope if scope in ("core", "spec", "memo") else _extract_scope(content)
+    milestone = _extract_frontmatter_field(content, "milestone")
+    now_iso = datetime.datetime.now().isoformat()
+
+    if not doc_id:
+        doc_id = _generate_doc_id()
+
+    data = {
+        "project_id": project_id,
+        "doc_id": doc_id,
+        "title": title,
+        "content": content,
+        "scope": resolved_scope,
+        "updated_at": now_iso,
+        "updated_by": updated_by,
+    }
+    if milestone:
+        data["milestone"] = milestone
+
+    # 既存があれば現行 content を revision に積んでから上書き
+    existing = get_document(project_id, doc_id)
+    if existing:
+        next_rev = _last_revision_number(project_id, doc_id) + 1
+        _table("document_revisions").put_item(Item={
+            "project_id": project_id,
+            "revision_id": f"{doc_id}#{next_rev:06d}",
+            "doc_id": doc_id,
+            "rev": next_rev,
+            "content": existing.get("content", ""),
+            "title": existing.get("title", ""),
+            "ts": existing.get("updated_at", ""),
+            "saved_by": existing.get("updated_by", "unknown"),
+        })
+
+    _table("documents").put_item(Item=data)
+    return doc_id
 
 
 def list_document_revisions(project_id: str, doc_id: str) -> list:
-    raise _not_implemented("list_document_revisions")
+    items = _query_all(
+        _table("document_revisions"),
+        Key("project_id").eq(project_id) & Key("revision_id").begins_with(f"{doc_id}#"),
+    )
+    # rev DESC (= Firestore order_by("rev", DESCENDING) と一致)
+    items.sort(key=lambda it: it.get("rev", 0), reverse=True)
+    return [{"rev": it.get("rev"), "ts": it.get("ts"), "saved_by": it.get("saved_by")}
+            for it in items]
 
 
 def get_document_revision(project_id: str, doc_id: str, rev: int) -> dict | None:
-    raise _not_implemented("get_document_revision")
+    resp = _table("document_revisions").get_item(Key={
+        "project_id": project_id,
+        "revision_id": f"{doc_id}#{int(rev):06d}",
+    })
+    it = resp.get("Item")
+    if not it:
+        return None
+    return {
+        "rev": it.get("rev"),
+        "content": it.get("content", ""),
+        "title": it.get("title", ""),
+        "ts": it.get("ts"),
+        "saved_by": it.get("saved_by"),
+    }
 
 
 def delete_document(project_id: str, doc_id: str, deleted_by: str = "unknown",
                     reason: str = "") -> bool:
-    raise _not_implemented("delete_document")
+    """Soft-delete a document (sets deleted flag).
+
+    Optional ``reason`` is stored as ``trash_reason`` for audit symmetry
+    with local mode's frontmatter (ms-14 e-991). Clears any prior
+    restore stamps so audit fields reflect the current trash event
+    (= Firestore 版 DELETE_FIELD と等価、DynamoDB は REMOVE で表現)。
+    Returns True if existed.
+    """
+    import datetime
+    if get_document(project_id, doc_id) is None:
+        return False
+    set_parts = [
+        "#deleted = :dt",
+        "deleted_at = :dat",
+        "deleted_by = :dby",
+    ]
+    remove_parts = ["restored_at", "restored_by", "restore_reason"]
+    names = {"#deleted": "deleted"}
+    values = {
+        ":dt": True,
+        ":dat": datetime.datetime.now().isoformat(),
+        ":dby": deleted_by,
+    }
+    if reason:
+        set_parts.append("trash_reason = :tr")
+        values[":tr"] = reason
+    else:
+        remove_parts.append("trash_reason")
+    update_expr = "SET " + ", ".join(set_parts) + " REMOVE " + ", ".join(remove_parts)
+    _table("documents").update_item(
+        Key={"project_id": project_id, "doc_id": doc_id},
+        UpdateExpression=update_expr,
+        ExpressionAttributeNames=names,
+        ExpressionAttributeValues=values,
+    )
+    return True
 
 
 def sweep_trashed_documents(project_id: str, *, days: int = 30,
                             dry_run: bool = False) -> list[str]:
-    raise _not_implemented("sweep_trashed_documents")
+    """Hard-delete soft-deleted docs older than ``days`` (ms-14 e-991).
+
+    Docs with ``deleted=true`` but missing ``deleted_at`` are NOT swept
+    (mirrors the MS / task rule — no timestamp, no proof the window has
+    passed). Revisions are cascaded since DynamoDB has no native cascade.
+    """
+    import datetime
+    cutoff_iso = (datetime.datetime.now()
+                  - datetime.timedelta(days=max(1, days))).isoformat()
+    items = _query_all(
+        _table("documents"),
+        Key("project_id").eq(project_id),
+    )
+    purged: list[str] = []
+    docs_table = _table("documents")
+    revs_table = _table("document_revisions")
+    for it in items:
+        if not it.get("deleted"):
+            continue
+        deleted_at = it.get("deleted_at", "")
+        if not deleted_at or deleted_at >= cutoff_iso:
+            continue
+        doc_id = it.get("doc_id", "")
+        if not doc_id:
+            continue
+        purged.append(doc_id)
+        if dry_run:
+            continue
+        # Cascade revisions first then delete the doc itself
+        rev_items = _query_all(
+            revs_table,
+            Key("project_id").eq(project_id) & Key("revision_id").begins_with(f"{doc_id}#"),
+        )
+        if rev_items:
+            with revs_table.batch_writer() as batch:
+                for rev in rev_items:
+                    batch.delete_item(Key={
+                        "project_id": project_id,
+                        "revision_id": rev["revision_id"],
+                    })
+        docs_table.delete_item(Key={"project_id": project_id, "doc_id": doc_id})
+    return purged
 
 
 # ---------------------------------------------------------------------------
