@@ -5825,11 +5825,24 @@ def _ensure_cloud_config():
     project_id = f"{slug}-{h}"
 
     api_url = _resolve_active_api_url()
-    config = {"project_id": project_id, "api_url": api_url}
+    # ms-64 e-1627: cwd cloud.json に profile 名も書く。これで以後の
+    # `cd <project>` だけで cloud.json.profile → profile.json.api_url +
+    # profile.json.credentials 経路に自動で切り替わる (= AWS CLI / gcloud と
+    # 同じ「project ディレクトリに居ればその profile」モデル)。
+    try:
+        import profile as _profile  # type: ignore[import-not-found]
+        profile_name = _profile.resolve_active_profile().name
+    except Exception:
+        profile_name = "default"
+    config = {
+        "project_id": project_id,
+        "api_url": api_url,
+        "profile": profile_name,
+    }
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
         f.write("\n")
-    print(f"Created {config_path} (project_id: {project_id})")
+    print(f"Created {config_path} (project_id: {project_id}, profile: {profile_name})")
     return config
 
 
