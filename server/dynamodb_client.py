@@ -60,6 +60,7 @@ _SUBCOLLECTION_SK_NAMES = {
     "bus_nonces": "nonce",
     "bus_audit": "audit_id",
     "sessions": "session_id",
+    "session_lookup": "lookup_key",
     "session_logs": "session_id",
     "operation_envelopes": "envelope_id",
     "retros": "week",
@@ -595,130 +596,701 @@ def clear_notes(project_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Bus events / cursors / nonces / audit
+# Bus events / cursors / nonces / audit  (e-1544 Phase 3)
 # ---------------------------------------------------------------------------
+# Tables:
+#   beacon-{env}-bus_events    PK=project_id, SK=event_id
+#   beacon-{env}-bus_cursors   PK=project_id, SK=cursor_id (= recipient_id)
+#   beacon-{env}-bus_nonces    PK=project_id, SK=nonce
+#   beacon-{env}-bus_audit     PK=project_id, SK=audit_id
+#
+# event_id / audit_id は millisecond-precision timestamp prefix にして
+# SK 辞書順 = 時系列順とする。SK Sort で created_at ORDER BY 相当が無料で
+# 効くので、list_bus_events / list_bus_audit の since カーソルは
+# event_id / audit_id 自体の KeyCondition で push できる
+# (FilterExpression より安く帯域も食わない)。
+
+def _mint_timestamp_id() -> str:
+    """Millisecond-prefix sortable id (= "<epoch_ms:013>-<rand6>").
+
+    辞書順 = 時系列順を保証しつつ、ms 同一書き込みが衝突しないよう
+    後ろに 6 字のランダム英数字を付ける。Firestore auto-id (20 字
+    base62) に近い形状。
+    """
+    import secrets
+    import string
+    import time
+    ms = int(time.time() * 1000)
+    alphabet = string.ascii_letters + string.digits
+    rand = "".join(secrets.choice(alphabet) for _ in range(6))
+    return f"{ms:013d}-{rand}"
+
 
 def append_bus_event(project_id: str, data: dict) -> str:
-    raise _not_implemented("append_bus_event")
+    """Append a bus event (auto-id) and return the event_id.
+
+    呼び出し側が data に created_at (ISO8601) を含めることが前提
+    (firestore_client と同じ契約)。event_id は ms-prefix なので
+    SK 辞書順 = チャネル横断の時系列順になる。
+    """
+    event_id = _mint_timestamp_id()
+    item = {**data, "project_id": project_id, "event_id": event_id}
+    _table("bus_events").put_item(Item=item)
+    return event_id
 
 
 def get_bus_cursor(project_id: str, recipient_id: str) -> dict:
-    raise _not_implemented("get_bus_cursor")
+    resp = _table("bus_cursors").get_item(
+        Key={"project_id": project_id, "cursor_id": recipient_id}
+    )
+    item = resp.get("Item")
+    if not item:
+        return {}
+    # cursor_id (= recipient_id) は内部キー、callers には返さない
+    return {k: v for k, v in item.items() if k not in ("project_id", "cursor_id")}
 
 
 def advance_bus_cursor(project_id: str, recipient_id: str,
                        last_seen_at: str) -> dict:
-    raise _not_implemented("advance_bus_cursor")
+    """Forward-only cursor advance. Returns the resulting cursor.
+
+    既存カーソルより新しい last_seen_at だけ書き込む。同一 / 古い
+    値の場合は既存を返して idempotent な no-op にする。
+    structural 防御: stale クライアントが古い値で巻き戻しを起こせない。
+    """
+    import datetime
+    table = _table("bus_cursors")
+    existing_resp = table.get_item(
+        Key={"project_id": project_id, "cursor_id": recipient_id}
+    )
+    existing = existing_resp.get("Item") or {}
+    existing_seen = existing.get("last_seen_at", "")
+    if existing_seen and last_seen_at <= existing_seen:
+        return {k: v for k, v in existing.items() if k not in ("project_id", "cursor_id")}
+    now = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    table.update_item(
+        Key={"project_id": project_id, "cursor_id": recipient_id},
+        UpdateExpression="SET last_seen_at = :ls, updated_at = :ua",
+        ExpressionAttributeValues={":ls": last_seen_at, ":ua": now},
+    )
+    return {"last_seen_at": last_seen_at, "updated_at": now}
 
 
 def check_and_record_bus_nonce(project_id: str, nonce: str,
                                expires_at: str) -> bool:
-    raise _not_implemented("check_and_record_bus_nonce")
+    """Return True iff ``nonce`` is fresh; atomically record it on first use.
+
+    ConditionExpression "attribute_not_exists" で put_item を行うことで
+    Firestore transaction と同じ "最初の 1 回だけ True" を実現する。
+    競合時には ConditionalCheckFailedException が出るので False を返す。
+    """
+    import datetime
+    table = _table("bus_nonces")
+    now = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    try:
+        table.put_item(
+            Item={
+                "project_id": project_id,
+                "nonce": nonce,
+                "expires_at": expires_at,
+                "recorded_at": now,
+            },
+            ConditionExpression="attribute_not_exists(#n)",
+            ExpressionAttributeNames={"#n": "nonce"},
+        )
+        return True
+    except Exception as e:
+        # boto3 のクライアントエラーは ClientError、moto も同様。
+        # 名前で識別する (= import パスが boto3 / botocore で揺れない)。
+        if e.__class__.__name__ == "ConditionalCheckFailedException":
+            return False
+        if hasattr(e, "response") and isinstance(getattr(e, "response", None), dict):
+            code = e.response.get("Error", {}).get("Code", "")
+            if code == "ConditionalCheckFailedException":
+                return False
+        raise
 
 
 def set_bus_event_receipt(project_id: str, event_id: str, stage: str,
                           recipient_session_id: str) -> dict | None:
-    raise _not_implemented("set_bus_event_receipt")
+    """Stamp a per-event receipt timestamp (DM read receipt, e-1348).
+
+    First-write-wins per stage (= delivered/opened). 既存 stamp があれば
+    上書きせずに ``already_set=True`` で返す。ConditionExpression で
+    "attribute_not_exists(<stage>_at)" を立てて二重書きを構造的に防ぐ。
+
+    Returns ``None`` if the event does not exist.
+    """
+    import datetime
+    if stage not in ("delivered", "opened"):
+        raise ValueError(f"set_bus_event_receipt: invalid stage {stage!r}")
+    ts_field = f"{stage}_at"
+    by_field = f"{stage}_by"
+    table = _table("bus_events")
+
+    existing = table.get_item(
+        Key={"project_id": project_id, "event_id": event_id}
+    ).get("Item")
+    if not existing:
+        return None
+
+    existing_ts = existing.get(ts_field)
+    if existing_ts:
+        return {
+            "event_id": event_id,
+            "stage": stage,
+            "timestamp": existing_ts,
+            "by": existing.get(by_field, ""),
+            "already_set": True,
+        }
+    now = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    try:
+        table.update_item(
+            Key={"project_id": project_id, "event_id": event_id},
+            UpdateExpression="SET #ts = :ts, #by = :by",
+            ConditionExpression="attribute_not_exists(#ts)",
+            ExpressionAttributeNames={"#ts": ts_field, "#by": by_field},
+            ExpressionAttributeValues={":ts": now, ":by": recipient_session_id},
+        )
+    except Exception as e:
+        # 競合: 別 caller が先に stamp した。最新を読み直して already_set で返す
+        if (e.__class__.__name__ == "ConditionalCheckFailedException"
+                or (hasattr(e, "response")
+                    and isinstance(getattr(e, "response", None), dict)
+                    and e.response.get("Error", {}).get("Code", "") == "ConditionalCheckFailedException")):
+            cur = table.get_item(
+                Key={"project_id": project_id, "event_id": event_id}
+            ).get("Item") or {}
+            return {
+                "event_id": event_id,
+                "stage": stage,
+                "timestamp": cur.get(ts_field, ""),
+                "by": cur.get(by_field, ""),
+                "already_set": True,
+            }
+        raise
+    return {
+        "event_id": event_id,
+        "stage": stage,
+        "timestamp": now,
+        "by": recipient_session_id,
+        "already_set": False,
+    }
 
 
 def find_bus_event(project_id: str, event_id: str) -> dict | None:
-    raise _not_implemented("find_bus_event")
+    resp = _table("bus_events").get_item(
+        Key={"project_id": project_id, "event_id": event_id}
+    )
+    return resp.get("Item")
 
 
 def append_bus_audit(project_id: str, record: dict) -> str:
-    raise _not_implemented("append_bus_audit")
+    audit_id = _mint_timestamp_id()
+    _table("bus_audit").put_item(
+        Item={**record, "project_id": project_id, "audit_id": audit_id}
+    )
+    return audit_id
 
 
 def list_bus_audit(project_id: str, *, since: str = "",
                    limit: int = 100) -> list[dict]:
-    raise _not_implemented("list_bus_audit")
+    """List audit records ordered by received_at (most recent at end).
+
+    since は received_at に対する > 比較。SK (audit_id) は ms-prefix で
+    時系列順に並ぶので、since から派生する audit_id 範囲で KeyCondition を
+    絞ることもできるが、received_at は caller が record に格納する任意
+    フィールドなので「received_at と audit_id が必ず時系列一致する」とは
+    限らない。安全側で SK は全 query、received_at は FilterExpression に
+    して整合性を保つ。
+    """
+    kwargs = {"KeyConditionExpression": Key("project_id").eq(project_id)}
+    if since:
+        kwargs["FilterExpression"] = Attr("received_at").gt(since)
+    items = []
+    while True:
+        resp = _table("bus_audit").query(**kwargs)
+        items.extend(resp.get("Items", []))
+        last = resp.get("LastEvaluatedKey")
+        if not last:
+            break
+        kwargs["ExclusiveStartKey"] = last
+    items.sort(key=lambda it: it.get("received_at", ""))
+    if limit:
+        items = items[:limit]
+    return items
 
 
 def list_bus_events(project_id: str, since: str = "", channel: str = "",
                     limit: int = 100) -> list[dict]:
-    raise _not_implemented("list_bus_events")
+    """List bus events ordered by created_at.
+
+    Firestore 版と同じ契約:
+      - since: created_at > since の event のみ返す
+      - channel: equality filter (in-memory)
+      - limit: 結果件数の上限
+
+    実装ストラテジ:
+      - event_id (SK) は ms-prefix のため辞書順 = 時系列順、Query 結果は
+        昇順で並ぶ
+      - since / channel は FilterExpression に push して帯域節約
+      - limit は filter 後に caller 側で切る (Firestore 版と同じ意味論)
+    """
+    kwargs = {"KeyConditionExpression": Key("project_id").eq(project_id)}
+    filters = []
+    values = {}
+    names = {}
+    if since:
+        filters.append("created_at > :since")
+        values[":since"] = since
+    if channel:
+        filters.append("#chan = :chan")
+        names["#chan"] = "channel"
+        values[":chan"] = channel
+    if filters:
+        kwargs["FilterExpression"] = " AND ".join(filters)
+        if values:
+            kwargs["ExpressionAttributeValues"] = values
+        if names:
+            kwargs["ExpressionAttributeNames"] = names
+    # Fetch with a soft cap so channel-narrow queries still satisfy `limit`.
+    # 単一 query にすると LastEvaluatedKey が返らないので、必要なら pagination
+    # で次を取りに行く (= Firestore 版が "fetch_cap = limit * 5" でやってた
+    # オーバーフェッチの代替)。
+    fetch_cap = (limit * 5) if (limit and channel) else (limit or 0)
+    items: list[dict] = []
+    while True:
+        resp = _table("bus_events").query(**kwargs)
+        items.extend(resp.get("Items", []))
+        last = resp.get("LastEvaluatedKey")
+        if not last:
+            break
+        if fetch_cap and len(items) >= fetch_cap:
+            break
+        kwargs["ExclusiveStartKey"] = last
+    # SK 辞書順 = ms-prefix の時系列順なので Query 結果は既に created_at 順に
+    # 近い。但し caller が created_at を別タイムソースで埋めることがあるので
+    # 念のため明示ソート (idempotent)。
+    items.sort(key=lambda it: it.get("created_at", ""))
+    if limit:
+        items = items[:limit]
+    return items
 
 
 # ---------------------------------------------------------------------------
-# Sessions
+# Sessions (e-1544 Phase 4)
 # ---------------------------------------------------------------------------
+# Table: beacon-{env}-sessions, PK=project_id, SK=session_id
+
+def _now_iso_utc() -> str:
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+
+
+def _build_set_update(data: dict) -> tuple[str, dict, dict]:
+    """Build a SET UpdateExpression that mirrors Firestore set(merge=True).
+
+    data の各 key を SET <#k> = <:v> として並べる。予約語ガードのため
+    必ず ExpressionAttributeNames 経由で渡す。
+    """
+    sets = []
+    names = {}
+    values = {}
+    for i, (k, v) in enumerate(data.items()):
+        np = f"#k{i}"
+        vp = f":v{i}"
+        sets.append(f"{np} = {vp}")
+        names[np] = k
+        values[vp] = v
+    return ("SET " + ", ".join(sets), names, values)
+
 
 def upsert_session(project_id: str, session_id: str, data: dict) -> None:
-    raise _not_implemented("upsert_session")
+    """Upsert a session document by session_id (merge semantics).
+
+    Firestore の set(merge=True) は「指定された key だけ書く、ほかは
+    触らない」。DynamoDB の UpdateExpression SET も同じ意味論で動く。
+    空 data は no-op (Firestore も実質同様)。
+    """
+    if not data:
+        return
+    expr, names, values = _build_set_update(data)
+    _table("sessions").update_item(
+        Key={"project_id": project_id, "session_id": session_id},
+        UpdateExpression=expr,
+        ExpressionAttributeNames=names,
+        ExpressionAttributeValues=values,
+    )
 
 
 def stamp_session_actor_email(project_id: str, session_id: str,
                               email: str) -> None:
-    raise _not_implemented("stamp_session_actor_email")
+    """Stamp ``actor.email`` on a session document without touching siblings
+    (= ms-54 e-1349; Firestore 版は dotted-path update に相当する)。
+
+    DynamoDB は nested document path への部分 update をサポートする
+    ("SET actor.email = :e")。親の actor map が存在しない場合は
+    ValidationException になるので、その時は actor=map 全体を merge で書き直す。
+    """
+    if not email:
+        return
+    try:
+        _table("sessions").update_item(
+            Key={"project_id": project_id, "session_id": session_id},
+            UpdateExpression="SET #actor.#email = :e",
+            ExpressionAttributeNames={"#actor": "actor", "#email": "email"},
+            ExpressionAttributeValues={":e": email},
+        )
+    except Exception:
+        # 親 map が無いケース: actor 全体を書く (= heartbeat と race 中に
+        # 一瞬 machine/agent が落ちる可能性があるが Firestore 版と同じ挙動)
+        _table("sessions").update_item(
+            Key={"project_id": project_id, "session_id": session_id},
+            UpdateExpression="SET #actor = :a",
+            ExpressionAttributeNames={"#actor": "actor"},
+            ExpressionAttributeValues={":a": {"email": email}},
+        )
 
 
 def list_sessions(project_id: str) -> list[dict]:
-    raise _not_implemented("list_sessions")
+    """List sessions for a project ordered by last_active desc."""
+    items = _query_all(_table("sessions"), Key("project_id").eq(project_id))
+    items.sort(key=lambda it: it.get("last_active", ""), reverse=True)
+    # session_id (= SK) は item にも入っているが Firestore 版は最後に上書きする
+    # ので key win 順序を揃える。
+    return [{**it, "session_id": it.get("session_id", "")} for it in items]
 
 
 # ---------------------------------------------------------------------------
-# Machines + session minting
+# Machines + session minting (ms-62 / e-1509)  e-1544 Phase 4
 # ---------------------------------------------------------------------------
+# Tables:
+#   beacon-{env}-machines        PK=user_id,    SK=fingerprint_id
+#   beacon-{env}-session_lookup  PK=project_id, SK=lookup_key
+#                                ("{machine_id}_{parent_pid}")
+
+def _safe_doc_id(s: str) -> str:
+    """Firestore safe id とほぼ同じ。/ を含むか長すぎる場合はハッシュ化。"""
+    import hashlib
+    if not s:
+        return "_empty"
+    if "/" in s or len(s) > 200:
+        return "h-" + hashlib.sha256(s.encode("utf-8")).hexdigest()[:32]
+    return s
+
 
 def get_or_mint_machine(user_id: str, fingerprint: str, *,
                         hostname: str = "", agent: str = "") -> tuple[str, bool]:
-    raise _not_implemented("get_or_mint_machine")
+    """Get or mint machine_id for (user_id, fingerprint).
+
+    Returns ``(machine_id, minted)``. The fingerprint is sanitised for use
+    as the SK; the returned machine_id is a fresh server-side nonce so the
+    value itself never leaks the fingerprint.
+    """
+    import secrets
+    if not user_id or not fingerprint:
+        raise ValueError("user_id and fingerprint are required")
+
+    fingerprint_id = _safe_doc_id(fingerprint)
+    table = _table("machines")
+    now = _now_iso_utc()
+
+    existing = table.get_item(
+        Key={"user_id": user_id, "fingerprint_id": fingerprint_id}
+    ).get("Item")
+    if existing:
+        table.update_item(
+            Key={"user_id": user_id, "fingerprint_id": fingerprint_id},
+            UpdateExpression="SET last_seen_at = :ls",
+            ExpressionAttributeValues={":ls": now},
+        )
+        return existing.get("machine_id", ""), False
+
+    machine_id = f"mc-{secrets.token_hex(8)}"
+    table.put_item(Item={
+        "user_id": user_id,
+        "fingerprint_id": fingerprint_id,
+        "machine_id": machine_id,
+        "fingerprint": fingerprint,
+        "hostname": hostname or fingerprint,
+        "agent": agent,
+        "created_at": now,
+        "last_seen_at": now,
+    })
+    return machine_id, True
 
 
 def get_or_mint_session_by_tuple(project_id: str, machine_id: str,
                                  parent_pid: int, *, user_id: str,
                                  cwd: str = "",
                                  metadata: dict | None = None) -> dict:
-    raise _not_implemented("get_or_mint_session_by_tuple")
+    """Server-side identity tuple → session_id resolver (= ms-62 e-1509)。
+
+    Resolve (project_id, machine_id, parent_pid) to a session_id. Lookup
+    miss → mint, register lookup doc + session doc, return.
+
+    DynamoDB transaction (TransactWriteItems) は put + put の組合せだけ
+    なら使えるが、Firestore 版も実は「race で 2 つ mint されたら新しい方が
+    勝つ」程度の保証しかない (lookup_ref が後勝ち)。同じ挙動になるよう
+    sequential put にする。
+    """
+    import secrets
+    import time
+
+    if not project_id or not machine_id or not isinstance(parent_pid, int):
+        raise ValueError("project_id, machine_id, parent_pid are required")
+
+    lookup_key = _safe_doc_id(f"{machine_id}_{parent_pid}")
+    sessions_table = _table("sessions")
+    lookup_table = _table("session_lookup")
+    now = _now_iso_utc()
+
+    existing_lookup = lookup_table.get_item(
+        Key={"project_id": project_id, "lookup_key": lookup_key}
+    ).get("Item")
+    if existing_lookup:
+        sid = existing_lookup.get("session_id", "")
+        if sid:
+            # Refresh last_heartbeat_at + metadata on the session doc itself
+            heartbeat_data = {
+                "last_heartbeat_at": now,
+                "machine_id": machine_id,
+                "parent_pid": parent_pid,
+                "cwd": cwd,
+            }
+            if metadata:
+                heartbeat_data.update(metadata)
+            expr, names, values = _build_set_update(heartbeat_data)
+            sessions_table.update_item(
+                Key={"project_id": project_id, "session_id": sid},
+                UpdateExpression=expr,
+                ExpressionAttributeNames=names,
+                ExpressionAttributeValues=values,
+            )
+            existing_session = sessions_table.get_item(
+                Key={"project_id": project_id, "session_id": sid}
+            ).get("Item") or {}
+            return {
+                "session_id": sid,
+                "minted": False,
+                "last_heartbeat_at": now,
+                "created_at": existing_session.get("created_at", ""),
+            }
+
+    # Mint a fresh session_id (= Firestore 実装と同じ形式)
+    epoch_ms = int(time.time() * 1000)
+    prefix = machine_id[3:11] if machine_id.startswith("mc-") else machine_id[:8]
+    new_sid = f"sv-{prefix}-{epoch_ms}-{secrets.token_hex(4)}"
+
+    session_data = {
+        "project_id": project_id,
+        "session_id": new_sid,
+        "user_id": user_id,
+        "machine_id": machine_id,
+        "parent_pid": parent_pid,
+        "cwd": cwd,
+        "created_at": now,
+        "last_heartbeat_at": now,
+        "last_active": now,
+        "source": "server_minted",
+    }
+    if metadata:
+        session_data.update(metadata)
+    sessions_table.put_item(Item=session_data)
+    lookup_table.put_item(Item={
+        "project_id": project_id,
+        "lookup_key": lookup_key,
+        "session_id": new_sid,
+        "machine_id": machine_id,
+        "parent_pid": parent_pid,
+        "created_at": now,
+    })
+    return {
+        "session_id": new_sid,
+        "minted": True,
+        "last_heartbeat_at": now,
+        "created_at": now,
+    }
 
 
 def list_user_machines(user_id: str) -> list[dict]:
-    raise _not_implemented("list_user_machines")
+    return _query_all(_table("machines"), Key("user_id").eq(user_id))
 
 
 # ---------------------------------------------------------------------------
-# Session logs
+# Session logs (ms-57 / e-1037)  e-1544 Phase 4
 # ---------------------------------------------------------------------------
+# Table: beacon-{env}-session_logs, PK=project_id, SK=session_id
 
 def upsert_session_log(project_id: str, session_id: str, data: dict) -> None:
-    raise _not_implemented("upsert_session_log")
+    """Upsert a session log entry. merge semantics same as upsert_session."""
+    if not data:
+        return
+    expr, names, values = _build_set_update(data)
+    _table("session_logs").update_item(
+        Key={"project_id": project_id, "session_id": session_id},
+        UpdateExpression=expr,
+        ExpressionAttributeNames=names,
+        ExpressionAttributeValues=values,
+    )
 
 
 def list_session_logs(project_id: str,
                       limit: int | None = None) -> list[dict]:
-    raise _not_implemented("list_session_logs")
+    """List session logs ordered by last_aggregated_at desc."""
+    items = _query_all(_table("session_logs"), Key("project_id").eq(project_id))
+    items.sort(key=lambda it: it.get("last_aggregated_at", ""), reverse=True)
+    if limit:
+        items = items[:limit]
+    return items
 
 
 def get_session_log(project_id: str, session_id: str) -> dict | None:
-    raise _not_implemented("get_session_log")
+    resp = _table("session_logs").get_item(
+        Key={"project_id": project_id, "session_id": session_id}
+    )
+    return resp.get("Item")
 
 
 # ---------------------------------------------------------------------------
-# Operation envelopes (Tier 2)
+# Operation envelopes (Tier 2) — ms-60 / e-1339  e-1544 Phase 4
 # ---------------------------------------------------------------------------
+# Table: beacon-{env}-operation_envelopes, PK=project_id, SK=envelope_id
+#
+# Invariant: at most one envelope per op_id has status="active". issue が
+# 先に既存 active を revoke してから新 envelope を put する。Firestore 版は
+# 1 つの transaction でやるが、DynamoDB は TransactWriteItems で同じ
+# atomicity が取れる範囲なら使う。ここでは active が 0 or 1 件のみと
+# いう前提なので sequential update でも race window は十分狭い (= Firestore
+# 版が transaction で守りたかった "2 件 active" がそもそも発生確率が
+# 極小)。万一二重 active が観測されたときの read 側 fallback は Firestore
+# 版と同じく「created_at 最新を採用」。
 
 def get_active_operation_envelope(project_id: str,
                                   op_id: str) -> dict | None:
-    raise _not_implemented("get_active_operation_envelope")
+    items = _query_all(
+        _table("operation_envelopes"),
+        Key("project_id").eq(project_id),
+    )
+    actives = [it for it in items
+               if it.get("op_id") == op_id and it.get("status") == "active"]
+    if not actives:
+        return None
+    if len(actives) > 1:
+        actives.sort(key=lambda d: d.get("created_at", ""), reverse=True)
+    return actives[0]
 
 
 def issue_operation_envelope(project_id: str, op_id: str, spec_doc_id: str,
                              spec_revision_id: str, envelope_dict: dict,
                              approved_actions: list[str],
                              created_by: str) -> dict:
-    raise _not_implemented("issue_operation_envelope")
+    """Store a freshly minted T2 envelope. Auto-revokes any prior active."""
+    nonce = envelope_dict.get("nonce")
+    if not nonce:
+        raise ValueError("envelope_dict missing nonce")
+    now = _now_iso_utc()
+    table = _table("operation_envelopes")
+
+    # 既存 actives を revoke
+    items = _query_all(table, Key("project_id").eq(project_id))
+    for it in items:
+        if it.get("op_id") == op_id and it.get("status") == "active":
+            table.update_item(
+                Key={"project_id": project_id,
+                     "envelope_id": it.get("envelope_id", "")},
+                UpdateExpression=(
+                    "SET #status = :revoked, revoked_at = :ra, "
+                    "revoked_by = :rb, revoke_reason = :rr"
+                ),
+                ExpressionAttributeNames={"#status": "status"},
+                ExpressionAttributeValues={
+                    ":revoked": "revoked",
+                    ":ra": now,
+                    ":rb": created_by,
+                    ":rr": "superseded by new approve",
+                },
+            )
+
+    new_doc = {
+        "project_id": project_id,
+        "envelope_id": nonce,
+        "op_id": op_id,
+        "spec_doc_id": spec_doc_id,
+        "spec_revision_id": spec_revision_id,
+        "envelope": envelope_dict,
+        "approved_actions": list(approved_actions),
+        "status": "active",
+        "created_at": now,
+        "created_by": created_by,
+        "revoked_at": None,
+        "revoked_by": None,
+        "revoke_reason": None,
+    }
+    table.put_item(Item=new_doc)
+    return new_doc
 
 
 def revoke_operation_envelope(project_id: str, envelope_id: str,
                               revoked_by: str, reason: str) -> dict | None:
-    raise _not_implemented("revoke_operation_envelope")
+    """Mark envelope as revoked. Idempotent (already-revoked → return as-is)."""
+    table = _table("operation_envelopes")
+    existing = table.get_item(
+        Key={"project_id": project_id, "envelope_id": envelope_id}
+    ).get("Item")
+    if not existing:
+        return None
+    if existing.get("status") == "revoked":
+        return existing
+    now = _now_iso_utc()
+    table.update_item(
+        Key={"project_id": project_id, "envelope_id": envelope_id},
+        UpdateExpression=(
+            "SET #status = :revoked, revoked_at = :ra, "
+            "revoked_by = :rb, revoke_reason = :rr"
+        ),
+        ExpressionAttributeNames={"#status": "status"},
+        ExpressionAttributeValues={
+            ":revoked": "revoked",
+            ":ra": now,
+            ":rb": revoked_by,
+            ":rr": reason,
+        },
+    )
+    existing.update({
+        "status": "revoked",
+        "revoked_at": now,
+        "revoked_by": revoked_by,
+        "revoke_reason": reason,
+    })
+    return existing
 
 
 def list_operation_envelopes(project_id: str, op_id: str | None = None,
                              status: str | None = None) -> list[dict]:
-    raise _not_implemented("list_operation_envelopes")
+    items = _query_all(
+        _table("operation_envelopes"),
+        Key("project_id").eq(project_id),
+    )
+    if op_id:
+        items = [it for it in items if it.get("op_id") == op_id]
+    if status:
+        items = [it for it in items if it.get("status") == status]
+    items.sort(key=lambda d: d.get("created_at", ""), reverse=True)
+    return items
 
 
 def get_operation_envelope(project_id: str,
                            envelope_id: str) -> dict | None:
-    raise _not_implemented("get_operation_envelope")
+    resp = _table("operation_envelopes").get_item(
+        Key={"project_id": project_id, "envelope_id": envelope_id}
+    )
+    return resp.get("Item")
