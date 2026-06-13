@@ -834,17 +834,29 @@ def load_project_consistent(project_id: str) -> dict:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
 
-    import firestore_client as db  # type: ignore[import-not-found]
+    # ms-64 e-1627: store_router 経由でバックエンド (firestore / dynamodb)
+    # を切替える。v2 schema (= milestones を subcollection に分解) は
+    # Firestore 由来の概念で、DynamoDB 経路では存在しない (= 新規 project は
+    # v1 unified 形式で save_project に渡されるため)。よって DynamoDB
+    # バックエンド時は schema check + subcollection hydration を skip して
+    # whole-doc を返す。
+    import store_router as db  # type: ignore[import-not-found]
     meta = db.get_project(project_id)
     if meta is None:
         raise LookupError(f"Project '{project_id}' not found")
+
+    store_backend = os.environ.get("BEACON_STORE_BACKEND", "firestore").lower()
+    if store_backend == "dynamodb":
+        return meta
+
     if get_schema_version(meta) == SCHEMA_V1_LEGACY:
         return meta
 
-    # v2: hydrate milestones from subcollection.
-    client = db.get_db()
+    # v2 (Firestore only): hydrate milestones from subcollection.
+    import firestore_client as fsdb  # type: ignore[import-not-found]
+    client = fsdb.get_db()
     ms_col = (
-        client.collection(db.COLLECTION)
+        client.collection(fsdb.COLLECTION)
         .document(project_id)
         .collection("milestones")
     )
