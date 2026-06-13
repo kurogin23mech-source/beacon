@@ -134,6 +134,22 @@ if echo "$STAGED" | grep -qE "^(bin/beacon|lib/commands\.py|README\.md|beacon_cl
 fi
 
 # ==============================================================================
+# Check 7: server/ vs lib/ module name collision (added 2026-06-13, ms-64 e-1618)
+# ==============================================================================
+# app.py 上部の sys.path.insert(0, "../lib") のせいで lib/ が import path 先頭。
+# server/*.py に lib/ と同名のファイルを作ると shadow されて本番障害 (= 2026-06-13)。
+# strict mode (= exit 1) で commit を block する。
+if echo "$STAGED" | grep -qE "^(server|lib)/[^/]+\.py$"; then
+  if [ -f scripts/check-server-lib-collision.py ]; then
+    python3 scripts/check-server-lib-collision.py --strict 2>&1 | sed 's/^/[pre-commit] /'
+    if [ ${PIPESTATUS[0]} -ne 0 ]; then
+      echo "[pre-commit] ERROR: server/ ↔ lib/ name collision を解消してから commit してください。" >&2
+      exit 1
+    fi
+  fi
+fi
+
+# ==============================================================================
 # Check 7: INSTALL.md static validation (added 2026-06-02, ms-10 e-722)
 # ==============================================================================
 if echo "$STAGED" | grep -q "^INSTALL\.md$"; then

@@ -42,6 +42,12 @@ jobs:
       - name: CLI help drift
         run: python3 scripts/check-cli-help-drift.py --strict
 
+      - name: server/ ↔ lib/ name collision (ms-64 e-1618)
+        # 2026-06-13 本番障害の再発防止: app.py の sys.path.insert で lib/ が
+        # import path 先頭に入るため、server/*.py に lib/ と同名のファイルを
+        # 作ると shadow されて壊れる。pre-commit と CI で機械的に block。
+        run: python3 scripts/check-server-lib-collision.py --strict
+
       - name: INSTALL.md static validation
         run: python3 scripts/check-install-md.py --strict
 
