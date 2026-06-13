@@ -221,13 +221,130 @@ def _verify_cli_token(token: str) -> dict | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Identity provider dispatch (e-1545)
+# ---------------------------------------------------------------------------
+# BEACON_AUTH_PROVIDER = "firebase" (default, = GCP 既存経路 / Cloud Run) or
+#                       "cognito"  (= AWS GA-incubation Lambda 経路)
+# CLI トークンはどちらの provider でも有効 (provider-agnostic な HMAC)。
+# CLI 以外の bearer トークンは provider 固有の検証経路に流す。
+_AUTH_PROVIDER = os.environ.get("BEACON_AUTH_PROVIDER", "firebase").lower()
+
+_cognito_jwks_client = None
+
+
+def _get_cognito_jwks_client():
+    """Return a (cached) PyJWKClient pointed at the configured Cognito User Pool.
+
+    Cognito の JWKS は概ね不変 (= 鍵ローテーション時のみ変わる) なので、
+    PyJWKClient の内部キャッシュをそのまま再利用すると毎リクエストの
+    HTTP 取得を避けられる。プロセス起動後の初回呼び出しで 1 回だけ
+    JWKS endpoint に届く。
+    """
+    global _cognito_jwks_client
+    if _cognito_jwks_client is not None:
+        return _cognito_jwks_client
+    user_pool_id = os.environ.get("BEACON_COGNITO_USER_POOL_ID", "")
+    if not user_pool_id:
+        raise HTTPException(
+            status_code=500,
+            detail="BEACON_AUTH_PROVIDER=cognito but BEACON_COGNITO_USER_POOL_ID is unset",
+        )
+    region = os.environ.get("AWS_REGION", "ap-northeast-1")
+    import jwt as _jwt
+    jwks_url = (
+        f"https://cognito-idp.{region}.amazonaws.com/{user_pool_id}/.well-known/jwks.json"
+    )
+    _cognito_jwks_client = _jwt.PyJWKClient(jwks_url)
+    return _cognito_jwks_client
+
+
+def _verify_cognito_token(token: str) -> dict:
+    """Verify a Cognito User Pool JWT and return the claims.
+
+    Cognito User Pool は ID token と access token の 2 種類を発行する:
+      - ID token: ``token_use=id`` + ``aud`` claim にクライアントID
+      - access token: ``token_use=access`` + ``client_id`` claim にクライアントID
+    Beacon CLI は ID token を使う想定 (= ユーザ属性 email / sub を要求するため)。
+    access token も将来必要になる可能性があるので、両方とも受け付けて
+    token_use で分岐する。
+    """
+    user_pool_id = os.environ.get("BEACON_COGNITO_USER_POOL_ID", "")
+    client_id = os.environ.get("BEACON_COGNITO_CLIENT_ID", "")
+    region = os.environ.get("AWS_REGION", "ap-northeast-1")
+    if not user_pool_id:
+        raise HTTPException(
+            status_code=500,
+            detail="BEACON_AUTH_PROVIDER=cognito but BEACON_COGNITO_USER_POOL_ID is unset",
+        )
+    issuer = f"https://cognito-idp.{region}.amazonaws.com/{user_pool_id}"
+
+    import jwt as _jwt
+    try:
+        jwks_client = _get_cognito_jwks_client()
+        signing_key = jwks_client.get_signing_key_from_jwt(token).key
+        # First decode without aud check to read token_use, then re-validate
+        # with the appropriate audience claim.
+        unverified = _jwt.decode(
+            token,
+            signing_key,
+            algorithms=["RS256"],
+            issuer=issuer,
+            options={"verify_aud": False},
+        )
+        token_use = unverified.get("token_use")
+        if token_use == "id":
+            # ID token: aud claim must match client_id (if configured)
+            if client_id:
+                claims = _jwt.decode(
+                    token,
+                    signing_key,
+                    algorithms=["RS256"],
+                    issuer=issuer,
+                    audience=client_id,
+                )
+            else:
+                claims = unverified
+        elif token_use == "access":
+            # access token: client_id claim must match (manual check; PyJWT
+            # decode の audience は ID token 用なのでここでは触らない)
+            if client_id and unverified.get("client_id") != client_id:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Invalid token: client_id mismatch",
+                )
+            claims = unverified
+        else:
+            raise HTTPException(
+                status_code=401,
+                detail=f"Invalid token_use: {token_use!r}",
+            )
+        # Cognito の sub は User Pool 固有の UUID。email は ID token に含まれる
+        # (= access token には無いことがある)。両者に email を埋めて
+        # downstream の get_or_create_user(sub, email) が動くようにする。
+        if "email" not in claims:
+            claims["email"] = ""
+        return claims
+    except _jwt.PyJWTError as e:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
+
+
 def _verify_id_token(token: str) -> dict:
-    """Verify a Google ID token or Beacon CLI token and return the claims."""
+    """Verify a bearer token (CLI / Google ID / Cognito JWT) and return claims.
+
+    検証順:
+      1. Beacon CLI token (HMAC, provider 非依存)
+      2. ``BEACON_AUTH_PROVIDER`` に応じた IdP 経路
+         - "cognito" → Cognito User Pool JWT 検証
+         - その他    → Google ID token 検証 (= 既存 Cloud Run 経路)
+    """
     # Check for long-lived CLI token first (no network call)
     claims = _verify_cli_token(token)
     if claims:
         return claims
-    # Fall back to Google ID token verification
+    if _AUTH_PROVIDER == "cognito":
+        return _verify_cognito_token(token)
+    # Fall back to Google ID token verification (= Cloud Run 既存経路)
     from google.oauth2 import id_token
     from google.auth.transport import requests as google_requests
 

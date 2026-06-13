@@ -4,3 +4,7 @@ google-cloud-firestore>=2.19.0
 google-cloud-storage>=2.18.0
 google-auth>=2.36.0
 python-multipart>=0.0.9
+# e-1545: Cognito (AWS GA-incubation) 経路で Cognito User Pool の JWT
+# (RS256 / JWKS) を検証する。BEACON_AUTH_PROVIDER=firebase (= 既定の
+# Cloud Run 既存経路) では import されない。
+PyJWT[crypto]>=2.8.0
