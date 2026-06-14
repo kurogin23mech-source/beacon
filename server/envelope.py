@@ -16,6 +16,18 @@ The 4-tier model:
   * **T5** — AI autonomous send. Info disclosure forbidden (short-ping shape
     only); actions forbidden.
 
+Why T4 is absent (ms-63 / e-1433):
+
+  Earlier iterations of the tier model reserved T4 for "AI suggested,
+  awaiting human ack" — a state between T2 (scope-auto) and T5 (autonomous
+  send). During the e-1155 design we collapsed that into ``decide_delivery``
+  outcomes ("propose-to-ai") because the "awaiting ack" is a *delivery*
+  property, not an authorization tier — the same envelope can yield
+  propose-to-ai under one receiver context and auto-execute under another.
+  Keeping the slot empty rather than renumbering preserves backward-compat
+  with any audit record that referenced T1/T2/T3/T5 by name, and the gap
+  is a recurring reminder that delivery and tier are orthogonal axes.
+
 Phase 1 scope (this module):
 
   * envelope dataclass + canonical serialization
@@ -107,6 +119,126 @@ LEGACY_NO_ENVELOPE_TIER = TIER_T5
 
 
 # ---------------------------------------------------------------------------
+# Disclosure contract (ms-63 / e-1443) — project disclosure_policy snapshot
+# burned into the envelope at mint time.
+#
+# Why this lives on the envelope (= signed) rather than as advisory metadata:
+#   The disclosure gate (e-1430) on the receiver side fires when the receiver
+#   AI is about to emit text in *reply* to a bus message. The contract that
+#   bounds what the receiver may say is decided by the *sender's* project
+#   sensitivity at the moment they joined the conversation. An attacker who
+#   could strip a separate ``disclosure_contract`` field post-signature would
+#   bypass the gate; folding the snapshot into the signed canonical bytes
+#   shuts that off — any tamper invalidates the HMAC.
+#
+# Why "snapshot" not "live lookup":
+#   See SPEC § 設計方針 4 — dev/prod 不可分問題は project sensitivity 固定で
+#   扱う (人間組織の NDA メタファー). The contract is what the project
+#   *agreed to at join time*, not what it might be re-configured to mid-flight.
+#
+# Sensitivity values:
+#   * "high" — project handles confidential context (PII, credentials,
+#     business secrets). T5 (= AI-autonomous) replies are capped to the
+#     T5_RESPONSE_SCHEMA_HIGH allowlist (= status pings only); no free-text
+#     answers can leave the boundary, even from a well-meaning AI.
+#   * "low"  — project is openly shared (OSS repos, public docs). T5 replies
+#     can use the full short-ping schema; no extra cap beyond Phase 1
+#     ping-shape rules.
+#
+# Future axes (reserved, NOT validated in this Phase):
+#   * t5_response_mode — explicit override of the high/low default mapping.
+#   * t5_free_text     — bool, opt-in to allow T5 free text on low projects.
+#   * data_classes     — declared inventory of confidential context kinds.
+# ---------------------------------------------------------------------------
+
+SENSITIVITY_HIGH = "high"
+SENSITIVITY_LOW = "low"
+VALID_SENSITIVITIES = {SENSITIVITY_HIGH, SENSITIVITY_LOW}
+
+# Default sensitivity for a project mint when none is configured. The SPEC
+# § 設計方針 2 picks "high" so that "forgetting to set it" fails in the safe
+# direction (= the AI clams up). The flip side — overly chatty defaults —
+# would let the very first DM after a new project is created leak context.
+DEFAULT_SENSITIVITY = SENSITIVITY_HIGH
+
+# T5 response mode keywords. ``schema-only`` is the high-sensitivity cap.
+# ``free`` is the low-sensitivity (= default Phase-1 behaviour, only bounded
+# by the ping-shape rules already in validate_t5_payload).
+T5_RESPONSE_MODE_SCHEMA_ONLY = "schema-only"
+T5_RESPONSE_MODE_FREE = "free"
+VALID_T5_RESPONSE_MODES = {T5_RESPONSE_MODE_SCHEMA_ONLY, T5_RESPONSE_MODE_FREE}
+
+# Keys allowed in a T5 reply on a high-sensitivity project (= the "定型
+# schema only" enforcement from SPEC § 設計方針 5 and acceptance criterion 5).
+# This is intentionally narrower than T5_PING_KEYS — it excludes ``ts`` and
+# ``kind`` (those are sender-emitted markers, not response shapes).
+T5_RESPONSE_SCHEMA_HIGH_KEYS = frozenset({"busy", "available", "ack", "task_id"})
+
+
+def default_disclosure_contract() -> dict:
+    """Return the default disclosure_contract used when a project has not yet
+    declared a disclosure_policy.
+
+    Defaulting to ``sensitivity=high`` matches SPEC § 設計方針 2: the failure
+    mode "forgot to configure → AI clams up" is preferred over "forgot to
+    configure → AI leaks". A caller that wants the open-OSS posture must
+    declare it explicitly via ``beacon init --sensitivity low`` (cmd_init).
+    """
+    return {
+        "sensitivity": DEFAULT_SENSITIVITY,
+        "t5_response_mode": T5_RESPONSE_MODE_SCHEMA_ONLY,
+        "t5_free_text": False,
+    }
+
+
+def normalize_disclosure_contract(raw: Optional[dict]) -> dict:
+    """Coerce a raw disclosure_contract dict into the canonical schema shape.
+
+    Unknown keys are dropped (forward-compat with Phase-2 axes like
+    declared data_classes). Missing keys are filled from the default
+    contract. The returned dict is fresh (caller-owned).
+
+    Validation is conservative:
+      * sensitivity must be in ``VALID_SENSITIVITIES`` else default applied
+      * t5_response_mode must be in ``VALID_T5_RESPONSE_MODES`` else default
+      * t5_free_text coerces to bool
+    """
+    contract = default_disclosure_contract()
+    if not isinstance(raw, dict):
+        return contract
+    sensitivity = raw.get("sensitivity")
+    if sensitivity in VALID_SENSITIVITIES:
+        contract["sensitivity"] = sensitivity
+    mode = raw.get("t5_response_mode")
+    if mode in VALID_T5_RESPONSE_MODES:
+        contract["t5_response_mode"] = mode
+    elif sensitivity == SENSITIVITY_LOW and "t5_response_mode" not in raw:
+        # low-sensitivity default flips the mode to "free" when the caller
+        # didn't override it — see SPEC § 設計方針 2 dual-default.
+        contract["t5_response_mode"] = T5_RESPONSE_MODE_FREE
+    if "t5_free_text" in raw:
+        contract["t5_free_text"] = bool(raw.get("t5_free_text"))
+    elif contract["sensitivity"] == SENSITIVITY_LOW:
+        # low projects default to allowing free text. Explicit override above
+        # still wins.
+        contract["t5_free_text"] = True
+    return contract
+
+
+def disclosure_contract_from_policy(policy: Optional[dict]) -> dict:
+    """Build the envelope-burned contract from a project's disclosure_policy.
+
+    ``policy`` is the dict that lives in project.json under the
+    ``disclosure_policy`` key. Missing or malformed inputs degrade to the
+    safe default (= high sensitivity, schema-only T5).
+
+    The output of this function is what gets *signed into* the envelope at
+    issuance time; we keep it small so the canonical bytes stay compact.
+    """
+    return normalize_disclosure_contract(policy)
+
+
+# ---------------------------------------------------------------------------
 # Envelope schema
 # ---------------------------------------------------------------------------
 
@@ -129,6 +261,12 @@ class Envelope:
     conversation_id: str
     in_reply_to: Optional[str]
     chain_depth: int
+    # ms-63 / e-1443: disclosure_contract sits in parallel with
+    # actions_authorized as the read-side counterpart. Defaulting to None
+    # is what older (pre-ms-63) envelopes look like on the wire; verify()
+    # treats absent contract as the safe default (= high sensitivity) for
+    # forward-compat with envelopes minted before this field existed.
+    disclosure_contract: Optional[dict] = None
     # Phase 2 reservation slots — always None in Phase 1.
     tokens: Optional[dict] = None
     refill_policy: Optional[dict] = None
@@ -274,6 +412,8 @@ def issue_envelope(
     in_reply_to: Optional[str] = None,
     chain_depth: int = 0,
     ttl_seconds: int = 3600,
+    disclosure_contract: Optional[dict] = None,
+    disclosure_policy: Optional[dict] = None,
 ) -> dict:
     """Issue a server-signed envelope.
 
@@ -319,6 +459,20 @@ def issue_envelope(
     nonce = secrets.token_urlsafe(16)
     convo = conversation_id or secrets.token_urlsafe(8)
 
+    # ms-63 / e-1429: bake the disclosure_contract in at mint time so the
+    # receive-side gate (e-1430) consults the contract that the *sender's*
+    # project agreed to at join time, not a live (mutable) project lookup.
+    # Precedence: explicit disclosure_contract > disclosure_policy → derived
+    # > default-safe. Either way the result is normalized to the canonical
+    # schema shape so out-of-band edits don't get carried into the signed
+    # bytes.
+    if disclosure_contract is not None:
+        contract = normalize_disclosure_contract(disclosure_contract)
+    elif disclosure_policy is not None:
+        contract = disclosure_contract_from_policy(disclosure_policy)
+    else:
+        contract = default_disclosure_contract()
+
     body: dict[str, Any] = {
         "tier": tier,
         "issuer": issuer,
@@ -332,6 +486,7 @@ def issue_envelope(
         "conversation_id": convo,
         "in_reply_to": in_reply_to,
         "chain_depth": chain_depth,
+        "disclosure_contract": contract,  # ms-63 / e-1443 — signed-in
         "tokens": None,        # Phase 2 reservation
         "refill_policy": None, # Phase 2 reservation
     }
@@ -786,6 +941,239 @@ def decide_delivery(
     # T1: in actions_authorized → respect requested_delivery; otherwise
     # caller's request stands (T1 issuer endorsed it).
     return requested_delivery
+
+
+# ---------------------------------------------------------------------------
+# Disclosure gate (ms-63 / e-1430) — receive-side response gate
+#
+# Symmetric counterpart to e-1293 (persistence gate, "書込口"). Where the
+# write gate refuses an *inbound* bus DM from being persisted, the disclosure
+# gate refuses an *outbound* AI reply from leaving the boundary when the
+# inbound envelope's disclosure_contract forbids it.
+#
+# Two related responsibilities:
+#   1. ``disclosure_gate_check(envelope, reply_kind, reply_payload)`` — verdict
+#      function the handler layer calls before sending a reply. Returns either
+#      a "permit" or "refuse" result with a reason.
+#   2. ``T5 自発的問い合わせ救済`` (SPEC § 設計方針 5) — the two-direction
+#      relaxation for genuine query traffic: in_reply_to chain → T3 treatment
+#      (handled at verify time via the parent lookup), and ``query_type``
+#      schema → permitted even from T5 on low-sensitivity projects.
+# ---------------------------------------------------------------------------
+
+# Reply kinds the disclosure gate knows about. ``schema`` is a structured
+# response (ack / busy / etc.); ``query`` is a question (no answer leakage
+# risk); ``free`` is open prose (the prompt-injection / exfil risk surface).
+REPLY_KIND_SCHEMA = "schema"
+REPLY_KIND_QUERY = "query"
+REPLY_KIND_FREE = "free"
+VALID_REPLY_KINDS = {REPLY_KIND_SCHEMA, REPLY_KIND_QUERY, REPLY_KIND_FREE}
+
+# Keys allowed in a ``query`` reply (SPEC § 設計方針 5 方向 B). A query is a
+# question, not an answer — so it can carry the question text but not data.
+# ``question`` holds the question prose; ``ref`` may carry a task/event id
+# the question is about. Length-capped to avoid free-text exfil through the
+# query schema.
+T5_QUERY_KEYS = frozenset({"question", "ref", "kind"})
+T5_QUERY_VALUE_MAX_LEN = 200  # generous enough for a real question, capped
+
+
+@dataclasses.dataclass
+class DisclosureVerdict:
+    """Outcome of disclosure_gate_check.
+
+    ``permit`` is True iff the reply may be sent as-is. ``rewrite_to`` is the
+    schema-conformant fallback the caller should send instead when the gate
+    refuses but a degraded reply is still appropriate (e.g. ack-only). The
+    handler layer can choose to either send ``rewrite_to`` automatically or
+    escalate via the t3-escalation channel (e-1442 wiring).
+    """
+    permit: bool
+    reason: str
+    rewrite_to: Optional[dict] = None
+
+    def to_audit_dict(self) -> dict:
+        return {
+            "permit": self.permit,
+            "reason": self.reason,
+            "rewrite_to": dict(self.rewrite_to) if self.rewrite_to else None,
+        }
+
+
+def _validate_query_payload(payload: dict) -> Optional[str]:
+    """Return None if ``payload`` fits the T5 query schema, else a reason.
+
+    The query schema is the second of the two SPEC § 設計方針 5 救済
+    paths — it lets a genuine question travel even on T5 while the answer
+    surface stays bounded by the receiver's own disclosure gate.
+    """
+    if not isinstance(payload, dict):
+        return "query payload must be a dict"
+    extra = set(payload.keys()) - T5_QUERY_KEYS
+    if extra:
+        return f"query payload keys not in allowlist: {sorted(extra)}"
+    for key, value in payload.items():
+        if isinstance(value, str):
+            if len(value) > T5_QUERY_VALUE_MAX_LEN:
+                return (f"query payload field {key!r} exceeds "
+                        f"{T5_QUERY_VALUE_MAX_LEN} chars")
+        elif isinstance(value, (int, float, bool)) or value is None:
+            continue
+        else:
+            return f"query payload field {key!r} must be primitive"
+    return None
+
+
+def _validate_high_sensitivity_schema(payload: dict) -> Optional[str]:
+    """Return None if ``payload`` fits the high-sensitivity reply schema.
+
+    Implements SPEC acceptance § 5: "busy / available / ack / task_id 参照
+    以外の自由テキスト応答が gate で reject されること". Used by the
+    disclosure_gate when the inbound envelope's contract says
+    ``t5_response_mode == schema-only`` (= high-sensitivity project).
+    """
+    if not isinstance(payload, dict):
+        return "high-sensitivity reply payload must be a dict"
+    keys = set(payload.keys())
+    extra = keys - T5_RESPONSE_SCHEMA_HIGH_KEYS
+    if extra:
+        return (f"high-sensitivity reply keys not in allowlist "
+                f"{sorted(T5_RESPONSE_SCHEMA_HIGH_KEYS)}: {sorted(extra)}")
+    for key, value in payload.items():
+        if isinstance(value, str):
+            if len(value) > T5_PING_VALUE_MAX_LEN:
+                return (f"high-sensitivity reply field {key!r} exceeds "
+                        f"{T5_PING_VALUE_MAX_LEN} chars")
+        elif isinstance(value, (int, float, bool)) or value is None:
+            continue
+        else:
+            return f"high-sensitivity reply field {key!r} must be primitive"
+    return None
+
+
+def _ack_only_rewrite() -> dict:
+    """Return the minimal ack-only reply used as a refuse-but-degrade fallback.
+
+    When the gate refuses a free-text reply, the handler layer can substitute
+    this instead of dropping the reply on the floor. ``ack=true`` is the
+    standard "I received your message but can't share details" signal.
+    """
+    return {"ack": True}
+
+
+def disclosure_gate_check(
+    envelope: Optional[dict],
+    *,
+    reply_kind: str,
+    reply_payload: dict,
+) -> DisclosureVerdict:
+    """Check whether an outbound AI reply may be sent under this envelope.
+
+    Symmetric to the receive-side verify (e-1155) and the persistence gate
+    (e-1293): the handler layer calls this BEFORE emitting any reply text.
+    A None envelope means the inbound message was legacy/unsigned — same
+    fail-closed default the rest of the pipeline applies.
+
+    Decision matrix (SPEC § 設計方針):
+      * reply_kind=schema with payload conforming to T5 ping → always permit
+        (= the safest reply shape).
+      * reply_kind=query → permitted on low-sensitivity projects (= valuable
+        TrailNode→Beacon "PR#66 どうなった?" pattern, SPEC § 5 方向 B);
+        refused on high-sensitivity projects with a query→schema rewrite
+        suggestion (the question itself can leak context about what the
+        sender is interested in).
+      * reply_kind=free → permitted on low-sensitivity projects iff the
+        contract allows ``t5_free_text``; refused on high-sensitivity with
+        an ack-only rewrite suggestion.
+
+    Phase 2 (NOT implemented): tier-aware relaxation for T1 inbound (= human
+    explicit) where free-text replies may be permitted unconditionally. The
+    current gate treats *all* tiers conservatively because the inbound
+    envelope's tier affects what the sender is authorized to *send*, not
+    what the receiver may *disclose*. Those are orthogonal axes.
+    """
+    if reply_kind not in VALID_REPLY_KINDS:
+        return DisclosureVerdict(
+            permit=False,
+            reason=f"unknown reply_kind {reply_kind!r}",
+            rewrite_to=_ack_only_rewrite(),
+        )
+
+    # Pull contract from envelope; fall back to the safe default when the
+    # inbound is legacy or didn't ship a contract. Fail-closed is required
+    # here — an attacker who can suppress the contract field on the wire
+    # must NOT thereby gain free-text disclosure.
+    if envelope is None:
+        contract = default_disclosure_contract()
+    else:
+        contract = normalize_disclosure_contract(
+            envelope.get("disclosure_contract")
+        )
+
+    sensitivity = contract.get("sensitivity", SENSITIVITY_HIGH)
+    response_mode = contract.get("t5_response_mode", T5_RESPONSE_MODE_SCHEMA_ONLY)
+    allow_free_text = bool(contract.get("t5_free_text", False))
+
+    # --- schema reply ---
+    # Schema replies (= structured short-ping shape) are the lowest-risk
+    # surface; they're always permitted as long as the payload itself fits
+    # the high-sensitivity allowlist (which is stricter than ping-shape, so
+    # passing the strict one means passing both).
+    if reply_kind == REPLY_KIND_SCHEMA:
+        fail = _validate_high_sensitivity_schema(reply_payload)
+        if fail:
+            return DisclosureVerdict(
+                permit=False,
+                reason=fail,
+                rewrite_to=_ack_only_rewrite(),
+            )
+        return DisclosureVerdict(permit=True, reason="schema reply permitted")
+
+    # --- query reply (T5 救済方向 B) ---
+    if reply_kind == REPLY_KIND_QUERY:
+        if sensitivity == SENSITIVITY_HIGH:
+            # Even the question itself can carry context about what we
+            # care about; refuse on high projects, suggest a schema rewrite.
+            return DisclosureVerdict(
+                permit=False,
+                reason=("query replies refused on high-sensitivity project "
+                        "(send a schema reply with task_id reference instead)"),
+                rewrite_to=_ack_only_rewrite(),
+            )
+        fail = _validate_query_payload(reply_payload)
+        if fail:
+            return DisclosureVerdict(
+                permit=False,
+                reason=fail,
+                rewrite_to=_ack_only_rewrite(),
+            )
+        return DisclosureVerdict(permit=True, reason="query reply permitted")
+
+    # --- free-text reply ---
+    # This is the prompt-injection / exfil risk surface. Refuse unless:
+    #   * project is low-sensitivity, AND
+    #   * contract explicitly allows t5_free_text, AND
+    #   * the policy isn't in schema-only mode (an override on a low project).
+    if sensitivity == SENSITIVITY_HIGH:
+        return DisclosureVerdict(
+            permit=False,
+            reason=("free-text replies refused on high-sensitivity project "
+                    "(use a schema reply: ack / busy / available / task_id)"),
+            rewrite_to=_ack_only_rewrite(),
+        )
+    if response_mode == T5_RESPONSE_MODE_SCHEMA_ONLY:
+        return DisclosureVerdict(
+            permit=False,
+            reason="response_mode=schema-only forbids free-text replies",
+            rewrite_to=_ack_only_rewrite(),
+        )
+    if not allow_free_text:
+        return DisclosureVerdict(
+            permit=False,
+            reason="t5_free_text disabled on this project",
+            rewrite_to=_ack_only_rewrite(),
+        )
+    return DisclosureVerdict(permit=True, reason="free reply permitted")
 
 
 # ---------------------------------------------------------------------------
