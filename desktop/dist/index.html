@@ -1796,6 +1796,332 @@ body::after {
   text-decoration: underline;
 }
 
+/* =================================================================
+   Trek detail page (ms-69 / e-1659 v2 — mock parity refactor)
+   ================================================================= */
+
+/* Crumb back-link. Same row as page title so the user sees "where am I → click to leave". */
+.trek-crumb {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  margin-bottom: 18px;
+  cursor: pointer;
+  display: inline-block;
+}
+.trek-crumb:hover { color: var(--accent); }
+
+.trek-head { margin-bottom: 18px; }
+.trek-title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.trek-title-text {
+  font-size: 1.4rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.trek-badge {
+  font-size: 0.6rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+.trek-badge.persistent { color: #a78bfa; border-color: #a78bfa; }
+.trek-badge.temporary { color: var(--info, #60a5fa); border-color: var(--info, #60a5fa); }
+.trek-badge.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-glow);
+}
+.trek-badge.archived { color: var(--text-dim); }
+.trek-badge.planning { color: var(--text-secondary); }
+
+.trek-stats {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
+.trek-meta {
+  display: grid;
+  grid-template-columns: 100px 1fr;
+  gap: 6px 14px;
+  font-size: 0.78rem;
+  margin: 14px 0 24px;
+}
+.trek-meta .k { color: var(--text-dim); }
+.trek-meta .v { color: var(--text-primary); }
+.trek-meta .v .session-id {
+  font-family: var(--font-mono, monospace);
+  color: var(--accent);
+}
+.trek-meta .v .sub {
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  margin-left: 8px;
+}
+
+/* STOP card — prominent red, always rendered on active trek so the
+   "kill switch" is one click away. */
+.trek-stop-card {
+  border: 1px solid var(--danger, #ef4444);
+  background: rgba(239,68,68,0.06);
+  border-radius: 6px;
+  padding: 20px;
+  margin-bottom: 18px;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+.trek-stop-card .icon { font-size: 1.8rem; }
+.trek-stop-card .text { flex: 1; font-size: 0.78rem; color: var(--text-secondary); }
+.trek-stop-card .text strong {
+  display: block;
+  color: var(--danger, #ef4444);
+  font-size: 0.9rem;
+  letter-spacing: 0.1em;
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+.trek-stop-card button {
+  background: var(--danger, #ef4444);
+  color: #0a0a0c;
+  border: 1px solid var(--danger, #ef4444);
+  padding: 10px 24px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  border-radius: 3px;
+}
+.trek-stop-card button:hover { background: #ff5f5f; }
+.trek-stop-card.halted { background: rgba(251,191,36,0.08); border-color: var(--warning, #fbbf24); }
+.trek-stop-card.halted .text strong { color: var(--warning, #fbbf24); }
+.trek-stop-card.halted button { background: var(--warning, #fbbf24); border-color: var(--warning, #fbbf24); }
+
+/* Archive card — same height but visually subordinate to STOP. */
+.trek-archive-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 12px;
+  margin-bottom: 18px;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-surface, var(--bg-raised));
+}
+.trek-archive-card .ico { color: var(--text-dim); }
+.trek-archive-card .text { flex: 1; }
+.trek-archive-card .text strong { color: var(--text-primary); }
+
+/* Section block — used by SCOPE / MEMBERS / CLAIMS / ACTIVITY / SUMMARIES. */
+.trek-section { margin: 24px 0; }
+.trek-section-title {
+  font-size: 0.65rem;
+  letter-spacing: 0.2em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.trek-section-title .right {
+  margin-left: auto;
+  font-size: 0.62rem;
+  color: var(--text-dim);
+  letter-spacing: 0.05em;
+}
+
+/* SCOPE row: 24px pin | 110px proj-tag | 80px ref | 1fr desc | 90px pill */
+.trek-scope-row {
+  display: grid;
+  grid-template-columns: 24px 110px 80px 1fr 90px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle, var(--border));
+  font-size: 0.78rem;
+}
+.trek-scope-row .pin { color: var(--text-secondary); }
+.trek-scope-row .proj-tag {
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.trek-scope-row .ref {
+  color: var(--text-dim);
+  font-family: var(--font-mono, monospace);
+  font-size: 0.72rem;
+}
+.trek-scope-row .desc {
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.trek-scope-row .pill {
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  text-align: right;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.trek-scope-row .pill.active { color: var(--accent); }
+.trek-scope-row .pill.observing { color: #a78bfa; }
+
+/* Member row + nested session rows */
+.trek-member-row {
+  display: grid;
+  grid-template-columns: 14px 1fr 80px 90px 130px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle, var(--border));
+  font-size: 0.78rem;
+}
+.trek-member-row .dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent-glow);
+}
+.trek-member-row.offline .dot { background: var(--text-dim); box-shadow: none; }
+.trek-member-row.invited .dot { background: var(--text-dim); box-shadow: none; opacity: 0.5; }
+.trek-member-row .email { color: var(--text-primary); }
+.trek-member-row .where { color: var(--text-dim); font-size: 0.7rem; display: block; }
+.trek-member-row .role {
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.trek-member-row .role.leader { color: var(--accent); }
+.trek-member-row .joined { color: var(--text-dim); font-size: 0.7rem; text-align: right; }
+
+.trek-session-nest {
+  margin-left: 24px;
+  border-left: 1px solid var(--border-subtle, var(--border));
+  padding-left: 12px;
+}
+.trek-session-row {
+  display: grid;
+  grid-template-columns: 16px 1fr 80px 90px 130px;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+  font-size: 0.78rem;
+}
+.trek-session-row .leader-mark { color: var(--accent); }
+.trek-session-row .session-id {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.74rem;
+  color: var(--accent);
+}
+.trek-session-row.member-session .session-id { color: var(--text-primary); }
+
+/* Claim / activity / summary rows (= placeholder while e-1696/97/98 land). */
+.trek-claim-row,
+.trek-activity-row,
+.trek-summary-row {
+  display: grid;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle, var(--border));
+  font-size: 0.78rem;
+}
+.trek-claim-row { grid-template-columns: 20px 110px 1fr auto; }
+.trek-claim-row .lock { color: var(--warning, #fbbf24); }
+.trek-claim-row .target { color: var(--text-primary); }
+.trek-claim-row .since { color: var(--text-dim); font-size: 0.72rem; }
+.trek-activity-row { grid-template-columns: 70px 1fr; }
+.trek-activity-row .ts {
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  font-family: var(--font-mono, monospace);
+}
+.trek-activity-row .desc { color: var(--text-primary); }
+.trek-summary-row { grid-template-columns: 30px 1fr auto; cursor: pointer; }
+.trek-summary-row:hover { background: var(--bg-hover); }
+.trek-summary-row .ico { color: var(--text-secondary); }
+.trek-summary-row .summary-title { color: var(--text-primary); }
+.trek-summary-row .summary-date { color: var(--text-dim); font-size: 0.72rem; }
+
+/* CLI hint block — used at the bottom of each section. */
+.trek-cli-hint {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  margin: 6px 0 22px;
+  padding-left: 8px;
+  border-left: 2px solid var(--border);
+  font-family: var(--font-mono, monospace);
+}
+.trek-cli-hint code {
+  display: block;
+  color: var(--text-secondary);
+  padding: 1px 0;
+}
+
+/* Placeholder shown for sections whose backing feature is not yet shipped
+   (= "this section will populate when e-XXXX lands"). */
+.trek-coming-soon {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  font-style: italic;
+  padding: 8px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 3px;
+}
+
+/* List view (= Treks tab on the project page) — mock-style row. */
+.trek-list-row {
+  display: grid;
+  grid-template-columns: 14px 1fr 100px 110px;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 14px;
+  border: 1px solid transparent;
+  border-bottom: 1px solid var(--border-subtle, var(--border));
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+.trek-list-row:hover { background: var(--bg-hover); border-color: var(--border); }
+.trek-list-row .status-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--text-dim);
+  margin: 0 auto;
+}
+.trek-list-row .status-dot.active {
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent-glow);
+}
+.trek-list-row .status-dot.planning { background: transparent; border: 1px solid var(--text-dim); }
+.trek-list-row .status-dot.archived { background: var(--text-dim); }
+.trek-list-row .name { color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.trek-list-row .name .id {
+  color: var(--text-dim);
+  font-size: 0.7rem;
+  font-family: var(--font-mono, monospace);
+  margin-left: 8px;
+}
+.trek-list-row .counts { color: var(--text-dim); font-size: 0.72rem; text-align: right; }
+.trek-list-row .halt-mark { color: var(--warning, #fbbf24); margin-left: 6px; }
+
 </style>
 </head>
 <body>
@@ -3195,66 +3521,231 @@ function renderRelatedTreksWidget(kind, id) {
     </div>`;
 }
 
+// Short session id rendering: keep prefix + suffix, elide middle.
+// "sv-77e81553-1781222638255-547f2dcd" → "sv-77e815...547f2dcd"
+function _trekShortSessionId(sid) {
+  if (!sid) return '';
+  const s = String(sid);
+  if (s.length <= 22) return s;
+  return s.slice(0, 10) + '…' + s.slice(-8);
+}
+
+function _trekBadgeClass(s) {
+  if (s === 'active') return 'active';
+  if (s === 'planning') return 'planning';
+  if (s === 'archived') return 'archived';
+  return '';
+}
+
+function _renderTrekScopeRow(s) {
+  // ref column: prefer the narrowest known ref (task > operation > milestone > project-wide).
+  let refLabel = '';
+  let descLabel = '';
+  if (s.task) { refLabel = s.task; descLabel = '(task)'; }
+  else if (s.operation) { refLabel = s.operation; descLabel = '(operation)'; }
+  else if (s.milestone) { refLabel = s.milestone; descLabel = '(milestone)'; }
+  else { refLabel = '—'; descLabel = '<project-wide>'; }
+  return `
+    <div class="trek-scope-row">
+      <span class="pin">📌</span>
+      <span class="proj-tag">${esc(s.project)}</span>
+      <span class="ref">${esc(refLabel)}</span>
+      <span class="desc">${esc(descLabel)}</span>
+      <span class="pill"></span>
+    </div>`;
+}
+
+function _renderTrekMemberRow(m) {
+  const isLeader = m.role === 'leader';
+  const isInvited = !m.joined_at;
+  const dotCls = isInvited ? 'invited' : (isLeader ? '' : '');
+  const joinedAt = m.joined_at ? (m.joined_at.slice(0, 10)) : '';
+  const invitedAt = m.invited_at ? (m.invited_at.slice(0, 10)) : '';
+  return `
+    <div class="trek-member-row ${dotCls}">
+      <span class="dot"></span>
+      <div>
+        <span class="email">${esc(m.email || '')}</span>
+        <span class="where">${isInvited ? 'invited' : 'member'}</span>
+      </div>
+      <span class="role ${isLeader ? 'leader' : ''}">${isLeader ? 'Leader' : 'Member'}</span>
+      <span class="joined" style="text-align:left;">${isInvited ? '—' : 'joined'}</span>
+      <span class="joined">${isInvited ? ('invited ' + invitedAt) : ('joined ' + joinedAt)}</span>
+    </div>`;
+}
+
+function _renderTrekSummaryRow(d) {
+  return `
+    <div class="trek-summary-row">
+      <span class="ico">📄</span>
+      <div>
+        <span class="summary-title">${esc(d.title || d.doc_id || '(no title)')}</span>
+        <span class="summary-date" style="display:block;font-size:0.7rem;">${esc(d.project_id || '')} · scope=${esc(d.scope || 'memo')}</span>
+      </div>
+      <span class="summary-date">${(d.updated_at || '').slice(0, 10)}</span>
+    </div>`;
+}
+
 function _renderTrekDetail(t) {
   const members = t.members || [];
   const scope = t.scope || [];
-  const joined = members.filter(m => m.joined_at);
-  const invited = members.filter(m => !m.joined_at);
   const halted = !!t.halt;
-  const scopeRow = (s) => {
-    const refParts = [];
-    if (s.milestone) refParts.push(`<span style="color:var(--text-dim);">/ ms</span> <span style="font-family:var(--font-mono);">${esc(s.milestone)}</span>`);
-    if (s.operation) refParts.push(`<span style="color:var(--text-dim);">/ op</span> <span style="font-family:var(--font-mono);">${esc(s.operation)}</span>`);
-    if (s.task) refParts.push(`<span style="color:var(--text-dim);">/ task</span> <span style="font-family:var(--font-mono);">${esc(s.task)}</span>`);
-    if (refParts.length === 0) refParts.push('<span style="color:var(--text-dim);font-style:italic;">project-wide</span>');
-    return `
-      <li style="padding:5px 0;border-bottom:1px solid var(--border);font-size:0.78rem;">
-        <span style="font-family:var(--font-mono);color:var(--accent);">${esc(s.project)}</span>
-        ${refParts.join(' ')}
-      </li>`;
-  };
-  const memberRow = (m) => `
-    <li style="padding:5px 0;border-bottom:1px solid var(--border);font-size:0.78rem;">
-      <span>${esc(m.email || '')}</span>
-      <span style="font-size:0.7rem;color:${m.role === 'leader' ? 'var(--accent)' : 'var(--text-dim)'};margin-left:8px;">[${esc(m.role || 'member')}]</span>
-      <span style="font-size:0.7rem;color:var(--text-dim);margin-left:8px;">${m.joined_at ? 'joined' : 'invited'}</span>
-    </li>`;
-  const docRow = (d) => `
-    <li class="retro-item">
-      <span class="retro-item-week">${esc(d.title || d.doc_id || '(no title)')}</span>
-      <span class="retro-item-date">${esc(d.project_id || '')} · ${(d.updated_at || '').slice(0, 10)}</span>
-    </li>`;
+  const projectsInScope = new Set(scope.map(s => s.project).filter(Boolean));
+  const workItemsInScope = scope.filter(s => s.milestone || s.operation || s.task).length;
+
+  // Group members so the leader sits at the top + invited members appear last.
+  const ordered = [
+    ...members.filter(m => m.role === 'leader'),
+    ...members.filter(m => m.role !== 'leader' && m.joined_at),
+    ...members.filter(m => !m.joined_at),
+  ];
+
+  const creatorEmail = (t.creator_actor || {}).email || '';
+  const leaderSid = t.leader_session_id || '';
+
+  // STOP / halt card: red while active+unhalted, amber + recovery copy when halted.
+  let stopCardHtml = '';
+  if (t.status === 'active') {
+    if (halted) {
+      stopCardHtml = `
+        <div class="trek-stop-card halted">
+          <span class="icon">⏸</span>
+          <div class="text">
+            <strong>HALTED — sessions are paused</strong>
+            ${t.halt.reason ? esc(t.halt.reason) + ' — ' : ''}STOP signal issued by ${esc(_trekShortSessionId(t.halt.issued_by_session_id))} at ${(t.halt.issued_at || '').slice(0,16).replace('T',' ')}.
+            CLI で再開: <code style="color:var(--accent);">beacon trek resume ${esc(t.trek_id)}</code>
+          </div>
+          <button data-action="trek-cli-hint" data-cmd="beacon trek resume ${esc(t.trek_id)}">Resume</button>
+        </div>`;
+    } else {
+      stopCardHtml = `
+        <div class="trek-stop-card">
+          <span class="icon">🚨</span>
+          <div class="text">
+            <strong>STOP THIS TREK</strong>
+            参加中の全 session が現在の tool call の手前で halt し、状態を保存します。再開は leader session に「再開」を指示すれば OK。
+            CLI: <code style="color:var(--accent);">beacon trek stop ${esc(t.trek_id)} --reason "..."</code>
+          </div>
+          <button data-action="trek-cli-hint" data-cmd="beacon trek stop ${esc(t.trek_id)} --reason &quot;...&quot;">STOP</button>
+        </div>`;
+    }
+  }
+
+  const archiveCardHtml = t.status !== 'archived' ? `
+    <div class="trek-archive-card">
+      <span class="ico">📦</span>
+      <div class="text">
+        この trek を <strong>archive</strong> する (= 一時 trek なら完了、永続 trek なら休眠)。記録は残り、参照は archive 後も可能。
+        CLI: <code style="color:var(--accent);">beacon trek archive ${esc(t.trek_id)}</code>
+      </div>
+    </div>` : '';
+
+  const docs = state.openTrekDocs || [];
+  const summaryDocs = docs.slice(0, 10);
   return `
-    <section class="retro-section fade-in">
-      <span class="retro-back" data-action="close-trek">← back to Treks</span>
-      <h3 style="font-size:1rem;color:var(--text-primary);margin:8px 0 12px;">
-        ${esc(t.title || '')}
-        <span style="font-size:0.7rem;color:var(--text-dim);font-family:var(--font-mono);margin-left:8px;">${esc(t.trek_id)}</span>
-      </h3>
-      <div style="display:flex;gap:14px;font-size:0.72rem;color:var(--text-secondary);margin-bottom:14px;flex-wrap:wrap;">
-        <span>Type: <strong>${esc(t.type || '?')}</strong></span>
-        <span>Status: <strong>${_trekStatusIcon(t.status)} ${esc(t.status || '?')}</strong></span>
-        ${halted ? `<span style="color:#c75;"><strong>⚠ HALTED</strong>${t.halt.reason ? ` — ${esc(t.halt.reason)}` : ''}</span>` : ''}
-        <span>Created: ${(t.created_at || '').slice(0, 10)}</span>
-        ${t.archived_at ? `<span>Archived: ${t.archived_at.slice(0, 10)}</span>` : ''}
+    <section class="fade-in">
+      <span class="trek-crumb" data-action="close-trek">← Back to TREKS</span>
+
+      <div class="trek-head">
+        <div class="trek-title-row">
+          <span class="trek-title-text">${esc(t.title || '')}</span>
+          <span class="trek-badge ${t.type === 'temporary' ? 'temporary' : 'persistent'}">${esc(t.type || '')}</span>
+          <span class="trek-badge ${_trekBadgeClass(t.status)}">${_trekStatusIcon(t.status)} ${esc(t.status || '')}</span>
+          ${halted ? `<span class="trek-badge" style="color:var(--warning,#fbbf24);border-color:var(--warning,#fbbf24);">⚠ halted</span>` : ''}
+        </div>
+        <div class="trek-stats">
+          ${projectsInScope.size} project${projectsInScope.size === 1 ? '' : 's'} · ${workItemsInScope} work item${workItemsInScope === 1 ? '' : 's'} · ${members.length} member${members.length === 1 ? '' : 's'}
+        </div>
       </div>
 
-      <h4 style="font-size:0.72rem;color:var(--text-secondary);margin:14px 0 4px;letter-spacing:0.05em;">SCOPE (${scope.length})</h4>
-      ${scope.length
-        ? `<ul style="list-style:none;padding:0;margin:0;">${scope.map(scopeRow).join('')}</ul>`
-        : `<div class="retro-empty">No scope entries.</div>`}
+      <div class="trek-meta">
+        <span class="k">Trek ID</span>
+        <span class="v" style="font-family:var(--font-mono,monospace);">${esc(t.trek_id)}</span>
+        <span class="k">Leader session</span>
+        <span class="v">
+          <span class="session-id">${esc(_trekShortSessionId(leaderSid))}</span>
+          ${creatorEmail ? `<span class="sub">(${esc(creatorEmail)})</span>` : ''}
+        </span>
+        <span class="k">Created</span>
+        <span class="v">${(t.created_at || '').slice(0, 16).replace('T', ' ')}</span>
+        ${t.archived_at ? `
+        <span class="k">Archived</span>
+        <span class="v">${t.archived_at.slice(0, 16).replace('T', ' ')}</span>` : ''}
+      </div>
 
-      <h4 style="font-size:0.72rem;color:var(--text-secondary);margin:14px 0 4px;letter-spacing:0.05em;">MEMBERS (${joined.length} joined / ${invited.length} invited)</h4>
-      <ul style="list-style:none;padding:0;margin:0;">${members.map(memberRow).join('')}</ul>
+      ${stopCardHtml}
+      ${archiveCardHtml}
 
-      <h4 style="font-size:0.72rem;color:var(--text-secondary);margin:14px 0 4px;letter-spacing:0.05em;">RELATED DOCS (${(state.openTrekDocs || []).length})</h4>
-      ${(state.openTrekDocs || []).length
-        ? `<ul class="retro-list">${state.openTrekDocs.map(docRow).join('')}</ul>`
-        : `<div class="retro-empty">No docs tagged with this trek yet.</div>`}
+      <!-- SCOPE -->
+      <div class="trek-section">
+        <div class="trek-section-title">
+          <span>SCOPE</span>
+          <span class="right">${scope.length} item${scope.length === 1 ? '' : 's'}</span>
+        </div>
+        ${scope.length
+          ? scope.map(_renderTrekScopeRow).join('')
+          : `<div class="trek-coming-soon">No scope entries. CLI で追加: <code>beacon trek plan ${esc(t.trek_id)} --add-scope &lt;project&gt;:&lt;ref&gt;</code></div>`}
+        <div class="trek-cli-hint">
+          追加・削除はターミナルから:
+          <code>beacon trek plan ${esc(t.trek_id)} --add-scope &lt;project&gt;:&lt;ms-XX|op-X|e-X&gt;</code>
+          <code>beacon trek plan ${esc(t.trek_id)} --remove-scope &lt;project&gt;:&lt;ref&gt;</code>
+        </div>
+      </div>
 
-      <div style="margin-top:18px;padding:10px 12px;font-size:0.72rem;color:var(--text-dim);background:var(--bg-surface);border:1px solid var(--border);border-radius:4px;line-height:1.5;">
-        ℹ trek の編集 (= scope 追加 / 削除 ・ member 招待 / 離脱 ・ STOP ・ leader 引き継ぎ ・ archive) はターミナルから:
-        <code style="display:block;margin-top:6px;color:var(--accent);">beacon trek invite ${esc(t.trek_id)} --actor user@example.com</code>
+      <!-- MEMBERS & SESSIONS -->
+      <div class="trek-section">
+        <div class="trek-section-title">
+          <span>MEMBERS &amp; SESSIONS</span>
+          <span class="right">${members.length} member${members.length === 1 ? '' : 's'} · ★ = leader session</span>
+        </div>
+        ${ordered.map(_renderTrekMemberRow).join('')}
+        <div class="trek-cli-hint">
+          招待・離脱・リーダー譲渡はターミナルから:
+          <code>beacon trek invite ${esc(t.trek_id)} --actor &lt;email&gt;</code>
+          <code>beacon trek transfer-leader ${esc(t.trek_id)} --to &lt;session-id&gt;</code>
+        </div>
+      </div>
+
+      <!-- ACTIVE CLAIMS — backed by ms-55 (claim primitive, in flight) -->
+      <div class="trek-section">
+        <div class="trek-section-title">
+          <span>ACTIVE CLAIMS</span>
+          <span class="right">ms-55 で実装予定</span>
+        </div>
+        <div class="trek-coming-soon">
+          claim 一覧 (= 誰が今どの work item を取り組んでいるか) は ms-55
+          (走れて止まれる両輪 — claim 交渉で半自律的に作業分担) と同時に
+          ここに出ます。
+        </div>
+      </div>
+
+      <!-- RECENT ACTIVITY — backed by e-1696 (Activity log auto-update) -->
+      <div class="trek-section">
+        <div class="trek-section-title">
+          <span>RECENT ACTIVITY</span>
+          <span class="right">e-1696 で実装予定</span>
+        </div>
+        <div class="trek-coming-soon">
+          trek 内の bus event ストリーム (= 招待・claim・stop・doc 更新等)
+          は Activity log doc に累積記録される予定。e-1696 が land すると
+          ここに直近 5-10 件が表示されます。
+        </div>
+      </div>
+
+      <!-- SUMMARIES — trek_id 紐付け doc を表示 (= e-1697/98 が land すると Morning briefing / Weekly summary もここに並ぶ) -->
+      <div class="trek-section">
+        <div class="trek-section-title">
+          <span>SUMMARIES</span>
+          <span class="right">trek 配下 ${summaryDocs.length}件 · archive 後も残る</span>
+        </div>
+        ${summaryDocs.length
+          ? summaryDocs.map(_renderTrekSummaryRow).join('')
+          : `<div class="trek-coming-soon">trek_id 紐付けされた doc がまだありません。<br>CLI: <code>beacon doc add "title" --scope memo --trek ${esc(t.trek_id)} --content "..."</code></div>`}
+        <div class="trek-cli-hint">
+          自動生成 (= 定期 cron) は e-1697 / e-1698 で実装予定。手動は:
+          <code>beacon morning --trek ${esc(t.trek_id)}</code>
+          <code>beacon trek summary ${esc(t.trek_id)} --period weekly</code>
+        </div>
       </div>
     </section>`;
 }
@@ -3293,16 +3784,23 @@ function renderTreksSection() {
         </div>
       </section>`;
   }
-  // Split active vs archived for visual grouping (= mirrors Documents).
+  // Split active vs archived for visual grouping (mock convention).
   const active = inProject.filter(t => t.status !== 'archived');
   const archived = inProject.filter(t => t.status === 'archived');
-  const trekRow = (t) => `
-    <li class="retro-item" data-action="open-trek" data-trek-id="${esc(t.trek_id)}">
-      <span class="retro-item-week">${_trekStatusIcon(t.status)} ${esc(t.title || '')}${t.halt ? ' ⚠' : ''}</span>
-      <span class="retro-item-date">${(t.members || []).length}m / ${(t.scope || []).length}s · ${esc(t.type || '')}</span>
-    </li>`;
+  const trekRow = (t) => {
+    const halt = !!t.halt;
+    const memberCount = (t.members || []).length;
+    const scopeCount = (t.scope || []).length;
+    return `
+      <div class="trek-list-row" data-action="open-trek" data-trek-id="${esc(t.trek_id)}">
+        <span class="status-dot ${_trekBadgeClass(t.status)}"></span>
+        <span class="name">${esc(t.title || '')}${halt ? '<span class="halt-mark">⚠</span>' : ''}<span class="id">${esc(t.trek_id)}</span></span>
+        <span class="counts">${memberCount}m / ${scopeCount}s</span>
+        <span class="counts">${esc(t.type || '')}</span>
+      </div>`;
+  };
   let html = `
-    <section class="retro-section fade-in">
+    <section class="retro-section fade-in" style="margin-bottom:6px;">
       <div class="milestones-header" style="margin-bottom:4px;">
         <span class="milestones-title">Treks</span>
         <span class="milestones-count">${active.length} active / ${archived.length} archived</span>
@@ -3311,17 +3809,22 @@ function renderTreksSection() {
   if (active.length) {
     html += `
       <section class="retro-section fade-in" style="margin-bottom:12px;">
-        <h4 style="font-size:0.72rem;color:var(--text-secondary);margin:0 0 6px;letter-spacing:0.05em;">ACTIVE</h4>
-        <ul class="retro-list">${active.map(trekRow).join('')}</ul>
+        <div class="trek-section-title" style="margin-bottom:6px;">ACTIVE</div>
+        ${active.map(trekRow).join('')}
       </section>`;
   }
   if (archived.length) {
     html += `
       <section class="retro-section fade-in" style="margin-bottom:12px;">
-        <h4 style="font-size:0.72rem;color:var(--text-secondary);margin:0 0 6px;letter-spacing:0.05em;">ARCHIVED</h4>
-        <ul class="retro-list">${archived.map(trekRow).join('')}</ul>
+        <div class="trek-section-title" style="margin-bottom:6px;">ARCHIVED</div>
+        ${archived.map(trekRow).join('')}
       </section>`;
   }
+  html += `
+    <div class="trek-cli-hint" style="margin-top:14px;">
+      ターミナルから新しい trek を起票:
+      <code>beacon trek create "title" --type persistent</code>
+    </div>`;
   return html;
 }
 
@@ -4648,6 +5151,16 @@ function handleCommonAction(action, el) {
       // Close the entry modal (if open) so the Treks tab is unobstructed.
       if (state.openEntryId) closeEntryModal();
       switchTab('treks').then(() => openTrek(tid));
+      return true;
+    }
+    // ms-69 / e-1659 v2 — trek detail STOP / Resume buttons surface the CLI
+    // command (= editing is terminal-only per ux-principle-no-terminal CORE doc).
+    case 'trek-cli-hint': {
+      const cmd = el.dataset.cmd || '';
+      try {
+        if (navigator.clipboard) navigator.clipboard.writeText(cmd);
+      } catch (_e) { /* noop */ }
+      window.alert('ターミナルでこのコマンドを実行してください:\n\n' + cmd + '\n\n(クリップボードにコピー済み)');
       return true;
     }
   }

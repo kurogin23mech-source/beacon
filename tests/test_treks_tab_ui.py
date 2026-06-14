@@ -105,3 +105,92 @@ class TestDesktopUI_TrekTab:
             "function renderTreksSection(",
         ):
             assert fn in self.src, f"function {fn!r} missing from desktop bundle"
+
+
+# ---------------------------------------------------------------------------
+# Mock parity (ms-69 / e-1659 v2 — wireframe refactor)
+#
+# After the v2 refactor, the trek detail view mirrors mocks/trek-ui-v1.html
+# point-for-point: full-page layout with crumb / head / meta grid / STOP card
+# / Archive card / SCOPE / MEMBERS & SESSIONS / ACTIVE CLAIMS (placeholder) /
+# RECENT ACTIVITY (placeholder) / SUMMARIES sections. These tests pin the
+# structural elements so a future "simplify" edit can't silently lose the
+# mock fidelity.
+# ---------------------------------------------------------------------------
+
+class TestWebUI_TrekMockParity:
+    def setup_method(self, _method):
+        self.src = _read(WEB_INDEX)
+
+    def test_trek_palette_css_present(self):
+        for cls in (
+            ".trek-crumb",
+            ".trek-head",
+            ".trek-title-row",
+            ".trek-badge",
+            ".trek-stats",
+            ".trek-meta",
+            ".trek-stop-card",
+            ".trek-archive-card",
+            ".trek-section",
+            ".trek-section-title",
+            ".trek-scope-row",
+            ".trek-member-row",
+            ".trek-claim-row",
+            ".trek-activity-row",
+            ".trek-summary-row",
+            ".trek-cli-hint",
+            ".trek-coming-soon",
+            ".trek-list-row",
+        ):
+            assert cls in self.src, f"CSS class {cls!r} missing from trek palette"
+
+    def test_detail_view_renders_mock_sections(self):
+        for header in (
+            "SCOPE",
+            "MEMBERS &amp; SESSIONS",
+            "ACTIVE CLAIMS",
+            "RECENT ACTIVITY",
+            "SUMMARIES",
+        ):
+            assert header in self.src, f"section {header!r} missing from trek detail"
+
+    def test_detail_view_uses_full_page_crumb_back_link(self):
+        # The mock uses "← Back to TREKS" instead of an inline retro-back tab.
+        assert "Back to TREKS" in self.src
+        assert 'class="trek-crumb"' in self.src
+
+    def test_stop_card_invokes_cli(self):
+        # STOP / Resume buttons surface the CLI command (= editing is
+        # terminal-only per ux-principle-no-terminal).
+        assert "STOP THIS TREK" in self.src
+        assert "trek-cli-hint" in self.src
+        assert "case 'trek-cli-hint':" in self.src
+
+    def test_unimplemented_sections_have_explanatory_placeholders(self):
+        # ACTIVE CLAIMS / RECENT ACTIVITY are placeholders pointing at the
+        # follow-up MS / tasks until backing data lands.
+        assert "ms-55" in self.src  # ACTIVE CLAIMS placeholder
+        assert "e-1696" in self.src  # RECENT ACTIVITY placeholder
+        assert ("e-1697" in self.src) or ("beacon morning" in self.src)
+        assert ("e-1698" in self.src) or ("beacon trek summary" in self.src)
+
+    def test_list_row_uses_mock_class(self):
+        # The list row has a distinct class (not retro-item) so the mock-style
+        # status dot / id chip render correctly.
+        assert 'class="trek-list-row"' in self.src
+
+
+class TestDesktopUI_TrekMockParity:
+    def setup_method(self, _method):
+        self.src = _read(DESKTOP_INDEX)
+
+    def test_palette_css_carried_into_tauri_bundle(self):
+        for cls in (".trek-crumb", ".trek-head", ".trek-stop-card",
+                    ".trek-scope-row", ".trek-member-row", ".trek-list-row"):
+            assert cls in self.src, f"CSS class {cls!r} missing from desktop bundle"
+
+    def test_sections_present_in_tauri_bundle(self):
+        for header in ("SCOPE", "MEMBERS &amp; SESSIONS", "ACTIVE CLAIMS",
+                       "RECENT ACTIVITY", "SUMMARIES"):
+            assert header in self.src, f"section {header!r} missing"
