@@ -1850,6 +1850,15 @@ let state = {
   documents: [],
   documentContent: null,  // { doc_id, title, content }
   documentOverlay: null,  // { doc_id, title, content, scope } — overlay for search hits (ms-43 e-796)
+  // ms-69 / e-1659 — Treks tab: cross-project / cross-session work areas
+  // ``treks`` is the full set visible to the caller (= they are creator or
+  // member of every trek listed here). The Treks tab on a project page
+  // filters this client-side to treks whose scope mentions the current
+  // project. ``openTrekId`` switches the tab into detail mode; the matching
+  // trek + its docs render.
+  treks: [],
+  openTrekId: null,
+  openTrekDocs: [],
   // Filter: hidden statuses (cancelled is hidden by default)
   hiddenStatuses: new Set(['cancelled']),
   // Entry done filter (per milestone)
@@ -2607,6 +2616,7 @@ function renderMainContent() {
       <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
       <button class="tab-btn ${state.activeTab === 'releases' ? 'active' : ''}" data-action="switch-tab" data-tab="releases">Releases</button>
       <button class="tab-btn ${state.activeTab === 'operations' ? 'active' : ''}" data-action="switch-tab" data-tab="operations">Operations</button>
+      <button class="tab-btn ${state.activeTab === 'treks' ? 'active' : ''}" data-action="switch-tab" data-tab="treks">Treks</button>
       <button class="tab-btn ${state.activeTab === 'notes' ? 'active' : ''}" data-action="switch-tab" data-tab="notes">Session</button>
     </div>
     ${state.activeTab === 'dashboard' ? (state.showGraph ? renderGraphSection() : `
@@ -2632,6 +2642,7 @@ function renderMainContent() {
     ${state.activeTab === 'documents' ? `<div id="documents-container">${renderDocumentsSection()}</div>` : ''}
     ${state.activeTab === 'releases' ? renderReleasesSection() : ''}
     ${state.activeTab === 'operations' ? renderOperationsSection() : ''}
+    ${state.activeTab === 'treks' ? renderTreksSection() : ''}
     ${state.activeTab === 'notes' ? renderSessionSection() : ''}
   `;
 }
@@ -2749,6 +2760,17 @@ const dataSource = {
     }
   },
   loadDocumentContent: async (docId) => { state.documentContent = await api(`/api/projects/${state.projectId}/documents/${docId}`); },
+  // ms-69 / e-1659 — top-level treks resource (= not under /api/projects/{id}/)
+  // because treks bridge projects. Caller sees the treks they are creator or
+  // member of, across all projects.
+  loadTreks: async () => { state.treks = await api(`/api/treks?include_archived=true`); },
+  loadTrekDocs: async (trekId) => {
+    try {
+      state.openTrekDocs = await api(`/api/treks/${encodeURIComponent(trekId)}/documents`);
+    } catch (_e) {
+      state.openTrekDocs = [];
+    }
+  },
   // ms-43 e-631: unified cross-entity search.
   // Returns {results, total, facets, limit, offset}. Caller manages state.search* fields.
   searchProject: async (params) => {
@@ -2975,11 +2997,27 @@ async function switchTab(tab) {
   state.showGraph = false;
   state.retroContent = null;
   state.documentContent = null;
+  // ms-69 / e-1659 — leaving the Treks tab drops the open detail so coming
+  // back to the tab lands on the list view (= matches Documents UX).
+  if (tab !== 'treks') {
+    state.openTrekId = null;
+    state.openTrekDocs = [];
+  }
   if (tab === 'documents') {
     const loads = [];
     if (state.documents.length === 0) loads.push(dataSource.loadDocuments().catch(() => {}));
     if (state.retros.length === 0) loads.push(dataSource.loadRetros().catch(() => {}));
     await Promise.all(loads);
+  }
+  if (tab === 'treks') {
+    // Fetch the trek list every time the tab opens — short-lived state that
+    // can change from other sessions / CLI, so reusing the cached value
+    // would surface stale "halted" / "archived" status badges.
+    try {
+      await dataSource.loadTreks();
+    } catch (_e) {
+      state.treks = [];
+    }
   }
   if (tab === 'notes') {
     // ms-57 e-1041: Session tab carries two sub-views (notes/logs). Kick
@@ -2990,6 +3028,163 @@ async function switchTab(tab) {
     ]).then(() => render()).catch(() => {});
   }
   render();
+}
+
+// ---- Treks (ms-69 / e-1659) ----
+
+async function openTrek(trekId) {
+  state.openTrekId = trekId;
+  state.openTrekDocs = [];
+  render();
+  // Fetch docs in the background; if it fails, the detail view shows
+  // "No docs tagged with this trek yet." which is a fine degrade.
+  try {
+    await dataSource.loadTrekDocs(trekId);
+    render();
+  } catch (_e) { /* no-op */ }
+}
+
+function closeTrek() {
+  state.openTrekId = null;
+  state.openTrekDocs = [];
+  render();
+}
+
+function _trekStatusIcon(s) {
+  if (s === 'active') return '●';
+  if (s === 'planning') return '○';
+  if (s === 'archived') return '\u{1F4E6}';
+  return '?';
+}
+
+function _renderTrekDetail(t) {
+  const members = t.members || [];
+  const scope = t.scope || [];
+  const joined = members.filter(m => m.joined_at);
+  const invited = members.filter(m => !m.joined_at);
+  const halted = !!t.halt;
+  const scopeRow = (s) => {
+    const refParts = [];
+    if (s.milestone) refParts.push(`<span style="color:var(--text-dim);">/ ms</span> <span style="font-family:var(--font-mono);">${esc(s.milestone)}</span>`);
+    if (s.operation) refParts.push(`<span style="color:var(--text-dim);">/ op</span> <span style="font-family:var(--font-mono);">${esc(s.operation)}</span>`);
+    if (s.task) refParts.push(`<span style="color:var(--text-dim);">/ task</span> <span style="font-family:var(--font-mono);">${esc(s.task)}</span>`);
+    if (refParts.length === 0) refParts.push('<span style="color:var(--text-dim);font-style:italic;">project-wide</span>');
+    return `
+      <li style="padding:5px 0;border-bottom:1px solid var(--border);font-size:0.78rem;">
+        <span style="font-family:var(--font-mono);color:var(--accent);">${esc(s.project)}</span>
+        ${refParts.join(' ')}
+      </li>`;
+  };
+  const memberRow = (m) => `
+    <li style="padding:5px 0;border-bottom:1px solid var(--border);font-size:0.78rem;">
+      <span>${esc(m.email || '')}</span>
+      <span style="font-size:0.7rem;color:${m.role === 'leader' ? 'var(--accent)' : 'var(--text-dim)'};margin-left:8px;">[${esc(m.role || 'member')}]</span>
+      <span style="font-size:0.7rem;color:var(--text-dim);margin-left:8px;">${m.joined_at ? 'joined' : 'invited'}</span>
+    </li>`;
+  const docRow = (d) => `
+    <li class="retro-item">
+      <span class="retro-item-week">${esc(d.title || d.doc_id || '(no title)')}</span>
+      <span class="retro-item-date">${esc(d.project_id || '')} · ${(d.updated_at || '').slice(0, 10)}</span>
+    </li>`;
+  return `
+    <section class="retro-section fade-in">
+      <span class="retro-back" data-action="close-trek">← back to Treks</span>
+      <h3 style="font-size:1rem;color:var(--text-primary);margin:8px 0 12px;">
+        ${esc(t.title || '')}
+        <span style="font-size:0.7rem;color:var(--text-dim);font-family:var(--font-mono);margin-left:8px;">${esc(t.trek_id)}</span>
+      </h3>
+      <div style="display:flex;gap:14px;font-size:0.72rem;color:var(--text-secondary);margin-bottom:14px;flex-wrap:wrap;">
+        <span>Type: <strong>${esc(t.type || '?')}</strong></span>
+        <span>Status: <strong>${_trekStatusIcon(t.status)} ${esc(t.status || '?')}</strong></span>
+        ${halted ? `<span style="color:#c75;"><strong>⚠ HALTED</strong>${t.halt.reason ? ` — ${esc(t.halt.reason)}` : ''}</span>` : ''}
+        <span>Created: ${(t.created_at || '').slice(0, 10)}</span>
+        ${t.archived_at ? `<span>Archived: ${t.archived_at.slice(0, 10)}</span>` : ''}
+      </div>
+
+      <h4 style="font-size:0.72rem;color:var(--text-secondary);margin:14px 0 4px;letter-spacing:0.05em;">SCOPE (${scope.length})</h4>
+      ${scope.length
+        ? `<ul style="list-style:none;padding:0;margin:0;">${scope.map(scopeRow).join('')}</ul>`
+        : `<div class="retro-empty">No scope entries.</div>`}
+
+      <h4 style="font-size:0.72rem;color:var(--text-secondary);margin:14px 0 4px;letter-spacing:0.05em;">MEMBERS (${joined.length} joined / ${invited.length} invited)</h4>
+      <ul style="list-style:none;padding:0;margin:0;">${members.map(memberRow).join('')}</ul>
+
+      <h4 style="font-size:0.72rem;color:var(--text-secondary);margin:14px 0 4px;letter-spacing:0.05em;">RELATED DOCS (${(state.openTrekDocs || []).length})</h4>
+      ${(state.openTrekDocs || []).length
+        ? `<ul class="retro-list">${state.openTrekDocs.map(docRow).join('')}</ul>`
+        : `<div class="retro-empty">No docs tagged with this trek yet.</div>`}
+
+      <div style="margin-top:18px;padding:10px 12px;font-size:0.72rem;color:var(--text-dim);background:var(--bg-surface);border:1px solid var(--border);border-radius:4px;line-height:1.5;">
+        ℹ trek の編集 (= scope 追加 / 削除 ・ member 招待 / 離脱 ・ STOP ・ leader 引き継ぎ ・ archive) はターミナルから:
+        <code style="display:block;margin-top:6px;color:var(--accent);">beacon trek invite ${esc(t.trek_id)} --actor user@example.com</code>
+      </div>
+    </section>`;
+}
+
+function renderTreksSection() {
+  // Detail view first (if a trek is open) so loading shows immediately.
+  if (state.openTrekId) {
+    const t = (state.treks || []).find(x => x.trek_id === state.openTrekId);
+    if (!t) {
+      return `
+        <section class="retro-section fade-in">
+          <span class="retro-back" data-action="close-trek">← back to Treks</span>
+          <div class="retro-empty">Trek not found (= it was archived elsewhere or you're not a member).</div>
+        </section>`;
+    }
+    return _renderTrekDetail(t);
+  }
+  // List view: filter to treks that include the current project in scope.
+  const pid = state.projectId;
+  const inProject = (state.treks || []).filter(t =>
+    (t.scope || []).some(s => s.project === pid)
+  );
+  if (inProject.length === 0) {
+    return `
+      <section class="retro-section fade-in">
+        <div class="milestones-header" style="margin-bottom:4px;">
+          <span class="milestones-title">Treks</span>
+          <span class="milestones-count">0</span>
+        </div>
+        <div class="retro-empty" style="margin-top:10px;">
+          このプロジェクトを scope に含む trek (= プロジェクト横断 ・ セッション横断の協奏作業領域) はまだありません。
+        </div>
+        <div style="margin-top:14px;padding:10px 12px;font-size:0.72rem;color:var(--text-dim);background:var(--bg-surface);border:1px solid var(--border);border-radius:4px;line-height:1.5;">
+          ℹ trek はターミナルから作成します:
+          <code style="display:block;margin-top:6px;color:var(--accent);">beacon trek create "title" --type persistent</code>
+        </div>
+      </section>`;
+  }
+  // Split active vs archived for visual grouping (= mirrors Documents).
+  const active = inProject.filter(t => t.status !== 'archived');
+  const archived = inProject.filter(t => t.status === 'archived');
+  const trekRow = (t) => `
+    <li class="retro-item" data-action="open-trek" data-trek-id="${esc(t.trek_id)}">
+      <span class="retro-item-week">${_trekStatusIcon(t.status)} ${esc(t.title || '')}${t.halt ? ' ⚠' : ''}</span>
+      <span class="retro-item-date">${(t.members || []).length}m / ${(t.scope || []).length}s · ${esc(t.type || '')}</span>
+    </li>`;
+  let html = `
+    <section class="retro-section fade-in">
+      <div class="milestones-header" style="margin-bottom:4px;">
+        <span class="milestones-title">Treks</span>
+        <span class="milestones-count">${active.length} active / ${archived.length} archived</span>
+      </div>
+    </section>`;
+  if (active.length) {
+    html += `
+      <section class="retro-section fade-in" style="margin-bottom:12px;">
+        <h4 style="font-size:0.72rem;color:var(--text-secondary);margin:0 0 6px;letter-spacing:0.05em;">ACTIVE</h4>
+        <ul class="retro-list">${active.map(trekRow).join('')}</ul>
+      </section>`;
+  }
+  if (archived.length) {
+    html += `
+      <section class="retro-section fade-in" style="margin-bottom:12px;">
+        <h4 style="font-size:0.72rem;color:var(--text-secondary);margin:0 0 6px;letter-spacing:0.05em;">ARCHIVED</h4>
+        <ul class="retro-list">${archived.map(trekRow).join('')}</ul>
+      </section>`;
+  }
+  return html;
 }
 
 async function openRetro(week) {
@@ -4295,6 +4490,11 @@ function handleCommonAction(action, el) {
       openDocument(el.dataset.docId); return true;
     case 'open-retro':
       openRetro(el.dataset.week); return true;
+    // ms-69 / e-1659 — Treks tab
+    case 'open-trek':
+      openTrek(el.dataset.trekId); return true;
+    case 'close-trek':
+      closeTrek(); return true;
   }
   return false;
 }
