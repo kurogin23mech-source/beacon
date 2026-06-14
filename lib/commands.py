@@ -4164,6 +4164,69 @@ def cmd_trek_join():
         print(f"Joined trek {trek_id} as {email}")
 
 
+def cmd_trek_plan():
+    """Edit a trek's scope (= what work items the trek is concerned with).
+
+    Env (exactly one of add/remove must be set):
+      BEACON_TREK_ID            (required)
+      BEACON_TREK_SCOPE_ADD     "<project>[:<ref>]" — append a scope entry
+      BEACON_TREK_SCOPE_REMOVE  "<project>[:<ref>]" — remove a scope entry
+      BEACON_JSON               "1" → json output
+
+    ``ref`` prefix dispatches: ``ms-...`` → milestone, ``op-...`` → operation,
+    ``e-...`` → task; omitted = project-wide scope.
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    add_arg = os.environ.get("BEACON_TREK_SCOPE_ADD", "").strip()
+    remove_arg = os.environ.get("BEACON_TREK_SCOPE_REMOVE", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+    if not add_arg and not remove_arg:
+        print(
+            "Error: --add-scope <ref> or --remove-scope <ref> is required",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if add_arg and remove_arg:
+        print(
+            "Error: pass --add-scope or --remove-scope, not both in one call",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        if add_arg:
+            entry = trek.parse_scope_arg(add_arg)
+            trek.add_scope_entry(t, entry=entry)
+        else:
+            entry = trek.parse_scope_arg(remove_arg)
+            trek.remove_scope_entry(t, entry=entry)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    trek_store.save_trek(t)
+
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        verb = "Added" if add_arg else "Removed"
+        ref_display = (add_arg or remove_arg)
+        print(f"{verb} scope {ref_display} on trek {trek_id} "
+              f"(scope: {len(t.get('scope') or [])} items)")
+
+
 def cmd_trek_leave():
     """Leave a trek (= remove self from members[]).
 
@@ -11837,6 +11900,7 @@ if __name__ == "__main__":
         "trek_invite": cmd_trek_invite,
         "trek_join": cmd_trek_join,
         "trek_leave": cmd_trek_leave,
+        "trek_plan": cmd_trek_plan,
         "version": lambda: print(f"beacon {__version__}"),
         "help_json": cmd_help_json,
         "doctor": cmd_doctor,

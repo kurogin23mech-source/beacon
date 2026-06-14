@@ -315,3 +315,87 @@ def test_trek_leave_non_member(trek_env):
     r = _run(env_stranger, "leave", tid)
     assert r.returncode != 0
     assert "not a member" in r.stderr.lower()
+
+
+# ---------------------------------------------------------------------------
+# plan (= scope editing) (e-1655)
+# ---------------------------------------------------------------------------
+
+def test_trek_plan_add_scope_milestone(trek_env):
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "plan", tid, "--add-scope", "beacon-1:ms-64", "--json")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(r.stdout)
+    assert {"project": "beacon-1", "milestone": "ms-64"} in doc["scope"]
+
+
+def test_trek_plan_add_scope_operation(trek_env):
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "plan", tid, "--add-scope", "pe-1:op-12", "--json")
+    assert r.returncode == 0
+    doc = json.loads(r.stdout)
+    assert {"project": "pe-1", "operation": "op-12"} in doc["scope"]
+
+
+def test_trek_plan_add_scope_task(trek_env):
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "plan", tid, "--add-scope", "lps-1:e-1234", "--json")
+    assert r.returncode == 0
+    doc = json.loads(r.stdout)
+    assert {"project": "lps-1", "task": "e-1234"} in doc["scope"]
+
+
+def test_trek_plan_add_scope_project_wide(trek_env):
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "plan", tid, "--add-scope", "lps-1", "--json")
+    assert r.returncode == 0
+    doc = json.loads(r.stdout)
+    assert {"project": "lps-1"} in doc["scope"]
+
+
+def test_trek_plan_remove_scope(trek_env):
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "plan", tid, "--add-scope", "beacon-1:ms-64")
+    _run(trek_env, "plan", tid, "--add-scope", "pe-1")
+    r = _run(trek_env, "plan", tid, "--remove-scope", "beacon-1:ms-64", "--json")
+    assert r.returncode == 0
+    doc = json.loads(r.stdout)
+    assert doc["scope"] == [{"project": "pe-1"}]
+
+
+def test_trek_plan_requires_add_or_remove(trek_env):
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "plan", tid)
+    assert r.returncode != 0
+    assert "add-scope" in r.stderr or "remove-scope" in r.stderr
+
+
+def test_trek_plan_rejects_both_add_and_remove(trek_env):
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "plan", tid,
+             "--add-scope", "a:ms-1",
+             "--remove-scope", "a:ms-1")
+    assert r.returncode != 0
+    assert "not both" in r.stderr.lower() or "one" in r.stderr.lower()
+
+
+def test_trek_plan_add_scope_rejects_duplicate(trek_env):
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "plan", tid, "--add-scope", "beacon-1:ms-64")
+    r = _run(trek_env, "plan", tid, "--add-scope", "beacon-1:ms-64")
+    assert r.returncode != 0
+    assert "already" in r.stderr.lower()
+
+
+def test_trek_plan_remove_scope_missing(trek_env):
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "plan", tid, "--remove-scope", "beacon-1:ms-64")
+    assert r.returncode != 0
+    assert "not found" in r.stderr.lower()
+
+
+def test_trek_plan_unknown_ref_prefix(trek_env):
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "plan", tid, "--add-scope", "beacon-1:foo-99")
+    assert r.returncode != 0
+    assert "unknown" in r.stderr.lower() or "ref" in r.stderr.lower()

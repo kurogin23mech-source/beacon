@@ -157,3 +157,75 @@ def test_remove_member_blocks_last_member(base_trek):
     }
     with pytest.raises(ValueError, match="last member"):
         trek.remove_member(t, user_id="u-only")
+
+
+# ---------------------------------------------------------------------------
+# parse_scope_arg / add_scope_entry / remove_scope_entry (e-1655)
+# ---------------------------------------------------------------------------
+
+def test_parse_scope_arg_project_only():
+    assert trek.parse_scope_arg("beacon-1") == {"project": "beacon-1"}
+
+
+def test_parse_scope_arg_milestone():
+    assert trek.parse_scope_arg("beacon-1:ms-64") == {
+        "project": "beacon-1", "milestone": "ms-64",
+    }
+
+
+def test_parse_scope_arg_operation():
+    assert trek.parse_scope_arg("beacon-1:op-2") == {
+        "project": "beacon-1", "operation": "op-2",
+    }
+
+
+def test_parse_scope_arg_task():
+    assert trek.parse_scope_arg("pe-1:e-1234") == {
+        "project": "pe-1", "task": "e-1234",
+    }
+
+
+def test_parse_scope_arg_empty_ref_means_project_wide():
+    """Trailing `:` is allowed → project-wide."""
+    assert trek.parse_scope_arg("beacon-1:") == {"project": "beacon-1"}
+
+
+def test_parse_scope_arg_unknown_ref_prefix():
+    with pytest.raises(ValueError, match="unknown ref prefix"):
+        trek.parse_scope_arg("beacon-1:foo-99")
+
+
+def test_parse_scope_arg_empty_rejected():
+    with pytest.raises(ValueError):
+        trek.parse_scope_arg("")
+    with pytest.raises(ValueError):
+        trek.parse_scope_arg("   ")
+
+
+def test_parse_scope_arg_missing_project():
+    with pytest.raises(ValueError):
+        trek.parse_scope_arg(":ms-1")
+
+
+def test_add_scope_entry_basic(base_trek):
+    assert base_trek["scope"] == []
+    trek.add_scope_entry(base_trek, entry={"project": "p", "milestone": "ms-1"})
+    assert base_trek["scope"] == [{"project": "p", "milestone": "ms-1"}]
+
+
+def test_add_scope_entry_rejects_duplicate(base_trek):
+    trek.add_scope_entry(base_trek, entry={"project": "p", "milestone": "ms-1"})
+    with pytest.raises(ValueError, match="already exists"):
+        trek.add_scope_entry(base_trek, entry={"project": "p", "milestone": "ms-1"})
+
+
+def test_remove_scope_entry_basic(base_trek):
+    trek.add_scope_entry(base_trek, entry={"project": "p", "milestone": "ms-1"})
+    trek.add_scope_entry(base_trek, entry={"project": "q"})
+    trek.remove_scope_entry(base_trek, entry={"project": "p", "milestone": "ms-1"})
+    assert base_trek["scope"] == [{"project": "q"}]
+
+
+def test_remove_scope_entry_missing(base_trek):
+    with pytest.raises(ValueError, match="not found"):
+        trek.remove_scope_entry(base_trek, entry={"project": "p"})

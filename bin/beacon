@@ -2379,6 +2379,22 @@ except ValueError as e:
                 done
                 BEACON_TREK_ID="$trek_id" python3 "$COMMANDS_PY" trek_leave
                 ;;
+            plan)
+                shift 2
+                trek_id="" scope_add="" scope_remove=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --add-scope) scope_add="${2:-}"; shift 2 ;;
+                        --remove-scope) scope_remove="${2:-}"; shift 2 ;;
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" \
+                    BEACON_TREK_SCOPE_ADD="$scope_add" \
+                    BEACON_TREK_SCOPE_REMOVE="$scope_remove" \
+                    python3 "$COMMANDS_PY" trek_plan
+                ;;
             *)
                 echo "Usage: beacon trek <subcommand> [args]"
                 echo ""
@@ -2391,6 +2407,8 @@ except ValueError as e:
                 echo "  invite <trek-id> --actor <email> [--notify]"
                 echo "  join <trek-id>"
                 echo "  leave <trek-id>"
+                echo "  plan <trek-id> --add-scope <project[:ref]>"
+                echo "  plan <trek-id> --remove-scope <project[:ref]>"
                 echo ""
                 echo "Env (creator identity, required for 'create'):"
                 echo "  BEACON_USER_EMAIL    creator email"

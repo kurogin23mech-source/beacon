@@ -313,6 +313,68 @@ def accept_invitation(trek_doc: dict, *, user_id: str) -> dict:
     return trek_doc
 
 
+def parse_scope_arg(arg: str) -> dict:
+    """Parse a CLI ``<project>[:<ref>]`` scope argument into a normalized entry.
+
+    ``ref`` is dispatched by prefix:
+    - ``ms-...`` → milestone
+    - ``op-...`` → operation
+    - ``e-...``  → task
+    - omitted    → project-wide scope (= no narrowing)
+
+    Returns the normalized scope dict ready to append to ``trek_doc.scope``.
+    Raises ValueError on empty input or unknown ref prefix.
+    """
+    if not arg or not arg.strip():
+        raise ValueError("scope argument cannot be empty")
+    arg = arg.strip()
+    if ":" in arg:
+        project, ref = arg.split(":", 1)
+        project = project.strip()
+        ref = ref.strip()
+        if not project:
+            raise ValueError(f"scope arg {arg!r} missing project")
+        entry: dict = {"project": project}
+        if not ref:
+            return normalize_scope_entry(entry)
+        if ref.startswith("ms-"):
+            entry["milestone"] = ref
+        elif ref.startswith("op-"):
+            entry["operation"] = ref
+        elif ref.startswith("e-"):
+            entry["task"] = ref
+        else:
+            raise ValueError(
+                f"unknown ref prefix in {arg!r} — expected ms-/op-/e- "
+                "(or omit ref for project-wide scope)"
+            )
+        return normalize_scope_entry(entry)
+    return normalize_scope_entry({"project": arg})
+
+
+def add_scope_entry(trek_doc: dict, *, entry: dict) -> dict:
+    """Append a scope entry; raises ValueError if it already exists."""
+    norm = normalize_scope_entry(entry)
+    for existing in trek_doc.get("scope") or []:
+        if existing == norm:
+            raise ValueError(f"scope entry already exists: {norm}")
+    trek_doc.setdefault("scope", []).append(norm)
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
+
+
+def remove_scope_entry(trek_doc: dict, *, entry: dict) -> dict:
+    """Remove a scope entry; raises ValueError if not found."""
+    norm = normalize_scope_entry(entry)
+    scope = trek_doc.get("scope") or []
+    new_scope = [s for s in scope if s != norm]
+    if len(new_scope) == len(scope):
+        raise ValueError(f"scope entry not found: {norm}")
+    trek_doc["scope"] = new_scope
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
+
+
 def remove_member(trek_doc: dict, *, user_id: str) -> dict:
     """Remove a member from the trek.
 

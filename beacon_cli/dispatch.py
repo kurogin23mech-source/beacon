@@ -714,6 +714,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_trek_leave.add_argument("trek_id", nargs="?", default="")
     p_trek_leave.add_argument("--json", action="store_true")
 
+    p_trek_plan = trek_sub.add_parser("plan", add_help=False)
+    p_trek_plan.add_argument("trek_id", nargs="?", default="")
+    p_trek_plan.add_argument("--add-scope", dest="add_scope", default="")
+    p_trek_plan.add_argument("--remove-scope", dest="remove_scope", default="")
+    p_trek_plan.add_argument("--json", action="store_true")
+
     # ---- doctor / project / help ----
     sub.add_parser("doctor", add_help=False)
     p_project = sub.add_parser("project", add_help=False)
@@ -1885,6 +1891,8 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
             "  invite <trek-id> --actor <email> [--notify]\n"
             "  join <trek-id>\n"
             "  leave <trek-id>\n"
+            "  plan <trek-id> --add-scope <project[:ref]>\n"
+            "  plan <trek-id> --remove-scope <project[:ref]>\n"
             "\n"
             "Env (creator identity, required for 'create'):\n"
             "  BEACON_USER_EMAIL    creator email\n"
@@ -1949,6 +1957,16 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
         return _run_commands_py(
             root, "trek_leave",
             {"BEACON_TREK_ID": args.trek_id or "", "BEACON_JSON": json_env},
+        )
+    if cmd == "plan":
+        return _run_commands_py(
+            root, "trek_plan",
+            {
+                "BEACON_TREK_ID": args.trek_id or "",
+                "BEACON_TREK_SCOPE_ADD": args.add_scope or "",
+                "BEACON_TREK_SCOPE_REMOVE": args.remove_scope or "",
+                "BEACON_JSON": json_env,
+            },
         )
     return 1
 
