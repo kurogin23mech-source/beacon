@@ -4091,14 +4091,23 @@ async function _settingsArchiveProject() {
   if (!window.confirm(`${action === 'archive' ? 'Archive' : 'Unarchive'} project "${pid}"?`)) return;
   try {
     await api(`/api/projects/${pid}/${action}`, {method: 'POST'});
-    // If we archived the active project, the server has it hidden — close
-    // settings and let the project list reload via the legacy archiveProject
-    // path (preserves the existing UX for active-project archive).
-    if (isViewingActive && typeof archiveProject === 'function') {
-      // Use the legacy helper purely for the post-action navigation;
-      // confirm() inside it gets bypassed since we just confirmed above.
-      // (Skip if the legacy helper is unavailable, e.g. in tests.)
+    if (isViewingActive) {
+      // Active project changed archived state — refresh project list, reload
+      // current project, close settings so the user sees the result.
+      if (typeof dataSource.loadProjects === 'function') {
+        try { await dataSource.loadProjects(); } catch (_e) {}
+      }
+      if (typeof loadProject === 'function') {
+        try { await loadProject(); } catch (_e) {}
+      }
+      closeSettings();
+      render();
     } else {
+      // Peeked project: refresh own project list so archived flag updates,
+      // then repaint settings (still viewing peeked project).
+      if (typeof dataSource.loadProjects === 'function') {
+        try { await dataSource.loadProjects(); } catch (_e) {}
+      }
       renderSettings();
     }
   } catch (err) {
@@ -5590,7 +5599,7 @@ function handleCommonAction(action, el) {
     case 'settings-archive-project':
       _settingsArchiveProject(); return true;
     case 'settings-export-json':
-      if (typeof exportProject === 'function') exportProject();
+      if (typeof exportProject === 'function') exportProject(_settingsViewedProjectId());
       return true;
     // ms-69 / e-1664 — Related Treks widget on work item detail
     case 'trek-jump-from-widget': {

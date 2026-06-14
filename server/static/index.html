@@ -4058,14 +4058,23 @@ async function _settingsArchiveProject() {
   if (!window.confirm(`${action === 'archive' ? 'Archive' : 'Unarchive'} project "${pid}"?`)) return;
   try {
     await api(`/api/projects/${pid}/${action}`, {method: 'POST'});
-    // If we archived the active project, the server has it hidden — close
-    // settings and let the project list reload via the legacy archiveProject
-    // path (preserves the existing UX for active-project archive).
-    if (isViewingActive && typeof archiveProject === 'function') {
-      // Use the legacy helper purely for the post-action navigation;
-      // confirm() inside it gets bypassed since we just confirmed above.
-      // (Skip if the legacy helper is unavailable, e.g. in tests.)
+    if (isViewingActive) {
+      // Active project changed archived state — refresh project list, reload
+      // current project, close settings so the user sees the result.
+      if (typeof dataSource.loadProjects === 'function') {
+        try { await dataSource.loadProjects(); } catch (_e) {}
+      }
+      if (typeof loadProject === 'function') {
+        try { await loadProject(); } catch (_e) {}
+      }
+      closeSettings();
+      render();
     } else {
+      // Peeked project: refresh own project list so archived flag updates,
+      // then repaint settings (still viewing peeked project).
+      if (typeof dataSource.loadProjects === 'function') {
+        try { await dataSource.loadProjects(); } catch (_e) {}
+      }
       renderSettings();
     }
   } catch (err) {
@@ -5557,7 +5566,7 @@ function handleCommonAction(action, el) {
     case 'settings-archive-project':
       _settingsArchiveProject(); return true;
     case 'settings-export-json':
-      if (typeof exportProject === 'function') exportProject();
+      if (typeof exportProject === 'function') exportProject(_settingsViewedProjectId());
       return true;
     // ms-69 / e-1664 — Related Treks widget on work item detail
     case 'trek-jump-from-widget': {
@@ -5940,20 +5949,24 @@ async function archiveProject(archive) {
   }
 }
 
-async function exportProject() {
-  if (!state.projectId) return;
+async function exportProject(targetProjectId) {
+  // ms-69 / e-1659 v3 follow-up: Export from Settings overlay must respect
+  // the dropdown-selected project (= peek target). Caller may pass the
+  // viewed projectId; falls back to the active project for legacy callers.
+  const pid = targetProjectId || state.projectId;
+  if (!pid) return;
   try {
     const [project, documents, retros] = await Promise.all([
-      api(`/api/projects/${state.projectId}`),
-      api(`/api/projects/${state.projectId}/documents`).catch(() => []),
-      api(`/api/projects/${state.projectId}/retros`).catch(() => []),
+      api(`/api/projects/${pid}`),
+      api(`/api/projects/${pid}/documents`).catch(() => []),
+      api(`/api/projects/${pid}/retros`).catch(() => []),
     ]);
     const fullExport = { ...project, documents, retros };
     const blob = new Blob([JSON.stringify(fullExport, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${state.projectId}.json`;
+    a.download = `${pid}.json`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
