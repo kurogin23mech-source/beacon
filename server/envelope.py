@@ -1051,6 +1051,37 @@ def _validate_high_sensitivity_schema(payload: dict) -> Optional[str]:
     return None
 
 
+def effective_tier_for_disclosure(envelope: Optional[dict]) -> str:
+    """Return the effective tier for disclosure-gate purposes.
+
+    SPEC § 設計方針 5 方向 A: a T5 envelope that carries a non-empty
+    ``in_reply_to`` is treated as T3 (= reply chain). This lets the
+    TrailNode → Beacon "PR#66 どうなった?" use case survive — the original
+    spontaneous question is T5 (the requester's AI woke up by itself),
+    but the conversation chain is alive, so the recipient can answer in
+    the relaxed-but-bounded T3 regime instead of the T5-ping-only cap.
+
+    This is **separate** from the verify-time tier (= the wire tier). The
+    wire tier governs delivery decisions (decide_delivery), the
+    disclosure-effective tier governs reply content (disclosure_gate).
+    Keeping the two helpers separate preserves backwards-compat with the
+    existing ms-60 / e-1340 wiring that reads ``effective_tier`` from
+    VerifyResult.
+
+    Other tiers pass through unchanged. The in_reply_to chain's integrity
+    is still verified at receive-time (Step 6 of the verify pipeline), so
+    by the time the disclosure gate runs, an in_reply_to-carrying T5
+    envelope is already known to be replying to a real parent.
+    """
+    if envelope is None:
+        return TIER_T5
+    tier = envelope.get("tier")
+    in_reply_to = envelope.get("in_reply_to")
+    if tier == TIER_T5 and in_reply_to:
+        return TIER_T3
+    return tier or TIER_T5
+
+
 def _ack_only_rewrite() -> dict:
     """Return the minimal ack-only reply used as a refuse-but-degrade fallback.
 
@@ -1114,6 +1145,16 @@ def disclosure_gate_check(
     response_mode = contract.get("t5_response_mode", T5_RESPONSE_MODE_SCHEMA_ONLY)
     allow_free_text = bool(contract.get("t5_free_text", False))
 
+    # SPEC § 設計方針 5 方向 A: T5 + in_reply_to → T3 promotion for the
+    # disclosure side. The reply-chain promotion is *additive*: high
+    # sensitivity still caps free-text outright (the NDA metaphor doesn't
+    # bend just because we're in a reply), but the **query** surface
+    # opens on high projects when the conversation is alive — the
+    # original TrailNode → Beacon question pattern survives even on
+    # high-sensitivity recipients.
+    effective_tier = effective_tier_for_disclosure(envelope)
+    in_reply_chain = (effective_tier == TIER_T3)
+
     # --- schema reply ---
     # Schema replies (= structured short-ping shape) are the lowest-risk
     # surface; they're always permitted as long as the payload itself fits
@@ -1129,11 +1170,15 @@ def disclosure_gate_check(
             )
         return DisclosureVerdict(permit=True, reason="schema reply permitted")
 
-    # --- query reply (T5 救済方向 B) ---
+    # --- query reply (T5 救済方向 B + 方向 A combined) ---
     if reply_kind == REPLY_KIND_QUERY:
-        if sensitivity == SENSITIVITY_HIGH:
-            # Even the question itself can carry context about what we
-            # care about; refuse on high projects, suggest a schema rewrite.
+        if sensitivity == SENSITIVITY_HIGH and not in_reply_chain:
+            # 自発的 T5 (no in_reply_to) on a high project: even the
+            # question itself can carry context about what we care about;
+            # refuse and suggest a schema rewrite. This is the conservative
+            # default. An alive reply chain (in_reply_to → T3 promotion)
+            # opens this surface so the TrailNode → Beacon pattern works
+            # even on high projects (SPEC § 設計方針 5 方向 A).
             return DisclosureVerdict(
                 permit=False,
                 reason=("query replies refused on high-sensitivity project "

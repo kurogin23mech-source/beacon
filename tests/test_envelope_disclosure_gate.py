@@ -337,6 +337,114 @@ def test_gate_envelope_with_missing_contract_field_treated_as_high():
 
 
 # ---------------------------------------------------------------------------
+# effective_tier_for_disclosure (T5 救済方向 A, e-1432)
+# ---------------------------------------------------------------------------
+
+def test_effective_tier_t5_with_in_reply_to_promotes_to_t3():
+    """SPEC § 設計方針 5 方向 A: alive reply chain → T3 treatment."""
+    env = env_mod.issue_envelope(
+        tier=env_mod.TIER_T5,
+        issuer="ai@beacon",
+        project_id=PROJECT_ID,
+        actions_authorized=[],
+        in_reply_to="evt-parent-123",
+        disclosure_policy={"sensitivity": "high"},
+    )
+    assert env_mod.effective_tier_for_disclosure(env) == env_mod.TIER_T3
+
+
+def test_effective_tier_t5_without_in_reply_to_stays_t5():
+    """Spontaneous T5 (no parent) is still T5 — = autonomous-send risk surface."""
+    env = _t1()
+    # Build a manual T5 with no in_reply_to.
+    env_t5 = env_mod.issue_envelope(
+        tier=env_mod.TIER_T5,
+        issuer="ai@beacon",
+        project_id=PROJECT_ID,
+        actions_authorized=[],
+    )
+    assert env_mod.effective_tier_for_disclosure(env_t5) == env_mod.TIER_T5
+
+
+def test_effective_tier_other_tiers_passthrough():
+    """T1/T2/T3 are unaffected by the in_reply_to promotion logic."""
+    env_t1 = _t1()
+    assert env_mod.effective_tier_for_disclosure(env_t1) == env_mod.TIER_T1
+
+
+def test_effective_tier_none_envelope_defaults_to_t5():
+    assert env_mod.effective_tier_for_disclosure(None) == env_mod.TIER_T5
+
+
+# ---------------------------------------------------------------------------
+# T5 救済方向 A applied to disclosure_gate: query reply opens on high
+# project when the inbound is a reply chain.
+# ---------------------------------------------------------------------------
+
+def test_gate_query_reply_permitted_on_high_when_in_reply_chain():
+    """The TrailNode → Beacon "PR#66 どうなった?" pattern works even on high.
+
+    Reasoning: the inbound carries in_reply_to → T3 effective tier; the
+    receiver is replying to an existing thread, not unilaterally exposing
+    new context. The query schema itself caps payload to a question +
+    optional reference id, so even on a high project the disclosure
+    surface stays bounded.
+    """
+    env = env_mod.issue_envelope(
+        tier=env_mod.TIER_T5,
+        issuer="ai@trailnode",
+        project_id=PROJECT_ID,
+        actions_authorized=[],
+        in_reply_to="evt-parent-456",
+        disclosure_policy={"sensitivity": "high"},
+    )
+    verdict = env_mod.disclosure_gate_check(
+        env, reply_kind="query",
+        reply_payload={"question": "Did PR#66 land?", "ref": "PR-66"},
+    )
+    assert verdict.permit is True
+
+
+def test_gate_query_reply_refused_on_high_without_in_reply_chain():
+    """No reply chain → still refuse query on high (autonomous = risk)."""
+    env = env_mod.issue_envelope(
+        tier=env_mod.TIER_T5,
+        issuer="ai@trailnode",
+        project_id=PROJECT_ID,
+        actions_authorized=[],
+        # No in_reply_to.
+        disclosure_policy={"sensitivity": "high"},
+    )
+    verdict = env_mod.disclosure_gate_check(
+        env, reply_kind="query",
+        reply_payload={"question": "Did PR#66 land?"},
+    )
+    assert verdict.permit is False
+
+
+def test_gate_free_reply_still_refused_on_high_even_with_in_reply_chain():
+    """Reply-chain promotion does NOT open the free-text surface on high.
+
+    The NDA metaphor (SPEC § 設計方針 4) doesn't bend just because a
+    conversation is alive — high-sensitivity projects clamp free text
+    unconditionally, regardless of the inbound tier.
+    """
+    env = env_mod.issue_envelope(
+        tier=env_mod.TIER_T5,
+        issuer="ai@trailnode",
+        project_id=PROJECT_ID,
+        actions_authorized=[],
+        in_reply_to="evt-parent-789",
+        disclosure_policy={"sensitivity": "high"},
+    )
+    verdict = env_mod.disclosure_gate_check(
+        env, reply_kind="free",
+        reply_payload={"text": "Yes, PR#66 was merged at 14:30 UTC by John"},
+    )
+    assert verdict.permit is False
+
+
+# ---------------------------------------------------------------------------
 # Verdict object serialization (audit log shape)
 # ---------------------------------------------------------------------------
 
