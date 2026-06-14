@@ -12624,6 +12624,120 @@ def cmd_claim_release():
     print(f"  event_id: {event.get('event_id', '?')}")
 
 
+def cmd_morning():
+    """beacon morning (ms-55 e-1650): 4-category summary of recent
+    autonomous activity.
+
+    Reads events from the bus (channels: stop-signal + claim-signal)
+    over a window (default = last 12 hours) and buckets them as:
+
+      ✓ 完了 (Completed):   claim releases with outcome=completed
+      ⚠ 停止 (Halted):      stop signals other than STUCK
+      ✗ Skip:               claim releases with outcome=abandoned
+      ⏱ 介入要望 (Needs attention): STUCK signals (= idle timeout)
+
+    Env:
+      BEACON_MORNING_SINCE_HOURS  default 12
+      BEACON_MORNING_EVENTS_FILE  optional path to a JSON array of
+                                  events (= testing / replay path)
+      BEACON_JSON                 "1" → JSON output
+    """
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    import morning as _morning
+
+    since_hours_raw = os.environ.get("BEACON_MORNING_SINCE_HOURS", "12")
+    events_file = os.environ.get("BEACON_MORNING_EVENTS_FILE", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    try:
+        since_hours = float(since_hours_raw)
+    except ValueError:
+        print(
+            f"Error: --since-hours must be a number (got {since_hours_raw!r})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if since_hours <= 0:
+        print("Error: --since-hours must be > 0", file=sys.stderr)
+        sys.exit(1)
+
+    now = _dt.now(_tz.utc)
+    since = now - _td(hours=since_hours)
+
+    events: list[dict] = []
+    if events_file:
+        try:
+            with open(events_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"Error: could not read events file: {e}",
+                  file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(data, list):
+            print("Error: events file must be a JSON array",
+                  file=sys.stderr)
+            sys.exit(1)
+        events = data
+    else:
+        # Pull recent stop + claim channel events from the bus. Use a
+        # synthetic observer recipient so we don't advance anyone's
+        # cursor (= same trick as cmd_stop_status).
+        try:
+            client, config = _get_api_client()
+            project_id = _resolve_bus_project_id(config)
+        except Exception as e:
+            print(
+                f"Error: cannot reach bus to gather events ({e}).\n"
+                "If running offline, pass --events-file <path> with a "
+                "JSON dump of events.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        for channel in ("stop-signal", "claim-signal"):
+            try:
+                batch = client.list_unread_bus_events(
+                    project_id, "_morning_observer",
+                    channel=channel, limit=500,
+                )
+            except TypeError:
+                batch = client.list_unread_bus_events(
+                    project_id, "_morning_observer", channel=channel,
+                )
+            except Exception as e:
+                print(
+                    f"Note: could not fetch {channel} events ({e}); "
+                    "continuing with partial data.",
+                    file=sys.stderr,
+                )
+                continue
+            if batch:
+                events.extend(batch)
+
+    briefing = _morning.build_briefing(events, since=since, until=now)
+
+    if json_mode:
+        out = {
+            "since": briefing.since,
+            "until": briefing.until,
+            "counts": briefing.counts,
+            "entries": [
+                {
+                    "bucket": e.bucket,
+                    "title": e.title,
+                    "detail": e.detail,
+                    "at": e.at,
+                    "source": e.source,
+                    "ref": e.ref,
+                }
+                for e in briefing.entries
+            ],
+        }
+        print(json.dumps(out, ensure_ascii=False))
+        return
+
+    print(_morning.render_briefing(briefing), end="")
+
+
 def cmd_stuck_check():
     """beacon stuck check (ms-55 e-1649): scan session telemetry, emit
     STUCK signals for sessions idle past the timeout.
@@ -13080,6 +13194,9 @@ if __name__ == "__main__":
         # ms-55 e-1649: STUCK detector. Idle-timeout based emission of
         # stop signals with reason_kind="stuck", same protocol as e-1646.
         "stuck_check": cmd_stuck_check,
+        # ms-55 e-1650: morning briefing. 4-bucket digest of recent
+        # autonomous activity for the human to read with coffee.
+        "morning": cmd_morning,
         "sessions_list": cmd_sessions_list,
         "profile_list": cmd_profile_list,
         "bus_budget_grant": cmd_bus_budget_grant,
