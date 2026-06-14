@@ -296,6 +296,10 @@ def save_document(project_id: str, doc_id: str, title: str, content: str,
     import datetime
     resolved_scope = scope if scope in ("core", "spec", "memo") else _extract_scope(content)
     milestone = _extract_frontmatter_field(content, "milestone")
+    # ms-69 / e-1663: trek_id is optional; lets a doc be associated with a
+    # cross-project trek (= 別 project / 別 session を巻き込んだ協奏作業領域).
+    # Existing docs without trek_id are unaffected (= migration 不要).
+    trek_id = _extract_frontmatter_field(content, "trek_id")
 
     col = get_db().collection(COLLECTION).document(project_id).collection(DOCS_SUBCOLLECTION)
     data = {
@@ -307,6 +311,8 @@ def save_document(project_id: str, doc_id: str, title: str, content: str,
     }
     if milestone:
         data["milestone"] = milestone
+    if trek_id:
+        data["trek_id"] = trek_id
 
     if doc_id:
         doc_ref = col.document(doc_id)
@@ -1498,3 +1504,108 @@ def get_operation_envelope(
     """Fetch a single envelope record by id, or None if absent."""
     snap = _operation_envelopes_col(project_id).document(envelope_id).get()
     return snap.to_dict() if snap.exists else None
+
+
+# ---------------------------------------------------------------------------
+# Treks (ms-69 / e-1652)
+#
+# Top-level collection ``treks/{trek_id}`` — independent of any single
+# project. SPEC 設計方針 1: trek is its own authorisation surface
+# (= creator + invited members), cross-project by construction. Storing
+# under a project subcollection would formally bias ownership.
+#
+# Schema (Phase 1):
+#   trek_id        string   # "tk-<8 hex>"
+#   title          string
+#   description    string
+#   type           string   # "temporary" | "persistent"
+#   status         string   # "planning" | "active" | "paused" | "archived"
+#   creator_actor  {user_id, email}
+#   leader_actor   {user_id, email}
+#   members        [{user_id, email, role, invited_at, joined_at, invited_by}]
+#   scope          [{project, milestone?, operation?, task?}]
+#   created_at     ISO8601
+#   updated_at     ISO8601
+#   archived_at    ISO8601 | null
+#
+# Activity log / summary docs / claim records are separate subcollections
+# under ``treks/{trek_id}/...`` added in e-1663 / e-1657 — out of scope
+# for this Phase 1 schema slice.
+# ---------------------------------------------------------------------------
+
+TREKS_COLLECTION = "treks" if _ENV == "prod" else "treks-dev"
+
+
+def get_trek(trek_id: str) -> dict | None:
+    """Load a trek document. Returns None if not found.
+
+    The Firestore doc id is the authoritative trek_id; it is merged in
+    last so it always wins over any stale field of the same name.
+    """
+    doc = get_db().collection(TREKS_COLLECTION).document(trek_id).get()
+    if not doc.exists:
+        return None
+    return {**(doc.to_dict() or {}), "trek_id": doc.id}
+
+
+def save_trek(trek_id: str, data: dict) -> None:
+    """Save a trek document (full replace).
+
+    The caller is responsible for assembling the full doc; this mirrors
+    ``save_project`` which is also a full set (no merge). Mutators that
+    need merge semantics should compose get → modify → save.
+
+    ``trek_id`` field in ``data`` is ignored — the doc id is the truth.
+    """
+    payload = {k: v for k, v in data.items() if k != "trek_id"}
+    get_db().collection(TREKS_COLLECTION).document(trek_id).set(payload)
+
+
+def list_treks(actor_id: str | None = None, *,
+               status: str | None = None,
+               include_archived: bool = False) -> list[dict]:
+    """List treks. Optionally filter by visibility / status.
+
+    ``actor_id=None`` returns all treks (= admin view). When set, only
+    treks where the actor is creator OR appears in the members list
+    are returned (= same authorisation model as ``list_projects``).
+
+    ``include_archived=False`` (default) hides archived treks; setting
+    True surfaces them for "show me everything we have ever worked on"
+    auditor queries.
+    """
+    docs = get_db().collection(TREKS_COLLECTION).stream()
+    result: list[dict] = []
+    for doc in docs:
+        data = doc.to_dict() or {}
+        if not include_archived and data.get("status") == "archived":
+            continue
+        if status and data.get("status") != status:
+            continue
+        if actor_id:
+            creator = (data.get("creator_actor") or {}).get("user_id")
+            members = [
+                m.get("user_id") for m in data.get("members", []) or []
+            ]
+            if creator != actor_id and actor_id not in members:
+                continue
+        # Merge doc.id last so it always wins (= mirrors list_sessions).
+        result.append({**data, "trek_id": doc.id})
+    # Newest first by created_at; ties fall back to trek_id for stability.
+    result.sort(key=lambda t: (t.get("created_at", ""), t.get("trek_id", "")),
+                reverse=True)
+    return result
+
+
+def delete_trek(trek_id: str) -> bool:
+    """Delete a trek. Returns True if it existed.
+
+    Phase 1: hard delete of the top-level doc only. Subcollections
+    (activity log, summaries, claims — e-1663) are introduced later;
+    when they land this function will cascade like ``delete_project``.
+    """
+    doc_ref = get_db().collection(TREKS_COLLECTION).document(trek_id)
+    if not doc_ref.get().exists:
+        return False
+    doc_ref.delete()
+    return True

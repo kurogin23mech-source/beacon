@@ -79,6 +79,11 @@ if _BACKEND == "dynamodb":
         revoke_operation_envelope,
         list_operation_envelopes,
         get_operation_envelope,
+        # Treks (ms-69 / e-1652)
+        get_trek,
+        save_trek,
+        list_treks,
+        delete_trek,
     )
 elif _BACKEND == "firestore":
     from firestore_client import (  # noqa: F401
@@ -142,6 +147,11 @@ elif _BACKEND == "firestore":
         revoke_operation_envelope,
         list_operation_envelopes,
         get_operation_envelope,
+        # Treks (ms-69 / e-1652)
+        get_trek,
+        save_trek,
+        list_treks,
+        delete_trek,
     )
 else:
     raise RuntimeError(

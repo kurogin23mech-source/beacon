@@ -28,6 +28,7 @@ import core
 import envelope as envelope_mod
 import store_router as db  # e-1544: BEACON_STORE_BACKEND で firestore / dynamodb を切替
 import operations
+import trek as trek_mod  # ms-69 / e-1656: trek schema + pure mutators
 
 # debug=False is the default, but set explicitly to ensure stack traces are
 # never included in error responses in production.
@@ -77,9 +78,9 @@ _audit_logger.propagate = False
 # Mutating methods that should be audit-logged
 _AUDIT_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
-# All mutations under /api/projects/* and /api/admin/*
+# All mutations under /api/projects/*, /api/admin/*, and /api/treks(/...)?
 import re
-_AUDIT_PATHS = re.compile(r"^/api/(?:projects/[^/]+|admin/)")
+_AUDIT_PATHS = re.compile(r"^/api/(?:projects/[^/]+|admin/|treks(?:$|/))")
 
 
 def _extract_project_id(path: str) -> str:
@@ -102,6 +103,23 @@ def _derive_action(method: str, path: str) -> str:
         return f"admin.user.{method.lower()}"
     if "/admin/projects" in path:
         return f"admin.project.{method.lower()}"
+    # ms-69 / e-1656: treks are top-level. Disambiguate /treks/{id}/members
+    # from project /members so audit logs read "trek.member.post" rather than
+    # being confused with project member ops.
+    if path.startswith("/api/treks"):
+        if "/members" in path:
+            return f"trek.member.{method.lower()}"
+        if "/scope" in path:
+            return f"trek.scope.{method.lower()}"
+        if "/halt" in path:
+            return f"trek.halt.{method.lower()}"
+        if "/transfer-leader" in path:
+            return f"trek.leader.{method.lower()}"
+        if "/start" in path:
+            return f"trek.start.{method.lower()}"
+        if "/summary" in path:
+            return f"trek.summary.{method.lower()}"
+        return f"trek.{method.lower()}"
     for plural, singular in _RESOURCE_SINGULAR.items():
         if f"/{plural}" in path:
             return f"{singular}.{method.lower()}"
@@ -118,6 +136,8 @@ def _extract_resource(path: str) -> str:
         return "admin.user"
     if "/admin/projects" in path:
         return "admin.project"
+    if path.startswith("/api/treks"):
+        return "trek"
     for resource in ("members", "documents", "milestones", "entries", "retros", "log", "summary"):
         if f"/{resource}" in path:
             return resource
@@ -2199,6 +2219,83 @@ def list_changelog_endpoint(project_id: str,
 
 
 # ---------------------------------------------------------------------------
+# Related treks (ms-69 / e-1663) — reverse lookup from a project work item
+# (milestone / operation / task) to the treks that include it in scope.
+#
+# Used by the e-1664 Related Treks widget on the project detail page.
+# Archived treks are included by default so the widget can render historic
+# associations ("we worked on this together in trek X, archived 2 weeks ago").
+# ---------------------------------------------------------------------------
+
+def _list_related_treks(project_id: str, *, milestone: str = "",
+                        operation: str = "", task: str = "",
+                        user: dict | None) -> list:
+    """Return treks visible to ``user`` whose scope matches this work item.
+
+    Match rule: an entry counts if it is in the same project AND either
+    (a) narrows to the exact ref, or (b) has no narrowing key (= covers
+    the whole project, so the item is implicitly in scope).
+    """
+    actor = user.get("sub") if (_auth_enabled and user) else None
+    candidates = db.list_treks(
+        actor_id=actor,
+        include_archived=True,  # widget renders historic associations too
+    )
+    out = []
+    for t in candidates:
+        for entry in t.get("scope") or []:
+            if entry.get("project") != project_id:
+                continue
+            has_narrow = bool(
+                entry.get("milestone")
+                or entry.get("operation")
+                or entry.get("task")
+            )
+            if not has_narrow:
+                out.append(t)
+                break
+            if milestone and entry.get("milestone") == milestone:
+                out.append(t)
+                break
+            if operation and entry.get("operation") == operation:
+                out.append(t)
+                break
+            if task and entry.get("task") == task:
+                out.append(t)
+                break
+    return out
+
+
+@app.get("/api/projects/{project_id}/milestones/{ms_id}/related-treks")
+def related_treks_for_milestone(project_id: str, ms_id: str,
+                                user: dict = Depends(require_auth)):
+    """List treks visible to the caller whose scope covers this milestone.
+
+    Includes archived treks (= the widget renders history). Returns the
+    full trek doc per match; the Web UI picks status / title / archived_at
+    for the badge rendering.
+    """
+    _load(project_id, user)  # project-side access check
+    return _list_related_treks(project_id, milestone=ms_id, user=user)
+
+
+@app.get("/api/projects/{project_id}/operations/{op_id}/related-treks")
+def related_treks_for_operation(project_id: str, op_id: str,
+                                user: dict = Depends(require_auth)):
+    """List treks whose scope covers this operation (e-1663 / e-1664)."""
+    _load(project_id, user)
+    return _list_related_treks(project_id, operation=op_id, user=user)
+
+
+@app.get("/api/projects/{project_id}/entries/{entry_id}/related-treks")
+def related_treks_for_entry(project_id: str, entry_id: str,
+                            user: dict = Depends(require_auth)):
+    """List treks whose scope covers this task entry (e-1663 / e-1664)."""
+    _load(project_id, user)
+    return _list_related_treks(project_id, task=entry_id, user=user)
+
+
+# ---------------------------------------------------------------------------
 # Members (invite / remove)
 # ---------------------------------------------------------------------------
 
@@ -2500,6 +2597,467 @@ def admin_check(user: dict = Depends(require_auth)):
     user_data = db.get_user(user.get("sub", ""))
     is_admin = user_data.get("role") == "admin" if user_data else False
     return {"is_admin": is_admin}
+
+
+# ---------------------------------------------------------------------------
+# Treks (ms-69 / e-1656) — cross-project / cross-session collaboration area
+#
+# Top-level resource (not under /api/projects/) because a trek's whole point
+# is to bridge projects. Storage lives in `treks/` collection (Firestore) or
+# `beacon-{env}-treks` table (DynamoDB), routed through store_router.
+#
+# Membership is at user grain (= user_id + email pair), so a single user
+# with multiple sessions counts as one member. Leader is at session grain
+# (= `leader_session_id` on the trek doc).
+#
+# Authorization model:
+#   - read  (list / get / summary)        : creator OR any member
+#   - write (invite / scope / halt set+clear) : joined member
+#   - leader-only (update / archive / start / transfer) : member with
+#     role="leader" (user grain). Transfer additionally requires the caller's
+#     session to equal trek.leader_session_id (session grain).
+#   - join                                : caller must already appear in
+#     members[] (= invited but not yet joined). Non-invited callers get 403.
+# ---------------------------------------------------------------------------
+
+class TrekCreate(BaseModel):
+    title: str
+    description: str = ""
+    type: str = "persistent"  # temporary | persistent
+    creator_session_id: str   # caller's session_id (becomes leader)
+
+
+class TrekUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    type: Optional[str] = None
+
+
+class TrekInvite(BaseModel):
+    email: str
+
+
+class TrekScopeOp(BaseModel):
+    project: str
+    milestone: Optional[str] = None
+    operation: Optional[str] = None
+    task: Optional[str] = None
+
+
+class TrekHaltSet(BaseModel):
+    issued_by_session_id: str
+    reason: str = ""
+
+
+class TrekTransferLeader(BaseModel):
+    from_session_id: str  # current leader session (caller's session)
+    to_session_id: str    # new leader session
+
+
+def _load_trek_for_read(trek_id: str, user: dict) -> dict:
+    """Load a trek doc. 404 if missing, 403 if caller is neither creator
+    nor a member (per SPEC visibility = creator OR members)."""
+    t = db.get_trek(trek_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail=f"Trek '{trek_id}' not found")
+    if not _auth_enabled:
+        return t
+    uid = user.get("sub", "")
+    creator_uid = (t.get("creator_actor") or {}).get("user_id", "")
+    if creator_uid == uid:
+        return t
+    for m in t.get("members") or []:
+        if m.get("user_id") == uid:
+            return t
+    raise HTTPException(status_code=403, detail="Not a member of this trek")
+
+
+def _trek_member_role(t: dict, user_id: str) -> str:
+    """Return the caller's role ('leader' / 'member' / '' if not a member)."""
+    for m in t.get("members") or []:
+        if m.get("user_id") == user_id:
+            return m.get("role", "member")
+    return ""
+
+
+def _require_trek_leader(t: dict, user: dict) -> None:
+    """Raise 403 if caller does not hold the leader role on this trek."""
+    if not _auth_enabled:
+        return
+    if _trek_member_role(t, user.get("sub", "")) != "leader":
+        raise HTTPException(status_code=403, detail="Trek leader role required")
+
+
+def _require_trek_joined_member(t: dict, user: dict) -> None:
+    """Raise 403 if caller is not a joined member (= invited but not joined
+    is insufficient for write ops; mirrors SPEC 設計方針 12 join-flow)."""
+    if not _auth_enabled:
+        return
+    uid = user.get("sub", "")
+    for m in t.get("members") or []:
+        if m.get("user_id") == uid and m.get("joined_at"):
+            return
+    raise HTTPException(status_code=403, detail="Only joined members can perform this action")
+
+
+@app.get("/api/treks")
+def list_treks_endpoint(
+    status: Optional[str] = None,
+    include_archived: bool = False,
+    all_actors: bool = False,
+    user: dict = Depends(require_auth),
+):
+    """List treks visible to the caller.
+
+    Default: treks where caller is creator OR member.
+    ``?all_actors=true`` returns every trek (admin only; non-admin sees 403).
+    ``?status=`` narrows to a specific lifecycle state.
+    ``?include_archived=true`` includes archived treks (default hides them).
+    """
+    if all_actors:
+        _require_admin(user)
+        actor_filter = None
+    else:
+        actor_filter = user.get("sub") if _auth_enabled else None
+    return db.list_treks(
+        actor_id=actor_filter,
+        status=status,
+        include_archived=include_archived,
+    )
+
+
+@app.post("/api/treks")
+def create_trek_endpoint(body: TrekCreate, user: dict = Depends(require_auth)):
+    """Create a new trek. Caller becomes the creator + initial leader member.
+
+    ``creator_session_id`` is recorded as ``leader_session_id`` (SPEC 設計方針 9).
+    """
+    if not body.creator_session_id:
+        raise HTTPException(status_code=400, detail="creator_session_id required")
+    try:
+        new_doc = trek_mod.new_trek(
+            title=body.title,
+            creator_user_id=user.get("sub", ""),
+            creator_email=user.get("email", ""),
+            creator_session_id=body.creator_session_id,
+            description=body.description,
+            type_=body.type,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.save_trek(new_doc["trek_id"], new_doc)
+    return new_doc
+
+
+@app.get("/api/treks/{trek_id}")
+def get_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
+    """Get a single trek by id. Caller must be creator or member."""
+    return _load_trek_for_read(trek_id, user)
+
+
+@app.patch("/api/treks/{trek_id}")
+def update_trek_endpoint(trek_id: str, body: TrekUpdate,
+                         user: dict = Depends(require_auth)):
+    """Update title / description / type. Leader-only.
+
+    Status / members / scope / halt are mutated through dedicated endpoints
+    so audit logs and authz rules stay sharp per intent.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_leader(t, user)
+    if body.title is not None:
+        title = body.title.strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="title cannot be empty")
+        t["title"] = title
+    if body.description is not None:
+        t["description"] = body.description
+    if body.type is not None:
+        try:
+            trek_mod.validate_type(body.type)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        t["type"] = body.type
+    t["updated_at"] = trek_mod.utcnow_iso()
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.delete("/api/treks/{trek_id}")
+def archive_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
+    """Archive a trek (status → archived). Leader-only. Archive is terminal."""
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_leader(t, user)
+    cur = t.get("status", "")
+    try:
+        trek_mod.validate_transition(cur, "archived")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    now = trek_mod.utcnow_iso()
+    t["status"] = "archived"
+    t["archived_at"] = now
+    t["updated_at"] = now
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.post("/api/treks/{trek_id}/start")
+def start_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
+    """Transition trek planning → active. Leader-only."""
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_leader(t, user)
+    cur = t.get("status", "")
+    try:
+        trek_mod.validate_transition(cur, "active")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    t["status"] = "active"
+    t["updated_at"] = trek_mod.utcnow_iso()
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.post("/api/treks/{trek_id}/members")
+def invite_trek_member_endpoint(trek_id: str, body: TrekInvite,
+                                user: dict = Depends(require_auth)):
+    """Invite a user to the trek by email. Any joined member can invite.
+
+    Invitee must already exist as a Beacon user (= signed in once). The
+    invitation appears in members[] with ``joined_at=""`` until they call
+    POST /api/treks/{id}/members/join.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    found = db.find_user_by_email(body.email)
+    if found is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"User '{body.email}' not found. They must sign in to Beacon first.",
+        )
+    invited_id, _ = found
+    try:
+        trek_mod.add_invitation(
+            t,
+            user_id=invited_id,
+            email=body.email,
+            invited_by_user_id=user.get("sub", ""),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.post("/api/treks/{trek_id}/members/join")
+def join_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
+    """Accept the caller's own invitation (= sets ``joined_at`` to now).
+
+    Caller must already appear in members[] (= owner-issued invitation).
+    Non-invited callers get 403 — there is no self-add path by design.
+
+    We bypass _load_trek_for_read's membership check here because the trek
+    visibility model is "creator OR member" and an invited-but-not-yet-joined
+    user IS a member entry; the visibility check passes. Self-add (= caller
+    not yet in members[] at all) gets caught by trek_mod.accept_invitation.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    try:
+        trek_mod.accept_invitation(t, user_id=user.get("sub", ""))
+    except ValueError as e:
+        # Not invited (no row at all) → 403, not 404. The trek exists; the
+        # caller just cannot self-add.
+        raise HTTPException(status_code=403, detail=str(e))
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.delete("/api/treks/{trek_id}/members/me")
+def leave_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
+    """Caller removes themselves from the trek.
+
+    The leader must transfer leadership first (`POST .../transfer-leader`),
+    and the last member cannot leave (= archive the trek instead).
+    """
+    t = _load_trek_for_read(trek_id, user)
+    try:
+        trek_mod.remove_member(t, user_id=user.get("sub", ""))
+    except ValueError as e:
+        # leader-still-leader / not-a-member / last-member → 400
+        raise HTTPException(status_code=400, detail=str(e))
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.put("/api/treks/{trek_id}/scope")
+def add_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
+                            user: dict = Depends(require_auth)):
+    """Append a scope entry (cross-project ref). Any joined member."""
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    entry: dict = {"project": body.project}
+    if body.milestone:
+        entry["milestone"] = body.milestone
+    if body.operation:
+        entry["operation"] = body.operation
+    if body.task:
+        entry["task"] = body.task
+    try:
+        trek_mod.add_scope_entry(t, entry=entry)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.delete("/api/treks/{trek_id}/scope")
+def remove_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
+                               user: dict = Depends(require_auth)):
+    """Remove a scope entry. Any joined member."""
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    entry: dict = {"project": body.project}
+    if body.milestone:
+        entry["milestone"] = body.milestone
+    if body.operation:
+        entry["operation"] = body.operation
+    if body.task:
+        entry["task"] = body.task
+    try:
+        trek_mod.remove_scope_entry(t, entry=entry)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.put("/api/treks/{trek_id}/halt")
+def set_trek_halt_endpoint(trek_id: str, body: TrekHaltSet,
+                           user: dict = Depends(require_auth)):
+    """Pull the Andon cord. Any joined member may halt an active trek.
+
+    Halt is metadata, not a status: trek stays ``active`` while halted.
+    Sessions observe the halt field and pause autonomous work. Resume by
+    DELETE on this same path.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    if not body.issued_by_session_id:
+        raise HTTPException(status_code=400, detail="issued_by_session_id required")
+    try:
+        trek_mod.set_halt(
+            t,
+            issued_by_session_id=body.issued_by_session_id,
+            reason=body.reason or "",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.delete("/api/treks/{trek_id}/halt")
+def clear_trek_halt_endpoint(trek_id: str, user: dict = Depends(require_auth)):
+    """Release the Andon cord. Any joined member."""
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    trek_mod.clear_halt(t)
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.post("/api/treks/{trek_id}/transfer-leader")
+def transfer_trek_leader_endpoint(trek_id: str, body: TrekTransferLeader,
+                                  user: dict = Depends(require_auth)):
+    """Hand off leadership to another session.
+
+    Two-factor check (session AND user grain):
+      * ``from_session_id`` must equal the current ``leader_session_id`` —
+        confirms the caller is the live leader session.
+      * The calling user must hold the ``leader`` role in members[] —
+        confirms identity at the user grain (= survives session restart).
+    """
+    t = _load_trek_for_read(trek_id, user)
+    if not body.from_session_id or not body.to_session_id:
+        raise HTTPException(status_code=400,
+                            detail="from_session_id and to_session_id required")
+    if t.get("leader_session_id") != body.from_session_id:
+        raise HTTPException(
+            status_code=403,
+            detail="from_session_id does not match current trek leader",
+        )
+    _require_trek_leader(t, user)
+    try:
+        trek_mod.transfer_leader(t, target_session_id=body.to_session_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.get("/api/treks/{trek_id}/documents")
+def list_trek_documents_endpoint(trek_id: str,
+                                 user: dict = Depends(require_auth)):
+    """List documents associated with this trek (= ``trek_id`` field set).
+
+    Iterates the trek's scope to collect candidate projects, then lists
+    documents for each and filters by ``trek_id``. Returns the docs the
+    caller can see (= the caller is already a trek member, so they have
+    visibility into any project that the trek's scope includes).
+    """
+    t = _load_trek_for_read(trek_id, user)
+    out: list = []
+    seen_doc_ids: set[str] = set()
+    project_ids = {
+        s.get("project") for s in t.get("scope") or [] if s.get("project")
+    }
+    for pid in project_ids:
+        try:
+            project_docs = db.list_documents(pid)
+        except Exception:
+            # Stale scope entry pointing at a project the caller cannot
+            # read; skip silently so a single bad ref doesn't break the
+            # whole listing.
+            continue
+        for d in project_docs:
+            if d.get("trek_id") != trek_id:
+                continue
+            doc_id = d.get("doc_id")
+            if doc_id in seen_doc_ids:
+                continue
+            seen_doc_ids.add(doc_id)
+            # Surface the source project_id so the UI can deep-link the doc.
+            d_out = dict(d)
+            d_out["project_id"] = pid
+            out.append(d_out)
+    return out
+
+
+@app.get("/api/treks/{trek_id}/summary")
+def trek_summary_endpoint(trek_id: str, user: dict = Depends(require_auth)):
+    """Compact status snapshot for dashboards / Web UI Treks tab.
+
+    Returns the high-level counts + status fields without exposing the full
+    members[] / scope[] arrays — a separate GET /api/treks/{id} fetches the
+    full doc when the caller drills in.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    members = t.get("members") or []
+    return {
+        "trek_id": t.get("trek_id"),
+        "title": t.get("title"),
+        "type": t.get("type"),
+        "status": t.get("status"),
+        "halted": bool(t.get("halt")),
+        "halt": t.get("halt"),
+        "leader_session_id": t.get("leader_session_id"),
+        "creator_actor": t.get("creator_actor"),
+        "member_count": len(members),
+        "joined_member_count": sum(1 for m in members if m.get("joined_at")),
+        "scope_count": len(t.get("scope") or []),
+        "created_at": t.get("created_at"),
+        "updated_at": t.get("updated_at"),
+        "archived_at": t.get("archived_at"),
+    }
 
 
 # ---------------------------------------------------------------------------
