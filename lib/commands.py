@@ -11991,6 +11991,353 @@ def cmd_profile_list():
             print(f" {marker}   {name:<20} (could not load)")
 
 
+# ---------------------------------------------------------------------------
+# Stop signal CLI (ms-55 e-1646)
+# ---------------------------------------------------------------------------
+#
+# `beacon stop` is the user-facing entry point for the halt protocol
+# defined in lib/stop_signal.py. It rides on the existing bus event
+# transport — the stop event is just another bus event on the
+# `stop-signal` channel. The CLI's job is to:
+#
+#   1. Resolve the issuer's session_id (so the receipt is auditable).
+#   2. Build a validated payload via stop_signal.build_stop_payload.
+#   3. Post the event via the same api_client used by bus_send.
+#
+# Authorization mirrors SPEC §2: anyone can broadcast. We do NOT gate
+# on envelope tier here — the human typing `beacon stop` is the human
+# approval, and AI sessions that auto-emit a stop pass through the
+# normal autonomous-action accounting. The halt itself is enforced on
+# the receive side (the inbox hook for AI sessions, future Tauri UI for
+# human-attended sessions).
+
+def _stop_post_event(*, payload: dict, channel: str = None) -> dict:
+    """Common transport for stop/resume events.
+
+    Wraps the same client.post_bus_event call used by cmd_bus_send,
+    but without the envelope-issue path: stop signals are explicitly
+    not gated by tier (SPEC §2), so a T0 / no-envelope post is the
+    correct wire form. This also makes the CLI usable from sessions
+    that can't reach the envelope-issue endpoint (= offline, legacy
+    server, etc.) — stopping a runaway must not fail because the
+    auxiliary endpoint is down.
+    """
+    from stop_signal import STOP_CHANNEL  # local import to avoid cycle
+    client, config = _get_api_client()
+    project_id = _resolve_bus_project_id(config)
+    sender = payload.get("issued_by_session_id", "")
+    event = client.post_bus_event(
+        project_id, channel or STOP_CHANNEL,
+        sender_session_id=sender,
+        payload=payload,
+        delivery="propose-to-ai",
+        envelope=None,
+        requested_action=None,
+    )
+    return event
+
+
+def cmd_stop_scoped():
+    """Broadcast a scoped stop signal.
+
+    Env:
+      BEACON_STOP_TARGET_KIND   "ms" | "task" | "session" (required)
+      BEACON_STOP_TARGET_ID     id of the target (required)
+      BEACON_STOP_REASON        free text (optional)
+      BEACON_STOP_REASON_KIND   one of stop_signal.REASON_KINDS (optional)
+      BEACON_STOP_MACHINE_REASON  optional JSON-encoded dict
+      BEACON_JSON               "1" → json output
+    """
+    import stop_signal as _stop
+
+    target_kind = os.environ.get("BEACON_STOP_TARGET_KIND", "").strip()
+    target_id = os.environ.get("BEACON_STOP_TARGET_ID", "").strip()
+    reason = os.environ.get("BEACON_STOP_REASON", "")
+    reason_kind = os.environ.get("BEACON_STOP_REASON_KIND", "").strip() or "manual"
+    machine_reason_raw = os.environ.get("BEACON_STOP_MACHINE_REASON", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not target_kind or not target_id:
+        print(
+            "Error: scoped stop requires --target <kind>:<id> "
+            "(kind = ms|task|session)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    machine_reason = None
+    if machine_reason_raw:
+        try:
+            parsed = json.loads(machine_reason_raw)
+        except json.JSONDecodeError as e:
+            print(f"Error: --machine-reason must be valid JSON ({e})",
+                  file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(parsed, dict):
+            print("Error: --machine-reason must be a JSON object",
+                  file=sys.stderr)
+            sys.exit(1)
+        machine_reason = parsed
+
+    sender = _resolve_session_id()
+    if not sender:
+        print(
+            "Error: cannot resolve current session_id (run `beacon session id` "
+            "to mint one, or set BEACON_BUS_SENDER explicitly)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        payload = _stop.build_stop_payload(
+            scope=_stop.SCOPE_SCOPED,
+            issued_by_session_id=sender,
+            target_kind=target_kind,
+            target_id=target_id,
+            reason=reason,
+            reason_kind=reason_kind,
+            machine_reason=machine_reason,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    event = _stop_post_event(payload=payload)
+
+    if json_mode:
+        print(json.dumps(event, ensure_ascii=False))
+        return
+    suffix = f" — {reason}" if reason else ""
+    print(
+        f"STOP signal (scoped) raised on {target_kind}:{target_id} "
+        f"by {sender}{suffix}"
+    )
+    print(f"  event_id: {event.get('event_id', '?')}")
+    print("  All matching sessions will halt after the current tool call.")
+    print(f"  Resume with: beacon resume scoped --target {target_kind}:{target_id}")
+
+
+def cmd_stop_global():
+    """Broadcast a global stop signal (= halt every active autonomous
+    session in the project).
+
+    Env:
+      BEACON_STOP_REASON        free text (recommended)
+      BEACON_STOP_REASON_KIND   one of stop_signal.REASON_KINDS (optional)
+      BEACON_STOP_MACHINE_REASON  optional JSON-encoded dict
+      BEACON_JSON               "1" → json output
+    """
+    import stop_signal as _stop
+
+    reason = os.environ.get("BEACON_STOP_REASON", "")
+    reason_kind = os.environ.get("BEACON_STOP_REASON_KIND", "").strip() or "manual"
+    machine_reason_raw = os.environ.get("BEACON_STOP_MACHINE_REASON", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    machine_reason = None
+    if machine_reason_raw:
+        try:
+            parsed = json.loads(machine_reason_raw)
+        except json.JSONDecodeError as e:
+            print(f"Error: --machine-reason must be valid JSON ({e})",
+                  file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(parsed, dict):
+            print("Error: --machine-reason must be a JSON object",
+                  file=sys.stderr)
+            sys.exit(1)
+        machine_reason = parsed
+
+    sender = _resolve_session_id()
+    if not sender:
+        print(
+            "Error: cannot resolve current session_id "
+            "(set BEACON_BUS_SENDER explicitly)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        payload = _stop.build_stop_payload(
+            scope=_stop.SCOPE_GLOBAL,
+            issued_by_session_id=sender,
+            reason=reason,
+            reason_kind=reason_kind,
+            machine_reason=machine_reason,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    event = _stop_post_event(payload=payload)
+
+    if json_mode:
+        print(json.dumps(event, ensure_ascii=False))
+        return
+    suffix = f" — {reason}" if reason else ""
+    print(f"STOP signal (GLOBAL) raised by {sender}{suffix}")
+    print(f"  event_id: {event.get('event_id', '?')}")
+    print("  All active autonomous sessions will halt after the current tool call.")
+    print("  Resume with: beacon resume global")
+
+
+def cmd_stop_status():
+    """List currently active stop signals.
+
+    Reads recent events on the stop-signal channel via list_unread_bus_events
+    (with a synthetic empty recipient so the server returns the full
+    channel history rather than a per-recipient cursor view). This avoids
+    consuming any real recipient's cursor — `stop status` is observational
+    and must not race with receivers.
+
+    Env:
+      BEACON_JSON               "1" → json output
+      BEACON_STOP_SINCE_HOURS   limit window (default 24)
+    """
+    import stop_signal as _stop
+
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    try:
+        client, config = _get_api_client()
+    except Exception as e:
+        print(f"Error: cannot reach bus ({e})", file=sys.stderr)
+        sys.exit(1)
+    project_id = _resolve_bus_project_id(config)
+
+    # Pull the recent stop-signal channel history. We use a synthetic
+    # recipient so we don't advance any real session's cursor; the
+    # server returns the channel slice (most backends honor that).
+    try:
+        events = client.list_unread_bus_events(
+            project_id, "_stop_status_observer",
+            channel=_stop.STOP_CHANNEL,
+            limit=500,
+        )
+    except TypeError:
+        # Older api_client signature without `limit`. The default page
+        # size is typically generous enough for a stop-status snapshot.
+        events = client.list_unread_bus_events(
+            project_id, "_stop_status_observer",
+            channel=_stop.STOP_CHANNEL,
+        )
+    except Exception as e:
+        print(f"Error: cannot list stop-signal events ({e})", file=sys.stderr)
+        sys.exit(1)
+
+    actives = _stop.latest_active_stops(events or [])
+
+    if json_mode:
+        # Strip raw_event for compactness — callers who need the full event
+        # can call `beacon bus receive --channel stop-signal --once`.
+        out = []
+        for rec in actives:
+            r = {k: v for k, v in rec.items() if k != "raw_event"}
+            out.append(r)
+        print(json.dumps(out, ensure_ascii=False))
+        return
+
+    if not actives:
+        print("No active stop signals.")
+        return
+
+    print(f"Active stop signals ({len(actives)}):")
+    for rec in actives:
+        scope = rec["scope"]
+        target = rec.get("target") or {}
+        if scope == "global":
+            tag = "GLOBAL"
+        else:
+            tag = f"{target.get('kind', '?')}:{target.get('id', '?')}"
+        line = (
+            f"  ⚠ {tag}  reason_kind={rec.get('reason_kind', '?')}  "
+            f"by={rec.get('issued_by_session_id', '?')}  "
+            f"at={rec.get('issued_at', '?')}"
+        )
+        print(line)
+        if rec.get("reason"):
+            print(f"      reason: {rec['reason']}")
+
+
+def cmd_resume_scoped():
+    """Broadcast a resume (= clear stop) for a scoped target.
+
+    Env mirrors cmd_stop_scoped (without machine_reason).
+    """
+    import stop_signal as _stop
+
+    target_kind = os.environ.get("BEACON_STOP_TARGET_KIND", "").strip()
+    target_id = os.environ.get("BEACON_STOP_TARGET_ID", "").strip()
+    reason = os.environ.get("BEACON_STOP_REASON", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not target_kind or not target_id:
+        print(
+            "Error: scoped resume requires --target <kind>:<id>",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    sender = _resolve_session_id()
+    if not sender:
+        print("Error: cannot resolve current session_id", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        payload = _stop.build_resume_payload(
+            scope=_stop.SCOPE_SCOPED,
+            issued_by_session_id=sender,
+            target_kind=target_kind,
+            target_id=target_id,
+            reason=reason,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    event = _stop_post_event(payload=payload)
+
+    if json_mode:
+        print(json.dumps(event, ensure_ascii=False))
+        return
+    print(
+        f"RESUME signal (scoped) raised on {target_kind}:{target_id} "
+        f"by {sender}"
+    )
+    print(f"  event_id: {event.get('event_id', '?')}")
+
+
+def cmd_resume_global():
+    """Broadcast a global resume."""
+    import stop_signal as _stop
+
+    reason = os.environ.get("BEACON_STOP_REASON", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    sender = _resolve_session_id()
+    if not sender:
+        print("Error: cannot resolve current session_id", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        payload = _stop.build_resume_payload(
+            scope=_stop.SCOPE_GLOBAL,
+            issued_by_session_id=sender,
+            reason=reason,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    event = _stop_post_event(payload=payload)
+
+    if json_mode:
+        print(json.dumps(event, ensure_ascii=False))
+        return
+    print(f"RESUME signal (GLOBAL) raised by {sender}")
+    print(f"  event_id: {event.get('event_id', '?')}")
+
+
 def cmd_sessions_list():
     """Cross-project session directory (ms-54 / e-1587).
 
@@ -12180,6 +12527,14 @@ if __name__ == "__main__":
         "bus_ack": cmd_bus_ack,
         "bus_status": cmd_bus_status,
         "bus_directory": cmd_bus_directory,
+        # ms-55 e-1646: stop / resume signal CLI. Anyone can broadcast
+        # (Andon cord principle, SPEC §2). The events ride on the
+        # existing bus on channel `stop-signal`.
+        "stop_scoped": cmd_stop_scoped,
+        "stop_global": cmd_stop_global,
+        "stop_status": cmd_stop_status,
+        "resume_scoped": cmd_resume_scoped,
+        "resume_global": cmd_resume_global,
         "sessions_list": cmd_sessions_list,
         "profile_list": cmd_profile_list,
         "bus_budget_grant": cmd_bus_budget_grant,
