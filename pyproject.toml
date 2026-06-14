@@ -101,6 +101,10 @@ beacon-hook-save = "beacon_cli.hooks.save_hook:main"
 # bin/context-usage-monitor.sh; the Python entry-point unblocks Windows where
 # bash/jq are unavailable.
 beacon-hook-context-monitor = "beacon_cli.hooks.context_monitor:main"
+# PostToolUse: surface STOP signals (ms-55 e-1721). Reads the
+# halt-request.json the bus inbox hook drops on disk and injects it as
+# additionalContext so the AI sees the halt request after each tool call.
+beacon-hook-halt-check = "beacon_cli.hooks.halt_check:main"
 
 # -----------------------------------------------------------------------------
 # Packaging layout
