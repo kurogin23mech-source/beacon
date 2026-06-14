@@ -2497,11 +2497,20 @@ let state = {
   // settingsOpen / settingsTab: full Settings overlay (= mock has two tabs).
   // onlineSessions: cross-project live sessions for sidebar ONLINE AGENTS
   // section + Settings>Agents & Treks table.
+  // myProjects: the caller's project memberships (= /api/me/projects).
+  //   Settings>Projects pulldown lists these so the user can jump between
+  //   projects they belong to. Distinct from state.projects which historically
+  //   listed admin-visible projects.
+  // myRole / myIsOwner: settings members-tab decides what controls to render
+  //   (invite / role-change / remove are owner-only).
   accountMenuOpen: false,
   settingsOpen: false,
   settingsTab: 'members',  // 'members' | 'agents'
   settingsFilterTrek: '',
   onlineSessions: [],
+  myProjects: [],
+  myRole: '',
+  myIsOwner: false,
   // Filter: hidden statuses (cancelled is hidden by default)
   hiddenStatuses: new Set(['cancelled']),
   // Entry done filter (per milestone)
@@ -3464,6 +3473,16 @@ const dataSource = {
       state.onlineSessions = [];
     }
   },
+  // ms-69 / e-1659 v3 — caller's project memberships (= /api/me/projects).
+  // Used by the Settings project-pulldown so the user can jump between
+  // projects they belong to.
+  loadMyProjects: async () => {
+    try {
+      state.myProjects = await api('/api/me/projects');
+    } catch (_e) {
+      state.myProjects = [];
+    }
+  },
   // ms-43 e-631: unified cross-entity search.
   // Returns {results, total, facets, limit, offset}. Caller manages state.search* fields.
   searchProject: async (params) => {
@@ -3750,6 +3769,17 @@ async function openSettings(tab) {
   state.settingsOpen = true;
   if (tab) state.settingsTab = tab;
   state.accountMenuOpen = false;
+  // Members tab always needs the caller's project memberships + role.
+  if (state.settingsTab === 'members') {
+    if (!state.myProjects || state.myProjects.length === 0) {
+      dataSource.loadMyProjects().catch(() => {}).then(() => {
+        _resolveMyRole();
+        renderSettings();
+      });
+    } else {
+      _resolveMyRole();
+    }
+  }
   // Ensure data is loaded so the two tabs have something to render.
   if (state.settingsTab === 'agents'
       && (!state.onlineSessions || state.onlineSessions.length === 0)) {
@@ -3761,6 +3791,15 @@ async function openSettings(tab) {
   }
   renderSettings();
 }
+function _resolveMyRole() {
+  // state.myProjects entries carry .role per /api/me/projects. Find the
+  // current project; default to 'unknown' so the UI degrades to read-only
+  // until the lookup resolves.
+  const pid = state.projectId;
+  const me = (state.myProjects || []).find(p => (p.id || p.project_id) === pid);
+  state.myRole = (me && me.role) || '';
+  state.myIsOwner = state.myRole === 'owner';
+}
 function closeSettings() {
   state.settingsOpen = false;
   renderSettings();
@@ -3771,26 +3810,32 @@ function setSettingsTab(tab) {
 }
 
 function _renderSettingsMembersTab() {
-  // Real project selector + member list + Archive / Export buttons.
-  // These used to live in the project footer (= Archive / Export JSON);
-  // moved here so settings is the one place for "manage this project."
-  const projects = state.projects || [];
+  // Real project selector (= /api/me/projects = caller's memberships) +
+  // member list + Archive / Export buttons. Owner-only controls (invite /
+  // role-change / remove / archive) are hidden for editor / viewer roles.
+  const projects = state.myProjects || [];
+  const role = state.myRole || '';
+  const isOwner = !!state.myIsOwner;
   return `
     <div class="settings-section">
-      <div class="label">Project</div>
+      <div class="label">Project ${role ? `(your role: <strong style="color:var(--accent);">${esc(role)}</strong>)` : ''}</div>
       <select id="settings-project-select" data-action="settings-switch-project"
-              style="background:var(--bg-surface);border:1px solid var(--border);color:var(--text-primary);padding:6px 8px;border-radius:3px;font-family:var(--font-mono);font-size:0.78rem;width:100%;max-width:380px;">
+              style="background:var(--bg-surface);border:1px solid var(--border);color:var(--text-primary);padding:6px 8px;border-radius:3px;font-family:var(--font-mono);font-size:0.78rem;width:100%;max-width:480px;">
         ${projects.length
           ? projects.map(p => `
-              <option value="${esc(p.project_id)}" ${p.project_id === state.projectId ? 'selected' : ''}>
-                ${esc(p.name || '')} — ${esc(p.project_id)}
+              <option value="${esc(p.id || p.project_id)}" ${(p.id || p.project_id) === state.projectId ? 'selected' : ''}>
+                ${esc(p.name || '')} — ${esc(p.id || p.project_id)}${p.role ? ` [${esc(p.role)}]` : ''}
               </option>
             `).join('')
           : `<option value="${esc(state.projectId || '')}" selected>${esc(state.project ? state.project.name : '')}</option>`}
       </select>
+      ${projects.length <= 1
+        ? '<div style="font-size:0.7rem;color:var(--text-dim);margin-top:6px;">所属プロジェクトが 1 つだけです。招待を受けると追加で表示されます。</div>'
+        : `<div style="font-size:0.7rem;color:var(--text-dim);margin-top:6px;">${projects.length} project(s) you belong to.</div>`}
     </div>
     <div class="settings-section">
       <div class="label">Members</div>
+      ${isOwner ? `
       <div class="settings-invite-row">
         <input class="email" id="settings-invite-email" placeholder="email">
         <select id="settings-invite-role">
@@ -3799,26 +3844,40 @@ function _renderSettingsMembersTab() {
         </select>
         <button class="primary" data-action="settings-invite-member">Invite</button>
       </div>
+      <div id="settings-invite-msg" style="font-size:0.7rem;color:var(--text-dim);margin:4px 0 10px;"></div>
+      ` : `
+      <div style="font-size:0.7rem;color:var(--text-dim);margin-bottom:10px;">
+        メンバー一覧は閲覧のみ可能です (= owner のみが招待 / 役割変更 / 削除を行えます)
+      </div>
+      `}
       <div id="settings-member-list">
         <div class="menu-user" style="color:var(--text-dim);">Loading members…</div>
       </div>
-      <div id="settings-invite-msg" style="font-size:0.7rem;color:var(--text-dim);margin-top:4px;"></div>
     </div>
     <div class="settings-section">
       <div class="label">Export &amp; Archive</div>
       <div style="display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap;">
+        ${isOwner ? `
         <button data-action="settings-archive-project"
                 style="background:transparent;color:var(--text-secondary);border:1px solid var(--border);padding:6px 14px;border-radius:3px;cursor:pointer;font-family:var(--font-mono);font-size:0.75rem;">
           ${state.project && state.project.archived ? 'Unarchive' : 'Archive'}
         </button>
+        ` : `
+        <button disabled title="owner-only"
+                style="background:transparent;color:var(--text-dim);border:1px dashed var(--border-subtle);padding:6px 14px;border-radius:3px;cursor:not-allowed;font-family:var(--font-mono);font-size:0.75rem;">
+          Archive (owner-only)
+        </button>
+        `}
         <button data-action="settings-export-json"
                 style="background:transparent;color:var(--text-secondary);border:1px solid var(--border);padding:6px 14px;border-radius:3px;cursor:pointer;font-family:var(--font-mono);font-size:0.75rem;">
           Export JSON
         </button>
         <span style="color:var(--text-dim);font-size:0.7rem;margin-left:8px;">
-          ${state.project && state.project.archived
-            ? '(現在 archived。Unarchive で project list に戻る)'
-            : 'Archive すると project list から隠れます。Export はその場で JSON ダウンロード。'}
+          ${isOwner
+            ? (state.project && state.project.archived
+                ? '(現在 archived。Unarchive で project list に戻る)'
+                : 'Archive すると project list から隠れます。Export はその場で JSON ダウンロード。')
+            : 'Export はあなたの権限で読める範囲を JSON でダウンロードします。'}
         </span>
       </div>
     </div>`;
@@ -3943,26 +4002,32 @@ function renderSettings() {
 }
 
 // Settings > Members: fetch + render into #settings-member-list.
+// Only owner sees role-change / remove controls; editor / viewer see the
+// member list as read-only.
 async function _settingsLoadMemberList() {
   const dst = document.getElementById('settings-member-list');
   if (!dst) return;
   try {
     const data = await api(`/api/projects/${state.projectId}/members`);
     const myEmail = (state.auth && state.auth.email) || '';
-    const isOwner = !!myEmail && data.owner_email === myEmail;
+    // Confirm owner-grant via both myRole resolution AND server-reported
+    // owner email — defense in depth.
+    const isOwner = (state.myIsOwner === true)
+      && !!myEmail && data.owner_email === myEmail;
     let html = '';
     if (data.owner_email) {
       html += `
         <div class="settings-member-row">
-          <span class="email">${esc(data.owner_email)}</span>
+          <span class="email">${esc(data.owner_email)}${data.owner_email === myEmail ? ' <span style="color:var(--text-dim);font-size:0.6rem;">(you)</span>' : ''}</span>
           <span class="role-tag">owner</span>
           <span></span>
         </div>`;
     }
     for (const m of (data.members || [])) {
+      const isMe = m.email === myEmail;
       html += `
         <div class="settings-member-row">
-          <span class="email">${esc(m.email)}</span>
+          <span class="email">${esc(m.email)}${isMe ? ' <span style="color:var(--text-dim);font-size:0.6rem;">(you)</span>' : ''}</span>
           ${isOwner
             ? `<select data-action="settings-change-role" data-email="${esc(m.email)}"
                        style="background:var(--bg-surface);border:1px solid var(--border);color:var(--text-primary);font-size:0.7rem;padding:1px 4px;border-radius:3px;cursor:pointer;">
@@ -3970,7 +4035,9 @@ async function _settingsLoadMemberList() {
                  <option value="editor" ${m.role === 'editor' ? 'selected' : ''}>editor</option>
                </select>`
             : `<span class="role-tag" style="color:var(--text-dim);">${esc(m.role)}</span>`}
-          <span class="x" data-action="settings-remove-member" data-email="${esc(m.email)}">×</span>
+          ${isOwner
+            ? `<span class="x" data-action="settings-remove-member" data-email="${esc(m.email)}">×</span>`
+            : '<span></span>'}
         </div>`;
     }
     if (!html) {
