@@ -1859,6 +1859,11 @@ let state = {
   treks: [],
   openTrekId: null,
   openTrekDocs: [],
+  // ms-69 / e-1664 — Related Treks widget cache (= per work item).
+  // Key shape: 'ms:ms-69' / 'op:op-1' / 'task:e-1656'. Values are the
+  // list of treks whose scope covers the item. Populated lazily by
+  // ``dataSource.loadRelatedTreks`` when the item is expanded / opened.
+  relatedTreks: {},
   // Filter: hidden statuses (cancelled is hidden by default)
   hiddenStatuses: new Set(['cancelled']),
   // Entry done filter (per milestone)
@@ -2771,6 +2776,21 @@ const dataSource = {
       state.openTrekDocs = [];
     }
   },
+  // ms-69 / e-1664 — reverse lookup for the Related Treks widget on
+  // milestone / operation / task detail. ``kind`` ∈ {'milestone','operation','task'}.
+  loadRelatedTreks: async (kind, id) => {
+    const path = kind === 'milestone' ? 'milestones'
+      : kind === 'operation' ? 'operations'
+      : 'entries';
+    const key = (kind === 'milestone' ? 'ms' : kind === 'operation' ? 'op' : 'task') + ':' + id;
+    try {
+      state.relatedTreks[key] = await api(
+        `/api/projects/${state.projectId}/${path}/${encodeURIComponent(id)}/related-treks`,
+      );
+    } catch (_e) {
+      state.relatedTreks[key] = [];
+    }
+  },
   // ms-43 e-631: unified cross-entity search.
   // Returns {results, total, facets, limit, offset}. Caller manages state.search* fields.
   searchProject: async (params) => {
@@ -2937,6 +2957,7 @@ function renderMilestoneCard(ms, index) {
         ${msObjective}${msAc}
         ${ms.description ? `<div class="ms-description">${esc(ms.description)}</div>` : ''}
         ${renderedEntries}
+        ${renderRelatedTreksWidget('milestone', ms.id)}
       </div>
     `;
   }
@@ -3019,6 +3040,18 @@ async function switchTab(tab) {
       state.treks = [];
     }
   }
+  if (tab === 'operations') {
+    // ms-69 / e-1664: pre-warm related-treks for every operation on the
+    // project so the widget renders immediately as the op cards paint.
+    // Skip ops we already have cached.
+    const ops = (state.project && state.project.operations) || [];
+    const missing = ops.filter(o => state.relatedTreks['op:' + o.id] === undefined);
+    if (missing.length) {
+      Promise.all(missing.map(o => dataSource.loadRelatedTreks('operation', o.id)))
+        .then(() => render())
+        .catch(() => {});
+    }
+  }
   if (tab === 'notes') {
     // ms-57 e-1041: Session tab carries two sub-views (notes/logs). Kick
     // off both loads in parallel so toggling between them is instant.
@@ -3055,6 +3088,33 @@ function _trekStatusIcon(s) {
   if (s === 'planning') return '○';
   if (s === 'archived') return '\u{1F4E6}';
   return '?';
+}
+
+// ms-69 / e-1664 — Related Treks widget rendered inline on milestone /
+// operation / task detail. Reads from state.relatedTreks (= cache keyed by
+// "ms:..." / "op:..." / "task:..."). Returns empty string when not yet
+// loaded or when there are no matches, so the widget never adds visual
+// noise to work items that no trek covers.
+function renderRelatedTreksWidget(kind, id) {
+  const prefix = kind === 'milestone' ? 'ms' : kind === 'operation' ? 'op' : 'task';
+  const key = prefix + ':' + id;
+  const treks = state.relatedTreks[key];
+  if (!treks || treks.length === 0) return '';
+  const row = (t) => `
+    <div data-action="trek-jump-from-widget" data-trek-id="${esc(t.trek_id)}"
+         style="display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer;font-size:0.78rem;border-bottom:1px solid var(--border);">
+      <span>${_trekStatusIcon(t.status)}</span>
+      <span style="flex:1;">${esc(t.title || '')}</span>
+      ${t.halt ? '<span style="color:#c75;" title="halted">⚠</span>' : ''}
+      <span style="color:var(--text-dim);font-size:0.72rem;">${esc(t.status || '')}</span>
+    </div>`;
+  return `
+    <div style="margin-top:14px;padding:8px 12px;background:var(--bg-surface);border:1px solid var(--border);border-radius:4px;">
+      <div style="font-size:0.7rem;color:var(--text-secondary);letter-spacing:0.05em;margin-bottom:4px;">
+        RELATED TREKS (${treks.length})
+      </div>
+      ${treks.map(row).join('')}
+    </div>`;
 }
 
 function _renderTrekDetail(t) {
@@ -3919,6 +3979,7 @@ function renderOperationsSection() {
         <div class="op-section-label">Incidents</div>
         ${incidentsHtml}${resolvedHtml}
       </div>` : ''}
+      ${renderRelatedTreksWidget('operation', op.id)}
     </div>`;
   };
 
@@ -4354,8 +4415,16 @@ function handleCommonAction(action, el) {
   switch (action) {
     case 'toggle-ms': {
       const msId = el.dataset.msId;
-      state.expanded.has(msId) ? state.expanded.delete(msId) : state.expanded.add(msId);
-      render(); return true;
+      const wasExpanded = state.expanded.has(msId);
+      wasExpanded ? state.expanded.delete(msId) : state.expanded.add(msId);
+      render();
+      // ms-69 / e-1664: lazy-load related treks the first time this ms is
+      // expanded. Re-renders the card in-place once the data lands; the
+      // widget hides itself when the result is empty.
+      if (!wasExpanded && state.relatedTreks['ms:' + msId] === undefined) {
+        dataSource.loadRelatedTreks('milestone', msId).then(() => render());
+      }
+      return true;
     }
     case 'toggle-entry': {
       const eid = el.dataset.entryId;
@@ -4495,6 +4564,14 @@ function handleCommonAction(action, el) {
       openTrek(el.dataset.trekId); return true;
     case 'close-trek':
       closeTrek(); return true;
+    // ms-69 / e-1664 — Related Treks widget on work item detail
+    case 'trek-jump-from-widget': {
+      const tid = el.dataset.trekId;
+      // Close the entry modal (if open) so the Treks tab is unobstructed.
+      if (state.openEntryId) closeEntryModal();
+      switchTab('treks').then(() => openTrek(tid));
+      return true;
+    }
   }
   return false;
 }
@@ -4527,6 +4604,17 @@ function openEntryDetail(entryId) {
   if (!result) return;
   state.openEntryId = entryId;
   renderEntryModal(result.entry, result.ms || result.op);
+  // ms-69 / e-1664: lazy-load related treks for this task entry. When the
+  // data lands, re-render the modal so the widget appears (or stays empty,
+  // in which case the widget is silent).
+  if (state.relatedTreks['task:' + entryId] === undefined) {
+    dataSource.loadRelatedTreks('task', entryId).then(() => {
+      // Only re-render the modal if it's still showing the same entry.
+      if (state.openEntryId === entryId) {
+        renderEntryModal(result.entry, result.ms || result.op);
+      }
+    });
+  }
 }
 
 function renderEntryModal(entry, parent) {
@@ -4567,11 +4655,15 @@ function renderEntryModal(entry, parent) {
         <div class="entry-modal-desc">${esc(entry.description)}</div>
         <div class="entry-modal-meta">${priorityBadge}${statusText}${reasonMissing}</div>
         ${motivation}${ac}${behavior}${resolves}${detail}${doneReason}${cancelReason}${restoreReason}
+        ${renderRelatedTreksWidget('task', entry.id)}
       </div>
     </div>
   `;
   overlay.style.display = 'flex';
   overlay.querySelector('[data-action="close-entry-modal"]')?.addEventListener('click', closeEntryModal);
+  overlay.querySelectorAll('[data-action="trek-jump-from-widget"]').forEach(node => {
+    node.addEventListener('click', handleAction);
+  });
 }
 
 function closeEntryModal() {
