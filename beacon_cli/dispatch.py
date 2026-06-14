@@ -668,6 +668,38 @@ def build_parser() -> argparse.ArgumentParser:
     p_op_purge.add_argument("--index", default="")
     p_op_purge.add_argument("--json", action="store_true")
 
+    # ---- trek (ms-69) ----
+    # Top-level cross-project collaboration area. Storage is local-only
+    # (~/.beacon/treks/) until the HTTP path lands in e-1656.
+    p_trek = sub.add_parser("trek", help="Trek operations (ms-69)", add_help=False)
+    p_trek.add_argument("--help", "-h", action="store_true", dest="show_help")
+    trek_sub = p_trek.add_subparsers(dest="trek_cmd", metavar="<subcmd>")
+
+    p_trek_create = trek_sub.add_parser("create", add_help=False)
+    p_trek_create.add_argument("title", nargs="?", default="")
+    p_trek_create.add_argument("--type", dest="trek_type", default="")
+    p_trek_create.add_argument("--description", "--desc", dest="trek_desc", default="")
+    p_trek_create.add_argument("--json", action="store_true")
+
+    p_trek_list = trek_sub.add_parser("list", aliases=["ls"], add_help=False)
+    p_trek_list.add_argument("--status", default="")
+    p_trek_list.add_argument("--all", "--include-archived",
+                             dest="include_archived", action="store_true")
+    p_trek_list.add_argument("--all-actors", dest="all_actors", action="store_true")
+    p_trek_list.add_argument("--json", action="store_true")
+
+    p_trek_show = trek_sub.add_parser("show", aliases=["get"], add_help=False)
+    p_trek_show.add_argument("trek_id", nargs="?", default="")
+    p_trek_show.add_argument("--json", action="store_true")
+
+    p_trek_start = trek_sub.add_parser("start", add_help=False)
+    p_trek_start.add_argument("trek_id", nargs="?", default="")
+    p_trek_start.add_argument("--json", action="store_true")
+
+    p_trek_archive = trek_sub.add_parser("archive", add_help=False)
+    p_trek_archive.add_argument("trek_id", nargs="?", default="")
+    p_trek_archive.add_argument("--json", action="store_true")
+
     # ---- doctor / project / help ----
     sub.add_parser("doctor", add_help=False)
     p_project = sub.add_parser("project", add_help=False)
@@ -1814,6 +1846,76 @@ def _handle_project(root: Path, args: argparse.Namespace) -> int:
     return 1
 
 
+def _handle_trek(root: Path, args: argparse.Namespace) -> int:
+    """`beacon trek <create|list|show|start|archive>` (ms-69 / e-1653).
+
+    Mirrors the bash dispatch in bin/beacon. Trek is a top-level
+    cross-project entity so we do **not** call ``_ensure_project`` —
+    the storage layer (~/.beacon/treks/) is project-agnostic.
+
+    BEACON_USER_EMAIL / BEACON_SESSION_ID are inherited from the parent
+    process environment for the ``create`` path (= identity gating lives
+    in commands.py).
+    """
+    if args.show_help or args.trek_cmd is None:
+        print(
+            "Usage: beacon trek <subcommand> [args]\n"
+            "\n"
+            "Subcommands:\n"
+            "  create \"<title>\" [--type temporary|persistent] "
+            "[--description \"...\"]\n"
+            "  list [--status S] [--all] [--all-actors] [--json]\n"
+            "  show <trek-id> [--json]\n"
+            "  start <trek-id>\n"
+            "  archive <trek-id>\n"
+            "\n"
+            "Env (creator identity, required for 'create'):\n"
+            "  BEACON_USER_EMAIL    creator email\n"
+            "  BEACON_SESSION_ID    creator session id (becomes initial leader)\n"
+            "  BEACON_USER_ID       creator user_id (fallback: whoami)"
+        )
+        return 0 if args.show_help else 2
+    cmd = args.trek_cmd
+    json_env = "1" if getattr(args, "json", False) else ""
+
+    if cmd == "create":
+        return _run_commands_py(
+            root, "trek_create",
+            {
+                "BEACON_TREK_TITLE": args.title or "",
+                "BEACON_TREK_TYPE": args.trek_type or "",
+                "BEACON_TREK_DESCRIPTION": args.trek_desc or "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd in ("list", "ls"):
+        return _run_commands_py(
+            root, "trek_list",
+            {
+                "BEACON_TREK_STATUS": args.status or "",
+                "BEACON_TREK_INCLUDE_ARCHIVED": "1" if args.include_archived else "",
+                "BEACON_TREK_ALL_ACTORS": "1" if args.all_actors else "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd in ("show", "get"):
+        return _run_commands_py(
+            root, "trek_show",
+            {"BEACON_TREK_ID": args.trek_id or "", "BEACON_JSON": json_env},
+        )
+    if cmd == "start":
+        return _run_commands_py(
+            root, "trek_start",
+            {"BEACON_TREK_ID": args.trek_id or "", "BEACON_JSON": json_env},
+        )
+    if cmd == "archive":
+        return _run_commands_py(
+            root, "trek_archive",
+            {"BEACON_TREK_ID": args.trek_id or "", "BEACON_JSON": json_env},
+        )
+    return 1
+
+
 def _handle_doctor(root: Path, args: argparse.Namespace) -> int:
     return _run_commands_py(root, "doctor", {})
 
@@ -2504,6 +2606,7 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "deploy": _handle_deploy,
     "entry": _handle_entry,
     "operation": _handle_operation,
+    "trek": _handle_trek,
     "project": _handle_project,
     "doctor": _handle_doctor,
     "skill": _handle_skill,
