@@ -105,6 +105,44 @@ Treks (cross-project / cross-session 協奏作業領域 — ms-69):
   beacon trek transfer-leader <trek-id> --to <session-id>
                                     Hand off leader_session_id
 
+Stop signal (ms-55: Andon cord — anyone can broadcast a halt):
+  beacon stop scoped --target <kind>:<id> [--reason "..."] [--reason-kind X]
+                                    Halt sessions matching kind:id (ms|task|session)
+  beacon stop global [--reason "..."] [--reason-kind X]
+                                    Halt every active autonomous session in the project
+  beacon stop status [--json]       List currently active stop signals
+  beacon resume scoped --target <kind>:<id> [--reason "..."]
+                                    Clear a scoped stop signal
+  beacon resume global [--reason "..."]
+                                    Clear the global stop signal
+
+Rollback (ms-55: safe boundary — local-only is auto, pushed is report-only):
+  beacon rollback [--commits N] [--reason "..."] [--dry-run] [--json]
+                                    Stash dirty edits + git reset --soft un-pushed
+                                    commits; pushed history surfaces as
+                                    compensation proposals (= revert PR etc.)
+
+Claim primitives (ms-55: who is taking what work — coordination):
+  beacon claim post    --target <kind>:<id> [--intent "..."]
+                                    Broadcast "I'm taking X" (first-publisher-wins)
+  beacon claim request --target <kind>:<id> --to <sid> [--intent "..."]
+                                    Ask a specific session to take X
+  beacon claim handoff --target <kind>:<id> --to <sid> [--intent "..."]
+                                    Hand off in-progress X to another session
+  beacon claim respond <claim_id> [--accept|--decline] [--reason "..."]
+                                    Reply to a request/handoff
+  beacon claim release <claim_id> [--outcome completed|abandoned]
+                                    Mark a claim done
+  beacon claim list    [--mine] [--target <kind>:<id>]
+                                    List local active claims (= restart recovery)
+  beacon stuck check   (--telemetry-inline '<json>' | --telemetry-file <path>)
+                       [--timeout-minutes N] [--dry-run] [--json]
+                                    Detect silent sessions (= idle > N min) and
+                                    emit STUCK signals (= stop with reason="stuck")
+  beacon morning [--since-hours N] [--events-file <path>] [--json]
+                                    4-bucket digest of recent autonomous activity:
+                                    完了 / 停止 / skip / 介入要望
+
 Releases & Deploys:
   beacon deploy record [--revision <rev>] [--semver <v>] [--version <tag>] [--desc <text>]
   beacon deploy list
@@ -2891,6 +2929,419 @@ EOF
                 BEACON_NOTE_TEXT="$note_text" BEACON_NOTE_CONTEXT="$note_context" \
                     BEACON_BUS_ORIGIN="$note_bus_origin" \
                     python3 "$COMMANDS_PY" note_add
+                ;;
+        esac
+        ;;
+    stop)
+        # ms-55 e-1646: Andon-cord-style halt protocol.
+        # `beacon stop scoped --target <kind>:<id>` halts a specific MS / task
+        # / session; `beacon stop global` halts the whole project.
+        # SPEC §2: anyone can broadcast (no envelope-tier gate here).
+        ensure_project
+        _stop_sub="${2:-}"
+        shift 2 || true
+        _stop_target=""
+        _stop_reason=""
+        _stop_reason_kind=""
+        _stop_machine_reason=""
+        _stop_json=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --target)         _stop_target="${2:-}"; shift 2 ;;
+                --reason)         _stop_reason="${2:-}"; shift 2 ;;
+                --reason-kind)    _stop_reason_kind="${2:-}"; shift 2 ;;
+                --machine-reason) _stop_machine_reason="${2:-}"; shift 2 ;;
+                --json)           _stop_json="1"; shift ;;
+                *) shift ;;
+            esac
+        done
+        # --target is "kind:id" (e.g. "ms:ms-55") — split into env vars so the
+        # Python CLI can validate each piece independently.
+        _stop_target_kind=""
+        _stop_target_id=""
+        if [[ -n "$_stop_target" ]]; then
+            _stop_target_kind="${_stop_target%%:*}"
+            _stop_target_id="${_stop_target#*:}"
+            # If no colon was present the substitutions both yield the whole
+            # string — guard against that so a bare `--target ms-55` doesn't
+            # silently encode kind="ms-55" id="ms-55".
+            if [[ "$_stop_target_kind" == "$_stop_target_id" && "$_stop_target" != *:* ]]; then
+                echo "Error: --target must be <kind>:<id> (e.g. ms:ms-55)" >&2
+                exit 1
+            fi
+        fi
+        case "$_stop_sub" in
+            scoped)
+                BEACON_STOP_TARGET_KIND="$_stop_target_kind" \
+                    BEACON_STOP_TARGET_ID="$_stop_target_id" \
+                    BEACON_STOP_REASON="$_stop_reason" \
+                    BEACON_STOP_REASON_KIND="$_stop_reason_kind" \
+                    BEACON_STOP_MACHINE_REASON="$_stop_machine_reason" \
+                    BEACON_JSON="$_stop_json" \
+                    python3 "$COMMANDS_PY" stop_scoped
+                ;;
+            global)
+                BEACON_STOP_REASON="$_stop_reason" \
+                    BEACON_STOP_REASON_KIND="$_stop_reason_kind" \
+                    BEACON_STOP_MACHINE_REASON="$_stop_machine_reason" \
+                    BEACON_JSON="$_stop_json" \
+                    python3 "$COMMANDS_PY" stop_global
+                ;;
+            status)
+                BEACON_JSON="$_stop_json" python3 "$COMMANDS_PY" stop_status
+                ;;
+            "")
+                cat <<'EOF'
+Usage: beacon stop scoped --target <kind>:<id> [--reason "..."] [--reason-kind X] [--machine-reason '<json>'] [--json]
+       beacon stop global [--reason "..."] [--reason-kind X] [--machine-reason '<json>'] [--json]
+       beacon stop status [--json]
+
+target kind: ms | task | session
+reason-kind: manual | build_fail | deploy_fail | test_fail | approved_actions_violation | stuck | other
+
+Examples:
+  beacon stop scoped --target ms:ms-55 --reason "build fail 3 retries" --reason-kind build_fail
+  beacon stop global --reason "hostile prompt detected" --reason-kind approved_actions_violation
+  beacon stop status                # list active stop signals
+EOF
+                ;;
+            *)
+                echo "Error: unknown subcommand 'beacon stop $_stop_sub'" >&2
+                echo "Try 'beacon stop' for usage." >&2
+                exit 1
+                ;;
+        esac
+        ;;
+    rollback)
+        # ms-55 e-1647: SPEC §4 safe-boundary rollback. Working tree edits +
+        # un-pushed commits are auto-undone; anything past upstream is
+        # surfaced as a "report + compensation proposal" instead of being
+        # silently destroyed.
+        ensure_project
+        shift
+        _rb_commits=""
+        _rb_reason=""
+        _rb_dry_run=""
+        _rb_json=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --commits) _rb_commits="${2:-0}"; shift 2 ;;
+                --reason)  _rb_reason="${2:-}"; shift 2 ;;
+                --dry-run) _rb_dry_run="1"; shift ;;
+                --json)    _rb_json="1"; shift ;;
+                -h|--help)
+                    cat <<'EOF'
+Usage: beacon rollback [--commits N] [--reason "..."] [--dry-run] [--json]
+
+Inspect the local git state and roll back the safe portion:
+  • Dirty working tree → `git stash push -u` (preserved, recoverable via `git stash`)
+  • Un-pushed local commits → `git reset --soft HEAD~N` (changes stay staged)
+
+Anything past your branch's upstream (= already pushed / merged / deployed)
+is NOT touched. Instead the report lists concrete compensation proposals
+(open a revert PR, etc.) so a human can decide.
+
+Flags:
+  --commits N    Number of HEAD commits to undo. 0 (default) means
+                 "auto-decide": when an upstream is configured, undo
+                 everything ahead of upstream (capped). Without
+                 upstream, default is 0 — pass --commits explicitly.
+  --reason TEXT  Free-text reason. Recorded into the stash message and
+                 the printed report.
+  --dry-run      Print the plan, do not execute.
+  --json         Machine-readable plan + result.
+EOF
+                    exit 0
+                    ;;
+                *) shift ;;
+            esac
+        done
+        BEACON_ROLLBACK_COMMITS="${_rb_commits:-0}" \
+            BEACON_ROLLBACK_REASON="$_rb_reason" \
+            BEACON_ROLLBACK_DRY_RUN="$_rb_dry_run" \
+            BEACON_JSON="$_rb_json" \
+            python3 "$COMMANDS_PY" rollback
+        ;;
+    resume)
+        # ms-55 e-1646: clear a previously-broadcast stop signal.
+        # Resume itself is also unrestricted at this layer — a workflow that
+        # wants leader-only resume can layer a hook on the receive side.
+        ensure_project
+        _res_sub="${2:-}"
+        shift 2 || true
+        _res_target=""
+        _res_reason=""
+        _res_json=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --target) _res_target="${2:-}"; shift 2 ;;
+                --reason) _res_reason="${2:-}"; shift 2 ;;
+                --json)   _res_json="1"; shift ;;
+                *) shift ;;
+            esac
+        done
+        _res_target_kind=""
+        _res_target_id=""
+        if [[ -n "$_res_target" ]]; then
+            _res_target_kind="${_res_target%%:*}"
+            _res_target_id="${_res_target#*:}"
+            if [[ "$_res_target_kind" == "$_res_target_id" && "$_res_target" != *:* ]]; then
+                echo "Error: --target must be <kind>:<id>" >&2
+                exit 1
+            fi
+        fi
+        case "$_res_sub" in
+            scoped)
+                BEACON_STOP_TARGET_KIND="$_res_target_kind" \
+                    BEACON_STOP_TARGET_ID="$_res_target_id" \
+                    BEACON_STOP_REASON="$_res_reason" \
+                    BEACON_JSON="$_res_json" \
+                    python3 "$COMMANDS_PY" resume_scoped
+                ;;
+            global)
+                BEACON_STOP_REASON="$_res_reason" \
+                    BEACON_JSON="$_res_json" \
+                    python3 "$COMMANDS_PY" resume_global
+                ;;
+            "")
+                cat <<'EOF'
+Usage: beacon resume scoped --target <kind>:<id> [--reason "..."] [--json]
+       beacon resume global [--reason "..."] [--json]
+
+Clears a previously-issued stop signal of matching scope/target.
+See `beacon stop status` for the currently active stops.
+EOF
+                ;;
+            *)
+                echo "Error: unknown subcommand 'beacon resume $_res_sub'" >&2
+                exit 1
+                ;;
+        esac
+        ;;
+    morning)
+        # ms-55 e-1650: 4-category briefing of recent autonomous activity.
+        # Reads stop-signal + claim-signal channels (or a JSON dump for
+        # offline / testing) and renders 完了 / 停止 / skip / 介入要望.
+        ensure_project
+        shift
+        _morning_since=""
+        _morning_file=""
+        _morning_json=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --since-hours) _morning_since="${2:-}"; shift 2 ;;
+                --events-file) _morning_file="${2:-}"; shift 2 ;;
+                --json)        _morning_json="1"; shift ;;
+                -h|--help)
+                    cat <<'EOF'
+Usage: beacon morning [--since-hours N] [--events-file <path>] [--json]
+
+Read recent activity on the stop-signal + claim-signal channels and
+render a 4-bucket morning briefing:
+
+  ✓ 完了 (Completed):      claim released with outcome=completed
+  ⚠ 停止 (Halted):         stop signals (manual / build_fail / etc.)
+  ✗ Skip:                  claim released with outcome=abandoned
+  ⏱ 介入要望 (Needs hand): STUCK signals (= idle > timeout)
+
+Flags:
+  --since-hours N       window length, default 12
+  --events-file PATH    skip the bus query and read events from a JSON
+                        array file (= replay / offline / dogfood mode)
+  --json                machine-readable output
+EOF
+                    exit 0
+                    ;;
+                *) shift ;;
+            esac
+        done
+        BEACON_MORNING_SINCE_HOURS="${_morning_since:-12}" \
+            BEACON_MORNING_EVENTS_FILE="$_morning_file" \
+            BEACON_JSON="$_morning_json" \
+            python3 "$COMMANDS_PY" morning
+        ;;
+    stuck)
+        # ms-55 e-1649: STUCK detector. Read session telemetry, identify
+        # rows past the idle timeout, emit stop signals with
+        # reason_kind="stuck" so the morning briefing can categorize
+        # them as "intervention needed".
+        ensure_project
+        _stuck_sub="${2:-}"
+        shift 2 || true
+        _stuck_inline=""
+        _stuck_file=""
+        _stuck_timeout=""
+        _stuck_dry_run=""
+        _stuck_json=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --telemetry-inline) _stuck_inline="${2:-}"; shift 2 ;;
+                --telemetry-file)   _stuck_file="${2:-}"; shift 2 ;;
+                --timeout-minutes)  _stuck_timeout="${2:-}"; shift 2 ;;
+                --dry-run)          _stuck_dry_run="1"; shift ;;
+                --json)             _stuck_json="1"; shift ;;
+                *) shift ;;
+            esac
+        done
+        case "$_stuck_sub" in
+            check)
+                BEACON_STUCK_TELEMETRY_INLINE="$_stuck_inline" \
+                    BEACON_STUCK_TELEMETRY_FILE="$_stuck_file" \
+                    BEACON_STUCK_TIMEOUT_MINUTES="${_stuck_timeout:-30}" \
+                    BEACON_STUCK_DRY_RUN="$_stuck_dry_run" \
+                    BEACON_JSON="$_stuck_json" \
+                    python3 "$COMMANDS_PY" stuck_check
+                ;;
+            "")
+                cat <<'EOF'
+Usage: beacon stuck check (--telemetry-inline '<json>' | --telemetry-file <path>)
+                          [--timeout-minutes N] [--dry-run] [--json]
+
+Read session telemetry from a JSON array and emit STUCK signals for
+sessions whose last_active is older than --timeout-minutes (default 30).
+
+Each telemetry record needs at least:
+  { "session_id": "sv-...", "last_active": "2026-06-15T11:00:00Z" }
+
+Optional fields:
+  - "ms_id" / "task_id": included in the emitted signal's machine_reason
+  - "ignore": true → skip this row from detection
+
+STUCK signals are stop-signal channel events with reason_kind="stuck".
+They are processed by the same receivers as any other stop signal —
+this is the same protocol, not a new one.
+
+Examples:
+  beacon stuck check --telemetry-file telemetry.json --timeout-minutes 20
+  beacon stuck check --telemetry-inline '[{"session_id":"sv-A","last_active":"..."}]' --dry-run
+EOF
+                ;;
+            *)
+                echo "Error: unknown subcommand 'beacon stuck $_stuck_sub'" >&2
+                exit 1
+                ;;
+        esac
+        ;;
+    claim)
+        # ms-55 e-1648: claim primitives. request / handoff need a
+        # recipient (--to); plain claim is broadcast. respond / release /
+        # list round out the lifecycle. Local persistence keeps the
+        # issuer's view across session restarts.
+        ensure_project
+        _claim_sub="${2:-}"
+        shift 2 || true
+        _claim_id_positional=""
+        # respond + release take a positional claim_id as the first arg.
+        if [[ "$_claim_sub" == "respond" || "$_claim_sub" == "release" ]]; then
+            if [[ -n "${1:-}" && "${1:0:1}" != "-" ]]; then
+                _claim_id_positional="${1:-}"
+                shift || true
+            fi
+        fi
+        _claim_target=""
+        _claim_intent=""
+        _claim_to=""
+        _claim_expires=""
+        _claim_decision=""
+        _claim_reason=""
+        _claim_outcome=""
+        _claim_mine=""
+        _claim_json=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --target)  _claim_target="${2:-}"; shift 2 ;;
+                --intent)  _claim_intent="${2:-}"; shift 2 ;;
+                --to)      _claim_to="${2:-}"; shift 2 ;;
+                --expires-at) _claim_expires="${2:-}"; shift 2 ;;
+                --accept)  _claim_decision="accept"; shift ;;
+                --decline) _claim_decision="decline"; shift ;;
+                --reason)  _claim_reason="${2:-}"; shift 2 ;;
+                --outcome) _claim_outcome="${2:-}"; shift 2 ;;
+                --mine)    _claim_mine="1"; shift ;;
+                --json)    _claim_json="1"; shift ;;
+                *) shift ;;
+            esac
+        done
+        # Split --target kind:id.
+        _claim_tk=""
+        _claim_ti=""
+        if [[ -n "$_claim_target" ]]; then
+            _claim_tk="${_claim_target%%:*}"
+            _claim_ti="${_claim_target#*:}"
+            if [[ "$_claim_tk" == "$_claim_ti" && "$_claim_target" != *:* ]]; then
+                echo "Error: --target must be <kind>:<id> (e.g. task:e-1648)" >&2
+                exit 1
+            fi
+        fi
+        case "$_claim_sub" in
+            request|handoff|post)
+                # `post` maps to the broadcast `claim` kind on the Python side.
+                _claim_py="claim_$_claim_sub"
+                BEACON_CLAIM_TARGET_KIND="$_claim_tk" \
+                    BEACON_CLAIM_TARGET_ID="$_claim_ti" \
+                    BEACON_CLAIM_INTENT="$_claim_intent" \
+                    BEACON_CLAIM_TO="$_claim_to" \
+                    BEACON_CLAIM_EXPIRES_AT="$_claim_expires" \
+                    BEACON_JSON="$_claim_json" \
+                    python3 "$COMMANDS_PY" "$_claim_py"
+                ;;
+            respond)
+                if [[ -z "$_claim_id_positional" ]]; then
+                    echo "Error: beacon claim respond <claim_id> [--accept|--decline] [--reason ...]" >&2
+                    exit 1
+                fi
+                BEACON_CLAIM_ID="$_claim_id_positional" \
+                    BEACON_CLAIM_DECISION="$_claim_decision" \
+                    BEACON_CLAIM_REASON="$_claim_reason" \
+                    BEACON_JSON="$_claim_json" \
+                    python3 "$COMMANDS_PY" claim_respond
+                ;;
+            release)
+                if [[ -z "$_claim_id_positional" ]]; then
+                    echo "Error: beacon claim release <claim_id> [--outcome completed|abandoned] [--reason ...]" >&2
+                    exit 1
+                fi
+                BEACON_CLAIM_ID="$_claim_id_positional" \
+                    BEACON_CLAIM_OUTCOME="$_claim_outcome" \
+                    BEACON_CLAIM_REASON="$_claim_reason" \
+                    BEACON_JSON="$_claim_json" \
+                    python3 "$COMMANDS_PY" claim_release
+                ;;
+            list)
+                BEACON_CLAIM_MINE="$_claim_mine" \
+                    BEACON_CLAIM_TARGET_KIND="$_claim_tk" \
+                    BEACON_CLAIM_TARGET_ID="$_claim_ti" \
+                    BEACON_JSON="$_claim_json" \
+                    python3 "$COMMANDS_PY" claim_list
+                ;;
+            "")
+                cat <<'EOF'
+Usage:
+  beacon claim post     --target <kind>:<id> [--intent "..."] [--json]
+                                    Broadcast a claim (= "I'm taking X").
+                                    First-publisher-wins; no consent needed.
+  beacon claim request  --target <kind>:<id> --to <sid> [--intent "..."]
+                                    Ask a specific session to take X.
+                                    Recipient must accept.
+  beacon claim handoff  --target <kind>:<id> --to <sid> [--intent "..."]
+                                    Transfer in-progress X to a specific
+                                    session. Recipient must accept.
+  beacon claim respond  <claim_id> [--accept|--decline] [--reason "..."]
+                                    Reply to a pending request / handoff.
+  beacon claim release  <claim_id> [--outcome completed|abandoned] [--reason "..."]
+                                    Mark a claim as done so others can take it.
+  beacon claim list     [--mine] [--target <kind>:<id>] [--json]
+                                    List active claims in the local cache.
+                                    Use --mine after session restart to
+                                    recover what you were in the middle of.
+
+target kind: ms | task | operation | trek | free
+EOF
+                ;;
+            *)
+                echo "Error: unknown subcommand 'beacon claim $_claim_sub'" >&2
+                echo "Try 'beacon claim' for usage." >&2
+                exit 1
                 ;;
         esac
         ;;

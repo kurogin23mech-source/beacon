@@ -12105,6 +12105,996 @@ def cmd_profile_list():
             print(f" {marker}   {name:<20} (could not load)")
 
 
+# ---------------------------------------------------------------------------
+# Stop signal CLI (ms-55 e-1646)
+# ---------------------------------------------------------------------------
+#
+# `beacon stop` is the user-facing entry point for the halt protocol
+# defined in lib/stop_signal.py. It rides on the existing bus event
+# transport — the stop event is just another bus event on the
+# `stop-signal` channel. The CLI's job is to:
+#
+#   1. Resolve the issuer's session_id (so the receipt is auditable).
+#   2. Build a validated payload via stop_signal.build_stop_payload.
+#   3. Post the event via the same api_client used by bus_send.
+#
+# Authorization mirrors SPEC §2: anyone can broadcast. We do NOT gate
+# on envelope tier here — the human typing `beacon stop` is the human
+# approval, and AI sessions that auto-emit a stop pass through the
+# normal autonomous-action accounting. The halt itself is enforced on
+# the receive side (the inbox hook for AI sessions, future Tauri UI for
+# human-attended sessions).
+
+def _stop_post_event(*, payload: dict, channel: str = None) -> dict:
+    """Common transport for stop/resume events.
+
+    Wraps the same client.post_bus_event call used by cmd_bus_send,
+    but without the envelope-issue path: stop signals are explicitly
+    not gated by tier (SPEC §2), so a T0 / no-envelope post is the
+    correct wire form. This also makes the CLI usable from sessions
+    that can't reach the envelope-issue endpoint (= offline, legacy
+    server, etc.) — stopping a runaway must not fail because the
+    auxiliary endpoint is down.
+    """
+    from stop_signal import STOP_CHANNEL  # local import to avoid cycle
+    client, config = _get_api_client()
+    project_id = _resolve_bus_project_id(config)
+    sender = payload.get("issued_by_session_id", "")
+    event = client.post_bus_event(
+        project_id, channel or STOP_CHANNEL,
+        sender_session_id=sender,
+        payload=payload,
+        delivery="propose-to-ai",
+        envelope=None,
+        requested_action=None,
+    )
+    return event
+
+
+def cmd_stop_scoped():
+    """Broadcast a scoped stop signal.
+
+    Env:
+      BEACON_STOP_TARGET_KIND   "ms" | "task" | "session" (required)
+      BEACON_STOP_TARGET_ID     id of the target (required)
+      BEACON_STOP_REASON        free text (optional)
+      BEACON_STOP_REASON_KIND   one of stop_signal.REASON_KINDS (optional)
+      BEACON_STOP_MACHINE_REASON  optional JSON-encoded dict
+      BEACON_JSON               "1" → json output
+    """
+    import stop_signal as _stop
+
+    target_kind = os.environ.get("BEACON_STOP_TARGET_KIND", "").strip()
+    target_id = os.environ.get("BEACON_STOP_TARGET_ID", "").strip()
+    reason = os.environ.get("BEACON_STOP_REASON", "")
+    reason_kind = os.environ.get("BEACON_STOP_REASON_KIND", "").strip() or "manual"
+    machine_reason_raw = os.environ.get("BEACON_STOP_MACHINE_REASON", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not target_kind or not target_id:
+        print(
+            "Error: scoped stop requires --target <kind>:<id> "
+            "(kind = ms|task|session)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    machine_reason = None
+    if machine_reason_raw:
+        try:
+            parsed = json.loads(machine_reason_raw)
+        except json.JSONDecodeError as e:
+            print(f"Error: --machine-reason must be valid JSON ({e})",
+                  file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(parsed, dict):
+            print("Error: --machine-reason must be a JSON object",
+                  file=sys.stderr)
+            sys.exit(1)
+        machine_reason = parsed
+
+    sender = _resolve_session_id()
+    if not sender:
+        print(
+            "Error: cannot resolve current session_id (run `beacon session id` "
+            "to mint one, or set BEACON_BUS_SENDER explicitly)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        payload = _stop.build_stop_payload(
+            scope=_stop.SCOPE_SCOPED,
+            issued_by_session_id=sender,
+            target_kind=target_kind,
+            target_id=target_id,
+            reason=reason,
+            reason_kind=reason_kind,
+            machine_reason=machine_reason,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    event = _stop_post_event(payload=payload)
+
+    if json_mode:
+        print(json.dumps(event, ensure_ascii=False))
+        return
+    suffix = f" — {reason}" if reason else ""
+    print(
+        f"STOP signal (scoped) raised on {target_kind}:{target_id} "
+        f"by {sender}{suffix}"
+    )
+    print(f"  event_id: {event.get('event_id', '?')}")
+    print("  All matching sessions will halt after the current tool call.")
+    print(f"  Resume with: beacon resume scoped --target {target_kind}:{target_id}")
+
+
+def cmd_stop_global():
+    """Broadcast a global stop signal (= halt every active autonomous
+    session in the project).
+
+    Env:
+      BEACON_STOP_REASON        free text (recommended)
+      BEACON_STOP_REASON_KIND   one of stop_signal.REASON_KINDS (optional)
+      BEACON_STOP_MACHINE_REASON  optional JSON-encoded dict
+      BEACON_JSON               "1" → json output
+    """
+    import stop_signal as _stop
+
+    reason = os.environ.get("BEACON_STOP_REASON", "")
+    reason_kind = os.environ.get("BEACON_STOP_REASON_KIND", "").strip() or "manual"
+    machine_reason_raw = os.environ.get("BEACON_STOP_MACHINE_REASON", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    machine_reason = None
+    if machine_reason_raw:
+        try:
+            parsed = json.loads(machine_reason_raw)
+        except json.JSONDecodeError as e:
+            print(f"Error: --machine-reason must be valid JSON ({e})",
+                  file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(parsed, dict):
+            print("Error: --machine-reason must be a JSON object",
+                  file=sys.stderr)
+            sys.exit(1)
+        machine_reason = parsed
+
+    sender = _resolve_session_id()
+    if not sender:
+        print(
+            "Error: cannot resolve current session_id "
+            "(set BEACON_BUS_SENDER explicitly)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        payload = _stop.build_stop_payload(
+            scope=_stop.SCOPE_GLOBAL,
+            issued_by_session_id=sender,
+            reason=reason,
+            reason_kind=reason_kind,
+            machine_reason=machine_reason,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    event = _stop_post_event(payload=payload)
+
+    if json_mode:
+        print(json.dumps(event, ensure_ascii=False))
+        return
+    suffix = f" — {reason}" if reason else ""
+    print(f"STOP signal (GLOBAL) raised by {sender}{suffix}")
+    print(f"  event_id: {event.get('event_id', '?')}")
+    print("  All active autonomous sessions will halt after the current tool call.")
+    print("  Resume with: beacon resume global")
+
+
+def cmd_stop_status():
+    """List currently active stop signals.
+
+    Reads recent events on the stop-signal channel via list_unread_bus_events
+    (with a synthetic empty recipient so the server returns the full
+    channel history rather than a per-recipient cursor view). This avoids
+    consuming any real recipient's cursor — `stop status` is observational
+    and must not race with receivers.
+
+    Env:
+      BEACON_JSON               "1" → json output
+      BEACON_STOP_SINCE_HOURS   limit window (default 24)
+    """
+    import stop_signal as _stop
+
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    try:
+        client, config = _get_api_client()
+    except Exception as e:
+        print(f"Error: cannot reach bus ({e})", file=sys.stderr)
+        sys.exit(1)
+    project_id = _resolve_bus_project_id(config)
+
+    # Pull the recent stop-signal channel history. We use a synthetic
+    # recipient so we don't advance any real session's cursor; the
+    # server returns the channel slice (most backends honor that).
+    try:
+        events = client.list_unread_bus_events(
+            project_id, "_stop_status_observer",
+            channel=_stop.STOP_CHANNEL,
+            limit=500,
+        )
+    except TypeError:
+        # Older api_client signature without `limit`. The default page
+        # size is typically generous enough for a stop-status snapshot.
+        events = client.list_unread_bus_events(
+            project_id, "_stop_status_observer",
+            channel=_stop.STOP_CHANNEL,
+        )
+    except Exception as e:
+        print(f"Error: cannot list stop-signal events ({e})", file=sys.stderr)
+        sys.exit(1)
+
+    actives = _stop.latest_active_stops(events or [])
+
+    if json_mode:
+        # Strip raw_event for compactness — callers who need the full event
+        # can call `beacon bus receive --channel stop-signal --once`.
+        out = []
+        for rec in actives:
+            r = {k: v for k, v in rec.items() if k != "raw_event"}
+            out.append(r)
+        print(json.dumps(out, ensure_ascii=False))
+        return
+
+    if not actives:
+        print("No active stop signals.")
+        return
+
+    print(f"Active stop signals ({len(actives)}):")
+    for rec in actives:
+        scope = rec["scope"]
+        target = rec.get("target") or {}
+        if scope == "global":
+            tag = "GLOBAL"
+        else:
+            tag = f"{target.get('kind', '?')}:{target.get('id', '?')}"
+        line = (
+            f"  ⚠ {tag}  reason_kind={rec.get('reason_kind', '?')}  "
+            f"by={rec.get('issued_by_session_id', '?')}  "
+            f"at={rec.get('issued_at', '?')}"
+        )
+        print(line)
+        if rec.get("reason"):
+            print(f"      reason: {rec['reason']}")
+
+
+def cmd_resume_scoped():
+    """Broadcast a resume (= clear stop) for a scoped target.
+
+    Env mirrors cmd_stop_scoped (without machine_reason).
+    """
+    import stop_signal as _stop
+
+    target_kind = os.environ.get("BEACON_STOP_TARGET_KIND", "").strip()
+    target_id = os.environ.get("BEACON_STOP_TARGET_ID", "").strip()
+    reason = os.environ.get("BEACON_STOP_REASON", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not target_kind or not target_id:
+        print(
+            "Error: scoped resume requires --target <kind>:<id>",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    sender = _resolve_session_id()
+    if not sender:
+        print("Error: cannot resolve current session_id", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        payload = _stop.build_resume_payload(
+            scope=_stop.SCOPE_SCOPED,
+            issued_by_session_id=sender,
+            target_kind=target_kind,
+            target_id=target_id,
+            reason=reason,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    event = _stop_post_event(payload=payload)
+
+    if json_mode:
+        print(json.dumps(event, ensure_ascii=False))
+        return
+    print(
+        f"RESUME signal (scoped) raised on {target_kind}:{target_id} "
+        f"by {sender}"
+    )
+    print(f"  event_id: {event.get('event_id', '?')}")
+
+
+# ---------------------------------------------------------------------------
+# Rollback CLI (ms-55 e-1647)
+# ---------------------------------------------------------------------------
+#
+# `beacon rollback` is the SPEC §4 "safe boundary" surface: it undoes
+# work that lives entirely inside the local repo (working tree edits,
+# un-pushed commits) automatically, and refuses to touch anything past
+# the upstream branch. Anything past upstream becomes a "compensation
+# proposal" in the report — concrete next-step text like "open a
+# revert PR" rather than silent destructive action.
+
+def cmd_rollback():
+    """Inspect local git state and roll back the safe portion.
+
+    Env:
+      BEACON_ROLLBACK_COMMITS    int (default 0 = auto)
+      BEACON_ROLLBACK_REASON     free text, recorded into stash msg + report
+      BEACON_ROLLBACK_DRY_RUN    "1" → show plan, don't mutate
+      BEACON_ROLLBACK_CWD        override cwd (mainly for tests)
+      BEACON_JSON                "1" → json output (plan + result)
+    """
+    import rollback as _rb
+
+    commits_raw = os.environ.get("BEACON_ROLLBACK_COMMITS", "0").strip()
+    try:
+        commits = int(commits_raw)
+    except ValueError:
+        print(
+            f"Error: --commits must be an integer (got {commits_raw!r})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    reason = os.environ.get("BEACON_ROLLBACK_REASON", "")
+    dry_run = os.environ.get("BEACON_ROLLBACK_DRY_RUN", "") == "1"
+    cwd = os.environ.get("BEACON_ROLLBACK_CWD", "").strip() or None
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    plan, result, report = _rb.rollback(
+        cwd=cwd,
+        commits=commits,
+        reason=reason,
+        dry_run=dry_run,
+    )
+
+    if json_mode:
+        out = {
+            "plan": {
+                "stash_working_tree": plan.stash_working_tree,
+                "reset_commits": plan.reset_commits,
+                "pushed_warning": plan.pushed_warning,
+                "compensation_options": list(plan.compensation_options),
+                "reason": plan.reason,
+                "requested_commits": plan.requested_commits,
+                "state": {
+                    "head_hash": plan.state.head_hash,
+                    "branch": plan.state.branch,
+                    "upstream_branch": plan.state.upstream_branch,
+                    "local_commits_ahead": plan.state.local_commits_ahead,
+                    "working_tree_dirty": plan.state.working_tree_dirty,
+                    "working_tree_files": list(plan.state.working_tree_files),
+                },
+            },
+            "dry_run": dry_run,
+        }
+        if result is not None:
+            out["result"] = {
+                "stashed": result.stashed,
+                "stash_ref": result.stash_ref,
+                "reset_commits": result.reset_commits,
+                "errors": list(result.errors),
+            }
+        print(json.dumps(out, ensure_ascii=False))
+        if result is not None and result.errors:
+            sys.exit(1)
+        return
+
+    print(report, end="")
+    if dry_run:
+        print("(dry run — nothing executed. Re-run without --dry-run to apply.)")
+        return
+
+    if result is None:
+        # Defensive: rollback() should always return a result when
+        # dry_run=False. Falling through means something inside the
+        # helper changed shape; surface so it gets caught early.
+        print("Error: rollback executor returned no result.", file=sys.stderr)
+        sys.exit(1)
+
+    summary_bits = []
+    if result.stashed:
+        summary_bits.append(f"stashed ({result.stash_ref or 'stash@{0}'})")
+    if result.reset_commits > 0:
+        summary_bits.append(f"reset {result.reset_commits} commit(s)")
+    if not summary_bits:
+        summary_bits.append("nothing to do")
+    print(f"Executed: {', '.join(summary_bits)}")
+
+    if result.errors:
+        print("", file=sys.stderr)
+        for err in result.errors:
+            print(f"Error: {err}", file=sys.stderr)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Claim CLI (ms-55 e-1648)
+# ---------------------------------------------------------------------------
+#
+# `beacon claim` is the user-facing surface for the claim primitives
+# defined in lib/claims.py. Three issuance verbs share most of the
+# argument shape (`--target`, `--intent`), so the implementation
+# factors the common path through a private helper.
+
+def _claim_parse_target_env() -> tuple[str, str]:
+    """Pull --target kind:id from env vars set by the bash dispatcher."""
+    tk = os.environ.get("BEACON_CLAIM_TARGET_KIND", "").strip()
+    ti = os.environ.get("BEACON_CLAIM_TARGET_ID", "").strip()
+    if not tk or not ti:
+        print(
+            "Error: --target <kind>:<id> is required "
+            "(kind = ms|task|operation|trek|free)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return tk, ti
+
+
+def _claim_post_event(payload: dict) -> dict:
+    """Common transport for claim / response / release events.
+
+    Same shape as _stop_post_event: bypass the envelope-issue path
+    because claim signals are coordination, not tier-gated capability
+    grants — broadcasting "I'm picking up this task" should not require
+    the auxiliary endpoint to be up.
+    """
+    import claims as _claims
+    client, config = _get_api_client()
+    project_id = _resolve_bus_project_id(config)
+    sender = payload.get("from_session_id", "")
+    event = client.post_bus_event(
+        project_id, _claims.CLAIM_CHANNEL,
+        sender_session_id=sender,
+        payload=payload,
+        delivery="propose-to-ai",
+        envelope=None,
+        requested_action=None,
+    )
+    return event
+
+
+def _claim_issue(claim_kind: str):
+    """Shared body for `beacon claim request|handoff|post`."""
+    import claims as _claims
+
+    tk, ti = _claim_parse_target_env()
+    intent = os.environ.get("BEACON_CLAIM_INTENT", "")
+    to_sid = os.environ.get("BEACON_CLAIM_TO", "").strip()
+    expires_at = os.environ.get("BEACON_CLAIM_EXPIRES_AT", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    sender = _resolve_session_id()
+    if not sender:
+        print("Error: cannot resolve current session_id", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        payload = _claims.build_claim_payload(
+            claim_kind=claim_kind,
+            from_session_id=sender,
+            target_kind=tk,
+            target_id=ti,
+            intent=intent,
+            to_session_id=to_sid,
+            expires_at=expires_at,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    event = _claim_post_event(payload)
+
+    # Persist the issuer's view of the claim locally so `claim list --mine`
+    # works across restarts even before the receive-side hook lands.
+    try:
+        _claims.record_local_claim(payload)
+    except (OSError, ValueError) as e:
+        # Don't fail the send if local persistence is broken — the bus
+        # event is the canonical record, the local file is a cache.
+        print(f"Note: could not persist claim locally: {e}",
+              file=sys.stderr)
+
+    if json_mode:
+        print(json.dumps(event, ensure_ascii=False))
+        return
+
+    kind_label = {
+        "request": "REQUEST (recipient must accept)",
+        "handoff": "HANDOFF (recipient must accept)",
+        "claim": "CLAIM (broadcast, first-publisher-wins)",
+    }.get(claim_kind, claim_kind.upper())
+    print(f"{kind_label} on {tk}:{ti} by {sender}")
+    print(f"  claim_id: {payload['claim_id']}")
+    print(f"  event_id: {event.get('event_id', '?')}")
+    if to_sid:
+        print(f"  recipient: {to_sid}")
+    if intent:
+        print(f"  intent: {intent}")
+    print(f"  Release with: beacon claim release {payload['claim_id']}")
+
+
+def cmd_claim_request():
+    """beacon claim request --target <k>:<id> --to <sid> [--intent ...]"""
+    _claim_issue("request")
+
+
+def cmd_claim_handoff():
+    """beacon claim handoff --target <k>:<id> --to <sid> [--intent ...]"""
+    _claim_issue("handoff")
+
+
+def cmd_claim_post():
+    """beacon claim post --target <k>:<id> [--intent ...]
+
+    Broadcast a claim (= "I'm taking X"). First-publisher-wins; no
+    recipient consent needed.
+    """
+    _claim_issue("claim")
+
+
+def cmd_claim_respond():
+    """beacon claim respond <claim_id> --accept|--decline [--reason ...]"""
+    import claims as _claims
+
+    claim_id = os.environ.get("BEACON_CLAIM_ID", "").strip()
+    decision = os.environ.get("BEACON_CLAIM_DECISION", "").strip()
+    reason = os.environ.get("BEACON_CLAIM_REASON", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not claim_id:
+        print("Error: claim_id is required", file=sys.stderr)
+        sys.exit(1)
+    if decision not in ("accept", "decline"):
+        print("Error: pass --accept or --decline", file=sys.stderr)
+        sys.exit(1)
+
+    sender = _resolve_session_id()
+    if not sender:
+        print("Error: cannot resolve current session_id", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        payload = _claims.build_response_payload(
+            claim_id=claim_id,
+            decision=decision,
+            from_session_id=sender,
+            reason=reason,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    event = _claim_post_event(payload)
+
+    if json_mode:
+        print(json.dumps(event, ensure_ascii=False))
+        return
+    label = "ACCEPTED" if decision == "accept" else "DECLINED"
+    print(f"{label} claim {claim_id} by {sender}")
+    print(f"  event_id: {event.get('event_id', '?')}")
+
+
+def cmd_claim_release():
+    """beacon claim release <claim_id> [--outcome completed|abandoned] [--reason ...]"""
+    import claims as _claims
+
+    claim_id = os.environ.get("BEACON_CLAIM_ID", "").strip()
+    outcome = os.environ.get("BEACON_CLAIM_OUTCOME", "completed").strip() or "completed"
+    reason = os.environ.get("BEACON_CLAIM_REASON", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not claim_id:
+        print("Error: claim_id is required", file=sys.stderr)
+        sys.exit(1)
+
+    sender = _resolve_session_id()
+    if not sender:
+        print("Error: cannot resolve current session_id", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        payload = _claims.build_release_payload(
+            claim_id=claim_id,
+            outcome=outcome,
+            from_session_id=sender,
+            reason=reason,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    event = _claim_post_event(payload)
+
+    # Drop the local cache entry too so `claim list --mine` reflects
+    # the release immediately.
+    try:
+        _claims.release_local_claim(claim_id)
+    except OSError as e:
+        print(f"Note: could not update local cache: {e}",
+              file=sys.stderr)
+
+    if json_mode:
+        print(json.dumps(event, ensure_ascii=False))
+        return
+    print(f"RELEASED claim {claim_id} ({outcome}) by {sender}")
+    print(f"  event_id: {event.get('event_id', '?')}")
+
+
+def cmd_morning():
+    """beacon morning (ms-55 e-1650): 4-category summary of recent
+    autonomous activity.
+
+    Reads events from the bus (channels: stop-signal + claim-signal)
+    over a window (default = last 12 hours) and buckets them as:
+
+      ✓ 完了 (Completed):   claim releases with outcome=completed
+      ⚠ 停止 (Halted):      stop signals other than STUCK
+      ✗ Skip:               claim releases with outcome=abandoned
+      ⏱ 介入要望 (Needs attention): STUCK signals (= idle timeout)
+
+    Env:
+      BEACON_MORNING_SINCE_HOURS  default 12
+      BEACON_MORNING_EVENTS_FILE  optional path to a JSON array of
+                                  events (= testing / replay path)
+      BEACON_JSON                 "1" → JSON output
+    """
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    import morning as _morning
+
+    since_hours_raw = os.environ.get("BEACON_MORNING_SINCE_HOURS", "12")
+    events_file = os.environ.get("BEACON_MORNING_EVENTS_FILE", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    try:
+        since_hours = float(since_hours_raw)
+    except ValueError:
+        print(
+            f"Error: --since-hours must be a number (got {since_hours_raw!r})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if since_hours <= 0:
+        print("Error: --since-hours must be > 0", file=sys.stderr)
+        sys.exit(1)
+
+    now = _dt.now(_tz.utc)
+    since = now - _td(hours=since_hours)
+
+    events: list[dict] = []
+    if events_file:
+        try:
+            with open(events_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"Error: could not read events file: {e}",
+                  file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(data, list):
+            print("Error: events file must be a JSON array",
+                  file=sys.stderr)
+            sys.exit(1)
+        events = data
+    else:
+        # Pull recent stop + claim channel events from the bus. Use a
+        # synthetic observer recipient so we don't advance anyone's
+        # cursor (= same trick as cmd_stop_status).
+        try:
+            client, config = _get_api_client()
+            project_id = _resolve_bus_project_id(config)
+        except Exception as e:
+            print(
+                f"Error: cannot reach bus to gather events ({e}).\n"
+                "If running offline, pass --events-file <path> with a "
+                "JSON dump of events.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        for channel in ("stop-signal", "claim-signal"):
+            try:
+                batch = client.list_unread_bus_events(
+                    project_id, "_morning_observer",
+                    channel=channel, limit=500,
+                )
+            except TypeError:
+                batch = client.list_unread_bus_events(
+                    project_id, "_morning_observer", channel=channel,
+                )
+            except Exception as e:
+                print(
+                    f"Note: could not fetch {channel} events ({e}); "
+                    "continuing with partial data.",
+                    file=sys.stderr,
+                )
+                continue
+            if batch:
+                events.extend(batch)
+
+    briefing = _morning.build_briefing(events, since=since, until=now)
+
+    if json_mode:
+        out = {
+            "since": briefing.since,
+            "until": briefing.until,
+            "counts": briefing.counts,
+            "entries": [
+                {
+                    "bucket": e.bucket,
+                    "title": e.title,
+                    "detail": e.detail,
+                    "at": e.at,
+                    "source": e.source,
+                    "ref": e.ref,
+                }
+                for e in briefing.entries
+            ],
+        }
+        print(json.dumps(out, ensure_ascii=False))
+        return
+
+    print(_morning.render_briefing(briefing), end="")
+
+
+def cmd_stuck_check():
+    """beacon stuck check (ms-55 e-1649): scan session telemetry, emit
+    STUCK signals for sessions idle past the timeout.
+
+    Input modes (exactly one):
+      * BEACON_STUCK_TELEMETRY_FILE — path to a JSON file with a list
+        of telemetry records. Each record needs at least session_id +
+        last_active; ms_id / task_id / ignore are optional.
+      * BEACON_STUCK_TELEMETRY_INLINE — JSON string with the same shape.
+
+    The JSON shape:
+      [
+        {"session_id": "sv-A", "last_active": "2026-06-15T11:00:00Z",
+         "ms_id": "ms-55", "task_id": "e-1646"},
+        {"session_id": "sv-B", "last_active": "2026-06-15T11:55:00Z"},
+        ...
+      ]
+
+    Other env:
+      BEACON_STUCK_TIMEOUT_MINUTES   default 30
+      BEACON_STUCK_DRY_RUN          "1" → identify stuck sessions but
+                                    don't emit signals
+      BEACON_JSON                   "1" → JSON output (list of records
+                                    {session_id, last_active, payload?, event?})
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    import stuck_detect as _stuck
+
+    inline = os.environ.get("BEACON_STUCK_TELEMETRY_INLINE", "").strip()
+    file_path = os.environ.get("BEACON_STUCK_TELEMETRY_FILE", "").strip()
+    timeout_raw = os.environ.get("BEACON_STUCK_TIMEOUT_MINUTES",
+                                 str(_stuck.DEFAULT_TIMEOUT_MINUTES))
+    dry_run = os.environ.get("BEACON_STUCK_DRY_RUN", "") == "1"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    try:
+        timeout_minutes = int(timeout_raw)
+    except ValueError:
+        print(
+            f"Error: --timeout-minutes must be an integer "
+            f"(got {timeout_raw!r})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if timeout_minutes <= 0:
+        print("Error: --timeout-minutes must be > 0", file=sys.stderr)
+        sys.exit(1)
+
+    raw = ""
+    if inline and file_path:
+        print(
+            "Error: pass either --telemetry-inline or --telemetry-file, "
+            "not both",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if inline:
+        raw = inline
+    elif file_path:
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                raw = f.read()
+        except OSError as e:
+            print(f"Error: could not read telemetry file: {e}",
+                  file=sys.stderr)
+            sys.exit(1)
+    else:
+        print(
+            "Error: provide --telemetry-inline '<json>' "
+            "or --telemetry-file <path>",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"Error: telemetry payload is not valid JSON ({e})",
+              file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(data, list):
+        print("Error: telemetry payload must be a JSON array",
+              file=sys.stderr)
+        sys.exit(1)
+
+    rows = []
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        rows.append(_stuck.SessionTelemetry(
+            session_id=row.get("session_id", "") or "",
+            last_active=row.get("last_active", "") or "",
+            ms_id=row.get("ms_id", "") or "",
+            task_id=row.get("task_id", "") or "",
+            ignore=bool(row.get("ignore", False)),
+        ))
+
+    now = _dt.now(_tz.utc)
+    try:
+        stuck_rows = _stuck.find_stuck_sessions(
+            rows, now=now, timeout_minutes=timeout_minutes,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    sender = _resolve_session_id() or "_stuck_detector"
+
+    results = []
+    for t in stuck_rows:
+        payload = _stuck.build_stuck_signal(
+            t, issued_by_session_id=sender, now=now,
+            timeout_minutes=timeout_minutes,
+        )
+        entry = {
+            "session_id": t.session_id,
+            "last_active": t.last_active,
+            "ms_id": t.ms_id,
+            "task_id": t.task_id,
+            "payload": payload,
+        }
+        if not dry_run:
+            try:
+                ev = _stop_post_event(payload=payload)
+                entry["event"] = ev
+            except Exception as e:
+                # Don't let a single send failure prevent the rest of
+                # the batch from being reported — partial coverage is
+                # still useful for the morning briefing.
+                entry["error"] = str(e)
+        results.append(entry)
+
+    if json_mode:
+        print(json.dumps({
+            "dry_run": dry_run,
+            "timeout_minutes": timeout_minutes,
+            "stuck": results,
+        }, ensure_ascii=False))
+        return
+
+    if not results:
+        print(
+            f"No stuck sessions (timeout = {timeout_minutes} min, "
+            f"scanned {len(rows)} session(s))."
+        )
+        return
+
+    print(f"Stuck sessions detected ({len(results)}):")
+    for r in results:
+        suffix = "  (dry-run, no signal emitted)" if dry_run else ""
+        print(
+            f"  ⚠ {r['session_id']}  last_active={r['last_active']}  "
+            f"ms={r['ms_id'] or '-'}  task={r['task_id'] or '-'}{suffix}"
+        )
+        if "event" in r:
+            print(f"      → STUCK signal posted: {r['event'].get('event_id', '?')}")
+        if "error" in r:
+            print(f"      → error: {r['error']}", file=sys.stderr)
+
+
+def cmd_claim_list():
+    """beacon claim list [--mine] [--target <k>:<id>] [--json]
+
+    Lists claims this session has issued + still has cached locally.
+
+    For a project-wide view ("what's everyone holding right now?"),
+    use `beacon bus receive --channel claim-signal` (= live stream) or
+    the future `beacon claim status` command that reduces the channel
+    history server-side. The local list is the right surface for
+    "what was I in the middle of when this session restarted?".
+    """
+    import claims as _claims
+
+    mine_flag = os.environ.get("BEACON_CLAIM_MINE", "") == "1"
+    tk = os.environ.get("BEACON_CLAIM_TARGET_KIND", "").strip() or None
+    ti = os.environ.get("BEACON_CLAIM_TARGET_ID", "").strip() or None
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    mine = _resolve_session_id() if mine_flag else None
+    if mine_flag and not mine:
+        print("Error: --mine requires a resolvable session_id",
+              file=sys.stderr)
+        sys.exit(1)
+
+    out = _claims.list_local_claims(
+        mine=mine, target_kind=tk, target_id=ti,
+    )
+
+    if json_mode:
+        print(json.dumps(out, ensure_ascii=False))
+        return
+
+    if not out:
+        print("No active claims in the local cache.")
+        return
+
+    print(f"Local active claims ({len(out)}):")
+    for rec in out:
+        target = rec.get("target") or {}
+        tag = f"{target.get('kind', '?')}:{target.get('id', '?')}"
+        intent = rec.get("intent") or ""
+        intent_suffix = f"  intent: {intent}" if intent else ""
+        print(
+            f"  [{rec.get('claim_kind', '?')}] {tag}  "
+            f"id={rec.get('claim_id', '?')}  "
+            f"by={rec.get('from_session_id', '?')}  "
+            f"at={rec.get('issued_at', '?')}"
+        )
+        if intent_suffix:
+            print(f"   {intent_suffix.strip()}")
+
+
+def cmd_resume_global():
+    """Broadcast a global resume."""
+    import stop_signal as _stop
+
+    reason = os.environ.get("BEACON_STOP_REASON", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    sender = _resolve_session_id()
+    if not sender:
+        print("Error: cannot resolve current session_id", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        payload = _stop.build_resume_payload(
+            scope=_stop.SCOPE_GLOBAL,
+            issued_by_session_id=sender,
+            reason=reason,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    event = _stop_post_event(payload=payload)
+
+    if json_mode:
+        print(json.dumps(event, ensure_ascii=False))
+        return
+    print(f"RESUME signal (GLOBAL) raised by {sender}")
+    print(f"  event_id: {event.get('event_id', '?')}")
+
+
 def cmd_sessions_list():
     """Cross-project session directory (ms-54 / e-1587).
 
@@ -12294,6 +13284,33 @@ if __name__ == "__main__":
         "bus_ack": cmd_bus_ack,
         "bus_status": cmd_bus_status,
         "bus_directory": cmd_bus_directory,
+        # ms-55 e-1646: stop / resume signal CLI. Anyone can broadcast
+        # (Andon cord principle, SPEC §2). The events ride on the
+        # existing bus on channel `stop-signal`.
+        "stop_scoped": cmd_stop_scoped,
+        "stop_global": cmd_stop_global,
+        "stop_status": cmd_stop_status,
+        "resume_scoped": cmd_resume_scoped,
+        "resume_global": cmd_resume_global,
+        # ms-55 e-1647: rollback boundary CLI. Auto-undoes working tree +
+        # un-pushed commits; refuses to touch pushed/merged/deployed
+        # state (those produce report + compensation proposals).
+        "rollback": cmd_rollback,
+        # ms-55 e-1648: claim primitives. 3 kinds (request/handoff/claim);
+        # request + handoff need recipient consent, claim is first-publisher
+        # -wins broadcast. Local persistence for session restart recovery.
+        "claim_request": cmd_claim_request,
+        "claim_handoff": cmd_claim_handoff,
+        "claim_post": cmd_claim_post,
+        "claim_respond": cmd_claim_respond,
+        "claim_release": cmd_claim_release,
+        "claim_list": cmd_claim_list,
+        # ms-55 e-1649: STUCK detector. Idle-timeout based emission of
+        # stop signals with reason_kind="stuck", same protocol as e-1646.
+        "stuck_check": cmd_stuck_check,
+        # ms-55 e-1650: morning briefing. 4-bucket digest of recent
+        # autonomous activity for the human to read with coffee.
+        "morning": cmd_morning,
         "sessions_list": cmd_sessions_list,
         "profile_list": cmd_profile_list,
         "bus_budget_grant": cmd_bus_budget_grant,
