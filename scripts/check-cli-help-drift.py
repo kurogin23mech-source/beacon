@@ -160,6 +160,16 @@ ALLOW_MISSING_FROM_HELP_JSON: set[str] = {
     "milestone workspace-cleanup",
     "reset",
     "update",
+    # ms-55 coordination signal CLIs — bash-only, help_json + README docs
+    # are a follow-up (= dedicated entries for each verb). Until then, users
+    # discover them via `beacon <verb> --help` (= bash help text).
+    "claim handoff", "claim list", "claim post", "claim release",
+    "claim request", "claim respond",
+    "morning",
+    "resume global", "resume scoped",
+    "rollback",
+    "stop global", "stop scoped", "stop status",
+    "stuck check",
 }
 
 # Top-level verbs intentionally available in bin/beacon (bash) but NOT in
@@ -177,6 +187,15 @@ ALLOW_BASH_ONLY_DISPATCH: set[str] = {
     "reset",       # destructive admin op, bash-only
     "run",         # operation run record (member-aware, not in Python yet)
     "incident",    # incident open/close (operation-coupled, not in Python yet)
+    # ms-55 coordination signals (= 走る止まる両輪) — bash-only for now,
+    # Windows mirror is a follow-up task (= dispatch.py + argparse for these
+    # 6 verbs). Until then, Win pipx users see `argparse invalid choice`.
+    "stop",        # `beacon stop scoped|global|status` (e-1646)
+    "resume",      # `beacon resume scoped|global` (paired with stop)
+    "rollback",    # `beacon rollback` (e-1647)
+    "claim",       # `beacon claim request|post|handoff|...` (e-1648)
+    "stuck",       # `beacon stuck check` (e-1649)
+    "morning",     # `beacon morning` briefing CLI (e-1650)
     # `help` is handled in dispatch.py BEFORE _HANDLERS is consulted
     # (early return in `dispatch()`), so it intentionally doesn't appear
     # as a key in the dict — but it IS handled. The `-h`/`--help` flag
@@ -216,6 +235,15 @@ ALLOW_MISSING_FROM_README: set[str] = {
     "cloud status",
     "help",             # `beacon help` mirrors --help, not a "command"
     "update",           # documented in self-update section, not CLI table
+    # ms-55 coordination signal CLIs — README rows are a follow-up; until
+    # then they're discovered via `beacon <verb> --help`.
+    "claim handoff", "claim list", "claim post", "claim release",
+    "claim request", "claim respond",
+    "morning",
+    "resume global", "resume scoped",
+    "rollback",
+    "stop global", "stop scoped", "stop status",
+    "stuck check",
 }
 
 
