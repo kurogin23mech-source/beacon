@@ -84,6 +84,27 @@ Operations:
   beacon incident close <id> --resolution "..."
   beacon incident escalate <id> -m <ms-id>
 
+Treks (cross-project / cross-session 協奏作業領域 — ms-69):
+  beacon trek create "<title>" [--type temporary|persistent] [--description "..."]
+                                    Create a trek; caller becomes leader
+  beacon trek list [--status s] [--include-archived] [--all-actors] [--json]
+                                    List treks visible to the caller
+  beacon trek show <trek-id> [--json]
+                                    Show members / scope / status / halt
+  beacon trek start <trek-id>       Transition planning → active
+  beacon trek archive <trek-id>     Archive (= terminal; restart by new trek)
+  beacon trek invite <trek-id> --actor <email> [--notify]
+                                    Invite by email
+  beacon trek join <trek-id>        Accept own invitation
+  beacon trek leave <trek-id>       Remove self (leader must transfer first)
+  beacon trek plan <trek-id> --add-scope <project:ref> | --remove-scope <project:ref>
+                                    Edit scope (ms-/op-/e- ref, or project-wide)
+  beacon trek stop <trek-id> [--reason "..."]
+                                    Pull the Andon cord (halt signal)
+  beacon trek resume <trek-id>      Clear the halt signal
+  beacon trek transfer-leader <trek-id> --to <session-id>
+                                    Hand off leader_session_id
+
 Releases & Deploys:
   beacon deploy record [--revision <rev>] [--semver <v>] [--version <tag>] [--desc <text>]
   beacon deploy list

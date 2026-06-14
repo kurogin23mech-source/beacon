@@ -27,6 +27,7 @@ Beaconが想定するワークフローは**コミット駆動・マイルスト
 - **Always-visible dashboard** — Tauri Desktop App or Web UI shows live progress alongside your working shell
 - **Audit trail** — every commit and task is recorded under a milestone, making AI session handoffs transparent and human-auditable
 - **CLI-first design** — structured JSON output enables seamless integration with Claude Code Skills
+- **Trek (cross-project協奏作業領域)** — `beacon trek` で複数プロジェクト・複数セッションをまたぐ協奏作業を 1 枚の trek にまとめて追跡できる。CLI でも Web UI でも同じ trek を見て協奏でき、参加・離脱・対象 (scope) 編集・非常停止 (halt) も CLI 1 行で。詳細は [CLI Commands → Treks](#treks)
 
 ## Requirements
 
@@ -333,6 +334,30 @@ Operations track recurring operational workloads (daily batch jobs, incident man
 | `beacon incident escalate <id> -m <ms-id>` | Escalate incident to a Milestone task / Milestoneタスクに昇格 |
 
 The `/beacon-operation-setup` Skill walks through setup conversationally and auto-generates a SPEC document (log fetch instructions). The `/beacon-operation-review` Skill reads that SPEC, fetches logs, interprets them, and records the result — triggered automatically by `operation_check_<op-id>` triggers at session start.
+
+### Treks
+
+Treks (= 協奏作業領域) are cross-project, cross-session work areas. While a Milestone lives inside one project, a trek bundles work that spans several projects (and several teammates' sessions) — for example "v0.35.0 release rehearsal across Beacon + PE + LPS" or "Daily cross-team standup" — and keeps members, scope (= work items in / out of focus), live status, and halt (= Andon cord) state in one place. CLI / Web UI / Tauri Desktop all see the same trek, so a CLI user and a Web UI user can co-drive without diverging.
+
+| Command | Description |
+|---------|-------------|
+| `beacon trek create "title" [--type temporary\|persistent] [--description "..."]` | Create a trek; caller becomes leader / trek 作成、起票者が leader |
+| `beacon trek list [--status s] [--include-archived] [--all-actors] [--json]` | List treks visible to the caller / 自分が member の trek 一覧 |
+| `beacon trek show <trek-id> [--json]` | Show trek detail (members / scope / status / halt) / trek 詳細 |
+| `beacon trek start <trek-id>` | Transition planning → active / planning から active へ |
+| `beacon trek archive <trek-id>` | Archive (= terminal); restart by creating a new trek / 完了化、再開は新 trek 起票 |
+| `beacon trek invite <trek-id> --actor <email> [--notify]` | Invite a user by email; `--notify` sends a live DM (`--notify` is acknowledged but live DM lands later) / メンバー招待 |
+| `beacon trek join <trek-id>` | Accept own invitation / 招待を accept |
+| `beacon trek leave <trek-id>` | Remove self (leader must `transfer-leader` first; last member must `archive` instead) / 離脱 |
+| `beacon trek plan <trek-id> --add-scope <project:ref>` | Add a scope entry (`ms-X` / `op-X` / `e-X` ref, or omit for project-wide) / scope 追加 |
+| `beacon trek plan <trek-id> --remove-scope <project:ref>` | Remove a scope entry / scope 削除 |
+| `beacon trek stop <trek-id> [--reason "..."]` | Pull the Andon cord (= halt signal, sessions pause) / 非常停止 |
+| `beacon trek resume <trek-id>` | Clear the halt signal / 再開 |
+| `beacon trek transfer-leader <trek-id> --to <session-id>` | Hand off `leader_session_id` to another session / leader 引き継ぎ |
+
+In the Web UI / Tauri Desktop, the **Treks** tab on a project page lists every trek that includes the current project in its scope (= active と archived を別表示)。各 trek の詳細では members / scope / status / 関連 docs が並ぶ。逆に milestone / operation / task の詳細を開くと、その作業項目を scope に含む trek 一覧が **Related Treks** widget としてインラインで出る。
+
+Trek の作成・編集・状態遷移はすべて CLI から。Web UI は閲覧と監査 (= 誰が何を見ているか・どこで halt がかかっているか) に専念し、ユーザーをターミナルに戻さない。
 
 ### Session Notes
 
