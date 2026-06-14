@@ -404,6 +404,32 @@ walkthrough.
 with the channel pre-wired, and falls back to plain `claude` when any
 opt-out source is active.
 
+### Coordination signals (ms-55)
+
+The "走る / 止まる両輪" surface for parallel autonomous sessions:
+**STOP** anyone can broadcast a halt, **rollback** undoes the safe local
+portion, **claim** coordinates who's taking what, **stuck** escalates
+idle timeouts, and **morning** is the next-day digest. See
+[SPEC `bnzTXhu6KYIMfVE2Ivy2`](https://beacon-ai.dev/) for the full
+design.
+
+| Command | Description |
+|---------|-------------|
+| `beacon stop scoped <target> [--kind ms\|task\|session] [--reason-kind <k>] [--reason <text>]` | Broadcast STOP at one MS / task / session (Andon cord — anyone can halt) |
+| `beacon stop global [--reason-kind <k>] [--reason <text>]` | Broadcast STOP across every active autonomous session |
+| `beacon stop status [--json]` | Show the latest stop / resume state from the stop-signal channel |
+| `beacon resume scoped <target> [--kind ms\|task\|session] [--reason <text>]` | Clear a scoped STOP, allowing targeted session(s) to resume |
+| `beacon resume global [--reason <text>]` | Clear a global STOP |
+| `beacon rollback [--commits N] [--reason <text>] [--dry-run] [--no-record]` | Undo working tree (`git stash`) + N local commits (`--soft` reset); past upstream → report + compensation proposals only |
+| `beacon claim request <kind>:<id> [--intent <text>]` | Announce intent to take a target (`ms`/`task`/`operation`/`trek`/`free`) |
+| `beacon claim respond <claim-id> [--accept\|--reject] [--reason <text>]` | Respond to another session's claim request |
+| `beacon claim post <kind>:<id> [--intent <text>]` | Post-hoc record (no request/response dance) |
+| `beacon claim handoff <claim-id> --to <session> [--reason <text>]` | Transfer an active claim to another session |
+| `beacon claim release <claim-id> [--outcome completed\|abandoned] [--reason <text>]` | Release a claim (outcome surfaces in `beacon morning`) |
+| `beacon claim list [--json]` | List active claims from local `.beacon/active_claims.json` |
+| `beacon stuck check [--telemetry-file <path>] [--idle-min N]` | Detect sessions idle past `--idle-min`; emit STUCK signals so `beacon morning` surfaces 介入要望 |
+| `beacon morning [--since-hours N] [--events-file <path>] [--no-doc] [--json]` | 4-bucket digest (完了 / 停止 / skip / 介入要望); auto-saves as a `scope=report` doc |
+
 ## Dashboard
 
 Beacon's visual UI is split across two front-ends:
