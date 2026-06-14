@@ -4164,6 +4164,132 @@ def cmd_trek_join():
         print(f"Joined trek {trek_id} as {email}")
 
 
+def cmd_trek_stop():
+    """Engage the Andon cord (= set the trek's halt field).
+
+    Env:
+      BEACON_TREK_ID    (required)
+      BEACON_TREK_REASON optional human-readable reason
+      BEACON_SESSION_ID (required, recorded as issued_by_session_id)
+      BEACON_JSON       "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    reason = os.environ.get("BEACON_TREK_REASON", "")
+    session_id = os.environ.get("BEACON_SESSION_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+    if not session_id:
+        print(
+            "Error: BEACON_SESSION_ID is required (= recorded as the session "
+            "that pulled the Andon cord)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        trek.set_halt(t, issued_by_session_id=session_id, reason=reason)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    trek_store.save_trek(t)
+
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        suffix = f" — {reason}" if reason else ""
+        print(f"STOP signal raised on trek {trek_id} by {session_id}{suffix}")
+        print("  All participating sessions will halt their autonomous work.")
+        print("  Resume with: beacon trek resume " + trek_id)
+
+
+def cmd_trek_resume():
+    """Clear the halt signal. Idempotent.
+
+    Env:
+      BEACON_TREK_ID  (required)
+      BEACON_JSON     "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+
+    had_halt = bool(t.get("halt"))
+    trek.clear_halt(t)
+    trek_store.save_trek(t)
+
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        if had_halt:
+            print(f"Resumed trek {trek_id} — sessions can continue work")
+        else:
+            print(f"Trek {trek_id} was not halted (no-op)")
+
+
+def cmd_trek_transfer_leader():
+    """Hand off leader_session_id to another session.
+
+    Env:
+      BEACON_TREK_ID       (required)
+      BEACON_TREK_TO       (required) target session_id
+      BEACON_JSON          "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    target = os.environ.get("BEACON_TREK_TO", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+    if not target:
+        print("Error: --to <session_id> is required", file=sys.stderr)
+        sys.exit(1)
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+
+    prior_leader = t.get("leader_session_id")
+    try:
+        trek.transfer_leader(t, target_session_id=target)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    trek_store.save_trek(t)
+
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        print(f"Transferred leader of trek {trek_id}: "
+              f"{prior_leader} → {target}")
+
+
 def cmd_trek_plan():
     """Edit a trek's scope (= what work items the trek is concerned with).
 
@@ -11901,6 +12027,9 @@ if __name__ == "__main__":
         "trek_join": cmd_trek_join,
         "trek_leave": cmd_trek_leave,
         "trek_plan": cmd_trek_plan,
+        "trek_stop": cmd_trek_stop,
+        "trek_resume": cmd_trek_resume,
+        "trek_transfer_leader": cmd_trek_transfer_leader,
         "version": lambda: print(f"beacon {__version__}"),
         "help_json": cmd_help_json,
         "doctor": cmd_doctor,

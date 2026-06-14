@@ -2395,6 +2395,43 @@ except ValueError as e:
                     BEACON_TREK_SCOPE_REMOVE="$scope_remove" \
                     python3 "$COMMANDS_PY" trek_plan
                 ;;
+            stop)
+                shift 2
+                trek_id="" reason=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --reason) reason="${2:-}"; shift 2 ;;
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" BEACON_TREK_REASON="$reason" \
+                    python3 "$COMMANDS_PY" trek_stop
+                ;;
+            resume)
+                shift 2
+                trek_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" python3 "$COMMANDS_PY" trek_resume
+                ;;
+            transfer-leader)
+                shift 2
+                trek_id="" to_sid=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --to) to_sid="${2:-}"; shift 2 ;;
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" BEACON_TREK_TO="$to_sid" \
+                    python3 "$COMMANDS_PY" trek_transfer_leader
+                ;;
             *)
                 echo "Usage: beacon trek <subcommand> [args]"
                 echo ""
@@ -2409,6 +2446,9 @@ except ValueError as e:
                 echo "  leave <trek-id>"
                 echo "  plan <trek-id> --add-scope <project[:ref]>"
                 echo "  plan <trek-id> --remove-scope <project[:ref]>"
+                echo "  stop <trek-id> [--reason \"...\"]    (= Andon cord、halt 信号を立てる)"
+                echo "  resume <trek-id>                     (= halt 信号を clear)"
+                echo "  transfer-leader <trek-id> --to <session-id>"
                 echo ""
                 echo "Env (creator identity, required for 'create'):"
                 echo "  BEACON_USER_EMAIL    creator email"

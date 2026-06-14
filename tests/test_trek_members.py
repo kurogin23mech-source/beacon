@@ -229,3 +229,73 @@ def test_remove_scope_entry_basic(base_trek):
 def test_remove_scope_entry_missing(base_trek):
     with pytest.raises(ValueError, match="not found"):
         trek.remove_scope_entry(base_trek, entry={"project": "p"})
+
+
+# ---------------------------------------------------------------------------
+# set_halt / clear_halt / transfer_leader (e-1662)
+# ---------------------------------------------------------------------------
+
+def _planning_to_active(t):
+    """Bypass validate_transition to construct an active trek for tests."""
+    t["status"] = "active"
+    return t
+
+
+def test_set_halt_active_trek(base_trek):
+    _planning_to_active(base_trek)
+    trek.set_halt(base_trek, issued_by_session_id="sv-x", reason="cooldown")
+    assert base_trek["halt"]
+    assert base_trek["halt"]["issued_by_session_id"] == "sv-x"
+    assert base_trek["halt"]["reason"] == "cooldown"
+    assert base_trek["halt"]["issued_at"]
+    # status unchanged
+    assert base_trek["status"] == "active"
+
+
+def test_set_halt_rejects_planning(base_trek):
+    """Cannot halt a trek that hasn't started yet."""
+    with pytest.raises(ValueError, match="active"):
+        trek.set_halt(base_trek, issued_by_session_id="sv-x")
+
+
+def test_set_halt_replaces_prior(base_trek):
+    _planning_to_active(base_trek)
+    trek.set_halt(base_trek, issued_by_session_id="sv-x", reason="first")
+    trek.set_halt(base_trek, issued_by_session_id="sv-y", reason="second")
+    assert base_trek["halt"]["issued_by_session_id"] == "sv-y"
+    assert base_trek["halt"]["reason"] == "second"
+
+
+def test_clear_halt_basic(base_trek):
+    _planning_to_active(base_trek)
+    trek.set_halt(base_trek, issued_by_session_id="sv-x")
+    assert base_trek["halt"]
+    trek.clear_halt(base_trek)
+    assert base_trek["halt"] is None
+
+
+def test_clear_halt_idempotent(base_trek):
+    """Clearing an already-clear halt should be a no-op."""
+    assert base_trek["halt"] is None
+    trek.clear_halt(base_trek)
+    assert base_trek["halt"] is None
+
+
+def test_transfer_leader_basic(base_trek):
+    assert base_trek["leader_session_id"] == "sv-1"
+    trek.transfer_leader(base_trek, target_session_id="sv-2")
+    assert base_trek["leader_session_id"] == "sv-2"
+
+
+def test_transfer_leader_idempotent_same_session(base_trek):
+    """Transferring to the current leader is a no-op."""
+    original = base_trek["updated_at"]
+    trek.transfer_leader(base_trek, target_session_id="sv-1")
+    assert base_trek["leader_session_id"] == "sv-1"
+    # updated_at should not have changed
+    assert base_trek["updated_at"] == original
+
+
+def test_transfer_leader_requires_target(base_trek):
+    with pytest.raises(ValueError, match="required"):
+        trek.transfer_leader(base_trek, target_session_id="")

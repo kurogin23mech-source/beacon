@@ -399,3 +399,72 @@ def test_trek_plan_unknown_ref_prefix(trek_env):
     r = _run(trek_env, "plan", tid, "--add-scope", "beacon-1:foo-99")
     assert r.returncode != 0
     assert "unknown" in r.stderr.lower() or "ref" in r.stderr.lower()
+
+
+# ---------------------------------------------------------------------------
+# stop / resume / transfer-leader (e-1662)
+# ---------------------------------------------------------------------------
+
+def test_trek_stop_sets_halt(trek_env):
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "start", tid)
+    r = _run(trek_env, "stop", tid, "--reason", "deploy in progress", "--json")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(r.stdout)
+    assert doc["status"] == "active"  # status unchanged
+    assert doc["halt"]
+    assert doc["halt"]["issued_by_session_id"] == "sv-test-1"
+    assert doc["halt"]["reason"] == "deploy in progress"
+
+
+def test_trek_stop_rejects_planning(trek_env):
+    """Cannot stop a trek that hasn't started."""
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "stop", tid)
+    assert r.returncode != 0
+    assert "active" in r.stderr.lower()
+
+
+def test_trek_stop_requires_session_id(trek_env):
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "start", tid)
+    env = dict(trek_env)
+    env.pop("BEACON_SESSION_ID")
+    r = _run(env, "stop", tid)
+    assert r.returncode != 0
+    assert "session" in r.stderr.lower()
+
+
+def test_trek_resume_clears_halt(trek_env):
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "start", tid)
+    _run(trek_env, "stop", tid)
+    r = _run(trek_env, "resume", tid, "--json")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(r.stdout)
+    assert doc["halt"] is None
+    assert doc["status"] == "active"
+
+
+def test_trek_resume_idempotent(trek_env):
+    """Resuming an unhalted trek is a no-op (= no error)."""
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "start", tid)
+    r = _run(trek_env, "resume", tid)
+    assert r.returncode == 0
+    assert "not halted" in r.stdout.lower() or "no-op" in r.stdout.lower()
+
+
+def test_trek_transfer_leader_basic(trek_env):
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "transfer-leader", tid, "--to", "sv-new-leader", "--json")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(r.stdout)
+    assert doc["leader_session_id"] == "sv-new-leader"
+
+
+def test_trek_transfer_leader_requires_to(trek_env):
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "transfer-leader", tid)
+    assert r.returncode != 0
+    assert "to" in r.stderr.lower() or "session" in r.stderr.lower()

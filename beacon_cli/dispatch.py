@@ -720,6 +720,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_trek_plan.add_argument("--remove-scope", dest="remove_scope", default="")
     p_trek_plan.add_argument("--json", action="store_true")
 
+    p_trek_stop = trek_sub.add_parser("stop", add_help=False)
+    p_trek_stop.add_argument("trek_id", nargs="?", default="")
+    p_trek_stop.add_argument("--reason", default="")
+    p_trek_stop.add_argument("--json", action="store_true")
+
+    p_trek_resume = trek_sub.add_parser("resume", add_help=False)
+    p_trek_resume.add_argument("trek_id", nargs="?", default="")
+    p_trek_resume.add_argument("--json", action="store_true")
+
+    p_trek_xfer = trek_sub.add_parser("transfer-leader", add_help=False)
+    p_trek_xfer.add_argument("trek_id", nargs="?", default="")
+    p_trek_xfer.add_argument("--to", dest="to_session_id", default="")
+    p_trek_xfer.add_argument("--json", action="store_true")
+
     # ---- doctor / project / help ----
     sub.add_parser("doctor", add_help=False)
     p_project = sub.add_parser("project", add_help=False)
@@ -1893,6 +1907,9 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
             "  leave <trek-id>\n"
             "  plan <trek-id> --add-scope <project[:ref]>\n"
             "  plan <trek-id> --remove-scope <project[:ref]>\n"
+            "  stop <trek-id> [--reason \"...\"]    (= Andon cord、halt 信号)\n"
+            "  resume <trek-id>                     (= halt 信号を clear)\n"
+            "  transfer-leader <trek-id> --to <session-id>\n"
             "\n"
             "Env (creator identity, required for 'create'):\n"
             "  BEACON_USER_EMAIL    creator email\n"
@@ -1965,6 +1982,29 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
                 "BEACON_TREK_ID": args.trek_id or "",
                 "BEACON_TREK_SCOPE_ADD": args.add_scope or "",
                 "BEACON_TREK_SCOPE_REMOVE": args.remove_scope or "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd == "stop":
+        return _run_commands_py(
+            root, "trek_stop",
+            {
+                "BEACON_TREK_ID": args.trek_id or "",
+                "BEACON_TREK_REASON": args.reason or "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd == "resume":
+        return _run_commands_py(
+            root, "trek_resume",
+            {"BEACON_TREK_ID": args.trek_id or "", "BEACON_JSON": json_env},
+        )
+    if cmd == "transfer-leader":
+        return _run_commands_py(
+            root, "trek_transfer_leader",
+            {
+                "BEACON_TREK_ID": args.trek_id or "",
+                "BEACON_TREK_TO": args.to_session_id or "",
                 "BEACON_JSON": json_env,
             },
         )

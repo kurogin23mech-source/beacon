@@ -375,6 +375,64 @@ def remove_scope_entry(trek_doc: dict, *, entry: dict) -> dict:
     return trek_doc
 
 
+# ---------------------------------------------------------------------------
+# Halt + leader transfer (ms-69 / e-1662)
+#
+# Halt = Andon cord. The STOP signal sets the ``halt`` field; participating
+# sessions observe it and stop their autonomous work. Status stays
+# ``active`` either way (SPEC 方針 2). Resume clears the field.
+#
+# Leader transfer hands the ``leader_session_id`` from one session to
+# another. The current implementation trusts the caller to verify the
+# transferring session is the current leader; server-side enforcement
+# lands in e-1656 with proper auth.
+# ---------------------------------------------------------------------------
+
+def set_halt(trek_doc: dict, *,
+             issued_by_session_id: str, reason: str = "") -> dict:
+    """Engage the Andon cord. Raises if trek is not currently ``active``.
+
+    Halt is idempotent in the sense that re-issuing replaces the prior
+    record (= last STOP wins, more recent ``reason`` survives). Callers
+    that need atomicity should check ``trek_doc.get("halt")`` first.
+    """
+    if trek_doc.get("status") != "active":
+        raise ValueError(
+            f"can only halt an active trek "
+            f"(current status: {trek_doc.get('status')!r})"
+        )
+    trek_doc["halt"] = build_halt(
+        issued_by_session_id=issued_by_session_id, reason=reason,
+    )
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
+
+
+def clear_halt(trek_doc: dict) -> dict:
+    """Clear the halt signal. Idempotent (= no-op if already cleared)."""
+    if not trek_doc.get("halt"):
+        return trek_doc
+    trek_doc["halt"] = None
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
+
+
+def transfer_leader(trek_doc: dict, *, target_session_id: str) -> dict:
+    """Hand off ``leader_session_id`` to another session.
+
+    Caller verifies the requesting session is the current leader (or owner)
+    — this helper just performs the swap and stamps updated_at. Server
+    auth (e-1656) will enforce the verification later.
+    """
+    if not target_session_id:
+        raise ValueError("target_session_id is required for transfer_leader")
+    if trek_doc.get("leader_session_id") == target_session_id:
+        return trek_doc  # already the leader, idempotent
+    trek_doc["leader_session_id"] = target_session_id
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
+
+
 def remove_member(trek_doc: dict, *, user_id: str) -> dict:
     """Remove a member from the trek.
 
