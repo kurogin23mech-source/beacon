@@ -279,6 +279,8 @@ Step 1 (+ Step 1.5) で特定した MS の情報を読み、以下の基準で *
 
 ## Step 3: 書き込み（finalize）
 
+**ms-68 / e-1641 補足 (= entry-writing principle の自律パス例外)**: `/beacon-log` は **PostToolUse hook 経由で自律起動される唯一の Skill**。post-commit hook はユーザー応答を待てないため、書き込み前の draft 提示 step は持たない。代わりに **Step 1.8 で behavior を生成した直後に self-review (4 原則) を必須化**: 読み手目線 1 行 / 横文字 3 段階 / ID 参照に文脈 / 尻切れトンボ禁止 をその場で 1 度自問し、違反があれば finalize の前に直す。これは ms-68 SPEC (`HQvN4Gimw3n1UKwrk6o1`、書き手の作法を仕組みで担保する MS) で明示された「自律パスは self-review のみで進める」の唯一の正当例。
+
 Step 1.5〜2 の結果と Step 1.8 で生成した補足情報を使って、Bash ツールで実行:
 
 ```bash
