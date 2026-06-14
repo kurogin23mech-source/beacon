@@ -2,6 +2,27 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.38.0] - 2026-06-14
+
+- chore(ms-55): exempt new coordination CLIs from drift gate (Win parity follow-up)
+- Merge ms-55/work: stop / rollback / claim primitives + STUCK detector + morning briefing CLI
+- Merge ms-63/work: envelope disclosure_contract + beacon init --sensitivity + T5 schema enforcement
+- Merge ms-68/work: entry-writing principle marker + draft display step in write Skills
+- feat(ms-55): beacon morning — 4-category briefing of overnight autonomous activity (e-1650)
+- feat(ms-55): STUCK signal detector — idle timeout escalation (e-1649)
+- feat(ms-55): claim primitives (request / handoff / post) + local persistence (e-1648)
+- feat(ms-68): embed draft display step in remaining write Skills (e-1643)
+- feat(ms-55): rollback boundary CLI — auto-undo local, report on pushed (e-1647)
+- feat(ms-63): T5 in_reply_to chain → T3 disclosure promotion (e-1432 方向 A)
+- feat(ms-68): embed draft display step in mid-freq write Skills (e-1642)
+- feat(ms-63): beacon init --sensitivity (default high) writes disclosure_policy (e-1428, e-1441)
+- feat(ms-68): embed draft display step + autonomous-path exceptions in high-freq write Skills (e-1641)
+- feat(ms-55): stop signal CLI + bus broadcast schema (e-1646)
+- feat(ms-63): envelope disclosure_contract schema + receive-side gate (e-1428, e-1429, e-1430, e-1431, e-1432, e-1433, e-1443)
+- feat(ms-68): embed entry-writing principle marker + doctor check (e-1639, e-1640)
+- docs(release): update README/CHANGELOG for v0.37.4
+- chore(release): bump formula to 0.37.4
+
 ## [v0.37.4] - 2026-06-14
 
 - fix(ms-69): Settings の Archive ボタン無反応 + Export JSON が別プロジェクト
