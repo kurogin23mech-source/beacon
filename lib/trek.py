@@ -232,3 +232,110 @@ def validate_transition(from_status: str, to_status: str) -> None:
             f"invalid trek transition {from_status!r} → {to_status!r} "
             f"(allowed from {from_status!r}: {sorted(allowed)})"
         )
+
+
+# ---------------------------------------------------------------------------
+# Member operations (ms-69 / e-1654)
+#
+# Member identity is at user grain (= user_id + email pair), so a single
+# user with multiple sessions counts as one member. Per-session presence
+# is tracked separately by the session registry (= ``sessions/`` collection)
+# and joined at render time, not stored inside the trek doc.
+#
+# These helpers are pure (= they mutate and return the dict, no I/O).
+# Storage callers (lib/trek_store, server/firestore_client) wrap them.
+# ---------------------------------------------------------------------------
+
+def find_member(trek_doc: dict, user_id: str) -> dict | None:
+    """Return the member dict for ``user_id``, or None if absent."""
+    for m in trek_doc.get("members") or []:
+        if m.get("user_id") == user_id:
+            return m
+    return None
+
+
+def find_member_by_email(trek_doc: dict, email: str) -> dict | None:
+    """Return the member dict for ``email``, or None if absent.
+
+    Used by the CLI's local mode invite/join flow where the inviter only
+    knows the invitee's email (= cloud user resolution lands in e-1656).
+    """
+    if not email:
+        return None
+    for m in trek_doc.get("members") or []:
+        if m.get("email") == email:
+            return m
+    return None
+
+
+def add_invitation(trek_doc: dict, *,
+                   user_id: str, email: str,
+                   invited_by_user_id: str) -> dict:
+    """Add a new member to the trek with ``joined_at=""`` (= invited, not joined).
+
+    Raises ValueError if the user is already a member. Mutates and returns
+    the trek doc so callers can persist with a single save_trek.
+    """
+    if find_member(trek_doc, user_id) is not None:
+        raise ValueError(
+            f"user {user_id} is already a member of trek "
+            f"{trek_doc.get('trek_id')}"
+        )
+    new_member = build_member(
+        user_id=user_id, email=email,
+        role="member",
+        invited_at=utcnow_iso(),
+        joined_at="",
+        invited_by=invited_by_user_id,
+    )
+    trek_doc.setdefault("members", []).append(new_member)
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
+
+
+def accept_invitation(trek_doc: dict, *, user_id: str) -> dict:
+    """Mark a member as joined (= sets ``joined_at`` to now).
+
+    Idempotent: if the member already joined, returns the doc unchanged.
+    Raises ValueError if ``user_id`` is not in the members list (= must
+    be invited first, no self-add).
+    """
+    member = find_member(trek_doc, user_id)
+    if member is None:
+        raise ValueError(
+            f"user {user_id} not invited to trek {trek_doc.get('trek_id')} "
+            "(owner must `beacon trek invite` first)"
+        )
+    if member.get("joined_at"):
+        return trek_doc  # already joined, no-op
+    member["joined_at"] = utcnow_iso()
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
+
+
+def remove_member(trek_doc: dict, *, user_id: str) -> dict:
+    """Remove a member from the trek.
+
+    Guard rails:
+    - Cannot remove the leader (= they must `transfer-leader` first).
+    - Cannot remove the last member (= archive the trek instead).
+    """
+    members = trek_doc.get("members") or []
+    target = find_member(trek_doc, user_id)
+    if target is None:
+        raise ValueError(
+            f"user {user_id} not a member of trek {trek_doc.get('trek_id')}"
+        )
+    if target.get("role") == "leader":
+        raise ValueError(
+            f"cannot remove leader (user {user_id}); use "
+            "`beacon trek transfer-leader` to hand off first"
+        )
+    new_members = [m for m in members if m.get("user_id") != user_id]
+    if not new_members:
+        raise ValueError(
+            "cannot remove last member; archive the trek instead"
+        )
+    trek_doc["members"] = new_members
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc

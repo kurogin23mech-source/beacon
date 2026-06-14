@@ -207,3 +207,111 @@ def test_trek_start_missing_trek(trek_env):
     r = _run(trek_env, "start", "tk-missing")
     assert r.returncode != 0
     assert "not found" in r.stderr
+
+
+# ---------------------------------------------------------------------------
+# invite / join / leave (e-1654)
+# ---------------------------------------------------------------------------
+
+def _make_trek_and_return_id(trek_env, title="T") -> str:
+    r = _run(trek_env, "create", title, "--json")
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)["trek_id"]
+
+
+def test_trek_invite_basic(trek_env):
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "invite", tid, "--actor", "b@x.com", "--json")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(r.stdout)
+    emails = {m["email"] for m in doc["members"]}
+    assert "b@x.com" in emails
+    invitee = next(m for m in doc["members"] if m["email"] == "b@x.com")
+    assert invitee["role"] == "member"
+    assert invitee["joined_at"] == ""  # invited but not yet joined
+
+
+def test_trek_invite_requires_actor(trek_env):
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "invite", tid)
+    assert r.returncode != 0
+    assert "actor" in r.stderr.lower() or "email" in r.stderr.lower()
+
+
+def test_trek_invite_rejects_duplicate(trek_env):
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "invite", tid, "--actor", "b@x.com")
+    r = _run(trek_env, "invite", tid, "--actor", "b@x.com")
+    assert r.returncode != 0
+    assert "already" in r.stderr.lower()
+
+
+def test_trek_invite_notify_acknowledged_but_noop(trek_env):
+    """--notify should not fail and should mention deferred implementation."""
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "invite", tid, "--actor", "b@x.com", "--notify")
+    assert r.returncode == 0
+    assert "notify" in r.stdout.lower()  # acknowledged in human output
+
+
+def test_trek_join_after_invite(trek_env):
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "invite", tid, "--actor", "b@x.com")
+    # B joins from their own session
+    env_b = dict(trek_env)
+    env_b.update({
+        "BEACON_USER_ID": "u-b",
+        "BEACON_USER_EMAIL": "b@x.com",
+        "BEACON_SESSION_ID": "sv-b-1",
+    })
+    r = _run(env_b, "join", tid, "--json")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(r.stdout)
+    b_member = next(m for m in doc["members"] if m["email"] == "b@x.com")
+    assert b_member["joined_at"]  # now joined
+
+
+def test_trek_join_rejects_uninvited(trek_env):
+    tid = _make_trek_and_return_id(trek_env)
+    env_stranger = dict(trek_env)
+    env_stranger.update({
+        "BEACON_USER_ID": "u-stranger",
+        "BEACON_USER_EMAIL": "stranger@x",
+    })
+    r = _run(env_stranger, "join", tid)
+    assert r.returncode != 0
+    assert "no invitation" in r.stderr.lower() or "not invited" in r.stderr.lower()
+
+
+def test_trek_leave_removes_member(trek_env):
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "invite", tid, "--actor", "b@x.com")
+    env_b = dict(trek_env)
+    env_b.update({"BEACON_USER_ID": "u-b", "BEACON_USER_EMAIL": "b@x.com"})
+    _run(env_b, "join", tid)
+    r = _run(env_b, "leave", tid, "--json")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(r.stdout)
+    emails = {m["email"] for m in doc["members"]}
+    assert "b@x.com" not in emails
+
+
+def test_trek_leave_blocks_leader(trek_env):
+    """Leader cannot leave (must transfer-leader first)."""
+    tid = _make_trek_and_return_id(trek_env)
+    # creator is the leader; trying to leave should fail
+    r = _run(trek_env, "leave", tid)
+    assert r.returncode != 0
+    assert "leader" in r.stderr.lower()
+
+
+def test_trek_leave_non_member(trek_env):
+    tid = _make_trek_and_return_id(trek_env)
+    env_stranger = dict(trek_env)
+    env_stranger.update({
+        "BEACON_USER_ID": "u-stranger",
+        "BEACON_USER_EMAIL": "stranger@x",
+    })
+    r = _run(env_stranger, "leave", tid)
+    assert r.returncode != 0
+    assert "not a member" in r.stderr.lower()

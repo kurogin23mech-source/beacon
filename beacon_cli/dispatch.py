@@ -700,6 +700,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_trek_archive.add_argument("trek_id", nargs="?", default="")
     p_trek_archive.add_argument("--json", action="store_true")
 
+    p_trek_invite = trek_sub.add_parser("invite", add_help=False)
+    p_trek_invite.add_argument("trek_id", nargs="?", default="")
+    p_trek_invite.add_argument("--actor", default="")
+    p_trek_invite.add_argument("--notify", action="store_true")
+    p_trek_invite.add_argument("--json", action="store_true")
+
+    p_trek_join = trek_sub.add_parser("join", add_help=False)
+    p_trek_join.add_argument("trek_id", nargs="?", default="")
+    p_trek_join.add_argument("--json", action="store_true")
+
+    p_trek_leave = trek_sub.add_parser("leave", add_help=False)
+    p_trek_leave.add_argument("trek_id", nargs="?", default="")
+    p_trek_leave.add_argument("--json", action="store_true")
+
     # ---- doctor / project / help ----
     sub.add_parser("doctor", add_help=False)
     p_project = sub.add_parser("project", add_help=False)
@@ -1868,6 +1882,9 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
             "  show <trek-id> [--json]\n"
             "  start <trek-id>\n"
             "  archive <trek-id>\n"
+            "  invite <trek-id> --actor <email> [--notify]\n"
+            "  join <trek-id>\n"
+            "  leave <trek-id>\n"
             "\n"
             "Env (creator identity, required for 'create'):\n"
             "  BEACON_USER_EMAIL    creator email\n"
@@ -1911,6 +1928,26 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
     if cmd == "archive":
         return _run_commands_py(
             root, "trek_archive",
+            {"BEACON_TREK_ID": args.trek_id or "", "BEACON_JSON": json_env},
+        )
+    if cmd == "invite":
+        return _run_commands_py(
+            root, "trek_invite",
+            {
+                "BEACON_TREK_ID": args.trek_id or "",
+                "BEACON_TREK_ACTOR": args.actor or "",
+                "BEACON_TREK_NOTIFY": "1" if args.notify else "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd == "join":
+        return _run_commands_py(
+            root, "trek_join",
+            {"BEACON_TREK_ID": args.trek_id or "", "BEACON_JSON": json_env},
+        )
+    if cmd == "leave":
+        return _run_commands_py(
+            root, "trek_leave",
             {"BEACON_TREK_ID": args.trek_id or "", "BEACON_JSON": json_env},
         )
     return 1

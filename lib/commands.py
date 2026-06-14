@@ -4039,6 +4039,184 @@ def cmd_trek_archive():
               "再開したい時は新 trek 起票")
 
 
+def cmd_trek_invite():
+    """Invite a user (by email) to a trek (= add to members[] with joined_at='').
+
+    Env:
+      BEACON_TREK_ID       (required) trek to invite into
+      BEACON_TREK_ACTOR    (required) invitee's email
+      BEACON_TREK_NOTIFY   "1" → also send a live DM (= e-1662 で実装、
+                           現在は acknowledged but no-op)
+      BEACON_USER_EMAIL    inviter's email (= invited_by, defaults to whoami)
+      BEACON_JSON          "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    actor_email = os.environ.get("BEACON_TREK_ACTOR", "").strip()
+    notify = os.environ.get("BEACON_TREK_NOTIFY", "") == "1"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+    if not actor_email:
+        print("Error: --actor <email> is required", file=sys.stderr)
+        sys.exit(1)
+
+    inviter_user_id, _, _ = _resolve_creator_identity()
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+
+    # Local mode identity: user_id = email (cloud mode resolves properly
+    # via auth in e-1656). When the invitee later runs `beacon trek join`,
+    # their BEACON_USER_ID must match — easiest path is to also use email
+    # there.
+    invitee_user_id = actor_email
+
+    try:
+        trek.add_invitation(
+            t, user_id=invitee_user_id, email=actor_email,
+            invited_by_user_id=inviter_user_id,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    trek_store.save_trek(t)
+
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        member_count = len(t.get("members") or [])
+        print(f"Invited {actor_email} to trek {trek_id} "
+              f"(members: {member_count})")
+        if notify:
+            # e-1662 で bus DM 経路を実装予定。現在は --notify を受け付ける
+            # だけで、DM は飛ばない (= invitee が trigger check / session-start
+            # で気付く流れ default)。
+            print("  (--notify is acknowledged but live DM is not implemented "
+                  "yet — invitee will see the invitation via trigger check; "
+                  "live DM lands in e-1662)")
+
+
+def cmd_trek_join():
+    """Accept an invitation (= set member.joined_at = now for the current user).
+
+    Env:
+      BEACON_TREK_ID    (required)
+      BEACON_USER_EMAIL (required, matched against the invitee's email)
+      BEACON_USER_ID    inviter's recorded user_id (fallback: whoami).
+                        Used as the local-mode identity match.
+      BEACON_SESSION_ID (informational, recorded if leader_session_id is empty)
+      BEACON_JSON       "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+
+    user_id, email, _ = _resolve_creator_identity()
+    if not email:
+        print(
+            "Error: BEACON_USER_EMAIL is required to join a trek",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+
+    # Local mode identity match: prefer email lookup first (= simplest path
+    # for the invitee who is told "look for an invitation to email X"); fall
+    # back to user_id lookup. Use the looked-up member's user_id for the
+    # actual accept call.
+    member = trek.find_member_by_email(t, email)
+    if member is None:
+        member = trek.find_member(t, user_id)
+    if member is None:
+        print(
+            f"Error: no invitation found for {email} (user_id={user_id}) "
+            f"in trek {trek_id} — owner must `beacon trek invite` first",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        trek.accept_invitation(t, user_id=member["user_id"])
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    trek_store.save_trek(t)
+
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        print(f"Joined trek {trek_id} as {email}")
+
+
+def cmd_trek_leave():
+    """Leave a trek (= remove self from members[]).
+
+    Env:
+      BEACON_TREK_ID    (required)
+      BEACON_USER_EMAIL (required, matched against the member's email)
+      BEACON_USER_ID    fallback
+      BEACON_JSON       "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+
+    user_id, email, _ = _resolve_creator_identity()
+    if not email:
+        print(
+            "Error: BEACON_USER_EMAIL is required to leave a trek",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+
+    member = trek.find_member_by_email(t, email) or trek.find_member(t, user_id)
+    if member is None:
+        print(
+            f"Error: {email} (user_id={user_id}) is not a member of trek "
+            f"{trek_id}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        trek.remove_member(t, user_id=member["user_id"])
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    trek_store.save_trek(t)
+
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        print(f"Left trek {trek_id} ({email})")
+
+
 def cmd_member_add():
     """Add a member to the project."""
     import operations  # lazy import to avoid circular at module load
@@ -11656,6 +11834,9 @@ if __name__ == "__main__":
         "trek_show": cmd_trek_show,
         "trek_start": cmd_trek_start,
         "trek_archive": cmd_trek_archive,
+        "trek_invite": cmd_trek_invite,
+        "trek_join": cmd_trek_join,
+        "trek_leave": cmd_trek_leave,
         "version": lambda: print(f"beacon {__version__}"),
         "help_json": cmd_help_json,
         "doctor": cmd_doctor,

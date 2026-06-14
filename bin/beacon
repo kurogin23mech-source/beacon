@@ -2341,6 +2341,44 @@ except ValueError as e:
                 done
                 BEACON_TREK_ID="$trek_id" python3 "$COMMANDS_PY" trek_archive
                 ;;
+            invite)
+                shift 2
+                trek_id="" actor="" notify=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --actor) actor="${2:-}"; shift 2 ;;
+                        --notify) notify="1"; shift ;;
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" \
+                    BEACON_TREK_ACTOR="$actor" \
+                    BEACON_TREK_NOTIFY="$notify" \
+                    python3 "$COMMANDS_PY" trek_invite
+                ;;
+            join)
+                shift 2
+                trek_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" python3 "$COMMANDS_PY" trek_join
+                ;;
+            leave)
+                shift 2
+                trek_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" python3 "$COMMANDS_PY" trek_leave
+                ;;
             *)
                 echo "Usage: beacon trek <subcommand> [args]"
                 echo ""
@@ -2350,6 +2388,9 @@ except ValueError as e:
                 echo "  show <trek-id> [--json]"
                 echo "  start <trek-id>"
                 echo "  archive <trek-id>"
+                echo "  invite <trek-id> --actor <email> [--notify]"
+                echo "  join <trek-id>"
+                echo "  leave <trek-id>"
                 echo ""
                 echo "Env (creator identity, required for 'create'):"
                 echo "  BEACON_USER_EMAIL    creator email"
