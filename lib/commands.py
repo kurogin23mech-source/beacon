@@ -12432,6 +12432,73 @@ def cmd_resume_scoped():
 # proposal" in the report — concrete next-step text like "open a
 # revert PR" rather than silent destructive action.
 
+def _rollback_record_history(plan, result, reason: str) -> dict:
+    """Record a `beacon rollback` execution as a save entry on the active MS.
+
+    ms-55 e-1727: after `beacon rollback` mutates the working tree (=
+    non-dry-run, no fatal errors), persist a structured trail so
+    `beacon search "rollback"` surfaces "when did we roll back, what
+    did we touch, what compensation was proposed". Without this trail
+    the runaway story is lost — stash refs survive but project history
+    has no pointer to them.
+
+    The entry uses source="rollback" so the search query is single-keyword,
+    and the description packs reason + commit hashes + working-tree count +
+    compensation hints. Returns the {status, entry_id, milestone} dict
+    from save_entry, or {"status": "error", "error": ...} on failure.
+    Failures are non-fatal — the rollback already succeeded.
+    """
+    try:
+        import operations as _ops  # noqa: PLC0415
+    except Exception as e:
+        return {"status": "error", "error": f"import operations: {e}"}
+
+    state = plan.state
+    head_hash = state.head_hash or "?"
+    branch = state.branch or "(detached HEAD)"
+    upstream = state.upstream_branch or "(no upstream)"
+
+    parts: list[str] = []
+    parts.append(f"rollback on {branch} (HEAD~={head_hash}, upstream={upstream})")
+    if reason:
+        parts.append(f"reason: {reason}")
+    if result.stashed:
+        parts.append(
+            f"stashed {len(state.working_tree_files)} working-tree path(s) → "
+            f"{result.stash_ref or 'stash@{0}'}"
+        )
+    if result.reset_commits > 0:
+        parts.append(f"reset {result.reset_commits} local commit(s) (--soft)")
+    if not result.stashed and result.reset_commits == 0:
+        parts.append("(no-op: clean tree, no local commits)")
+    if plan.pushed_warning:
+        parts.append("⚠ rollback request extended past upstream — report-only")
+    for opt in plan.compensation_options:
+        parts.append(f"compensation: {opt}")
+
+    description = "; ".join(parts)
+
+    def op(d):
+        return d, core.save_entry(
+            d,
+            ms_id="",  # auto-target the active MS
+            description=description,
+            source="rollback",
+            date="",
+            hash=head_hash,
+        )
+
+    try:
+        project_id = _project_id_for_ops()
+        return _ops.apply_operation(
+            project_id, op,
+            op_name="rollback.record",
+            reason=reason or "rollback record",
+        )
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
 def cmd_rollback():
     """Inspect local git state and roll back the safe portion.
 
@@ -12440,6 +12507,8 @@ def cmd_rollback():
       BEACON_ROLLBACK_REASON     free text, recorded into stash msg + report
       BEACON_ROLLBACK_DRY_RUN    "1" → show plan, don't mutate
       BEACON_ROLLBACK_CWD        override cwd (mainly for tests)
+      BEACON_ROLLBACK_NO_RECORD  "1" → skip the history save entry (= e-1727
+                                 escape hatch for tests / no-op rollbacks)
       BEACON_JSON                "1" → json output (plan + result)
     """
     import rollback as _rb
@@ -12464,6 +12533,18 @@ def cmd_rollback():
         reason=reason,
         dry_run=dry_run,
     )
+
+    # ms-55 e-1727: also record on the non-error JSON path. We compute
+    # the record first so it appears in the JSON payload.
+    record_info: Optional[dict] = None
+    if (
+        not dry_run
+        and result is not None
+        and os.environ.get("BEACON_ROLLBACK_NO_RECORD", "") != "1"
+        and (result.stashed or result.reset_commits > 0
+             or plan.compensation_options)
+    ):
+        record_info = _rollback_record_history(plan, result, reason)
 
     if json_mode:
         out = {
@@ -12492,6 +12573,8 @@ def cmd_rollback():
                 "reset_commits": result.reset_commits,
                 "errors": list(result.errors),
             }
+        if record_info is not None:
+            out["record"] = record_info
         print(json.dumps(out, ensure_ascii=False))
         if result is not None and result.errors:
             sys.exit(1)
@@ -12517,6 +12600,25 @@ def cmd_rollback():
     if not summary_bits:
         summary_bits.append("nothing to do")
     print(f"Executed: {', '.join(summary_bits)}")
+
+    # ms-55 e-1727: surface the history record outcome. The save itself
+    # was already attempted in the shared pre-print block above; here we
+    # just report what happened. Non-fatal — the rollback already
+    # succeeded; the trail being broken is annoying, not catastrophic.
+    if record_info is not None:
+        if record_info.get("status") == "saved":
+            print(
+                f"Recorded: {record_info.get('entry_id', '?')} → "
+                f"{record_info.get('milestone', '?')}"
+            )
+        elif record_info.get("status") == "duplicate":
+            print(f"Recorded: (duplicate) → {record_info.get('milestone', '?')}")
+        elif record_info.get("status") == "error":
+            print(
+                f"Warning: could not record rollback history: "
+                f"{record_info.get('error', 'unknown')}",
+                file=sys.stderr,
+            )
 
     if result.errors:
         print("", file=sys.stderr)
