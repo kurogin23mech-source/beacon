@@ -21,14 +21,20 @@ import datetime
 import secrets
 from typing import Iterable
 
-# Trek lifecycle: planning → active → paused → archived
+# Trek lifecycle: planning → active → archived  (3 states only)
 # - planning: scope/invites being staged, sessions not yet joining
 # - active: members can claim work, DM, run Operations under this trek
-# - paused: stop signal in effect; resume re-enters active
-# - archived: terminal state for temporary treks; persistent treks may
-#   archive as "hibernate" and be reactivated later via lifecycle CLI
+# - archived: terminal for temporary treks; persistent treks may archive
+#   as "hibernate" and be reactivated later (= caller-enforced)
+#
+# Halt is **not a status**. The STOP signal sets a separate ``halt`` field
+# on the trek doc (= Andon cord); sessions observe it and pause their
+# autonomous work. Recovery happens by the leader instructing sessions
+# to resume — no state transition required. This collapsed the prior
+# planning/active/paused/archived 4-state machine into 3 states because
+# pause+resume turned out to be redundant with STOP+leader-instruction.
 VALID_TREK_TYPES = ("temporary", "persistent")
-VALID_TREK_STATUSES = ("planning", "active", "paused", "archived")
+VALID_TREK_STATUSES = ("planning", "active", "archived")
 VALID_MEMBER_ROLES = ("leader", "member")
 
 DEFAULT_STATUS = "planning"
@@ -176,16 +182,15 @@ def new_trek(*,
     }
 
 
-# Lifecycle transition rules (= server / CLI enforce these on state changes).
-# Mirrors SPEC 設計方針 2 lifecycle diagram. ``archived`` is reachable from
-# any state because emergency archive should always be available; reverse
-# direction (archived → anything) is allowed only for ``persistent`` treks
-# (= hibernate / wake), enforced separately by the caller.
+# Lifecycle transition rules (= server / CLI enforce on state changes).
+# 3-state machine: planning → active → archived. ``archived`` is **terminal**
+# — to restart work after archive, create a fresh trek with the same scope
+# / members. Keeping archived terminal avoids hibernate / wake mode state
+# explosion and matches user-facing intuition ("archived = done").
 ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "planning": frozenset({"active", "archived"}),
-    "active": frozenset({"paused", "archived"}),
-    "paused": frozenset({"active", "archived"}),
-    "archived": frozenset({"active"}),  # only for persistent — caller checks
+    "active": frozenset({"archived"}),
+    "archived": frozenset(),  # terminal
 }
 
 

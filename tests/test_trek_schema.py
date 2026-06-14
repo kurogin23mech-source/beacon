@@ -48,13 +48,16 @@ def test_validate_type_rejects_invalid(bad):
         trek.validate_type(bad)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("good", ["planning", "active", "paused", "archived"])
+@pytest.mark.parametrize("good", ["planning", "active", "archived"])
 def test_validate_status_accepts_valid(good):
     assert trek.validate_status(good) == good
 
 
-@pytest.mark.parametrize("bad", ["", "closed", "done", None])
+@pytest.mark.parametrize("bad", ["", "closed", "done", "paused", None])
 def test_validate_status_rejects_invalid(bad):
+    # "paused" is explicitly rejected: the 4-state machine collapsed into
+    # 3 states (= STOP signal replaces pause, leader instruction replaces
+    # resume).
     with pytest.raises(ValueError):
         trek.validate_status(bad)  # type: ignore[arg-type]
 
@@ -201,11 +204,7 @@ def test_new_trek_rejects_bad_type():
 @pytest.mark.parametrize("frm,to", [
     ("planning", "active"),
     ("planning", "archived"),
-    ("active", "paused"),
     ("active", "archived"),
-    ("paused", "active"),
-    ("paused", "archived"),
-    ("archived", "active"),  # caller separately enforces persistent-only
 ])
 def test_validate_transition_allowed(frm, to):
     trek.validate_transition(frm, to)  # should not raise
@@ -216,10 +215,13 @@ def test_validate_transition_same_state_is_noop():
 
 
 @pytest.mark.parametrize("frm,to", [
-    ("planning", "paused"),  # planning has no sessions to pause
-    ("active", "planning"),  # cannot go back to planning
-    ("archived", "paused"),  # only active is reachable from archived
-    ("archived", "planning"),
+    ("active", "planning"),     # cannot go back to planning
+    ("archived", "planning"),   # archived is terminal
+    ("archived", "active"),     # archived is terminal — recreate trek instead
+    # "paused" was retired in this iteration — reject any pause-related move
+    ("active", "paused"),
+    ("planning", "paused"),
+    ("paused", "active"),
 ])
 def test_validate_transition_rejected(frm, to):
     with pytest.raises(ValueError):

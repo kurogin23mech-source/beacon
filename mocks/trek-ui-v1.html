@@ -1,0 +1,1443 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Beacon Trek UI mock v1</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg-void: #0a0a0c;
+  --bg-surface: #111114;
+  --bg-raised: #18181c;
+  --bg-hover: #1f1f24;
+  --border: #2a2a30;
+  --border-subtle: #1e1e24;
+  --text-primary: #e4e4e8;
+  --text-secondary: #a1a1aa;
+  --text-dim: #71717a;
+  --accent: #4ade80;
+  --accent-dim: #166534;
+  --accent-glow: rgba(74, 222, 128, 0.08);
+  --warning: #fbbf24;
+  --info: #60a5fa;
+  --done: #4ade80;
+  --in-progress: #60a5fa;
+  --observing: #a78bfa;
+  --todo: #71717a;
+  --waiting: #f97316;
+  --cancelled: #ef4444;
+  --danger: #ef4444;
+  --font-mono: 'JetBrains Mono', 'IBM Plex Mono', monospace;
+  --font-body: 'IBM Plex Mono', monospace;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { font-size: 15px; -webkit-font-smoothing: antialiased; }
+body {
+  background: var(--bg-void);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-weight: 400;
+  line-height: 1.6;
+  min-height: 100vh;
+}
+
+button {
+  font-family: var(--font-mono);
+  background: transparent;
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  padding: 4px 10px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 0.75rem;
+}
+button:hover { background: var(--bg-hover); border-color: var(--accent-dim); }
+button.primary { background: var(--accent); color: #0a0a0c; border-color: var(--accent); font-weight: 600; }
+button.primary:hover { background: #6ee7a0; }
+button.danger { color: var(--danger); border-color: var(--danger); }
+button.danger:hover { background: rgba(239,68,68,0.1); }
+button.ghost { border-color: transparent; color: var(--text-secondary); }
+button.ghost:hover { color: var(--text-primary); background: var(--bg-hover); }
+
+select, input {
+  font-family: var(--font-mono);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+  border-radius: 3px;
+  font-size: 0.75rem;
+}
+
+/* =================================================================
+   View switcher (mock-only)
+   ================================================================= */
+.view-switcher {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  z-index: 9999;
+  display: flex;
+  gap: 6px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px;
+  font-size: 0.7rem;
+}
+.view-switcher .label { color: var(--text-dim); align-self: center; padding: 0 6px; }
+.view-switcher button.active { background: var(--accent); color: #0a0a0c; border-color: var(--accent); }
+
+/* =================================================================
+   App layout
+   ================================================================= */
+.app {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ---------- Sidebar ---------- */
+.sidebar {
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  padding: 14px 0;
+}
+
+.sidebar-section {
+  margin-bottom: 18px;
+}
+
+.sidebar-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 14px;
+  font-size: 0.65rem;
+  letter-spacing: 0.16em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+}
+.sidebar-header .x { cursor: pointer; }
+.sidebar-header .x:hover { color: var(--text-primary); }
+
+.sidebar-item {
+  display: block;
+  padding: 6px 14px;
+  font-size: 0.78rem;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  color: var(--text-primary);
+}
+.sidebar-item:hover { background: var(--bg-hover); }
+.sidebar-item.active {
+  color: var(--accent);
+  border-left-color: var(--accent);
+  background: var(--accent-glow);
+}
+.sidebar-item .sub {
+  display: block;
+  font-size: 0.65rem;
+  color: var(--text-dim);
+  margin-top: 1px;
+}
+
+.sidebar-agent {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  font-size: 0.7rem;
+}
+.sidebar-agent .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent-glow);
+  flex-shrink: 0;
+}
+.sidebar-agent .agent-id { color: var(--text-primary); font-size: 0.7rem; }
+.sidebar-agent .agent-where {
+  display: block;
+  color: var(--text-dim);
+  font-size: 0.6rem;
+  text-align: right;
+}
+.sidebar-agent .right { margin-left: auto; text-align: right; }
+
+/* ---------- Main panel ---------- */
+.main {
+  overflow-y: auto;
+  position: relative;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--border);
+}
+.topbar .ham { cursor: pointer; color: var(--text-secondary); }
+.topbar .brand {
+  font-size: 1.2rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.topbar .brand-sub {
+  font-size: 0.6rem;
+  letter-spacing: 0.3em;
+  color: var(--text-dim);
+  margin-left: 4px;
+}
+.topbar .spacer { flex: 1; }
+.topbar .avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #f59e0b, #ef4444);
+  cursor: pointer;
+  position: relative;
+  border: 1px solid var(--border);
+}
+
+.account-menu {
+  position: absolute;
+  top: 50px;
+  right: 24px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  min-width: 240px;
+  padding: 8px 0;
+  font-size: 0.78rem;
+  display: none;
+  z-index: 100;
+}
+.account-menu.open { display: block; }
+.account-menu .head {
+  padding: 6px 14px;
+  font-size: 0.6rem;
+  letter-spacing: 0.2em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+}
+.account-menu .email {
+  padding: 0 14px 10px;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 6px;
+}
+.account-menu .item {
+  padding: 8px 14px;
+  cursor: pointer;
+  color: var(--text-primary);
+}
+.account-menu .item:hover { background: var(--bg-hover); }
+.account-menu .item.danger { color: var(--danger); }
+
+.content {
+  padding: 24px 24px 60px;
+}
+
+/* OBJECTIVE / NEXT REVIEW header block */
+.obj-block { padding: 20px 0 12px; }
+.obj-label,
+.next-label {
+  font-size: 0.6rem;
+  letter-spacing: 0.2em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.obj-text { font-size: 0.85rem; color: var(--text-primary); line-height: 1.6; }
+.next-text { font-size: 0.85rem; color: var(--text-primary); }
+
+.search {
+  display: block;
+  width: 100%;
+  margin: 18px 0 6px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  padding: 8px 12px;
+  font-size: 0.78rem;
+  color: var(--text-primary);
+}
+.search::placeholder { color: var(--text-dim); }
+
+.tabs {
+  display: flex;
+  gap: 22px;
+  padding: 14px 0 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 14px;
+}
+.tab {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  padding-bottom: 8px;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
+.tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.subtabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.7rem;
+  margin: 8px 0 14px;
+}
+.subtab {
+  padding: 3px 9px;
+  border-radius: 3px;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.subtab.active {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.subtabs .right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.subtabs .right .link {
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.subtabs .right .link:hover { color: var(--accent); }
+
+.ms-count {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  margin: 6px 0 10px;
+}
+
+/* Milestone rows */
+.ms-row {
+  display: grid;
+  grid-template-columns: 22px 56px 1fr 50px 90px 50px;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid transparent;
+  border-bottom: 1px solid var(--border-subtle);
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+.ms-row:hover { background: var(--bg-hover); border-color: var(--border); }
+.ms-row.active { background: var(--accent-glow); border-color: var(--accent-dim); }
+.ms-row .status-icon {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--todo);
+  margin: 0 auto;
+}
+.ms-row .status-icon.active { background: var(--in-progress); box-shadow: 0 0 6px var(--in-progress); }
+.ms-row .status-icon.observing { background: var(--observing); }
+.ms-row .status-icon.done { background: var(--done); }
+.ms-row .status-icon.todo { background: transparent; border: 1px solid var(--text-dim); }
+.ms-row .id { color: var(--text-dim); font-size: 0.72rem; }
+.ms-row .title { color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ms-row .title.active { color: var(--accent); }
+.ms-row .ratio { color: var(--text-dim); font-size: 0.72rem; text-align: right; }
+.ms-row .progress-bar {
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.ms-row .progress-bar > div {
+  height: 100%;
+  background: var(--in-progress);
+}
+.ms-row .pct {
+  color: var(--text-dim);
+  font-size: 0.7rem;
+  text-align: right;
+}
+.ms-row .status-tag {
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  width: max-content;
+}
+.ms-row .status-tag.active { color: var(--in-progress); border-color: var(--in-progress); }
+.ms-row .status-tag.todo { color: var(--text-dim); }
+
+.footer {
+  border-top: 1px solid var(--border);
+  margin-top: 30px;
+  padding-top: 16px;
+  font-size: 0.62rem;
+  color: var(--text-dim);
+}
+.footer .pid { letter-spacing: 0.1em; }
+.footer .motto { margin-top: 4px; }
+
+/* =================================================================
+   Settings overlay
+   ================================================================= */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: none;
+  z-index: 50;
+  justify-content: center;
+  padding: 40px 24px;
+  overflow-y: auto;
+}
+.overlay.open { display: flex; }
+.settings-panel {
+  background: var(--bg-void);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  width: 100%;
+  max-width: 880px;
+  height: max-content;
+  padding: 18px 22px 26px;
+}
+.settings-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.settings-head .brand-block {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 1.05rem;
+}
+.settings-head .label {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+.settings-head .spacer { flex: 1; }
+
+.settings-tabs {
+  display: flex;
+  gap: 22px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 18px;
+}
+.settings-tabs .tab {
+  font-size: 0.8rem;
+  padding-bottom: 8px;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+.settings-tabs .tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.settings-section { margin-bottom: 26px; }
+.settings-section .label {
+  font-size: 0.65rem;
+  letter-spacing: 0.18em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+
+.invite-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.invite-row input.email { flex: 1; }
+
+.member-row {
+  display: grid;
+  grid-template-columns: 1fr 110px 30px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 0.78rem;
+}
+.member-row .email { color: var(--text-primary); }
+.member-row .role-tag {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+}
+.member-row .x {
+  color: var(--text-dim);
+  cursor: pointer;
+  text-align: center;
+}
+.member-row .x:hover { color: var(--danger); }
+
+.export-row { display: flex; gap: 8px; margin-top: 8px; }
+
+.agents-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+}
+.agents-table th {
+  text-align: left;
+  font-weight: 400;
+  color: var(--text-dim);
+  font-size: 0.62rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.agents-table td {
+  padding: 9px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+  vertical-align: middle;
+}
+.agents-table .session-avatar {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent-glow);
+  margin-right: 8px;
+}
+.agents-table .session-id { color: var(--text-primary); font-family: var(--font-mono); }
+.agents-table .actions { display: flex; gap: 6px; justify-content: flex-end; }
+.agents-table tr.muted .session-avatar { background: var(--text-dim); box-shadow: none; }
+
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+/* =================================================================
+   Trek detail page
+   ================================================================= */
+.crumb {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  margin-bottom: 18px;
+  cursor: pointer;
+}
+.crumb:hover { color: var(--accent); }
+
+.trek-head {
+  margin-bottom: 18px;
+}
+.trek-title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.trek-title {
+  font-size: 1.4rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.badge {
+  font-size: 0.6rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+.badge.persistent { color: var(--observing); border-color: var(--observing); }
+.badge.temporary { color: var(--info); border-color: var(--info); }
+.badge.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-glow);
+}
+.badge.archived { color: var(--text-dim); }
+.badge.paused { color: var(--warning); border-color: var(--warning); }
+
+.trek-stats {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
+.trek-meta {
+  display: grid;
+  grid-template-columns: 100px 1fr;
+  gap: 6px 14px;
+  font-size: 0.78rem;
+  margin: 14px 0 24px;
+}
+.trek-meta .k { color: var(--text-dim); }
+.trek-meta .v { color: var(--text-primary); }
+
+/* STOP card */
+.stop-card {
+  border: 1px solid var(--danger);
+  background: rgba(239,68,68,0.06);
+  border-radius: 6px;
+  padding: 20px;
+  margin-bottom: 18px;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+.stop-card .icon {
+  font-size: 1.8rem;
+}
+.stop-card .text {
+  flex: 1;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+.stop-card .text strong {
+  display: block;
+  color: var(--danger);
+  font-size: 0.9rem;
+  letter-spacing: 0.1em;
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+.stop-card button.stop {
+  background: var(--danger);
+  color: #0a0a0c;
+  border-color: var(--danger);
+  padding: 10px 24px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+}
+.stop-card button.stop:hover {
+  background: #ff5f5f;
+}
+
+.cli-hint {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  margin: 6px 0 22px;
+  padding-left: 8px;
+  border-left: 2px solid var(--border);
+  font-family: var(--font-mono);
+}
+.cli-hint code {
+  display: block;
+  color: var(--text-secondary);
+  padding: 1px 0;
+}
+
+.section-block {
+  margin: 24px 0;
+}
+.section-title {
+  font-size: 0.65rem;
+  letter-spacing: 0.2em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.section-title .right {
+  margin-left: auto;
+  font-size: 0.62rem;
+  color: var(--text-dim);
+  letter-spacing: 0.05em;
+}
+.section-title .link {
+  margin-left: auto;
+  font-size: 0.68rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+  letter-spacing: 0.04em;
+  text-transform: none;
+}
+.section-title .link:hover { color: var(--accent); }
+
+.scope-row,
+.member-row2,
+.claim-row,
+.activity-row,
+.summary-row {
+  display: grid;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 0.78rem;
+}
+.scope-row {
+  grid-template-columns: 24px 110px 80px 1fr 90px;
+}
+.scope-row .pin { color: var(--text-secondary); }
+.scope-row .proj-tag {
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+.scope-row .ref { color: var(--text-dim); font-family: var(--font-mono); font-size: 0.72rem; }
+.scope-row .desc { color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scope-row .pill {
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  text-align: right;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.scope-row .pill.active { color: var(--accent); }
+.scope-row .pill.observing { color: var(--observing); }
+
+.member-row2 {
+  grid-template-columns: 14px 1fr 80px 90px 130px;
+}
+.member-row2 .dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent-glow);
+}
+.member-row2.offline .dot {
+  background: var(--text-dim);
+  box-shadow: none;
+}
+.member-row2 .email { color: var(--text-primary); }
+.member-row2 .where { color: var(--text-dim); font-size: 0.7rem; }
+.member-row2 .role {
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.member-row2 .role.leader { color: var(--accent); }
+.member-row2 .joined { color: var(--text-dim); font-size: 0.7rem; text-align: right; }
+
+.claim-row {
+  grid-template-columns: 20px 110px 1fr auto;
+}
+.claim-row .lock { color: var(--warning); }
+.claim-row .target { color: var(--text-primary); }
+.claim-row .since { color: var(--text-dim); font-size: 0.72rem; }
+
+.activity-row {
+  grid-template-columns: 70px 1fr;
+}
+.activity-row .ts { color: var(--text-dim); font-size: 0.72rem; font-family: var(--font-mono); }
+.activity-row .desc { color: var(--text-primary); }
+
+.summary-row {
+  grid-template-columns: 30px 1fr auto;
+  cursor: pointer;
+}
+.summary-row:hover { background: var(--bg-hover); }
+.summary-row .ico { color: var(--text-secondary); }
+.summary-row .title { color: var(--text-primary); }
+.summary-row .date { color: var(--text-dim); font-size: 0.72rem; }
+
+</style>
+</head>
+<body>
+
+<!-- ============== MAIN VIEW ============== -->
+<div class="app view" data-view="main">
+  <aside class="sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-header"><span>MENU</span><span class="x">×</span></div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-header"><span>PROJECTS</span></div>
+      <div class="sidebar-item active">Beacon<span class="sub">beacon-b95643</span></div>
+      <div class="sidebar-item">beacon-test<span class="sub">beacon-test-7f54cb</span></div>
+      <div class="sidebar-item">Idle Wake Test<span class="sub">idle-wake-test-352f78</span></div>
+      <div class="sidebar-item">life-plan-simulator<span class="sub">life-plan-simulator-68c5df</span></div>
+      <div class="sidebar-item">profile-extractor<span class="sub">profile-extractor-27bd28</span></div>
+      <div class="sidebar-item">sales-script-builder<span class="sub">sales-script-builder-028bf3</span></div>
+      <div class="sidebar-item">test_beacon<span class="sub">test-beacon</span></div>
+      <div class="sidebar-item">TrailNode<span class="sub">trailnode-cd652b</span></div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-header"><span>TREKS</span></div>
+      <div class="sidebar-item" onclick="setView('trek')">Daily Operation A<span class="sub">tk-a1b2c3d4</span></div>
+      <div class="sidebar-item" onclick="setView('trek')">Cross Project Test A<span class="sub">tk-e5f6a7b8</span></div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-header"><span>ONLINE AGENTS</span></div>
+      <div class="sidebar-agent">
+        <span class="dot"></span>
+        <div>
+          <span class="agent-id">****-*****</span>
+          <span class="agent-where">kurogin23mech@gmail.com<br>Beacon</span>
+        </div>
+      </div>
+      <div class="sidebar-agent">
+        <span class="dot"></span>
+        <div>
+          <span class="agent-id">****-*****</span>
+          <span class="agent-where">kurogin23mech@gmail.com<br>TrailNode</span>
+        </div>
+      </div>
+      <div class="sidebar-agent">
+        <span class="dot"></span>
+        <div>
+          <span class="agent-id">****-*****</span>
+          <span class="agent-where">****@gmail.com<br>Beacon</span>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <span class="ham">☰</span>
+      <span class="brand">Beacon</span>
+      <span class="brand-sub">BEACON</span>
+      <span class="spacer"></span>
+      <button onclick="openSettings('members')">Settings</button>
+      <div class="avatar" onclick="toggleAccount()"></div>
+    </div>
+
+    <div class="account-menu" id="account-menu">
+      <div class="head">ACCOUNT</div>
+      <div class="email">kurogin23mech@gmail.com</div>
+      <div class="item">Admin</div>
+      <div class="item danger">Sign out</div>
+    </div>
+
+    <div class="content">
+      <div class="obj-block">
+        <div class="obj-label">OBJECTIVE</div>
+        <div class="obj-text">AI駆動開発においてマイルストーンベースのプロジェクト進捗を常時可視化し、開発者が方向性を見失わずに実装を進められるツールを構築する</div>
+      </div>
+
+      <div class="obj-block">
+        <div class="next-label">NEXT REVIEW</div>
+        <div class="next-text">2026-06-15 (monday)</div>
+      </div>
+
+      <input class="search" placeholder="Search everything: milestones, tasks, commits, documents, pushes, deploys...">
+
+      <div class="tabs">
+        <div class="tab active">Milestones</div>
+        <div class="tab">Documents</div>
+        <div class="tab">Releases</div>
+        <div class="tab">Operations</div>
+        <div class="tab">Session</div>
+      </div>
+
+      <div class="subtabs">
+        <span class="subtab">all</span>
+        <span class="subtab">todo</span>
+        <span class="subtab active">active</span>
+        <span class="subtab">observing</span>
+        <span class="subtab">waiting</span>
+        <span class="subtab">done</span>
+        <span class="subtab">cancelled</span>
+        <div class="right">
+          <span class="link">↑ ms-1 first</span>
+          <span class="link">Graph →</span>
+        </div>
+      </div>
+
+      <div class="ms-count">MILESTONES 1 active · 42/68 done</div>
+
+      <!-- todo row -->
+      <div class="ms-row">
+        <span class="status-icon todo"></span>
+        <span class="id">ms-38</span>
+        <span class="title">Beacon Desktop に統合ターミナル: 1アプリでCLI+Web UI並列表示</span>
+        <span class="ratio">1/1</span>
+        <div class="progress-bar"><div style="width:0%"></div></div>
+        <span class="pct">0%</span>
+      </div>
+
+      <!-- active row (ms-69 = Trek) -->
+      <div class="ms-row active">
+        <span class="status-icon active"></span>
+        <span class="id">ms-69</span>
+        <span class="title">Trek: 分散協奏のための作業領域 (cross-project / cross-session)</span>
+        <span class="ratio">2/12</span>
+        <div class="progress-bar"><div style="width:12%; background: var(--in-progress);"></div></div>
+        <span class="pct">12%</span>
+      </div>
+
+      <div class="ms-row">
+        <span class="status-icon todo"></span>
+        <span class="id">ms-55</span>
+        <span class="title">別セッション／マシンで動くエージェント同士が claim 交渉で半自律的に作業分担</span>
+        <span class="ratio">5/14</span>
+        <div class="progress-bar"><div style="width:36%; background:var(--text-dim);"></div></div>
+        <span class="pct">0%</span>
+      </div>
+
+      <div class="ms-row">
+        <span class="status-icon todo"></span>
+        <span class="id">ms-63</span>
+        <span class="title">Disclosure gate: 受信側応答の機密フィルタを project disclosure_policy × tier で構造防御</span>
+        <span class="ratio">1/11</span>
+        <div class="progress-bar"><div style="width:9%; background:var(--text-dim);"></div></div>
+        <span class="pct">0%</span>
+      </div>
+
+      <div class="ms-row">
+        <span class="status-icon todo"></span>
+        <span class="id">ms-68</span>
+        <span class="title">Beacon エントリの書き方を構造的に強制する</span>
+        <span class="ratio">1/7</span>
+        <div class="progress-bar"><div style="width:14%; background:var(--text-dim);"></div></div>
+        <span class="pct">0%</span>
+      </div>
+
+      <div class="footer">
+        <div class="pid">beacon-b95643</div>
+        <div class="motto">Where humans and AI are bound together.</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- ============== TREK DETAIL VIEW ============== -->
+<div class="app view" data-view="trek" style="display:none;">
+  <aside class="sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-header"><span>MENU</span><span class="x">×</span></div>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-header"><span>PROJECTS</span></div>
+      <div class="sidebar-item" onclick="setView('main')">Beacon<span class="sub">beacon-b95643</span></div>
+      <div class="sidebar-item">beacon-test<span class="sub">beacon-test-7f54cb</span></div>
+      <div class="sidebar-item">profile-extractor<span class="sub">profile-extractor-27bd28</span></div>
+      <div class="sidebar-item">TrailNode<span class="sub">trailnode-cd652b</span></div>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-header"><span>TREKS</span></div>
+      <div class="sidebar-item active">Daily Operation A<span class="sub">tk-a1b2c3d4</span></div>
+      <div class="sidebar-item">Cross Project Test A<span class="sub">tk-e5f6a7b8</span></div>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-header"><span>ONLINE AGENTS</span></div>
+      <div class="sidebar-agent">
+        <span class="dot"></span>
+        <div>
+          <span class="agent-id">****-*****</span>
+          <span class="agent-where">kurogin23mech@gmail.com<br>Beacon</span>
+        </div>
+      </div>
+      <div class="sidebar-agent">
+        <span class="dot"></span>
+        <div>
+          <span class="agent-id">****-*****</span>
+          <span class="agent-where">dolphin.orca@gmail.com<br>TrailNode</span>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <span class="ham">☰</span>
+      <span class="brand">Beacon</span>
+      <span class="brand-sub">BEACON</span>
+      <span class="spacer"></span>
+      <button onclick="openSettings('agents')">Settings</button>
+      <div class="avatar" onclick="toggleAccount()"></div>
+    </div>
+
+    <div class="content">
+      <div class="crumb" onclick="setView('main')">← Back to TREKS</div>
+
+      <div class="trek-head">
+        <div class="trek-title-row">
+          <span class="trek-title">Daily Operation A</span>
+          <span class="badge persistent">Persistent</span>
+          <span class="badge active">● Active</span>
+        </div>
+        <div class="trek-stats">4 projects · 6 work items · 3 active claims</div>
+      </div>
+
+      <div class="trek-meta">
+        <span class="k">Leader session</span>
+        <span class="v">
+          <span style="font-family:var(--font-mono); color:var(--accent);">sv-aa11-1716...-3f</span>
+          <span style="color:var(--text-dim); font-size:0.72rem; margin-left:8px;">
+            (kurogin23mech@gmail.com · Mac · since 09:30)
+          </span>
+        </span>
+        <span class="k">Created</span>
+        <span class="v">2026-05-13</span>
+        <span class="k">Last event</span>
+        <span class="v">09:32 (1分前)</span>
+      </div>
+
+      <!-- STOP card -->
+      <div class="stop-card">
+        <span class="icon">🚨</span>
+        <div class="text">
+          <strong>STOP THIS TREK</strong>
+          参加中の全 session が現在の tool call の手前で halt し、状態を保存します。
+          確認 dialog が出ます。再開は leader session に「再開」を指示すれば OK。
+        </div>
+        <button class="stop" onclick="alert('（確認 dialog → 全 session に STOP signal）')">STOP</button>
+      </div>
+
+      <!-- Archive (=完了 or 休眠) — STOPほど目立たない位置に -->
+      <div style="display:flex; align-items:center; gap:14px; padding: 8px 12px; margin-bottom:18px; font-size:0.75rem; color: var(--text-secondary); border: 1px solid var(--border); border-radius: 4px; background: var(--bg-surface);">
+        <span style="color: var(--text-dim);">📦</span>
+        <span style="flex:1;">この trek を <strong style="color:var(--text-primary)">archive</strong> する (= 一時 trek なら完了、永続 trek なら休眠)。記録は残り、参照は archive 後も可能。</span>
+        <button onclick="alert('（確認 dialog → archived 状態に遷移）')">Archive</button>
+      </div>
+
+      <!-- SCOPE -->
+      <div class="section-block">
+        <div class="section-title">
+          <span>SCOPE</span>
+          <span class="right">6 items</span>
+        </div>
+        <div class="scope-row">
+          <span class="pin">📌</span>
+          <span class="proj-tag">Beacon</span>
+          <span class="ref">ms-64</span>
+          <span class="desc">CLI/Skill 多バックエンド対応</span>
+          <span class="pill observing">◐ 92%</span>
+        </div>
+        <div class="scope-row">
+          <span class="pin">📌</span>
+          <span class="proj-tag">Beacon</span>
+          <span class="ref">op-2</span>
+          <span class="desc">envelope test suite</span>
+          <span class="pill active">● ACTIVE</span>
+        </div>
+        <div class="scope-row">
+          <span class="pin">📌</span>
+          <span class="proj-tag">PE</span>
+          <span class="ref">ms-3</span>
+          <span class="desc">プロファイル抽出パイプライン</span>
+          <span class="pill observing">◐ 60%</span>
+        </div>
+        <div class="scope-row">
+          <span class="pin">📌</span>
+          <span class="proj-tag">PE</span>
+          <span class="ref">op-12</span>
+          <span class="desc">nightly profile sync</span>
+          <span class="pill active">● ACTIVE</span>
+        </div>
+        <div class="scope-row">
+          <span class="pin">📌</span>
+          <span class="proj-tag">LPS</span>
+          <span class="ref">e-1234</span>
+          <span class="desc">タスク詳細</span>
+          <span class="pill">○ TODO</span>
+        </div>
+        <div class="scope-row">
+          <span class="pin">📌</span>
+          <span class="proj-tag">LPS</span>
+          <span class="ref">—</span>
+          <span class="desc">&lt;project 全体&gt;</span>
+          <span class="pill">—</span>
+        </div>
+        <div class="cli-hint">
+          追加・削除はターミナルから:
+          <code>beacon trek plan tk-a1b2c3d4 --add-scope pe-xxx:ms-3</code>
+        </div>
+      </div>
+
+      <!-- MEMBERS & SESSIONS -->
+      <div class="section-block">
+        <div class="section-title">
+          <span>MEMBERS &amp; SESSIONS</span>
+          <span class="right">3 members · 4 live sessions · ★ = leader</span>
+        </div>
+
+        <!-- Member 1 (kurogin) — has the leader session -->
+        <div class="member-row2">
+          <span class="dot"></span>
+          <div>
+            <span class="email">kurogin23mech@gmail.com</span>
+            <span class="where">2 live sessions</span>
+          </div>
+          <span class="role">Member</span>
+          <span class="joined" style="text-align:left;">live</span>
+          <span class="joined">joined 5/13</span>
+        </div>
+        <div style="margin-left:24px; border-left:1px solid var(--border-subtle); padding-left:12px;">
+          <div class="member-row2" style="grid-template-columns: 16px 1fr 80px 90px 130px; padding: 4px 0; border-bottom:none;">
+            <span style="color: var(--accent);">★</span>
+            <div>
+              <span class="email" style="font-family:var(--font-mono); font-size:0.74rem; color:var(--accent);">sv-aa11-1716...-3f</span>
+              <span class="where">Mac · since 09:30</span>
+            </div>
+            <span class="role leader">Leader</span>
+            <span class="joined" style="text-align:left;">live</span>
+            <span class="joined">—</span>
+          </div>
+          <div class="member-row2" style="grid-template-columns: 16px 1fr 80px 90px 130px; padding: 4px 0; border-bottom:none;">
+            <span style="color: var(--text-dim);">·</span>
+            <div>
+              <span class="email" style="font-family:var(--font-mono); font-size:0.74rem;">sv-bb22-1716...-7c</span>
+              <span class="where">TrailNode 兼任 · since 08:50</span>
+            </div>
+            <span class="role">—</span>
+            <span class="joined" style="text-align:left;">live</span>
+            <span class="joined">—</span>
+          </div>
+        </div>
+
+        <!-- Member 2 (dolphin) -->
+        <div class="member-row2">
+          <span class="dot"></span>
+          <div>
+            <span class="email">dolphin.orca@gmail.com</span>
+            <span class="where">1 live session</span>
+          </div>
+          <span class="role">Member</span>
+          <span class="joined" style="text-align:left;">live</span>
+          <span class="joined">joined 5/14</span>
+        </div>
+        <div style="margin-left:24px; border-left:1px solid var(--border-subtle); padding-left:12px;">
+          <div class="member-row2" style="grid-template-columns: 16px 1fr 80px 90px 130px; padding: 4px 0; border-bottom:none;">
+            <span style="color: var(--text-dim);">·</span>
+            <div>
+              <span class="email" style="font-family:var(--font-mono); font-size:0.74rem;">sv-cc33-1716...-9d</span>
+              <span class="where">Mac · since 08:55</span>
+            </div>
+            <span class="role">—</span>
+            <span class="joined" style="text-align:left;">live</span>
+            <span class="joined">—</span>
+          </div>
+        </div>
+
+        <!-- Member 3 (agent-bot) — offline -->
+        <div class="member-row2 offline">
+          <span class="dot"></span>
+          <div>
+            <span class="email">agent-bot</span>
+            <span class="where">0 live sessions</span>
+          </div>
+          <span class="role">Member</span>
+          <span class="joined" style="text-align:left;">offline</span>
+          <span class="joined">joined 5/20</span>
+        </div>
+        <div style="margin-left:24px; border-left:1px solid var(--border-subtle); padding-left:12px;">
+          <div class="member-row2 offline" style="grid-template-columns: 16px 1fr 80px 90px 130px; padding: 4px 0; border-bottom:none;">
+            <span style="color: var(--text-dim);">·</span>
+            <div>
+              <span class="email" style="font-family:var(--font-mono); font-size:0.74rem; color:var(--text-dim);">sv-dd44-1715...-1a</span>
+              <span class="where">Lambda · last seen 昨日 23:01</span>
+            </div>
+            <span class="role">—</span>
+            <span class="joined" style="text-align:left;">offline</span>
+            <span class="joined">—</span>
+          </div>
+        </div>
+
+        <div class="cli-hint">
+          招待・離脱・リーダー譲渡はターミナルから:
+          <code>beacon trek invite tk-a1b2c3d4 --actor dolphin.orca@gmail.com</code>
+          <code>beacon trek transfer-leader tk-a1b2c3d4 --to sv-bb22-1716...-7c</code>
+        </div>
+      </div>
+
+      <!-- ACTIVE CLAIMS -->
+      <div class="section-block">
+        <div class="section-title">
+          <span>ACTIVE CLAIMS</span>
+          <span class="right">real-time · 3 active</span>
+        </div>
+        <div class="claim-row">
+          <span class="lock">🔒</span>
+          <span class="ref">ms-64 e-1631</span>
+          <span class="target">operations.py 移植 — kurogin@... が claim</span>
+          <span class="since">since 09:30</span>
+        </div>
+        <div class="claim-row">
+          <span class="lock">🔒</span>
+          <span class="ref">op-12</span>
+          <span class="target">nightly profile sync — agent-bot が claim</span>
+          <span class="since">since 08:00</span>
+        </div>
+        <div class="claim-row">
+          <span class="lock">🔒</span>
+          <span class="ref">ms-3 e-1188</span>
+          <span class="target">プロファイル正規化 — dolphin.orca@... が claim</span>
+          <span class="since">since 08:55</span>
+        </div>
+      </div>
+
+      <!-- RECENT ACTIVITY -->
+      <div class="section-block">
+        <div class="section-title">
+          <span>RECENT ACTIVITY</span>
+          <span class="link">View all →</span>
+        </div>
+        <div class="activity-row">
+          <span class="ts">09:32</span>
+          <span class="desc">e-1631 (= ms-64 残: operations.py 移植) を kurogin が claim</span>
+        </div>
+        <div class="activity-row">
+          <span class="ts">09:01</span>
+          <span class="desc">agent-bot が op-12 run record を保存 (ok)</span>
+        </div>
+        <div class="activity-row">
+          <span class="ts">08:50</span>
+          <span class="desc">dolphin.orca@... が trek に join</span>
+        </div>
+        <div class="activity-row">
+          <span class="ts">08:00</span>
+          <span class="desc">agent-bot が op-12 を claim</span>
+        </div>
+        <div class="activity-row">
+          <span class="ts">07:30</span>
+          <span class="desc">STOP signal recovered (= 昨日 23:14 の stop が解除)</span>
+        </div>
+      </div>
+
+      <!-- SUMMARIES -->
+      <div class="section-block">
+        <div class="section-title">
+          <span>SUMMARIES</span>
+          <span class="right">trek 配下に永続保存・archive 後も残る</span>
+        </div>
+        <div class="summary-row">
+          <span class="ico">📄</span>
+          <div>
+            <span class="title">Activity log (cumulative)</span>
+            <span class="date" style="display:block; font-size:0.7rem;">自動更新</span>
+          </div>
+          <span class="date">→</span>
+        </div>
+        <div class="summary-row">
+          <span class="ico">📄</span>
+          <div>
+            <span class="title">Morning briefing</span>
+            <span class="date" style="display:block; font-size:0.7rem;">朝の総括 — 2026-06-14</span>
+          </div>
+          <span class="date">today</span>
+        </div>
+        <div class="summary-row">
+          <span class="ico">📄</span>
+          <div>
+            <span class="title">Morning briefing</span>
+            <span class="date" style="display:block; font-size:0.7rem;">朝の総括 — 2026-06-13</span>
+          </div>
+          <span class="date">1日前</span>
+        </div>
+        <div class="summary-row">
+          <span class="ico">📄</span>
+          <div>
+            <span class="title">Weekly summary</span>
+            <span class="date" style="display:block; font-size:0.7rem;">週次振り返り — 2026-W23</span>
+          </div>
+          <span class="date">先週</span>
+        </div>
+        <div class="cli-hint">
+          サマリー生成は自動定期 (daily / weekly cron) + ターミナル:
+          <code>beacon morning --trek tk-a1b2c3d4</code>
+          <code>beacon trek summary tk-a1b2c3d4 --period weekly</code>
+        </div>
+      </div>
+
+      <div class="footer">
+        <div class="pid">tk-a1b2c3d4 · Daily Operation A</div>
+        <div class="motto">Where humans and AI converge around shared work.</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- ============== SETTINGS OVERLAY ============== -->
+<div class="overlay" id="settings-overlay">
+  <div class="settings-panel">
+    <div class="settings-head">
+      <div class="brand-block">
+        <span style="font-size:1rem;">☰</span> Beacon <span class="label">Settings</span>
+      </div>
+      <span class="spacer"></span>
+      <button class="ghost" onclick="closeSettings()">×</button>
+    </div>
+
+    <div class="settings-tabs">
+      <div class="tab" id="tab-members" onclick="showSettingsTab('members')">Projects &amp; Members</div>
+      <div class="tab" id="tab-agents" onclick="showSettingsTab('agents')">Agents &amp; Treks</div>
+    </div>
+
+    <!-- PROJECTS & MEMBERS -->
+    <div id="pane-members">
+      <div class="settings-section">
+        <div class="label">Project</div>
+        <select>
+          <option>Beacon (beacon-b95643)</option>
+          <option>beacon-test</option>
+          <option>TrailNode</option>
+        </select>
+      </div>
+
+      <div class="settings-section">
+        <div class="label">Members</div>
+        <div class="invite-row">
+          <input class="email" placeholder="email">
+          <select><option>viewer</option><option>editor</option><option>owner</option></select>
+          <button class="primary">Invite</button>
+        </div>
+
+        <div class="member-row">
+          <span class="email">kurogin23mech@gmail.com</span>
+          <span class="role-tag">owner</span>
+          <span class="x">×</span>
+        </div>
+        <div class="member-row">
+          <span class="email">dolphin.orca@gmail.com</span>
+          <select style="width:100px;"><option>editor</option><option>viewer</option><option>owner</option></select>
+          <span class="x">×</span>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="label">Export &amp; Archive</div>
+        <div class="export-row">
+          <button>Archive</button>
+          <button>Export JSON</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- AGENTS & TREKS -->
+    <div id="pane-agents" style="display:none;">
+      <div class="settings-section">
+        <div class="label" style="margin-bottom:4px;">現在オンライン (DM 可能) な自分のセッション</div>
+        <div style="font-size:0.7rem; color: var(--text-dim); margin-bottom: 14px;">
+          従事している Trek で絞り込み、Trek から離脱もできる
+        </div>
+
+        <div class="filter-row">
+          <select style="width:140px;">
+            <option>All</option>
+            <option>Trek A — Daily Operation A</option>
+            <option>Trek B — Cross Project Test A</option>
+            <option>Trek C</option>
+          </select>
+        </div>
+
+        <table class="agents-table">
+          <thead>
+            <tr>
+              <th style="width:30%">Session</th>
+              <th>Project</th>
+              <th>Trek</th>
+              <th>Started</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><span class="session-avatar"></span><span class="session-id">sv-aa11-1716...-3f</span></td>
+              <td>Beacon</td>
+              <td>—</td>
+              <td>26/06/14 09:12</td>
+              <td class="actions"><button class="danger">cutting</button></td>
+            </tr>
+            <tr>
+              <td><span class="session-avatar"></span><span class="session-id">sv-bb22-1716...-7c</span></td>
+              <td>TrailNode</td>
+              <td>Daily Operation A</td>
+              <td>26/06/14 08:50</td>
+              <td class="actions">
+                <button class="danger">cutting</button>
+                <button>Exit Trek</button>
+              </td>
+            </tr>
+            <tr>
+              <td><span class="session-avatar"></span><span class="session-id">sv-cc33-1716...-9d</span></td>
+              <td>profile-extractor</td>
+              <td>Cross Project Test A</td>
+              <td>26/06/14 06:30</td>
+              <td class="actions">
+                <button class="danger">cutting</button>
+                <button>Exit Trek</button>
+              </td>
+            </tr>
+            <tr class="muted">
+              <td><span class="session-avatar"></span><span class="session-id" style="color: var(--text-dim);">sv-dd44-1716...-1a</span></td>
+              <td style="color:var(--text-dim);">life-plan-simulator</td>
+              <td style="color:var(--text-dim);">Daily Operation A</td>
+              <td style="color:var(--text-dim);">26/06/13 23:01 (offline)</td>
+              <td class="actions"><button class="ghost">Exit Trek</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- View switcher (mock-only) -->
+<div class="view-switcher">
+  <span class="label">VIEW:</span>
+  <button id="vw-main" class="active" onclick="setView('main')">Main</button>
+  <button id="vw-trek" onclick="setView('trek')">Trek detail</button>
+  <button id="vw-members" onclick="setView('main'); openSettings('members')">Settings · Members</button>
+  <button id="vw-agents" onclick="setView('main'); openSettings('agents')">Settings · Agents</button>
+</div>
+
+<script>
+function setView(name) {
+  document.querySelectorAll('.view').forEach(v => v.style.display = (v.dataset.view === name) ? 'grid' : 'none');
+  document.querySelectorAll('.view-switcher button').forEach(b => b.classList.remove('active'));
+  const map = {main:'vw-main', trek:'vw-trek'};
+  if (map[name]) document.getElementById(map[name]).classList.add('active');
+  closeSettings();
+}
+function openSettings(tab) {
+  document.getElementById('settings-overlay').classList.add('open');
+  showSettingsTab(tab || 'members');
+}
+function closeSettings() {
+  document.getElementById('settings-overlay').classList.remove('open');
+}
+function showSettingsTab(name) {
+  document.getElementById('tab-members').classList.toggle('active', name === 'members');
+  document.getElementById('tab-agents').classList.toggle('active', name === 'agents');
+  document.getElementById('pane-members').style.display = (name === 'members') ? '' : 'none';
+  document.getElementById('pane-agents').style.display = (name === 'agents') ? '' : 'none';
+}
+function toggleAccount() {
+  document.getElementById('account-menu').classList.toggle('open');
+}
+document.addEventListener('click', (e) => {
+  // close account menu when clicking outside
+  const menu = document.getElementById('account-menu');
+  if (!menu.contains(e.target) && !e.target.classList.contains('avatar')) {
+    menu.classList.remove('open');
+  }
+  // close settings via backdrop
+  if (e.target.id === 'settings-overlay') closeSettings();
+});
+</script>
+
+</body>
+</html>
