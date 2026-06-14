@@ -9482,6 +9482,7 @@ def cmd_help_json():
         {"command": "beacon doc list", "flags": ["--json", "--scope <scope>", "--ms <id>"], "description": "List documents"},
         {"command": "beacon doc show <doc-id>", "flags": [], "description": "Show document content"},
         {"command": "beacon doc update <doc-id>", "flags": ["--content <text>", "--stdin"], "description": "Update document content"},
+        {"command": "beacon doc image-upload <local-file>", "flags": ["--json"], "description": "Upload image, get markdown img tag"},
         {"command": "beacon pr add", "flags": ["-m <ms-id>", "--url <url>", "--intent <text>"], "description": "Record a PR entry"},
         {"command": "beacon pr approve <entry-id>", "flags": [], "description": "Approve a PR"},
         {"command": "beacon pr reject <entry-id>", "flags": [], "description": "Reject a PR"},

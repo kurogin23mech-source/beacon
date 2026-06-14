@@ -65,6 +65,7 @@ Documents:
   beacon doc show <doc-id>                         Show document content
   beacon doc update <doc-id>                       Update a document
   beacon doc delete <doc-id>                       Delete a document
+  beacon doc image-upload <local-file>             Upload image, get markdown img tag
   (doc add / doc update support --bus-origin to refuse bus-derived
    writes — persistence poisoning defense, ms-54 / e-1293)
 
