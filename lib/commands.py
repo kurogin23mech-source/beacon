@@ -12840,9 +12840,109 @@ def cmd_claim_release():
     print(f"  event_id: {event.get('event_id', '?')}")
 
 
+def _morning_save_briefing_doc(briefing_text: str, briefing) -> dict:
+    """Save the morning briefing as a `scope=report` doc (ms-55 e-1733).
+
+    Lets the user re-read past briefings via Web UI Documents tab (or
+    `beacon doc show`) without having to scroll terminal history. The
+    daily cadence makes each briefing a small artifact worth preserving.
+
+    Title is ISO-prefixed for chronological listing. Body is the rendered
+    text wrapped in a code fence + a one-line meta header so the doc
+    stands alone as a search target.
+
+    Returns {"status": "saved", "doc_id": ..., "title": ...} or
+    {"status": "error", "error": ...}. Failures are non-fatal — the
+    terminal briefing already printed.
+    """
+    from datetime import datetime as _dt, timezone as _tz  # noqa: PLC0415
+    import datetime as _datetime  # noqa: PLC0415
+
+    now = _dt.now(_tz.utc)
+    iso_min = now.strftime("%Y-%m-%dT%H:%M")
+    title = f"morning briefing {iso_min}Z"
+
+    counts = briefing.counts or {}
+    summary_bits = []
+    for b in ("completed", "halted", "skipped", "needs_attention"):
+        summary_bits.append(f"{b}={counts.get(b, 0)}")
+    meta_line = (
+        f"window: {briefing.since or '(start)'} → {briefing.until or '(now)'}  "
+        f"counts: {' / '.join(summary_bits)}"
+    )
+
+    body = (
+        f"# morning briefing — {iso_min}Z\n\n"
+        f"{meta_line}\n\n"
+        f"```\n{briefing_text.rstrip()}\n```\n"
+    )
+
+    scope = "report"
+
+    try:
+        # Frontmatter aligns with cmd_doc_add so Web UI / list filters
+        # recognise the scope = report tag.
+        content = _add_frontmatter(body, scope, "", "", "")
+    except Exception as e:
+        return {"status": "error", "error": f"frontmatter: {e}"}
+
+    today_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        if _is_cloud_mode():
+            client, config = _get_api_client()
+            result = client.create_document(
+                config["project_id"], title, content,
+            )
+            doc_id = result["doc_id"]
+        else:
+            docs_dir = _get_docs_dir()
+            os.makedirs(docs_dir, exist_ok=True)
+            # Slug + minute resolution → collision-free across the day
+            # while still distinguishable. Adds an "-Z" suffix to
+            # mirror the title's UTC marker.
+            slug = _doc_slug(f"morning-briefing-{iso_min}-Z")
+            doc_id = slug
+            fpath = os.path.join(docs_dir, f"{doc_id}.md")
+            with open(fpath, "w", encoding="utf-8") as f:
+                f.write(content)
+    except Exception as e:
+        return {"status": "error", "error": f"persist: {e}"}
+
+    # Record an MS entry pointing at the saved doc — same shape as
+    # cmd_doc_add (= source=auto, revision_id=doc_id) so the briefing
+    # appears in the active MS timeline. Failures are non-fatal.
+    try:
+        import operations as _ops  # noqa: PLC0415
+
+        def op(d):
+            return d, core.save_entry(
+                d, ms_id="",
+                description=f"doc add: {title} ({scope})",
+                source="auto", date=today_iso,
+                revision_id=doc_id,
+            )
+        project_id = _project_id_for_ops()
+        _ops.apply_operation(
+            project_id, op,
+            op_name="morning.briefing_doc",
+            reason="morning briefing snapshot",
+        )
+    except Exception as e:
+        # The doc itself was written — we just couldn't link it from
+        # the MS timeline. Surface as warning only.
+        return {
+            "status": "saved",
+            "doc_id": doc_id,
+            "title": title,
+            "warning": f"could not link to MS timeline: {e}",
+        }
+
+    return {"status": "saved", "doc_id": doc_id, "title": title}
+
+
 def cmd_morning():
-    """beacon morning (ms-55 e-1650): 4-category summary of recent
-    autonomous activity.
+    """beacon morning (ms-55 e-1650 / e-1733): 4-category summary of recent
+    autonomous activity, plus auto-save as a report doc.
 
     Reads events from the bus (channels: stop-signal + claim-signal)
     over a window (default = last 12 hours) and buckets them as:
@@ -12852,10 +12952,15 @@ def cmd_morning():
       ✗ Skip:               claim releases with outcome=abandoned
       ⏱ 介入要望 (Needs attention): STUCK signals (= idle timeout)
 
+    The briefing is also persisted as a `scope=report` doc so the user
+    can re-read past briefings via Web UI Documents tab. Skip the save
+    with BEACON_MORNING_NO_DOC=1 (= --no-doc).
+
     Env:
       BEACON_MORNING_SINCE_HOURS  default 12
       BEACON_MORNING_EVENTS_FILE  optional path to a JSON array of
                                   events (= testing / replay path)
+      BEACON_MORNING_NO_DOC       "1" → skip the report doc save (e-1733)
       BEACON_JSON                 "1" → JSON output
     """
     from datetime import datetime as _dt, timezone as _tz, timedelta as _td
@@ -12930,6 +13035,14 @@ def cmd_morning():
                 events.extend(batch)
 
     briefing = _morning.build_briefing(events, since=since, until=now)
+    briefing_text = _morning.render_briefing(briefing)
+
+    # ms-55 e-1733: save the briefing as a `scope=report` doc so the
+    # user can re-read past briefings from the Web UI Documents tab
+    # (or via `beacon doc show`). Opt out with --no-doc.
+    record_info: Optional[dict] = None
+    if os.environ.get("BEACON_MORNING_NO_DOC", "") != "1":
+        record_info = _morning_save_briefing_doc(briefing_text, briefing)
 
     if json_mode:
         out = {
@@ -12948,10 +13061,28 @@ def cmd_morning():
                 for e in briefing.entries
             ],
         }
+        if record_info is not None:
+            out["doc"] = record_info
         print(json.dumps(out, ensure_ascii=False))
         return
 
-    print(_morning.render_briefing(briefing), end="")
+    print(briefing_text, end="")
+    if record_info is not None:
+        if record_info.get("status") == "saved":
+            warn = record_info.get("warning")
+            line = (
+                f"\nSaved briefing as doc: {record_info.get('doc_id', '?')} "
+                f"({record_info.get('title', '?')})"
+            )
+            print(line)
+            if warn:
+                print(f"  warning: {warn}", file=sys.stderr)
+        elif record_info.get("status") == "error":
+            print(
+                f"\nWarning: could not save briefing doc: "
+                f"{record_info.get('error', 'unknown')}",
+                file=sys.stderr,
+            )
 
 
 def cmd_stuck_check():

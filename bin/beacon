@@ -3127,14 +3127,16 @@ EOF
         _morning_since=""
         _morning_file=""
         _morning_json=""
+        _morning_no_doc=""
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 --since-hours) _morning_since="${2:-}"; shift 2 ;;
                 --events-file) _morning_file="${2:-}"; shift 2 ;;
                 --json)        _morning_json="1"; shift ;;
+                --no-doc)      _morning_no_doc="1"; shift ;;
                 -h|--help)
                     cat <<'EOF'
-Usage: beacon morning [--since-hours N] [--events-file <path>] [--json]
+Usage: beacon morning [--since-hours N] [--events-file <path>] [--json] [--no-doc]
 
 Read recent activity on the stop-signal + claim-signal channels and
 render a 4-bucket morning briefing:
@@ -3149,6 +3151,8 @@ Flags:
   --events-file PATH    skip the bus query and read events from a JSON
                         array file (= replay / offline / dogfood mode)
   --json                machine-readable output
+  --no-doc              do not persist the briefing as a `report` doc
+                        (default: save so it shows up in Web UI)
 EOF
                     exit 0
                     ;;
@@ -3158,6 +3162,7 @@ EOF
         BEACON_MORNING_SINCE_HOURS="${_morning_since:-12}" \
             BEACON_MORNING_EVENTS_FILE="$_morning_file" \
             BEACON_JSON="$_morning_json" \
+            BEACON_MORNING_NO_DOC="$_morning_no_doc" \
             python3 "$COMMANDS_PY" morning
         ;;
     stuck)
