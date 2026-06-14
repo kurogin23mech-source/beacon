@@ -76,3 +76,18 @@ Proposals should feel like "What if we tried X?" — not directives.
 | `beacon note "text"` | Add session note (ephemeral, cleared at session-end) / セッションメモ追加 |
 | `beacon note list` | Show session notes / メモ一覧 |
 | `beacon note clear` | Clear all session notes / メモ全削除 |
+
+<!-- BEACON_ENTRY_WRITING_PRINCIPLE -->
+### Entry Writing Principle / エントリ記述原則
+
+When writing task / spec / doc entries (`description` / `motivation` / `acceptance_criteria`), follow these 4 principles. Beacon's readers include non-developers — the principles apply to all forward-going writes.
+タスク・SPEC・ドキュメントを書くとき、以下 4 原則を守る。Beacon の読み手には非開発者が含まれるため、新しく書く全エントリに適用する。
+
+1. **Reader-first 1-line description / 読み手目線 1 行**: `description` は「何が嬉しいか」をユーザーの言葉で 1 行。実装手段は含めない。
+2. **3-tier loanword policy / 横文字 3 段階**: 固有名詞 (`Firestore` / `MCP`) はそのまま、技術概念 (`allowlist` / `opt-in`) は初出時に「(= 許可リスト)」のような日本語注、一般概念 (configure / receiver / audit) は日本語化。
+3. **ID references with context / ID 参照に文脈**: `e-XXXX` / `ms-XX` / `UC?` の初出には必ず「(何の話か)」を 1 行添える。click-through 前提にしない。
+4. **No truncated sentences / 尻切れトンボ禁止**: 主語・述語・論理関係を省略しない。開発者は文脈で補えるが非開発者は補えない。
+
+Full principle and examples: `beacon doc show F3ZkqT0pKS6JpR8dn70n` (CORE doc `entry-writing-principle`).
+原則の全文と実例: `beacon doc show F3ZkqT0pKS6JpR8dn70n` (CORE doc `entry-writing-principle`)。
+<!-- /BEACON_ENTRY_WRITING_PRINCIPLE -->
