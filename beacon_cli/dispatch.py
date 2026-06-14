@@ -836,6 +836,126 @@ def build_parser() -> argparse.ArgumentParser:
     channel_sub = p_channel.add_subparsers(dest="channel_cmd", metavar="<subcmd>")
     channel_sub.add_parser("install", add_help=False)
 
+    # ---- ms-55 coordination signals (e-1735) ----
+    # Win parity for the 6 ms-55 verbs (stop / resume / rollback / claim /
+    # stuck / morning). Each subparser mirrors bin/beacon's env layout
+    # so the same commands.py subcommand runs end-to-end. Without this,
+    # Windows pipx users hit `argparse invalid choice` for everything in
+    # the 走る / 止まる両輪 surface.
+
+    # `beacon stop scoped|global|status` (ms-55 e-1646).
+    p_stop = sub.add_parser("stop", help="Broadcast STOP signal (Andon cord)", add_help=False)
+    p_stop.add_argument("--help", "-h", action="store_true", dest="show_help")
+    stop_sub = p_stop.add_subparsers(dest="stop_cmd", metavar="<subcmd>")
+    p_stop_scoped = stop_sub.add_parser("scoped", add_help=False)
+    p_stop_scoped.add_argument("--target", default="")
+    p_stop_scoped.add_argument("--reason", default="")
+    p_stop_scoped.add_argument("--reason-kind", dest="reason_kind", default="")
+    p_stop_scoped.add_argument("--machine-reason", dest="machine_reason", default="")
+    p_stop_scoped.add_argument("--json", action="store_true")
+    p_stop_global = stop_sub.add_parser("global", add_help=False)
+    p_stop_global.add_argument("--reason", default="")
+    p_stop_global.add_argument("--reason-kind", dest="reason_kind", default="")
+    p_stop_global.add_argument("--machine-reason", dest="machine_reason", default="")
+    p_stop_global.add_argument("--json", action="store_true")
+    p_stop_status = stop_sub.add_parser("status", add_help=False)
+    p_stop_status.add_argument("--json", action="store_true")
+
+    # `beacon resume scoped|global` (paired with stop).
+    p_resume = sub.add_parser("resume", help="Clear a STOP signal", add_help=False)
+    p_resume.add_argument("--help", "-h", action="store_true", dest="show_help")
+    resume_sub = p_resume.add_subparsers(dest="resume_cmd", metavar="<subcmd>")
+    p_resume_scoped = resume_sub.add_parser("scoped", add_help=False)
+    p_resume_scoped.add_argument("--target", default="")
+    p_resume_scoped.add_argument("--reason", default="")
+    p_resume_scoped.add_argument("--json", action="store_true")
+    p_resume_global = resume_sub.add_parser("global", add_help=False)
+    p_resume_global.add_argument("--reason", default="")
+    p_resume_global.add_argument("--json", action="store_true")
+
+    # `beacon rollback` (ms-55 e-1647).
+    p_rollback = sub.add_parser(
+        "rollback", help="Safe-boundary rollback (e-1647)", add_help=False,
+    )
+    p_rollback.add_argument("--help", "-h", action="store_true", dest="show_help")
+    p_rollback.add_argument("--commits", default="0")
+    p_rollback.add_argument("--reason", default="")
+    p_rollback.add_argument("--dry-run", dest="dry_run", action="store_true")
+    p_rollback.add_argument(
+        "--no-record", dest="no_record", action="store_true",
+    )
+    p_rollback.add_argument("--json", action="store_true")
+
+    # `beacon claim ...` (ms-55 e-1648).
+    p_claim = sub.add_parser("claim", help="Claim primitives", add_help=False)
+    p_claim.add_argument("--help", "-h", action="store_true", dest="show_help")
+    claim_sub = p_claim.add_subparsers(dest="claim_cmd", metavar="<subcmd>")
+    # request / handoff / post share argument shape; only the bash side
+    # name maps to a different commands.py verb (claim_request /
+    # claim_handoff / claim_post).
+    # Loop var must NOT be named `p` — that would shadow the top-level
+    # parser captured at the top of build_parser() and `return p` at the
+    # bottom would silently return claim_sub's last child instead.
+    for _cs in ("request", "handoff", "post"):
+        _pc = claim_sub.add_parser(_cs, add_help=False)
+        _pc.add_argument("--target", default="")
+        _pc.add_argument("--intent", default="")
+        _pc.add_argument("--to", default="")
+        _pc.add_argument("--expires-at", dest="expires_at", default="")
+        _pc.add_argument("--json", action="store_true")
+    p_claim_respond = claim_sub.add_parser("respond", add_help=False)
+    p_claim_respond.add_argument("claim_id", nargs="?", default="")
+    p_claim_respond.add_argument("--accept", action="store_true")
+    p_claim_respond.add_argument("--decline", action="store_true")
+    p_claim_respond.add_argument("--reason", default="")
+    p_claim_respond.add_argument("--json", action="store_true")
+    p_claim_release = claim_sub.add_parser("release", add_help=False)
+    p_claim_release.add_argument("claim_id", nargs="?", default="")
+    p_claim_release.add_argument("--outcome", default="")
+    p_claim_release.add_argument("--reason", default="")
+    p_claim_release.add_argument("--json", action="store_true")
+    p_claim_list = claim_sub.add_parser("list", aliases=["ls"], add_help=False)
+    p_claim_list.add_argument("--mine", action="store_true")
+    p_claim_list.add_argument("--target", default="")
+    p_claim_list.add_argument("--json", action="store_true")
+
+    # `beacon stuck check` (ms-55 e-1649).
+    p_stuck = sub.add_parser(
+        "stuck", help="STUCK signal detector", add_help=False,
+    )
+    p_stuck.add_argument("--help", "-h", action="store_true", dest="show_help")
+    stuck_sub = p_stuck.add_subparsers(dest="stuck_cmd", metavar="<subcmd>")
+    p_stuck_check = stuck_sub.add_parser("check", add_help=False)
+    p_stuck_check.add_argument(
+        "--telemetry-inline", dest="telemetry_inline", default="",
+    )
+    p_stuck_check.add_argument(
+        "--telemetry-file", dest="telemetry_file", default="",
+    )
+    p_stuck_check.add_argument(
+        "--timeout-minutes", dest="timeout_minutes", default="",
+    )
+    p_stuck_check.add_argument(
+        "--dry-run", dest="dry_run", action="store_true",
+    )
+    p_stuck_check.add_argument("--json", action="store_true")
+
+    # `beacon morning` (ms-55 e-1650 + e-1733 --no-doc).
+    p_morning = sub.add_parser(
+        "morning", help="Overnight briefing", add_help=False,
+    )
+    p_morning.add_argument("--help", "-h", action="store_true", dest="show_help")
+    p_morning.add_argument(
+        "--since-hours", dest="since_hours", default="",
+    )
+    p_morning.add_argument(
+        "--events-file", dest="events_file", default="",
+    )
+    p_morning.add_argument(
+        "--no-doc", dest="no_doc", action="store_true",
+    )
+    p_morning.add_argument("--json", action="store_true")
+
     # ---- monitor (ms-44 e-854) ----
     # `beacon monitor context` invokes the Stop hook context-usage monitor on
     # the current cwd's transcript payload, mirroring the bash entrypoint
@@ -2492,6 +2612,228 @@ def _handle_channel(root: Path, args: argparse.Namespace) -> int:
     return _run_commands_py(root, "channel_install", {})
 
 
+# ---------------------------------------------------------------------------
+# ms-55 coordination signal handlers (e-1735) — Win parity for the 6 new
+# verbs (stop / resume / rollback / claim / stuck / morning). The bash side
+# is the source of truth for argv → env shape; each handler replays the
+# same translation a Bash dispatcher would do, then delegates to the
+# matching commands.py subcommand. Lib modules (stop_signal / rollback /
+# claims / stuck_detect / morning) are pure-Python, so the underlying
+# logic runs identically on Windows pipx — we only need to bridge argv.
+# ---------------------------------------------------------------------------
+
+def _split_target(target: str) -> tuple[str, str]:
+    """Split `<kind>:<id>` into (kind, id). Empty string → empty tuple."""
+    if not target:
+        return "", ""
+    if ":" not in target:
+        return target, target  # mirrored bash bug-shape; CLI catches it
+    k, _, i = target.partition(":")
+    return k, i
+
+
+def _handle_stop(root: Path, args: argparse.Namespace) -> int:
+    """`beacon stop scoped|global|status` (ms-55 e-1646)."""
+    if args.show_help or getattr(args, "stop_cmd", None) is None:
+        print(
+            "Usage: beacon stop scoped --target <kind>:<id> [--reason \"...\"] "
+            "[--reason-kind X] [--machine-reason '<json>'] [--json]"
+        )
+        print(
+            "       beacon stop global [--reason \"...\"] "
+            "[--reason-kind X] [--machine-reason '<json>'] [--json]"
+        )
+        print("       beacon stop status [--json]")
+        return 0 if args.show_help else 2
+
+    if args.stop_cmd == "scoped":
+        kind, sid = _split_target(getattr(args, "target", "") or "")
+        if getattr(args, "target", "") and ":" not in args.target:
+            _eprint("Error: --target must be <kind>:<id> (e.g. ms:ms-55)")
+            return 1
+        return _run_commands_py(root, "stop_scoped", {
+            "BEACON_STOP_TARGET_KIND": kind,
+            "BEACON_STOP_TARGET_ID": sid,
+            "BEACON_STOP_REASON": getattr(args, "reason", "") or "",
+            "BEACON_STOP_REASON_KIND": getattr(args, "reason_kind", "") or "",
+            "BEACON_STOP_MACHINE_REASON": getattr(args, "machine_reason", "") or "",
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        })
+    if args.stop_cmd == "global":
+        return _run_commands_py(root, "stop_global", {
+            "BEACON_STOP_REASON": getattr(args, "reason", "") or "",
+            "BEACON_STOP_REASON_KIND": getattr(args, "reason_kind", "") or "",
+            "BEACON_STOP_MACHINE_REASON": getattr(args, "machine_reason", "") or "",
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        })
+    if args.stop_cmd == "status":
+        return _run_commands_py(root, "stop_status", {
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        })
+    _eprint(f"Unknown stop subcommand: {args.stop_cmd}")
+    return 2
+
+
+def _handle_resume(root: Path, args: argparse.Namespace) -> int:
+    """`beacon resume scoped|global` (ms-55 e-1646 / paired with stop)."""
+    if args.show_help or getattr(args, "resume_cmd", None) is None:
+        print(
+            "Usage: beacon resume scoped --target <kind>:<id> [--reason \"...\"] [--json]"
+        )
+        print("       beacon resume global [--reason \"...\"] [--json]")
+        return 0 if args.show_help else 2
+
+    if args.resume_cmd == "scoped":
+        kind, sid = _split_target(getattr(args, "target", "") or "")
+        if getattr(args, "target", "") and ":" not in args.target:
+            _eprint("Error: --target must be <kind>:<id>")
+            return 1
+        return _run_commands_py(root, "resume_scoped", {
+            "BEACON_STOP_TARGET_KIND": kind,
+            "BEACON_STOP_TARGET_ID": sid,
+            "BEACON_STOP_REASON": getattr(args, "reason", "") or "",
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        })
+    if args.resume_cmd == "global":
+        return _run_commands_py(root, "resume_global", {
+            "BEACON_STOP_REASON": getattr(args, "reason", "") or "",
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        })
+    _eprint(f"Unknown resume subcommand: {args.resume_cmd}")
+    return 2
+
+
+def _handle_rollback(root: Path, args: argparse.Namespace) -> int:
+    """`beacon rollback` (ms-55 e-1647 + e-1727 --no-record)."""
+    if args.show_help:
+        print(
+            "Usage: beacon rollback [--commits N] [--reason \"...\"] "
+            "[--dry-run] [--no-record] [--json]"
+        )
+        return 0
+    return _run_commands_py(root, "rollback", {
+        "BEACON_ROLLBACK_COMMITS": str(getattr(args, "commits", "0") or "0"),
+        "BEACON_ROLLBACK_REASON": getattr(args, "reason", "") or "",
+        "BEACON_ROLLBACK_DRY_RUN": "1" if getattr(args, "dry_run", False) else "",
+        "BEACON_ROLLBACK_NO_RECORD": "1" if getattr(args, "no_record", False) else "",
+        "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+    })
+
+
+def _handle_claim(root: Path, args: argparse.Namespace) -> int:
+    """`beacon claim request|handoff|post|respond|release|list` (ms-55 e-1648).
+
+    The bash dispatcher remaps subcommand → commands.py verb name (e.g.
+    `request` → `claim_request`). We do the same; lib/claims.py is pure
+    Python so the underlying logic runs identically on Windows pipx.
+    """
+    sub_cmd = getattr(args, "claim_cmd", None)
+    if args.show_help or sub_cmd is None:
+        print("Usage:")
+        print(
+            "  beacon claim post     --target <kind>:<id> [--intent \"...\"] [--json]"
+        )
+        print(
+            "  beacon claim request  --target <kind>:<id> --to <sid> [--intent \"...\"]"
+        )
+        print(
+            "  beacon claim handoff  --target <kind>:<id> --to <sid> [--intent \"...\"]"
+        )
+        print(
+            "  beacon claim respond  <claim-id> [--accept|--decline] [--reason \"...\"]"
+        )
+        print(
+            "  beacon claim release  <claim-id> [--outcome completed|abandoned] [--reason \"...\"]"
+        )
+        print("  beacon claim list     [--mine] [--target <k>:<id>] [--json]")
+        return 0 if args.show_help else 2
+
+    if sub_cmd in ("request", "handoff", "post"):
+        kind, sid = _split_target(getattr(args, "target", "") or "")
+        if getattr(args, "target", "") and ":" not in args.target:
+            _eprint("Error: --target must be <kind>:<id> (e.g. task:e-1648)")
+            return 1
+        return _run_commands_py(root, f"claim_{sub_cmd}", {
+            "BEACON_CLAIM_TARGET_KIND": kind,
+            "BEACON_CLAIM_TARGET_ID": sid,
+            "BEACON_CLAIM_INTENT": getattr(args, "intent", "") or "",
+            "BEACON_CLAIM_TO": getattr(args, "to", "") or "",
+            "BEACON_CLAIM_EXPIRES_AT": getattr(args, "expires_at", "") or "",
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        })
+    if sub_cmd == "respond":
+        if not args.claim_id:
+            _eprint("Error: beacon claim respond <claim_id> [--accept|--decline]")
+            return 1
+        decision = ""
+        if args.accept:
+            decision = "accept"
+        elif args.decline:
+            decision = "decline"
+        return _run_commands_py(root, "claim_respond", {
+            "BEACON_CLAIM_ID": args.claim_id,
+            "BEACON_CLAIM_DECISION": decision,
+            "BEACON_CLAIM_REASON": getattr(args, "reason", "") or "",
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        })
+    if sub_cmd == "release":
+        if not args.claim_id:
+            _eprint("Error: beacon claim release <claim_id> [--outcome completed|abandoned]")
+            return 1
+        return _run_commands_py(root, "claim_release", {
+            "BEACON_CLAIM_ID": args.claim_id,
+            "BEACON_CLAIM_OUTCOME": getattr(args, "outcome", "") or "",
+            "BEACON_CLAIM_REASON": getattr(args, "reason", "") or "",
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        })
+    if sub_cmd in ("list", "ls"):
+        kind, sid = _split_target(getattr(args, "target", "") or "")
+        return _run_commands_py(root, "claim_list", {
+            "BEACON_CLAIM_MINE": "1" if getattr(args, "mine", False) else "",
+            "BEACON_CLAIM_TARGET_KIND": kind,
+            "BEACON_CLAIM_TARGET_ID": sid,
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        })
+    _eprint(f"Unknown claim subcommand: {sub_cmd}")
+    return 2
+
+
+def _handle_stuck(root: Path, args: argparse.Namespace) -> int:
+    """`beacon stuck check` (ms-55 e-1649)."""
+    if args.show_help or getattr(args, "stuck_cmd", None) is None:
+        print(
+            "Usage: beacon stuck check (--telemetry-inline '<json>' | "
+            "--telemetry-file <path>) [--timeout-minutes N] [--dry-run] [--json]"
+        )
+        return 0 if args.show_help else 2
+    if args.stuck_cmd != "check":
+        _eprint(f"Unknown stuck subcommand: {args.stuck_cmd}")
+        return 2
+    return _run_commands_py(root, "stuck_check", {
+        "BEACON_STUCK_TELEMETRY_INLINE": getattr(args, "telemetry_inline", "") or "",
+        "BEACON_STUCK_TELEMETRY_FILE": getattr(args, "telemetry_file", "") or "",
+        "BEACON_STUCK_TIMEOUT_MINUTES": getattr(args, "timeout_minutes", "") or "30",
+        "BEACON_STUCK_DRY_RUN": "1" if getattr(args, "dry_run", False) else "",
+        "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+    })
+
+
+def _handle_morning(root: Path, args: argparse.Namespace) -> int:
+    """`beacon morning` (ms-55 e-1650 + e-1733 --no-doc)."""
+    if args.show_help:
+        print(
+            "Usage: beacon morning [--since-hours N] [--events-file <path>] "
+            "[--no-doc] [--json]"
+        )
+        return 0
+    return _run_commands_py(root, "morning", {
+        "BEACON_MORNING_SINCE_HOURS": getattr(args, "since_hours", "") or "12",
+        "BEACON_MORNING_EVENTS_FILE": getattr(args, "events_file", "") or "",
+        "BEACON_MORNING_NO_DOC": "1" if getattr(args, "no_doc", False) else "",
+        "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+    })
+
+
 def _handle_monitor(root: Path, args: argparse.Namespace) -> int:
     """`beacon monitor context [--dry-run]` (ms-44 e-854).
 
@@ -2735,6 +3077,14 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "channel": _handle_channel,
     "bus": _handle_bus,
     "monitor": _handle_monitor,
+    # ms-55 coordination signals (e-1735) — Win parity for the 6 verbs
+    # in the 走る / 止まる両輪 surface.
+    "stop": _handle_stop,
+    "resume": _handle_resume,
+    "rollback": _handle_rollback,
+    "claim": _handle_claim,
+    "stuck": _handle_stuck,
+    "morning": _handle_morning,
 }
 
 
