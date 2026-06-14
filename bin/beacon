@@ -214,6 +214,8 @@ cmd_init() {
     local objective="${BEACON_INIT_OBJECTIVE:-}"
     local retro_day="${BEACON_INIT_RETRO_DAY:-}"
     local storage="${BEACON_INIT_STORAGE:-local}"
+    # ms-63 / e-1441: default-high sensitivity unless caller opts in to low.
+    local sensitivity="${BEACON_INIT_SENSITIVITY:-high}"
     local storage_choice="1"
     [[ "$storage" == "cloud" ]] && storage_choice="2"
 
@@ -270,6 +272,7 @@ cmd_init() {
 
     BEACON_NAME="$name" BEACON_OBJECTIVE="$objective" \
         BEACON_RETRO_DAY="${retro_day:-friday}" \
+        BEACON_SENSITIVITY="$sensitivity" \
         python3 "$COMMANDS_PY" init
 
     # Cloud setup if selected
@@ -340,8 +343,12 @@ cmd_setup() {
                     7) retro_day="sunday" ;;
                     *) retro_day="friday" ;;
                 esac
+                # ms-63 / e-1441: setup-driven init also honours the
+                # default-high sensitivity posture (no opt-in path from the
+                # interactive setup yet; users get the safe default).
                 BEACON_NAME="$proj_name" BEACON_OBJECTIVE="$proj_objective" \
-                    BEACON_RETRO_DAY="$retro_day" python3 "$COMMANDS_PY" init
+                    BEACON_RETRO_DAY="$retro_day" \
+                    BEACON_SENSITIVITY="high" python3 "$COMMANDS_PY" init
             fi
             ;;
         2)
@@ -1913,17 +1920,23 @@ case "${1:-}" in
     init)
         shift
         _init_name="" _init_objective="" _init_retro_day="" _init_storage="local"
+        # ms-63 / e-1441: default sensitivity is high (= SPEC § 設計方針 2
+        # safe default). Opt-in low via --sensitivity low for OSS-style
+        # open projects.
+        _init_sensitivity="high"
         while [[ $# -gt 0 ]]; do
             case "$1" in
-                --name)      _init_name="${2:-}"; shift 2 ;;
-                --objective) _init_objective="${2:-}"; shift 2 ;;
-                --retro-day) _init_retro_day="${2:-}"; shift 2 ;;
-                --storage)   _init_storage="${2:-}"; shift 2 ;;
+                --name)        _init_name="${2:-}"; shift 2 ;;
+                --objective)   _init_objective="${2:-}"; shift 2 ;;
+                --retro-day)   _init_retro_day="${2:-}"; shift 2 ;;
+                --storage)     _init_storage="${2:-}"; shift 2 ;;
+                --sensitivity) _init_sensitivity="${2:-}"; shift 2 ;;
                 *) shift ;;
             esac
         done
         BEACON_INIT_NAME="$_init_name" BEACON_INIT_OBJECTIVE="$_init_objective" \
             BEACON_INIT_RETRO_DAY="$_init_retro_day" BEACON_INIT_STORAGE="$_init_storage" \
+            BEACON_INIT_SENSITIVITY="$_init_sensitivity" \
             cmd_init
         ;;
     status)
