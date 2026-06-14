@@ -2,6 +2,12 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.37.0] - 2026-06-14
+
+- feat(ms-69): Web UI Navigation を mock 通りに再構成 (e-1659 v3)
+- docs(release): update README/CHANGELOG for v0.36.0
+- chore(release): bump formula to 0.36.0
+
 ## [v0.36.0] - 2026-06-14
 
 - feat(ms-69): Web UI Trek 詳細をワイヤーフレームに準拠した full-page に refactor (e-1659 v2)
