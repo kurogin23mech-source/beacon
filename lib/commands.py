@@ -12307,6 +12307,110 @@ def cmd_resume_scoped():
     print(f"  event_id: {event.get('event_id', '?')}")
 
 
+# ---------------------------------------------------------------------------
+# Rollback CLI (ms-55 e-1647)
+# ---------------------------------------------------------------------------
+#
+# `beacon rollback` is the SPEC §4 "safe boundary" surface: it undoes
+# work that lives entirely inside the local repo (working tree edits,
+# un-pushed commits) automatically, and refuses to touch anything past
+# the upstream branch. Anything past upstream becomes a "compensation
+# proposal" in the report — concrete next-step text like "open a
+# revert PR" rather than silent destructive action.
+
+def cmd_rollback():
+    """Inspect local git state and roll back the safe portion.
+
+    Env:
+      BEACON_ROLLBACK_COMMITS    int (default 0 = auto)
+      BEACON_ROLLBACK_REASON     free text, recorded into stash msg + report
+      BEACON_ROLLBACK_DRY_RUN    "1" → show plan, don't mutate
+      BEACON_ROLLBACK_CWD        override cwd (mainly for tests)
+      BEACON_JSON                "1" → json output (plan + result)
+    """
+    import rollback as _rb
+
+    commits_raw = os.environ.get("BEACON_ROLLBACK_COMMITS", "0").strip()
+    try:
+        commits = int(commits_raw)
+    except ValueError:
+        print(
+            f"Error: --commits must be an integer (got {commits_raw!r})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    reason = os.environ.get("BEACON_ROLLBACK_REASON", "")
+    dry_run = os.environ.get("BEACON_ROLLBACK_DRY_RUN", "") == "1"
+    cwd = os.environ.get("BEACON_ROLLBACK_CWD", "").strip() or None
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    plan, result, report = _rb.rollback(
+        cwd=cwd,
+        commits=commits,
+        reason=reason,
+        dry_run=dry_run,
+    )
+
+    if json_mode:
+        out = {
+            "plan": {
+                "stash_working_tree": plan.stash_working_tree,
+                "reset_commits": plan.reset_commits,
+                "pushed_warning": plan.pushed_warning,
+                "compensation_options": list(plan.compensation_options),
+                "reason": plan.reason,
+                "requested_commits": plan.requested_commits,
+                "state": {
+                    "head_hash": plan.state.head_hash,
+                    "branch": plan.state.branch,
+                    "upstream_branch": plan.state.upstream_branch,
+                    "local_commits_ahead": plan.state.local_commits_ahead,
+                    "working_tree_dirty": plan.state.working_tree_dirty,
+                    "working_tree_files": list(plan.state.working_tree_files),
+                },
+            },
+            "dry_run": dry_run,
+        }
+        if result is not None:
+            out["result"] = {
+                "stashed": result.stashed,
+                "stash_ref": result.stash_ref,
+                "reset_commits": result.reset_commits,
+                "errors": list(result.errors),
+            }
+        print(json.dumps(out, ensure_ascii=False))
+        if result is not None and result.errors:
+            sys.exit(1)
+        return
+
+    print(report, end="")
+    if dry_run:
+        print("(dry run — nothing executed. Re-run without --dry-run to apply.)")
+        return
+
+    if result is None:
+        # Defensive: rollback() should always return a result when
+        # dry_run=False. Falling through means something inside the
+        # helper changed shape; surface so it gets caught early.
+        print("Error: rollback executor returned no result.", file=sys.stderr)
+        sys.exit(1)
+
+    summary_bits = []
+    if result.stashed:
+        summary_bits.append(f"stashed ({result.stash_ref or 'stash@{0}'})")
+    if result.reset_commits > 0:
+        summary_bits.append(f"reset {result.reset_commits} commit(s)")
+    if not summary_bits:
+        summary_bits.append("nothing to do")
+    print(f"Executed: {', '.join(summary_bits)}")
+
+    if result.errors:
+        print("", file=sys.stderr)
+        for err in result.errors:
+            print(f"Error: {err}", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_resume_global():
     """Broadcast a global resume."""
     import stop_signal as _stop
@@ -12535,6 +12639,10 @@ if __name__ == "__main__":
         "stop_status": cmd_stop_status,
         "resume_scoped": cmd_resume_scoped,
         "resume_global": cmd_resume_global,
+        # ms-55 e-1647: rollback boundary CLI. Auto-undoes working tree +
+        # un-pushed commits; refuses to touch pushed/merged/deployed
+        # state (those produce report + compensation proposals).
+        "rollback": cmd_rollback,
         "sessions_list": cmd_sessions_list,
         "profile_list": cmd_profile_list,
         "bus_budget_grant": cmd_bus_budget_grant,

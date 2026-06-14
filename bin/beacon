@@ -116,6 +116,12 @@ Stop signal (ms-55: Andon cord — anyone can broadcast a halt):
   beacon resume global [--reason "..."]
                                     Clear the global stop signal
 
+Rollback (ms-55: safe boundary — local-only is auto, pushed is report-only):
+  beacon rollback [--commits N] [--reason "..."] [--dry-run] [--json]
+                                    Stash dirty edits + git reset --soft un-pushed
+                                    commits; pushed history surfaces as
+                                    compensation proposals (= revert PR etc.)
+
 Releases & Deploys:
   beacon deploy record [--revision <rev>] [--semver <v>] [--version <tag>] [--desc <text>]
   beacon deploy list
@@ -2971,6 +2977,56 @@ EOF
                 exit 1
                 ;;
         esac
+        ;;
+    rollback)
+        # ms-55 e-1647: SPEC §4 safe-boundary rollback. Working tree edits +
+        # un-pushed commits are auto-undone; anything past upstream is
+        # surfaced as a "report + compensation proposal" instead of being
+        # silently destroyed.
+        ensure_project
+        shift
+        _rb_commits=""
+        _rb_reason=""
+        _rb_dry_run=""
+        _rb_json=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --commits) _rb_commits="${2:-0}"; shift 2 ;;
+                --reason)  _rb_reason="${2:-}"; shift 2 ;;
+                --dry-run) _rb_dry_run="1"; shift ;;
+                --json)    _rb_json="1"; shift ;;
+                -h|--help)
+                    cat <<'EOF'
+Usage: beacon rollback [--commits N] [--reason "..."] [--dry-run] [--json]
+
+Inspect the local git state and roll back the safe portion:
+  • Dirty working tree → `git stash push -u` (preserved, recoverable via `git stash`)
+  • Un-pushed local commits → `git reset --soft HEAD~N` (changes stay staged)
+
+Anything past your branch's upstream (= already pushed / merged / deployed)
+is NOT touched. Instead the report lists concrete compensation proposals
+(open a revert PR, etc.) so a human can decide.
+
+Flags:
+  --commits N    Number of HEAD commits to undo. 0 (default) means
+                 "auto-decide": when an upstream is configured, undo
+                 everything ahead of upstream (capped). Without
+                 upstream, default is 0 — pass --commits explicitly.
+  --reason TEXT  Free-text reason. Recorded into the stash message and
+                 the printed report.
+  --dry-run      Print the plan, do not execute.
+  --json         Machine-readable plan + result.
+EOF
+                    exit 0
+                    ;;
+                *) shift ;;
+            esac
+        done
+        BEACON_ROLLBACK_COMMITS="${_rb_commits:-0}" \
+            BEACON_ROLLBACK_REASON="$_rb_reason" \
+            BEACON_ROLLBACK_DRY_RUN="$_rb_dry_run" \
+            BEACON_JSON="$_rb_json" \
+            python3 "$COMMANDS_PY" rollback
         ;;
     resume)
         # ms-55 e-1646: clear a previously-broadcast stop signal.
