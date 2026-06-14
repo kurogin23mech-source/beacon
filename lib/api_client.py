@@ -687,3 +687,31 @@ class ApiClient:
         return self.get(
             f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/summary"
         )
+
+    def list_trek_documents(self, trek_id: str) -> list:
+        """List documents associated with this trek (= trek_id field set)."""
+        return self.get(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/documents"
+        )
+
+    # Reverse lookup: project work item → related treks (ms-69 / e-1663)
+    # Used by the Related Treks widget on milestone / operation / task
+    # detail pages (e-1664). Includes archived treks by default.
+
+    def list_related_treks_for_milestone(self, project_id: str, ms_id: str) -> list:
+        return self.get(
+            f"/api/projects/{urllib.parse.quote(project_id, safe='')}"
+            f"/milestones/{urllib.parse.quote(ms_id, safe='')}/related-treks"
+        )
+
+    def list_related_treks_for_operation(self, project_id: str, op_id: str) -> list:
+        return self.get(
+            f"/api/projects/{urllib.parse.quote(project_id, safe='')}"
+            f"/operations/{urllib.parse.quote(op_id, safe='')}/related-treks"
+        )
+
+    def list_related_treks_for_entry(self, project_id: str, entry_id: str) -> list:
+        return self.get(
+            f"/api/projects/{urllib.parse.quote(project_id, safe='')}"
+            f"/entries/{urllib.parse.quote(entry_id, safe='')}/related-treks"
+        )

@@ -6134,13 +6134,16 @@ def _parse_frontmatter(text):
     return meta, body
 
 
-def _add_frontmatter(content, scope, milestone="", operation=""):
-    """Prepend frontmatter to content, or update existing scope/milestone/operation.
+def _add_frontmatter(content, scope, milestone="", operation="", trek_id=""):
+    """Prepend frontmatter to content, or update existing scope/milestone/operation/trek_id.
 
     List values are written as inline YAML arrays (``key: ["a", "b"]``) so
     they survive the line-based parser on the next round-trip — block-list
     items containing colons (e.g. ``op:op-2:check_run``) cannot be expressed
     safely in the line-based format and must be normalised.
+
+    ``trek_id`` (ms-69 / e-1663) associates a doc with a cross-project trek;
+    optional, defaults preserved on round-trip.
     """
     meta, body = _parse_frontmatter(content)
     meta["scope"] = scope
@@ -6152,6 +6155,8 @@ def _add_frontmatter(content, scope, milestone="", operation=""):
         meta["operation"] = operation
     elif "operation" not in meta:
         pass
+    if trek_id:
+        meta["trek_id"] = trek_id
     lines = ["---"]
     for k, v in meta.items():
         if isinstance(v, list):
@@ -6184,6 +6189,7 @@ def _read_local_doc(fpath):
     stat = os.stat(fpath)
     updated = datetime.datetime.fromtimestamp(stat.st_mtime).isoformat()
     operation = meta.get("operation", "")
+    trek_id = meta.get("trek_id", "")  # ms-69 / e-1663
     result = {
         "doc_id": fname[:-3],
         "title": title,
@@ -6195,6 +6201,8 @@ def _read_local_doc(fpath):
         result["milestone"] = milestone
     if operation:
         result["operation"] = operation
+    if trek_id:
+        result["trek_id"] = trek_id
     # Soft-delete fields surface so cmd_doc_list can filter without
     # re-parsing the frontmatter (ms-14 e-973).
     if meta.get("status"):
@@ -6292,6 +6300,7 @@ def cmd_doc_add():
     scope = os.environ.get("BEACON_SCOPE", DEFAULT_SCOPE)
     milestone = os.environ.get("BEACON_MS", "")
     operation = os.environ.get("BEACON_OP", "")
+    trek_id = os.environ.get("BEACON_TREK_ID", "")  # ms-69 / e-1663
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not title:
@@ -6333,8 +6342,9 @@ def cmd_doc_add():
         except Exception:
             pass
 
-    # Add frontmatter with scope, milestone, and operation
-    content = _add_frontmatter(content, scope, milestone or "", operation or "")
+    # Add frontmatter with scope, milestone, operation, and trek_id
+    content = _add_frontmatter(content, scope, milestone or "", operation or "",
+                               trek_id or "")
 
     if _is_cloud_mode():
         client, config = _get_api_client()
@@ -6390,6 +6400,7 @@ def cmd_doc_update():
     title = os.environ.get("BEACON_TITLE", "")
     scope = os.environ.get("BEACON_SCOPE", "")
     milestone = os.environ.get("BEACON_MS", "")
+    trek_id = os.environ.get("BEACON_TREK_ID", "")  # ms-69 / e-1663
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not doc_id:
@@ -6428,11 +6439,13 @@ def cmd_doc_update():
         milestone = existing.get("milestone", "")
     if not operation:
         operation = existing.get("operation", "")
+    if not trek_id:
+        trek_id = existing.get("trek_id", "")
     if not content:
         content = existing.get("content", "")
 
     # Rebuild with frontmatter
-    content = _add_frontmatter(content, scope, milestone, operation)
+    content = _add_frontmatter(content, scope, milestone, operation, trek_id)
 
     if _is_cloud_mode():
         client.update_document(config["project_id"], doc_id, title, content)

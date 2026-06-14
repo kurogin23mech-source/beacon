@@ -520,6 +520,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc_add.add_argument("--scope", "-s", dest="scope", default="")
     p_doc_add.add_argument("--ms", dest="doc_ms", default="")
     p_doc_add.add_argument("--op", dest="doc_op", default="")
+    p_doc_add.add_argument("--trek", dest="doc_trek", default="")
     p_doc_add.add_argument("--json", action="store_true")
     p_doc_add.add_argument("--content", default="")
     p_doc_add.add_argument("--stdin", action="store_true")
@@ -545,6 +546,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc_update.add_argument("--scope", "-s", dest="scope", default="")
     p_doc_update.add_argument("--ms", dest="doc_ms", default="")
     p_doc_update.add_argument("--op", dest="doc_op", default="")
+    p_doc_update.add_argument("--trek", dest="doc_trek", default="")
     p_doc_update.add_argument("--json", action="store_true")
     p_doc_update.add_argument("--stdin", action="store_true")
     # ms-54 / e-1293: persistence poisoning defense.
@@ -1588,6 +1590,7 @@ def _handle_doc(root: Path, args: argparse.Namespace) -> int:
             "BEACON_SCOPE": args.scope or "",
             "BEACON_MS": args.doc_ms or "",
             "BEACON_OP": args.doc_op or "",
+            "BEACON_TREK_ID": getattr(args, "doc_trek", "") or "",
             "BEACON_JSON": "1" if args.json else "",
             "BEACON_BUS_ORIGIN": "1" if getattr(args, "bus_origin", False) else "",
         }
@@ -1629,6 +1632,7 @@ def _handle_doc(root: Path, args: argparse.Namespace) -> int:
             "BEACON_SCOPE": args.scope or "",
             "BEACON_MS": args.doc_ms or "",
             "BEACON_OP": args.doc_op or "",
+            "BEACON_TREK_ID": getattr(args, "doc_trek", "") or "",
             "BEACON_JSON": "1" if args.json else "",
             "BEACON_BUS_ORIGIN": "1" if getattr(args, "bus_origin", False) else "",
         }

@@ -417,6 +417,8 @@ def save_document(project_id: str, doc_id: str, title: str, content: str,
     import datetime
     resolved_scope = scope if scope in ("core", "spec", "memo") else _extract_scope(content)
     milestone = _extract_frontmatter_field(content, "milestone")
+    # ms-69 / e-1663: trek_id is optional (= 既存 doc 影響なし migration 不要)
+    trek_id = _extract_frontmatter_field(content, "trek_id")
     now_iso = datetime.datetime.now().isoformat()
 
     if not doc_id:
@@ -433,6 +435,8 @@ def save_document(project_id: str, doc_id: str, title: str, content: str,
     }
     if milestone:
         data["milestone"] = milestone
+    if trek_id:
+        data["trek_id"] = trek_id
 
     # 既存があれば現行 content を revision に積んでから上書き
     existing = get_document(project_id, doc_id)

@@ -296,6 +296,10 @@ def save_document(project_id: str, doc_id: str, title: str, content: str,
     import datetime
     resolved_scope = scope if scope in ("core", "spec", "memo") else _extract_scope(content)
     milestone = _extract_frontmatter_field(content, "milestone")
+    # ms-69 / e-1663: trek_id is optional; lets a doc be associated with a
+    # cross-project trek (= 別 project / 別 session を巻き込んだ協奏作業領域).
+    # Existing docs without trek_id are unaffected (= migration 不要).
+    trek_id = _extract_frontmatter_field(content, "trek_id")
 
     col = get_db().collection(COLLECTION).document(project_id).collection(DOCS_SUBCOLLECTION)
     data = {
@@ -307,6 +311,8 @@ def save_document(project_id: str, doc_id: str, title: str, content: str,
     }
     if milestone:
         data["milestone"] = milestone
+    if trek_id:
+        data["trek_id"] = trek_id
 
     if doc_id:
         doc_ref = col.document(doc_id)

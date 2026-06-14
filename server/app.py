@@ -2219,6 +2219,83 @@ def list_changelog_endpoint(project_id: str,
 
 
 # ---------------------------------------------------------------------------
+# Related treks (ms-69 / e-1663) — reverse lookup from a project work item
+# (milestone / operation / task) to the treks that include it in scope.
+#
+# Used by the e-1664 Related Treks widget on the project detail page.
+# Archived treks are included by default so the widget can render historic
+# associations ("we worked on this together in trek X, archived 2 weeks ago").
+# ---------------------------------------------------------------------------
+
+def _list_related_treks(project_id: str, *, milestone: str = "",
+                        operation: str = "", task: str = "",
+                        user: dict | None) -> list:
+    """Return treks visible to ``user`` whose scope matches this work item.
+
+    Match rule: an entry counts if it is in the same project AND either
+    (a) narrows to the exact ref, or (b) has no narrowing key (= covers
+    the whole project, so the item is implicitly in scope).
+    """
+    actor = user.get("sub") if (_auth_enabled and user) else None
+    candidates = db.list_treks(
+        actor_id=actor,
+        include_archived=True,  # widget renders historic associations too
+    )
+    out = []
+    for t in candidates:
+        for entry in t.get("scope") or []:
+            if entry.get("project") != project_id:
+                continue
+            has_narrow = bool(
+                entry.get("milestone")
+                or entry.get("operation")
+                or entry.get("task")
+            )
+            if not has_narrow:
+                out.append(t)
+                break
+            if milestone and entry.get("milestone") == milestone:
+                out.append(t)
+                break
+            if operation and entry.get("operation") == operation:
+                out.append(t)
+                break
+            if task and entry.get("task") == task:
+                out.append(t)
+                break
+    return out
+
+
+@app.get("/api/projects/{project_id}/milestones/{ms_id}/related-treks")
+def related_treks_for_milestone(project_id: str, ms_id: str,
+                                user: dict = Depends(require_auth)):
+    """List treks visible to the caller whose scope covers this milestone.
+
+    Includes archived treks (= the widget renders history). Returns the
+    full trek doc per match; the Web UI picks status / title / archived_at
+    for the badge rendering.
+    """
+    _load(project_id, user)  # project-side access check
+    return _list_related_treks(project_id, milestone=ms_id, user=user)
+
+
+@app.get("/api/projects/{project_id}/operations/{op_id}/related-treks")
+def related_treks_for_operation(project_id: str, op_id: str,
+                                user: dict = Depends(require_auth)):
+    """List treks whose scope covers this operation (e-1663 / e-1664)."""
+    _load(project_id, user)
+    return _list_related_treks(project_id, operation=op_id, user=user)
+
+
+@app.get("/api/projects/{project_id}/entries/{entry_id}/related-treks")
+def related_treks_for_entry(project_id: str, entry_id: str,
+                            user: dict = Depends(require_auth)):
+    """List treks whose scope covers this task entry (e-1663 / e-1664)."""
+    _load(project_id, user)
+    return _list_related_treks(project_id, task=entry_id, user=user)
+
+
+# ---------------------------------------------------------------------------
 # Members (invite / remove)
 # ---------------------------------------------------------------------------
 
@@ -2915,6 +2992,44 @@ def transfer_trek_leader_endpoint(trek_id: str, body: TrekTransferLeader,
         raise HTTPException(status_code=400, detail=str(e))
     db.save_trek(trek_id, t)
     return t
+
+
+@app.get("/api/treks/{trek_id}/documents")
+def list_trek_documents_endpoint(trek_id: str,
+                                 user: dict = Depends(require_auth)):
+    """List documents associated with this trek (= ``trek_id`` field set).
+
+    Iterates the trek's scope to collect candidate projects, then lists
+    documents for each and filters by ``trek_id``. Returns the docs the
+    caller can see (= the caller is already a trek member, so they have
+    visibility into any project that the trek's scope includes).
+    """
+    t = _load_trek_for_read(trek_id, user)
+    out: list = []
+    seen_doc_ids: set[str] = set()
+    project_ids = {
+        s.get("project") for s in t.get("scope") or [] if s.get("project")
+    }
+    for pid in project_ids:
+        try:
+            project_docs = db.list_documents(pid)
+        except Exception:
+            # Stale scope entry pointing at a project the caller cannot
+            # read; skip silently so a single bad ref doesn't break the
+            # whole listing.
+            continue
+        for d in project_docs:
+            if d.get("trek_id") != trek_id:
+                continue
+            doc_id = d.get("doc_id")
+            if doc_id in seen_doc_ids:
+                continue
+            seen_doc_ids.add(doc_id)
+            # Surface the source project_id so the UI can deep-link the doc.
+            d_out = dict(d)
+            d_out["project_id"] = pid
+            out.append(d_out)
+    return out
 
 
 @app.get("/api/treks/{trek_id}/summary")
