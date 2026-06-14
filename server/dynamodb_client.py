@@ -80,6 +80,7 @@ TABLES = {
     # top-level
     "projects": f"{TABLE_PREFIX}-projects",
     "users": f"{TABLE_PREFIX}-users",
+    "treks": f"{TABLE_PREFIX}-treks",  # ms-69 / e-1652 (PK=trek_id)
     # projects/{pid}/* subcollections
     "retros": f"{TABLE_PREFIX}-retros",
     "documents": f"{TABLE_PREFIX}-documents",
@@ -1294,3 +1295,60 @@ def get_operation_envelope(project_id: str,
         Key={"project_id": project_id, "envelope_id": envelope_id}
     )
     return resp.get("Item")
+
+
+# ---------------------------------------------------------------------------
+# Treks (ms-69 / e-1652)  — top-level entity, PK=trek_id
+#
+# Same Schema as firestore_client. Table: beacon-{env}-treks.
+# Subcollections (activity / summaries / claims) land in later tasks
+# (e-1663 / e-1657); they will be separate tables with PK=trek_id, SK=*.
+# ---------------------------------------------------------------------------
+
+def get_trek(trek_id: str) -> dict | None:
+    resp = _table("treks").get_item(Key={"trek_id": trek_id})
+    return resp.get("Item")
+
+
+def save_trek(trek_id: str, data: dict) -> None:
+    # PK is trek_id; caller-supplied trek_id in ``data`` is overwritten on
+    # purpose (= same shape as save_project / save_document).
+    item = {**data, "trek_id": trek_id}
+    _table("treks").put_item(Item=item)
+
+
+def list_treks(actor_id: str | None = None, *,
+               status: str | None = None,
+               include_archived: bool = False) -> list[dict]:
+    """List treks. See firestore_client.list_treks for semantics.
+
+    Scan is fine at dev scale; once trek counts grow, owner / member GSI
+    will let us push the visibility filter to DynamoDB.
+    """
+    items = _scan_all(_table("treks"))
+    result: list[dict] = []
+    for item in items:
+        if not include_archived and item.get("status") == "archived":
+            continue
+        if status and item.get("status") != status:
+            continue
+        if actor_id:
+            creator = (item.get("creator_actor") or {}).get("user_id")
+            members = [m.get("user_id")
+                       for m in item.get("members", []) or []]
+            if creator != actor_id and actor_id not in members:
+                continue
+        result.append(item)
+    # Newest first (= matches firestore_client ordering).
+    result.sort(key=lambda t: (t.get("created_at", ""), t.get("trek_id", "")),
+                reverse=True)
+    return result
+
+
+def delete_trek(trek_id: str) -> bool:
+    if get_trek(trek_id) is None:
+        return False
+    # Phase 1: top-level delete only. Subcollection cascade follows the
+    # delete_project pattern once e-1663 lands.
+    _table("treks").delete_item(Key={"trek_id": trek_id})
+    return True
