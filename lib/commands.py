@@ -3780,6 +3780,265 @@ def _project_id_for_ops() -> str:
     return data.get("name", "")
 
 
+# ---------------------------------------------------------------------------
+# Trek (ms-69) — top-level cross-project collaboration area.
+# Local mode only for now (storage = lib/trek_store, files under
+# ~/.beacon/treks/). Cloud HTTP path lands in e-1656.
+# ---------------------------------------------------------------------------
+
+def _resolve_creator_identity() -> tuple[str, str, str]:
+    """Return (user_id, email, session_id) for the trek creator.
+
+    Reads from env vars first so tests and bash can override freely.
+    Falls back to ``whoami`` for user_id when no env var is set so a
+    user running ``beacon trek create`` in dev mode without explicit env
+    still gets a meaningful creator record. Email and session_id have no
+    safe fallback — they MUST be supplied (= error out otherwise) because
+    fabricating them silently would corrupt member/leader records that
+    later identity flows depend on.
+    """
+    user_id = os.environ.get("BEACON_USER_ID", "").strip()
+    email = os.environ.get("BEACON_USER_EMAIL", "").strip()
+    session_id = os.environ.get("BEACON_SESSION_ID", "").strip()
+    if not user_id:
+        try:
+            import getpass
+            user_id = getpass.getuser()
+        except Exception:
+            user_id = ""
+    return user_id, email, session_id
+
+
+def cmd_trek_create():
+    """Create a new trek (= top-level cross-project collaboration area).
+
+    Reads from env:
+      BEACON_TREK_TITLE       (required) trek title
+      BEACON_TREK_TYPE        temporary | persistent (default persistent)
+      BEACON_TREK_DESCRIPTION free-form description (optional)
+      BEACON_USER_ID          creator user_id (fallback: whoami)
+      BEACON_USER_EMAIL       creator email (required)
+      BEACON_SESSION_ID       creator session_id (required, becomes leader)
+      BEACON_JSON             "1" → emit json instead of human text
+    """
+    import trek
+    import trek_store
+
+    title = os.environ.get("BEACON_TREK_TITLE", "").strip()
+    type_ = os.environ.get("BEACON_TREK_TYPE", "").strip() or "persistent"
+    description = os.environ.get("BEACON_TREK_DESCRIPTION", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not title:
+        print("Error: trek title is required (--title or positional arg)",
+              file=sys.stderr)
+        sys.exit(1)
+
+    user_id, email, session_id = _resolve_creator_identity()
+    if not email:
+        print(
+            "Error: BEACON_USER_EMAIL is required to create a trek "
+            "(= recorded as creator/leader member email)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not session_id:
+        print(
+            "Error: BEACON_SESSION_ID is required to create a trek "
+            "(= the session that creates becomes initial leader; SPEC 方針 9)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        new_doc = trek.new_trek(
+            title=title,
+            creator_user_id=user_id,
+            creator_email=email,
+            creator_session_id=session_id,
+            description=description,
+            type_=type_,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    trek_store.save_trek(new_doc)
+
+    if json_mode:
+        print(json.dumps(new_doc, ensure_ascii=False))
+    else:
+        print(f"Created trek {new_doc['trek_id']} \"{new_doc['title']}\" "
+              f"({new_doc['type']}, status={new_doc['status']})")
+        print(f"  leader session: {new_doc['leader_session_id']}")
+        print(f"  creator: {new_doc['creator_actor']['email']}")
+        print("  next: `beacon trek plan` で scope を追加、"
+              "`beacon trek invite` でメンバーを呼ぶ、"
+              "`beacon trek start <id>` で active に")
+
+
+def cmd_trek_list():
+    """List treks. By default hides archived; --all includes them.
+
+    Reads from env:
+      BEACON_TREK_STATUS       optional status filter
+      BEACON_TREK_INCLUDE_ARCHIVED  "1" → include archived
+      BEACON_USER_ID           visibility filter (defaults to current user
+                               so the listing is per-actor; pass --all to
+                               disable from CLI)
+      BEACON_TREK_ALL_ACTORS   "1" → disable actor filter (admin view)
+      BEACON_JSON              "1" → emit json
+    """
+    import trek_store
+
+    status_filter = os.environ.get("BEACON_TREK_STATUS", "").strip() or None
+    include_archived = os.environ.get("BEACON_TREK_INCLUDE_ARCHIVED", "") == "1"
+    all_actors = os.environ.get("BEACON_TREK_ALL_ACTORS", "") == "1"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if all_actors:
+        actor_id = None
+    else:
+        user_id, _, _ = _resolve_creator_identity()
+        actor_id = user_id or None
+
+    treks = trek_store.list_treks(
+        actor_id=actor_id, status=status_filter,
+        include_archived=include_archived,
+    )
+
+    if json_mode:
+        print(json.dumps(treks, ensure_ascii=False, indent=2))
+        return
+
+    if not treks:
+        if actor_id:
+            print(f"(no treks visible to {actor_id} — try --all で全件)")
+        else:
+            print("(no treks yet — `beacon trek create \"title\"` で最初の trek を起票)")
+        return
+
+    print(f"Treks ({len(treks)}):")
+    for t in treks:
+        status_icon = {
+            "planning": "○",
+            "active": "●",
+            "archived": "□",
+        }.get(t.get("status", ""), "?")
+        halt_marker = " [halted]" if t.get("halt") else ""
+        member_count = len(t.get("members") or [])
+        scope_count = len(t.get("scope") or [])
+        print(f"  {status_icon} {t['trek_id']:14s} {t['title'][:55]}"
+              f" — {t.get('type', '?')}/{t.get('status', '?')}"
+              f"{halt_marker}, {member_count}m/{scope_count}s")
+
+
+def cmd_trek_show():
+    """Show a single trek by id.
+
+    Reads from env:
+      BEACON_TREK_ID  required
+      BEACON_JSON     "1" → emit json
+    """
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False, indent=2))
+        return
+
+    halt_marker = " [HALTED]" if t.get("halt") else ""
+    print(f"Trek {t['trek_id']} — {t['title']}{halt_marker}")
+    print(f"  type:        {t.get('type')}")
+    print(f"  status:      {t.get('status')}")
+    print(f"  created:     {t.get('created_at', '')[:19]}")
+    if t.get("archived_at"):
+        print(f"  archived:    {t.get('archived_at', '')[:19]}")
+    creator = t.get("creator_actor") or {}
+    print(f"  creator:     {creator.get('email')} (user_id={creator.get('user_id')})")
+    print(f"  leader sess: {t.get('leader_session_id')}")
+    if t.get("description"):
+        print(f"  description: {t['description']}")
+    members = t.get("members") or []
+    print(f"  members ({len(members)}):")
+    for m in members:
+        joined = "joined" if m.get("joined_at") else "invited"
+        print(f"    - {m.get('email')} [{m.get('role')}] ({joined})")
+    scope = t.get("scope") or []
+    print(f"  scope ({len(scope)}):")
+    for s in scope:
+        ref = " / ".join(f"{k}={v}" for k, v in s.items() if k != "project")
+        print(f"    - {s.get('project')}" + (f" / {ref}" if ref else ""))
+    if t.get("halt"):
+        h = t["halt"]
+        print(f"  halt: at={h.get('issued_at')} by={h.get('issued_by_session_id')}"
+              + (f" reason={h.get('reason')}" if h.get("reason") else ""))
+
+
+def _trek_transition(trek_id: str, to_status: str):
+    """Helper: validate + apply a state transition. Returns the updated trek."""
+    import trek
+    import trek_store
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    cur = t.get("status", "")
+    try:
+        trek.validate_transition(cur, to_status)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    updates = {
+        "status": to_status,
+        "updated_at": trek.utcnow_iso(),
+    }
+    if to_status == "archived":
+        updates["archived_at"] = updates["updated_at"]
+    return trek_store.update_trek(trek_id, updates=updates)
+
+
+def cmd_trek_start():
+    """Transition trek planning → active."""
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+    t = _trek_transition(trek_id, "active")
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        print(f"Started trek {t['trek_id']} (status: active)")
+
+
+def cmd_trek_archive():
+    """Transition trek → archived (terminal)."""
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+    t = _trek_transition(trek_id, "archived")
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        print(f"Archived trek {t['trek_id']} — recorded for posterity, "
+              "再開したい時は新 trek 起票")
+
+
 def cmd_member_add():
     """Add a member to the project."""
     import operations  # lazy import to avoid circular at module load
@@ -11392,6 +11651,11 @@ if __name__ == "__main__":
         "member_list": cmd_member_list,
         "member_remove": cmd_member_remove,
         "member_role": cmd_member_role,
+        "trek_create": cmd_trek_create,
+        "trek_list": cmd_trek_list,
+        "trek_show": cmd_trek_show,
+        "trek_start": cmd_trek_start,
+        "trek_archive": cmd_trek_archive,
         "version": lambda: print(f"beacon {__version__}"),
         "help_json": cmd_help_json,
         "doctor": cmd_doctor,

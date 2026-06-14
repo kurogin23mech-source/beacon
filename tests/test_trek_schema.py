@@ -149,6 +149,7 @@ def test_new_trek_minimal():
     t = trek.new_trek(
         title="Daily Ops",
         creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-aaaa-12345",
     )
     assert t["trek_id"].startswith("tk-")
     assert t["title"] == "Daily Ops"
@@ -156,13 +157,18 @@ def test_new_trek_minimal():
     assert t["type"] == "persistent"
     assert t["status"] == "planning"
     assert t["creator_actor"] == {"user_id": "u-1", "email": "a@b.com"}
-    assert t["leader_actor"] == {"user_id": "u-1", "email": "a@b.com"}
+    # SPEC 方針 9: leader is the session, not the user
+    assert t["leader_session_id"] == "sv-aaaa-12345"
+    # legacy field must not be present
+    assert "leader_actor" not in t
     assert len(t["members"]) == 1
     leader = t["members"][0]
     assert leader["role"] == "leader"
     assert leader["user_id"] == "u-1"
     assert leader["joined_at"]  # leader auto-joined
     assert t["scope"] == []
+    # SPEC 方針 2: halt is a separate field, not a status
+    assert t["halt"] is None
     assert t["created_at"] == t["updated_at"]
     assert t["archived_at"] is None
 
@@ -171,6 +177,7 @@ def test_new_trek_with_scope():
     t = trek.new_trek(
         title="Cross-project release",
         creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-aaaa-12345",
         type_="temporary",
         initial_scope=[
             {"project": "beacon-1", "milestone": "ms-64"},
@@ -186,15 +193,47 @@ def test_new_trek_with_scope():
 def test_new_trek_requires_title():
     with pytest.raises(ValueError):
         trek.new_trek(title="   ", creator_user_id="u-1",
-                      creator_email="a@b.com")
+                      creator_email="a@b.com",
+                      creator_session_id="sv-x")
+
+
+def test_new_trek_requires_creator_session_id():
+    # SPEC 方針 9: creator's session becomes the initial leader, can't be empty
+    with pytest.raises(ValueError):
+        trek.new_trek(
+            title="x", creator_user_id="u-1", creator_email="a@b.com",
+            creator_session_id="",
+        )
 
 
 def test_new_trek_rejects_bad_type():
     with pytest.raises(ValueError):
         trek.new_trek(
             title="x", creator_user_id="u-1", creator_email="a@b.com",
+            creator_session_id="sv-x",
             type_="permanent",
         )
+
+
+# ---------------------------------------------------------------------------
+# build_halt
+# ---------------------------------------------------------------------------
+
+def test_build_halt_minimal():
+    h = trek.build_halt(issued_by_session_id="sv-x")
+    assert h["issued_by_session_id"] == "sv-x"
+    assert h["reason"] == ""
+    assert h["issued_at"]  # non-empty ISO
+
+
+def test_build_halt_with_reason():
+    h = trek.build_halt(issued_by_session_id="sv-x", reason="deploy in progress")
+    assert h["reason"] == "deploy in progress"
+
+
+def test_build_halt_requires_session():
+    with pytest.raises(ValueError):
+        trek.build_halt(issued_by_session_id="")
 
 
 # ---------------------------------------------------------------------------

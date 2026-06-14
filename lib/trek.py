@@ -84,16 +84,29 @@ def validate_role(r: str) -> str:
 def build_actor_ref(*, user_id: str, email: str) -> dict:
     """Canonical actor reference (= user_id + email pair).
 
-    SPEC 設計方針 3 names actor = machine + agent + email at the session
-    level. At the trek MEMBER level we collapse this to (user_id, email)
-    because membership is per-person, not per-bclaude-instance. Session
-    observation (= live presence, claims, STOP signaling) reads sessions/
-    separately. Keeping membership at the user grain avoids the bug where
-    a single user with 3 terminals shows up as 3 members.
+    SPEC 設計方針 3 collapses member identity to user grain (user_id + email)
+    so a single user with 3 terminals × 2 machines counts as 1 member.
+    Leader / claim live at session grain instead (see ``leader_session_id``
+    on the trek doc and ms-55 claim model).
     """
     if not user_id or not email:
         raise ValueError("actor ref requires both user_id and email")
     return {"user_id": user_id, "email": email}
+
+
+def build_halt(*, issued_by_session_id: str, reason: str = "") -> dict:
+    """Build a halt record (= the Andon cord signal).
+
+    Set on the trek doc's ``halt`` field by STOP, cleared by resume.
+    State stays ``active`` either way — halt is not a status (SPEC 方針 2).
+    """
+    if not issued_by_session_id:
+        raise ValueError("halt requires issued_by_session_id")
+    return {
+        "issued_at": utcnow_iso(),
+        "issued_by_session_id": issued_by_session_id,
+        "reason": reason,
+    }
 
 
 def build_member(*, user_id: str, email: str,
@@ -142,19 +155,31 @@ def new_trek(*,
              title: str,
              creator_user_id: str,
              creator_email: str,
+             creator_session_id: str,
              description: str = "",
              type_: str = DEFAULT_TYPE,
              initial_scope: Iterable[dict] | None = None) -> dict:
     """Build a fresh trek doc (= not yet persisted, no I/O).
 
-    The creator is automatically added as the initial leader member and is
-    recorded as both ``creator_actor`` and ``leader_actor``. Leader can be
-    transferred later via lifecycle CLI (e-1662). status starts at
-    ``planning`` so the caller can stage scope / invites before any
-    session joins / activity is permitted.
+    The creator is:
+    - recorded as ``creator_actor`` (= user grain, durable identity)
+    - automatically added as the first ``member`` with role ``leader``
+      (= user grain again, membership is per-person)
+    - their session is recorded as ``leader_session_id`` (= the actual
+      live session that currently leads the trek, can be transferred
+      later via `beacon trek transfer-leader --to <session_id>`)
+
+    Status starts at ``planning`` so the caller can stage scope / invites
+    before any session joins. ``halt`` starts None — STOP / resume toggle
+    it without changing status (SPEC 方針 2).
     """
     if not title.strip():
         raise ValueError("trek title is required")
+    if not creator_session_id:
+        raise ValueError(
+            "creator_session_id is required (= the session that creates "
+            "the trek becomes its initial leader; SPEC 方針 9)"
+        )
     validate_type(type_)
     now = utcnow_iso()
     creator_actor = build_actor_ref(
@@ -173,9 +198,10 @@ def new_trek(*,
         "type": type_,
         "status": DEFAULT_STATUS,
         "creator_actor": creator_actor,
-        "leader_actor": creator_actor,
+        "leader_session_id": creator_session_id,
         "members": [leader_member],
         "scope": scope,
+        "halt": None,
         "created_at": now,
         "updated_at": now,
         "archived_at": None,

@@ -2270,6 +2270,95 @@ except ValueError as e:
                 ;;
         esac
         ;;
+    trek)
+        # Trek is a top-level cross-project entity, so we don't call
+        # ensure_project. Storage is ~/.beacon/treks/ (local mode) until
+        # the HTTP path lands in e-1656.
+        case "${2:-}" in
+            create)
+                shift 2
+                title="" type_="" desc=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --type) type_="${2:-}"; shift 2 ;;
+                        --description|--desc) desc="${2:-}"; shift 2 ;;
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$title" ]] && title="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_TITLE="$title" \
+                    BEACON_TREK_TYPE="$type_" \
+                    BEACON_TREK_DESCRIPTION="$desc" \
+                    python3 "$COMMANDS_PY" trek_create
+                ;;
+            list|ls)
+                shift 2
+                status_filter="" include_archived="" all_actors=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --status) status_filter="${2:-}"; shift 2 ;;
+                        --all|--include-archived) include_archived="1"; shift ;;
+                        --all-actors) all_actors="1"; shift ;;
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) shift ;;
+                    esac
+                done
+                BEACON_TREK_STATUS="$status_filter" \
+                    BEACON_TREK_INCLUDE_ARCHIVED="$include_archived" \
+                    BEACON_TREK_ALL_ACTORS="$all_actors" \
+                    python3 "$COMMANDS_PY" trek_list
+                ;;
+            show|get)
+                shift 2
+                trek_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" python3 "$COMMANDS_PY" trek_show
+                ;;
+            start)
+                shift 2
+                trek_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" python3 "$COMMANDS_PY" trek_start
+                ;;
+            archive)
+                shift 2
+                trek_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" python3 "$COMMANDS_PY" trek_archive
+                ;;
+            *)
+                echo "Usage: beacon trek <subcommand> [args]"
+                echo ""
+                echo "Subcommands:"
+                echo "  create \"<title>\" [--type temporary|persistent] [--description \"...\"]"
+                echo "  list [--status S] [--all] [--all-actors] [--json]"
+                echo "  show <trek-id> [--json]"
+                echo "  start <trek-id>"
+                echo "  archive <trek-id>"
+                echo ""
+                echo "Env (creator identity, required for 'create'):"
+                echo "  BEACON_USER_EMAIL    creator email"
+                echo "  BEACON_SESSION_ID    creator session id (becomes initial leader)"
+                echo "  BEACON_USER_ID       creator user_id (fallback: whoami)"
+                exit 1
+                ;;
+        esac
+        ;;
     run)
         ensure_project
         case "${2:-}" in
