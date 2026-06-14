@@ -12411,6 +12411,271 @@ def cmd_rollback():
         sys.exit(1)
 
 
+# ---------------------------------------------------------------------------
+# Claim CLI (ms-55 e-1648)
+# ---------------------------------------------------------------------------
+#
+# `beacon claim` is the user-facing surface for the claim primitives
+# defined in lib/claims.py. Three issuance verbs share most of the
+# argument shape (`--target`, `--intent`), so the implementation
+# factors the common path through a private helper.
+
+def _claim_parse_target_env() -> tuple[str, str]:
+    """Pull --target kind:id from env vars set by the bash dispatcher."""
+    tk = os.environ.get("BEACON_CLAIM_TARGET_KIND", "").strip()
+    ti = os.environ.get("BEACON_CLAIM_TARGET_ID", "").strip()
+    if not tk or not ti:
+        print(
+            "Error: --target <kind>:<id> is required "
+            "(kind = ms|task|operation|trek|free)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return tk, ti
+
+
+def _claim_post_event(payload: dict) -> dict:
+    """Common transport for claim / response / release events.
+
+    Same shape as _stop_post_event: bypass the envelope-issue path
+    because claim signals are coordination, not tier-gated capability
+    grants — broadcasting "I'm picking up this task" should not require
+    the auxiliary endpoint to be up.
+    """
+    import claims as _claims
+    client, config = _get_api_client()
+    project_id = _resolve_bus_project_id(config)
+    sender = payload.get("from_session_id", "")
+    event = client.post_bus_event(
+        project_id, _claims.CLAIM_CHANNEL,
+        sender_session_id=sender,
+        payload=payload,
+        delivery="propose-to-ai",
+        envelope=None,
+        requested_action=None,
+    )
+    return event
+
+
+def _claim_issue(claim_kind: str):
+    """Shared body for `beacon claim request|handoff|post`."""
+    import claims as _claims
+
+    tk, ti = _claim_parse_target_env()
+    intent = os.environ.get("BEACON_CLAIM_INTENT", "")
+    to_sid = os.environ.get("BEACON_CLAIM_TO", "").strip()
+    expires_at = os.environ.get("BEACON_CLAIM_EXPIRES_AT", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    sender = _resolve_session_id()
+    if not sender:
+        print("Error: cannot resolve current session_id", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        payload = _claims.build_claim_payload(
+            claim_kind=claim_kind,
+            from_session_id=sender,
+            target_kind=tk,
+            target_id=ti,
+            intent=intent,
+            to_session_id=to_sid,
+            expires_at=expires_at,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    event = _claim_post_event(payload)
+
+    # Persist the issuer's view of the claim locally so `claim list --mine`
+    # works across restarts even before the receive-side hook lands.
+    try:
+        _claims.record_local_claim(payload)
+    except (OSError, ValueError) as e:
+        # Don't fail the send if local persistence is broken — the bus
+        # event is the canonical record, the local file is a cache.
+        print(f"Note: could not persist claim locally: {e}",
+              file=sys.stderr)
+
+    if json_mode:
+        print(json.dumps(event, ensure_ascii=False))
+        return
+
+    kind_label = {
+        "request": "REQUEST (recipient must accept)",
+        "handoff": "HANDOFF (recipient must accept)",
+        "claim": "CLAIM (broadcast, first-publisher-wins)",
+    }.get(claim_kind, claim_kind.upper())
+    print(f"{kind_label} on {tk}:{ti} by {sender}")
+    print(f"  claim_id: {payload['claim_id']}")
+    print(f"  event_id: {event.get('event_id', '?')}")
+    if to_sid:
+        print(f"  recipient: {to_sid}")
+    if intent:
+        print(f"  intent: {intent}")
+    print(f"  Release with: beacon claim release {payload['claim_id']}")
+
+
+def cmd_claim_request():
+    """beacon claim request --target <k>:<id> --to <sid> [--intent ...]"""
+    _claim_issue("request")
+
+
+def cmd_claim_handoff():
+    """beacon claim handoff --target <k>:<id> --to <sid> [--intent ...]"""
+    _claim_issue("handoff")
+
+
+def cmd_claim_post():
+    """beacon claim post --target <k>:<id> [--intent ...]
+
+    Broadcast a claim (= "I'm taking X"). First-publisher-wins; no
+    recipient consent needed.
+    """
+    _claim_issue("claim")
+
+
+def cmd_claim_respond():
+    """beacon claim respond <claim_id> --accept|--decline [--reason ...]"""
+    import claims as _claims
+
+    claim_id = os.environ.get("BEACON_CLAIM_ID", "").strip()
+    decision = os.environ.get("BEACON_CLAIM_DECISION", "").strip()
+    reason = os.environ.get("BEACON_CLAIM_REASON", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not claim_id:
+        print("Error: claim_id is required", file=sys.stderr)
+        sys.exit(1)
+    if decision not in ("accept", "decline"):
+        print("Error: pass --accept or --decline", file=sys.stderr)
+        sys.exit(1)
+
+    sender = _resolve_session_id()
+    if not sender:
+        print("Error: cannot resolve current session_id", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        payload = _claims.build_response_payload(
+            claim_id=claim_id,
+            decision=decision,
+            from_session_id=sender,
+            reason=reason,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    event = _claim_post_event(payload)
+
+    if json_mode:
+        print(json.dumps(event, ensure_ascii=False))
+        return
+    label = "ACCEPTED" if decision == "accept" else "DECLINED"
+    print(f"{label} claim {claim_id} by {sender}")
+    print(f"  event_id: {event.get('event_id', '?')}")
+
+
+def cmd_claim_release():
+    """beacon claim release <claim_id> [--outcome completed|abandoned] [--reason ...]"""
+    import claims as _claims
+
+    claim_id = os.environ.get("BEACON_CLAIM_ID", "").strip()
+    outcome = os.environ.get("BEACON_CLAIM_OUTCOME", "completed").strip() or "completed"
+    reason = os.environ.get("BEACON_CLAIM_REASON", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not claim_id:
+        print("Error: claim_id is required", file=sys.stderr)
+        sys.exit(1)
+
+    sender = _resolve_session_id()
+    if not sender:
+        print("Error: cannot resolve current session_id", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        payload = _claims.build_release_payload(
+            claim_id=claim_id,
+            outcome=outcome,
+            from_session_id=sender,
+            reason=reason,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    event = _claim_post_event(payload)
+
+    # Drop the local cache entry too so `claim list --mine` reflects
+    # the release immediately.
+    try:
+        _claims.release_local_claim(claim_id)
+    except OSError as e:
+        print(f"Note: could not update local cache: {e}",
+              file=sys.stderr)
+
+    if json_mode:
+        print(json.dumps(event, ensure_ascii=False))
+        return
+    print(f"RELEASED claim {claim_id} ({outcome}) by {sender}")
+    print(f"  event_id: {event.get('event_id', '?')}")
+
+
+def cmd_claim_list():
+    """beacon claim list [--mine] [--target <k>:<id>] [--json]
+
+    Lists claims this session has issued + still has cached locally.
+
+    For a project-wide view ("what's everyone holding right now?"),
+    use `beacon bus receive --channel claim-signal` (= live stream) or
+    the future `beacon claim status` command that reduces the channel
+    history server-side. The local list is the right surface for
+    "what was I in the middle of when this session restarted?".
+    """
+    import claims as _claims
+
+    mine_flag = os.environ.get("BEACON_CLAIM_MINE", "") == "1"
+    tk = os.environ.get("BEACON_CLAIM_TARGET_KIND", "").strip() or None
+    ti = os.environ.get("BEACON_CLAIM_TARGET_ID", "").strip() or None
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    mine = _resolve_session_id() if mine_flag else None
+    if mine_flag and not mine:
+        print("Error: --mine requires a resolvable session_id",
+              file=sys.stderr)
+        sys.exit(1)
+
+    out = _claims.list_local_claims(
+        mine=mine, target_kind=tk, target_id=ti,
+    )
+
+    if json_mode:
+        print(json.dumps(out, ensure_ascii=False))
+        return
+
+    if not out:
+        print("No active claims in the local cache.")
+        return
+
+    print(f"Local active claims ({len(out)}):")
+    for rec in out:
+        target = rec.get("target") or {}
+        tag = f"{target.get('kind', '?')}:{target.get('id', '?')}"
+        intent = rec.get("intent") or ""
+        intent_suffix = f"  intent: {intent}" if intent else ""
+        print(
+            f"  [{rec.get('claim_kind', '?')}] {tag}  "
+            f"id={rec.get('claim_id', '?')}  "
+            f"by={rec.get('from_session_id', '?')}  "
+            f"at={rec.get('issued_at', '?')}"
+        )
+        if intent_suffix:
+            print(f"   {intent_suffix.strip()}")
+
+
 def cmd_resume_global():
     """Broadcast a global resume."""
     import stop_signal as _stop
@@ -12643,6 +12908,15 @@ if __name__ == "__main__":
         # un-pushed commits; refuses to touch pushed/merged/deployed
         # state (those produce report + compensation proposals).
         "rollback": cmd_rollback,
+        # ms-55 e-1648: claim primitives. 3 kinds (request/handoff/claim);
+        # request + handoff need recipient consent, claim is first-publisher
+        # -wins broadcast. Local persistence for session restart recovery.
+        "claim_request": cmd_claim_request,
+        "claim_handoff": cmd_claim_handoff,
+        "claim_post": cmd_claim_post,
+        "claim_respond": cmd_claim_respond,
+        "claim_release": cmd_claim_release,
+        "claim_list": cmd_claim_list,
         "sessions_list": cmd_sessions_list,
         "profile_list": cmd_profile_list,
         "bus_budget_grant": cmd_bus_budget_grant,

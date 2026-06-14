@@ -122,6 +122,20 @@ Rollback (ms-55: safe boundary — local-only is auto, pushed is report-only):
                                     commits; pushed history surfaces as
                                     compensation proposals (= revert PR etc.)
 
+Claim primitives (ms-55: who is taking what work — coordination):
+  beacon claim post    --target <kind>:<id> [--intent "..."]
+                                    Broadcast "I'm taking X" (first-publisher-wins)
+  beacon claim request --target <kind>:<id> --to <sid> [--intent "..."]
+                                    Ask a specific session to take X
+  beacon claim handoff --target <kind>:<id> --to <sid> [--intent "..."]
+                                    Hand off in-progress X to another session
+  beacon claim respond <claim_id> [--accept|--decline] [--reason "..."]
+                                    Reply to a request/handoff
+  beacon claim release <claim_id> [--outcome completed|abandoned]
+                                    Mark a claim done
+  beacon claim list    [--mine] [--target <kind>:<id>]
+                                    List local active claims (= restart recovery)
+
 Releases & Deploys:
   beacon deploy record [--revision <rev>] [--semver <v>] [--version <tag>] [--desc <text>]
   beacon deploy list
@@ -3080,6 +3094,129 @@ EOF
                 ;;
             *)
                 echo "Error: unknown subcommand 'beacon resume $_res_sub'" >&2
+                exit 1
+                ;;
+        esac
+        ;;
+    claim)
+        # ms-55 e-1648: claim primitives. request / handoff need a
+        # recipient (--to); plain claim is broadcast. respond / release /
+        # list round out the lifecycle. Local persistence keeps the
+        # issuer's view across session restarts.
+        ensure_project
+        _claim_sub="${2:-}"
+        shift 2 || true
+        _claim_id_positional=""
+        # respond + release take a positional claim_id as the first arg.
+        if [[ "$_claim_sub" == "respond" || "$_claim_sub" == "release" ]]; then
+            if [[ -n "${1:-}" && "${1:0:1}" != "-" ]]; then
+                _claim_id_positional="${1:-}"
+                shift || true
+            fi
+        fi
+        _claim_target=""
+        _claim_intent=""
+        _claim_to=""
+        _claim_expires=""
+        _claim_decision=""
+        _claim_reason=""
+        _claim_outcome=""
+        _claim_mine=""
+        _claim_json=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --target)  _claim_target="${2:-}"; shift 2 ;;
+                --intent)  _claim_intent="${2:-}"; shift 2 ;;
+                --to)      _claim_to="${2:-}"; shift 2 ;;
+                --expires-at) _claim_expires="${2:-}"; shift 2 ;;
+                --accept)  _claim_decision="accept"; shift ;;
+                --decline) _claim_decision="decline"; shift ;;
+                --reason)  _claim_reason="${2:-}"; shift 2 ;;
+                --outcome) _claim_outcome="${2:-}"; shift 2 ;;
+                --mine)    _claim_mine="1"; shift ;;
+                --json)    _claim_json="1"; shift ;;
+                *) shift ;;
+            esac
+        done
+        # Split --target kind:id.
+        _claim_tk=""
+        _claim_ti=""
+        if [[ -n "$_claim_target" ]]; then
+            _claim_tk="${_claim_target%%:*}"
+            _claim_ti="${_claim_target#*:}"
+            if [[ "$_claim_tk" == "$_claim_ti" && "$_claim_target" != *:* ]]; then
+                echo "Error: --target must be <kind>:<id> (e.g. task:e-1648)" >&2
+                exit 1
+            fi
+        fi
+        case "$_claim_sub" in
+            request|handoff|post)
+                # `post` maps to the broadcast `claim` kind on the Python side.
+                _claim_py="claim_$_claim_sub"
+                BEACON_CLAIM_TARGET_KIND="$_claim_tk" \
+                    BEACON_CLAIM_TARGET_ID="$_claim_ti" \
+                    BEACON_CLAIM_INTENT="$_claim_intent" \
+                    BEACON_CLAIM_TO="$_claim_to" \
+                    BEACON_CLAIM_EXPIRES_AT="$_claim_expires" \
+                    BEACON_JSON="$_claim_json" \
+                    python3 "$COMMANDS_PY" "$_claim_py"
+                ;;
+            respond)
+                if [[ -z "$_claim_id_positional" ]]; then
+                    echo "Error: beacon claim respond <claim_id> [--accept|--decline] [--reason ...]" >&2
+                    exit 1
+                fi
+                BEACON_CLAIM_ID="$_claim_id_positional" \
+                    BEACON_CLAIM_DECISION="$_claim_decision" \
+                    BEACON_CLAIM_REASON="$_claim_reason" \
+                    BEACON_JSON="$_claim_json" \
+                    python3 "$COMMANDS_PY" claim_respond
+                ;;
+            release)
+                if [[ -z "$_claim_id_positional" ]]; then
+                    echo "Error: beacon claim release <claim_id> [--outcome completed|abandoned] [--reason ...]" >&2
+                    exit 1
+                fi
+                BEACON_CLAIM_ID="$_claim_id_positional" \
+                    BEACON_CLAIM_OUTCOME="$_claim_outcome" \
+                    BEACON_CLAIM_REASON="$_claim_reason" \
+                    BEACON_JSON="$_claim_json" \
+                    python3 "$COMMANDS_PY" claim_release
+                ;;
+            list)
+                BEACON_CLAIM_MINE="$_claim_mine" \
+                    BEACON_CLAIM_TARGET_KIND="$_claim_tk" \
+                    BEACON_CLAIM_TARGET_ID="$_claim_ti" \
+                    BEACON_JSON="$_claim_json" \
+                    python3 "$COMMANDS_PY" claim_list
+                ;;
+            "")
+                cat <<'EOF'
+Usage:
+  beacon claim post     --target <kind>:<id> [--intent "..."] [--json]
+                                    Broadcast a claim (= "I'm taking X").
+                                    First-publisher-wins; no consent needed.
+  beacon claim request  --target <kind>:<id> --to <sid> [--intent "..."]
+                                    Ask a specific session to take X.
+                                    Recipient must accept.
+  beacon claim handoff  --target <kind>:<id> --to <sid> [--intent "..."]
+                                    Transfer in-progress X to a specific
+                                    session. Recipient must accept.
+  beacon claim respond  <claim_id> [--accept|--decline] [--reason "..."]
+                                    Reply to a pending request / handoff.
+  beacon claim release  <claim_id> [--outcome completed|abandoned] [--reason "..."]
+                                    Mark a claim as done so others can take it.
+  beacon claim list     [--mine] [--target <kind>:<id>] [--json]
+                                    List active claims in the local cache.
+                                    Use --mine after session restart to
+                                    recover what you were in the middle of.
+
+target kind: ms | task | operation | trek | free
+EOF
+                ;;
+            *)
+                echo "Error: unknown subcommand 'beacon claim $_claim_sub'" >&2
+                echo "Try 'beacon claim' for usage." >&2
                 exit 1
                 ;;
         esac
