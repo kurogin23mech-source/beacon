@@ -482,8 +482,20 @@ body::after {
 }
 .header-avatar:hover { filter: brightness(1.1); }
 
+/* Backdrop covers the page while the dropdown is open — closes the menu
+   on click (= modal-style dismiss), and lifts the menu's z-index above
+   project content (the Objective block was painting over the popup). */
+.account-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  background: transparent;
+  display: none;
+  z-index: 1500;
+}
+.account-menu-backdrop.open { display: block; }
+
 .account-menu {
-  position: absolute;
+  position: fixed;
   top: 56px;
   right: 14px;
   background: var(--bg-raised);
@@ -493,7 +505,8 @@ body::after {
   padding: 8px 0;
   font-size: 0.78rem;
   display: none;
-  z-index: 100;
+  z-index: 1600;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
 }
 .account-menu.open { display: block; }
 .account-menu-head {
@@ -3561,13 +3574,17 @@ function renderShell(app) {
           ${state.auth && state.auth.email ? esc(state.auth.email.slice(0,1).toUpperCase()) : '?'}
         </div>
       </div>
-      <div id="account-menu" class="account-menu ${state.accountMenuOpen ? 'open' : ''}">
-        <div class="account-menu-head">ACCOUNT</div>
-        <div class="account-menu-email">${esc((state.auth && state.auth.email) || 'unknown')}</div>
-        <a class="account-menu-item" href="/admin" style="text-decoration:none;display:block">Admin</a>
-        <button class="account-menu-item danger" data-action="logout">Sign out</button>
-      </div>
     </header>
+
+    <!-- Account menu (modal-style: overlay backdrop + lifted z-index so the
+         Objective block can't paint over the popup) -->
+    <div id="account-menu-backdrop" class="account-menu-backdrop ${state.accountMenuOpen ? 'open' : ''}" data-action="close-account-menu"></div>
+    <div id="account-menu" class="account-menu ${state.accountMenuOpen ? 'open' : ''}">
+      <div class="account-menu-head">ACCOUNT</div>
+      <div class="account-menu-email">${esc((state.auth && state.auth.email) || 'unknown')}</div>
+      <button class="account-menu-item" data-action="goto-admin">Admin</button>
+      <button class="account-menu-item danger" data-action="logout">Sign out</button>
+    </div>
 
     ${(p.objective || retro) ? `
     <div class="project-info fade-in stagger-1">
@@ -3590,8 +3607,6 @@ function renderShell(app) {
         <div class="footer-tagline">Where humans and AI are bound together.</div>
       </div>
       <div class="footer-right">
-        ${PLATFORM.getArchiveButtonHTML(p)}
-        <button class="sort-toggle" data-action="export-json" style="font-size:0.65rem;">Export JSON</button>
         ${state.serverVersion ? `<span title="Running Beacon server version (from /health)">Beacon server v${state.serverVersion.replace(/[<>"'&]/g, '')}</span>` : ''}
         <span>${state.lastUpdate ? formatTime(state.lastUpdate) : ''}</span>
       </div>
@@ -3813,16 +3828,23 @@ function setSettingsTab(tab) {
 }
 
 function _renderSettingsMembersTab() {
-  // The current project's members + invite row. The actual member list
-  // refresh happens via the existing loadMembers(); here we render the
-  // shell + call the loader (= mirrors prior menu Members behavior).
+  // Real project selector + member list + Archive / Export buttons.
+  // These used to live in the project footer (= Archive / Export JSON);
+  // moved here so settings is the one place for "manage this project."
+  const projects = state.projects || [];
   return `
     <div class="settings-section">
       <div class="label">Project</div>
-      <div style="font-size:0.85rem;color:var(--text-primary);">
-        ${esc(state.project ? state.project.name : '')}
-        <span style="color:var(--text-dim);font-family:var(--font-mono);font-size:0.7rem;margin-left:8px;">${esc(state.projectId || '')}</span>
-      </div>
+      <select id="settings-project-select" data-action="settings-switch-project"
+              style="background:var(--bg-surface);border:1px solid var(--border);color:var(--text-primary);padding:6px 8px;border-radius:3px;font-family:var(--font-mono);font-size:0.78rem;width:100%;max-width:380px;">
+        ${projects.length
+          ? projects.map(p => `
+              <option value="${esc(p.project_id)}" ${p.project_id === state.projectId ? 'selected' : ''}>
+                ${esc(p.name || '')} — ${esc(p.project_id)}
+              </option>
+            `).join('')
+          : `<option value="${esc(state.projectId || '')}" selected>${esc(state.project ? state.project.name : '')}</option>`}
+      </select>
     </div>
     <div class="settings-section">
       <div class="label">Members</div>
@@ -3835,38 +3857,52 @@ function _renderSettingsMembersTab() {
         <button class="primary" data-action="settings-invite-member">Invite</button>
       </div>
       <div id="settings-member-list">
-        <div class="menu-user" style="color:var(--text-dim);">Loading members...</div>
+        <div class="menu-user" style="color:var(--text-dim);">Loading members…</div>
       </div>
+      <div id="settings-invite-msg" style="font-size:0.7rem;color:var(--text-dim);margin-top:4px;"></div>
     </div>
     <div class="settings-section">
       <div class="label">Export &amp; Archive</div>
-      <div style="display:flex;gap:8px;margin-top:8px;font-size:0.72rem;color:var(--text-dim);">
-        プロジェクトの archive / JSON export はターミナルから:
-      </div>
-      <div class="trek-cli-hint" style="margin-top:6px;">
-        <code>beacon cloud export ${esc(state.projectId || '')}</code>
-        <code>beacon project archive ${esc(state.projectId || '')}</code>
+      <div style="display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap;">
+        <button data-action="settings-archive-project"
+                style="background:transparent;color:var(--text-secondary);border:1px solid var(--border);padding:6px 14px;border-radius:3px;cursor:pointer;font-family:var(--font-mono);font-size:0.75rem;">
+          ${state.project && state.project.archived ? 'Unarchive' : 'Archive'}
+        </button>
+        <button data-action="settings-export-json"
+                style="background:transparent;color:var(--text-secondary);border:1px solid var(--border);padding:6px 14px;border-radius:3px;cursor:pointer;font-family:var(--font-mono);font-size:0.75rem;">
+          Export JSON
+        </button>
+        <span style="color:var(--text-dim);font-size:0.7rem;margin-left:8px;">
+          ${state.project && state.project.archived
+            ? '(現在 archived。Unarchive で project list に戻る)'
+            : 'Archive すると project list から隠れます。Export はその場で JSON ダウンロード。'}
+        </span>
       </div>
     </div>`;
 }
 
 function _renderSettingsAgentsTab() {
   const treks = state.treks || [];
-  const sessions = state.onlineSessions || [];
+  const allSessions = state.onlineSessions || [];
   const filter = state.settingsFilterTrek || '';
-  // Map session_id → trek titles the session is associated with (= member
-  // grain: trek participation is per user, but we render per session as the
-  // mock shows session-level rows).
+  // Only show the caller's own sessions (= "My Agents & Treks" tab).
+  // We filter by the auth email rather than trusting the server-side
+  // endpoint to be strict — defense in depth.
+  const myEmail = (state.auth && state.auth.email) || '';
+  const mySessions = allSessions.filter(s => {
+    const email = (s.actor && s.actor.email) || '';
+    return !myEmail || email === myEmail;
+  });
   const userTreks = (email) => {
     return treks.filter(t => (t.members || []).some(m => m.email === email
                                                       && m.joined_at));
   };
   const filtered = filter
-    ? sessions.filter(s => {
+    ? mySessions.filter(s => {
         const email = (s.actor && s.actor.email) || '';
         return userTreks(email).some(t => t.trek_id === filter);
       })
-    : sessions;
+    : mySessions;
   const rowHtml = (s) => {
     const sid = s.session_id || '';
     const sidShort = _trekShortSessionId(sid);
@@ -3891,9 +3927,9 @@ function _renderSettingsAgentsTab() {
   };
   return `
     <div class="settings-section">
-      <div class="label" style="margin-bottom:4px;">現在オンライン (DM 可能) なセッション</div>
+      <div class="label" style="margin-bottom:4px;">${esc(myEmail || 'You')} の現在オンラインなセッション</div>
       <div style="font-size:0.7rem;color:var(--text-dim);margin-bottom:14px;">
-        参加中の Trek で絞り込み、Trek から離脱はターミナルから (= beacon trek leave)
+        自分のセッションのみ表示。参加中の Trek で絞り込み、Trek から離脱はターミナルから (= beacon trek leave)
       </div>
       <div style="margin-bottom:12px;">
         <select id="settings-filter-trek" data-action="settings-set-filter-trek">
@@ -3935,7 +3971,7 @@ function renderSettings() {
       </div>
       <div class="settings-tabs">
         <button class="tab ${tab === 'members' ? 'active' : ''}" data-action="settings-set-tab" data-tab="members">Projects &amp; Members</button>
-        <button class="tab ${tab === 'agents' ? 'active' : ''}" data-action="settings-set-tab" data-tab="agents">Agents &amp; Treks</button>
+        <button class="tab ${tab === 'agents' ? 'active' : ''}" data-action="settings-set-tab" data-tab="agents">My Agents &amp; Treks</button>
       </div>
       ${tab === 'members' ? _renderSettingsMembersTab() : _renderSettingsAgentsTab()}
     </div>
@@ -3945,7 +3981,11 @@ function renderSettings() {
     if (ev.target === root) closeSettings();
   }, { once: true });
   root.querySelectorAll('[data-action]').forEach(el => {
-    el.addEventListener('click', handleAction);
+    if (el.tagName === 'SELECT' && el.dataset.action === 'settings-switch-project') {
+      el.addEventListener('change', handleAction);
+    } else {
+      el.addEventListener('click', handleAction);
+    }
   });
   // Hook the trek filter dropdown
   const sel = document.getElementById('settings-filter-trek');
@@ -3953,25 +3993,130 @@ function renderSettings() {
     state.settingsFilterTrek = e.target.value;
     renderSettings();
   });
-  // Members tab: kick off the member-list fetch so the row list paints.
-  if (tab === 'members' && state.projectId && typeof loadMembers === 'function') {
-    loadMembers();
-    setTimeout(() => {
-      // Mirror loaded HTML into our settings panel slot.
-      const src = document.getElementById('menu-members');
-      const dst = document.getElementById('settings-member-list');
-      if (src && dst && src.innerHTML.trim()) {
-        dst.innerHTML = src.innerHTML.replace(/menu-user/g, 'settings-member-row');
-      }
-    }, 400);
+  // Members tab: load the project members directly into our slot.
+  if (tab === 'members' && state.projectId) {
+    _settingsLoadMemberList();
   }
 }
 
-// ---- Account-menu dropdown (avatar) ----
+// Settings > Members: fetch + render into #settings-member-list.
+async function _settingsLoadMemberList() {
+  const dst = document.getElementById('settings-member-list');
+  if (!dst) return;
+  try {
+    const data = await api(`/api/projects/${state.projectId}/members`);
+    const myEmail = (state.auth && state.auth.email) || '';
+    const isOwner = !!myEmail && data.owner_email === myEmail;
+    let html = '';
+    if (data.owner_email) {
+      html += `
+        <div class="settings-member-row">
+          <span class="email">${esc(data.owner_email)}</span>
+          <span class="role-tag">owner</span>
+          <span></span>
+        </div>`;
+    }
+    for (const m of (data.members || [])) {
+      html += `
+        <div class="settings-member-row">
+          <span class="email">${esc(m.email)}</span>
+          ${isOwner
+            ? `<select data-action="settings-change-role" data-email="${esc(m.email)}"
+                       style="background:var(--bg-surface);border:1px solid var(--border);color:var(--text-primary);font-size:0.7rem;padding:1px 4px;border-radius:3px;cursor:pointer;">
+                 <option value="viewer" ${m.role === 'viewer' ? 'selected' : ''}>viewer</option>
+                 <option value="editor" ${m.role === 'editor' ? 'selected' : ''}>editor</option>
+               </select>`
+            : `<span class="role-tag" style="color:var(--text-dim);">${esc(m.role)}</span>`}
+          <span class="x" data-action="settings-remove-member" data-email="${esc(m.email)}">×</span>
+        </div>`;
+    }
+    if (!html) {
+      html = '<div class="menu-user" style="color:var(--text-dim);">No members.</div>';
+    }
+    dst.innerHTML = html;
+    dst.querySelectorAll('[data-action]').forEach(el => {
+      const act = el.dataset.action;
+      if (act === 'settings-change-role') {
+        el.addEventListener('change', _settingsChangeRole);
+      } else if (act === 'settings-remove-member') {
+        el.addEventListener('click', _settingsRemoveMember);
+      }
+    });
+  } catch (e) {
+    dst.innerHTML = `<div class="menu-user" style="color:var(--text-dim);">Failed to load members (${esc(e.message || 'error')}).</div>`;
+  }
+}
+
+async function _settingsInviteMember() {
+  const emailEl = document.getElementById('settings-invite-email');
+  const roleEl = document.getElementById('settings-invite-role');
+  const msg = document.getElementById('settings-invite-msg');
+  const email = (emailEl && emailEl.value || '').trim();
+  const role = (roleEl && roleEl.value) || 'viewer';
+  if (!email) { if (msg) msg.textContent = 'email is required'; return; }
+  try {
+    await api(`/api/projects/${state.projectId}/members`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({email, role}),
+    });
+    if (msg) msg.textContent = `Invited ${email}`;
+    if (emailEl) emailEl.value = '';
+    _settingsLoadMemberList();
+  } catch (e) {
+    if (msg) msg.textContent = e.message || 'Error';
+  }
+}
+
+async function _settingsChangeRole(e) {
+  const sel = e.currentTarget;
+  const email = sel.dataset.email;
+  const newRole = sel.value;
+  try {
+    await api(`/api/projects/${state.projectId}/members/${encodeURIComponent(email)}`, {
+      method: 'PATCH', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({role: newRole}),
+    });
+  } catch (err) { window.alert(err.message || 'Error'); }
+}
+
+async function _settingsRemoveMember(e) {
+  const email = e.currentTarget.dataset.email;
+  if (!window.confirm(`Remove ${email}?`)) return;
+  try {
+    await api(`/api/projects/${state.projectId}/members/${encodeURIComponent(email)}`,
+              {method: 'DELETE'});
+    _settingsLoadMemberList();
+  } catch (err) { window.alert(err.message || 'Error'); }
+}
+
+async function _settingsArchiveProject() {
+  const wantArchive = !(state.project && state.project.archived);
+  if (typeof archiveProject === 'function') {
+    await archiveProject(wantArchive);
+    // archiveProject may close the menu / navigate; refresh the panel if
+    // we still have a project context.
+    if (state.projectId) renderSettings();
+  }
+}
+
+// ---- Account-menu dropdown (avatar) — modal style ----
+function _syncAccountMenuClasses() {
+  const menu = document.getElementById('account-menu');
+  const bd = document.getElementById('account-menu-backdrop');
+  if (menu) menu.classList.toggle('open', !!state.accountMenuOpen);
+  if (bd) bd.classList.toggle('open', !!state.accountMenuOpen);
+}
 function toggleAccountMenu() {
   state.accountMenuOpen = !state.accountMenuOpen;
-  const el = document.getElementById('account-menu');
-  if (el) el.classList.toggle('open', state.accountMenuOpen);
+  _syncAccountMenuClasses();
+}
+function closeAccountMenu() {
+  state.accountMenuOpen = false;
+  _syncAccountMenuClasses();
+}
+function gotoAdmin() {
+  closeAccountMenu();
+  window.location.assign('/admin');
 }
 
 function _trekStatusIcon(s) {
@@ -5643,6 +5788,31 @@ function handleCommonAction(action, el) {
       setSettingsTab(el.dataset.tab); return true;
     case 'toggle-account-menu':
       toggleAccountMenu(); return true;
+    case 'close-account-menu':
+      closeAccountMenu(); return true;
+    case 'goto-admin':
+      gotoAdmin(); return true;
+    case 'settings-switch-project': {
+      const pid = el.value || el.dataset.projectId;
+      if (pid && pid !== state.projectId) {
+        closeSettings();
+        if (typeof doSelectProject === 'function') {
+          // Tauri path uses local-mode path lookup; not relevant on Web.
+          doSelectProject(pid);
+        } else {
+          // Web SPA: just navigate so the new project loads via URL param.
+          window.location.assign(`/?project=${encodeURIComponent(pid)}`);
+        }
+      }
+      return true;
+    }
+    case 'settings-invite-member':
+      _settingsInviteMember(); return true;
+    case 'settings-archive-project':
+      _settingsArchiveProject(); return true;
+    case 'settings-export-json':
+      if (typeof exportProject === 'function') exportProject();
+      return true;
     // ms-69 / e-1664 — Related Treks widget on work item detail
     case 'trek-jump-from-widget': {
       const tid = el.dataset.trekId;
