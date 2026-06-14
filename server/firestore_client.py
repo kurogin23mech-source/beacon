@@ -447,6 +447,111 @@ def sweep_trashed_documents(project_id: str, *, days: int = 30,
 
 
 # ---------------------------------------------------------------------------
+# Active claims (subcollection: projects/{project_id}/active_claims/{claim_id})
+# ms-55 e-1730
+# ---------------------------------------------------------------------------
+#
+# Server-side mirror of lib/claims.py's local `.beacon/active_claims.json`
+# store. Each session (= one bclaude process) records the claims it has
+# issued so that:
+#
+#   * the issuer can recover "what was I in the middle of?" after a
+#     restart (= `beacon claim list --mine`)
+#   * the Web UI Active Claims tab shows the project-wide picture
+#     without scanning the bus event stream
+#   * cross-machine coordination (= Mac + Win running side by side) sees
+#     the same authoritative claim set instead of two local files that
+#     don't know about each other
+#
+# The wire payload (= what gets stored here) is the same dict
+# lib/claims.py:build_claim_payload returns. We don't validate the
+# schema server-side; the client builds + validates locally, then this
+# layer is a pure mirror. That keeps the schema evolution surface in
+# one place (= the builder).
+
+ACTIVE_CLAIMS_SUBCOLLECTION = "active_claims"
+
+
+def list_active_claims(project_id: str) -> list[dict]:
+    """Return all active claims for a project, ordered by issued_at."""
+    docs = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(ACTIVE_CLAIMS_SUBCOLLECTION)
+        .stream()
+    )
+    out = []
+    for doc in docs:
+        data = doc.to_dict() or {}
+        # Surface the doc id as claim_id even if the stored payload lost
+        # it; the subcollection layout uses claim_id as the document id.
+        data.setdefault("claim_id", doc.id)
+        out.append(data)
+    out.sort(key=lambda r: r.get("issued_at") or "")
+    return out
+
+
+def get_active_claim(project_id: str, claim_id: str) -> dict | None:
+    doc = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(ACTIVE_CLAIMS_SUBCOLLECTION)
+        .document(claim_id)
+        .get()
+    )
+    if not doc.exists:
+        return None
+    data = doc.to_dict() or {}
+    data.setdefault("claim_id", doc.id)
+    return data
+
+
+def save_active_claim(project_id: str, claim_id: str, payload: dict) -> str:
+    """Upsert a claim. Returns the claim_id stored.
+
+    Idempotent: writing the same claim_id overwrites. Matches "the
+    latest issue is the canonical record" semantics from local mode.
+    """
+    if not claim_id:
+        raise ValueError("claim_id is required")
+    if not isinstance(payload, dict):
+        raise TypeError("payload must be a dict")
+    body = dict(payload)
+    body["claim_id"] = claim_id  # ensure stored payload has the id
+    (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(ACTIVE_CLAIMS_SUBCOLLECTION)
+        .document(claim_id)
+        .set(body)
+    )
+    return claim_id
+
+
+def delete_active_claim(project_id: str, claim_id: str) -> bool:
+    """Hard-delete a claim. Returns True iff it existed.
+
+    Unlike documents, claims have no soft-delete / restore concept —
+    a release IS the deletion. The bus event stream retains the
+    full audit trail.
+    """
+    doc_ref = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(ACTIVE_CLAIMS_SUBCOLLECTION)
+        .document(claim_id)
+    )
+    if not doc_ref.get().exists:
+        return False
+    doc_ref.delete()
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Changelog (subcollection: projects/{project_id}/changelog/{doc_id})
 # ---------------------------------------------------------------------------
 #

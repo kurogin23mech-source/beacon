@@ -715,3 +715,33 @@ class ApiClient:
             f"/api/projects/{urllib.parse.quote(project_id, safe='')}"
             f"/entries/{urllib.parse.quote(entry_id, safe='')}/related-treks"
         )
+
+    # ms-55 e-1730: active claims subcollection (= lib/claims.py mirror).
+    # The wire payload is the dict lib/claims.py:build_claim_payload returns.
+
+    def list_active_claims(self, project_id: str) -> list:
+        """Return all active claims on a project, sorted by issued_at."""
+        return self.get(
+            f"/api/projects/{urllib.parse.quote(project_id, safe='')}/active_claims"
+        )
+
+    def get_active_claim(self, project_id: str, claim_id: str) -> dict:
+        return self.get(
+            f"/api/projects/{urllib.parse.quote(project_id, safe='')}"
+            f"/active_claims/{urllib.parse.quote(claim_id, safe='')}"
+        )
+
+    def save_active_claim(self, project_id: str, claim_id: str, payload: dict) -> dict:
+        """Upsert a claim; returns ``{claim_id, status}``."""
+        return self.post(
+            f"/api/projects/{urllib.parse.quote(project_id, safe='')}"
+            f"/active_claims/{urllib.parse.quote(claim_id, safe='')}",
+            {"payload": payload},
+        )
+
+    def delete_active_claim(self, project_id: str, claim_id: str) -> dict:
+        """Release a claim; returns ``{claim_id, deleted: bool}``."""
+        return self.delete(
+            f"/api/projects/{urllib.parse.quote(project_id, safe='')}"
+            f"/active_claims/{urllib.parse.quote(claim_id, safe='')}"
+        )

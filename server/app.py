@@ -840,6 +840,18 @@ class DocumentSave(BaseModel):
 class DeleteRequest(BaseModel):
     reason: str = ""
 
+
+class ActiveClaimSave(BaseModel):
+    """Body for ``POST /api/projects/{pid}/active_claims/{claim_id}`` (ms-55 e-1730).
+
+    The whole `payload` dict is the wire shape lib/claims.py:build_claim_payload
+    produces — claim_kind, target {kind,id}, from_session_id, intent,
+    optional to_session_id / expires_at / metadata, issued_at, claim_id.
+    We do not validate the schema server-side; the client builds + validates
+    locally and this layer is a pure persistence mirror.
+    """
+    payload: dict
+
 class PurgeRequest(BaseModel):
     """Body for destructive hard-delete endpoints (milestone/entry/operation purge).
 
@@ -2196,6 +2208,59 @@ async def upload_document_image(project_id: str,
         "size": result.size,
         "content_type": result.content_type,
     }
+
+
+# ---------------------------------------------------------------------------
+# Active claims (ms-55 e-1730)
+# ---------------------------------------------------------------------------
+#
+# Project-wide mirror of lib/claims.py's local active_claims.json store.
+# The CLI in cloud-mode round-trips through these endpoints so:
+#   * `beacon claim list` returns the multi-machine union (= Mac + Win
+#     view the same set), not just one machine's local cache
+#   * `beacon claim post/handoff/request` is idempotent across sessions
+#   * the Web UI can render Active Claims without scanning the bus
+# Schema is opaque to the server — the client owns the wire shape.
+
+@app.get("/api/projects/{project_id}/active_claims")
+def list_active_claims_endpoint(project_id: str,
+                                user: dict = Depends(require_auth)):
+    """List all active claims on a project, sorted by issued_at."""
+    _load(project_id, user)  # access check
+    return db.list_active_claims(project_id)
+
+
+@app.get("/api/projects/{project_id}/active_claims/{claim_id}")
+def get_active_claim_endpoint(project_id: str, claim_id: str,
+                              user: dict = Depends(require_auth)):
+    _load(project_id, user)
+    claim = db.get_active_claim(project_id, claim_id)
+    if claim is None:
+        raise HTTPException(
+            status_code=404, detail=f"Claim '{claim_id}' not found",
+        )
+    return claim
+
+
+@app.post("/api/projects/{project_id}/active_claims/{claim_id}")
+def save_active_claim_endpoint(project_id: str, claim_id: str,
+                               body: ActiveClaimSave,
+                               user: dict = Depends(require_auth)):
+    """Upsert a claim. Idempotent — same claim_id overwrites."""
+    data = _load(project_id, user)
+    _require_write(data, user)
+    db.save_active_claim(project_id, claim_id, body.payload)
+    return {"claim_id": claim_id, "status": "saved"}
+
+
+@app.delete("/api/projects/{project_id}/active_claims/{claim_id}")
+def delete_active_claim_endpoint(project_id: str, claim_id: str,
+                                 user: dict = Depends(require_auth)):
+    """Release a claim from the project-wide store. Idempotent."""
+    data = _load(project_id, user)
+    _require_write(data, user)
+    deleted = db.delete_active_claim(project_id, claim_id)
+    return {"claim_id": claim_id, "deleted": deleted}
 
 
 @app.get("/api/projects/{project_id}/changelog")

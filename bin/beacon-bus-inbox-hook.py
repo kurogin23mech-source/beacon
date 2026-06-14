@@ -71,6 +71,44 @@ from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
+# Lazy lib/stop_signal import (ms-55 e-1721 receive-side halt protocol)
+# ---------------------------------------------------------------------------
+#
+# The inbox hook deliberately avoids importing lib/* at module load to
+# keep startup snappy. The stop-signal processor only needs to run when
+# the bus returned at least one event, so we defer the import + sys.path
+# injection until then.
+
+def _import_stop_signal():
+    """Import lib/stop_signal lazily from the beacon source tree.
+
+    Tries (in order):
+      * neighbour ``lib/stop_signal.py`` relative to this script
+        (= source checkout / editable install)
+      * walk up from the script dir looking for a ``lib/stop_signal.py``
+        (= installed alongside the bin/ tree)
+
+    Returns the module on success, ``None`` on failure. Failures are
+    silent — the receive-side halt is a layer over the existing inject,
+    and the user still sees the stop event as a regular bus event.
+    """
+    candidates = []
+    here = Path(__file__).resolve().parent
+    candidates.append(here.parent / "lib")
+    candidates.append(here.parent.parent / "lib")
+    for lib_dir in candidates:
+        candidate = lib_dir / "stop_signal.py"
+        if candidate.exists():
+            sys.path.insert(0, str(lib_dir))
+            try:
+                import stop_signal as _stop  # type: ignore[import-not-found]
+            except Exception:
+                return None
+            return _stop
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Project + session discovery
 # ---------------------------------------------------------------------------
 
@@ -101,6 +139,20 @@ def _load_session_id(root: Path, hook_input: dict) -> str:
     """
     sess = _read_json(root / ".beacon" / "session.json")
     return sess.get("session_id") or hook_input.get("session_id") or ""
+
+
+def _read_session_focus(root: Path) -> tuple[str, str]:
+    """Return (ms_id, task_id) for this session.
+
+    Reads `.beacon/session.json` for ``ms_id`` / ``task_id`` / focus
+    fields. Either field may be empty when the session hasn't pinned
+    its work yet; the stop-signal processor treats empty as "no match"
+    which means scoped halts on the matching kind won't bind.
+    """
+    data = _read_json(root / ".beacon" / "session.json")
+    ms_id = data.get("ms_id") or data.get("milestone_id") or ""
+    task_id = data.get("task_id") or data.get("entry_id") or ""
+    return str(ms_id or ""), str(task_id or "")
 
 
 def _refresh_session_heartbeat(root: Path) -> None:
@@ -507,6 +559,25 @@ def main() -> None:
 
     if not isinstance(unread, list) or not unread:
         return
+
+    # ms-55 e-1721: process stop-signal channel events first so the
+    # halt-request.json is on disk before the PostToolUse hook fires
+    # again. Failures here are non-fatal — the regular event inject
+    # still tells the AI "STOP signal arrived" even if file write is
+    # broken.
+    _stop = _import_stop_signal()
+    if _stop is not None:
+        try:
+            ms_id, task_id = _read_session_focus(root)
+            _stop.process_inbox_events(
+                unread,
+                session_id=session_id,
+                ms_id=ms_id,
+                task_id=task_id,
+                beacon_dir=str(root / ".beacon"),
+            )
+        except Exception as exc:
+            _log(f"stop-signal processor failed: {exc}")
 
     # Read the receiver-side auto-execute allowlist. Default-empty ⇒ every
     # auto-execute event gets downgraded to propose-to-ai before it reaches

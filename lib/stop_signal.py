@@ -1,4 +1,4 @@
-"""Beacon Stop Signal protocol (ms-55 e-1646).
+"""Beacon Stop Signal protocol (ms-55 e-1646 / e-1721 receive side).
 
 The "止まる側" half of ms-55 SPEC (= 並走するエージェントが「走れて、止まれる」
 自律性). This module defines:
@@ -434,3 +434,327 @@ def latest_active_stops(events: list[dict]) -> list[dict]:
             state.pop(key, None)
 
     return sorted(state.values(), key=lambda r: r.get("issued_at") or "")
+
+
+# ---------------------------------------------------------------------------
+# Halt-request file path — receiver-side persistence (ms-55 e-1721)
+# ---------------------------------------------------------------------------
+#
+# When the inbox hook sees a stop event that applies to this session, it
+# writes a `halt-request.json` under `.beacon/sessions/<sid>/`. The
+# PostToolUse hook reads that file after each tool call and surfaces it
+# to the AI as additionalContext, completing the protocol:
+#
+#   sender -> bus event -> receiver inbox hook -> halt-request.json
+#                                              -> PostToolUse hook
+#                                              -> AI sees "STOP signal"
+#
+# The file format intentionally mirrors `parse_stop_event`'s output
+# (= scope, reason, reason_kind, target, issued_by_session_id, ...)
+# so the PostToolUse hook can render it without re-parsing the bus
+# event. A separate `acknowledged_at` field is stamped when the AI
+# acknowledges the halt; subsequent PostToolUse fires can suppress the
+# inject so the AI isn't reminded repeatedly.
+
+HALT_REQUEST_FILENAME = "halt-request.json"
+
+
+def halt_request_path(
+    session_id: str,
+    *,
+    beacon_dir: Optional[str] = None,
+) -> str:
+    """Return the absolute path to the halt-request file for `session_id`.
+
+    Default base = `.beacon` from the cwd. Override via the `beacon_dir`
+    kwarg (mostly for tests).
+    """
+    import os  # noqa: PLC0415
+
+    base = beacon_dir or os.environ.get("BEACON_DIR", "") or ".beacon"
+    return os.path.join(base, "sessions", session_id, HALT_REQUEST_FILENAME)
+
+
+def write_halt_request(
+    stop_record: dict,
+    *,
+    session_id: str,
+    beacon_dir: Optional[str] = None,
+) -> str:
+    """Persist a halt request for the receiver session.
+
+    Idempotent — re-writing the same stop record overwrites in place.
+    Caller is expected to have already filtered via
+    `stop_applies_to_session` so the file represents an actionable halt,
+    not noise.
+
+    Returns the path written.
+    """
+    import json as _json  # noqa: PLC0415
+    import os  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    if not session_id:
+        raise ValueError("session_id is required")
+    if not isinstance(stop_record, dict):
+        raise TypeError("stop_record must be a dict")
+
+    path = halt_request_path(session_id, beacon_dir=beacon_dir)
+    parent = os.path.dirname(path)
+    os.makedirs(parent, exist_ok=True)
+
+    # Drop the raw_event subtree before writing — it carries the full
+    # bus envelope which inflates the file size + duplicates data already
+    # in the bus log. Keep only fields the PostToolUse hook renders.
+    body = {
+        k: v for k, v in stop_record.items()
+        if k != "raw_event"
+    }
+    body.setdefault("received_at", _utcnow_iso())
+
+    fd, tmp = tempfile.mkstemp(prefix=".halt-request.", dir=parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            _json.dump(body, f, ensure_ascii=False, indent=2, sort_keys=True)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return path
+
+
+def read_halt_request(
+    session_id: str,
+    *,
+    beacon_dir: Optional[str] = None,
+) -> Optional[dict]:
+    """Return the active halt request for `session_id`, or None.
+
+    A request that has already been acknowledged (= `acknowledged_at`
+    field set) is still returned; callers decide whether to suppress
+    based on that field. We don't auto-delete because the file doubles
+    as an audit artifact for "this session was asked to halt at <ts>".
+    """
+    import json as _json  # noqa: PLC0415
+    import os  # noqa: PLC0415
+
+    if not session_id:
+        return None
+    path = halt_request_path(session_id, beacon_dir=beacon_dir)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def acknowledge_halt_request(
+    session_id: str,
+    *,
+    beacon_dir: Optional[str] = None,
+    note: str = "",
+) -> bool:
+    """Stamp `acknowledged_at` on the halt request so the PostToolUse
+    hook can stop re-surfacing it.
+
+    Returns True if a request existed (acknowledged or not before).
+    """
+    import json as _json  # noqa: PLC0415
+    import os  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    data = read_halt_request(session_id, beacon_dir=beacon_dir)
+    if data is None:
+        return False
+    data["acknowledged_at"] = _utcnow_iso()
+    if note:
+        data["acknowledgement_note"] = note
+
+    path = halt_request_path(session_id, beacon_dir=beacon_dir)
+    parent = os.path.dirname(path)
+    fd, tmp = tempfile.mkstemp(prefix=".halt-request.", dir=parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            _json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return True
+
+
+def clear_halt_request(
+    session_id: str,
+    *,
+    beacon_dir: Optional[str] = None,
+) -> bool:
+    """Remove the halt request entirely (= resume / session restart).
+
+    Returns True if a file existed.
+    """
+    import os  # noqa: PLC0415
+
+    if not session_id:
+        return False
+    path = halt_request_path(session_id, beacon_dir=beacon_dir)
+    if not os.path.exists(path):
+        return False
+    try:
+        os.unlink(path)
+        return True
+    except OSError:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Receive-side reducer — drive write_halt_request from a bus event batch
+# ---------------------------------------------------------------------------
+
+def process_inbox_events(
+    events: list[dict],
+    *,
+    session_id: str,
+    ms_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+    beacon_dir: Optional[str] = None,
+) -> Optional[dict]:
+    """Scan an inbox event batch for stop / resume signals that apply
+    to the current session.
+
+    Writes / clears `.beacon/sessions/<sid>/halt-request.json` as a
+    side effect:
+      * latest matching stop → write the request file
+      * latest matching resume after a stop → clear the file
+      * neither → no change
+
+    Returns the persisted halt request dict (= same shape
+    `read_halt_request` returns) when one is now active, or None.
+    """
+    if not session_id:
+        return None
+
+    # Walk oldest-first so the latest event wins.
+    sorted_events = sorted(
+        (e for e in events or [] if isinstance(e, dict)),
+        key=lambda e: e.get("created_at") or "",
+    )
+
+    pending_stop: Optional[dict] = None
+    cleared = False
+    for ev in sorted_events:
+        if ev.get("channel") != STOP_CHANNEL:
+            continue
+        stop = parse_stop_event(ev)
+        if stop and stop_applies_to_session(
+            stop, my_session_id=session_id,
+            my_ms_id=ms_id, my_task_id=task_id,
+        ):
+            pending_stop = stop
+            cleared = False
+            continue
+        resume = parse_resume_event(ev)
+        if resume:
+            # A scoped resume that matches our active halt clears it.
+            scope = resume.get("scope")
+            if scope == SCOPE_GLOBAL:
+                pending_stop = None
+                cleared = True
+                continue
+            target = resume.get("target") or {}
+            # Mirror stop_applies_to_session's matching rule on the
+            # target side so a resume for ms-55 clears a halt on ms-55.
+            if scope == SCOPE_SCOPED:
+                pretend_stop = {
+                    "scope": SCOPE_SCOPED,
+                    "target": target,
+                }
+                if stop_applies_to_session(
+                    pretend_stop, my_session_id=session_id,
+                    my_ms_id=ms_id, my_task_id=task_id,
+                ):
+                    pending_stop = None
+                    cleared = True
+
+    if pending_stop is not None:
+        write_halt_request(
+            pending_stop, session_id=session_id, beacon_dir=beacon_dir,
+        )
+        return read_halt_request(session_id, beacon_dir=beacon_dir)
+    if cleared:
+        clear_halt_request(session_id, beacon_dir=beacon_dir)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# PostToolUse hook surface (ms-55 e-1721)
+# ---------------------------------------------------------------------------
+#
+# The Claude Code PostToolUse hook calls render_halt_inject after each
+# tool call to decide whether to surface the halt to the AI. The render
+# emits a short markdown block with the stop record's reason / target /
+# sender — enough for the AI to decide to halt voluntarily after
+# finishing the current tool call (= SPEC §3 "halt after current tool
+# call completes").
+
+def render_halt_inject(halt_request: dict) -> str:
+    """Format a halt request as PostToolUse additionalContext markdown.
+
+    Returns "" for malformed input so the hook can just check truthiness.
+    """
+    if not isinstance(halt_request, dict):
+        return ""
+    scope = halt_request.get("scope") or "?"
+    reason = halt_request.get("reason") or "(no reason)"
+    reason_kind = halt_request.get("reason_kind") or "other"
+    sender = halt_request.get("issued_by_session_id") or "?"
+    issued_at = halt_request.get("issued_at") or "?"
+    received_at = halt_request.get("received_at") or "?"
+
+    if scope == SCOPE_GLOBAL:
+        target_line = "scope: GLOBAL (every active session is asked to halt)"
+    else:
+        target = halt_request.get("target") or {}
+        target_line = (
+            f"scope: scoped → {target.get('kind', '?')}:{target.get('id', '?')}"
+        )
+
+    lines = [
+        "⚠ STOP SIGNAL — halt requested",
+        "",
+        target_line,
+        f"reason_kind: {reason_kind}",
+        f"reason: {reason}",
+        f"from: {sender}",
+        f"issued_at: {issued_at}",
+        f"received_at: {received_at}",
+        "",
+        "Action: finish the current tool call cleanly, persist any in-progress",
+        "work, then halt. Do not start new tool calls until the user clears",
+        "the halt with `beacon resume ...` (or you explicitly override after",
+        "explaining why).",
+    ]
+    return "\n".join(lines)
+
+
+def halt_inject_needed(halt_request: Optional[dict]) -> bool:
+    """Return True iff the halt should be surfaced to the AI right now.
+
+    Suppression rules:
+      * No request file → no inject.
+      * `acknowledged_at` already stamped → no inject (the AI already
+        saw it; re-surfacing every PostToolUse would be noise).
+    """
+    if not halt_request:
+        return False
+    return not halt_request.get("acknowledged_at")

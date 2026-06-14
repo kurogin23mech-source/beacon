@@ -84,6 +84,11 @@ if _BACKEND == "dynamodb":
         save_trek,
         list_treks,
         delete_trek,
+        # Active claims (ms-55 e-1730)
+        list_active_claims,
+        get_active_claim,
+        save_active_claim,
+        delete_active_claim,
     )
 elif _BACKEND == "firestore":
     from firestore_client import (  # noqa: F401
@@ -152,6 +157,11 @@ elif _BACKEND == "firestore":
         save_trek,
         list_treks,
         delete_trek,
+        # Active claims (ms-55 e-1730)
+        list_active_claims,
+        get_active_claim,
+        save_active_claim,
+        delete_active_claim,
     )
 else:
     raise RuntimeError(

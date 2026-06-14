@@ -10432,6 +10432,24 @@ def cmd_help_json():
         {"command": "beacon channel opt-out", "flags": ["--project", "--global"], "description": "Block all install / auto-install attempts (persistent flag)"},
         {"command": "beacon channel opt-in", "flags": ["--project", "--global"], "description": "Lift the opt-out flag at project or global scope"},
         {"command": "beacon channel status", "flags": [], "description": "Show install / files / opt-out / next-action state in one screen"},
+        # ms-55 e-1736: coordination signals (= 走る / 止まる両輪).
+        # SPEC `bnzTXhu6KYIMfVE2Ivy2` for the design; landed in
+        # e-1646 (stop) / e-1647 (rollback) / e-1648 (claim) /
+        # e-1649 (stuck) / e-1650 (morning).
+        {"command": "beacon stop scoped <target>", "flags": ["--kind ms|task|session", "--reason-kind <k>", "--reason <text>", "--json"], "description": "Broadcast a STOP signal at a single MS / task / session (Andon cord — anyone can halt)"},
+        {"command": "beacon stop global", "flags": ["--reason-kind <k>", "--reason <text>", "--json"], "description": "Broadcast STOP across every active autonomous session (everything-stops fallback)"},
+        {"command": "beacon stop status", "flags": ["--json"], "description": "Show the latest stop / resume state from the stop-signal channel"},
+        {"command": "beacon resume scoped <target>", "flags": ["--kind ms|task|session", "--reason <text>", "--json"], "description": "Clear a scoped STOP, allowing the targeted session(s) to resume work"},
+        {"command": "beacon resume global", "flags": ["--reason <text>", "--json"], "description": "Clear a global STOP across every autonomous session"},
+        {"command": "beacon rollback", "flags": ["--commits N", "--reason <text>", "--dry-run", "--no-record", "--json"], "description": "Undo working tree (git stash) + N local commits (--soft reset); push past upstream → report-only with compensation proposals"},
+        {"command": "beacon claim request <kind>:<id>", "flags": ["--intent <text>", "--json"], "description": "Announce intent to take a target (ms/task/operation/trek/free); other sessions can respond"},
+        {"command": "beacon claim respond <claim-id>", "flags": ["--accept|--reject", "--reason <text>", "--json"], "description": "Respond to another session's claim request"},
+        {"command": "beacon claim post <kind>:<id>", "flags": ["--intent <text>", "--json"], "description": "Post-hoc record that this session already started on the target (no request/response dance)"},
+        {"command": "beacon claim handoff <claim-id> --to <session>", "flags": ["--reason <text>", "--json"], "description": "Transfer an active claim to a different session"},
+        {"command": "beacon claim release <claim-id>", "flags": ["--outcome completed|abandoned", "--reason <text>", "--json"], "description": "Release a claim (outcome surfaces in `beacon morning` as 完了 or skip)"},
+        {"command": "beacon claim list", "flags": ["--json"], "description": "List active claims from local `.beacon/active_claims.json` (= restart restore path)"},
+        {"command": "beacon stuck check", "flags": ["--telemetry-file <path>", "--idle-min N", "--json"], "description": "Detect sessions idle past --idle-min; emit STUCK stop signals so morning briefing surfaces 介入要望"},
+        {"command": "beacon morning", "flags": ["--since-hours N", "--events-file <path>", "--no-doc", "--json"], "description": "4-bucket digest of recent autonomous activity (完了 / 停止 / skip / 介入要望); auto-saves as scope=report doc"},
         {"command": "beacon help", "flags": ["--json"], "description": "Show help (--json for machine-readable output)"},
     ]
     print(json.dumps({"version": __version__, "commands": commands}, ensure_ascii=False, indent=2))
@@ -12432,6 +12450,73 @@ def cmd_resume_scoped():
 # proposal" in the report — concrete next-step text like "open a
 # revert PR" rather than silent destructive action.
 
+def _rollback_record_history(plan, result, reason: str) -> dict:
+    """Record a `beacon rollback` execution as a save entry on the active MS.
+
+    ms-55 e-1727: after `beacon rollback` mutates the working tree (=
+    non-dry-run, no fatal errors), persist a structured trail so
+    `beacon search "rollback"` surfaces "when did we roll back, what
+    did we touch, what compensation was proposed". Without this trail
+    the runaway story is lost — stash refs survive but project history
+    has no pointer to them.
+
+    The entry uses source="rollback" so the search query is single-keyword,
+    and the description packs reason + commit hashes + working-tree count +
+    compensation hints. Returns the {status, entry_id, milestone} dict
+    from save_entry, or {"status": "error", "error": ...} on failure.
+    Failures are non-fatal — the rollback already succeeded.
+    """
+    try:
+        import operations as _ops  # noqa: PLC0415
+    except Exception as e:
+        return {"status": "error", "error": f"import operations: {e}"}
+
+    state = plan.state
+    head_hash = state.head_hash or "?"
+    branch = state.branch or "(detached HEAD)"
+    upstream = state.upstream_branch or "(no upstream)"
+
+    parts: list[str] = []
+    parts.append(f"rollback on {branch} (HEAD~={head_hash}, upstream={upstream})")
+    if reason:
+        parts.append(f"reason: {reason}")
+    if result.stashed:
+        parts.append(
+            f"stashed {len(state.working_tree_files)} working-tree path(s) → "
+            f"{result.stash_ref or 'stash@{0}'}"
+        )
+    if result.reset_commits > 0:
+        parts.append(f"reset {result.reset_commits} local commit(s) (--soft)")
+    if not result.stashed and result.reset_commits == 0:
+        parts.append("(no-op: clean tree, no local commits)")
+    if plan.pushed_warning:
+        parts.append("⚠ rollback request extended past upstream — report-only")
+    for opt in plan.compensation_options:
+        parts.append(f"compensation: {opt}")
+
+    description = "; ".join(parts)
+
+    def op(d):
+        return d, core.save_entry(
+            d,
+            ms_id="",  # auto-target the active MS
+            description=description,
+            source="rollback",
+            date="",
+            hash=head_hash,
+        )
+
+    try:
+        project_id = _project_id_for_ops()
+        return _ops.apply_operation(
+            project_id, op,
+            op_name="rollback.record",
+            reason=reason or "rollback record",
+        )
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
 def cmd_rollback():
     """Inspect local git state and roll back the safe portion.
 
@@ -12440,6 +12525,8 @@ def cmd_rollback():
       BEACON_ROLLBACK_REASON     free text, recorded into stash msg + report
       BEACON_ROLLBACK_DRY_RUN    "1" → show plan, don't mutate
       BEACON_ROLLBACK_CWD        override cwd (mainly for tests)
+      BEACON_ROLLBACK_NO_RECORD  "1" → skip the history save entry (= e-1727
+                                 escape hatch for tests / no-op rollbacks)
       BEACON_JSON                "1" → json output (plan + result)
     """
     import rollback as _rb
@@ -12464,6 +12551,18 @@ def cmd_rollback():
         reason=reason,
         dry_run=dry_run,
     )
+
+    # ms-55 e-1727: also record on the non-error JSON path. We compute
+    # the record first so it appears in the JSON payload.
+    record_info: Optional[dict] = None
+    if (
+        not dry_run
+        and result is not None
+        and os.environ.get("BEACON_ROLLBACK_NO_RECORD", "") != "1"
+        and (result.stashed or result.reset_commits > 0
+             or plan.compensation_options)
+    ):
+        record_info = _rollback_record_history(plan, result, reason)
 
     if json_mode:
         out = {
@@ -12492,6 +12591,8 @@ def cmd_rollback():
                 "reset_commits": result.reset_commits,
                 "errors": list(result.errors),
             }
+        if record_info is not None:
+            out["record"] = record_info
         print(json.dumps(out, ensure_ascii=False))
         if result is not None and result.errors:
             sys.exit(1)
@@ -12518,6 +12619,25 @@ def cmd_rollback():
         summary_bits.append("nothing to do")
     print(f"Executed: {', '.join(summary_bits)}")
 
+    # ms-55 e-1727: surface the history record outcome. The save itself
+    # was already attempted in the shared pre-print block above; here we
+    # just report what happened. Non-fatal — the rollback already
+    # succeeded; the trail being broken is annoying, not catastrophic.
+    if record_info is not None:
+        if record_info.get("status") == "saved":
+            print(
+                f"Recorded: {record_info.get('entry_id', '?')} → "
+                f"{record_info.get('milestone', '?')}"
+            )
+        elif record_info.get("status") == "duplicate":
+            print(f"Recorded: (duplicate) → {record_info.get('milestone', '?')}")
+        elif record_info.get("status") == "error":
+            print(
+                f"Warning: could not record rollback history: "
+                f"{record_info.get('error', 'unknown')}",
+                file=sys.stderr,
+            )
+
     if result.errors:
         print("", file=sys.stderr)
         for err in result.errors:
@@ -12533,6 +12653,35 @@ def cmd_rollback():
 # defined in lib/claims.py. Three issuance verbs share most of the
 # argument shape (`--target`, `--intent`), so the implementation
 # factors the common path through a private helper.
+
+def _claims_register_provider() -> None:
+    """Wire lib/claims.py's cloud provider hook to this CLI's transport
+    (ms-55 e-1730).
+
+    Called lazily by each claim command so import-time of lib/claims.py
+    stays side-effect-free. Re-registers on every call (cheap, idempotent)
+    — handy if the user switches cloud mode mid-session.
+
+    The provider closure returns ``(client, project_id)`` when cloud
+    mode is active, or ``None`` to fall back to local. Errors during
+    resolution map to ``None`` so the worker keeps working.
+    """
+    import claims as _claims
+
+    def _provider():
+        try:
+            if not _is_cloud_mode():
+                return None
+            client, config = _get_api_client()
+        except Exception:
+            return None
+        project_id = (config or {}).get("project_id") or ""
+        if not project_id:
+            return None
+        return client, project_id
+
+    _claims.register_cloud_provider(_provider)
+
 
 def _claim_parse_target_env() -> tuple[str, str]:
     """Pull --target kind:id from env vars set by the bash dispatcher."""
@@ -12602,14 +12751,16 @@ def _claim_issue(claim_kind: str):
 
     event = _claim_post_event(payload)
 
-    # Persist the issuer's view of the claim locally so `claim list --mine`
-    # works across restarts even before the receive-side hook lands.
+    # Persist the issuer's view of the claim. Cloud-mode rounds through
+    # the server subcollection (= multi-machine view) + the local cache
+    # mirror; local-mode just writes the cache (ms-55 e-1730).
+    _claims_register_provider()
     try:
-        _claims.record_local_claim(payload)
+        _claims.record_claim(payload)
     except (OSError, ValueError) as e:
-        # Don't fail the send if local persistence is broken — the bus
-        # event is the canonical record, the local file is a cache.
-        print(f"Note: could not persist claim locally: {e}",
+        # Don't fail the send if persistence is broken — the bus event
+        # is the canonical record, this store is a derived view.
+        print(f"Note: could not persist claim: {e}",
               file=sys.stderr)
 
     if json_mode:
@@ -12723,12 +12874,13 @@ def cmd_claim_release():
 
     event = _claim_post_event(payload)
 
-    # Drop the local cache entry too so `claim list --mine` reflects
-    # the release immediately.
+    # Drop the local cache entry + cloud-mode subcollection record
+    # (ms-55 e-1730). Same fall-back rule as the issue path.
+    _claims_register_provider()
     try:
-        _claims.release_local_claim(claim_id)
+        _claims.release_claim(claim_id)
     except OSError as e:
-        print(f"Note: could not update local cache: {e}",
+        print(f"Note: could not update claim cache: {e}",
               file=sys.stderr)
 
     if json_mode:
@@ -12738,9 +12890,109 @@ def cmd_claim_release():
     print(f"  event_id: {event.get('event_id', '?')}")
 
 
+def _morning_save_briefing_doc(briefing_text: str, briefing) -> dict:
+    """Save the morning briefing as a `scope=report` doc (ms-55 e-1733).
+
+    Lets the user re-read past briefings via Web UI Documents tab (or
+    `beacon doc show`) without having to scroll terminal history. The
+    daily cadence makes each briefing a small artifact worth preserving.
+
+    Title is ISO-prefixed for chronological listing. Body is the rendered
+    text wrapped in a code fence + a one-line meta header so the doc
+    stands alone as a search target.
+
+    Returns {"status": "saved", "doc_id": ..., "title": ...} or
+    {"status": "error", "error": ...}. Failures are non-fatal — the
+    terminal briefing already printed.
+    """
+    from datetime import datetime as _dt, timezone as _tz  # noqa: PLC0415
+    import datetime as _datetime  # noqa: PLC0415
+
+    now = _dt.now(_tz.utc)
+    iso_min = now.strftime("%Y-%m-%dT%H:%M")
+    title = f"morning briefing {iso_min}Z"
+
+    counts = briefing.counts or {}
+    summary_bits = []
+    for b in ("completed", "halted", "skipped", "needs_attention"):
+        summary_bits.append(f"{b}={counts.get(b, 0)}")
+    meta_line = (
+        f"window: {briefing.since or '(start)'} → {briefing.until or '(now)'}  "
+        f"counts: {' / '.join(summary_bits)}"
+    )
+
+    body = (
+        f"# morning briefing — {iso_min}Z\n\n"
+        f"{meta_line}\n\n"
+        f"```\n{briefing_text.rstrip()}\n```\n"
+    )
+
+    scope = "report"
+
+    try:
+        # Frontmatter aligns with cmd_doc_add so Web UI / list filters
+        # recognise the scope = report tag.
+        content = _add_frontmatter(body, scope, "", "", "")
+    except Exception as e:
+        return {"status": "error", "error": f"frontmatter: {e}"}
+
+    today_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        if _is_cloud_mode():
+            client, config = _get_api_client()
+            result = client.create_document(
+                config["project_id"], title, content,
+            )
+            doc_id = result["doc_id"]
+        else:
+            docs_dir = _get_docs_dir()
+            os.makedirs(docs_dir, exist_ok=True)
+            # Slug + minute resolution → collision-free across the day
+            # while still distinguishable. Adds an "-Z" suffix to
+            # mirror the title's UTC marker.
+            slug = _doc_slug(f"morning-briefing-{iso_min}-Z")
+            doc_id = slug
+            fpath = os.path.join(docs_dir, f"{doc_id}.md")
+            with open(fpath, "w", encoding="utf-8") as f:
+                f.write(content)
+    except Exception as e:
+        return {"status": "error", "error": f"persist: {e}"}
+
+    # Record an MS entry pointing at the saved doc — same shape as
+    # cmd_doc_add (= source=auto, revision_id=doc_id) so the briefing
+    # appears in the active MS timeline. Failures are non-fatal.
+    try:
+        import operations as _ops  # noqa: PLC0415
+
+        def op(d):
+            return d, core.save_entry(
+                d, ms_id="",
+                description=f"doc add: {title} ({scope})",
+                source="auto", date=today_iso,
+                revision_id=doc_id,
+            )
+        project_id = _project_id_for_ops()
+        _ops.apply_operation(
+            project_id, op,
+            op_name="morning.briefing_doc",
+            reason="morning briefing snapshot",
+        )
+    except Exception as e:
+        # The doc itself was written — we just couldn't link it from
+        # the MS timeline. Surface as warning only.
+        return {
+            "status": "saved",
+            "doc_id": doc_id,
+            "title": title,
+            "warning": f"could not link to MS timeline: {e}",
+        }
+
+    return {"status": "saved", "doc_id": doc_id, "title": title}
+
+
 def cmd_morning():
-    """beacon morning (ms-55 e-1650): 4-category summary of recent
-    autonomous activity.
+    """beacon morning (ms-55 e-1650 / e-1733): 4-category summary of recent
+    autonomous activity, plus auto-save as a report doc.
 
     Reads events from the bus (channels: stop-signal + claim-signal)
     over a window (default = last 12 hours) and buckets them as:
@@ -12750,10 +13002,15 @@ def cmd_morning():
       ✗ Skip:               claim releases with outcome=abandoned
       ⏱ 介入要望 (Needs attention): STUCK signals (= idle timeout)
 
+    The briefing is also persisted as a `scope=report` doc so the user
+    can re-read past briefings via Web UI Documents tab. Skip the save
+    with BEACON_MORNING_NO_DOC=1 (= --no-doc).
+
     Env:
       BEACON_MORNING_SINCE_HOURS  default 12
       BEACON_MORNING_EVENTS_FILE  optional path to a JSON array of
                                   events (= testing / replay path)
+      BEACON_MORNING_NO_DOC       "1" → skip the report doc save (e-1733)
       BEACON_JSON                 "1" → JSON output
     """
     from datetime import datetime as _dt, timezone as _tz, timedelta as _td
@@ -12828,6 +13085,14 @@ def cmd_morning():
                 events.extend(batch)
 
     briefing = _morning.build_briefing(events, since=since, until=now)
+    briefing_text = _morning.render_briefing(briefing)
+
+    # ms-55 e-1733: save the briefing as a `scope=report` doc so the
+    # user can re-read past briefings from the Web UI Documents tab
+    # (or via `beacon doc show`). Opt out with --no-doc.
+    record_info: Optional[dict] = None
+    if os.environ.get("BEACON_MORNING_NO_DOC", "") != "1":
+        record_info = _morning_save_briefing_doc(briefing_text, briefing)
 
     if json_mode:
         out = {
@@ -12846,10 +13111,28 @@ def cmd_morning():
                 for e in briefing.entries
             ],
         }
+        if record_info is not None:
+            out["doc"] = record_info
         print(json.dumps(out, ensure_ascii=False))
         return
 
-    print(_morning.render_briefing(briefing), end="")
+    print(briefing_text, end="")
+    if record_info is not None:
+        if record_info.get("status") == "saved":
+            warn = record_info.get("warning")
+            line = (
+                f"\nSaved briefing as doc: {record_info.get('doc_id', '?')} "
+                f"({record_info.get('title', '?')})"
+            )
+            print(line)
+            if warn:
+                print(f"  warning: {warn}", file=sys.stderr)
+        elif record_info.get("status") == "error":
+            print(
+                f"\nWarning: could not save briefing doc: "
+                f"{record_info.get('error', 'unknown')}",
+                file=sys.stderr,
+            )
 
 
 def cmd_stuck_check():
@@ -13036,7 +13319,10 @@ def cmd_claim_list():
               file=sys.stderr)
         sys.exit(1)
 
-    out = _claims.list_local_claims(
+    # ms-55 e-1730: cloud-mode pulls from the server subcollection (=
+    # multi-machine view), local-mode falls back to the cached file.
+    _claims_register_provider()
+    out = _claims.list_claims(
         mine=mine, target_kind=tk, target_id=ti,
     )
 

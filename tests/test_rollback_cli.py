@@ -46,9 +46,17 @@ def _clear_env(monkeypatch):
         "BEACON_ROLLBACK_REASON",
         "BEACON_ROLLBACK_DRY_RUN",
         "BEACON_ROLLBACK_CWD",
+        "BEACON_ROLLBACK_NO_RECORD",
         "BEACON_JSON",
     ):
         monkeypatch.delenv(k, raising=False)
+    # ms-55 e-1727: the rollback history record path calls
+    # operations.apply_operation, which needs either a real local
+    # project.json or the firestore_client mock. CLI mechanics tests
+    # don't need the trail, so opt out by default; tests that *do*
+    # care about the record (= test_cli_records_history_on_execute)
+    # override BEACON_ROLLBACK_NO_RECORD explicitly.
+    monkeypatch.setenv("BEACON_ROLLBACK_NO_RECORD", "1")
 
 
 def test_cli_clean_repo_says_nothing(monkeypatch, capsys, repo):
@@ -123,6 +131,130 @@ def test_cli_invalid_commits_errors(monkeypatch, capsys, repo):
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "integer" in err
+
+
+def test_cli_records_history_on_execute(monkeypatch, capsys, repo, tmp_path):
+    """ms-55 e-1727: a non-dry-run rollback that actually mutated the tree
+    writes a save entry to the active MS so `beacon search "rollback"`
+    can find it later."""
+    _clear_env(monkeypatch)
+    # Override the default opt-out from _clear_env — this test wants
+    # the record path exercised end-to-end.
+    monkeypatch.delenv("BEACON_ROLLBACK_NO_RECORD", raising=False)
+
+    # Set up a real local project.json so apply_operation has somewhere
+    # to write. Place it OUTSIDE the repo dir — otherwise the dirty
+    # working-tree stash sweeps project.json up with it (= it's an
+    # untracked file from git's POV).
+    project_dir = tmp_path.parent / f"{tmp_path.name}-proj"
+    project_dir.mkdir(exist_ok=True)
+    project_file = project_dir / "project.json"
+    monkeypatch.setenv("BEACON_PROJECT_FILE", str(project_file))
+    monkeypatch.setenv("BEACON_OPERATIONS_BACKEND", "local")
+
+    import core
+    project_data = {
+        "name": "test-rollback-record",
+        "schema_version": "1",
+        "summary": "",
+        "milestones": [
+            {
+                "id": "ms-1",
+                "title": "Active MS",
+                "status": "in_progress",
+                "progress": 0,
+                "target_date": "",
+                "entries": [],
+            }
+        ],
+    }
+    project_file.write_text(json.dumps(project_data))
+
+    # Make a dirty working tree so the rollback actually has work to do.
+    (tmp_path / "wip.txt").write_text("dirty\n")
+    monkeypatch.setenv("BEACON_ROLLBACK_CWD", repo)
+    monkeypatch.setenv("BEACON_ROLLBACK_REASON", "test rollback for record")
+
+    commands.cmd_rollback()
+    captured = capsys.readouterr()
+    out = captured.out
+    err = captured.err
+
+    # Surface assertions: report tells the user the trail was recorded.
+    assert "Executed" in out
+    assert "stashed" in out
+    assert "Recorded:" in out, f"stdout=\n{out}\nstderr=\n{err}"
+    # The recorded entry should appear in the project file with
+    # type=save + source=rollback.
+    saved = json.loads(project_file.read_text())
+    entries = saved["milestones"][0]["entries"]
+    rollback_entries = [
+        e for e in entries
+        if e.get("type") == "save"
+        and e.get("meta", {}).get("source") == "rollback"
+    ]
+    assert len(rollback_entries) == 1, entries
+    desc = rollback_entries[0]["description"]
+    # AC (2) — description carries the reason + commit hash + working
+    # tree change summary.
+    assert "test rollback for record" in desc
+    assert "stashed" in desc
+    assert "working-tree" in desc
+    # AC: the entry meta.hash points at the HEAD we rolled back from.
+    assert rollback_entries[0]["meta"].get("hash")
+
+
+def test_cli_records_skipped_for_noop(monkeypatch, capsys, repo, tmp_path):
+    """No-op rollback (clean tree, nothing to undo) should NOT pollute
+    history. Saves are only worth their bytes when something happened."""
+    _clear_env(monkeypatch)
+    monkeypatch.delenv("BEACON_ROLLBACK_NO_RECORD", raising=False)
+    project_dir = tmp_path.parent / f"{tmp_path.name}-proj-noop"
+    project_dir.mkdir(exist_ok=True)
+    project_file = project_dir / "project.json"
+    monkeypatch.setenv("BEACON_PROJECT_FILE", str(project_file))
+    monkeypatch.setenv("BEACON_OPERATIONS_BACKEND", "local")
+    project_file.write_text(json.dumps({
+        "name": "test-noop", "schema_version": "1", "summary": "",
+        "milestones": [{
+            "id": "ms-1", "title": "Active MS", "status": "in_progress",
+            "progress": 0, "target_date": "", "entries": [],
+        }],
+    }))
+    monkeypatch.setenv("BEACON_ROLLBACK_CWD", repo)
+    commands.cmd_rollback()
+    out = capsys.readouterr().out
+    assert "nothing" in out.lower()
+    assert "Recorded:" not in out
+    saved = json.loads(project_file.read_text())
+    assert saved["milestones"][0]["entries"] == []
+
+
+def test_cli_no_record_flag_skips_history(monkeypatch, capsys, repo, tmp_path):
+    """BEACON_ROLLBACK_NO_RECORD=1 disables the trail even when there's
+    work to record. Useful for one-off cleanups + the test escape hatch."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("BEACON_ROLLBACK_NO_RECORD", "1")
+    project_dir = tmp_path.parent / f"{tmp_path.name}-proj-noflag"
+    project_dir.mkdir(exist_ok=True)
+    project_file = project_dir / "project.json"
+    monkeypatch.setenv("BEACON_PROJECT_FILE", str(project_file))
+    monkeypatch.setenv("BEACON_OPERATIONS_BACKEND", "local")
+    project_file.write_text(json.dumps({
+        "name": "test-noflag", "schema_version": "1", "summary": "",
+        "milestones": [{
+            "id": "ms-1", "title": "Active MS", "status": "in_progress",
+            "progress": 0, "target_date": "", "entries": [],
+        }],
+    }))
+    (tmp_path / "wip.txt").write_text("dirty\n")
+    monkeypatch.setenv("BEACON_ROLLBACK_CWD", repo)
+    commands.cmd_rollback()
+    out = capsys.readouterr().out
+    assert "Executed" in out
+    assert "Recorded:" not in out
+    saved = json.loads(project_file.read_text())
+    assert saved["milestones"][0]["entries"] == []
 
 
 def test_cli_explicit_commits_with_upstream(monkeypatch, capsys, repo, tmp_path):
