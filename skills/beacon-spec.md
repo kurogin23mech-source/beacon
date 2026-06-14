@@ -297,6 +297,13 @@ Step 3 で必須 4 セクションが埋まったら、残り 2 セクション�
 
 draft が完成したら **そのまま** Step 5 で `beacon doc add` 実行。事前に「これでいいですか？」とは聞かない (CORE doc アンチパターン)。
 
+**ms-68 / e-1641 補足 (= entry-writing principle の draft 表示例外)**: SPEC は本文全体を事前 draft として書き上げる性質上、書き込み前のユーザー touchpoint を 1 つ挟むと CORE doc `AeN9aPpjvh6URTQlFmb6`「Act first, confirm next-step」と衝突する。そのため SPEC Skill は **「Act first 原則の制約下にある自律パス」として扱い、書き込み前の draft 提示は省略**。代わりに以下 2 点で原則違反を防ぐ:
+
+1. **4b で本文を内部生成し終えた直後に self-review (4 原則) を必須化**: 読み手目線 1 行 / 横文字 3 段階 / ID 参照に文脈 / 尻切れトンボ禁止 をその場で 1 度自問し、違反があれば書き込み前に直す
+2. **書き込み後は Web UI で即見られる + `beacon doc update <doc-id>` で forward-only に直せる**: 違反に気付いたユーザーは過去 entry を遡及修正せず、その場で update を指示する
+
+→ ms-68 SPEC (`HQvN4Gimw3n1UKwrk6o1`) の「過去エントリは触らない (forward-only)」「自律パスは self-review のみ」と整合。
+
 ## Step 5: SPEC の書き込み (Act)
 
 **heredoc は必ず quoted EOF (`<<'EOF'` または `<< 'EOF'`) を使う**: 非引用 `<<EOF` だと shell が中身の backtick (`` ` ``) を command substitution として展開し、本文が silent corrupt する (2026-06-10 LPS dogfood で観察された病理、e-1401)。

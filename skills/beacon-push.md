@@ -225,6 +225,16 @@ gh release create vX.Y.Z --title vX.Y.Z --notes "Release vX.Y.Z" 2>/dev/null || 
 
 ## Step 3: 書き込み
 
+**ms-68 / e-1642 補足 (= entry-writing principle の draft 表示)**: `beacon push record` を実行する **前** に、Step 2 で生成した説明文を 1 度ユーザーに提示し、self-review 4 原則 (読み手目線 1 行 / 横文字 3 段階 / ID 参照に文脈 / 尻切れトンボ禁止) で違反が無いか自問する。違反があればその場で書き直してから書き込む。push record の本文は将来 retrospection や release note 生成で参照されるため、silent write は読み手 (非開発者を含む) を排除する。
+
+```
+push を以下の説明文で記録します:
+
+  <Step2 で生成した説明文>
+
+このまま記録しますか? (= OK / 書き直し)
+```
+
 Step 2 で生成した説明文を使って Bash ツールで実行:
 
 ```bash

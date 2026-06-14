@@ -147,6 +147,16 @@ Step 1 の情報を読み、**日本語で1〜3文の説明文**を生成する�
 
 ## Step 3: 書き込み（finalize）
 
+**ms-68 / e-1642 補足 (= entry-writing principle の draft 表示)**: `beacon deploy record --finalize` を実行する **前** に、Step 2 で生成した説明文を 1 度ユーザーに提示し、self-review 4 原則 (読み手目線 1 行 / 横文字 3 段階 / ID 参照に文脈 / 尻切れトンボ禁止) で違反が無いか自問する。違反があればその場で書き直してから書き込む。deploy 説明文は CHANGELOG / リリースノート / Releases タブで広く読まれるため、silent write は読み手 (非開発者を含む) を排除する。
+
+```
+deploy を以下の説明文で記録します:
+
+  <Step2 で生成した説明文>
+
+このまま記録しますか? (= OK / 書き直し)
+```
+
 Step 2 で生成した説明文を使って Bash ツールで実行:
 
 ```bash

@@ -115,6 +115,18 @@ Step 1 のデータを元に、以下の構造でマークダウンドキュメ�
 
 ## Step 3: ドキュメントの保存
 
+**ms-68 / e-1642 補足 (= entry-writing principle の draft 表示)**: `beacon retro save` を実行する **前** に、Step 2 で生成した retro 本文 (= 課題ごとにグルーピング・文脈再構成済) を 1 度ユーザーに提示する。retro は週単位の振り返り記録として将来 retrospection / dispatch / onboarding で広く読まれるため、silent write は読み手 (非開発者を含む) を排除する。提示時に self-review 4 原則 (読み手目線 1 行 / 横文字 3 段階 / ID 参照に文脈 / 尻切れトンボ禁止) を 1 度通し、違反があれば書き直してから保存する。
+
+```
+以下の内容で週次 retro を保存します:
+
+  week: YYYY-WNN
+
+  <本文 draft>
+
+このまま保存しますか? (= OK / 書き直し)
+```
+
 **heredoc は必ず quoted EOF (`<<'EOF'` または `<< 'EOF'`) を使う**: 非引用 `<<EOF` だと shell が中身の backtick (`` ` ``) を command substitution として展開し、本文が silent corrupt する (2026-06-10 LPS dogfood で観察された病理、e-1401)。
 
 生成したドキュメントを **Bash ツール経由で `beacon retro save` CLI に渡す**:

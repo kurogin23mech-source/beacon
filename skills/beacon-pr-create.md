@@ -132,6 +132,8 @@ beacon doc list --scope spec --ms <ms-id> --json
 
 ## Step 4: PR タイトルと本文の draft
 
+**ms-68 / e-1642 補足 (= entry-writing principle の draft 表示)**: 本 Step は既に draft 提示型 (= 書き込み前にユーザー承認を取る形) で設計されており、ms-68 SPEC が要求する「書き込み直前の draft 表示」の要件を満たしている。提示前に self-review 4 原則 (読み手目線 1 行 / 横文字 3 段階 / ID 参照に文脈 / 尻切れトンボ禁止) を 1 度通し、特に **本文 What / Why / How / Test の各セクションで非開発者を排除する横文字や尻切れトンボが無いか** を自問する。PR 本文は merge 後にプロジェクトの歴史記録として残るため、silent write 禁止。
+
 intent と差分コミット履歴から **PR タイトル候補と本文 draft** を生成し、ユーザーに見せる:
 
 ```

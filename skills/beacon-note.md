@@ -52,6 +52,19 @@ beacon-find-root >/dev/null && echo "OK" || echo "NO_BEACON"
 
 ## 実行
 
+**ms-68 / e-1642 補足 (= entry-writing principle の draft 表示)**: `beacon note` を実行する **前** に、整理した記録テキストを 1 度ユーザーに提示する。note は session 引き継ぎで他の AI / 人間が読む可能性が高く、silent write は読み手 (非開発者を含む) を排除する。CORE doc `entry-writing-principle` の例外条項では note は「個人スクラッチ」として原則を緩めてよいとされるが、それでも 4 原則 self-review (= 読み手目線 1 行 / 横文字 3 段階 / ID 参照に文脈 / 尻切れトンボ禁止) を 1 度通すことで判断軌跡の読みやすさを担保する。
+
+```
+note を以下の内容で記録します:
+
+  <整理した記録テキスト>
+  context: <文脈ラベル>
+
+このまま記録しますか? (= OK / 書き直し)
+```
+
+ユーザーが OK なら下記コマンドを実行。書き直し指示があれば反映してから再提示。
+
 記録内容と文脈を整理して Bash ツールで実行:
 
 ```bash

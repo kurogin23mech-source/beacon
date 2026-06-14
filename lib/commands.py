@@ -236,6 +236,21 @@ Proposals should feel like "What if we tried X?" — not directives.
 | `beacon note "text"` | Add session note (ephemeral, cleared at session-end) / セッションメモ追加 |
 | `beacon note list` | Show session notes / メモ一覧 |
 | `beacon note clear` | Clear all session notes / メモ全削除 |
+
+<!-- BEACON_ENTRY_WRITING_PRINCIPLE -->
+### Entry Writing Principle / エントリ記述原則
+
+When writing task / spec / doc entries (`description` / `motivation` / `acceptance_criteria`), follow these 4 principles. Beacon's readers include non-developers — the principles apply to all forward-going writes.
+タスク・SPEC・ドキュメントを書くとき、以下 4 原則を守る。Beacon の読み手には非開発者が含まれるため、新しく書く全エントリに適用する。
+
+1. **Reader-first 1-line description / 読み手目線 1 行**: `description` は「何が嬉しいか」をユーザーの言葉で 1 行。実装手段は含めない。
+2. **3-tier loanword policy / 横文字 3 段階**: 固有名詞 (`Firestore` / `MCP`) はそのまま、技術概念 (`allowlist` / `opt-in`) は初出時に「(= 許可リスト)」のような日本語注、一般概念 (configure / receiver / audit) は日本語化。
+3. **ID references with context / ID 参照に文脈**: `e-XXXX` / `ms-XX` / `UC?` の初出には必ず「(何の話か)」を 1 行添える。click-through 前提にしない。
+4. **No truncated sentences / 尻切れトンボ禁止**: 主語・述語・論理関係を省略しない。開発者は文脈で補えるが非開発者は補えない。
+
+Full principle and examples: `beacon doc show F3ZkqT0pKS6JpR8dn70n` (CORE doc `entry-writing-principle`).
+原則の全文と実例: `beacon doc show F3ZkqT0pKS6JpR8dn70n` (CORE doc `entry-writing-principle`)。
+<!-- /BEACON_ENTRY_WRITING_PRINCIPLE -->
 """
 
 
@@ -9972,6 +9987,44 @@ def _doctor_check_project_staleness():
     return []
 
 
+def _doctor_check_claude_md_principle_marker():
+    """Detect when CLAUDE.md lacks the entry-writing-principle marker.
+
+    ms-68 / e-1640: the principle (= `entry-writing-principle` CORE doc) must
+    live in CLAUDE.md so every session / every tool call has it in context.
+    If the marker `<!-- BEACON_ENTRY_WRITING_PRINCIPLE -->` is missing, the
+    section was either never installed (legacy projects predating ms-68) or
+    silently dropped by a manual edit. Warning-level only — never block.
+
+    Returns a list of warning strings. Empty list = OK, or skip (no CLAUDE.md
+    in cwd, which is not a beacon-managed project).
+    """
+    claude_md = "CLAUDE.md"
+    marker = "<!-- BEACON_ENTRY_WRITING_PRINCIPLE -->"
+
+    # No CLAUDE.md = not a beacon-managed project from this cwd, skip silently.
+    if not os.path.exists(claude_md):
+        return []
+
+    try:
+        with open(claude_md, "r", encoding="utf-8") as f:
+            content = f.read()
+    except OSError:
+        return []
+
+    if marker in content:
+        return []
+
+    return [
+        "WARN [entry-writing-principle] CLAUDE.md lacks the entry writing principle section.\n"
+        f"       Missing marker: {marker}\n"
+        "       Beacon's task/spec/doc readers include non-developers — the principle\n"
+        "       (reader-first 1-line / loanword tiers / ID context / no truncated sentences)\n"
+        "       must live in CLAUDE.md so it is in context for every session.\n"
+        "       Run: beacon common-setup   (re-installs CLAUDE.md beacon section)"
+    ]
+
+
 def cmd_doctor():
     """Lightweight environment health check for Beacon.
 
@@ -10237,6 +10290,16 @@ def cmd_doctor():
     # `beacon cloud pull` had never run from this cwd. Best-effort: skips
     # on local mode, recent local writes (<5 min), and network errors.
     warnings.extend(_doctor_check_project_staleness())
+
+    # ------------------------------------------------------------------ #
+    # 10. CLAUDE.md entry-writing-principle marker (ms-68 / e-1640)
+    # ------------------------------------------------------------------ #
+    # Detect when CLAUDE.md is missing the marker that anchors the
+    # entry-writing-principle section. Without it, the principle drops
+    # out of every-session context and AI silently breaks reader-first /
+    # loanword / ID-context / no-truncation rules. Warning-level only.
+    if os.environ.get("BEACON_DOCTOR_SKIP_PRINCIPLE_MARKER") != "1":
+        warnings.extend(_doctor_check_claude_md_principle_marker())
 
     # ------------------------------------------------------------------ #
     # Summary
