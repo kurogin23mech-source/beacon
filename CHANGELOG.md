@@ -2,6 +2,12 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.37.3] - 2026-06-14
+
+- fix(ms-69): settings dropdown peeks instead of navigating + menu paints once
+- docs(release): update README/CHANGELOG for v0.37.2
+- chore(release): bump formula to 0.37.2
+
 ## [v0.37.2] - 2026-06-14
 
 - refactor(ms-69): My Agents & Treks の CLI ラベルを削除 + Milestones の Graph 機能を完全削除
