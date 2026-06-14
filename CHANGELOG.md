@@ -2,6 +2,14 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.37.2] - 2026-06-14
+
+- refactor(ms-69): My Agents & Treks の CLI ラベルを削除 + Milestones の Graph 機能を完全削除
+- fix(ms-69): Settings Projects プルダウンを /api/me/projects 化 + 権限別表示 (e-1659 v3 follow-up)
+- docs(ms-52): version-rules + /beacon-push Skill を MS 駆動 bump ルールに改訂
+- docs(release): update README/CHANGELOG for v0.37.1
+- chore(release): bump formula to 0.37.1
+
 ## [v0.37.1] - 2026-06-14
 
 - fix(ms-69): Web UI 9 件の UX 修正 + Settings 機能補完 (e-1659 v3 follow-up)
