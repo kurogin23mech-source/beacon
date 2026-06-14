@@ -2,6 +2,12 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.37.1] - 2026-06-14
+
+- fix(ms-69): Web UI 9 件の UX 修正 + Settings 機能補完 (e-1659 v3 follow-up)
+- docs(release): update README/CHANGELOG for v0.37.0
+- chore(release): bump formula to 0.37.0
+
 ## [v0.37.0] - 2026-06-14
 
 - feat(ms-69): Web UI Navigation を mock 通りに再構成 (e-1659 v3)
