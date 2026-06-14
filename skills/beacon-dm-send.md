@@ -292,6 +292,8 @@ reply mode では `--action` は使わない (= 返信は payload を運ぶだ�
 
 ## Step 6: 送信確認 (mode で表示が変わる)
 
+**ms-68 / e-1643 補足 (= entry-writing principle の draft 表示)**: 本 Step は既に draft 提示型 (= 送信前に full argv + payload 本文をユーザーに見せて yes/edit/cancel を取る形) で設計されており、ms-68 SPEC の「書き込み直前の draft 表示」要件を満たす。送信表示の前に payload 本文について self-review 4 原則 (読み手目線 1 行 / 横文字 3 段階 / ID 参照に文脈 / 尻切れトンボ禁止) を 1 度通す。**特に DM は受信側 AI が「非開発者の代理として読む」可能性がある (受信側 AI は親プロジェクトの文脈を持たない)** ため、横文字濫用 / ID 参照に文脈なし は致命的。違反があれば `edit` で Step 5 に戻して書き直す。
+
 組み立てた argv をユーザーに見せて確認。reply mode と send mode で `--in-reply-to` の有無が変わる:
 
 ### send mode
