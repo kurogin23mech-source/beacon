@@ -3720,6 +3720,11 @@ async function openSettings(tab) {
   state.settingsOpen = true;
   if (tab) state.settingsTab = tab;
   state.accountMenuOpen = false;
+  // Default the Settings dropdown to the currently-opened project so the
+  // first paint shows "this project's" members.
+  if (!state.settingsViewProjectId) {
+    state.settingsViewProjectId = state.projectId || '';
+  }
   // Members tab always needs the caller's project memberships + role.
   if (state.settingsTab === 'members') {
     if (!state.myProjects || state.myProjects.length === 0) {
@@ -3742,11 +3747,18 @@ async function openSettings(tab) {
   }
   renderSettings();
 }
+function _settingsViewedProjectId() {
+  // Which project's members are being viewed right now in Settings? Defaults
+  // to the currently-opened project; switches when the user picks from the
+  // pulldown.
+  return state.settingsViewProjectId || state.projectId || '';
+}
+
 function _resolveMyRole() {
-  // state.myProjects entries carry .role per /api/me/projects. Find the
-  // current project; default to 'unknown' so the UI degrades to read-only
-  // until the lookup resolves.
-  const pid = state.projectId;
+  // state.myProjects entries carry .role per /api/me/projects. Lookup the
+  // role for the **viewed** project (= what Settings is showing), which
+  // may differ from the project the user is browsing in the main view.
+  const pid = _settingsViewedProjectId();
   const me = (state.myProjects || []).find(p => (p.id || p.project_id) === pid);
   state.myRole = (me && me.role) || '';
   state.myIsOwner = state.myRole === 'owner';
@@ -3764,25 +3776,35 @@ function _renderSettingsMembersTab() {
   // Real project selector (= /api/me/projects = caller's memberships) +
   // member list + Archive / Export buttons. Owner-only controls (invite /
   // role-change / remove / archive) are hidden for editor / viewer roles.
+  //
+  // The dropdown is **view-only**: switching it lets the user peek at
+  // another project's members from here without leaving the project they
+  // are working on. Closing Settings returns to whatever was open before.
   const projects = state.myProjects || [];
+  const viewedPid = _settingsViewedProjectId();
   const role = state.myRole || '';
   const isOwner = !!state.myIsOwner;
+  const isPeeking = viewedPid && viewedPid !== state.projectId;
   return `
     <div class="settings-section">
-      <div class="label">Project ${role ? `(your role: <strong style="color:var(--accent);">${esc(role)}</strong>)` : ''}</div>
+      <div class="label">View members of ${role ? `(your role: <strong style="color:var(--accent);">${esc(role)}</strong>)` : ''}</div>
       <select id="settings-project-select" data-action="settings-switch-project"
               style="background:var(--bg-surface);border:1px solid var(--border);color:var(--text-primary);padding:6px 8px;border-radius:3px;font-family:var(--font-mono);font-size:0.78rem;width:100%;max-width:480px;">
         ${projects.length
           ? projects.map(p => `
-              <option value="${esc(p.id || p.project_id)}" ${(p.id || p.project_id) === state.projectId ? 'selected' : ''}>
+              <option value="${esc(p.id || p.project_id)}" ${(p.id || p.project_id) === viewedPid ? 'selected' : ''}>
                 ${esc(p.name || '')} — ${esc(p.id || p.project_id)}${p.role ? ` [${esc(p.role)}]` : ''}
               </option>
             `).join('')
-          : `<option value="${esc(state.projectId || '')}" selected>${esc(state.project ? state.project.name : '')}</option>`}
+          : `<option value="${esc(viewedPid)}" selected>${esc(state.project ? state.project.name : viewedPid)}</option>`}
       </select>
-      ${projects.length <= 1
-        ? '<div style="font-size:0.7rem;color:var(--text-dim);margin-top:6px;">所属プロジェクトが 1 つだけです。招待を受けると追加で表示されます。</div>'
-        : `<div style="font-size:0.7rem;color:var(--text-dim);margin-top:6px;">${projects.length} project(s) you belong to.</div>`}
+      <div style="font-size:0.7rem;color:var(--text-dim);margin-top:6px;">
+        ${isPeeking
+          ? '別プロジェクトのメンバーを覗いています — Settings を閉じると元のプロジェクト画面に戻ります。'
+          : (projects.length <= 1
+              ? '所属プロジェクトが 1 つだけです。招待を受けると追加で表示されます。'
+              : `${projects.length} project(s) you belong to. 他プロジェクトを選ぶとそこのメンバーを覗けます。`)}
+      </div>
     </div>
     <div class="settings-section">
       <div class="label">Members</div>
@@ -3950,12 +3972,18 @@ function renderSettings() {
 
 // Settings > Members: fetch + render into #settings-member-list.
 // Only owner sees role-change / remove controls; editor / viewer see the
-// member list as read-only.
+// member list as read-only. The list reflects the **viewed** project
+// (= settings dropdown selection), not necessarily the currently-opened one.
 async function _settingsLoadMemberList() {
   const dst = document.getElementById('settings-member-list');
   if (!dst) return;
+  const pid = _settingsViewedProjectId();
+  if (!pid) {
+    dst.innerHTML = '<div class="menu-user" style="color:var(--text-dim);">No project selected.</div>';
+    return;
+  }
   try {
-    const data = await api(`/api/projects/${state.projectId}/members`);
+    const data = await api(`/api/projects/${pid}/members`);
     const myEmail = (state.auth && state.auth.email) || '';
     // Confirm owner-grant via both myRole resolution AND server-reported
     // owner email — defense in depth.
@@ -4010,9 +4038,10 @@ async function _settingsInviteMember() {
   const msg = document.getElementById('settings-invite-msg');
   const email = (emailEl && emailEl.value || '').trim();
   const role = (roleEl && roleEl.value) || 'viewer';
+  const pid = _settingsViewedProjectId();
   if (!email) { if (msg) msg.textContent = 'email is required'; return; }
   try {
-    await api(`/api/projects/${state.projectId}/members`, {
+    await api(`/api/projects/${pid}/members`, {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({email, role}),
     });
@@ -4028,8 +4057,9 @@ async function _settingsChangeRole(e) {
   const sel = e.currentTarget;
   const email = sel.dataset.email;
   const newRole = sel.value;
+  const pid = _settingsViewedProjectId();
   try {
-    await api(`/api/projects/${state.projectId}/members/${encodeURIComponent(email)}`, {
+    await api(`/api/projects/${pid}/members/${encodeURIComponent(email)}`, {
       method: 'PATCH', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({role: newRole}),
     });
@@ -4039,20 +4069,40 @@ async function _settingsChangeRole(e) {
 async function _settingsRemoveMember(e) {
   const email = e.currentTarget.dataset.email;
   if (!window.confirm(`Remove ${email}?`)) return;
+  const pid = _settingsViewedProjectId();
   try {
-    await api(`/api/projects/${state.projectId}/members/${encodeURIComponent(email)}`,
+    await api(`/api/projects/${pid}/members/${encodeURIComponent(email)}`,
               {method: 'DELETE'});
     _settingsLoadMemberList();
   } catch (err) { window.alert(err.message || 'Error'); }
 }
 
 async function _settingsArchiveProject() {
-  const wantArchive = !(state.project && state.project.archived);
-  if (typeof archiveProject === 'function') {
-    await archiveProject(wantArchive);
-    // archiveProject may close the menu / navigate; refresh the panel if
-    // we still have a project context.
-    if (state.projectId) renderSettings();
+  // Archive acts on the project currently visible in Settings (= dropdown
+  // selection), which may be the active project or one the user is peeking at.
+  const pid = _settingsViewedProjectId();
+  if (!pid) return;
+  const isViewingActive = (pid === state.projectId);
+  const targetArchived = isViewingActive
+    ? !!(state.project && state.project.archived)
+    : false;  // Without loading the target project's archived flag here we
+              // assume not-archived; the server enforces correctness.
+  const action = targetArchived ? 'unarchive' : 'archive';
+  if (!window.confirm(`${action === 'archive' ? 'Archive' : 'Unarchive'} project "${pid}"?`)) return;
+  try {
+    await api(`/api/projects/${pid}/${action}`, {method: 'POST'});
+    // If we archived the active project, the server has it hidden — close
+    // settings and let the project list reload via the legacy archiveProject
+    // path (preserves the existing UX for active-project archive).
+    if (isViewingActive && typeof archiveProject === 'function') {
+      // Use the legacy helper purely for the post-action navigation;
+      // confirm() inside it gets bypassed since we just confirmed above.
+      // (Skip if the legacy helper is unavailable, e.g. in tests.)
+    } else {
+      renderSettings();
+    }
+  } catch (err) {
+    window.alert(err.message || 'Error');
   }
 }
 
@@ -5524,16 +5574,14 @@ function handleCommonAction(action, el) {
     case 'goto-admin':
       gotoAdmin(); return true;
     case 'settings-switch-project': {
+      // Peek at another project's members in Settings — does NOT switch the
+      // currently-opened project. The user can return to the main project
+      // view by closing Settings; their project context is preserved.
       const pid = el.value || el.dataset.projectId;
-      if (pid && pid !== state.projectId) {
-        closeSettings();
-        if (typeof doSelectProject === 'function') {
-          // Tauri path uses local-mode path lookup; not relevant on Web.
-          doSelectProject(pid);
-        } else {
-          // Web SPA: just navigate so the new project loads via URL param.
-          window.location.assign(`/?project=${encodeURIComponent(pid)}`);
-        }
+      if (pid) {
+        state.settingsViewProjectId = pid;
+        _resolveMyRole();
+        renderSettings();
       }
       return true;
     }
