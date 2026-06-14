@@ -518,17 +518,68 @@ def _persist_initial_profile_choice(profile_name: str) -> None:
         f.write("\n")
 
 
+def _build_disclosure_policy_from_env() -> dict:
+    """Resolve the disclosure_policy for a new project from env vars.
+
+    ms-63 / e-1441: ``beacon init --sensitivity {high,low}`` (forwarded via
+    ``BEACON_SENSITIVITY``) lets the user pick the project posture at
+    create-time. Default is ``high`` per SPEC § 設計方針 2 — forgetting to
+    configure must fail closed (= AI clams up) rather than fail open (= AI
+    leaks). The OSS dogfood (Beacon itself) opts in to ``low`` explicitly.
+
+    Recognised values: ``high`` or ``low``. Anything else (typo / future
+    value) silently degrades to ``high`` so a misconfiguration cannot
+    accidentally produce an open project.
+    """
+    raw = os.environ.get("BEACON_SENSITIVITY", "").strip().lower()
+    sensitivity = "low" if raw == "low" else "high"
+    # The semantics mirror server/envelope.normalize_disclosure_contract:
+    # high → schema-only T5 + no free text; low → free mode + free text on.
+    if sensitivity == "low":
+        return {
+            "sensitivity": "low",
+            "t5_response_mode": "free",
+            "t5_free_text": True,
+        }
+    return {
+        "sensitivity": "high",
+        "t5_response_mode": "schema-only",
+        "t5_free_text": False,
+    }
+
+
 def cmd_init():
     name = os.environ.get("BEACON_NAME", "")
     objective = os.environ.get("BEACON_OBJECTIVE", "")
     pf = get_project_file()
     os.makedirs(os.path.dirname(pf), exist_ok=True)
     retro_day = os.environ.get("BEACON_RETRO_DAY", "monday")
-    data = {"name": name, "objective": objective, "milestones": [], "retro_day": retro_day}
+    # ms-63 / e-1428 + e-1441: persist the project disclosure_policy at
+    # init time so subsequent envelope mints (server/envelope.issue_envelope)
+    # can snapshot the contract. Default is high (safe). The field lives
+    # next to the existing top-level project fields so legacy readers that
+    # don't know about it just ignore it (= forward-compat append-only).
+    disclosure_policy = _build_disclosure_policy_from_env()
+    data = {
+        "name": name,
+        "objective": objective,
+        "milestones": [],
+        "retro_day": retro_day,
+        "disclosure_policy": disclosure_policy,
+    }
     with open(pf, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")
     print(f"Created {pf}")
+    # Visible feedback on the chosen posture (SPEC § acceptance 2 + 3):
+    # default-high is silent-but-printed so the user notices, opt-in low
+    # gets a single-line confirmation that the OSS-friendly mode is active.
+    if disclosure_policy["sensitivity"] == "low":
+        print("  disclosure_policy.sensitivity = low (open posture; free-text "
+              "DM replies permitted)")
+    else:
+        print("  disclosure_policy.sensitivity = high (default-safe; T5 DM "
+              "replies capped to schema)")
 
     chosen = _maybe_prompt_initial_profile()
     if chosen:

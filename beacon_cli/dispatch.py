@@ -310,6 +310,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--objective")
     p_init.add_argument("--retro-day", dest="retro_day")
     p_init.add_argument("--storage", default="local")
+    # ms-63 / e-1441: project disclosure posture at init time. Default is
+    # ``high`` per SPEC § 設計方針 2 — opt-in low only when the project is
+    # explicitly open (= OSS, public docs).
+    p_init.add_argument(
+        "--sensitivity",
+        choices=("high", "low"),
+        default="high",
+        help="disclosure posture: high (default, schema-only T5 replies) "
+             "or low (open project, free-text T5 replies)",
+    )
     p_init.add_argument("--help", "-h", action="store_true", dest="show_help")
 
     # ---- status ----
@@ -1116,6 +1126,10 @@ def _handle_init(root: Path, args: argparse.Namespace) -> int:
         "BEACON_NAME": name,
         "BEACON_OBJECTIVE": objective,
         "BEACON_RETRO_DAY": retro_day,
+        # ms-63 / e-1441: forward sensitivity choice. cmd_init reads
+        # BEACON_SENSITIVITY and falls back to "high" on any unknown value
+        # (= forgot-to-configure → safe default).
+        "BEACON_SENSITIVITY": getattr(args, "sensitivity", "high") or "high",
     }
     rc = _run_commands_py(root, "init", env)
     if rc != 0:
@@ -1134,7 +1148,8 @@ def _handle_init(root: Path, args: argparse.Namespace) -> int:
 def _print_init_help() -> None:
     print(
         "Usage: beacon init [--name NAME] [--objective TEXT] "
-        "[--retro-day mon|tue|...|sun|monday|...] [--storage local|cloud]"
+        "[--retro-day mon|tue|...|sun|monday|...] [--storage local|cloud] "
+        "[--sensitivity high|low]"
     )
 
 
