@@ -178,6 +178,61 @@ class ApiClient:
             body,
         )
 
+    def upload_document_image(self, project_id: str, local_path: str) -> dict:
+        """Upload an image to be embedded in document markdown (ms-43).
+
+        Multipart POST against ``/api/projects/<id>/documents/images``.
+        Returns ``{url, markdown, size, content_type}`` on success.
+        Server-side validation gates content-type (image/* only) and size
+        (10 MiB cap) — see ``server/doc_images.py``.
+        """
+        import os as _os
+        import mimetypes as _mt
+        import uuid as _uuid
+
+        with open(local_path, "rb") as f:
+            file_bytes = f.read()
+        filename = _os.path.basename(local_path)
+        content_type = _mt.guess_type(filename)[0] or "application/octet-stream"
+
+        boundary = f"----BeaconCli{_uuid.uuid4().hex}"
+        body_parts: list[bytes] = []
+        body_parts.append(f"--{boundary}\r\n".encode())
+        body_parts.append(
+            (
+                f"Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n"
+                f"Content-Type: {content_type}\r\n\r\n"
+            ).encode()
+        )
+        body_parts.append(file_bytes)
+        body_parts.append(f"\r\n--{boundary}--\r\n".encode())
+        body = b"".join(body_parts)
+
+        url = (
+            f"{self._base_url}/api/projects/"
+            f"{urllib.parse.quote(project_id, safe='')}/documents/images"
+        )
+        req = urllib.request.Request(url, data=body, method="POST")
+        req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+        token = self._get_token()
+        if token:
+            req.add_header("Authorization", f"Bearer {token}")
+
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8", errors="replace")
+            try:
+                detail = json.loads(error_body).get("detail", error_body)
+            except (json.JSONDecodeError, AttributeError):
+                detail = error_body
+            raise RuntimeError(f"API error {e.code}: {detail}") from e
+        except urllib.error.URLError as e:
+            raise ConnectionError(
+                f"Cannot connect to API ({self._base_url}): {e.reason}"
+            ) from e
+
     # Purge operations (owner-only, hard-delete for duplicate-ID recovery — e-1030)
 
     def purge_milestone(self, project_id: str, ms_id: str, *,

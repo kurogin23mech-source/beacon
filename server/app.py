@@ -16,7 +16,7 @@ from typing import Optional
 # Add lib/ to path so we can import core
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
-from fastapi import FastAPI, HTTPException, Depends, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Depends, Query, Request, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -2134,6 +2134,48 @@ async def delete_document_endpoint(project_id: str, doc_id: str,
         payload["milestone"] = milestone
     await _broadcast_document_change(project_id, payload)
     return {"doc_id": doc_id, "status": "cancelled"}
+
+
+@app.post("/api/projects/{project_id}/documents/images")
+async def upload_document_image(project_id: str,
+                                file: UploadFile = File(...),
+                                user: dict = Depends(require_auth)):
+    """ms-43: SPEC / memo / retro 本文に貼る画像を 1 枚アップロードする。
+
+    multipart/form-data の ``file`` フィールドにバイナリを乗せて POST する。
+    認可は project の write 権限と等価 (= 本文を書ける人なら画像も貼れる)。
+    レスポンスは ``{url, markdown}``: ``markdown`` をそのまま doc 本文に
+    貼り付けると ``![filename](url)`` として render される。
+
+    保存先と仕様の詳細は ``server/doc_images.py`` 参照 (= GCS bucket、UUID
+    key、public read、画像 MIME のみ、10 MiB 上限)。
+    """
+    data = _load(project_id, user)
+    _require_write(data, user)
+
+    contents = await file.read()
+    try:
+        import doc_images
+        result = doc_images.upload_image(
+            project_id=project_id,
+            filename=file.filename or "image",
+            data=contents,
+            declared_content_type=file.content_type,
+        )
+    except ValueError as e:
+        # 不正な MIME / サイズ超過 / 空 data 等、client 側に責任がある類。
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        # GCS 接続不能 / bucket 不在 等の server 側障害。
+        logger.error("doc image upload failed: %s", e)
+        raise HTTPException(status_code=500, detail="image upload failed")
+
+    return {
+        "url": result.url,
+        "markdown": result.markdown,
+        "size": result.size,
+        "content_type": result.content_type,
+    }
 
 
 @app.get("/api/projects/{project_id}/changelog")

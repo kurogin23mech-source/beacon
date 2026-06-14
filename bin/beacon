@@ -1576,15 +1576,36 @@ cmd_doc() {
             BEACON_DOC_ID="$doc_id" BEACON_REV="$rev" \
                 python3 "$COMMANDS_PY" doc_restore
             ;;
+        image-upload)
+            ensure_project
+            shift
+            local image_path=""
+            local json_flag=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --json) json_flag="1"; shift ;;
+                    *)      [[ -z "$image_path" ]] && image_path="$1"; shift ;;
+                esac
+            done
+            if [ -z "$image_path" ]; then
+                echo "Usage: beacon doc image-upload <local-file> [--json]"
+                echo "  Uploads an image to GCS and prints a markdown img tag to stdout."
+                echo "  Paste the output into a doc body (or use with beacon doc update)."
+                exit 1
+            fi
+            BEACON_DOC_IMAGE_PATH="$image_path" BEACON_JSON="$json_flag" \
+                python3 "$COMMANDS_PY" doc_image_upload
+            ;;
         *)
-            echo "Usage: beacon doc [add|list|show|update|delete|restore|history]"
-            echo "  add    \"title\" --scope core|spec|memo|retro|report [--ms ms-id]  Create a document"
-            echo "  update <doc-id> [--title text] [--content text]     Update a document"
-            echo "  list   [--scope core|spec|memo|retro|report] [--ms ms-id] [--include-trashed]"
-            echo "  show   <doc-id>                                      Show document content"
-            echo "  delete <doc-id> [--reason \"text\"]                    Soft-delete to trash"
-            echo "  history <doc-id>                                     Show revision history"
-            echo "  restore <doc-id> --rev <n>                           Restore to a revision"
+            echo "Usage: beacon doc [add|list|show|update|delete|restore|history|image-upload]"
+            echo "  add          \"title\" --scope core|spec|memo|retro|report [--ms ms-id]"
+            echo "  update       <doc-id> [--title text] [--content text]"
+            echo "  list         [--scope core|spec|memo|retro|report] [--ms ms-id] [--include-trashed]"
+            echo "  show         <doc-id>"
+            echo "  delete       <doc-id> [--reason \"text\"]"
+            echo "  history      <doc-id>"
+            echo "  restore      <doc-id> --rev <n>"
+            echo "  image-upload <local-file>                           Upload image, get markdown img tag"
             ;;
     esac
 }

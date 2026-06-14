@@ -285,6 +285,7 @@ Requires `gh` CLI authenticated. When a task linked to an Issue is marked done, 
 | `beacon doc list [--scope scope] [--ms ms-id] [--op op-id] [--json]` | List documents / 一覧 |
 | `beacon doc show <doc-id>` | Show document / 内容表示 |
 | `beacon doc update <doc-id> --content "text"` | Update document / 更新 |
+| `beacon doc image-upload <local-file>` | Upload image, get markdown img tag / 画像アップロードして img タグを返す |
 
 Scopes: `core` (design principles / 設計原則), `spec` (technical specs / 仕様), `memo` (notes / メモ)
 

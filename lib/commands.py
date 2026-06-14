@@ -5973,6 +5973,57 @@ def _get_api_client():
     return ApiClient(api_url, _token_provider), config
 
 
+def cmd_doc_image_upload():
+    """ms-43: SPEC / memo / retro 本文に貼る画像を 1 枚アップロードする。
+
+    ローカルファイルパスを受け取って Beacon API にアップロードし、本文に
+    貼り付け可能な markdown img tag (= ``![filename](url)``) を stdout に
+    返す。AI / 人間ともに ``beacon doc image-upload <path>`` を叩いて URL
+    を得てから ``beacon doc update <doc-id>`` で本文に取り込む使い方を
+    想定。
+
+    クラウドモード必須 (= 画像 hosting に GCS bucket を使う、ローカル
+    モードでは UI render 経路が無い)。AWS S3 対応は別 task で拡張する。
+    """
+    local_path = os.environ.get("BEACON_DOC_IMAGE_PATH", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not local_path:
+        print("Error: image file path required (set BEACON_DOC_IMAGE_PATH or pass path as argument)")
+        sys.exit(1)
+    if not os.path.exists(local_path):
+        print(f"Error: file not found: {local_path}")
+        sys.exit(1)
+
+    if not _is_cloud_mode():
+        print("Error: image upload requires cloud mode (run 'beacon cloud push' first)")
+        sys.exit(1)
+
+    client, config = _get_api_client()
+    try:
+        result = client.upload_document_image(config["project_id"], local_path)
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    except ConnectionError as e:
+        print(f"Network error: {e}")
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(result.get("markdown", ""))
+        # ファイル sizeと URL も補助情報として stderr に出す (= stdout を
+        # markdown 単独に保つことで、`beacon doc image-upload x.png` の出力を
+        # そのまま doc 本文へ append できる)。
+        size_kb = result.get("size", 0) / 1024
+        sys.stderr.write(
+            f"Uploaded: {result.get('content_type', '?')}, "
+            f"{size_kb:.1f} KiB\n"
+            f"URL: {result.get('url', '')}\n"
+        )
+
+
 def cmd_cloud_list():
     """List cloud projects via API."""
     from auth import load_credentials
@@ -11248,6 +11299,7 @@ if __name__ == "__main__":
         "doc_delete": cmd_doc_delete,
         "doc_history": cmd_doc_history,
         "doc_restore": cmd_doc_restore,
+        "doc_image_upload": cmd_doc_image_upload,
         "cloud_list": cmd_cloud_list,
         "cloud_push": cmd_cloud_push,
         "cloud_pull": cmd_cloud_pull,
