@@ -150,6 +150,20 @@ scope は **必ず `report`** にする (他の振り返りや SPEC との区別
 
 ## Step 4: report ドキュメントの保存
 
+**ms-68 / e-1642 補足 (= entry-writing principle の draft 表示)**: `beacon doc add` を実行する **前** に、Step 3 で生成した report 本文を 1 度ユーザーに提示する。Incident report は post-mortem として将来読まれる重要なドキュメントであり、silent write は読み手 (非開発者を含む) を排除する。提示時に self-review 4 原則 (読み手目線 1 行 / 横文字 3 段階 / ID 参照に文脈 / 尻切れトンボ禁止) を 1 度通し、違反があれば書き直してから保存する。
+
+```
+以下の内容で Incident Report を保存します:
+
+  title: Incident Report: <title>
+  scope: report
+  op:    <op-id>
+
+  <本文 draft>
+
+このまま保存しますか? (= OK / 書き直し)
+```
+
 ```bash
 beacon doc add --scope report --op <op-id> --title "Incident Report: <title>" --content "<生成した本文>"
 ```
