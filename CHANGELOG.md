@@ -2,6 +2,18 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.38.1] - 2026-06-14
+
+- Merge ms-55-amended: follow-up 6 件 (receive-side halt / rollback log / morning doc / dispatch.py mirror / cloud claims / CLI table)
+- fix(ms-55): stop signal の receive 側 halt 実装 (e-1721)
+- fix(ms-55): cloud-mode active_claims subcollection 永続化 (e-1730)
+- fix(ms-55): dispatch.py Windows mirror for 6 coordination verbs (e-1735)
+- docs(ms-55): cmd_help_json + README CLI table — 14 coordination verbs (e-1736)
+- fix(ms-55): morning briefing → report doc (e-1733)
+- fix(ms-55): rollback 履歴記録 — save entry on successful rollback (e-1727)
+- docs(release): update README/CHANGELOG for v0.38.0
+- chore(release): bump formula to 0.38.0
+
 ## [v0.38.0] - 2026-06-14
 
 - chore(ms-55): exempt new coordination CLIs from drift gate (Win parity follow-up)
