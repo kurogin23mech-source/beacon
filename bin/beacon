@@ -135,6 +135,10 @@ Claim primitives (ms-55: who is taking what work — coordination):
                                     Mark a claim done
   beacon claim list    [--mine] [--target <kind>:<id>]
                                     List local active claims (= restart recovery)
+  beacon stuck check   (--telemetry-inline '<json>' | --telemetry-file <path>)
+                       [--timeout-minutes N] [--dry-run] [--json]
+                                    Detect silent sessions (= idle > N min) and
+                                    emit STUCK signals (= stop with reason="stuck")
 
 Releases & Deploys:
   beacon deploy record [--revision <rev>] [--semver <v>] [--version <tag>] [--desc <text>]
@@ -3094,6 +3098,68 @@ EOF
                 ;;
             *)
                 echo "Error: unknown subcommand 'beacon resume $_res_sub'" >&2
+                exit 1
+                ;;
+        esac
+        ;;
+    stuck)
+        # ms-55 e-1649: STUCK detector. Read session telemetry, identify
+        # rows past the idle timeout, emit stop signals with
+        # reason_kind="stuck" so the morning briefing can categorize
+        # them as "intervention needed".
+        ensure_project
+        _stuck_sub="${2:-}"
+        shift 2 || true
+        _stuck_inline=""
+        _stuck_file=""
+        _stuck_timeout=""
+        _stuck_dry_run=""
+        _stuck_json=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --telemetry-inline) _stuck_inline="${2:-}"; shift 2 ;;
+                --telemetry-file)   _stuck_file="${2:-}"; shift 2 ;;
+                --timeout-minutes)  _stuck_timeout="${2:-}"; shift 2 ;;
+                --dry-run)          _stuck_dry_run="1"; shift ;;
+                --json)             _stuck_json="1"; shift ;;
+                *) shift ;;
+            esac
+        done
+        case "$_stuck_sub" in
+            check)
+                BEACON_STUCK_TELEMETRY_INLINE="$_stuck_inline" \
+                    BEACON_STUCK_TELEMETRY_FILE="$_stuck_file" \
+                    BEACON_STUCK_TIMEOUT_MINUTES="${_stuck_timeout:-30}" \
+                    BEACON_STUCK_DRY_RUN="$_stuck_dry_run" \
+                    BEACON_JSON="$_stuck_json" \
+                    python3 "$COMMANDS_PY" stuck_check
+                ;;
+            "")
+                cat <<'EOF'
+Usage: beacon stuck check (--telemetry-inline '<json>' | --telemetry-file <path>)
+                          [--timeout-minutes N] [--dry-run] [--json]
+
+Read session telemetry from a JSON array and emit STUCK signals for
+sessions whose last_active is older than --timeout-minutes (default 30).
+
+Each telemetry record needs at least:
+  { "session_id": "sv-...", "last_active": "2026-06-15T11:00:00Z" }
+
+Optional fields:
+  - "ms_id" / "task_id": included in the emitted signal's machine_reason
+  - "ignore": true → skip this row from detection
+
+STUCK signals are stop-signal channel events with reason_kind="stuck".
+They are processed by the same receivers as any other stop signal —
+this is the same protocol, not a new one.
+
+Examples:
+  beacon stuck check --telemetry-file telemetry.json --timeout-minutes 20
+  beacon stuck check --telemetry-inline '[{"session_id":"sv-A","last_active":"..."}]' --dry-run
+EOF
+                ;;
+            *)
+                echo "Error: unknown subcommand 'beacon stuck $_stuck_sub'" >&2
                 exit 1
                 ;;
         esac

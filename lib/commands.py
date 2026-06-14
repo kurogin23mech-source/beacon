@@ -12624,6 +12624,166 @@ def cmd_claim_release():
     print(f"  event_id: {event.get('event_id', '?')}")
 
 
+def cmd_stuck_check():
+    """beacon stuck check (ms-55 e-1649): scan session telemetry, emit
+    STUCK signals for sessions idle past the timeout.
+
+    Input modes (exactly one):
+      * BEACON_STUCK_TELEMETRY_FILE — path to a JSON file with a list
+        of telemetry records. Each record needs at least session_id +
+        last_active; ms_id / task_id / ignore are optional.
+      * BEACON_STUCK_TELEMETRY_INLINE — JSON string with the same shape.
+
+    The JSON shape:
+      [
+        {"session_id": "sv-A", "last_active": "2026-06-15T11:00:00Z",
+         "ms_id": "ms-55", "task_id": "e-1646"},
+        {"session_id": "sv-B", "last_active": "2026-06-15T11:55:00Z"},
+        ...
+      ]
+
+    Other env:
+      BEACON_STUCK_TIMEOUT_MINUTES   default 30
+      BEACON_STUCK_DRY_RUN          "1" → identify stuck sessions but
+                                    don't emit signals
+      BEACON_JSON                   "1" → JSON output (list of records
+                                    {session_id, last_active, payload?, event?})
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    import stuck_detect as _stuck
+
+    inline = os.environ.get("BEACON_STUCK_TELEMETRY_INLINE", "").strip()
+    file_path = os.environ.get("BEACON_STUCK_TELEMETRY_FILE", "").strip()
+    timeout_raw = os.environ.get("BEACON_STUCK_TIMEOUT_MINUTES",
+                                 str(_stuck.DEFAULT_TIMEOUT_MINUTES))
+    dry_run = os.environ.get("BEACON_STUCK_DRY_RUN", "") == "1"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    try:
+        timeout_minutes = int(timeout_raw)
+    except ValueError:
+        print(
+            f"Error: --timeout-minutes must be an integer "
+            f"(got {timeout_raw!r})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if timeout_minutes <= 0:
+        print("Error: --timeout-minutes must be > 0", file=sys.stderr)
+        sys.exit(1)
+
+    raw = ""
+    if inline and file_path:
+        print(
+            "Error: pass either --telemetry-inline or --telemetry-file, "
+            "not both",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if inline:
+        raw = inline
+    elif file_path:
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                raw = f.read()
+        except OSError as e:
+            print(f"Error: could not read telemetry file: {e}",
+                  file=sys.stderr)
+            sys.exit(1)
+    else:
+        print(
+            "Error: provide --telemetry-inline '<json>' "
+            "or --telemetry-file <path>",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"Error: telemetry payload is not valid JSON ({e})",
+              file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(data, list):
+        print("Error: telemetry payload must be a JSON array",
+              file=sys.stderr)
+        sys.exit(1)
+
+    rows = []
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        rows.append(_stuck.SessionTelemetry(
+            session_id=row.get("session_id", "") or "",
+            last_active=row.get("last_active", "") or "",
+            ms_id=row.get("ms_id", "") or "",
+            task_id=row.get("task_id", "") or "",
+            ignore=bool(row.get("ignore", False)),
+        ))
+
+    now = _dt.now(_tz.utc)
+    try:
+        stuck_rows = _stuck.find_stuck_sessions(
+            rows, now=now, timeout_minutes=timeout_minutes,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    sender = _resolve_session_id() or "_stuck_detector"
+
+    results = []
+    for t in stuck_rows:
+        payload = _stuck.build_stuck_signal(
+            t, issued_by_session_id=sender, now=now,
+            timeout_minutes=timeout_minutes,
+        )
+        entry = {
+            "session_id": t.session_id,
+            "last_active": t.last_active,
+            "ms_id": t.ms_id,
+            "task_id": t.task_id,
+            "payload": payload,
+        }
+        if not dry_run:
+            try:
+                ev = _stop_post_event(payload=payload)
+                entry["event"] = ev
+            except Exception as e:
+                # Don't let a single send failure prevent the rest of
+                # the batch from being reported — partial coverage is
+                # still useful for the morning briefing.
+                entry["error"] = str(e)
+        results.append(entry)
+
+    if json_mode:
+        print(json.dumps({
+            "dry_run": dry_run,
+            "timeout_minutes": timeout_minutes,
+            "stuck": results,
+        }, ensure_ascii=False))
+        return
+
+    if not results:
+        print(
+            f"No stuck sessions (timeout = {timeout_minutes} min, "
+            f"scanned {len(rows)} session(s))."
+        )
+        return
+
+    print(f"Stuck sessions detected ({len(results)}):")
+    for r in results:
+        suffix = "  (dry-run, no signal emitted)" if dry_run else ""
+        print(
+            f"  ⚠ {r['session_id']}  last_active={r['last_active']}  "
+            f"ms={r['ms_id'] or '-'}  task={r['task_id'] or '-'}{suffix}"
+        )
+        if "event" in r:
+            print(f"      → STUCK signal posted: {r['event'].get('event_id', '?')}")
+        if "error" in r:
+            print(f"      → error: {r['error']}", file=sys.stderr)
+
+
 def cmd_claim_list():
     """beacon claim list [--mine] [--target <k>:<id>] [--json]
 
@@ -12917,6 +13077,9 @@ if __name__ == "__main__":
         "claim_respond": cmd_claim_respond,
         "claim_release": cmd_claim_release,
         "claim_list": cmd_claim_list,
+        # ms-55 e-1649: STUCK detector. Idle-timeout based emission of
+        # stop signals with reason_kind="stuck", same protocol as e-1646.
+        "stuck_check": cmd_stuck_check,
         "sessions_list": cmd_sessions_list,
         "profile_list": cmd_profile_list,
         "bus_budget_grant": cmd_bus_budget_grant,
