@@ -3850,20 +3850,35 @@ def cmd_trek_create():
         )
         sys.exit(1)
 
-    try:
-        new_doc = trek.new_trek(
-            title=title,
-            creator_user_id=user_id,
-            creator_email=email,
-            creator_session_id=session_id,
-            description=description,
-            type_=type_,
-        )
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    trek_store.save_trek(new_doc)
+    if _is_cloud_mode():
+        # Cloud path: server resolves creator identity from auth token.
+        # BEACON_USER_ID / BEACON_USER_EMAIL are ignored server-side (kept
+        # for local-mode parity).
+        try:
+            client, _config = _get_api_client()
+            new_doc = client.create_trek(
+                title=title,
+                creator_session_id=session_id,
+                description=description,
+                type_=type_,
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        try:
+            new_doc = trek.new_trek(
+                title=title,
+                creator_user_id=user_id,
+                creator_email=email,
+                creator_session_id=session_id,
+                description=description,
+                type_=type_,
+            )
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        trek_store.save_trek(new_doc)
 
     if json_mode:
         print(json.dumps(new_doc, ensure_ascii=False))
@@ -3902,10 +3917,24 @@ def cmd_trek_list():
         user_id, _, _ = _resolve_creator_identity()
         actor_id = user_id or None
 
-    treks = trek_store.list_treks(
-        actor_id=actor_id, status=status_filter,
-        include_archived=include_archived,
-    )
+    if _is_cloud_mode():
+        # Cloud path: server filters by auth token's user (= ignores actor_id).
+        # ``all_actors`` requires admin role server-side; non-admin gets 403.
+        try:
+            client, _config = _get_api_client()
+            treks = client.list_treks(
+                status=status_filter or "",
+                include_archived=include_archived,
+                all_actors=all_actors,
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        treks = trek_store.list_treks(
+            actor_id=actor_id, status=status_filter,
+            include_archived=include_archived,
+        )
 
     if json_mode:
         print(json.dumps(treks, ensure_ascii=False, indent=2))
@@ -3949,10 +3978,18 @@ def cmd_trek_show():
         print("Error: trek_id is required", file=sys.stderr)
         sys.exit(1)
 
-    t = trek_store.load_trek(trek_id)
-    if t is None:
-        print(f"Error: trek {trek_id} not found", file=sys.stderr)
-        sys.exit(1)
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            t = client.get_trek(trek_id)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        t = trek_store.load_trek(trek_id)
+        if t is None:
+            print(f"Error: trek {trek_id} not found", file=sys.stderr)
+            sys.exit(1)
 
     if json_mode:
         print(json.dumps(t, ensure_ascii=False, indent=2))
@@ -3987,7 +4024,11 @@ def cmd_trek_show():
 
 
 def _trek_transition(trek_id: str, to_status: str):
-    """Helper: validate + apply a state transition. Returns the updated trek."""
+    """Helper: validate + apply a state transition. Returns the updated trek.
+
+    Local mode only. Cloud mode dispatches via the dedicated start/archive
+    endpoints on the server (= caller branches before invoking this).
+    """
     import trek
     import trek_store
 
@@ -4017,7 +4058,15 @@ def cmd_trek_start():
     if not trek_id:
         print("Error: trek_id is required", file=sys.stderr)
         sys.exit(1)
-    t = _trek_transition(trek_id, "active")
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            t = client.start_trek(trek_id)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        t = _trek_transition(trek_id, "active")
     if json_mode:
         print(json.dumps(t, ensure_ascii=False))
     else:
@@ -4031,7 +4080,15 @@ def cmd_trek_archive():
     if not trek_id:
         print("Error: trek_id is required", file=sys.stderr)
         sys.exit(1)
-    t = _trek_transition(trek_id, "archived")
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            t = client.archive_trek(trek_id)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        t = _trek_transition(trek_id, "archived")
     if json_mode:
         print(json.dumps(t, ensure_ascii=False))
     else:
@@ -4067,26 +4124,34 @@ def cmd_trek_invite():
 
     inviter_user_id, _, _ = _resolve_creator_identity()
 
-    t = trek_store.load_trek(trek_id)
-    if t is None:
-        print(f"Error: trek {trek_id} not found", file=sys.stderr)
-        sys.exit(1)
-
-    # Local mode identity: user_id = email (cloud mode resolves properly
-    # via auth in e-1656). When the invitee later runs `beacon trek join`,
-    # their BEACON_USER_ID must match — easiest path is to also use email
-    # there.
-    invitee_user_id = actor_email
-
-    try:
-        trek.add_invitation(
-            t, user_id=invitee_user_id, email=actor_email,
-            invited_by_user_id=inviter_user_id,
-        )
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-    trek_store.save_trek(t)
+    if _is_cloud_mode():
+        # Cloud path: server resolves the invitee's user_id via
+        # find_user_by_email + records inviter from auth token.
+        try:
+            client, _config = _get_api_client()
+            t = client.invite_trek_member(trek_id, actor_email)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        t = trek_store.load_trek(trek_id)
+        if t is None:
+            print(f"Error: trek {trek_id} not found", file=sys.stderr)
+            sys.exit(1)
+        # Local mode identity: user_id = email (cloud mode resolves properly
+        # via auth in e-1656). When the invitee later runs `beacon trek join`,
+        # their BEACON_USER_ID must match — easiest path is to also use email
+        # there.
+        invitee_user_id = actor_email
+        try:
+            trek.add_invitation(
+                t, user_id=invitee_user_id, email=actor_email,
+                invited_by_user_id=inviter_user_id,
+            )
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        trek_store.save_trek(t)
 
     if json_mode:
         print(json.dumps(t, ensure_ascii=False))
@@ -4131,32 +4196,40 @@ def cmd_trek_join():
         )
         sys.exit(1)
 
-    t = trek_store.load_trek(trek_id)
-    if t is None:
-        print(f"Error: trek {trek_id} not found", file=sys.stderr)
-        sys.exit(1)
-
-    # Local mode identity match: prefer email lookup first (= simplest path
-    # for the invitee who is told "look for an invitation to email X"); fall
-    # back to user_id lookup. Use the looked-up member's user_id for the
-    # actual accept call.
-    member = trek.find_member_by_email(t, email)
-    if member is None:
-        member = trek.find_member(t, user_id)
-    if member is None:
-        print(
-            f"Error: no invitation found for {email} (user_id={user_id}) "
-            f"in trek {trek_id} — owner must `beacon trek invite` first",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    try:
-        trek.accept_invitation(t, user_id=member["user_id"])
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-    trek_store.save_trek(t)
+    if _is_cloud_mode():
+        # Cloud path: server identifies the joiner from auth token (no
+        # email lookup needed). Non-invited callers get 403.
+        try:
+            client, _config = _get_api_client()
+            t = client.join_trek(trek_id)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        t = trek_store.load_trek(trek_id)
+        if t is None:
+            print(f"Error: trek {trek_id} not found", file=sys.stderr)
+            sys.exit(1)
+        # Local mode identity match: prefer email lookup first (= simplest path
+        # for the invitee who is told "look for an invitation to email X"); fall
+        # back to user_id lookup. Use the looked-up member's user_id for the
+        # actual accept call.
+        member = trek.find_member_by_email(t, email)
+        if member is None:
+            member = trek.find_member(t, user_id)
+        if member is None:
+            print(
+                f"Error: no invitation found for {email} (user_id={user_id}) "
+                f"in trek {trek_id} — owner must `beacon trek invite` first",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        try:
+            trek.accept_invitation(t, user_id=member["user_id"])
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        trek_store.save_trek(t)
 
     if json_mode:
         print(json.dumps(t, ensure_ascii=False))
@@ -4192,17 +4265,26 @@ def cmd_trek_stop():
         )
         sys.exit(1)
 
-    t = trek_store.load_trek(trek_id)
-    if t is None:
-        print(f"Error: trek {trek_id} not found", file=sys.stderr)
-        sys.exit(1)
-
-    try:
-        trek.set_halt(t, issued_by_session_id=session_id, reason=reason)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-    trek_store.save_trek(t)
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            t = client.set_trek_halt(
+                trek_id, issued_by_session_id=session_id, reason=reason,
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        t = trek_store.load_trek(trek_id)
+        if t is None:
+            print(f"Error: trek {trek_id} not found", file=sys.stderr)
+            sys.exit(1)
+        try:
+            trek.set_halt(t, issued_by_session_id=session_id, reason=reason)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        trek_store.save_trek(t)
 
     if json_mode:
         print(json.dumps(t, ensure_ascii=False))
@@ -4230,11 +4312,26 @@ def cmd_trek_resume():
         print("Error: trek_id is required", file=sys.stderr)
         sys.exit(1)
 
+    if _is_cloud_mode():
+        # Server idempotently clears halt; we cannot know "was it halted"
+        # from the post-clear response, so the message just confirms the
+        # outcome.
+        try:
+            client, _config = _get_api_client()
+            t = client.clear_trek_halt(trek_id)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        if json_mode:
+            print(json.dumps(t, ensure_ascii=False))
+        else:
+            print(f"Resumed trek {trek_id} — sessions can continue work")
+        return
+
     t = trek_store.load_trek(trek_id)
     if t is None:
         print(f"Error: trek {trek_id} not found", file=sys.stderr)
         sys.exit(1)
-
     had_halt = bool(t.get("halt"))
     trek.clear_halt(t)
     trek_store.save_trek(t)
@@ -4269,6 +4366,34 @@ def cmd_trek_transfer_leader():
     if not target:
         print("Error: --to <session_id> is required", file=sys.stderr)
         sys.exit(1)
+
+    if _is_cloud_mode():
+        # Cloud mode requires caller's session as `from_session_id` for the
+        # session-grain check. We use BEACON_SESSION_ID (the calling CLI's
+        # session). Server also enforces user-grain leader role.
+        from_session = os.environ.get("BEACON_SESSION_ID", "").strip()
+        if not from_session:
+            print(
+                "Error: BEACON_SESSION_ID is required in cloud mode "
+                "(= the caller's session; server checks it equals the "
+                "current leader_session_id)",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        try:
+            client, _config = _get_api_client()
+            t = client.transfer_trek_leader(
+                trek_id, from_session_id=from_session, to_session_id=target,
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        if json_mode:
+            print(json.dumps(t, ensure_ascii=False))
+        else:
+            print(f"Transferred leader of trek {trek_id}: "
+                  f"{from_session} → {target}")
+        return
 
     t = trek_store.load_trek(trek_id)
     if t is None:
@@ -4326,23 +4451,45 @@ def cmd_trek_plan():
         )
         sys.exit(1)
 
-    t = trek_store.load_trek(trek_id)
-    if t is None:
-        print(f"Error: trek {trek_id} not found", file=sys.stderr)
-        sys.exit(1)
-
+    # Parse the scope arg with the shared helper so cloud and local agree on
+    # the entry shape. We do this BEFORE branching so syntax errors surface
+    # the same way regardless of mode.
     try:
-        if add_arg:
-            entry = trek.parse_scope_arg(add_arg)
-            trek.add_scope_entry(t, entry=entry)
-        else:
-            entry = trek.parse_scope_arg(remove_arg)
-            trek.remove_scope_entry(t, entry=entry)
+        entry = trek.parse_scope_arg(add_arg or remove_arg)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    trek_store.save_trek(t)
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            kwargs = {
+                "project": entry["project"],
+                "milestone": entry.get("milestone", ""),
+                "operation": entry.get("operation", ""),
+                "task": entry.get("task", ""),
+            }
+            if add_arg:
+                t = client.add_trek_scope(trek_id, **kwargs)
+            else:
+                t = client.remove_trek_scope(trek_id, **kwargs)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        t = trek_store.load_trek(trek_id)
+        if t is None:
+            print(f"Error: trek {trek_id} not found", file=sys.stderr)
+            sys.exit(1)
+        try:
+            if add_arg:
+                trek.add_scope_entry(t, entry=entry)
+            else:
+                trek.remove_scope_entry(t, entry=entry)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        trek_store.save_trek(t)
 
     if json_mode:
         print(json.dumps(t, ensure_ascii=False))
@@ -4378,6 +4525,21 @@ def cmd_trek_leave():
             file=sys.stderr,
         )
         sys.exit(1)
+
+    if _is_cloud_mode():
+        # Cloud path: server identifies the leaver from auth token; rejects
+        # leader-removal / last-member with 400.
+        try:
+            client, _config = _get_api_client()
+            t = client.leave_trek(trek_id)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        if json_mode:
+            print(json.dumps(t, ensure_ascii=False))
+        else:
+            print(f"Left trek {trek_id} ({email})")
+        return
 
     t = trek_store.load_trek(trek_id)
     if t is None:

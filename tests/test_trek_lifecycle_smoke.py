@@ -41,11 +41,15 @@ BEACON = REPO_ROOT / "bin" / "beacon"
 
 
 def _run(env, *args):
+    """Run beacon CLI in an isolated cwd so ``bin/beacon`` can't walk up to
+    a parent repo's cloud config and flip ``_is_cloud_mode()`` (e-1681
+    regression: cmd_trek_* now dispatches to HTTP when cloud is detected)."""
     full_env = os.environ.copy()
     full_env.update(env)
+    cwd = full_env.pop("BEACON_CWD", None)
     return subprocess.run(
         [str(BEACON), "trek", *args],
-        env=full_env, capture_output=True, text=True,
+        env=full_env, capture_output=True, text=True, cwd=cwd,
     )
 
 
@@ -60,8 +64,14 @@ def _ok(result, *args):
 
 @pytest.fixture
 def smoke_env(tmp_path):
+    # Minimal isolated project so bin/beacon's walk-up settles inside tmp_path
+    # rather than the host repo whose .beacon/config.json may set cloud mode.
+    project_file = tmp_path / ".beacon" / "project.json"
+    project_file.parent.mkdir(parents=True, exist_ok=True)
+    project_file.write_text('{"name":"test","milestones":[],"operations":[]}\n')
     base = {
         "BEACON_TREKS_DIR": str(tmp_path / "treks"),
+        "BEACON_CWD": str(tmp_path),
     }
     alice = {
         **base,

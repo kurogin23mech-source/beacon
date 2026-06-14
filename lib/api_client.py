@@ -544,3 +544,146 @@ class ApiClient:
             if s.get("session_id") == session_id:
                 return s
         return {}
+
+    # Trek operations (ms-69 / e-1681)
+    #
+    # Top-level resource (= not under /api/projects/) because treks bridge
+    # projects. Caller does not pass a project_id — trek membership lives at
+    # the user grain (user_id + email), so the auth token alone identifies
+    # the caller. See server/app.py /api/treks/* endpoints (e-1656).
+
+    def list_treks(self, *, status: str = "", include_archived: bool = False,
+                   all_actors: bool = False) -> list:
+        """List treks visible to the caller. Default scope = creator OR member.
+
+        ``status``: filter by lifecycle (planning|active|archived).
+        ``include_archived``: also surface archived treks (default hides).
+        ``all_actors``: admin view (= every trek). Non-admin caller gets 403.
+        """
+        qs = []
+        if status:
+            qs.append(f"status={urllib.parse.quote(status)}")
+        if include_archived:
+            qs.append("include_archived=true")
+        if all_actors:
+            qs.append("all_actors=true")
+        suffix = "?" + "&".join(qs) if qs else ""
+        return self.get(f"/api/treks{suffix}")
+
+    def create_trek(self, *, title: str, creator_session_id: str,
+                    description: str = "", type_: str = "persistent") -> dict:
+        """Create a trek. Caller becomes creator + initial leader.
+
+        ``creator_session_id`` is recorded as ``leader_session_id`` per
+        SPEC 設計方針 9 (= leader is at session grain).
+        """
+        return self.post("/api/treks", {
+            "title": title,
+            "description": description,
+            "type": type_,
+            "creator_session_id": creator_session_id,
+        })
+
+    def get_trek(self, trek_id: str) -> dict:
+        """Fetch a single trek by id. 403 if caller is neither creator nor member."""
+        return self.get(f"/api/treks/{urllib.parse.quote(trek_id, safe='')}")
+
+    def patch_trek(self, trek_id: str, *, title: str | None = None,
+                   description: str | None = None, type_: str | None = None) -> dict:
+        """Update title / description / type. Leader-only."""
+        body: dict = {}
+        if title is not None:
+            body["title"] = title
+        if description is not None:
+            body["description"] = description
+        if type_ is not None:
+            body["type"] = type_
+        return self.patch(f"/api/treks/{urllib.parse.quote(trek_id, safe='')}", body)
+
+    def archive_trek(self, trek_id: str) -> dict:
+        """Archive (= status → archived, terminal). Leader-only."""
+        return self.delete(f"/api/treks/{urllib.parse.quote(trek_id, safe='')}")
+
+    def start_trek(self, trek_id: str) -> dict:
+        """Transition planning → active. Leader-only."""
+        return self.post(f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/start")
+
+    def invite_trek_member(self, trek_id: str, email: str) -> dict:
+        """Invite a user (by email) to the trek. Any joined member may invite."""
+        return self.post(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/members",
+            {"email": email},
+        )
+
+    def join_trek(self, trek_id: str) -> dict:
+        """Caller accepts their own invitation. Non-invited → 403."""
+        return self.post(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/members/join"
+        )
+
+    def leave_trek(self, trek_id: str) -> dict:
+        """Caller removes themselves. Leader must transfer first; last member
+        cannot leave (= archive instead)."""
+        return self.delete(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/members/me"
+        )
+
+    def add_trek_scope(self, trek_id: str, *, project: str,
+                       milestone: str = "", operation: str = "",
+                       task: str = "") -> dict:
+        """Append a scope entry (cross-project ref). Any joined member."""
+        body: dict = {"project": project}
+        if milestone:
+            body["milestone"] = milestone
+        if operation:
+            body["operation"] = operation
+        if task:
+            body["task"] = task
+        return self.put(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/scope", body,
+        )
+
+    def remove_trek_scope(self, trek_id: str, *, project: str,
+                          milestone: str = "", operation: str = "",
+                          task: str = "") -> dict:
+        """Remove a scope entry. Any joined member."""
+        body: dict = {"project": project}
+        if milestone:
+            body["milestone"] = milestone
+        if operation:
+            body["operation"] = operation
+        if task:
+            body["task"] = task
+        return self.delete(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/scope", body,
+        )
+
+    def set_trek_halt(self, trek_id: str, *, issued_by_session_id: str,
+                      reason: str = "") -> dict:
+        """Pull the Andon cord. Any joined member may halt an active trek."""
+        return self.put(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/halt",
+            {"issued_by_session_id": issued_by_session_id, "reason": reason},
+        )
+
+    def clear_trek_halt(self, trek_id: str) -> dict:
+        """Release the Andon cord. Any joined member."""
+        return self.delete(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/halt"
+        )
+
+    def transfer_trek_leader(self, trek_id: str, *, from_session_id: str,
+                             to_session_id: str) -> dict:
+        """Hand off leadership. Caller's session must equal the trek's current
+        ``leader_session_id`` AND the calling user must hold the leader role."""
+        return self.post(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/transfer-leader",
+            {"from_session_id": from_session_id,
+             "to_session_id": to_session_id},
+        )
+
+    def get_trek_summary(self, trek_id: str) -> dict:
+        """Compact status snapshot (counts + status + halt) for dashboards."""
+        return self.get(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/summary"
+        )

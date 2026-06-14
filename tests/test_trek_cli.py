@@ -26,23 +26,47 @@ BEACON = REPO_ROOT / "bin" / "beacon"
 
 
 def _run(env_extra: dict, *args: str) -> subprocess.CompletedProcess:
+    """Run beacon CLI in an isolated cwd (= the tmp project dir from the
+    fixture) so ``bin/beacon`` doesn't walk up to a parent repo's cloud
+    config and flip ``_is_cloud_mode()`` to True (e-1681 regression).
+
+    The fixture stamps ``BEACON_CWD`` into env_extra; we pop it out and
+    hand it to ``subprocess.run(cwd=)``.
+    """
     env = os.environ.copy()
     env.update(env_extra)
+    cwd = env.pop("BEACON_CWD", None)
     return subprocess.run(
         [str(BEACON), "trek", *args],
-        env=env, capture_output=True, text=True,
+        env=env, capture_output=True, text=True, cwd=cwd,
     )
 
 
 @pytest.fixture
 def trek_env(tmp_path):
-    """Base env with BEACON_TREKS_DIR pointing at a per-test tmp dir."""
+    """Base env with BEACON_TREKS_DIR pointing at a per-test tmp dir.
+
+    The fixture also creates a minimal .beacon/project.json INSIDE
+    ``tmp_path`` and asks ``_run`` to launch the subprocess with cwd at
+    that tmp_path. This way ``bin/beacon``'s ``find_beacon_root`` walk
+    settles on the tmp project (which has no cloud config) instead of
+    the parent repo's worktree, which can have cloud mode set globally.
+
+    BEACON_PROJECT_FILE is intentionally NOT passed in env_extra because
+    ``bin/beacon`` line 7 unconditionally re-exports it to the relative
+    ``.beacon/project.json``; the cwd-based isolation is the only path
+    that actually shields the test from parent cloud config.
+    """
     treks_dir = tmp_path / "treks"
+    project_file = tmp_path / ".beacon" / "project.json"
+    project_file.parent.mkdir(parents=True, exist_ok=True)
+    project_file.write_text('{"name":"test","milestones":[],"operations":[]}\n')
     return {
         "BEACON_TREKS_DIR": str(treks_dir),
         "BEACON_USER_ID": "u-test",
         "BEACON_USER_EMAIL": "test@example.com",
         "BEACON_SESSION_ID": "sv-test-1",
+        "BEACON_CWD": str(tmp_path),
     }
 
 
