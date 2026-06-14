@@ -2,6 +2,28 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.35.0] - 2026-06-14
+
+- Merge pull request #151 from kurogin23mech-source/ms-69-trek-cross-project-cross-session
+- feat(ms-69): work item 詳細に Related Treks widget を追加 (e-1664)
+- feat(ms-69): Web UI に Treks タブ + trek 詳細ページを追加 (e-1659)
+- feat(ms-69): doc.trek_id field + 関連 trek の逆引き / 順引き API (e-1663)
+- test(ms-69): ms-55 が依存する trek API contract を pin (e-1657)
+- feat(ms-69): beacon trek CLI を cloud-mode 対応 (e-1681)
+- feat(ms-69): server に /api/treks/ CRUD + member ops + halt + transfer + summary endpoint (e-1656)
+- test(ms-69): trek full-lifecycle smoke (SPEC AC #14) — e-1658
+- feat(ms-69): beacon trek stop / resume / transfer-leader (e-1662)
+- feat(ms-69): beacon trek plan — scope 編集 CLI (e-1655)
+- feat(ms-69): beacon trek member CLI (invite / join / leave) — e-1654
+- chore(ms-69): mirror beacon trek in beacon_cli/dispatch.py — Win pipx 対応
+- feat(ms-69): beacon trek CLI 基本 CRUD + schema v2 (e-1653)
+- feat(ms-69): UI mock + lifecycle 簡素化 (3-state, archived terminal)
+- feat(ms-69): trek data schema — top-level collection + dual backend (e-1652)
+- chore: fix CLI drift for beacon doc image-upload
+- feat(ms-43): doc image upload — agent CLI/API for embedding images in SPECs (e-1660)
+- docs(release): update README/CHANGELOG for v0.34.1
+- chore(release): bump formula to 0.34.1
+
 ## [v0.34.1] - 2026-06-13
 
 - fix(release): rename PyPI distribution to beacon-ai
