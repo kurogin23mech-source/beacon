@@ -1644,91 +1644,6 @@ body::after {
   border-bottom-color: var(--accent);
 }
 
-/* ---- Dependency Graph ---- */
-
-.graph-section { padding: 24px 0; }
-
-.graph-container {
-  width: 100%;
-  overflow-x: auto;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  padding: 16px;
-}
-
-.graph-container svg { display: block; margin: 0 auto; }
-
-.graph-node rect {
-  rx: 6;
-  ry: 6;
-  stroke-width: 1.5;
-  cursor: pointer;
-  transition: filter 0.2s;
-}
-
-.graph-node:hover rect { filter: brightness(1.3); }
-
-.graph-node text {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  fill: var(--text-primary);
-  pointer-events: none;
-}
-
-.graph-node .node-id {
-  font-size: 9px;
-  fill: var(--text-dim);
-}
-
-.graph-node .node-progress {
-  font-size: 9px;
-  fill: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-}
-
-.graph-edge {
-  fill: none;
-  stroke: var(--border);
-  stroke-width: 1.5;
-  marker-end: url(#arrowhead);
-}
-
-.graph-edge.cross-task {
-  stroke-dasharray: 4 3;
-  stroke: var(--text-dim);
-}
-
-.graph-empty {
-  color: var(--text-dim);
-  text-align: center;
-  padding: 48px 0;
-  font-size: 0.85rem;
-}
-
-.graph-legend {
-  display: flex;
-  gap: 16px;
-  margin-top: 12px;
-  justify-content: center;
-  flex-wrap: wrap;
-}
-
-.graph-legend-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 0.7rem;
-  color: var(--text-dim);
-}
-
-.graph-legend-swatch {
-  width: 12px;
-  height: 12px;
-  border-radius: 3px;
-  border: 1px solid var(--border);
-}
-
 /* ---- Retro Viewer ---- */
 
 .retro-section {
@@ -2471,8 +2386,6 @@ let state = {
   sessionView: 'notes', // 'notes' | 'logs'
   sessionNotes: [],
   sessionLogs: [],
-  showGraph: false,
-  graphFilterDeps: true,
   retros: [],
   retroContent: null,
   documents: [],
@@ -3284,12 +3197,11 @@ function renderMainContent() {
       <button class="tab-btn ${state.activeTab === 'operations' ? 'active' : ''}" data-action="switch-tab" data-tab="operations">Operations</button>
       <button class="tab-btn ${state.activeTab === 'notes' ? 'active' : ''}" data-action="switch-tab" data-tab="notes">Session</button>
     </div>
-    ${state.activeTab === 'dashboard' ? (state.showGraph ? renderGraphSection() : `
+    ${state.activeTab === 'dashboard' ? `
     <section class="milestones fade-in">
       <div class="milestones-header">
         <span class="milestones-title">Milestones</span>
         <span class="milestones-count">${activeCount} active · ${doneCount}/${(p.milestones||[]).length} done</span>
-        <button class="sort-toggle" data-action="show-graph">Graph →</button>
       </div>
       <div id="ms-list-container">
       <div class="filter-bar">
@@ -3303,7 +3215,7 @@ function renderMainContent() {
       ${filtered.map((ms, i) => renderMilestoneCard(ms, i)).join('')}
       </div>
     </section>
-    `) : ''}
+    ` : ''}
     ${state.activeTab === 'documents' ? `<div id="documents-container">${renderDocumentsSection()}</div>` : ''}
     ${state.activeTab === 'releases' ? renderReleasesSection() : ''}
     ${state.activeTab === 'operations' ? renderOperationsSection() : ''}
@@ -3707,7 +3619,6 @@ function renderRetroSection() {
 
 async function switchTab(tab) {
   state.activeTab = tab;
-  state.showGraph = false;
   state.retroContent = null;
   state.documentContent = null;
   // ms-69 / e-1659 v3: switching tabs leaves any open trek detail and
@@ -3922,9 +3833,6 @@ function _renderSettingsAgentsTab() {
         <td>${esc(proj)}</td>
         <td>${esc(trekLabel)}</td>
         <td>${esc(ts)}</td>
-        <td class="actions">
-          <span style="color:var(--text-dim);font-size:0.7rem;">CLI</span>
-        </td>
       </tr>`;
   };
   return `
@@ -3946,13 +3854,12 @@ function _renderSettingsAgentsTab() {
             <th>Project</th>
             <th>Trek</th>
             <th>Started / last active</th>
-            <th></th>
           </tr>
         </thead>
         <tbody>
           ${filtered.length
             ? filtered.map(rowHtml).join('')
-            : '<tr><td colspan="5" style="color:var(--text-dim);font-style:italic;text-align:center;padding:12px;">No sessions match this filter.</td></tr>'}
+            : '<tr><td colspan="4" style="color:var(--text-dim);font-style:italic;text-align:center;padding:12px;">No sessions match this filter.</td></tr>'}
         </tbody>
       </table>
     </div>`;
@@ -4797,91 +4704,6 @@ function closeDocument() {
   render();
 }
 
-// ---- Dependency Graph ----
-
-function buildGraph(milestones) {
-  const nodes = [];
-  const edges = [];
-  const idSet = new Set();
-
-  for (const ms of milestones) {
-    if (ms.status === 'cancelled') continue;
-    idSet.add(ms.id);
-    nodes.push({
-      id: ms.id,
-      title: ms.title || '',
-      status: ms.status || 'todo',
-      progress: ms.progress || 0,
-      depends_on: ms.depends_on || [],
-    });
-  }
-
-  for (const n of nodes) {
-    for (const dep of n.depends_on) {
-      if (idSet.has(dep)) {
-        edges.push({ from: n.id, to: dep, type: 'depends_on' });
-      }
-    }
-  }
-
-  // Cross-MS task references
-  for (const ms of milestones) {
-    if (ms.status === 'cancelled') continue;
-    for (const entry of (ms.entries || [])) {
-      const reqBy = (entry.meta || {}).requested_by || '';
-      if (reqBy && idSet.has(reqBy)) {
-        edges.push({ from: reqBy, to: ms.id, type: 'cross_task', task_id: entry.id || '' });
-      }
-    }
-  }
-
-  // Kahn's algorithm for waves
-  const inDeg = {};
-  for (const n of nodes) inDeg[n.id] = 0;
-  for (const n of nodes) {
-    for (const dep of n.depends_on) {
-      if (dep in inDeg) inDeg[n.id]++;
-    }
-  }
-
-  const waves = [];
-  const remaining = { ...inDeg };
-  while (Object.keys(remaining).length > 0) {
-    const wave = Object.keys(remaining).filter(id => remaining[id] === 0).sort();
-    if (wave.length === 0) {
-      waves.push({ wave: waves.length + 1, milestones: Object.keys(remaining).sort(), cycle: true });
-      break;
-    }
-    waves.push({ wave: waves.length + 1, milestones: wave });
-    for (const id of wave) delete remaining[id];
-    for (const n of nodes) {
-      if (n.id in remaining) {
-        for (const dep of n.depends_on) {
-          if (wave.includes(dep)) remaining[n.id]--;
-        }
-      }
-    }
-  }
-
-  return { nodes, edges, waves };
-}
-
-const GRAPH_STATUS_COLORS = {
-  done: '#166534',
-  in_progress: '#1e3a5f',
-  todo: '#2a2a30',
-  waiting: '#44403c',
-  observing: '#3b2f4a',
-};
-
-const GRAPH_STATUS_STROKES = {
-  done: '#4ade80',
-  in_progress: '#60a5fa',
-  todo: '#71717a',
-  waiting: '#fbbf24',
-  observing: '#a78bfa',
-};
-
 // Build hash → beacon entry map from all milestone entries
 function buildHashEntryMap(project) {
   const map = {};
@@ -5307,141 +5129,6 @@ function renderNotesSection() {
   </section>`;
 }
 
-
-function renderGraphSection() {
-  const p = state.project;
-  const header = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
-    <span class="retro-back" data-action="hide-graph">← back</span>
-    <button class="sort-toggle" data-action="toggle-graph-filter" style="font-size:0.7rem;">${state.graphFilterDeps ? 'deps only ✓' : 'show all'}</button>
-  </div>`;
-
-  if (!p || !p.milestones || p.milestones.length === 0) {
-    return `<section class="graph-section fade-in">${header}<div class="graph-empty">No milestones.</div></section>`;
-  }
-
-  const fullGraph = buildGraph(p.milestones);
-  if (fullGraph.edges.length === 0) {
-    return `<section class="graph-section fade-in">${header}<div class="graph-empty">No dependencies defined yet.<br><span style="font-size:0.7rem;color:var(--text-dim)">Use <code>beacon milestone depends ms-X --on ms-Y</code> to add.</span></div></section>`;
-  }
-
-  let milestones = p.milestones;
-  if (state.graphFilterDeps) {
-    const connected = new Set();
-    for (const e of fullGraph.edges) { connected.add(e.from); connected.add(e.to); }
-    milestones = milestones.filter(ms => connected.has(ms.id));
-  }
-  const graph = state.graphFilterDeps ? buildGraph(milestones) : fullGraph;
-
-  if (graph.edges.length === 0) {
-    return `<section class="graph-section fade-in">${header}<div class="graph-empty">No dependencies defined yet.<br><span style="font-size:0.7rem;color:var(--text-dim)">Use <code>beacon milestone depends ms-X --on ms-Y</code> to add.</span></div></section>`;
-  }
-
-  // Layout: waves flow left-to-right, nodes stacked vertically within each wave
-  const nodeW = 180;
-  const nodeH = 52;
-  const waveGap = 60;
-  const nodeGap = 16;
-  const padX = 40;
-  const padY = 32;
-
-  // Assign positions
-  const pos = {};
-  let maxRow = 0;
-  for (const w of graph.waves) {
-    maxRow = Math.max(maxRow, w.milestones.length);
-  }
-
-  for (let wi = 0; wi < graph.waves.length; wi++) {
-    const wave = graph.waves[wi];
-    const count = wave.milestones.length;
-    const startY = (maxRow - count) * (nodeH + nodeGap) / 2;
-    for (let ni = 0; ni < count; ni++) {
-      pos[wave.milestones[ni]] = {
-        x: padX + wi * (nodeW + waveGap),
-        y: padY + startY + ni * (nodeH + nodeGap),
-      };
-    }
-  }
-
-  const svgW = padX * 2 + graph.waves.length * (nodeW + waveGap) - waveGap;
-  const svgH = padY * 2 + maxRow * (nodeH + nodeGap) - nodeGap;
-
-  // Build SVG
-  const nodeMap = {};
-  for (const n of graph.nodes) nodeMap[n.id] = n;
-
-  let edgeSvg = '';
-  for (const e of graph.edges) {
-    const from = pos[e.from];
-    const to = pos[e.to];
-    if (!from || !to) continue;
-
-    // Edge: from depends on to, arrow from "to" to "from" (dependency flows right)
-    const x1 = to.x + nodeW;
-    const y1 = to.y + nodeH / 2;
-    const x2 = from.x;
-    const y2 = from.y + nodeH / 2;
-
-    const cx1 = x1 + (x2 - x1) * 0.4;
-    const cx2 = x1 + (x2 - x1) * 0.6;
-
-    const cls = e.type === 'cross_task' ? ' cross-task' : '';
-    edgeSvg += `<path class="graph-edge${cls}" d="M${x1},${y1} C${cx1},${y1} ${cx2},${y2} ${x2},${y2}" />`;
-  }
-
-  let nodeSvg = '';
-  for (const n of graph.nodes) {
-    const p = pos[n.id];
-    if (!p) continue;
-    const fill = GRAPH_STATUS_COLORS[n.status] || GRAPH_STATUS_COLORS.todo;
-    const stroke = GRAPH_STATUS_STROKES[n.status] || GRAPH_STATUS_STROKES.todo;
-    const titleTrunc = n.title.length > 20 ? n.title.slice(0, 19) + '\u2026' : n.title;
-
-    nodeSvg += `
-      <g class="graph-node" transform="translate(${p.x},${p.y})">
-        <rect width="${nodeW}" height="${nodeH}" fill="${fill}" stroke="${stroke}" />
-        <text class="node-id" x="8" y="16">${esc(n.id)}</text>
-        <text x="8" y="32">${esc(titleTrunc)}</text>
-        <text class="node-progress" x="${nodeW - 8}" y="16" text-anchor="end">${n.progress}%</text>
-      </g>`;
-  }
-
-  // Wave labels
-  let waveSvg = '';
-  for (let wi = 0; wi < graph.waves.length; wi++) {
-    const x = padX + wi * (nodeW + waveGap) + nodeW / 2;
-    waveSvg += `<text x="${x}" y="18" text-anchor="middle" fill="var(--text-dim)" font-size="10" font-family="var(--font-mono)">wave ${graph.waves[wi].wave}${graph.waves[wi].cycle ? ' (cycle)' : ''}</text>`;
-  }
-
-  const legendItems = [
-    { label: 'done', color: GRAPH_STATUS_STROKES.done },
-    { label: 'in_progress', color: GRAPH_STATUS_STROKES.in_progress },
-    { label: 'todo', color: GRAPH_STATUS_STROKES.todo },
-    { label: 'observing', color: GRAPH_STATUS_STROKES.observing },
-    { label: 'waiting', color: GRAPH_STATUS_STROKES.waiting },
-  ];
-
-  return `
-    <section class="graph-section fade-in">
-      ${header}
-      <div class="graph-container">
-        <svg width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}" xmlns="http://www.w3.org/2000/svg">
-          <defs>
-            <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-              <polygon points="0 0, 8 3, 0 6" fill="var(--border)" />
-            </marker>
-          </defs>
-          ${waveSvg}
-          ${edgeSvg}
-          ${nodeSvg}
-        </svg>
-      </div>
-      <div class="graph-legend">
-        ${legendItems.map(l => `<div class="graph-legend-item"><div class="graph-legend-swatch" style="background:${l.color}"></div>${l.label}</div>`).join('')}
-      </div>
-    </section>`;
-}
-
 // ---- Shared search partial-update (both Web and Desktop) ----
 
 function renderMsListArea() {
@@ -5520,7 +5207,7 @@ function renderOnDataChange() {
     // stays intact.
     if (state.searchQuery.trim()) {
       renderMainContentArea();
-    } else if (state.activeTab === 'dashboard' && !state.showGraph && !state.documentContent && !state.retroContent) {
+    } else if (state.activeTab === 'dashboard' && !state.documentContent && !state.retroContent) {
       renderMsListArea();
     } else {
       render();
@@ -5673,12 +5360,6 @@ function handleCommonAction(action, el) {
       state.hiddenStatuses.clear(); render(); return true;
     case 'toggle-sort':
       state.sortAsc = !state.sortAsc; render(); return true;
-    case 'show-graph':
-      state.showGraph = true; render(); return true;
-    case 'hide-graph':
-      state.showGraph = false; render(); return true;
-    case 'toggle-graph-filter':
-      state.graphFilterDeps = !state.graphFilterDeps; render(); return true;
     case 'toggle-release-graph':
       state.showReleaseGraph = !state.showReleaseGraph; render(); return true;
     case 'switch-releases-tab':
