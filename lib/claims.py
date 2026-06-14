@@ -593,10 +593,198 @@ def list_local_claims(
 
 
 # ---------------------------------------------------------------------------
-# TODO: Cloud-mode active_claims/ subcollection wiring (= ms-55 e-1648
-# follow-up). The local-mode helpers above mirror the intended layout —
-# the cloud-mode equivalent should call api_client to write/read into
-# the subcollection so the Web UI can render "who has what taken right
-# now" without a separate API endpoint. The wire payload format is the
-# same; only the persistence transport differs.
+# Cloud-mode active_claims/ subcollection (ms-55 e-1730)
 # ---------------------------------------------------------------------------
+#
+# The wire payload (= what we send) is identical to the local store
+# layout; only the transport differs. Cloud mode is detected via
+# `_get_cloud_provider`, an injectable hook that the CLI layer wires up
+# (= commands.py:_get_api_client + cloud.json present). Keeping the hook
+# injectable avoids a lib/claims.py ↔ commands.py import cycle and lets
+# tests substitute a stub provider for the round-trip checks.
+
+# Module-level provider: a zero-arg callable that returns either
+# (api_client, project_id) — meaning "use cloud" — or None — meaning
+# "use the local file store". The CLI registers a real provider during
+# import; the default is None so import-time of this module is side-
+# effect-free.
+_cloud_provider: Optional["_CloudProvider"] = None  # type: ignore[name-defined]
+
+
+class _CloudProvider:
+    """Protocol-like shim: anything with a ``resolve() -> Optional[tuple]``
+    method works. The CLI passes a closure that wraps
+    ``commands.py:_get_api_client`` + a project_id resolver.
+
+    Returning ``None`` from ``resolve()`` falls back to local mode.
+    Returning ``(client, project_id)`` activates cloud round-trip.
+    """
+
+    def resolve(self):  # pragma: no cover — overridden by callable below
+        return None
+
+
+def register_cloud_provider(provider) -> None:
+    """Register a cloud-mode provider (zero-arg callable or class instance).
+
+    The provider's ``resolve()`` method (or the callable itself) must
+    return ``Optional[tuple[ApiClient, project_id_str]]``. Passing
+    ``None`` to this function unregisters.
+    """
+    global _cloud_provider
+    _cloud_provider = provider
+
+
+def _resolve_cloud() -> Optional[tuple]:
+    """Ask the registered provider whether cloud mode is active.
+
+    Returns ``(client, project_id)`` if so, else ``None``. Wraps the
+    provider in a defensive try/except so a misbehaving provider falls
+    back to local mode rather than crashing the CLI.
+    """
+    p = _cloud_provider
+    if p is None:
+        return None
+    try:
+        result = p() if callable(p) else p.resolve()
+    except Exception:
+        return None
+    if not result:
+        return None
+    try:
+        client, project_id = result
+    except (TypeError, ValueError):
+        return None
+    if not project_id:
+        return None
+    return client, project_id
+
+
+# ---------------------------------------------------------------------------
+# Cloud transport helpers
+# ---------------------------------------------------------------------------
+
+def _record_cloud_claim(claim_payload: dict) -> bool:
+    """Persist a claim to the server's active_claims subcollection.
+
+    Returns True on success, False otherwise (= caller falls back to
+    local). Errors are swallowed: cloud round-trip is best-effort, the
+    bus event remains the canonical record.
+    """
+    resolved = _resolve_cloud()
+    if not resolved:
+        return False
+    client, project_id = resolved
+    cid = claim_payload.get("claim_id")
+    if not cid:
+        return False
+    try:
+        client.save_active_claim(project_id, cid, claim_payload)
+        return True
+    except Exception:
+        return False
+
+
+def _release_cloud_claim(claim_id: str) -> Optional[bool]:
+    """Remove a claim from the server.
+
+    Returns:
+      True  — deleted (existed)
+      False — didn't exist on the server (still a "success")
+      None  — cloud not active OR transport failure; caller decides
+              whether to also clear the local file as a fallback
+    """
+    resolved = _resolve_cloud()
+    if not resolved:
+        return None
+    client, project_id = resolved
+    try:
+        result = client.delete_active_claim(project_id, claim_id)
+    except Exception:
+        return None
+    if isinstance(result, dict):
+        return bool(result.get("deleted"))
+    return True
+
+
+def _list_cloud_claims() -> Optional[list[dict]]:
+    """Fetch active claims from the server. Returns None when cloud is
+    inactive or unreachable; caller falls back to local store."""
+    resolved = _resolve_cloud()
+    if not resolved:
+        return None
+    client, project_id = resolved
+    try:
+        return client.list_active_claims(project_id)
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Public API — cloud-aware wrappers around the local-mode helpers.
+# ---------------------------------------------------------------------------
+#
+# These are the entry points the CLI uses. They check for a cloud
+# provider first; if active, they round-trip through the API client.
+# If the cloud call fails, they fall back to the local file so the
+# user still gets *some* record. Same return shapes as the local
+# helpers so existing callers don't care which transport ran.
+
+def record_claim(
+    claim_payload: dict, *, beacon_dir: Optional[str] = None,
+) -> None:
+    """Persist a claim. Cloud-mode → server subcollection + local cache
+    mirror. Local-mode → local cache only."""
+    # Always write the local file so a session restart can read it
+    # before any cloud round-trip resolves (= offline survival).
+    record_local_claim(claim_payload, beacon_dir=beacon_dir)
+    _record_cloud_claim(claim_payload)
+
+
+def release_claim(
+    claim_id: str, *, beacon_dir: Optional[str] = None,
+) -> bool:
+    """Drop a claim. Returns True if anything existed (cloud or local).
+
+    The cloud release is attempted first so the multi-machine view
+    drops the entry quickly; the local file is cleared regardless so
+    `claim list --mine` reflects the release immediately on this box.
+    """
+    cloud_outcome = _release_cloud_claim(claim_id)
+    local_dropped = release_local_claim(claim_id, beacon_dir=beacon_dir)
+    if cloud_outcome is None:
+        return local_dropped
+    return bool(cloud_outcome) or local_dropped
+
+
+def list_claims(
+    *,
+    mine: Optional[str] = None,
+    target_kind: Optional[str] = None,
+    target_id: Optional[str] = None,
+    beacon_dir: Optional[str] = None,
+) -> list[dict]:
+    """Return active claims with optional filters.
+
+    Cloud-mode: server is the source of truth. Local-mode (or cloud
+    unreachable): the local cache.
+    """
+    cloud_records = _list_cloud_claims()
+    if cloud_records is None:
+        return list_local_claims(
+            mine=mine, target_kind=target_kind, target_id=target_id,
+            beacon_dir=beacon_dir,
+        )
+    out: list[dict] = []
+    for rec in cloud_records:
+        if mine and rec.get("from_session_id") != mine:
+            continue
+        if target_kind or target_id:
+            target = rec.get("target") or {}
+            if target_kind and target.get("kind") != target_kind:
+                continue
+            if target_id and target.get("id") != target_id:
+                continue
+        out.append(rec)
+    out.sort(key=lambda r: r.get("issued_at") or "")
+    return out

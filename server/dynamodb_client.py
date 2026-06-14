@@ -94,6 +94,10 @@ TABLES = {
     "sessions": f"{TABLE_PREFIX}-sessions",
     "session_logs": f"{TABLE_PREFIX}-session_logs",
     "operation_envelopes": f"{TABLE_PREFIX}-operation_envelopes",
+    # ms-55 e-1730: per-project active claim subcollection (PK=project_id,
+    # SK=claim_id). Mirrors Firestore's active_claims/ subcollection so
+    # Web UI + restart-recovery work cross-backend.
+    "active_claims": f"{TABLE_PREFIX}-active_claims",
     # users/{uid}/* subcollections
     "machines": f"{TABLE_PREFIX}-machines",
     "session_lookup": f"{TABLE_PREFIX}-session_lookup",
@@ -569,6 +573,62 @@ def sweep_trashed_documents(project_id: str, *, days: int = 30,
                     })
         docs_table.delete_item(Key={"project_id": project_id, "doc_id": doc_id})
     return purged
+
+
+# ---------------------------------------------------------------------------
+# Active claims (subcollection)  ms-55 e-1730
+# ---------------------------------------------------------------------------
+#
+# PK=project_id, SK=claim_id. Mirrors Firestore subcollection (see
+# server/firestore_client.py for the design rationale).
+
+def list_active_claims(project_id: str) -> list[dict]:
+    items = _query_all(_table("active_claims"), Key("project_id").eq(project_id))
+    out: list[dict] = []
+    for it in items:
+        data = dict(it)
+        # PK / SK are inlined onto every item; surface claim_id even if
+        # the stored payload lost it (= legacy back-fill).
+        data.setdefault("claim_id", data.pop("claim_id", "") or "")
+        # Strip the storage PK from the wire shape — clients don't need it.
+        data.pop("project_id", None)
+        out.append(data)
+    out.sort(key=lambda r: r.get("issued_at") or "")
+    return out
+
+
+def get_active_claim(project_id: str, claim_id: str) -> dict | None:
+    resp = _table("active_claims").get_item(
+        Key={"project_id": project_id, "claim_id": claim_id},
+    )
+    item = resp.get("Item")
+    if not item:
+        return None
+    data = dict(item)
+    data.pop("project_id", None)
+    data.setdefault("claim_id", claim_id)
+    return data
+
+
+def save_active_claim(project_id: str, claim_id: str, payload: dict) -> str:
+    if not claim_id:
+        raise ValueError("claim_id is required")
+    if not isinstance(payload, dict):
+        raise TypeError("payload must be a dict")
+    item = {**payload, "project_id": project_id, "claim_id": claim_id}
+    _table("active_claims").put_item(Item=item)
+    return claim_id
+
+
+def delete_active_claim(project_id: str, claim_id: str) -> bool:
+    table = _table("active_claims")
+    existing = table.get_item(
+        Key={"project_id": project_id, "claim_id": claim_id},
+    ).get("Item")
+    if not existing:
+        return False
+    table.delete_item(Key={"project_id": project_id, "claim_id": claim_id})
+    return True
 
 
 # ---------------------------------------------------------------------------

@@ -12654,6 +12654,35 @@ def cmd_rollback():
 # argument shape (`--target`, `--intent`), so the implementation
 # factors the common path through a private helper.
 
+def _claims_register_provider() -> None:
+    """Wire lib/claims.py's cloud provider hook to this CLI's transport
+    (ms-55 e-1730).
+
+    Called lazily by each claim command so import-time of lib/claims.py
+    stays side-effect-free. Re-registers on every call (cheap, idempotent)
+    — handy if the user switches cloud mode mid-session.
+
+    The provider closure returns ``(client, project_id)`` when cloud
+    mode is active, or ``None`` to fall back to local. Errors during
+    resolution map to ``None`` so the worker keeps working.
+    """
+    import claims as _claims
+
+    def _provider():
+        try:
+            if not _is_cloud_mode():
+                return None
+            client, config = _get_api_client()
+        except Exception:
+            return None
+        project_id = (config or {}).get("project_id") or ""
+        if not project_id:
+            return None
+        return client, project_id
+
+    _claims.register_cloud_provider(_provider)
+
+
 def _claim_parse_target_env() -> tuple[str, str]:
     """Pull --target kind:id from env vars set by the bash dispatcher."""
     tk = os.environ.get("BEACON_CLAIM_TARGET_KIND", "").strip()
@@ -12722,14 +12751,16 @@ def _claim_issue(claim_kind: str):
 
     event = _claim_post_event(payload)
 
-    # Persist the issuer's view of the claim locally so `claim list --mine`
-    # works across restarts even before the receive-side hook lands.
+    # Persist the issuer's view of the claim. Cloud-mode rounds through
+    # the server subcollection (= multi-machine view) + the local cache
+    # mirror; local-mode just writes the cache (ms-55 e-1730).
+    _claims_register_provider()
     try:
-        _claims.record_local_claim(payload)
+        _claims.record_claim(payload)
     except (OSError, ValueError) as e:
-        # Don't fail the send if local persistence is broken — the bus
-        # event is the canonical record, the local file is a cache.
-        print(f"Note: could not persist claim locally: {e}",
+        # Don't fail the send if persistence is broken — the bus event
+        # is the canonical record, this store is a derived view.
+        print(f"Note: could not persist claim: {e}",
               file=sys.stderr)
 
     if json_mode:
@@ -12843,12 +12874,13 @@ def cmd_claim_release():
 
     event = _claim_post_event(payload)
 
-    # Drop the local cache entry too so `claim list --mine` reflects
-    # the release immediately.
+    # Drop the local cache entry + cloud-mode subcollection record
+    # (ms-55 e-1730). Same fall-back rule as the issue path.
+    _claims_register_provider()
     try:
-        _claims.release_local_claim(claim_id)
+        _claims.release_claim(claim_id)
     except OSError as e:
-        print(f"Note: could not update local cache: {e}",
+        print(f"Note: could not update claim cache: {e}",
               file=sys.stderr)
 
     if json_mode:
@@ -13287,7 +13319,10 @@ def cmd_claim_list():
               file=sys.stderr)
         sys.exit(1)
 
-    out = _claims.list_local_claims(
+    # ms-55 e-1730: cloud-mode pulls from the server subcollection (=
+    # multi-machine view), local-mode falls back to the cached file.
+    _claims_register_provider()
+    out = _claims.list_claims(
         mine=mine, target_kind=tk, target_id=ti,
     )
 
