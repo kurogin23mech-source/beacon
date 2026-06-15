@@ -670,8 +670,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_entry_purge.add_argument("--index", default="")
     p_entry_purge.add_argument("--json", action="store_true")
 
-    # ---- operation (purge only — full operation CRUD remains bash-only) ----
-    p_op = sub.add_parser("operation", help="Operation operations (purge)", add_help=False)
+    # ---- operation (purge + envelope verify — full CRUD remains bash-only) ----
+    p_op = sub.add_parser(
+        "operation", help="Operation operations (purge, envelope verify)",
+        add_help=False,
+    )
     p_op.add_argument("--help", "-h", action="store_true", dest="show_help")
     op_sub = p_op.add_subparsers(dest="op_cmd", metavar="<subcmd>")
     p_op_purge = op_sub.add_parser("purge", add_help=False)
@@ -679,6 +682,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_op_purge.add_argument("-r", "--reason", default="")
     p_op_purge.add_argument("--index", default="")
     p_op_purge.add_argument("--json", action="store_true")
+
+    # ms-73 / e-1764: AI self-check primitive for the envelope path
+    # (ms-60 e-1340). `beacon operation envelope verify <op-id> <action>`
+    # asks "is this action permitted by the active envelope?" — the
+    # /beacon-operation-execute Skill calls it before running each
+    # action. Without Win parity, autonomous operations on Windows pipx
+    # could not perform the pre-flight authorization check.
+    p_op_envelope = op_sub.add_parser("envelope", add_help=False)
+    p_op_envelope_sub = p_op_envelope.add_subparsers(
+        dest="op_envelope_cmd", metavar="<subcmd>"
+    )
+    p_op_envelope_verify = p_op_envelope_sub.add_parser("verify", add_help=False)
+    p_op_envelope_verify.add_argument("op_id", nargs="?", default="")
+    p_op_envelope_verify.add_argument("action", nargs="?", default="")
+    p_op_envelope_verify.add_argument("--json", action="store_true")
 
     # ---- trek (ms-69) ----
     # Top-level cross-project collaboration area. Storage is local-only
@@ -794,6 +812,49 @@ def build_parser() -> argparse.ArgumentParser:
     p_session_attention.add_argument("--set", dest="attention_set",
                                       choices=["true", "false"], default="")
     p_session_attention.add_argument("--json", action="store_true")
+
+    # ms-73 / e-1762: Win parity for session lifecycle / forensics verbs.
+    # `end` aggregates this session's notes/commits/PRs into the session log
+    # (graceful close path). `rescue` aggregates all OTHER sessions (used when
+    # a sibling bclaude died without calling end). `fork` spawns a sibling
+    # worktree for parallel work on a target ms (ms-67). `log` enumerates or
+    # shows session log entries (used by /beacon-session-start to restore
+    # context). The Python paths translate argv → env exactly like the bash
+    # dispatcher in bin/beacon (lines 2659/2677/2688/2770) so commands.py
+    # observes the same env contract regardless of OS.
+    p_session_end = session_sub.add_parser("end", add_help=False)
+    p_session_end.add_argument("--summary", default="")
+    p_session_end.add_argument("--session-id", dest="session_id", default="")
+    p_session_end.add_argument("--bus-origin", dest="bus_origin",
+                                action="store_true",
+                                help="Refuse the write (poisoning defense, e-1293)")
+    p_session_end.add_argument("--json", action="store_true")
+
+    p_session_rescue = session_sub.add_parser("rescue", add_help=False)
+    p_session_rescue.add_argument("--json", action="store_true")
+
+    # `session fork <ms-id>` and `session fork list` share a subparser; the
+    # handler dispatches on the positional. Mirrors the bash branch in
+    # bin/beacon @ line 2770.
+    p_session_fork = session_sub.add_parser("fork", add_help=False)
+    p_session_fork.add_argument("ms_id_or_list", nargs="?", default="",
+                                 help="Target ms-id, or literal 'list'")
+    p_session_fork.add_argument("--json", action="store_true")
+
+    p_session_log = session_sub.add_parser("log", add_help=False)
+    p_session_log_sub = p_session_log.add_subparsers(
+        dest="session_log_cmd", metavar="<list|show>"
+    )
+    p_session_log_list = p_session_log_sub.add_parser(
+        "list", aliases=["ls"], add_help=False
+    )
+    p_session_log_list.add_argument("--limit", default="0")
+    p_session_log_list.add_argument("--json", action="store_true")
+    p_session_log_show = p_session_log_sub.add_parser(
+        "show", aliases=["get"], add_help=False
+    )
+    p_session_log_show.add_argument("session_id", nargs="?", default="")
+    p_session_log_show.add_argument("--json", action="store_true")
 
     # ---- profile (ms-64 e-1461) ----
     # `beacon profile list` enumerates ~/.beacon/profiles/* with active marker.
@@ -990,6 +1051,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_bus_send.add_argument("--delivery", default="")
     p_bus_send.add_argument("--in-reply-to", dest="in_reply_to", default="")
     p_bus_send.add_argument("--project", dest="bus_project_id", default="")
+    # ms-73 / e-1763: DM-routing + envelope-issue flags. `--to <recipient>`
+    # is the cross-user DM target (bash: BEACON_BUS_RECIPIENT_SESSION).
+    # `--action <name>` is the Tier-1 envelope authorized action; bash
+    # accepts repeated flags and comma-joins them server-side (e-1290).
+    # `--no-envelope` opts out of the envelope issuance path (debug /
+    # legacy). Without these flags Windows pipx users could not send
+    # authorized cross-user DMs at all (W1 in ms-73 SPEC).
+    p_bus_send.add_argument("--to", dest="bus_to", default="")
+    p_bus_send.add_argument("--action", dest="bus_action",
+                             action="append", default=[])
+    p_bus_send.add_argument("--no-envelope", dest="no_envelope",
+                             action="store_true")
     p_bus_send.add_argument("--json", action="store_true")
 
     p_bus_listen = bus_sub.add_parser("listen", add_help=False)
@@ -1012,6 +1085,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_bus_ack.add_argument("--recipient", default="")
     p_bus_ack.add_argument("--last-seen-at", dest="last_seen_at", default="")
     p_bus_ack.add_argument("--project", dest="bus_project_id", default="")
+    # ms-73 / e-1763: explicit event-id ack (e-1423). Used by
+    # /beacon-operation-execute to structurally clear the triggering
+    # event from the next inbox-hook inject (forcing function).
+    p_bus_ack.add_argument("--event", dest="bus_ack_event_id", default="")
     p_bus_ack.add_argument("--json", action="store_true")
 
     # ms-54 / e-1348: per-event receipt status (sent / delivered / opened).
@@ -1987,14 +2064,18 @@ def _handle_entry(root: Path, args: argparse.Namespace) -> int:
 
 
 def _handle_operation(root: Path, args: argparse.Namespace) -> int:
-    """Operation dispatch — only `purge` is implemented natively (e-893).
+    """Operation dispatch — `purge` (e-893) + `envelope verify` (ms-73 e-1764).
 
     Full operation management (open/close/list/show/run/incident) is still
-    bash-only; we expose just the duplicate-ID recovery path here because
-    that is what must work when the project won't load and bash is absent.
+    bash-only; we expose the duplicate-ID recovery path (purge) and the
+    AI self-check primitive (envelope verify, ms-60 e-1340) which the
+    autonomous /beacon-operation-execute Skill calls before each action.
+    Without envelope verify on Windows pipx, autonomous operations could
+    not perform the pre-flight authorization check (W1 in ms-73 SPEC).
     """
     if args.show_help or args.op_cmd is None:
         print("Usage: beacon operation purge <op-id> --reason <text> [--index <n>]")
+        print("       beacon operation envelope verify <op-id> <action> [--json]")
         print("  (Full operation management is available via the bash CLI.)")
         return 0 if args.show_help else 2
     if args.op_cmd == "purge":
@@ -2003,6 +2084,32 @@ def _handle_operation(root: Path, args: argparse.Namespace) -> int:
             reason=args.reason, index=args.index, json_flag=args.json,
             usage="beacon operation purge <op-id> --reason <text> [--index <n>] [--json]",
         )
+    if args.op_cmd == "envelope":
+        env_sub = getattr(args, "op_envelope_cmd", None)
+        if env_sub is None:
+            print("Usage: beacon operation envelope verify <op-id> <action> [--json]")
+            return 2
+        if env_sub == "verify":
+            op_id = (getattr(args, "op_id", "") or "").strip()
+            action = (getattr(args, "action", "") or "").strip()
+            if not op_id or not action:
+                _eprint(
+                    "Usage: beacon operation envelope verify <op-id> <action> [--json]"
+                )
+                return 2
+            # commands.py:cmd_operation_envelope_verify reads:
+            #   BEACON_OPERATION_ID, BEACON_ACTION, BEACON_JSON
+            # and routes to server/approved_actions for the actual match.
+            # cloud / local mode branching lives there (returns rc=2 with
+            # a clear error if local mode); we don't pre-check it here so
+            # the error message stays identical across OS.
+            return _run_commands_py(root, "operation_envelope_verify", {
+                "BEACON_OPERATION_ID": op_id,
+                "BEACON_ACTION": action,
+                "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+            })
+        _eprint(f"Unknown operation envelope subcommand: {env_sub}")
+        return 2
     return 1
 
 
@@ -2566,16 +2673,28 @@ def _handle_skill(root: Path, args: argparse.Namespace) -> int:
 
 
 def _handle_session(root: Path, args: argparse.Namespace) -> int:
-    """`beacon session id` / `focus` / `attention` (ms-44 e-1171, ms-54 e-1369).
+    """`beacon session <id|focus|attention|end|rescue|fork|log>`.
 
-    Bash path: `python3 COMMANDS_PY session_id` / `session_focus` /
-    `session_attention` with env vars carrying flag values. Mirror that
-    exactly so Windows pipx users get the same behavior.
+    Mirrors the bash dispatcher (bin/beacon) so Windows pipx users get the
+    same behavior. Initial 3 verbs (id/focus/attention) landed in ms-44
+    e-1171 + ms-54 e-1369. The remaining 4 (end/rescue/fork/log) were
+    bash-only until ms-73 e-1762 added Win parity here.
+
+    Each branch translates argv → BEACON_* env vars exactly like
+    bin/beacon, then delegates to the matching commands.py entry. lib/
+    modules being pure-Python is what makes this a thin wrapper.
     """
     if args.show_help or args.session_cmd is None:
         print("Usage: beacon session id")
         print("       beacon session focus \"<text>\" | --clear | --show [--json]")
         print("       beacon session attention --set true|false [--json]")
+        print("       beacon session end [--summary <text>] [--session-id <id>] "
+              "[--bus-origin] [--json]")
+        print("       beacon session rescue [--json]")
+        print("       beacon session fork <ms-id> [--json]")
+        print("       beacon session fork list [--json]")
+        print("       beacon session log list [--limit N] [--json]")
+        print("       beacon session log show <session-id> [--json]")
         return 0 if args.show_help else 2
     if args.session_cmd == "id":
         return _run_commands_py(root, "session_id", {})
@@ -2593,6 +2712,60 @@ def _handle_session(root: Path, args: argparse.Namespace) -> int:
             "BEACON_JSON": "1" if args.json else "",
         }
         return _run_commands_py(root, "session_attention", env)
+    # ----- ms-73 e-1762 additions -----
+    if args.session_cmd == "end":
+        env = {
+            "BEACON_SUMMARY": getattr(args, "summary", "") or "",
+            "BEACON_SESSION_ID": getattr(args, "session_id", "") or "",
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+            "BEACON_BUS_ORIGIN": "1" if getattr(args, "bus_origin", False) else "",
+        }
+        return _run_commands_py(root, "session_end", env)
+    if args.session_cmd == "rescue":
+        env = {
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        }
+        return _run_commands_py(root, "session_rescue", env)
+    if args.session_cmd == "fork":
+        # `session fork list [--json]` enumerates active forks; otherwise
+        # `session fork <ms-id> [--json]` spawns one. The bash side uses
+        # positional discrimination on `list`, mirrored here so Skills can
+        # call either path identically.
+        positional = (getattr(args, "ms_id_or_list", "") or "").strip()
+        if positional == "list":
+            env = {
+                "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+            }
+            return _run_commands_py(root, "session_fork_list", env)
+        if not positional:
+            _eprint("Usage: beacon session fork <ms-id> [--json]")
+            _eprint("       beacon session fork list [--json]")
+            return 2
+        env = {
+            "BEACON_SESSION_FORK_MS_ID": positional,
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        }
+        return _run_commands_py(root, "session_fork", env)
+    if args.session_cmd == "log":
+        log_sub = getattr(args, "session_log_cmd", None)
+        if log_sub in ("list", "ls"):
+            env = {
+                "BEACON_LIMIT": str(getattr(args, "limit", "0") or "0"),
+                "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+            }
+            return _run_commands_py(root, "session_log_list", env)
+        if log_sub in ("show", "get"):
+            sid = (getattr(args, "session_id", "") or "").strip()
+            if not sid:
+                _eprint("Error: beacon session log show <session-id>")
+                return 1
+            env = {
+                "BEACON_SESSION_ID": sid,
+                "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+            }
+            return _run_commands_py(root, "session_log_show", env)
+        _eprint("Usage: beacon session log [list|show]")
+        return 2
     print(f"Unknown session subcommand: {args.session_cmd}")
     return 2
 
@@ -2915,16 +3088,33 @@ def _handle_sessions(root: Path, args: argparse.Namespace) -> int:
 
 
 def _handle_bus(root: Path, args: argparse.Namespace) -> int:
+    """`beacon bus <send|listen|receive|ack|status|directory|budget>`.
+
+    Bash↔Python role split (ms-73 e-1763):
+      - **bus.mjs** (Node) is the *transport / persistence* layer. It owns
+        the bridge poll loop that stamps session heartbeat, and is the
+        only writer of bus events into the cloud bus collection.
+      - **commands.py** (Python, via this dispatch) is the *operator
+        surface*: enumerate (directory), enqueue an outbound event (send),
+        block-read (listen / receive), advance the cursor (ack), and
+        inspect (status). It is what humans + Skills call from the CLI.
+      - **dispatch.py** (this file) is the *argv → env shim* that lets
+        Windows pipx callers reach the same commands.py entry points
+        without a bash dispatcher in front.
+    The transport layer (bus.mjs) is not duplicated in Python — it runs
+    out-of-process and is OS-independent.
+    """
     if args.show_help or args.bus_cmd is None:
         print("Usage: beacon bus send      --channel <ch> [--payload '<json>'] "
-              "[--sender <id>] [--delivery <mode>] [--in-reply-to <event_id>] "
-              "[--project <id>]")
+              "[--sender <id>] [--to <recipient>] [--delivery <mode>] "
+              "[--in-reply-to <event_id>] [--action <name> ...] "
+              "[--no-envelope] [--project <id>]")
         print("       beacon bus listen    [--recipient <id>] [--channel <ch>] "
               "[--interval <sec>] [--auto-ack] [--once] [--project <id>]")
         print("       beacon bus receive   [--recipient <id>] [--channel <ch>] "
               "[--timeout <sec>] [--auto-ack] [--project <id>]")
         print("       beacon bus ack       [--recipient <id>] "
-              "--last-seen-at <iso8601> [--project <id>]")
+              "--last-seen-at <iso8601> [--event <event_id>] [--project <id>]")
         print("       beacon bus status    <event_id> [--project <id>] [--json]")
         print("       beacon bus directory [--user <email>] [--machine <name>] "
               "[--agent <name>] [--live] [--healthy] [--since-min <N>] "
@@ -2932,6 +3122,10 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
         print("       beacon bus budget    grant --turns <N>  |  show  |  clear")
         print("")
         print("delivery: auto-execute | propose-to-ai (default) | notify-user-only")
+        print("--to: cross-user DM recipient session id (Tier-1 envelope path)")
+        print("--action: repeat for each authorized action; comma-joined "
+              "for envelope issuance (e-1290).")
+        print("--no-envelope: opt-out of envelope issuance (legacy / debug).")
         print("--in-reply-to: mark as AI-authored reply. Requires `bus budget "
               "grant N` first.")
         print("--project: override the cwd's project_id (e-1151) for cross-"
@@ -2943,12 +3137,19 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
     project_id = getattr(args, "bus_project_id", "") or ""
 
     if cmd == "send":
+        # ms-73 e-1763: comma-join repeated --action values so commands.py
+        # receives the same shape as bin/beacon's BEACON_BUS_ACTION.
+        actions = getattr(args, "bus_action", []) or []
+        bus_action_csv = ",".join([a for a in actions if a])
         env: Dict[str, str] = {
             "BEACON_BUS_CHANNEL": args.channel or "",
             "BEACON_BUS_PAYLOAD": args.payload or "",
             "BEACON_BUS_SENDER": args.sender or "",
+            "BEACON_BUS_RECIPIENT_SESSION": getattr(args, "bus_to", "") or "",
             "BEACON_BUS_DELIVERY": args.delivery or "",
             "BEACON_BUS_IN_REPLY_TO": args.in_reply_to or "",
+            "BEACON_BUS_ACTION": bus_action_csv,
+            "BEACON_BUS_NO_ENVELOPE": "1" if getattr(args, "no_envelope", False) else "",
             "BEACON_JSON": "1" if args.json else "",
         }
         if project_id:
@@ -2980,9 +3181,11 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
         return _run_commands_py(root, "bus_receive", env)
 
     if cmd == "ack":
+        # ms-73 e-1763: --event <id> for explicit single-event ack (e-1423).
         env = {
             "BEACON_BUS_RECIPIENT": args.recipient or "",
             "BEACON_BUS_LAST_SEEN_AT": args.last_seen_at or "",
+            "BEACON_BUS_ACK_EVENT_ID": getattr(args, "bus_ack_event_id", "") or "",
             "BEACON_JSON": "1" if args.json else "",
         }
         if project_id:

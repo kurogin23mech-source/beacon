@@ -187,15 +187,10 @@ ALLOW_BASH_ONLY_DISPATCH: set[str] = {
     "reset",       # destructive admin op, bash-only
     "run",         # operation run record (member-aware, not in Python yet)
     "incident",    # incident open/close (operation-coupled, not in Python yet)
-    # ms-55 coordination signals (= 走る止まる両輪) — bash-only for now,
-    # Windows mirror is a follow-up task (= dispatch.py + argparse for these
-    # 6 verbs). Until then, Win pipx users see `argparse invalid choice`.
-    "stop",        # `beacon stop scoped|global|status` (e-1646)
-    "resume",      # `beacon resume scoped|global` (paired with stop)
-    "rollback",    # `beacon rollback` (e-1647)
-    "claim",       # `beacon claim request|post|handoff|...` (e-1648)
-    "stuck",       # `beacon stuck check` (e-1649)
-    "morning",     # `beacon morning` briefing CLI (e-1650)
+    # ms-73 e-1762/e-1763/e-1764 cleared the ms-55 coordination-signal
+    # exempts (stop / resume / rollback / claim / stuck / morning) once
+    # commit 3b5b64a (e-1735) landed their Python parity. Their entries
+    # have been removed here as part of the ms-73 drift-gate sweep.
     # `help` is handled in dispatch.py BEFORE _HANDLERS is consulted
     # (early return in `dispatch()`), so it intentionally doesn't appear
     # as a key in the dict — but it IS handled. The `-h`/`--help` flag
