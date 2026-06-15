@@ -57,6 +57,18 @@ WEB_ONLY_ACTIONS = {
     "change-member-role",
     "logout",
 }
+# ms-72 e-1774 — actions wired via element-local `addEventListener` instead
+# of the top-level `handleAction` switch (e.g. `<select>` change events,
+# `<span>` click handlers attached in `_settingsLoadMemberList`). The drift
+# detector previously flagged these as orphans because no `case '...'` exists,
+# but the action is genuinely handled — just through a different routing
+# mechanism. Listing here keeps the check meaningful for true orphans without
+# false-positives on the legitimate event-listener pattern.
+EVENT_LISTENER_ROUTED_ACTIONS = {
+    "settings-change-role",
+    "settings-remove-member",
+    "settings-set-filter-trek",
+}
 # Tabs are expected to be 1:1 once e-743 (render() SHARED) completes.
 # Until then, allow-list Web-only tabs that Tauri hasn't caught up to yet.
 WEB_ONLY_TABS: set[str] = set()  # empty: drift treated as error after e-743
@@ -138,8 +150,8 @@ def main() -> int:
         if tauri_handle_match else set()
     ) | common_actions
 
-    web_unhandled = web_actions - web_handled
-    tauri_unhandled = tauri_actions - tauri_handled
+    web_unhandled = web_actions - web_handled - EVENT_LISTENER_ROUTED_ACTIONS
+    tauri_unhandled = tauri_actions - tauri_handled - EVENT_LISTENER_ROUTED_ACTIONS
     if web_unhandled:
         issues.append(
             f"  [actions/web] HTML emits actions that no handler covers: {sorted(web_unhandled)}\n"
@@ -157,10 +169,12 @@ def main() -> int:
     cross_drift_web_only = (
         web_actions - tauri_handled - common_actions
         - WEB_ONLY_ACTIONS - TAURI_ONLY_ACTIONS
+        - EVENT_LISTENER_ROUTED_ACTIONS
     )
     cross_drift_tauri_only = (
         tauri_actions - web_handled - common_actions
         - WEB_ONLY_ACTIONS - TAURI_ONLY_ACTIONS
+        - EVENT_LISTENER_ROUTED_ACTIONS
     )
     if cross_drift_web_only:
         issues.append(

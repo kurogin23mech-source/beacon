@@ -3289,8 +3289,7 @@ function renderShell(app) {
     <div id="account-menu" class="account-menu ${state.accountMenuOpen ? 'open' : ''}">
       <div class="account-menu-head">ACCOUNT</div>
       <div class="account-menu-email">${esc((state.auth && state.auth.email) || 'unknown')}</div>
-      <button class="account-menu-item" data-action="goto-admin">Admin</button>
-      <button class="account-menu-item danger" data-action="logout">Sign out</button>
+      ${PLATFORM.accountMenuItemsHTML()}
     </div>
 
     ${(p.objective || retro) ? `
@@ -3335,6 +3334,14 @@ const PLATFORM = {
     ? `<button class="sort-toggle" data-action="archive-project" style="font-size:0.65rem;color:var(--text-dim);">Archive</button>`
     : '',
   footerStaggerClass: 'stagger-4',
+  // ms-72 e-1774 — Account-menu items. Web shows Admin + Sign out (cloud
+  // session, browser auth). Tauri shows a short hint pointing to the CLI
+  // because cloud_logout is not yet wired in the Rust layer (= 意図的差分,
+  // documented in CORE doc K8AhPgjpDG3mEa4eVm37 §Tauri-only differences).
+  accountMenuItemsHTML: () => `
+    <button class="account-menu-item" data-action="goto-admin">Admin</button>
+    <button class="account-menu-item danger" data-action="logout">Sign out</button>
+  `,
 };
 
 // DataSource (ms-46 e-728): Web implementation (fetch via api() helper).
@@ -3414,6 +3421,38 @@ const dataSource = {
     const query = qs.toString();
     return await api(`/api/projects/${state.projectId}/search${query ? '?' + query : ''}`);
   },
+  // ms-72 e-1774 — Member admin (Settings > Projects & Members).
+  // Web routes through cloud REST; Tauri's mirror in layer.js returns a
+  // "cloud-only / use Web UI" hint until Rust bindings land (= 意図的差分).
+  // Throws on HTTP error so callers can surface the message.
+  loadProjectMembers: async (pid) => api(`/api/projects/${pid}/members`),
+  inviteMember: async (pid, email, role) => api(
+    `/api/projects/${pid}/members`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, role }),
+    },
+  ),
+  changeMemberRole: async (pid, email, role) => api(
+    `/api/projects/${pid}/members/${encodeURIComponent(email)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role }),
+    },
+  ),
+  removeMember: async (pid, email) => api(
+    `/api/projects/${pid}/members/${encodeURIComponent(email)}`,
+    { method: 'DELETE' },
+  ),
+  // ms-72 e-1774 — Project archive / unarchive. ``action`` ∈ {'archive','unarchive'}.
+  // Web hits the REST endpoint; Tauri's mirror in layer.js calls the cloud-mode
+  // Rust binding (`cloud_archive_project` / `cloud_unarchive_project`).
+  setProjectArchived: async (pid, action) => api(
+    `/api/projects/${pid}/${action}`,
+    { method: 'POST' },
+  ),
 };
 
 function render() {
@@ -3950,7 +3989,7 @@ async function _settingsLoadMemberList() {
     return;
   }
   try {
-    const data = await api(`/api/projects/${pid}/members`);
+    const data = await dataSource.loadProjectMembers(pid);
     const myEmail = (state.auth && state.auth.email) || '';
     // Confirm owner-grant via both myRole resolution AND server-reported
     // owner email — defense in depth.
@@ -4008,10 +4047,7 @@ async function _settingsInviteMember() {
   const pid = _settingsViewedProjectId();
   if (!email) { if (msg) msg.textContent = 'email is required'; return; }
   try {
-    await api(`/api/projects/${pid}/members`, {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({email, role}),
-    });
+    await dataSource.inviteMember(pid, email, role);
     if (msg) msg.textContent = `Invited ${email}`;
     if (emailEl) emailEl.value = '';
     _settingsLoadMemberList();
@@ -4026,10 +4062,7 @@ async function _settingsChangeRole(e) {
   const newRole = sel.value;
   const pid = _settingsViewedProjectId();
   try {
-    await api(`/api/projects/${pid}/members/${encodeURIComponent(email)}`, {
-      method: 'PATCH', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({role: newRole}),
-    });
+    await dataSource.changeMemberRole(pid, email, newRole);
   } catch (err) { window.alert(err.message || 'Error'); }
 }
 
@@ -4038,8 +4071,7 @@ async function _settingsRemoveMember(e) {
   if (!window.confirm(`Remove ${email}?`)) return;
   const pid = _settingsViewedProjectId();
   try {
-    await api(`/api/projects/${pid}/members/${encodeURIComponent(email)}`,
-              {method: 'DELETE'});
+    await dataSource.removeMember(pid, email);
     _settingsLoadMemberList();
   } catch (err) { window.alert(err.message || 'Error'); }
 }
@@ -4057,7 +4089,7 @@ async function _settingsArchiveProject() {
   const action = targetArchived ? 'unarchive' : 'archive';
   if (!window.confirm(`${action === 'archive' ? 'Archive' : 'Unarchive'} project "${pid}"?`)) return;
   try {
-    await api(`/api/projects/${pid}/${action}`, {method: 'POST'});
+    await dataSource.setProjectArchived(pid, action);
     if (isViewingActive) {
       // Active project changed archived state — refresh project list, reload
       // current project, close settings so the user sees the result.
