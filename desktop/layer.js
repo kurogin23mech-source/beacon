@@ -173,6 +173,41 @@ const dataSource = {
     if (m) title = m[1];
     state.documentContent = { doc_id: docId, title, scope, content: body };
   },
+  // ms-72 e-1774 — Member admin (Settings > Projects & Members).
+  // Tauri Rust bindings for member CRUD are not implemented yet; this
+  // mirror keeps the SHARED region pure (= ms-46 e-728) and surfaces a
+  // single clear message to the user instead of silent breakage. Once the
+  // Rust commands land (= cloud_list_members / cloud_invite_member /
+  // cloud_change_member_role / cloud_remove_member), replace each branch
+  // with the corresponding invoke() call.
+  loadProjectMembers: async (_pid) => {
+    throw new Error('Member management is Web-only in this build. Open the Web UI to invite or change roles.');
+  },
+  inviteMember: async (_pid, _email, _role) => {
+    throw new Error('Member management is Web-only in this build. Open the Web UI to invite or change roles.');
+  },
+  changeMemberRole: async (_pid, _email, _role) => {
+    throw new Error('Member management is Web-only in this build. Open the Web UI to invite or change roles.');
+  },
+  removeMember: async (_pid, _email) => {
+    throw new Error('Member management is Web-only in this build. Open the Web UI to invite or change roles.');
+  },
+  // ms-72 e-1774 — Project archive / unarchive. Maps to existing Rust
+  // commands (`cloud_archive_project` / `cloud_unarchive_project`) when
+  // running cloud mode. Local Tauri mode is project-archive-free (= local
+  // projects are managed via filesystem moves, not a flag).
+  setProjectArchived: async (_pid, action) => {
+    if (!cloudMode) {
+      throw new Error('Local projects cannot be archived from the UI. Move the project folder instead.');
+    }
+    if (action === 'archive') {
+      await invoke('cloud_archive_project');
+    } else if (action === 'unarchive') {
+      await invoke('cloud_unarchive_project');
+    } else {
+      throw new Error(`Unknown archive action: ${action}`);
+    }
+  },
 };
 
 function startPolling() { if (!pollTimer) pollTimer = setInterval(loadProject, 2000); }
@@ -479,6 +514,17 @@ const PLATFORM = {
     ? `<button class="sort-toggle" data-action="archive-cloud-project" style="font-size:0.65rem;color:var(--text-dim);">Archive</button>`
     : '',
   footerStaggerClass: 'stagger-3',
+  // ms-72 e-1774 — Account-menu items for Tauri. Web layer has Admin + Sign
+  // out; Tauri has neither because (a) Admin is browser-only (`window.location`
+  // routes elsewhere in the Web build) and (b) sign-out goes through the CLI
+  // (`beacon auth logout`) in the Tauri build until the Rust binding lands.
+  // This intentional difference is captured in CORE doc K8AhPgjpDG3mEa4eVm37
+  // §Tauri-only differences.
+  accountMenuItemsHTML: () => `
+    <div class="account-menu-item" style="color:var(--text-dim);cursor:default;font-size:0.7rem;">
+      Use <code style="color:var(--accent);">beacon auth logout</code> from the terminal to sign out.
+    </div>
+  `,
 };
 
 function render() {
