@@ -55,7 +55,8 @@ ENV_SESSION_ID = "CLAUDE_CODE_SESSION_ID"
 
 _SESSION_JSON_RELATIVE = Path(".beacon") / "session.json"
 _CLOUD_JSON_RELATIVE = Path(".beacon") / "cloud.json"
-_CONFIG_JSON_RELATIVE = Path(".beacon") / "config.json"
+# _CONFIG_JSON_RELATIVE removed in e-1861 (ms-61): config.json `mode` field
+# was the silent-drift attack surface — cloud.json existence is now sole truth.
 _BRIDGES_DIR_RELATIVE = Path(".beacon") / "bridges"
 
 ENV_FORCE_MINT = "BEACON_FORCE_MINT"
@@ -143,17 +144,17 @@ def _mint_session_id(actor: dict) -> str:
 
 
 def _is_cloud_mode() -> bool:
-    """Mirror commands._is_cloud_mode without depending on commands.py."""
+    """Mirror commands._is_cloud_mode without depending on commands.py.
+
+    e-1861 (ms-61): cloud.json existence is the single source of truth.
+    The legacy ``config.json["mode"] == "cloud"`` dual-source check was
+    removed to close the silent-drift window where a sub-agent rewriting
+    ``config.json`` to ``{"mode": "local"}`` could silently flip the CLI
+    off cloud and produce apparent user data loss.
+    """
     if os.environ.get("BEACON_CLOUD") == "1":
         return True
-    config_path = Path.cwd() / _CONFIG_JSON_RELATIVE
-    if not config_path.exists():
-        return False
-    try:
-        with config_path.open("r", encoding="utf-8") as f:
-            return json.load(f).get("mode") == "cloud"
-    except (json.JSONDecodeError, OSError):
-        return False
+    return (Path.cwd() / _CLOUD_JSON_RELATIVE).exists()
 
 
 def _should_cloud_sync(last_sync_iso: str) -> bool:

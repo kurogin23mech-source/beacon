@@ -683,10 +683,10 @@ def cmd_cloud_join():
         json.dump({"project_id": project_id, "api_url": api_url}, f, indent=2, ensure_ascii=False)
         f.write("\n")
 
-    mode_config_path = os.path.join(beacon_dir, "config.json")
-    with open(mode_config_path, "w", encoding="utf-8") as f:
-        json.dump({"mode": "cloud"}, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    # e-1861 (ms-61): No longer write `{"mode": "cloud"}` to config.json —
+    # cloud.json existence is the sole source of truth. The previous dual
+    # write created a silent-drift attack surface (= sub-agent overwriting
+    # config.json could flip cloud → local without touching cloud.json).
 
     # Write project.json directly (LocalStore.save_project requires the file to exist)
     pf = get_project_file()
@@ -6102,16 +6102,28 @@ def _doc_slug(title):
 
 
 def _is_cloud_mode():
-    """Check if we're in cloud mode (has cloud.json + config mode=cloud)."""
-    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
-    config_path = os.path.join(beacon_dir, "config.json")
+    """Check if we're in cloud mode (single source of truth: cloud.json existence).
+
+    e-1861 (ms-61): The legacy ``config.json["mode"] == "cloud"`` dual-source
+    check was removed because it created a silent drift window: a sub-agent
+    could overwrite ``.beacon/config.json`` to ``{"mode": "local"}`` and the
+    CLI would suddenly read the stale local ``project.json`` instead of cloud,
+    causing apparent user data loss (2026-06-15 incident).
+
+    Beacon is always invoked from Claude Code, which requires internet, so
+    "local mode" has no production use case. ``.beacon/cloud.json`` existence
+    is now the single, structurally protected source of truth. ``BEACON_CLOUD=1``
+    still forces cloud for test harnesses that mock ``cloud.json`` indirectly.
+
+    Any ``mode`` field still sitting in legacy ``config.json`` is ignored
+    (graceful — we never error, we just stop reading it). ``beacon doctor``
+    surfaces the legacy field as a non-fatal migration warning.
+    """
     if os.environ.get("BEACON_CLOUD") == "1":
         return True
-    if os.path.exists(config_path):
-        with open(config_path, "r", encoding="utf-8") as f:
-            config = json.load(f)
-        return config.get("mode") == "cloud"
-    return False
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    cloud_path = os.path.join(beacon_dir, "cloud.json")
+    return os.path.exists(cloud_path)
 
 
 def _resolve_content_input(content: str) -> str:
@@ -7017,12 +7029,9 @@ def cmd_cloud_push():
                 except RuntimeError as e:
                     print(f"  retro error [{week}]: {e}")
 
-    # Auto-switch to cloud mode
-    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
-    config_path = os.path.join(beacon_dir, "config.json")
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump({"mode": "cloud"}, f, indent=2)
-        f.write("\n")
+    # e-1861 (ms-61): cloud.json existence already marks us as cloud-mode
+    # (written above during the push setup), so the legacy config.json
+    # ``{"mode": "cloud"}`` write was retired. Single source of truth = cloud.json.
     print("Switched to cloud mode.")
 
 
@@ -10229,32 +10238,40 @@ def cmd_doctor():
     # ------------------------------------------------------------------ #
     # 5. cloud.json present and valid (only when in a beacon project dir)
     # ------------------------------------------------------------------ #
+    # e-1861 (ms-61): cloud.json existence is the sole source of truth for
+    # cloud mode. config.json's ``mode`` field was retired because it could
+    # be silently overwritten by a sub-agent to flip cloud → local without
+    # touching cloud.json (2026-06-15 incident). doctor now:
+    #   (a) validates cloud.json shape directly when present, and
+    #   (b) surfaces any legacy ``mode`` field still in config.json as a
+    #       gentle migration warning (non-fatal, ignored by the runtime).
     cloud_json_path = os.path.join(".beacon", "cloud.json")
     config_json_path = os.path.join(".beacon", "config.json")
+    if os.path.exists(cloud_json_path):
+        try:
+            with open(cloud_json_path, "r", encoding="utf-8") as _f:
+                _cloud = json.load(_f)
+            if not _cloud.get("api_url"):
+                warnings.append(
+                    "WARN [cloud.json] api_url is not set in .beacon/cloud.json.\n"
+                    "       Run: beacon cloud push"
+                )
+        except Exception:
+            warnings.append(
+                "WARN [cloud.json] .beacon/cloud.json is unreadable.\n"
+                "       Run: beacon cloud push"
+            )
     if os.path.exists(config_json_path):
         try:
             with open(config_json_path, "r", encoding="utf-8") as _f:
                 _config = json.load(_f)
-            if _config.get("mode") == "cloud":
-                if not os.path.exists(cloud_json_path):
-                    warnings.append(
-                        "WARN [cloud.json] Project is in cloud mode but .beacon/cloud.json is missing.\n"
-                        "       Run: beacon cloud push"
-                    )
-                else:
-                    try:
-                        with open(cloud_json_path, "r", encoding="utf-8") as _f:
-                            _cloud = json.load(_f)
-                        if not _cloud.get("api_url"):
-                            warnings.append(
-                                "WARN [cloud.json] api_url is not set in .beacon/cloud.json.\n"
-                                "       Run: beacon cloud push"
-                            )
-                    except Exception:
-                        warnings.append(
-                            "WARN [cloud.json] .beacon/cloud.json is unreadable.\n"
-                            "       Run: beacon cloud push"
-                        )
+            if isinstance(_config, dict) and "mode" in _config:
+                warnings.append(
+                    "WARN [legacy-mode-field] .beacon/config.json still contains a `mode` field.\n"
+                    "       This field is ignored as of e-1861 (ms-61) — cloud.json existence\n"
+                    "       is now the sole source of truth. The field is harmless but can be\n"
+                    "       removed manually for cleanliness."
+                )
         except Exception:
             pass  # config.json unreadable — not a fatal error
 

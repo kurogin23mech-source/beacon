@@ -1,6 +1,6 @@
 ---
 name: beacon-cloud
-description: Cloud sync (= ローカル Beacon データの cloud 同期) を AI が対話で操作する Skill。push / pull / off / open の 4 subaction を 1 Skill に統合。cloud push は別マシン作業との衝突 (= overwrite) を避けるため強警告 + 二段確認で構造的にガードする。
+description: Cloud sync (= ローカル Beacon データの cloud 同期) を AI が対話で操作する Skill。push / pull / open の 3 通常操作 + off (= sandbox / 検証専用、e-1861 で default picker から外し、明示指定でのみ届く) の 4 subaction を 1 Skill に統合。cloud push は別マシン作業との衝突 (= overwrite) を避けるため強警告 + 二段確認で構造的にガードする。
 version: 0.1.0
 triggers:
   - /beacon-cloud
@@ -47,9 +47,9 @@ Beacon に書き込む全ての文章 (task / マイルストーン / Operation 
 
 ## Cloud Mode の構図 (= 1 段落導入)
 
-Beacon は default で local mode (= `.beacon/` ローカルのみ) で動く。`beacon auth login` + `beacon cloud setup` で cloud mode に切り替えると、`.beacon/cloud.json` に cloud project_id が書かれ、`beacon log` / `beacon task done` 等が自動で cloud Firestore に上り、複数マシン / 複数メンバー間で同期される。
+Beacon は Claude Code から呼ばれる前提で動く。Claude Code は internet 接続必須なので、Beacon は **常時 cloud mode で動くのが本来の姿** (e-1861 / ms-61 で「Beacon = cloud-only」 を構造的に確定)。`.beacon/cloud.json` の存在が cloud mode かどうかの単一の判定源 (= silent drift 防止のため二重持ちを撤廃)。
 
-本 Skill が扱うのは **切り替え後の運用** (= push / pull / off / open) であり、初回 setup は `/beacon-init` または直 CLI に委ねる。
+本 Skill が扱うのは **cloud 運用の通常操作** (= push / pull / open) と、**sandbox / 検証用途の `off`** の 4 つ。`off` は default の picker には出さない (= 誤発火防止)。初回 setup は `/beacon-init` または直 CLI に委ねる。
 
 ---
 
@@ -72,6 +72,7 @@ beacon cloud status --json
 subaction 別の前提:
 - `push` / `pull` / `off`: cloud mode が enabled (= `.beacon/cloud.json` 存在) であること
 - `open`: 上記に加え、ブラウザで開ける環境 (= GUI 環境推奨、SSH 環境は URL 表示のみ)
+- `off` は **sandbox / 検証用途のみ** (e-1861 / ms-61) — Beacon は Claude Code から呼ばれ常時 cloud 動作する前提のため、production では使わない。明示的に `/beacon-cloud off` と subaction 名指定された時だけ届く (= default picker から外している)。
 
 ---
 
@@ -83,11 +84,12 @@ subaction 別の前提:
 どの操作を実行しますか?
   1. push    ローカル変更を cloud に送信 (= 注意: 他マシンの作業を上書きする可能性)
   2. pull    cloud の最新状態を取り込む (= ローカルの未 push 変更があれば確認)
-  3. off     cloud mode を解除して local mode に戻す
-  4. open    cloud project を web UI でブラウザに開く
+  3. open    cloud project を web UI でブラウザに開く
 
 選択 (番号 or subaction 名, cancel で中止):
 ```
+
+`off` は default picker に出さない (e-1861 / ms-61): Beacon は Claude Code から呼ばれる前提で cloud-only 運用が標準。`off` を出すと「local mode に戻す」誤選択を誘発し、2026-06-15 incident (= sub-agent silent drift) の再現経路になる。明示的に `/beacon-cloud off` と subaction 名指定された時のみ Step 3 に進む。
 
 判定された subaction に対応する Step (1〜4) へ分岐する。
 
@@ -257,7 +259,9 @@ beacon cloud pull --json
 
 ---
 
-## Step 3: off (= cloud mode 解除、local mode に戻す)
+## Step 3: off (= cloud sync 解除、sandbox / 検証専用)
+
+> **e-1861 (ms-61) 注意**: `off` は **sandbox / 検証用途のみ**。Beacon は Claude Code から呼ばれる前提で常時 cloud 動作するのが正しい姿。production の cloud project から sync を外す正当な理由はほぼ無い (= 別マシンで作業継続できなくなる、メンバーへの変更が届かなくなる、bus DM が止まる)。誤起動を防ぐため CLI 側でも `--confirm <project_id>` 完全一致を必須化している (= 二段防御)。
 
 ### 3-a: 影響範囲の表示
 

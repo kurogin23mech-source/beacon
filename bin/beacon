@@ -158,7 +158,9 @@ Cloud:
   beacon cloud join <id>        Join an existing cloud project
   beacon cloud open <id>        Open a specific cloud project
   beacon cloud status           Show cloud config status
-  beacon cloud off              Switch back to local mode
+
+  (sandbox / verification only, e-1861/ms-61: `cloud off --confirm <project_id>`
+   disables cloud sync — archives cloud.json to .beacon/.trash/, no data loss.)
 
 Server (maintainer only):
   gcloud run deploy beacon-api-prod --source . --region asia-northeast1 \
@@ -316,7 +318,9 @@ cmd_init() {
     # Cloud setup if selected
     if [ "${storage_choice}" = "2" ]; then
         python3 "$COMMANDS_PY" cloud_push
-        echo '{"mode": "cloud"}' > .beacon/config.json
+        # e-1861 (ms-61): cloud.json existence is sole source of truth.
+        # cmd_cloud_push above already created .beacon/cloud.json — no need
+        # to write the legacy `{"mode": "cloud"}` marker into config.json.
         echo "Cloud mode enabled."
     fi
 }
@@ -1438,17 +1442,16 @@ cmd_cloud_launch() {
         fi
     fi
 
-    # Ensure .beacon dir, cloud.json, and config.json exist
+    # Ensure .beacon dir and cloud.json exist
+    # e-1861 (ms-61): cloud.json existence is the sole source of truth. The
+    # legacy config.json {"mode": "cloud"} marker is no longer written
+    # (closes the silent-drift attack surface — sub-agents can't flip the
+    # CLI off cloud by rewriting config.json anymore).
     mkdir -p .beacon
     cat > .beacon/cloud.json <<EOJSON
 {
   "project_id": "$project_id",
   "api_url": "https://beacon-ai.dev"
-}
-EOJSON
-    cat > .beacon/config.json <<EOJSON
-{
-  "mode": "cloud"
 }
 EOJSON
 
@@ -3662,12 +3665,46 @@ EOF
             status) python3 "$COMMANDS_PY" cloud_status ;;
             list)   python3 "$COMMANDS_PY" cloud_list ;;
             off)
-                if [ -f .beacon/config.json ]; then
-                    echo '{"mode": "local"}' > .beacon/config.json
-                    echo "Switched to local mode."
-                else
-                    echo "No .beacon/config.json found."
+                # e-1861 (ms-61): "cloud off" is sandbox / verification-only now.
+                # Beacon = cloud-only in normal operation (Claude Code requires
+                # internet, so local mode has no production use case). This
+                # subcommand stays available for testing and for users who
+                # explicitly want to detach from cloud sync — but it requires
+                # ``--confirm <project_id>`` to prevent silent / accidental
+                # invocation by sub-agents (the same pattern that triggered the
+                # 2026-06-15 data-loss panic incident).
+                if [ ! -f .beacon/cloud.json ]; then
+                    echo "Not in cloud mode (no .beacon/cloud.json found)."
+                    exit 0
                 fi
+                expected_pid=$(python3 -c "import json; print(json.load(open('.beacon/cloud.json')).get('project_id',''))" 2>/dev/null)
+                if [ -z "$expected_pid" ]; then
+                    echo "Error: .beacon/cloud.json is malformed (no project_id)."
+                    exit 1
+                fi
+                # parse --confirm flag
+                given_pid=""
+                if [ "${3:-}" = "--confirm" ] && [ -n "${4:-}" ]; then
+                    given_pid="${4}"
+                fi
+                if [ -z "$given_pid" ] || [ "$given_pid" != "$expected_pid" ]; then
+                    echo "Refusing to disable cloud sync without two-factor confirmation."
+                    echo ""
+                    echo "  Sandbox / verification only — Beacon assumes cloud mode in production."
+                    echo "  To disable: beacon cloud off --confirm \"$expected_pid\""
+                    echo ""
+                    echo "  This guard exists because a 2026-06-15 incident (e-1776) saw a"
+                    echo "  sub-agent silently flip cloud → local and trigger a data-loss panic."
+                    exit 1
+                fi
+                # Move cloud.json into .beacon/.trash/ with timestamp (never rm).
+                trash_dir=".beacon/.trash"
+                mkdir -p "$trash_dir"
+                ts=$(date +%Y%m%d-%H%M%S)
+                mv .beacon/cloud.json "$trash_dir/cloud.json.disabled-$ts"
+                echo "Cloud sync disabled for this directory."
+                echo "  .beacon/cloud.json → $trash_dir/cloud.json.disabled-$ts"
+                echo "  To re-enable: beacon cloud join $expected_pid  (or beacon cloud setup)"
                 ;;
             open)
                 if [ -z "${3:-}" ]; then
@@ -3679,7 +3716,8 @@ EOF
             "")     cmd_cloud_launch ;;
             *)
                 echo "Error: unknown subcommand '${2}'."
-                echo "Usage: beacon cloud [push|pull|join|open|list|status|off]"
+                echo "Usage: beacon cloud [push|pull|join|open|list|status]"
+                echo "       (sandbox: cloud off --confirm <project_id>)"
                 exit 1
                 ;;
         esac

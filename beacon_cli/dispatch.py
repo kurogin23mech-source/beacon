@@ -1146,7 +1146,11 @@ def build_parser() -> argparse.ArgumentParser:
     cloud_sub = p_cloud.add_subparsers(dest="cloud_cmd", metavar="<subcmd>")
     cloud_sub.add_parser("list", add_help=False)
     cloud_sub.add_parser("status", add_help=False)
-    cloud_sub.add_parser("off", add_help=False)
+    # e-1861 (ms-61): cloud off is sandbox / verification-only and requires
+    # explicit --confirm <project_id> to prevent silent invocation.
+    p_cloud_off = cloud_sub.add_parser("off", add_help=False)
+    p_cloud_off.add_argument("--confirm", default="",
+                             help="cloud project_id (exact match required)")
     p_cloud_join = cloud_sub.add_parser("join", add_help=False)
     p_cloud_join.add_argument("project_id", nargs="?", default="")
     p_cloud_open = cloud_sub.add_parser("open", add_help=False)
@@ -1333,12 +1337,11 @@ def _handle_init(root: Path, args: argparse.Namespace) -> int:
         return rc
 
     if args.storage == "cloud":
+        # e-1861 (ms-61): cloud.json existence is sole source of truth.
+        # cloud_push above already materialised .beacon/cloud.json — no
+        # need to write the legacy `{"mode": "cloud"}` marker into config.json.
         _run_commands_py(root, "cloud_push", {})
-        try:
-            Path(".beacon/config.json").write_text('{"mode": "cloud"}\n')
-            print("Cloud mode enabled.")
-        except OSError as exc:
-            _eprint(f"Warning: could not write .beacon/config.json: {exc}")
+        print("Cloud mode enabled.")
     return 0
 
 
@@ -2478,14 +2481,16 @@ def _handle_cloud(root: Path, args: argparse.Namespace) -> int:
     """
     if args.show_help or args.cloud_cmd is None:
         print(
-            "Usage: beacon cloud [list|status|open <id>|join <id>|off|push|pull]\n"
+            "Usage: beacon cloud [list|status|open <id>|join <id>|push|pull]\n"
             "  list                 List cloud projects\n"
             "  status               Show current cloud mode + project_id\n"
             "  open <project-id>    Bind cwd to a cloud project + open Web UI\n"
             "  join <project-id>    Bind cwd to a cloud project (no UI launch)\n"
-            "  off                  Switch back to local mode (writes config.json)\n"
-            "  push [-f|--force]    Upload local project (local mode → cloud + auto switch)\n"
-            "  pull                 Sync cloud state into the local read-only cache"
+            "  push [-f|--force]    Upload local project to cloud\n"
+            "  pull                 Sync cloud state into the local read-only cache\n"
+            "\n"
+            "Sandbox / verification only (e-1861, ms-61):\n"
+            "  off --confirm <id>   Disable cloud sync (archives cloud.json into .beacon/.trash/)"
         )
         return 0 if args.show_help else 2
 
@@ -2502,19 +2507,50 @@ def _handle_cloud(root: Path, args: argparse.Namespace) -> int:
             root, "cloud_join", {"BEACON_CLOUD_PROJECT_ID": args.project_id}
         )
     if cmd == "off":
-        # Local Python-side write (no commands.py handler exists for `off` —
-        # bash does it inline). Mirror the bash behaviour byte-for-byte.
-        config_path = Path(".beacon/config.json")
-        if not config_path.exists():
-            print("No .beacon/config.json found.")
+        # e-1861 (ms-61): "cloud off" is sandbox / verification-only. Beacon
+        # = cloud-only in normal operation (Claude Code requires internet).
+        # The subcommand requires --confirm <project_id> to prevent silent
+        # invocation by sub-agents (the same pattern that caused the
+        # 2026-06-15 data-loss panic / e-1776). Mirrors bash bin/beacon.
+        cloud_path = Path(".beacon/cloud.json")
+        if not cloud_path.exists():
+            print("Not in cloud mode (no .beacon/cloud.json found).")
             return 0
         try:
-            config_path.write_text('{"mode": "local"}\n', encoding="utf-8")
-            print("Switched to local mode.")
-            return 0
-        except OSError as exc:
-            _eprint(f"Error writing config.json: {exc}")
+            import json as _json
+            expected_pid = _json.loads(
+                cloud_path.read_text(encoding="utf-8")
+            ).get("project_id", "")
+        except (OSError, ValueError):
+            expected_pid = ""
+        if not expected_pid:
+            _eprint("Error: .beacon/cloud.json is malformed (no project_id).")
             return 1
+        given_pid = getattr(args, "confirm", "") or ""
+        if given_pid != expected_pid:
+            print("Refusing to disable cloud sync without two-factor confirmation.")
+            print()
+            print("  Sandbox / verification only — Beacon assumes cloud mode in production.")
+            print(f"  To disable: beacon cloud off --confirm \"{expected_pid}\"")
+            print()
+            print("  This guard exists because a 2026-06-15 incident (e-1776) saw a")
+            print("  sub-agent silently flip cloud → local and trigger a data-loss panic.")
+            return 1
+        # Move cloud.json into .beacon/.trash/ with timestamp (never delete).
+        from datetime import datetime as _dt
+        trash_dir = Path(".beacon/.trash")
+        trash_dir.mkdir(parents=True, exist_ok=True)
+        ts = _dt.now().strftime("%Y%m%d-%H%M%S")
+        dest = trash_dir / f"cloud.json.disabled-{ts}"
+        try:
+            cloud_path.rename(dest)
+        except OSError as exc:
+            _eprint(f"Error archiving cloud.json: {exc}")
+            return 1
+        print("Cloud sync disabled for this directory.")
+        print(f"  .beacon/cloud.json -> {dest}")
+        print(f"  To re-enable: beacon cloud join {expected_pid}  (or beacon cloud setup)")
+        return 0
     if cmd == "open":
         if not args.project_id:
             print("Usage: beacon cloud open <project-id>")
@@ -2522,9 +2558,11 @@ def _handle_cloud(root: Path, args: argparse.Namespace) -> int:
         return _do_cloud_open(root, args.project_id, args.no_browser)
     if cmd == "push":
         # cmd_cloud_push reads BEACON_FORCE from env. It already enforces the
-        # ms-24 cloud-mode block (refuses without --force) and ms-36 auto-
-        # switch (config.json mode -> cloud after initial migration), so the
-        # dispatch handler is intentionally thin.
+        # ms-24 cloud-mode block (refuses without --force). The historical
+        # ms-36 "config.json mode -> cloud after initial migration" auto-
+        # switch was retired in e-1861 (ms-61) — cloud.json existence is
+        # now the sole source of truth, so no mode-write happens here.
+        # Dispatch handler is intentionally thin.
         return _run_commands_py(
             root, "cloud_push",
             {"BEACON_FORCE": "1" if args.force else ""},
@@ -2593,15 +2631,15 @@ def _do_cloud_open(root: Path, project_id: str, no_browser: bool) -> int:
     except Exception:
         pass
 
-    # 3. Write the cloud / config / project skeleton.
+    # 3. Write the cloud / project skeleton.
+    # e-1861 (ms-61): cloud.json existence is the sole source of truth.
+    # The legacy `{"mode": "cloud"}` write into config.json is no longer
+    # needed (closes the silent-drift attack surface).
     Path(".beacon").mkdir(exist_ok=True)
     cloud_path.write_text(
         '{\n  "project_id": "' + project_id + '",\n'
         '  "api_url": "' + api_url + '"\n}\n',
         encoding="utf-8",
-    )
-    Path(".beacon/config.json").write_text(
-        '{"mode": "cloud"}\n', encoding="utf-8"
     )
     project_file = os.environ.get(
         "BEACON_PROJECT_FILE", ".beacon/project.json"
