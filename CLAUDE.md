@@ -88,6 +88,26 @@ When writing task / spec / doc entries (`description` / `motivation` / `acceptan
 3. **ID references with context / ID 参照に文脈**: `e-XXXX` / `ms-XX` / `UC?` の初出には必ず「(何の話か)」を 1 行添える。click-through 前提にしない。
 4. **No truncated sentences / 尻切れトンボ禁止**: 主語・述語・論理関係を省略しない。開発者は文脈で補えるが非開発者は補えない。
 
+#### Applies to AI responses too / AI 応答にも適用 (ms-77 e-1801)
+
+The 4 principles above are not only for written entries — **they also apply to AI's spoken/written replies in chat**. In particular, Beacon-specific concepts must be glossed in Japanese on first mention within a session:
+上記 4 原則は書き込みエントリだけでなく、**AI のチャット応答にも適用する**。特に Beacon 固有概念は、セッション内の初出時に必ず日本語注を添える:
+
+- **リズム系 (rhythm) — 定期的に AI / 人間がプロジェクトを揺り動かす仕組み**:
+  - Retro = 振り返り (毎週金曜にプロジェクトを 1 週間単位で振り返り、次の塊を提案する)
+  - Release = リリース (機能を本番に届ける節目)
+  - PR レビュー = プルリクエストの査読 (変更を取り込む前に内容を確認する手続き)
+- **軌跡系 (trace) — 判断・計画・実行記録を後から辿る仕組み**:
+  - SPEC = 要求書 / 判断軌跡 (なぜこの MS をやるか・どこまでがスコープかを 1 ページにまとめる)
+  - Operation = 運用 (定期トリガーで AI が自動実行する作業 = ヘルスチェック・コスト監視等)
+  - Trek = 缶詰の作業部屋 (= 自律的計画的タスク実行の作業空間)
+
+**Structural concepts (MS / タスク / コミット / PR / ブランチ) need NO gloss** — they are common project-management vocabulary readers already know.
+構造概念 (MS / タスク / コミット / PR / ブランチ) は説明不要 (= 既に親しみのある語彙)。
+
+This rule prevents the "Retro Retro Retro" pathology where AI casually drops Beacon-specific katakana terms without explanation, leaving non-developer users lost. The same wording rules (3-tier loanword policy etc.) apply equally to AI responses and to written task / SPEC / doc entries.
+この原則は「Retro Retro Retro 病理」(= AI が Beacon 固有のカタカナ概念を説明なしで連発し、非開発者ユーザーが置き去りになる現象) を防ぐ。横文字 3 段階等の文言ルールは AI 応答にも task / SPEC / doc 書き込みと同じ強度で適用する。
+
 Full principle and examples: `beacon doc show F3ZkqT0pKS6JpR8dn70n` (CORE doc `entry-writing-principle`).
 原則の全文と実例: `beacon doc show F3ZkqT0pKS6JpR8dn70n` (CORE doc `entry-writing-principle`)。
 <!-- /BEACON_ENTRY_WRITING_PRINCIPLE -->
