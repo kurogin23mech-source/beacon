@@ -379,6 +379,13 @@ def list_documents(project_id: str) -> list[dict]:
         milestone = data.get("milestone") or _extract_frontmatter_field(
             data.get("content", ""), "milestone"
         )
+        # e-1859: operation field, same row-first / frontmatter-fallback
+        # pattern as milestone. Without this, `beacon doc list --op <op-id>`
+        # always returned [] in cloud mode, and `/beacon-operation-review`
+        # Step 2 (= SPEC discovery by --op) could not find op-scoped specs.
+        operation = data.get("operation") or _extract_frontmatter_field(
+            data.get("content", ""), "operation"
+        )
         entry = {
             "doc_id": data.get("doc_id", ""),
             "title": data.get("title", ""),
@@ -387,6 +394,8 @@ def list_documents(project_id: str) -> list[dict]:
         }
         if milestone:
             entry["milestone"] = milestone
+        if operation:
+            entry["operation"] = operation
         result.append(entry)
     result.sort(key=lambda e: e.get("updated_at", ""), reverse=True)
     return result
@@ -421,6 +430,10 @@ def save_document(project_id: str, doc_id: str, title: str, content: str,
     import datetime
     resolved_scope = scope if scope in ("core", "spec", "memo") else _extract_scope(content)
     milestone = _extract_frontmatter_field(content, "milestone")
+    # e-1859: operation field — extract from frontmatter and store as a
+    # column so list_documents can hand it back without re-parsing the
+    # full content blob. Symmetric to milestone above.
+    operation = _extract_frontmatter_field(content, "operation")
     # ms-69 / e-1663: trek_id is optional (= 既存 doc 影響なし migration 不要)
     trek_id = _extract_frontmatter_field(content, "trek_id")
     now_iso = datetime.datetime.now().isoformat()
@@ -439,6 +452,8 @@ def save_document(project_id: str, doc_id: str, title: str, content: str,
     }
     if milestone:
         data["milestone"] = milestone
+    if operation:
+        data["operation"] = operation
     if trek_id:
         data["trek_id"] = trek_id
 
