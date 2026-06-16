@@ -1326,13 +1326,14 @@ cmd_entry_move() {
 
 cmd_retro() {
     ensure_project
-    local since="" until=""
+    local since="" until="" catch_up=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --since) since="${2:-}"; shift 2 ;;
             --until) until="${2:-}"; shift 2 ;;
             --prepare) shift ;;
+            --catch-up) catch_up="1"; shift ;;
             *) shift ;;
         esac
     done
@@ -1374,7 +1375,7 @@ cmd_retro() {
         fi
     fi
 
-    BEACON_SINCE="$since" BEACON_UNTIL="$until" \
+    BEACON_SINCE="$since" BEACON_UNTIL="$until" BEACON_RETRO_CATCH_UP="$catch_up" \
         python3 "$COMMANDS_PY" retro_prepare
 }
 

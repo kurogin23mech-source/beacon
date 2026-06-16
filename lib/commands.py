@@ -5100,8 +5100,31 @@ def cmd_milestone_graph():
 # ---------------------------------------------------------------------------
 
 def cmd_retro_prepare():
+    """Prepare the JSON payload that /beacon-retro Skill renders into a
+    weekly markdown.
+
+    The historical core path (= ``core.collect_retro_entries``) is kept
+    as the "per-MS narrative grouping" layer — it walks each milestone's
+    entry tree recursively in date order, which is exactly what the Skill
+    wants for the "今週の取り組み" section.
+
+    ms-79 / e-1836 additions:
+
+      - ``source_breakdown`` (source 別件数): a top-level facet showing
+        how many of the week's entries came from human dialog vs auto-op
+        (= envelope auto-execute) vs DM. Generated via the unified
+        ``retro_query`` base so the same human/auto-op/dm tagging used
+        by /beacon-retrospect is reused here without duplication.
+      - ``catch_up`` block: when multiple retro slots are unreviewed
+        (= the retro trigger reports ``overdue_slots`` length > 1), this
+        block surfaces the overdue weeks list so the Skill can offer a
+        catch-up batch path (e-1837 / UC5-F2). The flag
+        ``BEACON_RETRO_CATCH_UP=1`` enables the listing; without it the
+        block is omitted so existing Skill output is unchanged.
+    """
     since = os.environ.get("BEACON_SINCE", "")
     until = os.environ.get("BEACON_UNTIL", "")
+    catch_up_mode = os.environ.get("BEACON_RETRO_CATCH_UP", "") == "1"
     data = load_project()
 
     weekly_milestones = []
@@ -5130,14 +5153,91 @@ def cmd_retro_prepare():
                 "description": dep.get("description", ""),
             })
 
-    output = {
+    # ms-79 / e-1836: source breakdown via the unified retro_query base.
+    # Counts how many of the week's history events were human vs auto-op
+    # vs DM. Silent-fail-tolerant so the retro prepare path never breaks
+    # on a malformed entry — we just omit the breakdown in that case.
+    source_breakdown: dict[str, int] = {}
+    try:
+        import retro_query as _rq  # noqa: PLC0415
+        documents = _load_local_documents()
+        rq_result = _rq.retro_query(
+            data,
+            documents,
+            from_date=since,
+            to_date=until,
+            limit=10_000,
+        )
+        source_breakdown = (rq_result.get("facets") or {}).get("source") or {}
+    except Exception:
+        pass
+
+    output: dict = {
         "project": data.get("name", ""),
         "period": {"since": since, "until": until},
         "summary": data.get("summary", ""),
         "milestones": weekly_milestones,
         "deploys": weekly_deploys,
+        "source_breakdown": source_breakdown,
     }
+
+    # ms-79 / e-1837 (UC5-F2): catch-up batch info.
+    # Read the retro trigger payload (= written by _auto_fire_retro_trigger)
+    # to discover whether more than one slot is overdue. The trigger file
+    # is the canonical record so we don't recompute the slot list here.
+    if catch_up_mode:
+        catch_up_block = _retro_catch_up_block()
+        if catch_up_block:
+            output["catch_up"] = catch_up_block
+
     print(json.dumps(output, ensure_ascii=False))
+
+
+def _retro_catch_up_block() -> Optional[dict]:
+    """Return the catch-up payload built from the persistent retro trigger.
+
+    Shape::
+
+        {
+          "overdue_slots": ["2026-W23", "2026-W24", "2026-W25"],
+          "count": 3,
+          "since_first_overdue": "2026-06-01",
+        }
+
+    Returns ``None`` if there is no retro trigger (= nothing to catch up
+    on) or only a single overdue slot (= the regular retro flow already
+    covers it).
+    """
+    project_dir = os.path.dirname(get_project_file())
+    trigger_path = os.path.join(project_dir, "triggers", "retro.json")
+    if not os.path.exists(trigger_path):
+        return None
+    try:
+        with open(trigger_path, "r", encoding="utf-8") as f:
+            trig = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    overdue = trig.get("overdue_slots") or []
+    if not isinstance(overdue, list) or len(overdue) < 2:
+        return None
+    # Compute the Monday of the earliest overdue slot for since-display.
+    import datetime as _dt
+    since_first = ""
+    try:
+        first_slot = overdue[0]  # YYYY-WNN
+        year_str, wk_str = first_slot.split("-W")
+        year = int(year_str); wk = int(wk_str)
+        jan4 = _dt.date(year, 1, 4)
+        week1_mon = jan4 - _dt.timedelta(days=jan4.weekday())
+        first_mon = week1_mon + _dt.timedelta(weeks=wk - 1)
+        since_first = first_mon.strftime("%Y-%m-%d")
+    except (ValueError, IndexError):
+        pass
+    return {
+        "overdue_slots": overdue,
+        "count": len(overdue),
+        "since_first_overdue": since_first,
+    }
 
 
 def cmd_retro_default_since():
