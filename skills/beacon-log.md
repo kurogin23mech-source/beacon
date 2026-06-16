@@ -15,6 +15,12 @@ triggers:
 >
 > (サマリー更新は e-1040 で廃止 — 人間向けナラティブは `project-vision` CORE doc、セッション単位の経緯は session_logs subcollection が継承する)
 
+## 責務分界 (= ms-79 / e-1818)
+
+このSkillは「いま終えた commit」 を構造化する責務に閉じる。タスクキューの意図的な管理 (= 新規 task の add / cancel / 一覧) は `/beacon-task` の責務。「次の塊」 を 1 文で示唆するところまでが /beacon-log の範囲で、それを task として登録するかは user 判断に委ねる。
+
+詳細は CORE doc `5qySQmOHa9sZhyJiOOjR` (= /beacon-log と /beacon-task の責務分界) 参照。Step 4 / Step 4.5 の挙動 (= done 判定 / MS 完了提案) もこの分界に従う。
+
 ## 文章の書き方 (Beacon 全体の哲学)
 
 Beacon に書き込む全ての文章 (task / マイルストーン / Operation / コミット / PR / レビュー / ドキュメント / ノート / セッションログ / リリース / デプロイ) は、**非開発者を含む読み手** が読めるように書く。これは Skill ごとの方針ではなく Beacon プロジェクト全体の哲学。
