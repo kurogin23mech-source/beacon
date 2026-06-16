@@ -1859,6 +1859,18 @@ def cmd_log():
     # retro can filter "AI 自律でやった commit だけ".
     source = _resolve_commit_source()
 
+    # ms-79 / e-1816 (UC3-F2): fork.json の target_ms_id を最優先する。
+    # 親が --ms を明示しているならそれが勝つ (= fork.json は hint であって
+    # 命令ではない、cmd_log_prepare と同じセマンティクスを揃える)。
+    if not ms_id:
+        fork_target = _read_fork_target_ms_id()
+        if fork_target:
+            # fork target_ms_id が project.json にあるか軽くチェック。無ければ
+            # 普通の auto-pick (find_target_milestone) に倒れる。
+            data_check = load_project()
+            if any(m.get("id") == fork_target for m in data_check.get("milestones", [])):
+                ms_id = fork_target
+
     data = load_project()
     result = core.log_commit(
         data, ms_id=ms_id, commit_hash=commit_hash,
@@ -1888,14 +1900,36 @@ def cmd_log_prepare():
 
     data = load_project()
 
-    if ms_id:
+    # ms-79 / e-1816 (UC3-F2): fork.json の target_ms_id を最優先する。
+    # ms-67 で fork した子 worktree は明示意図 (= 親が「この MS をやれ」と
+    # 指示した target_ms_id) を持つ。fork.json があれば、--ms 明示が無い
+    # ときの候補選定の前にそれを優先採用する。これにより「fork 子で
+    # commit したら親 MS に誤記録」 のドリフトを構造的に防ぐ。
+    fork_target_ms_id = ""
+    if not ms_id:
+        fork_target_ms_id = _read_fork_target_ms_id()
+
+    effective_ms_id = ms_id or fork_target_ms_id
+
+    if effective_ms_id:
         for ms in data["milestones"]:
-            if ms["id"] == ms_id:
+            if ms["id"] == effective_ms_id:
                 targets = [ms]
                 break
         else:
-            print(f"Milestone not found: {ms_id}")
-            sys.exit(1)
+            # fork.json が指す ms_id がローカル project.json に無い場合
+            # (= stale fork、活性化前 / 削除済 MS) は普通の active 候補に
+            # fallback。explicit --ms ms_id が無効なときと違って
+            # silent fallback でよい (= fork.json は hint であって命令ではない)。
+            if fork_target_ms_id and not ms_id:
+                targets = [ms for ms in data["milestones"]
+                           if ms["status"] in ("todo", "in_progress", "observing")]
+                if not targets:
+                    print("No active milestone. Run: beacon milestone start <ms-id>")
+                    sys.exit(1)
+            else:
+                print(f"Milestone not found: {effective_ms_id}")
+                sys.exit(1)
     else:
         targets = [ms for ms in data["milestones"] if ms["status"] in ("todo", "in_progress", "observing")]
         if not targets:
@@ -1906,6 +1940,11 @@ def cmd_log_prepare():
         "commit": {"hash": commit_hash, "message": message, "date": date, "summary": summary_text},
         "current_summary": data.get("summary", ""),
     }
+    # e-1816: 透明性のため fork.json 由来であることを payload に明示する。
+    # /beacon-log Skill はこれを見て「fork 由来の active MS を採用しています」
+    # と user に notice を出せる (= 暗黙の選定で誤解されるのを防ぐ)。
+    if fork_target_ms_id and not ms_id:
+        output["fork_target_ms_id"] = fork_target_ms_id
 
     if len(targets) == 1:
         output["milestone"] = core.milestone_prepare_info(targets[0])
@@ -1913,6 +1952,44 @@ def cmd_log_prepare():
         output["candidates"] = [core.milestone_prepare_info(ms) for ms in targets]
 
     print(json.dumps(output, ensure_ascii=False))
+
+
+def _read_fork_target_ms_id() -> str:
+    """Return the ``target_ms_id`` from ``.beacon/fork.json``, or "".
+
+    Fork worktrees are created by /beacon-session-fork (ms-67) and carry
+    a fork.json next to project.json that records the intent (= "this
+    worktree exists to work on ms-X"). cmd_log_prepare consults this
+    before falling back to the active-MS heuristic so commits made from
+    a fork worktree route to the milestone the fork was created for —
+    even if the parent repo has multiple active milestones (which would
+    otherwise force a candidates / picker dialog the human did not
+    intend in this child session).
+
+    Returns "" when:
+      - no fork.json exists (= regular worktree / main checkout)
+      - fork.json is malformed (= treat as no fork hint, don't crash)
+      - target_ms_id field is missing or empty
+
+    Reads from ``$(dirname project.json)/fork.json`` so it stays
+    consistent with how every other beacon helper resolves its
+    ``.beacon/`` directory.
+    """
+    try:
+        project_file = get_project_file()
+        fork_path = os.path.join(os.path.dirname(project_file), "fork.json")
+        if not os.path.exists(fork_path):
+            return ""
+        with open(fork_path, "r", encoding="utf-8") as f:
+            rec = json.load(f)
+        if not isinstance(rec, dict):
+            return ""
+        target = rec.get("target_ms_id")
+        if isinstance(target, str) and target.strip():
+            return target.strip()
+        return ""
+    except (OSError, json.JSONDecodeError, ValueError):
+        return ""
 
 
 def cmd_log_finalize():
