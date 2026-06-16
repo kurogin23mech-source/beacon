@@ -179,12 +179,15 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 |---------|-------------|
 | `beacon auth login` | Sign in with Google / Googleログイン |
 | `beacon auth status` | Show login status / ログイン状態 |
-| `beacon cloud push` | Upload project to cloud / クラウドにアップロード |
-| `beacon cloud pull` | Download project from cloud / クラウドからダウンロード |
-| `beacon cloud join <id>` | Join an existing cloud project / 既存プロジェクトに参加 |
+| `beacon cloud` | Open cloud project (interactive select; daily op) / 日常運用 |
+| `beacon cloud status` | Show cloud config / クラウド設定表示 (read-only) |
 | `beacon cloud list` | List cloud projects / クラウドプロジェクト一覧 |
-| `beacon cloud status` | Show cloud config / クラウド設定表示 |
-| `beacon cloud off` | Switch back to local mode / ローカルモードに戻す |
+| `beacon cloud join <id>` | Join an existing cloud project / 既存プロジェクトに参加 |
+| `beacon cloud upload-initial` | Initial bootstrap upload to new cloud project / 初回 upload (special; e-1862) |
+| `beacon cloud force-pull` | Emergency overwrite local from cloud / 緊急 force pull (special; e-1862) |
+| `beacon cloud push` | Legacy alias of upload-initial (deprecated) / 旧名 |
+| `beacon cloud pull` | Legacy alias of force-pull (deprecated) / 旧名 |
+| `beacon cloud off` | Switch back to local mode (sandbox / offline only) / sandbox 用途のみ |
 
 ## CLI Commands
 

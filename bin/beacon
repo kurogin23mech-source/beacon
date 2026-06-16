@@ -157,9 +157,9 @@ Cloud:
   beacon cloud list                  List accessible cloud projects (read-only)
   beacon cloud join <id>             Join an existing cloud project
   beacon cloud upload-initial        Initial bootstrap upload to a new cloud project (special)
-                                       alias: beacon cloud push  (legacy; same effect, deprecated name)
+  beacon cloud push                  Legacy alias for upload-initial (deprecated; e-1862)
   beacon cloud force-pull            Emergency overwrite local from cloud (special)
-                                       alias: beacon cloud pull  (legacy; same effect, deprecated name)
+  beacon cloud pull                  Legacy alias for force-pull (deprecated; e-1862)
   beacon cloud off                   Switch back to local mode (sandbox / offline only)
 
 Server (maintainer only):
