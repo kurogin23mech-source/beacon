@@ -301,6 +301,7 @@ finalize の stdout と Step 1.9 の判定結果を組み合わせ、ユーザ�
 ```
 Beacon: [hash] → [ms-id] [紐づけ先] (progress%)
 Behavior: [Step1.8で生成したbehaviorを引用]
+by [actor]              ← ms-79 / e-1815 で追加。下の表示ルール参照。
 
 タスク判定 (Step 1.9):              ← 判定対象が 1 件以上ある場合のみ
   ✓ DONE:    [e-id] <description 短縮> — <done_reason 短縮>
@@ -309,6 +310,45 @@ Behavior: [Step1.8で生成したbehaviorを引用]
 
 AI が物理確認できなかった側面 (user 監査推奨):   ← done_reason に「(未検証: ...)」があれば
   - [e-id]: <未検証の側面>
+```
+
+### actor 表示ルール (= ms-79 / e-1815, UC3-F1)
+
+- log entry は `meta.actor` (= ms-51 / e-934 で記録される `{machine, agent}` ペア) を運ぶ。Skill 側は finalize 直後にこの値を読み、以下の条件で **`by <actor>` 行を末尾に表示** する:
+  - **マルチユーザー / マルチエージェント環境**: `agent` が当該プロジェクトで複数登場している場合 (= `beacon status --json` の commit entries で 2 種類以上の `meta.actor.agent` を観測) に表示
+  - **fork / dispatch 子セッション**: `meta.actor.agent` が `parent.dispatch-N` 形式の場合は **必ず表示** (= 親と子のどちらの作業として残ったかが視認できないと混乱の元になる)
+  - **solo dev**: 1 種類しか登場せず suffix も無い場合は省略 (= 冗長性回避、ms-79 e-1815 AC-2 通り)
+- `agent` が `hostname.dispatch-1` 形式なら `by mac.local.dispatch-1`、純粋な hostname なら `by mac.local`、agent.json 設定済なら `by claude-mac` のように、そのまま末尾に置く
+- `meta.actor` が欠落 (= 古い commit / actor 解決失敗) のときは行ごと省略
+
+### 表示例
+
+```
+Beacon: abc1234 → ms-1 [feature-auth] (35%)
+Behavior: ログイン画面でメール送信ボタンを押すと確認メールが届くようになる
+by claude-mac.dispatch-2          ← サブエージェント子の commit、必ず表示
+
+タスク判定 (Step 1.9):
+  ✓ DONE: e-100 メール送信フロー実装 — AC『...』達成
+```
+
+```
+Beacon: def5678 → ms-2 (40%)
+Behavior: 外部挙動の変化なし（内部実装の整理）
+                                  ← solo dev で actor 1 種類のみ、by 行は省略
+```
+
+### source 表示ルール (= ms-79 / e-1817, UC3-F3)
+
+`meta.source` が `"auto-op"` の場合 (= Operation 自律実行 / envelope context での commit) は、`Behavior:` 行の直後に **`source: auto-op` を 1 行付け加える**。これにより `/beacon-retrospect` を待たずに、その場で「これは AI 自律 commit です」 と user に伝えられる。
+
+`meta.source` が無い (= 通常の人間対話 commit) ときは何も表示しない (= human が default、冗長表示を避ける)。
+
+```
+Beacon: 999abcd → ms-1 (52%)
+Behavior: 月次バッチが自動実行され、レポートが指定 S3 に保存される
+source: auto-op                   ← Operation envelope 経由の commit
+by claude-mac.dispatch-1
 ```
 
 判定対象がなかった（pending_tasks が空、または LOW 信頼度しかなかった）場合は「タスク判定」セクションごと省略する。
