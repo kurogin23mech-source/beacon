@@ -151,14 +151,16 @@ Releases & Deploys:
   beacon push list
 
 Cloud:
-  beacon cloud                  Open cloud project (interactive select)
-  beacon cloud list             List accessible cloud projects
-  beacon cloud push             Push local project to cloud
-  beacon cloud pull             Pull project from cloud
-  beacon cloud join <id>        Join an existing cloud project
-  beacon cloud open <id>        Open a specific cloud project
-  beacon cloud status           Show cloud config status
-  beacon cloud off              Switch back to local mode
+  beacon cloud                       Open cloud project (interactive select; daily op)
+  beacon cloud open <id>             Open a specific cloud project in web UI (daily op)
+  beacon cloud status                Show cloud config status (read-only, daily op)
+  beacon cloud list                  List accessible cloud projects (read-only)
+  beacon cloud join <id>             Join an existing cloud project
+  beacon cloud upload-initial        Initial bootstrap upload to a new cloud project (special)
+                                       alias: beacon cloud push  (legacy; same effect, deprecated name)
+  beacon cloud force-pull            Emergency overwrite local from cloud (special)
+                                       alias: beacon cloud pull  (legacy; same effect, deprecated name)
+  beacon cloud off                   Switch back to local mode (sandbox / offline only)
 
 Server (maintainer only):
   gcloud run deploy beacon-api-prod --source . --region asia-northeast1 \
@@ -3645,13 +3647,37 @@ EOF
         ;;
     cloud)
         case "${2:-}" in
-            push)
+            push|upload-initial)
+                # e-1862: `push` is the legacy alias kept for backward compat.
+                # `upload-initial` is the renamed subcommand making the intent
+                # (= initial bootstrap upload to a new cloud project) explicit.
+                # Daily ops do NOT use this — Cloud-first design (ms-36) means
+                # the CLI reads/writes cloud directly. push/upload-initial is
+                # only for the initial bootstrap of a fresh cloud project, or
+                # an emergency --force overwrite. cmd_cloud_push() itself
+                # already guards against accidental overwrites in cloud mode.
+                if [ "${2}" = "push" ]; then
+                    echo "Note: 'beacon cloud push' is the legacy name." >&2
+                    echo "      Prefer 'beacon cloud upload-initial' for clarity (e-1862)." >&2
+                fi
                 ensure_project
                 force=""
                 [[ "${3:-}" == "--force" || "${3:-}" == "-f" ]] && force="1"
                 BEACON_FORCE="$force" python3 "$COMMANDS_PY" cloud_push
                 ;;
-            pull)   ensure_project; python3 "$COMMANDS_PY" cloud_pull ;;
+            pull|force-pull)
+                # e-1862: `pull` is the legacy alias kept for backward compat.
+                # `force-pull` is the renamed subcommand making the intent
+                # (= emergency overwrite of local from cloud) explicit. Daily
+                # ops do NOT need pull — Cloud-first design means CLI reads
+                # cloud directly, so stale local cache does not affect behavior.
+                if [ "${2}" = "pull" ]; then
+                    echo "Note: 'beacon cloud pull' is the legacy name." >&2
+                    echo "      Prefer 'beacon cloud force-pull' for clarity (e-1862)." >&2
+                fi
+                ensure_project
+                python3 "$COMMANDS_PY" cloud_pull
+                ;;
             join)
                 if [ -z "${3:-}" ]; then
                     echo "Usage: beacon cloud join <project-id>"
@@ -3679,7 +3705,8 @@ EOF
             "")     cmd_cloud_launch ;;
             *)
                 echo "Error: unknown subcommand '${2}'."
-                echo "Usage: beacon cloud [push|pull|join|open|list|status|off]"
+                echo "Usage: beacon cloud [open|status|list|join|upload-initial|force-pull|off]"
+                echo "       (push/pull are deprecated aliases for upload-initial/force-pull)"
                 exit 1
                 ;;
         esac
