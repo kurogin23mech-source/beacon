@@ -9582,8 +9582,12 @@ def cmd_cycle_status():
 def cmd_search():
     """Unified search across all Beacon entities (CORE doc 検索基盤の原則 / SPEC 3ne57ccZegYQXDQA03op).
 
-    Delegates the actual work to lib/search.search_project so the CLI, server
-    endpoint, and Skill all share the same logic.
+    Delegates the actual work to ``lib/search.search_project`` for the
+    canonical (= pre-ms-79) path, or to ``lib/retro_query.retro_query``
+    when any ms-79 extension flag is present (source / actor / claim /
+    include_*). retro_query wraps search_project and adds the post-filters
+    plus extension entity merges (= bus archive / session_logs / Trek);
+    see SPEC ms-79 §3 ‘設計の柱 6’ (基盤統合).
     """
     import search as _search  # noqa: PLC0415
 
@@ -9597,6 +9601,15 @@ def cmd_search():
     from_date = os.environ.get("BEACON_FROM", "")
     to_date = os.environ.get("BEACON_TO", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    # ms-79 extension knobs (= /beacon-retrospect Skill が opt-in で渡す).
+    # 空のときは search_project の旧経路で動かして back-compat を保つ。
+    source_list_raw = os.environ.get("BEACON_SOURCE", "").strip()
+    actor_filter = os.environ.get("BEACON_ACTOR", "").strip()
+    claimant_filter = os.environ.get("BEACON_CLAIMANT", "").strip()
+    include_bus_dm = os.environ.get("BEACON_INCLUDE_BUS_DM", "") == "1"
+    include_session_logs = os.environ.get("BEACON_INCLUDE_SESSION_LOGS", "") == "1"
+    include_trek = os.environ.get("BEACON_INCLUDE_TREK", "") == "1"
 
     def _parse_list(env_key: str) -> list[str]:
         raw = os.environ.get(env_key, "").strip()
@@ -9624,24 +9637,63 @@ def cmd_search():
     data = load_project()
     documents = _load_local_documents()
 
-    result = _search.search_project(
-        data,
-        documents,
-        q=query,
-        type=type_list or None,
-        status=status_list or None,
-        priority=priority_list or None,
-        scope=scope_filter,
-        ms=ms_filter,
-        op=op_filter,
-        id=id_filter,
-        assignee=assignee,
-        owner=owner,
-        from_date=from_date,
-        to_date=to_date,
-        limit=limit,
-        offset=offset,
+    source_list = [s.strip() for s in source_list_raw.split(",") if s.strip()] if source_list_raw else None
+    use_retro_query = bool(
+        source_list or actor_filter or claimant_filter
+        or include_bus_dm or include_session_logs or include_trek
     )
+
+    if use_retro_query:
+        import retro_query as _rq  # noqa: PLC0415
+        session_logs = _load_session_logs() if include_session_logs else None
+        bus_archive = _load_bus_archive() if include_bus_dm else None
+        trek_summaries = _load_trek_summaries() if include_trek else None
+        result = _rq.retro_query(
+            data,
+            documents,
+            q=query,
+            type=type_list or None,
+            status=status_list or None,
+            priority=priority_list or None,
+            scope=scope_filter,
+            ms=ms_filter,
+            op=op_filter,
+            id=id_filter,
+            assignee=assignee,
+            owner=owner,
+            from_date=from_date,
+            to_date=to_date,
+            limit=limit,
+            offset=offset,
+            source=source_list,
+            actor=actor_filter,
+            claimant=claimant_filter,
+            include_bus_dm=include_bus_dm,
+            include_session_logs=include_session_logs,
+            include_trek=include_trek,
+            session_logs=session_logs,
+            bus_archive=bus_archive,
+            trek_summaries=trek_summaries,
+        )
+    else:
+        result = _search.search_project(
+            data,
+            documents,
+            q=query,
+            type=type_list or None,
+            status=status_list or None,
+            priority=priority_list or None,
+            scope=scope_filter,
+            ms=ms_filter,
+            op=op_filter,
+            id=id_filter,
+            assignee=assignee,
+            owner=owner,
+            from_date=from_date,
+            to_date=to_date,
+            limit=limit,
+            offset=offset,
+        )
 
     if json_mode:
         print(json.dumps(result, ensure_ascii=False))
@@ -9725,6 +9777,128 @@ def _load_local_documents() -> list[dict]:
             "updated_at": meta.get("updated_at", ""),
         })
     return docs
+
+
+def _load_session_logs() -> list[dict]:
+    """Return session_log entries for the active project (ms-79 / e-1835).
+
+    Cloud mode: pulls ``/api/projects/{id}/session_logs`` (= the
+    aggregated session summaries written by ``beacon session end`` and
+    ``beacon session rescue``).
+
+    Local mode: walks ``.beacon/session_logs/*.json`` if present and
+    returns each as a dict. The local layout is the same shape the cloud
+    endpoint serves, so retro_query needs no mode-aware logic.
+
+    Returns ``[]`` on any failure — retro_query treats this as "no
+    session log source available" and silently skips the merge. This
+    keeps /beacon-retrospect usable on installs that never enabled the
+    session_log subcollection.
+    """
+    try:
+        if _is_cloud_mode():
+            client, config = _get_api_client()
+            try:
+                rows = client.list_session_logs(config["project_id"]) or []
+                # tolerate either dict or list responses
+                if isinstance(rows, dict):
+                    rows = rows.get("session_logs") or rows.get("items") or []
+                return rows if isinstance(rows, list) else []
+            except Exception:
+                return []
+        # Local mode: look for .beacon/session_logs/*.json
+        project_dir = os.path.dirname(get_project_file())
+        sl_dir = os.path.join(project_dir, "session_logs")
+        if not os.path.isdir(sl_dir):
+            return []
+        out: list[dict] = []
+        for fname in os.listdir(sl_dir):
+            if not fname.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(sl_dir, fname), "r", encoding="utf-8") as f:
+                    rec = json.load(f)
+                if isinstance(rec, dict):
+                    out.append(rec)
+            except (OSError, json.JSONDecodeError):
+                continue
+        return out
+    except Exception:
+        return []
+
+
+def _load_bus_archive() -> list[dict]:
+    """Return DM / bus event archive entries (ms-79 / e-1832 / UC10-F1).
+
+    Reads ``.beacon/bus_archive/*.json`` if the install has captured
+    DM history (= ms-54 envelope archive). Returns ``[]`` if nothing is
+    persisted — retro_query then silently skips the merge.
+
+    Per SPEC ms-79 §8 ‘やらないこと’: we do not change the archive
+    schema, we only **read** it. Whatever shape ms-54 writes is what
+    we surface, with the renderer in lib/retro_query tolerating missing
+    fields.
+    """
+    try:
+        project_dir = os.path.dirname(get_project_file())
+        ba_dir = os.path.join(project_dir, "bus_archive")
+        if not os.path.isdir(ba_dir):
+            return []
+        out: list[dict] = []
+        for fname in os.listdir(ba_dir):
+            if not fname.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(ba_dir, fname), "r", encoding="utf-8") as f:
+                    rec = json.load(f)
+                if isinstance(rec, dict):
+                    out.append(rec)
+                elif isinstance(rec, list):
+                    # support an archive-as-list layout if any install uses it
+                    out.extend(r for r in rec if isinstance(r, dict))
+            except (OSError, json.JSONDecodeError):
+                continue
+        return out
+    except Exception:
+        return []
+
+
+def _load_trek_summaries() -> list[dict]:
+    """Return Trek summary entries (ms-79 / e-1835 / UC10-F4).
+
+    Cloud mode: walks each trek's summaries via the API client (= ms-69
+    Trek records carry their own summary list).
+
+    Local mode: walks ``.beacon/treks/*/summaries/*.json`` if present.
+
+    Returns ``[]`` on any failure — retro_query handles the absence
+    gracefully.
+    """
+    out: list[dict] = []
+    try:
+        # Local mode walk (also useful as a cache when cloud sync is on).
+        project_dir = os.path.dirname(get_project_file())
+        treks_dir = os.path.join(project_dir, "treks")
+        if os.path.isdir(treks_dir):
+            for trek_name in os.listdir(treks_dir):
+                summaries_dir = os.path.join(treks_dir, trek_name, "summaries")
+                if not os.path.isdir(summaries_dir):
+                    continue
+                for fname in os.listdir(summaries_dir):
+                    if not fname.endswith(".json"):
+                        continue
+                    try:
+                        with open(os.path.join(summaries_dir, fname),
+                                  "r", encoding="utf-8") as f:
+                            rec = json.load(f)
+                        if isinstance(rec, dict):
+                            rec.setdefault("trek_id", trek_name)
+                            out.append(rec)
+                    except (OSError, json.JSONDecodeError):
+                        continue
+    except Exception:
+        pass
+    return out
 
 
 def _find_all_on_path(name: str) -> list[str]:
