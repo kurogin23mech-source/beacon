@@ -79,6 +79,22 @@ methodology は: クエリ解釈・検索戦略・件数による分岐・引用
 
 時間表現が曖昧（「最近」「あの時」）の場合は、ユーザーに「過去 1 週間 / 1 ヶ月 / 全期間のどれですか？」を聞き返す（Step 4 で）。
 
+## Step 0.5: ms-79 拡張フィルタの抽出 (= e-1832 / e-1833 / e-1834 / e-1835)
+
+Step 0 のクエリ解釈に加えて、以下のキーワードがクエリに含まれていれば対応する拡張フラグを Step 1 で付ける:
+
+| クエリ表現 | 抽出する拡張 | 渡すフラグ |
+|---|---|---|
+| 「AI が自律でやった」「auto-op だけ」「envelope 経由の」 | source filter | `--source auto-op` |
+| 「人が判断した」「手動で」「human dialog の」 | source filter | `--source human` |
+| 「DM 経由の決定」「あの DM」 | source filter + bus archive | `--source dm --include-bus-dm` |
+| 「○○ さんが」「user 別」「actor 別」 | actor filter | `--actor <name>` |
+| 「○○ さんが claim していた」「△△ の claim」 | claimant filter | `--claimant <name>` |
+| 「fork で何を」「あの fork セッション」 | session_log + Trek | `--include-session-logs --include-trek` |
+| 「Trek で合意した」「○○ Trek の」 | Trek 取り込み | `--include-trek` |
+
+これらは ms-79 で新設された retrospect 拡張 (= UC10-F1〜F4) で、cmd_search が指定された時のみ retro_query 共通基盤を経由する形になる。指定無しの普通の検索は従来通り。
+
 ## Step 1: 検索の実行（戦略 A 単発 sweep）
 
 Bash ツールで実行:
@@ -91,16 +107,22 @@ beacon search "<q>" \
   --ms <ms-id> --op <op-id> --id <entry-id> \
   --scope <core|spec|memo|retro|report> \
   --from <YYYY-MM-DD> --to <YYYY-MM-DD> \
-  --limit 30 --json
+  --limit 30 --json \
+  [--source <human,auto-op,dm>] \
+  [--actor <name>] [--claimant <name>] \
+  [--include-bus-dm] [--include-session-logs] [--include-trek]
 ```
 
-省略可能なフラグは Step 0 で抽出した内容に応じて付ける（無ければ付けない）。
+省略可能なフラグは Step 0 / Step 0.5 で抽出した内容に応じて付ける（無ければ付けない）。
 **戦略 A**: 1 回だけ広く検索する。再帰展開・深掘り (戦略 B/C/D) は将来検討、現状は範囲外。
 
 stdout が JSON で返る:
 ```json
-{"results": [...], "total": N, "limit": L, "offset": 0, "facets": {...}}
+{"results": [...], "total": N, "limit": L, "offset": 0,
+ "facets": {"type": {...}, "source": {"human": N, "auto-op": M, "dm": K}, ...}}
 ```
+
+`facets.source` は ms-79 / e-1833 で追加された source 別件数 (= 「該当 N 件: human X / auto-op Y / DM Z」)。Step 4 の要約に必ず含める (= UC10-F2 / F3 で「source 別の件数を一目で見たい」 を満たす)。
 
 ## Step 2: 件数による分岐 (SPEC §3 通り)
 
@@ -157,9 +179,16 @@ methodology.md の「出力フォーマット」セクション通り:
 ```
 **結論**: [q に対するユーザー視点の答え。1-2 文]
 
+**該当 N 件**: human X / auto-op Y / DM Z  ← ms-79 / e-1833、facets.source から
+                                              source filter / include_bus_dm 使用時
+                                              のみ表示。普通の検索では省略。
+
 **根拠**:
   - [e-id] (type, status, date) [title]
     - [本文/snippet からの抜粋。30-80 文字]
+    - 出典: <marker> ← ms-79 / e-1835、fork 由来 / DM 由来 / Trek 由来
+                       の row には marker を付ける (例: "fork 由来" / "DM 由来"
+                       / "Trek 由来")。通常 commit / task は省略
     - 🔗 https://beacon-ai.dev/?project=<project_id>#<url_hash>
   - [e-id] (type, status, date) [title]
     - ...
@@ -169,7 +198,12 @@ methodology.md の「出力フォーマット」セクション通り:
 
 ポイント:
 - **結論**: 「実装済み / 未実装 / 部分実装」のような端的な答え
+- **該当 N 件**: source 別の breakdown を 1 行で示す (= UC10-F2)。ms-79 拡張フラグ使用時のみ
 - **根拠**: エントリ ID + 種別 + 日付 を必ず併記 (引用元が辿れる)
+- **出典 marker**: fork 子セッション / DM 由来 / Trek 由来は明示 (= UC10-F4)
+  - `result.from_fork == true` → "fork 由来"
+  - `result.from_dm == true` → "DM 由来"
+  - `result.from_trek == true` → "Trek 由来"
 - **Web UI deep link**: cloud mode なら必ず添える (ms-43 e-618 deep link 機能との整合)
 
 ## Step 5: 結果報告
