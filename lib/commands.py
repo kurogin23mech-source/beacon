@@ -39,6 +39,31 @@ def _resolve_session_id() -> str:
         return ""
 
 
+def _resolve_commit_source() -> str:
+    """Detect the source axis for a commit being recorded (ms-79 / e-1817).
+
+    Returns one of:
+      - ``"auto-op"`` when the commit is happening inside a Beacon
+        Operation envelope auto-execute context (= ms-60). The detection
+        keys off env vars set by the operation runner; specifically:
+          * ``BEACON_OPERATION_ENVELOPE_ID``  (= active envelope token)
+          * ``BEACON_OPERATION_AUTO_EXECUTE`` set to ``"1"``
+      - ``""`` (empty) for the default human dialog case. The empty
+        string is the documented "untagged = human" sentinel — older
+        commits without the field stay as-is and continue to count as
+        human in retro_query's source breakdown.
+
+    Kept env-var-driven on purpose: the Operation runner can set the
+    flag without log_commit needing to know about envelope internals,
+    and tests can drive it deterministically by exporting one env var.
+    """
+    if os.environ.get("BEACON_OPERATION_AUTO_EXECUTE", "") == "1":
+        return "auto-op"
+    if os.environ.get("BEACON_OPERATION_ENVELOPE_ID", "").strip():
+        return "auto-op"
+    return ""
+
+
 def _user_home():
     """Resolve the user home directory, honoring an explicit HOME override.
 
@@ -1829,13 +1854,17 @@ def cmd_log():
         actor = None
 
     session_id = _resolve_session_id()  # ms-57 / e-1062
+    # ms-79 / e-1817 (UC3-F3): detect envelope context to tag auto-op
+    # commits. The source label is stored on meta.source so retrospect /
+    # retro can filter "AI 自律でやった commit だけ".
+    source = _resolve_commit_source()
 
     data = load_project()
     result = core.log_commit(
         data, ms_id=ms_id, commit_hash=commit_hash,
         message=message, date=date, summary=summary, progress=progress,
         behavior=behavior, resolves=resolves, actor=actor,
-        session_id=session_id,
+        session_id=session_id, source=source,
     )
     save_project(data)
 
@@ -1913,13 +1942,17 @@ def cmd_log_finalize():
         actor = None
 
     session_id = _resolve_session_id()  # ms-57 / e-1062
+    # ms-79 / e-1817 (UC3-F3): tag the commit's source axis (= human dialog
+    # vs auto-op envelope execution). Retrospect / retro can then filter
+    # "AI 自律 commit だけ見たい" type queries.
+    source = _resolve_commit_source()
 
     data = load_project()
     result = core.log_commit(
         data, ms_id=ms_id, commit_hash=commit_hash,
         message=message, date=date, summary=summary_text, progress=progress,
         behavior=behavior, resolves=resolves, actor=actor,
-        session_id=session_id,
+        session_id=session_id, source=source,
     )
 
     # e-1040 deprecation: don't write data["summary"] anymore. The legacy

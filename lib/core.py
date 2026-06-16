@@ -1194,7 +1194,7 @@ def log_commit(data: dict, *, ms_id: str = "", commit_hash: str,
                message: str, date: str, summary: str = "",
                progress: str = "", behavior: str = "",
                resolves: str = "", actor: dict | None = None,
-               session_id: str = "") -> dict:
+               session_id: str = "", source: str = "") -> dict:
     """Record a commit to the target milestone. Returns result info dict.
 
     ``actor`` (ms-51 / e-934): optional ``{"machine": ..., "agent": ...}``
@@ -1210,6 +1210,12 @@ def log_commit(data: dict, *, ms_id: str = "", commit_hash: str,
     Forward-only: past commits without it stay untagged. Empty string
     is the documented "no session" sentinel — those entries simply won't
     appear in aggregation results.
+
+    ``source`` (ms-79 / e-1817): optional axis tag distinguishing AI
+    auto-op commits from human dialog commits. Stored on
+    ``meta.source``. Currently the recognised value is ``"auto-op"``;
+    empty string keeps the historical behaviour (= human-untagged). The
+    field powers the source-breakdown facet in retro_query.
     """
     target = find_target_milestone(data, ms_id)
     entries = target.setdefault("entries", [])
@@ -1236,6 +1242,11 @@ def log_commit(data: dict, *, ms_id: str = "", commit_hash: str,
             meta["actor"] = clean
     if session_id:
         meta["session_id"] = session_id
+    if source:
+        # ms-79 / e-1817: persist the source axis so retrospect / retro
+        # can filter "AI 自律 commit だけ". No-op when source is empty
+        # (the historical / human default).
+        meta["source"] = source
     commit_entry = {
         "id": next_entry_id(data),
         "type": "commit",
