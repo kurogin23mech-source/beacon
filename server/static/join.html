@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Beacon — 招待を受ける</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+:root {
+  --bg: #0a0a0c; --surface: #111114; --border: #2a2a30;
+  --text: #e4e4e8; --dim: #71717a; --accent: #4ade80;
+  --accent-dim: #166534; --error: #ef4444;
+  --font: 'JetBrains Mono', monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--bg); color: var(--text); font-family: var(--font);
+  min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+}
+.card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 40px; max-width: 600px; width: 100%;
+}
+h1 { font-size: 1.6rem; margin-bottom: 4px; }
+.tagline { font-size: 0.75rem; color: var(--dim); font-style: italic; margin-bottom: 24px; }
+.step { margin: 24px 0; }
+.step-label {
+  font-size: 0.7rem; color: var(--dim); letter-spacing: 0.1em;
+  text-transform: uppercase; margin-bottom: 10px;
+}
+.preview {
+  background: rgba(74,222,128,0.05);
+  border: 1px solid var(--accent-dim);
+  border-radius: 6px; padding: 16px; margin: 16px 0;
+}
+.preview .row { margin: 6px 0; font-size: 0.85rem; }
+.preview .row .k { color: var(--dim); display: inline-block; width: 100px; }
+.preview .row .v { color: var(--text); font-weight: 700; }
+.preview .v.role { color: var(--accent); }
+input[type=text] {
+  font-family: var(--font); font-size: 0.85rem;
+  padding: 8px 12px; border: 1px solid var(--border);
+  border-radius: 4px; background: var(--bg); color: var(--text);
+  width: 100%; margin: 6px 0;
+}
+.btn {
+  font-family: var(--font); font-size: 0.85rem;
+  padding: 10px 24px; border: 1px solid var(--accent-dim);
+  border-radius: 4px; background: rgba(74,222,128,0.08);
+  color: var(--accent); cursor: pointer; transition: all 0.2s;
+}
+.btn:hover { background: rgba(74,222,128,0.15); border-color: var(--accent); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.status { font-size: 0.8rem; color: var(--dim); margin-top: 16px; }
+.status.success { color: var(--accent); }
+.status.error { color: var(--error); }
+.hidden { display: none; }
+#g_id_signin { display: inline-block; margin: 12px 0; }
+.setup-block {
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 4px; padding: 14px; font-size: 0.72rem;
+  color: var(--text); margin: 12px 0; white-space: pre-wrap;
+  max-height: 360px; overflow-y: auto; line-height: 1.55;
+}
+.note {
+  font-size: 0.7rem; color: var(--dim); margin: 10px 0;
+  line-height: 1.5;
+}
+.flex-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Beacon</h1>
+  <p class="tagline">プロジェクト招待</p>
+
+  <!-- Step 0: loading preview -->
+  <div id="step-loading" class="step">
+    <div class="step-label">招待情報を確認しています…</div>
+    <div id="loading-status" class="status">…</div>
+  </div>
+
+  <!-- Step 1: preview + sign in -->
+  <div id="step-preview" class="step hidden">
+    <div class="step-label">招待内容</div>
+    <div class="preview">
+      <div class="row"><span class="k">プロジェクト</span><span class="v" id="p-project"></span></div>
+      <div class="row"><span class="k">あなたの役割</span><span class="v role" id="p-role"></span></div>
+      <div class="row"><span class="k">招待先 email</span><span class="v" id="p-email"></span></div>
+      <div class="row"><span class="k">招待主</span><span class="v" id="p-inviter"></span></div>
+      <div class="row"><span class="k">有効期限</span><span class="v" id="p-expires"></span></div>
+    </div>
+    <div class="step-label">Step 1: Google アカウントでサインイン</div>
+    <p class="note">招待された email と同じ Google アカウントでログインしてください。</p>
+    <div id="g_id_signin"></div>
+  </div>
+
+  <!-- Step 2: display name -->
+  <div id="step-name" class="step hidden">
+    <div class="step-label">Step 2: 表示名 (display name)</div>
+    <p class="note">
+      他のメンバーがあなたを見つけやすくするための名前です。
+      email アドレスより読みやすい表記を入れてください (= UC11-F5)。
+    </p>
+    <input type="text" id="display-name" placeholder="例: Alice / 田中 太郎" />
+    <div class="flex-row">
+      <button class="btn" id="accept-btn">参加する</button>
+      <span id="accept-status" class="status"></span>
+    </div>
+  </div>
+
+  <!-- Step 3: done + setup prompt -->
+  <div id="step-done" class="step hidden">
+    <div class="step-label">Step 3: 参加完了 — Claude Code のセットアップ</div>
+    <p class="note" style="color:var(--accent);">
+      プロジェクトへの参加が完了しました。下記の prompt を Claude Code (= bclaude) に
+      貼り付けると、CLI のインストールから初回 onboarding まで自動で進みます。
+    </p>
+    <div class="flex-row" style="margin:8px 0;">
+      <button class="btn" id="copy-prompt-btn">prompt をコピー</button>
+      <a id="open-project-link" class="btn" style="text-decoration:none;" href="#">
+        プロジェクトを開く
+      </a>
+    </div>
+    <div class="setup-block" id="setup-prompt"></div>
+    <p class="note">
+      ※ GitHub repo の collaborator (= 共同編集者) 招待は Beacon の責任範囲外です。
+      招待主に直接依頼してください (= e-1806)。
+    </p>
+  </div>
+
+  <div id="status" class="status"></div>
+</div>
+
+<script>
+// ms-78 e-1804 — /join/<token> landing page.
+// Flow:
+//   1. parse <token> from URL path
+//   2. GET /api/invitations/<token>  (no auth)  → render preview
+//   3. user signs in with Google → JWT id_token
+//   4. ask for display_name
+//   5. POST /api/invitations/<token>/accept  (auth)  → server adds member + persists display_name
+//   6. render Claude Code setup prompt (UC11-F6 template, doc id pk1CKCu...) with variables filled in
+const API_BASE = window.location.origin;
+
+// Parse path: /join/<token>
+const pathParts = window.location.pathname.split('/').filter(Boolean);
+const token = pathParts.length >= 2 && pathParts[0] === 'join' ? pathParts[1] : '';
+
+let preview = null;
+let authToken = null;
+let clientId = null;
+let authedEmail = '';
+
+async function loadAuthConfig() {
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/config`);
+    if (res.ok) {
+      const config = await res.json();
+      clientId = config.client_id;
+    }
+  } catch (e) {}
+}
+
+function decodeJwtPayload(t) {
+  let s = (t || '').split('.')[1] || '';
+  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  return JSON.parse(atob(s));
+}
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])
+  );
+}
+
+// UC11-F6 setup prompt template (doc id pk1CKCuiHVQLODbjaCpi, e-1808).
+// Variables: project_name / project_id / invite_token / role / inviter_name.
+// Mirrored from the SPEC doc — when the template changes, regenerate this
+// constant via the doc.
+function buildSetupPrompt(vars) {
+  return `${vars.inviter_name} から Beacon プロジェクト「${vars.project_name}」 (${vars.role}) への招待を受けました。
+セットアップを進めてください。Beacon は AI / 人間が一緒にプロジェクトの記録を残す道具です。
+
+タスク:
+1. Beacon CLI を install (= 設置)
+   - mac:     brew install r-kida2/tap/beacon
+   - windows: pipx install beacon-cli
+   - linux:   pipx install beacon-cli
+   install 確認: \`beacon --version\` が表示されれば OK。
+
+2. Beacon Cloud にログイン
+   - \`beacon auth login\` を実行
+   - ブラウザが開いて Google 認証 → 完了したら閉じる
+   - 確認: \`beacon auth whoami\` で email が表示されれば OK
+
+3. 招待を受諾してプロジェクトに参加 (= 既に Web 上で完了済の場合は skip 可能)
+   - \`beacon member join --token ${vars.invite_token}\` を実行
+   - 成功すると「Joined project ${vars.project_name} (${vars.project_id}) as ${vars.role}」 と表示
+   - ※ 既に Web のこのページで参加済の場合は cloud setup に進む:
+     \`beacon cloud join ${vars.project_id}\`
+
+4. 作業フォルダに移動して channel install (= 受信経路の設定)
+   - 既存の repo がある場合: その repo の root へ \`cd\`
+   - repo が無い場合: 適当な作業ディレクトリを作って \`cd\`
+   - \`beacon channel install\` を実行 (= この cwd で他セッションからの DM を受信可能にする)
+   - 失敗時の対処: \`beacon doctor\` で原因を表示、warning に従う
+
+5. 初回 onboarding を起動
+   - Claude Code 内で \`/beacon-onboard\` Skill を叩いてください
+   - これがプロジェクトの大目的 / 現在の流れ / あなたの role の責任範囲を提示します
+
+確認質問:
+- Q1: install 段階 (= 1) で失敗したら、エラーメッセージを貼ってください
+- Q2: auth (= 2) でブラウザが開かない時は、Linux か WSL ですか? その場合は表示される URL を手動で開いてください
+- Q3: join (= 3) で「token expired」 が出たら、招待主 (${vars.inviter_name}) に再送をお願いしてください
+
+完了したら「セットアップ完了」 と言ってください。次に /beacon-session-start でプロジェクト状況を確認します。`;
+}
+
+async function loadPreview() {
+  if (!token) {
+    document.getElementById('loading-status').textContent =
+      '招待トークンが URL に含まれていません。リンクをもう一度確認してください。';
+    document.getElementById('loading-status').className = 'status error';
+    return;
+  }
+  try {
+    const res = await fetch(`${API_BASE}/api/invitations/${encodeURIComponent(token)}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      document.getElementById('loading-status').textContent =
+        err.detail || '招待が見つかりません (= 期限切れ / キャンセル済み / 既に消費)。';
+      document.getElementById('loading-status').className = 'status error';
+      return;
+    }
+    preview = await res.json();
+    // populate preview fields
+    document.getElementById('p-project').textContent = preview.project_name || preview.project_id;
+    document.getElementById('p-role').textContent = preview.role || '';
+    document.getElementById('p-email').textContent = preview.invited_email || '';
+    document.getElementById('p-inviter').textContent =
+      preview.inviter_email || preview.owner_email || '';
+    document.getElementById('p-expires').textContent =
+      (preview.expires_at || '').slice(0, 10);
+
+    document.getElementById('step-loading').classList.add('hidden');
+    document.getElementById('step-preview').classList.remove('hidden');
+
+    function waitForGsi() {
+      if (window.google?.accounts && clientId) {
+        google.accounts.id.initialize({
+          client_id: clientId,
+          callback: handleCredentialResponse,
+        });
+        google.accounts.id.renderButton(
+          document.getElementById('g_id_signin'),
+          { theme: 'filled_black', size: 'large', shape: 'rectangular', text: 'signin_with' }
+        );
+      } else {
+        setTimeout(waitForGsi, 100);
+      }
+    }
+    waitForGsi();
+  } catch (e) {
+    document.getElementById('loading-status').textContent =
+      'ネットワークエラー: ' + (e.message || e);
+    document.getElementById('loading-status').className = 'status error';
+  }
+}
+
+function handleCredentialResponse(response) {
+  authToken = (response && response.credential) || '';
+  if (!authToken || authToken.split('.').length < 2) {
+    document.getElementById('status').textContent =
+      'サインインに失敗しました。ブラウザを最新版に更新してください。';
+    document.getElementById('status').className = 'status error';
+    return;
+  }
+  let payload;
+  try { payload = decodeJwtPayload(authToken); }
+  catch (e) {
+    document.getElementById('status').textContent =
+      'サインインに失敗しました (token decode error)。';
+    document.getElementById('status').className = 'status error';
+    return;
+  }
+  authedEmail = (payload.email || '').toLowerCase();
+  const invited = (preview.invited_email || '').toLowerCase();
+  if (invited && authedEmail && authedEmail !== invited) {
+    document.getElementById('status').textContent =
+      `この招待は ${invited} 宛です。サインインしたのは ${authedEmail} なので、招待された email で再度サインインしてください。`;
+    document.getElementById('status').className = 'status error';
+    return;
+  }
+  document.getElementById('status').textContent = `Signed in as ${authedEmail}`;
+  document.getElementById('status').className = 'status';
+
+  // Show display name step
+  document.getElementById('step-preview').classList.add('hidden');
+  document.getElementById('step-name').classList.remove('hidden');
+
+  const nameInput = document.getElementById('display-name');
+  // Best-effort default from Google profile name
+  if (payload.name) nameInput.value = payload.name;
+  nameInput.focus();
+
+  document.getElementById('accept-btn').addEventListener('click', accept);
+}
+
+async function accept() {
+  const name = (document.getElementById('display-name').value || '').trim();
+  const status = document.getElementById('accept-status');
+  if (!name) {
+    status.textContent = '表示名を入力してください (UC11-F5)';
+    status.className = 'status error';
+    return;
+  }
+  const btn = document.getElementById('accept-btn');
+  btn.disabled = true;
+  btn.textContent = '参加中…';
+  status.textContent = '';
+  try {
+    const res = await fetch(
+      `${API_BASE}/api/invitations/${encodeURIComponent(token)}/accept`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({ display_name: name }),
+      }
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      status.textContent = err.detail || '参加に失敗しました。';
+      status.className = 'status error';
+      btn.disabled = false;
+      btn.textContent = '参加する';
+      return;
+    }
+    const data = await res.json();
+    // Render setup prompt + project link
+    const prompt = buildSetupPrompt({
+      project_name: preview.project_name || preview.project_id,
+      project_id: preview.project_id,
+      invite_token: token,
+      role: preview.role,
+      inviter_name: preview.inviter_email || preview.owner_email || 'someone',
+    });
+    document.getElementById('setup-prompt').textContent = prompt;
+    document.getElementById('open-project-link').href =
+      data.next_step_url || `/?project=${encodeURIComponent(preview.project_id)}`;
+    document.getElementById('step-name').classList.add('hidden');
+    document.getElementById('step-done').classList.remove('hidden');
+
+    document.getElementById('copy-prompt-btn').addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(prompt);
+        const b = document.getElementById('copy-prompt-btn');
+        b.textContent = 'コピー完了';
+        setTimeout(() => { b.textContent = 'prompt をコピー'; }, 1500);
+      } catch (_) {
+        // Fall back: select the block so the user can ⌘C manually
+        const range = document.createRange();
+        range.selectNode(document.getElementById('setup-prompt'));
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+    });
+  } catch (e) {
+    status.textContent = 'ネットワークエラー: ' + (e.message || e);
+    status.className = 'status error';
+    btn.disabled = false;
+    btn.textContent = '参加する';
+  }
+}
+
+async function init() {
+  await loadAuthConfig();
+  await loadPreview();
+}
+
+init();
+</script>
+</body>
+</html>

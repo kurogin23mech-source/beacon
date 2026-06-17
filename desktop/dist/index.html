@@ -3860,12 +3860,20 @@ function _renderSettingsMembersTab() {
           <option value="viewer">viewer</option>
           <option value="editor">editor</option>
         </select>
-        <button class="primary" data-action="settings-invite-member">Invite</button>
+        <button class="primary" data-action="settings-invite-member">Generate invite URL</button>
       </div>
       <div id="settings-invite-msg" style="font-size:0.7rem;color:var(--text-dim);margin:4px 0 10px;"></div>
-      <div style="font-size:0.65rem;color:var(--text-dim);margin:0 0 10px;line-height:1.5;">
-        ※ ここで招待するのは Beacon プロジェクトのメンバー (= Web UI / CLI でこのプロジェクトを見られる人) です。GitHub repo の collaborator 招待は Beacon の責任範囲外で、GitHub 側で別途設定してください (例: <code style="font-family:var(--font-mono);font-size:0.65rem;">gh repo edit --add-collaborator &lt;user&gt;</code>)。
+      <div id="settings-invite-url-box"
+           style="display:none;margin:6px 0 10px;padding:8px 10px;
+                  background:var(--bg-surface);border:1px solid var(--border);
+                  border-radius:3px;font-family:var(--font-mono);font-size:0.7rem;
+                  word-break:break-all;">
       </div>
+      <div style="font-size:0.65rem;color:var(--text-dim);margin:0 0 10px;line-height:1.5;">
+        ※ ここで招待するのは Beacon プロジェクトのメンバー (= Web UI / CLI でこのプロジェクトを見られる人) です。GitHub repo の collaborator 招待は Beacon の責任範囲外で、GitHub 側で別途設定してください (例: <code style="font-family:var(--font-mono);font-size:0.65rem;">gh repo edit --add-collaborator &lt;user&gt;</code>)。<br>
+        ※ 招待 URL は <strong>発行直後にしか表示されません</strong>。誘いたい相手にコピーして渡してください。
+      </div>
+      <div id="settings-invitation-list" style="margin-top:6px;"></div>
       ` : `
       <div style="font-size:0.7rem;color:var(--text-dim);margin-bottom:10px;">
         メンバー一覧は閲覧のみ可能です (= owner のみが招待 / 役割変更 / 削除を行えます)
@@ -4015,6 +4023,9 @@ function renderSettings() {
   // Members tab: load the project members directly into our slot.
   if (tab === 'members' && state.projectId) {
     _settingsLoadMemberList();
+    // ms-78 e-1803 — Owner-only pending invitations list. Non-owner calls
+    // return 403 and silently render nothing (see _settingsLoadInvitationList).
+    if (state.myIsOwner) _settingsLoadInvitationList();
   }
 }
 
@@ -4080,21 +4091,117 @@ async function _settingsLoadMemberList() {
   }
 }
 
+// ms-78 e-1803 — Token-based invitation. Owner submits email + role; server
+// returns a one-shot plaintext token + URL. We surface the URL with a copy
+// button so the inviter can paste it into Slack / email / DM.
+//
+// The legacy "directly add an existing Beacon user as member" path is
+// deliberately replaced — invitations now go through the /join/<token>
+// landing flow so the invitee gets the Claude Code setup prompt (UC11-F6).
 async function _settingsInviteMember() {
   const emailEl = document.getElementById('settings-invite-email');
   const roleEl = document.getElementById('settings-invite-role');
   const msg = document.getElementById('settings-invite-msg');
+  const urlBox = document.getElementById('settings-invite-url-box');
   const email = (emailEl && emailEl.value || '').trim();
   const role = (roleEl && roleEl.value) || 'viewer';
   const pid = _settingsViewedProjectId();
   if (!email) { if (msg) msg.textContent = 'email is required'; return; }
+  if (msg) msg.textContent = 'Generating invite URL…';
   try {
-    await dataSource.inviteMember(pid, email, role);
-    if (msg) msg.textContent = `Invited ${email}`;
+    const res = await dataSource.createInvitation(pid, email, role);
+    const url = res.url || '';
+    if (msg) msg.textContent =
+      `Invite URL for ${esc(email)} (${esc(role)}) — expires ${(res.expires_at || '').slice(0,10)}`;
     if (emailEl) emailEl.value = '';
-    _settingsLoadMemberList();
+    if (urlBox) {
+      urlBox.style.display = 'block';
+      urlBox.innerHTML = `
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+          <span style="flex:1;min-width:200px;">${esc(url)}</span>
+          <button data-action="settings-copy-invite-url" data-url="${esc(url)}"
+                  style="background:var(--accent);color:#000;border:0;padding:4px 10px;
+                         border-radius:3px;font-family:var(--font-mono);font-size:0.7rem;
+                         cursor:pointer;">Copy</button>
+        </div>
+        <div style="margin-top:6px;color:var(--text-dim);font-size:0.65rem;line-height:1.4;">
+          このリンクを ${esc(email)} に渡してください。Beacon project member への参加が成立します
+          (GitHub repo の collaborator 招待は別経路 = <code>gh repo edit --add-collaborator</code>)。
+          リンクは一度だけ表示されます — 失くしたら cancel して再発行してください。
+        </div>
+      `;
+      // Hook the copy button (innerHTML resets data-action wires).
+      const copyBtn = urlBox.querySelector('[data-action="settings-copy-invite-url"]');
+      if (copyBtn) {
+        copyBtn.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(url);
+            copyBtn.textContent = 'Copied!';
+            setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+          } catch (_) {
+            copyBtn.textContent = '(copy failed — select manually)';
+          }
+        });
+      }
+    }
+    _settingsLoadInvitationList();
   } catch (e) {
     if (msg) msg.textContent = e.message || 'Error';
+  }
+}
+
+// ms-78 e-1803 — Pending invitations list. Owner-only. Each row shows email,
+// role, who issued it, and an x button to cancel.
+async function _settingsLoadInvitationList() {
+  const dst = document.getElementById('settings-invitation-list');
+  if (!dst) return;
+  const pid = _settingsViewedProjectId();
+  if (!pid) { dst.innerHTML = ''; return; }
+  try {
+    const data = await dataSource.listInvitations(pid);
+    const items = data.invitations || [];
+    if (!items.length) {
+      dst.innerHTML = '';
+      return;
+    }
+    let html = `
+      <div style="font-size:0.7rem;color:var(--text-dim);
+                  margin:0 0 4px;text-transform:uppercase;letter-spacing:0.04em;">
+        Pending invitations
+      </div>`;
+    for (const inv of items) {
+      const exp = (inv.expires_at || '').slice(0, 10);
+      html += `
+        <div class="settings-member-row" style="opacity:0.85;">
+          <span class="email">${esc(inv.email)}
+            <span style="color:var(--text-dim);font-size:0.6rem;">expires ${esc(exp)}</span>
+          </span>
+          <span class="role-tag" style="color:var(--text-dim);">${esc(inv.role)}</span>
+          <span class="x" data-action="settings-cancel-invitation"
+                data-id="${esc(inv.id)}"
+                title="Cancel invitation">×</span>
+        </div>`;
+    }
+    dst.innerHTML = html;
+    dst.querySelectorAll('[data-action="settings-cancel-invitation"]').forEach(el => {
+      el.addEventListener('click', _settingsCancelInvitation);
+    });
+  } catch (e) {
+    // Non-owner callers get 403 — silently render nothing (handled by isOwner gate).
+    dst.innerHTML = '';
+  }
+}
+
+async function _settingsCancelInvitation(ev) {
+  const id = ev.currentTarget.dataset.id;
+  if (!id) return;
+  if (!window.confirm('Cancel this invitation?')) return;
+  const pid = _settingsViewedProjectId();
+  try {
+    await dataSource.cancelInvitation(pid, id);
+    _settingsLoadInvitationList();
+  } catch (e) {
+    window.alert(e.message || 'Error');
   }
 }
 

@@ -26,6 +26,7 @@ from starlette.responses import Response, JSONResponse
 import approved_actions as approved_actions_mod
 import core
 import envelope as envelope_mod
+import invitations as invitations_mod  # ms-78 e-1803/e-1804: token-based invites
 import store_router as db  # e-1544: BEACON_STORE_BACKEND で firestore / dynamodb を切替
 import operations
 import trek as trek_mod  # ms-69 / e-1656: trek schema + pure mutators
@@ -2476,6 +2477,294 @@ def update_member_role(project_id: str, member_email: str, body: MemberRoleUpdat
 
 
 # ---------------------------------------------------------------------------
+# Member invitations (ms-78 e-1803/e-1804)
+# ---------------------------------------------------------------------------
+#
+# Token-based invite flow (replaces the legacy "must already have a Beacon
+# account" path in invite_member above):
+#
+#   1. Owner POSTs /api/projects/{pid}/invitations with email + role.
+#      Server issues a random token, stores SHA256 hash, returns the
+#      plaintext + the share URL (/join/<token>) ONCE.
+#   2. Invitee opens /join/<token>. The landing page calls
+#      GET /api/invitations/{token} (no auth) to preview project name /
+#      role / inviter, then prompts Google login.
+#   3. After login the landing page calls POST /api/invitations/{token}/accept
+#      with the invitee's display name. Server atomically consumes the
+#      invitation and adds them to members[].
+#
+# All writes go through `apply_operation` so the Firestore vs DynamoDB
+# split is invisible to this layer.
+
+class InvitationCreate(BaseModel):
+    email: str
+    role: str = "viewer"  # viewer | editor
+    expiry_days: int = invitations_mod.DEFAULT_EXPIRY_DAYS
+
+
+class InvitationAccept(BaseModel):
+    display_name: str = ""  # ms-78 e-1807: required-but-allow-server-default
+
+
+def _invite_url(token: str) -> str:
+    """Build the public landing URL for a token. Honours BEACON_PUBLIC_BASE_URL
+    so local dev / staging / prod all produce a clickable link."""
+    base = os.environ.get(
+        "BEACON_PUBLIC_BASE_URL", "https://beacon-ai.dev"
+    ).rstrip("/")
+    return f"{base}/join/{token}"
+
+
+@app.post("/api/projects/{project_id}/invitations")
+def create_invitation(project_id: str, body: InvitationCreate,
+                      user: dict = Depends(require_auth)):
+    """Owner issues a fresh invite token. Returns the plaintext token + URL ONCE.
+
+    The plaintext is *never* returned again — if the inviter loses it they
+    must cancel + re-issue. The DB only ever sees the SHA256 hash.
+    """
+    issued: dict = {}
+
+    def op(data: dict):
+        if _auth_enabled and data.get("owner") != user.get("sub"):
+            raise HTTPException(
+                status_code=403,
+                detail="Only project owner can issue invitations",
+            )
+        try:
+            invitation, token = invitations_mod.invitation_create(
+                data,
+                email=body.email,
+                role=body.role,
+                invited_by_user_id=user.get("sub", ""),
+                invited_by_email=user.get("email", ""),
+                expiry_days=body.expiry_days,
+                project_id=project_id,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        # Stash for outside the txn — the closure may be retried, only the
+        # last successful run's values matter.
+        issued["invitation"] = invitation
+        issued["token"] = token
+        return data, None
+
+    operations.apply_operation(
+        project_id, op,
+        op_name="invitation.create", actor=user.get("sub", ""),
+    )
+    invitation = issued.get("invitation") or {}
+    token = issued.get("token") or ""
+    return {
+        "invitation": invitations_mod.invitation_public_view(invitation),
+        "token": token,                        # plaintext, returned ONCE
+        "url": _invite_url(token),
+        "expires_at": invitation.get("expires_at", ""),
+        "note": (
+            "Beacon project member への招待です。GitHub repo collaborator は別途 "
+            "GitHub 側で `gh repo edit --add-collaborator <user>` 等で設定してください。"
+        ),
+    }
+
+
+@app.get("/api/projects/{project_id}/invitations")
+def list_invitations(project_id: str, user: dict = Depends(require_auth)):
+    """List active (= unexpired) invitations for a project. Owner-only."""
+    data = _load(project_id, user)
+    if _auth_enabled and data.get("owner") != user.get("sub"):
+        raise HTTPException(
+            status_code=403,
+            detail="Only project owner can view invitations",
+        )
+    return {
+        "invitations": [
+            invitations_mod.invitation_public_view(inv)
+            for inv in invitations_mod.invitations_list(data)
+            if not invitations_mod._is_expired(inv.get("expires_at", ""))
+        ],
+    }
+
+
+@app.delete("/api/projects/{project_id}/invitations/{invitation_id}")
+def cancel_invitation(project_id: str, invitation_id: str,
+                      user: dict = Depends(require_auth)):
+    """Cancel an outstanding invitation. Owner-only.
+
+    After cancel, the token becomes invalid — even if the invitee still has
+    the URL, /accept will return 404.
+    """
+    def op(data: dict):
+        if _auth_enabled and data.get("owner") != user.get("sub"):
+            raise HTTPException(
+                status_code=403,
+                detail="Only project owner can cancel invitations",
+            )
+        try:
+            removed = invitations_mod.invitation_cancel(data, invitation_id)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        return data, {
+            "status": "cancelled",
+            "invitation": invitations_mod.invitation_public_view(removed),
+        }
+
+    return operations.apply_operation(
+        project_id, op,
+        op_name="invitation.cancel", actor=user.get("sub", ""),
+    )
+
+
+def _resolve_invitation_project(token: str) -> tuple[str, dict, dict]:
+    """Resolve (project_id, project_data, invitation_dict) from a plaintext token.
+
+    Tokens carry the project_id as a prefix (= ``<pid>.<random>``) so we can
+    look up directly without scanning all projects. Raises 404 on miss.
+    """
+    pid = invitations_mod.parse_token_project_id(token)
+    if not pid:
+        raise HTTPException(
+            status_code=404,
+            detail="Invitation token has no project context. Ask the inviter for a fresh link.",
+        )
+    data = db.get_project(pid)
+    if not data:
+        raise HTTPException(
+            status_code=404,
+            detail="Invitation not found or expired. Ask the inviter for a fresh link.",
+        )
+    inv = invitations_mod.invitation_find_by_token(data, token)
+    if not inv:
+        raise HTTPException(
+            status_code=404,
+            detail="Invitation not found or expired. Ask the inviter for a fresh link.",
+        )
+    return pid, data, inv
+
+
+@app.get("/api/invitations/{token}")
+def preview_invitation(token: str):
+    """Preview an invitation by plaintext token. Public endpoint — no auth.
+
+    Returns project name / role / inviter so the landing page can render
+    "X invited you to Project Y as Z" before the invitee logs in. Does NOT
+    return any secrets and does NOT consume the invitation.
+
+    404 if the token does not match any live invitation (= unknown / expired /
+    cancelled / already accepted).
+    """
+    pid, data, inv = _resolve_invitation_project(token)
+    owner_id = data.get("owner") or ""
+    owner_email = ""
+    if owner_id:
+        owner_data = db.get_user(owner_id)
+        if owner_data:
+            owner_email = owner_data.get("email", "")
+    return {
+        "project_id": pid,
+        "project_name": data.get("name", ""),
+        "role": inv.get("role", ""),
+        "invited_email": inv.get("email", ""),
+        "inviter_email": inv.get("invited_by_email", "") or owner_email,
+        "expires_at": inv.get("expires_at", ""),
+        "owner_email": owner_email,
+    }
+
+
+@app.post("/api/invitations/{token}/accept")
+def accept_invitation(token: str, body: InvitationAccept,
+                      user: dict = Depends(require_auth)):
+    """Consume an invite token and add the caller to the project's members.
+
+    Authenticated — the caller must already be signed in (= Google login on
+    the landing page). The invitee email must match the email the invitation
+    was issued to (= prevents passing the URL to a third party).
+
+    `display_name` is recorded on the user record (= ms-78 e-1807, the
+    UC11-F5 "no more raw emails in author columns" goal).
+
+    Idempotent on success in the trivial sense: invitation is consumed and
+    the member row is added. A second call returns 404 because the token
+    no longer exists.
+    """
+    target_pid = invitations_mod.parse_token_project_id(token)
+    if not target_pid:
+        raise HTTPException(
+            status_code=404,
+            detail="Invitation token has no project context. Ask the inviter for a fresh link.",
+        )
+    caller_id = user.get("sub", "")
+    caller_email = (user.get("email") or "").lower()
+    display_name = (body.display_name or "").strip()
+
+    accepted: dict = {}
+
+    def op(data: dict):
+        try:
+            inv = invitations_mod.invitation_consume(data, token)
+        except ValueError as e:
+            # Race against another consume / cancel attempt
+            raise HTTPException(status_code=404, detail=str(e))
+        # Email match check — server enforces, role cannot be re-targeted
+        invitee_email = (inv.get("email") or "").lower()
+        if caller_email and invitee_email and caller_email != invitee_email:
+            # Re-insert the invitation so the legitimate invitee can still use it
+            data.setdefault("invitations", []).append(inv)
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"This invitation was issued to {invitee_email}, but you "
+                    f"are signed in as {caller_email}. Sign in with the "
+                    "invited account and try again."
+                ),
+            )
+        # Add to project members (= server-side schema, user_id key)
+        members = data.setdefault("members", [])
+        if not isinstance(members, list):
+            members = []
+            data["members"] = members
+        if data.get("owner") == caller_id:
+            # Owner accepting their own invite (= edge case, no-op for membership)
+            pass
+        elif not any(m.get("user_id") == caller_id for m in members
+                     if isinstance(m, dict)):
+            members.append({
+                "user_id": caller_id,
+                "email": caller_email,
+                "role": inv.get("role", "viewer"),
+                "joined_at": invitations_mod._now_iso(),
+                "invited_by": inv.get("invited_by", ""),
+            })
+        accepted["invitation"] = inv
+        return data, None
+
+    operations.apply_operation(
+        target_pid, op,
+        op_name="invitation.accept", actor=caller_id,
+    )
+
+    # Persist display_name on the user record (= UC11-F5 / e-1807).
+    # Best-effort — failure here should not block project membership.
+    if display_name:
+        try:
+            db.update_user(caller_id, {"display_name": display_name})
+        except Exception:
+            pass
+
+    inv = accepted.get("invitation") or {}
+    return {
+        "status": "accepted",
+        "project_id": target_pid,
+        "role": inv.get("role", ""),
+        "display_name": display_name,
+        "next_step_url": f"/?project={target_pid}",
+        "note": (
+            "Beacon project に追加されました。GitHub repo の collaborator は "
+            "別途 GitHub 側で設定が必要です (招待主に依頼してください)。"
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Admin
 # ---------------------------------------------------------------------------
 
@@ -4549,5 +4838,12 @@ if _static_dir.exists():
     @app.get("/cli-auth")
     def serve_cli_auth():
         return FileResponse(_static_dir / "cli-auth.html", headers=_GIS_HEADERS)
+
+    # ms-78 e-1804 — /join/<token> public landing for invitations.
+    # The token is parsed client-side from window.location.pathname; we just
+    # serve the same join.html for any /join/* path so deep-links work.
+    @app.get("/join/{token}")
+    def serve_join_landing(token: str):
+        return FileResponse(_static_dir / "join.html", headers=_GIS_HEADERS)
 
     app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
