@@ -683,10 +683,10 @@ def cmd_cloud_join():
         json.dump({"project_id": project_id, "api_url": api_url}, f, indent=2, ensure_ascii=False)
         f.write("\n")
 
-    mode_config_path = os.path.join(beacon_dir, "config.json")
-    with open(mode_config_path, "w", encoding="utf-8") as f:
-        json.dump({"mode": "cloud"}, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    # e-1861 (ms-61): No longer write `{"mode": "cloud"}` to config.json —
+    # cloud.json existence is the sole source of truth. The previous dual
+    # write created a silent-drift attack surface (= sub-agent overwriting
+    # config.json could flip cloud → local without touching cloud.json).
 
     # Write project.json directly (LocalStore.save_project requires the file to exist)
     pf = get_project_file()
@@ -6102,16 +6102,28 @@ def _doc_slug(title):
 
 
 def _is_cloud_mode():
-    """Check if we're in cloud mode (has cloud.json + config mode=cloud)."""
-    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
-    config_path = os.path.join(beacon_dir, "config.json")
+    """Check if we're in cloud mode (single source of truth: cloud.json existence).
+
+    e-1861 (ms-61): The legacy ``config.json["mode"] == "cloud"`` dual-source
+    check was removed because it created a silent drift window: a sub-agent
+    could overwrite ``.beacon/config.json`` to ``{"mode": "local"}`` and the
+    CLI would suddenly read the stale local ``project.json`` instead of cloud,
+    causing apparent user data loss (2026-06-15 incident).
+
+    Beacon is always invoked from Claude Code, which requires internet, so
+    "local mode" has no production use case. ``.beacon/cloud.json`` existence
+    is now the single, structurally protected source of truth. ``BEACON_CLOUD=1``
+    still forces cloud for test harnesses that mock ``cloud.json`` indirectly.
+
+    Any ``mode`` field still sitting in legacy ``config.json`` is ignored
+    (graceful — we never error, we just stop reading it). ``beacon doctor``
+    surfaces the legacy field as a non-fatal migration warning.
+    """
     if os.environ.get("BEACON_CLOUD") == "1":
         return True
-    if os.path.exists(config_path):
-        with open(config_path, "r", encoding="utf-8") as f:
-            config = json.load(f)
-        return config.get("mode") == "cloud"
-    return False
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    cloud_path = os.path.join(beacon_dir, "cloud.json")
+    return os.path.exists(cloud_path)
 
 
 def _resolve_content_input(content: str) -> str:
@@ -6200,7 +6212,8 @@ def _parse_frontmatter(text):
     return meta, body
 
 
-def _add_frontmatter(content, scope, milestone="", operation="", trek_id=""):
+def _add_frontmatter(content, scope, milestone="", operation="", trek_id="",
+                     drop_milestone=False, drop_operation=False):
     """Prepend frontmatter to content, or update existing scope/milestone/operation/trek_id.
 
     List values are written as inline YAML arrays (``key: ["a", "b"]``) so
@@ -6210,17 +6223,24 @@ def _add_frontmatter(content, scope, milestone="", operation="", trek_id=""):
 
     ``trek_id`` (ms-69 / e-1663) associates a doc with a cross-project trek;
     optional, defaults preserved on round-trip.
+
+    ``drop_milestone`` / ``drop_operation`` (e-1859) explicitly remove the
+    matching key from existing frontmatter. ``cmd_doc_update`` sets these
+    when the user switches a doc from milestone scope to operation scope
+    (or vice versa) so the rejected field doesn't linger and produce
+    two-headed (= both milestone and operation set) frontmatter that
+    silently misleads ``/beacon-operation-review`` discovery filters.
     """
     meta, body = _parse_frontmatter(content)
     meta["scope"] = scope
-    if milestone:
+    if drop_milestone:
+        meta.pop("milestone", None)
+    elif milestone:
         meta["milestone"] = milestone
-    elif "milestone" not in meta:
-        pass
-    if operation:
+    if drop_operation:
+        meta.pop("operation", None)
+    elif operation:
         meta["operation"] = operation
-    elif "operation" not in meta:
-        pass
     if trek_id:
         meta["trek_id"] = trek_id
     lines = ["---"]
@@ -6468,6 +6488,14 @@ def cmd_doc_update():
     milestone = os.environ.get("BEACON_MS", "")
     trek_id = os.environ.get("BEACON_TREK_ID", "")  # ms-69 / e-1663
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    # e-1859: the bin/beacon wrapper sets BEACON_{MS,OP}_SET=1 whenever the
+    # user typed --ms / --op (even with an empty value). This lets us treat
+    # `--ms ms-1` and "did not pass --ms" differently — without it, op-scoped
+    # docs silently keep their `operation:` frontmatter while gaining a
+    # `milestone:` field, producing two-headed scope rows that the
+    # /beacon-operation-review discovery filter can't reason about.
+    ms_explicit = os.environ.get("BEACON_MS_SET", "") == "1"
+    op_explicit = os.environ.get("BEACON_OP_SET", "") == "1"
 
     if not doc_id:
         print("Error: doc_id required")
@@ -6501,17 +6529,43 @@ def cmd_doc_update():
         title = existing.get("title", "")
     if not scope:
         scope = existing.get("scope", DEFAULT_SCOPE)
-    if not milestone:
-        milestone = existing.get("milestone", "")
-    if not operation:
-        operation = existing.get("operation", "")
+
+    # e-1859: scope (= milestone vs operation binding) is treated as mutually
+    # exclusive. The three input modes:
+    #   1. User passed --ms <id>  → switch to milestone scope; drop operation.
+    #   2. User passed --op <id>  → switch to operation scope; drop milestone.
+    #   3. User passed neither    → preserve whichever the doc already had.
+    # If a user passes BOTH --ms and --op in one call, that is a programmer
+    # error; we honor both literally (= same behavior as before this fix) and
+    # leave the duplicated frontmatter visible so the mistake is loud, not
+    # silent.
+    if ms_explicit and not op_explicit:
+        # Mode 1: user wants this doc on a milestone. Drop any prior op.
+        operation = ""
+    elif op_explicit and not ms_explicit:
+        # Mode 2: user wants this doc on an operation. Drop any prior ms.
+        milestone = ""
+    else:
+        # Mode 3 (neither flag) or both flags: preserve whatever wasn't passed.
+        if not milestone:
+            milestone = existing.get("milestone", "")
+        if not operation:
+            operation = existing.get("operation", "")
+
     if not trek_id:
         trek_id = existing.get("trek_id", "")
     if not content:
         content = existing.get("content", "")
 
-    # Rebuild with frontmatter
-    content = _add_frontmatter(content, scope, milestone, operation, trek_id)
+    # Rebuild with frontmatter. e-1859: _add_frontmatter is called with an
+    # explicit "scope wipe" pass so the field we are dropping (= operation
+    # under Mode 1, milestone under Mode 2) is removed from the existing
+    # frontmatter dict instead of being left behind alongside the new field.
+    content = _add_frontmatter(
+        content, scope, milestone, operation, trek_id,
+        drop_milestone=(op_explicit and not ms_explicit),
+        drop_operation=(ms_explicit and not op_explicit),
+    )
 
     if _is_cloud_mode():
         client.update_document(config["project_id"], doc_id, title, content)
@@ -6523,9 +6577,30 @@ def cmd_doc_update():
     import datetime
     data = load_project()
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    core.save_entry(data, ms_id=milestone, description=f"doc update: {title} ({scope})",
-                    source="auto", date=today, revision_id=doc_id,
-                    url=None, hash=None, progress=None)
+    # e-1859: mirror cmd_doc_add's scope-aware entry recording so an
+    # op-scoped doc update lands in op.entries (not the milestone log).
+    # core scope is project-wide and skips entry recording entirely.
+    if scope == "core":
+        pass
+    elif operation:
+        for op in data.get("operations", []):
+            if op.get("id") == operation:
+                eid = core.next_entry_id(data)
+                op.setdefault("entries", []).append({
+                    "id": eid,
+                    "type": "save",
+                    "description": f"doc update: {title} ({scope})",
+                    "status": "done",
+                    "created_at": today,
+                    "done_at": today,
+                    "meta": {"revision_id": doc_id, "source": "auto"},
+                })
+                break
+    else:
+        core.save_entry(data, ms_id=milestone,
+                        description=f"doc update: {title} ({scope})",
+                        source="auto", date=today, revision_id=doc_id,
+                        url=None, hash=None, progress=None)
     save_project(data)
 
     if json_mode:
@@ -7017,12 +7092,9 @@ def cmd_cloud_push():
                 except RuntimeError as e:
                     print(f"  retro error [{week}]: {e}")
 
-    # Auto-switch to cloud mode
-    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
-    config_path = os.path.join(beacon_dir, "config.json")
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump({"mode": "cloud"}, f, indent=2)
-        f.write("\n")
+    # e-1861 (ms-61): cloud.json existence already marks us as cloud-mode
+    # (written above during the push setup), so the legacy config.json
+    # ``{"mode": "cloud"}`` write was retired. Single source of truth = cloud.json.
     print("Switched to cloud mode.")
 
 
@@ -10229,32 +10301,40 @@ def cmd_doctor():
     # ------------------------------------------------------------------ #
     # 5. cloud.json present and valid (only when in a beacon project dir)
     # ------------------------------------------------------------------ #
+    # e-1861 (ms-61): cloud.json existence is the sole source of truth for
+    # cloud mode. config.json's ``mode`` field was retired because it could
+    # be silently overwritten by a sub-agent to flip cloud → local without
+    # touching cloud.json (2026-06-15 incident). doctor now:
+    #   (a) validates cloud.json shape directly when present, and
+    #   (b) surfaces any legacy ``mode`` field still in config.json as a
+    #       gentle migration warning (non-fatal, ignored by the runtime).
     cloud_json_path = os.path.join(".beacon", "cloud.json")
     config_json_path = os.path.join(".beacon", "config.json")
+    if os.path.exists(cloud_json_path):
+        try:
+            with open(cloud_json_path, "r", encoding="utf-8") as _f:
+                _cloud = json.load(_f)
+            if not _cloud.get("api_url"):
+                warnings.append(
+                    "WARN [cloud.json] api_url is not set in .beacon/cloud.json.\n"
+                    "       Run: beacon cloud push"
+                )
+        except Exception:
+            warnings.append(
+                "WARN [cloud.json] .beacon/cloud.json is unreadable.\n"
+                "       Run: beacon cloud push"
+            )
     if os.path.exists(config_json_path):
         try:
             with open(config_json_path, "r", encoding="utf-8") as _f:
                 _config = json.load(_f)
-            if _config.get("mode") == "cloud":
-                if not os.path.exists(cloud_json_path):
-                    warnings.append(
-                        "WARN [cloud.json] Project is in cloud mode but .beacon/cloud.json is missing.\n"
-                        "       Run: beacon cloud push"
-                    )
-                else:
-                    try:
-                        with open(cloud_json_path, "r", encoding="utf-8") as _f:
-                            _cloud = json.load(_f)
-                        if not _cloud.get("api_url"):
-                            warnings.append(
-                                "WARN [cloud.json] api_url is not set in .beacon/cloud.json.\n"
-                                "       Run: beacon cloud push"
-                            )
-                    except Exception:
-                        warnings.append(
-                            "WARN [cloud.json] .beacon/cloud.json is unreadable.\n"
-                            "       Run: beacon cloud push"
-                        )
+            if isinstance(_config, dict) and "mode" in _config:
+                warnings.append(
+                    "WARN [legacy-mode-field] .beacon/config.json still contains a `mode` field.\n"
+                    "       This field is ignored as of e-1861 (ms-61) — cloud.json existence\n"
+                    "       is now the sole source of truth. The field is harmless but can be\n"
+                    "       removed manually for cleanliness."
+                )
         except Exception:
             pass  # config.json unreadable — not a fatal error
 
@@ -10405,8 +10485,10 @@ def cmd_help_json():
         {"command": "beacon retro", "flags": [], "description": "Start weekly retrospective (interactive)"},
         {"command": "beacon trigger check", "flags": [], "description": "Check pending triggers (JSON array)"},
         {"command": "beacon cloud list", "flags": [], "description": "List cloud projects"},
-        {"command": "beacon cloud push", "flags": [], "description": "Push local project to cloud"},
-        {"command": "beacon cloud pull", "flags": [], "description": "Pull project from cloud"},
+        {"command": "beacon cloud upload-initial", "flags": ["--force"], "description": "Initial bootstrap upload to a new cloud project (e-1862); alias of legacy 'push'"},
+        {"command": "beacon cloud force-pull", "flags": [], "description": "Emergency overwrite local from cloud (e-1862); alias of legacy 'pull'"},
+        {"command": "beacon cloud push", "flags": ["--force"], "description": "Legacy alias for upload-initial (deprecated, kept for backward compat)"},
+        {"command": "beacon cloud pull", "flags": [], "description": "Legacy alias for force-pull (deprecated, kept for backward compat)"},
         {"command": "beacon cloud join <id>", "flags": [], "description": "Join an existing cloud project"},
         {"command": "beacon auth login", "flags": [], "description": "Sign in with Google"},
         {"command": "beacon auth logout", "flags": [], "description": "Remove cached credentials"},

@@ -228,6 +228,11 @@ ALLOW_MISSING_FROM_README: set[str] = {
     "cloud pull",
     "cloud push",
     "cloud status",
+    # e-1862: renamed aliases live in the Cloud Mode section
+    # (alongside their legacy `push` / `pull` partners), not in the
+    # main `## CLI Commands` table.
+    "cloud upload-initial",
+    "cloud force-pull",
     "help",             # `beacon help` mirrors --help, not a "command"
     "update",           # documented in self-update section, not CLI table
     # ms-55 coordination signal CLIs — README rows are a follow-up; until
