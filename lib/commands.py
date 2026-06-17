@@ -4780,6 +4780,8 @@ def cmd_member_add():
         print(json.dumps(new_member, ensure_ascii=False))
     else:
         print(f"Added member {new_member['id']} ({new_member['role']})")
+        print("  note: this adds a Beacon project member. GitHub repo")
+        print("  collaborator access is separate — set via `gh repo edit --add-collaborator <user>`.")
 
 
 def cmd_member_list():

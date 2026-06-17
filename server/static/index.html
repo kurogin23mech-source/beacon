@@ -3824,6 +3824,9 @@ function _renderSettingsMembersTab() {
         <button class="primary" data-action="settings-invite-member">Invite</button>
       </div>
       <div id="settings-invite-msg" style="font-size:0.7rem;color:var(--text-dim);margin:4px 0 10px;"></div>
+      <div style="font-size:0.65rem;color:var(--text-dim);margin:0 0 10px;line-height:1.5;">
+        ※ ここで招待するのは Beacon プロジェクトのメンバー (= Web UI / CLI でこのプロジェクトを見られる人) です。GitHub repo の collaborator 招待は Beacon の責任範囲外で、GitHub 側で別途設定してください (例: <code style="font-family:var(--font-mono);font-size:0.65rem;">gh repo edit --add-collaborator &lt;user&gt;</code>)。
+      </div>
       ` : `
       <div style="font-size:0.7rem;color:var(--text-dim);margin-bottom:10px;">
         メンバー一覧は閲覧のみ可能です (= owner のみが招待 / 役割変更 / 削除を行えます)
