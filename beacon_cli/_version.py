@@ -5,4 +5,4 @@ update BOTH places (or run `scripts/release.py` which handles it). A future
 task will collapse them into one — see ms-44 e-695.
 """
 
-__version__ = "0.38.1"
+__version__ = "0.39.0"
