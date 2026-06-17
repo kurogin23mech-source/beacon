@@ -1099,6 +1099,44 @@ def list_pending_approvals(project_id: str, *,
     return rows
 
 
+def list_decided_approvals(project_id: str, *, limit: int = 50) -> list[dict]:
+    """List sidecar rows in approval_status in {"approved","denied"} (= ms-70 / e-1718).
+
+    DynamoDB mirror of :func:`firestore_client.list_decided_approvals`. Same
+    contract: pending / auto excluded, newest-first by ``decision_at``
+    (fallback ``created_at``), cap at ``limit``.
+
+    Single Query on the project_id PK with a FilterExpression matching
+    approved OR denied. No GSI provisioned — dev scale only, mirrors the
+    "no composite index" trade-off used by list_pending_approvals.
+    """
+    kwargs = {
+        "KeyConditionExpression": Key("project_id").eq(project_id),
+        "FilterExpression": (
+            Attr("approval_status").eq("approved")
+            | Attr("approval_status").eq("denied")
+        ),
+    }
+    items: list[dict] = []
+    fetch_cap = (limit * 2) if limit else 0
+    while True:
+        resp = _table("bus_event_approvals").query(**kwargs)
+        items.extend(resp.get("Items", []))
+        last = resp.get("LastEvaluatedKey")
+        if not last:
+            break
+        if fetch_cap and len(items) >= fetch_cap:
+            break
+        kwargs["ExclusiveStartKey"] = last
+    rows = [{k: v for k, v in it.items() if k != "project_id"} for it in items]
+    def _sort_key(r: dict) -> str:
+        return r.get("decision_at") or r.get("created_at") or ""
+    rows.sort(key=_sort_key, reverse=True)
+    if limit:
+        rows = rows[:limit]
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Sessions (e-1544 Phase 4)
 # ---------------------------------------------------------------------------

@@ -1227,6 +1227,63 @@ def list_pending_approvals(project_id: str, *,
     return rows
 
 
+def list_decided_approvals(project_id: str, *, limit: int = 50) -> list[dict]:
+    """List sidecar rows in approval_status in {"approved","denied"} (= ms-70 / e-1718).
+
+    Audit-trail read used by the Web UI's "DM 承認履歴" (DM approval history)
+    section. Returns rows newest-first (= ordered by ``decision_at`` DESC where
+    available, falling back to ``created_at`` for any malformed row), which
+    matches the human expectation of "show me the most recent decisions".
+
+    Pending rows are **deliberately excluded** — per SPEC 設計方針 3 the
+    terminal Claude Code is the only surface that decides approvals. The Web
+    UI is read-only audit; surfacing pending rows here would tempt a future
+    contributor to wire approve/deny buttons into the audit table, breaking
+    the "terminal-only decision" invariant.
+
+    ``auto`` rows are also excluded — they carry no human decision and would
+    drown out the interesting human-decided rows.
+
+    No GSI / composite index is required: Firestore enforces a single
+    equality + order_by pair without one, so we do **two** equality queries
+    (approved / denied) and merge in memory. This is fine at dev scale; if
+    decisions ever exceed a few hundred per project we can swap to an "in"
+    query with a composite index.
+    """
+    out: list[dict] = []
+    for status in ("approved", "denied"):
+        q = (
+            get_db()
+            .collection(COLLECTION)
+            .document(project_id)
+            .collection(BUS_EVENT_APPROVALS_SUBCOLLECTION)
+            .where("approval_status", "==", status)
+        )
+        # No order_by on decision_at — that field may be None for legacy rows
+        # and Firestore would skip them. Sort in memory after merge.
+        #
+        # We do NOT apply `.limit(limit)` per-status here. Doing so would
+        # truncate each status independently in created_at order, which is
+        # **not** the same as truncating the merged-and-sorted-by-decision_at
+        # result: e.g. if status=approved has 10 old rows and status=denied
+        # has 1 new row, a per-status limit=3 would surface evt-000..002
+        # plus the denied row, but the actually-newest 3 by decision_at are
+        # evt-007..009. So we fetch everything and truncate after the merge
+        # sort. At dev scale this is fine; if decisions grow large we should
+        # add a GSI on (project_id, decision_at) and switch to a server-side
+        # ORDER BY decision_at DESC LIMIT.
+        for doc in q.stream():
+            out.append({"event_id": doc.id, **(doc.to_dict() or {})})
+    # newest-first by decision_at (fall back to created_at). Rows missing
+    # both sort to the end so they don't displace real decisions.
+    def _sort_key(r: dict) -> str:
+        return r.get("decision_at") or r.get("created_at") or ""
+    out.sort(key=_sort_key, reverse=True)
+    if limit:
+        out = out[:limit]
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Session registry (subcollection: projects/{project_id}/sessions/{session_id})
 # ms-57 / e-1063: cloud-visible per-session state, used by Web UI for "who is

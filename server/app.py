@@ -3807,6 +3807,40 @@ def list_pending_dm_actions(
     )
 
 
+@app.get("/api/projects/{project_id}/dm/approval/history")
+def list_dm_approval_history(
+    project_id: str,
+    limit: int = 50,
+    user: dict = Depends(require_auth),
+):
+    """List **decided** bus_event_approvals rows for ``project_id`` (ms-70 / e-1718).
+
+    Audit-trail read used by the Web UI's "DM 承認履歴" (DM approval history)
+    section, which is read-only by design: SPEC 設計方針 3 keeps every
+    approve / deny decision inside the terminal Claude Code that received
+    the action, so the Web UI surfaces only the *aftermath* — who decided
+    what, when — never an approve / deny control.
+
+    Filters out ``pending`` rows specifically so a future contributor cannot
+    casually wire approve / deny buttons on top of this endpoint without
+    noticing they would break the terminal-only invariant. ``auto`` rows
+    are also excluded — they carry no human decision and would drown out
+    the interesting human-decided rows in the audit view.
+
+    Membership-gated like the symmetric ``/dm/pending`` endpoint (e-1714):
+    project members can read; non-members cannot. ``decision_by`` is
+    returned as the raw user_id stamped by the server at decision time;
+    rendering "(you)" suffixes etc. is a presentation concern handled in
+    the Web UI.
+    """
+    _load(project_id, user)
+    # Defensive cap. Frontend default is 50; allowing a few hundred is fine
+    # for human audit scroll, but unbounded would let a curious client slurp
+    # every decision in the project.
+    capped = max(1, min(int(limit or 50), 500))
+    return db.list_decided_approvals(project_id, limit=capped)
+
+
 # ms-70 / e-1716: receiver-side decision endpoint.
 #
 # SPEC 設計方針 3 ("承認は terminal Claude Code 内での user 直接判断のみ") means
