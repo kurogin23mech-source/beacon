@@ -12889,6 +12889,154 @@ def cmd_dm_respond():
     print(f"  receiver:    {row.get('receiver_user_id', '')}")
 
 
+def cmd_dm_log():
+    """Audit-history CLI for decided DM-action sidecars (ms-70 / e-1923).
+
+    Usage shape (= what the user types in their terminal):
+      beacon dm log [<project_id>] [--limit N] [--json] [--project <id>]
+
+    This is the CLI mirror of the Web UI Settings > Audit table that
+    landed in e-1718 (commit 4c5052f). Both surfaces read the same
+    server endpoint ``GET /api/projects/{pid}/dm/approval/history`` and
+    show the same 6 fields (status / sender / receiver / decision_at /
+    decision_by / event_id) — the Web UI as a styled table, the CLI as
+    a fixed-column ASCII view sized for a terminal.
+
+    SPEC 設計方針 3 ("承認は terminal Claude Code 内での user 直接判断のみ"):
+    this view is read-only by design. The server filters out ``pending``
+    and ``auto`` rows so a future contributor cannot wire an
+    approve / deny button onto this output.
+
+    Args flow through env vars set by ``bin/beacon`` / ``dispatch.py``:
+      * ``BEACON_DM_LOG_PROJECT_ID`` = optional positional project_id
+        (= the cloud project to read history from; defaults to the
+        cwd's project)
+      * ``BEACON_DM_LOG_LIMIT`` = optional row limit (defaults to 50,
+        server caps at 500)
+      * ``BEACON_BUS_PROJECT_ID`` = ``--project <id>`` override (same
+        semantics as the bus / dm respond subcmds)
+      * ``BEACON_JSON`` = "1" emits the raw rows list as JSON instead
+        of the 6-column ASCII table
+
+    Exit codes:
+      * 0 — rows printed (zero rows is success, surfaces an empty-state
+        line so a tail of "no decisions yet" is distinguishable from a
+        broken pipe)
+      * 1 — server reported a structural error (membership 403, 404, etc.)
+      * 2 — bad CLI usage (currently unreachable: all flags have defaults)
+    """
+    # Positional project_id (if any) wins over the cwd default but loses
+    # to an explicit --project override (= same precedence as bus subcmds).
+    positional_pid = os.environ.get("BEACON_DM_LOG_PROJECT_ID", "").strip()
+    limit_raw = os.environ.get("BEACON_DM_LOG_LIMIT", "").strip()
+    try:
+        limit = int(limit_raw) if limit_raw else 50
+    except ValueError:
+        print(
+            f"Error: --limit must be an integer, got {limit_raw!r}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if limit <= 0:
+        limit = 50
+
+    client, config = _get_api_client()
+    project_id = _resolve_bus_project_id(config)
+    if not project_id and positional_pid:
+        project_id = positional_pid
+    elif positional_pid and not os.environ.get("BEACON_BUS_PROJECT_ID", "").strip():
+        # Positional arg supplied without --project override: positional wins
+        # over cwd default. (= matches the help-banner shape.)
+        project_id = positional_pid
+    if not project_id:
+        print(
+            "Error: no project_id resolved.\n"
+            "  Run from a beacon project cwd, pass `beacon dm log <project_id>`,\n"
+            "  or set --project <id>.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    try:
+        rows = client.list_dm_approval_history(project_id, limit=limit)
+    except Exception as e:
+        msg = str(e)
+        if "403" in msg:
+            print(
+                f"Error: not a member of project {project_id!r} "
+                "(audit history is membership-gated).\n"
+                f"  ({msg})",
+                file=sys.stderr,
+            )
+        elif "404" in msg:
+            print(
+                f"Error: project {project_id!r} not found "
+                "(check the project_id).\n"
+                f"  ({msg})",
+                file=sys.stderr,
+            )
+        else:
+            print(f"Error: {msg}", file=sys.stderr)
+        sys.exit(1)
+
+    if os.environ.get("BEACON_JSON", "") == "1":
+        print(json.dumps(rows or [], ensure_ascii=False))
+        return
+
+    if not rows:
+        # Match the Web UI's empty-state copy (renderDmApprovalHistoryRows)
+        # so the audit narrative reads the same across both surfaces.
+        print("承認履歴はまだありません (= 過去に approve / deny された DM action がない)。")
+        return
+
+    # 6-column ASCII table. Widths chosen for typical 100-col terminals:
+    # status is short (approved / denied), decision_at is fixed-ish ISO8601,
+    # the event_id / user_id columns get truncated with an ellipsis so a
+    # too-long Google-OAuth-style sub doesn't wreck the layout. Order
+    # matches the AC: event_id / sender / receiver / status / decision_at /
+    # decision_by.
+    def _trunc(s, n):
+        s = "" if s is None else str(s)
+        if len(s) <= n:
+            return s
+        # 3-char ellipsis fits inside the column width; using a single
+        # ASCII period × 3 keeps copy-paste safe (no multibyte width math).
+        return s[: max(0, n - 3)] + "..."
+
+    # Column widths (= total ~98 chars + 5 separator spaces = ~103). Tweak
+    # here, not in renderer logic, so a future column-width A/B test stays
+    # readable.
+    W_EVT, W_SEN, W_REC, W_STA, W_DEC_AT, W_DEC_BY = 18, 22, 22, 9, 20, 22
+    header = (
+        f"{'event_id':<{W_EVT}}  "
+        f"{'sender':<{W_SEN}}  "
+        f"{'receiver':<{W_REC}}  "
+        f"{'status':<{W_STA}}  "
+        f"{'decision_at':<{W_DEC_AT}}  "
+        f"{'decision_by':<{W_DEC_BY}}"
+    )
+    sep = "-" * len(header)
+    print(header)
+    print(sep)
+    for r in rows:
+        evt = _trunc(r.get("event_id", ""), W_EVT)
+        sen = _trunc(r.get("sender_user_id", ""), W_SEN)
+        rec = _trunc(r.get("receiver_user_id", ""), W_REC)
+        sta = _trunc(r.get("approval_status", ""), W_STA)
+        dat = _trunc(r.get("decision_at", ""), W_DEC_AT)
+        dby = _trunc(r.get("decision_by", ""), W_DEC_BY)
+        print(
+            f"{evt:<{W_EVT}}  "
+            f"{sen:<{W_SEN}}  "
+            f"{rec:<{W_REC}}  "
+            f"{sta:<{W_STA}}  "
+            f"{dat:<{W_DEC_AT}}  "
+            f"{dby:<{W_DEC_BY}}"
+        )
+    print(sep)
+    print(f"{len(rows)} row(s).")
+
+
 def _resolve_bus_project_id(config: dict) -> str:
     """Return the project_id the bus call should target.
 
@@ -14648,6 +14796,10 @@ if __name__ == "__main__":
         # ms-70 / e-1716: receiver-side decision primitive for pending DM
         # actions. Reached by `beacon dm respond approve|deny <event_id>`.
         "dm_respond": cmd_dm_respond,
+        # ms-70 / e-1923 (e-1718 AC 4): audit history view in the terminal.
+        # Mirror of the Web UI Settings > Audit table; reaches the same
+        # server endpoint and renders 6 columns of decided sidecar rows.
+        "dm_log": cmd_dm_log,
         # ms-55 e-1646: stop / resume signal CLI. Anyone can broadcast
         # (Andon cord principle, SPEC §2). The events ride on the
         # existing bus on channel `stop-signal`.

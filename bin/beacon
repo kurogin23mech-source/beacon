@@ -3642,16 +3642,72 @@ EOF
                     BEACON_JSON="$_dm_json" \
                     python3 "$COMMANDS_PY" dm_respond
                 ;;
+            # ms-70 / e-1923 (e-1718 AC 4): audit history viewer in the
+            # terminal. Same endpoint and rows as the Web UI's Settings >
+            # Audit table; 6 columns sized for typical terminal widths.
+            # Usage: `beacon dm log [<project_id>] [--limit N] [--json]
+            #                       [--project <id>]`
+            log)
+                _dm_log_project_positional=""
+                _dm_log_limit=""
+                _dm_log_json=""
+                _dm_log_project_override=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json)    _dm_log_json="1"; shift ;;
+                        --limit)   _dm_log_limit="${2:-}"; shift 2 ;;
+                        --project) _dm_log_project_override="${2:-}"; shift 2 ;;
+                        -h|--help)
+                            cat <<'EOF'
+Usage: beacon dm log [<project_id>] [--limit N] [--project <id>] [--json]
+
+Print the 6-column DM-approval audit log (event_id / sender / receiver /
+status / decision_at / decision_by) for decided rows only — pending and
+auto-allowed rows are excluded by design (SPEC 設計方針 3 keeps every
+decide in the terminal Claude Code, so this view is read-only).
+
+<project_id> (positional): override the cwd's project_id for one-off
+                           cross-project lookups; same semantics as
+                           --project but more terse.
+--limit N:      max rows (default 50, server caps at 500).
+--project <id>: cross-project override; wins over the positional form.
+--json:         emit the raw rows list as JSON (one array, no table).
+EOF
+                            shift; _dm_log_help="1" ;;
+                        *)
+                            if [[ -z "$_dm_log_project_positional" ]]; then
+                                _dm_log_project_positional="$1"
+                            fi
+                            shift ;;
+                    esac
+                done
+                if [[ -n "${_dm_log_help:-}" ]]; then
+                    :
+                else
+                    # --project wins; positional is fallback (= dispatch.py mirror).
+                    _dm_log_resolved_project="${_dm_log_project_override:-$_dm_log_project_positional}"
+                    BEACON_DM_LOG_PROJECT_ID="$_dm_log_project_positional" \
+                        BEACON_DM_LOG_LIMIT="$_dm_log_limit" \
+                        BEACON_BUS_PROJECT_ID="$_dm_log_resolved_project" \
+                        BEACON_JSON="$_dm_log_json" \
+                        python3 "$COMMANDS_PY" dm_log
+                fi
+                ;;
             *)
                 cat <<'EOF'
 Usage: beacon dm respond approve <event_id> [--project <id>] [--json]
        beacon dm respond deny    <event_id> [--project <id>] [--json]
+       beacon dm log    [<project_id>] [--limit N] [--project <id>] [--json]
 
 Decide a pending cross-user DM action envelope. Only the intended
 receiver (= the addressee on the sidecar) can press approve / deny;
 the server enforces this via the Bearer token's sub claim, so the
 CLI argument cannot forge a different actor (SPEC 設計方針 3:
 承認は terminal Claude Code 内での user 直接判断のみ).
+
+`dm log` is the read-only audit mirror of the Web UI's Settings >
+Audit table — same endpoint, same rows, 6 fixed columns for terminal
+scanning.
 
 --project: override the cwd's project_id for cross-project decisions
            (same semantics as `beacon bus --project <id>`).

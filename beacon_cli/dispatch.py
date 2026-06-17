@@ -1121,6 +1121,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_bus_budget_show.add_argument("--json", action="store_true")
     bus_budget_sub.add_parser("clear", add_help=False)
 
+    # ---- dm respond / dm log (ms-70 / e-1716, e-1923) ----
+    # Cross-user DM action decision (respond) + audit-trail viewer (log).
+    # Win mirror for the bash `dm)` dispatch case. Adding here closes
+    # the drift gap that the scripts/check-cli-help-drift.py guard
+    # flagged after e-1716 (= bin/beacon `dm` verb shipped without a
+    # Python sibling, so Windows pipx users hit `argparse invalid
+    # choice: 'dm'`).
+    p_dm = sub.add_parser("dm", help="DM approval ops (ms-70)", add_help=False)
+    p_dm.add_argument("--help", "-h", action="store_true", dest="show_help")
+    dm_sub = p_dm.add_subparsers(dest="dm_cmd", metavar="<subcmd>")
+
+    p_dm_respond = dm_sub.add_parser("respond", add_help=False)
+    # respond accepts approve|deny + event_id in either positional order;
+    # we capture them as raw positionals and let the handler sort it out
+    # (same pattern bin/beacon uses).
+    p_dm_respond.add_argument("respond_args", nargs="*", default=[])
+    p_dm_respond.add_argument("--project", dest="dm_project_id", default="")
+    p_dm_respond.add_argument("--json", action="store_true")
+
+    p_dm_log = dm_sub.add_parser("log", add_help=False)
+    p_dm_log.add_argument("project_id", nargs="?", default="")
+    p_dm_log.add_argument("--limit", default="")
+    p_dm_log.add_argument("--project", dest="dm_project_id", default="")
+    p_dm_log.add_argument("--json", action="store_true")
+
     # ---- auth login / logout / status (cloud OAuth) ----
     # `beacon auth login` opens a browser and signs in with Google so the
     # cloud project APIs (firestore / WS) become reachable. commands.py
@@ -3278,6 +3303,75 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
     return 2
 
 
+def _handle_dm(root: Path, args: argparse.Namespace) -> int:
+    """`beacon dm <respond|log>` (ms-70 / e-1716, e-1923).
+
+    Two subverbs:
+      * ``respond approve|deny <event_id>`` — receiver-side decision on
+        a pending DM-action sidecar. Reaches POST /api/projects/{pid}/
+        dm/approval/{event_id} via cmd_dm_respond. Order of approve|deny
+        and event_id is flexible (both positional shapes accepted).
+      * ``log [<project_id>] [--limit N]`` — audit-trail viewer in the
+        terminal. Mirror of the Web UI Settings > Audit table; reaches
+        GET /api/projects/{pid}/dm/approval/history.
+
+    SPEC 設計方針 3 ("承認は terminal Claude Code 内での user 直接判断のみ")
+    is enforced server-side: the CLI carries the human's Bearer token
+    and the server stamps decision_by from the token's sub claim — neither
+    `dm respond` argv nor `dm log` argv can spoof a different actor.
+    """
+    if args.show_help or getattr(args, "dm_cmd", None) is None:
+        print("Usage: beacon dm respond approve <event_id> [--project <id>] [--json]")
+        print("       beacon dm respond deny    <event_id> [--project <id>] [--json]")
+        print("       beacon dm log    [<project_id>] [--limit N] [--project <id>] [--json]")
+        print("")
+        print("Decide a pending cross-user DM action envelope (respond), or")
+        print("scroll the audit log of already-decided rows (log).")
+        print("")
+        print("respond: only the intended receiver can press approve / deny;")
+        print("         the server enforces this via the Bearer token.")
+        print("log:     read-only mirror of the Web UI Settings > Audit table.")
+        return 0 if args.show_help else 2
+
+    cmd = args.dm_cmd
+
+    if cmd == "respond":
+        # Parse the flexible positional pair: accept either
+        # `respond approve <evt>` or `respond <evt> approve`. Empty / bad
+        # input falls through to the handler's usage error.
+        decision = ""
+        event_id = ""
+        for tok in getattr(args, "respond_args", []) or []:
+            if tok in ("approve", "deny") and not decision:
+                decision = tok
+            elif not event_id:
+                event_id = tok
+        env: Dict[str, str] = {
+            "BEACON_DM_DECISION": decision,
+            "BEACON_DM_EVENT_ID": event_id,
+            "BEACON_BUS_PROJECT_ID": getattr(args, "dm_project_id", "") or "",
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        }
+        return _run_commands_py(root, "dm_respond", env)
+
+    if cmd == "log":
+        # `--project <id>` (override) wins over the positional project_id;
+        # both feed _resolve_bus_project_id in commands.py (matches the
+        # bash dispatch precedence).
+        positional_pid = getattr(args, "project_id", "") or ""
+        override_pid = getattr(args, "dm_project_id", "") or ""
+        env = {
+            "BEACON_DM_LOG_PROJECT_ID": positional_pid,
+            "BEACON_DM_LOG_LIMIT": getattr(args, "limit", "") or "",
+            "BEACON_BUS_PROJECT_ID": override_pid or positional_pid,
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        }
+        return _run_commands_py(root, "dm_log", env)
+
+    print(f"Unknown dm subcommand: {cmd}")
+    return 2
+
+
 # ---------------------------------------------------------------------------
 # Top-level entry — argv parse + dispatch
 # ---------------------------------------------------------------------------
@@ -3317,6 +3411,9 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "profile": _handle_profile,
     "channel": _handle_channel,
     "bus": _handle_bus,
+    # ms-70 / e-1716 + e-1923: cross-user DM approval primitives (Win mirror
+    # of bin/beacon's `dm)` case). `dm respond` + `dm log`.
+    "dm": _handle_dm,
     "monitor": _handle_monitor,
     # ms-55 coordination signals (e-1735) — Win parity for the 6 verbs
     # in the 走る / 止まる両輪 surface.
