@@ -4785,7 +4785,13 @@ def cmd_member_add():
 
 
 def cmd_member_list():
-    """List members of the project."""
+    """List members of the project.
+
+    ms-78 e-1807: prefer display_name (= the human-friendly label set during
+    invite accept) over the raw id / email when present. Local-mode members
+    use the id-based schema; cloud members use the user_id-based schema —
+    the display logic accepts both.
+    """
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     data = load_project()
     members = core.members_list(data)
@@ -4796,19 +4802,21 @@ def cmd_member_list():
         print("(no members — `beacon member add <id>` to add the first one)")
         return
     print(f"Members ({len(members)}):")
-    # Pretty-print: align role column for readability
-    width = max(len(m.get("id", "")) for m in members) + 2
+    # Pretty-print: align role column for readability. Use display_name (or
+    # name fallback) as the primary label; email goes in the parens.
+    def label(m):
+        return (m.get("display_name") or m.get("name") or
+                m.get("id") or m.get("user_id") or m.get("email") or "?")
+    width = max(len(str(label(m))) for m in members) + 2
     for m in members:
         role = m.get("role", "?")
-        name = m.get("name", "")
+        lbl = label(m)
         email = m.get("email", "")
         extras = []
-        if name and name != m.get("id"):
-            extras.append(name)
-        if email:
+        if email and email != lbl:
             extras.append(email)
         extras_str = f"  ({', '.join(extras)})" if extras else ""
-        print(f"  {m.get('id', '?'):<{width}} {role:<11}{extras_str}")
+        print(f"  {str(lbl):<{width}} {role:<11}{extras_str}")
 
 
 def cmd_member_remove():
@@ -4887,6 +4895,279 @@ def cmd_member_role():
         print(json.dumps(updated, ensure_ascii=False))
     else:
         print(f"Set {updated['id']} role to {updated['role']}")
+
+
+# ---------------------------------------------------------------------------
+# Member invitations (ms-78 e-1805) — token-based invite flow.
+# These thin commands call the server REST API (= no local-mode equivalent;
+# invitations always go through the cloud project doc). The Skill / CLI / Web
+# trinity stays symmetric: the same UC11 invitation can be issued, listed,
+# and cancelled from any of the three surfaces.
+# ---------------------------------------------------------------------------
+
+def _resolve_cloud_project_id() -> tuple[str, "object", "object"]:
+    """Resolve the active cloud project_id + an authenticated ApiClient.
+
+    Returns (project_id, client, creds). Raises SystemExit on failure with a
+    user-friendly message. Used by `member invite / invitation list / cancel /
+    join / whoami` to share one auth-resolve path.
+    """
+    from auth import load_credentials
+    creds = load_credentials()
+    if creds is None:
+        print("Not logged in. Run: beacon auth login", file=sys.stderr)
+        sys.exit(1)
+    api_url = _resolve_active_api_url()
+    from api_client import ApiClient
+    client = ApiClient(api_url, _extract_token(creds))
+    # Read cloud project_id from .beacon/cloud.json (= the same file
+    # `beacon cloud join` writes).
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    cloud_path = os.path.join(beacon_dir, "cloud.json")
+    if not os.path.exists(cloud_path):
+        print(
+            "No cloud project bound to this cwd.\n"
+            "Run `beacon cloud join <project-id>` or `beacon cloud setup` first.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    try:
+        with open(cloud_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        pid = cfg.get("project_id", "")
+    except Exception as e:
+        print(f"Error reading {cloud_path}: {e}", file=sys.stderr)
+        sys.exit(1)
+    if not pid:
+        print(f"cloud.json has no project_id", file=sys.stderr)
+        sys.exit(1)
+    return pid, client, creds
+
+
+def cmd_member_invite():
+    """Issue an invite URL for a Beacon project member (ms-78 e-1805)."""
+    email = (os.environ.get("BEACON_MEMBER_EMAIL", "") or "").strip()
+    role = (os.environ.get("BEACON_MEMBER_ROLE", "") or "viewer").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not email:
+        print("Error: email is required", file=sys.stderr)
+        print("Usage: beacon member invite <email> [--role viewer|editor]",
+              file=sys.stderr)
+        sys.exit(1)
+    pid, client, _ = _resolve_cloud_project_id()
+    try:
+        resp = client.post(
+            f"/api/projects/{pid}/invitations",
+            {"email": email, "role": role},
+        )
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    if json_mode:
+        print(json.dumps(resp, ensure_ascii=False))
+        return
+    url = resp.get("url", "")
+    exp = (resp.get("expires_at") or "")[:10]
+    print(f"Invite URL for {email} ({role}):")
+    print(f"  {url}")
+    print(f"  expires: {exp}")
+    print()
+    print("  Send this URL to the invitee. It can only be used once.")
+    print("  note: this adds a Beacon project member only. GitHub repo")
+    print("  collaborator access is separate — set via")
+    print("  `gh repo edit --add-collaborator <user>`.")
+
+
+def cmd_member_invitation_list():
+    """List pending invitations for the current cloud project (ms-78 e-1805)."""
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    pid, client, _ = _resolve_cloud_project_id()
+    try:
+        resp = client.get(f"/api/projects/{pid}/invitations")
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    items = resp.get("invitations", [])
+    if json_mode:
+        print(json.dumps(items, ensure_ascii=False, indent=2))
+        return
+    if not items:
+        print("(no pending invitations)")
+        return
+    print(f"Pending invitations ({len(items)}):")
+    for inv in items:
+        exp = (inv.get("expires_at") or "")[:10]
+        print(f"  {inv.get('id', '?'):<12} {inv.get('email', ''):<32} "
+              f"{inv.get('role', ''):<8} expires {exp}")
+
+
+def cmd_member_invitation_cancel():
+    """Cancel a pending invitation by id (ms-78 e-1805)."""
+    invitation_id = (os.environ.get("BEACON_INVITATION_ID", "") or "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not invitation_id:
+        print("Error: invitation id required", file=sys.stderr)
+        print("Usage: beacon member invitation cancel <id>", file=sys.stderr)
+        sys.exit(1)
+    pid, client, _ = _resolve_cloud_project_id()
+    try:
+        resp = client.delete(f"/api/projects/{pid}/invitations/{invitation_id}")
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    if json_mode:
+        print(json.dumps(resp, ensure_ascii=False))
+        return
+    inv = resp.get("invitation") or {}
+    print(f"Cancelled invitation {invitation_id} ({inv.get('email', '')}).")
+
+
+def cmd_member_join():
+    """Accept an invite token and bind this cwd to the joined project (ms-78 e-1805).
+
+    Server-side: consumes the invite + adds caller to project members[].
+    Client-side: writes .beacon/cloud.json + .beacon/project.json so subsequent
+    Beacon commands operate against the joined project.
+    """
+    token = (os.environ.get("BEACON_INVITE_TOKEN", "") or "").strip()
+    display_name = (os.environ.get("BEACON_DISPLAY_NAME", "") or "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not token:
+        print("Error: --token is required", file=sys.stderr)
+        print("Usage: beacon member join --token <token> [--display-name <name>]",
+              file=sys.stderr)
+        sys.exit(1)
+    from auth import load_credentials
+    creds = load_credentials()
+    if creds is None:
+        print("Not logged in. Run: beacon auth login first.", file=sys.stderr)
+        sys.exit(1)
+    api_url = _resolve_active_api_url()
+    from api_client import ApiClient
+    client = ApiClient(api_url, _extract_token(creds))
+    try:
+        resp = client.post(
+            f"/api/invitations/{token}/accept",
+            {"display_name": display_name},
+        )
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    pid = resp.get("project_id", "")
+    role = resp.get("role", "")
+    if not pid:
+        print(f"Server returned no project_id: {resp}", file=sys.stderr)
+        sys.exit(1)
+    # Bind this cwd to the joined project by writing cloud.json + project.json,
+    # mirroring `beacon cloud join`.
+    try:
+        data = client.get_project(pid)
+    except RuntimeError as e:
+        print(f"Joined project {pid}, but failed to fetch project doc: {e}",
+              file=sys.stderr)
+        sys.exit(1)
+    core.validate_project(data)
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    os.makedirs(beacon_dir, exist_ok=True)
+    cloud_config_path = os.path.join(beacon_dir, "cloud.json")
+    with open(cloud_config_path, "w", encoding="utf-8") as f:
+        json.dump({"project_id": pid, "api_url": api_url}, f,
+                  indent=2, ensure_ascii=False)
+        f.write("\n")
+    pf = get_project_file()
+    with open(pf, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    if json_mode:
+        print(json.dumps({
+            "status": "joined",
+            "project_id": pid,
+            "project_name": data.get("name", ""),
+            "role": role,
+            "display_name": display_name,
+        }, ensure_ascii=False))
+        return
+    print(f"Joined project {data.get('name', pid)} ({pid}) as {role}.")
+    if display_name:
+        print(f"  display name: {display_name}")
+    print()
+    print("Next steps:")
+    print("  - Run `beacon channel install` in your work directory so other")
+    print("    sessions can DM you.")
+    print("  - In Claude Code, invoke `/beacon-onboard` to load project context.")
+    print("  note: GitHub repo collaborator access is separate — ask the")
+    print("  inviter if you need write access to the repo.")
+
+
+def cmd_member_whoami():
+    """Show the calling user's identity + role on the current cloud project (e-1805)."""
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    from auth import load_credentials
+    creds = load_credentials()
+    if creds is None:
+        print("Not logged in. Run: beacon auth login", file=sys.stderr)
+        sys.exit(1)
+    api_url = _resolve_active_api_url()
+    from api_client import ApiClient
+    client = ApiClient(api_url, _extract_token(creds))
+    # Best-effort: look at .beacon/cloud.json to scope role lookup.
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    cloud_path = os.path.join(beacon_dir, "cloud.json")
+    pid = ""
+    if os.path.exists(cloud_path):
+        try:
+            with open(cloud_path, "r", encoding="utf-8") as f:
+                pid = (json.load(f) or {}).get("project_id", "")
+        except Exception:
+            pid = ""
+    email = ""
+    sub = ""
+    if isinstance(creds, dict):
+        # Token payload may not include email; rely on auth claims if present.
+        email = creds.get("email", "") or creds.get("user_email", "")
+        sub = creds.get("sub", "") or creds.get("user_id", "")
+    # Fallback: ask the server for the caller's projects + role list.
+    role = ""
+    project_name = ""
+    if pid:
+        try:
+            resp = client.get(f"/api/projects/{pid}/members")
+            owner_email = resp.get("owner_email", "")
+            if email and owner_email == email:
+                role = "owner"
+            else:
+                for m in resp.get("members", []) or []:
+                    if (m.get("email") or "") == email:
+                        role = m.get("role", "")
+                        break
+            # Also try to recover the project name for nicer display
+            try:
+                proj = client.get_project(pid)
+                project_name = proj.get("name", "")
+            except Exception:
+                pass
+        except RuntimeError:
+            pass
+    out = {
+        "email": email,
+        "user_id": sub,
+        "project_id": pid,
+        "project_name": project_name,
+        "role": role,
+    }
+    if json_mode:
+        print(json.dumps(out, ensure_ascii=False))
+        return
+    print(f"email:        {email or '(unknown — token has no email claim)'}")
+    if sub:
+        print(f"user_id:      {sub}")
+    if pid:
+        print(f"project_id:   {pid}")
+        if project_name:
+            print(f"project_name: {project_name}")
+        print(f"role:         {role or '(not a member)'}")
+    else:
+        print("(no cloud project bound to this cwd — run `beacon cloud join <id>`)")
 
 
 # ---------------------------------------------------------------------------
@@ -14420,6 +14701,12 @@ if __name__ == "__main__":
         "member_list": cmd_member_list,
         "member_remove": cmd_member_remove,
         "member_role": cmd_member_role,
+        # ms-78 e-1805: token-based invite flow + self-introspection.
+        "member_invite": cmd_member_invite,
+        "member_invitation_list": cmd_member_invitation_list,
+        "member_invitation_cancel": cmd_member_invitation_cancel,
+        "member_join": cmd_member_join,
+        "member_whoami": cmd_member_whoami,
         "trek_create": cmd_trek_create,
         "trek_list": cmd_trek_list,
         "trek_show": cmd_trek_show,

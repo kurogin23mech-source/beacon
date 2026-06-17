@@ -3924,7 +3924,15 @@ EOF
         esac
         ;;
     member)
-        ensure_project
+        # ms-78 e-1805: `member join` / `whoami` and the help banner can be
+        # invoked before any project is bound to this cwd — they're how a
+        # fresh user accepts an invite and inspects their state. All other
+        # member subcmds operate on the active project and require
+        # ensure_project.
+        case "${2:-}" in
+            join|whoami|"") : ;;
+            *) ensure_project ;;
+        esac
         case "${2:-}" in
             add)
                 shift 2
@@ -3986,12 +3994,104 @@ EOF
                 BEACON_MEMBER_ID="$mid" BEACON_MEMBER_ROLE="$mrole" \
                     python3 "$COMMANDS_PY" member_role
                 ;;
+            invite)
+                # ms-78 e-1805 — issue an invite URL for a Beacon project member.
+                shift 2
+                memail="" mrole="viewer" mjson=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --role) mrole="${2:-}"; shift 2 ;;
+                        --json) mjson="1"; shift ;;
+                        *)      [[ -z "$memail" ]] && memail="$1"; shift ;;
+                    esac
+                done
+                if [ -z "$memail" ]; then
+                    echo "Usage: beacon member invite <email> [--role viewer|editor] [--json]"
+                    exit 1
+                fi
+                BEACON_MEMBER_EMAIL="$memail" BEACON_MEMBER_ROLE="$mrole" \
+                    BEACON_JSON="$mjson" \
+                    python3 "$COMMANDS_PY" member_invite
+                ;;
+            invitation)
+                # ms-78 e-1805 — list / cancel pending invitations.
+                case "${3:-}" in
+                    list|ls)
+                        shift 3
+                        mjson=""
+                        while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                --json) mjson="1"; shift ;;
+                                *) shift ;;
+                            esac
+                        done
+                        BEACON_JSON="$mjson" python3 "$COMMANDS_PY" member_invitation_list
+                        ;;
+                    cancel)
+                        shift 3
+                        iid="${1:-}" mjson=""
+                        shift || true
+                        while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                --json) mjson="1"; shift ;;
+                                *) [[ -z "$iid" ]] && iid="$1"; shift ;;
+                            esac
+                        done
+                        if [ -z "$iid" ]; then
+                            echo "Usage: beacon member invitation cancel <id> [--json]"
+                            exit 1
+                        fi
+                        BEACON_INVITATION_ID="$iid" BEACON_JSON="$mjson" \
+                            python3 "$COMMANDS_PY" member_invitation_cancel
+                        ;;
+                    *)
+                        echo "Usage: beacon member invitation [list|cancel <id>]"
+                        ;;
+                esac
+                ;;
+            join)
+                # ms-78 e-1805 — accept an invite token and bind this cwd.
+                shift 2
+                itoken="" dname="" mjson=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --token)         itoken="${2:-}"; shift 2 ;;
+                        --display-name)  dname="${2:-}"; shift 2 ;;
+                        --json)          mjson="1"; shift ;;
+                        *) shift ;;
+                    esac
+                done
+                if [ -z "$itoken" ]; then
+                    echo "Usage: beacon member join --token <token> [--display-name <name>] [--json]"
+                    exit 1
+                fi
+                BEACON_INVITE_TOKEN="$itoken" BEACON_DISPLAY_NAME="$dname" \
+                    BEACON_JSON="$mjson" \
+                    python3 "$COMMANDS_PY" member_join
+                ;;
+            whoami)
+                # ms-78 e-1805 — show your identity + role on the current cloud project.
+                shift 2
+                mjson=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) mjson="1"; shift ;;
+                        *) shift ;;
+                    esac
+                done
+                BEACON_JSON="$mjson" python3 "$COMMANDS_PY" member_whoami
+                ;;
             *)
-                echo "Usage: beacon member [add|list|remove|role]"
+                echo "Usage: beacon member [add|list|remove|role|invite|invitation|join|whoami]"
                 echo "  add <id> [--name N] [--email E] [--role R]   Add a member to the project"
                 echo "  list [--json]                                  List members"
                 echo "  remove <id> --reason <text>                    Remove a member (audit reason required)"
                 echo "  role <id> <role>                               Change role (owner|maintainer|contributor|viewer)"
+                echo "  invite <email> [--role viewer|editor]          Issue a token-based invite URL (ms-78)"
+                echo "  invitation list                                 List pending invitations"
+                echo "  invitation cancel <id>                          Cancel a pending invitation"
+                echo "  join --token <token> [--display-name <name>]    Accept an invite and bind this cwd"
+                echo "  whoami                                          Show your identity + role here"
                 ;;
         esac
         ;;
