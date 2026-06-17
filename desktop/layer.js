@@ -175,32 +175,52 @@ const dataSource = {
   },
   // ms-70 e-1718 — DM approval history (Settings > Audit).
   // Tauri Rust binding (cloud_list_dm_approval_history) is not implemented
-  // yet; mirror the "Web-only" pattern used by Member admin below. The
-  // Settings > Audit tab will surface this thrown message in-slot as a
-  // dim "load failed" line — non-disruptive, matches Member tab UX. Once
-  // a Rust command lands, replace with the corresponding invoke() call.
+  // yet; mirror the "Web-only" pattern used by Member admin (= now wired
+  // below via cloud_* commands). Audit history Rust binding is tracked as
+  // a follow-up; throw stub keeps the SHARED region pure (= ms-46 e-728).
   loadDmApprovalHistory: async (_pid, _limit) => {
     throw new Error('DM approval history is Web-only in this build. Open the Web UI to view the audit trail.');
   },
-  // ms-72 e-1774 — Member admin (Settings > Projects & Members).
-  // Tauri Rust bindings for member CRUD are not implemented yet; this
-  // mirror keeps the SHARED region pure (= ms-46 e-728) and surfaces a
-  // single clear message to the user instead of silent breakage. Once the
-  // Rust commands land (= cloud_list_members / cloud_invite_member /
-  // cloud_change_member_role / cloud_remove_member), replace each branch
-  // with the corresponding invoke() call.
-  loadProjectMembers: async (_pid) => {
-    throw new Error('Member management is Web-only in this build. Open the Web UI to invite or change roles.');
-  },
-  inviteMember: async (_pid, _email, _role) => {
-    throw new Error('Member management is Web-only in this build. Open the Web UI to invite or change roles.');
-  },
-  changeMemberRole: async (_pid, _email, _role) => {
-    throw new Error('Member management is Web-only in this build. Open the Web UI to invite or change roles.');
-  },
-  removeMember: async (_pid, _email) => {
-    throw new Error('Member management is Web-only in this build. Open the Web UI to invite or change roles.');
-  },
+  // ms-72 e-1779 — Member admin + invitation flow wired to Rust commands.
+  // Was a "Web-only" throw stub before the Rust layer landed (= ms-72 prior).
+  // SHARED Settings > Members tab now reaches the real backend through these
+  // invoke() calls, restoring parity with the Web UI. JSON.parse mirrors the
+  // pattern used by loadDocuments / loadRetros (= Rust returns raw response
+  // text; the JS dataSource decodes).
+  loadProjectMembers: async (pid) => JSON.parse(
+    await invoke('cloud_list_members', { projectId: pid }),
+  ),
+  inviteMember: async (pid, email, role) => JSON.parse(
+    await invoke('cloud_invite_member', { projectId: pid, args: { email, role } }),
+  ),
+  changeMemberRole: async (pid, email, role) => JSON.parse(
+    await invoke('cloud_change_member_role', { projectId: pid, args: { email, role } }),
+  ),
+  removeMember: async (pid, email) => JSON.parse(
+    await invoke('cloud_remove_member', { projectId: pid, args: { email } }),
+  ),
+  // ms-78 e-1803 (= token-based invitation) — Tauri parity for the
+  // "Generate invite URL" flow. createInvitation returns { invitation, url,
+  // expires_at } where `url` includes the plaintext token (= shown to the
+  // owner once, never returned again by listInvitations).
+  createInvitation: async (pid, email, role) => JSON.parse(
+    await invoke('cloud_create_invitation', { projectId: pid, args: { email, role } }),
+  ),
+  listInvitations: async (pid) => JSON.parse(
+    await invoke('cloud_list_invitations', { projectId: pid }),
+  ),
+  cancelInvitation: async (pid, invitationId) => JSON.parse(
+    await invoke('cloud_cancel_invitation', { projectId: pid, args: { invitationId } }),
+  ),
+  // ms-78 e-1804 — Public landing endpoints. previewInvitation does NOT need
+  // an auth token (= Rust drops the Authorization header); acceptInvitation
+  // requires the caller to be signed in.
+  previewInvitation: async (token) => JSON.parse(
+    await invoke('cloud_preview_invitation', { args: { token } }),
+  ),
+  acceptInvitation: async (token, displayName) => JSON.parse(
+    await invoke('cloud_accept_invitation', { args: { token, displayName: displayName || '' } }),
+  ),
   // ms-72 e-1774 — Project archive / unarchive. Maps to existing Rust
   // commands (`cloud_archive_project` / `cloud_unarchive_project`) when
   // running cloud mode. Local Tauri mode is project-archive-free (= local
@@ -523,16 +543,15 @@ const PLATFORM = {
     ? `<button class="sort-toggle" data-action="archive-cloud-project" style="font-size:0.65rem;color:var(--text-dim);">Archive</button>`
     : '',
   footerStaggerClass: 'stagger-3',
-  // ms-72 e-1774 — Account-menu items for Tauri. Web layer has Admin + Sign
-  // out; Tauri has neither because (a) Admin is browser-only (`window.location`
-  // routes elsewhere in the Web build) and (b) sign-out goes through the CLI
-  // (`beacon auth logout`) in the Tauri build until the Rust binding lands.
-  // This intentional difference is captured in CORE doc K8AhPgjpDG3mEa4eVm37
-  // §Tauri-only differences.
+  // ms-72 e-1779 — Account-menu items: Admin + Sign out, matching Web.
+  // Was a CLI-hint stub while cloud_logout was unwired (= ms-72 e-1774). Now
+  // that the Rust binding lands, the Tauri build can clear credentials.json
+  // through the menu just like Web clears localStorage. Admin opens the Web
+  // admin page in an external browser (Tauri has no `/admin` route of its
+  // own) — handled in `case 'goto-admin'` below.
   accountMenuItemsHTML: () => `
-    <div class="account-menu-item" style="color:var(--text-dim);cursor:default;font-size:0.7rem;">
-      Use <code style="color:var(--accent);">beacon auth logout</code> from the terminal to sign out.
-    </div>
+    <button class="account-menu-item" data-action="goto-admin">Admin</button>
+    <button class="account-menu-item danger" data-action="logout">Sign out</button>
   `,
 };
 
@@ -586,12 +605,71 @@ async function handleAction(e) {
   if (action === 'toggle-entry' && e.target.closest('.entry-children')) return;
   e.stopPropagation();
 
-  // First try SHARED common-action dispatcher (ms-46 e-726).
-  // Returns true if handled — keeps platform handleAction focused on
-  // data-source-specific cases.
-  if (handleCommonAction(action, el)) return;
+  // ms-72 e-1779 — Tauri-specific account-menu intercepts BEFORE the SHARED
+  // dispatcher gets them. SHARED's `goto-admin` calls `gotoAdmin()` which
+  // does `window.location.assign('/admin')`; inside the Tauri webview that
+  // navigates AWAY from the app shell and breaks the session, so we open
+  // the Web admin URL in an external browser via the system shell instead.
+  // SHARED has no `logout` case at all (Web's `logout()` lives in SKIP), so
+  // we own the Tauri sign-out path here: clear credentials.json via
+  // cloud_logout and bounce back to the project selector. The case
+  // statements below mirror the names so scripts/check-frontend-drift.py
+  // sees handleAction "covers" both actions; the actual work is dispatched
+  // into the switch via TAURI_PLATFORM_INTERCEPTS so the SHARED dispatcher
+  // never sees them.
+  const TAURI_PLATFORM_INTERCEPTS = new Set(['goto-admin', 'logout']);
+  if (!TAURI_PLATFORM_INTERCEPTS.has(action)) {
+    // First try SHARED common-action dispatcher (ms-46 e-726).
+    // Returns true if handled — keeps platform handleAction focused on
+    // data-source-specific cases.
+    if (handleCommonAction(action, el)) return;
+  }
 
   switch (action) {
+    case 'goto-admin': {
+      try { if (typeof closeAccountMenu === 'function') closeAccountMenu(); } catch (_) {}
+      const apiUrl = await getApiUrl();
+      const url = `${apiUrl}/admin`;
+      try {
+        // Prefer tauri-plugin-shell so the link opens in the user's default
+        // browser. If the plugin isn't available (= older builds) fall back
+        // to clipboard + alert so the user can still reach the page.
+        if (window.__TAURI__?.shell?.open) {
+          await window.__TAURI__.shell.open(url);
+        } else {
+          await navigator.clipboard.writeText(url);
+          alert(`Admin URL copied to clipboard:\n${url}`);
+        }
+      } catch (err) {
+        alert(`Failed to open Admin URL (${url}): ${err}`);
+      }
+      break;
+    }
+    case 'logout': {
+      try { if (typeof closeAccountMenu === 'function') closeAccountMenu(); } catch (_) {}
+      try {
+        await invoke('cloud_logout');
+      } catch (err) {
+        alert(`Sign out failed: ${err}`);
+        break;
+      }
+      // Clear app shell state so the next render lands on the project selector
+      // instead of a stale dashboard. Mirrors Web's logout() which closes the
+      // WS and re-renders the login screen.
+      closeCloudWebSocket();
+      stopPolling();
+      stopWatcher();
+      cloudMode = false;
+      state.cloudProjectId = null;
+      state.project = null;
+      state.expanded.clear();
+      lastProjectJson = null;
+      state.projectPath = null;
+      state.error = null;
+      renderProjectSelector();
+      break;
+    }
+
     // ---- Project selection (path-based for Tauri local) ----
     case 'select-project': await doSelectProject(el.dataset.path); break;
     case 'select-cloud-project': await doSelectCloudProject(el.dataset.projectId); break;
