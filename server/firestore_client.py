@@ -241,6 +241,13 @@ def list_documents(project_id: str) -> list[dict]:
         milestone = data.get("milestone") or _extract_frontmatter_field(
             data.get("content", ""), "milestone"
         )
+        # e-1859: operation field, same row-first / frontmatter-fallback
+        # pattern as milestone. Without this, op-scoped docs were invisible
+        # to `beacon doc list --op <op-id>` and to /beacon-operation-review
+        # Step 2 discovery (= "beacon doc list --scope spec --op X").
+        operation = data.get("operation") or _extract_frontmatter_field(
+            data.get("content", ""), "operation"
+        )
         entry = {
             "doc_id": doc.id,
             "title": data.get("title", ""),
@@ -249,6 +256,8 @@ def list_documents(project_id: str) -> list[dict]:
         }
         if milestone:
             entry["milestone"] = milestone
+        if operation:
+            entry["operation"] = operation
         result.append(entry)
     return result
 
@@ -301,6 +310,13 @@ def save_document(project_id: str, doc_id: str, title: str, content: str,
     # Existing docs without trek_id are unaffected (= migration 不要).
     trek_id = _extract_frontmatter_field(content, "trek_id")
 
+    # e-1859: operation field mirrors milestone — extract it from the body's
+    # frontmatter so the document row keeps an indexable column alongside
+    # the raw content. list_documents reads this back; without it, op-scoped
+    # docs only existed in the content blob and `--op <op-id>` filtering
+    # silently returned [].
+    operation = _extract_frontmatter_field(content, "operation")
+
     col = get_db().collection(COLLECTION).document(project_id).collection(DOCS_SUBCOLLECTION)
     data = {
         "title": title,
@@ -311,6 +327,8 @@ def save_document(project_id: str, doc_id: str, title: str, content: str,
     }
     if milestone:
         data["milestone"] = milestone
+    if operation:
+        data["operation"] = operation
     if trek_id:
         data["trek_id"] = trek_id
 

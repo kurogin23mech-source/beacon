@@ -1569,14 +1569,22 @@ cmd_doc() {
             local doc_trek=""
             local json_flag=""
             local doc_bus_origin=""
+            # e-1859: distinguish "flag absent" from "flag passed empty".
+            # Without this, --ms ms-1 on an op-scoped doc could not know
+            # whether the user explicitly wants to switch scope (= drop op)
+            # or accidentally keep both. The Python side treats the *_SET
+            # marker as "user explicitly set this; honor their value, even
+            # if empty (= clear the field)".
+            local doc_ms_set=""
+            local doc_op_set=""
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --content)    doc_content="${2:-}"; shift 2 ;;
                     --title)      doc_title="${2:-}"; shift 2 ;;
                     --scope|-s)   doc_scope="${2:-}"; shift 2 ;;
-                    --ms)         doc_ms="${2:-}"; shift 2 ;;
-                    --op)         doc_op="${2:-}"; shift 2 ;;
+                    --ms)         doc_ms="${2:-}"; doc_ms_set="1"; shift 2 ;;
+                    --op)         doc_op="${2:-}"; doc_op_set="1"; shift 2 ;;
                     --trek)       doc_trek="${2:-}"; shift 2 ;;
                     --json)       json_flag="1"; shift ;;
                     --bus-origin) doc_bus_origin="1"; shift ;;
@@ -1593,6 +1601,7 @@ cmd_doc() {
             BEACON_DOC_ID="$doc_id" BEACON_TITLE="$doc_title" \
                 BEACON_CONTENT="$doc_content" BEACON_SCOPE="$doc_scope" \
                 BEACON_MS="$doc_ms" BEACON_OP="$doc_op" \
+                BEACON_MS_SET="$doc_ms_set" BEACON_OP_SET="$doc_op_set" \
                 BEACON_TREK_ID="$doc_trek" \
                 BEACON_JSON="$json_flag" \
                 BEACON_BUS_ORIGIN="$doc_bus_origin" \

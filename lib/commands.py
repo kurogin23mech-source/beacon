@@ -6200,7 +6200,8 @@ def _parse_frontmatter(text):
     return meta, body
 
 
-def _add_frontmatter(content, scope, milestone="", operation="", trek_id=""):
+def _add_frontmatter(content, scope, milestone="", operation="", trek_id="",
+                     drop_milestone=False, drop_operation=False):
     """Prepend frontmatter to content, or update existing scope/milestone/operation/trek_id.
 
     List values are written as inline YAML arrays (``key: ["a", "b"]``) so
@@ -6210,17 +6211,24 @@ def _add_frontmatter(content, scope, milestone="", operation="", trek_id=""):
 
     ``trek_id`` (ms-69 / e-1663) associates a doc with a cross-project trek;
     optional, defaults preserved on round-trip.
+
+    ``drop_milestone`` / ``drop_operation`` (e-1859) explicitly remove the
+    matching key from existing frontmatter. ``cmd_doc_update`` sets these
+    when the user switches a doc from milestone scope to operation scope
+    (or vice versa) so the rejected field doesn't linger and produce
+    two-headed (= both milestone and operation set) frontmatter that
+    silently misleads ``/beacon-operation-review`` discovery filters.
     """
     meta, body = _parse_frontmatter(content)
     meta["scope"] = scope
-    if milestone:
+    if drop_milestone:
+        meta.pop("milestone", None)
+    elif milestone:
         meta["milestone"] = milestone
-    elif "milestone" not in meta:
-        pass
-    if operation:
+    if drop_operation:
+        meta.pop("operation", None)
+    elif operation:
         meta["operation"] = operation
-    elif "operation" not in meta:
-        pass
     if trek_id:
         meta["trek_id"] = trek_id
     lines = ["---"]
@@ -6468,6 +6476,14 @@ def cmd_doc_update():
     milestone = os.environ.get("BEACON_MS", "")
     trek_id = os.environ.get("BEACON_TREK_ID", "")  # ms-69 / e-1663
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    # e-1859: the bin/beacon wrapper sets BEACON_{MS,OP}_SET=1 whenever the
+    # user typed --ms / --op (even with an empty value). This lets us treat
+    # `--ms ms-1` and "did not pass --ms" differently — without it, op-scoped
+    # docs silently keep their `operation:` frontmatter while gaining a
+    # `milestone:` field, producing two-headed scope rows that the
+    # /beacon-operation-review discovery filter can't reason about.
+    ms_explicit = os.environ.get("BEACON_MS_SET", "") == "1"
+    op_explicit = os.environ.get("BEACON_OP_SET", "") == "1"
 
     if not doc_id:
         print("Error: doc_id required")
@@ -6501,17 +6517,43 @@ def cmd_doc_update():
         title = existing.get("title", "")
     if not scope:
         scope = existing.get("scope", DEFAULT_SCOPE)
-    if not milestone:
-        milestone = existing.get("milestone", "")
-    if not operation:
-        operation = existing.get("operation", "")
+
+    # e-1859: scope (= milestone vs operation binding) is treated as mutually
+    # exclusive. The three input modes:
+    #   1. User passed --ms <id>  → switch to milestone scope; drop operation.
+    #   2. User passed --op <id>  → switch to operation scope; drop milestone.
+    #   3. User passed neither    → preserve whichever the doc already had.
+    # If a user passes BOTH --ms and --op in one call, that is a programmer
+    # error; we honor both literally (= same behavior as before this fix) and
+    # leave the duplicated frontmatter visible so the mistake is loud, not
+    # silent.
+    if ms_explicit and not op_explicit:
+        # Mode 1: user wants this doc on a milestone. Drop any prior op.
+        operation = ""
+    elif op_explicit and not ms_explicit:
+        # Mode 2: user wants this doc on an operation. Drop any prior ms.
+        milestone = ""
+    else:
+        # Mode 3 (neither flag) or both flags: preserve whatever wasn't passed.
+        if not milestone:
+            milestone = existing.get("milestone", "")
+        if not operation:
+            operation = existing.get("operation", "")
+
     if not trek_id:
         trek_id = existing.get("trek_id", "")
     if not content:
         content = existing.get("content", "")
 
-    # Rebuild with frontmatter
-    content = _add_frontmatter(content, scope, milestone, operation, trek_id)
+    # Rebuild with frontmatter. e-1859: _add_frontmatter is called with an
+    # explicit "scope wipe" pass so the field we are dropping (= operation
+    # under Mode 1, milestone under Mode 2) is removed from the existing
+    # frontmatter dict instead of being left behind alongside the new field.
+    content = _add_frontmatter(
+        content, scope, milestone, operation, trek_id,
+        drop_milestone=(op_explicit and not ms_explicit),
+        drop_operation=(ms_explicit and not op_explicit),
+    )
 
     if _is_cloud_mode():
         client.update_document(config["project_id"], doc_id, title, content)
@@ -6523,9 +6565,30 @@ def cmd_doc_update():
     import datetime
     data = load_project()
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    core.save_entry(data, ms_id=milestone, description=f"doc update: {title} ({scope})",
-                    source="auto", date=today, revision_id=doc_id,
-                    url=None, hash=None, progress=None)
+    # e-1859: mirror cmd_doc_add's scope-aware entry recording so an
+    # op-scoped doc update lands in op.entries (not the milestone log).
+    # core scope is project-wide and skips entry recording entirely.
+    if scope == "core":
+        pass
+    elif operation:
+        for op in data.get("operations", []):
+            if op.get("id") == operation:
+                eid = core.next_entry_id(data)
+                op.setdefault("entries", []).append({
+                    "id": eid,
+                    "type": "save",
+                    "description": f"doc update: {title} ({scope})",
+                    "status": "done",
+                    "created_at": today,
+                    "done_at": today,
+                    "meta": {"revision_id": doc_id, "source": "auto"},
+                })
+                break
+    else:
+        core.save_entry(data, ms_id=milestone,
+                        description=f"doc update: {title} ({scope})",
+                        source="auto", date=today, revision_id=doc_id,
+                        url=None, hash=None, progress=None)
     save_project(data)
 
     if json_mode:
