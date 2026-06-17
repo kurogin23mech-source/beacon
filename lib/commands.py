@@ -6022,6 +6022,59 @@ def _cleanup_stale_triggers():
         except (json.JSONDecodeError, KeyError, ValueError, IOError):
             pass
 
+    # ms-80 e-1829: release-marker triggers accumulate forever otherwise (e.g.
+    # 28 markers from v0.8.0 〜 v0.38.1 observed in session-start). Keep only
+    # the *latest* tag's marker (= matches current `version_rules.get_current_tag`),
+    # delete older ones. The current marker is preserved for the "did I post
+    # to Discord?" reminder (= release-due / release-marker pair).
+    _cleanup_old_release_marker_triggers()
+
+
+def _cleanup_old_release_marker_triggers():
+    """Sweep release-marker triggers, keeping only the one matching the
+    current git tag. Older markers accumulate on every release fire and
+    have no signal value once a newer marker exists.
+
+    Silent failures: any git / version_rules / IO error -> no-op.
+    """
+    try:
+        import version_rules
+    except Exception:
+        return
+    triggers_dir = _get_triggers_dir()
+    if not os.path.isdir(triggers_dir):
+        return
+
+    project_dir = os.path.dirname(get_project_file())
+    repo_root = os.path.dirname(project_dir) or "."
+    try:
+        latest_tag = version_rules.get_current_tag(prefix="v", repo_path=repo_root)
+    except Exception:
+        return
+    if not latest_tag:
+        return
+    version_str = latest_tag[1:] if latest_tag.startswith("v") else latest_tag
+    keep_name = f"release-{version_str}"
+
+    for fname in os.listdir(triggers_dir):
+        if not fname.startswith("release-") or not fname.endswith(".json"):
+            continue
+        # Skip release-due (= not a release-marker, different trigger kind)
+        if fname == "release-due.json":
+            continue
+        # Keep the trigger for the current tag
+        if fname == f"{keep_name}.json":
+            continue
+        fpath = os.path.join(triggers_dir, fname)
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                trigger = json.load(f)
+            if trigger.get("kind") != "release-marker":
+                continue
+            os.remove(fpath)
+        except (json.JSONDecodeError, IOError, OSError, ValueError):
+            pass
+
 
 def _auto_fire_operation_triggers():
     import datetime
@@ -7413,15 +7466,70 @@ def cmd_pr_add():
         sys.exit(1)
     save_project(data)
 
+    # ms-80 e-1821: 同一 MS に並列で open PR が他にもあれば claim 競合の可能性
+    # を author に知らせる (= 警告のみ、block しない)。
+    conflicts = _detect_pr_claim_conflict(data, ms_id, eid)
+
     if json_mode:
-        print(json.dumps({"entry_id": eid, "url": url, "title": title, "intent": intent,
-                          "commits": len(commits)}, ensure_ascii=False))
+        out = {"entry_id": eid, "url": url, "title": title, "intent": intent,
+               "commits": len(commits)}
+        if conflicts:
+            out["claim_conflicts"] = conflicts
+        print(json.dumps(out, ensure_ascii=False))
     else:
         print(f"Added PR [{eid}]: {title or url}")
         if commits:
             print(f"  Commits: {len(commits)} linked")
         if intent:
             print(f"  Intent: {intent}")
+        if conflicts:
+            print(f"")
+            print(f"⚠ 同じ {ms_id} に並列で open な PR が {len(conflicts)} 件あります (= claim 競合の可能性):")
+            for c in conflicts[:5]:
+                author_str = f" by {c['author']}" if c.get("author") else ""
+                intent_str = f" — {c['intent'][:60]}" if c.get("intent") else ""
+                print(f"  [{c['eid']}] {c['title'] or c['url']}{author_str}{intent_str}")
+            if len(conflicts) > 5:
+                print(f"  (... and {len(conflicts) - 5} more)")
+            print(f"  推奨: `beacon claim` で作業範囲を調整、または各 PR の intent を見直して重複を解消してください。")
+
+
+def _detect_pr_claim_conflict(data: dict, ms_id: str, new_eid: str) -> list:
+    """Return open PR entries under ms_id that may conflict with the newly
+    added PR (= new_eid). Excludes the new entry itself.
+
+    A "conflict" here means another PR is also in_review against the same MS.
+    Author and reviewer should be aware to either coordinate via beacon claim
+    (= ms-55 claim primitives) or split the MS into smaller pieces. The detection
+    is structural (= same ms_id + status=in_review), not semantic — actual
+    overlap is judged by the humans.
+    """
+    if not ms_id:
+        return []
+    conflicts = []
+    for ms in data.get("milestones", []):
+        if ms.get("id") != ms_id:
+            continue
+        for e in ms.get("entries", []):
+            if e.get("type") != "pr":
+                continue
+            if e.get("id") == new_eid:
+                continue
+            if e.get("status") not in ("in_review", "open"):
+                continue
+            meta = e.get("meta") or {}
+            if meta.get("pr_status") not in ("in_review", "open", None):
+                continue
+            conflicts.append({
+                "eid": e.get("id"),
+                "title": e.get("description", ""),
+                "url": meta.get("url", ""),
+                "author": meta.get("author", ""),
+                "intent": meta.get("intent", ""),
+                "date": e.get("date", ""),
+            })
+        break
+    return conflicts
 
 
 def cmd_pr_show():
