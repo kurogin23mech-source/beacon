@@ -2,6 +2,44 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.39.0] - 2026-06-17
+
+- feat(ms-80): release-marker auto-clear + PR claim 競合検知 (e-1829 / e-1821)
+- feat(ms-80): reviewer 任命動線 + deploy backend 記録 (e-1819 / e-1831)
+- feat(ms-78): 招待 UI / CLI に GitHub repo collaborator は範疇外と明示 (e-1806)
+- feat(ms-80): PR review DM template + 取り込み戦略の構造防御 (e-1820 / e-1823)
+- Merge pull request #157 from kurogin23mech-source/ms-79-beacon-log-retro-retrospect-uc3-uc5
+- Merge pull request #156 from kurogin23mech-source/ms-77-onboarding-beacon-init-archaeology-ux
+- Merge pull request #155 from kurogin23mech-source/ms-61-cli-skill-forcing-function-drift
+- merge e-1862/work into ms-61 branch: cloud push/pull cleanup + resolve conflicts with e-1861 (= cloud off section unified, default picker open/status, alias rename)
+- merge e-1861/work into ms-61 branch: local mode removal
+- merge e-1859/work into ms-61 branch: doc op CLI fix
+- test(ms-79): retrospect fork/Trek/DM 取り込み検証 + source filter (e-1835 / e-1832 / e-1833)
+- feat(ms-79): retro / retrospect Skill markdown を ms-79 拡張に対応 (e-1837 / e-1832 / e-1833 / e-1834 / e-1835)
+- docs(ms-79): /beacon-log と /beacon-task の責務分界 CORE doc 参照誘導 (e-1818)
+- feat(ms-79): /beacon-log Step 4 で actor / source を表示 (e-1815 / e-1817)
+- fix(ms-79): /beacon-log honors fork.json target_ms_id (e-1816)
+- feat(ms-79): tag auto-op commits with meta.source (e-1817)
+- feat(ms-79): retro_prepare uses unified base + catch-up batch (e-1836 / e-1837)
+- feat(ms-79): wire cmd_search to retro_query for ms-79 extensions  (e-1832 / e-1833 / e-1834 / e-1835)
+- feat(ms-79): retro/retrospect unified query base (e-1836)
+- feat(ms-77): extend entry-writing-principle to AI responses (e-1801)
+- feat(ms-61): remove local mode, cloud.json is single source of truth (e-1861)
+- fix(ms-61): doc update --op flag + list --op filter + frontmatter preservation (e-1859)
+- chore(ms-61): align CLI help drift surfaces for cloud upload-initial / force-pull (e-1862 follow-up)
+- feat(ms-61): cloud subaction picker default to open/status only, push/pull → special-purpose with explicit aliases (e-1862)
+- Merge pull request #154 from kurogin23mech-source/ms-74/work
+- Merge pull request #153 from kurogin23mech-source/ms-73/work
+- Merge pull request #152 from kurogin23mech-source/ms-72/work
+- feat(ms-74): /beacon-cloud Skill — push/pull/off/open 4 subaction (e-1770)
+- feat(ms-73): dispatch.py Win parity for 11 session/bus/envelope verbs (e-1762/e-1763/e-1764)
+- feat(ms-72): SHARED purity 復旧 — dataSource に member 系 5 メソッド + PLATFORM.accountMenuItemsHTML (e-1772/e-1773/e-1774/e-1775)
+- feat(ms-74): /beacon-member Skill — invite/role/remove 二段確認 (e-1769)
+- feat(ms-74): /beacon-trek Skill — 8 subaction 統合 (e-1768)
+- feat(ms-74): /beacon-dm-respond Skill (e-1767)
+- docs(release): update README/CHANGELOG for v0.38.1
+- chore(release): bump formula to 0.38.1
+
 ## [v0.38.1] - 2026-06-14
 
 - Merge ms-55-amended: follow-up 6 件 (receive-side halt / rollback log / morning doc / dispatch.py mirror / cloud claims / CLI table)
