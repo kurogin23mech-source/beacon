@@ -515,6 +515,27 @@ class ApiClient:
             {"stage": stage, "recipient_session_id": recipient_session_id},
         )
 
+    # ms-70 / e-1716: receiver-side decision on a pending DM-action sidecar.
+    # The CLI carries the human's Bearer token; the server stamps decision_by
+    # from that token's sub claim — the CLI cannot spoof a different user.
+    def respond_dm_approval(self, project_id: str, event_id: str, *,
+                            decision: str) -> dict:
+        """POST a receiver-side approve / deny decision on a pending sidecar.
+
+        ``decision`` must be ``"approve"`` or ``"deny"``. Returns the resulting
+        7-field sidecar row. Server enforces:
+          * 400 — bad decision verb
+          * 403 — caller is not the addressed receiver
+          * 404 — no sidecar exists for this event_id (= legacy / auto / typo)
+          * 409 — already decided by someone else, or attempt to flip decision
+        Idempotent for "same caller resubmits same decision" (= no-op return).
+        """
+        return self.post(
+            f"/api/projects/{project_id}/dm/approval/"
+            f"{urllib.parse.quote(event_id)}",
+            {"decision": decision},
+        )
+
     # ms-54 / e-1369 Layer 4: AI-authored intent. Set via `beacon session
     # focus "<text>"` / `beacon session attention --set true`. Read by the
     # /beacon-dm-send picker so a sender sees "what is each session doing".

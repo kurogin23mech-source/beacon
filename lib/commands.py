@@ -12507,6 +12507,107 @@ def cmd_bus_status():
     print(_row("✓" if opened_at else "✗", "opened", opened_at, opened_by))
 
 
+def cmd_dm_respond():
+    """Receiver-side decision CLI for a pending DM-action envelope (e-1716).
+
+    Usage shape (= what the user types in their terminal):
+      beacon dm respond approve <event_id>
+      beacon dm respond deny    <event_id>
+
+    SPEC 設計方針 3 ("承認は terminal Claude Code 内での user 直接判断のみ"):
+    this primitive is reached by a human typing the command, never by an
+    autonomous AI loop. The server stamps ``decision_by`` from the Bearer
+    token's ``sub`` claim — the CLI cannot forge a different actor.
+
+    Args flow through env vars set by ``bin/beacon`` dispatch:
+      * ``BEACON_DM_DECISION``  = "approve" | "deny"
+      * ``BEACON_DM_EVENT_ID``  = sidecar event_id (= parent bus_event id)
+      * ``BEACON_BUS_PROJECT_ID`` = optional --project override (same
+        semantics as bus subcmd)
+      * ``BEACON_JSON`` = "1" emits the resulting 7-field sidecar row as
+        JSON instead of a human summary
+
+    Exit codes:
+      * 0 — decision accepted (or idempotent no-op for "same user resubmits
+        same decision")
+      * 1 — server reported a structural error (404 unknown event_id, 403
+        not your envelope, 409 already-decided / auto)
+      * 2 — bad CLI usage (missing args)
+    """
+    decision = os.environ.get("BEACON_DM_DECISION", "").strip().lower()
+    event_id = os.environ.get("BEACON_DM_EVENT_ID", "").strip()
+
+    if decision not in ("approve", "deny"):
+        print(
+            "Usage: beacon dm respond approve <event_id>\n"
+            "       beacon dm respond deny    <event_id>\n"
+            "  Decide a pending cross-user DM action envelope. Only the\n"
+            "  intended receiver (= the addressee on the sidecar) can press\n"
+            "  approve/deny; the server enforces this via the Bearer token.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if not event_id:
+        print(
+            "Error: <event_id> required.\n"
+            "  Example: beacon dm respond approve evt-abc12345",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    client, config = _get_api_client()
+    project_id = _resolve_bus_project_id(config)  # respects --project override
+
+    try:
+        row = client.respond_dm_approval(
+            project_id, event_id, decision=decision
+        )
+    except Exception as e:
+        # api_client raises RuntimeError("API error <code>: <detail>") on
+        # HTTP errors. Surface a single human line — not a stacktrace —
+        # because the human is staring at this terminal.
+        msg = str(e)
+        if "404" in msg:
+            print(
+                f"Error: no pending approval for event_id={event_id!r} "
+                f"in project {project_id!r}.\n"
+                "  Either the envelope was already auto-allowed (legacy "
+                "path), the event_id is wrong, or the sidecar has not\n"
+                "  landed yet.",
+                file=sys.stderr,
+            )
+        elif "403" in msg:
+            print(
+                f"Error: event_id={event_id!r} is addressed to a different "
+                "user; only the intended receiver can decide it.\n"
+                f"  ({msg})",
+                file=sys.stderr,
+            )
+        elif "409" in msg:
+            print(
+                f"Error: event_id={event_id!r} is already in a terminal "
+                "state (approved / denied / auto).\n"
+                f"  ({msg})",
+                file=sys.stderr,
+            )
+        else:
+            print(f"Error: {msg}", file=sys.stderr)
+        sys.exit(1)
+
+    if os.environ.get("BEACON_JSON", "") == "1":
+        print(json.dumps(row, ensure_ascii=False))
+        return
+
+    # Human-readable summary. Verb + 7-field row in compact form.
+    verb_past = "approved" if decision == "approve" else "denied"
+    print(f"{verb_past}: event_id={row.get('event_id', event_id)}")
+    print(f"  status:      {row.get('approval_status', '')}")
+    print(f"  decision_by: {row.get('decision_by', '')}")
+    print(f"  decision_at: {row.get('decision_at', '')}")
+    print(f"  sender:      {row.get('sender_user_id', '')}")
+    print(f"  receiver:    {row.get('receiver_user_id', '')}")
+
+
 def _resolve_bus_project_id(config: dict) -> str:
     """Return the project_id the bus call should target.
 
@@ -14263,6 +14364,9 @@ if __name__ == "__main__":
         "bus_ack": cmd_bus_ack,
         "bus_status": cmd_bus_status,
         "bus_directory": cmd_bus_directory,
+        # ms-70 / e-1716: receiver-side decision primitive for pending DM
+        # actions. Reached by `beacon dm respond approve|deny <event_id>`.
+        "dm_respond": cmd_dm_respond,
         # ms-55 e-1646: stop / resume signal CLI. Anyone can broadcast
         # (Andon cord principle, SPEC §2). The events ride on the
         # existing bus on channel `stop-signal`.

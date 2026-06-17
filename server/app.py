@@ -3807,6 +3807,137 @@ def list_pending_dm_actions(
     )
 
 
+# ms-70 / e-1716: receiver-side decision endpoint.
+#
+# SPEC 設計方針 3 ("承認は terminal Claude Code 内での user 直接判断のみ") means
+# this endpoint is reached exclusively from `beacon dm respond` typed by the
+# human, never from an autonomous AI loop. The CLI carries the human's Bearer
+# token; the server pulls ``decision_by`` from that token's ``sub`` claim so
+# the CLI cannot spoof "I am someone else" by passing a different user_id.
+#
+# State machine pinned here (idempotency / safety rails):
+#   * sidecar missing (legacy / auto): refuse — there is nothing to decide.
+#   * sidecar pending: write the requested decision_status. Allowed.
+#   * sidecar already approved / denied with the same caller + same decision:
+#       no-op idempotent return (= same user retrying the same press).
+#   * sidecar already approved / denied with a different caller OR different
+#       decision: refuse (= the receiver-of-record already made their call;
+#       a second user or a flip cannot smuggle through this primitive).
+#   * sidecar receiver_user_id != caller's sub: refuse with 403 (= "not your
+#       envelope to decide" — important defense against a curious teammate
+#       clicking a colleague's pending row).
+class DMRespondBody(BaseModel):
+    decision: str  # "approve" | "deny"
+
+
+@app.post("/api/projects/{project_id}/dm/approval/{event_id}")
+def respond_dm_approval(
+    project_id: str,
+    event_id: str,
+    body: DMRespondBody,
+    user: dict = Depends(require_auth),
+):
+    """Receiver decides approve / deny on a pending DM-action sidecar (e-1716).
+
+    Returns the resulting 7-field sidecar row, same shape as
+    :func:`db.get_bus_event_approval`. The caller's identity (= server-side
+    ``user.sub``) is stamped as ``decision_by`` and the server clock is
+    stamped as ``decision_at``; both fields are server-authoritative — the
+    CLI has no way to pass them in.
+    """
+    _load(project_id, user)
+    # Normalize decision verb. "approve" / "deny" only — no auto / pending
+    # flip from this endpoint (auto is set by the dispatcher when blanket-
+    # allowing, pending is set when the gate first fires).
+    decision = (body.decision or "").strip().lower()
+    if decision not in ("approve", "deny"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"invalid decision {body.decision!r}; "
+                "expected 'approve' or 'deny'"
+            ),
+        )
+    target_status = "approved" if decision == "approve" else "denied"
+
+    # Caller's user_id from auth context. In dev (BEACON_API_AUTH=0) the
+    # require_auth dependency returns {'sub': 'dev', 'email': 'dev@local'},
+    # so decision_by = "dev" in that mode — consistent with how other
+    # actor-stamping endpoints (project.archive etc.) behave in dev.
+    caller_uid = user.get("sub") or ""
+
+    existing = db.get_bus_event_approval(project_id, event_id)
+    if existing is None:
+        # No sidecar = legacy/auto envelope. Nothing to decide.
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"no pending approval found for event_id={event_id!r} "
+                f"in project={project_id!r} (the envelope may be legacy / "
+                "auto-allowed, or the event_id is wrong)"
+            ),
+        )
+
+    receiver_uid = existing.get("receiver_user_id") or ""
+    sender_uid = existing.get("sender_user_id") or ""
+
+    # Receiver-of-record check. Only the addressee can decide.
+    if caller_uid and receiver_uid and caller_uid != receiver_uid:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"event_id={event_id!r} is addressed to a different user; "
+                "only the intended receiver can approve or deny"
+            ),
+        )
+
+    current_status = existing.get("approval_status") or ""
+
+    if current_status in ("approved", "denied"):
+        # Already decided. Idempotent only when SAME caller chose the SAME
+        # outcome — anything else is a structural error.
+        if (existing.get("decision_by") == caller_uid
+                and current_status == target_status):
+            # Same press, same user: no-op return.
+            return existing
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"event_id={event_id!r} already decided as "
+                f"{current_status!r} by {existing.get('decision_by')!r} "
+                f"at {existing.get('decision_at')!r}; cannot change to "
+                f"{target_status!r}"
+            ),
+        )
+
+    if current_status == "auto":
+        # Sidecar exists in auto-allowed state (= dispatcher blanket allow).
+        # No human decision required; refuse rather than overwriting.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"event_id={event_id!r} is in auto-allowed state and does "
+                "not require an explicit decision"
+            ),
+        )
+
+    # current_status == "pending" → write the decision. put_bus_event_approval
+    # preserves created_at and updates status/decision_by/decision_at.
+    now = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    row = db.put_bus_event_approval(
+        project_id,
+        event_id,
+        approval_status=target_status,
+        sender_user_id=sender_uid,
+        receiver_user_id=receiver_uid,
+        decision_by=caller_uid,
+        decision_at=now,
+    )
+    return row
+
+
 @app.get("/api/projects/{project_id}/bus")
 def list_bus_events(
     project_id: str,
