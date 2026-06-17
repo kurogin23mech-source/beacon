@@ -25,6 +25,7 @@ from starlette.responses import Response, JSONResponse
 
 import approved_actions as approved_actions_mod
 import core
+import dm_gate as dm_gate_mod  # ms-70 / e-1713: cross-user DM action authorization judge
 import envelope as envelope_mod
 import store_router as db  # e-1544: BEACON_STORE_BACKEND で firestore / dynamodb を切替
 import operations
@@ -3461,6 +3462,53 @@ def list_session_logs(
 # Bus events (ms-54 / e-996)
 # ---------------------------------------------------------------------------
 
+def _resolve_bus_event_user_ids(
+    project_id: str,
+    sender_session_id: str,
+    payload: dict | None,
+) -> tuple[str, str]:
+    """Resolve (sender_user_id, receiver_user_id) for a bus envelope.
+
+    Both ids are looked up from the project's session registry
+    (= projects/{project_id}/sessions/{session_id}.user_id, written by
+    upsert_session / mint_session paths). Missing rows return empty
+    string for that side; the caller (``dm_gate.should_gate_dm_action``)
+    treats empty-string sender / receiver as "unknown" and falls through
+    to the standard rule set (= same_user skip is impossible when sender
+    is blank, but the no_actions / shared_trek rules still apply).
+
+    Used only by the post_bus_event gate (ms-70 / e-1713). Kept off the
+    hot path of normal lookups — one ``list_sessions`` call per bus
+    write is acceptable at current dogfood traffic; a directory-style
+    point lookup can replace it if/when scale demands.
+    """
+    if not sender_session_id and not (isinstance(payload, dict) and payload.get("recipient_session_id")):
+        return ("", "")
+    recipient_sid = ""
+    if isinstance(payload, dict):
+        recipient_sid = str(payload.get("recipient_session_id") or "")
+    sender_uid = ""
+    receiver_uid = ""
+    try:
+        sessions = db.list_sessions(project_id)
+    except Exception:
+        # Backend unavailable / table missing in a fresh project: treat
+        # both ids as unknown. The gate's no_actions / shared_trek rules
+        # still cover the safe defaults.
+        return ("", "")
+    for s in sessions:
+        sid = s.get("session_id") or ""
+        if sender_session_id and sid == sender_session_id:
+            sender_uid = str(s.get("user_id") or "")
+        if recipient_sid and sid == recipient_sid:
+            receiver_uid = str(s.get("user_id") or "")
+        if (not sender_session_id or sender_uid) and (
+            not recipient_sid or receiver_uid
+        ):
+            break
+    return (sender_uid, receiver_uid)
+
+
 @app.post("/api/projects/{project_id}/bus")
 async def post_bus_event(
     project_id: str,
@@ -3560,6 +3608,43 @@ async def post_bus_event(
             },
         )
 
+    # ms-70 / e-1713: cross-user DM action authorization gate.
+    # Resolve sender / receiver user_ids from the project session registry,
+    # then ask the pure judge whether this envelope must be held for
+    # receiver-side human approval. The gate writes a pending sidecar row
+    # *and* downgrades effective_delivery to a non-auto-execute mode so
+    # the receiver daemon cannot self-act before the human decides.
+    sender_uid, receiver_uid = _resolve_bus_event_user_ids(
+        project_id=project_id,
+        sender_session_id=body.sender_session_id,
+        payload=body.payload,
+    )
+    env_actions = (body.envelope or {}).get("actions_authorized") or []
+    gate_lookup = dm_gate_mod.build_shared_trek_lookup_from_lists(
+        # Sender-side trek visibility is sufficient — Trek membership
+        # query is symmetric (creator OR members) on either backend.
+        lambda uid: db.list_treks(actor_id=uid) if uid else [],
+    )
+    should_gate, gate_reason = dm_gate_mod.should_gate_dm_action(
+        sender_user_id=sender_uid,
+        receiver_user_id=receiver_uid,
+        actions_authorized=env_actions,
+        shared_trek_lookup=gate_lookup,
+    )
+    audit_record["dm_gate"] = {
+        "should_gate": should_gate,
+        "reason": gate_reason,
+        "sender_user_id": sender_uid,
+        "receiver_user_id": receiver_uid,
+    }
+    if should_gate:
+        # Force a safe, non-auto-execute delivery so legacy receivers
+        # that ignore the sidecar still cannot fire actions. The
+        # canonical "needs human consent" mode is propose-to-ai
+        # (= surface in the AI context but do not auto-run).
+        effective_delivery = "propose-to-ai"
+        audit_record["effective_delivery"] = effective_delivery
+
     data = {
         "channel": body.channel,
         "sender_session_id": body.sender_session_id,
@@ -3579,6 +3664,31 @@ async def post_bus_event(
     event_id = db.append_bus_event(project_id, data)
     audit_record["event_id"] = event_id
     db.append_bus_audit(project_id, audit_record)
+
+    # Sidecar write must happen *after* append_bus_event so the parent
+    # event_id exists. Pending is the only status we record from this
+    # path; approved / denied land via the receiver's CLI/Skill, and
+    # auto-allow events deliberately leave no sidecar (= legacy read
+    # path interprets None as "auto").
+    if should_gate:
+        try:
+            db.put_bus_event_approval(
+                project_id,
+                event_id,
+                approval_status="pending",
+                sender_user_id=sender_uid or "",
+                receiver_user_id=receiver_uid or "",
+            )
+        except Exception as _exc:  # pragma: no cover - defensive
+            # Sidecar write failure must NOT break the dispatcher; the
+            # event is already in bus_events and the audit record
+            # captured the gate decision. Receivers reading the sidecar
+            # will see None == "auto" and an operator can re-stamp by
+            # hand if needed. Log and move on.
+            logging.getLogger(__name__).warning(
+                "put_bus_event_approval failed for event_id=%s: %s",
+                event_id, _exc,
+            )
 
     event = {"event_id": event_id, **data}
     # e-997: push to all WS subscribers of this project. Multi-replica delivery
