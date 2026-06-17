@@ -203,20 +203,31 @@ function buildSetupPrompt(vars) {
    - ※ 既に Web のこのページで参加済の場合は cloud setup に進む:
      \`beacon cloud join ${vars.project_id}\`
 
-4. 作業フォルダに移動して channel install (= 受信経路の設定)
+4. Claude Code Skills を install (= 必須、Beacon の対話 Skill 群を配布)
+   - \`beacon skill install\` を実行
+   - これで \`/beacon-onboard\` / \`/beacon-session-start\` 等の Skill が \`~/.claude/skills/\` に配置される
+   - 確認: 「Installed N skills」 のメッセージが出れば OK
+
+5. 作業フォルダに移動 + (任意) channel install (= 他セッションからの DM 受信、optional)
    - 既存の repo がある場合: その repo の root へ \`cd\`
    - repo が無い場合: 適当な作業ディレクトリを作って \`cd\`
-   - \`beacon channel install\` を実行 (= この cwd で他セッションからの DM を受信可能にする)
+   - (DM 受信動線が要る場合のみ) \`beacon channel install\` を実行
+   - 1 人開発・単一マシン・DM 不要なら本ステップは skip しても問題ありません
    - 失敗時の対処: \`beacon doctor\` で原因を表示、warning に従う
 
-5. 初回 onboarding を起動
-   - Claude Code 内で \`/beacon-onboard\` Skill を叩いてください
+6. **Claude Code (or bclaude) を一度終了して再起動**
+   - **重要**: step 4 の Skill install と step 5 の channel install は、現在動いている Claude Code セッション内では即時反映されません。 Claude Code を一度閉じて起動し直し、新しい Skills と MCP server config を読み込ませてください。
+   - 再起動後、cwd は step 5 で決めた作業フォルダ (= channel install を実行した同じディレクトリ) にしてください
+
+7. 初回 onboarding を起動
+   - 再起動後の Claude Code 内で \`/beacon-onboard\` Skill を叩いてください
    - これがプロジェクトの大目的 / 現在の流れ / あなたの role の責任範囲を提示します
 
 確認質問:
 - Q1: install 段階 (= 1) で失敗したら、エラーメッセージを貼ってください
 - Q2: auth (= 2) でブラウザが開かない時は、Linux か WSL ですか? その場合は表示される URL を手動で開いてください
 - Q3: join (= 3) で「token expired」 が出たら、招待主 (${vars.inviter_name}) に再送をお願いしてください
+- Q4: step 7 で \`/beacon-onboard\` が「Skill not found」 と返る場合、step 6 の Claude Code 再起動を実施したか確認してください
 
 完了したら「セットアップ完了」 と言ってください。次に /beacon-session-start でプロジェクト状況を確認します。`;
 }
