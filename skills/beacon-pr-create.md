@@ -191,7 +191,25 @@ beacon pr create -m ms-42 --intent "..." -- --title "..." --body-file /tmp/pr-bo
   - レビュアーを指定したい場合: gh pr edit <num> --add-reviewer <user>
   - レビューを依頼: /review はレビュアー側の Skill です（このPR作成者は使いません）
   - 1人開発で自己レビューする場合: /review <PR-num> で intent vs 実装の整合をチェックできます (e-611)
+  - merge 時は `gh pr merge --merge` を使う (= hash 保持、CORE doc 0KqFUbmJ7V0lmJZcW230 参照)
 ```
+
+## 取り込み戦略の構造防御 (= ms-80 e-1823)
+
+PR を merge する時は **`gh pr merge --merge`** で merge commit を作る (= linear branch + fast-forward 風)。
+
+| 動線 | 採否 | 理由 |
+|------|------|------|
+| `gh pr merge --merge` | ✓ 採用 | branch 上の commit hash が保持される、beacon entry が指す dead hash 発生せず |
+| `gh pr merge --rebase` | ✗ 禁止 | base に rebase で hash 再生成、過去 `beacon log` entry が dead hash になる |
+| `gh pr merge --squash` | ✗ 禁止 | 全 commit を 1 つに圧縮、commit 単位 1:1 trace が壊れる |
+
+GitHub UI 経路の構造防御 (= repo admin 操作、別 task) は Settings > General > Pull Requests で:
+- Allow merge commits: ✓ ON
+- Allow squash merging: ✗ OFF
+- Allow rebase merging: ✗ OFF
+
+詳細: CORE doc `0KqFUbmJ7V0lmJZcW230` (= PR の取り込み戦略: hash 保持と beacon entry 整合)。
 
 ## 1人開発時の挙動（e-611）
 

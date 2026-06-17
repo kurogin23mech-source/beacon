@@ -288,6 +288,81 @@ send mode のみ:
 
 reply mode では `--action` は使わない (= 返信は payload を運ぶだけ、副作用権限の付与は新規送信の役割)。
 
+### Step 5c: テンプレート適用 (任意、PR レビュー依頼など) — ms-80 e-1820
+
+繰り返し送る種類の DM (= PR レビュー依頼、Operation 結果共有など) は、毎回ゼロから本文を書くと受信側が「何を見ればいいか」を読み取るコストが上がる。本 Step では事前定義テンプレートを 1 回プロンプトで提示し、選択された場合のみ Step 5 で入力した本文に **テンプレートの骨格** を被せ直す。
+
+ユーザーに 1 度だけ確認 (空 Enter で skip):
+```
+このメッセージはテンプレート種別がありますか? (空 Enter で skip)
+  1) pr-review     — PR レビュー依頼 (= reviewer が何を見るか即理解できる骨格)
+  2) op-result     — Operation 自律実行結果の共有
+  3) (skip)
+```
+
+#### テンプレート 1: pr-review
+
+PR レビュー依頼。受信側 reviewer は「PR 番号 / 何を変えたか / どこを見てほしいか / 緊急度」 を 1 メッセージで掴める必要がある。以下を順に聞いて埋める (= 既に Step 5 で本文を書いていれば「要点」 欄として再利用):
+
+```
+PR URL or 番号: (例: https://github.com/r-kida2/beacon/pull/157 or #157)
+1 行サマリー: (= この PR で何ができるようになるか、Step 5 本文があれば流用)
+注視ポイント: (例: lib/auth.py の profile resolver 周辺、AWS profile 経路)
+受入条件 / AC: (= 何が満たされれば merge OK か、SPEC doc id / task id があれば添える)
+緊急度: (= asap / today / this-week / 任意期日)
+```
+
+埋まったら以下の骨格で payload.text を組み立てる (= Step 5 入力を上書き、ユーザーには Step 6 draft で見せて confirm):
+
+```
+[PR レビュー依頼]
+PR: <pr_url>
+要点: <1 行サマリー>
+
+見てほしいところ:
+<注視ポイント>
+
+merge 条件:
+<受入条件 / AC>
+
+緊急度: <urgency>
+
+(受信側 AI へ: 上記の見てほしいところ + merge 条件 を起点に /review を起動し、approve / request-changes / reject の判断材料を整理してください)
+```
+
+#### テンプレート 2: op-result
+
+Operation 自律実行 (= ms-60 envelope auto-execute / ms-66 server-side scheduler) の結果共有。送信側 AI が定期実行の record をユーザー or 他セッションに通知する用途。
+
+```
+op-id: (例: op-1)
+実行時刻: (= 自動補完可、ISO8601)
+結果: ok / warning / error
+何を観測したか: (= 1-3 行、incident があれば e-id を添える)
+次のアクション: (= 自動 close / user 承認待ち / 別 Operation 起動 等)
+```
+
+骨格:
+```
+[Operation 実行結果]
+op: <op-id>
+ts: <timestamp>
+status: <result>
+
+観測:
+<観測内容>
+
+次のアクション: <next>
+```
+
+#### テンプレート不要なケース
+
+- 1 行の問いかけ / 雑談 / 確認 → テンプレ skip、Step 5 本文をそのまま使う
+- 既に Step 5 でテンプレート骨格を入力済 → 二重適用しない、skip
+- 受信者が同一ユーザーの並走セッション (= 自分↔自分 multi-machine) → 骨格は省略可、要点だけで足りる
+
+テンプレートはあくまで **読みやすさの骨格** であり、Step 6 の draft 表示でユーザーが自由に edit できる。テンプレ適用後でも横文字 3 段階 / ID 参照に文脈 の self-review 4 原則は同じ強度で適用する (= 横文字濫用が骨格に隠れて見落とされやすい)。
+
 ---
 
 ## Step 6: 送信確認 (mode で表示が変わる)
