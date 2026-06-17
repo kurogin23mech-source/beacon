@@ -4,7 +4,13 @@ use serde::Serialize;
 use tauri::{Emitter, Manager, State};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
-struct AppState {
+// ms-72 e-1779: HTTP plumbing (PATCH/DELETE/POST-with-body) lives in cloud_http,
+// member/invitation Tauri bindings live in member. Both reuse the auth-token +
+// 401-refresh helpers defined here (load_auth_token, refresh_id_token).
+mod cloud_http;
+mod member;
+
+pub(crate) struct AppState {
     project_dir: Mutex<Option<String>>,
     cloud_project_id: Mutex<Option<String>>,
     watcher: Mutex<Option<RecommendedWatcher>>,
@@ -53,7 +59,7 @@ const DEFAULT_API_URL: &str = "https://beacon-ai.dev";
 ///   2. cwd .beacon/cloud.json `api_url` field
 ///   3. ~/.beacon/profiles/<BEACON_PROFILE | default>/profile.json `api_url`
 ///   4. DEFAULT_API_URL
-fn resolve_api_url() -> String {
+pub(crate) fn resolve_api_url() -> String {
     if let Ok(env_url) = std::env::var("BEACON_API_URL") {
         if !env_url.is_empty() {
             return env_url.trim_end_matches('/').to_string();
@@ -218,7 +224,7 @@ fn list_projects() -> Vec<ProjectInfo> {
 
 /// Load auth token from ~/.beacon/credentials.json
 /// HOME is used on macOS/Linux; USERPROFILE is used on Windows.
-fn load_auth_token() -> Option<String> {
+pub(crate) fn load_auth_token() -> Option<String> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .ok()?;
@@ -234,7 +240,7 @@ fn load_auth_token() -> Option<String> {
 
 /// Refresh the id_token using the refresh_token from credentials.json.
 /// Updates credentials.json in-place on success and returns the new id_token.
-fn refresh_id_token() -> Option<String> {
+pub(crate) fn refresh_id_token() -> Option<String> {
     let home = std::env::var("HOME").ok()?;
     let creds_path = std::path::Path::new(&home).join(".beacon/credentials.json");
     let content = std::fs::read_to_string(&creds_path).ok()?;
@@ -645,6 +651,11 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
+        // ms-72 e-1779: shell plugin enables `window.__TAURI__.shell.open(url)`
+        // from layer.js, used by the account-menu Admin item to open the Web
+        // admin page in the user's default browser. Capability already grants
+        // `shell:allow-open` in capabilities/default.json.
+        .plugin(tauri_plugin_shell::init())
         .manage(AppState {
             project_dir: Mutex::new(find_project_dir()),
             cloud_project_id: Mutex::new(None),
@@ -692,6 +703,17 @@ pub fn run() {
             cloud_list_notes,
             cloud_list_session_logs,
             cloud_get_api_url,
+            // ms-72 e-1779 — Member admin + invitation flow + sign-out.
+            member::cloud_list_members,
+            member::cloud_invite_member,
+            member::cloud_change_member_role,
+            member::cloud_remove_member,
+            member::cloud_create_invitation,
+            member::cloud_list_invitations,
+            member::cloud_cancel_invitation,
+            member::cloud_preview_invitation,
+            member::cloud_accept_invitation,
+            member::cloud_logout,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
