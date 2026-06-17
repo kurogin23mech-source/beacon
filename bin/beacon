@@ -3969,7 +3969,7 @@ EOF
         case "${2:-}" in
             record)
                 shift 2
-                revision="" semver="" desc="" hash="" date="" before="" mode="" type="" env="" version=""
+                revision="" semver="" desc="" hash="" date="" before="" mode="" type="" env="" version="" backend=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --prepare)       mode="prepare";    shift ;;
@@ -3983,6 +3983,7 @@ EOF
                         --insert-before) before="${2:-}";   shift 2 ;;
                         --type)          type="${2:-}";     shift 2 ;;
                         --env)           env="${2:-}";      shift 2 ;;
+                        --backend)       backend="${2:-}";  shift 2 ;;
                         *) shift ;;
                     esac
                 done
@@ -3990,20 +3991,21 @@ EOF
                     BEACON_VERSION="$version" \
                     BEACON_DESCRIPTION="$desc" BEACON_HASH="$hash" \
                     BEACON_DATE="$date" BEACON_INSERT_BEFORE="$before" BEACON_TYPE="$type" \
-                    BEACON_ENVIRONMENT="$env" \
+                    BEACON_ENVIRONMENT="$env" BEACON_BACKEND="$backend" \
                     python3 "$COMMANDS_PY" deploy_record
                 ;;
             list)
                 shift 2
-                env="" json=""
+                env="" json="" backend=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
-                        --env)    env="${2:-}"; shift 2 ;;
-                        --json)   json="1";     shift ;;
+                        --env)     env="${2:-}";     shift 2 ;;
+                        --backend) backend="${2:-}"; shift 2 ;;
+                        --json)    json="1";         shift ;;
                         *) shift ;;
                     esac
                 done
-                BEACON_JSON="$json" BEACON_ENVIRONMENT="$env" python3 "$COMMANDS_PY" deploy_list ;;
+                BEACON_JSON="$json" BEACON_ENVIRONMENT="$env" BEACON_BACKEND="$backend" python3 "$COMMANDS_PY" deploy_list ;;
             delete)
                 BEACON_DEPLOY_ID="${3:-}" python3 "$COMMANDS_PY" deploy_delete ;;
             void)

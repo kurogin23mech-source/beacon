@@ -8795,6 +8795,16 @@ def cmd_deploy_record():
     insert_before = os.environ.get("BEACON_INSERT_BEFORE", "")  # insert before this deploy-id
     type_override = os.environ.get("BEACON_TYPE", "")  # override: "major" or "minor"
     environment = os.environ.get("BEACON_ENVIRONMENT", "prod")
+    # ms-80 e-1831: backend (= GCP Cloud Run / AWS / TrailNode / custom) を deploy 記録に保存し
+    # backend 別に追えるように。env 未指定 + cloud profile があれば profile name を fallback。
+    backend = os.environ.get("BEACON_BACKEND", "").strip()
+    if not backend:
+        # Active profile を引いて backend を auto-detect (= 例: profile=aws-ga → backend="aws-ga")
+        try:
+            import profile as _profile
+            backend = _profile.resolve_active_profile().name or ""
+        except Exception:
+            backend = ""
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     data = load_project()
@@ -8960,6 +8970,10 @@ def cmd_deploy_record():
         # e-1274: top-level version tag (e.g. v0.22.0). Surfaces in Releases tab
         # without needing to dereference linked_release → releases[*].semver.
         deploy_entry["version"] = version
+    if backend:
+        # ms-80 e-1831: backend 名 (= 例 "default" / "aws-ga" / "trailnode")。multi-backend
+        # 運用で「どの backend に何が反映されたか」を deploy 別に追えるように。
+        deploy_entry["backend"] = backend
     if links_to:
         deploy_entry["links_to"] = links_to
 
@@ -9006,7 +9020,8 @@ def cmd_deploy_record():
         icon = "◉" if deploy_type == "major" else "○"
         ms_str = " ".join(f"[{m}]" for m in affected_ms) or "(no MS detected)"
         ver_str = f" {version}" if version and not semver else ""
-        print(f"{icon} {deploy_id}{ver_str} [{deploy_type}] {ms_str}")
+        backend_str = f" <backend={backend}>" if backend else ""
+        print(f"{icon} {deploy_id}{ver_str} [{deploy_type}]{backend_str} {ms_str}")
         print(f"  {description}")
         if semver:
             print(f"  Release: {release_entry['id']} ({semver})")
@@ -9015,15 +9030,19 @@ def cmd_deploy_record():
 
 
 def cmd_deploy_list():
-    """List deployment records, optionally filtered by environment."""
+    """List deployment records, optionally filtered by environment or backend."""
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     env_filter = os.environ.get("BEACON_ENVIRONMENT", "")
+    # ms-80 e-1831: backend 別 filter (= 例 --backend aws-ga で AWS だけ列挙)
+    backend_filter = os.environ.get("BEACON_BACKEND", "").strip()
     data = load_project()
     deployments = data.get("deployments", [])
     releases = {r["id"]: r for r in data.get("releases", [])}
 
     if env_filter:
         deployments = [d for d in deployments if d.get("environment", "prod") == env_filter]
+    if backend_filter:
+        deployments = [d for d in deployments if d.get("backend", "") == backend_filter]
 
     if json_mode:
         print(json.dumps({"deployments": deployments, "releases": list(releases.values())},
@@ -9041,7 +9060,8 @@ def cmd_deploy_list():
         semver_str = f" {rel['semver']}" if rel and rel.get("semver") else ""
         ms_str = " ".join(d.get("milestones", [])) or "-"
         env_str = f" [{d.get('environment', 'prod')}]" if d.get("environment") not in (None, "prod") else ""
-        print(f"{icon} {d['id']}{semver_str}  {d['date'][:10]}  [{d.get('type','')}]{env_str}  {ms_str}")
+        backend_str = f" <{d['backend']}>" if d.get("backend") else ""
+        print(f"{icon} {d['id']}{semver_str}  {d['date'][:10]}  [{d.get('type','')}]{env_str}{backend_str}  {ms_str}")
         print(f"   {d.get('description', '')}")
         if d.get("links_to"):
             print(f"   patches: {', '.join(d['links_to'])}")
