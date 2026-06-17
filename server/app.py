@@ -3776,6 +3776,37 @@ def list_bus_audit(
     return db.list_bus_audit(project_id, since=since, limit=limit)
 
 
+@app.get("/api/projects/{project_id}/dm/pending")
+def list_pending_dm_actions(
+    project_id: str,
+    receiver_user_id: str = "",
+    limit: int = 100,
+    user: dict = Depends(require_auth),
+):
+    """List pending bus_event_approvals rows (ms-70 / e-1714).
+
+    Used by ``/beacon-session-start`` to surface "保留中の DM action"
+    (= cross-user DM bus envelopes that the receiver's terminal was
+    closed for when ms-70 / e-1713's dispatcher gate held them).
+
+    The endpoint is membership-gated like other project-scoped reads;
+    no extra ACL beyond that because the sidecar's
+    ``receiver_user_id`` query gives the caller scoped-to-self filter
+    semantics — and read-only members can already see bus events in
+    the parent collection.
+
+    ``receiver_user_id`` (optional): restrict to "my pending". Empty
+    string returns rows for all receivers in the project (used by web
+    UI dashboards / debugging; the Skill always passes a value).
+    """
+    _load(project_id, user)
+    return db.list_pending_approvals(
+        project_id,
+        receiver_user_id=(receiver_user_id or None),
+        limit=limit,
+    )
+
+
 @app.get("/api/projects/{project_id}/bus")
 def list_bus_events(
     project_id: str,
