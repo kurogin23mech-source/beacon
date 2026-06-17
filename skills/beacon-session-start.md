@@ -346,6 +346,56 @@ JSON が返れば parse して以下のフィールドを Step 3 で表示する
 
 この Step は **読み取り専用**。
 
+## Step 1n: 保留中 DM action の取得 (ms-70 e-1714)
+
+terminal が close 中に届いた **cross-user DM (= 直接メッセージ) action 付き envelope** は、ms-70 / e-1713 のディスパッチャ・ゲートが `bus_event_approvals` sidecar (= 同 event_id を主キーに別 subcollection で保持する判断記録) に `approval_status="pending"` を立てて auto-act を抑止している。session-start でその pending リストを取り出して human に提示することで、「閉じている間に来た action 系 DM が、次回起動時に必ず目に入る」 経路を作る。
+
+Bash ツールで実行 (fail-safe、cloud 未設定 / endpoint 不在ならスキップ):
+
+```bash
+PROJECT_ID=$(python3 -c "import json; print(json.load(open('.beacon/cloud.json')).get('project_id',''))" 2>/dev/null)
+USER_ID=$(python3 -c "import json,os; p=os.path.expanduser('~/.beacon/auth.json'); print(json.load(open(p)).get('user_id',''))" 2>/dev/null)
+if [ -n "$PROJECT_ID" ] && [ -n "$USER_ID" ]; then
+  python3 - <<'PY' 2>/dev/null
+import json, os, sys, urllib.request, urllib.parse
+project_id = os.environ.get("PROJECT_ID") or ""
+user_id = os.environ.get("USER_ID") or ""
+base = os.environ.get("BEACON_API_BASE") or "https://beacon-api-prod-2dlj7zlbiq-uc.a.run.app"
+# token: cloud.json -> id_token, fallback to auth.json
+token = ""
+try:
+    with open(".beacon/cloud.json") as f: token = json.load(f).get("id_token","") or ""
+except Exception: pass
+if not token:
+    try:
+        with open(os.path.expanduser("~/.beacon/auth.json")) as f: token = json.load(f).get("id_token","") or ""
+    except Exception: pass
+q = urllib.parse.urlencode({"receiver_user_id": user_id})
+url = f"{base}/api/projects/{project_id}/dm/pending?{q}"
+req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"} if token else {})
+try:
+    with urllib.request.urlopen(req, timeout=5) as r:
+        rows = json.loads(r.read().decode("utf-8"))
+except Exception as e:
+    print(f"PENDING_DM_FETCH_FAIL: {e}", file=sys.stderr); sys.exit(0)
+sys.path.insert(0, os.path.abspath("lib"))
+try:
+    from dm_pending import format_pending_dm_summary
+    print(format_pending_dm_summary(rows))
+except Exception as e:
+    print(f"PENDING_DM_FORMAT_FAIL: {e}", file=sys.stderr)
+PY
+fi
+```
+
+出力が空でなければ Step 3 の出力ヘッダ部に **そのまま転記** する。空ならセクションごと省略 (= ノイズ削減、`format_pending_dm_summary` が `""` を返す契約)。
+
+提示情報は helper (= `lib/dm_pending.py` の `format_pending_dm_summary`) が 1 行サマリーに圧縮: `event_id from sender_user_id at created_at`。envelope 本文 (= `actions_authorized` 等) は sidecar に持たない設計 (ms-70 / e-1712) なので、詳細展開は出力末尾に書かれた `beacon dm show <event_id>` (= e-1716 で primitive 化予定) と `beacon dm respond approve|deny <event_id>` の案内に従う。
+
+local mode (= `.beacon/cloud.json` 不在) / 未認証 / endpoint タイムアウトはすべて silent skip。session-start を中断しない。
+
+この Step は **読み取り専用**。sidecar の書き換え (= approved / denied 決定) は `/beacon-dm-respond` Skill 経由でのみ行う。
+
 ## Step 1j: 前セッションの session log 読み込み（ms-43 e-1360）
 
 前セッション末で `/beacon-session-end` Skill が `beacon session end` で集約した session log には、**「次セッション最優先 / top of queue / 次にやること」セクションが summary 内に明文化されている**ことが多い。これは trigger より優先順位が高い (人間/AI が curate した継続意図そのもの)。
