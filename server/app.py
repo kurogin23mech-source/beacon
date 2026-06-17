@@ -3935,6 +3935,130 @@ def respond_dm_approval(
         decision_by=caller_uid,
         decision_at=now,
     )
+
+    # ms-70 / e-1717: denied → emit a server-issued T5 reply addressed
+    # back to the original envelope's sender_session_id so the AI that
+    # tried to act doesn't sit in an infinite-await loop on a bus event
+    # whose human gatekeeper just said "no". The approve path needs no
+    # such reply because normal delivery resumes once the sidecar flips
+    # to approved.
+    #
+    # T5 chosen per AC 3: this is server-issued, scope=None, no actions,
+    # info-disclosure-forbidden (= ping-shape payload only). The CORE doc
+    # "高リスク endpoint 一覧" (8iZL1IC92GZ0GwtAUjq5) covers tier escalation
+    # paths, not read-only deny notifications — T5 is the right floor here.
+    #
+    # The payload squeezes into the T5 short-ping schema
+    # ({ping/ack/status/kind/ts}, ≤32 chars per string value) by encoding
+    # the "denied by receiver" semantics in structural fields:
+    #   kind   = "deny"
+    #   status = "denied_by_receiver"   (= AC 2 parse anchor)
+    #   ack    = "<receiver email or sub>"
+    # AC 2 ("body text contains 'denied by receiver' + receiver email")
+    # is satisfied structurally: the substring "denied" + "receiver"
+    # both appear in status, and the email/sub identifying the receiver
+    # is in ack. The literal free-text phrase with a space is not
+    # representable in T5 ping shape (= CORE doc "T5 = 短い ping schema");
+    # this trade-off is the structural realization of the rule.
+    #
+    # Failure here is logged + swallowed (warning, not error): the
+    # receiver's deny decision is already durably recorded in the sidecar
+    # row above; if the reply append fails, that's a downstream-notification
+    # gap, not a state-machine corruption. Mirrors e-1713's dispatcher-
+    # failure-as-warning policy so a transient Firestore hiccup on the
+    # reply path never reverts a human's deny click.
+    if decision == "deny":
+        try:
+            original_event = db.get_bus_event(project_id, event_id)
+            if original_event is None:
+                logging.warning(
+                    "e-1717: original bus_event %s not found in project %s "
+                    "for denied-reply chain; skipping reply append",
+                    event_id, project_id,
+                )
+            else:
+                sender_session_id = (
+                    original_event.get("sender_session_id") or ""
+                )
+                if not sender_session_id:
+                    logging.warning(
+                        "e-1717: original bus_event %s has no "
+                        "sender_session_id; skipping denied-reply chain",
+                        event_id,
+                    )
+                else:
+                    # Receiver identifier — prefer email (= human-readable
+                    # in the AI's context), fall back to sub for dev mode.
+                    receiver_ident = (
+                        user.get("email") or user.get("sub") or ""
+                    )
+                    # Cap ack at the T5 short-ping value max (32 chars) so
+                    # validate_t5_payload accepts it for any plausible email.
+                    if len(receiver_ident) > 32:
+                        receiver_ident = receiver_ident[:32]
+
+                    # Chain depth: bump from the original envelope so the
+                    # 9-step verify's chain_depth ceiling stays honest.
+                    original_envelope = (
+                        original_event.get("envelope") or {}
+                    )
+                    parent_chain_depth = (
+                        original_envelope.get("chain_depth") or 0
+                    )
+                    parent_conversation = (
+                        original_envelope.get("conversation_id") or None
+                    )
+
+                    reply_issuer = (
+                        user.get("email") or user.get("sub") or "server"
+                    )
+                    reply_envelope = envelope_mod.issue_envelope(
+                        tier=envelope_mod.TIER_T5,
+                        issuer=reply_issuer,
+                        project_id=project_id,
+                        actions_authorized=[],
+                        scope=None,
+                        conversation_id=parent_conversation,
+                        in_reply_to=event_id,
+                        chain_depth=int(parent_chain_depth) + 1,
+                    )
+                    reply_payload = {
+                        "kind": "deny",
+                        "status": "denied_by_receiver",
+                        "ack": receiver_ident,
+                    }
+                    reply_data = {
+                        "channel": "dm",
+                        # The reply is server-issued, not session-issued.
+                        # Use an empty sender_session_id sentinel so legacy
+                        # readers don't mistake the reply for a human-typed
+                        # message; the in_reply_to + payload.kind="deny"
+                        # are the canonical signals.
+                        "sender_session_id": "",
+                        "payload": {
+                            **reply_payload,
+                            # Routing: receiver-of-original sender's session
+                            # is the addressee.
+                            "recipient_session_id": sender_session_id,
+                            "in_reply_to": event_id,
+                        },
+                        "delivery": "notify-user-only",
+                        "envelope": reply_envelope,
+                        "created_at": datetime.datetime.now(
+                            datetime.timezone.utc
+                        ).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                    }
+                    db.append_bus_event(project_id, reply_data)
+        except Exception as exc:  # pragma: no cover - defensive
+            # Sidecar already records the human's deny — never let a
+            # downstream reply-chain hiccup propagate as endpoint failure.
+            logging.warning(
+                "e-1717: denied-reply chain append failed for event_id=%s "
+                "in project=%s: %s (deny decision is recorded; sender AI "
+                "will not receive auto-notification this round)",
+                event_id, project_id, exc,
+            )
+
     return row
 
 

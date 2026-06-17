@@ -751,6 +751,33 @@ def append_bus_event(project_id: str, data: dict) -> str:
     return ref[1].id
 
 
+def get_bus_event(project_id: str, event_id: str) -> dict | None:
+    """Return the bus_event doc for ``event_id`` or None if absent.
+
+    ms-70 / e-1717: the denied-reply chain needs to read the original
+    envelope's ``sender_session_id`` (= where the AI that emitted the
+    action request is listening) to address the "denied by receiver"
+    reply back to it. The append-only bus_events collection is keyed
+    by auto-id, but Firestore lets us address a single doc by id without
+    a query — this helper is the small wrapper around that direct read.
+
+    Returned dict shape mirrors :func:`list_bus_events` rows: the
+    Firestore doc fields plus a top-level ``event_id`` set to the doc id.
+    Returns None if no doc exists for that id.
+    """
+    doc = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(BUS_EVENTS_SUBCOLLECTION)
+        .document(event_id)
+        .get()
+    )
+    if not doc.exists:
+        return None
+    return {"event_id": doc.id, **(doc.to_dict() or {})}
+
+
 # ---------------------------------------------------------------------------
 # Bus cursors (subcollection: projects/{project_id}/bus_cursors/{recipient_id})
 # ms-54 / e-998: per-recipient read cursor. Together with the append-only event
