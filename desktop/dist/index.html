@@ -4048,11 +4048,19 @@ async function _settingsLoadMemberList() {
     // owner email — defense in depth.
     const isOwner = (state.myIsOwner === true)
       && !!myEmail && data.owner_email === myEmail;
+    // ms-78 e-1807 — render a human-friendly label: display_name (large)
+    // + email (small dim). When display_name is empty we fall back to email
+    // alone, matching the legacy view.
+    const renderName = (displayName, email) => {
+      const dn = (displayName || '').trim();
+      if (!dn) return esc(email || '');
+      return `${esc(dn)} <span style="color:var(--text-dim);font-size:0.65rem;">${esc(email || '')}</span>`;
+    };
     let html = '';
     if (data.owner_email) {
       html += `
         <div class="settings-member-row">
-          <span class="email">${esc(data.owner_email)}${data.owner_email === myEmail ? ' <span style="color:var(--text-dim);font-size:0.6rem;">(you)</span>' : ''}</span>
+          <span class="email">${renderName(data.owner_display_name, data.owner_email)}${data.owner_email === myEmail ? ' <span style="color:var(--text-dim);font-size:0.6rem;">(you)</span>' : ''}</span>
           <span class="role-tag">owner</span>
           <span></span>
         </div>`;
@@ -4061,7 +4069,7 @@ async function _settingsLoadMemberList() {
       const isMe = m.email === myEmail;
       html += `
         <div class="settings-member-row">
-          <span class="email">${esc(m.email)}${isMe ? ' <span style="color:var(--text-dim);font-size:0.6rem;">(you)</span>' : ''}</span>
+          <span class="email">${renderName(m.display_name, m.email)}${isMe ? ' <span style="color:var(--text-dim);font-size:0.6rem;">(you)</span>' : ''}</span>
           ${isOwner
             ? `<select data-action="settings-change-role" data-email="${esc(m.email)}"
                        style="background:var(--bg-surface);border:1px solid var(--border);color:var(--text-primary);font-size:0.7rem;padding:1px 4px;border-radius:3px;cursor:pointer;">
@@ -5744,6 +5752,24 @@ function handleCommonAction(action, el) {
     }
     case 'settings-invite-member':
       _settingsInviteMember(); return true;
+    case 'settings-cancel-invitation':
+      // ms-78 e-1803 — Pending invitations row × button. Cancel handlers
+      // attached at render time (= _settingsLoadInvitationList), so this
+      // path is reached only if the row is re-rendered without that hook,
+      // but registering the action keeps frontend-drift check happy and
+      // gives a fallback bind.
+      _settingsCancelInvitation({ currentTarget: el });
+      return true;
+    case 'settings-copy-invite-url':
+      // ms-78 e-1803 — Copy invite URL button. Handler is attached inline
+      // by _settingsInviteMember after the box is built, so this case is
+      // mostly here for frontend-drift coverage. If the inline binding is
+      // missing for any reason, fall back to copying from data-url.
+      try {
+        const u = el.dataset.url || '';
+        if (u) navigator.clipboard.writeText(u);
+      } catch (_) { /* noop */ }
+      return true;
     case 'settings-archive-project':
       _settingsArchiveProject(); return true;
     case 'settings-export-json':

@@ -320,3 +320,46 @@ def test_join_landing_serves_html_for_any_token():
     assert r.status_code == 200
     assert b"Beacon" in r.content
     assert b"<title>" in r.content
+
+
+# ---------------------------------------------------------------------------
+# display_name enrichment in list_members (ms-78 e-1807)
+# ---------------------------------------------------------------------------
+
+def test_list_members_includes_display_name_from_user_record():
+    """`GET /api/projects/{pid}/members` should join the user record so
+    callers see display_name, not just the raw email."""
+    # Seed an extra member + a display_name on the user record
+    _users["alice-uid"] = {
+        "user_id": "alice-uid",
+        "email": "alice@example.com",
+        "display_name": "Alice A.",
+    }
+    _store[PROJECT_ID]["members"] = [
+        {"user_id": "alice-uid", "email": "alice@example.com", "role": "editor"}
+    ]
+    r = client.get(f"/api/projects/{PROJECT_ID}/members")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    members = body["members"]
+    assert any(
+        m.get("display_name") == "Alice A." and m.get("email") == "alice@example.com"
+        for m in members
+    ), members
+
+
+def test_list_members_returns_empty_display_name_when_user_has_none():
+    _users["alice-uid"] = {"user_id": "alice-uid", "email": "alice@example.com"}
+    _store[PROJECT_ID]["members"] = [
+        {"user_id": "alice-uid", "email": "alice@example.com", "role": "viewer"}
+    ]
+    r = client.get(f"/api/projects/{PROJECT_ID}/members")
+    assert r.status_code == 200
+    members = r.json()["members"]
+    for m in members:
+        if m.get("email") == "alice@example.com":
+            # display_name is either absent or empty — both are acceptable
+            assert not (m.get("display_name") or "")
+            break
+    else:
+        pytest.fail("alice not found in members list")

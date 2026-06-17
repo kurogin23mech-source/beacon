@@ -2429,19 +2429,41 @@ def remove_member(project_id: str, member_email: str,
 
 @app.get("/api/projects/{project_id}/members")
 def list_members(project_id: str, user: dict = Depends(require_auth)):
-    """List project members."""
+    """List project members.
+
+    ms-78 e-1807: enriches each row with the user's `display_name` so the
+    UI / CLI can prefer a human-friendly label over the raw email. The field
+    is empty when the user hasn't set one yet — the UI should fall back to
+    email in that case.
+    """
     data = _load(project_id, user)
     owner_id = data.get("owner", "")
     owner_email = ""
+    owner_display_name = ""
     if owner_id:
         owner_data = db.get_user(owner_id)
         if owner_data:
             owner_email = owner_data.get("email", "")
-    members = data.get("members", [])
+            owner_display_name = owner_data.get("display_name", "")
+    members = data.get("members", []) or []
+    enriched = []
+    for m in members:
+        if not isinstance(m, dict):
+            continue
+        m2 = dict(m)
+        uid = m.get("user_id", "")
+        if uid:
+            udata = db.get_user(uid)
+            if udata:
+                m2["display_name"] = udata.get("display_name", "") or m2.get(
+                    "display_name", ""
+                )
+        enriched.append(m2)
     return {
         "owner": owner_id,
         "owner_email": owner_email,
-        "members": members,
+        "owner_display_name": owner_display_name,
+        "members": enriched,
     }
 
 
