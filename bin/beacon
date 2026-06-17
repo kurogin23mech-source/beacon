@@ -3603,6 +3603,62 @@ EOF
                 ;;
         esac
         ;;
+    # ms-70 / e-1716: receiver-side DM action decision primitive.
+    # Usage: `beacon dm respond approve|deny <event_id>`
+    # The decision is recorded server-side; decision_by comes from the Bearer
+    # token's sub claim — the CLI cannot forge a different actor. Designed
+    # for a human typing the command in their terminal (SPEC 設計方針 3).
+    dm)
+        ensure_project
+        _dm_sub="${2:-}"
+        shift 2 || true
+        case "$_dm_sub" in
+            respond)
+                # Two positional forms are accepted to match both the helper
+                # hint string (= `beacon dm respond approve|deny <event_id>`)
+                # and the natural typing flow some users prefer
+                # (= `beacon dm respond <event_id> approve|deny`).
+                _dm_decision=""
+                _dm_event_id=""
+                _dm_json=""
+                _dm_project_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json)    _dm_json="1"; shift ;;
+                        --project) _dm_project_id="${2:-}"; shift 2 ;;
+                        approve|deny)
+                            _dm_decision="$1"; shift ;;
+                        *)
+                            # First non-flag, non-verb positional is event_id.
+                            if [[ -z "$_dm_event_id" ]]; then
+                                _dm_event_id="$1"
+                            fi
+                            shift ;;
+                    esac
+                done
+                BEACON_DM_DECISION="$_dm_decision" \
+                    BEACON_DM_EVENT_ID="$_dm_event_id" \
+                    BEACON_BUS_PROJECT_ID="$_dm_project_id" \
+                    BEACON_JSON="$_dm_json" \
+                    python3 "$COMMANDS_PY" dm_respond
+                ;;
+            *)
+                cat <<'EOF'
+Usage: beacon dm respond approve <event_id> [--project <id>] [--json]
+       beacon dm respond deny    <event_id> [--project <id>] [--json]
+
+Decide a pending cross-user DM action envelope. Only the intended
+receiver (= the addressee on the sidecar) can press approve / deny;
+the server enforces this via the Bearer token's sub claim, so the
+CLI argument cannot forge a different actor (SPEC 設計方針 3:
+承認は terminal Claude Code 内での user 直接判断のみ).
+
+--project: override the cwd's project_id for cross-project decisions
+           (same semantics as `beacon bus --project <id>`).
+EOF
+                ;;
+        esac
+        ;;
     retro)
         shift
         case "${1:-}" in

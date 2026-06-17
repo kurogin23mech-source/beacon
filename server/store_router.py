@@ -61,6 +61,10 @@ if _BACKEND == "dynamodb":
         append_bus_audit,
         list_bus_audit,
         list_bus_events,
+        # Bus event approvals sidecar (ms-70 / e-1712, e-1713 dispatcher gate)
+        get_bus_event_approval,
+        put_bus_event_approval,
+        list_pending_approvals,
         # Sessions
         upsert_session,
         stamp_session_actor_email,
@@ -134,6 +138,10 @@ elif _BACKEND == "firestore":
         append_bus_audit,
         list_bus_audit,
         list_bus_events,
+        # Bus event approvals sidecar (ms-70 / e-1712, e-1713 dispatcher gate)
+        get_bus_event_approval,
+        put_bus_event_approval,
+        list_pending_approvals,
         # Sessions
         upsert_session,
         stamp_session_actor_email,

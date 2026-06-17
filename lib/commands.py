@@ -12478,6 +12478,82 @@ def cmd_bus_send():
     print(line)
 
 
+def _fetch_pending_dm_lookup(client, project_id: str) -> dict:
+    """Fetch the project-scoped pending sidecar map for inline banner emission.
+
+    Used by ``cmd_bus_listen`` / ``cmd_bus_receive`` (ms-70 / e-1715) to
+    decide whether to print a banner before each event. Returns
+    ``{event_id: row}`` (= via ``lib/dm_pending.build_pending_lookup``).
+
+    All failures (= cloud unconfigured, endpoint absent on a server
+    older than e-1714, transient network blip, auth missing) collapse
+    to an empty dict — the CLI's existing event-stream output keeps
+    flowing untouched. This is the explicit AC requirement: sidecar
+    lookup failure MUST NOT break legacy listen / receive behaviour.
+
+    We deliberately do NOT pass ``receiver_user_id`` because resolving
+    the local user_id at this point would require touching the auth
+    layer (= ``.beacon/cloud.json`` / ``~/.beacon/auth.json``) which
+    has multiple resolution orders. The endpoint is membership-gated,
+    so the empty receiver_user_id case returns all project-scoped
+    pending rows; the banner only fires for events that actually appear
+    in *this* recipient's unread feed, which is the natural filter.
+    """
+    try:
+        from dm_pending import build_pending_lookup
+    except Exception:
+        return {}
+    try:
+        rows = client.get(
+            f"/api/projects/{project_id}/dm/pending"
+            f"?receiver_user_id=&limit=200"
+        )
+    except Exception:
+        # Silent: this includes 404 (older server), 401 (no token),
+        # 5xx (transient), and OSError (no network).
+        return {}
+    if not isinstance(rows, list):
+        return {}
+    try:
+        return build_pending_lookup(rows)
+    except Exception:
+        return {}
+
+
+def _print_event_with_banner(ev: dict, pending_lookup: dict) -> None:
+    """Print a single bus event JSON line, optionally preceded by the
+    pending-DM banner.
+
+    ms-70 / e-1715: if ``ev['event_id']`` is in ``pending_lookup`` (= the
+    dispatcher gate set ``approval_status="pending"`` for this envelope),
+    emit a structurally recognizable banner line first so the AI session
+    consuming the stream stops and asks the user before acting on the
+    envelope's actions_authorized.
+
+    Banner formatting / contract lives in ``lib/dm_pending.py``. This
+    function is intentionally a thin wrapper so the legacy "just print
+    JSON" behaviour stays one line away in a diff.
+    """
+    if pending_lookup:
+        eid = ev.get("event_id")
+        if eid and eid in pending_lookup:
+            try:
+                from dm_pending import format_inline_dm_banner
+                row = pending_lookup[eid]
+                banner = format_inline_dm_banner(
+                    eid,
+                    sender_user_id=row.get("sender_user_id", ""),
+                    created_at=row.get("created_at", ""),
+                )
+                print(banner, flush=True)
+            except Exception:
+                # If formatting fails for any reason, fall back to the
+                # plain JSON line. The AC says "do not break legacy
+                # output"; missing banner is worse than missing JSON.
+                pass
+    print(json.dumps(ev, ensure_ascii=False), flush=True)
+
+
 def cmd_bus_listen():
     """Long-poll /bus/unread and stream each event as one JSON line on stdout.
 
@@ -12489,6 +12565,13 @@ def cmd_bus_listen():
     The loop ends only on SIGINT or when the optional ``--once`` mode has
     delivered a batch. There is no implicit timeout — callers wanting one
     should use ``beacon bus receive --timeout`` instead.
+
+    ms-70 / e-1715: before printing each event, look up its sidecar
+    ``approval_status``. If pending, emit an inline banner so the AI
+    session reading the stream stops and asks the user before acting.
+    Sidecar lookup failures (= older server / no auth / network) silently
+    fall back to the legacy "just JSON" output — the banner is added on
+    top of the existing contract, not in place of it.
     """
     import time
     recipient = _bus_resolve_recipient()
@@ -12508,8 +12591,14 @@ def cmd_bus_listen():
                 project_id, recipient, channel=channel,
             )
             if events:
+                # e-1715: refresh sidecar lookup once per batch so a
+                # newly-approved row in the middle of a poll loop stops
+                # banner emission on the very next poll. Per-event
+                # lookups would be more accurate but multiply HTTP cost
+                # by N — batch granularity is the right tradeoff.
+                pending_lookup = _fetch_pending_dm_lookup(client, project_id)
                 for ev in events:
-                    print(json.dumps(ev, ensure_ascii=False), flush=True)
+                    _print_event_with_banner(ev, pending_lookup)
                 if auto_ack:
                     last_ts = events[-1].get("created_at", "")
                     if last_ts:
@@ -12522,7 +12611,14 @@ def cmd_bus_listen():
 
 
 def cmd_bus_receive():
-    """Block until a single batch of events arrives (or ``--timeout`` elapses)."""
+    """Block until a single batch of events arrives (or ``--timeout`` elapses).
+
+    ms-70 / e-1715: same inline pending-DM banner injection as
+    ``cmd_bus_listen``. ``beacon bus receive`` is the one-shot variant
+    used by ``beacon-bus-inbox-hook.py`` and ad-hoc scripts; treating
+    its output identically keeps the AI gate contract (= banner-then-event)
+    uniform across the two CLI entry points.
+    """
     import time
     recipient = _bus_resolve_recipient()
     channel = os.environ.get("BEACON_BUS_CHANNEL", "").strip()
@@ -12545,8 +12641,9 @@ def cmd_bus_receive():
             project_id, recipient, channel=channel,
         )
         if events:
+            pending_lookup = _fetch_pending_dm_lookup(client, project_id)
             for ev in events:
-                print(json.dumps(ev, ensure_ascii=False))
+                _print_event_with_banner(ev, pending_lookup)
             if auto_ack:
                 last_ts = events[-1].get("created_at", "")
                 if last_ts:
@@ -12689,6 +12786,107 @@ def cmd_bus_status():
     print(_row("✓" if delivered_at else "✗", "delivered", delivered_at,
                delivered_by))
     print(_row("✓" if opened_at else "✗", "opened", opened_at, opened_by))
+
+
+def cmd_dm_respond():
+    """Receiver-side decision CLI for a pending DM-action envelope (e-1716).
+
+    Usage shape (= what the user types in their terminal):
+      beacon dm respond approve <event_id>
+      beacon dm respond deny    <event_id>
+
+    SPEC 設計方針 3 ("承認は terminal Claude Code 内での user 直接判断のみ"):
+    this primitive is reached by a human typing the command, never by an
+    autonomous AI loop. The server stamps ``decision_by`` from the Bearer
+    token's ``sub`` claim — the CLI cannot forge a different actor.
+
+    Args flow through env vars set by ``bin/beacon`` dispatch:
+      * ``BEACON_DM_DECISION``  = "approve" | "deny"
+      * ``BEACON_DM_EVENT_ID``  = sidecar event_id (= parent bus_event id)
+      * ``BEACON_BUS_PROJECT_ID`` = optional --project override (same
+        semantics as bus subcmd)
+      * ``BEACON_JSON`` = "1" emits the resulting 7-field sidecar row as
+        JSON instead of a human summary
+
+    Exit codes:
+      * 0 — decision accepted (or idempotent no-op for "same user resubmits
+        same decision")
+      * 1 — server reported a structural error (404 unknown event_id, 403
+        not your envelope, 409 already-decided / auto)
+      * 2 — bad CLI usage (missing args)
+    """
+    decision = os.environ.get("BEACON_DM_DECISION", "").strip().lower()
+    event_id = os.environ.get("BEACON_DM_EVENT_ID", "").strip()
+
+    if decision not in ("approve", "deny"):
+        print(
+            "Usage: beacon dm respond approve <event_id>\n"
+            "       beacon dm respond deny    <event_id>\n"
+            "  Decide a pending cross-user DM action envelope. Only the\n"
+            "  intended receiver (= the addressee on the sidecar) can press\n"
+            "  approve/deny; the server enforces this via the Bearer token.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if not event_id:
+        print(
+            "Error: <event_id> required.\n"
+            "  Example: beacon dm respond approve evt-abc12345",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    client, config = _get_api_client()
+    project_id = _resolve_bus_project_id(config)  # respects --project override
+
+    try:
+        row = client.respond_dm_approval(
+            project_id, event_id, decision=decision
+        )
+    except Exception as e:
+        # api_client raises RuntimeError("API error <code>: <detail>") on
+        # HTTP errors. Surface a single human line — not a stacktrace —
+        # because the human is staring at this terminal.
+        msg = str(e)
+        if "404" in msg:
+            print(
+                f"Error: no pending approval for event_id={event_id!r} "
+                f"in project {project_id!r}.\n"
+                "  Either the envelope was already auto-allowed (legacy "
+                "path), the event_id is wrong, or the sidecar has not\n"
+                "  landed yet.",
+                file=sys.stderr,
+            )
+        elif "403" in msg:
+            print(
+                f"Error: event_id={event_id!r} is addressed to a different "
+                "user; only the intended receiver can decide it.\n"
+                f"  ({msg})",
+                file=sys.stderr,
+            )
+        elif "409" in msg:
+            print(
+                f"Error: event_id={event_id!r} is already in a terminal "
+                "state (approved / denied / auto).\n"
+                f"  ({msg})",
+                file=sys.stderr,
+            )
+        else:
+            print(f"Error: {msg}", file=sys.stderr)
+        sys.exit(1)
+
+    if os.environ.get("BEACON_JSON", "") == "1":
+        print(json.dumps(row, ensure_ascii=False))
+        return
+
+    # Human-readable summary. Verb + 7-field row in compact form.
+    verb_past = "approved" if decision == "approve" else "denied"
+    print(f"{verb_past}: event_id={row.get('event_id', event_id)}")
+    print(f"  status:      {row.get('approval_status', '')}")
+    print(f"  decision_by: {row.get('decision_by', '')}")
+    print(f"  decision_at: {row.get('decision_at', '')}")
+    print(f"  sender:      {row.get('sender_user_id', '')}")
+    print(f"  receiver:    {row.get('receiver_user_id', '')}")
 
 
 def _resolve_bus_project_id(config: dict) -> str:
@@ -14447,6 +14645,9 @@ if __name__ == "__main__":
         "bus_ack": cmd_bus_ack,
         "bus_status": cmd_bus_status,
         "bus_directory": cmd_bus_directory,
+        # ms-70 / e-1716: receiver-side decision primitive for pending DM
+        # actions. Reached by `beacon dm respond approve|deny <event_id>`.
+        "dm_respond": cmd_dm_respond,
         # ms-55 e-1646: stop / resume signal CLI. Anyone can broadcast
         # (Andon cord principle, SPEC §2). The events ride on the
         # existing bus on channel `stop-signal`.

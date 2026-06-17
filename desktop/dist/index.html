@@ -2527,6 +2527,14 @@ const dataSource = {
     if (m) title = m[1];
     state.documentContent = { doc_id: docId, title, scope, content: body };
   },
+  // ms-70 e-1718 — DM approval history (Settings > Audit).
+  // Tauri Rust binding (cloud_list_dm_approval_history) is not implemented
+  // yet; mirror the "Web-only" pattern used by Member admin (= now wired
+  // below via cloud_* commands). Audit history Rust binding is tracked as
+  // a follow-up; throw stub keeps the SHARED region pure (= ms-46 e-728).
+  loadDmApprovalHistory: async (_pid, _limit) => {
+    throw new Error('DM approval history is Web-only in this build. Open the Web UI to view the audit trail.');
+  },
   // ms-72 e-1779 — Member admin + invitation flow wired to Rust commands.
   // Was a "Web-only" throw stub before the Rust layer landed (= ms-72 prior).
   // SHARED Settings > Members tab now reaches the real backend through these
@@ -3991,6 +3999,54 @@ function _renderSettingsMembersTab() {
     </div>`;
 }
 
+// ms-70 / e-1718 — Settings > Audit tab.
+//
+// Surfaces the project's DM approval history (= bus_event_approvals rows
+// where approval_status ∈ {approved, denied}). Read-only by design —
+// SPEC 設計方針 3 keeps every decision inside the terminal Claude Code
+// that received the action via `beacon dm respond`. This tab is the
+// *after the fact* audit window; never wire approve / deny here.
+//
+// We render the row-rendering helper (renderDmApprovalHistoryRows, which
+// lives in the SHARED region) into a slot the loader paints in place
+// after the GET completes. Same "render shell now, fill slot on fetch
+// resolve" pattern as the Members tab — avoids re-rendering the whole
+// settings panel just to swap the list contents.
+function _renderSettingsAuditTab() {
+  return `
+    <div class="settings-section">
+      <div class="label">DM 承認履歴 (DM approval history)</div>
+      <div style="font-size:0.7rem;color:var(--text-dim);margin:4px 0 12px;line-height:1.5;">
+        他のユーザーがあなた宛 (または逆方向) に送った DM action のうち、すでに <strong>approve / deny の判断が下されたもの</strong>を新しい順に表示します。判断は terminal Claude Code の <code style="font-family:var(--font-mono);">beacon dm respond</code> で行うため、ここでは承認 / 拒否ボタンは出ません (= 監査専用の後追い参照)。pending な envelope は <code style="font-family:var(--font-mono);">/api/projects/{pid}/dm/pending</code> 経由で session-start 時に terminal へ流れます。
+      </div>
+      <div id="settings-dm-approval-history">
+        <div class="menu-user" style="color:var(--text-dim);">Loading approval history…</div>
+      </div>
+    </div>`;
+}
+
+// Settings > Audit: fetch + render into #settings-dm-approval-history.
+//
+// Errors (= 401 / 403 / 5xx) surface as a one-line dim string in the slot
+// rather than a popup — audit is read-only so a failed read is a "look
+// later" situation, not a blocker. The Members tab uses the same
+// "swallow error → render placeholder" strategy.
+async function _settingsLoadDmApprovalHistory() {
+  const dst = document.getElementById('settings-dm-approval-history');
+  if (!dst) return;
+  const pid = _settingsViewedProjectId();
+  if (!pid) {
+    dst.innerHTML = '<div class="menu-user" style="color:var(--text-dim);">No project selected.</div>';
+    return;
+  }
+  try {
+    const rows = await dataSource.loadDmApprovalHistory(pid, 50);
+    dst.innerHTML = renderDmApprovalHistoryRows(rows);
+  } catch (e) {
+    dst.innerHTML = `<div class="menu-user" style="color:var(--text-dim);">承認履歴を読み込めませんでした (${esc(String(e && e.message ? e.message : e))})。</div>`;
+  }
+}
+
 function _renderSettingsAgentsTab() {
   const treks = state.treks || [];
   const allSessions = state.onlineSessions || [];
@@ -4078,8 +4134,13 @@ function renderSettings() {
       <div class="settings-tabs">
         <button class="tab ${tab === 'members' ? 'active' : ''}" data-action="settings-set-tab" data-tab="members">Projects &amp; Members</button>
         <button class="tab ${tab === 'agents' ? 'active' : ''}" data-action="settings-set-tab" data-tab="agents">My Agents &amp; Treks</button>
+        <button class="tab ${tab === 'audit' ? 'active' : ''}" data-action="settings-set-tab" data-tab="audit">Audit</button>
       </div>
-      ${tab === 'members' ? _renderSettingsMembersTab() : _renderSettingsAgentsTab()}
+      ${tab === 'members'
+        ? _renderSettingsMembersTab()
+        : tab === 'audit'
+        ? _renderSettingsAuditTab()
+        : _renderSettingsAgentsTab()}
     </div>
   `;
   // Close on overlay click (= outside panel)
@@ -4105,6 +4166,14 @@ function renderSettings() {
     // ms-78 e-1803 — Owner-only pending invitations list. Non-owner calls
     // return 403 and silently render nothing (see _settingsLoadInvitationList).
     if (state.myIsOwner) _settingsLoadInvitationList();
+  }
+  // Audit tab (ms-70 / e-1718): load DM approval history into its slot.
+  // Same "load directly into target slot" pattern as the Members tab — the
+  // initial renderSettings() shows a "Loading…" placeholder; the fetch
+  // completes and we paint rows in place without re-rendering the whole
+  // settings panel.
+  if (tab === 'audit' && state.projectId) {
+    _settingsLoadDmApprovalHistory();
   }
 }
 
@@ -6010,6 +6079,72 @@ function closeDocumentOverlay() {
   state.documentOverlay = null;
   const overlay = document.getElementById('document-overlay-modal');
   if (overlay) { overlay.style.display = 'none'; overlay.innerHTML = ''; }
+}
+
+// ms-70 / e-1718 — DM approval history (audit) row rendering.
+//
+// Lives inside the SHARED region so the Web build (server/static/index.html)
+// and the Tauri build (desktop/dist/index.html generated by desktop/build.py)
+// render the same audit table from the same source of truth. If the Tauri
+// side ever wires up a Rust loader, it can reuse this helper unchanged.
+//
+// Read-only by design: per SPEC 設計方針 3 the approve/deny decision is
+// made exclusively in the terminal Claude Code via `beacon dm respond`.
+// The Web UI is the *aftermath* view — who decided what, when. There is
+// no approve / deny button here and there must never be one (= violating
+// the terminal-only invariant would let a curious browser tab smuggle a
+// decision past the receiver's own typing).
+//
+// ``rows`` is the array returned by GET /api/projects/{pid}/dm/approval/history
+// (server-side: db.list_decided_approvals). Each row is the 7-field
+// sidecar shape; we surface 6 of them (sender / receiver / status /
+// decision_at / decision_by / event_id) and omit ``created_at`` to keep
+// the table scannable — created_at differs from decision_at only by the
+// elapsed-pending time, which is rarely useful for human audit.
+function renderDmApprovalHistoryRows(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return '<div class="menu-user" style="color:var(--text-dim);padding:12px;font-style:italic;">承認履歴はまだありません (= 過去に approve / deny された DM action がない)。</div>';
+  }
+  const head = `
+    <thead>
+      <tr>
+        <th style="width:90px;">status</th>
+        <th>sender</th>
+        <th>receiver</th>
+        <th style="width:140px;">decided at</th>
+        <th>decided by</th>
+        <th style="width:120px;">event_id</th>
+      </tr>
+    </thead>`;
+  const body = rows.map(r => {
+    const status = r.approval_status || '';
+    const sender = r.sender_user_id || '';
+    const receiver = r.receiver_user_id || '';
+    const decidedAt = r.decision_at || '';
+    const decidedBy = r.decision_by || '';
+    const eid = r.event_id || '';
+    // Color-tag approved / denied so the eye can sweep the column. Inline
+    // styles only — no new CSS class needed (= minimal blast radius).
+    const statusColor = status === 'approved'
+      ? 'color:#7fb389;'
+      : status === 'denied'
+      ? 'color:#c97a7a;'
+      : 'color:var(--text-dim);';
+    return `
+      <tr>
+        <td><span style="${statusColor}font-weight:600;">${esc(status)}</span></td>
+        <td><span style="font-size:0.72rem;">${esc(sender)}</span></td>
+        <td><span style="font-size:0.72rem;">${esc(receiver)}</span></td>
+        <td><span style="font-size:0.7rem;color:var(--text-dim);">${esc(decidedAt)}</span></td>
+        <td><span style="font-size:0.72rem;">${esc(decidedBy)}</span></td>
+        <td><span style="font-size:0.65rem;color:var(--text-dim);font-family:var(--font-mono,monospace);">${esc(eid)}</span></td>
+      </tr>`;
+  }).join('');
+  return `
+    <table class="settings-table">
+      ${head}
+      <tbody>${body}</tbody>
+    </table>`;
 }
 </script>
 </body>

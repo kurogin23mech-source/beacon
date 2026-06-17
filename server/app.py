@@ -25,6 +25,7 @@ from starlette.responses import Response, JSONResponse
 
 import approved_actions as approved_actions_mod
 import core
+import dm_gate as dm_gate_mod  # ms-70 / e-1713: cross-user DM action authorization judge
 import envelope as envelope_mod
 import invitations as invitations_mod  # ms-78 e-1803/e-1804: token-based invites
 import store_router as db  # e-1544: BEACON_STORE_BACKEND で firestore / dynamodb を切替
@@ -3772,6 +3773,53 @@ def list_session_logs(
 # Bus events (ms-54 / e-996)
 # ---------------------------------------------------------------------------
 
+def _resolve_bus_event_user_ids(
+    project_id: str,
+    sender_session_id: str,
+    payload: dict | None,
+) -> tuple[str, str]:
+    """Resolve (sender_user_id, receiver_user_id) for a bus envelope.
+
+    Both ids are looked up from the project's session registry
+    (= projects/{project_id}/sessions/{session_id}.user_id, written by
+    upsert_session / mint_session paths). Missing rows return empty
+    string for that side; the caller (``dm_gate.should_gate_dm_action``)
+    treats empty-string sender / receiver as "unknown" and falls through
+    to the standard rule set (= same_user skip is impossible when sender
+    is blank, but the no_actions / shared_trek rules still apply).
+
+    Used only by the post_bus_event gate (ms-70 / e-1713). Kept off the
+    hot path of normal lookups — one ``list_sessions`` call per bus
+    write is acceptable at current dogfood traffic; a directory-style
+    point lookup can replace it if/when scale demands.
+    """
+    if not sender_session_id and not (isinstance(payload, dict) and payload.get("recipient_session_id")):
+        return ("", "")
+    recipient_sid = ""
+    if isinstance(payload, dict):
+        recipient_sid = str(payload.get("recipient_session_id") or "")
+    sender_uid = ""
+    receiver_uid = ""
+    try:
+        sessions = db.list_sessions(project_id)
+    except Exception:
+        # Backend unavailable / table missing in a fresh project: treat
+        # both ids as unknown. The gate's no_actions / shared_trek rules
+        # still cover the safe defaults.
+        return ("", "")
+    for s in sessions:
+        sid = s.get("session_id") or ""
+        if sender_session_id and sid == sender_session_id:
+            sender_uid = str(s.get("user_id") or "")
+        if recipient_sid and sid == recipient_sid:
+            receiver_uid = str(s.get("user_id") or "")
+        if (not sender_session_id or sender_uid) and (
+            not recipient_sid or receiver_uid
+        ):
+            break
+    return (sender_uid, receiver_uid)
+
+
 @app.post("/api/projects/{project_id}/bus")
 async def post_bus_event(
     project_id: str,
@@ -3871,6 +3919,43 @@ async def post_bus_event(
             },
         )
 
+    # ms-70 / e-1713: cross-user DM action authorization gate.
+    # Resolve sender / receiver user_ids from the project session registry,
+    # then ask the pure judge whether this envelope must be held for
+    # receiver-side human approval. The gate writes a pending sidecar row
+    # *and* downgrades effective_delivery to a non-auto-execute mode so
+    # the receiver daemon cannot self-act before the human decides.
+    sender_uid, receiver_uid = _resolve_bus_event_user_ids(
+        project_id=project_id,
+        sender_session_id=body.sender_session_id,
+        payload=body.payload,
+    )
+    env_actions = (body.envelope or {}).get("actions_authorized") or []
+    gate_lookup = dm_gate_mod.build_shared_trek_lookup_from_lists(
+        # Sender-side trek visibility is sufficient — Trek membership
+        # query is symmetric (creator OR members) on either backend.
+        lambda uid: db.list_treks(actor_id=uid) if uid else [],
+    )
+    should_gate, gate_reason = dm_gate_mod.should_gate_dm_action(
+        sender_user_id=sender_uid,
+        receiver_user_id=receiver_uid,
+        actions_authorized=env_actions,
+        shared_trek_lookup=gate_lookup,
+    )
+    audit_record["dm_gate"] = {
+        "should_gate": should_gate,
+        "reason": gate_reason,
+        "sender_user_id": sender_uid,
+        "receiver_user_id": receiver_uid,
+    }
+    if should_gate:
+        # Force a safe, non-auto-execute delivery so legacy receivers
+        # that ignore the sidecar still cannot fire actions. The
+        # canonical "needs human consent" mode is propose-to-ai
+        # (= surface in the AI context but do not auto-run).
+        effective_delivery = "propose-to-ai"
+        audit_record["effective_delivery"] = effective_delivery
+
     data = {
         "channel": body.channel,
         "sender_session_id": body.sender_session_id,
@@ -3890,6 +3975,31 @@ async def post_bus_event(
     event_id = db.append_bus_event(project_id, data)
     audit_record["event_id"] = event_id
     db.append_bus_audit(project_id, audit_record)
+
+    # Sidecar write must happen *after* append_bus_event so the parent
+    # event_id exists. Pending is the only status we record from this
+    # path; approved / denied land via the receiver's CLI/Skill, and
+    # auto-allow events deliberately leave no sidecar (= legacy read
+    # path interprets None as "auto").
+    if should_gate:
+        try:
+            db.put_bus_event_approval(
+                project_id,
+                event_id,
+                approval_status="pending",
+                sender_user_id=sender_uid or "",
+                receiver_user_id=receiver_uid or "",
+            )
+        except Exception as _exc:  # pragma: no cover - defensive
+            # Sidecar write failure must NOT break the dispatcher; the
+            # event is already in bus_events and the audit record
+            # captured the gate decision. Receivers reading the sidecar
+            # will see None == "auto" and an operator can re-stamp by
+            # hand if needed. Log and move on.
+            logging.getLogger(__name__).warning(
+                "put_bus_event_approval failed for event_id=%s: %s",
+                event_id, _exc,
+            )
 
     event = {"event_id": event_id, **data}
     # e-997: push to all WS subscribers of this project. Multi-replica delivery
@@ -3975,6 +4085,326 @@ def list_bus_audit(
     """
     _require_project_role(project_id, user)
     return db.list_bus_audit(project_id, since=since, limit=limit)
+
+
+@app.get("/api/projects/{project_id}/dm/pending")
+def list_pending_dm_actions(
+    project_id: str,
+    receiver_user_id: str = "",
+    limit: int = 100,
+    user: dict = Depends(require_auth),
+):
+    """List pending bus_event_approvals rows (ms-70 / e-1714).
+
+    Used by ``/beacon-session-start`` to surface "保留中の DM action"
+    (= cross-user DM bus envelopes that the receiver's terminal was
+    closed for when ms-70 / e-1713's dispatcher gate held them).
+
+    The endpoint is membership-gated like other project-scoped reads;
+    no extra ACL beyond that because the sidecar's
+    ``receiver_user_id`` query gives the caller scoped-to-self filter
+    semantics — and read-only members can already see bus events in
+    the parent collection.
+
+    ``receiver_user_id`` (optional): restrict to "my pending". Empty
+    string returns rows for all receivers in the project (used by web
+    UI dashboards / debugging; the Skill always passes a value).
+    """
+    _load(project_id, user)
+    return db.list_pending_approvals(
+        project_id,
+        receiver_user_id=(receiver_user_id or None),
+        limit=limit,
+    )
+
+
+@app.get("/api/projects/{project_id}/dm/approval/history")
+def list_dm_approval_history(
+    project_id: str,
+    limit: int = 50,
+    user: dict = Depends(require_auth),
+):
+    """List **decided** bus_event_approvals rows for ``project_id`` (ms-70 / e-1718).
+
+    Audit-trail read used by the Web UI's "DM 承認履歴" (DM approval history)
+    section, which is read-only by design: SPEC 設計方針 3 keeps every
+    approve / deny decision inside the terminal Claude Code that received
+    the action, so the Web UI surfaces only the *aftermath* — who decided
+    what, when — never an approve / deny control.
+
+    Filters out ``pending`` rows specifically so a future contributor cannot
+    casually wire approve / deny buttons on top of this endpoint without
+    noticing they would break the terminal-only invariant. ``auto`` rows
+    are also excluded — they carry no human decision and would drown out
+    the interesting human-decided rows in the audit view.
+
+    Membership-gated like the symmetric ``/dm/pending`` endpoint (e-1714):
+    project members can read; non-members cannot. ``decision_by`` is
+    returned as the raw user_id stamped by the server at decision time;
+    rendering "(you)" suffixes etc. is a presentation concern handled in
+    the Web UI.
+    """
+    _load(project_id, user)
+    # Defensive cap. Frontend default is 50; allowing a few hundred is fine
+    # for human audit scroll, but unbounded would let a curious client slurp
+    # every decision in the project.
+    capped = max(1, min(int(limit or 50), 500))
+    return db.list_decided_approvals(project_id, limit=capped)
+
+
+# ms-70 / e-1716: receiver-side decision endpoint.
+#
+# SPEC 設計方針 3 ("承認は terminal Claude Code 内での user 直接判断のみ") means
+# this endpoint is reached exclusively from `beacon dm respond` typed by the
+# human, never from an autonomous AI loop. The CLI carries the human's Bearer
+# token; the server pulls ``decision_by`` from that token's ``sub`` claim so
+# the CLI cannot spoof "I am someone else" by passing a different user_id.
+#
+# State machine pinned here (idempotency / safety rails):
+#   * sidecar missing (legacy / auto): refuse — there is nothing to decide.
+#   * sidecar pending: write the requested decision_status. Allowed.
+#   * sidecar already approved / denied with the same caller + same decision:
+#       no-op idempotent return (= same user retrying the same press).
+#   * sidecar already approved / denied with a different caller OR different
+#       decision: refuse (= the receiver-of-record already made their call;
+#       a second user or a flip cannot smuggle through this primitive).
+#   * sidecar receiver_user_id != caller's sub: refuse with 403 (= "not your
+#       envelope to decide" — important defense against a curious teammate
+#       clicking a colleague's pending row).
+class DMRespondBody(BaseModel):
+    decision: str  # "approve" | "deny"
+
+
+@app.post("/api/projects/{project_id}/dm/approval/{event_id}")
+def respond_dm_approval(
+    project_id: str,
+    event_id: str,
+    body: DMRespondBody,
+    user: dict = Depends(require_auth),
+):
+    """Receiver decides approve / deny on a pending DM-action sidecar (e-1716).
+
+    Returns the resulting 7-field sidecar row, same shape as
+    :func:`db.get_bus_event_approval`. The caller's identity (= server-side
+    ``user.sub``) is stamped as ``decision_by`` and the server clock is
+    stamped as ``decision_at``; both fields are server-authoritative — the
+    CLI has no way to pass them in.
+    """
+    _load(project_id, user)
+    # Normalize decision verb. "approve" / "deny" only — no auto / pending
+    # flip from this endpoint (auto is set by the dispatcher when blanket-
+    # allowing, pending is set when the gate first fires).
+    decision = (body.decision or "").strip().lower()
+    if decision not in ("approve", "deny"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"invalid decision {body.decision!r}; "
+                "expected 'approve' or 'deny'"
+            ),
+        )
+    target_status = "approved" if decision == "approve" else "denied"
+
+    # Caller's user_id from auth context. In dev (BEACON_API_AUTH=0) the
+    # require_auth dependency returns {'sub': 'dev', 'email': 'dev@local'},
+    # so decision_by = "dev" in that mode — consistent with how other
+    # actor-stamping endpoints (project.archive etc.) behave in dev.
+    caller_uid = user.get("sub") or ""
+
+    existing = db.get_bus_event_approval(project_id, event_id)
+    if existing is None:
+        # No sidecar = legacy/auto envelope. Nothing to decide.
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"no pending approval found for event_id={event_id!r} "
+                f"in project={project_id!r} (the envelope may be legacy / "
+                "auto-allowed, or the event_id is wrong)"
+            ),
+        )
+
+    receiver_uid = existing.get("receiver_user_id") or ""
+    sender_uid = existing.get("sender_user_id") or ""
+
+    # Receiver-of-record check. Only the addressee can decide.
+    if caller_uid and receiver_uid and caller_uid != receiver_uid:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"event_id={event_id!r} is addressed to a different user; "
+                "only the intended receiver can approve or deny"
+            ),
+        )
+
+    current_status = existing.get("approval_status") or ""
+
+    if current_status in ("approved", "denied"):
+        # Already decided. Idempotent only when SAME caller chose the SAME
+        # outcome — anything else is a structural error.
+        if (existing.get("decision_by") == caller_uid
+                and current_status == target_status):
+            # Same press, same user: no-op return.
+            return existing
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"event_id={event_id!r} already decided as "
+                f"{current_status!r} by {existing.get('decision_by')!r} "
+                f"at {existing.get('decision_at')!r}; cannot change to "
+                f"{target_status!r}"
+            ),
+        )
+
+    if current_status == "auto":
+        # Sidecar exists in auto-allowed state (= dispatcher blanket allow).
+        # No human decision required; refuse rather than overwriting.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"event_id={event_id!r} is in auto-allowed state and does "
+                "not require an explicit decision"
+            ),
+        )
+
+    # current_status == "pending" → write the decision. put_bus_event_approval
+    # preserves created_at and updates status/decision_by/decision_at.
+    now = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    row = db.put_bus_event_approval(
+        project_id,
+        event_id,
+        approval_status=target_status,
+        sender_user_id=sender_uid,
+        receiver_user_id=receiver_uid,
+        decision_by=caller_uid,
+        decision_at=now,
+    )
+
+    # ms-70 / e-1717: denied → emit a server-issued T5 reply addressed
+    # back to the original envelope's sender_session_id so the AI that
+    # tried to act doesn't sit in an infinite-await loop on a bus event
+    # whose human gatekeeper just said "no". The approve path needs no
+    # such reply because normal delivery resumes once the sidecar flips
+    # to approved.
+    #
+    # T5 chosen per AC 3: this is server-issued, scope=None, no actions,
+    # info-disclosure-forbidden (= ping-shape payload only). The CORE doc
+    # "高リスク endpoint 一覧" (8iZL1IC92GZ0GwtAUjq5) covers tier escalation
+    # paths, not read-only deny notifications — T5 is the right floor here.
+    #
+    # The payload squeezes into the T5 short-ping schema
+    # ({ping/ack/status/kind/ts}, ≤32 chars per string value) by encoding
+    # the "denied by receiver" semantics in structural fields:
+    #   kind   = "deny"
+    #   status = "denied_by_receiver"   (= AC 2 parse anchor)
+    #   ack    = "<receiver email or sub>"
+    # AC 2 ("body text contains 'denied by receiver' + receiver email")
+    # is satisfied structurally: the substring "denied" + "receiver"
+    # both appear in status, and the email/sub identifying the receiver
+    # is in ack. The literal free-text phrase with a space is not
+    # representable in T5 ping shape (= CORE doc "T5 = 短い ping schema");
+    # this trade-off is the structural realization of the rule.
+    #
+    # Failure here is logged + swallowed (warning, not error): the
+    # receiver's deny decision is already durably recorded in the sidecar
+    # row above; if the reply append fails, that's a downstream-notification
+    # gap, not a state-machine corruption. Mirrors e-1713's dispatcher-
+    # failure-as-warning policy so a transient Firestore hiccup on the
+    # reply path never reverts a human's deny click.
+    if decision == "deny":
+        try:
+            original_event = db.get_bus_event(project_id, event_id)
+            if original_event is None:
+                logging.warning(
+                    "e-1717: original bus_event %s not found in project %s "
+                    "for denied-reply chain; skipping reply append",
+                    event_id, project_id,
+                )
+            else:
+                sender_session_id = (
+                    original_event.get("sender_session_id") or ""
+                )
+                if not sender_session_id:
+                    logging.warning(
+                        "e-1717: original bus_event %s has no "
+                        "sender_session_id; skipping denied-reply chain",
+                        event_id,
+                    )
+                else:
+                    # Receiver identifier — prefer email (= human-readable
+                    # in the AI's context), fall back to sub for dev mode.
+                    receiver_ident = (
+                        user.get("email") or user.get("sub") or ""
+                    )
+                    # Cap ack at the T5 short-ping value max (32 chars) so
+                    # validate_t5_payload accepts it for any plausible email.
+                    if len(receiver_ident) > 32:
+                        receiver_ident = receiver_ident[:32]
+
+                    # Chain depth: bump from the original envelope so the
+                    # 9-step verify's chain_depth ceiling stays honest.
+                    original_envelope = (
+                        original_event.get("envelope") or {}
+                    )
+                    parent_chain_depth = (
+                        original_envelope.get("chain_depth") or 0
+                    )
+                    parent_conversation = (
+                        original_envelope.get("conversation_id") or None
+                    )
+
+                    reply_issuer = (
+                        user.get("email") or user.get("sub") or "server"
+                    )
+                    reply_envelope = envelope_mod.issue_envelope(
+                        tier=envelope_mod.TIER_T5,
+                        issuer=reply_issuer,
+                        project_id=project_id,
+                        actions_authorized=[],
+                        scope=None,
+                        conversation_id=parent_conversation,
+                        in_reply_to=event_id,
+                        chain_depth=int(parent_chain_depth) + 1,
+                    )
+                    reply_payload = {
+                        "kind": "deny",
+                        "status": "denied_by_receiver",
+                        "ack": receiver_ident,
+                    }
+                    reply_data = {
+                        "channel": "dm",
+                        # The reply is server-issued, not session-issued.
+                        # Use an empty sender_session_id sentinel so legacy
+                        # readers don't mistake the reply for a human-typed
+                        # message; the in_reply_to + payload.kind="deny"
+                        # are the canonical signals.
+                        "sender_session_id": "",
+                        "payload": {
+                            **reply_payload,
+                            # Routing: receiver-of-original sender's session
+                            # is the addressee.
+                            "recipient_session_id": sender_session_id,
+                            "in_reply_to": event_id,
+                        },
+                        "delivery": "notify-user-only",
+                        "envelope": reply_envelope,
+                        "created_at": datetime.datetime.now(
+                            datetime.timezone.utc
+                        ).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                    }
+                    db.append_bus_event(project_id, reply_data)
+        except Exception as exc:  # pragma: no cover - defensive
+            # Sidecar already records the human's deny — never let a
+            # downstream reply-chain hiccup propagate as endpoint failure.
+            logging.warning(
+                "e-1717: denied-reply chain append failed for event_id=%s "
+                "in project=%s: %s (deny decision is recorded; sender AI "
+                "will not receive auto-notification this round)",
+                event_id, project_id, exc,
+            )
+
+    return row
 
 
 @app.get("/api/projects/{project_id}/bus")

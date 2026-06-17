@@ -59,6 +59,11 @@ _SUBCOLLECTION_SK_NAMES = {
     "bus_cursors": "cursor_id",
     "bus_nonces": "nonce",
     "bus_audit": "audit_id",
+    # ms-70 / e-1712: sidecar to bus_events carrying the receiver-side
+    # approval decision_stamp. SK = parent event_id so the sidecar row
+    # collocates with its source envelope but is updated independently
+    # without touching the HMAC-signed payload.
+    "bus_event_approvals": "event_id",
     "sessions": "session_id",
     "session_lookup": "lookup_key",
     "session_logs": "session_id",
@@ -91,6 +96,8 @@ TABLES = {
     "bus_cursors": f"{TABLE_PREFIX}-bus_cursors",
     "bus_nonces": f"{TABLE_PREFIX}-bus_nonces",
     "bus_audit": f"{TABLE_PREFIX}-bus_audit",
+    # ms-70 / e-1712: receiver-side approval decision_stamp sidecar.
+    "bus_event_approvals": f"{TABLE_PREFIX}-bus_event_approvals",
     "sessions": f"{TABLE_PREFIX}-sessions",
     "session_logs": f"{TABLE_PREFIX}-session_logs",
     "operation_envelopes": f"{TABLE_PREFIX}-operation_envelopes",
@@ -961,6 +968,173 @@ def list_bus_events(project_id: str, since: str = "", channel: str = "",
     if limit:
         items = items[:limit]
     return items
+
+
+# ---------------------------------------------------------------------------
+# Bus event approvals (ms-70 / e-1712)
+# ---------------------------------------------------------------------------
+# Table: beacon-{env}-bus_event_approvals, PK=project_id, SK=event_id
+#
+# Receiver-side decision_stamp sidecar mirrored byte-for-byte with the
+# Firestore implementation (server/firestore_client.py). The bus_event
+# envelope itself stays in beacon-{env}-bus_events untouched — flipping a
+# field on it would break the HMAC signature (= ms-54 / e-1155 design).
+# This sidecar table stores only the mutable receiver decision:
+#
+#   event_id           : str           (= SK, same id as parent bus_event)
+#   approval_status    : str           (= "pending" | "approved" | "denied" | "auto")
+#   decision_by        : str | None    (= user_id of decider, None while pending)
+#   decision_at        : str | None    (= ISO8601 of decision, None while pending)
+#   created_at         : str           (= ISO8601 of sidecar first write)
+#   sender_user_id     : str
+#   receiver_user_id   : str
+#
+# Migration: bus_events without a sidecar row are read as
+# approval_status="auto" by callers (= same-user DMs / shared-Trek blanket
+# allow). get_bus_event_approval returns None for that case; the caller
+# must treat None == "auto" rather than "missing".
+
+# Module-level alias mirrors the firestore_client.py constant so callers can
+# import either backend and refer to the SK / subcollection name uniformly.
+_BUS_EVENT_APPROVAL_STATUSES = ("pending", "approved", "denied", "auto")
+
+
+def get_bus_event_approval(project_id: str, event_id: str) -> dict | None:
+    """Return the sidecar approval doc for ``event_id`` or None if absent.
+
+    None is the **legacy / auto-allow** signal — callers must treat None as
+    ``approval_status="auto"`` for backwards compatibility with bus_events
+    written before this sidecar landed (= ms-70 / e-1712).
+    """
+    resp = _table("bus_event_approvals").get_item(
+        Key={"project_id": project_id, "event_id": event_id}
+    )
+    item = resp.get("Item")
+    if not item:
+        return None
+    # project_id は内部キー、callers には返さない (= firestore 版が doc.id を
+    # event_id にマップする shape と同じ surface にする)。
+    return {k: v for k, v in item.items() if k != "project_id"}
+
+
+def put_bus_event_approval(project_id: str, event_id: str, *,
+                           approval_status: str,
+                           sender_user_id: str,
+                           receiver_user_id: str,
+                           decision_by: str | None = None,
+                           decision_at: str | None = None) -> dict:
+    """Write or update the sidecar approval row for ``event_id``.
+
+    First call for an event_id sets ``created_at`` to the server clock;
+    subsequent calls (= pending → approved | denied) update the decision
+    fields but preserve the original ``created_at``. This mirrors the
+    Firestore implementation's lifecycle (= ms-70 / e-1712 design).
+
+    Returns the resulting row as a 7-field dict (without the internal
+    project_id key), matching :func:`get_bus_event_approval`'s shape.
+
+    Raises ``ValueError`` for invalid ``approval_status``.
+    """
+    if approval_status not in _BUS_EVENT_APPROVAL_STATUSES:
+        raise ValueError(
+            f"put_bus_event_approval: invalid approval_status "
+            f"{approval_status!r} (allowed: {_BUS_EVENT_APPROVAL_STATUSES})"
+        )
+    table = _table("bus_event_approvals")
+    existing = table.get_item(
+        Key={"project_id": project_id, "event_id": event_id}
+    ).get("Item") or {}
+    now = _now_iso_utc()
+    created_at = existing.get("created_at") or now
+    item = {
+        "project_id": project_id,
+        "event_id": event_id,
+        "approval_status": approval_status,
+        "decision_by": decision_by,
+        "decision_at": decision_at,
+        "created_at": created_at,
+        "sender_user_id": sender_user_id,
+        "receiver_user_id": receiver_user_id,
+    }
+    table.put_item(Item=item)
+    return {k: v for k, v in item.items() if k != "project_id"}
+
+
+def list_pending_approvals(project_id: str, *,
+                           receiver_user_id: str | None = None,
+                           limit: int = 100) -> list[dict]:
+    """List sidecar rows in ``approval_status="pending"`` ordered by created_at.
+
+    ``receiver_user_id`` (optional): restrict to rows where the receiver
+    matches — applied in-memory after the FilterExpression on
+    ``approval_status``. No GSI is provisioned (= dev scale, mirrors the
+    Firestore version's "no composite index" trade-off).
+
+    ``limit``: cap returned rows; defaults to 100. Applied after the
+    receiver filter so a heavy other-receiver burst does not starve the
+    caller's "my pending" query.
+    """
+    kwargs = {
+        "KeyConditionExpression": Key("project_id").eq(project_id),
+        "FilterExpression": Attr("approval_status").eq("pending"),
+    }
+    # Soft over-fetch to satisfy `limit` after in-memory receiver filter.
+    fetch_cap = (limit * 5) if (limit and receiver_user_id) else (limit or 0)
+    items: list[dict] = []
+    while True:
+        resp = _table("bus_event_approvals").query(**kwargs)
+        items.extend(resp.get("Items", []))
+        last = resp.get("LastEvaluatedKey")
+        if not last:
+            break
+        if fetch_cap and len(items) >= fetch_cap:
+            break
+        kwargs["ExclusiveStartKey"] = last
+    items.sort(key=lambda it: it.get("created_at", ""))
+    rows = [{k: v for k, v in it.items() if k != "project_id"} for it in items]
+    if receiver_user_id:
+        rows = [r for r in rows if r.get("receiver_user_id") == receiver_user_id]
+    if limit:
+        rows = rows[:limit]
+    return rows
+
+
+def list_decided_approvals(project_id: str, *, limit: int = 50) -> list[dict]:
+    """List sidecar rows in approval_status in {"approved","denied"} (= ms-70 / e-1718).
+
+    DynamoDB mirror of :func:`firestore_client.list_decided_approvals`. Same
+    contract: pending / auto excluded, newest-first by ``decision_at``
+    (fallback ``created_at``), cap at ``limit``.
+
+    Single Query on the project_id PK with a FilterExpression matching
+    approved OR denied. No GSI provisioned — dev scale only, mirrors the
+    "no composite index" trade-off used by list_pending_approvals.
+    """
+    kwargs = {
+        "KeyConditionExpression": Key("project_id").eq(project_id),
+        "FilterExpression": (
+            Attr("approval_status").eq("approved")
+            | Attr("approval_status").eq("denied")
+        ),
+    }
+    items: list[dict] = []
+    fetch_cap = (limit * 2) if limit else 0
+    while True:
+        resp = _table("bus_event_approvals").query(**kwargs)
+        items.extend(resp.get("Items", []))
+        last = resp.get("LastEvaluatedKey")
+        if not last:
+            break
+        if fetch_cap and len(items) >= fetch_cap:
+            break
+        kwargs["ExclusiveStartKey"] = last
+    rows = [{k: v for k, v in it.items() if k != "project_id"} for it in items]
+    def _sort_key(r: dict) -> str:
+        return r.get("decision_at") or r.get("created_at") or ""
+    rows.sort(key=_sort_key, reverse=True)
+    if limit:
+        rows = rows[:limit]
+    return rows
 
 
 # ---------------------------------------------------------------------------

@@ -173,6 +173,14 @@ const dataSource = {
     if (m) title = m[1];
     state.documentContent = { doc_id: docId, title, scope, content: body };
   },
+  // ms-70 e-1718 — DM approval history (Settings > Audit).
+  // Tauri Rust binding (cloud_list_dm_approval_history) is not implemented
+  // yet; mirror the "Web-only" pattern used by Member admin (= now wired
+  // below via cloud_* commands). Audit history Rust binding is tracked as
+  // a follow-up; throw stub keeps the SHARED region pure (= ms-46 e-728).
+  loadDmApprovalHistory: async (_pid, _limit) => {
+    throw new Error('DM approval history is Web-only in this build. Open the Web UI to view the audit trail.');
+  },
   // ms-72 e-1779 — Member admin + invitation flow wired to Rust commands.
   // Was a "Web-only" throw stub before the Rust layer landed (= ms-72 prior).
   // SHARED Settings > Members tab now reaches the real backend through these
