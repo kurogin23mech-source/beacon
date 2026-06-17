@@ -12197,6 +12197,82 @@ def cmd_bus_send():
     print(line)
 
 
+def _fetch_pending_dm_lookup(client, project_id: str) -> dict:
+    """Fetch the project-scoped pending sidecar map for inline banner emission.
+
+    Used by ``cmd_bus_listen`` / ``cmd_bus_receive`` (ms-70 / e-1715) to
+    decide whether to print a banner before each event. Returns
+    ``{event_id: row}`` (= via ``lib/dm_pending.build_pending_lookup``).
+
+    All failures (= cloud unconfigured, endpoint absent on a server
+    older than e-1714, transient network blip, auth missing) collapse
+    to an empty dict — the CLI's existing event-stream output keeps
+    flowing untouched. This is the explicit AC requirement: sidecar
+    lookup failure MUST NOT break legacy listen / receive behaviour.
+
+    We deliberately do NOT pass ``receiver_user_id`` because resolving
+    the local user_id at this point would require touching the auth
+    layer (= ``.beacon/cloud.json`` / ``~/.beacon/auth.json``) which
+    has multiple resolution orders. The endpoint is membership-gated,
+    so the empty receiver_user_id case returns all project-scoped
+    pending rows; the banner only fires for events that actually appear
+    in *this* recipient's unread feed, which is the natural filter.
+    """
+    try:
+        from dm_pending import build_pending_lookup
+    except Exception:
+        return {}
+    try:
+        rows = client.get(
+            f"/api/projects/{project_id}/dm/pending"
+            f"?receiver_user_id=&limit=200"
+        )
+    except Exception:
+        # Silent: this includes 404 (older server), 401 (no token),
+        # 5xx (transient), and OSError (no network).
+        return {}
+    if not isinstance(rows, list):
+        return {}
+    try:
+        return build_pending_lookup(rows)
+    except Exception:
+        return {}
+
+
+def _print_event_with_banner(ev: dict, pending_lookup: dict) -> None:
+    """Print a single bus event JSON line, optionally preceded by the
+    pending-DM banner.
+
+    ms-70 / e-1715: if ``ev['event_id']`` is in ``pending_lookup`` (= the
+    dispatcher gate set ``approval_status="pending"`` for this envelope),
+    emit a structurally recognizable banner line first so the AI session
+    consuming the stream stops and asks the user before acting on the
+    envelope's actions_authorized.
+
+    Banner formatting / contract lives in ``lib/dm_pending.py``. This
+    function is intentionally a thin wrapper so the legacy "just print
+    JSON" behaviour stays one line away in a diff.
+    """
+    if pending_lookup:
+        eid = ev.get("event_id")
+        if eid and eid in pending_lookup:
+            try:
+                from dm_pending import format_inline_dm_banner
+                row = pending_lookup[eid]
+                banner = format_inline_dm_banner(
+                    eid,
+                    sender_user_id=row.get("sender_user_id", ""),
+                    created_at=row.get("created_at", ""),
+                )
+                print(banner, flush=True)
+            except Exception:
+                # If formatting fails for any reason, fall back to the
+                # plain JSON line. The AC says "do not break legacy
+                # output"; missing banner is worse than missing JSON.
+                pass
+    print(json.dumps(ev, ensure_ascii=False), flush=True)
+
+
 def cmd_bus_listen():
     """Long-poll /bus/unread and stream each event as one JSON line on stdout.
 
@@ -12208,6 +12284,13 @@ def cmd_bus_listen():
     The loop ends only on SIGINT or when the optional ``--once`` mode has
     delivered a batch. There is no implicit timeout — callers wanting one
     should use ``beacon bus receive --timeout`` instead.
+
+    ms-70 / e-1715: before printing each event, look up its sidecar
+    ``approval_status``. If pending, emit an inline banner so the AI
+    session reading the stream stops and asks the user before acting.
+    Sidecar lookup failures (= older server / no auth / network) silently
+    fall back to the legacy "just JSON" output — the banner is added on
+    top of the existing contract, not in place of it.
     """
     import time
     recipient = _bus_resolve_recipient()
@@ -12227,8 +12310,14 @@ def cmd_bus_listen():
                 project_id, recipient, channel=channel,
             )
             if events:
+                # e-1715: refresh sidecar lookup once per batch so a
+                # newly-approved row in the middle of a poll loop stops
+                # banner emission on the very next poll. Per-event
+                # lookups would be more accurate but multiply HTTP cost
+                # by N — batch granularity is the right tradeoff.
+                pending_lookup = _fetch_pending_dm_lookup(client, project_id)
                 for ev in events:
-                    print(json.dumps(ev, ensure_ascii=False), flush=True)
+                    _print_event_with_banner(ev, pending_lookup)
                 if auto_ack:
                     last_ts = events[-1].get("created_at", "")
                     if last_ts:
@@ -12241,7 +12330,14 @@ def cmd_bus_listen():
 
 
 def cmd_bus_receive():
-    """Block until a single batch of events arrives (or ``--timeout`` elapses)."""
+    """Block until a single batch of events arrives (or ``--timeout`` elapses).
+
+    ms-70 / e-1715: same inline pending-DM banner injection as
+    ``cmd_bus_listen``. ``beacon bus receive`` is the one-shot variant
+    used by ``beacon-bus-inbox-hook.py`` and ad-hoc scripts; treating
+    its output identically keeps the AI gate contract (= banner-then-event)
+    uniform across the two CLI entry points.
+    """
     import time
     recipient = _bus_resolve_recipient()
     channel = os.environ.get("BEACON_BUS_CHANNEL", "").strip()
@@ -12264,8 +12360,9 @@ def cmd_bus_receive():
             project_id, recipient, channel=channel,
         )
         if events:
+            pending_lookup = _fetch_pending_dm_lookup(client, project_id)
             for ev in events:
-                print(json.dumps(ev, ensure_ascii=False))
+                _print_event_with_banner(ev, pending_lookup)
             if auto_ack:
                 last_ts = events[-1].get("created_at", "")
                 if last_ts:
