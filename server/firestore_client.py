@@ -1050,6 +1050,157 @@ def list_bus_events(project_id: str, since: str = "", channel: str = "",
 
 
 # ---------------------------------------------------------------------------
+# Bus event approvals (subcollection: projects/{project_id}/bus_event_approvals/{event_id})
+# ms-70 / e-1712: receiver-side decision_stamp sidecar for cross-user DM action
+# envelopes. The envelope itself (in bus_events) is HMAC-signed and therefore
+# immutable — flipping a field on it to record "approved by user X at time T"
+# would break signature verification on every subsequent read.
+#
+# Instead, we keep the envelope intact in bus_events and store the variable
+# decision state in this parallel subcollection, keyed by the same event_id.
+# That gives CLI / Skill / Web UI / another session's AI a single place to
+# ask "is this envelope pending, approved, denied, or auto-allowed right now?"
+# without touching the signed payload.
+#
+# Schema (7 fields, mirrored byte-for-byte in DynamoDB):
+#   event_id           : str           (= parent bus_event auto-id, also doc id here)
+#   approval_status    : str           (= "pending" | "approved" | "denied" | "auto")
+#   decision_by        : str | None    (= user_id of the decider, None while pending)
+#   decision_at        : str | None    (= ISO8601 timestamp of decision, None while pending)
+#   created_at         : str           (= ISO8601 timestamp the sidecar row was first written)
+#   sender_user_id     : str           (= who issued the envelope; carried for cheap UI filtering)
+#   receiver_user_id   : str           (= who needs to approve; carried for cheap "my pending" query)
+#
+# Migration semantics: a bus_event without a matching sidecar row is treated
+# as approval_status="auto" by callers (= existing behaviour, e.g. same-user
+# DMs or Trek-scoped blanket-allow events that never produced a stamp).
+# get_bus_event_approval returns None for that case; the caller is expected
+# to interpret None as "auto" rather than "missing".
+# ---------------------------------------------------------------------------
+
+BUS_EVENT_APPROVALS_SUBCOLLECTION = "bus_event_approvals"
+
+# Allowed approval_status values. "auto" is materialised only when a caller
+# explicitly stamps a sidecar row to record that an auto-allow decision was
+# made (e.g. shared-Trek blanket-allow). Bare absence of a sidecar row is
+# also semantically "auto" but no document is written for it.
+_BUS_EVENT_APPROVAL_STATUSES = ("pending", "approved", "denied", "auto")
+
+
+def get_bus_event_approval(project_id: str, event_id: str) -> dict | None:
+    """Return the sidecar approval doc for ``event_id`` or None if absent.
+
+    None is the **legacy / auto-allow** signal — callers should treat None
+    as ``approval_status="auto"`` for backwards compatibility with bus_events
+    written before this sidecar landed (= ms-70 / e-1712).
+
+    Schema returned (7 fields) — see module-level doc above:
+      event_id / approval_status / decision_by / decision_at /
+      created_at / sender_user_id / receiver_user_id
+    """
+    doc = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(BUS_EVENT_APPROVALS_SUBCOLLECTION)
+        .document(event_id)
+        .get()
+    )
+    if not doc.exists:
+        return None
+    return {"event_id": doc.id, **(doc.to_dict() or {})}
+
+
+def put_bus_event_approval(project_id: str, event_id: str, *,
+                           approval_status: str,
+                           sender_user_id: str,
+                           receiver_user_id: str,
+                           decision_by: str | None = None,
+                           decision_at: str | None = None) -> dict:
+    """Write or update the sidecar approval row for ``event_id``.
+
+    First call on a given event_id creates the row with ``created_at`` set to
+    the server clock; subsequent calls update ``approval_status`` /
+    ``decision_by`` / ``decision_at`` but preserve the original ``created_at``
+    (= ms-70 design: the lifecycle "pending → approved | denied" should not
+    rewrite when the request came in).
+
+    Returns the resulting row as a dict (7 fields), in the same shape as
+    :func:`get_bus_event_approval`.
+
+    Raises ``ValueError`` if ``approval_status`` is not in the allowed set.
+    """
+    import datetime
+    if approval_status not in _BUS_EVENT_APPROVAL_STATUSES:
+        raise ValueError(
+            f"put_bus_event_approval: invalid approval_status "
+            f"{approval_status!r} (allowed: {_BUS_EVENT_APPROVAL_STATUSES})"
+        )
+    now = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    ref = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(BUS_EVENT_APPROVALS_SUBCOLLECTION)
+        .document(event_id)
+    )
+    snap = ref.get()
+    existing = snap.to_dict() if snap.exists else None
+    if existing:
+        created_at = existing.get("created_at") or now
+    else:
+        created_at = now
+    data = {
+        "approval_status": approval_status,
+        "decision_by": decision_by,
+        "decision_at": decision_at,
+        "created_at": created_at,
+        "sender_user_id": sender_user_id,
+        "receiver_user_id": receiver_user_id,
+    }
+    ref.set(data)
+    return {"event_id": event_id, **data}
+
+
+def list_pending_approvals(project_id: str, *,
+                           receiver_user_id: str | None = None,
+                           limit: int = 100) -> list[dict]:
+    """List sidecar rows in ``approval_status="pending"`` ordered by created_at.
+
+    ``receiver_user_id`` (optional): restrict to rows where the receiver
+    matches — the common UI query is "what is *my* inbox waiting on me to
+    decide". Applied in-memory after the equality query on
+    ``approval_status`` so no composite index is required (= same trade-off
+    as :func:`list_bus_events`'s channel filter).
+
+    ``limit``: cap returned rows; defaults to 100. Applied after the
+    in-memory receiver filter so a heavy other-receiver burst does not
+    starve the requested caller.
+    """
+    q = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(BUS_EVENT_APPROVALS_SUBCOLLECTION)
+        .where("approval_status", "==", "pending")
+        .order_by("created_at")
+    )
+    # Fetch slightly more than `limit` when we will post-filter by receiver
+    # so the final result still satisfies the bound.
+    fetch_cap = (limit * 5) if (limit and receiver_user_id) else limit
+    if fetch_cap:
+        q = q.limit(fetch_cap)
+    rows = [{"event_id": doc.id, **(doc.to_dict() or {})} for doc in q.stream()]
+    if receiver_user_id:
+        rows = [r for r in rows if r.get("receiver_user_id") == receiver_user_id]
+    if limit:
+        rows = rows[:limit]
+    return rows
+
+
+# ---------------------------------------------------------------------------
 # Session registry (subcollection: projects/{project_id}/sessions/{session_id})
 # ms-57 / e-1063: cloud-visible per-session state, used by Web UI for "who is
 # active right now" and by session-start for cross-machine rescue lookups.
