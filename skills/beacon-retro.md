@@ -54,20 +54,47 @@ cd "$PROJECT_DIR" 2>/dev/null; beacon-find-root >/dev/null && echo "OK" || echo 
 ```
 - `NO_BEACON` の場合、このSkillは何もせず終了する。
 
+## Step 0: catch-up モード判定 (= ms-79 / e-1837 / UC5-F2)
+
+retro trigger が示す overdue 週数が 2 以上の時、または user が `/beacon-retro catch-up` / 「まとめて消化したい」 と発話した時は、catch-up フローに分岐する。
+
+```bash
+cd "$PROJECT_DIR" && beacon trigger check 2>&1 | head -20
+```
+
+trigger payload (= `.beacon/triggers/retro.json`) に `overdue_slots` が 2 件以上ある場合は catch-up モードで開始することを提案:
+
+```
+振り返り未完の週が N 件たまっています ({W1, W2, W3})。
+- 1 週ずつ詳しく振り返る (通常モード)
+- まとめて消化 (catch-up モード: 各週で要約だけ確認、最後に期間メタ retro を生成)
+- やめる
+
+どうしますか?
+```
+
+user が catch-up を選んだ場合 (= 自動で catch-up に倒さず、ここは user 判断を尊重)、Step 1 で `--catch-up` フラグを付ける。1 件以下 / user が通常モード選択時は従来通り Step 1 へ進む。
+
 ## Step 1: 週次データの収集
 
 Bash ツールで以下を **並列に** 実行:
 
 ### 1a. beacon エントリ
 ```bash
+# 通常モード:
 cd "$PROJECT_DIR" && beacon retro --prepare [--since YYYY-MM-DD] [--until YYYY-MM-DD]
+
+# catch-up モード (= Step 0 で選択時、ms-79 e-1837):
+cd "$PROJECT_DIR" && beacon retro --catch-up [--since YYYY-MM-DD] [--until YYYY-MM-DD]
 ```
 - デフォルト挙動 (ms-43 e-570 で柔軟化):
   - `.beacon/retro/.reviewed` がある → 「最後にreviewした週の翌週月曜」が since
   - なければ「直近の retro_day から 6日遡った日」が since
   - 後方互換: 古い install は date 演算で「今週月曜 (月曜起動時は先週月曜)」にフォールバック
 - これにより **金曜 retro を忘れて翌週火曜に retro した場合でも、先週月曜〜今週火曜の全期間がカバーされる**
+- catch-up モード時は payload に `catch_up: { overdue_slots, count, since_first_overdue }` が同梱される (= ms-79 e-1837)。Step 2 / Step 3 はこのリストを順に処理する
 - ユーザーが期間を指定した場合は `--since` / `--until` を付加
+- payload は ms-79 / e-1836 で `source_breakdown` (= human N / auto-op M / dm K の facet) も同梱する。Step 2 の出力でこの内訳を「数字で示す事実セクション」 に反映できる
 
 ### 1b. git コミット一覧（コンテキスト補完用）
 ```bash
@@ -141,6 +168,49 @@ EOF
 - CLI が cloud mode を判別し、cloud subcollection または `.beacon/retro/YYYY-WNN.md` に書き込む
 
 ⚠️ **Write ツールで `.beacon/retro/*.md` を直接書かないこと**。cloud mode では Web UI Reviews タブに反映されず、retro が orphan になる。local/cloud の判定は CLI 層に任せ、Skill は本文生成だけに専念する。
+
+## Step 3.5: catch-up 連続消化 (= ms-79 / e-1837)
+
+catch-up モードのとき (= Step 0 で user が catch-up を選び、Step 1 payload に `catch_up.overdue_slots` が同梱されているとき) は、Step 2 → Step 3 を `overdue_slots` の各週について **順に** 繰り返す。
+
+各週で:
+
+1. その週の since / until を ISO 週から計算して `beacon retro --prepare --since ... --until ...` を再実行
+2. user に短い 3 択を提示:
+   ```
+   {YYYY-WNN}: <この週の主要 entry を 2-3 行で要約>
+   - 詳しく振り返る (= 通常 Step 2-3 を回す)
+   - 要約だけ確認して進む (= Step 2 軽量版で save)
+   - skip (= 何も書かずに .reviewed だけ進める)
+
+   どれにしますか?
+   ```
+3. user の選択に応じて分岐:
+   - 「詳しく」 → 通常 Step 2-3 を回す (= 通常モードと同じ深さ)
+   - 「要約だけ」 → 課題ごとのグルーピングは省略し、entry リスト + source_breakdown を箇条書きで save
+   - 「skip」 → `beacon retro done` 相当の `.reviewed` 更新のみ (= 内容は書かない、後から振り返り不可なので user に明示)
+
+4. 1 週終わったら次の `overdue_slots[i+1]` に進む
+
+全週終わったら **期間メタ retro** を 1 本生成して save:
+
+```bash
+cd "$PROJECT_DIR" && beacon retro save --week "{YYYY-WNN-meta}" --stdin <<'EOF'
+# Catch-up Meta Retro: {since_first_overdue} 〜 {today}
+
+## 対象期間
+- 振り返った週: W1, W2, W3 (= N 件)
+- 各週の概要: (各週から要約 1 行 ×N)
+
+## 期間全体の方向性チェック
+- (期間を通して見えてきたパターン / drift / 学び)
+
+## 次週のヒント
+- (期間メタの観点から、次に着手すべき塊)
+EOF
+```
+
+(`--week` の値は最終週のスロット名のままで OK。期間メタ retro が複数の週を内包していることは本文で示す。)
 
 ## Step 4: ディスカッションの開始
 

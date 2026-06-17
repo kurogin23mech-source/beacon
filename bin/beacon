@@ -1331,13 +1331,14 @@ cmd_entry_move() {
 
 cmd_retro() {
     ensure_project
-    local since="" until=""
+    local since="" until="" catch_up=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --since) since="${2:-}"; shift 2 ;;
             --until) until="${2:-}"; shift 2 ;;
             --prepare) shift ;;
+            --catch-up) catch_up="1"; shift ;;
             *) shift ;;
         esac
     done
@@ -1379,7 +1380,7 @@ cmd_retro() {
         fi
     fi
 
-    BEACON_SINCE="$since" BEACON_UNTIL="$until" \
+    BEACON_SINCE="$since" BEACON_UNTIL="$until" BEACON_RETRO_CATCH_UP="$catch_up" \
         python3 "$COMMANDS_PY" retro_prepare
 }
 
@@ -4175,6 +4176,14 @@ EOF
         search_limit=""
         search_offset=""
         search_json_flag=""
+        # ms-79 extensions for /beacon-retrospect (e-1832 / e-1833 / e-1834 / e-1835).
+        # 旧フラグだけ使う限りは search_project の旧経路で back-compat 維持。
+        search_source=""
+        search_actor=""
+        search_claimant=""
+        search_inc_bus_dm=""
+        search_inc_session_logs=""
+        search_inc_trek=""
         shift
         while [[ $# -gt 0 ]]; do
             case "$1" in
@@ -4192,6 +4201,13 @@ EOF
                 --limit)       search_limit="${2:-}";    shift 2 ;;
                 --offset)      search_offset="${2:-}";   shift 2 ;;
                 --json)        search_json_flag="1";     shift ;;
+                # ms-79 extension flags
+                --source)      search_source="${2:-}";   shift 2 ;;
+                --actor)       search_actor="${2:-}";    shift 2 ;;
+                --claimant)    search_claimant="${2:-}"; shift 2 ;;
+                --include-bus-dm)       search_inc_bus_dm="1"; shift ;;
+                --include-session-logs) search_inc_session_logs="1"; shift ;;
+                --include-trek)         search_inc_trek="1"; shift ;;
                 *) [[ -z "$search_query" ]] && search_query="$1"; shift ;;
             esac
         done
@@ -4210,6 +4226,12 @@ EOF
             BEACON_LIMIT="$search_limit" \
             BEACON_OFFSET="$search_offset" \
             BEACON_JSON="$search_json_flag" \
+            BEACON_SOURCE="$search_source" \
+            BEACON_ACTOR="$search_actor" \
+            BEACON_CLAIMANT="$search_claimant" \
+            BEACON_INCLUDE_BUS_DM="$search_inc_bus_dm" \
+            BEACON_INCLUDE_SESSION_LOGS="$search_inc_session_logs" \
+            BEACON_INCLUDE_TREK="$search_inc_trek" \
             python3 "$COMMANDS_PY" search
         ;;
     doctor)

@@ -39,6 +39,31 @@ def _resolve_session_id() -> str:
         return ""
 
 
+def _resolve_commit_source() -> str:
+    """Detect the source axis for a commit being recorded (ms-79 / e-1817).
+
+    Returns one of:
+      - ``"auto-op"`` when the commit is happening inside a Beacon
+        Operation envelope auto-execute context (= ms-60). The detection
+        keys off env vars set by the operation runner; specifically:
+          * ``BEACON_OPERATION_ENVELOPE_ID``  (= active envelope token)
+          * ``BEACON_OPERATION_AUTO_EXECUTE`` set to ``"1"``
+      - ``""`` (empty) for the default human dialog case. The empty
+        string is the documented "untagged = human" sentinel — older
+        commits without the field stay as-is and continue to count as
+        human in retro_query's source breakdown.
+
+    Kept env-var-driven on purpose: the Operation runner can set the
+    flag without log_commit needing to know about envelope internals,
+    and tests can drive it deterministically by exporting one env var.
+    """
+    if os.environ.get("BEACON_OPERATION_AUTO_EXECUTE", "") == "1":
+        return "auto-op"
+    if os.environ.get("BEACON_OPERATION_ENVELOPE_ID", "").strip():
+        return "auto-op"
+    return ""
+
+
 def _user_home():
     """Resolve the user home directory, honoring an explicit HOME override.
 
@@ -1829,13 +1854,29 @@ def cmd_log():
         actor = None
 
     session_id = _resolve_session_id()  # ms-57 / e-1062
+    # ms-79 / e-1817 (UC3-F3): detect envelope context to tag auto-op
+    # commits. The source label is stored on meta.source so retrospect /
+    # retro can filter "AI 自律でやった commit だけ".
+    source = _resolve_commit_source()
+
+    # ms-79 / e-1816 (UC3-F2): fork.json の target_ms_id を最優先する。
+    # 親が --ms を明示しているならそれが勝つ (= fork.json は hint であって
+    # 命令ではない、cmd_log_prepare と同じセマンティクスを揃える)。
+    if not ms_id:
+        fork_target = _read_fork_target_ms_id()
+        if fork_target:
+            # fork target_ms_id が project.json にあるか軽くチェック。無ければ
+            # 普通の auto-pick (find_target_milestone) に倒れる。
+            data_check = load_project()
+            if any(m.get("id") == fork_target for m in data_check.get("milestones", [])):
+                ms_id = fork_target
 
     data = load_project()
     result = core.log_commit(
         data, ms_id=ms_id, commit_hash=commit_hash,
         message=message, date=date, summary=summary, progress=progress,
         behavior=behavior, resolves=resolves, actor=actor,
-        session_id=session_id,
+        session_id=session_id, source=source,
     )
     save_project(data)
 
@@ -1859,14 +1900,36 @@ def cmd_log_prepare():
 
     data = load_project()
 
-    if ms_id:
+    # ms-79 / e-1816 (UC3-F2): fork.json の target_ms_id を最優先する。
+    # ms-67 で fork した子 worktree は明示意図 (= 親が「この MS をやれ」と
+    # 指示した target_ms_id) を持つ。fork.json があれば、--ms 明示が無い
+    # ときの候補選定の前にそれを優先採用する。これにより「fork 子で
+    # commit したら親 MS に誤記録」 のドリフトを構造的に防ぐ。
+    fork_target_ms_id = ""
+    if not ms_id:
+        fork_target_ms_id = _read_fork_target_ms_id()
+
+    effective_ms_id = ms_id or fork_target_ms_id
+
+    if effective_ms_id:
         for ms in data["milestones"]:
-            if ms["id"] == ms_id:
+            if ms["id"] == effective_ms_id:
                 targets = [ms]
                 break
         else:
-            print(f"Milestone not found: {ms_id}")
-            sys.exit(1)
+            # fork.json が指す ms_id がローカル project.json に無い場合
+            # (= stale fork、活性化前 / 削除済 MS) は普通の active 候補に
+            # fallback。explicit --ms ms_id が無効なときと違って
+            # silent fallback でよい (= fork.json は hint であって命令ではない)。
+            if fork_target_ms_id and not ms_id:
+                targets = [ms for ms in data["milestones"]
+                           if ms["status"] in ("todo", "in_progress", "observing")]
+                if not targets:
+                    print("No active milestone. Run: beacon milestone start <ms-id>")
+                    sys.exit(1)
+            else:
+                print(f"Milestone not found: {effective_ms_id}")
+                sys.exit(1)
     else:
         targets = [ms for ms in data["milestones"] if ms["status"] in ("todo", "in_progress", "observing")]
         if not targets:
@@ -1877,6 +1940,11 @@ def cmd_log_prepare():
         "commit": {"hash": commit_hash, "message": message, "date": date, "summary": summary_text},
         "current_summary": data.get("summary", ""),
     }
+    # e-1816: 透明性のため fork.json 由来であることを payload に明示する。
+    # /beacon-log Skill はこれを見て「fork 由来の active MS を採用しています」
+    # と user に notice を出せる (= 暗黙の選定で誤解されるのを防ぐ)。
+    if fork_target_ms_id and not ms_id:
+        output["fork_target_ms_id"] = fork_target_ms_id
 
     if len(targets) == 1:
         output["milestone"] = core.milestone_prepare_info(targets[0])
@@ -1884,6 +1952,44 @@ def cmd_log_prepare():
         output["candidates"] = [core.milestone_prepare_info(ms) for ms in targets]
 
     print(json.dumps(output, ensure_ascii=False))
+
+
+def _read_fork_target_ms_id() -> str:
+    """Return the ``target_ms_id`` from ``.beacon/fork.json``, or "".
+
+    Fork worktrees are created by /beacon-session-fork (ms-67) and carry
+    a fork.json next to project.json that records the intent (= "this
+    worktree exists to work on ms-X"). cmd_log_prepare consults this
+    before falling back to the active-MS heuristic so commits made from
+    a fork worktree route to the milestone the fork was created for —
+    even if the parent repo has multiple active milestones (which would
+    otherwise force a candidates / picker dialog the human did not
+    intend in this child session).
+
+    Returns "" when:
+      - no fork.json exists (= regular worktree / main checkout)
+      - fork.json is malformed (= treat as no fork hint, don't crash)
+      - target_ms_id field is missing or empty
+
+    Reads from ``$(dirname project.json)/fork.json`` so it stays
+    consistent with how every other beacon helper resolves its
+    ``.beacon/`` directory.
+    """
+    try:
+        project_file = get_project_file()
+        fork_path = os.path.join(os.path.dirname(project_file), "fork.json")
+        if not os.path.exists(fork_path):
+            return ""
+        with open(fork_path, "r", encoding="utf-8") as f:
+            rec = json.load(f)
+        if not isinstance(rec, dict):
+            return ""
+        target = rec.get("target_ms_id")
+        if isinstance(target, str) and target.strip():
+            return target.strip()
+        return ""
+    except (OSError, json.JSONDecodeError, ValueError):
+        return ""
 
 
 def cmd_log_finalize():
@@ -1913,13 +2019,17 @@ def cmd_log_finalize():
         actor = None
 
     session_id = _resolve_session_id()  # ms-57 / e-1062
+    # ms-79 / e-1817 (UC3-F3): tag the commit's source axis (= human dialog
+    # vs auto-op envelope execution). Retrospect / retro can then filter
+    # "AI 自律 commit だけ見たい" type queries.
+    source = _resolve_commit_source()
 
     data = load_project()
     result = core.log_commit(
         data, ms_id=ms_id, commit_hash=commit_hash,
         message=message, date=date, summary=summary_text, progress=progress,
         behavior=behavior, resolves=resolves, actor=actor,
-        session_id=session_id,
+        session_id=session_id, source=source,
     )
 
     # e-1040 deprecation: don't write data["summary"] anymore. The legacy
@@ -5100,8 +5210,31 @@ def cmd_milestone_graph():
 # ---------------------------------------------------------------------------
 
 def cmd_retro_prepare():
+    """Prepare the JSON payload that /beacon-retro Skill renders into a
+    weekly markdown.
+
+    The historical core path (= ``core.collect_retro_entries``) is kept
+    as the "per-MS narrative grouping" layer — it walks each milestone's
+    entry tree recursively in date order, which is exactly what the Skill
+    wants for the "今週の取り組み" section.
+
+    ms-79 / e-1836 additions:
+
+      - ``source_breakdown`` (source 別件数): a top-level facet showing
+        how many of the week's entries came from human dialog vs auto-op
+        (= envelope auto-execute) vs DM. Generated via the unified
+        ``retro_query`` base so the same human/auto-op/dm tagging used
+        by /beacon-retrospect is reused here without duplication.
+      - ``catch_up`` block: when multiple retro slots are unreviewed
+        (= the retro trigger reports ``overdue_slots`` length > 1), this
+        block surfaces the overdue weeks list so the Skill can offer a
+        catch-up batch path (e-1837 / UC5-F2). The flag
+        ``BEACON_RETRO_CATCH_UP=1`` enables the listing; without it the
+        block is omitted so existing Skill output is unchanged.
+    """
     since = os.environ.get("BEACON_SINCE", "")
     until = os.environ.get("BEACON_UNTIL", "")
+    catch_up_mode = os.environ.get("BEACON_RETRO_CATCH_UP", "") == "1"
     data = load_project()
 
     weekly_milestones = []
@@ -5130,14 +5263,91 @@ def cmd_retro_prepare():
                 "description": dep.get("description", ""),
             })
 
-    output = {
+    # ms-79 / e-1836: source breakdown via the unified retro_query base.
+    # Counts how many of the week's history events were human vs auto-op
+    # vs DM. Silent-fail-tolerant so the retro prepare path never breaks
+    # on a malformed entry — we just omit the breakdown in that case.
+    source_breakdown: dict[str, int] = {}
+    try:
+        import retro_query as _rq  # noqa: PLC0415
+        documents = _load_local_documents()
+        rq_result = _rq.retro_query(
+            data,
+            documents,
+            from_date=since,
+            to_date=until,
+            limit=10_000,
+        )
+        source_breakdown = (rq_result.get("facets") or {}).get("source") or {}
+    except Exception:
+        pass
+
+    output: dict = {
         "project": data.get("name", ""),
         "period": {"since": since, "until": until},
         "summary": data.get("summary", ""),
         "milestones": weekly_milestones,
         "deploys": weekly_deploys,
+        "source_breakdown": source_breakdown,
     }
+
+    # ms-79 / e-1837 (UC5-F2): catch-up batch info.
+    # Read the retro trigger payload (= written by _auto_fire_retro_trigger)
+    # to discover whether more than one slot is overdue. The trigger file
+    # is the canonical record so we don't recompute the slot list here.
+    if catch_up_mode:
+        catch_up_block = _retro_catch_up_block()
+        if catch_up_block:
+            output["catch_up"] = catch_up_block
+
     print(json.dumps(output, ensure_ascii=False))
+
+
+def _retro_catch_up_block() -> Optional[dict]:
+    """Return the catch-up payload built from the persistent retro trigger.
+
+    Shape::
+
+        {
+          "overdue_slots": ["2026-W23", "2026-W24", "2026-W25"],
+          "count": 3,
+          "since_first_overdue": "2026-06-01",
+        }
+
+    Returns ``None`` if there is no retro trigger (= nothing to catch up
+    on) or only a single overdue slot (= the regular retro flow already
+    covers it).
+    """
+    project_dir = os.path.dirname(get_project_file())
+    trigger_path = os.path.join(project_dir, "triggers", "retro.json")
+    if not os.path.exists(trigger_path):
+        return None
+    try:
+        with open(trigger_path, "r", encoding="utf-8") as f:
+            trig = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    overdue = trig.get("overdue_slots") or []
+    if not isinstance(overdue, list) or len(overdue) < 2:
+        return None
+    # Compute the Monday of the earliest overdue slot for since-display.
+    import datetime as _dt
+    since_first = ""
+    try:
+        first_slot = overdue[0]  # YYYY-WNN
+        year_str, wk_str = first_slot.split("-W")
+        year = int(year_str); wk = int(wk_str)
+        jan4 = _dt.date(year, 1, 4)
+        week1_mon = jan4 - _dt.timedelta(days=jan4.weekday())
+        first_mon = week1_mon + _dt.timedelta(weeks=wk - 1)
+        since_first = first_mon.strftime("%Y-%m-%d")
+    except (ValueError, IndexError):
+        pass
+    return {
+        "overdue_slots": overdue,
+        "count": len(overdue),
+        "since_first_overdue": since_first,
+    }
 
 
 def cmd_retro_default_since():
@@ -9654,8 +9864,12 @@ def cmd_cycle_status():
 def cmd_search():
     """Unified search across all Beacon entities (CORE doc 検索基盤の原則 / SPEC 3ne57ccZegYQXDQA03op).
 
-    Delegates the actual work to lib/search.search_project so the CLI, server
-    endpoint, and Skill all share the same logic.
+    Delegates the actual work to ``lib/search.search_project`` for the
+    canonical (= pre-ms-79) path, or to ``lib/retro_query.retro_query``
+    when any ms-79 extension flag is present (source / actor / claim /
+    include_*). retro_query wraps search_project and adds the post-filters
+    plus extension entity merges (= bus archive / session_logs / Trek);
+    see SPEC ms-79 §3 ‘設計の柱 6’ (基盤統合).
     """
     import search as _search  # noqa: PLC0415
 
@@ -9669,6 +9883,15 @@ def cmd_search():
     from_date = os.environ.get("BEACON_FROM", "")
     to_date = os.environ.get("BEACON_TO", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    # ms-79 extension knobs (= /beacon-retrospect Skill が opt-in で渡す).
+    # 空のときは search_project の旧経路で動かして back-compat を保つ。
+    source_list_raw = os.environ.get("BEACON_SOURCE", "").strip()
+    actor_filter = os.environ.get("BEACON_ACTOR", "").strip()
+    claimant_filter = os.environ.get("BEACON_CLAIMANT", "").strip()
+    include_bus_dm = os.environ.get("BEACON_INCLUDE_BUS_DM", "") == "1"
+    include_session_logs = os.environ.get("BEACON_INCLUDE_SESSION_LOGS", "") == "1"
+    include_trek = os.environ.get("BEACON_INCLUDE_TREK", "") == "1"
 
     def _parse_list(env_key: str) -> list[str]:
         raw = os.environ.get(env_key, "").strip()
@@ -9696,24 +9919,63 @@ def cmd_search():
     data = load_project()
     documents = _load_local_documents()
 
-    result = _search.search_project(
-        data,
-        documents,
-        q=query,
-        type=type_list or None,
-        status=status_list or None,
-        priority=priority_list or None,
-        scope=scope_filter,
-        ms=ms_filter,
-        op=op_filter,
-        id=id_filter,
-        assignee=assignee,
-        owner=owner,
-        from_date=from_date,
-        to_date=to_date,
-        limit=limit,
-        offset=offset,
+    source_list = [s.strip() for s in source_list_raw.split(",") if s.strip()] if source_list_raw else None
+    use_retro_query = bool(
+        source_list or actor_filter or claimant_filter
+        or include_bus_dm or include_session_logs or include_trek
     )
+
+    if use_retro_query:
+        import retro_query as _rq  # noqa: PLC0415
+        session_logs = _load_session_logs() if include_session_logs else None
+        bus_archive = _load_bus_archive() if include_bus_dm else None
+        trek_summaries = _load_trek_summaries() if include_trek else None
+        result = _rq.retro_query(
+            data,
+            documents,
+            q=query,
+            type=type_list or None,
+            status=status_list or None,
+            priority=priority_list or None,
+            scope=scope_filter,
+            ms=ms_filter,
+            op=op_filter,
+            id=id_filter,
+            assignee=assignee,
+            owner=owner,
+            from_date=from_date,
+            to_date=to_date,
+            limit=limit,
+            offset=offset,
+            source=source_list,
+            actor=actor_filter,
+            claimant=claimant_filter,
+            include_bus_dm=include_bus_dm,
+            include_session_logs=include_session_logs,
+            include_trek=include_trek,
+            session_logs=session_logs,
+            bus_archive=bus_archive,
+            trek_summaries=trek_summaries,
+        )
+    else:
+        result = _search.search_project(
+            data,
+            documents,
+            q=query,
+            type=type_list or None,
+            status=status_list or None,
+            priority=priority_list or None,
+            scope=scope_filter,
+            ms=ms_filter,
+            op=op_filter,
+            id=id_filter,
+            assignee=assignee,
+            owner=owner,
+            from_date=from_date,
+            to_date=to_date,
+            limit=limit,
+            offset=offset,
+        )
 
     if json_mode:
         print(json.dumps(result, ensure_ascii=False))
@@ -9797,6 +10059,128 @@ def _load_local_documents() -> list[dict]:
             "updated_at": meta.get("updated_at", ""),
         })
     return docs
+
+
+def _load_session_logs() -> list[dict]:
+    """Return session_log entries for the active project (ms-79 / e-1835).
+
+    Cloud mode: pulls ``/api/projects/{id}/session_logs`` (= the
+    aggregated session summaries written by ``beacon session end`` and
+    ``beacon session rescue``).
+
+    Local mode: walks ``.beacon/session_logs/*.json`` if present and
+    returns each as a dict. The local layout is the same shape the cloud
+    endpoint serves, so retro_query needs no mode-aware logic.
+
+    Returns ``[]`` on any failure — retro_query treats this as "no
+    session log source available" and silently skips the merge. This
+    keeps /beacon-retrospect usable on installs that never enabled the
+    session_log subcollection.
+    """
+    try:
+        if _is_cloud_mode():
+            client, config = _get_api_client()
+            try:
+                rows = client.list_session_logs(config["project_id"]) or []
+                # tolerate either dict or list responses
+                if isinstance(rows, dict):
+                    rows = rows.get("session_logs") or rows.get("items") or []
+                return rows if isinstance(rows, list) else []
+            except Exception:
+                return []
+        # Local mode: look for .beacon/session_logs/*.json
+        project_dir = os.path.dirname(get_project_file())
+        sl_dir = os.path.join(project_dir, "session_logs")
+        if not os.path.isdir(sl_dir):
+            return []
+        out: list[dict] = []
+        for fname in os.listdir(sl_dir):
+            if not fname.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(sl_dir, fname), "r", encoding="utf-8") as f:
+                    rec = json.load(f)
+                if isinstance(rec, dict):
+                    out.append(rec)
+            except (OSError, json.JSONDecodeError):
+                continue
+        return out
+    except Exception:
+        return []
+
+
+def _load_bus_archive() -> list[dict]:
+    """Return DM / bus event archive entries (ms-79 / e-1832 / UC10-F1).
+
+    Reads ``.beacon/bus_archive/*.json`` if the install has captured
+    DM history (= ms-54 envelope archive). Returns ``[]`` if nothing is
+    persisted — retro_query then silently skips the merge.
+
+    Per SPEC ms-79 §8 ‘やらないこと’: we do not change the archive
+    schema, we only **read** it. Whatever shape ms-54 writes is what
+    we surface, with the renderer in lib/retro_query tolerating missing
+    fields.
+    """
+    try:
+        project_dir = os.path.dirname(get_project_file())
+        ba_dir = os.path.join(project_dir, "bus_archive")
+        if not os.path.isdir(ba_dir):
+            return []
+        out: list[dict] = []
+        for fname in os.listdir(ba_dir):
+            if not fname.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(ba_dir, fname), "r", encoding="utf-8") as f:
+                    rec = json.load(f)
+                if isinstance(rec, dict):
+                    out.append(rec)
+                elif isinstance(rec, list):
+                    # support an archive-as-list layout if any install uses it
+                    out.extend(r for r in rec if isinstance(r, dict))
+            except (OSError, json.JSONDecodeError):
+                continue
+        return out
+    except Exception:
+        return []
+
+
+def _load_trek_summaries() -> list[dict]:
+    """Return Trek summary entries (ms-79 / e-1835 / UC10-F4).
+
+    Cloud mode: walks each trek's summaries via the API client (= ms-69
+    Trek records carry their own summary list).
+
+    Local mode: walks ``.beacon/treks/*/summaries/*.json`` if present.
+
+    Returns ``[]`` on any failure — retro_query handles the absence
+    gracefully.
+    """
+    out: list[dict] = []
+    try:
+        # Local mode walk (also useful as a cache when cloud sync is on).
+        project_dir = os.path.dirname(get_project_file())
+        treks_dir = os.path.join(project_dir, "treks")
+        if os.path.isdir(treks_dir):
+            for trek_name in os.listdir(treks_dir):
+                summaries_dir = os.path.join(treks_dir, trek_name, "summaries")
+                if not os.path.isdir(summaries_dir):
+                    continue
+                for fname in os.listdir(summaries_dir):
+                    if not fname.endswith(".json"):
+                        continue
+                    try:
+                        with open(os.path.join(summaries_dir, fname),
+                                  "r", encoding="utf-8") as f:
+                            rec = json.load(f)
+                        if isinstance(rec, dict):
+                            rec.setdefault("trek_id", trek_name)
+                            out.append(rec)
+                    except (OSError, json.JSONDecodeError):
+                        continue
+    except Exception:
+        pass
+    return out
 
 
 def _find_all_on_path(name: str) -> list[str]:

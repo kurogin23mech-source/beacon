@@ -14,6 +14,12 @@ triggers:
 
 > beacon のタスク操作を CLI 経由で行う。
 
+## 責務分界 (= ms-79 / e-1818)
+
+このSkillは「これから取り組む作業のキュー」を意図的に管理する責務に閉じる。コミットの記録 / 進捗率の AI 評価 / commit を起点とした task 自動 done は `/beacon-log` の責務。task の優先順位を推奨する際は、/beacon-log が直前 commit を元に出す「次の塊」 示唆と競合しないように priority highest を除いて log 側を優先する。
+
+詳細は CORE doc `5qySQmOHa9sZhyJiOOjR` (= /beacon-log と /beacon-task の責務分界) 参照。両 Skill の冒頭でこの doc を参照誘導し、新しい finding (= UC3 の追加要望) が来たとき先にこの doc に追記してから実装に入る (= 後付けで境界が動く drift を防ぐ forcing function)。
+
 ## 文章の書き方 (Beacon 全体の哲学)
 
 Beacon に書き込む全ての文章 (task / マイルストーン / Operation / コミット / PR / レビュー / ドキュメント / ノート / セッションログ / リリース / デプロイ) は、**非開発者を含む読み手** が読めるように書く。これは Skill ごとの方針ではなく Beacon プロジェクト全体の哲学。
