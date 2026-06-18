@@ -343,6 +343,65 @@ def test_reply_json_mode_includes_budget_state(project_dir, monkeypatch, capsys,
     assert parsed["_budget"]["total"] == 5
 
 
+# ---------------------------------------------------------------------------
+# ms-76 / e-1852: structural禁止帯 — bus budget grant is T1-only.
+# ---------------------------------------------------------------------------
+# CORE doc QvyVwRU8otQEn5iMfP36 (= AI 自律 action の envelope tier framework)
+# forbids T2 (= Operation auto-execute) from re-granting the budget. The whole
+# point of the cap is that AI cannot self-escalate; if T2 could grant, a
+# long-running Operation would route around the gate by writing a
+# "grant N more turns" Operation. We block at the CLI entry by env-flag.
+
+def test_grant_refused_under_operation_auto_execute(project_dir, monkeypatch,
+                                                      capsys):
+    """An Operation runner that exports BEACON_OPERATION_AUTO_EXECUTE=1 MUST
+    NOT be able to grant the budget. This is the structural禁止帯 in ms-76.
+    """
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_OPERATION_AUTO_EXECUTE", "1")
+    monkeypatch.setenv("BEACON_BUS_BUDGET_N", "5")
+    with pytest.raises(SystemExit) as exc:
+        commands.cmd_bus_budget_grant()
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "T1-only" in err
+    assert "structural禁止帯" in err or "AI self-escalation" in err
+    # The budget file MUST NOT be written: structural means the write
+    # never happens, not "writes then asks forgiveness".
+    path = project_dir / ".beacon" / "bus-budget.json"
+    assert not path.exists()
+
+
+def test_grant_refused_when_operation_envelope_id_set(project_dir, monkeypatch,
+                                                       capsys):
+    """The Operation runner also sets BEACON_OPERATION_ENVELOPE_ID; we treat
+    it as equivalent to BEACON_OPERATION_AUTO_EXECUTE=1 because either
+    marker indicates "running under T2"."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_OPERATION_ENVELOPE_ID", "env-test-123")
+    monkeypatch.setenv("BEACON_BUS_BUDGET_N", "5")
+    with pytest.raises(SystemExit) as exc:
+        commands.cmd_bus_budget_grant()
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "T1-only" in err
+
+
+def test_grant_allowed_when_no_operation_context(project_dir, monkeypatch,
+                                                   capsys):
+    """The guard MUST NOT regress the normal human-typed path. Without the
+    Operation env markers, grant proceeds as before."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.delenv("BEACON_OPERATION_AUTO_EXECUTE", raising=False)
+    monkeypatch.delenv("BEACON_OPERATION_ENVELOPE_ID", raising=False)
+    monkeypatch.setenv("BEACON_BUS_BUDGET_N", "5")
+    commands.cmd_bus_budget_grant()
+    path = project_dir / ".beacon" / "bus-budget.json"
+    assert path.exists()
+    data = json.loads(path.read_text())
+    assert data["total"] == 5
+
+
 def test_reply_consumes_even_if_cloud_call_would_fail(project_dir, monkeypatch,
                                                        capsys):
     """Pessimistic semantics: decrement happens BEFORE the cloud call so a

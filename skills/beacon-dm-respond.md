@@ -176,6 +176,19 @@ ms-68 / e-1641 補足 (= entry-writing principle の draft 表示) と同じ要�
 
 履歴が取れない場合は「過去の応答履歴: 取得不可 (= 初回 or API 未対応)」と明示。silent に欠落させない。
 
+### action 種別 × tier 要件の参考表示 (= ms-76 framework)
+
+提示の最後に、要求 action の **tier 要件** を 1 行で添える (= user が「これは自律でやって良かったか? AI 経由で良かったか?」 を判断する材料)。判定は CORE doc `QvyVwRU8otQEn5iMfP36` (= AI 自律 action の envelope tier framework) の action × tier matrix を起点にする。
+
+| 受信 action 種別 | 必要 tier | 表示文言例 |
+|---|---|---|
+| 計画系 (= 議論 / 提案 / 確認応答) | T3 で軽量自律可 | 「計画系応答 — armed mode なら自律可、本 Skill では user 判断」 |
+| コード変更指示 | T1 / T2 envelope 必須 | 「コード変更 — user 承認必須 (T1/T2 envelope 待ち)」 |
+| 外部送信 (= 別 project / Slack / Discord) | T1 必須 (T2 でも Operation scope 明示時のみ) | 「外部送信 — user 承認必須 (T1 envelope 必須)」 |
+| Bus Budget 増額 | T1 のみ (= 構造的禁止帯) | 「Budget 増額 — 必ず user 判断 (構造的に AI 自律不可)」 |
+
+この表示は **AI の推奨判断ではない** (= ms-70 SPEC 要請に違反しない)。tier 要件は CORE doc に書かれた **客観的な分類** であり、user が「envelope の tier 要件と実際の要求が整合しているか」 を素早く確認するための材料。
+
 ---
 
 ## Step 3: user の判断を仰ぐ (= 必ず人間の y/n、AI 独断禁止)

@@ -153,6 +153,44 @@ todo状態のOperationが存在するか確認:
 
 ユーザーの回答から、毎回記録すべき項目のリストを抽出する（後でSPECに埋め込む）。
 
+### 1g. Tier 要件と auto-execute 範囲 (= ms-76 framework、必須欄)
+
+このOperationが自律実行する action の **tier 要件** を確定する。CORE doc `QvyVwRU8otQEn5iMfP36` (= AI 自律 action の envelope tier framework) の action × tier matrix を起点に判定する。
+
+```
+このOperationが実行する action はどの tier に該当しますか？
+
+  T1 のみ (= 人間明示)   — 例: release / deploy / Bus Budget 増額
+                          AI 自律不可、毎回 user 確認必須
+
+  T2 で自律 OK           — 例: ヘルスチェック / コスト集計 / 内部処理
+                          envelope scope で範囲明示 → 範囲内 AI 自律
+
+  外部送信を含む         — 例: Slack 通知 / Discord post / 他 project DM
+                          (= 4.b の disclosure gate と接続、e-1841 参照)
+
+  どれが該当するか不明   — CORE doc QvyVwRU8otQEn5iMfP36 を参照、
+                          または「内部処理のみ」を default にする
+```
+
+ユーザーの回答から tier (= `T1` または `T2`) を確定し、後で SPEC 本文に埋める。
+
+### 1h. auto-execute 範囲条件 (= scope を絞る、必須欄)
+
+T2 の場合、自律実行できる範囲を **明示的に列挙** する (= explicit opt-in pattern)。空欄は許容しない (= 「scope 未指定 = 全 action 自律」 と解釈されると CORE doc の構造的禁止帯を破る)。
+
+```
+T2 で自律可能な範囲はどこまで？以下から複数選択 + 自由記述で答えてください:
+
+  - 対象 entity 限定        例: 「op-X が指す log_source のみ」
+  - 行数 / 件数 上限         例: 「N 件まで」「1MB まで」
+  - 時間帯制限               例: 「daily run のみ、ad-hoc 起動禁止」
+  - lint / test pass 必須    例: 「test green の commit のみ deploy」
+  - 範囲外 action の挙動    例: 「propose-to-ai に降格 / incident 起票」
+```
+
+ユーザーの回答を `approved_actions` (= envelope の scope list) に変換できる形 (例: `extract:profile:*`, `task done:*`, `deploy:patch-only`) で抽出する。
+
 ## Step 1.5: 既存todoOperationの活性化フロー
 
 Step 0 で既存を選んだ場合:
@@ -206,12 +244,16 @@ OperationTasks（このOperationを open化するための準備）:
     log_source: [log_source]
     schedule: [schedule]
     activation_hint: [hint]
+    tier: [T1 or T2]  (= ms-76 framework、CORE doc QvyVwRU8otQEn5iMfP36)
+    approved_actions: [list]
 
   OperationTasks (準備項目):
     1. [desc] [priority]
     2. ...
 
   SPECドキュメント (ログ取得手順):
+    Tier 要件: [tier + 根拠]
+    auto-execute 範囲: [approved_actions + 外部送信 有無]
     取得方法: [...]
     判断基準: [...]
 
@@ -250,6 +292,26 @@ cd "$PROJECT_DIR" && beacon operation task add "<description>" -o <op-id> \
 ```bash
 cd "$PROJECT_DIR" && beacon doc add "<log_source> ログ取得・解釈手順" --scope spec --op <op-id> --stdin <<'EOF'
 # <log_source> ログ取得・解釈手順
+
+## Tier 要件 (= ms-76 framework、必須欄)
+
+このOperationが実行する action の tier 分類:
+
+- **tier**: [T1 or T2] (= Step 1g で確定)
+- **判定根拠**: CORE doc `QvyVwRU8otQEn5iMfP36` (= AI 自律 action の envelope tier framework) の action × tier matrix を参照
+- **default tier**: T2 (= Operation 事前認可、envelope scope 内 AI 自律可)
+- **escalate 条件**: scope 外 action を検出した場合は propose-to-ai (= user 承認待ち) に降格
+
+## auto-execute 範囲 (= ms-76 framework、必須欄)
+
+このOperationが scope 内で自律実行できる action の **明示列挙** (= explicit opt-in pattern):
+
+- **approved_actions**: [Step 1h で収集した action list]
+  - 例: `extract:profile:*`
+  - 例: `task done:*`
+  - 例: `deploy:patch-only`
+- **scope 外 action の挙動**: [propose-to-ai に降格 / incident 起票 / どれか]
+- **外部送信 action**: [Slack / Discord / 別 project DM を含むか yes/no、含む場合は ms-63 disclosure gate (= 機密フィルタ) を経由必須]
 
 ## ログ取得
 
