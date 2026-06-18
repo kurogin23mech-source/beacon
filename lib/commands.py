@@ -6899,6 +6899,14 @@ def _auto_fire_operation_triggers():
 def cmd_trigger_fire():
     trigger_name = os.environ.get("BEACON_TRIGGER_NAME", "")
     trigger_message = os.environ.get("BEACON_TRIGGER_MESSAGE", "")
+    # ms-75 / e-1870: Trek-aware trigger. When a trek-id is supplied
+    # (= via `beacon trigger fire --trek <id> <name> [msg]`), the trigger
+    # rides a dedicated ``trek-trigger`` channel on the bus with
+    # ``delivery=auto-execute`` so opted-in sessions can run
+    # ``/beacon-trek-execute`` autonomously — twin of the
+    # ``operation-trigger`` path. Without --trek the legacy
+    # ``trigger`` channel + ``propose-to-ai`` delivery is unchanged.
+    trek_id = os.environ.get("BEACON_TRIGGER_TREK_ID", "").strip()
     if not trigger_name:
         print("Error: trigger name required")
         sys.exit(1)
@@ -6913,6 +6921,11 @@ def cmd_trigger_fire():
         "message": trigger_message,
         "created_at": datetime.datetime.now().isoformat(),
     }
+    # Persist trek_id on the on-disk trigger so `beacon trigger check`
+    # readers (= session-start, dispatch) can detect a trek-scoped
+    # trigger without re-querying the bus event.
+    if trek_id:
+        trigger_data["trek_id"] = trek_id
     with open(trigger_path, "w", encoding="utf-8") as f:
         json.dump(trigger_data, f, ensure_ascii=False)
         f.write("\n")
@@ -6923,8 +6936,12 @@ def cmd_trigger_fire():
     # The post is best-effort: a network failure, missing creds, or local-mode
     # project must NOT prevent the trigger file from being written. Triggers
     # are the existing single source of truth; the bus event is a propagation
-    # layer on top. _push_trigger_to_bus swallows every error path to stderr.
-    _push_trigger_to_bus(trigger_data)
+    # layer on top. _push_trigger_to_bus / _push_trek_trigger_to_bus swallow
+    # every error path to stderr.
+    if trek_id:
+        _push_trek_trigger_to_bus(trek_id, trigger_data)
+    else:
+        _push_trigger_to_bus(trigger_data)
 
 
 def _push_trigger_to_bus(trigger_data: dict) -> None:
@@ -7056,6 +7073,88 @@ def _push_operation_trigger_to_bus(op_id: str, log_source: str,
     except Exception as exc:
         sys.stderr.write(
             f"[beacon] operation-trigger bus mirror failed silently: "
+            f"{type(exc).__name__}: {exc}\n"
+        )
+
+
+def _push_trek_trigger_to_bus(trek_id: str, trigger_data: dict) -> None:
+    """Mirror a trek-scoped trigger onto the bus (ms-75 / e-1870).
+
+    Twin of ``_push_operation_trigger_to_bus`` for Trek scope. Posts on the
+    ``trek-trigger`` channel with ``delivery=auto-execute`` and a T2 Trek-
+    scope envelope. Sessions opted in via
+    ``beacon bus auto-execute add --channel trek-trigger`` see the event
+    routed by the inbox hook into a structured "TREK ACTION" block that
+    launches ``/beacon-trek-execute <trek-id>`` without a confirmation
+    prompt. Without opt-in the event is downgraded to ``propose-to-ai``
+    (= safe fallback, user reviews before launching).
+
+    Why a dedicated channel:
+    - operation-trigger is scoped to one ``op_id`` (= a single periodic
+      check). Trek-trigger is scoped to a ``trek_id`` (= an entire
+      workspace of MS / task / Operation). Sharing one channel would force
+      every receiver to inspect the payload before they can decide whether
+      to act.
+    - Opt-in is per-channel. A project that auto-executes Operations
+      may still want to keep Trek autonomy gated behind manual review
+      until it has dogfooded the trek-execute Skill once.
+
+    Best-effort: failures don't break the local trigger file write.
+    """
+    try:
+        config_path = _get_cloud_config_path()
+        if not os.path.exists(config_path):
+            return
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        project_id = config.get("project_id")
+        if not project_id:
+            return
+        from auth import load_credentials
+        creds = load_credentials()
+        if creds is None:
+            return
+        from api_client import ApiClient
+        api_url = _resolve_active_api_url()
+        client = ApiClient(api_url, _extract_token(creds))
+
+        # Mint a T2 Trek-scope envelope so the server's verify pipeline
+        # keeps ``delivery=auto-execute`` instead of degrading it to
+        # ``notify-user-only`` (same gate as e-1393 for operations).
+        # ``scope=trek:<trek-id>`` mirrors the ``op:<op-id>`` convention
+        # used by operation-trigger so the audit log carries the trek id
+        # in a uniform shape.
+        envelope_obj = None
+        try:
+            envelope_obj = client.issue_bus_envelope(
+                project_id,
+                tier="T2",
+                actions_authorized=["trek.trigger.fire"],
+                scope=f"trek:{trek_id}",
+                data_class="free",
+            )
+        except Exception as env_exc:
+            sys.stderr.write(
+                f"[beacon] trek-trigger envelope mint failed "
+                f"({type(env_exc).__name__}: {env_exc}); posting without "
+                "envelope — delivery will be degraded to notify-user-only.\n"
+            )
+
+        client.post_bus_event(
+            project_id, "trek-trigger",
+            sender_session_id="",
+            payload={
+                "trek_id": trek_id,
+                "trigger_name": trigger_data.get("name", ""),
+                "message": trigger_data.get("message", ""),
+                "created_at": trigger_data.get("created_at", ""),
+            },
+            delivery="auto-execute",
+            envelope=envelope_obj,
+        )
+    except Exception as exc:
+        sys.stderr.write(
+            f"[beacon] trek-trigger bus mirror failed silently: "
             f"{type(exc).__name__}: {exc}\n"
         )
 
