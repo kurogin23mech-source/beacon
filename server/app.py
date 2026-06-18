@@ -31,6 +31,7 @@ import invitations as invitations_mod  # ms-78 e-1803/e-1804: token-based invite
 import store_router as db  # e-1544: BEACON_STORE_BACKEND で firestore / dynamodb を切替
 import operations
 import trek as trek_mod  # ms-69 / e-1656: trek schema + pure mutators
+import trek_scheduler as trek_scheduler_mod  # ms-83 / e-1997: progress-check cadence logic
 
 # debug=False is the default, but set explicitly to ensure stack traces are
 # never included in error responses in production.
@@ -4184,6 +4185,159 @@ def _envelope_audit_view(env: Optional[dict]) -> Optional[dict]:
             "issued_at", "expires_at", "project_id", "nonce",
             "conversation_id", "in_reply_to", "chain_depth"}
     return {k: env.get(k) for k in keep if k in env}
+
+
+class TrekSchedulerTickRequest(BaseModel):
+    """Body for POST /api/system/trek-scheduler/tick (ms-83 / e-1997).
+
+    Cloud Scheduler calls this endpoint at a fixed cadence (= every minute
+    by default). The endpoint walks all active Treks, decides which are
+    due based on each trek's ``meta.cadence_minutes`` and previous fire
+    time, mints a T1-system envelope for each due trek, and posts a
+    ``trek-progress-check`` bus event with auto-execute delivery into
+    the trek's leader-session project.
+
+    Authentication: ``X-Beacon-Scheduler-Key`` header (same key as
+    T1-system mint endpoint — they share a trust boundary).
+
+    Body is empty by default; ``project_id`` / ``trek_ids`` overrides let
+    integration tests scope the tick to a single trek without iterating
+    every project in the backend.
+    """
+    # Optional scoping for tests / staged rollout. None = iterate all.
+    project_ids: Optional[list[str]] = None
+    trek_ids: Optional[list[str]] = None
+
+
+@app.post("/api/system/trek-scheduler/tick")
+def trek_scheduler_tick_endpoint(
+    body: TrekSchedulerTickRequest,
+    request: Request,
+):
+    """Run one Trek scheduler tick (ms-83 / e-1997).
+
+    Returns a structured report of which treks were considered, which
+    fired, and any per-trek errors. The report is what Cloud Scheduler
+    logs hold onto for observability.
+
+    Decision logic (= pure) lives in ``lib/trek_scheduler.py`` so unit
+    tests pin the cadence math without standing up an HTTP server.
+    """
+    provided = request.headers.get("X-Beacon-Scheduler-Key", "")
+    expected = envelope_mod.scheduler_internal_key()
+    if not provided or provided != expected:
+        raise HTTPException(
+            status_code=403,
+            detail="trek scheduler tick requires X-Beacon-Scheduler-Key",
+        )
+
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    # Fan out across active treks. Without project scoping we list every
+    # trek in the backend (admin-style enumeration); the scheduler tick is
+    # an internal service, not a user-driven query, so this is acceptable
+    # and matches Operation scheduler's behaviour for the same reason.
+    candidate_treks = db.list_treks(actor_id=None)
+    if body.trek_ids:
+        wanted = set(body.trek_ids)
+        candidate_treks = [t for t in candidate_treks
+                           if t.get("trek_id") in wanted]
+    candidate_treks = [t for t in candidate_treks
+                       if t.get("status") == "active"]
+    due_treks = trek_scheduler_mod.select_due_treks(
+        candidate_treks, now=now,
+    )
+
+    fired: list[dict] = []
+    errors: list[dict] = []
+    for trek_doc in due_treks:
+        trek_id = trek_doc.get("trek_id", "")
+        # Determine the target project for the bus event. The trek's first
+        # scope entry's project is the canonical "home project" for the
+        # progress-check; treks with no scope are skipped by the payload
+        # builder (= empty-scope fallback DM still fires, into the leader
+        # session's home project resolved from its actor).
+        scope = trek_doc.get("scope") or []
+        if not scope:
+            errors.append({
+                "trek_id": trek_id,
+                "error": "empty_scope_no_target_project",
+            })
+            continue
+        target_project_id = scope[0].get("project", "")
+        if not target_project_id:
+            errors.append({
+                "trek_id": trek_id,
+                "error": "scope_entry_missing_project",
+            })
+            continue
+        try:
+            envelope = envelope_mod.issue_t1_system_envelope(
+                project_id=target_project_id,
+                trek_id=trek_id,
+                actions_authorized=["trek.progress_check"],
+                data_class="free",
+                ttl_seconds=3600,
+            )
+        except ValueError as exc:
+            errors.append({
+                "trek_id": trek_id,
+                "error": f"envelope_mint_failed: {exc}",
+            })
+            continue
+        # Build the DM body from a project-data snapshot. We don't have
+        # live local project.json here on the server side, so the body
+        # is the minimal "scope-aware" fallback (= scope refs only). The
+        # AI side enriches it from the receiving session's local repo.
+        payload = trek_scheduler_mod.build_progress_check_payload(
+            trek_doc,
+            project_data=None,
+            now=now,
+        )
+        bus_data = {
+            "channel": "trek-progress-check",
+            "sender_session_id": "",
+            "payload": payload,
+            "envelope": envelope,
+            "delivery": "auto-execute",
+            "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        }
+        try:
+            event_id = db.append_bus_event(target_project_id, bus_data)
+        except Exception as exc:
+            errors.append({
+                "trek_id": trek_id,
+                "error": f"bus_append_failed: {type(exc).__name__}: {exc}",
+            })
+            continue
+        # Stamp last_progress_check_at so the next tick skips this trek
+        # until its cadence elapses again.
+        meta = trek_doc.setdefault("meta", {})
+        meta["last_progress_check_at"] = now.strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
+        trek_doc["updated_at"] = trek_mod.utcnow_iso()
+        try:
+            db.save_trek(trek_id, trek_doc)
+        except Exception as exc:
+            errors.append({
+                "trek_id": trek_id,
+                "error": f"trek_save_failed: {type(exc).__name__}: {exc}",
+            })
+            continue
+        fired.append({
+            "trek_id": trek_id,
+            "project_id": target_project_id,
+            "event_id": event_id,
+        })
+
+    return {
+        "now": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "candidates": len(candidate_treks),
+        "due": len(due_treks),
+        "fired": fired,
+        "errors": errors,
+    }
 
 
 class T1SystemEnvelopeRequest(BaseModel):

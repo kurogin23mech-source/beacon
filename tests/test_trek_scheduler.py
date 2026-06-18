@@ -1,0 +1,263 @@
+"""Unit tests for lib/trek_scheduler.py (ms-83 / e-1997 / e-1998).
+
+Pure-function coverage:
+
+  (a) is_trek_due cadence math:
+        - planning trek → never due
+        - archived trek → never due
+        - active + halt set → not due (= Andon cord)
+        - never fired → due
+        - fired < cadence ago → not due
+        - fired >= cadence ago → due
+        - custom cadence_minutes override
+
+  (b) integration: 10-min cadence trek fires once at t=10min, twice by
+      t=20min (= simulated tick-by-tick).
+
+  (c) build_progress_check_payload (e-1998):
+        - empty scope → canonical empty-scope DM
+        - scope set but all tasks done → all-done DM with latest done id
+        - scope + todo tasks present → "next, please" body with at least
+          one target entry id
+        - scope only contains entries from unknown / non-existent MS →
+          falls through to all-done message
+"""
+
+from __future__ import annotations
+
+import datetime
+import os
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
+
+import trek as trek_mod  # noqa: E402
+import trek_scheduler as scheduler  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+def _build_trek(*,
+                status: str = "active",
+                cadence_minutes=None,
+                last_at: str = "",
+                scope: list[dict] | None = None,
+                halt: dict | None = None) -> dict:
+    t = trek_mod.new_trek(
+        title="x",
+        creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-leader",
+        cadence_minutes=cadence_minutes,
+        initial_scope=scope or [],
+    )
+    t["status"] = status
+    if last_at:
+        t.setdefault("meta", {})["last_progress_check_at"] = last_at
+    if halt:
+        t["halt"] = halt
+    return t
+
+
+def _utc(year=2026, month=6, day=18, hour=12, minute=0):
+    return datetime.datetime(year, month, day, hour, minute,
+                             tzinfo=datetime.timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# (a) is_trek_due cadence math
+# ---------------------------------------------------------------------------
+
+def test_planning_trek_never_due():
+    t = _build_trek(status="planning")
+    assert scheduler.is_trek_due(t, now=_utc()) is False
+
+
+def test_archived_trek_never_due():
+    t = _build_trek(status="archived")
+    assert scheduler.is_trek_due(t, now=_utc()) is False
+
+
+def test_halted_trek_never_due():
+    t = _build_trek(
+        status="active",
+        halt={"issued_by_session_id": "sv-leader", "reason": "STOP",
+              "issued_at": "2026-06-18T11:00:00.000000Z"},
+    )
+    assert scheduler.is_trek_due(t, now=_utc()) is False
+
+
+def test_never_fired_active_trek_is_due():
+    t = _build_trek(status="active")
+    assert scheduler.is_trek_due(t, now=_utc()) is True
+
+
+def test_fired_within_cadence_not_due():
+    # cadence=10, fired 5 minutes ago → not due.
+    last = "2026-06-18T11:55:00.000000Z"
+    t = _build_trek(status="active", cadence_minutes=10, last_at=last)
+    assert scheduler.is_trek_due(t, now=_utc(hour=12, minute=0)) is False
+
+
+def test_fired_at_exact_cadence_boundary_is_due():
+    # cadence=10, fired exactly 10 minutes ago → due (= ``>=`` boundary).
+    last = "2026-06-18T11:50:00.000000Z"
+    t = _build_trek(status="active", cadence_minutes=10, last_at=last)
+    assert scheduler.is_trek_due(t, now=_utc(hour=12, minute=0)) is True
+
+
+def test_fired_beyond_cadence_is_due():
+    # cadence=10, fired 30 minutes ago → due.
+    last = "2026-06-18T11:30:00.000000Z"
+    t = _build_trek(status="active", cadence_minutes=10, last_at=last)
+    assert scheduler.is_trek_due(t, now=_utc(hour=12, minute=0)) is True
+
+
+def test_default_cadence_when_unset():
+    """Trek without meta.cadence_minutes → default = 10 minutes."""
+    t = _build_trek(status="active")  # no cadence_minutes
+    # fired 6 minutes ago, default cadence 10 → not yet due.
+    last = "2026-06-18T11:54:00.000000Z"
+    t.setdefault("meta", {})["last_progress_check_at"] = last
+    assert scheduler.is_trek_due(t, now=_utc(hour=12, minute=0)) is False
+
+
+# ---------------------------------------------------------------------------
+# (b) Integration — simulated tick loop
+# ---------------------------------------------------------------------------
+
+def test_select_due_treks_picks_only_due():
+    a = _build_trek(status="active", cadence_minutes=10,
+                    last_at="2026-06-18T11:30:00.000000Z")  # 30 min ago — due
+    b = _build_trek(status="active", cadence_minutes=10,
+                    last_at="2026-06-18T11:58:00.000000Z")  # 2 min ago — not
+    c = _build_trek(status="active")  # never fired — due
+    d = _build_trek(status="planning")  # planning — not due
+    due = scheduler.select_due_treks(
+        [a, b, c, d], now=_utc(hour=12, minute=0),
+    )
+    assert a in due
+    assert c in due
+    assert b not in due
+    assert d not in due
+
+
+def test_10min_cadence_fires_correctly_over_20min():
+    """Simulated minute-by-minute scheduler ticks for a 10-min trek.
+
+    Sequence:
+      t=00: never fired → due → tick records last_at=t=00
+      t=05: 5 min ago → not due
+      t=10: exactly 10 min ago → due → record last_at=t=10
+      t=15: 5 min ago → not due
+      t=20: 10 min ago → due → record last_at=t=20
+    Total fires by t=20: 3 (= initial + 10 + 20).
+    """
+    t = _build_trek(status="active", cadence_minutes=10)
+    fire_count = 0
+    for minute in range(0, 21):
+        now = _utc(hour=12, minute=minute)
+        if scheduler.is_trek_due(t, now=now):
+            fire_count += 1
+            t.setdefault("meta", {})["last_progress_check_at"] = (
+                now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            )
+    assert fire_count == 3
+
+
+# ---------------------------------------------------------------------------
+# (c) build_progress_check_payload
+# ---------------------------------------------------------------------------
+
+def test_payload_empty_scope():
+    t = _build_trek(status="active", scope=[])
+    payload = scheduler.build_progress_check_payload(
+        t, project_data=None, now=_utc(),
+    )
+    assert payload["kind"] == "trek-progress-check"
+    assert payload["trek_id"] == t["trek_id"]
+    assert "scope が空" in payload["body"]
+    assert payload["target_entries"] == []
+
+
+def test_payload_all_done_with_latest_done_anchor():
+    t = _build_trek(
+        status="active",
+        scope=[{"project": "beacon-1", "milestone": "ms-83"}],
+    )
+    project_data = {
+        "entries": [
+            {"id": "e-1994", "type": "task", "status": "done",
+             "milestone": "ms-83",
+             "description": "trek cadence schema"},
+            {"id": "e-1995", "type": "task", "status": "done",
+             "milestone": "ms-83",
+             "description": "T1-system envelope"},
+        ],
+    }
+    payload = scheduler.build_progress_check_payload(
+        t, project_data=project_data, now=_utc(),
+    )
+    assert "todo task が見当たりません" in payload["body"]
+    # AC 3: payload contains at least one trek-scope-internal entry id.
+    assert len(payload["target_entries"]) >= 1
+    assert payload["target_entries"][0] in {"e-1994", "e-1995"}
+
+
+def test_payload_with_todo_includes_first_target_entry():
+    t = _build_trek(
+        status="active",
+        scope=[{"project": "beacon-1", "milestone": "ms-83"}],
+    )
+    project_data = {
+        "entries": [
+            {"id": "e-1997", "type": "task", "status": "todo",
+             "milestone": "ms-83",
+             "description": "Cloud Scheduler trek tick endpoint"},
+            {"id": "e-1998", "type": "task", "status": "todo",
+             "milestone": "ms-83",
+             "description": "progress-check DM payload builder"},
+            {"id": "e-1994", "type": "task", "status": "done",
+             "milestone": "ms-83",
+             "description": "cadence schema"},
+        ],
+    }
+    payload = scheduler.build_progress_check_payload(
+        t, project_data=project_data, now=_utc(),
+        last_commit_summary="abc1234 feat(ms-83): cadence (e-1994)",
+    )
+    assert payload["trek_id"] == t["trek_id"]
+    # AC 3: trek-scope-internal entry id appears in body.
+    assert "e-1997" in payload["body"]
+    assert payload["target_entries"][0] == "e-1997"
+    # First-todo description excerpt present.
+    assert "Cloud Scheduler" in payload["body"]
+    # Last commit included.
+    assert "abc1234" in payload["body"]
+
+
+def test_payload_unknown_scope_falls_to_all_done():
+    """A scope pointing at an MS with zero matching entries lands in the
+    all-done branch (= no todos found). The fallback DM still carries
+    target_entries=[] which is fine — the AI side recognises 'nothing
+    to do, propose new task'."""
+    t = _build_trek(
+        status="active",
+        scope=[{"project": "beacon-1", "milestone": "ms-99"}],
+    )
+    project_data = {
+        "entries": [
+            {"id": "e-1994", "type": "task", "status": "todo",
+             "milestone": "ms-83",
+             "description": "irrelevant"},
+        ],
+    }
+    payload = scheduler.build_progress_check_payload(
+        t, project_data=project_data, now=_utc(),
+    )
+    assert "todo task が見当たりません" in payload["body"]
+    # No matching todo + no matching done → no anchor.
+    assert payload["target_entries"] == []
