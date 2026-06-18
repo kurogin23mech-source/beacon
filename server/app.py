@@ -524,6 +524,45 @@ def _save(project_id: str, data: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Author resolution (ms-78 / e-1909) — UC11-F5 follow-up
+# ---------------------------------------------------------------------------
+
+def _resolve_author(user: dict) -> dict:
+    """Build the ``meta.author`` dict for a write triggered by ``user``.
+
+    Returns ``{"user_id", "email", "display_name"}``, dropping empty fields.
+    ``display_name`` is fetched from the users collection (= what
+    invite-accept / /api/me/profile writes). When the user record has
+    no display_name yet, that field is omitted — the UI then falls back
+    to email rendering. Best-effort: any DB hiccup returns just the
+    claim-derived fields so we never block a write on a profile lookup
+    failure.
+    """
+    uid = (user.get("sub") or "").strip()
+    email = (user.get("email") or "").strip()
+    display_name = ""
+    if uid:
+        try:
+            udata = db.get_user(uid)
+            if udata:
+                display_name = (udata.get("display_name") or "").strip()
+                # Prefer the persisted email over the claim's email when both
+                # exist — invite-accept writes the canonical one.
+                if not email:
+                    email = (udata.get("email") or "").strip()
+        except Exception:  # noqa: BLE001 - profile lookup must never break the write
+            pass
+    author: dict = {}
+    if uid:
+        author["user_id"] = uid
+    if email:
+        author["email"] = email
+    if display_name:
+        author["display_name"] = display_name
+    return author
+
+
+# ---------------------------------------------------------------------------
 # Request models
 # ---------------------------------------------------------------------------
 
@@ -1032,6 +1071,75 @@ class MeHeartbeat(BaseModel):
     branch: Optional[str] = None
     focus_milestone: Optional[str] = None
     agent: Optional[dict] = None
+
+
+class MeProfileUpdate(BaseModel):
+    """Body for PATCH /api/me/profile (ms-78 / e-1909).
+
+    Only ``display_name`` is mutable through this endpoint — email is the
+    sign-in identity (managed by the OAuth provider) and ``user_id`` is
+    immutable. Empty string clears the display name (= fall back to email
+    in the UI).
+    """
+    display_name: str = ""
+
+
+@app.get("/api/me/profile")
+def me_get_profile(user: dict = Depends(require_auth)):
+    """Return the caller's own profile (display_name + email + user_id).
+
+    ms-78 / e-1909 — the Web UI's Settings > Profile tab and the retroactive
+    "you haven't set a display name yet" prompt both read this endpoint to
+    discover the current state. We don't leak any field outside the
+    user's own record (= same identity gate as every other /api/me/* route:
+    ``require_auth`` resolves the JWT to a ``sub``).
+    """
+    uid = user.get("sub")
+    if not uid:
+        raise HTTPException(status_code=401, detail="user has no sub claim")
+    udata = db.get_user(uid) or {}
+    email = (udata.get("email") or user.get("email") or "").strip()
+    display_name = (udata.get("display_name") or "").strip()
+    return {
+        "user_id": uid,
+        "email": email,
+        "display_name": display_name,
+    }
+
+
+@app.patch("/api/me/profile")
+def me_update_profile(body: MeProfileUpdate, user: dict = Depends(require_auth)):
+    """Update the caller's own display_name (ms-78 / e-1909).
+
+    Trimmed empty string explicitly clears the field — the UI then falls
+    back to the email label. ``db.update_user`` is symmetric across the
+    Firestore and DynamoDB backends (= store_router routes by
+    ``BEACON_STORE_BACKEND``).
+    """
+    uid = user.get("sub")
+    if not uid:
+        raise HTTPException(status_code=401, detail="user has no sub claim")
+    display_name = (body.display_name or "").strip()
+    # Mint the user record if absent (= first-time profile edit for an
+    # auto-created identity that never went through invite-accept).
+    udata = db.get_user(uid)
+    if not udata:
+        email = (user.get("email") or "").strip()
+        try:
+            db.get_or_create_user(uid, email)
+        except Exception:  # noqa: BLE001 - best-effort mint, update still proceeds
+            pass
+    try:
+        ok = db.update_user(uid, {"display_name": display_name})
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"profile update failed: {e}")
+    if not ok:
+        raise HTTPException(status_code=404, detail="user record not found")
+    return {
+        "status": "ok",
+        "user_id": uid,
+        "display_name": display_name,
+    }
 
 
 @app.get("/api/me/projects")
@@ -1669,12 +1777,17 @@ def purge_milestone(
 @app.post("/api/projects/{project_id}/milestones/{ms_id}/entries")
 def create_entry(project_id: str, ms_id: str, body: EntryCreate,
                  user: dict = Depends(require_auth)):
+    # ms-78 / e-1909 — resolve the human author identity once, then thread it
+    # into core.task_add so meta.author is stamped at creation time.
+    author = _resolve_author(user)
+
     def op(data: dict):
         _require_write(data, user)
         try:
             eid = core.task_add(
                 data, ms_id, body.description,
                 entry_type=body.type, date=body.date, detail=body.detail,
+                author=author,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
@@ -1687,6 +1800,9 @@ def create_entry(project_id: str, ms_id: str, body: EntryCreate,
 @app.patch("/api/projects/{project_id}/entries/{entry_id}")
 def update_entry(project_id: str, entry_id: str, body: EntryUpdate,
                  user: dict = Depends(require_auth)):
+    # ms-78 / e-1909
+    author = _resolve_author(user)
+
     def op(data: dict):
         _require_write(data, user)
         try:
@@ -1694,6 +1810,7 @@ def update_entry(project_id: str, entry_id: str, body: EntryUpdate,
                 data, entry_id,
                 description=body.description, status=body.status,
                 detail=body.detail, date=body.date,
+                author=author,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
@@ -1708,11 +1825,13 @@ def done_entry(project_id: str, entry_id: str,
                user: dict = Depends(require_auth)):
     import datetime
     today = datetime.date.today().isoformat()
+    # ms-78 / e-1909
+    author = _resolve_author(user)
 
     def op(data: dict):
         _require_write(data, user)
         try:
-            ms, entry = core.task_done(data, entry_id, date=today)
+            ms, entry = core.task_done(data, entry_id, date=today, author=author)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return data, {"entry_id": entry_id, "status": "done"}
@@ -1993,6 +2112,10 @@ def operation_envelopes_list(
 @app.post("/api/projects/{project_id}/log")
 def log_commit(project_id: str, body: LogCommit,
                user: dict = Depends(require_auth)):
+    # ms-78 / e-1909 — stamp meta.author with the human identity of the
+    # signed-in committer (= what the Web UI renders in commit lists).
+    author = _resolve_author(user)
+
     def op(data: dict):
         _require_write(data, user)
         try:
@@ -2000,6 +2123,7 @@ def log_commit(project_id: str, body: LogCommit,
                 data, ms_id=body.ms_id, commit_hash=body.hash,
                 message=body.message, date=body.date,
                 summary=body.summary, progress=body.progress,
+                author=author,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))

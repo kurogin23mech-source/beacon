@@ -181,6 +181,20 @@ const dataSource = {
   loadDmApprovalHistory: async (_pid, _limit) => {
     throw new Error('DM approval history is Web-only in this build. Open the Web UI to view the audit trail.');
   },
+  // ms-78 / e-1909 — Profile read / write. Cloud Rust bindings
+  // (cloud_get_my_profile / cloud_update_my_profile) are a follow-up; the
+  // Tauri build silently no-ops the load so the SHARED retroactive prompt
+  // path stays inert and the Settings > Profile tab surfaces a one-line
+  // "Web-only" message on save attempt.
+  loadMyProfile: async () => {
+    // No-op: leave state.myProfile null so _shouldShowDisplayNamePrompt
+    // returns false (= guard against showing the banner inside Tauri until
+    // the Rust binding lands).
+    state.myProfile = null;
+  },
+  updateMyProfile: async (_displayName) => {
+    throw new Error('Profile editing is Web-only in this build. Open the Web UI to set your display name.');
+  },
   // ms-72 e-1779 — Member admin + invitation flow wired to Rust commands.
   // Was a "Web-only" throw stub before the Rust layer landed (= ms-72 prior).
   // SHARED Settings > Members tab now reaches the real backend through these
