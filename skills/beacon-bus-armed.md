@@ -136,11 +136,25 @@ Monitor の stdout 行 (= 1 event = JSON) を notification として受け取っ
 
 1. event を読む
 2. payload の `text` / `to` / `in_reply_to` を確認、payload に明示的指示があれば従う
-3. **返答が必要と判断したら**:
+3. event の `channel` を見て分岐:
+   - `channel == "trek-trigger"`: ms-75 / e-1870 由来。`/beacon-trek-execute <trek-id>` を起動して Trek scope を autonomous で進める (= user 確認なし)
+   - `channel == "operation-trigger"`: ms-60 由来。`/beacon-operation-execute <op-id>` を起動
+   - `channel == "dm"` / `"session-dm"`: 下記の DM 返答ロジックへ
+4. **DM 返答が必要と判断したら**:
    - `beacon bus send --channel <ch> --sender <my_session_id> --in-reply-to <event_id> --payload '<json>'` を発行
    - `--in-reply-to` を **必ず** 付ける (これが budget gate の trigger; 付けないと manual mode 扱いになり gate が効かない = 暴走のリスク)
    - send 成功時に CLI が表示する「budget: M/N, X remaining」を読んで、残数が 0 ならそれ以上送らない
-4. **返答が不要と判断したら**: 何もせず次の event を待つ (= sleep)
+5. **返答が不要と判断したら**: 何もせず次の event を待つ (= sleep)
+
+### Trek 参加中の DM 自律応答 (= ms-75 / e-1856 blanket exception)
+
+送信者と受信者が同じ Trek の member の場合、server 側 `dm_gate.py` が `shared_trek_member` 判定で gate を bypass している (= ms-70 例外)。AI は届いた envelope に対し以下のように振る舞う:
+
+- **計画系 / 議論 / 進捗共有 / 設計判断 / 実装計画** に該当する DM → **user 確認なしで自律返信してよい** (= Trek scope 内の事前承認に基づく、CORE doc `b1XOKXQeC0JXaKkO0CRt` の権限委譲ルール)
+- **デプロイ / リリース / 外部送信 (Slack / Discord / 外部 email)** を要求する DM → user 確認必須 (= scope 外、安全側 default)
+- 判断に迷う場合は安全側 (= user 確認) に倒す。Trek 自律は「明らかに scope 内の計画系」 に限定する
+
+`/beacon-trek-execute` を起動済の場合、本 Skill (armed mode) は同 Trek scope の DM については重ねて処理しないこと (= 二重応答の防止)。
 
 ### budget exhausted 時
 
