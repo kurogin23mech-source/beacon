@@ -166,8 +166,9 @@ Step 2 / 3 / 4 のいずれかで以下のいずれかに該当するアクシ�
 - `beacon deploy` / 外部 deploy コマンド (= `cdk deploy` / `gcloud run deploy` / `aws ...` / `terraform apply` 等)
 - 本番環境への secret / config 書き込み
 - 外部送信 (= Slack / Discord / 外部 email、UC7-F3 e-1841 と整合)
+- **Trek member 招待 (= 外部 user 初回招待 + scope 内 project に sensitivity=high のものがある組合せ)** (= ms-75 / e-1863 構造的安全帯、 LPS dogfood 事故由来)
 
-**判定基準**: 「ローカル開発環境 / Trek member 間の DM 以外の変更で、user に対し本番影響を伴うもの」 はすべて境界の外。迷ったら escalate (= 安全側 default)。
+**判定基準**: 「ローカル開発環境 / Trek member 間の DM 以外の変更で、user に対し本番影響を伴うもの」 はすべて境界の外。迷ったら escalate (= 安全側 default)。 Trek 招待については「外部 user (= scope 内 project の member に含まれない人) を初めて招待する場合は user 確認境界」 と明示。 これは scope に customer-data 等の sensitivity=high が含まれるとき、 silent inclusion で外部 user を機密 scope に巻き込む事故 (= e-1863 motivation の LPS dogfood event) を構造的に防ぐ。
 
 ## Step 5.5: budget 枯渇 / 致命エラー時の降格 (graceful stop)
 

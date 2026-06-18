@@ -272,3 +272,63 @@ def test_validate_transition_rejects_invalid_states():
         trek.validate_transition("unknown", "active")
     with pytest.raises(ValueError):
         trek.validate_transition("active", "closed")
+
+
+# ---------------------------------------------------------------------------
+# goal_state (ms-75 / e-1865)
+# ---------------------------------------------------------------------------
+
+def test_new_trek_goal_state_defaults_to_empty():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+    )
+    # Field is always present so consumers can branch on "" without
+    # KeyError. Empty = "leader decides", matching pre-e-1865 behaviour.
+    assert t["goal_state"] == ""
+
+
+def test_new_trek_with_goal_state():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+        goal_state="customer profile diff < 1% across both projects",
+    )
+    assert t["goal_state"] == \
+        "customer profile diff < 1% across both projects"
+
+
+def test_set_goal_state_updates_value_and_bumps_updated_at():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+    )
+    prior_updated = t["updated_at"]
+    # ensure now() advances to a different microsecond
+    import time
+    time.sleep(0.001)
+    out = trek.set_goal_state(t, goal_state="ship release v1.0")
+    assert out["goal_state"] == "ship release v1.0"
+    assert out["updated_at"] >= prior_updated
+
+
+def test_set_goal_state_idempotent_no_op():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+        goal_state="same value",
+    )
+    prior_updated = t["updated_at"]
+    out = trek.set_goal_state(t, goal_state="same value")
+    # No mutation when value is unchanged — keeps fixtures stable.
+    assert out["updated_at"] == prior_updated
+
+
+def test_set_goal_state_clear_via_empty_string():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+        goal_state="something",
+    )
+    trek.set_goal_state(t, goal_state="")
+    assert t["goal_state"] == ""
