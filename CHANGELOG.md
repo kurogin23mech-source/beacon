@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.41.1] - 2026-06-18
+
+- Merge pull request #169 from kurogin23mech-source/fix/ms-83-current-project-id-e2007
+- fix(ms-83): _current_project_id cloud-mode fallback (e-2007)
+- docs(release): update README/CHANGELOG for v0.41.0
+- chore(release): bump formula to 0.41.0
+
 ## [v0.41.0] - 2026-06-18
 
 - Merge pull request #168 from kurogin23mech-source/ms-83-trek-server-side-continuity
