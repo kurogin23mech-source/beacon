@@ -1,49 +1,72 @@
-# Beacon Cloud server — local development stack
+# Beacon Cloud server — local development stack (e-1987: 永続化対応版)
 #
 # ローカルで Beacon Cloud サーバを丸ごと立てて試すための compose 定義。
 # クラウド認証情報 (GCP / AWS) は一切不要。
 #
-#   - beacon-server      : 既存 Dockerfile の FastAPI サーバ (= 本番 Cloud Run と同じイメージ)
-#   - firestore-emulator : Google 公式 Firestore エミュレータ (GCP 接続なしで動く)
+#   - dynamodb-local : amazon/dynamodb-local。データをディスク (named volume)
+#                      へ永続化する。docker compose down → up してもプロジェクト
+#                      が残る (= Firestore エミュレータがメモリ専用だった問題の解決)。
+#   - dynamodb-init  : 起動時に 16+ テーブルを作成する使い捨てサービス (冪等)。
+#   - beacon-server  : 既存 Dockerfile の FastAPI サーバ (= 本番 Cloud Run と同じコード)。
+#                      ローカルでは BEACON_STORE_BACKEND=dynamodb で DynamoDB Local に繋ぐ。
 #
 # 認証はローカル開発ログイン (BEACON_LOCAL_DEV) で行う。
 #
-# 注意: データはエミュレータのメモリ上に保持され、停止 (down) すると消える (= 使い捨て)。
-# Firestore エミュレータはメモリ専用で、export-on-exit が Docker のシグナル経路と
-# 相性が悪く (gcloud / cloud_firestore_emulator の各ラッパーが SIGINT/SIGTERM を
-# Java 本体へ転送しない) 永続化できない。ディスク永続化は DynamoDB Local バックエンド
-# への切替で対応予定 (task e-1987 = ローカルクラウドのデータ永続化)。
+# データ永続化: dynamodb-data ボリュームに保存されるため、down してもデータは残る。
+# 完全に消したいときは: docker compose down -v
 #
 # 使い方:
 #   docker compose up --build        # 起動 (API は http://localhost:8080)
-#   docker compose down              # 停止 (データ破棄)
+#   docker compose down              # 停止 (データは残る)
+#   docker compose down -v           # 停止 + データ破棄
 #
 # CLI / Desktop から接続する場合は接続先 api_url を http://localhost:8080 に向ける。
+#
+# 補足: 本番 (Cloud Run) は引き続き Firestore 経路。ローカル検証=DynamoDB /
+# 本番=Firestore の対称構成。両 backend は server/store.py 経由で同じ public API
+# を提供するので、サーバコードは無改修で両対応する。
 
 services:
-  firestore-emulator:
-    # 公式 Cloud SDK イメージの emulators タグ (Firestore エミュレータ + Java 同梱)
-    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
-    command: >
-      gcloud emulators firestore start
-      --host-port=0.0.0.0:8080
-      --project=beacon-local
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    # -sharedDb: 単一の共有 DB ファイルを使う (region/credentials で分かれない)。
+    # -dbPath /data: 永続ボリュームへ書き出す (= down→up でデータ残存)。
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-dbPath", "/data"]
+    working_dir: /home/dynamodblocal
+    # named volume (root 所有) へ書けるよう root で動かす。
+    user: root
+    volumes:
+      - dynamodb-data:/data
     ports:
-      # ホストからエミュレータを直接触りたいとき用 (任意)。8080 はサーバが使うので 8081 に出す。
-      - "8081:8080"
-    healthcheck:
-      # エミュレータがポートを listen し始めたら ready とみなす。サーバはこれを待ってから繋ぐ。
-      # curl 非同梱の可能性があるため bash の /dev/tcp で TCP 接続可否のみを判定する。
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/8080' >/dev/null 2>&1 || exit 1"]
-      interval: 3s
-      timeout: 3s
-      retries: 20
-      start_period: 10s
+      # ホストから直接 DynamoDB Local を触りたいとき用 (任意、aws cli 等)。
+      - "8000:8000"
+
+  dynamodb-init:
+    # beacon-server と同一イメージ (boto3 入り) を再利用してテーブルを作る。
+    image: beacon-local-server:dev
+    depends_on:
+      - dynamodb-local
+    environment:
+      BEACON_DYNAMODB_ENDPOINT: "http://dynamodb-local:8000"
+      BEACON_ENV: "dev"
+      AWS_REGION: "ap-northeast-1"
+      AWS_ACCESS_KEY_ID: "local"
+      AWS_SECRET_ACCESS_KEY: "local"
+    # WORKDIR は Dockerfile で /app/server。スクリプトが DynamoDB Local の
+    # listen 開始を内部で待ってからテーブルを冪等作成する。
+    command: ["python", "create_local_tables.py"]
+    restart: "no"
 
   beacon-server:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # ローカル検証は DynamoDB 経路なので boto3 を入れる。
+        INSTALL_DYNAMODB: "1"
+    # dynamodb-init が同じイメージを参照できるよう明示タグを付ける
+    # (= イメージのビルドは 1 回で済む)。
+    image: beacon-local-server:dev
     ports:
       - "8080:8080"
     environment:
@@ -59,14 +82,24 @@ services:
       # envelope 署名鍵。BEACON_API_AUTH=1 のとき起動ガードが設定を要求する
       # (= 本番で dev fallback 鍵を使わせない安全装置)。ローカル固定値で満たす。
       BEACON_ENVELOPE_SECRET: "local-dev-envelope-secret"
-      # Firestore SDK はこの env を自動検出し、GCP ではなくエミュレータへ接続する
-      FIRESTORE_EMULATOR_HOST: "firestore-emulator:8080"
-      # エミュレータ利用時もプロジェクト ID は必須 (firestore_client.py が参照)
-      BEACON_GCP_PROJECT_ID: "beacon-local"
-      # ストレージバックエンド (既定値だが明示)
-      BEACON_STORE_BACKEND: "firestore"
-      # コレクション接頭辞: dev → projects-dev / users-dev
+      # ストレージバックエンド: ローカル検証は DynamoDB Local (= 永続化)。
+      BEACON_STORE_BACKEND: "dynamodb"
+      # DynamoDB Local の接続先 (server/dynamodb_client.py が endpoint_url に使う)。
+      BEACON_DYNAMODB_ENDPOINT: "http://dynamodb-local:8000"
+      # テーブル接頭辞: dev → beacon-dev-projects / beacon-dev-users ...
       BEACON_ENV: "dev"
+      # boto3 用。DynamoDB Local は任意値で可だが、未設定だと boto3 が
+      # 「credentials が見つからない」で落ちるのでダミーを渡す。
+      AWS_REGION: "ap-northeast-1"
+      AWS_ACCESS_KEY_ID: "local"
+      AWS_SECRET_ACCESS_KEY: "local"
     depends_on:
-      firestore-emulator:
-        condition: service_healthy
+      # テーブル作成 (init) が成功裏に完了してからサーバを起動する。
+      dynamodb-init:
+        condition: service_completed_successfully
+      dynamodb-local:
+        condition: service_started
+
+volumes:
+  # プロジェクトデータの永続ボリューム。down では消えず、down -v で消える。
+  dynamodb-data:
