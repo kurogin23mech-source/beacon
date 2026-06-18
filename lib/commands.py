@@ -4456,6 +4456,10 @@ def cmd_trek_create():
     title = os.environ.get("BEACON_TREK_TITLE", "").strip()
     type_ = os.environ.get("BEACON_TREK_TYPE", "").strip() or "persistent"
     description = os.environ.get("BEACON_TREK_DESCRIPTION", "")
+    # ms-75 / e-1865: optional acceptance criterion / completion marker for the
+    # trek. Empty = "leader decides", non-empty = explicit signal that members
+    # can match against to suggest archive.
+    goal_state = os.environ.get("BEACON_TREK_GOAL_STATE", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not title:
@@ -4503,6 +4507,7 @@ def cmd_trek_create():
                 creator_session_id=session_id,
                 description=description,
                 type_=type_,
+                goal_state=goal_state,
             )
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)
@@ -4538,12 +4543,18 @@ def cmd_trek_list():
     status_filter = os.environ.get("BEACON_TREK_STATUS", "").strip() or None
     include_archived = os.environ.get("BEACON_TREK_INCLUDE_ARCHIVED", "") == "1"
     all_actors = os.environ.get("BEACON_TREK_ALL_ACTORS", "") == "1"
+    # ms-75 / e-1813: filter to treks the current user has actually joined
+    # (= members[].joined_at non-empty for them). Pending invitations stay
+    # out of the joined list so /beacon-session-start can display "current
+    # treks" without mixing in invitations the user hasn't yet accepted.
+    joined_only = os.environ.get("BEACON_TREK_JOINED_ONLY", "") == "1"
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if all_actors:
         actor_id = None
+        actor_email = ""
     else:
-        user_id, _, _ = _resolve_creator_identity()
+        user_id, actor_email, _ = _resolve_creator_identity()
         actor_id = user_id or None
 
     if _is_cloud_mode():
@@ -4565,12 +4576,28 @@ def cmd_trek_list():
             include_archived=include_archived,
         )
 
+    if joined_only:
+        # Walk members[] for an entry matching the caller (user_id or email)
+        # whose ``joined_at`` is non-empty. This is the only structurally
+        # reliable join check — bare visibility (= creator/member presence)
+        # would include treks the user was invited to but never accepted.
+        def _is_joined(t: dict) -> bool:
+            for m in t.get("members") or []:
+                if (actor_id and m.get("user_id") == actor_id) \
+                        or (actor_email and m.get("email") == actor_email):
+                    if m.get("joined_at"):
+                        return True
+            return False
+        treks = [t for t in treks if _is_joined(t)]
+
     if json_mode:
         print(json.dumps(treks, ensure_ascii=False, indent=2))
         return
 
     if not treks:
-        if actor_id:
+        if joined_only:
+            print("(no joined treks — `beacon trek join <id>` で招待を承諾)")
+        elif actor_id:
             print(f"(no treks visible to {actor_id} — try --all で全件)")
         else:
             print("(no treks yet — `beacon trek create \"title\"` で最初の trek を起票)")
@@ -4591,17 +4618,235 @@ def cmd_trek_list():
               f"{halt_marker}, {member_count}m/{scope_count}s")
 
 
+def _current_project_id() -> str:
+    """Return the current project's id (= what ``load_project()`` operates on).
+
+    Used by trek-show / trek-timeline aggregation to decide which scope
+    entries it can resolve locally (= same-project) and which are
+    cross-project hints the caller must visit separately.
+    """
+    try:
+        data = load_project()
+    except Exception:
+        return ""
+    return (data.get("id") or data.get("project_id") or "").strip()
+
+
+def _scope_matches_entry(scope: list[dict], project_id: str,
+                         entry: dict, ms_id: str) -> bool:
+    """Return True if ``entry`` (in milestone ``ms_id``) is in the trek scope.
+
+    A scope row matches when its ``project`` matches AND any narrowing key
+    (milestone / task) matches. Project-wide scope (= no narrowing) is a
+    catch-all that includes every milestone/task in the project.
+    """
+    if not scope or not project_id:
+        return False
+    eid = entry.get("id", "")
+    for row in scope:
+        if (row.get("project") or "") != project_id:
+            continue
+        # Project-wide scope row → always matches.
+        narrow_keys = [k for k in ("milestone", "task", "operation")
+                       if row.get(k)]
+        if not narrow_keys:
+            return True
+        if row.get("milestone") and row.get("milestone") == ms_id:
+            return True
+        if row.get("task") and row.get("task") == eid:
+            return True
+        # operation narrowing doesn't apply to milestone entries; let the
+        # operation-walk pick it up instead.
+    return False
+
+
+def _scope_matches_operation(scope: list[dict], project_id: str,
+                             op_id: str) -> bool:
+    if not scope or not project_id:
+        return False
+    for row in scope:
+        if (row.get("project") or "") != project_id:
+            continue
+        if not any(row.get(k) for k in ("milestone", "task", "operation")):
+            return True  # project-wide
+        if row.get("operation") and row.get("operation") == op_id:
+            return True
+    return False
+
+
+def _scope_matches_milestone(scope: list[dict], project_id: str,
+                             ms_id: str) -> bool:
+    if not scope or not project_id:
+        return False
+    for row in scope:
+        if (row.get("project") or "") != project_id:
+            continue
+        if not any(row.get(k) for k in ("milestone", "task", "operation")):
+            return True
+        if row.get("milestone") and row.get("milestone") == ms_id:
+            return True
+    return False
+
+
+def _collect_trek_local_aggregation(trek_doc: dict) -> dict:
+    """Walk the current project and collect items in this trek's scope.
+
+    Returns a dict shaped as::
+
+        {
+          "project_id": "<pid or empty>",
+          "tasks_todo": [{ms_id, ms_title, id, description, status, priority}],
+          "tasks_done_recent": [...],
+          "commits_recent": [{ms_id, hash, summary, date}],
+          "docs": [{doc_id, title, scope, milestone, trek_id}],
+          "cross_project_scope": [{project, milestone/task/operation}],
+        }
+
+    Cross-project scope rows are surfaced as hints so the CLI prompts the
+    user to cd into the other project; only the current project's items
+    are walked here (= e-1864 CLI-side aggregation lives at the project
+    grain, no remote fetch).
+    """
+    scope = trek_doc.get("scope") or []
+    pid = _current_project_id()
+    out: dict = {
+        "project_id": pid,
+        "tasks_todo": [],
+        "tasks_done_recent": [],
+        "commits_recent": [],
+        "docs": [],
+        "cross_project_scope": [s for s in scope
+                                if (s.get("project") or "") != pid],
+    }
+    if not pid:
+        return out
+    try:
+        data = load_project()
+    except Exception:
+        return out
+
+    done_recent: list[dict] = []
+    commits: list[dict] = []
+    for ms in data.get("milestones", []) or []:
+        ms_id = ms.get("id", "")
+        ms_title = ms.get("title", "")
+        for entry in ms.get("entries", []) or []:
+            etype = entry.get("type", "")
+            if etype == "commit":
+                if _scope_matches_milestone(scope, pid, ms_id) or \
+                   _scope_matches_entry(scope, pid, entry, ms_id):
+                    commits.append({
+                        "ms_id": ms_id,
+                        "hash": (entry.get("meta") or {}).get("hash", ""),
+                        "summary": entry.get("description", ""),
+                        "date": entry.get("created_at", ""),
+                    })
+                continue
+            if not _scope_matches_entry(scope, pid, entry, ms_id):
+                continue
+            row = {
+                "ms_id": ms_id,
+                "ms_title": ms_title,
+                "id": entry.get("id", ""),
+                "description": entry.get("description", ""),
+                "status": entry.get("status", ""),
+                "priority": (entry.get("meta") or {}).get("priority", ""),
+                "type": etype,
+            }
+            if entry.get("status") == "todo":
+                out["tasks_todo"].append(row)
+            elif entry.get("status") == "done":
+                done_recent.append(row | {"done_at": entry.get("done_at", "")})
+
+    # Operations matched at trek scope (= ms-75 4.4 UC7-F4 ハイブリッド入口、
+    # ここでは entries は別途扱わず、Operation 自体の状況を要約)
+    ops_in_scope = []
+    for op in data.get("operations", []) or []:
+        op_id = op.get("id", "")
+        if _scope_matches_operation(scope, pid, op_id):
+            ops_in_scope.append({
+                "id": op_id,
+                "title": op.get("title", ""),
+                "status": op.get("status", ""),
+            })
+    out["operations"] = ops_in_scope
+
+    # Sort recent commits / done tasks newest-first, cap to 5 each so the
+    # default view stays readable. --detail / --all in the caller can lift
+    # the cap if we want a full expansion (= e-1864 AC 2).
+    commits.sort(key=lambda c: c.get("date", ""), reverse=True)
+    done_recent.sort(key=lambda r: r.get("done_at", ""), reverse=True)
+    out["commits_recent"] = commits[:5]
+    out["tasks_done_recent"] = done_recent[:5]
+
+    # Forward doc lookup (= e-1866): docs tagged with this trek_id in the
+    # current project's docs/ directory. Cross-project doc lookup lives
+    # behind /api/treks/{tid}/documents (cloud-mode).
+    docs: list[dict] = []
+    docs_dir = _get_docs_dir()
+    if os.path.isdir(docs_dir):
+        for fname in sorted(os.listdir(docs_dir)):
+            if not fname.endswith(".md"):
+                continue
+            try:
+                doc = _read_local_doc(os.path.join(docs_dir, fname))
+            except (OSError, UnicodeDecodeError):
+                continue
+            if doc.get("trek_id") != trek_doc.get("trek_id"):
+                continue
+            docs.append({
+                "doc_id": doc.get("doc_id", ""),
+                "title": doc.get("title", ""),
+                "scope": doc.get("scope", ""),
+                "milestone": doc.get("milestone", ""),
+                "updated_at": doc.get("updated_at", ""),
+            })
+    out["docs"] = docs
+    return out
+
+
+def _goal_state_status(trek_doc: dict, agg: dict) -> str:
+    """Return a 1-line readable status of the trek's goal_state field.
+
+    The criterion itself is free-form text, so we cannot programmatically
+    score completion. Instead we surface a simple counter ("3 todo / 7
+    done") that members can match against the text to decide whether to
+    suggest archive. This is intentionally lightweight — the SPEC explicitly
+    rejects "completion enforcement" as overdesign.
+    """
+    goal = (trek_doc.get("goal_state") or "").strip()
+    if not goal:
+        return ""
+    todo = len(agg.get("tasks_todo") or [])
+    done = len(agg.get("tasks_done_recent") or [])
+    return (
+        f"goal:        {goal}\n"
+        f"  progress (current project): {todo} todo / {done} recently-done"
+        + (" — consider `beacon trek archive` if criterion is met."
+           if todo == 0 and done > 0 else "")
+    )
+
+
 def cmd_trek_show():
-    """Show a single trek by id.
+    """Show a single trek by id with task / commit / doc aggregation.
 
     Reads from env:
       BEACON_TREK_ID  required
-      BEACON_JSON     "1" → emit json
+      BEACON_JSON     "1" → emit json (= raw trek doc + ``aggregation`` key)
+      BEACON_ALL      "1" → uncap recent lists (= --detail equivalent)
+
+    ms-75 / e-1864: human output now surfaces the trek's scoped tasks /
+    commits / docs from the *current* project so a CLI-driven workflow can
+    see Trek-wide progress without bouncing to the Web UI. Cross-project
+    scope rows are surfaced as hints (= the user must cd into the other
+    project) — the CLI intentionally does not fan out into other
+    project.json files to keep aggregation cheap and unambiguous.
     """
     import trek_store
 
     trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    expand = os.environ.get("BEACON_ALL", "") == "1"
 
     if not trek_id:
         print("Error: trek_id is required", file=sys.stderr)
@@ -4620,8 +4865,18 @@ def cmd_trek_show():
             print(f"Error: trek {trek_id} not found", file=sys.stderr)
             sys.exit(1)
 
+    # Build local aggregation regardless of cloud/local — the current
+    # project view is always available.
+    agg = _collect_trek_local_aggregation(t)
+
     if json_mode:
-        print(json.dumps(t, ensure_ascii=False, indent=2))
+        # Emit the trek doc as-is, plus an ``aggregation`` key. Existing
+        # consumers (= /beacon-trek-execute Step 1) that only read top-level
+        # fields are unaffected; new consumers can opt into the aggregation
+        # block by name (= forward-compatible).
+        out = dict(t)
+        out["aggregation"] = agg
+        print(json.dumps(out, ensure_ascii=False, indent=2))
         return
 
     halt_marker = " [HALTED]" if t.get("halt") else ""
@@ -4636,6 +4891,12 @@ def cmd_trek_show():
     print(f"  leader sess: {t.get('leader_session_id')}")
     if t.get("description"):
         print(f"  description: {t['description']}")
+    goal_line = _goal_state_status(t, agg)
+    if goal_line:
+        # _goal_state_status returns 1-2 lines, prefix each with two spaces
+        # so it visually aligns with the other show fields.
+        for line in goal_line.split("\n"):
+            print(f"  {line}" if not line.startswith("  ") else line)
     members = t.get("members") or []
     print(f"  members ({len(members)}):")
     for m in members:
@@ -4644,12 +4905,233 @@ def cmd_trek_show():
     scope = t.get("scope") or []
     print(f"  scope ({len(scope)}):")
     for s in scope:
-        ref = " / ".join(f"{k}={v}" for k, v in s.items() if k != "project")
-        print(f"    - {s.get('project')}" + (f" / {ref}" if ref else ""))
+        # ms-75 / e-1864 AC 6: surface bind grain (project / project:task=eXXX /
+        # project:ms=msXX / project:op=opXX) explicitly so members understand
+        # whether the trek covers a whole project or a narrow item.
+        narrow = [(k, v) for k, v in s.items() if k != "project"]
+        if narrow:
+            ref_str = ", ".join(f"{k}={v}" for k, v in narrow)
+            print(f"    - {s.get('project')}:{ref_str}")
+        else:
+            print(f"    - {s.get('project')} (project-wide)")
     if t.get("halt"):
         h = t["halt"]
         print(f"  halt: at={h.get('issued_at')} by={h.get('issued_by_session_id')}"
               + (f" reason={h.get('reason')}" if h.get("reason") else ""))
+
+    # ms-75 / e-1864: aggregation sections. Cross-project scope rows can't
+    # be expanded locally, so we surface them as hints rather than silently
+    # omitting items the user expects to see.
+    if agg.get("cross_project_scope"):
+        print()
+        print(f"  cross-project scope (not aggregated locally; cd into the "
+              f"other project for detail):")
+        for s in agg["cross_project_scope"]:
+            narrow = [(k, v) for k, v in s.items() if k != "project"]
+            if narrow:
+                ref_str = ", ".join(f"{k}={v}" for k, v in narrow)
+                print(f"    - {s.get('project')}:{ref_str}")
+            else:
+                print(f"    - {s.get('project')} (project-wide)")
+
+    todos = agg.get("tasks_todo") or []
+    if todos:
+        print()
+        print(f"  open tasks in scope ({len(todos)}):")
+        shown = todos if expand else todos[:10]
+        for row in shown:
+            pri = f" [{row['priority']}]" if row.get("priority") else ""
+            print(f"    ○ [{row['id']}]{pri} {row['description'][:80]}")
+        if not expand and len(todos) > len(shown):
+            print(f"    … {len(todos) - len(shown)} more (pass --all to "
+                  f"expand)")
+
+    done_recent = agg.get("tasks_done_recent") or []
+    if done_recent:
+        print()
+        print(f"  recently done in scope ({len(done_recent)} shown):")
+        for row in done_recent:
+            print(f"    ● [{row['id']}] {row['description'][:80]}")
+
+    ops_in_scope = agg.get("operations") or []
+    if ops_in_scope:
+        print()
+        print(f"  Operations in scope ({len(ops_in_scope)}):")
+        for op in ops_in_scope:
+            print(f"    - [{op['id']}] {op['title'][:60]} ({op['status']})")
+
+    commits = agg.get("commits_recent") or []
+    if commits:
+        print()
+        print(f"  recent commits in scope ({len(commits)} shown):")
+        for c in commits:
+            short = (c.get("hash") or "")[:8]
+            print(f"    {short:8s} {c['summary'][:80]}")
+
+    docs = agg.get("docs") or []
+    if docs:
+        print()
+        print(f"  trek docs ({len(docs)}):")
+        scope_icons = {"core": "*", "spec": "+", "memo": "-",
+                       "retro": "~", "report": "!"}
+        for d in docs:
+            icon = scope_icons.get(d.get("scope") or "memo", "?")
+            print(f"    {icon} [{d.get('scope', 'memo')}] "
+                  f"{d['doc_id']}: {d['title'][:60]}")
+
+
+def cmd_trek_timeline():
+    """Show a chronological timeline of trek-scoped events (ms-75 / e-1867).
+
+    Combines (a) trek lifecycle events (= created / status / halt / scope
+    changes / members) reconstructed from the trek doc's timestamps,
+    (b) scope-matching commits and task done events from the current
+    project, (c) trek-scoped doc additions, and (d) Trek-scope DM events
+    if a local bus_log file is available. Cross-project events live behind
+    the Tauri / Web UI (ms-72) and are surfaced here only as a one-line
+    hint pointing to the trek_id.
+
+    Reads from env:
+      BEACON_TREK_ID  required
+      BEACON_JSON     "1" → emit json (list of events, newest first)
+      BEACON_LIMIT    integer (default 50) — cap event count
+    """
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    try:
+        limit = int(os.environ.get("BEACON_LIMIT", "50") or "50")
+    except ValueError:
+        limit = 50
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            t = client.get_trek(trek_id)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        t = trek_store.load_trek(trek_id)
+        if t is None:
+            print(f"Error: trek {trek_id} not found", file=sys.stderr)
+            sys.exit(1)
+
+    events: list[dict] = []
+
+    # (a) trek lifecycle.
+    if t.get("created_at"):
+        events.append({"at": t["created_at"], "kind": "trek_created",
+                       "summary": f"trek {trek_id} created"})
+    if t.get("archived_at"):
+        events.append({"at": t["archived_at"], "kind": "trek_archived",
+                       "summary": "trek archived"})
+    for m in t.get("members") or []:
+        if m.get("invited_at"):
+            events.append({
+                "at": m["invited_at"], "kind": "member_invited",
+                "summary": f"invited {m.get('email')} [{m.get('role')}]",
+            })
+        if m.get("joined_at"):
+            events.append({
+                "at": m["joined_at"], "kind": "member_joined",
+                "summary": f"joined {m.get('email')} [{m.get('role')}]",
+            })
+    halt = t.get("halt") or {}
+    if halt.get("issued_at"):
+        reason = halt.get("reason") or "(no reason)"
+        events.append({
+            "at": halt["issued_at"], "kind": "halt_engaged",
+            "summary": f"halt engaged: {reason}",
+        })
+
+    # (b) scoped commits + done tasks from current project.
+    pid = _current_project_id()
+    if pid:
+        try:
+            data = load_project()
+        except Exception:
+            data = {}
+        scope = t.get("scope") or []
+        for ms in data.get("milestones", []) or []:
+            ms_id = ms.get("id", "")
+            for entry in ms.get("entries", []) or []:
+                etype = entry.get("type", "")
+                if etype == "commit":
+                    if not (_scope_matches_milestone(scope, pid, ms_id)
+                            or _scope_matches_entry(scope, pid, entry, ms_id)):
+                        continue
+                    events.append({
+                        "at": entry.get("created_at", ""),
+                        "kind": "commit",
+                        "summary": (
+                            f"[{ms_id}] {entry.get('description', '')[:80]}"
+                        ),
+                    })
+                    continue
+                if not _scope_matches_entry(scope, pid, entry, ms_id):
+                    continue
+                if entry.get("done_at"):
+                    events.append({
+                        "at": entry["done_at"],
+                        "kind": "task_done",
+                        "summary": (
+                            f"[{entry.get('id', '')}] "
+                            f"{entry.get('description', '')[:80]}"
+                        ),
+                    })
+
+    # (c) trek-scoped docs.
+    docs_dir = _get_docs_dir()
+    if os.path.isdir(docs_dir):
+        for fname in sorted(os.listdir(docs_dir)):
+            if not fname.endswith(".md"):
+                continue
+            try:
+                doc = _read_local_doc(os.path.join(docs_dir, fname))
+            except (OSError, UnicodeDecodeError):
+                continue
+            if doc.get("trek_id") != trek_id:
+                continue
+            events.append({
+                "at": doc.get("updated_at", ""),
+                "kind": "doc",
+                "summary": (
+                    f"[{doc.get('scope', 'memo')}] {doc.get('doc_id', '')}: "
+                    f"{doc.get('title', '')[:70]}"
+                ),
+            })
+
+    # Newest first; cap.
+    events.sort(key=lambda e: e.get("at", ""), reverse=True)
+    events = events[:max(limit, 0)] if limit > 0 else events
+
+    if json_mode:
+        print(json.dumps(events, ensure_ascii=False))
+        return
+
+    if not events:
+        print(f"Trek {trek_id} timeline: (no events found in current "
+              f"project; cross-project events are visible via the Web / "
+              f"Tauri UI)")
+        return
+
+    print(f"Trek {trek_id} timeline ({len(events)} events shown, newest "
+          f"first):")
+    kind_icons = {
+        "trek_created": "*", "trek_archived": "!", "member_invited": "+",
+        "member_joined": "+", "halt_engaged": "!", "commit": ">",
+        "task_done": "●", "doc": "-",
+    }
+    for ev in events:
+        when = (ev.get("at") or "")[:19]
+        icon = kind_icons.get(ev.get("kind", ""), "?")
+        print(f"  {when}  {icon} [{ev.get('kind')}] {ev.get('summary', '')}")
 
 
 def _trek_transition(trek_id: str, to_status: str):
@@ -5062,14 +5544,22 @@ def cmd_trek_plan():
     trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
     add_arg = os.environ.get("BEACON_TREK_SCOPE_ADD", "").strip()
     remove_arg = os.environ.get("BEACON_TREK_SCOPE_REMOVE", "").strip()
+    # ms-75 / e-1865: optional goal_state setter. Empty string clears it.
+    # ``BEACON_TREK_GOAL_STATE_SET`` distinguishes "user passed --goal-state ''"
+    # (= clear) from "user did not pass --goal-state at all" (= preserve).
+    goal_state_arg = os.environ.get("BEACON_TREK_GOAL_STATE", "")
+    goal_state_explicit = (
+        os.environ.get("BEACON_TREK_GOAL_STATE_SET", "") == "1"
+    )
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not trek_id:
         print("Error: trek_id is required", file=sys.stderr)
         sys.exit(1)
-    if not add_arg and not remove_arg:
+    if not add_arg and not remove_arg and not goal_state_explicit:
         print(
-            "Error: --add-scope <ref> or --remove-scope <ref> is required",
+            "Error: --add-scope <ref>, --remove-scope <ref>, or --goal-state "
+            "<text> is required",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -5082,26 +5572,52 @@ def cmd_trek_plan():
 
     # Parse the scope arg with the shared helper so cloud and local agree on
     # the entry shape. We do this BEFORE branching so syntax errors surface
-    # the same way regardless of mode.
-    try:
-        entry = trek.parse_scope_arg(add_arg or remove_arg)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+    # the same way regardless of mode. goal_state-only calls skip parsing.
+    entry: dict | None = None
+    if add_arg or remove_arg:
+        try:
+            entry = trek.parse_scope_arg(add_arg or remove_arg)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
 
     if _is_cloud_mode():
         try:
             client, _config = _get_api_client()
-            kwargs = {
-                "project": entry["project"],
-                "milestone": entry.get("milestone", ""),
-                "operation": entry.get("operation", ""),
-                "task": entry.get("task", ""),
-            }
-            if add_arg:
-                t = client.add_trek_scope(trek_id, **kwargs)
-            else:
-                t = client.remove_trek_scope(trek_id, **kwargs)
+            t = None
+            if entry is not None:
+                kwargs = {
+                    "project": entry["project"],
+                    "milestone": entry.get("milestone", ""),
+                    "operation": entry.get("operation", ""),
+                    "task": entry.get("task", ""),
+                }
+                if add_arg:
+                    t = client.add_trek_scope(trek_id, **kwargs)
+                else:
+                    t = client.remove_trek_scope(trek_id, **kwargs)
+            if goal_state_explicit:
+                # ms-75 / e-1865: goal_state setter via cloud API. The server
+                # endpoint is wired in a follow-up (cloud-mode parity will
+                # land alongside the rest of e-1865 server work); in the
+                # meantime cloud users get a graceful warning rather than a
+                # silent no-op.
+                if hasattr(client, "set_trek_goal_state"):
+                    t = client.set_trek_goal_state(
+                        trek_id, goal_state=goal_state_arg,
+                    )
+                else:
+                    print(
+                        "warn: --goal-state is local-mode only until the "
+                        "server endpoint lands (e-1865 cloud parity). "
+                        "Set it locally first; the cloud copy will be "
+                        "updated by the next sync.",
+                        file=sys.stderr,
+                    )
+                    if t is None:
+                        # Nothing to print downstream — bail without error so
+                        # the user sees the warning and can re-plan.
+                        sys.exit(0)
         except RuntimeError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
@@ -5111,10 +5627,13 @@ def cmd_trek_plan():
             print(f"Error: trek {trek_id} not found", file=sys.stderr)
             sys.exit(1)
         try:
-            if add_arg:
-                trek.add_scope_entry(t, entry=entry)
-            else:
-                trek.remove_scope_entry(t, entry=entry)
+            if entry is not None:
+                if add_arg:
+                    trek.add_scope_entry(t, entry=entry)
+                else:
+                    trek.remove_scope_entry(t, entry=entry)
+            if goal_state_explicit:
+                trek.set_goal_state(t, goal_state=goal_state_arg)
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
@@ -5123,10 +5642,17 @@ def cmd_trek_plan():
     if json_mode:
         print(json.dumps(t, ensure_ascii=False))
     else:
-        verb = "Added" if add_arg else "Removed"
-        ref_display = (add_arg or remove_arg)
-        print(f"{verb} scope {ref_display} on trek {trek_id} "
-              f"(scope: {len(t.get('scope') or [])} items)")
+        if add_arg or remove_arg:
+            verb = "Added" if add_arg else "Removed"
+            ref_display = (add_arg or remove_arg)
+            print(f"{verb} scope {ref_display} on trek {trek_id} "
+                  f"(scope: {len(t.get('scope') or [])} items)")
+        if goal_state_explicit:
+            new_val = (goal_state_arg or "").strip()
+            if new_val:
+                print(f"goal_state set on trek {trek_id}: \"{new_val}\"")
+            else:
+                print(f"goal_state cleared on trek {trek_id}")
 
 
 def cmd_trek_leave():
@@ -7492,6 +8018,12 @@ def cmd_doc_list():
     scope_filter = os.environ.get("BEACON_SCOPE", "")
     ms_filter = os.environ.get("BEACON_MS", "")
     op_filter = os.environ.get("BEACON_OP", "")
+    # ms-75 / e-1866: ``--trek <trek-id>`` filter — surfaces all docs
+    # whose frontmatter is tagged with the given trek_id. The trek_id
+    # frontmatter field has existed since ms-69 / e-1663; this filter
+    # makes it usable from the CLI (= mirrors what the server-side
+    # /api/treks/{tid}/documents lookup does for the Web UI).
+    trek_filter = os.environ.get("BEACON_TREK_ID", "")
     # Trashed docs are hidden by default — pass --include-trashed to see
     # them in line with active ones (ms-14 e-973).
     include_trashed = os.environ.get("BEACON_INCLUDE_TRASHED", "") == "1"
@@ -7519,6 +8051,8 @@ def cmd_doc_list():
                     entry["milestone"] = doc["milestone"]
                 if doc.get("operation"):
                     entry["operation"] = doc["operation"]
+                if doc.get("trek_id"):
+                    entry["trek_id"] = doc["trek_id"]
                 if doc.get("status"):
                     entry["status"] = doc["status"]
                 docs.append(entry)
@@ -7529,6 +8063,8 @@ def cmd_doc_list():
         docs = [d for d in docs if d.get("milestone") == ms_filter]
     if op_filter:
         docs = [d for d in docs if d.get("operation") == op_filter]
+    if trek_filter:
+        docs = [d for d in docs if d.get("trek_id") == trek_filter]
 
     if json_mode:
         print(json.dumps(docs, ensure_ascii=False))
@@ -15687,6 +16223,7 @@ if __name__ == "__main__":
         "trek_stop": cmd_trek_stop,
         "trek_resume": cmd_trek_resume,
         "trek_transfer_leader": cmd_trek_transfer_leader,
+        "trek_timeline": cmd_trek_timeline,
         "version": lambda: print(f"beacon {__version__}"),
         "help_json": cmd_help_json,
         "doctor": cmd_doctor,

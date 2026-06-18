@@ -544,6 +544,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc_list.add_argument("--scope", "-s", dest="scope", default="")
     p_doc_list.add_argument("--ms", dest="doc_ms", default="")
     p_doc_list.add_argument("--op", dest="doc_op", default="")
+    # ms-75 / e-1866: filter to docs tagged with a specific trek_id
+    # (= frontmatter trek_id == <value>). Mirrors the ``--ms`` / ``--op``
+    # filters; orthogonal to scope/ms/op narrowing so the user can ask
+    # "show all spec docs tagged to this trek".
+    p_doc_list.add_argument("--trek", dest="doc_trek", default="")
 
     p_doc_show = doc_sub.add_parser("show", aliases=["get"], add_help=False)
     p_doc_show.add_argument("doc_id", nargs="?", default="")
@@ -709,6 +714,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_trek_create.add_argument("title", nargs="?", default="")
     p_trek_create.add_argument("--type", dest="trek_type", default="")
     p_trek_create.add_argument("--description", "--desc", dest="trek_desc", default="")
+    # ms-75 / e-1865: optional acceptance criterion at creation time.
+    p_trek_create.add_argument("--goal-state", dest="goal_state", default="")
     p_trek_create.add_argument("--json", action="store_true")
 
     p_trek_list = trek_sub.add_parser("list", aliases=["ls"], add_help=False)
@@ -716,10 +723,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_trek_list.add_argument("--all", "--include-archived",
                              dest="include_archived", action="store_true")
     p_trek_list.add_argument("--all-actors", dest="all_actors", action="store_true")
+    # ms-75 / e-1813: filter to treks the current user has actually joined
+    # (= joined_at non-empty for the calling user). Skipping invitees that
+    # have not accepted yet — they show up via plain list / status.
+    p_trek_list.add_argument("--joined", dest="joined_only", action="store_true",
+                             help="Show only treks the current user has joined")
     p_trek_list.add_argument("--json", action="store_true")
 
     p_trek_show = trek_sub.add_parser("show", aliases=["get"], add_help=False)
     p_trek_show.add_argument("trek_id", nargs="?", default="")
+    # ms-75 / e-1864: uncap the recent-task / commit lists in the aggregation
+    # block. Default caps lists at 10 / 5 for readability.
+    p_trek_show.add_argument("--all", "--detail", dest="show_all",
+                             action="store_true",
+                             help="Expand all entries in the aggregation block")
     p_trek_show.add_argument("--json", action="store_true")
 
     p_trek_start = trek_sub.add_parser("start", add_help=False)
@@ -748,7 +765,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_trek_plan.add_argument("trek_id", nargs="?", default="")
     p_trek_plan.add_argument("--add-scope", dest="add_scope", default="")
     p_trek_plan.add_argument("--remove-scope", dest="remove_scope", default="")
+    # ms-75 / e-1865: optional goal_state setter. Sentinel value separately
+    # records "user passed --goal-state" so we can distinguish empty string
+    # (= clear) from "did not pass" (= preserve existing).
+    p_trek_plan.add_argument("--goal-state", dest="goal_state", default=None)
     p_trek_plan.add_argument("--json", action="store_true")
+
+    # ms-75 / e-1867: chronological view of trek-scoped events.
+    p_trek_timeline = trek_sub.add_parser("timeline", add_help=False)
+    p_trek_timeline.add_argument("trek_id", nargs="?", default="")
+    p_trek_timeline.add_argument("--limit", default="50",
+                                 help="Cap event count (default: 50)")
+    p_trek_timeline.add_argument("--json", action="store_true")
 
     p_trek_stop = trek_sub.add_parser("stop", add_help=False)
     p_trek_stop.add_argument("trek_id", nargs="?", default="")
@@ -1842,6 +1870,9 @@ def _handle_doc(root: Path, args: argparse.Namespace) -> int:
             "BEACON_SCOPE": args.scope or "",
             "BEACON_MS": args.doc_ms or "",
             "BEACON_OP": args.doc_op or "",
+            # ms-75 / e-1866: --trek <trek-id> filter forwarded as
+            # BEACON_TREK_ID to cmd_doc_list. Empty string = no filter.
+            "BEACON_TREK_ID": getattr(args, "doc_trek", "") or "",
         }
         return _run_commands_py(root, "doc_list", env)
 
@@ -2171,9 +2202,10 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
             "\n"
             "Subcommands:\n"
             "  create \"<title>\" [--type temporary|persistent] "
-            "[--description \"...\"]\n"
-            "  list [--status S] [--all] [--all-actors] [--json]\n"
-            "  show <trek-id> [--json]\n"
+            "[--description \"...\"] [--goal-state \"<criterion>\"]\n"
+            "  list [--status S] [--all] [--all-actors] [--joined] [--json]\n"
+            "  show <trek-id> [--all] [--json]   (= aggregation block: tasks "
+            "/ commits / docs)\n"
             "  start <trek-id>\n"
             "  archive <trek-id>\n"
             "  invite <trek-id> --actor <email> [--notify]\n"
@@ -2181,6 +2213,10 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
             "  leave <trek-id>\n"
             "  plan <trek-id> --add-scope <project[:ref]>\n"
             "  plan <trek-id> --remove-scope <project[:ref]>\n"
+            "  plan <trek-id> --goal-state \"<criterion>\"   "
+            "(= ms-75 / e-1865, '' clears)\n"
+            "  timeline <trek-id> [--limit N] [--json]   "
+            "(= chronological view)\n"
             "  stop <trek-id> [--reason \"...\"]    (= Andon cord、halt 信号)\n"
             "  resume <trek-id>                     (= halt 信号を clear)\n"
             "  transfer-leader <trek-id> --to <session-id>\n"
@@ -2201,6 +2237,7 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
                 "BEACON_TREK_TITLE": args.title or "",
                 "BEACON_TREK_TYPE": args.trek_type or "",
                 "BEACON_TREK_DESCRIPTION": args.trek_desc or "",
+                "BEACON_TREK_GOAL_STATE": getattr(args, "goal_state", "") or "",
                 "BEACON_JSON": json_env,
             },
         )
@@ -2211,13 +2248,20 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
                 "BEACON_TREK_STATUS": args.status or "",
                 "BEACON_TREK_INCLUDE_ARCHIVED": "1" if args.include_archived else "",
                 "BEACON_TREK_ALL_ACTORS": "1" if args.all_actors else "",
+                "BEACON_TREK_JOINED_ONLY": (
+                    "1" if getattr(args, "joined_only", False) else ""
+                ),
                 "BEACON_JSON": json_env,
             },
         )
     if cmd in ("show", "get"):
         return _run_commands_py(
             root, "trek_show",
-            {"BEACON_TREK_ID": args.trek_id or "", "BEACON_JSON": json_env},
+            {
+                "BEACON_TREK_ID": args.trek_id or "",
+                "BEACON_ALL": "1" if getattr(args, "show_all", False) else "",
+                "BEACON_JSON": json_env,
+            },
         )
     if cmd == "start":
         return _run_commands_py(
@@ -2250,12 +2294,25 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
             {"BEACON_TREK_ID": args.trek_id or "", "BEACON_JSON": json_env},
         )
     if cmd == "plan":
+        goal_state_val = getattr(args, "goal_state", None)
+        goal_state_explicit = goal_state_val is not None
         return _run_commands_py(
             root, "trek_plan",
             {
                 "BEACON_TREK_ID": args.trek_id or "",
                 "BEACON_TREK_SCOPE_ADD": args.add_scope or "",
                 "BEACON_TREK_SCOPE_REMOVE": args.remove_scope or "",
+                "BEACON_TREK_GOAL_STATE": goal_state_val or "",
+                "BEACON_TREK_GOAL_STATE_SET": "1" if goal_state_explicit else "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd == "timeline":
+        return _run_commands_py(
+            root, "trek_timeline",
+            {
+                "BEACON_TREK_ID": args.trek_id or "",
+                "BEACON_LIMIT": args.limit or "50",
                 "BEACON_JSON": json_env,
             },
         )

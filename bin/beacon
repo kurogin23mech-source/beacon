@@ -89,11 +89,18 @@ Operations:
 
 Treks (cross-project / cross-session 協奏作業領域 — ms-69):
   beacon trek create "<title>" [--type temporary|persistent] [--description "..."]
-                                    Create a trek; caller becomes leader
-  beacon trek list [--status s] [--include-archived] [--all-actors] [--json]
-                                    List treks visible to the caller
-  beacon trek show <trek-id> [--json]
-                                    Show members / scope / status / halt
+                              [--goal-state "<criterion>"]
+                                    Create a trek; caller becomes leader.
+                                    --goal-state は ms-75/e-1865 で追加: trek の
+                                    完了マーカー (acceptance_criteria 相当).
+  beacon trek list [--status s] [--include-archived] [--all-actors] [--joined] [--json]
+                                    List treks visible to the caller. --joined
+                                    で自分が join 済の trek だけに絞る.
+  beacon trek show <trek-id> [--all] [--json]
+                                    Show members / scope / status / halt と、
+                                    scope に紐付く task / commit / 配下 doc
+                                    の集約ビュー (ms-75/e-1864). --all で
+                                    要約 cap を解除.
   beacon trek start <trek-id>       Transition planning → active
   beacon trek archive <trek-id>     Archive (= terminal; restart by new trek)
   beacon trek invite <trek-id> --actor <email> [--notify]
@@ -102,6 +109,11 @@ Treks (cross-project / cross-session 協奏作業領域 — ms-69):
   beacon trek leave <trek-id>       Remove self (leader must transfer first)
   beacon trek plan <trek-id> --add-scope <project:ref> | --remove-scope <project:ref>
                                     Edit scope (ms-/op-/e- ref, or project-wide)
+  beacon trek plan <trek-id> --goal-state "<criterion>"
+                                    Set / clear (空文字で clear) trek の完了マーカー.
+  beacon trek timeline <trek-id> [--limit N] [--json]
+                                    Trek の lifecycle / scope 内 commit /
+                                    task done / 配下 doc を時系列で参照 (ms-75/e-1867).
   beacon trek stop <trek-id> [--reason "..."]
                                     Pull the Andon cord (halt signal)
   beacon trek resume <trek-id>      Clear the halt signal
@@ -1608,6 +1620,7 @@ cmd_doc() {
             local scope_filter=""
             local ms_filter=""
             local op_filter=""
+            local trek_filter=""
             local include_trashed=""
             while [[ $# -gt 0 ]]; do
                 case "$1" in
@@ -1615,12 +1628,14 @@ cmd_doc() {
                     --scope|-s)         scope_filter="${2:-}"; shift 2 ;;
                     --ms)               ms_filter="${2:-}"; shift 2 ;;
                     --op)               op_filter="${2:-}"; shift 2 ;;
+                    --trek)             trek_filter="${2:-}"; shift 2 ;;
                     --include-trashed)  include_trashed="1"; shift ;;
                     *) shift ;;
                 esac
             done
             BEACON_JSON="$json_flag" BEACON_SCOPE="$scope_filter" \
                 BEACON_MS="$ms_filter" BEACON_OP="$op_filter" \
+                BEACON_TREK_ID="$trek_filter" \
                 BEACON_INCLUDE_TRASHED="$include_trashed" \
                 python3 "$COMMANDS_PY" doc_list
             ;;
@@ -2435,11 +2450,12 @@ except ValueError as e:
         case "${2:-}" in
             create)
                 shift 2
-                title="" type_="" desc=""
+                title="" type_="" desc="" goal_state=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --type) type_="${2:-}"; shift 2 ;;
                         --description|--desc) desc="${2:-}"; shift 2 ;;
+                        --goal-state) goal_state="${2:-}"; shift 2 ;;
                         --json) export BEACON_JSON=1; shift ;;
                         *) [[ -z "$title" ]] && title="$1"; shift ;;
                     esac
@@ -2447,16 +2463,18 @@ except ValueError as e:
                 BEACON_TREK_TITLE="$title" \
                     BEACON_TREK_TYPE="$type_" \
                     BEACON_TREK_DESCRIPTION="$desc" \
+                    BEACON_TREK_GOAL_STATE="$goal_state" \
                     python3 "$COMMANDS_PY" trek_create
                 ;;
             list|ls)
                 shift 2
-                status_filter="" include_archived="" all_actors=""
+                status_filter="" include_archived="" all_actors="" joined_only=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --status) status_filter="${2:-}"; shift 2 ;;
                         --all|--include-archived) include_archived="1"; shift ;;
                         --all-actors) all_actors="1"; shift ;;
+                        --joined) joined_only="1"; shift ;;
                         --json) export BEACON_JSON=1; shift ;;
                         *) shift ;;
                     esac
@@ -2464,18 +2482,21 @@ except ValueError as e:
                 BEACON_TREK_STATUS="$status_filter" \
                     BEACON_TREK_INCLUDE_ARCHIVED="$include_archived" \
                     BEACON_TREK_ALL_ACTORS="$all_actors" \
+                    BEACON_TREK_JOINED_ONLY="$joined_only" \
                     python3 "$COMMANDS_PY" trek_list
                 ;;
             show|get)
                 shift 2
-                trek_id=""
+                trek_id="" show_all=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
+                        --all|--detail) show_all="1"; shift ;;
                         --json) export BEACON_JSON=1; shift ;;
                         *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                     esac
                 done
-                BEACON_TREK_ID="$trek_id" python3 "$COMMANDS_PY" trek_show
+                BEACON_TREK_ID="$trek_id" BEACON_ALL="$show_all" \
+                    python3 "$COMMANDS_PY" trek_show
                 ;;
             start)
                 shift 2
@@ -2539,11 +2560,12 @@ except ValueError as e:
                 ;;
             plan)
                 shift 2
-                trek_id="" scope_add="" scope_remove=""
+                trek_id="" scope_add="" scope_remove="" goal_state="" goal_state_set=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --add-scope) scope_add="${2:-}"; shift 2 ;;
                         --remove-scope) scope_remove="${2:-}"; shift 2 ;;
+                        --goal-state) goal_state="${2:-}"; goal_state_set="1"; shift 2 ;;
                         --json) export BEACON_JSON=1; shift ;;
                         *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                     esac
@@ -2551,7 +2573,22 @@ except ValueError as e:
                 BEACON_TREK_ID="$trek_id" \
                     BEACON_TREK_SCOPE_ADD="$scope_add" \
                     BEACON_TREK_SCOPE_REMOVE="$scope_remove" \
+                    BEACON_TREK_GOAL_STATE="$goal_state" \
+                    BEACON_TREK_GOAL_STATE_SET="$goal_state_set" \
                     python3 "$COMMANDS_PY" trek_plan
+                ;;
+            timeline)
+                shift 2
+                trek_id="" limit="50"
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --limit) limit="${2:-50}"; shift 2 ;;
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" BEACON_LIMIT="$limit" \
+                    python3 "$COMMANDS_PY" trek_timeline
                 ;;
             stop)
                 shift 2

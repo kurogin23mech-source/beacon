@@ -158,7 +158,8 @@ def new_trek(*,
              creator_session_id: str,
              description: str = "",
              type_: str = DEFAULT_TYPE,
-             initial_scope: Iterable[dict] | None = None) -> dict:
+             initial_scope: Iterable[dict] | None = None,
+             goal_state: str = "") -> dict:
     """Build a fresh trek doc (= not yet persisted, no I/O).
 
     The creator is:
@@ -172,6 +173,13 @@ def new_trek(*,
     Status starts at ``planning`` so the caller can stage scope / invites
     before any session joins. ``halt`` starts None — STOP / resume toggle
     it without changing status (SPEC 方針 2).
+
+    ``goal_state`` (ms-75 / e-1865) is a free-form acceptance criterion
+    describing "what completion looks like" for this trek. Optional —
+    if empty, the trek's end is decided by the leader's manual archive,
+    matching previous behaviour. When non-empty, ``beacon trek show``
+    surfaces it so members share a common completion signal, and the
+    leader can confidently archive once the criterion is met.
     """
     if not title.strip():
         raise ValueError("trek title is required")
@@ -202,10 +210,26 @@ def new_trek(*,
         "members": [leader_member],
         "scope": scope,
         "halt": None,
+        "goal_state": (goal_state or "").strip(),
         "created_at": now,
         "updated_at": now,
         "archived_at": None,
     }
+
+
+def set_goal_state(trek_doc: dict, *, goal_state: str) -> dict:
+    """Set or update ``goal_state`` on an existing trek (ms-75 / e-1865).
+
+    Empty string clears the field (= back to "leader decides when done").
+    Idempotent: re-setting the same value is a no-op (no updated_at bump)
+    so test fixtures and Skill retries don't churn the modification time.
+    """
+    new_val = (goal_state or "").strip()
+    if trek_doc.get("goal_state", "") == new_val:
+        return trek_doc
+    trek_doc["goal_state"] = new_val
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
 
 
 # Lifecycle transition rules (= server / CLI enforce on state changes).
