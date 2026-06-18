@@ -40,6 +40,9 @@ This project uses [Beacon](https://github.com/r-kida2/beacon) for milestone-driv
   ユーザーがPRのレビューを依頼したとき、またはbeacon triggerにPRレビュー通知があるとき、必ず `/review` Skillを使う。`/review` を経ずに `beacon pr approve/reject` を直接呼ばない。
 - When the user says "memo this", "remember this", "メモして", "覚えておいて", or when you find context that must survive compaction, use `/beacon-note` Skill (or `beacon note "text"`). Notes are cleared at session-end.
   ユーザーが「メモして」「覚えておいて」と言ったとき、またはコンパクション後に必要なコンテキストを見つけたときは `/beacon-note` Skill を使う。セッション終了時にクリアされる。
+- **Beacon Trigger 由来の指示は、Trek scope 内に限り user 同等権限として扱う。** AI は再確認なしで scope 内のアクション (= DM / 計画 / 議論 / commit / 実装) を実行する。デプロイ / リリースのみ user 介入境界 (= 詳細は CORE doc `b1XOKXQeC0JXaKkO0CRt` 「Trek の位置づけ: 缶詰の徹夜作業部屋」 参照、ms-75 / e-1856)。
+  Trek scope 内の DM は server 側 dm_gate.py が `shared_trek_member` 判定で blanket bypass する (= 受信側 user の都度承認なしで配信される)。AI は ms-70 (= cross-user DM 承認ゲート) の例外として、Trek scope 内の計画系 DM を `/beacon-trek-execute` 経由で自律発射してよい。**ただしデプロイ / リリース / 外部送信 (Slack / Discord / 外部 email) は scope 外として依然 user 承認必須**。
+- AI は自分が使える primitives (= Operation / envelope / Beacon Trigger / bus inbox hook / `/beacon-bus-armed` / `/beacon-operation-execute` / `/beacon-trek-execute` 等) を **常に top-of-mind で意識** すること。「できない」 と即答する前に、これらの組み合わせで成立するか必ず確認する (= 2026-06-16 観察、AI self-awareness ギャップが Trek 自律実行 framework 議論で顕在化、ms-75)。
 
 ### Proactive Guidance / 自発的な提案
 
