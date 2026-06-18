@@ -332,3 +332,154 @@ def test_set_goal_state_clear_via_empty_string():
     )
     trek.set_goal_state(t, goal_state="")
     assert t["goal_state"] == ""
+
+
+# ---------------------------------------------------------------------------
+# cadence_minutes / manager_agent_url (ms-83 / e-1994)
+# ---------------------------------------------------------------------------
+
+def test_new_trek_defaults_meta_empty():
+    """No cadence + no manager URL → meta is present but empty.
+
+    Always-present empty dict keeps consumers from branching on KeyError
+    vs. empty-dict (= the same pattern goal_state uses with empty string).
+    """
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+    )
+    assert t["meta"] == {}
+
+
+def test_new_trek_with_cadence_minutes():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+        cadence_minutes=15,
+    )
+    assert t["meta"]["cadence_minutes"] == 15
+
+
+def test_new_trek_with_manager_agent_url():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+        manager_agent_url="https://agents.example.com/trek-1",
+    )
+    assert (
+        t["meta"]["manager_agent_url"]
+        == "https://agents.example.com/trek-1"
+    )
+
+
+def test_new_trek_strips_manager_agent_url_whitespace():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+        manager_agent_url="  https://x  ",
+    )
+    assert t["meta"]["manager_agent_url"] == "https://x"
+
+
+@pytest.mark.parametrize("bad", [0, -1, -10])
+def test_new_trek_rejects_non_positive_cadence(bad):
+    with pytest.raises(ValueError):
+        trek.new_trek(
+            title="x", creator_user_id="u-1", creator_email="a@b.com",
+            creator_session_id="sv-x",
+            cadence_minutes=bad,
+        )
+
+
+def test_new_trek_rejects_bool_cadence():
+    """``True`` is technically ``isinstance(True, int)`` → guard against
+    accidental boolean coercion."""
+    with pytest.raises(ValueError):
+        trek.new_trek(
+            title="x", creator_user_id="u-1", creator_email="a@b.com",
+            creator_session_id="sv-x",
+            cadence_minutes=True,  # type: ignore[arg-type]
+        )
+
+
+def test_get_cadence_minutes_default_when_unset():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+    )
+    assert trek.get_cadence_minutes(t) == trek.DEFAULT_CADENCE_MINUTES
+    assert trek.DEFAULT_CADENCE_MINUTES == 10
+
+
+def test_get_cadence_minutes_returns_set_value():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+        cadence_minutes=30,
+    )
+    assert trek.get_cadence_minutes(t) == 30
+
+
+def test_set_cadence_minutes_updates():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+    )
+    prior = t["updated_at"]
+    import time
+    time.sleep(0.001)
+    trek.set_cadence_minutes(t, cadence_minutes=20)
+    assert t["meta"]["cadence_minutes"] == 20
+    assert t["updated_at"] > prior
+
+
+def test_set_cadence_minutes_idempotent():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+        cadence_minutes=20,
+    )
+    prior = t["updated_at"]
+    trek.set_cadence_minutes(t, cadence_minutes=20)
+    # No mutation → updated_at unchanged (fixtures stay stable).
+    assert t["updated_at"] == prior
+
+
+def test_set_cadence_minutes_clear_via_none():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+        cadence_minutes=20,
+    )
+    trek.set_cadence_minutes(t, cadence_minutes=None)
+    assert "cadence_minutes" not in t["meta"]
+    # After clear, get_cadence_minutes falls back to default.
+    assert trek.get_cadence_minutes(t) == trek.DEFAULT_CADENCE_MINUTES
+
+
+def test_set_manager_agent_url_updates_and_idempotent():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+    )
+    trek.set_manager_agent_url(
+        t, manager_agent_url="https://example.com/agent"
+    )
+    assert (
+        t["meta"]["manager_agent_url"] == "https://example.com/agent"
+    )
+    prior = t["updated_at"]
+    trek.set_manager_agent_url(
+        t, manager_agent_url="https://example.com/agent"
+    )
+    assert t["updated_at"] == prior
+
+
+def test_set_manager_agent_url_clear_via_empty():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+        manager_agent_url="https://example.com/agent",
+    )
+    trek.set_manager_agent_url(t, manager_agent_url="")
+    assert "manager_agent_url" not in t["meta"]
