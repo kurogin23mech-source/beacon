@@ -12665,7 +12665,35 @@ def _bus_budget_consume_one() -> tuple[bool, dict]:
 
 
 def cmd_bus_budget_grant():
-    """Set or refresh the outbound-send budget for autonomous mode."""
+    """Set or refresh the outbound-send budget for autonomous mode.
+
+    ms-76 / e-1852 structural禁止帯 (= 構造的禁止): budget grant requires a
+    human (T1 envelope-equivalent) signal — Operation auto-execute (T2) is
+    NOT allowed to self-escalate. The whole point of the budget is to cap
+    autonomous-loop runaway. If T2 Operations could re-grant the budget,
+    an AI inside a long-running Operation could write a "grant N more
+    turns" Operation, schedule itself, and bypass the cap silently. We
+    block the path at the CLI entry: if the process is running under
+    BEACON_OPERATION_AUTO_EXECUTE=1 (= the Operation runner's marker),
+    refuse with a non-zero exit and a message pointing the human to run
+    the grant interactively.
+
+    See CORE doc QvyVwRU8otQEn5iMfP36 (= AI 自律 action の envelope tier
+    framework) 「構造的禁止」 section. Mirrors the explicit T1-only
+    guarantee in ms-76 SPEC EuLwGrAawmMzeKYsxkrd 設計方針 8.
+    """
+    if os.environ.get("BEACON_OPERATION_AUTO_EXECUTE", "") == "1" or \
+       os.environ.get("BEACON_OPERATION_ENVELOPE_ID", "").strip():
+        print(
+            "Error: bus budget grant is T1-only (= human-signature required).\n"
+            "  This process is running under an Operation auto-execute "
+            "context (T2 envelope); structural禁止帯 forbids AI self-escalation.\n"
+            "  See CORE doc QvyVwRU8otQEn5iMfP36 (= AI 自律 action の envelope "
+            "tier framework). Run `beacon bus budget grant --turns N` "
+            "interactively (= outside the Operation runner) to refresh.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     import datetime
     raw = os.environ.get("BEACON_BUS_BUDGET_N", "").strip()
     try:
