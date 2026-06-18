@@ -338,29 +338,36 @@ SPEC を先に作る場合: 一旦キャンセルして `/beacon-spec <ms-id>` �
 - **選択**: ユーザーが指定したMS-IDのみ起動
 - **キャンセル**: 何もせず終了 (SPEC 作成は別途 `/beacon-spec` で)
 
-## Step 4.5: Worktree作成フェーズ
+## Step 4.5: MS 活性化フェーズ (ms-81 e-1920 で workspace → start に統一)
 
-ユーザーが承認後（「全て」または「選択」）、エージェント起動の前に各MSのworktreeを準備する。
+ユーザーが承認後（「全て」または「選択」）、エージェント起動の前に各MSを活性化し worktree (= MSごとの作業領域、git project の場合のみ作成) を準備する。
 
-### Worktree作成手順
+### MS 活性化手順
 
-承認されたMSそれぞれについて、以下を順次実行する:
+承認されたMSそれぞれについて、以下を順次実行する。`beacon milestone start` が status (= MSの状態) / assignee (= 担当者) / 専有 (= 今このセッションが座っている、というラベル) / worktree (git project の場合) を atomic に確保する:
 
 ```bash
-beacon milestone workspace <ms-id> --executor ai --json
+beacon milestone start <ms-id>
 ```
 
-成功した場合（JSON出力あり）:
-- `workspace_path` を記録する（Step 5 の prompt に使用）
-- `workspace_branch` も記録する
+stdout から以下を抽出する (= 出力に表に出るので非開発者ユーザーにも何が起きたか伝わる):
+- `branch:` 行 → `workspace_branch` として記録 (Step 5 の prompt に使用)
+- `next: cd <path> && bclaude` 行 → `<path>` を `workspace_path` として記録
+- `workspace: non-git project, worktree step skipped` 行が出ていれば非 git project → worktree なしで続行、論理専有のみ取得済
 
-失敗した場合:
+### 失敗時の扱い
+
+`beacon milestone start` がエラーで停止した場合:
 - エラーを表示してユーザーに確認を求める
-- 「worktreeなしで続行しますか？」と問い、承認されれば workspace_path = "プロジェクトルート" で続行
+- 「worktreeなしで続行しますか？」と問い、承認されれば `workspace_path = "プロジェクトルート"` で続行 (= 非 git project と同じ扱い)
 
-### Worktreeが既に存在する場合
+### 既に活性化されている場合
 
-`beacon milestone workspace` は冪等に動作する（既存のworktreeがあればスキップして情報を返す）ので、再実行しても安全。
+`beacon milestone start` は冪等に動作する (= 既存の worktree があれば再利用、既存の assignee は no-op で重複追加せず、既存専有が他セッションなら警告と takeover event を残して続行)。再実行しても安全。
+
+### Deprecated alias の warning が出た時
+
+`beacon milestone workspace` を直接叩いた legacy 経路は内部で `start` に転送されるが deprecation warning が stderr に出る。Skill としては表記を `start` に統一し、warning を見たら呼び出し側の修正を提案する (= e-1920 drift 防止)。
 
 ## Step 5: サブエージェント起動
 

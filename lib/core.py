@@ -486,6 +486,109 @@ def milestone_start(data: dict, ms_id: str) -> dict:
     return found
 
 
+# ms-81 e-1918: session occupation model. Active MS may also be "occupied"
+# by a session — meaning a single bclaude (or other agent) is currently
+# sitting in front of it. Per CORE doc DqIvAVzDprcq6hsq0AuF §3, occupation
+# is a separate layer from `status`: an active MS can be unoccupied (=
+# nobody's sitting at it right now) and a session can release without
+# changing status. Occupation is a soft claim; the SPEC explicitly chose
+# warning-based over block, so callers always look up the existing claim
+# and decide rather than ever rejecting.
+
+
+def milestone_claim_occupation(
+    data: dict,
+    ms_id: str,
+    *,
+    session_id: str,
+    machine: str = "",
+    agent: str = "",
+) -> tuple[dict, dict | None]:
+    """Record an occupation claim on ``ms_id``.
+
+    Returns ``(milestone, previous_claim)``. ``previous_claim`` is the
+    occupation record that was in place *before* this call, or ``None`` if
+    the MS was unoccupied. Callers (= CLI) decide whether to surface a
+    warning based on whether ``previous_claim`` exists and whether its
+    session is still live.
+
+    The claim is stored directly on the milestone (``ms["occupation"]``)
+    so the standard cloud-sync path propagates it without new
+    subcollections; the event-log (= ``worktree_sessions``) lives at the
+    project level (see ``milestone_record_occupation_event``).
+    """
+    for ms in data["milestones"]:
+        if ms["id"] == ms_id:
+            previous = ms.get("occupation")
+            claim = {
+                "session_id": session_id,
+                "machine": machine,
+                "agent": agent,
+                "claimed_at": _now_iso(),
+            }
+            ms["occupation"] = claim
+            return ms, previous
+    raise ValueError(f"Milestone not found: {ms_id}")
+
+
+def milestone_release_occupation(
+    data: dict, ms_id: str, *, reason: str = "manual"
+) -> tuple[dict, dict | None]:
+    """Release the occupation claim on ``ms_id``.
+
+    Returns ``(milestone, released_claim)``. ``released_claim`` is the
+    occupation that was just cleared, or ``None`` if the MS wasn't
+    occupied. The MS ``status`` is NOT touched — release leaves the MS
+    in whatever phase it was in, per the SPEC's "active のまま専有解除
+    できる" principle (CORE doc §3).
+    """
+    for ms in data["milestones"]:
+        if ms["id"] == ms_id:
+            released = ms.pop("occupation", None)
+            return ms, released
+    raise ValueError(f"Milestone not found: {ms_id}")
+
+
+def milestone_record_occupation_event(
+    data: dict,
+    *,
+    ms_id: str,
+    event_type: str,
+    session_id: str,
+    machine: str = "",
+    agent: str = "",
+    reason: str = "",
+) -> dict:
+    """Append a row to the project-level ``worktree_sessions`` log.
+
+    ``event_type`` is one of ``"claim"``, ``"release"``, ``"takeover"``.
+    The log lives at ``data["worktree_sessions"]`` so cloud sync carries
+    it without bespoke subcollection plumbing; consumers (= Web UI audit
+    tab in e-1921) read this list directly.
+
+    Returns the recorded event for convenience.
+    """
+    if event_type not in {"claim", "release", "takeover"}:
+        raise ValueError(
+            f"Invalid occupation event_type: {event_type}. "
+            f"Expected one of claim / release / takeover."
+        )
+    log = data.setdefault("worktree_sessions", [])
+    event = {
+        "event_id": f"wts-{len(log) + 1}",
+        "ms_id": ms_id,
+        "event_type": event_type,
+        "session_id": session_id,
+        "machine": machine,
+        "agent": agent,
+        "at": _now_iso(),
+    }
+    if reason:
+        event["reason"] = reason
+    log.append(event)
+    return event
+
+
 def _split_assignees(value) -> list[str]:
     """Normalise the assignee field (str or list) into a list of names.
 
@@ -548,6 +651,44 @@ def milestone_done(data: dict, ms_id: str, *, reason: str = "") -> dict:
             meta["done_by"] = _get_actor()
             if reason:
                 meta["done_reason"] = reason
+            return ms
+    raise ValueError(f"Milestone not found: {ms_id}")
+
+
+# ms-81 e-1915: waiting = a milestone that was active/observing but is now
+# paused, with the explicit intent of returning later. Distinct from todo
+# (= never started) because commit/PR history is already attached and the
+# work has accumulated context. Per CORE doc DqIvAVzDprcq6hsq0AuF §1, the
+# legal source statuses are active (= in_progress) and observing; todo / done
+# / cancelled cannot transition to waiting because their semantics conflict.
+_WAITING_SOURCES = {"in_progress", "active", "observing"}
+
+
+def milestone_wait(data: dict, ms_id: str, *, reason: str = "") -> dict:
+    """Transition a milestone to ``waiting`` status (ms-81 e-1915).
+
+    Rejects the transition if the current status is not in
+    ``_WAITING_SOURCES``. Per the state-machine CORE doc, todo / done /
+    cancelled cannot move to waiting — todo means "never started" (no
+    history to preserve), done means "completed" (re-open via observe or
+    active), cancelled is terminal.
+    """
+    for ms in data["milestones"]:
+        if ms["id"] == ms_id:
+            current = ms.get("status", "todo")
+            if current not in _WAITING_SOURCES:
+                raise ValueError(
+                    f"Cannot wait milestone in status '{current}'. "
+                    f"Only active (in_progress) or observing milestones can "
+                    f"transition to waiting. "
+                    f"(todo → use start; done → use start to re-open)"
+                )
+            ms["status"] = "waiting"
+            meta = ms.setdefault("meta", {})
+            meta["waiting_at"] = _now_iso()
+            meta["waiting_by"] = _get_actor()
+            if reason:
+                meta["waiting_reason"] = reason
             return ms
     raise ValueError(f"Milestone not found: {ms_id}")
 

@@ -23,6 +23,9 @@ Milestones:
   beacon milestone join <id> [--checkout]  Add self as assignee (and optionally switch branch)
   beacon milestone close <id>   Close milestone (keeps current progress)
   beacon milestone observe <id> Set milestone to observing
+  beacon milestone wait <id> --reason <text>   Pause an active/observing milestone (ms-81)
+  beacon milestone release <id> Release occupation claim without changing status (ms-81)
+  beacon milestone occupations [--ms <id>] [--json]   List occupation event log (ms-81)
   beacon milestone update <id>  Update title/progress/status/description/priority/objective/ac
   beacon milestone delete <id>  Delete (soft) a milestone
   beacon milestone purge <id> --reason <text> [--index <n>]   Hard delete (recovery only; Issue #14)
@@ -641,6 +644,64 @@ cmd_milestone_observe() {
     else
         BEACON_MS_ID="$ms_id" \
             python3 "$COMMANDS_PY" milestone_observe
+    fi
+}
+
+# ms-81 e-1921: list the occupation event log (worktree_sessions).
+cmd_milestone_occupations() {
+    ensure_project
+    local ms_id=""
+    local json_flag=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_flag="1"; shift ;;
+            --ms)   ms_id="${2:-}"; shift 2 ;;
+            *)      ms_id="$1"; shift ;;
+        esac
+    done
+    BEACON_MS_ID="$ms_id" BEACON_JSON="$json_flag" \
+        python3 "$COMMANDS_PY" milestone_occupations
+}
+
+# ms-81 e-1918: release the occupation claim on an MS without flipping
+# status. Used when a session finishes working on an active MS so another
+# session can pick it up immediately.
+cmd_milestone_release() {
+    ensure_project
+    local ms_id="${1:-}"
+    if [ -z "$ms_id" ]; then
+        echo "Usage: beacon milestone release <ms-id>"
+        exit 1
+    fi
+    BEACON_MS_ID="$ms_id" python3 "$COMMANDS_PY" milestone_release
+}
+
+# ms-81 e-1915: wait transitions an active/observing MS to waiting.
+# Mirror of cmd_milestone_observe — same --reason gate, same dispatch shape;
+# core.milestone_wait enforces source-status validity.
+cmd_milestone_wait() {
+    ensure_project
+    local ms_id=""
+    local reason=""
+    local reason_set=0
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -r|--reason) reason="${2:-}"; reason_set=1; shift 2 ;;
+            *)           ms_id="$1";     shift   ;;
+        esac
+    done
+
+    if [ -z "$ms_id" ]; then
+        echo "Usage: beacon milestone wait <ms-id> --reason <text>"
+        exit 1
+    fi
+    if [ "$reason_set" = "1" ]; then
+        BEACON_MS_ID="$ms_id" BEACON_REASON="$reason" \
+            python3 "$COMMANDS_PY" milestone_wait
+    else
+        BEACON_MS_ID="$ms_id" \
+            python3 "$COMMANDS_PY" milestone_wait
     fi
 }
 
@@ -2003,6 +2064,9 @@ case "${1:-}" in
             join)   shift 2; cmd_milestone_join "$@" ;;
             done|close) shift 2; cmd_milestone_done "$@" ;;
             observe)    shift 2; cmd_milestone_observe "$@" ;;
+            wait)       shift 2; cmd_milestone_wait "$@" ;;
+            release)    shift 2; cmd_milestone_release "$@" ;;
+            occupations) shift 2; cmd_milestone_occupations "$@" ;;
             show)   shift 2; cmd_milestone_show "$@" ;;
             update) shift 2; cmd_milestone_update "$@" ;;
             rename) BEACON_MS_ID="${3:-}" BEACON_TITLE="${4:-}" python3 "$COMMANDS_PY" milestone_update ;;
@@ -2012,7 +2076,7 @@ case "${1:-}" in
             workspace) shift 2; cmd_milestone_workspace "$@" ;;
             workspace-cleanup) shift 2; cmd_milestone_workspace_cleanup "$@" ;;
             graph) shift 2; cmd_milestone_graph "$@" ;;
-            *)      echo "Usage: beacon milestone [add|list|start|join|close|observe|done|show|update|rename|delete|purge|depends|workspace|workspace-cleanup|graph]" ;;
+            *)      echo "Usage: beacon milestone [add|list|start|join|close|observe|wait|release|occupations|done|show|update|rename|delete|purge|depends|workspace|workspace-cleanup|graph]" ;;
         esac
         ;;
     log)

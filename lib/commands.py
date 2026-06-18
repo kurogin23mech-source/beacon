@@ -164,6 +164,66 @@ def _require_reason_or_skip(verb: str) -> str:
     return os.environ.get("BEACON_REASON", "")
 
 
+# ms-81 e-1916: forcing function — warn (don't block) when a write targets
+# a milestone whose status doesn't authorise writes per the state-machine
+# CORE doc DqIvAVzDprcq6hsq0AuF §1 + §6.
+#
+# Per the SPEC (warning-based, not block), this emits a stderr warning that
+# names the offending status and the recommended remediation, and:
+#   - on an interactive tty, prompts [y/N] to let the operator decide;
+#   - on a non-interactive run (no tty — Skill / hook / dispatch path),
+#     proceeds after logging the warning (= 努力義務, the operator can act
+#     on the audit trail later);
+#   - if BEACON_BYPASS_STATUS_GATE=1, skips the prompt entirely (= explicit
+#     opt-out for bulk migrations / hook bypass scenarios).
+_WRITE_AUTHORISED_STATUSES = {"in_progress", "active", "observing"}
+
+
+def _check_ms_status_for_write(ms: dict, op_desc: str) -> bool:
+    """Return True if the write may proceed (status authorised or operator
+    consented to override); False only when an interactive operator declines.
+    """
+    status = ms.get("status", "todo")
+    if status in _WRITE_AUTHORISED_STATUSES:
+        return True
+
+    if os.environ.get("BEACON_BYPASS_STATUS_GATE", "") == "1":
+        return True
+
+    title = ms.get("title", "")
+    ms_id = ms.get("id", "")
+    print(
+        f"\n[ms-81 status gate] write to a {status} milestone\n"
+        f"   target:      [{ms_id}] {title}\n"
+        f"   status:      {status} (writes are discouraged — see CORE doc "
+        f"DqIvAVzDprcq6hsq0AuF §1)\n"
+        f"   operation:   {op_desc}\n"
+        f"   suggestion:  transition to active via `beacon milestone start "
+        f"{ms_id}` or to observing via `beacon milestone observe {ms_id} "
+        f"--reason \"...\"` first.\n"
+        f"   bypass:      set BEACON_BYPASS_STATUS_GATE=1 to silence this gate "
+        f"(opt-out for hooks / bulk ops).",
+        file=sys.stderr,
+    )
+
+    if not sys.stdin.isatty():
+        # Non-interactive: proceed after logging the warning. The forcing
+        # function is the visible warning + audit trail, not a block.
+        print(
+            f"   (non-interactive stdin — proceeding; the warning above is "
+            f"the forcing function)",
+            file=sys.stderr,
+        )
+        return True
+
+    try:
+        response = input("   Proceed anyway? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\n   declined (no input)", file=sys.stderr)
+        return False
+    return response in ("y", "yes")
+
+
 def save_project(data, op=None):
     core.validate_project(data)
     store = get_store()
@@ -916,6 +976,51 @@ def cmd_milestone_start():
     data = load_project()
     ms = core.milestone_start(data, ms_id)
 
+    # ---- 1b. occupation claim (ms-81 e-1918) ----
+    # Tied to milestone_start so status / assignee / occupation always lift
+    # together. If a previous claim exists from another session, warn —
+    # never block (= SPEC §3-3, 努力義務). Gated by BEACON_NO_BRANCH /
+    # BEACON_NO_ASSIGNEE so test sandboxes and scripted scaffolds that
+    # request a pure status flip don't trip session-resolution side effects.
+    if not no_branch and not no_assignee:
+        try:
+            import agent as _agent_for_claim
+            actor_for_claim = _agent_for_claim.get_actor()
+        except Exception:
+            actor_for_claim = {}
+        sid_for_claim = _resolve_session_id() or ""
+        _ms_claim, previous_claim = core.milestone_claim_occupation(
+            data, ms_id,
+            session_id=sid_for_claim,
+            machine=actor_for_claim.get("machine", ""),
+            agent=actor_for_claim.get("agent", ""),
+        )
+        if previous_claim and previous_claim.get("session_id") != sid_for_claim:
+            prev_sid = previous_claim.get("session_id", "?")
+            prev_machine = previous_claim.get("machine", "?")
+            print(
+                f"  [ms-81 occupation] previous claim by session "
+                f"{prev_sid[:12]}... on {prev_machine} (claimed_at: "
+                f"{previous_claim.get('claimed_at', '?')}). Proceeding with "
+                f"takeover; if that session crashed, this is normal — if it is "
+                f"still actively working, coordinate via beacon dm.",
+                file=sys.stderr,
+            )
+            core.milestone_record_occupation_event(
+                data, ms_id=ms_id, event_type="takeover",
+                session_id=sid_for_claim,
+                machine=actor_for_claim.get("machine", ""),
+                agent=actor_for_claim.get("agent", ""),
+                reason=f"superseded session {prev_sid[:12]}",
+            )
+        else:
+            core.milestone_record_occupation_event(
+                data, ms_id=ms_id, event_type="claim",
+                session_id=sid_for_claim,
+                machine=actor_for_claim.get("machine", ""),
+                agent=actor_for_claim.get("agent", ""),
+            )
+
     # ---- 1. assignee auto-add (lib/agent.py is the single source) ----
     actor_str = ""
     if not no_assignee:
@@ -935,38 +1040,48 @@ def cmd_milestone_start():
         except Exception as e:  # pragma: no cover - defensive
             print(f"  warning: could not auto-add assignee: {e}", file=sys.stderr)
 
-    # ---- 2. auto-workspace / auto-branch (cwd-aware) ----
+    # ---- 2. auto-workspace / auto-branch (cwd-aware + project-type-aware) ----
+    # ms-81 e-1917: explicit non-git degrade. If the project isn't a git repo
+    # (= research / writing project, scaffold, fresh dir), we skip the entire
+    # worktree branch silently and only flip status + assignee. Per CORE doc
+    # DqIvAVzDprcq6hsq0AuF §3-2 the physical-boundary mechanism degrades to
+    # logical occupation only; for now occupation is recorded server-side
+    # (handled in e-1918), so degrade simply means "no worktree".
     branch_name = ""
     branch_msg = ""
     workspace_path = ""
+    non_git_skip = False
     if not no_branch:
-        try:
-            import branch as _branch
-            branch_name = _branch.ms_branch_name(ms_id, ms.get("title", ""))
-            if _is_in_main_project_root():
-                import worktree as _worktree
-                workspace_path = os.path.join(".worktrees", branch_name)
-                try:
-                    wt = _worktree.create_workspace(workspace_path, branch_name)
-                    branch_msg = "worktree created" if wt["created"] else "worktree exists"
-                except _worktree.GitNotInstalledError:
-                    # No git → fall through silently (status flip already done).
-                    branch_name = ""
-                    workspace_path = ""
-                except _worktree.WorktreeCreateError as exc:
-                    print(f"  warning: could not create worktree: {exc}", file=sys.stderr)
-                    branch_name = ""
-                    workspace_path = ""
-            else:
-                # Already inside a worktree: in-place checkout is safe
-                # because each worktree owns its own HEAD.
-                branch_msg = _ensure_on_branch(branch_name)
-        except _NotAGitRepoError:
-            # Quiet skip: scaffolds / tests / fresh projects without git
-            # should still be able to start a milestone.
-            branch_name = ""
-        except Exception as e:  # pragma: no cover - defensive
-            print(f"  warning: could not create/switch branch: {e}", file=sys.stderr)
+        if not _is_git_project():
+            non_git_skip = True
+        else:
+            try:
+                import branch as _branch
+                branch_name = _branch.ms_branch_name(ms_id, ms.get("title", ""))
+                if _is_in_main_project_root():
+                    import worktree as _worktree
+                    workspace_path = os.path.join(".worktrees", branch_name)
+                    try:
+                        wt = _worktree.create_workspace(workspace_path, branch_name)
+                        branch_msg = "worktree created" if wt["created"] else "worktree exists"
+                    except _worktree.GitNotInstalledError:
+                        # No git → fall through silently (status flip already done).
+                        branch_name = ""
+                        workspace_path = ""
+                    except _worktree.WorktreeCreateError as exc:
+                        print(f"  warning: could not create worktree: {exc}", file=sys.stderr)
+                        branch_name = ""
+                        workspace_path = ""
+                else:
+                    # Already inside a worktree: in-place checkout is safe
+                    # because each worktree owns its own HEAD.
+                    branch_msg = _ensure_on_branch(branch_name)
+            except _NotAGitRepoError:
+                # Quiet skip: scaffolds / tests / fresh projects without git
+                # should still be able to start a milestone.
+                branch_name = ""
+            except Exception as e:  # pragma: no cover - defensive
+                print(f"  warning: could not create/switch branch: {e}", file=sys.stderr)
 
     save_project(data)
     print(f"Activated: {ms['title']}")
@@ -978,6 +1093,41 @@ def cmd_milestone_start():
         print(f"  next: cd {workspace_path} && bclaude")
         print(f"        (新しいセッションをこの worktree で開いて作業してください — "
               f"同 cwd で並走すると別マイルストーンの作業を同じ branch に書く事故が起きるため)")
+    if non_git_skip:
+        # ms-81 e-1917: surface the project-type degrade so the user knows
+        # the worktree step was intentionally skipped (= research / writing
+        # project), not silently dropped.
+        print("  workspace: non-git project, worktree step skipped "
+              "(logical occupation only)")
+
+
+def _is_git_project() -> bool:
+    """Return True if the current project root looks like a git repository.
+
+    ms-81 e-1917: explicit project-type detection used by ``milestone start``
+    to decide whether to engage the worktree mechanism. We check the cheap
+    common-case (``.git`` exists at the beacon root / cwd) before falling
+    back to ``git rev-parse``, which would otherwise produce noisy stderr
+    on plain directories.
+    """
+    # Cheapest path: a ``.git`` directory or file at cwd / beacon root.
+    candidates = [os.getcwd()]
+    beacon_root = os.environ.get("BEACON_ROOT", "")
+    if beacon_root and beacon_root not in candidates:
+        candidates.append(beacon_root)
+    for root in candidates:
+        if os.path.exists(os.path.join(root, ".git")):
+            return True
+    # Fall back to git rev-parse (covers the worktree case where ``.git`` is
+    # a pointer file outside cwd).
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return r.returncode == 0
+    except (FileNotFoundError, OSError):
+        return False
 
 
 def _is_in_main_project_root() -> bool:
@@ -1084,15 +1234,241 @@ def _ensure_on_branch(branch_name: str) -> str:
     return "created"
 
 
+def _prompt_close_leftover_worktree(ms_id: str, transition: str) -> None:
+    """ms-81 e-1919: surface leftover worktrees on phase transitions.
+
+    When an MS moves to done / observing / waiting we check whether the
+    branch-specific worktree directory still exists; a leftover worktree
+    is the temptation other sessions could later (re-)check out and
+    accidentally commit against. We prompt rather than block: interactive
+    runs get a [y/N] auto-close; non-interactive runs get a one-line
+    warning and proceed. Per SPEC §4 this is intentionally a forcing
+    function, not enforcement.
+    """
+    try:
+        data = load_project()
+    except Exception:
+        return
+    ms = next((m for m in data.get("milestones", []) if m.get("id") == ms_id), None)
+    if ms is None:
+        return
+    try:
+        import branch as _branch
+        branch_name = _branch.ms_branch_name(ms_id, ms.get("title", ""))
+    except Exception:
+        return
+    workspace_path = os.path.join(".worktrees", branch_name)
+    if not os.path.exists(workspace_path):
+        return
+    msg = (
+        f"\n[ms-81 transition prompt] worktree still present at "
+        f"{workspace_path} after {transition} of [{ms_id}].\n"
+        f"   Leftover worktrees can be (re-)entered by other sessions; "
+        f"cleanup keeps the audit trail tight."
+    )
+    print(msg, file=sys.stderr)
+    if not sys.stdin.isatty():
+        print(
+            "   (non-interactive — leaving the worktree in place; clean up "
+            "with `beacon milestone workspace-cleanup " + ms_id + "` when "
+            "convenient.)",
+            file=sys.stderr,
+        )
+        return
+    try:
+        choice = input("   Auto-close worktree? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        choice = "n"
+    if choice in ("y", "yes"):
+        # Defer to the existing workspace_cleanup command rather than
+        # duplicating the git worktree remove machinery; it already
+        # handles branch checks and idempotency.
+        os.environ["BEACON_MS_ID"] = ms_id
+        cmd_milestone_workspace_cleanup()
+    else:
+        print(
+            f"   leaving worktree in place; run `beacon milestone "
+            f"workspace-cleanup {ms_id}` to remove later.",
+            file=sys.stderr,
+        )
+
+
+def _release_all_occupations_for_session(session_id: str) -> int:
+    """ms-81 e-1918 (SPEC AC #15): release every MS this session is occupying.
+
+    Called from session-end so a clean exit leaves the next session free
+    to claim. Returns the number of releases performed (0 for sessions
+    that weren't holding anything).
+    """
+    if not session_id:
+        return 0
+    data = load_project()
+    try:
+        import agent as _agent_for_se
+        actor = _agent_for_se.get_actor()
+    except Exception:
+        actor = {}
+    released = 0
+    for ms in data.get("milestones", []):
+        occ = ms.get("occupation")
+        if occ and occ.get("session_id") == session_id:
+            ms_id = ms["id"]
+            core.milestone_release_occupation(data, ms_id, reason="session-end")
+            core.milestone_record_occupation_event(
+                data, ms_id=ms_id, event_type="release",
+                session_id=session_id,
+                machine=actor.get("machine", ""),
+                agent=actor.get("agent", ""),
+                reason="session-end",
+            )
+            released += 1
+    if released:
+        save_project(data, op={"op": "session_end_release", "count": released})
+    return released
+
+
+def _release_occupation_for_transition(data, ms_id, *, reason):
+    """ms-81 e-1918: phase transitions auto-release any active occupation
+    on the target MS. Per the SPEC the release happens whether or not the
+    session that claimed it is the same one calling the transition (= a
+    done verb on someone else's claim is implicitly a takeover).
+    """
+    sid = _resolve_session_id() or ""
+    try:
+        import agent as _agent_for_release
+        actor = _agent_for_release.get_actor()
+    except Exception:
+        actor = {}
+    _ms, released = core.milestone_release_occupation(data, ms_id, reason=reason)
+    if released:
+        core.milestone_record_occupation_event(
+            data, ms_id=ms_id, event_type="release",
+            session_id=sid,
+            machine=actor.get("machine", ""),
+            agent=actor.get("agent", ""),
+            reason=reason,
+        )
+
+
 def cmd_milestone_done():
     ms_id = os.environ.get("BEACON_MS_ID", "")
     reason = _require_reason_or_skip("milestone done")
     data = load_project()
     ms = core.milestone_done(data, ms_id, reason=reason)
+    _release_occupation_for_transition(data, ms_id, reason="done")
     save_project(data, op={"op": "milestone_done", "ms_id": ms_id, "reason": reason})
+    _prompt_close_leftover_worktree(ms_id, "done")
     print(f"Completed: {ms['title']}")
     if reason:
         print(f"  Reason: {reason}")
+
+
+def cmd_milestone_wait():
+    """Transition a milestone to ``waiting`` status (ms-81 e-1915).
+
+    Requires --reason (same gate as observe / done) so retro can reconstruct
+    why work paused. The transition is rejected by core.milestone_wait if
+    the source status is not active or observing.
+    """
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    reason = _require_reason_or_skip("milestone wait")
+    if not ms_id:
+        print("Usage: beacon milestone wait <ms-id> --reason <text>",
+              file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    try:
+        ms = core.milestone_wait(data, ms_id, reason=reason)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    _release_occupation_for_transition(data, ms_id, reason="wait")
+    save_project(data, op={"op": "milestone_wait", "ms_id": ms_id,
+                           "reason": reason})
+    _prompt_close_leftover_worktree(ms_id, "wait")
+    print(f"Waiting: [{ms['id']}] {ms['title']}")
+    if reason:
+        print(f"  Reason: {reason}")
+
+
+def cmd_milestone_occupations():
+    """List worktree_sessions / occupation log entries (ms-81 e-1921).
+
+    Surfaces the audit trail recorded by milestone_record_occupation_event.
+    Filtered with --ms <ms-id> to scope to one milestone; --json emits the
+    raw shape for downstream tools (= Web UI audit tab in a later iteration
+    can hit this endpoint via the standard project sync rather than a new
+    subcollection plumbing).
+    """
+    ms_filter = os.environ.get("BEACON_MS_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    log = data.get("worktree_sessions", [])
+    if ms_filter:
+        log = [e for e in log if e.get("ms_id") == ms_filter]
+    if json_mode:
+        print(json.dumps(log, ensure_ascii=False))
+        return
+    if not log:
+        print("(no occupation events recorded)")
+        return
+    for ev in log:
+        ev_type = ev.get("event_type", "?")
+        ev_ms = ev.get("ms_id", "?")
+        ev_sid = (ev.get("session_id") or "?")[:14]
+        ev_machine = ev.get("machine", "")
+        ev_agent = ev.get("agent", "")
+        ev_at = ev.get("at", "")
+        ev_reason = ev.get("reason", "")
+        actor_str = f"{ev_machine}/{ev_agent}" if ev_machine or ev_agent else "?"
+        line = f"  {ev_at[:19]} [{ev_type:8}] {ev_ms:6} by {ev_sid}... ({actor_str})"
+        if ev_reason:
+            line += f"  — {ev_reason}"
+        print(line)
+
+
+def cmd_milestone_release():
+    """Release the occupation claim on a milestone without changing status
+    (ms-81 e-1918, SPEC AC #16).
+
+    Use this when finishing a working session on an active MS so the next
+    session can pick it up immediately. The MS stays in its current phase;
+    only the per-session occupation marker is cleared.
+    """
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    if not ms_id:
+        print("Usage: beacon milestone release <ms-id>", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    try:
+        _ms, released = core.milestone_release_occupation(
+            data, ms_id, reason="manual"
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    if released:
+        sid = _resolve_session_id() or ""
+        try:
+            import agent as _agent_for_release
+            actor = _agent_for_release.get_actor()
+        except Exception:
+            actor = {}
+        core.milestone_record_occupation_event(
+            data, ms_id=ms_id, event_type="release",
+            session_id=sid,
+            machine=actor.get("machine", ""),
+            agent=actor.get("agent", ""),
+            reason="manual",
+        )
+        save_project(data, op={"op": "milestone_release", "ms_id": ms_id})
+        prev_sid = released.get("session_id", "?")
+        print(
+            f"Released: [{ms_id}] (was claimed by session "
+            f"{prev_sid[:12] if prev_sid else '?'}...)"
+        )
+    else:
+        print(f"Released: [{ms_id}] (was not occupied; no-op)")
 
 
 def cmd_milestone_observe():
@@ -1120,8 +1496,10 @@ def cmd_milestone_observe():
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    _release_occupation_for_transition(data, ms_id, reason="observe")
     save_project(data, op={"op": "milestone_observe", "ms_id": ms_id,
                            "reason": reason})
+    _prompt_close_leftover_worktree(ms_id, "observe")
     print(f"Observing: [{ms['id']}] {ms['title']}")
     if reason:
         print(f"  Reason: {reason}")
@@ -2025,6 +2403,17 @@ def cmd_log_finalize():
     source = _resolve_commit_source()
 
     data = load_project()
+    # ms-81 e-1916: status gate. Resolve the target MS the same way log_commit
+    # would internally, then surface the warning before mutating state.
+    try:
+        target_ms = core.find_target_milestone(data, ms_id)
+    except ValueError:
+        target_ms = None
+    if target_ms is not None:
+        if not _check_ms_status_for_write(
+            target_ms, f"log commit {commit_hash[:7]}"
+        ):
+            sys.exit(1)
     result = core.log_commit(
         data, ms_id=ms_id, commit_hash=commit_hash,
         message=message, date=date, summary=summary_text, progress=progress,
@@ -2134,6 +2523,53 @@ def cmd_task_add():
 
     data = load_project()
     target = core.find_target_milestone(data, ms_id)
+
+    # ms-81 e-1919: re-open prompt for done MS. Adding a task to a done
+    # milestone creates a zombie (= the e-1916 write gate then blocks any
+    # commit/done against it, so it would stay in todo forever). Per SPEC
+    # §5 the right move is to surface the choice: re-open into observing
+    # (the natural recovery slot) or active, or abort. Interactive only;
+    # in the non-interactive Skill / hook path we proceed with a warning
+    # so the Skill report can flag the audit trail rather than block.
+    if target.get("status") == "done":
+        if sys.stdin.isatty():
+            print(
+                f"\n[ms-81 re-open prompt] [{target['id']}] {target['title']} "
+                f"is done. Adding a task here will leave it stuck (the "
+                f"write gate blocks commit / done on done milestones).",
+                file=sys.stderr,
+            )
+            print(
+                "   Options: (o) re-open as observing, (a) re-open as active, "
+                "(s) skip prompt and add anyway, (n) abort",
+                file=sys.stderr,
+            )
+            try:
+                choice = input("   Choice [o/a/s/N]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                choice = "n"
+            if choice == "o":
+                core.milestone_update(
+                    data, ms_id, status="observing",
+                    reason="re-opened to add task",
+                )
+                print(f"  re-opened {ms_id} as observing", file=sys.stderr)
+            elif choice == "a":
+                core.milestone_start(data, ms_id)
+                print(f"  re-opened {ms_id} as active", file=sys.stderr)
+            elif choice in ("", "n"):
+                print("  aborted (no task added)", file=sys.stderr)
+                sys.exit(1)
+            # "s" falls through and adds the task without changing status
+        else:
+            print(
+                f"[ms-81 re-open warning] adding to done MS [{target['id']}] "
+                f"{target['title']} — task will be stuck (write gate blocks "
+                f"future commits / done). Re-open with `beacon milestone start "
+                f"{ms_id}` or `beacon milestone observe {ms_id}` first.",
+                file=sys.stderr,
+            )
+
     eid = core.task_add(data, ms_id, description, entry_type=entry_type,
                         date=date, detail=detail, requested_by=requested_by,
                         priority=priority, motivation=motivation,
@@ -2151,10 +2587,16 @@ def cmd_task_done():
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     data = load_project()
-    # PR entries: auto-forward to pr_merge, but warn if status is unexpected
+    # ms-81 e-1916: status gate. Look up the entry's parent MS first so we
+    # can warn if the MS isn't write-authorised. The PR-merge sub-branch
+    # below also goes through the same gate.
     result = core.find_entry(data, entry_id)
     if result:
-        _, _, entry, _ = result
+        parent_ms, _, entry, _ = result
+        if not _check_ms_status_for_write(
+            parent_ms, f"task done {entry_id}"
+        ):
+            sys.exit(1)
         if entry.get("type") == "pr":
             pr_status = entry.get("meta", {}).get("pr_status", "")
             if pr_status not in ("approved", "merged"):
@@ -2819,6 +3261,17 @@ def cmd_session_end():
         print("Error: no session id (no .beacon/session.json and BEACON_SESSION_ID unset)",
               file=sys.stderr)
         sys.exit(1)
+
+    # ms-81 e-1918 (SPEC AC #15): release any MS occupations held by this
+    # session before aggregating. Done here so the session_log includes the
+    # release events; running it after persistence would race the cloud sync.
+    _released_count = _release_all_occupations_for_session(sid)
+    if _released_count:
+        print(
+            f"  released {_released_count} occupation claim(s) held by this "
+            f"session (status unchanged)",
+            file=sys.stderr,
+        )
 
     payload = _aggregate_and_persist(sid, recovered=False,
                                       summary_override=summary_override)
@@ -5287,6 +5740,16 @@ def cmd_milestone_depends():
 def cmd_milestone_workspace():
     # OSS: git worktree lifecycle core
     # Human Executor notification (beacon trigger fire) is handled below and is closed-source.
+    #
+    # ms-81 e-1917: this verb is being demoted to a deprecated alias of
+    # `milestone start`. The common "create worktree + flip status" path
+    # belongs on `start` so status / assignee / worktree always lift
+    # together. Two legacy sub-modes survive here for back-compat:
+    #   - `--clear`: legacy workspace-field clear (kept; pure data op)
+    #   - `--dir <path>` (BEACON_NO_GIT=1): legacy explicit-path mode that
+    #     bypasses git worktree creation entirely (kept; some scripts use it)
+    # The default no-arg path emits a deprecation warning and delegates to
+    # `cmd_milestone_start` so callers stop accumulating drift.
     import subprocess
     from datetime import datetime, timezone
 
@@ -5302,6 +5765,21 @@ def cmd_milestone_workspace():
         sys.exit(1)
 
     data = load_project()
+
+    # ms-81 e-1917: deprecation alias. If neither legacy sub-mode is in play
+    # (= no --clear, no --dir/no-git), the caller is using the default
+    # worktree-create path which has moved to `milestone start`.
+    if not clear and not no_git:
+        print(
+            "[ms-81 deprecation] `beacon milestone workspace` is being "
+            "absorbed by `beacon milestone start` so that status / assignee "
+            "/ worktree always activate together. Forwarding to "
+            "`milestone start` now; please update callers to use "
+            "`beacon milestone start " + ms_id + "` directly.",
+            file=sys.stderr,
+        )
+        cmd_milestone_start()
+        return
 
     if clear:
         # Legacy --clear: remove the old workspace field only
@@ -7738,6 +8216,18 @@ def cmd_pr_add():
             intent = pr_body.strip() if pr_body.strip() else ""
 
     data = load_project()
+    # ms-81 e-1916: status gate. Surface the warning before adding a PR
+    # entry to a non-write-authorised MS so the operator can re-target
+    # rather than discover the issue later in retro.
+    try:
+        target_ms = core.find_target_milestone(data, ms_id)
+    except ValueError:
+        target_ms = None
+    if target_ms is not None:
+        if not _check_ms_status_for_write(
+            target_ms, f"pr add {url}"
+        ):
+            sys.exit(1)
     try:
         eid = core.pr_add(data, ms_id=ms_id, url=url, author=author,
                           intent=intent, date=date, title=title, commits=commits,
@@ -10943,6 +11433,125 @@ def _doctor_check_claude_md_principle_marker():
     ]
 
 
+def _doctor_check_ms81_state_machine():
+    """ms-81 e-1921: surface the four state-machine warnings named in SPEC AC #9.
+
+    Each is warning-level only; the state machine is a forcing function,
+    not enforcement. Returns a list of warning strings.
+
+    Checks:
+      A. active or observing MS missing assignee — work is happening but
+         nobody's name is on it; audit trail loses provenance.
+      B. done MS still has a worktree directory at `.worktrees/<branch>/`
+         — another session could check it out and accidentally commit
+         against a closed branch.
+      C. occupation field present but `session_id` empty — a half-written
+         claim that nothing can release; usually a sign of a crash that
+         left the field stale.
+      D. waiting MS has commits/PRs being attached after it was paused —
+         we approximate this by checking whether the most recent commit
+         entry's `created_at` is *after* `meta.waiting_at`.
+    """
+    warnings: list[str] = []
+    try:
+        data = load_project()
+    except Exception:
+        return warnings
+
+    try:
+        import branch as _branch
+    except Exception:
+        _branch = None
+
+    cwd_root = os.getcwd()
+    a_hits: list[str] = []
+    b_hits: list[str] = []
+    c_hits: list[str] = []
+    d_hits: list[str] = []
+
+    for ms in data.get("milestones", []):
+        ms_id = ms.get("id", "")
+        title = ms.get("title", "")
+        status = ms.get("status", "")
+        # A: active / observing without assignee
+        if status in ("in_progress", "active", "observing"):
+            assignee = ms.get("assignee", "")
+            if not assignee or (
+                isinstance(assignee, list) and not any(a.strip() for a in assignee)
+            ):
+                a_hits.append(f"{ms_id} ({status}, {title[:60]})")
+        # B: done MS with leftover worktree
+        if status == "done" and _branch is not None:
+            try:
+                branch_name = _branch.ms_branch_name(ms_id, title)
+                if os.path.exists(os.path.join(cwd_root, ".worktrees", branch_name)):
+                    b_hits.append(f"{ms_id} (worktree: .worktrees/{branch_name})")
+            except Exception:
+                pass
+        # C: occupation field present but stale shape (no session_id)
+        occ = ms.get("occupation")
+        if occ and not occ.get("session_id"):
+            c_hits.append(f"{ms_id} (occupation present without session_id)")
+        # D: waiting MS with commits attached after the wait transition
+        if status == "waiting":
+            waiting_at = ms.get("meta", {}).get("waiting_at", "")
+            if waiting_at:
+                for e in ms.get("entries", []):
+                    if e.get("type") in ("commit", "pr"):
+                        created = e.get("created_at", "") or e.get("date", "")
+                        if created and created > waiting_at:
+                            d_hits.append(
+                                f"{ms_id} ({title[:50]}) — {e.get('type')} "
+                                f"[{e.get('id')}] attached after waiting_at"
+                            )
+                            break
+
+    def _fmt(label, code, hits, suggestion):
+        if not hits:
+            return None
+        return (
+            f"WARN [{code}] {label}:\n"
+            + "\n".join(f"       - {h}" for h in hits[:8])
+            + (f"\n       (+{len(hits) - 8} more)" if len(hits) > 8 else "")
+            + f"\n       {suggestion}"
+        )
+
+    for w in (
+        _fmt(
+            "Active/observing milestones without an assignee",
+            "ms81-assignee-missing",
+            a_hits,
+            "Run: beacon milestone update <ms-id> --assignee <name> "
+            "(or `beacon milestone join <ms-id>` to self-add).",
+        ),
+        _fmt(
+            "Done milestones with a leftover worktree directory",
+            "ms81-leftover-worktree",
+            b_hits,
+            "Run: beacon milestone workspace-cleanup <ms-id> to remove the "
+            "worktree; leftover dirs are a takeover-by-mistake hazard.",
+        ),
+        _fmt(
+            "Occupation field stuck without a session_id",
+            "ms81-stale-occupation",
+            c_hits,
+            "Run: beacon milestone release <ms-id> to clear the half-written "
+            "occupation marker.",
+        ),
+        _fmt(
+            "Waiting milestones with commits/PRs attached after wait_at",
+            "ms81-waiting-write",
+            d_hits,
+            "Re-activate with `beacon milestone start <ms-id>` before adding "
+            "more commit / PR entries — the write gate (e-1916) catches new "
+            "writes but does not retroactively clean up past attachments.",
+        ),
+    ):
+        if w:
+            warnings.append(w)
+    return warnings
+
+
 def cmd_doctor():
     """Lightweight environment health check for Beacon.
 
@@ -11228,6 +11837,15 @@ def cmd_doctor():
         warnings.extend(_doctor_check_claude_md_principle_marker())
 
     # ------------------------------------------------------------------ #
+    # 11. ms-81 state-machine warnings (e-1921)
+    # ------------------------------------------------------------------ #
+    # Surface the four SPEC §9 conditions where the state-machine and
+    # occupation model is being violated — warning-level only because the
+    # whole MS is designed as a forcing function, not a wall.
+    if os.environ.get("BEACON_DOCTOR_SKIP_MS81") != "1":
+        warnings.extend(_doctor_check_ms81_state_machine())
+
+    # ------------------------------------------------------------------ #
     # Summary
     # ------------------------------------------------------------------ #
     if warnings:
@@ -11251,6 +11869,9 @@ def cmd_help_json():
         {"command": "beacon milestone join <id>", "flags": ["--checkout"], "description": "Add self as assignee on a milestone (and optionally switch to its branch)"},
         {"command": "beacon milestone close <id>", "flags": [], "description": "Close milestone"},
         {"command": "beacon milestone observe <id>", "flags": [], "description": "Set milestone to observing"},
+        {"command": "beacon milestone wait <id>", "flags": ["--reason"], "description": "Pause an active/observing milestone (ms-81)"},
+        {"command": "beacon milestone release <id>", "flags": [], "description": "Release occupation claim without changing status (ms-81)"},
+        {"command": "beacon milestone occupations", "flags": ["--ms <id>", "--json"], "description": "List occupation event log (ms-81)"},
         {"command": "beacon milestone rename <id> <title>", "flags": [], "description": "Rename a milestone"},
         {"command": "beacon milestone depends <id> --on <id>", "flags": [], "description": "Declare milestone dependency"},
         {"command": "beacon milestone purge <id> --reason <text>", "flags": ["--index <n>", "--json"], "description": "Hard-delete a milestone record (recovery for duplicate-ID corruption; Issue #14)"},
@@ -14687,6 +15308,9 @@ if __name__ == "__main__":
         "milestone_start": cmd_milestone_start,
         "milestone_done": cmd_milestone_done,
         "milestone_observe": cmd_milestone_observe,
+        "milestone_wait": cmd_milestone_wait,
+        "milestone_release": cmd_milestone_release,
+        "milestone_occupations": cmd_milestone_occupations,
         "milestone_join": cmd_milestone_join,
         "milestone_show": cmd_milestone_show,
         "milestone_update": cmd_milestone_update,
