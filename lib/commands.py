@@ -1391,6 +1391,42 @@ def cmd_milestone_wait():
         print(f"  Reason: {reason}")
 
 
+def cmd_milestone_occupations():
+    """List worktree_sessions / occupation log entries (ms-81 e-1921).
+
+    Surfaces the audit trail recorded by milestone_record_occupation_event.
+    Filtered with --ms <ms-id> to scope to one milestone; --json emits the
+    raw shape for downstream tools (= Web UI audit tab in a later iteration
+    can hit this endpoint via the standard project sync rather than a new
+    subcollection plumbing).
+    """
+    ms_filter = os.environ.get("BEACON_MS_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    log = data.get("worktree_sessions", [])
+    if ms_filter:
+        log = [e for e in log if e.get("ms_id") == ms_filter]
+    if json_mode:
+        print(json.dumps(log, ensure_ascii=False))
+        return
+    if not log:
+        print("(no occupation events recorded)")
+        return
+    for ev in log:
+        ev_type = ev.get("event_type", "?")
+        ev_ms = ev.get("ms_id", "?")
+        ev_sid = (ev.get("session_id") or "?")[:14]
+        ev_machine = ev.get("machine", "")
+        ev_agent = ev.get("agent", "")
+        ev_at = ev.get("at", "")
+        ev_reason = ev.get("reason", "")
+        actor_str = f"{ev_machine}/{ev_agent}" if ev_machine or ev_agent else "?"
+        line = f"  {ev_at[:19]} [{ev_type:8}] {ev_ms:6} by {ev_sid}... ({actor_str})"
+        if ev_reason:
+            line += f"  — {ev_reason}"
+        print(line)
+
+
 def cmd_milestone_release():
     """Release the occupation claim on a milestone without changing status
     (ms-81 e-1918, SPEC AC #16).
@@ -11397,6 +11433,125 @@ def _doctor_check_claude_md_principle_marker():
     ]
 
 
+def _doctor_check_ms81_state_machine():
+    """ms-81 e-1921: surface the four state-machine warnings named in SPEC AC #9.
+
+    Each is warning-level only; the state machine is a forcing function,
+    not enforcement. Returns a list of warning strings.
+
+    Checks:
+      A. active or observing MS missing assignee — work is happening but
+         nobody's name is on it; audit trail loses provenance.
+      B. done MS still has a worktree directory at `.worktrees/<branch>/`
+         — another session could check it out and accidentally commit
+         against a closed branch.
+      C. occupation field present but `session_id` empty — a half-written
+         claim that nothing can release; usually a sign of a crash that
+         left the field stale.
+      D. waiting MS has commits/PRs being attached after it was paused —
+         we approximate this by checking whether the most recent commit
+         entry's `created_at` is *after* `meta.waiting_at`.
+    """
+    warnings: list[str] = []
+    try:
+        data = load_project()
+    except Exception:
+        return warnings
+
+    try:
+        import branch as _branch
+    except Exception:
+        _branch = None
+
+    cwd_root = os.getcwd()
+    a_hits: list[str] = []
+    b_hits: list[str] = []
+    c_hits: list[str] = []
+    d_hits: list[str] = []
+
+    for ms in data.get("milestones", []):
+        ms_id = ms.get("id", "")
+        title = ms.get("title", "")
+        status = ms.get("status", "")
+        # A: active / observing without assignee
+        if status in ("in_progress", "active", "observing"):
+            assignee = ms.get("assignee", "")
+            if not assignee or (
+                isinstance(assignee, list) and not any(a.strip() for a in assignee)
+            ):
+                a_hits.append(f"{ms_id} ({status}, {title[:60]})")
+        # B: done MS with leftover worktree
+        if status == "done" and _branch is not None:
+            try:
+                branch_name = _branch.ms_branch_name(ms_id, title)
+                if os.path.exists(os.path.join(cwd_root, ".worktrees", branch_name)):
+                    b_hits.append(f"{ms_id} (worktree: .worktrees/{branch_name})")
+            except Exception:
+                pass
+        # C: occupation field present but stale shape (no session_id)
+        occ = ms.get("occupation")
+        if occ and not occ.get("session_id"):
+            c_hits.append(f"{ms_id} (occupation present without session_id)")
+        # D: waiting MS with commits attached after the wait transition
+        if status == "waiting":
+            waiting_at = ms.get("meta", {}).get("waiting_at", "")
+            if waiting_at:
+                for e in ms.get("entries", []):
+                    if e.get("type") in ("commit", "pr"):
+                        created = e.get("created_at", "") or e.get("date", "")
+                        if created and created > waiting_at:
+                            d_hits.append(
+                                f"{ms_id} ({title[:50]}) — {e.get('type')} "
+                                f"[{e.get('id')}] attached after waiting_at"
+                            )
+                            break
+
+    def _fmt(label, code, hits, suggestion):
+        if not hits:
+            return None
+        return (
+            f"WARN [{code}] {label}:\n"
+            + "\n".join(f"       - {h}" for h in hits[:8])
+            + (f"\n       (+{len(hits) - 8} more)" if len(hits) > 8 else "")
+            + f"\n       {suggestion}"
+        )
+
+    for w in (
+        _fmt(
+            "Active/observing milestones without an assignee",
+            "ms81-assignee-missing",
+            a_hits,
+            "Run: beacon milestone update <ms-id> --assignee <name> "
+            "(or `beacon milestone join <ms-id>` to self-add).",
+        ),
+        _fmt(
+            "Done milestones with a leftover worktree directory",
+            "ms81-leftover-worktree",
+            b_hits,
+            "Run: beacon milestone workspace-cleanup <ms-id> to remove the "
+            "worktree; leftover dirs are a takeover-by-mistake hazard.",
+        ),
+        _fmt(
+            "Occupation field stuck without a session_id",
+            "ms81-stale-occupation",
+            c_hits,
+            "Run: beacon milestone release <ms-id> to clear the half-written "
+            "occupation marker.",
+        ),
+        _fmt(
+            "Waiting milestones with commits/PRs attached after wait_at",
+            "ms81-waiting-write",
+            d_hits,
+            "Re-activate with `beacon milestone start <ms-id>` before adding "
+            "more commit / PR entries — the write gate (e-1916) catches new "
+            "writes but does not retroactively clean up past attachments.",
+        ),
+    ):
+        if w:
+            warnings.append(w)
+    return warnings
+
+
 def cmd_doctor():
     """Lightweight environment health check for Beacon.
 
@@ -11682,6 +11837,15 @@ def cmd_doctor():
         warnings.extend(_doctor_check_claude_md_principle_marker())
 
     # ------------------------------------------------------------------ #
+    # 11. ms-81 state-machine warnings (e-1921)
+    # ------------------------------------------------------------------ #
+    # Surface the four SPEC §9 conditions where the state-machine and
+    # occupation model is being violated — warning-level only because the
+    # whole MS is designed as a forcing function, not a wall.
+    if os.environ.get("BEACON_DOCTOR_SKIP_MS81") != "1":
+        warnings.extend(_doctor_check_ms81_state_machine())
+
+    # ------------------------------------------------------------------ #
     # Summary
     # ------------------------------------------------------------------ #
     if warnings:
@@ -11707,6 +11871,7 @@ def cmd_help_json():
         {"command": "beacon milestone observe <id>", "flags": [], "description": "Set milestone to observing"},
         {"command": "beacon milestone wait <id>", "flags": ["--reason"], "description": "Pause an active/observing milestone (ms-81)"},
         {"command": "beacon milestone release <id>", "flags": [], "description": "Release occupation claim without changing status (ms-81)"},
+        {"command": "beacon milestone occupations", "flags": ["--ms <id>", "--json"], "description": "List occupation event log (ms-81)"},
         {"command": "beacon milestone rename <id> <title>", "flags": [], "description": "Rename a milestone"},
         {"command": "beacon milestone depends <id> --on <id>", "flags": [], "description": "Declare milestone dependency"},
         {"command": "beacon milestone purge <id> --reason <text>", "flags": ["--index <n>", "--json"], "description": "Hard-delete a milestone record (recovery for duplicate-ID corruption; Issue #14)"},
@@ -15145,6 +15310,7 @@ if __name__ == "__main__":
         "milestone_observe": cmd_milestone_observe,
         "milestone_wait": cmd_milestone_wait,
         "milestone_release": cmd_milestone_release,
+        "milestone_occupations": cmd_milestone_occupations,
         "milestone_join": cmd_milestone_join,
         "milestone_show": cmd_milestone_show,
         "milestone_update": cmd_milestone_update,
