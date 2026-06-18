@@ -2,6 +2,41 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.40.0] - 2026-06-18
+
+- Merge pull request #163 from kurogin23mech-source/ms-81-ms-status-assignee-worktree
+- feat(ms-81): doctor state-machine warnings + occupations CLI verb (e-1921)
+- feat(ms-81): swap /beacon-dispatch workspace verb for start + skill drift detector (e-1920)
+- feat(ms-81): transition + done-MS re-open prompts (e-1919)
+- fix(ms-81): gate occupation claim with NO_BRANCH/NO_ASSIGNEE + add session-end auto-release (e-1918 follow-up)
+- feat(ms-81): session occupation model + worktree_sessions audit log (e-1918)
+- feat(ms-81): unify activation entry + project-type detect for milestone start (e-1917)
+- feat(ms-81): CLI status write gate — warn before writing to non-active MS (e-1916)
+- docs(ms-81): register beacon milestone wait in cmd_help_json (e-1915 follow-up)
+- docs(ms-81): add `beacon milestone wait` row to README CLI table (e-1915 follow-up)
+- feat(ms-81): waiting status formal CLI + transition rules (e-1915)
+- Merge pull request #162 from kurogin23mech-source/ms-78/work
+- Merge pull request #161 from kurogin23mech-source/ms-70/work
+- feat(ms-78): display_name end-to-end propagation (e-1909)
+- feat(ms-70): beacon dm log CLI for approval audit history (e-1923 / e-1718 AC 4)
+- Merge pull request #159 from kurogin23mech-source/ms-72/work
+- Merge origin/main into ms-72/work: resolve conflicts in desktop/layer.js + regen dist
+- Merge pull request #160 from kurogin23mech-source/ms-78/work
+- Merge pull request #158 from kurogin23mech-source/ms-70/work
+- fix(ms-78): setup prompt に skill install + restart 動線を追加 (UC11-F6 ギャップ補修)
+- feat(ms-70): DM approval history audit view (e-1718)
+- feat(ms-70): denied notification reply chain to sender (e-1717)
+- feat(ms-72): Tauri Rust member + invitation commands + UI parity (e-1774 / e-1779)
+- feat(ms-70): beacon dm respond CLI primitive (e-1716)
+- feat(ms-70): inline pending-DM banner in bus listen / receive (e-1715)
+- feat(ms-78): beacon member invite CLI + display_name 優先表示 (e-1805/e-1807)
+- feat(ms-70): cross-session pending DM action flush at session-start (e-1714)
+- feat(ms-78): token-based invitation flow + /join landing (e-1803/e-1804)
+- feat(ms-70): cross-user DM action authorization gate (e-1713)
+- feat(ms-70): bus_event_approvals sidecar subcollection (e-1712)
+- docs(release): update README/CHANGELOG for v0.39.0
+- chore(release): bump formula to 0.39.0
+
 ## [v0.39.0] - 2026-06-17
 
 - feat(ms-80): release-marker auto-clear + PR claim 競合検知 (e-1829 / e-1821)
