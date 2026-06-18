@@ -186,7 +186,7 @@ Other:
                                                 writes — persistence poisoning defense, ms-54 / e-1293)
   beacon note list                             Show session notes
   beacon note clear                            Clear all session notes
-  beacon trigger fire <name> [msg]  Fire a named trigger
+  beacon trigger fire [--trek <id>] <name> [msg]  Fire a named trigger (--trek = ms-75 Trek-aware)
   beacon trigger check              Check pending triggers
   beacon trigger clear <name>       Clear a trigger
   beacon retro                      Prepare weekly retro
@@ -3815,8 +3815,21 @@ EOF
     trigger)
         case "${2:-}" in
             fire)
-                BEACON_TRIGGER_NAME="${3:-}" BEACON_TRIGGER_MESSAGE="${4:-}" \
-                    python3 "$COMMANDS_PY" trigger_fire
+                # ms-75 / e-1870: --trek <id> binds the trigger to a Trek scope
+                # so the bus event rides the trek-trigger channel with
+                # delivery=auto-execute (parallel to operation-trigger).
+                # Form 1 (legacy):    beacon trigger fire <name> [msg]
+                # Form 2 (trek-aware): beacon trigger fire --trek <id> <name> [msg]
+                # The flag must come first so positional parsing stays simple.
+                if [ "${3:-}" = "--trek" ]; then
+                    BEACON_TRIGGER_NAME="${5:-}" \
+                        BEACON_TRIGGER_MESSAGE="${6:-}" \
+                        BEACON_TRIGGER_TREK_ID="${4:-}" \
+                        python3 "$COMMANDS_PY" trigger_fire
+                else
+                    BEACON_TRIGGER_NAME="${3:-}" BEACON_TRIGGER_MESSAGE="${4:-}" \
+                        python3 "$COMMANDS_PY" trigger_fire
+                fi
                 ;;
             check)
                 python3 "$COMMANDS_PY" trigger_check
@@ -3825,7 +3838,9 @@ EOF
                 BEACON_TRIGGER_NAME="${3:-}" python3 "$COMMANDS_PY" trigger_clear
                 ;;
             *)
-                echo "Usage: beacon trigger [fire|check|clear] <name> [message]"
+                echo "Usage: beacon trigger fire [--trek <trek-id>] <name> [message]"
+                echo "       beacon trigger check"
+                echo "       beacon trigger clear <name>"
                 ;;
         esac
         ;;
