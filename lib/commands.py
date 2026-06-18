@@ -11277,6 +11277,7 @@ def cmd_help_json():
         {"command": "beacon milestone join <id>", "flags": ["--checkout"], "description": "Add self as assignee on a milestone (and optionally switch to its branch)"},
         {"command": "beacon milestone close <id>", "flags": [], "description": "Close milestone"},
         {"command": "beacon milestone observe <id>", "flags": [], "description": "Set milestone to observing"},
+        {"command": "beacon milestone wait <id>", "flags": ["--reason"], "description": "Pause an active/observing milestone (ms-81)"},
         {"command": "beacon milestone rename <id> <title>", "flags": [], "description": "Rename a milestone"},
         {"command": "beacon milestone depends <id> --on <id>", "flags": [], "description": "Declare milestone dependency"},
         {"command": "beacon milestone purge <id> --reason <text>", "flags": ["--index <n>", "--json"], "description": "Hard-delete a milestone record (recovery for duplicate-ID corruption; Issue #14)"},
