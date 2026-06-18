@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Beacon CLI commands - thin adapter over core.py logic."""
 
-__version__ = "0.32.0"
+__version__ = "0.39.0"
 
 import json
 import os
@@ -37,6 +37,31 @@ def _resolve_session_id() -> str:
         return _session.get_session_id()
     except Exception:
         return ""
+
+
+def _resolve_commit_source() -> str:
+    """Detect the source axis for a commit being recorded (ms-79 / e-1817).
+
+    Returns one of:
+      - ``"auto-op"`` when the commit is happening inside a Beacon
+        Operation envelope auto-execute context (= ms-60). The detection
+        keys off env vars set by the operation runner; specifically:
+          * ``BEACON_OPERATION_ENVELOPE_ID``  (= active envelope token)
+          * ``BEACON_OPERATION_AUTO_EXECUTE`` set to ``"1"``
+      - ``""`` (empty) for the default human dialog case. The empty
+        string is the documented "untagged = human" sentinel — older
+        commits without the field stay as-is and continue to count as
+        human in retro_query's source breakdown.
+
+    Kept env-var-driven on purpose: the Operation runner can set the
+    flag without log_commit needing to know about envelope internals,
+    and tests can drive it deterministically by exporting one env var.
+    """
+    if os.environ.get("BEACON_OPERATION_AUTO_EXECUTE", "") == "1":
+        return "auto-op"
+    if os.environ.get("BEACON_OPERATION_ENVELOPE_ID", "").strip():
+        return "auto-op"
+    return ""
 
 
 def _user_home():
@@ -236,6 +261,21 @@ Proposals should feel like "What if we tried X?" — not directives.
 | `beacon note "text"` | Add session note (ephemeral, cleared at session-end) / セッションメモ追加 |
 | `beacon note list` | Show session notes / メモ一覧 |
 | `beacon note clear` | Clear all session notes / メモ全削除 |
+
+<!-- BEACON_ENTRY_WRITING_PRINCIPLE -->
+### Entry Writing Principle / エントリ記述原則
+
+When writing task / spec / doc entries (`description` / `motivation` / `acceptance_criteria`), follow these 4 principles. Beacon's readers include non-developers — the principles apply to all forward-going writes.
+タスク・SPEC・ドキュメントを書くとき、以下 4 原則を守る。Beacon の読み手には非開発者が含まれるため、新しく書く全エントリに適用する。
+
+1. **Reader-first 1-line description / 読み手目線 1 行**: `description` は「何が嬉しいか」をユーザーの言葉で 1 行。実装手段は含めない。
+2. **3-tier loanword policy / 横文字 3 段階**: 固有名詞 (`Firestore` / `MCP`) はそのまま、技術概念 (`allowlist` / `opt-in`) は初出時に「(= 許可リスト)」のような日本語注、一般概念 (configure / receiver / audit) は日本語化。
+3. **ID references with context / ID 参照に文脈**: `e-XXXX` / `ms-XX` / `UC?` の初出には必ず「(何の話か)」を 1 行添える。click-through 前提にしない。
+4. **No truncated sentences / 尻切れトンボ禁止**: 主語・述語・論理関係を省略しない。開発者は文脈で補えるが非開発者は補えない。
+
+Full principle and examples: `beacon doc show F3ZkqT0pKS6JpR8dn70n` (CORE doc `entry-writing-principle`).
+原則の全文と実例: `beacon doc show F3ZkqT0pKS6JpR8dn70n` (CORE doc `entry-writing-principle`)。
+<!-- /BEACON_ENTRY_WRITING_PRINCIPLE -->
 """
 
 
@@ -462,17 +502,130 @@ def _install_skills():
         print(f"Installed skills: {', '.join(sorted(installed))}")
 
 
+def _maybe_prompt_initial_profile() -> Optional[str]:
+    """ms-64 e-1633: When the user has auth-logged into >= 2 Beacon backends
+    and has not already committed this cwd to a profile, ask once which one
+    this project should target. Returns the chosen profile name (or None if
+    the prompt should be skipped — caller falls back to silent default).
+
+    Skip rules (all silent, no prompt):
+      - --profile / BEACON_PROFILE explicitly set (= user already chose)
+      - .beacon/cloud.json already has a `profile` field (= prior choice persisted)
+      - len(logged_in_profiles) < 2 (= no ambiguity)
+      - stdin is not a TTY (= hook / CI / pipe — don't block on input)
+    """
+    if os.environ.get("BEACON_PROFILE"):
+        return None
+    cloud_path = _get_cloud_config_path()
+    if os.path.exists(cloud_path):
+        try:
+            with open(cloud_path, "r", encoding="utf-8") as f:
+                existing = json.load(f) or {}
+            if existing.get("profile"):
+                return None
+        except Exception:
+            pass
+    try:
+        import profile as _profile  # type: ignore[import-not-found]
+        candidates = _profile.list_logged_in_profiles()
+    except Exception:
+        return None
+    if len(candidates) < 2:
+        return None
+    if not sys.stdin.isatty():
+        return None
+    try:
+        return _profile.prompt_choose_profile(candidates)
+    except Exception:
+        return None
+
+
+def _persist_initial_profile_choice(profile_name: str) -> None:
+    """Write {"profile": <name>} to .beacon/cloud.json so that all subsequent
+    commands in this cwd resolve to that profile (= cwd-based auto-switch)."""
+    cloud_path = _get_cloud_config_path()
+    os.makedirs(os.path.dirname(cloud_path) or ".", exist_ok=True)
+    existing: dict = {}
+    if os.path.exists(cloud_path):
+        try:
+            with open(cloud_path, "r", encoding="utf-8") as f:
+                existing = json.load(f) or {}
+        except Exception:
+            existing = {}
+    existing["profile"] = profile_name
+    with open(cloud_path, "w", encoding="utf-8") as f:
+        json.dump(existing, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+
+def _build_disclosure_policy_from_env() -> dict:
+    """Resolve the disclosure_policy for a new project from env vars.
+
+    ms-63 / e-1441: ``beacon init --sensitivity {high,low}`` (forwarded via
+    ``BEACON_SENSITIVITY``) lets the user pick the project posture at
+    create-time. Default is ``high`` per SPEC § 設計方針 2 — forgetting to
+    configure must fail closed (= AI clams up) rather than fail open (= AI
+    leaks). The OSS dogfood (Beacon itself) opts in to ``low`` explicitly.
+
+    Recognised values: ``high`` or ``low``. Anything else (typo / future
+    value) silently degrades to ``high`` so a misconfiguration cannot
+    accidentally produce an open project.
+    """
+    raw = os.environ.get("BEACON_SENSITIVITY", "").strip().lower()
+    sensitivity = "low" if raw == "low" else "high"
+    # The semantics mirror server/envelope.normalize_disclosure_contract:
+    # high → schema-only T5 + no free text; low → free mode + free text on.
+    if sensitivity == "low":
+        return {
+            "sensitivity": "low",
+            "t5_response_mode": "free",
+            "t5_free_text": True,
+        }
+    return {
+        "sensitivity": "high",
+        "t5_response_mode": "schema-only",
+        "t5_free_text": False,
+    }
+
+
 def cmd_init():
     name = os.environ.get("BEACON_NAME", "")
     objective = os.environ.get("BEACON_OBJECTIVE", "")
     pf = get_project_file()
     os.makedirs(os.path.dirname(pf), exist_ok=True)
     retro_day = os.environ.get("BEACON_RETRO_DAY", "monday")
-    data = {"name": name, "objective": objective, "milestones": [], "retro_day": retro_day}
+    # ms-63 / e-1428 + e-1441: persist the project disclosure_policy at
+    # init time so subsequent envelope mints (server/envelope.issue_envelope)
+    # can snapshot the contract. Default is high (safe). The field lives
+    # next to the existing top-level project fields so legacy readers that
+    # don't know about it just ignore it (= forward-compat append-only).
+    disclosure_policy = _build_disclosure_policy_from_env()
+    data = {
+        "name": name,
+        "objective": objective,
+        "milestones": [],
+        "retro_day": retro_day,
+        "disclosure_policy": disclosure_policy,
+    }
     with open(pf, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")
     print(f"Created {pf}")
+    # Visible feedback on the chosen posture (SPEC § acceptance 2 + 3):
+    # default-high is silent-but-printed so the user notices, opt-in low
+    # gets a single-line confirmation that the OSS-friendly mode is active.
+    if disclosure_policy["sensitivity"] == "low":
+        print("  disclosure_policy.sensitivity = low (open posture; free-text "
+              "DM replies permitted)")
+    else:
+        print("  disclosure_policy.sensitivity = high (default-safe; T5 DM "
+              "replies capped to schema)")
+
+    chosen = _maybe_prompt_initial_profile()
+    if chosen:
+        _persist_initial_profile_choice(chosen)
+        print(f"Profile pinned for this project: {chosen}")
+
     print("Next: beacon milestone add")
 
 
@@ -507,7 +660,7 @@ def cmd_cloud_check_project():
     creds = load_credentials()
     if creds is None:
         _sys.exit(1)
-    api_url = os.environ.get("BEACON_API_URL", DEFAULT_API_URL)
+    api_url = _resolve_active_api_url()
     from api_client import ApiClient
     client = ApiClient(api_url, _extract_token(creds))
     try:
@@ -530,7 +683,7 @@ def cmd_cloud_join():
         print("Error: project ID required")
         sys.exit(1)
 
-    api_url = os.environ.get("BEACON_API_URL", DEFAULT_API_URL)
+    api_url = _resolve_active_api_url()
     token = _extract_token(creds)
 
     from api_client import ApiClient
@@ -555,10 +708,10 @@ def cmd_cloud_join():
         json.dump({"project_id": project_id, "api_url": api_url}, f, indent=2, ensure_ascii=False)
         f.write("\n")
 
-    mode_config_path = os.path.join(beacon_dir, "config.json")
-    with open(mode_config_path, "w", encoding="utf-8") as f:
-        json.dump({"mode": "cloud"}, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    # e-1861 (ms-61): No longer write `{"mode": "cloud"}` to config.json —
+    # cloud.json existence is the sole source of truth. The previous dual
+    # write created a silent-drift attack surface (= sub-agent overwriting
+    # config.json could flip cloud → local without touching cloud.json).
 
     # Write project.json directly (LocalStore.save_project requires the file to exist)
     pf = get_project_file()
@@ -1701,13 +1854,29 @@ def cmd_log():
         actor = None
 
     session_id = _resolve_session_id()  # ms-57 / e-1062
+    # ms-79 / e-1817 (UC3-F3): detect envelope context to tag auto-op
+    # commits. The source label is stored on meta.source so retrospect /
+    # retro can filter "AI 自律でやった commit だけ".
+    source = _resolve_commit_source()
+
+    # ms-79 / e-1816 (UC3-F2): fork.json の target_ms_id を最優先する。
+    # 親が --ms を明示しているならそれが勝つ (= fork.json は hint であって
+    # 命令ではない、cmd_log_prepare と同じセマンティクスを揃える)。
+    if not ms_id:
+        fork_target = _read_fork_target_ms_id()
+        if fork_target:
+            # fork target_ms_id が project.json にあるか軽くチェック。無ければ
+            # 普通の auto-pick (find_target_milestone) に倒れる。
+            data_check = load_project()
+            if any(m.get("id") == fork_target for m in data_check.get("milestones", [])):
+                ms_id = fork_target
 
     data = load_project()
     result = core.log_commit(
         data, ms_id=ms_id, commit_hash=commit_hash,
         message=message, date=date, summary=summary, progress=progress,
         behavior=behavior, resolves=resolves, actor=actor,
-        session_id=session_id,
+        session_id=session_id, source=source,
     )
     save_project(data)
 
@@ -1731,14 +1900,36 @@ def cmd_log_prepare():
 
     data = load_project()
 
-    if ms_id:
+    # ms-79 / e-1816 (UC3-F2): fork.json の target_ms_id を最優先する。
+    # ms-67 で fork した子 worktree は明示意図 (= 親が「この MS をやれ」と
+    # 指示した target_ms_id) を持つ。fork.json があれば、--ms 明示が無い
+    # ときの候補選定の前にそれを優先採用する。これにより「fork 子で
+    # commit したら親 MS に誤記録」 のドリフトを構造的に防ぐ。
+    fork_target_ms_id = ""
+    if not ms_id:
+        fork_target_ms_id = _read_fork_target_ms_id()
+
+    effective_ms_id = ms_id or fork_target_ms_id
+
+    if effective_ms_id:
         for ms in data["milestones"]:
-            if ms["id"] == ms_id:
+            if ms["id"] == effective_ms_id:
                 targets = [ms]
                 break
         else:
-            print(f"Milestone not found: {ms_id}")
-            sys.exit(1)
+            # fork.json が指す ms_id がローカル project.json に無い場合
+            # (= stale fork、活性化前 / 削除済 MS) は普通の active 候補に
+            # fallback。explicit --ms ms_id が無効なときと違って
+            # silent fallback でよい (= fork.json は hint であって命令ではない)。
+            if fork_target_ms_id and not ms_id:
+                targets = [ms for ms in data["milestones"]
+                           if ms["status"] in ("todo", "in_progress", "observing")]
+                if not targets:
+                    print("No active milestone. Run: beacon milestone start <ms-id>")
+                    sys.exit(1)
+            else:
+                print(f"Milestone not found: {effective_ms_id}")
+                sys.exit(1)
     else:
         targets = [ms for ms in data["milestones"] if ms["status"] in ("todo", "in_progress", "observing")]
         if not targets:
@@ -1749,6 +1940,11 @@ def cmd_log_prepare():
         "commit": {"hash": commit_hash, "message": message, "date": date, "summary": summary_text},
         "current_summary": data.get("summary", ""),
     }
+    # e-1816: 透明性のため fork.json 由来であることを payload に明示する。
+    # /beacon-log Skill はこれを見て「fork 由来の active MS を採用しています」
+    # と user に notice を出せる (= 暗黙の選定で誤解されるのを防ぐ)。
+    if fork_target_ms_id and not ms_id:
+        output["fork_target_ms_id"] = fork_target_ms_id
 
     if len(targets) == 1:
         output["milestone"] = core.milestone_prepare_info(targets[0])
@@ -1756,6 +1952,44 @@ def cmd_log_prepare():
         output["candidates"] = [core.milestone_prepare_info(ms) for ms in targets]
 
     print(json.dumps(output, ensure_ascii=False))
+
+
+def _read_fork_target_ms_id() -> str:
+    """Return the ``target_ms_id`` from ``.beacon/fork.json``, or "".
+
+    Fork worktrees are created by /beacon-session-fork (ms-67) and carry
+    a fork.json next to project.json that records the intent (= "this
+    worktree exists to work on ms-X"). cmd_log_prepare consults this
+    before falling back to the active-MS heuristic so commits made from
+    a fork worktree route to the milestone the fork was created for —
+    even if the parent repo has multiple active milestones (which would
+    otherwise force a candidates / picker dialog the human did not
+    intend in this child session).
+
+    Returns "" when:
+      - no fork.json exists (= regular worktree / main checkout)
+      - fork.json is malformed (= treat as no fork hint, don't crash)
+      - target_ms_id field is missing or empty
+
+    Reads from ``$(dirname project.json)/fork.json`` so it stays
+    consistent with how every other beacon helper resolves its
+    ``.beacon/`` directory.
+    """
+    try:
+        project_file = get_project_file()
+        fork_path = os.path.join(os.path.dirname(project_file), "fork.json")
+        if not os.path.exists(fork_path):
+            return ""
+        with open(fork_path, "r", encoding="utf-8") as f:
+            rec = json.load(f)
+        if not isinstance(rec, dict):
+            return ""
+        target = rec.get("target_ms_id")
+        if isinstance(target, str) and target.strip():
+            return target.strip()
+        return ""
+    except (OSError, json.JSONDecodeError, ValueError):
+        return ""
 
 
 def cmd_log_finalize():
@@ -1785,13 +2019,17 @@ def cmd_log_finalize():
         actor = None
 
     session_id = _resolve_session_id()  # ms-57 / e-1062
+    # ms-79 / e-1817 (UC3-F3): tag the commit's source axis (= human dialog
+    # vs auto-op envelope execution). Retrospect / retro can then filter
+    # "AI 自律 commit だけ見たい" type queries.
+    source = _resolve_commit_source()
 
     data = load_project()
     result = core.log_commit(
         data, ms_id=ms_id, commit_hash=commit_hash,
         message=message, date=date, summary=summary_text, progress=progress,
         behavior=behavior, resolves=resolves, actor=actor,
-        session_id=session_id,
+        session_id=session_id, source=source,
     )
 
     # e-1040 deprecation: don't write data["summary"] anymore. The legacy
@@ -2242,7 +2480,7 @@ def _push_note_to_cloud(note: dict) -> None:
         with open(config_path, "r", encoding="utf-8") as f:
             config = json.load(f)
         project_id = config.get("project_id", "")
-        api_url = config.get("api_url", DEFAULT_API_URL)
+        api_url = _resolve_active_api_url()
         if not project_id:
             return
         from auth import load_credentials
@@ -2331,7 +2569,7 @@ def cmd_note_clear():
             with open(config_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
             project_id = config.get("project_id", "")
-            api_url = config.get("api_url", DEFAULT_API_URL)
+            api_url = _resolve_active_api_url()
             if project_id:
                 from auth import load_credentials
                 creds = load_credentials()
@@ -3718,6 +3956,794 @@ def _project_id_for_ops() -> str:
     return data.get("name", "")
 
 
+# ---------------------------------------------------------------------------
+# Trek (ms-69) — top-level cross-project collaboration area.
+# Local mode only for now (storage = lib/trek_store, files under
+# ~/.beacon/treks/). Cloud HTTP path lands in e-1656.
+# ---------------------------------------------------------------------------
+
+def _resolve_creator_identity() -> tuple[str, str, str]:
+    """Return (user_id, email, session_id) for the trek creator.
+
+    Reads from env vars first so tests and bash can override freely.
+    Falls back to ``whoami`` for user_id when no env var is set so a
+    user running ``beacon trek create`` in dev mode without explicit env
+    still gets a meaningful creator record. Email and session_id have no
+    safe fallback — they MUST be supplied (= error out otherwise) because
+    fabricating them silently would corrupt member/leader records that
+    later identity flows depend on.
+    """
+    user_id = os.environ.get("BEACON_USER_ID", "").strip()
+    email = os.environ.get("BEACON_USER_EMAIL", "").strip()
+    session_id = os.environ.get("BEACON_SESSION_ID", "").strip()
+    if not user_id:
+        try:
+            import getpass
+            user_id = getpass.getuser()
+        except Exception:
+            user_id = ""
+    return user_id, email, session_id
+
+
+def cmd_trek_create():
+    """Create a new trek (= top-level cross-project collaboration area).
+
+    Reads from env:
+      BEACON_TREK_TITLE       (required) trek title
+      BEACON_TREK_TYPE        temporary | persistent (default persistent)
+      BEACON_TREK_DESCRIPTION free-form description (optional)
+      BEACON_USER_ID          creator user_id (fallback: whoami)
+      BEACON_USER_EMAIL       creator email (required)
+      BEACON_SESSION_ID       creator session_id (required, becomes leader)
+      BEACON_JSON             "1" → emit json instead of human text
+    """
+    import trek
+    import trek_store
+
+    title = os.environ.get("BEACON_TREK_TITLE", "").strip()
+    type_ = os.environ.get("BEACON_TREK_TYPE", "").strip() or "persistent"
+    description = os.environ.get("BEACON_TREK_DESCRIPTION", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not title:
+        print("Error: trek title is required (--title or positional arg)",
+              file=sys.stderr)
+        sys.exit(1)
+
+    user_id, email, session_id = _resolve_creator_identity()
+    if not email:
+        print(
+            "Error: BEACON_USER_EMAIL is required to create a trek "
+            "(= recorded as creator/leader member email)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not session_id:
+        print(
+            "Error: BEACON_SESSION_ID is required to create a trek "
+            "(= the session that creates becomes initial leader; SPEC 方針 9)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        # Cloud path: server resolves creator identity from auth token.
+        # BEACON_USER_ID / BEACON_USER_EMAIL are ignored server-side (kept
+        # for local-mode parity).
+        try:
+            client, _config = _get_api_client()
+            new_doc = client.create_trek(
+                title=title,
+                creator_session_id=session_id,
+                description=description,
+                type_=type_,
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        try:
+            new_doc = trek.new_trek(
+                title=title,
+                creator_user_id=user_id,
+                creator_email=email,
+                creator_session_id=session_id,
+                description=description,
+                type_=type_,
+            )
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        trek_store.save_trek(new_doc)
+
+    if json_mode:
+        print(json.dumps(new_doc, ensure_ascii=False))
+    else:
+        print(f"Created trek {new_doc['trek_id']} \"{new_doc['title']}\" "
+              f"({new_doc['type']}, status={new_doc['status']})")
+        print(f"  leader session: {new_doc['leader_session_id']}")
+        print(f"  creator: {new_doc['creator_actor']['email']}")
+        print("  next: `beacon trek plan` で scope を追加、"
+              "`beacon trek invite` でメンバーを呼ぶ、"
+              "`beacon trek start <id>` で active に")
+
+
+def cmd_trek_list():
+    """List treks. By default hides archived; --all includes them.
+
+    Reads from env:
+      BEACON_TREK_STATUS       optional status filter
+      BEACON_TREK_INCLUDE_ARCHIVED  "1" → include archived
+      BEACON_USER_ID           visibility filter (defaults to current user
+                               so the listing is per-actor; pass --all to
+                               disable from CLI)
+      BEACON_TREK_ALL_ACTORS   "1" → disable actor filter (admin view)
+      BEACON_JSON              "1" → emit json
+    """
+    import trek_store
+
+    status_filter = os.environ.get("BEACON_TREK_STATUS", "").strip() or None
+    include_archived = os.environ.get("BEACON_TREK_INCLUDE_ARCHIVED", "") == "1"
+    all_actors = os.environ.get("BEACON_TREK_ALL_ACTORS", "") == "1"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if all_actors:
+        actor_id = None
+    else:
+        user_id, _, _ = _resolve_creator_identity()
+        actor_id = user_id or None
+
+    if _is_cloud_mode():
+        # Cloud path: server filters by auth token's user (= ignores actor_id).
+        # ``all_actors`` requires admin role server-side; non-admin gets 403.
+        try:
+            client, _config = _get_api_client()
+            treks = client.list_treks(
+                status=status_filter or "",
+                include_archived=include_archived,
+                all_actors=all_actors,
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        treks = trek_store.list_treks(
+            actor_id=actor_id, status=status_filter,
+            include_archived=include_archived,
+        )
+
+    if json_mode:
+        print(json.dumps(treks, ensure_ascii=False, indent=2))
+        return
+
+    if not treks:
+        if actor_id:
+            print(f"(no treks visible to {actor_id} — try --all で全件)")
+        else:
+            print("(no treks yet — `beacon trek create \"title\"` で最初の trek を起票)")
+        return
+
+    print(f"Treks ({len(treks)}):")
+    for t in treks:
+        status_icon = {
+            "planning": "○",
+            "active": "●",
+            "archived": "□",
+        }.get(t.get("status", ""), "?")
+        halt_marker = " [halted]" if t.get("halt") else ""
+        member_count = len(t.get("members") or [])
+        scope_count = len(t.get("scope") or [])
+        print(f"  {status_icon} {t['trek_id']:14s} {t['title'][:55]}"
+              f" — {t.get('type', '?')}/{t.get('status', '?')}"
+              f"{halt_marker}, {member_count}m/{scope_count}s")
+
+
+def cmd_trek_show():
+    """Show a single trek by id.
+
+    Reads from env:
+      BEACON_TREK_ID  required
+      BEACON_JSON     "1" → emit json
+    """
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            t = client.get_trek(trek_id)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        t = trek_store.load_trek(trek_id)
+        if t is None:
+            print(f"Error: trek {trek_id} not found", file=sys.stderr)
+            sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False, indent=2))
+        return
+
+    halt_marker = " [HALTED]" if t.get("halt") else ""
+    print(f"Trek {t['trek_id']} — {t['title']}{halt_marker}")
+    print(f"  type:        {t.get('type')}")
+    print(f"  status:      {t.get('status')}")
+    print(f"  created:     {t.get('created_at', '')[:19]}")
+    if t.get("archived_at"):
+        print(f"  archived:    {t.get('archived_at', '')[:19]}")
+    creator = t.get("creator_actor") or {}
+    print(f"  creator:     {creator.get('email')} (user_id={creator.get('user_id')})")
+    print(f"  leader sess: {t.get('leader_session_id')}")
+    if t.get("description"):
+        print(f"  description: {t['description']}")
+    members = t.get("members") or []
+    print(f"  members ({len(members)}):")
+    for m in members:
+        joined = "joined" if m.get("joined_at") else "invited"
+        print(f"    - {m.get('email')} [{m.get('role')}] ({joined})")
+    scope = t.get("scope") or []
+    print(f"  scope ({len(scope)}):")
+    for s in scope:
+        ref = " / ".join(f"{k}={v}" for k, v in s.items() if k != "project")
+        print(f"    - {s.get('project')}" + (f" / {ref}" if ref else ""))
+    if t.get("halt"):
+        h = t["halt"]
+        print(f"  halt: at={h.get('issued_at')} by={h.get('issued_by_session_id')}"
+              + (f" reason={h.get('reason')}" if h.get("reason") else ""))
+
+
+def _trek_transition(trek_id: str, to_status: str):
+    """Helper: validate + apply a state transition. Returns the updated trek.
+
+    Local mode only. Cloud mode dispatches via the dedicated start/archive
+    endpoints on the server (= caller branches before invoking this).
+    """
+    import trek
+    import trek_store
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    cur = t.get("status", "")
+    try:
+        trek.validate_transition(cur, to_status)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    updates = {
+        "status": to_status,
+        "updated_at": trek.utcnow_iso(),
+    }
+    if to_status == "archived":
+        updates["archived_at"] = updates["updated_at"]
+    return trek_store.update_trek(trek_id, updates=updates)
+
+
+def cmd_trek_start():
+    """Transition trek planning → active."""
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            t = client.start_trek(trek_id)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        t = _trek_transition(trek_id, "active")
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        print(f"Started trek {t['trek_id']} (status: active)")
+
+
+def cmd_trek_archive():
+    """Transition trek → archived (terminal)."""
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            t = client.archive_trek(trek_id)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        t = _trek_transition(trek_id, "archived")
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        print(f"Archived trek {t['trek_id']} — recorded for posterity, "
+              "再開したい時は新 trek 起票")
+
+
+def cmd_trek_invite():
+    """Invite a user (by email) to a trek (= add to members[] with joined_at='').
+
+    Env:
+      BEACON_TREK_ID       (required) trek to invite into
+      BEACON_TREK_ACTOR    (required) invitee's email
+      BEACON_TREK_NOTIFY   "1" → also send a live DM (= e-1662 で実装、
+                           現在は acknowledged but no-op)
+      BEACON_USER_EMAIL    inviter's email (= invited_by, defaults to whoami)
+      BEACON_JSON          "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    actor_email = os.environ.get("BEACON_TREK_ACTOR", "").strip()
+    notify = os.environ.get("BEACON_TREK_NOTIFY", "") == "1"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+    if not actor_email:
+        print("Error: --actor <email> is required", file=sys.stderr)
+        sys.exit(1)
+
+    inviter_user_id, _, _ = _resolve_creator_identity()
+
+    if _is_cloud_mode():
+        # Cloud path: server resolves the invitee's user_id via
+        # find_user_by_email + records inviter from auth token.
+        try:
+            client, _config = _get_api_client()
+            t = client.invite_trek_member(trek_id, actor_email)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        t = trek_store.load_trek(trek_id)
+        if t is None:
+            print(f"Error: trek {trek_id} not found", file=sys.stderr)
+            sys.exit(1)
+        # Local mode identity: user_id = email (cloud mode resolves properly
+        # via auth in e-1656). When the invitee later runs `beacon trek join`,
+        # their BEACON_USER_ID must match — easiest path is to also use email
+        # there.
+        invitee_user_id = actor_email
+        try:
+            trek.add_invitation(
+                t, user_id=invitee_user_id, email=actor_email,
+                invited_by_user_id=inviter_user_id,
+            )
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        trek_store.save_trek(t)
+
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        member_count = len(t.get("members") or [])
+        print(f"Invited {actor_email} to trek {trek_id} "
+              f"(members: {member_count})")
+        if notify:
+            # e-1662 で bus DM 経路を実装予定。現在は --notify を受け付ける
+            # だけで、DM は飛ばない (= invitee が trigger check / session-start
+            # で気付く流れ default)。
+            print("  (--notify is acknowledged but live DM is not implemented "
+                  "yet — invitee will see the invitation via trigger check; "
+                  "live DM lands in e-1662)")
+
+
+def cmd_trek_join():
+    """Accept an invitation (= set member.joined_at = now for the current user).
+
+    Env:
+      BEACON_TREK_ID    (required)
+      BEACON_USER_EMAIL (required, matched against the invitee's email)
+      BEACON_USER_ID    inviter's recorded user_id (fallback: whoami).
+                        Used as the local-mode identity match.
+      BEACON_SESSION_ID (informational, recorded if leader_session_id is empty)
+      BEACON_JSON       "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+
+    user_id, email, _ = _resolve_creator_identity()
+    if not email:
+        print(
+            "Error: BEACON_USER_EMAIL is required to join a trek",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        # Cloud path: server identifies the joiner from auth token (no
+        # email lookup needed). Non-invited callers get 403.
+        try:
+            client, _config = _get_api_client()
+            t = client.join_trek(trek_id)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        t = trek_store.load_trek(trek_id)
+        if t is None:
+            print(f"Error: trek {trek_id} not found", file=sys.stderr)
+            sys.exit(1)
+        # Local mode identity match: prefer email lookup first (= simplest path
+        # for the invitee who is told "look for an invitation to email X"); fall
+        # back to user_id lookup. Use the looked-up member's user_id for the
+        # actual accept call.
+        member = trek.find_member_by_email(t, email)
+        if member is None:
+            member = trek.find_member(t, user_id)
+        if member is None:
+            print(
+                f"Error: no invitation found for {email} (user_id={user_id}) "
+                f"in trek {trek_id} — owner must `beacon trek invite` first",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        try:
+            trek.accept_invitation(t, user_id=member["user_id"])
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        trek_store.save_trek(t)
+
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        print(f"Joined trek {trek_id} as {email}")
+
+
+def cmd_trek_stop():
+    """Engage the Andon cord (= set the trek's halt field).
+
+    Env:
+      BEACON_TREK_ID    (required)
+      BEACON_TREK_REASON optional human-readable reason
+      BEACON_SESSION_ID (required, recorded as issued_by_session_id)
+      BEACON_JSON       "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    reason = os.environ.get("BEACON_TREK_REASON", "")
+    session_id = os.environ.get("BEACON_SESSION_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+    if not session_id:
+        print(
+            "Error: BEACON_SESSION_ID is required (= recorded as the session "
+            "that pulled the Andon cord)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            t = client.set_trek_halt(
+                trek_id, issued_by_session_id=session_id, reason=reason,
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        t = trek_store.load_trek(trek_id)
+        if t is None:
+            print(f"Error: trek {trek_id} not found", file=sys.stderr)
+            sys.exit(1)
+        try:
+            trek.set_halt(t, issued_by_session_id=session_id, reason=reason)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        trek_store.save_trek(t)
+
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        suffix = f" — {reason}" if reason else ""
+        print(f"STOP signal raised on trek {trek_id} by {session_id}{suffix}")
+        print("  All participating sessions will halt their autonomous work.")
+        print("  Resume with: beacon trek resume " + trek_id)
+
+
+def cmd_trek_resume():
+    """Clear the halt signal. Idempotent.
+
+    Env:
+      BEACON_TREK_ID  (required)
+      BEACON_JSON     "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        # Server idempotently clears halt; we cannot know "was it halted"
+        # from the post-clear response, so the message just confirms the
+        # outcome.
+        try:
+            client, _config = _get_api_client()
+            t = client.clear_trek_halt(trek_id)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        if json_mode:
+            print(json.dumps(t, ensure_ascii=False))
+        else:
+            print(f"Resumed trek {trek_id} — sessions can continue work")
+        return
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    had_halt = bool(t.get("halt"))
+    trek.clear_halt(t)
+    trek_store.save_trek(t)
+
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        if had_halt:
+            print(f"Resumed trek {trek_id} — sessions can continue work")
+        else:
+            print(f"Trek {trek_id} was not halted (no-op)")
+
+
+def cmd_trek_transfer_leader():
+    """Hand off leader_session_id to another session.
+
+    Env:
+      BEACON_TREK_ID       (required)
+      BEACON_TREK_TO       (required) target session_id
+      BEACON_JSON          "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    target = os.environ.get("BEACON_TREK_TO", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+    if not target:
+        print("Error: --to <session_id> is required", file=sys.stderr)
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        # Cloud mode requires caller's session as `from_session_id` for the
+        # session-grain check. We use BEACON_SESSION_ID (the calling CLI's
+        # session). Server also enforces user-grain leader role.
+        from_session = os.environ.get("BEACON_SESSION_ID", "").strip()
+        if not from_session:
+            print(
+                "Error: BEACON_SESSION_ID is required in cloud mode "
+                "(= the caller's session; server checks it equals the "
+                "current leader_session_id)",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        try:
+            client, _config = _get_api_client()
+            t = client.transfer_trek_leader(
+                trek_id, from_session_id=from_session, to_session_id=target,
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        if json_mode:
+            print(json.dumps(t, ensure_ascii=False))
+        else:
+            print(f"Transferred leader of trek {trek_id}: "
+                  f"{from_session} → {target}")
+        return
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+
+    prior_leader = t.get("leader_session_id")
+    try:
+        trek.transfer_leader(t, target_session_id=target)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    trek_store.save_trek(t)
+
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        print(f"Transferred leader of trek {trek_id}: "
+              f"{prior_leader} → {target}")
+
+
+def cmd_trek_plan():
+    """Edit a trek's scope (= what work items the trek is concerned with).
+
+    Env (exactly one of add/remove must be set):
+      BEACON_TREK_ID            (required)
+      BEACON_TREK_SCOPE_ADD     "<project>[:<ref>]" — append a scope entry
+      BEACON_TREK_SCOPE_REMOVE  "<project>[:<ref>]" — remove a scope entry
+      BEACON_JSON               "1" → json output
+
+    ``ref`` prefix dispatches: ``ms-...`` → milestone, ``op-...`` → operation,
+    ``e-...`` → task; omitted = project-wide scope.
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    add_arg = os.environ.get("BEACON_TREK_SCOPE_ADD", "").strip()
+    remove_arg = os.environ.get("BEACON_TREK_SCOPE_REMOVE", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+    if not add_arg and not remove_arg:
+        print(
+            "Error: --add-scope <ref> or --remove-scope <ref> is required",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if add_arg and remove_arg:
+        print(
+            "Error: pass --add-scope or --remove-scope, not both in one call",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Parse the scope arg with the shared helper so cloud and local agree on
+    # the entry shape. We do this BEFORE branching so syntax errors surface
+    # the same way regardless of mode.
+    try:
+        entry = trek.parse_scope_arg(add_arg or remove_arg)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            kwargs = {
+                "project": entry["project"],
+                "milestone": entry.get("milestone", ""),
+                "operation": entry.get("operation", ""),
+                "task": entry.get("task", ""),
+            }
+            if add_arg:
+                t = client.add_trek_scope(trek_id, **kwargs)
+            else:
+                t = client.remove_trek_scope(trek_id, **kwargs)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        t = trek_store.load_trek(trek_id)
+        if t is None:
+            print(f"Error: trek {trek_id} not found", file=sys.stderr)
+            sys.exit(1)
+        try:
+            if add_arg:
+                trek.add_scope_entry(t, entry=entry)
+            else:
+                trek.remove_scope_entry(t, entry=entry)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        trek_store.save_trek(t)
+
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        verb = "Added" if add_arg else "Removed"
+        ref_display = (add_arg or remove_arg)
+        print(f"{verb} scope {ref_display} on trek {trek_id} "
+              f"(scope: {len(t.get('scope') or [])} items)")
+
+
+def cmd_trek_leave():
+    """Leave a trek (= remove self from members[]).
+
+    Env:
+      BEACON_TREK_ID    (required)
+      BEACON_USER_EMAIL (required, matched against the member's email)
+      BEACON_USER_ID    fallback
+      BEACON_JSON       "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+
+    user_id, email, _ = _resolve_creator_identity()
+    if not email:
+        print(
+            "Error: BEACON_USER_EMAIL is required to leave a trek",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        # Cloud path: server identifies the leaver from auth token; rejects
+        # leader-removal / last-member with 400.
+        try:
+            client, _config = _get_api_client()
+            t = client.leave_trek(trek_id)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        if json_mode:
+            print(json.dumps(t, ensure_ascii=False))
+        else:
+            print(f"Left trek {trek_id} ({email})")
+        return
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+
+    member = trek.find_member_by_email(t, email) or trek.find_member(t, user_id)
+    if member is None:
+        print(
+            f"Error: {email} (user_id={user_id}) is not a member of trek "
+            f"{trek_id}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        trek.remove_member(t, user_id=member["user_id"])
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    trek_store.save_trek(t)
+
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        print(f"Left trek {trek_id} ({email})")
+
+
 def cmd_member_add():
     """Add a member to the project."""
     import operations  # lazy import to avoid circular at module load
@@ -3754,10 +4780,18 @@ def cmd_member_add():
         print(json.dumps(new_member, ensure_ascii=False))
     else:
         print(f"Added member {new_member['id']} ({new_member['role']})")
+        print("  note: this adds a Beacon project member. GitHub repo")
+        print("  collaborator access is separate — set via `gh repo edit --add-collaborator <user>`.")
 
 
 def cmd_member_list():
-    """List members of the project."""
+    """List members of the project.
+
+    ms-78 e-1807: prefer display_name (= the human-friendly label set during
+    invite accept) over the raw id / email when present. Local-mode members
+    use the id-based schema; cloud members use the user_id-based schema —
+    the display logic accepts both.
+    """
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     data = load_project()
     members = core.members_list(data)
@@ -3768,19 +4802,21 @@ def cmd_member_list():
         print("(no members — `beacon member add <id>` to add the first one)")
         return
     print(f"Members ({len(members)}):")
-    # Pretty-print: align role column for readability
-    width = max(len(m.get("id", "")) for m in members) + 2
+    # Pretty-print: align role column for readability. Use display_name (or
+    # name fallback) as the primary label; email goes in the parens.
+    def label(m):
+        return (m.get("display_name") or m.get("name") or
+                m.get("id") or m.get("user_id") or m.get("email") or "?")
+    width = max(len(str(label(m))) for m in members) + 2
     for m in members:
         role = m.get("role", "?")
-        name = m.get("name", "")
+        lbl = label(m)
         email = m.get("email", "")
         extras = []
-        if name and name != m.get("id"):
-            extras.append(name)
-        if email:
+        if email and email != lbl:
             extras.append(email)
         extras_str = f"  ({', '.join(extras)})" if extras else ""
-        print(f"  {m.get('id', '?'):<{width}} {role:<11}{extras_str}")
+        print(f"  {str(lbl):<{width}} {role:<11}{extras_str}")
 
 
 def cmd_member_remove():
@@ -3859,6 +4895,279 @@ def cmd_member_role():
         print(json.dumps(updated, ensure_ascii=False))
     else:
         print(f"Set {updated['id']} role to {updated['role']}")
+
+
+# ---------------------------------------------------------------------------
+# Member invitations (ms-78 e-1805) — token-based invite flow.
+# These thin commands call the server REST API (= no local-mode equivalent;
+# invitations always go through the cloud project doc). The Skill / CLI / Web
+# trinity stays symmetric: the same UC11 invitation can be issued, listed,
+# and cancelled from any of the three surfaces.
+# ---------------------------------------------------------------------------
+
+def _resolve_cloud_project_id() -> tuple[str, "object", "object"]:
+    """Resolve the active cloud project_id + an authenticated ApiClient.
+
+    Returns (project_id, client, creds). Raises SystemExit on failure with a
+    user-friendly message. Used by `member invite / invitation list / cancel /
+    join / whoami` to share one auth-resolve path.
+    """
+    from auth import load_credentials
+    creds = load_credentials()
+    if creds is None:
+        print("Not logged in. Run: beacon auth login", file=sys.stderr)
+        sys.exit(1)
+    api_url = _resolve_active_api_url()
+    from api_client import ApiClient
+    client = ApiClient(api_url, _extract_token(creds))
+    # Read cloud project_id from .beacon/cloud.json (= the same file
+    # `beacon cloud join` writes).
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    cloud_path = os.path.join(beacon_dir, "cloud.json")
+    if not os.path.exists(cloud_path):
+        print(
+            "No cloud project bound to this cwd.\n"
+            "Run `beacon cloud join <project-id>` or `beacon cloud setup` first.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    try:
+        with open(cloud_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        pid = cfg.get("project_id", "")
+    except Exception as e:
+        print(f"Error reading {cloud_path}: {e}", file=sys.stderr)
+        sys.exit(1)
+    if not pid:
+        print(f"cloud.json has no project_id", file=sys.stderr)
+        sys.exit(1)
+    return pid, client, creds
+
+
+def cmd_member_invite():
+    """Issue an invite URL for a Beacon project member (ms-78 e-1805)."""
+    email = (os.environ.get("BEACON_MEMBER_EMAIL", "") or "").strip()
+    role = (os.environ.get("BEACON_MEMBER_ROLE", "") or "viewer").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not email:
+        print("Error: email is required", file=sys.stderr)
+        print("Usage: beacon member invite <email> [--role viewer|editor]",
+              file=sys.stderr)
+        sys.exit(1)
+    pid, client, _ = _resolve_cloud_project_id()
+    try:
+        resp = client.post(
+            f"/api/projects/{pid}/invitations",
+            {"email": email, "role": role},
+        )
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    if json_mode:
+        print(json.dumps(resp, ensure_ascii=False))
+        return
+    url = resp.get("url", "")
+    exp = (resp.get("expires_at") or "")[:10]
+    print(f"Invite URL for {email} ({role}):")
+    print(f"  {url}")
+    print(f"  expires: {exp}")
+    print()
+    print("  Send this URL to the invitee. It can only be used once.")
+    print("  note: this adds a Beacon project member only. GitHub repo")
+    print("  collaborator access is separate — set via")
+    print("  `gh repo edit --add-collaborator <user>`.")
+
+
+def cmd_member_invitation_list():
+    """List pending invitations for the current cloud project (ms-78 e-1805)."""
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    pid, client, _ = _resolve_cloud_project_id()
+    try:
+        resp = client.get(f"/api/projects/{pid}/invitations")
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    items = resp.get("invitations", [])
+    if json_mode:
+        print(json.dumps(items, ensure_ascii=False, indent=2))
+        return
+    if not items:
+        print("(no pending invitations)")
+        return
+    print(f"Pending invitations ({len(items)}):")
+    for inv in items:
+        exp = (inv.get("expires_at") or "")[:10]
+        print(f"  {inv.get('id', '?'):<12} {inv.get('email', ''):<32} "
+              f"{inv.get('role', ''):<8} expires {exp}")
+
+
+def cmd_member_invitation_cancel():
+    """Cancel a pending invitation by id (ms-78 e-1805)."""
+    invitation_id = (os.environ.get("BEACON_INVITATION_ID", "") or "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not invitation_id:
+        print("Error: invitation id required", file=sys.stderr)
+        print("Usage: beacon member invitation cancel <id>", file=sys.stderr)
+        sys.exit(1)
+    pid, client, _ = _resolve_cloud_project_id()
+    try:
+        resp = client.delete(f"/api/projects/{pid}/invitations/{invitation_id}")
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    if json_mode:
+        print(json.dumps(resp, ensure_ascii=False))
+        return
+    inv = resp.get("invitation") or {}
+    print(f"Cancelled invitation {invitation_id} ({inv.get('email', '')}).")
+
+
+def cmd_member_join():
+    """Accept an invite token and bind this cwd to the joined project (ms-78 e-1805).
+
+    Server-side: consumes the invite + adds caller to project members[].
+    Client-side: writes .beacon/cloud.json + .beacon/project.json so subsequent
+    Beacon commands operate against the joined project.
+    """
+    token = (os.environ.get("BEACON_INVITE_TOKEN", "") or "").strip()
+    display_name = (os.environ.get("BEACON_DISPLAY_NAME", "") or "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not token:
+        print("Error: --token is required", file=sys.stderr)
+        print("Usage: beacon member join --token <token> [--display-name <name>]",
+              file=sys.stderr)
+        sys.exit(1)
+    from auth import load_credentials
+    creds = load_credentials()
+    if creds is None:
+        print("Not logged in. Run: beacon auth login first.", file=sys.stderr)
+        sys.exit(1)
+    api_url = _resolve_active_api_url()
+    from api_client import ApiClient
+    client = ApiClient(api_url, _extract_token(creds))
+    try:
+        resp = client.post(
+            f"/api/invitations/{token}/accept",
+            {"display_name": display_name},
+        )
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    pid = resp.get("project_id", "")
+    role = resp.get("role", "")
+    if not pid:
+        print(f"Server returned no project_id: {resp}", file=sys.stderr)
+        sys.exit(1)
+    # Bind this cwd to the joined project by writing cloud.json + project.json,
+    # mirroring `beacon cloud join`.
+    try:
+        data = client.get_project(pid)
+    except RuntimeError as e:
+        print(f"Joined project {pid}, but failed to fetch project doc: {e}",
+              file=sys.stderr)
+        sys.exit(1)
+    core.validate_project(data)
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    os.makedirs(beacon_dir, exist_ok=True)
+    cloud_config_path = os.path.join(beacon_dir, "cloud.json")
+    with open(cloud_config_path, "w", encoding="utf-8") as f:
+        json.dump({"project_id": pid, "api_url": api_url}, f,
+                  indent=2, ensure_ascii=False)
+        f.write("\n")
+    pf = get_project_file()
+    with open(pf, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    if json_mode:
+        print(json.dumps({
+            "status": "joined",
+            "project_id": pid,
+            "project_name": data.get("name", ""),
+            "role": role,
+            "display_name": display_name,
+        }, ensure_ascii=False))
+        return
+    print(f"Joined project {data.get('name', pid)} ({pid}) as {role}.")
+    if display_name:
+        print(f"  display name: {display_name}")
+    print()
+    print("Next steps:")
+    print("  - Run `beacon channel install` in your work directory so other")
+    print("    sessions can DM you.")
+    print("  - In Claude Code, invoke `/beacon-onboard` to load project context.")
+    print("  note: GitHub repo collaborator access is separate — ask the")
+    print("  inviter if you need write access to the repo.")
+
+
+def cmd_member_whoami():
+    """Show the calling user's identity + role on the current cloud project (e-1805)."""
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    from auth import load_credentials
+    creds = load_credentials()
+    if creds is None:
+        print("Not logged in. Run: beacon auth login", file=sys.stderr)
+        sys.exit(1)
+    api_url = _resolve_active_api_url()
+    from api_client import ApiClient
+    client = ApiClient(api_url, _extract_token(creds))
+    # Best-effort: look at .beacon/cloud.json to scope role lookup.
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    cloud_path = os.path.join(beacon_dir, "cloud.json")
+    pid = ""
+    if os.path.exists(cloud_path):
+        try:
+            with open(cloud_path, "r", encoding="utf-8") as f:
+                pid = (json.load(f) or {}).get("project_id", "")
+        except Exception:
+            pid = ""
+    email = ""
+    sub = ""
+    if isinstance(creds, dict):
+        # Token payload may not include email; rely on auth claims if present.
+        email = creds.get("email", "") or creds.get("user_email", "")
+        sub = creds.get("sub", "") or creds.get("user_id", "")
+    # Fallback: ask the server for the caller's projects + role list.
+    role = ""
+    project_name = ""
+    if pid:
+        try:
+            resp = client.get(f"/api/projects/{pid}/members")
+            owner_email = resp.get("owner_email", "")
+            if email and owner_email == email:
+                role = "owner"
+            else:
+                for m in resp.get("members", []) or []:
+                    if (m.get("email") or "") == email:
+                        role = m.get("role", "")
+                        break
+            # Also try to recover the project name for nicer display
+            try:
+                proj = client.get_project(pid)
+                project_name = proj.get("name", "")
+            except Exception:
+                pass
+        except RuntimeError:
+            pass
+    out = {
+        "email": email,
+        "user_id": sub,
+        "project_id": pid,
+        "project_name": project_name,
+        "role": role,
+    }
+    if json_mode:
+        print(json.dumps(out, ensure_ascii=False))
+        return
+    print(f"email:        {email or '(unknown — token has no email claim)'}")
+    if sub:
+        print(f"user_id:      {sub}")
+    if pid:
+        print(f"project_id:   {pid}")
+        if project_name:
+            print(f"project_name: {project_name}")
+        print(f"role:         {role or '(not a member)'}")
+    else:
+        print("(no cloud project bound to this cwd — run `beacon cloud join <id>`)")
 
 
 # ---------------------------------------------------------------------------
@@ -4184,8 +5493,31 @@ def cmd_milestone_graph():
 # ---------------------------------------------------------------------------
 
 def cmd_retro_prepare():
+    """Prepare the JSON payload that /beacon-retro Skill renders into a
+    weekly markdown.
+
+    The historical core path (= ``core.collect_retro_entries``) is kept
+    as the "per-MS narrative grouping" layer — it walks each milestone's
+    entry tree recursively in date order, which is exactly what the Skill
+    wants for the "今週の取り組み" section.
+
+    ms-79 / e-1836 additions:
+
+      - ``source_breakdown`` (source 別件数): a top-level facet showing
+        how many of the week's entries came from human dialog vs auto-op
+        (= envelope auto-execute) vs DM. Generated via the unified
+        ``retro_query`` base so the same human/auto-op/dm tagging used
+        by /beacon-retrospect is reused here without duplication.
+      - ``catch_up`` block: when multiple retro slots are unreviewed
+        (= the retro trigger reports ``overdue_slots`` length > 1), this
+        block surfaces the overdue weeks list so the Skill can offer a
+        catch-up batch path (e-1837 / UC5-F2). The flag
+        ``BEACON_RETRO_CATCH_UP=1`` enables the listing; without it the
+        block is omitted so existing Skill output is unchanged.
+    """
     since = os.environ.get("BEACON_SINCE", "")
     until = os.environ.get("BEACON_UNTIL", "")
+    catch_up_mode = os.environ.get("BEACON_RETRO_CATCH_UP", "") == "1"
     data = load_project()
 
     weekly_milestones = []
@@ -4214,14 +5546,91 @@ def cmd_retro_prepare():
                 "description": dep.get("description", ""),
             })
 
-    output = {
+    # ms-79 / e-1836: source breakdown via the unified retro_query base.
+    # Counts how many of the week's history events were human vs auto-op
+    # vs DM. Silent-fail-tolerant so the retro prepare path never breaks
+    # on a malformed entry — we just omit the breakdown in that case.
+    source_breakdown: dict[str, int] = {}
+    try:
+        import retro_query as _rq  # noqa: PLC0415
+        documents = _load_local_documents()
+        rq_result = _rq.retro_query(
+            data,
+            documents,
+            from_date=since,
+            to_date=until,
+            limit=10_000,
+        )
+        source_breakdown = (rq_result.get("facets") or {}).get("source") or {}
+    except Exception:
+        pass
+
+    output: dict = {
         "project": data.get("name", ""),
         "period": {"since": since, "until": until},
         "summary": data.get("summary", ""),
         "milestones": weekly_milestones,
         "deploys": weekly_deploys,
+        "source_breakdown": source_breakdown,
     }
+
+    # ms-79 / e-1837 (UC5-F2): catch-up batch info.
+    # Read the retro trigger payload (= written by _auto_fire_retro_trigger)
+    # to discover whether more than one slot is overdue. The trigger file
+    # is the canonical record so we don't recompute the slot list here.
+    if catch_up_mode:
+        catch_up_block = _retro_catch_up_block()
+        if catch_up_block:
+            output["catch_up"] = catch_up_block
+
     print(json.dumps(output, ensure_ascii=False))
+
+
+def _retro_catch_up_block() -> Optional[dict]:
+    """Return the catch-up payload built from the persistent retro trigger.
+
+    Shape::
+
+        {
+          "overdue_slots": ["2026-W23", "2026-W24", "2026-W25"],
+          "count": 3,
+          "since_first_overdue": "2026-06-01",
+        }
+
+    Returns ``None`` if there is no retro trigger (= nothing to catch up
+    on) or only a single overdue slot (= the regular retro flow already
+    covers it).
+    """
+    project_dir = os.path.dirname(get_project_file())
+    trigger_path = os.path.join(project_dir, "triggers", "retro.json")
+    if not os.path.exists(trigger_path):
+        return None
+    try:
+        with open(trigger_path, "r", encoding="utf-8") as f:
+            trig = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    overdue = trig.get("overdue_slots") or []
+    if not isinstance(overdue, list) or len(overdue) < 2:
+        return None
+    # Compute the Monday of the earliest overdue slot for since-display.
+    import datetime as _dt
+    since_first = ""
+    try:
+        first_slot = overdue[0]  # YYYY-WNN
+        year_str, wk_str = first_slot.split("-W")
+        year = int(year_str); wk = int(wk_str)
+        jan4 = _dt.date(year, 1, 4)
+        week1_mon = jan4 - _dt.timedelta(days=jan4.weekday())
+        first_mon = week1_mon + _dt.timedelta(weeks=wk - 1)
+        since_first = first_mon.strftime("%Y-%m-%d")
+    except (ValueError, IndexError):
+        pass
+    return {
+        "overdue_slots": overdue,
+        "count": len(overdue),
+        "since_first_overdue": since_first,
+    }
 
 
 def cmd_retro_default_since():
@@ -4894,6 +6303,59 @@ def _cleanup_stale_triggers():
         except (json.JSONDecodeError, KeyError, ValueError, IOError):
             pass
 
+    # ms-80 e-1829: release-marker triggers accumulate forever otherwise (e.g.
+    # 28 markers from v0.8.0 〜 v0.38.1 observed in session-start). Keep only
+    # the *latest* tag's marker (= matches current `version_rules.get_current_tag`),
+    # delete older ones. The current marker is preserved for the "did I post
+    # to Discord?" reminder (= release-due / release-marker pair).
+    _cleanup_old_release_marker_triggers()
+
+
+def _cleanup_old_release_marker_triggers():
+    """Sweep release-marker triggers, keeping only the one matching the
+    current git tag. Older markers accumulate on every release fire and
+    have no signal value once a newer marker exists.
+
+    Silent failures: any git / version_rules / IO error -> no-op.
+    """
+    try:
+        import version_rules
+    except Exception:
+        return
+    triggers_dir = _get_triggers_dir()
+    if not os.path.isdir(triggers_dir):
+        return
+
+    project_dir = os.path.dirname(get_project_file())
+    repo_root = os.path.dirname(project_dir) or "."
+    try:
+        latest_tag = version_rules.get_current_tag(prefix="v", repo_path=repo_root)
+    except Exception:
+        return
+    if not latest_tag:
+        return
+    version_str = latest_tag[1:] if latest_tag.startswith("v") else latest_tag
+    keep_name = f"release-{version_str}"
+
+    for fname in os.listdir(triggers_dir):
+        if not fname.startswith("release-") or not fname.endswith(".json"):
+            continue
+        # Skip release-due (= not a release-marker, different trigger kind)
+        if fname == "release-due.json":
+            continue
+        # Keep the trigger for the current tag
+        if fname == f"{keep_name}.json":
+            continue
+        fpath = os.path.join(triggers_dir, fname)
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                trigger = json.load(f)
+            if trigger.get("kind") != "release-marker":
+                continue
+            os.remove(fpath)
+        except (json.JSONDecodeError, IOError, OSError, ValueError):
+            pass
+
 
 def _auto_fire_operation_triggers():
     import datetime
@@ -5008,7 +6470,7 @@ def _push_trigger_to_bus(trigger_data: dict) -> None:
         if creds is None:
             return
         from api_client import ApiClient
-        api_url = config.get("api_url", DEFAULT_API_URL)
+        api_url = _resolve_active_api_url()
         client = ApiClient(api_url, _extract_token(creds))
         # Channel "trigger" is the convention for system-fired bus events,
         # distinct from "session-dm" used for agent-to-agent chat. Receivers
@@ -5072,7 +6534,7 @@ def _push_operation_trigger_to_bus(op_id: str, log_source: str,
         if creds is None:
             return
         from api_client import ApiClient
-        api_url = config.get("api_url", DEFAULT_API_URL)
+        api_url = _resolve_active_api_url()
         client = ApiClient(api_url, _extract_token(creds))
 
         # e-1393: mint a T2 Operation-scope envelope so the server's verify
@@ -5186,16 +6648,28 @@ def _doc_slug(title):
 
 
 def _is_cloud_mode():
-    """Check if we're in cloud mode (has cloud.json + config mode=cloud)."""
-    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
-    config_path = os.path.join(beacon_dir, "config.json")
+    """Check if we're in cloud mode (single source of truth: cloud.json existence).
+
+    e-1861 (ms-61): The legacy ``config.json["mode"] == "cloud"`` dual-source
+    check was removed because it created a silent drift window: a sub-agent
+    could overwrite ``.beacon/config.json`` to ``{"mode": "local"}`` and the
+    CLI would suddenly read the stale local ``project.json`` instead of cloud,
+    causing apparent user data loss (2026-06-15 incident).
+
+    Beacon is always invoked from Claude Code, which requires internet, so
+    "local mode" has no production use case. ``.beacon/cloud.json`` existence
+    is now the single, structurally protected source of truth. ``BEACON_CLOUD=1``
+    still forces cloud for test harnesses that mock ``cloud.json`` indirectly.
+
+    Any ``mode`` field still sitting in legacy ``config.json`` is ignored
+    (graceful — we never error, we just stop reading it). ``beacon doctor``
+    surfaces the legacy field as a non-fatal migration warning.
+    """
     if os.environ.get("BEACON_CLOUD") == "1":
         return True
-    if os.path.exists(config_path):
-        with open(config_path, "r", encoding="utf-8") as f:
-            config = json.load(f)
-        return config.get("mode") == "cloud"
-    return False
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    cloud_path = os.path.join(beacon_dir, "cloud.json")
+    return os.path.exists(cloud_path)
 
 
 def _resolve_content_input(content: str) -> str:
@@ -5284,24 +6758,37 @@ def _parse_frontmatter(text):
     return meta, body
 
 
-def _add_frontmatter(content, scope, milestone="", operation=""):
-    """Prepend frontmatter to content, or update existing scope/milestone/operation.
+def _add_frontmatter(content, scope, milestone="", operation="", trek_id="",
+                     drop_milestone=False, drop_operation=False):
+    """Prepend frontmatter to content, or update existing scope/milestone/operation/trek_id.
 
     List values are written as inline YAML arrays (``key: ["a", "b"]``) so
     they survive the line-based parser on the next round-trip — block-list
     items containing colons (e.g. ``op:op-2:check_run``) cannot be expressed
     safely in the line-based format and must be normalised.
+
+    ``trek_id`` (ms-69 / e-1663) associates a doc with a cross-project trek;
+    optional, defaults preserved on round-trip.
+
+    ``drop_milestone`` / ``drop_operation`` (e-1859) explicitly remove the
+    matching key from existing frontmatter. ``cmd_doc_update`` sets these
+    when the user switches a doc from milestone scope to operation scope
+    (or vice versa) so the rejected field doesn't linger and produce
+    two-headed (= both milestone and operation set) frontmatter that
+    silently misleads ``/beacon-operation-review`` discovery filters.
     """
     meta, body = _parse_frontmatter(content)
     meta["scope"] = scope
-    if milestone:
+    if drop_milestone:
+        meta.pop("milestone", None)
+    elif milestone:
         meta["milestone"] = milestone
-    elif "milestone" not in meta:
-        pass
-    if operation:
+    if drop_operation:
+        meta.pop("operation", None)
+    elif operation:
         meta["operation"] = operation
-    elif "operation" not in meta:
-        pass
+    if trek_id:
+        meta["trek_id"] = trek_id
     lines = ["---"]
     for k, v in meta.items():
         if isinstance(v, list):
@@ -5334,6 +6821,7 @@ def _read_local_doc(fpath):
     stat = os.stat(fpath)
     updated = datetime.datetime.fromtimestamp(stat.st_mtime).isoformat()
     operation = meta.get("operation", "")
+    trek_id = meta.get("trek_id", "")  # ms-69 / e-1663
     result = {
         "doc_id": fname[:-3],
         "title": title,
@@ -5345,6 +6833,8 @@ def _read_local_doc(fpath):
         result["milestone"] = milestone
     if operation:
         result["operation"] = operation
+    if trek_id:
+        result["trek_id"] = trek_id
     # Soft-delete fields surface so cmd_doc_list can filter without
     # re-parsing the frontmatter (ms-14 e-973).
     if meta.get("status"):
@@ -5442,6 +6932,7 @@ def cmd_doc_add():
     scope = os.environ.get("BEACON_SCOPE", DEFAULT_SCOPE)
     milestone = os.environ.get("BEACON_MS", "")
     operation = os.environ.get("BEACON_OP", "")
+    trek_id = os.environ.get("BEACON_TREK_ID", "")  # ms-69 / e-1663
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not title:
@@ -5483,8 +6974,9 @@ def cmd_doc_add():
         except Exception:
             pass
 
-    # Add frontmatter with scope, milestone, and operation
-    content = _add_frontmatter(content, scope, milestone or "", operation or "")
+    # Add frontmatter with scope, milestone, operation, and trek_id
+    content = _add_frontmatter(content, scope, milestone or "", operation or "",
+                               trek_id or "")
 
     if _is_cloud_mode():
         client, config = _get_api_client()
@@ -5540,7 +7032,16 @@ def cmd_doc_update():
     title = os.environ.get("BEACON_TITLE", "")
     scope = os.environ.get("BEACON_SCOPE", "")
     milestone = os.environ.get("BEACON_MS", "")
+    trek_id = os.environ.get("BEACON_TREK_ID", "")  # ms-69 / e-1663
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    # e-1859: the bin/beacon wrapper sets BEACON_{MS,OP}_SET=1 whenever the
+    # user typed --ms / --op (even with an empty value). This lets us treat
+    # `--ms ms-1` and "did not pass --ms" differently — without it, op-scoped
+    # docs silently keep their `operation:` frontmatter while gaining a
+    # `milestone:` field, producing two-headed scope rows that the
+    # /beacon-operation-review discovery filter can't reason about.
+    ms_explicit = os.environ.get("BEACON_MS_SET", "") == "1"
+    op_explicit = os.environ.get("BEACON_OP_SET", "") == "1"
 
     if not doc_id:
         print("Error: doc_id required")
@@ -5574,15 +7075,43 @@ def cmd_doc_update():
         title = existing.get("title", "")
     if not scope:
         scope = existing.get("scope", DEFAULT_SCOPE)
-    if not milestone:
-        milestone = existing.get("milestone", "")
-    if not operation:
-        operation = existing.get("operation", "")
+
+    # e-1859: scope (= milestone vs operation binding) is treated as mutually
+    # exclusive. The three input modes:
+    #   1. User passed --ms <id>  → switch to milestone scope; drop operation.
+    #   2. User passed --op <id>  → switch to operation scope; drop milestone.
+    #   3. User passed neither    → preserve whichever the doc already had.
+    # If a user passes BOTH --ms and --op in one call, that is a programmer
+    # error; we honor both literally (= same behavior as before this fix) and
+    # leave the duplicated frontmatter visible so the mistake is loud, not
+    # silent.
+    if ms_explicit and not op_explicit:
+        # Mode 1: user wants this doc on a milestone. Drop any prior op.
+        operation = ""
+    elif op_explicit and not ms_explicit:
+        # Mode 2: user wants this doc on an operation. Drop any prior ms.
+        milestone = ""
+    else:
+        # Mode 3 (neither flag) or both flags: preserve whatever wasn't passed.
+        if not milestone:
+            milestone = existing.get("milestone", "")
+        if not operation:
+            operation = existing.get("operation", "")
+
+    if not trek_id:
+        trek_id = existing.get("trek_id", "")
     if not content:
         content = existing.get("content", "")
 
-    # Rebuild with frontmatter
-    content = _add_frontmatter(content, scope, milestone, operation)
+    # Rebuild with frontmatter. e-1859: _add_frontmatter is called with an
+    # explicit "scope wipe" pass so the field we are dropping (= operation
+    # under Mode 1, milestone under Mode 2) is removed from the existing
+    # frontmatter dict instead of being left behind alongside the new field.
+    content = _add_frontmatter(
+        content, scope, milestone, operation, trek_id,
+        drop_milestone=(op_explicit and not ms_explicit),
+        drop_operation=(ms_explicit and not op_explicit),
+    )
 
     if _is_cloud_mode():
         client.update_document(config["project_id"], doc_id, title, content)
@@ -5594,9 +7123,30 @@ def cmd_doc_update():
     import datetime
     data = load_project()
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    core.save_entry(data, ms_id=milestone, description=f"doc update: {title} ({scope})",
-                    source="auto", date=today, revision_id=doc_id,
-                    url=None, hash=None, progress=None)
+    # e-1859: mirror cmd_doc_add's scope-aware entry recording so an
+    # op-scoped doc update lands in op.entries (not the milestone log).
+    # core scope is project-wide and skips entry recording entirely.
+    if scope == "core":
+        pass
+    elif operation:
+        for op in data.get("operations", []):
+            if op.get("id") == operation:
+                eid = core.next_entry_id(data)
+                op.setdefault("entries", []).append({
+                    "id": eid,
+                    "type": "save",
+                    "description": f"doc update: {title} ({scope})",
+                    "status": "done",
+                    "created_at": today,
+                    "done_at": today,
+                    "meta": {"revision_id": doc_id, "source": "auto"},
+                })
+                break
+    else:
+        core.save_entry(data, ms_id=milestone,
+                        description=f"doc update: {title} ({scope})",
+                        source="auto", date=today, revision_id=doc_id,
+                        url=None, hash=None, progress=None)
     save_project(data)
 
     if json_mode:
@@ -5774,6 +7324,38 @@ def cmd_doc_delete():
 DEFAULT_API_URL = "https://beacon-ai.dev"
 
 
+def _resolve_active_api_url() -> str:
+    """Return the api_url of the active profile (ms-64 / e-1458).
+
+    Replaces the previous ``os.environ.get("BEACON_API_URL", DEFAULT_API_URL)``
+    + ``config.get("api_url", DEFAULT_API_URL)`` chain that was duplicated at
+    11+ sites in this module. The profile resolver already implements the full
+    precedence chain (env > cwd cloud.json > profile.json > default), so all
+    sites now go through it and a single point of truth handles the precedence
+    rules.
+
+    The active profile is determined by (in order): ``--profile`` CLI arg
+    (exported as ``BEACON_PROFILE`` by ``bin/beacon`` top-level), then
+    ``BEACON_PROFILE`` env, then cwd ``.beacon/cloud.json`` ``profile`` field,
+    then the ``default`` profile.
+    """
+    try:
+        import profile as _profile  # type: ignore[import-not-found]
+        return _profile.resolve_active_profile().api_url
+    except Exception:
+        # Best-effort fallback: legacy chain. Keeps CLI usable if profile.py
+        # itself is unimportable for any reason (e.g. partial install).
+        api_url = _resolve_active_api_url()
+        config_path = _get_cloud_config_path()
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    api_url = json.load(f).get("api_url", api_url)
+            except Exception:
+                pass
+        return api_url
+
+
 def _get_cloud_config_path():
     beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
     return os.path.join(beacon_dir, "cloud.json")
@@ -5781,9 +7363,18 @@ def _get_cloud_config_path():
 
 def _ensure_cloud_config():
     config_path = _get_cloud_config_path()
+    existing: dict = {}
     if os.path.exists(config_path):
-        with open(config_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                existing = json.load(f) or {}
+        except Exception:
+            existing = {}
+        # Fast path: fully materialized cloud.json (= post-first-push state).
+        if existing.get("project_id"):
+            return existing
+        # Partial cloud.json (e.g. init wrote {"profile": <name>} only) falls
+        # through to the materialization step below, preserving existing fields.
 
     data = load_project()
     name = data.get("name", "project")
@@ -5792,12 +7383,39 @@ def _ensure_cloud_config():
     h = hashlib.md5(os.path.abspath(get_project_file()).encode()).hexdigest()[:6]
     project_id = f"{slug}-{h}"
 
-    api_url = os.environ.get("BEACON_API_URL", DEFAULT_API_URL)
-    config = {"project_id": project_id, "api_url": api_url}
+    # ms-64 e-1633: if profile wasn't pinned at init time (= first push without
+    # a prior `beacon init` having materialized a profile field), prompt once
+    # when the user has multi-account auth state. Skip silently if the choice
+    # was already made (existing.profile), explicitly set (env/--profile), or
+    # the env can't take a prompt (non-TTY).
+    profile_name = existing.get("profile")
+    if not profile_name:
+        chosen = _maybe_prompt_initial_profile()
+        if chosen:
+            profile_name = chosen
+            # Persist immediately so _resolve_active_api_url below sees it
+            # via the cwd cloud.json.profile precedence rule (lib/profile._resolve_api_url).
+            _persist_initial_profile_choice(chosen)
+        else:
+            try:
+                import profile as _profile  # type: ignore[import-not-found]
+                profile_name = _profile.resolve_active_profile().name
+            except Exception:
+                profile_name = "default"
+
+    api_url = _resolve_active_api_url()
+    config = {
+        "project_id": project_id,
+        "api_url": api_url,
+        "profile": profile_name,
+    }
+    # Preserve any unknown fields a partial cloud.json may have already carried.
+    for k, v in existing.items():
+        config.setdefault(k, v)
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
         f.write("\n")
-    print(f"Created {config_path} (project_id: {project_id})")
+    print(f"Created {config_path} (project_id: {project_id}, profile: {profile_name})")
     return config
 
 
@@ -5829,7 +7447,7 @@ def _get_api_client():
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
 
-    api_url = config.get("api_url", DEFAULT_API_URL)
+    api_url = _resolve_active_api_url()
 
     # Use a TokenProvider callable so each request picks up a fresh token.
     # load_credentials() refreshes OAuth tokens automatically; web_auth tokens
@@ -5843,6 +7461,57 @@ def _get_api_client():
     return ApiClient(api_url, _token_provider), config
 
 
+def cmd_doc_image_upload():
+    """ms-43: SPEC / memo / retro 本文に貼る画像を 1 枚アップロードする。
+
+    ローカルファイルパスを受け取って Beacon API にアップロードし、本文に
+    貼り付け可能な markdown img tag (= ``![filename](url)``) を stdout に
+    返す。AI / 人間ともに ``beacon doc image-upload <path>`` を叩いて URL
+    を得てから ``beacon doc update <doc-id>`` で本文に取り込む使い方を
+    想定。
+
+    クラウドモード必須 (= 画像 hosting に GCS bucket を使う、ローカル
+    モードでは UI render 経路が無い)。AWS S3 対応は別 task で拡張する。
+    """
+    local_path = os.environ.get("BEACON_DOC_IMAGE_PATH", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not local_path:
+        print("Error: image file path required (set BEACON_DOC_IMAGE_PATH or pass path as argument)")
+        sys.exit(1)
+    if not os.path.exists(local_path):
+        print(f"Error: file not found: {local_path}")
+        sys.exit(1)
+
+    if not _is_cloud_mode():
+        print("Error: image upload requires cloud mode (run 'beacon cloud push' first)")
+        sys.exit(1)
+
+    client, config = _get_api_client()
+    try:
+        result = client.upload_document_image(config["project_id"], local_path)
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    except ConnectionError as e:
+        print(f"Network error: {e}")
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(result.get("markdown", ""))
+        # ファイル sizeと URL も補助情報として stderr に出す (= stdout を
+        # markdown 単独に保つことで、`beacon doc image-upload x.png` の出力を
+        # そのまま doc 本文へ append できる)。
+        size_kb = result.get("size", 0) / 1024
+        sys.stderr.write(
+            f"Uploaded: {result.get('content_type', '?')}, "
+            f"{size_kb:.1f} KiB\n"
+            f"URL: {result.get('url', '')}\n"
+        )
+
+
 def cmd_cloud_list():
     """List cloud projects via API."""
     from auth import load_credentials
@@ -5851,13 +7520,10 @@ def cmd_cloud_list():
         print("Not logged in. Run: beacon auth login")
         sys.exit(1)
 
-    # cloud list may be called before cloud.json exists, so read api_url from env
-    api_url = os.environ.get("BEACON_API_URL", DEFAULT_API_URL)
-    config_path = _get_cloud_config_path()
-    if os.path.exists(config_path):
-        with open(config_path, "r", encoding="utf-8") as f:
-            config = json.load(f)
-        api_url = config.get("api_url", api_url)
+    # cloud list may be called before cloud.json exists; the profile resolver
+    # already honors the env > cwd cloud.json > profile.json > default chain,
+    # so we just use it directly here (e-1458).
+    api_url = _resolve_active_api_url()
 
     from api_client import ApiClient
     client = ApiClient(api_url, _extract_token(creds))
@@ -5893,7 +7559,7 @@ def cmd_cloud_push():
 
     config = _ensure_cloud_config()
     project_id = config["project_id"]
-    api_url = config.get("api_url", DEFAULT_API_URL)
+    api_url = _resolve_active_api_url()
 
     # In cloud mode, CLI writes go directly to cloud — local project.json is stale.
     # Pushing it would overwrite cloud state and cause data loss.
@@ -5972,12 +7638,9 @@ def cmd_cloud_push():
                 except RuntimeError as e:
                     print(f"  retro error [{week}]: {e}")
 
-    # Auto-switch to cloud mode
-    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
-    config_path = os.path.join(beacon_dir, "config.json")
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump({"mode": "cloud"}, f, indent=2)
-        f.write("\n")
+    # e-1861 (ms-61): cloud.json existence already marks us as cloud-mode
+    # (written above during the push setup), so the legacy config.json
+    # ``{"mode": "cloud"}`` write was retired. Single source of truth = cloud.json.
     print("Switched to cloud mode.")
 
 
@@ -6018,7 +7681,7 @@ def cmd_cloud_status():
     logged_in = creds is not None
 
     print(f"Cloud: {config['project_id']}")
-    print(f"API: {config.get('api_url', DEFAULT_API_URL)}")
+    print(f"API: {_resolve_active_api_url()}")
     print(f"Auth: {'logged in' if logged_in else 'not logged in'}")
 
 
@@ -6084,15 +7747,70 @@ def cmd_pr_add():
         sys.exit(1)
     save_project(data)
 
+    # ms-80 e-1821: 同一 MS に並列で open PR が他にもあれば claim 競合の可能性
+    # を author に知らせる (= 警告のみ、block しない)。
+    conflicts = _detect_pr_claim_conflict(data, ms_id, eid)
+
     if json_mode:
-        print(json.dumps({"entry_id": eid, "url": url, "title": title, "intent": intent,
-                          "commits": len(commits)}, ensure_ascii=False))
+        out = {"entry_id": eid, "url": url, "title": title, "intent": intent,
+               "commits": len(commits)}
+        if conflicts:
+            out["claim_conflicts"] = conflicts
+        print(json.dumps(out, ensure_ascii=False))
     else:
         print(f"Added PR [{eid}]: {title or url}")
         if commits:
             print(f"  Commits: {len(commits)} linked")
         if intent:
             print(f"  Intent: {intent}")
+        if conflicts:
+            print(f"")
+            print(f"⚠ 同じ {ms_id} に並列で open な PR が {len(conflicts)} 件あります (= claim 競合の可能性):")
+            for c in conflicts[:5]:
+                author_str = f" by {c['author']}" if c.get("author") else ""
+                intent_str = f" — {c['intent'][:60]}" if c.get("intent") else ""
+                print(f"  [{c['eid']}] {c['title'] or c['url']}{author_str}{intent_str}")
+            if len(conflicts) > 5:
+                print(f"  (... and {len(conflicts) - 5} more)")
+            print(f"  推奨: `beacon claim` で作業範囲を調整、または各 PR の intent を見直して重複を解消してください。")
+
+
+def _detect_pr_claim_conflict(data: dict, ms_id: str, new_eid: str) -> list:
+    """Return open PR entries under ms_id that may conflict with the newly
+    added PR (= new_eid). Excludes the new entry itself.
+
+    A "conflict" here means another PR is also in_review against the same MS.
+    Author and reviewer should be aware to either coordinate via beacon claim
+    (= ms-55 claim primitives) or split the MS into smaller pieces. The detection
+    is structural (= same ms_id + status=in_review), not semantic — actual
+    overlap is judged by the humans.
+    """
+    if not ms_id:
+        return []
+    conflicts = []
+    for ms in data.get("milestones", []):
+        if ms.get("id") != ms_id:
+            continue
+        for e in ms.get("entries", []):
+            if e.get("type") != "pr":
+                continue
+            if e.get("id") == new_eid:
+                continue
+            if e.get("status") not in ("in_review", "open"):
+                continue
+            meta = e.get("meta") or {}
+            if meta.get("pr_status") not in ("in_review", "open", None):
+                continue
+            conflicts.append({
+                "eid": e.get("id"),
+                "title": e.get("description", ""),
+                "url": meta.get("url", ""),
+                "author": meta.get("author", ""),
+                "intent": meta.get("intent", ""),
+                "date": e.get("date", ""),
+            })
+        break
+    return conflicts
 
 
 def cmd_pr_show():
@@ -7466,6 +9184,16 @@ def cmd_deploy_record():
     insert_before = os.environ.get("BEACON_INSERT_BEFORE", "")  # insert before this deploy-id
     type_override = os.environ.get("BEACON_TYPE", "")  # override: "major" or "minor"
     environment = os.environ.get("BEACON_ENVIRONMENT", "prod")
+    # ms-80 e-1831: backend (= GCP Cloud Run / AWS / TrailNode / custom) を deploy 記録に保存し
+    # backend 別に追えるように。env 未指定 + cloud profile があれば profile name を fallback。
+    backend = os.environ.get("BEACON_BACKEND", "").strip()
+    if not backend:
+        # Active profile を引いて backend を auto-detect (= 例: profile=aws-ga → backend="aws-ga")
+        try:
+            import profile as _profile
+            backend = _profile.resolve_active_profile().name or ""
+        except Exception:
+            backend = ""
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     data = load_project()
@@ -7631,6 +9359,10 @@ def cmd_deploy_record():
         # e-1274: top-level version tag (e.g. v0.22.0). Surfaces in Releases tab
         # without needing to dereference linked_release → releases[*].semver.
         deploy_entry["version"] = version
+    if backend:
+        # ms-80 e-1831: backend 名 (= 例 "default" / "aws-ga" / "trailnode")。multi-backend
+        # 運用で「どの backend に何が反映されたか」を deploy 別に追えるように。
+        deploy_entry["backend"] = backend
     if links_to:
         deploy_entry["links_to"] = links_to
 
@@ -7677,7 +9409,8 @@ def cmd_deploy_record():
         icon = "◉" if deploy_type == "major" else "○"
         ms_str = " ".join(f"[{m}]" for m in affected_ms) or "(no MS detected)"
         ver_str = f" {version}" if version and not semver else ""
-        print(f"{icon} {deploy_id}{ver_str} [{deploy_type}] {ms_str}")
+        backend_str = f" <backend={backend}>" if backend else ""
+        print(f"{icon} {deploy_id}{ver_str} [{deploy_type}]{backend_str} {ms_str}")
         print(f"  {description}")
         if semver:
             print(f"  Release: {release_entry['id']} ({semver})")
@@ -7686,15 +9419,19 @@ def cmd_deploy_record():
 
 
 def cmd_deploy_list():
-    """List deployment records, optionally filtered by environment."""
+    """List deployment records, optionally filtered by environment or backend."""
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     env_filter = os.environ.get("BEACON_ENVIRONMENT", "")
+    # ms-80 e-1831: backend 別 filter (= 例 --backend aws-ga で AWS だけ列挙)
+    backend_filter = os.environ.get("BEACON_BACKEND", "").strip()
     data = load_project()
     deployments = data.get("deployments", [])
     releases = {r["id"]: r for r in data.get("releases", [])}
 
     if env_filter:
         deployments = [d for d in deployments if d.get("environment", "prod") == env_filter]
+    if backend_filter:
+        deployments = [d for d in deployments if d.get("backend", "") == backend_filter]
 
     if json_mode:
         print(json.dumps({"deployments": deployments, "releases": list(releases.values())},
@@ -7712,7 +9449,8 @@ def cmd_deploy_list():
         semver_str = f" {rel['semver']}" if rel and rel.get("semver") else ""
         ms_str = " ".join(d.get("milestones", [])) or "-"
         env_str = f" [{d.get('environment', 'prod')}]" if d.get("environment") not in (None, "prod") else ""
-        print(f"{icon} {d['id']}{semver_str}  {d['date'][:10]}  [{d.get('type','')}]{env_str}  {ms_str}")
+        backend_str = f" <{d['backend']}>" if d.get("backend") else ""
+        print(f"{icon} {d['id']}{semver_str}  {d['date'][:10]}  [{d.get('type','')}]{env_str}{backend_str}  {ms_str}")
         print(f"   {d.get('description', '')}")
         if d.get("links_to"):
             print(f"   patches: {', '.join(d['links_to'])}")
@@ -8537,8 +10275,12 @@ def cmd_cycle_status():
 def cmd_search():
     """Unified search across all Beacon entities (CORE doc 検索基盤の原則 / SPEC 3ne57ccZegYQXDQA03op).
 
-    Delegates the actual work to lib/search.search_project so the CLI, server
-    endpoint, and Skill all share the same logic.
+    Delegates the actual work to ``lib/search.search_project`` for the
+    canonical (= pre-ms-79) path, or to ``lib/retro_query.retro_query``
+    when any ms-79 extension flag is present (source / actor / claim /
+    include_*). retro_query wraps search_project and adds the post-filters
+    plus extension entity merges (= bus archive / session_logs / Trek);
+    see SPEC ms-79 §3 ‘設計の柱 6’ (基盤統合).
     """
     import search as _search  # noqa: PLC0415
 
@@ -8552,6 +10294,15 @@ def cmd_search():
     from_date = os.environ.get("BEACON_FROM", "")
     to_date = os.environ.get("BEACON_TO", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    # ms-79 extension knobs (= /beacon-retrospect Skill が opt-in で渡す).
+    # 空のときは search_project の旧経路で動かして back-compat を保つ。
+    source_list_raw = os.environ.get("BEACON_SOURCE", "").strip()
+    actor_filter = os.environ.get("BEACON_ACTOR", "").strip()
+    claimant_filter = os.environ.get("BEACON_CLAIMANT", "").strip()
+    include_bus_dm = os.environ.get("BEACON_INCLUDE_BUS_DM", "") == "1"
+    include_session_logs = os.environ.get("BEACON_INCLUDE_SESSION_LOGS", "") == "1"
+    include_trek = os.environ.get("BEACON_INCLUDE_TREK", "") == "1"
 
     def _parse_list(env_key: str) -> list[str]:
         raw = os.environ.get(env_key, "").strip()
@@ -8579,24 +10330,63 @@ def cmd_search():
     data = load_project()
     documents = _load_local_documents()
 
-    result = _search.search_project(
-        data,
-        documents,
-        q=query,
-        type=type_list or None,
-        status=status_list or None,
-        priority=priority_list or None,
-        scope=scope_filter,
-        ms=ms_filter,
-        op=op_filter,
-        id=id_filter,
-        assignee=assignee,
-        owner=owner,
-        from_date=from_date,
-        to_date=to_date,
-        limit=limit,
-        offset=offset,
+    source_list = [s.strip() for s in source_list_raw.split(",") if s.strip()] if source_list_raw else None
+    use_retro_query = bool(
+        source_list or actor_filter or claimant_filter
+        or include_bus_dm or include_session_logs or include_trek
     )
+
+    if use_retro_query:
+        import retro_query as _rq  # noqa: PLC0415
+        session_logs = _load_session_logs() if include_session_logs else None
+        bus_archive = _load_bus_archive() if include_bus_dm else None
+        trek_summaries = _load_trek_summaries() if include_trek else None
+        result = _rq.retro_query(
+            data,
+            documents,
+            q=query,
+            type=type_list or None,
+            status=status_list or None,
+            priority=priority_list or None,
+            scope=scope_filter,
+            ms=ms_filter,
+            op=op_filter,
+            id=id_filter,
+            assignee=assignee,
+            owner=owner,
+            from_date=from_date,
+            to_date=to_date,
+            limit=limit,
+            offset=offset,
+            source=source_list,
+            actor=actor_filter,
+            claimant=claimant_filter,
+            include_bus_dm=include_bus_dm,
+            include_session_logs=include_session_logs,
+            include_trek=include_trek,
+            session_logs=session_logs,
+            bus_archive=bus_archive,
+            trek_summaries=trek_summaries,
+        )
+    else:
+        result = _search.search_project(
+            data,
+            documents,
+            q=query,
+            type=type_list or None,
+            status=status_list or None,
+            priority=priority_list or None,
+            scope=scope_filter,
+            ms=ms_filter,
+            op=op_filter,
+            id=id_filter,
+            assignee=assignee,
+            owner=owner,
+            from_date=from_date,
+            to_date=to_date,
+            limit=limit,
+            offset=offset,
+        )
 
     if json_mode:
         print(json.dumps(result, ensure_ascii=False))
@@ -8680,6 +10470,128 @@ def _load_local_documents() -> list[dict]:
             "updated_at": meta.get("updated_at", ""),
         })
     return docs
+
+
+def _load_session_logs() -> list[dict]:
+    """Return session_log entries for the active project (ms-79 / e-1835).
+
+    Cloud mode: pulls ``/api/projects/{id}/session_logs`` (= the
+    aggregated session summaries written by ``beacon session end`` and
+    ``beacon session rescue``).
+
+    Local mode: walks ``.beacon/session_logs/*.json`` if present and
+    returns each as a dict. The local layout is the same shape the cloud
+    endpoint serves, so retro_query needs no mode-aware logic.
+
+    Returns ``[]`` on any failure — retro_query treats this as "no
+    session log source available" and silently skips the merge. This
+    keeps /beacon-retrospect usable on installs that never enabled the
+    session_log subcollection.
+    """
+    try:
+        if _is_cloud_mode():
+            client, config = _get_api_client()
+            try:
+                rows = client.list_session_logs(config["project_id"]) or []
+                # tolerate either dict or list responses
+                if isinstance(rows, dict):
+                    rows = rows.get("session_logs") or rows.get("items") or []
+                return rows if isinstance(rows, list) else []
+            except Exception:
+                return []
+        # Local mode: look for .beacon/session_logs/*.json
+        project_dir = os.path.dirname(get_project_file())
+        sl_dir = os.path.join(project_dir, "session_logs")
+        if not os.path.isdir(sl_dir):
+            return []
+        out: list[dict] = []
+        for fname in os.listdir(sl_dir):
+            if not fname.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(sl_dir, fname), "r", encoding="utf-8") as f:
+                    rec = json.load(f)
+                if isinstance(rec, dict):
+                    out.append(rec)
+            except (OSError, json.JSONDecodeError):
+                continue
+        return out
+    except Exception:
+        return []
+
+
+def _load_bus_archive() -> list[dict]:
+    """Return DM / bus event archive entries (ms-79 / e-1832 / UC10-F1).
+
+    Reads ``.beacon/bus_archive/*.json`` if the install has captured
+    DM history (= ms-54 envelope archive). Returns ``[]`` if nothing is
+    persisted — retro_query then silently skips the merge.
+
+    Per SPEC ms-79 §8 ‘やらないこと’: we do not change the archive
+    schema, we only **read** it. Whatever shape ms-54 writes is what
+    we surface, with the renderer in lib/retro_query tolerating missing
+    fields.
+    """
+    try:
+        project_dir = os.path.dirname(get_project_file())
+        ba_dir = os.path.join(project_dir, "bus_archive")
+        if not os.path.isdir(ba_dir):
+            return []
+        out: list[dict] = []
+        for fname in os.listdir(ba_dir):
+            if not fname.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(ba_dir, fname), "r", encoding="utf-8") as f:
+                    rec = json.load(f)
+                if isinstance(rec, dict):
+                    out.append(rec)
+                elif isinstance(rec, list):
+                    # support an archive-as-list layout if any install uses it
+                    out.extend(r for r in rec if isinstance(r, dict))
+            except (OSError, json.JSONDecodeError):
+                continue
+        return out
+    except Exception:
+        return []
+
+
+def _load_trek_summaries() -> list[dict]:
+    """Return Trek summary entries (ms-79 / e-1835 / UC10-F4).
+
+    Cloud mode: walks each trek's summaries via the API client (= ms-69
+    Trek records carry their own summary list).
+
+    Local mode: walks ``.beacon/treks/*/summaries/*.json`` if present.
+
+    Returns ``[]`` on any failure — retro_query handles the absence
+    gracefully.
+    """
+    out: list[dict] = []
+    try:
+        # Local mode walk (also useful as a cache when cloud sync is on).
+        project_dir = os.path.dirname(get_project_file())
+        treks_dir = os.path.join(project_dir, "treks")
+        if os.path.isdir(treks_dir):
+            for trek_name in os.listdir(treks_dir):
+                summaries_dir = os.path.join(treks_dir, trek_name, "summaries")
+                if not os.path.isdir(summaries_dir):
+                    continue
+                for fname in os.listdir(summaries_dir):
+                    if not fname.endswith(".json"):
+                        continue
+                    try:
+                        with open(os.path.join(summaries_dir, fname),
+                                  "r", encoding="utf-8") as f:
+                            rec = json.load(f)
+                        if isinstance(rec, dict):
+                            rec.setdefault("trek_id", trek_name)
+                            out.append(rec)
+                    except (OSError, json.JSONDecodeError):
+                        continue
+    except Exception:
+        pass
+    return out
 
 
 def _find_all_on_path(name: str) -> list[str]:
@@ -8993,6 +10905,44 @@ def _doctor_check_project_staleness():
     return []
 
 
+def _doctor_check_claude_md_principle_marker():
+    """Detect when CLAUDE.md lacks the entry-writing-principle marker.
+
+    ms-68 / e-1640: the principle (= `entry-writing-principle` CORE doc) must
+    live in CLAUDE.md so every session / every tool call has it in context.
+    If the marker `<!-- BEACON_ENTRY_WRITING_PRINCIPLE -->` is missing, the
+    section was either never installed (legacy projects predating ms-68) or
+    silently dropped by a manual edit. Warning-level only — never block.
+
+    Returns a list of warning strings. Empty list = OK, or skip (no CLAUDE.md
+    in cwd, which is not a beacon-managed project).
+    """
+    claude_md = "CLAUDE.md"
+    marker = "<!-- BEACON_ENTRY_WRITING_PRINCIPLE -->"
+
+    # No CLAUDE.md = not a beacon-managed project from this cwd, skip silently.
+    if not os.path.exists(claude_md):
+        return []
+
+    try:
+        with open(claude_md, "r", encoding="utf-8") as f:
+            content = f.read()
+    except OSError:
+        return []
+
+    if marker in content:
+        return []
+
+    return [
+        "WARN [entry-writing-principle] CLAUDE.md lacks the entry writing principle section.\n"
+        f"       Missing marker: {marker}\n"
+        "       Beacon's task/spec/doc readers include non-developers — the principle\n"
+        "       (reader-first 1-line / loanword tiers / ID context / no truncated sentences)\n"
+        "       must live in CLAUDE.md so it is in context for every session.\n"
+        "       Run: beacon common-setup   (re-installs CLAUDE.md beacon section)"
+    ]
+
+
 def cmd_doctor():
     """Lightweight environment health check for Beacon.
 
@@ -9146,32 +11096,40 @@ def cmd_doctor():
     # ------------------------------------------------------------------ #
     # 5. cloud.json present and valid (only when in a beacon project dir)
     # ------------------------------------------------------------------ #
+    # e-1861 (ms-61): cloud.json existence is the sole source of truth for
+    # cloud mode. config.json's ``mode`` field was retired because it could
+    # be silently overwritten by a sub-agent to flip cloud → local without
+    # touching cloud.json (2026-06-15 incident). doctor now:
+    #   (a) validates cloud.json shape directly when present, and
+    #   (b) surfaces any legacy ``mode`` field still in config.json as a
+    #       gentle migration warning (non-fatal, ignored by the runtime).
     cloud_json_path = os.path.join(".beacon", "cloud.json")
     config_json_path = os.path.join(".beacon", "config.json")
+    if os.path.exists(cloud_json_path):
+        try:
+            with open(cloud_json_path, "r", encoding="utf-8") as _f:
+                _cloud = json.load(_f)
+            if not _cloud.get("api_url"):
+                warnings.append(
+                    "WARN [cloud.json] api_url is not set in .beacon/cloud.json.\n"
+                    "       Run: beacon cloud push"
+                )
+        except Exception:
+            warnings.append(
+                "WARN [cloud.json] .beacon/cloud.json is unreadable.\n"
+                "       Run: beacon cloud push"
+            )
     if os.path.exists(config_json_path):
         try:
             with open(config_json_path, "r", encoding="utf-8") as _f:
                 _config = json.load(_f)
-            if _config.get("mode") == "cloud":
-                if not os.path.exists(cloud_json_path):
-                    warnings.append(
-                        "WARN [cloud.json] Project is in cloud mode but .beacon/cloud.json is missing.\n"
-                        "       Run: beacon cloud push"
-                    )
-                else:
-                    try:
-                        with open(cloud_json_path, "r", encoding="utf-8") as _f:
-                            _cloud = json.load(_f)
-                        if not _cloud.get("api_url"):
-                            warnings.append(
-                                "WARN [cloud.json] api_url is not set in .beacon/cloud.json.\n"
-                                "       Run: beacon cloud push"
-                            )
-                    except Exception:
-                        warnings.append(
-                            "WARN [cloud.json] .beacon/cloud.json is unreadable.\n"
-                            "       Run: beacon cloud push"
-                        )
+            if isinstance(_config, dict) and "mode" in _config:
+                warnings.append(
+                    "WARN [legacy-mode-field] .beacon/config.json still contains a `mode` field.\n"
+                    "       This field is ignored as of e-1861 (ms-61) — cloud.json existence\n"
+                    "       is now the sole source of truth. The field is harmless but can be\n"
+                    "       removed manually for cleanliness."
+                )
         except Exception:
             pass  # config.json unreadable — not a fatal error
 
@@ -9260,6 +11218,16 @@ def cmd_doctor():
     warnings.extend(_doctor_check_project_staleness())
 
     # ------------------------------------------------------------------ #
+    # 10. CLAUDE.md entry-writing-principle marker (ms-68 / e-1640)
+    # ------------------------------------------------------------------ #
+    # Detect when CLAUDE.md is missing the marker that anchors the
+    # entry-writing-principle section. Without it, the principle drops
+    # out of every-session context and AI silently breaks reader-first /
+    # loanword / ID-context / no-truncation rules. Warning-level only.
+    if os.environ.get("BEACON_DOCTOR_SKIP_PRINCIPLE_MARKER") != "1":
+        warnings.extend(_doctor_check_claude_md_principle_marker())
+
+    # ------------------------------------------------------------------ #
     # Summary
     # ------------------------------------------------------------------ #
     if warnings:
@@ -9304,6 +11272,7 @@ def cmd_help_json():
         {"command": "beacon doc list", "flags": ["--json", "--scope <scope>", "--ms <id>"], "description": "List documents"},
         {"command": "beacon doc show <doc-id>", "flags": [], "description": "Show document content"},
         {"command": "beacon doc update <doc-id>", "flags": ["--content <text>", "--stdin"], "description": "Update document content"},
+        {"command": "beacon doc image-upload <local-file>", "flags": ["--json"], "description": "Upload image, get markdown img tag"},
         {"command": "beacon pr add", "flags": ["-m <ms-id>", "--url <url>", "--intent <text>"], "description": "Record a PR entry"},
         {"command": "beacon pr approve <entry-id>", "flags": [], "description": "Approve a PR"},
         {"command": "beacon pr reject <entry-id>", "flags": [], "description": "Reject a PR"},
@@ -9311,20 +11280,53 @@ def cmd_help_json():
         {"command": "beacon retro", "flags": [], "description": "Start weekly retrospective (interactive)"},
         {"command": "beacon trigger check", "flags": [], "description": "Check pending triggers (JSON array)"},
         {"command": "beacon cloud list", "flags": [], "description": "List cloud projects"},
-        {"command": "beacon cloud push", "flags": [], "description": "Push local project to cloud"},
-        {"command": "beacon cloud pull", "flags": [], "description": "Pull project from cloud"},
+        {"command": "beacon cloud upload-initial", "flags": ["--force"], "description": "Initial bootstrap upload to a new cloud project (e-1862); alias of legacy 'push'"},
+        {"command": "beacon cloud force-pull", "flags": [], "description": "Emergency overwrite local from cloud (e-1862); alias of legacy 'pull'"},
+        {"command": "beacon cloud push", "flags": ["--force"], "description": "Legacy alias for upload-initial (deprecated, kept for backward compat)"},
+        {"command": "beacon cloud pull", "flags": [], "description": "Legacy alias for force-pull (deprecated, kept for backward compat)"},
         {"command": "beacon cloud join <id>", "flags": [], "description": "Join an existing cloud project"},
         {"command": "beacon auth login", "flags": [], "description": "Sign in with Google"},
         {"command": "beacon auth logout", "flags": [], "description": "Remove cached credentials"},
         {"command": "beacon auth status", "flags": [], "description": "Show login status"},
         {"command": "beacon skill install", "flags": [], "description": "Install Claude Code Skills to ~/.claude/skills/"},
         {"command": "beacon monitor context", "flags": ["--dry-run"], "description": "Stop hook: context-usage threshold monitor (e-854); --dry-run skips note/state writes"},
+        # ms-69 e-1652+: Trek = cross-project / cross-session collaboration area
+        {"command": "beacon trek create <title>", "flags": ["--type temporary|persistent", "--description <text>", "--json"], "description": "Create a trek (cross-project協奏作業領域); caller becomes leader (ms-69)"},
+        {"command": "beacon trek list", "flags": ["--status <s>", "--include-archived", "--all-actors", "--json"], "description": "List treks visible to the caller"},
+        {"command": "beacon trek show <trek-id>", "flags": ["--json"], "description": "Show trek detail (members / scope / status / halt)"},
+        {"command": "beacon trek start <trek-id>", "flags": ["--json"], "description": "Transition trek planning → active"},
+        {"command": "beacon trek archive <trek-id>", "flags": ["--json"], "description": "Archive trek (= terminal); restart by creating a new one"},
+        {"command": "beacon trek invite <trek-id> --actor <email>", "flags": ["--notify", "--json"], "description": "Invite a user (by email) into the trek"},
+        {"command": "beacon trek join <trek-id>", "flags": ["--json"], "description": "Accept own invitation"},
+        {"command": "beacon trek leave <trek-id>", "flags": ["--json"], "description": "Remove self from the trek (leader must transfer first)"},
+        {"command": "beacon trek plan <trek-id>", "flags": ["--add-scope <project:ref>", "--remove-scope <project:ref>", "--json"], "description": "Edit trek scope (cross-project refs ms-/op-/e-)"},
+        {"command": "beacon trek stop <trek-id>", "flags": ["--reason <text>", "--json"], "description": "Pull the Andon cord (= halt signal, sessions pause)"},
+        {"command": "beacon trek resume <trek-id>", "flags": ["--json"], "description": "Clear the halt signal"},
+        {"command": "beacon trek transfer-leader <trek-id> --to <session-id>", "flags": ["--json"], "description": "Hand off leader_session_id to another session"},
         # ms-54 e-1266: DM channel lifecycle commands (install / uninstall / opt-out / opt-in / status)
         {"command": "beacon channel install", "flags": [], "description": "Install beacon-bus MCP entry into .mcp.json (DM channel for multi-session messaging)"},
         {"command": "beacon channel uninstall", "flags": ["--purge-files", "--keep-files"], "description": "Remove beacon-bus MCP entry; --purge-files also wipes channel/node_modules (moved to .trash/)"},
         {"command": "beacon channel opt-out", "flags": ["--project", "--global"], "description": "Block all install / auto-install attempts (persistent flag)"},
         {"command": "beacon channel opt-in", "flags": ["--project", "--global"], "description": "Lift the opt-out flag at project or global scope"},
         {"command": "beacon channel status", "flags": [], "description": "Show install / files / opt-out / next-action state in one screen"},
+        # ms-55 e-1736: coordination signals (= 走る / 止まる両輪).
+        # SPEC `bnzTXhu6KYIMfVE2Ivy2` for the design; landed in
+        # e-1646 (stop) / e-1647 (rollback) / e-1648 (claim) /
+        # e-1649 (stuck) / e-1650 (morning).
+        {"command": "beacon stop scoped <target>", "flags": ["--kind ms|task|session", "--reason-kind <k>", "--reason <text>", "--json"], "description": "Broadcast a STOP signal at a single MS / task / session (Andon cord — anyone can halt)"},
+        {"command": "beacon stop global", "flags": ["--reason-kind <k>", "--reason <text>", "--json"], "description": "Broadcast STOP across every active autonomous session (everything-stops fallback)"},
+        {"command": "beacon stop status", "flags": ["--json"], "description": "Show the latest stop / resume state from the stop-signal channel"},
+        {"command": "beacon resume scoped <target>", "flags": ["--kind ms|task|session", "--reason <text>", "--json"], "description": "Clear a scoped STOP, allowing the targeted session(s) to resume work"},
+        {"command": "beacon resume global", "flags": ["--reason <text>", "--json"], "description": "Clear a global STOP across every autonomous session"},
+        {"command": "beacon rollback", "flags": ["--commits N", "--reason <text>", "--dry-run", "--no-record", "--json"], "description": "Undo working tree (git stash) + N local commits (--soft reset); push past upstream → report-only with compensation proposals"},
+        {"command": "beacon claim request <kind>:<id>", "flags": ["--intent <text>", "--json"], "description": "Announce intent to take a target (ms/task/operation/trek/free); other sessions can respond"},
+        {"command": "beacon claim respond <claim-id>", "flags": ["--accept|--reject", "--reason <text>", "--json"], "description": "Respond to another session's claim request"},
+        {"command": "beacon claim post <kind>:<id>", "flags": ["--intent <text>", "--json"], "description": "Post-hoc record that this session already started on the target (no request/response dance)"},
+        {"command": "beacon claim handoff <claim-id> --to <session>", "flags": ["--reason <text>", "--json"], "description": "Transfer an active claim to a different session"},
+        {"command": "beacon claim release <claim-id>", "flags": ["--outcome completed|abandoned", "--reason <text>", "--json"], "description": "Release a claim (outcome surfaces in `beacon morning` as 完了 or skip)"},
+        {"command": "beacon claim list", "flags": ["--json"], "description": "List active claims from local `.beacon/active_claims.json` (= restart restore path)"},
+        {"command": "beacon stuck check", "flags": ["--telemetry-file <path>", "--idle-min N", "--json"], "description": "Detect sessions idle past --idle-min; emit STUCK stop signals so morning briefing surfaces 介入要望"},
+        {"command": "beacon morning", "flags": ["--since-hours N", "--events-file <path>", "--no-doc", "--json"], "description": "4-bucket digest of recent autonomous activity (完了 / 停止 / skip / 介入要望); auto-saves as scope=report doc"},
         {"command": "beacon help", "flags": ["--json"], "description": "Show help (--json for machine-readable output)"},
     ]
     print(json.dumps({"version": __version__, "commands": commands}, ensure_ascii=False, indent=2))
@@ -10476,6 +12478,82 @@ def cmd_bus_send():
     print(line)
 
 
+def _fetch_pending_dm_lookup(client, project_id: str) -> dict:
+    """Fetch the project-scoped pending sidecar map for inline banner emission.
+
+    Used by ``cmd_bus_listen`` / ``cmd_bus_receive`` (ms-70 / e-1715) to
+    decide whether to print a banner before each event. Returns
+    ``{event_id: row}`` (= via ``lib/dm_pending.build_pending_lookup``).
+
+    All failures (= cloud unconfigured, endpoint absent on a server
+    older than e-1714, transient network blip, auth missing) collapse
+    to an empty dict — the CLI's existing event-stream output keeps
+    flowing untouched. This is the explicit AC requirement: sidecar
+    lookup failure MUST NOT break legacy listen / receive behaviour.
+
+    We deliberately do NOT pass ``receiver_user_id`` because resolving
+    the local user_id at this point would require touching the auth
+    layer (= ``.beacon/cloud.json`` / ``~/.beacon/auth.json``) which
+    has multiple resolution orders. The endpoint is membership-gated,
+    so the empty receiver_user_id case returns all project-scoped
+    pending rows; the banner only fires for events that actually appear
+    in *this* recipient's unread feed, which is the natural filter.
+    """
+    try:
+        from dm_pending import build_pending_lookup
+    except Exception:
+        return {}
+    try:
+        rows = client.get(
+            f"/api/projects/{project_id}/dm/pending"
+            f"?receiver_user_id=&limit=200"
+        )
+    except Exception:
+        # Silent: this includes 404 (older server), 401 (no token),
+        # 5xx (transient), and OSError (no network).
+        return {}
+    if not isinstance(rows, list):
+        return {}
+    try:
+        return build_pending_lookup(rows)
+    except Exception:
+        return {}
+
+
+def _print_event_with_banner(ev: dict, pending_lookup: dict) -> None:
+    """Print a single bus event JSON line, optionally preceded by the
+    pending-DM banner.
+
+    ms-70 / e-1715: if ``ev['event_id']`` is in ``pending_lookup`` (= the
+    dispatcher gate set ``approval_status="pending"`` for this envelope),
+    emit a structurally recognizable banner line first so the AI session
+    consuming the stream stops and asks the user before acting on the
+    envelope's actions_authorized.
+
+    Banner formatting / contract lives in ``lib/dm_pending.py``. This
+    function is intentionally a thin wrapper so the legacy "just print
+    JSON" behaviour stays one line away in a diff.
+    """
+    if pending_lookup:
+        eid = ev.get("event_id")
+        if eid and eid in pending_lookup:
+            try:
+                from dm_pending import format_inline_dm_banner
+                row = pending_lookup[eid]
+                banner = format_inline_dm_banner(
+                    eid,
+                    sender_user_id=row.get("sender_user_id", ""),
+                    created_at=row.get("created_at", ""),
+                )
+                print(banner, flush=True)
+            except Exception:
+                # If formatting fails for any reason, fall back to the
+                # plain JSON line. The AC says "do not break legacy
+                # output"; missing banner is worse than missing JSON.
+                pass
+    print(json.dumps(ev, ensure_ascii=False), flush=True)
+
+
 def cmd_bus_listen():
     """Long-poll /bus/unread and stream each event as one JSON line on stdout.
 
@@ -10487,6 +12565,13 @@ def cmd_bus_listen():
     The loop ends only on SIGINT or when the optional ``--once`` mode has
     delivered a batch. There is no implicit timeout — callers wanting one
     should use ``beacon bus receive --timeout`` instead.
+
+    ms-70 / e-1715: before printing each event, look up its sidecar
+    ``approval_status``. If pending, emit an inline banner so the AI
+    session reading the stream stops and asks the user before acting.
+    Sidecar lookup failures (= older server / no auth / network) silently
+    fall back to the legacy "just JSON" output — the banner is added on
+    top of the existing contract, not in place of it.
     """
     import time
     recipient = _bus_resolve_recipient()
@@ -10506,8 +12591,14 @@ def cmd_bus_listen():
                 project_id, recipient, channel=channel,
             )
             if events:
+                # e-1715: refresh sidecar lookup once per batch so a
+                # newly-approved row in the middle of a poll loop stops
+                # banner emission on the very next poll. Per-event
+                # lookups would be more accurate but multiply HTTP cost
+                # by N — batch granularity is the right tradeoff.
+                pending_lookup = _fetch_pending_dm_lookup(client, project_id)
                 for ev in events:
-                    print(json.dumps(ev, ensure_ascii=False), flush=True)
+                    _print_event_with_banner(ev, pending_lookup)
                 if auto_ack:
                     last_ts = events[-1].get("created_at", "")
                     if last_ts:
@@ -10520,7 +12611,14 @@ def cmd_bus_listen():
 
 
 def cmd_bus_receive():
-    """Block until a single batch of events arrives (or ``--timeout`` elapses)."""
+    """Block until a single batch of events arrives (or ``--timeout`` elapses).
+
+    ms-70 / e-1715: same inline pending-DM banner injection as
+    ``cmd_bus_listen``. ``beacon bus receive`` is the one-shot variant
+    used by ``beacon-bus-inbox-hook.py`` and ad-hoc scripts; treating
+    its output identically keeps the AI gate contract (= banner-then-event)
+    uniform across the two CLI entry points.
+    """
     import time
     recipient = _bus_resolve_recipient()
     channel = os.environ.get("BEACON_BUS_CHANNEL", "").strip()
@@ -10543,8 +12641,9 @@ def cmd_bus_receive():
             project_id, recipient, channel=channel,
         )
         if events:
+            pending_lookup = _fetch_pending_dm_lookup(client, project_id)
             for ev in events:
-                print(json.dumps(ev, ensure_ascii=False))
+                _print_event_with_banner(ev, pending_lookup)
             if auto_ack:
                 last_ts = events[-1].get("created_at", "")
                 if last_ts:
@@ -10687,6 +12786,255 @@ def cmd_bus_status():
     print(_row("✓" if delivered_at else "✗", "delivered", delivered_at,
                delivered_by))
     print(_row("✓" if opened_at else "✗", "opened", opened_at, opened_by))
+
+
+def cmd_dm_respond():
+    """Receiver-side decision CLI for a pending DM-action envelope (e-1716).
+
+    Usage shape (= what the user types in their terminal):
+      beacon dm respond approve <event_id>
+      beacon dm respond deny    <event_id>
+
+    SPEC 設計方針 3 ("承認は terminal Claude Code 内での user 直接判断のみ"):
+    this primitive is reached by a human typing the command, never by an
+    autonomous AI loop. The server stamps ``decision_by`` from the Bearer
+    token's ``sub`` claim — the CLI cannot forge a different actor.
+
+    Args flow through env vars set by ``bin/beacon`` dispatch:
+      * ``BEACON_DM_DECISION``  = "approve" | "deny"
+      * ``BEACON_DM_EVENT_ID``  = sidecar event_id (= parent bus_event id)
+      * ``BEACON_BUS_PROJECT_ID`` = optional --project override (same
+        semantics as bus subcmd)
+      * ``BEACON_JSON`` = "1" emits the resulting 7-field sidecar row as
+        JSON instead of a human summary
+
+    Exit codes:
+      * 0 — decision accepted (or idempotent no-op for "same user resubmits
+        same decision")
+      * 1 — server reported a structural error (404 unknown event_id, 403
+        not your envelope, 409 already-decided / auto)
+      * 2 — bad CLI usage (missing args)
+    """
+    decision = os.environ.get("BEACON_DM_DECISION", "").strip().lower()
+    event_id = os.environ.get("BEACON_DM_EVENT_ID", "").strip()
+
+    if decision not in ("approve", "deny"):
+        print(
+            "Usage: beacon dm respond approve <event_id>\n"
+            "       beacon dm respond deny    <event_id>\n"
+            "  Decide a pending cross-user DM action envelope. Only the\n"
+            "  intended receiver (= the addressee on the sidecar) can press\n"
+            "  approve/deny; the server enforces this via the Bearer token.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if not event_id:
+        print(
+            "Error: <event_id> required.\n"
+            "  Example: beacon dm respond approve evt-abc12345",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    client, config = _get_api_client()
+    project_id = _resolve_bus_project_id(config)  # respects --project override
+
+    try:
+        row = client.respond_dm_approval(
+            project_id, event_id, decision=decision
+        )
+    except Exception as e:
+        # api_client raises RuntimeError("API error <code>: <detail>") on
+        # HTTP errors. Surface a single human line — not a stacktrace —
+        # because the human is staring at this terminal.
+        msg = str(e)
+        if "404" in msg:
+            print(
+                f"Error: no pending approval for event_id={event_id!r} "
+                f"in project {project_id!r}.\n"
+                "  Either the envelope was already auto-allowed (legacy "
+                "path), the event_id is wrong, or the sidecar has not\n"
+                "  landed yet.",
+                file=sys.stderr,
+            )
+        elif "403" in msg:
+            print(
+                f"Error: event_id={event_id!r} is addressed to a different "
+                "user; only the intended receiver can decide it.\n"
+                f"  ({msg})",
+                file=sys.stderr,
+            )
+        elif "409" in msg:
+            print(
+                f"Error: event_id={event_id!r} is already in a terminal "
+                "state (approved / denied / auto).\n"
+                f"  ({msg})",
+                file=sys.stderr,
+            )
+        else:
+            print(f"Error: {msg}", file=sys.stderr)
+        sys.exit(1)
+
+    if os.environ.get("BEACON_JSON", "") == "1":
+        print(json.dumps(row, ensure_ascii=False))
+        return
+
+    # Human-readable summary. Verb + 7-field row in compact form.
+    verb_past = "approved" if decision == "approve" else "denied"
+    print(f"{verb_past}: event_id={row.get('event_id', event_id)}")
+    print(f"  status:      {row.get('approval_status', '')}")
+    print(f"  decision_by: {row.get('decision_by', '')}")
+    print(f"  decision_at: {row.get('decision_at', '')}")
+    print(f"  sender:      {row.get('sender_user_id', '')}")
+    print(f"  receiver:    {row.get('receiver_user_id', '')}")
+
+
+def cmd_dm_log():
+    """Audit-history CLI for decided DM-action sidecars (ms-70 / e-1923).
+
+    Usage shape (= what the user types in their terminal):
+      beacon dm log [<project_id>] [--limit N] [--json] [--project <id>]
+
+    This is the CLI mirror of the Web UI Settings > Audit table that
+    landed in e-1718 (commit 4c5052f). Both surfaces read the same
+    server endpoint ``GET /api/projects/{pid}/dm/approval/history`` and
+    show the same 6 fields (status / sender / receiver / decision_at /
+    decision_by / event_id) — the Web UI as a styled table, the CLI as
+    a fixed-column ASCII view sized for a terminal.
+
+    SPEC 設計方針 3 ("承認は terminal Claude Code 内での user 直接判断のみ"):
+    this view is read-only by design. The server filters out ``pending``
+    and ``auto`` rows so a future contributor cannot wire an
+    approve / deny button onto this output.
+
+    Args flow through env vars set by ``bin/beacon`` / ``dispatch.py``:
+      * ``BEACON_DM_LOG_PROJECT_ID`` = optional positional project_id
+        (= the cloud project to read history from; defaults to the
+        cwd's project)
+      * ``BEACON_DM_LOG_LIMIT`` = optional row limit (defaults to 50,
+        server caps at 500)
+      * ``BEACON_BUS_PROJECT_ID`` = ``--project <id>`` override (same
+        semantics as the bus / dm respond subcmds)
+      * ``BEACON_JSON`` = "1" emits the raw rows list as JSON instead
+        of the 6-column ASCII table
+
+    Exit codes:
+      * 0 — rows printed (zero rows is success, surfaces an empty-state
+        line so a tail of "no decisions yet" is distinguishable from a
+        broken pipe)
+      * 1 — server reported a structural error (membership 403, 404, etc.)
+      * 2 — bad CLI usage (currently unreachable: all flags have defaults)
+    """
+    # Positional project_id (if any) wins over the cwd default but loses
+    # to an explicit --project override (= same precedence as bus subcmds).
+    positional_pid = os.environ.get("BEACON_DM_LOG_PROJECT_ID", "").strip()
+    limit_raw = os.environ.get("BEACON_DM_LOG_LIMIT", "").strip()
+    try:
+        limit = int(limit_raw) if limit_raw else 50
+    except ValueError:
+        print(
+            f"Error: --limit must be an integer, got {limit_raw!r}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if limit <= 0:
+        limit = 50
+
+    client, config = _get_api_client()
+    project_id = _resolve_bus_project_id(config)
+    if not project_id and positional_pid:
+        project_id = positional_pid
+    elif positional_pid and not os.environ.get("BEACON_BUS_PROJECT_ID", "").strip():
+        # Positional arg supplied without --project override: positional wins
+        # over cwd default. (= matches the help-banner shape.)
+        project_id = positional_pid
+    if not project_id:
+        print(
+            "Error: no project_id resolved.\n"
+            "  Run from a beacon project cwd, pass `beacon dm log <project_id>`,\n"
+            "  or set --project <id>.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    try:
+        rows = client.list_dm_approval_history(project_id, limit=limit)
+    except Exception as e:
+        msg = str(e)
+        if "403" in msg:
+            print(
+                f"Error: not a member of project {project_id!r} "
+                "(audit history is membership-gated).\n"
+                f"  ({msg})",
+                file=sys.stderr,
+            )
+        elif "404" in msg:
+            print(
+                f"Error: project {project_id!r} not found "
+                "(check the project_id).\n"
+                f"  ({msg})",
+                file=sys.stderr,
+            )
+        else:
+            print(f"Error: {msg}", file=sys.stderr)
+        sys.exit(1)
+
+    if os.environ.get("BEACON_JSON", "") == "1":
+        print(json.dumps(rows or [], ensure_ascii=False))
+        return
+
+    if not rows:
+        # Match the Web UI's empty-state copy (renderDmApprovalHistoryRows)
+        # so the audit narrative reads the same across both surfaces.
+        print("承認履歴はまだありません (= 過去に approve / deny された DM action がない)。")
+        return
+
+    # 6-column ASCII table. Widths chosen for typical 100-col terminals:
+    # status is short (approved / denied), decision_at is fixed-ish ISO8601,
+    # the event_id / user_id columns get truncated with an ellipsis so a
+    # too-long Google-OAuth-style sub doesn't wreck the layout. Order
+    # matches the AC: event_id / sender / receiver / status / decision_at /
+    # decision_by.
+    def _trunc(s, n):
+        s = "" if s is None else str(s)
+        if len(s) <= n:
+            return s
+        # 3-char ellipsis fits inside the column width; using a single
+        # ASCII period × 3 keeps copy-paste safe (no multibyte width math).
+        return s[: max(0, n - 3)] + "..."
+
+    # Column widths (= total ~98 chars + 5 separator spaces = ~103). Tweak
+    # here, not in renderer logic, so a future column-width A/B test stays
+    # readable.
+    W_EVT, W_SEN, W_REC, W_STA, W_DEC_AT, W_DEC_BY = 18, 22, 22, 9, 20, 22
+    header = (
+        f"{'event_id':<{W_EVT}}  "
+        f"{'sender':<{W_SEN}}  "
+        f"{'receiver':<{W_REC}}  "
+        f"{'status':<{W_STA}}  "
+        f"{'decision_at':<{W_DEC_AT}}  "
+        f"{'decision_by':<{W_DEC_BY}}"
+    )
+    sep = "-" * len(header)
+    print(header)
+    print(sep)
+    for r in rows:
+        evt = _trunc(r.get("event_id", ""), W_EVT)
+        sen = _trunc(r.get("sender_user_id", ""), W_SEN)
+        rec = _trunc(r.get("receiver_user_id", ""), W_REC)
+        sta = _trunc(r.get("approval_status", ""), W_STA)
+        dat = _trunc(r.get("decision_at", ""), W_DEC_AT)
+        dby = _trunc(r.get("decision_by", ""), W_DEC_BY)
+        print(
+            f"{evt:<{W_EVT}}  "
+            f"{sen:<{W_SEN}}  "
+            f"{rec:<{W_REC}}  "
+            f"{sta:<{W_STA}}  "
+            f"{dat:<{W_DEC_AT}}  "
+            f"{dby:<{W_DEC_BY}}"
+        )
+    print(sep)
+    print(f"{len(rows)} row(s).")
 
 
 def _resolve_bus_project_id(config: dict) -> str:
@@ -10941,6 +13289,1391 @@ def cmd_bus_directory():
         print(f"  {sid}  {ident}  last_active={last}{health_tag}")
 
 
+def cmd_profile_list():
+    """List Beacon profiles found under ~/.beacon/profiles/ (ms-64 / e-1461).
+
+    Each profile is a directory containing at least a credentials.json (created
+    by ``beacon auth login --profile <name>``) and optionally a profile.json
+    with ``api_url`` + ``backend_type`` overrides. The active profile is
+    starred so the user can confirm which one would be picked by the current
+    --profile / BEACON_PROFILE / cwd .beacon/cloud.json combination.
+
+    Output respects ``BEACON_JSON=1`` for scripting; otherwise prints a
+    human-readable list.
+    """
+    import profile as _profile  # local import: heavy module pulled lazily
+
+    try:
+        names = _profile.list_profiles()
+    except Exception as exc:
+        print(f"Error listing profiles: {exc}")
+        sys.exit(1)
+
+    # Resolve active profile name (does not require credentials to exist).
+    try:
+        active = _profile.resolve_profile_name()
+    except Exception:
+        active = ""
+
+    if os.environ.get("BEACON_JSON", "") == "1":
+        rows = []
+        for name in names:
+            try:
+                p = _profile.load_profile(name)
+                rows.append({
+                    "name": name,
+                    "api_url": p.api_url,
+                    "credentials_exists": p.credentials_exist(),
+                    "active": name == active,
+                })
+            except Exception:
+                rows.append({"name": name, "active": name == active})
+        print(json.dumps(rows, ensure_ascii=False))
+        return
+
+    if not names:
+        print("(no profiles found)")
+        print("Tip: `beacon auth login` will create the 'default' profile.")
+        return
+
+    for name in names:
+        marker = "*" if name == active else " "
+        try:
+            p = _profile.load_profile(name)
+            creds = "✓" if p.credentials_exist() else " "
+            print(f" {marker} {creds} {name:<20} {p.api_url}")
+        except Exception:
+            print(f" {marker}   {name:<20} (could not load)")
+
+
+# ---------------------------------------------------------------------------
+# Stop signal CLI (ms-55 e-1646)
+# ---------------------------------------------------------------------------
+#
+# `beacon stop` is the user-facing entry point for the halt protocol
+# defined in lib/stop_signal.py. It rides on the existing bus event
+# transport — the stop event is just another bus event on the
+# `stop-signal` channel. The CLI's job is to:
+#
+#   1. Resolve the issuer's session_id (so the receipt is auditable).
+#   2. Build a validated payload via stop_signal.build_stop_payload.
+#   3. Post the event via the same api_client used by bus_send.
+#
+# Authorization mirrors SPEC §2: anyone can broadcast. We do NOT gate
+# on envelope tier here — the human typing `beacon stop` is the human
+# approval, and AI sessions that auto-emit a stop pass through the
+# normal autonomous-action accounting. The halt itself is enforced on
+# the receive side (the inbox hook for AI sessions, future Tauri UI for
+# human-attended sessions).
+
+def _stop_post_event(*, payload: dict, channel: str = None) -> dict:
+    """Common transport for stop/resume events.
+
+    Wraps the same client.post_bus_event call used by cmd_bus_send,
+    but without the envelope-issue path: stop signals are explicitly
+    not gated by tier (SPEC §2), so a T0 / no-envelope post is the
+    correct wire form. This also makes the CLI usable from sessions
+    that can't reach the envelope-issue endpoint (= offline, legacy
+    server, etc.) — stopping a runaway must not fail because the
+    auxiliary endpoint is down.
+    """
+    from stop_signal import STOP_CHANNEL  # local import to avoid cycle
+    client, config = _get_api_client()
+    project_id = _resolve_bus_project_id(config)
+    sender = payload.get("issued_by_session_id", "")
+    event = client.post_bus_event(
+        project_id, channel or STOP_CHANNEL,
+        sender_session_id=sender,
+        payload=payload,
+        delivery="propose-to-ai",
+        envelope=None,
+        requested_action=None,
+    )
+    return event
+
+
+def cmd_stop_scoped():
+    """Broadcast a scoped stop signal.
+
+    Env:
+      BEACON_STOP_TARGET_KIND   "ms" | "task" | "session" (required)
+      BEACON_STOP_TARGET_ID     id of the target (required)
+      BEACON_STOP_REASON        free text (optional)
+      BEACON_STOP_REASON_KIND   one of stop_signal.REASON_KINDS (optional)
+      BEACON_STOP_MACHINE_REASON  optional JSON-encoded dict
+      BEACON_JSON               "1" → json output
+    """
+    import stop_signal as _stop
+
+    target_kind = os.environ.get("BEACON_STOP_TARGET_KIND", "").strip()
+    target_id = os.environ.get("BEACON_STOP_TARGET_ID", "").strip()
+    reason = os.environ.get("BEACON_STOP_REASON", "")
+    reason_kind = os.environ.get("BEACON_STOP_REASON_KIND", "").strip() or "manual"
+    machine_reason_raw = os.environ.get("BEACON_STOP_MACHINE_REASON", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not target_kind or not target_id:
+        print(
+            "Error: scoped stop requires --target <kind>:<id> "
+            "(kind = ms|task|session)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    machine_reason = None
+    if machine_reason_raw:
+        try:
+            parsed = json.loads(machine_reason_raw)
+        except json.JSONDecodeError as e:
+            print(f"Error: --machine-reason must be valid JSON ({e})",
+                  file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(parsed, dict):
+            print("Error: --machine-reason must be a JSON object",
+                  file=sys.stderr)
+            sys.exit(1)
+        machine_reason = parsed
+
+    sender = _resolve_session_id()
+    if not sender:
+        print(
+            "Error: cannot resolve current session_id (run `beacon session id` "
+            "to mint one, or set BEACON_BUS_SENDER explicitly)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        payload = _stop.build_stop_payload(
+            scope=_stop.SCOPE_SCOPED,
+            issued_by_session_id=sender,
+            target_kind=target_kind,
+            target_id=target_id,
+            reason=reason,
+            reason_kind=reason_kind,
+            machine_reason=machine_reason,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    event = _stop_post_event(payload=payload)
+
+    if json_mode:
+        print(json.dumps(event, ensure_ascii=False))
+        return
+    suffix = f" — {reason}" if reason else ""
+    print(
+        f"STOP signal (scoped) raised on {target_kind}:{target_id} "
+        f"by {sender}{suffix}"
+    )
+    print(f"  event_id: {event.get('event_id', '?')}")
+    print("  All matching sessions will halt after the current tool call.")
+    print(f"  Resume with: beacon resume scoped --target {target_kind}:{target_id}")
+
+
+def cmd_stop_global():
+    """Broadcast a global stop signal (= halt every active autonomous
+    session in the project).
+
+    Env:
+      BEACON_STOP_REASON        free text (recommended)
+      BEACON_STOP_REASON_KIND   one of stop_signal.REASON_KINDS (optional)
+      BEACON_STOP_MACHINE_REASON  optional JSON-encoded dict
+      BEACON_JSON               "1" → json output
+    """
+    import stop_signal as _stop
+
+    reason = os.environ.get("BEACON_STOP_REASON", "")
+    reason_kind = os.environ.get("BEACON_STOP_REASON_KIND", "").strip() or "manual"
+    machine_reason_raw = os.environ.get("BEACON_STOP_MACHINE_REASON", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    machine_reason = None
+    if machine_reason_raw:
+        try:
+            parsed = json.loads(machine_reason_raw)
+        except json.JSONDecodeError as e:
+            print(f"Error: --machine-reason must be valid JSON ({e})",
+                  file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(parsed, dict):
+            print("Error: --machine-reason must be a JSON object",
+                  file=sys.stderr)
+            sys.exit(1)
+        machine_reason = parsed
+
+    sender = _resolve_session_id()
+    if not sender:
+        print(
+            "Error: cannot resolve current session_id "
+            "(set BEACON_BUS_SENDER explicitly)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        payload = _stop.build_stop_payload(
+            scope=_stop.SCOPE_GLOBAL,
+            issued_by_session_id=sender,
+            reason=reason,
+            reason_kind=reason_kind,
+            machine_reason=machine_reason,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    event = _stop_post_event(payload=payload)
+
+    if json_mode:
+        print(json.dumps(event, ensure_ascii=False))
+        return
+    suffix = f" — {reason}" if reason else ""
+    print(f"STOP signal (GLOBAL) raised by {sender}{suffix}")
+    print(f"  event_id: {event.get('event_id', '?')}")
+    print("  All active autonomous sessions will halt after the current tool call.")
+    print("  Resume with: beacon resume global")
+
+
+def cmd_stop_status():
+    """List currently active stop signals.
+
+    Reads recent events on the stop-signal channel via list_unread_bus_events
+    (with a synthetic empty recipient so the server returns the full
+    channel history rather than a per-recipient cursor view). This avoids
+    consuming any real recipient's cursor — `stop status` is observational
+    and must not race with receivers.
+
+    Env:
+      BEACON_JSON               "1" → json output
+      BEACON_STOP_SINCE_HOURS   limit window (default 24)
+    """
+    import stop_signal as _stop
+
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    try:
+        client, config = _get_api_client()
+    except Exception as e:
+        print(f"Error: cannot reach bus ({e})", file=sys.stderr)
+        sys.exit(1)
+    project_id = _resolve_bus_project_id(config)
+
+    # Pull the recent stop-signal channel history. We use a synthetic
+    # recipient so we don't advance any real session's cursor; the
+    # server returns the channel slice (most backends honor that).
+    try:
+        events = client.list_unread_bus_events(
+            project_id, "_stop_status_observer",
+            channel=_stop.STOP_CHANNEL,
+            limit=500,
+        )
+    except TypeError:
+        # Older api_client signature without `limit`. The default page
+        # size is typically generous enough for a stop-status snapshot.
+        events = client.list_unread_bus_events(
+            project_id, "_stop_status_observer",
+            channel=_stop.STOP_CHANNEL,
+        )
+    except Exception as e:
+        print(f"Error: cannot list stop-signal events ({e})", file=sys.stderr)
+        sys.exit(1)
+
+    actives = _stop.latest_active_stops(events or [])
+
+    if json_mode:
+        # Strip raw_event for compactness — callers who need the full event
+        # can call `beacon bus receive --channel stop-signal --once`.
+        out = []
+        for rec in actives:
+            r = {k: v for k, v in rec.items() if k != "raw_event"}
+            out.append(r)
+        print(json.dumps(out, ensure_ascii=False))
+        return
+
+    if not actives:
+        print("No active stop signals.")
+        return
+
+    print(f"Active stop signals ({len(actives)}):")
+    for rec in actives:
+        scope = rec["scope"]
+        target = rec.get("target") or {}
+        if scope == "global":
+            tag = "GLOBAL"
+        else:
+            tag = f"{target.get('kind', '?')}:{target.get('id', '?')}"
+        line = (
+            f"  ⚠ {tag}  reason_kind={rec.get('reason_kind', '?')}  "
+            f"by={rec.get('issued_by_session_id', '?')}  "
+            f"at={rec.get('issued_at', '?')}"
+        )
+        print(line)
+        if rec.get("reason"):
+            print(f"      reason: {rec['reason']}")
+
+
+def cmd_resume_scoped():
+    """Broadcast a resume (= clear stop) for a scoped target.
+
+    Env mirrors cmd_stop_scoped (without machine_reason).
+    """
+    import stop_signal as _stop
+
+    target_kind = os.environ.get("BEACON_STOP_TARGET_KIND", "").strip()
+    target_id = os.environ.get("BEACON_STOP_TARGET_ID", "").strip()
+    reason = os.environ.get("BEACON_STOP_REASON", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not target_kind or not target_id:
+        print(
+            "Error: scoped resume requires --target <kind>:<id>",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    sender = _resolve_session_id()
+    if not sender:
+        print("Error: cannot resolve current session_id", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        payload = _stop.build_resume_payload(
+            scope=_stop.SCOPE_SCOPED,
+            issued_by_session_id=sender,
+            target_kind=target_kind,
+            target_id=target_id,
+            reason=reason,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    event = _stop_post_event(payload=payload)
+
+    if json_mode:
+        print(json.dumps(event, ensure_ascii=False))
+        return
+    print(
+        f"RESUME signal (scoped) raised on {target_kind}:{target_id} "
+        f"by {sender}"
+    )
+    print(f"  event_id: {event.get('event_id', '?')}")
+
+
+# ---------------------------------------------------------------------------
+# Rollback CLI (ms-55 e-1647)
+# ---------------------------------------------------------------------------
+#
+# `beacon rollback` is the SPEC §4 "safe boundary" surface: it undoes
+# work that lives entirely inside the local repo (working tree edits,
+# un-pushed commits) automatically, and refuses to touch anything past
+# the upstream branch. Anything past upstream becomes a "compensation
+# proposal" in the report — concrete next-step text like "open a
+# revert PR" rather than silent destructive action.
+
+def _rollback_record_history(plan, result, reason: str) -> dict:
+    """Record a `beacon rollback` execution as a save entry on the active MS.
+
+    ms-55 e-1727: after `beacon rollback` mutates the working tree (=
+    non-dry-run, no fatal errors), persist a structured trail so
+    `beacon search "rollback"` surfaces "when did we roll back, what
+    did we touch, what compensation was proposed". Without this trail
+    the runaway story is lost — stash refs survive but project history
+    has no pointer to them.
+
+    The entry uses source="rollback" so the search query is single-keyword,
+    and the description packs reason + commit hashes + working-tree count +
+    compensation hints. Returns the {status, entry_id, milestone} dict
+    from save_entry, or {"status": "error", "error": ...} on failure.
+    Failures are non-fatal — the rollback already succeeded.
+    """
+    try:
+        import operations as _ops  # noqa: PLC0415
+    except Exception as e:
+        return {"status": "error", "error": f"import operations: {e}"}
+
+    state = plan.state
+    head_hash = state.head_hash or "?"
+    branch = state.branch or "(detached HEAD)"
+    upstream = state.upstream_branch or "(no upstream)"
+
+    parts: list[str] = []
+    parts.append(f"rollback on {branch} (HEAD~={head_hash}, upstream={upstream})")
+    if reason:
+        parts.append(f"reason: {reason}")
+    if result.stashed:
+        parts.append(
+            f"stashed {len(state.working_tree_files)} working-tree path(s) → "
+            f"{result.stash_ref or 'stash@{0}'}"
+        )
+    if result.reset_commits > 0:
+        parts.append(f"reset {result.reset_commits} local commit(s) (--soft)")
+    if not result.stashed and result.reset_commits == 0:
+        parts.append("(no-op: clean tree, no local commits)")
+    if plan.pushed_warning:
+        parts.append("⚠ rollback request extended past upstream — report-only")
+    for opt in plan.compensation_options:
+        parts.append(f"compensation: {opt}")
+
+    description = "; ".join(parts)
+
+    def op(d):
+        return d, core.save_entry(
+            d,
+            ms_id="",  # auto-target the active MS
+            description=description,
+            source="rollback",
+            date="",
+            hash=head_hash,
+        )
+
+    try:
+        project_id = _project_id_for_ops()
+        return _ops.apply_operation(
+            project_id, op,
+            op_name="rollback.record",
+            reason=reason or "rollback record",
+        )
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+def cmd_rollback():
+    """Inspect local git state and roll back the safe portion.
+
+    Env:
+      BEACON_ROLLBACK_COMMITS    int (default 0 = auto)
+      BEACON_ROLLBACK_REASON     free text, recorded into stash msg + report
+      BEACON_ROLLBACK_DRY_RUN    "1" → show plan, don't mutate
+      BEACON_ROLLBACK_CWD        override cwd (mainly for tests)
+      BEACON_ROLLBACK_NO_RECORD  "1" → skip the history save entry (= e-1727
+                                 escape hatch for tests / no-op rollbacks)
+      BEACON_JSON                "1" → json output (plan + result)
+    """
+    import rollback as _rb
+
+    commits_raw = os.environ.get("BEACON_ROLLBACK_COMMITS", "0").strip()
+    try:
+        commits = int(commits_raw)
+    except ValueError:
+        print(
+            f"Error: --commits must be an integer (got {commits_raw!r})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    reason = os.environ.get("BEACON_ROLLBACK_REASON", "")
+    dry_run = os.environ.get("BEACON_ROLLBACK_DRY_RUN", "") == "1"
+    cwd = os.environ.get("BEACON_ROLLBACK_CWD", "").strip() or None
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    plan, result, report = _rb.rollback(
+        cwd=cwd,
+        commits=commits,
+        reason=reason,
+        dry_run=dry_run,
+    )
+
+    # ms-55 e-1727: also record on the non-error JSON path. We compute
+    # the record first so it appears in the JSON payload.
+    record_info: Optional[dict] = None
+    if (
+        not dry_run
+        and result is not None
+        and os.environ.get("BEACON_ROLLBACK_NO_RECORD", "") != "1"
+        and (result.stashed or result.reset_commits > 0
+             or plan.compensation_options)
+    ):
+        record_info = _rollback_record_history(plan, result, reason)
+
+    if json_mode:
+        out = {
+            "plan": {
+                "stash_working_tree": plan.stash_working_tree,
+                "reset_commits": plan.reset_commits,
+                "pushed_warning": plan.pushed_warning,
+                "compensation_options": list(plan.compensation_options),
+                "reason": plan.reason,
+                "requested_commits": plan.requested_commits,
+                "state": {
+                    "head_hash": plan.state.head_hash,
+                    "branch": plan.state.branch,
+                    "upstream_branch": plan.state.upstream_branch,
+                    "local_commits_ahead": plan.state.local_commits_ahead,
+                    "working_tree_dirty": plan.state.working_tree_dirty,
+                    "working_tree_files": list(plan.state.working_tree_files),
+                },
+            },
+            "dry_run": dry_run,
+        }
+        if result is not None:
+            out["result"] = {
+                "stashed": result.stashed,
+                "stash_ref": result.stash_ref,
+                "reset_commits": result.reset_commits,
+                "errors": list(result.errors),
+            }
+        if record_info is not None:
+            out["record"] = record_info
+        print(json.dumps(out, ensure_ascii=False))
+        if result is not None and result.errors:
+            sys.exit(1)
+        return
+
+    print(report, end="")
+    if dry_run:
+        print("(dry run — nothing executed. Re-run without --dry-run to apply.)")
+        return
+
+    if result is None:
+        # Defensive: rollback() should always return a result when
+        # dry_run=False. Falling through means something inside the
+        # helper changed shape; surface so it gets caught early.
+        print("Error: rollback executor returned no result.", file=sys.stderr)
+        sys.exit(1)
+
+    summary_bits = []
+    if result.stashed:
+        summary_bits.append(f"stashed ({result.stash_ref or 'stash@{0}'})")
+    if result.reset_commits > 0:
+        summary_bits.append(f"reset {result.reset_commits} commit(s)")
+    if not summary_bits:
+        summary_bits.append("nothing to do")
+    print(f"Executed: {', '.join(summary_bits)}")
+
+    # ms-55 e-1727: surface the history record outcome. The save itself
+    # was already attempted in the shared pre-print block above; here we
+    # just report what happened. Non-fatal — the rollback already
+    # succeeded; the trail being broken is annoying, not catastrophic.
+    if record_info is not None:
+        if record_info.get("status") == "saved":
+            print(
+                f"Recorded: {record_info.get('entry_id', '?')} → "
+                f"{record_info.get('milestone', '?')}"
+            )
+        elif record_info.get("status") == "duplicate":
+            print(f"Recorded: (duplicate) → {record_info.get('milestone', '?')}")
+        elif record_info.get("status") == "error":
+            print(
+                f"Warning: could not record rollback history: "
+                f"{record_info.get('error', 'unknown')}",
+                file=sys.stderr,
+            )
+
+    if result.errors:
+        print("", file=sys.stderr)
+        for err in result.errors:
+            print(f"Error: {err}", file=sys.stderr)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Claim CLI (ms-55 e-1648)
+# ---------------------------------------------------------------------------
+#
+# `beacon claim` is the user-facing surface for the claim primitives
+# defined in lib/claims.py. Three issuance verbs share most of the
+# argument shape (`--target`, `--intent`), so the implementation
+# factors the common path through a private helper.
+
+def _claims_register_provider() -> None:
+    """Wire lib/claims.py's cloud provider hook to this CLI's transport
+    (ms-55 e-1730).
+
+    Called lazily by each claim command so import-time of lib/claims.py
+    stays side-effect-free. Re-registers on every call (cheap, idempotent)
+    — handy if the user switches cloud mode mid-session.
+
+    The provider closure returns ``(client, project_id)`` when cloud
+    mode is active, or ``None`` to fall back to local. Errors during
+    resolution map to ``None`` so the worker keeps working.
+    """
+    import claims as _claims
+
+    def _provider():
+        try:
+            if not _is_cloud_mode():
+                return None
+            client, config = _get_api_client()
+        except Exception:
+            return None
+        project_id = (config or {}).get("project_id") or ""
+        if not project_id:
+            return None
+        return client, project_id
+
+    _claims.register_cloud_provider(_provider)
+
+
+def _claim_parse_target_env() -> tuple[str, str]:
+    """Pull --target kind:id from env vars set by the bash dispatcher."""
+    tk = os.environ.get("BEACON_CLAIM_TARGET_KIND", "").strip()
+    ti = os.environ.get("BEACON_CLAIM_TARGET_ID", "").strip()
+    if not tk or not ti:
+        print(
+            "Error: --target <kind>:<id> is required "
+            "(kind = ms|task|operation|trek|free)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return tk, ti
+
+
+def _claim_post_event(payload: dict) -> dict:
+    """Common transport for claim / response / release events.
+
+    Same shape as _stop_post_event: bypass the envelope-issue path
+    because claim signals are coordination, not tier-gated capability
+    grants — broadcasting "I'm picking up this task" should not require
+    the auxiliary endpoint to be up.
+    """
+    import claims as _claims
+    client, config = _get_api_client()
+    project_id = _resolve_bus_project_id(config)
+    sender = payload.get("from_session_id", "")
+    event = client.post_bus_event(
+        project_id, _claims.CLAIM_CHANNEL,
+        sender_session_id=sender,
+        payload=payload,
+        delivery="propose-to-ai",
+        envelope=None,
+        requested_action=None,
+    )
+    return event
+
+
+def _claim_issue(claim_kind: str):
+    """Shared body for `beacon claim request|handoff|post`."""
+    import claims as _claims
+
+    tk, ti = _claim_parse_target_env()
+    intent = os.environ.get("BEACON_CLAIM_INTENT", "")
+    to_sid = os.environ.get("BEACON_CLAIM_TO", "").strip()
+    expires_at = os.environ.get("BEACON_CLAIM_EXPIRES_AT", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    sender = _resolve_session_id()
+    if not sender:
+        print("Error: cannot resolve current session_id", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        payload = _claims.build_claim_payload(
+            claim_kind=claim_kind,
+            from_session_id=sender,
+            target_kind=tk,
+            target_id=ti,
+            intent=intent,
+            to_session_id=to_sid,
+            expires_at=expires_at,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    event = _claim_post_event(payload)
+
+    # Persist the issuer's view of the claim. Cloud-mode rounds through
+    # the server subcollection (= multi-machine view) + the local cache
+    # mirror; local-mode just writes the cache (ms-55 e-1730).
+    _claims_register_provider()
+    try:
+        _claims.record_claim(payload)
+    except (OSError, ValueError) as e:
+        # Don't fail the send if persistence is broken — the bus event
+        # is the canonical record, this store is a derived view.
+        print(f"Note: could not persist claim: {e}",
+              file=sys.stderr)
+
+    if json_mode:
+        print(json.dumps(event, ensure_ascii=False))
+        return
+
+    kind_label = {
+        "request": "REQUEST (recipient must accept)",
+        "handoff": "HANDOFF (recipient must accept)",
+        "claim": "CLAIM (broadcast, first-publisher-wins)",
+    }.get(claim_kind, claim_kind.upper())
+    print(f"{kind_label} on {tk}:{ti} by {sender}")
+    print(f"  claim_id: {payload['claim_id']}")
+    print(f"  event_id: {event.get('event_id', '?')}")
+    if to_sid:
+        print(f"  recipient: {to_sid}")
+    if intent:
+        print(f"  intent: {intent}")
+    print(f"  Release with: beacon claim release {payload['claim_id']}")
+
+
+def cmd_claim_request():
+    """beacon claim request --target <k>:<id> --to <sid> [--intent ...]"""
+    _claim_issue("request")
+
+
+def cmd_claim_handoff():
+    """beacon claim handoff --target <k>:<id> --to <sid> [--intent ...]"""
+    _claim_issue("handoff")
+
+
+def cmd_claim_post():
+    """beacon claim post --target <k>:<id> [--intent ...]
+
+    Broadcast a claim (= "I'm taking X"). First-publisher-wins; no
+    recipient consent needed.
+    """
+    _claim_issue("claim")
+
+
+def cmd_claim_respond():
+    """beacon claim respond <claim_id> --accept|--decline [--reason ...]"""
+    import claims as _claims
+
+    claim_id = os.environ.get("BEACON_CLAIM_ID", "").strip()
+    decision = os.environ.get("BEACON_CLAIM_DECISION", "").strip()
+    reason = os.environ.get("BEACON_CLAIM_REASON", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not claim_id:
+        print("Error: claim_id is required", file=sys.stderr)
+        sys.exit(1)
+    if decision not in ("accept", "decline"):
+        print("Error: pass --accept or --decline", file=sys.stderr)
+        sys.exit(1)
+
+    sender = _resolve_session_id()
+    if not sender:
+        print("Error: cannot resolve current session_id", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        payload = _claims.build_response_payload(
+            claim_id=claim_id,
+            decision=decision,
+            from_session_id=sender,
+            reason=reason,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    event = _claim_post_event(payload)
+
+    if json_mode:
+        print(json.dumps(event, ensure_ascii=False))
+        return
+    label = "ACCEPTED" if decision == "accept" else "DECLINED"
+    print(f"{label} claim {claim_id} by {sender}")
+    print(f"  event_id: {event.get('event_id', '?')}")
+
+
+def cmd_claim_release():
+    """beacon claim release <claim_id> [--outcome completed|abandoned] [--reason ...]"""
+    import claims as _claims
+
+    claim_id = os.environ.get("BEACON_CLAIM_ID", "").strip()
+    outcome = os.environ.get("BEACON_CLAIM_OUTCOME", "completed").strip() or "completed"
+    reason = os.environ.get("BEACON_CLAIM_REASON", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not claim_id:
+        print("Error: claim_id is required", file=sys.stderr)
+        sys.exit(1)
+
+    sender = _resolve_session_id()
+    if not sender:
+        print("Error: cannot resolve current session_id", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        payload = _claims.build_release_payload(
+            claim_id=claim_id,
+            outcome=outcome,
+            from_session_id=sender,
+            reason=reason,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    event = _claim_post_event(payload)
+
+    # Drop the local cache entry + cloud-mode subcollection record
+    # (ms-55 e-1730). Same fall-back rule as the issue path.
+    _claims_register_provider()
+    try:
+        _claims.release_claim(claim_id)
+    except OSError as e:
+        print(f"Note: could not update claim cache: {e}",
+              file=sys.stderr)
+
+    if json_mode:
+        print(json.dumps(event, ensure_ascii=False))
+        return
+    print(f"RELEASED claim {claim_id} ({outcome}) by {sender}")
+    print(f"  event_id: {event.get('event_id', '?')}")
+
+
+def _morning_save_briefing_doc(briefing_text: str, briefing) -> dict:
+    """Save the morning briefing as a `scope=report` doc (ms-55 e-1733).
+
+    Lets the user re-read past briefings via Web UI Documents tab (or
+    `beacon doc show`) without having to scroll terminal history. The
+    daily cadence makes each briefing a small artifact worth preserving.
+
+    Title is ISO-prefixed for chronological listing. Body is the rendered
+    text wrapped in a code fence + a one-line meta header so the doc
+    stands alone as a search target.
+
+    Returns {"status": "saved", "doc_id": ..., "title": ...} or
+    {"status": "error", "error": ...}. Failures are non-fatal — the
+    terminal briefing already printed.
+    """
+    from datetime import datetime as _dt, timezone as _tz  # noqa: PLC0415
+    import datetime as _datetime  # noqa: PLC0415
+
+    now = _dt.now(_tz.utc)
+    iso_min = now.strftime("%Y-%m-%dT%H:%M")
+    title = f"morning briefing {iso_min}Z"
+
+    counts = briefing.counts or {}
+    summary_bits = []
+    for b in ("completed", "halted", "skipped", "needs_attention"):
+        summary_bits.append(f"{b}={counts.get(b, 0)}")
+    meta_line = (
+        f"window: {briefing.since or '(start)'} → {briefing.until or '(now)'}  "
+        f"counts: {' / '.join(summary_bits)}"
+    )
+
+    body = (
+        f"# morning briefing — {iso_min}Z\n\n"
+        f"{meta_line}\n\n"
+        f"```\n{briefing_text.rstrip()}\n```\n"
+    )
+
+    scope = "report"
+
+    try:
+        # Frontmatter aligns with cmd_doc_add so Web UI / list filters
+        # recognise the scope = report tag.
+        content = _add_frontmatter(body, scope, "", "", "")
+    except Exception as e:
+        return {"status": "error", "error": f"frontmatter: {e}"}
+
+    today_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        if _is_cloud_mode():
+            client, config = _get_api_client()
+            result = client.create_document(
+                config["project_id"], title, content,
+            )
+            doc_id = result["doc_id"]
+        else:
+            docs_dir = _get_docs_dir()
+            os.makedirs(docs_dir, exist_ok=True)
+            # Slug + minute resolution → collision-free across the day
+            # while still distinguishable. Adds an "-Z" suffix to
+            # mirror the title's UTC marker.
+            slug = _doc_slug(f"morning-briefing-{iso_min}-Z")
+            doc_id = slug
+            fpath = os.path.join(docs_dir, f"{doc_id}.md")
+            with open(fpath, "w", encoding="utf-8") as f:
+                f.write(content)
+    except Exception as e:
+        return {"status": "error", "error": f"persist: {e}"}
+
+    # Record an MS entry pointing at the saved doc — same shape as
+    # cmd_doc_add (= source=auto, revision_id=doc_id) so the briefing
+    # appears in the active MS timeline. Failures are non-fatal.
+    try:
+        import operations as _ops  # noqa: PLC0415
+
+        def op(d):
+            return d, core.save_entry(
+                d, ms_id="",
+                description=f"doc add: {title} ({scope})",
+                source="auto", date=today_iso,
+                revision_id=doc_id,
+            )
+        project_id = _project_id_for_ops()
+        _ops.apply_operation(
+            project_id, op,
+            op_name="morning.briefing_doc",
+            reason="morning briefing snapshot",
+        )
+    except Exception as e:
+        # The doc itself was written — we just couldn't link it from
+        # the MS timeline. Surface as warning only.
+        return {
+            "status": "saved",
+            "doc_id": doc_id,
+            "title": title,
+            "warning": f"could not link to MS timeline: {e}",
+        }
+
+    return {"status": "saved", "doc_id": doc_id, "title": title}
+
+
+def cmd_morning():
+    """beacon morning (ms-55 e-1650 / e-1733): 4-category summary of recent
+    autonomous activity, plus auto-save as a report doc.
+
+    Reads events from the bus (channels: stop-signal + claim-signal)
+    over a window (default = last 12 hours) and buckets them as:
+
+      ✓ 完了 (Completed):   claim releases with outcome=completed
+      ⚠ 停止 (Halted):      stop signals other than STUCK
+      ✗ Skip:               claim releases with outcome=abandoned
+      ⏱ 介入要望 (Needs attention): STUCK signals (= idle timeout)
+
+    The briefing is also persisted as a `scope=report` doc so the user
+    can re-read past briefings via Web UI Documents tab. Skip the save
+    with BEACON_MORNING_NO_DOC=1 (= --no-doc).
+
+    Env:
+      BEACON_MORNING_SINCE_HOURS  default 12
+      BEACON_MORNING_EVENTS_FILE  optional path to a JSON array of
+                                  events (= testing / replay path)
+      BEACON_MORNING_NO_DOC       "1" → skip the report doc save (e-1733)
+      BEACON_JSON                 "1" → JSON output
+    """
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    import morning as _morning
+
+    since_hours_raw = os.environ.get("BEACON_MORNING_SINCE_HOURS", "12")
+    events_file = os.environ.get("BEACON_MORNING_EVENTS_FILE", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    try:
+        since_hours = float(since_hours_raw)
+    except ValueError:
+        print(
+            f"Error: --since-hours must be a number (got {since_hours_raw!r})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if since_hours <= 0:
+        print("Error: --since-hours must be > 0", file=sys.stderr)
+        sys.exit(1)
+
+    now = _dt.now(_tz.utc)
+    since = now - _td(hours=since_hours)
+
+    events: list[dict] = []
+    if events_file:
+        try:
+            with open(events_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"Error: could not read events file: {e}",
+                  file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(data, list):
+            print("Error: events file must be a JSON array",
+                  file=sys.stderr)
+            sys.exit(1)
+        events = data
+    else:
+        # Pull recent stop + claim channel events from the bus. Use a
+        # synthetic observer recipient so we don't advance anyone's
+        # cursor (= same trick as cmd_stop_status).
+        try:
+            client, config = _get_api_client()
+            project_id = _resolve_bus_project_id(config)
+        except Exception as e:
+            print(
+                f"Error: cannot reach bus to gather events ({e}).\n"
+                "If running offline, pass --events-file <path> with a "
+                "JSON dump of events.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        for channel in ("stop-signal", "claim-signal"):
+            try:
+                batch = client.list_unread_bus_events(
+                    project_id, "_morning_observer",
+                    channel=channel, limit=500,
+                )
+            except TypeError:
+                batch = client.list_unread_bus_events(
+                    project_id, "_morning_observer", channel=channel,
+                )
+            except Exception as e:
+                print(
+                    f"Note: could not fetch {channel} events ({e}); "
+                    "continuing with partial data.",
+                    file=sys.stderr,
+                )
+                continue
+            if batch:
+                events.extend(batch)
+
+    briefing = _morning.build_briefing(events, since=since, until=now)
+    briefing_text = _morning.render_briefing(briefing)
+
+    # ms-55 e-1733: save the briefing as a `scope=report` doc so the
+    # user can re-read past briefings from the Web UI Documents tab
+    # (or via `beacon doc show`). Opt out with --no-doc.
+    record_info: Optional[dict] = None
+    if os.environ.get("BEACON_MORNING_NO_DOC", "") != "1":
+        record_info = _morning_save_briefing_doc(briefing_text, briefing)
+
+    if json_mode:
+        out = {
+            "since": briefing.since,
+            "until": briefing.until,
+            "counts": briefing.counts,
+            "entries": [
+                {
+                    "bucket": e.bucket,
+                    "title": e.title,
+                    "detail": e.detail,
+                    "at": e.at,
+                    "source": e.source,
+                    "ref": e.ref,
+                }
+                for e in briefing.entries
+            ],
+        }
+        if record_info is not None:
+            out["doc"] = record_info
+        print(json.dumps(out, ensure_ascii=False))
+        return
+
+    print(briefing_text, end="")
+    if record_info is not None:
+        if record_info.get("status") == "saved":
+            warn = record_info.get("warning")
+            line = (
+                f"\nSaved briefing as doc: {record_info.get('doc_id', '?')} "
+                f"({record_info.get('title', '?')})"
+            )
+            print(line)
+            if warn:
+                print(f"  warning: {warn}", file=sys.stderr)
+        elif record_info.get("status") == "error":
+            print(
+                f"\nWarning: could not save briefing doc: "
+                f"{record_info.get('error', 'unknown')}",
+                file=sys.stderr,
+            )
+
+
+def cmd_stuck_check():
+    """beacon stuck check (ms-55 e-1649): scan session telemetry, emit
+    STUCK signals for sessions idle past the timeout.
+
+    Input modes (exactly one):
+      * BEACON_STUCK_TELEMETRY_FILE — path to a JSON file with a list
+        of telemetry records. Each record needs at least session_id +
+        last_active; ms_id / task_id / ignore are optional.
+      * BEACON_STUCK_TELEMETRY_INLINE — JSON string with the same shape.
+
+    The JSON shape:
+      [
+        {"session_id": "sv-A", "last_active": "2026-06-15T11:00:00Z",
+         "ms_id": "ms-55", "task_id": "e-1646"},
+        {"session_id": "sv-B", "last_active": "2026-06-15T11:55:00Z"},
+        ...
+      ]
+
+    Other env:
+      BEACON_STUCK_TIMEOUT_MINUTES   default 30
+      BEACON_STUCK_DRY_RUN          "1" → identify stuck sessions but
+                                    don't emit signals
+      BEACON_JSON                   "1" → JSON output (list of records
+                                    {session_id, last_active, payload?, event?})
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    import stuck_detect as _stuck
+
+    inline = os.environ.get("BEACON_STUCK_TELEMETRY_INLINE", "").strip()
+    file_path = os.environ.get("BEACON_STUCK_TELEMETRY_FILE", "").strip()
+    timeout_raw = os.environ.get("BEACON_STUCK_TIMEOUT_MINUTES",
+                                 str(_stuck.DEFAULT_TIMEOUT_MINUTES))
+    dry_run = os.environ.get("BEACON_STUCK_DRY_RUN", "") == "1"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    try:
+        timeout_minutes = int(timeout_raw)
+    except ValueError:
+        print(
+            f"Error: --timeout-minutes must be an integer "
+            f"(got {timeout_raw!r})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if timeout_minutes <= 0:
+        print("Error: --timeout-minutes must be > 0", file=sys.stderr)
+        sys.exit(1)
+
+    raw = ""
+    if inline and file_path:
+        print(
+            "Error: pass either --telemetry-inline or --telemetry-file, "
+            "not both",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if inline:
+        raw = inline
+    elif file_path:
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                raw = f.read()
+        except OSError as e:
+            print(f"Error: could not read telemetry file: {e}",
+                  file=sys.stderr)
+            sys.exit(1)
+    else:
+        print(
+            "Error: provide --telemetry-inline '<json>' "
+            "or --telemetry-file <path>",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"Error: telemetry payload is not valid JSON ({e})",
+              file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(data, list):
+        print("Error: telemetry payload must be a JSON array",
+              file=sys.stderr)
+        sys.exit(1)
+
+    rows = []
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        rows.append(_stuck.SessionTelemetry(
+            session_id=row.get("session_id", "") or "",
+            last_active=row.get("last_active", "") or "",
+            ms_id=row.get("ms_id", "") or "",
+            task_id=row.get("task_id", "") or "",
+            ignore=bool(row.get("ignore", False)),
+        ))
+
+    now = _dt.now(_tz.utc)
+    try:
+        stuck_rows = _stuck.find_stuck_sessions(
+            rows, now=now, timeout_minutes=timeout_minutes,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    sender = _resolve_session_id() or "_stuck_detector"
+
+    results = []
+    for t in stuck_rows:
+        payload = _stuck.build_stuck_signal(
+            t, issued_by_session_id=sender, now=now,
+            timeout_minutes=timeout_minutes,
+        )
+        entry = {
+            "session_id": t.session_id,
+            "last_active": t.last_active,
+            "ms_id": t.ms_id,
+            "task_id": t.task_id,
+            "payload": payload,
+        }
+        if not dry_run:
+            try:
+                ev = _stop_post_event(payload=payload)
+                entry["event"] = ev
+            except Exception as e:
+                # Don't let a single send failure prevent the rest of
+                # the batch from being reported — partial coverage is
+                # still useful for the morning briefing.
+                entry["error"] = str(e)
+        results.append(entry)
+
+    if json_mode:
+        print(json.dumps({
+            "dry_run": dry_run,
+            "timeout_minutes": timeout_minutes,
+            "stuck": results,
+        }, ensure_ascii=False))
+        return
+
+    if not results:
+        print(
+            f"No stuck sessions (timeout = {timeout_minutes} min, "
+            f"scanned {len(rows)} session(s))."
+        )
+        return
+
+    print(f"Stuck sessions detected ({len(results)}):")
+    for r in results:
+        suffix = "  (dry-run, no signal emitted)" if dry_run else ""
+        print(
+            f"  ⚠ {r['session_id']}  last_active={r['last_active']}  "
+            f"ms={r['ms_id'] or '-'}  task={r['task_id'] or '-'}{suffix}"
+        )
+        if "event" in r:
+            print(f"      → STUCK signal posted: {r['event'].get('event_id', '?')}")
+        if "error" in r:
+            print(f"      → error: {r['error']}", file=sys.stderr)
+
+
+def cmd_claim_list():
+    """beacon claim list [--mine] [--target <k>:<id>] [--json]
+
+    Lists claims this session has issued + still has cached locally.
+
+    For a project-wide view ("what's everyone holding right now?"),
+    use `beacon bus receive --channel claim-signal` (= live stream) or
+    the future `beacon claim status` command that reduces the channel
+    history server-side. The local list is the right surface for
+    "what was I in the middle of when this session restarted?".
+    """
+    import claims as _claims
+
+    mine_flag = os.environ.get("BEACON_CLAIM_MINE", "") == "1"
+    tk = os.environ.get("BEACON_CLAIM_TARGET_KIND", "").strip() or None
+    ti = os.environ.get("BEACON_CLAIM_TARGET_ID", "").strip() or None
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    mine = _resolve_session_id() if mine_flag else None
+    if mine_flag and not mine:
+        print("Error: --mine requires a resolvable session_id",
+              file=sys.stderr)
+        sys.exit(1)
+
+    # ms-55 e-1730: cloud-mode pulls from the server subcollection (=
+    # multi-machine view), local-mode falls back to the cached file.
+    _claims_register_provider()
+    out = _claims.list_claims(
+        mine=mine, target_kind=tk, target_id=ti,
+    )
+
+    if json_mode:
+        print(json.dumps(out, ensure_ascii=False))
+        return
+
+    if not out:
+        print("No active claims in the local cache.")
+        return
+
+    print(f"Local active claims ({len(out)}):")
+    for rec in out:
+        target = rec.get("target") or {}
+        tag = f"{target.get('kind', '?')}:{target.get('id', '?')}"
+        intent = rec.get("intent") or ""
+        intent_suffix = f"  intent: {intent}" if intent else ""
+        print(
+            f"  [{rec.get('claim_kind', '?')}] {tag}  "
+            f"id={rec.get('claim_id', '?')}  "
+            f"by={rec.get('from_session_id', '?')}  "
+            f"at={rec.get('issued_at', '?')}"
+        )
+        if intent_suffix:
+            print(f"   {intent_suffix.strip()}")
+
+
+def cmd_resume_global():
+    """Broadcast a global resume."""
+    import stop_signal as _stop
+
+    reason = os.environ.get("BEACON_STOP_REASON", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    sender = _resolve_session_id()
+    if not sender:
+        print("Error: cannot resolve current session_id", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        payload = _stop.build_resume_payload(
+            scope=_stop.SCOPE_GLOBAL,
+            issued_by_session_id=sender,
+            reason=reason,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    event = _stop_post_event(payload=payload)
+
+    if json_mode:
+        print(json.dumps(event, ensure_ascii=False))
+        return
+    print(f"RESUME signal (GLOBAL) raised by {sender}")
+    print(f"  event_id: {event.get('event_id', '?')}")
+
+
+def cmd_sessions_list():
+    """Cross-project session directory (ms-54 / e-1587).
+
+    Unlike ``bus directory`` which is cwd-scoped to the current project, this
+    command lists the calling user's live sessions across *all* their projects.
+    Use it when the picker needs to see DM recipients in projects you are not
+    currently cd'd into, or to diagnose heartbeat-stop incidents
+    (e.g. e-1579-style auth-fail-cascade) without cd-ing through each candidate.
+
+    Bootstraps the API client cwd-independently via the profile resolver
+    (ms-64 / e-1458). Auth credentials come from the active profile too
+    (e-1457). The resolver already honors the env > cwd cloud.json >
+    profile.json > default precedence chain, so no extra cloud.json read
+    is needed.
+    """
+    from auth import load_credentials
+    creds = load_credentials()
+    if creds is None:
+        print("Not logged in. Run: beacon auth login")
+        sys.exit(1)
+
+    api_url = _resolve_active_api_url()
+
+    from api_client import ApiClient
+    client = ApiClient(api_url, _extract_token(creds))
+
+    sessions = client.list_user_sessions(
+        live_only=os.environ.get("BEACON_SESSIONS_LIVE", "") == "1",
+        since_minutes=int(os.environ.get("BEACON_SESSIONS_SINCE_MIN", "5") or "5"),
+        healthy_only=os.environ.get("BEACON_SESSIONS_HEALTHY", "") == "1",
+        machine=os.environ.get("BEACON_SESSIONS_MACHINE", "").strip(),
+        agent=os.environ.get("BEACON_SESSIONS_AGENT", "").strip(),
+    )
+
+    if os.environ.get("BEACON_JSON", "") == "1":
+        print(json.dumps(sessions, ensure_ascii=False))
+        return
+
+    if not sessions:
+        print("(no matching sessions across your projects)")
+        return
+
+    for s in sessions:
+        actor = s.get("actor") or {}
+        sid = s.get("session_id", "?")
+        email = actor.get("email", "")
+        machine_s = actor.get("machine", "")
+        agent_s = actor.get("agent", "")
+        last = (s.get("last_active") or "")[:19]
+        ident = " / ".join(p for p in (email, machine_s, agent_s) if p) or "(anon)"
+        pid = s.get("project_id", "?")
+        pname = s.get("project_name", "") or pid
+
+        ph = s.get("poll_health") or {}
+        healthy = ph.get("healthy")
+        age = ph.get("age_seconds")
+        shutdown = ph.get("shutdown")
+        if shutdown:
+            health_tag = "  health=shutdown"
+        elif healthy is True:
+            age_str = f"{int(age)}s" if isinstance(age, (int, float)) else "?"
+            health_tag = f"  health=ok({age_str})"
+        elif healthy is False:
+            age_str = f"{int(age)}s" if isinstance(age, (int, float)) else "?"
+            health_tag = f"  health=stale({age_str})"
+        else:
+            health_tag = "  health=unknown"
+        print(f"  [{pname}]  {sid}  {ident}  last_active={last}{health_tag}")
+
+
 # ---------------------------------------------------------------------------
 # Main dispatch
 # ---------------------------------------------------------------------------
@@ -10994,6 +14727,7 @@ if __name__ == "__main__":
         "doc_delete": cmd_doc_delete,
         "doc_history": cmd_doc_history,
         "doc_restore": cmd_doc_restore,
+        "doc_image_upload": cmd_doc_image_upload,
         "cloud_list": cmd_cloud_list,
         "cloud_push": cmd_cloud_push,
         "cloud_pull": cmd_cloud_pull,
@@ -11059,6 +14793,42 @@ if __name__ == "__main__":
         "bus_ack": cmd_bus_ack,
         "bus_status": cmd_bus_status,
         "bus_directory": cmd_bus_directory,
+        # ms-70 / e-1716: receiver-side decision primitive for pending DM
+        # actions. Reached by `beacon dm respond approve|deny <event_id>`.
+        "dm_respond": cmd_dm_respond,
+        # ms-70 / e-1923 (e-1718 AC 4): audit history view in the terminal.
+        # Mirror of the Web UI Settings > Audit table; reaches the same
+        # server endpoint and renders 6 columns of decided sidecar rows.
+        "dm_log": cmd_dm_log,
+        # ms-55 e-1646: stop / resume signal CLI. Anyone can broadcast
+        # (Andon cord principle, SPEC §2). The events ride on the
+        # existing bus on channel `stop-signal`.
+        "stop_scoped": cmd_stop_scoped,
+        "stop_global": cmd_stop_global,
+        "stop_status": cmd_stop_status,
+        "resume_scoped": cmd_resume_scoped,
+        "resume_global": cmd_resume_global,
+        # ms-55 e-1647: rollback boundary CLI. Auto-undoes working tree +
+        # un-pushed commits; refuses to touch pushed/merged/deployed
+        # state (those produce report + compensation proposals).
+        "rollback": cmd_rollback,
+        # ms-55 e-1648: claim primitives. 3 kinds (request/handoff/claim);
+        # request + handoff need recipient consent, claim is first-publisher
+        # -wins broadcast. Local persistence for session restart recovery.
+        "claim_request": cmd_claim_request,
+        "claim_handoff": cmd_claim_handoff,
+        "claim_post": cmd_claim_post,
+        "claim_respond": cmd_claim_respond,
+        "claim_release": cmd_claim_release,
+        "claim_list": cmd_claim_list,
+        # ms-55 e-1649: STUCK detector. Idle-timeout based emission of
+        # stop signals with reason_kind="stuck", same protocol as e-1646.
+        "stuck_check": cmd_stuck_check,
+        # ms-55 e-1650: morning briefing. 4-bucket digest of recent
+        # autonomous activity for the human to read with coffee.
+        "morning": cmd_morning,
+        "sessions_list": cmd_sessions_list,
+        "profile_list": cmd_profile_list,
         "bus_budget_grant": cmd_bus_budget_grant,
         "bus_budget_show": cmd_bus_budget_show,
         "bus_budget_clear": cmd_bus_budget_clear,
@@ -11083,6 +14853,24 @@ if __name__ == "__main__":
         "member_list": cmd_member_list,
         "member_remove": cmd_member_remove,
         "member_role": cmd_member_role,
+        # ms-78 e-1805: token-based invite flow + self-introspection.
+        "member_invite": cmd_member_invite,
+        "member_invitation_list": cmd_member_invitation_list,
+        "member_invitation_cancel": cmd_member_invitation_cancel,
+        "member_join": cmd_member_join,
+        "member_whoami": cmd_member_whoami,
+        "trek_create": cmd_trek_create,
+        "trek_list": cmd_trek_list,
+        "trek_show": cmd_trek_show,
+        "trek_start": cmd_trek_start,
+        "trek_archive": cmd_trek_archive,
+        "trek_invite": cmd_trek_invite,
+        "trek_join": cmd_trek_join,
+        "trek_leave": cmd_trek_leave,
+        "trek_plan": cmd_trek_plan,
+        "trek_stop": cmd_trek_stop,
+        "trek_resume": cmd_trek_resume,
+        "trek_transfer_leader": cmd_trek_transfer_leader,
         "version": lambda: print(f"beacon {__version__}"),
         "help_json": cmd_help_json,
         "doctor": cmd_doctor,

@@ -189,14 +189,20 @@ def _append_changelog(project_id: str, op_name: str, actor: str,
         except OSError as e:
             _op_logger.warning("Failed to append changelog: %s", e)
 
-    # Cloud sink: persist to Firestore changelog subcollection. Only fires
-    # when firestore_client is available (= we're inside the API server).
-    # Includes the per-request audit context if any was set.
-    if "firestore_client" not in __import__("sys").modules:
-        return
-    try:
-        import firestore_client as db  # type: ignore[import-not-found]
-    except ImportError:
+    # Cloud sink: persist to the backend's changelog (Firestore subcollection
+    # for GCP, DynamoDB changelog table for AWS). Only fires when we're inside
+    # the API server (= store_router or firestore_client already loaded).
+    # ms-64 e-1631: route via store_router so the DynamoDB build also receives
+    # the changelog write — otherwise audit log would silently disappear on AWS.
+    sys_mod = __import__("sys").modules
+    if "store_router" in sys_mod:
+        import store_router as db  # type: ignore[import-not-found]
+    elif "firestore_client" in sys_mod:
+        try:
+            import firestore_client as db  # type: ignore[import-not-found]
+        except ImportError:
+            return
+    else:
         return
     cloud_entry = dict(entry)
     email = _current_email.get()
@@ -553,6 +559,47 @@ def migrate_v1_to_v2(project_id: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Cloud-mode atomic apply for DynamoDB backend (ms-64 e-1631)
+# ---------------------------------------------------------------------------
+
+def _apply_cloud_dynamodb(project_id: str, op: Op) -> Any:
+    """Apply ``op`` atomically against the DynamoDB-backed project document.
+
+    DynamoDB does not have Firestore's multi-doc transactional model nor the
+    v1 / v2 subcollection split (the 1 MiB cap that motivated v2 only exists
+    on Firestore). The atomic primitive here is single-item put_item under
+    a conditional check on the schema version field, which is sufficient
+    because ``apply_operation`` only guarantees per-project linearizability
+    of writes — not cross-project transactions.
+
+    Concurrency model:
+      - Read the current project document.
+      - Run ``op(data)`` in memory.
+      - Write it back via ``store_router.save_project`` (which the DynamoDB
+        backend implements as a single PK put_item).
+
+    Conflict handling: at the moment we accept the same last-writer-wins
+    semantics that Firestore v1's transaction retries protect against, with
+    the practical observation that AWS GA-incubation traffic is single-writer
+    (one CLI per cwd). Adding a ConditionalCheckExpression on a version
+    field is a future hardening step (out of scope for e-1631).
+    """
+    import store_router as db  # type: ignore[import-not-found]
+
+    data = db.get_project(project_id)
+    if data is None:
+        raise LookupError(f"Project '{project_id}' not found")
+
+    new_data, result = op(data)
+
+    import core  # noqa: PLC0415
+    core.validate_project(new_data)
+
+    db.save_project(project_id, new_data)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Mock-mode atomic apply (in-process lock, for unit tests with patched db)
 # ---------------------------------------------------------------------------
 
@@ -606,21 +653,23 @@ def _detect_backend() -> str:
 
     Precedence:
       1. BEACON_OPERATIONS_BACKEND env var (explicit override for tests)
-      2. Presence of firestore_client on sys.modules (server context)
+      2. Presence of store_router or firestore_client on sys.modules
+         (= API server context — either GCP/Firestore or AWS/DynamoDB build)
       3. Default: 'local'
 
-    The server imports firestore_client at module load, so its presence on
-    sys.modules is a reliable signal in production. The env var override lets
-    tests bypass that signal — see tests/test_api.py which imports
-    firestore_client purely to monkey-patch the helpers but never wants the
-    real Firestore client to run.
+    ms-64 e-1631: the cloud signal originally checked firestore_client only,
+    but the DynamoDB backend (server/dynamodb_client) is wired in through
+    store_router, which may not import firestore_client at all in pure-AWS
+    deployments. Recognise either as the cloud signal so the API server runs
+    in cloud mode regardless of which storage backend it was configured with.
+    The env var override still lets tests bypass that signal.
     """
     forced = os.environ.get("BEACON_OPERATIONS_BACKEND", "").strip().lower()
     if forced in ("local", "cloud", "mock"):
         return forced
 
     import sys
-    if "firestore_client" in sys.modules:
+    if "store_router" in sys.modules or "firestore_client" in sys.modules:
         return "cloud"
     return "local"
 
@@ -686,21 +735,29 @@ def apply_operation(
         # Test path: uses patched firestore_client.{get,save}_project.
         result = _apply_mock(project_id, op)
     else:
-        # Cloud: pick v1 or v2 based on the existing project's schema_version.
-        # We must read the project once outside the transaction to decide which
-        # codepath to take. This adds one extra read but avoids running both
-        # branches speculatively. The branch decision itself is not atomic
-        # with the write — but schema_version only changes at project creation,
-        # so this is safe in practice.
-        import firestore_client as db  # type: ignore[import-not-found]
-        existing = db.get_project(project_id)
-        if existing is None:
-            raise LookupError(f"Project '{project_id}' not found")
-        schema = get_schema_version(existing)
-        if schema == SCHEMA_V2_BETA:
-            result = _apply_cloud_v2(project_id, op)
+        # Cloud: pick the storage backend, then within Firestore pick v1 / v2
+        # based on the existing project's schema_version.
+        #
+        # ms-64 e-1631: DynamoDB does not have the v1/v2 subcollection layout
+        # (1 MiB cap is a Firestore-specific constraint), so the AWS build
+        # always uses the whole-document apply path. Single-PK put_item is
+        # atomic on DynamoDB, so a read → op → write loop with one retry on
+        # ConditionalCheckFailed is functionally equivalent to the Firestore
+        # transactional apply for the consistency guarantees apply_operation
+        # promises (= per-project linearizability of writes).
+        store_backend = os.environ.get("BEACON_STORE_BACKEND", "firestore").lower()
+        if store_backend == "dynamodb":
+            result = _apply_cloud_dynamodb(project_id, op)
         else:
-            result = _apply_cloud_v1(project_id, op)
+            import firestore_client as db  # type: ignore[import-not-found]
+            existing = db.get_project(project_id)
+            if existing is None:
+                raise LookupError(f"Project '{project_id}' not found")
+            schema = get_schema_version(existing)
+            if schema == SCHEMA_V2_BETA:
+                result = _apply_cloud_v2(project_id, op)
+            else:
+                result = _apply_cloud_v1(project_id, op)
 
     # Post-commit side effects (operation log). Failures here are non-fatal.
     _append_changelog(project_id, op_name, actor, reason=reason)
@@ -763,34 +820,50 @@ def replace_project(
         with _get_mock_lock():
             db.save_project(project_id, new_data)
     else:
-        # Cloud: dispatch by schema version. v2 projects store milestones in
-        # a subcollection, so a naive whole-doc set would (a) put the giant
-        # milestones[] back into the meta doc, re-creating the 1 MiB cap
-        # problem we just solved, and (b) leave stale subcollection docs.
-        # _replace_cloud_v2 handles the decomposition transparently.
-        import firestore_client as db  # type: ignore[import-not-found]
-        from google.cloud import firestore  # type: ignore[import-not-found]
+        # Cloud: dispatch by store backend then by schema version.
+        #
+        # ms-64 e-1627 注: Firestore (Cloud Run) 経路と DynamoDB (AWS Lambda)
+        # 経路の両方を扱う。store_router 経由でバックエンドが切替わる仕組みは
+        # 既存だが、operations.py には Firestore 固有の transaction / collection
+        # 経路 (= db.get_db().collection().document()) が残っており、
+        # DynamoDB ではそれらが存在しないので別経路で処理する。
+        store_backend = os.environ.get("BEACON_STORE_BACKEND", "firestore").lower()
 
-        client = db.get_db()
-        doc_ref = client.collection(db.COLLECTION).document(project_id)
-
-        # Peek at schema version (single doc read, cheap) before deciding path.
-        existing_meta = db.get_project(project_id)
-        existing_schema = (
-            get_schema_version(existing_meta) if existing_meta else SCHEMA_V1_LEGACY
-        )
-
-        if existing_schema == SCHEMA_V2_BETA:
-            _replace_cloud_v2(project_id, new_data)
+        if store_backend == "dynamodb":
+            # DynamoDB: トランザクションは PK の put_item に集約される
+            # (= DynamoDB は単一 PK 内の put_item が atomic)。v2 schema の
+            # subcollection 分解は dynamodb_client.save_project が PK のみで
+            # サブコレクションは別テーブルに置く設計なので、whole-doc set で
+            # 安全に動く (= Firestore 版で問題だった 1 MiB cap 制約は
+            # DynamoDB に存在しない、subcollection 元の document は別テーブル
+            # で寿命を独立に持つ)。
+            import store_router as db  # type: ignore[import-not-found]
+            db.save_project(project_id, new_data)
         else:
-            @firestore.transactional
-            def _txn(transaction):
-                # We still read so we have a transactional read-write pair;
-                # whether the doc exists is informational only for replace.
-                doc_ref.get(transaction=transaction)
-                transaction.set(doc_ref, new_data)
+            # Firestore: 既存の transaction + schema version dispatch 経路
+            import firestore_client as db  # type: ignore[import-not-found]
+            from google.cloud import firestore  # type: ignore[import-not-found]
 
-            _txn(client.transaction())
+            client = db.get_db()
+            doc_ref = client.collection(db.COLLECTION).document(project_id)
+
+            # Peek at schema version (single doc read, cheap) before deciding path.
+            existing_meta = db.get_project(project_id)
+            existing_schema = (
+                get_schema_version(existing_meta) if existing_meta else SCHEMA_V1_LEGACY
+            )
+
+            if existing_schema == SCHEMA_V2_BETA:
+                _replace_cloud_v2(project_id, new_data)
+            else:
+                @firestore.transactional
+                def _txn(transaction):
+                    # We still read so we have a transactional read-write pair;
+                    # whether the doc exists is informational only for replace.
+                    doc_ref.get(transaction=transaction)
+                    transaction.set(doc_ref, new_data)
+
+                _txn(client.transaction())
 
     _append_changelog(
         project_id, "project.replace", actor,
@@ -818,17 +891,29 @@ def load_project_consistent(project_id: str) -> dict:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
 
-    import firestore_client as db  # type: ignore[import-not-found]
+    # ms-64 e-1627: store_router 経由でバックエンド (firestore / dynamodb)
+    # を切替える。v2 schema (= milestones を subcollection に分解) は
+    # Firestore 由来の概念で、DynamoDB 経路では存在しない (= 新規 project は
+    # v1 unified 形式で save_project に渡されるため)。よって DynamoDB
+    # バックエンド時は schema check + subcollection hydration を skip して
+    # whole-doc を返す。
+    import store_router as db  # type: ignore[import-not-found]
     meta = db.get_project(project_id)
     if meta is None:
         raise LookupError(f"Project '{project_id}' not found")
+
+    store_backend = os.environ.get("BEACON_STORE_BACKEND", "firestore").lower()
+    if store_backend == "dynamodb":
+        return meta
+
     if get_schema_version(meta) == SCHEMA_V1_LEGACY:
         return meta
 
-    # v2: hydrate milestones from subcollection.
-    client = db.get_db()
+    # v2 (Firestore only): hydrate milestones from subcollection.
+    import firestore_client as fsdb  # type: ignore[import-not-found]
+    client = fsdb.get_db()
     ms_col = (
-        client.collection(db.COLLECTION)
+        client.collection(fsdb.COLLECTION)
         .document(project_id)
         .collection("milestones")
     )

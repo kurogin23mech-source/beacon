@@ -445,6 +445,305 @@ body::after {
   word-break: break-all;
 }
 
+/* ---- Header chrome (mock parity v3): Settings button + Avatar + account
+   menu) ---- */
+
+.header-spacer { flex: 1; }
+
+.header-settings-btn {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  padding: 4px 12px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+.header-settings-btn:hover {
+  background: var(--bg-raised);
+  color: var(--text-primary);
+  border-color: var(--accent-dim);
+}
+
+.header-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #f59e0b, #ef4444);
+  cursor: pointer;
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #0a0a0c;
+  user-select: none;
+  margin-left: 8px;
+}
+.header-avatar:hover { filter: brightness(1.1); }
+
+/* Backdrop covers the page while the dropdown is open — closes the menu
+   on click (= modal-style dismiss), and lifts the menu's z-index above
+   project content (the Objective block was painting over the popup). */
+.account-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  background: transparent;
+  display: none;
+  z-index: 1500;
+}
+.account-menu-backdrop.open { display: block; }
+
+.account-menu {
+  position: fixed;
+  top: 56px;
+  right: 14px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  min-width: 240px;
+  padding: 8px 0;
+  font-size: 0.78rem;
+  display: none;
+  z-index: 1600;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
+}
+.account-menu.open { display: block; }
+.account-menu-head {
+  padding: 6px 14px;
+  font-size: 0.6rem;
+  letter-spacing: 0.2em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+}
+.account-menu-email {
+  padding: 0 14px 10px;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 6px;
+  word-break: break-all;
+}
+.account-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 14px;
+  cursor: pointer;
+  color: var(--text-primary);
+  background: transparent;
+  border: none;
+  font-family: var(--font-body);
+  font-size: 0.78rem;
+}
+.account-menu-item:hover { background: var(--bg-hover); }
+.account-menu-item.danger { color: var(--danger, #ef4444); }
+
+/* Sidebar mock-parity additions: online-agent rows mirror the mock's
+   ONLINE AGENTS section. */
+.sidebar-agent-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 4px;
+  font-size: 0.7rem;
+}
+.sidebar-agent-row .agent-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent-glow);
+  flex-shrink: 0;
+  margin-top: 5px;
+}
+.sidebar-agent-row.muted .agent-dot { background: var(--text-dim); box-shadow: none; }
+.sidebar-agent-row .agent-meta { flex: 1; line-height: 1.4; }
+.sidebar-agent-row .agent-id {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+}
+.sidebar-agent-row .agent-where {
+  display: block;
+  color: var(--text-dim);
+  font-size: 0.6rem;
+}
+
+/* ---- Settings overlay (mock parity v3): two-tab full-page panel ---- */
+
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: none;
+  z-index: 1100;
+  justify-content: center;
+  padding: 40px 24px;
+  overflow-y: auto;
+}
+.settings-overlay.open { display: flex; }
+
+.settings-panel {
+  background: var(--bg-void);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  width: 100%;
+  max-width: 880px;
+  height: max-content;
+  padding: 18px 22px 26px;
+}
+.settings-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.settings-head .brand-block {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 1.05rem;
+}
+.settings-head .label { color: var(--text-secondary); font-size: 0.85rem; }
+.settings-head .spacer { flex: 1; }
+.settings-close {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  padding: 4px 10px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+.settings-close:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+.settings-tabs {
+  display: flex;
+  gap: 22px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 18px;
+}
+.settings-tabs .tab {
+  font-size: 0.8rem;
+  padding-bottom: 8px;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  color: var(--text-secondary);
+  background: transparent;
+  border-top: none; border-left: none; border-right: none;
+  font-family: var(--font-mono);
+}
+.settings-tabs .tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.settings-section { margin-bottom: 26px; }
+.settings-section .label {
+  font-size: 0.65rem;
+  letter-spacing: 0.18em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+
+.settings-invite-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.settings-invite-row input.email { flex: 1; }
+.settings-invite-row input,
+.settings-invite-row select {
+  font-family: var(--font-mono);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+  border-radius: 3px;
+  font-size: 0.75rem;
+}
+.settings-invite-row button.primary {
+  background: var(--accent);
+  color: #0a0a0c;
+  border: 1px solid var(--accent);
+  font-weight: 600;
+  padding: 4px 10px;
+  cursor: pointer;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.settings-member-row {
+  display: grid;
+  grid-template-columns: 1fr 110px 30px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 0.78rem;
+}
+.settings-member-row .email { color: var(--text-primary); word-break: break-all; }
+.settings-member-row .role-tag {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+}
+.settings-member-row .x {
+  color: var(--text-dim);
+  cursor: pointer;
+  text-align: center;
+}
+.settings-member-row .x:hover { color: var(--danger, #ef4444); }
+
+.settings-agents-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+}
+.settings-agents-table th {
+  text-align: left;
+  font-weight: 400;
+  color: var(--text-dim);
+  font-size: 0.62rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.settings-agents-table td {
+  padding: 9px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+  vertical-align: middle;
+}
+.settings-agents-table .session-avatar {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent-glow);
+  margin-right: 8px;
+}
+.settings-agents-table tr.muted .session-avatar {
+  background: var(--text-dim);
+  box-shadow: none;
+}
+.settings-agents-table .session-id {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+}
+.settings-agents-table .actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
 /* ---- Project Info Block ---- */
 
 .project-info {
@@ -1345,91 +1644,6 @@ body::after {
   border-bottom-color: var(--accent);
 }
 
-/* ---- Dependency Graph ---- */
-
-.graph-section { padding: 24px 0; }
-
-.graph-container {
-  width: 100%;
-  overflow-x: auto;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  padding: 16px;
-}
-
-.graph-container svg { display: block; margin: 0 auto; }
-
-.graph-node rect {
-  rx: 6;
-  ry: 6;
-  stroke-width: 1.5;
-  cursor: pointer;
-  transition: filter 0.2s;
-}
-
-.graph-node:hover rect { filter: brightness(1.3); }
-
-.graph-node text {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  fill: var(--text-primary);
-  pointer-events: none;
-}
-
-.graph-node .node-id {
-  font-size: 9px;
-  fill: var(--text-dim);
-}
-
-.graph-node .node-progress {
-  font-size: 9px;
-  fill: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-}
-
-.graph-edge {
-  fill: none;
-  stroke: var(--border);
-  stroke-width: 1.5;
-  marker-end: url(#arrowhead);
-}
-
-.graph-edge.cross-task {
-  stroke-dasharray: 4 3;
-  stroke: var(--text-dim);
-}
-
-.graph-empty {
-  color: var(--text-dim);
-  text-align: center;
-  padding: 48px 0;
-  font-size: 0.85rem;
-}
-
-.graph-legend {
-  display: flex;
-  gap: 16px;
-  margin-top: 12px;
-  justify-content: center;
-  flex-wrap: wrap;
-}
-
-.graph-legend-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 0.7rem;
-  color: var(--text-dim);
-}
-
-.graph-legend-swatch {
-  width: 12px;
-  height: 12px;
-  border-radius: 3px;
-  border: 1px solid var(--border);
-}
-
 /* ---- Retro Viewer ---- */
 
 .retro-section {
@@ -1798,6 +2012,332 @@ body::after {
   text-decoration: underline;
 }
 
+/* =================================================================
+   Trek detail page (ms-69 / e-1659 v2 — mock parity refactor)
+   ================================================================= */
+
+/* Crumb back-link. Same row as page title so the user sees "where am I → click to leave". */
+.trek-crumb {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  margin-bottom: 18px;
+  cursor: pointer;
+  display: inline-block;
+}
+.trek-crumb:hover { color: var(--accent); }
+
+.trek-head { margin-bottom: 18px; }
+.trek-title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.trek-title-text {
+  font-size: 1.4rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.trek-badge {
+  font-size: 0.6rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+.trek-badge.persistent { color: #a78bfa; border-color: #a78bfa; }
+.trek-badge.temporary { color: var(--info, #60a5fa); border-color: var(--info, #60a5fa); }
+.trek-badge.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-glow);
+}
+.trek-badge.archived { color: var(--text-dim); }
+.trek-badge.planning { color: var(--text-secondary); }
+
+.trek-stats {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
+.trek-meta {
+  display: grid;
+  grid-template-columns: 100px 1fr;
+  gap: 6px 14px;
+  font-size: 0.78rem;
+  margin: 14px 0 24px;
+}
+.trek-meta .k { color: var(--text-dim); }
+.trek-meta .v { color: var(--text-primary); }
+.trek-meta .v .session-id {
+  font-family: var(--font-mono, monospace);
+  color: var(--accent);
+}
+.trek-meta .v .sub {
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  margin-left: 8px;
+}
+
+/* STOP card — prominent red, always rendered on active trek so the
+   "kill switch" is one click away. */
+.trek-stop-card {
+  border: 1px solid var(--danger, #ef4444);
+  background: rgba(239,68,68,0.06);
+  border-radius: 6px;
+  padding: 20px;
+  margin-bottom: 18px;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+.trek-stop-card .icon { font-size: 1.8rem; }
+.trek-stop-card .text { flex: 1; font-size: 0.78rem; color: var(--text-secondary); }
+.trek-stop-card .text strong {
+  display: block;
+  color: var(--danger, #ef4444);
+  font-size: 0.9rem;
+  letter-spacing: 0.1em;
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+.trek-stop-card button {
+  background: var(--danger, #ef4444);
+  color: #0a0a0c;
+  border: 1px solid var(--danger, #ef4444);
+  padding: 10px 24px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  border-radius: 3px;
+}
+.trek-stop-card button:hover { background: #ff5f5f; }
+.trek-stop-card.halted { background: rgba(251,191,36,0.08); border-color: var(--warning, #fbbf24); }
+.trek-stop-card.halted .text strong { color: var(--warning, #fbbf24); }
+.trek-stop-card.halted button { background: var(--warning, #fbbf24); border-color: var(--warning, #fbbf24); }
+
+/* Archive card — same height but visually subordinate to STOP. */
+.trek-archive-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 12px;
+  margin-bottom: 18px;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-surface, var(--bg-raised));
+}
+.trek-archive-card .ico { color: var(--text-dim); }
+.trek-archive-card .text { flex: 1; }
+.trek-archive-card .text strong { color: var(--text-primary); }
+
+/* Section block — used by SCOPE / MEMBERS / CLAIMS / ACTIVITY / SUMMARIES. */
+.trek-section { margin: 24px 0; }
+.trek-section-title {
+  font-size: 0.65rem;
+  letter-spacing: 0.2em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.trek-section-title .right {
+  margin-left: auto;
+  font-size: 0.62rem;
+  color: var(--text-dim);
+  letter-spacing: 0.05em;
+}
+
+/* SCOPE row: 24px pin | 110px proj-tag | 80px ref | 1fr desc | 90px pill */
+.trek-scope-row {
+  display: grid;
+  grid-template-columns: 24px 110px 80px 1fr 90px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle, var(--border));
+  font-size: 0.78rem;
+}
+.trek-scope-row .pin { color: var(--text-secondary); }
+.trek-scope-row .proj-tag {
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.trek-scope-row .ref {
+  color: var(--text-dim);
+  font-family: var(--font-mono, monospace);
+  font-size: 0.72rem;
+}
+.trek-scope-row .desc {
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.trek-scope-row .pill {
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  text-align: right;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.trek-scope-row .pill.active { color: var(--accent); }
+.trek-scope-row .pill.observing { color: #a78bfa; }
+
+/* Member row + nested session rows */
+.trek-member-row {
+  display: grid;
+  grid-template-columns: 14px 1fr 80px 90px 130px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle, var(--border));
+  font-size: 0.78rem;
+}
+.trek-member-row .dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent-glow);
+}
+.trek-member-row.offline .dot { background: var(--text-dim); box-shadow: none; }
+.trek-member-row.invited .dot { background: var(--text-dim); box-shadow: none; opacity: 0.5; }
+.trek-member-row .email { color: var(--text-primary); }
+.trek-member-row .where { color: var(--text-dim); font-size: 0.7rem; display: block; }
+.trek-member-row .role {
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.trek-member-row .role.leader { color: var(--accent); }
+.trek-member-row .joined { color: var(--text-dim); font-size: 0.7rem; text-align: right; }
+
+.trek-session-nest {
+  margin-left: 24px;
+  border-left: 1px solid var(--border-subtle, var(--border));
+  padding-left: 12px;
+}
+.trek-session-row {
+  display: grid;
+  grid-template-columns: 16px 1fr 80px 90px 130px;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+  font-size: 0.78rem;
+}
+.trek-session-row .leader-mark { color: var(--accent); }
+.trek-session-row .session-id {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.74rem;
+  color: var(--accent);
+}
+.trek-session-row.member-session .session-id { color: var(--text-primary); }
+
+/* Claim / activity / summary rows (= placeholder while e-1696/97/98 land). */
+.trek-claim-row,
+.trek-activity-row,
+.trek-summary-row {
+  display: grid;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle, var(--border));
+  font-size: 0.78rem;
+}
+.trek-claim-row { grid-template-columns: 20px 110px 1fr auto; }
+.trek-claim-row .lock { color: var(--warning, #fbbf24); }
+.trek-claim-row .target { color: var(--text-primary); }
+.trek-claim-row .since { color: var(--text-dim); font-size: 0.72rem; }
+.trek-activity-row { grid-template-columns: 70px 1fr; }
+.trek-activity-row .ts {
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  font-family: var(--font-mono, monospace);
+}
+.trek-activity-row .desc { color: var(--text-primary); }
+.trek-summary-row { grid-template-columns: 30px 1fr auto; cursor: pointer; }
+.trek-summary-row:hover { background: var(--bg-hover); }
+.trek-summary-row .ico { color: var(--text-secondary); }
+.trek-summary-row .summary-title { color: var(--text-primary); }
+.trek-summary-row .summary-date { color: var(--text-dim); font-size: 0.72rem; }
+
+/* CLI hint block — used at the bottom of each section. */
+.trek-cli-hint {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  margin: 6px 0 22px;
+  padding-left: 8px;
+  border-left: 2px solid var(--border);
+  font-family: var(--font-mono, monospace);
+}
+.trek-cli-hint code {
+  display: block;
+  color: var(--text-secondary);
+  padding: 1px 0;
+}
+
+/* Placeholder shown for sections whose backing feature is not yet shipped
+   (= "this section will populate when e-XXXX lands"). */
+.trek-coming-soon {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  font-style: italic;
+  padding: 8px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 3px;
+}
+
+/* List view (= Treks tab on the project page) — mock-style row. */
+.trek-list-row {
+  display: grid;
+  grid-template-columns: 14px 1fr 100px 110px;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 14px;
+  border: 1px solid transparent;
+  border-bottom: 1px solid var(--border-subtle, var(--border));
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+.trek-list-row:hover { background: var(--bg-hover); border-color: var(--border); }
+.trek-list-row .status-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--text-dim);
+  margin: 0 auto;
+}
+.trek-list-row .status-dot.active {
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent-glow);
+}
+.trek-list-row .status-dot.planning { background: transparent; border: 1px solid var(--text-dim); }
+.trek-list-row .status-dot.archived { background: var(--text-dim); }
+.trek-list-row .name { color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.trek-list-row .name .id {
+  color: var(--text-dim);
+  font-size: 0.7rem;
+  font-family: var(--font-mono, monospace);
+  margin-left: 8px;
+}
+.trek-list-row .counts { color: var(--text-dim); font-size: 0.72rem; text-align: right; }
+.trek-list-row .halt-mark { color: var(--warning, #fbbf24); margin-left: 6px; }
+
 </style>
 </head>
 <body>
@@ -1816,6 +2356,12 @@ body::after {
 
 <!-- Menu overlay (rendered outside container) -->
 <div id="menu-root"></div>
+
+<!-- Settings overlay (ms-69 / e-1659 v3 — mock-faithful chrome) -->
+<div id="settings-root" class="settings-overlay"></div>
+
+<!-- ms-78 / e-1909 — Retroactive display_name prompt (1-shot per browser) -->
+<div id="display-name-prompt"></div>
 
 <script>
 // ================================================================
@@ -1843,13 +2389,56 @@ let state = {
   sessionView: 'notes', // 'notes' | 'logs'
   sessionNotes: [],
   sessionLogs: [],
-  showGraph: false,
-  graphFilterDeps: true,
   retros: [],
   retroContent: null,
   documents: [],
   documentContent: null,  // { doc_id, title, content }
   documentOverlay: null,  // { doc_id, title, content, scope } — overlay for search hits (ms-43 e-796)
+  // ms-69 / e-1659 — Treks tab: cross-project / cross-session work areas
+  // ``treks`` is the full set visible to the caller (= they are creator or
+  // member of every trek listed here). The Treks tab on a project page
+  // filters this client-side to treks whose scope mentions the current
+  // project. ``openTrekId`` switches the tab into detail mode; the matching
+  // trek + its docs render.
+  treks: [],
+  openTrekId: null,
+  openTrekDocs: [],
+  // ms-69 / e-1664 — Related Treks widget cache (= per work item).
+  // Key shape: 'ms:ms-69' / 'op:op-1' / 'task:e-1656'. Values are the
+  // list of treks whose scope covers the item. Populated lazily by
+  // ``dataSource.loadRelatedTreks`` when the item is expanded / opened.
+  relatedTreks: {},
+  // ms-69 / e-1659 v3 — header chrome state.
+  // accountMenuOpen: avatar dropdown.
+  // settingsOpen / settingsTab: full Settings overlay (= mock has two tabs).
+  // onlineSessions: cross-project live sessions for sidebar ONLINE AGENTS
+  // section + Settings>Agents & Treks table.
+  // myProjects: the caller's project memberships (= /api/me/projects).
+  //   Settings>Projects pulldown lists these so the user can jump between
+  //   projects they belong to. Distinct from state.projects which historically
+  //   listed admin-visible projects.
+  // myRole / myIsOwner: settings members-tab decides what controls to render
+  //   (invite / role-change / remove are owner-only).
+  accountMenuOpen: false,
+  settingsOpen: false,
+  settingsTab: 'members',  // 'members' | 'agents' | 'audit' | 'profile'
+  settingsFilterTrek: '',
+  // settingsViewProjectId: which project's members are currently visible in
+  // the Settings > Members tab. Defaults to the project the user is on,
+  // but the pulldown can switch to any other project they belong to —
+  // **without** navigating away from the currently-opened project. The
+  // intent is "peek at another project's members from here", not "switch
+  // active project".
+  settingsViewProjectId: '',
+  onlineSessions: [],
+  myProjects: [],
+  myRole: '',
+  myIsOwner: false,
+  // ms-78 / e-1909 — caller's own user record (display_name + email).
+  // Fetched once at startup via /api/me/profile and refreshed after
+  // the Profile tab saves. Drives the retroactive display_name prompt
+  // and the renderName fallback in author columns.
+  myProfile: null,
   // Filter: hidden statuses (cancelled is hidden by default)
   hiddenStatuses: new Set(['cancelled']),
   // Entry done filter (per milestone)
@@ -1911,8 +2500,69 @@ async function loadAuthConfig() {
     if (res.ok) {
       const config = await res.json();
       state.auth.clientId = config.client_id;
+      // e-1628: cognito provider なら hosted UI redirect flow を組み立てる
+      // ための追加メタ (= cognito_domain) を受け取る。firebase 経路では
+      // 値が無い (undefined) ので分岐ロジックがそのまま既存挙動になる。
+      state.auth.provider = config.provider || 'firebase';
+      state.auth.cognitoDomain = config.cognito_domain || '';
+      state.auth.region = config.region || '';
     }
   } catch (e) {}
+}
+
+// e-1628: Cognito Hosted UI からのコールバックで ?code= がついた状態で
+// SPA がロードされたとき、code を Cognito /oauth2/token に交換して
+// id_token を取り出し localStorage に保存する。
+// SPA は redirect_uri に PKCE なしの code flow (= Cognito SPA Client が
+// generate_secret=false で立っている前提) を使う。
+async function handleCognitoCallback() {
+  if (state.auth.provider !== 'cognito') return false;
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get('code');
+  if (!code) return false;
+  if (!state.auth.cognitoDomain || !state.auth.clientId) {
+    console.error('[beacon] cognito callback but config missing', state.auth);
+    return false;
+  }
+  // redirect_uri は code 発行時と完全一致でなければ Cognito が拒否するので、
+  // 現在の origin + path を埋め直す (query string は除去)。
+  const redirectUri = window.location.origin + window.location.pathname;
+  try {
+    const body = new URLSearchParams({
+      grant_type: 'authorization_code',
+      client_id: state.auth.clientId,
+      code,
+      redirect_uri: redirectUri,
+    });
+    const res = await fetch(`https://${state.auth.cognitoDomain}/oauth2/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+    if (!res.ok) {
+      console.error('[beacon] cognito token exchange failed', res.status, await res.text());
+      return false;
+    }
+    const tokens = await res.json();
+    const idToken = tokens.id_token;
+    if (!idToken) {
+      console.error('[beacon] cognito response missing id_token', tokens);
+      return false;
+    }
+    let payload;
+    try { payload = decodeJwtPayload(idToken); }
+    catch (e) { console.error('[beacon] cognito id_token decode failed', e); return false; }
+    state.auth.token = idToken;
+    state.auth.email = payload.email || '';
+    localStorage.setItem('beacon_token', idToken);
+    localStorage.setItem('beacon_email', state.auth.email);
+    // URL から ?code= を消す (= リロードで重複交換を避ける + 履歴汚染防止)
+    window.history.replaceState({}, '', redirectUri);
+    return true;
+  } catch (e) {
+    console.error('[beacon] cognito callback error', e);
+    return false;
+  }
 }
 
 // ms-44 e-1247: Google ID tokens are base64url-encoded (RFC 7515), which uses
@@ -1959,17 +2609,38 @@ function handleCredentialResponse(response) {
 
 function renderLogin() {
   const app = document.getElementById('app');
+  // e-1628: provider が cognito のときはサインインボタンを Cognito Hosted UI
+  // へのリダイレクトに置き換える。
+  const cognitoLoginUrl = (state.auth.provider === 'cognito'
+                           && state.auth.cognitoDomain
+                           && state.auth.clientId)
+    ? `https://${state.auth.cognitoDomain}/login?`
+      + `client_id=${encodeURIComponent(state.auth.clientId)}`
+      + `&response_type=code`
+      + `&scope=${encodeURIComponent('openid email profile')}`
+      + `&redirect_uri=${encodeURIComponent(window.location.origin + window.location.pathname)}`
+    : '';
+
   app.innerHTML = `
     <div class="login-screen fade-in">
       <h1 class="login-logo">Beacon</h1>
       <p class="login-tagline">Where humans and AI are bound together.</p>
       <p class="login-note">Beacon is an AI-driven project monitoring tool.<br>Track milestones, tasks, and commits in real time.</p>
       <div class="login-divider"></div>
-      <div id="g_id_signin"></div>
+      ${cognitoLoginUrl
+        ? `<a class="cognito-signin-button" href="${cognitoLoginUrl}"
+             style="display:inline-block;padding:10px 24px;background:#4285f4;
+                    color:#fff;border-radius:6px;text-decoration:none;
+                    font-weight:600;font-size:14px;">
+             Sign in with Google
+           </a>`
+        : `<div id="g_id_signin"></div>`}
       <div class="login-note">Sign in to view project telemetry</div>
       <div class="login-note"><a href="https://beacon-ai.dev/privacy">Privacy Policy</a> · <a href="https://beacon-ai.dev/terms">Terms of Service</a></div>
     </div>
   `;
+  // Cognito 経路では GIS の初期化はせず、上記 <a> リンクから直接 redirect する
+  if (state.auth.provider === 'cognito') return;
   if (state.auth.clientId && window.google?.accounts) {
     google.accounts.id.initialize({
       client_id: state.auth.clientId,
@@ -2283,11 +2954,20 @@ function renderEntry(entry) {
     ? `<button class="entry-info-btn" data-action="open-entry-detail" data-entry-id="${entry.id}">···</button>`
     : '';
 
+  // ms-78 / e-1909 — author column. Empty for older entries without
+  // meta.author and no legacy actor either, in which case we omit the
+  // span entirely so the row layout stays clean.
+  const authorLabel = renderEntryAuthor(entry);
+  const authorSpan = authorLabel
+    ? `<span class="entry-author" style="color:var(--text-dim);font-size:0.65rem;margin-right:6px;">${authorLabel}</span>`
+    : '';
+
   return `
     <div class="entry entry-type-${entry.type}${statusClass}${toggleClass}" ${rowAction}>
       ${entryTypeBadge(entry.type)}
       <span class="entry-id">${entry.id}</span>
       <span class="entry-desc">${esc(entry.description)}${hash}${statusText}${reasonMissing}${childBadge}${priorityBadge}${infoBtn}</span>
+      ${authorSpan}
       <span class="entry-date">${entry.created_at || ''}</span>
       ${prMeta}
       ${children}
@@ -2300,6 +2980,48 @@ function esc(s) {
   const el = document.createElement('span');
   el.textContent = s;
   return el.innerHTML;
+}
+
+/* ms-78 / e-1909 — human-friendly label for an author / member row.
+ *
+ * Returns escaped HTML where display_name is the primary label and email
+ * goes in a small dim suffix. When display_name is empty / missing we
+ * fall back to email alone — that matches the legacy author column and
+ * keeps the column from emitting nothing for un-prompted users.
+ *
+ * The Settings > Members tab uses an inlined copy of this helper (= it
+ * predates the SHARED extraction). New call sites (commit author column,
+ * task created-by column, CLI mirror) should use this top-level version
+ * so any future tweak lands in one place.
+ */
+function renderName(displayName, email) {
+  const dn = (displayName || '').trim();
+  const em = (email || '').trim();
+  if (!dn) return esc(em);
+  if (!em) return esc(dn);
+  return `${esc(dn)} <span style="color:var(--text-dim);font-size:0.65rem;">${esc(em)}</span>`;
+}
+
+/* ms-78 / e-1909 — author label for a commit / task entry.
+ *
+ * Pulls from meta.author (= server-rich identity {user_id, email,
+ * display_name} stamped by /api/projects/{pid}/log + entry create) and
+ * falls back to legacy meta.actor (= machine/agent pair for older
+ * commits). Returns empty string when neither is present so the
+ * caller can skip rendering entirely.
+ */
+function renderEntryAuthor(entry) {
+  const author = entry?.meta?.author;
+  if (author && (author.display_name || author.email)) {
+    return renderName(author.display_name, author.email);
+  }
+  // Legacy actor fallback: agent string (e.g. "mac-claude") is the best
+  // human-readable label we have for pre-e-1909 commits.
+  const actor = entry?.meta?.actor;
+  if (actor && actor.agent) {
+    return esc(actor.agent);
+  }
+  return '';
 }
 
 /* e-976: auto-link `PR #N` and `e-XXX` patterns inside reason strings
@@ -2512,6 +3234,20 @@ function nextRetroDate(retroDay) {
 function renderMainContent() {
   const p = state.project;
   if (!p) return '';
+  // ms-69 / e-1659 v3: trek detail is a top-level page (mock-faithful).
+  // When a trek is opened, the project tab-bar / sections are hidden and
+  // the trek detail replaces them. Closing the trek returns to the project.
+  if (state.openTrekId) {
+    const t = (state.treks || []).find(x => x.trek_id === state.openTrekId);
+    if (!t) {
+      return `
+        <section class="fade-in">
+          <span class="trek-crumb" data-action="close-trek">← Back to TREKS</span>
+          <div class="retro-empty">Trek not found (= archived elsewhere or you're not a member).</div>
+        </section>`;
+    }
+    return _renderTrekDetail(t);
+  }
   if (state.searchQuery.trim()) {
     return renderSearchResults();
   }
@@ -2527,12 +3263,11 @@ function renderMainContent() {
       <button class="tab-btn ${state.activeTab === 'operations' ? 'active' : ''}" data-action="switch-tab" data-tab="operations">Operations</button>
       <button class="tab-btn ${state.activeTab === 'notes' ? 'active' : ''}" data-action="switch-tab" data-tab="notes">Session</button>
     </div>
-    ${state.activeTab === 'dashboard' ? (state.showGraph ? renderGraphSection() : `
+    ${state.activeTab === 'dashboard' ? `
     <section class="milestones fade-in">
       <div class="milestones-header">
         <span class="milestones-title">Milestones</span>
         <span class="milestones-count">${activeCount} active · ${doneCount}/${(p.milestones||[]).length} done</span>
-        <button class="sort-toggle" data-action="show-graph">Graph →</button>
       </div>
       <div id="ms-list-container">
       <div class="filter-bar">
@@ -2546,7 +3281,7 @@ function renderMainContent() {
       ${filtered.map((ms, i) => renderMilestoneCard(ms, i)).join('')}
       </div>
     </section>
-    `) : ''}
+    ` : ''}
     ${state.activeTab === 'documents' ? `<div id="documents-container">${renderDocumentsSection()}</div>` : ''}
     ${state.activeTab === 'releases' ? renderReleasesSection() : ''}
     ${state.activeTab === 'operations' ? renderOperationsSection() : ''}
@@ -2599,8 +3334,22 @@ function renderShell(app) {
           <div class="status-dot ${state.connected ? '' : 'offline'}"></div>
           <span class="connection-label">${state.connected ? 'live' : 'offline'}</span>
         </div>
+        <span class="header-spacer"></span>
+        <button class="header-settings-btn" data-action="open-settings" title="Settings">Settings</button>
+        <div class="header-avatar" data-action="toggle-account-menu" title="Account">
+          ${state.auth && state.auth.email ? esc(state.auth.email.slice(0,1).toUpperCase()) : '?'}
+        </div>
       </div>
     </header>
+
+    <!-- Account menu (modal-style: overlay backdrop + lifted z-index so the
+         Objective block can't paint over the popup) -->
+    <div id="account-menu-backdrop" class="account-menu-backdrop ${state.accountMenuOpen ? 'open' : ''}" data-action="close-account-menu"></div>
+    <div id="account-menu" class="account-menu ${state.accountMenuOpen ? 'open' : ''}">
+      <div class="account-menu-head">ACCOUNT</div>
+      <div class="account-menu-email">${esc((state.auth && state.auth.email) || 'unknown')}</div>
+      ${PLATFORM.accountMenuItemsHTML()}
+    </div>
 
     ${(p.objective || retro) ? `
     <div class="project-info fade-in stagger-1">
@@ -2623,8 +3372,6 @@ function renderShell(app) {
         <div class="footer-tagline">Where humans and AI are bound together.</div>
       </div>
       <div class="footer-right">
-        ${PLATFORM.getArchiveButtonHTML(p)}
-        <button class="sort-toggle" data-action="export-json" style="font-size:0.65rem;">Export JSON</button>
         ${state.serverVersion ? `<span title="Running Beacon server version (from /health)">Beacon server v${state.serverVersion.replace(/[<>"'&]/g, '')}</span>` : ''}
         <span>${state.lastUpdate ? formatTime(state.lastUpdate) : ''}</span>
       </div>
@@ -2646,6 +3393,14 @@ const PLATFORM = {
     ? `<button class="sort-toggle" data-action="archive-project" style="font-size:0.65rem;color:var(--text-dim);">Archive</button>`
     : '',
   footerStaggerClass: 'stagger-4',
+  // ms-72 e-1774 — Account-menu items. Web shows Admin + Sign out (cloud
+  // session, browser auth). Tauri shows a short hint pointing to the CLI
+  // because cloud_logout is not yet wired in the Rust layer (= 意図的差分,
+  // documented in CORE doc K8AhPgjpDG3mEa4eVm37 §Tauri-only differences).
+  accountMenuItemsHTML: () => `
+    <button class="account-menu-item" data-action="goto-admin">Admin</button>
+    <button class="account-menu-item danger" data-action="logout">Sign out</button>
+  `,
 };
 
 // DataSource (ms-46 e-728): Web implementation (fetch via api() helper).
@@ -2667,6 +3422,66 @@ const dataSource = {
     }
   },
   loadDocumentContent: async (docId) => { state.documentContent = await api(`/api/projects/${state.projectId}/documents/${docId}`); },
+  // ms-69 / e-1659 — top-level treks resource (= not under /api/projects/{id}/)
+  // because treks bridge projects. Caller sees the treks they are creator or
+  // member of, across all projects.
+  loadTreks: async () => { state.treks = await api(`/api/treks?include_archived=true`); },
+  loadTrekDocs: async (trekId) => {
+    try {
+      state.openTrekDocs = await api(`/api/treks/${encodeURIComponent(trekId)}/documents`);
+    } catch (_e) {
+      state.openTrekDocs = [];
+    }
+  },
+  // ms-69 / e-1664 — reverse lookup for the Related Treks widget on
+  // milestone / operation / task detail. ``kind`` ∈ {'milestone','operation','task'}.
+  loadRelatedTreks: async (kind, id) => {
+    const path = kind === 'milestone' ? 'milestones'
+      : kind === 'operation' ? 'operations'
+      : 'entries';
+    const key = (kind === 'milestone' ? 'ms' : kind === 'operation' ? 'op' : 'task') + ':' + id;
+    try {
+      state.relatedTreks[key] = await api(
+        `/api/projects/${state.projectId}/${path}/${encodeURIComponent(id)}/related-treks`,
+      );
+    } catch (_e) {
+      state.relatedTreks[key] = [];
+    }
+  },
+  // ms-69 / e-1659 v3 — cross-project live sessions (= ONLINE AGENTS section
+  // in the sidebar + Settings>Agents & Treks table). Includes only treks the
+  // caller can see; falls back to empty list when offline / unauthenticated.
+  loadOnlineSessions: async () => {
+    try {
+      state.onlineSessions = await api('/api/me/sessions?live_only=true&since_minutes=10');
+    } catch (_e) {
+      state.onlineSessions = [];
+    }
+  },
+  // ms-69 / e-1659 v3 — caller's project memberships (= /api/me/projects).
+  // Used by the Settings project-pulldown so the user can jump between
+  // projects they belong to.
+  // ms-78 / e-1909 — caller's own profile. Returns
+  // {user_id, email, display_name}.
+  loadMyProfile: async () => {
+    try {
+      state.myProfile = await api('/api/me/profile');
+    } catch (e) {
+      state.myProfile = null;
+    }
+  },
+  updateMyProfile: async (displayName) => api('/api/me/profile', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ display_name: displayName || '' }),
+  }),
+  loadMyProjects: async () => {
+    try {
+      state.myProjects = await api('/api/me/projects');
+    } catch (_e) {
+      state.myProjects = [];
+    }
+  },
   // ms-43 e-631: unified cross-entity search.
   // Returns {results, total, facets, limit, offset}. Caller manages state.search* fields.
   searchProject: async (params) => {
@@ -2679,6 +3494,74 @@ const dataSource = {
     const query = qs.toString();
     return await api(`/api/projects/${state.projectId}/search${query ? '?' + query : ''}`);
   },
+  // ms-70 e-1718 — DM approval history (Settings > Audit).
+  // Read-only audit feed; per SPEC 設計方針 3 the approve/deny decision lives
+  // in the terminal, so this method has no companion "decide" route — the
+  // Web UI never surfaces decision controls.
+  loadDmApprovalHistory: async (pid, limit) => api(
+    `/api/projects/${pid}/dm/approval/history?limit=${encodeURIComponent(limit || 50)}`,
+  ),
+  // ms-72 e-1774 — Member admin (Settings > Projects & Members).
+  // Web routes through cloud REST; Tauri's mirror in layer.js returns a
+  // "cloud-only / use Web UI" hint until Rust bindings land (= 意図的差分).
+  // Throws on HTTP error so callers can surface the message.
+  loadProjectMembers: async (pid) => api(`/api/projects/${pid}/members`),
+  inviteMember: async (pid, email, role) => api(
+    `/api/projects/${pid}/members`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, role }),
+    },
+  ),
+  changeMemberRole: async (pid, email, role) => api(
+    `/api/projects/${pid}/members/${encodeURIComponent(email)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role }),
+    },
+  ),
+  removeMember: async (pid, email) => api(
+    `/api/projects/${pid}/members/${encodeURIComponent(email)}`,
+    { method: 'DELETE' },
+  ),
+  // ms-78 e-1803 — Token-based invitation flow.
+  // Web flow: owner POSTs email+role → server returns plaintext token + URL ONCE,
+  // we show it in a copy-to-clipboard modal. Pending invitations can be listed
+  // and cancelled. The plaintext is never returned again.
+  createInvitation: async (pid, email, role) => api(
+    `/api/projects/${pid}/invitations`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, role }),
+    },
+  ),
+  listInvitations: async (pid) => api(`/api/projects/${pid}/invitations`),
+  cancelInvitation: async (pid, invitationId) => api(
+    `/api/projects/${pid}/invitations/${encodeURIComponent(invitationId)}`,
+    { method: 'DELETE' },
+  ),
+  // ms-78 e-1804 — Public landing endpoints (no project_id known up front).
+  previewInvitation: async (token) => api(
+    `/api/invitations/${encodeURIComponent(token)}`,
+  ),
+  acceptInvitation: async (token, displayName) => api(
+    `/api/invitations/${encodeURIComponent(token)}/accept`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ display_name: displayName || '' }),
+    },
+  ),
+  // ms-72 e-1774 — Project archive / unarchive. ``action`` ∈ {'archive','unarchive'}.
+  // Web hits the REST endpoint; Tauri's mirror in layer.js calls the cloud-mode
+  // Rust binding (`cloud_archive_project` / `cloud_unarchive_project`).
+  setProjectArchived: async (pid, action) => api(
+    `/api/projects/${pid}/${action}`,
+    { method: 'POST' },
+  ),
 };
 
 function render() {
@@ -2833,6 +3716,7 @@ function renderMilestoneCard(ms, index) {
         ${msObjective}${msAc}
         ${ms.description ? `<div class="ms-description">${esc(ms.description)}</div>` : ''}
         ${renderedEntries}
+        ${renderRelatedTreksWidget('milestone', ms.id)}
       </div>
     `;
   }
@@ -2890,14 +3774,30 @@ function renderRetroSection() {
 
 async function switchTab(tab) {
   state.activeTab = tab;
-  state.showGraph = false;
   state.retroContent = null;
   state.documentContent = null;
+  // ms-69 / e-1659 v3: switching tabs leaves any open trek detail and
+  // returns the user to the project view (trek detail is a sidebar-driven
+  // standalone page, not a tab in the project chrome).
+  state.openTrekId = null;
+  state.openTrekDocs = [];
   if (tab === 'documents') {
     const loads = [];
     if (state.documents.length === 0) loads.push(dataSource.loadDocuments().catch(() => {}));
     if (state.retros.length === 0) loads.push(dataSource.loadRetros().catch(() => {}));
     await Promise.all(loads);
+  }
+  if (tab === 'operations') {
+    // ms-69 / e-1664: pre-warm related-treks for every operation on the
+    // project so the widget renders immediately as the op cards paint.
+    // Skip ops we already have cached.
+    const ops = (state.project && state.project.operations) || [];
+    const missing = ops.filter(o => state.relatedTreks['op:' + o.id] === undefined);
+    if (missing.length) {
+      Promise.all(missing.map(o => dataSource.loadRelatedTreks('operation', o.id)))
+        .then(() => render())
+        .catch(() => {});
+    }
   }
   if (tab === 'notes') {
     // ms-57 e-1041: Session tab carries two sub-views (notes/logs). Kick
@@ -2908,6 +3808,1130 @@ async function switchTab(tab) {
     ]).then(() => render()).catch(() => {});
   }
   render();
+}
+
+// ---- Treks (ms-69 / e-1659) ----
+
+async function openTrek(trekId) {
+  state.openTrekId = trekId;
+  state.openTrekDocs = [];
+  render();
+  // Fetch docs in the background; if it fails, the detail view shows
+  // "No docs tagged with this trek yet." which is a fine degrade.
+  try {
+    await dataSource.loadTrekDocs(trekId);
+    render();
+  } catch (_e) { /* no-op */ }
+}
+
+function closeTrek() {
+  state.openTrekId = null;
+  state.openTrekDocs = [];
+  render();
+}
+
+// ---- Settings overlay (ms-69 / e-1659 v3) ----
+async function openSettings(tab) {
+  state.settingsOpen = true;
+  if (tab) state.settingsTab = tab;
+  state.accountMenuOpen = false;
+  // Default the Settings dropdown to the currently-opened project so the
+  // first paint shows "this project's" members.
+  if (!state.settingsViewProjectId) {
+    state.settingsViewProjectId = state.projectId || '';
+  }
+  // Members tab always needs the caller's project memberships + role.
+  if (state.settingsTab === 'members') {
+    if (!state.myProjects || state.myProjects.length === 0) {
+      dataSource.loadMyProjects().catch(() => {}).then(() => {
+        _resolveMyRole();
+        renderSettings();
+      });
+    } else {
+      _resolveMyRole();
+    }
+  }
+  // Ensure data is loaded so the two tabs have something to render.
+  if (state.settingsTab === 'agents'
+      && (!state.onlineSessions || state.onlineSessions.length === 0)) {
+    dataSource.loadOnlineSessions().catch(() => {}).then(renderSettings);
+  }
+  if (state.settingsTab === 'agents'
+      && (!state.treks || state.treks.length === 0)) {
+    dataSource.loadTreks().catch(() => {}).then(renderSettings);
+  }
+  renderSettings();
+}
+function _settingsViewedProjectId() {
+  // Which project's members are being viewed right now in Settings? Defaults
+  // to the currently-opened project; switches when the user picks from the
+  // pulldown.
+  return state.settingsViewProjectId || state.projectId || '';
+}
+
+function _resolveMyRole() {
+  // state.myProjects entries carry .role per /api/me/projects. Lookup the
+  // role for the **viewed** project (= what Settings is showing), which
+  // may differ from the project the user is browsing in the main view.
+  const pid = _settingsViewedProjectId();
+  const me = (state.myProjects || []).find(p => (p.id || p.project_id) === pid);
+  state.myRole = (me && me.role) || '';
+  state.myIsOwner = state.myRole === 'owner';
+}
+function closeSettings() {
+  state.settingsOpen = false;
+  renderSettings();
+}
+function setSettingsTab(tab) {
+  state.settingsTab = tab;
+  openSettings(tab);
+}
+
+function _renderSettingsMembersTab() {
+  // Real project selector (= /api/me/projects = caller's memberships) +
+  // member list + Archive / Export buttons. Owner-only controls (invite /
+  // role-change / remove / archive) are hidden for editor / viewer roles.
+  //
+  // The dropdown is **view-only**: switching it lets the user peek at
+  // another project's members from here without leaving the project they
+  // are working on. Closing Settings returns to whatever was open before.
+  const projects = state.myProjects || [];
+  const viewedPid = _settingsViewedProjectId();
+  const role = state.myRole || '';
+  const isOwner = !!state.myIsOwner;
+  const isPeeking = viewedPid && viewedPid !== state.projectId;
+  return `
+    <div class="settings-section">
+      <div class="label">View members of ${role ? `(your role: <strong style="color:var(--accent);">${esc(role)}</strong>)` : ''}</div>
+      <select id="settings-project-select" data-action="settings-switch-project"
+              style="background:var(--bg-surface);border:1px solid var(--border);color:var(--text-primary);padding:6px 8px;border-radius:3px;font-family:var(--font-mono);font-size:0.78rem;width:100%;max-width:480px;">
+        ${projects.length
+          ? projects.map(p => `
+              <option value="${esc(p.id || p.project_id)}" ${(p.id || p.project_id) === viewedPid ? 'selected' : ''}>
+                ${esc(p.name || '')} — ${esc(p.id || p.project_id)}${p.role ? ` [${esc(p.role)}]` : ''}
+              </option>
+            `).join('')
+          : `<option value="${esc(viewedPid)}" selected>${esc(state.project ? state.project.name : viewedPid)}</option>`}
+      </select>
+      <div style="font-size:0.7rem;color:var(--text-dim);margin-top:6px;">
+        ${isPeeking
+          ? '別プロジェクトのメンバーを覗いています — Settings を閉じると元のプロジェクト画面に戻ります。'
+          : (projects.length <= 1
+              ? '所属プロジェクトが 1 つだけです。招待を受けると追加で表示されます。'
+              : `${projects.length} project(s) you belong to. 他プロジェクトを選ぶとそこのメンバーを覗けます。`)}
+      </div>
+    </div>
+    <div class="settings-section">
+      <div class="label">Members</div>
+      ${isOwner ? `
+      <div class="settings-invite-row">
+        <input class="email" id="settings-invite-email" placeholder="email">
+        <select id="settings-invite-role">
+          <option value="viewer">viewer</option>
+          <option value="editor">editor</option>
+        </select>
+        <button class="primary" data-action="settings-invite-member">Generate invite URL</button>
+      </div>
+      <div id="settings-invite-msg" style="font-size:0.7rem;color:var(--text-dim);margin:4px 0 10px;"></div>
+      <div id="settings-invite-url-box"
+           style="display:none;margin:6px 0 10px;padding:8px 10px;
+                  background:var(--bg-surface);border:1px solid var(--border);
+                  border-radius:3px;font-family:var(--font-mono);font-size:0.7rem;
+                  word-break:break-all;">
+      </div>
+      <div style="font-size:0.65rem;color:var(--text-dim);margin:0 0 10px;line-height:1.5;">
+        ※ ここで招待するのは Beacon プロジェクトのメンバー (= Web UI / CLI でこのプロジェクトを見られる人) です。GitHub repo の collaborator 招待は Beacon の責任範囲外で、GitHub 側で別途設定してください (例: <code style="font-family:var(--font-mono);font-size:0.65rem;">gh repo edit --add-collaborator &lt;user&gt;</code>)。<br>
+        ※ 招待 URL は <strong>発行直後にしか表示されません</strong>。誘いたい相手にコピーして渡してください。
+      </div>
+      <div id="settings-invitation-list" style="margin-top:6px;"></div>
+      ` : `
+      <div style="font-size:0.7rem;color:var(--text-dim);margin-bottom:10px;">
+        メンバー一覧は閲覧のみ可能です (= owner のみが招待 / 役割変更 / 削除を行えます)
+      </div>
+      `}
+      <div id="settings-member-list">
+        <div class="menu-user" style="color:var(--text-dim);">Loading members…</div>
+      </div>
+    </div>
+    <div class="settings-section">
+      <div class="label">Export &amp; Archive</div>
+      <div style="display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap;">
+        ${isOwner ? `
+        <button data-action="settings-archive-project"
+                style="background:transparent;color:var(--text-secondary);border:1px solid var(--border);padding:6px 14px;border-radius:3px;cursor:pointer;font-family:var(--font-mono);font-size:0.75rem;">
+          ${state.project && state.project.archived ? 'Unarchive' : 'Archive'}
+        </button>
+        ` : `
+        <button disabled title="owner-only"
+                style="background:transparent;color:var(--text-dim);border:1px dashed var(--border-subtle);padding:6px 14px;border-radius:3px;cursor:not-allowed;font-family:var(--font-mono);font-size:0.75rem;">
+          Archive (owner-only)
+        </button>
+        `}
+        <button data-action="settings-export-json"
+                style="background:transparent;color:var(--text-secondary);border:1px solid var(--border);padding:6px 14px;border-radius:3px;cursor:pointer;font-family:var(--font-mono);font-size:0.75rem;">
+          Export JSON
+        </button>
+        <span style="color:var(--text-dim);font-size:0.7rem;margin-left:8px;">
+          ${isOwner
+            ? (state.project && state.project.archived
+                ? '(現在 archived。Unarchive で project list に戻る)'
+                : 'Archive すると project list から隠れます。Export はその場で JSON ダウンロード。')
+            : 'Export はあなたの権限で読める範囲を JSON でダウンロードします。'}
+        </span>
+      </div>
+    </div>`;
+}
+
+// ms-70 / e-1718 — Settings > Audit tab.
+//
+// Surfaces the project's DM approval history (= bus_event_approvals rows
+// where approval_status ∈ {approved, denied}). Read-only by design —
+// SPEC 設計方針 3 keeps every decision inside the terminal Claude Code
+// that received the action via `beacon dm respond`. This tab is the
+// *after the fact* audit window; never wire approve / deny here.
+//
+// We render the row-rendering helper (renderDmApprovalHistoryRows, which
+// lives in the SHARED region) into a slot the loader paints in place
+// after the GET completes. Same "render shell now, fill slot on fetch
+// resolve" pattern as the Members tab — avoids re-rendering the whole
+// settings panel just to swap the list contents.
+function _renderSettingsAuditTab() {
+  return `
+    <div class="settings-section">
+      <div class="label">DM 承認履歴 (DM approval history)</div>
+      <div style="font-size:0.7rem;color:var(--text-dim);margin:4px 0 12px;line-height:1.5;">
+        他のユーザーがあなた宛 (または逆方向) に送った DM action のうち、すでに <strong>approve / deny の判断が下されたもの</strong>を新しい順に表示します。判断は terminal Claude Code の <code style="font-family:var(--font-mono);">beacon dm respond</code> で行うため、ここでは承認 / 拒否ボタンは出ません (= 監査専用の後追い参照)。pending な envelope は <code style="font-family:var(--font-mono);">/api/projects/{pid}/dm/pending</code> 経由で session-start 時に terminal へ流れます。
+      </div>
+      <div id="settings-dm-approval-history">
+        <div class="menu-user" style="color:var(--text-dim);">Loading approval history…</div>
+      </div>
+    </div>`;
+}
+
+// Settings > Audit: fetch + render into #settings-dm-approval-history.
+//
+// Errors (= 401 / 403 / 5xx) surface as a one-line dim string in the slot
+// rather than a popup — audit is read-only so a failed read is a "look
+// later" situation, not a blocker. The Members tab uses the same
+// "swallow error → render placeholder" strategy.
+async function _settingsLoadDmApprovalHistory() {
+  const dst = document.getElementById('settings-dm-approval-history');
+  if (!dst) return;
+  const pid = _settingsViewedProjectId();
+  if (!pid) {
+    dst.innerHTML = '<div class="menu-user" style="color:var(--text-dim);">No project selected.</div>';
+    return;
+  }
+  try {
+    const rows = await dataSource.loadDmApprovalHistory(pid, 50);
+    dst.innerHTML = renderDmApprovalHistoryRows(rows);
+  } catch (e) {
+    dst.innerHTML = `<div class="menu-user" style="color:var(--text-dim);">承認履歴を読み込めませんでした (${esc(String(e && e.message ? e.message : e))})。</div>`;
+  }
+}
+
+// ms-78 / e-1909 — Settings > Profile tab.
+//
+// Lets the signed-in user edit their own display_name (= the human-friendly
+// label that appears in author columns and member lists). Email is shown
+// read-only because it is the sign-in identity, owned by the OAuth provider.
+function _renderSettingsProfileTab() {
+  const prof = state.myProfile || {};
+  const email = prof.email || (state.auth && state.auth.email) || '';
+  const displayName = prof.display_name || '';
+  return `
+    <div class="settings-section">
+      <div class="label">プロフィール (Profile)</div>
+      <div style="font-size:0.7rem;color:var(--text-dim);margin:4px 0 12px;line-height:1.5;">
+        表示名 (display name) は author 列 / メンバー一覧で email の代わりに表示されます。空欄に戻すと email に戻ります。email はサインイン ID なのでここでは変更できません (= OAuth provider 側で管理)。
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px;max-width:480px;">
+        <label style="display:flex;flex-direction:column;gap:4px;">
+          <span style="font-size:0.7rem;color:var(--text-dim);">Email (read-only)</span>
+          <input type="text" value="${esc(email)}" readonly
+                 style="background:var(--bg-surface);border:1px solid var(--border-subtle);color:var(--text-dim);font-size:0.75rem;padding:6px 8px;border-radius:3px;font-family:var(--font-mono);"/>
+        </label>
+        <label style="display:flex;flex-direction:column;gap:4px;">
+          <span style="font-size:0.7rem;color:var(--text-dim);">Display name</span>
+          <input id="settings-profile-display-name" type="text" value="${esc(displayName)}"
+                 placeholder="(空欄にすると email を表示します)"
+                 maxlength="60"
+                 style="background:var(--bg-surface);border:1px solid var(--border);color:var(--text-primary);font-size:0.8rem;padding:6px 8px;border-radius:3px;"/>
+        </label>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button data-action="settings-profile-save"
+                  style="background:var(--accent);color:#000;border:0;padding:6px 14px;border-radius:3px;font-family:var(--font-mono);font-size:0.75rem;cursor:pointer;">
+            保存 (Save)
+          </button>
+          <span id="settings-profile-msg" style="color:var(--text-dim);font-size:0.7rem;"></span>
+        </div>
+      </div>
+    </div>`;
+}
+
+// ms-78 / e-1909 — save handler for Settings > Profile.
+async function _settingsSaveProfile() {
+  const input = document.getElementById('settings-profile-display-name');
+  const msg = document.getElementById('settings-profile-msg');
+  if (!input) return;
+  const value = (input.value || '').trim();
+  if (msg) msg.textContent = '保存中…';
+  try {
+    const res = await dataSource.updateMyProfile(value);
+    // Reflect the canonical server state locally so the next render uses it.
+    state.myProfile = state.myProfile || {};
+    state.myProfile.display_name = (res && typeof res.display_name === 'string')
+      ? res.display_name : value;
+    if (msg) msg.textContent = value ? '保存しました。' : '表示名をクリアしました (email にフォールバック)。';
+    // Mark the retroactive prompt dismissed so it doesn't reappear.
+    try {
+      localStorage.setItem(
+        'beacon_display_name_prompt_dismissed_at',
+        new Date().toISOString()
+      );
+    } catch (_) { /* private mode — ignore */ }
+  } catch (e) {
+    if (msg) msg.textContent = `エラー: ${e && e.message ? e.message : 'unknown'}`;
+  }
+}
+
+// ms-78 / e-1909 — retroactive "set your display name" prompt.
+//
+// Shown once per browser when:
+//   - the user is signed in (= state.auth.email present), AND
+//   - the server-side profile has no display_name yet, AND
+//   - the user has not dismissed the prompt before (= localStorage key
+//     `beacon_display_name_prompt_dismissed_at` absent).
+//
+// The dismiss is durable so closing the banner counts as "I'll do it
+// later from Settings", matching AC 3's "1 回だけ" requirement.
+function _shouldShowDisplayNamePrompt() {
+  if (!state.auth || !state.auth.email) return false;
+  if (!state.myProfile) return false;
+  if ((state.myProfile.display_name || '').trim()) return false;
+  try {
+    if (localStorage.getItem('beacon_display_name_prompt_dismissed_at')) return false;
+  } catch (_) { /* private mode → show it once per page load */ }
+  return true;
+}
+
+function renderDisplayNamePrompt() {
+  const root = document.getElementById('display-name-prompt');
+  if (!root) return;
+  if (!_shouldShowDisplayNamePrompt()) { root.innerHTML = ''; root.style.display = 'none'; return; }
+  const email = (state.myProfile && state.myProfile.email) || (state.auth && state.auth.email) || '';
+  root.style.display = 'block';
+  root.innerHTML = `
+    <div style="position:fixed;top:60px;right:24px;z-index:1000;
+                background:var(--bg-surface);border:1px solid var(--border);
+                border-radius:6px;padding:14px 16px;max-width:340px;
+                box-shadow:0 4px 12px rgba(0,0,0,0.4);">
+      <div style="font-size:0.8rem;color:var(--text-primary);margin-bottom:6px;font-weight:600;">
+        表示名を設定しませんか？
+      </div>
+      <div style="font-size:0.7rem;color:var(--text-dim);line-height:1.5;margin-bottom:10px;">
+        現在 author 列には ${esc(email)} がそのまま表示されています。
+        表示名 (display name) を設定すると、commit / task の作者欄が読みやすくなります。
+      </div>
+      <div style="display:flex;gap:6px;flex-direction:column;">
+        <input id="display-name-prompt-input" type="text" maxlength="60"
+               placeholder="例: 山田太郎"
+               style="background:var(--bg);border:1px solid var(--border);color:var(--text-primary);font-size:0.8rem;padding:6px 8px;border-radius:3px;"/>
+        <div style="display:flex;gap:6px;">
+          <button data-action="display-name-prompt-save"
+                  style="background:var(--accent);color:#000;border:0;padding:5px 12px;border-radius:3px;font-family:var(--font-mono);font-size:0.7rem;cursor:pointer;flex:1;">
+            保存
+          </button>
+          <button data-action="display-name-prompt-dismiss"
+                  style="background:transparent;color:var(--text-dim);border:1px solid var(--border);padding:5px 12px;border-radius:3px;font-family:var(--font-mono);font-size:0.7rem;cursor:pointer;">
+            後で
+          </button>
+        </div>
+      </div>
+    </div>`;
+  // Wire actions (data-action handler is global; direct binding here ensures
+  // the bus fires even when the prompt sits outside the main #app subtree).
+  const saveBtn = root.querySelector('[data-action="display-name-prompt-save"]');
+  const dismissBtn = root.querySelector('[data-action="display-name-prompt-dismiss"]');
+  if (saveBtn) saveBtn.addEventListener('click', _displayNamePromptSave);
+  if (dismissBtn) dismissBtn.addEventListener('click', _displayNamePromptDismiss);
+}
+
+async function _displayNamePromptSave() {
+  const input = document.getElementById('display-name-prompt-input');
+  const value = ((input && input.value) || '').trim();
+  if (!value) {
+    // Empty value → treat as dismiss (= user opted to skip).
+    _displayNamePromptDismiss();
+    return;
+  }
+  try {
+    const res = await dataSource.updateMyProfile(value);
+    state.myProfile = state.myProfile || {};
+    state.myProfile.display_name = (res && typeof res.display_name === 'string')
+      ? res.display_name : value;
+  } catch (_) {
+    // Best-effort — even on error, mark dismissed so we don't spam.
+  }
+  _displayNamePromptDismiss();
+}
+
+function _displayNamePromptDismiss() {
+  try {
+    localStorage.setItem(
+      'beacon_display_name_prompt_dismissed_at',
+      new Date().toISOString()
+    );
+  } catch (_) { /* private mode — prompt will return on reload, acceptable */ }
+  renderDisplayNamePrompt();
+}
+
+function _renderSettingsAgentsTab() {
+  const treks = state.treks || [];
+  const allSessions = state.onlineSessions || [];
+  const filter = state.settingsFilterTrek || '';
+  // Only show the caller's own sessions (= "My Agents & Treks" tab).
+  // We filter by the auth email rather than trusting the server-side
+  // endpoint to be strict — defense in depth.
+  const myEmail = (state.auth && state.auth.email) || '';
+  const mySessions = allSessions.filter(s => {
+    const email = (s.actor && s.actor.email) || '';
+    return !myEmail || email === myEmail;
+  });
+  const userTreks = (email) => {
+    return treks.filter(t => (t.members || []).some(m => m.email === email
+                                                      && m.joined_at));
+  };
+  const filtered = filter
+    ? mySessions.filter(s => {
+        const email = (s.actor && s.actor.email) || '';
+        return userTreks(email).some(t => t.trek_id === filter);
+      })
+    : mySessions;
+  const rowHtml = (s) => {
+    const sid = s.session_id || '';
+    const sidShort = _trekShortSessionId(sid);
+    const email = (s.actor && s.actor.email) || '';
+    const proj = s.project_name || s.project_id || '';
+    const ts = (s.last_active || s.created_at || '').slice(0, 16).replace('T', ' ');
+    const treksForSession = userTreks(email);
+    const trekLabel = treksForSession.length
+      ? treksForSession.map(t => t.title).join(' / ')
+      : '—';
+    const muted = !!s.shutdown;
+    return `
+      <tr class="${muted ? 'muted' : ''}">
+        <td><span class="session-avatar"></span><span class="session-id">${esc(sidShort)}</span></td>
+        <td>${esc(proj)}</td>
+        <td>${esc(trekLabel)}</td>
+        <td>${esc(ts)}</td>
+      </tr>`;
+  };
+  return `
+    <div class="settings-section">
+      <div class="label" style="margin-bottom:4px;">${esc(myEmail || 'You')} の現在オンラインなセッション</div>
+      <div style="font-size:0.7rem;color:var(--text-dim);margin-bottom:14px;">
+        自分のセッションのみ表示。参加中の Trek で絞り込み、Trek から離脱はターミナルから (= beacon trek leave)
+      </div>
+      <div style="margin-bottom:12px;">
+        <select id="settings-filter-trek" data-action="settings-set-filter-trek">
+          <option value="">All</option>
+          ${treks.map(t => `<option value="${esc(t.trek_id)}" ${filter === t.trek_id ? 'selected' : ''}>${esc(t.title || t.trek_id)}</option>`).join('')}
+        </select>
+      </div>
+      <table class="settings-agents-table">
+        <thead>
+          <tr>
+            <th style="width:30%">Session</th>
+            <th>Project</th>
+            <th>Trek</th>
+            <th>Started / last active</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${filtered.length
+            ? filtered.map(rowHtml).join('')
+            : '<tr><td colspan="4" style="color:var(--text-dim);font-style:italic;text-align:center;padding:12px;">No sessions match this filter.</td></tr>'}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function renderSettings() {
+  const root = document.getElementById('settings-root');
+  if (!root) return;
+  root.classList.toggle('open', !!state.settingsOpen);
+  if (!state.settingsOpen) { root.innerHTML = ''; return; }
+  const tab = state.settingsTab || 'members';
+  root.innerHTML = `
+    <div class="settings-panel" onclick="event.stopPropagation()">
+      <div class="settings-head">
+        <div class="brand-block"><span style="font-size:1rem;">☰</span> Beacon <span class="label">Settings</span></div>
+        <span class="spacer"></span>
+        <button class="settings-close" data-action="close-settings">×</button>
+      </div>
+      <div class="settings-tabs">
+        <button class="tab ${tab === 'members' ? 'active' : ''}" data-action="settings-set-tab" data-tab="members">Projects &amp; Members</button>
+        <button class="tab ${tab === 'agents' ? 'active' : ''}" data-action="settings-set-tab" data-tab="agents">My Agents &amp; Treks</button>
+        <button class="tab ${tab === 'audit' ? 'active' : ''}" data-action="settings-set-tab" data-tab="audit">Audit</button>
+        <button class="tab ${tab === 'profile' ? 'active' : ''}" data-action="settings-set-tab" data-tab="profile">Profile</button>
+      </div>
+      ${tab === 'members'
+        ? _renderSettingsMembersTab()
+        : tab === 'audit'
+        ? _renderSettingsAuditTab()
+        : tab === 'profile'
+        ? _renderSettingsProfileTab()
+        : _renderSettingsAgentsTab()}
+    </div>
+  `;
+  // Close on overlay click (= outside panel)
+  root.addEventListener('click', (ev) => {
+    if (ev.target === root) closeSettings();
+  }, { once: true });
+  root.querySelectorAll('[data-action]').forEach(el => {
+    if (el.tagName === 'SELECT' && el.dataset.action === 'settings-switch-project') {
+      el.addEventListener('change', handleAction);
+    } else {
+      el.addEventListener('click', handleAction);
+    }
+  });
+  // Hook the trek filter dropdown
+  const sel = document.getElementById('settings-filter-trek');
+  if (sel) sel.addEventListener('change', (e) => {
+    state.settingsFilterTrek = e.target.value;
+    renderSettings();
+  });
+  // Members tab: load the project members directly into our slot.
+  if (tab === 'members' && state.projectId) {
+    _settingsLoadMemberList();
+    // ms-78 e-1803 — Owner-only pending invitations list. Non-owner calls
+    // return 403 and silently render nothing (see _settingsLoadInvitationList).
+    if (state.myIsOwner) _settingsLoadInvitationList();
+  }
+  // Audit tab (ms-70 / e-1718): load DM approval history into its slot.
+  // Same "load directly into target slot" pattern as the Members tab — the
+  // initial renderSettings() shows a "Loading…" placeholder; the fetch
+  // completes and we paint rows in place without re-rendering the whole
+  // settings panel.
+  if (tab === 'audit' && state.projectId) {
+    _settingsLoadDmApprovalHistory();
+  }
+  // ms-78 / e-1909 — Profile tab: refresh myProfile so the input shows the
+  // current persisted display_name. The renderSettings shell renders the
+  // initial value from the cached state.myProfile; we kick a fresh fetch
+  // and re-render once it lands so the field stays in sync across tabs /
+  // devices.
+  if (tab === 'profile') {
+    dataSource.loadMyProfile().then(() => {
+      if (state.settingsOpen && state.settingsTab === 'profile') {
+        renderSettings();
+      }
+    });
+  }
+}
+
+// Settings > Members: fetch + render into #settings-member-list.
+// Only owner sees role-change / remove controls; editor / viewer see the
+// member list as read-only. The list reflects the **viewed** project
+// (= settings dropdown selection), not necessarily the currently-opened one.
+async function _settingsLoadMemberList() {
+  const dst = document.getElementById('settings-member-list');
+  if (!dst) return;
+  const pid = _settingsViewedProjectId();
+  if (!pid) {
+    dst.innerHTML = '<div class="menu-user" style="color:var(--text-dim);">No project selected.</div>';
+    return;
+  }
+  try {
+    const data = await dataSource.loadProjectMembers(pid);
+    const myEmail = (state.auth && state.auth.email) || '';
+    // Confirm owner-grant via both myRole resolution AND server-reported
+    // owner email — defense in depth.
+    const isOwner = (state.myIsOwner === true)
+      && !!myEmail && data.owner_email === myEmail;
+    // ms-78 e-1807 — render a human-friendly label: display_name (large)
+    // + email (small dim). When display_name is empty we fall back to email
+    // alone, matching the legacy view.
+    const renderName = (displayName, email) => {
+      const dn = (displayName || '').trim();
+      if (!dn) return esc(email || '');
+      return `${esc(dn)} <span style="color:var(--text-dim);font-size:0.65rem;">${esc(email || '')}</span>`;
+    };
+    let html = '';
+    if (data.owner_email) {
+      html += `
+        <div class="settings-member-row">
+          <span class="email">${renderName(data.owner_display_name, data.owner_email)}${data.owner_email === myEmail ? ' <span style="color:var(--text-dim);font-size:0.6rem;">(you)</span>' : ''}</span>
+          <span class="role-tag">owner</span>
+          <span></span>
+        </div>`;
+    }
+    for (const m of (data.members || [])) {
+      const isMe = m.email === myEmail;
+      html += `
+        <div class="settings-member-row">
+          <span class="email">${renderName(m.display_name, m.email)}${isMe ? ' <span style="color:var(--text-dim);font-size:0.6rem;">(you)</span>' : ''}</span>
+          ${isOwner
+            ? `<select data-action="settings-change-role" data-email="${esc(m.email)}"
+                       style="background:var(--bg-surface);border:1px solid var(--border);color:var(--text-primary);font-size:0.7rem;padding:1px 4px;border-radius:3px;cursor:pointer;">
+                 <option value="viewer" ${m.role === 'viewer' ? 'selected' : ''}>viewer</option>
+                 <option value="editor" ${m.role === 'editor' ? 'selected' : ''}>editor</option>
+               </select>`
+            : `<span class="role-tag" style="color:var(--text-dim);">${esc(m.role)}</span>`}
+          ${isOwner
+            ? `<span class="x" data-action="settings-remove-member" data-email="${esc(m.email)}">×</span>`
+            : '<span></span>'}
+        </div>`;
+    }
+    if (!html) {
+      html = '<div class="menu-user" style="color:var(--text-dim);">No members.</div>';
+    }
+    dst.innerHTML = html;
+    dst.querySelectorAll('[data-action]').forEach(el => {
+      const act = el.dataset.action;
+      if (act === 'settings-change-role') {
+        el.addEventListener('change', _settingsChangeRole);
+      } else if (act === 'settings-remove-member') {
+        el.addEventListener('click', _settingsRemoveMember);
+      }
+    });
+  } catch (e) {
+    dst.innerHTML = `<div class="menu-user" style="color:var(--text-dim);">Failed to load members (${esc(e.message || 'error')}).</div>`;
+  }
+}
+
+// ms-78 e-1803 — Token-based invitation. Owner submits email + role; server
+// returns a one-shot plaintext token + URL. We surface the URL with a copy
+// button so the inviter can paste it into Slack / email / DM.
+//
+// The legacy "directly add an existing Beacon user as member" path is
+// deliberately replaced — invitations now go through the /join/<token>
+// landing flow so the invitee gets the Claude Code setup prompt (UC11-F6).
+async function _settingsInviteMember() {
+  const emailEl = document.getElementById('settings-invite-email');
+  const roleEl = document.getElementById('settings-invite-role');
+  const msg = document.getElementById('settings-invite-msg');
+  const urlBox = document.getElementById('settings-invite-url-box');
+  const email = (emailEl && emailEl.value || '').trim();
+  const role = (roleEl && roleEl.value) || 'viewer';
+  const pid = _settingsViewedProjectId();
+  if (!email) { if (msg) msg.textContent = 'email is required'; return; }
+  if (msg) msg.textContent = 'Generating invite URL…';
+  try {
+    const res = await dataSource.createInvitation(pid, email, role);
+    const url = res.url || '';
+    if (msg) msg.textContent =
+      `Invite URL for ${esc(email)} (${esc(role)}) — expires ${(res.expires_at || '').slice(0,10)}`;
+    if (emailEl) emailEl.value = '';
+    if (urlBox) {
+      urlBox.style.display = 'block';
+      urlBox.innerHTML = `
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+          <span style="flex:1;min-width:200px;">${esc(url)}</span>
+          <button data-action="settings-copy-invite-url" data-url="${esc(url)}"
+                  style="background:var(--accent);color:#000;border:0;padding:4px 10px;
+                         border-radius:3px;font-family:var(--font-mono);font-size:0.7rem;
+                         cursor:pointer;">Copy</button>
+        </div>
+        <div style="margin-top:6px;color:var(--text-dim);font-size:0.65rem;line-height:1.4;">
+          このリンクを ${esc(email)} に渡してください。Beacon project member への参加が成立します
+          (GitHub repo の collaborator 招待は別経路 = <code>gh repo edit --add-collaborator</code>)。
+          リンクは一度だけ表示されます — 失くしたら cancel して再発行してください。
+        </div>
+      `;
+      // Hook the copy button (innerHTML resets data-action wires).
+      const copyBtn = urlBox.querySelector('[data-action="settings-copy-invite-url"]');
+      if (copyBtn) {
+        copyBtn.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(url);
+            copyBtn.textContent = 'Copied!';
+            setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+          } catch (_) {
+            copyBtn.textContent = '(copy failed — select manually)';
+          }
+        });
+      }
+    }
+    _settingsLoadInvitationList();
+  } catch (e) {
+    if (msg) msg.textContent = e.message || 'Error';
+  }
+}
+
+// ms-78 e-1803 — Pending invitations list. Owner-only. Each row shows email,
+// role, who issued it, and an x button to cancel.
+async function _settingsLoadInvitationList() {
+  const dst = document.getElementById('settings-invitation-list');
+  if (!dst) return;
+  const pid = _settingsViewedProjectId();
+  if (!pid) { dst.innerHTML = ''; return; }
+  try {
+    const data = await dataSource.listInvitations(pid);
+    const items = data.invitations || [];
+    if (!items.length) {
+      dst.innerHTML = '';
+      return;
+    }
+    let html = `
+      <div style="font-size:0.7rem;color:var(--text-dim);
+                  margin:0 0 4px;text-transform:uppercase;letter-spacing:0.04em;">
+        Pending invitations
+      </div>`;
+    for (const inv of items) {
+      const exp = (inv.expires_at || '').slice(0, 10);
+      html += `
+        <div class="settings-member-row" style="opacity:0.85;">
+          <span class="email">${esc(inv.email)}
+            <span style="color:var(--text-dim);font-size:0.6rem;">expires ${esc(exp)}</span>
+          </span>
+          <span class="role-tag" style="color:var(--text-dim);">${esc(inv.role)}</span>
+          <span class="x" data-action="settings-cancel-invitation"
+                data-id="${esc(inv.id)}"
+                title="Cancel invitation">×</span>
+        </div>`;
+    }
+    dst.innerHTML = html;
+    dst.querySelectorAll('[data-action="settings-cancel-invitation"]').forEach(el => {
+      el.addEventListener('click', _settingsCancelInvitation);
+    });
+  } catch (e) {
+    // Non-owner callers get 403 — silently render nothing (handled by isOwner gate).
+    dst.innerHTML = '';
+  }
+}
+
+async function _settingsCancelInvitation(ev) {
+  const id = ev.currentTarget.dataset.id;
+  if (!id) return;
+  if (!window.confirm('Cancel this invitation?')) return;
+  const pid = _settingsViewedProjectId();
+  try {
+    await dataSource.cancelInvitation(pid, id);
+    _settingsLoadInvitationList();
+  } catch (e) {
+    window.alert(e.message || 'Error');
+  }
+}
+
+async function _settingsChangeRole(e) {
+  const sel = e.currentTarget;
+  const email = sel.dataset.email;
+  const newRole = sel.value;
+  const pid = _settingsViewedProjectId();
+  try {
+    await dataSource.changeMemberRole(pid, email, newRole);
+  } catch (err) { window.alert(err.message || 'Error'); }
+}
+
+async function _settingsRemoveMember(e) {
+  const email = e.currentTarget.dataset.email;
+  if (!window.confirm(`Remove ${email}?`)) return;
+  const pid = _settingsViewedProjectId();
+  try {
+    await dataSource.removeMember(pid, email);
+    _settingsLoadMemberList();
+  } catch (err) { window.alert(err.message || 'Error'); }
+}
+
+async function _settingsArchiveProject() {
+  // Archive acts on the project currently visible in Settings (= dropdown
+  // selection), which may be the active project or one the user is peeking at.
+  const pid = _settingsViewedProjectId();
+  if (!pid) return;
+  const isViewingActive = (pid === state.projectId);
+  const targetArchived = isViewingActive
+    ? !!(state.project && state.project.archived)
+    : false;  // Without loading the target project's archived flag here we
+              // assume not-archived; the server enforces correctness.
+  const action = targetArchived ? 'unarchive' : 'archive';
+  if (!window.confirm(`${action === 'archive' ? 'Archive' : 'Unarchive'} project "${pid}"?`)) return;
+  try {
+    await dataSource.setProjectArchived(pid, action);
+    if (isViewingActive) {
+      // Active project changed archived state — refresh project list, reload
+      // current project, close settings so the user sees the result.
+      if (typeof dataSource.loadProjects === 'function') {
+        try { await dataSource.loadProjects(); } catch (_e) {}
+      }
+      if (typeof loadProject === 'function') {
+        try { await loadProject(); } catch (_e) {}
+      }
+      closeSettings();
+      render();
+    } else {
+      // Peeked project: refresh own project list so archived flag updates,
+      // then repaint settings (still viewing peeked project).
+      if (typeof dataSource.loadProjects === 'function') {
+        try { await dataSource.loadProjects(); } catch (_e) {}
+      }
+      renderSettings();
+    }
+  } catch (err) {
+    window.alert(err.message || 'Error');
+  }
+}
+
+// ---- Account-menu dropdown (avatar) — modal style ----
+function _syncAccountMenuClasses() {
+  const menu = document.getElementById('account-menu');
+  const bd = document.getElementById('account-menu-backdrop');
+  if (menu) menu.classList.toggle('open', !!state.accountMenuOpen);
+  if (bd) bd.classList.toggle('open', !!state.accountMenuOpen);
+}
+function toggleAccountMenu() {
+  state.accountMenuOpen = !state.accountMenuOpen;
+  _syncAccountMenuClasses();
+}
+function closeAccountMenu() {
+  state.accountMenuOpen = false;
+  _syncAccountMenuClasses();
+}
+function gotoAdmin() {
+  closeAccountMenu();
+  window.location.assign('/admin');
+}
+
+function _trekStatusIcon(s) {
+  if (s === 'active') return '●';
+  if (s === 'planning') return '○';
+  if (s === 'archived') return '\u{1F4E6}';
+  return '?';
+}
+
+// ms-69 / e-1664 — Related Treks widget rendered inline on milestone /
+// operation / task detail. Reads from state.relatedTreks (= cache keyed by
+// "ms:..." / "op:..." / "task:..."). Returns empty string when not yet
+// loaded or when there are no matches, so the widget never adds visual
+// noise to work items that no trek covers.
+function renderRelatedTreksWidget(kind, id) {
+  const prefix = kind === 'milestone' ? 'ms' : kind === 'operation' ? 'op' : 'task';
+  const key = prefix + ':' + id;
+  const treks = state.relatedTreks[key];
+  if (!treks || treks.length === 0) return '';
+  const row = (t) => `
+    <div data-action="trek-jump-from-widget" data-trek-id="${esc(t.trek_id)}"
+         style="display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer;font-size:0.78rem;border-bottom:1px solid var(--border);">
+      <span>${_trekStatusIcon(t.status)}</span>
+      <span style="flex:1;">${esc(t.title || '')}</span>
+      ${t.halt ? '<span style="color:#c75;" title="halted">⚠</span>' : ''}
+      <span style="color:var(--text-dim);font-size:0.72rem;">${esc(t.status || '')}</span>
+    </div>`;
+  return `
+    <div style="margin-top:14px;padding:8px 12px;background:var(--bg-surface);border:1px solid var(--border);border-radius:4px;">
+      <div style="font-size:0.7rem;color:var(--text-secondary);letter-spacing:0.05em;margin-bottom:4px;">
+        RELATED TREKS (${treks.length})
+      </div>
+      ${treks.map(row).join('')}
+    </div>`;
+}
+
+// Short session id rendering: keep prefix + suffix, elide middle.
+// "sv-77e81553-1781222638255-547f2dcd" → "sv-77e815...547f2dcd"
+function _trekShortSessionId(sid) {
+  if (!sid) return '';
+  const s = String(sid);
+  if (s.length <= 22) return s;
+  return s.slice(0, 10) + '…' + s.slice(-8);
+}
+
+function _trekBadgeClass(s) {
+  if (s === 'active') return 'active';
+  if (s === 'planning') return 'planning';
+  if (s === 'archived') return 'archived';
+  return '';
+}
+
+function _renderTrekScopeRow(s) {
+  // ref column: prefer the narrowest known ref (task > operation > milestone > project-wide).
+  let refLabel = '';
+  let descLabel = '';
+  if (s.task) { refLabel = s.task; descLabel = '(task)'; }
+  else if (s.operation) { refLabel = s.operation; descLabel = '(operation)'; }
+  else if (s.milestone) { refLabel = s.milestone; descLabel = '(milestone)'; }
+  else { refLabel = '—'; descLabel = '<project-wide>'; }
+  return `
+    <div class="trek-scope-row">
+      <span class="pin">📌</span>
+      <span class="proj-tag">${esc(s.project)}</span>
+      <span class="ref">${esc(refLabel)}</span>
+      <span class="desc">${esc(descLabel)}</span>
+      <span class="pill"></span>
+    </div>`;
+}
+
+function _renderTrekMemberRow(m) {
+  const isLeader = m.role === 'leader';
+  const isInvited = !m.joined_at;
+  const dotCls = isInvited ? 'invited' : (isLeader ? '' : '');
+  const joinedAt = m.joined_at ? (m.joined_at.slice(0, 10)) : '';
+  const invitedAt = m.invited_at ? (m.invited_at.slice(0, 10)) : '';
+  return `
+    <div class="trek-member-row ${dotCls}">
+      <span class="dot"></span>
+      <div>
+        <span class="email">${esc(m.email || '')}</span>
+        <span class="where">${isInvited ? 'invited' : 'member'}</span>
+      </div>
+      <span class="role ${isLeader ? 'leader' : ''}">${isLeader ? 'Leader' : 'Member'}</span>
+      <span class="joined" style="text-align:left;">${isInvited ? '—' : 'joined'}</span>
+      <span class="joined">${isInvited ? ('invited ' + invitedAt) : ('joined ' + joinedAt)}</span>
+    </div>`;
+}
+
+function _renderTrekSummaryRow(d) {
+  return `
+    <div class="trek-summary-row">
+      <span class="ico">📄</span>
+      <div>
+        <span class="summary-title">${esc(d.title || d.doc_id || '(no title)')}</span>
+        <span class="summary-date" style="display:block;font-size:0.7rem;">${esc(d.project_id || '')} · scope=${esc(d.scope || 'memo')}</span>
+      </div>
+      <span class="summary-date">${(d.updated_at || '').slice(0, 10)}</span>
+    </div>`;
+}
+
+function _renderTrekDetail(t) {
+  const members = t.members || [];
+  const scope = t.scope || [];
+  const halted = !!t.halt;
+  const projectsInScope = new Set(scope.map(s => s.project).filter(Boolean));
+  const workItemsInScope = scope.filter(s => s.milestone || s.operation || s.task).length;
+
+  // Group members so the leader sits at the top + invited members appear last.
+  const ordered = [
+    ...members.filter(m => m.role === 'leader'),
+    ...members.filter(m => m.role !== 'leader' && m.joined_at),
+    ...members.filter(m => !m.joined_at),
+  ];
+
+  const creatorEmail = (t.creator_actor || {}).email || '';
+  const leaderSid = t.leader_session_id || '';
+
+  // STOP / halt card: red while active+unhalted, amber + recovery copy when halted.
+  let stopCardHtml = '';
+  if (t.status === 'active') {
+    if (halted) {
+      stopCardHtml = `
+        <div class="trek-stop-card halted">
+          <span class="icon">⏸</span>
+          <div class="text">
+            <strong>HALTED — sessions are paused</strong>
+            ${t.halt.reason ? esc(t.halt.reason) + ' — ' : ''}STOP signal issued by ${esc(_trekShortSessionId(t.halt.issued_by_session_id))} at ${(t.halt.issued_at || '').slice(0,16).replace('T',' ')}.
+            CLI で再開: <code style="color:var(--accent);">beacon trek resume ${esc(t.trek_id)}</code>
+          </div>
+          <button data-action="trek-cli-hint" data-cmd="beacon trek resume ${esc(t.trek_id)}">Resume</button>
+        </div>`;
+    } else {
+      stopCardHtml = `
+        <div class="trek-stop-card">
+          <span class="icon">🚨</span>
+          <div class="text">
+            <strong>STOP THIS TREK</strong>
+            参加中の全 session が現在の tool call の手前で halt し、状態を保存します。再開は leader session に「再開」を指示すれば OK。
+            CLI: <code style="color:var(--accent);">beacon trek stop ${esc(t.trek_id)} --reason "..."</code>
+          </div>
+          <button data-action="trek-cli-hint" data-cmd="beacon trek stop ${esc(t.trek_id)} --reason &quot;...&quot;">STOP</button>
+        </div>`;
+    }
+  }
+
+  const archiveCardHtml = t.status !== 'archived' ? `
+    <div class="trek-archive-card">
+      <span class="ico">📦</span>
+      <div class="text">
+        この trek を <strong>archive</strong> する (= 一時 trek なら完了、永続 trek なら休眠)。記録は残り、参照は archive 後も可能。
+        CLI: <code style="color:var(--accent);">beacon trek archive ${esc(t.trek_id)}</code>
+      </div>
+    </div>` : '';
+
+  const docs = state.openTrekDocs || [];
+  const summaryDocs = docs.slice(0, 10);
+  return `
+    <section class="fade-in">
+      <span class="trek-crumb" data-action="close-trek">← Back to TREKS</span>
+
+      <div class="trek-head">
+        <div class="trek-title-row">
+          <span class="trek-title-text">${esc(t.title || '')}</span>
+          <span class="trek-badge ${t.type === 'temporary' ? 'temporary' : 'persistent'}">${esc(t.type || '')}</span>
+          <span class="trek-badge ${_trekBadgeClass(t.status)}">${_trekStatusIcon(t.status)} ${esc(t.status || '')}</span>
+          ${halted ? `<span class="trek-badge" style="color:var(--warning,#fbbf24);border-color:var(--warning,#fbbf24);">⚠ halted</span>` : ''}
+        </div>
+        <div class="trek-stats">
+          ${projectsInScope.size} project${projectsInScope.size === 1 ? '' : 's'} · ${workItemsInScope} work item${workItemsInScope === 1 ? '' : 's'} · ${members.length} member${members.length === 1 ? '' : 's'}
+        </div>
+      </div>
+
+      <div class="trek-meta">
+        <span class="k">Trek ID</span>
+        <span class="v" style="font-family:var(--font-mono,monospace);">${esc(t.trek_id)}</span>
+        <span class="k">Leader session</span>
+        <span class="v">
+          <span class="session-id">${esc(_trekShortSessionId(leaderSid))}</span>
+          ${creatorEmail ? `<span class="sub">(${esc(creatorEmail)})</span>` : ''}
+        </span>
+        <span class="k">Created</span>
+        <span class="v">${(t.created_at || '').slice(0, 16).replace('T', ' ')}</span>
+        ${t.archived_at ? `
+        <span class="k">Archived</span>
+        <span class="v">${t.archived_at.slice(0, 16).replace('T', ' ')}</span>` : ''}
+      </div>
+
+      ${stopCardHtml}
+      ${archiveCardHtml}
+
+      <!-- SCOPE -->
+      <div class="trek-section">
+        <div class="trek-section-title">
+          <span>SCOPE</span>
+          <span class="right">${scope.length} item${scope.length === 1 ? '' : 's'}</span>
+        </div>
+        ${scope.length
+          ? scope.map(_renderTrekScopeRow).join('')
+          : `<div class="trek-coming-soon">No scope entries. CLI で追加: <code>beacon trek plan ${esc(t.trek_id)} --add-scope &lt;project&gt;:&lt;ref&gt;</code></div>`}
+        <div class="trek-cli-hint">
+          追加・削除はターミナルから:
+          <code>beacon trek plan ${esc(t.trek_id)} --add-scope &lt;project&gt;:&lt;ms-XX|op-X|e-X&gt;</code>
+          <code>beacon trek plan ${esc(t.trek_id)} --remove-scope &lt;project&gt;:&lt;ref&gt;</code>
+        </div>
+      </div>
+
+      <!-- MEMBERS & SESSIONS -->
+      <div class="trek-section">
+        <div class="trek-section-title">
+          <span>MEMBERS &amp; SESSIONS</span>
+          <span class="right">${members.length} member${members.length === 1 ? '' : 's'} · ★ = leader session</span>
+        </div>
+        ${ordered.map(_renderTrekMemberRow).join('')}
+        <div class="trek-cli-hint">
+          招待・離脱・リーダー譲渡はターミナルから:
+          <code>beacon trek invite ${esc(t.trek_id)} --actor &lt;email&gt;</code>
+          <code>beacon trek transfer-leader ${esc(t.trek_id)} --to &lt;session-id&gt;</code>
+        </div>
+      </div>
+
+      <!-- ACTIVE CLAIMS — backed by ms-55 (claim primitive, in flight) -->
+      <div class="trek-section">
+        <div class="trek-section-title">
+          <span>ACTIVE CLAIMS</span>
+          <span class="right">ms-55 で実装予定</span>
+        </div>
+        <div class="trek-coming-soon">
+          claim 一覧 (= 誰が今どの work item を取り組んでいるか) は ms-55
+          (走れて止まれる両輪 — claim 交渉で半自律的に作業分担) と同時に
+          ここに出ます。
+        </div>
+      </div>
+
+      <!-- RECENT ACTIVITY — backed by e-1696 (Activity log auto-update) -->
+      <div class="trek-section">
+        <div class="trek-section-title">
+          <span>RECENT ACTIVITY</span>
+          <span class="right">e-1696 で実装予定</span>
+        </div>
+        <div class="trek-coming-soon">
+          trek 内の bus event ストリーム (= 招待・claim・stop・doc 更新等)
+          は Activity log doc に累積記録される予定。e-1696 が land すると
+          ここに直近 5-10 件が表示されます。
+        </div>
+      </div>
+
+      <!-- SUMMARIES — trek_id 紐付け doc を表示 (= e-1697/98 が land すると Morning briefing / Weekly summary もここに並ぶ) -->
+      <div class="trek-section">
+        <div class="trek-section-title">
+          <span>SUMMARIES</span>
+          <span class="right">trek 配下 ${summaryDocs.length}件 · archive 後も残る</span>
+        </div>
+        ${summaryDocs.length
+          ? summaryDocs.map(_renderTrekSummaryRow).join('')
+          : `<div class="trek-coming-soon">trek_id 紐付けされた doc がまだありません。<br>CLI: <code>beacon doc add "title" --scope memo --trek ${esc(t.trek_id)} --content "..."</code></div>`}
+        <div class="trek-cli-hint">
+          自動生成 (= 定期 cron) は e-1697 / e-1698 で実装予定。手動は:
+          <code>beacon morning --trek ${esc(t.trek_id)}</code>
+          <code>beacon trek summary ${esc(t.trek_id)} --period weekly</code>
+        </div>
+      </div>
+    </section>`;
+}
+
+function renderTreksSection() {
+  // Detail view first (if a trek is open) so loading shows immediately.
+  if (state.openTrekId) {
+    const t = (state.treks || []).find(x => x.trek_id === state.openTrekId);
+    if (!t) {
+      return `
+        <section class="retro-section fade-in">
+          <span class="retro-back" data-action="close-trek">← back to Treks</span>
+          <div class="retro-empty">Trek not found (= it was archived elsewhere or you're not a member).</div>
+        </section>`;
+    }
+    return _renderTrekDetail(t);
+  }
+  // List view: filter to treks that include the current project in scope.
+  const pid = state.projectId;
+  const inProject = (state.treks || []).filter(t =>
+    (t.scope || []).some(s => s.project === pid)
+  );
+  if (inProject.length === 0) {
+    return `
+      <section class="retro-section fade-in">
+        <div class="milestones-header" style="margin-bottom:4px;">
+          <span class="milestones-title">Treks</span>
+          <span class="milestones-count">0</span>
+        </div>
+        <div class="retro-empty" style="margin-top:10px;">
+          このプロジェクトを scope に含む trek (= プロジェクト横断 ・ セッション横断の協奏作業領域) はまだありません。
+        </div>
+        <div style="margin-top:14px;padding:10px 12px;font-size:0.72rem;color:var(--text-dim);background:var(--bg-surface);border:1px solid var(--border);border-radius:4px;line-height:1.5;">
+          ℹ trek はターミナルから作成します:
+          <code style="display:block;margin-top:6px;color:var(--accent);">beacon trek create "title" --type persistent</code>
+        </div>
+      </section>`;
+  }
+  // Split active vs archived for visual grouping (mock convention).
+  const active = inProject.filter(t => t.status !== 'archived');
+  const archived = inProject.filter(t => t.status === 'archived');
+  const trekRow = (t) => {
+    const halt = !!t.halt;
+    const memberCount = (t.members || []).length;
+    const scopeCount = (t.scope || []).length;
+    return `
+      <div class="trek-list-row" data-action="open-trek" data-trek-id="${esc(t.trek_id)}">
+        <span class="status-dot ${_trekBadgeClass(t.status)}"></span>
+        <span class="name">${esc(t.title || '')}${halt ? '<span class="halt-mark">⚠</span>' : ''}<span class="id">${esc(t.trek_id)}</span></span>
+        <span class="counts">${memberCount}m / ${scopeCount}s</span>
+        <span class="counts">${esc(t.type || '')}</span>
+      </div>`;
+  };
+  let html = `
+    <section class="retro-section fade-in" style="margin-bottom:6px;">
+      <div class="milestones-header" style="margin-bottom:4px;">
+        <span class="milestones-title">Treks</span>
+        <span class="milestones-count">${active.length} active / ${archived.length} archived</span>
+      </div>
+    </section>`;
+  if (active.length) {
+    html += `
+      <section class="retro-section fade-in" style="margin-bottom:12px;">
+        <div class="trek-section-title" style="margin-bottom:6px;">ACTIVE</div>
+        ${active.map(trekRow).join('')}
+      </section>`;
+  }
+  if (archived.length) {
+    html += `
+      <section class="retro-section fade-in" style="margin-bottom:12px;">
+        <div class="trek-section-title" style="margin-bottom:6px;">ARCHIVED</div>
+        ${archived.map(trekRow).join('')}
+      </section>`;
+  }
+  html += `
+    <div class="trek-cli-hint" style="margin-top:14px;">
+      ターミナルから新しい trek を起票:
+      <code>beacon trek create "title" --type persistent</code>
+    </div>`;
+  return html;
 }
 
 async function openRetro(week) {
@@ -3237,91 +5261,6 @@ function closeDocument() {
   render();
 }
 
-// ---- Dependency Graph ----
-
-function buildGraph(milestones) {
-  const nodes = [];
-  const edges = [];
-  const idSet = new Set();
-
-  for (const ms of milestones) {
-    if (ms.status === 'cancelled') continue;
-    idSet.add(ms.id);
-    nodes.push({
-      id: ms.id,
-      title: ms.title || '',
-      status: ms.status || 'todo',
-      progress: ms.progress || 0,
-      depends_on: ms.depends_on || [],
-    });
-  }
-
-  for (const n of nodes) {
-    for (const dep of n.depends_on) {
-      if (idSet.has(dep)) {
-        edges.push({ from: n.id, to: dep, type: 'depends_on' });
-      }
-    }
-  }
-
-  // Cross-MS task references
-  for (const ms of milestones) {
-    if (ms.status === 'cancelled') continue;
-    for (const entry of (ms.entries || [])) {
-      const reqBy = (entry.meta || {}).requested_by || '';
-      if (reqBy && idSet.has(reqBy)) {
-        edges.push({ from: reqBy, to: ms.id, type: 'cross_task', task_id: entry.id || '' });
-      }
-    }
-  }
-
-  // Kahn's algorithm for waves
-  const inDeg = {};
-  for (const n of nodes) inDeg[n.id] = 0;
-  for (const n of nodes) {
-    for (const dep of n.depends_on) {
-      if (dep in inDeg) inDeg[n.id]++;
-    }
-  }
-
-  const waves = [];
-  const remaining = { ...inDeg };
-  while (Object.keys(remaining).length > 0) {
-    const wave = Object.keys(remaining).filter(id => remaining[id] === 0).sort();
-    if (wave.length === 0) {
-      waves.push({ wave: waves.length + 1, milestones: Object.keys(remaining).sort(), cycle: true });
-      break;
-    }
-    waves.push({ wave: waves.length + 1, milestones: wave });
-    for (const id of wave) delete remaining[id];
-    for (const n of nodes) {
-      if (n.id in remaining) {
-        for (const dep of n.depends_on) {
-          if (wave.includes(dep)) remaining[n.id]--;
-        }
-      }
-    }
-  }
-
-  return { nodes, edges, waves };
-}
-
-const GRAPH_STATUS_COLORS = {
-  done: '#166534',
-  in_progress: '#1e3a5f',
-  todo: '#2a2a30',
-  waiting: '#44403c',
-  observing: '#3b2f4a',
-};
-
-const GRAPH_STATUS_STROKES = {
-  done: '#4ade80',
-  in_progress: '#60a5fa',
-  todo: '#71717a',
-  waiting: '#fbbf24',
-  observing: '#a78bfa',
-};
-
 // Build hash → beacon entry map from all milestone entries
 function buildHashEntryMap(project) {
   const map = {};
@@ -3642,6 +5581,7 @@ function renderOperationsSection() {
         <div class="op-section-label">Incidents</div>
         ${incidentsHtml}${resolvedHtml}
       </div>` : ''}
+      ${renderRelatedTreksWidget('operation', op.id)}
     </div>`;
   };
 
@@ -3746,141 +5686,6 @@ function renderNotesSection() {
   </section>`;
 }
 
-
-function renderGraphSection() {
-  const p = state.project;
-  const header = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
-    <span class="retro-back" data-action="hide-graph">← back</span>
-    <button class="sort-toggle" data-action="toggle-graph-filter" style="font-size:0.7rem;">${state.graphFilterDeps ? 'deps only ✓' : 'show all'}</button>
-  </div>`;
-
-  if (!p || !p.milestones || p.milestones.length === 0) {
-    return `<section class="graph-section fade-in">${header}<div class="graph-empty">No milestones.</div></section>`;
-  }
-
-  const fullGraph = buildGraph(p.milestones);
-  if (fullGraph.edges.length === 0) {
-    return `<section class="graph-section fade-in">${header}<div class="graph-empty">No dependencies defined yet.<br><span style="font-size:0.7rem;color:var(--text-dim)">Use <code>beacon milestone depends ms-X --on ms-Y</code> to add.</span></div></section>`;
-  }
-
-  let milestones = p.milestones;
-  if (state.graphFilterDeps) {
-    const connected = new Set();
-    for (const e of fullGraph.edges) { connected.add(e.from); connected.add(e.to); }
-    milestones = milestones.filter(ms => connected.has(ms.id));
-  }
-  const graph = state.graphFilterDeps ? buildGraph(milestones) : fullGraph;
-
-  if (graph.edges.length === 0) {
-    return `<section class="graph-section fade-in">${header}<div class="graph-empty">No dependencies defined yet.<br><span style="font-size:0.7rem;color:var(--text-dim)">Use <code>beacon milestone depends ms-X --on ms-Y</code> to add.</span></div></section>`;
-  }
-
-  // Layout: waves flow left-to-right, nodes stacked vertically within each wave
-  const nodeW = 180;
-  const nodeH = 52;
-  const waveGap = 60;
-  const nodeGap = 16;
-  const padX = 40;
-  const padY = 32;
-
-  // Assign positions
-  const pos = {};
-  let maxRow = 0;
-  for (const w of graph.waves) {
-    maxRow = Math.max(maxRow, w.milestones.length);
-  }
-
-  for (let wi = 0; wi < graph.waves.length; wi++) {
-    const wave = graph.waves[wi];
-    const count = wave.milestones.length;
-    const startY = (maxRow - count) * (nodeH + nodeGap) / 2;
-    for (let ni = 0; ni < count; ni++) {
-      pos[wave.milestones[ni]] = {
-        x: padX + wi * (nodeW + waveGap),
-        y: padY + startY + ni * (nodeH + nodeGap),
-      };
-    }
-  }
-
-  const svgW = padX * 2 + graph.waves.length * (nodeW + waveGap) - waveGap;
-  const svgH = padY * 2 + maxRow * (nodeH + nodeGap) - nodeGap;
-
-  // Build SVG
-  const nodeMap = {};
-  for (const n of graph.nodes) nodeMap[n.id] = n;
-
-  let edgeSvg = '';
-  for (const e of graph.edges) {
-    const from = pos[e.from];
-    const to = pos[e.to];
-    if (!from || !to) continue;
-
-    // Edge: from depends on to, arrow from "to" to "from" (dependency flows right)
-    const x1 = to.x + nodeW;
-    const y1 = to.y + nodeH / 2;
-    const x2 = from.x;
-    const y2 = from.y + nodeH / 2;
-
-    const cx1 = x1 + (x2 - x1) * 0.4;
-    const cx2 = x1 + (x2 - x1) * 0.6;
-
-    const cls = e.type === 'cross_task' ? ' cross-task' : '';
-    edgeSvg += `<path class="graph-edge${cls}" d="M${x1},${y1} C${cx1},${y1} ${cx2},${y2} ${x2},${y2}" />`;
-  }
-
-  let nodeSvg = '';
-  for (const n of graph.nodes) {
-    const p = pos[n.id];
-    if (!p) continue;
-    const fill = GRAPH_STATUS_COLORS[n.status] || GRAPH_STATUS_COLORS.todo;
-    const stroke = GRAPH_STATUS_STROKES[n.status] || GRAPH_STATUS_STROKES.todo;
-    const titleTrunc = n.title.length > 20 ? n.title.slice(0, 19) + '\u2026' : n.title;
-
-    nodeSvg += `
-      <g class="graph-node" transform="translate(${p.x},${p.y})">
-        <rect width="${nodeW}" height="${nodeH}" fill="${fill}" stroke="${stroke}" />
-        <text class="node-id" x="8" y="16">${esc(n.id)}</text>
-        <text x="8" y="32">${esc(titleTrunc)}</text>
-        <text class="node-progress" x="${nodeW - 8}" y="16" text-anchor="end">${n.progress}%</text>
-      </g>`;
-  }
-
-  // Wave labels
-  let waveSvg = '';
-  for (let wi = 0; wi < graph.waves.length; wi++) {
-    const x = padX + wi * (nodeW + waveGap) + nodeW / 2;
-    waveSvg += `<text x="${x}" y="18" text-anchor="middle" fill="var(--text-dim)" font-size="10" font-family="var(--font-mono)">wave ${graph.waves[wi].wave}${graph.waves[wi].cycle ? ' (cycle)' : ''}</text>`;
-  }
-
-  const legendItems = [
-    { label: 'done', color: GRAPH_STATUS_STROKES.done },
-    { label: 'in_progress', color: GRAPH_STATUS_STROKES.in_progress },
-    { label: 'todo', color: GRAPH_STATUS_STROKES.todo },
-    { label: 'observing', color: GRAPH_STATUS_STROKES.observing },
-    { label: 'waiting', color: GRAPH_STATUS_STROKES.waiting },
-  ];
-
-  return `
-    <section class="graph-section fade-in">
-      ${header}
-      <div class="graph-container">
-        <svg width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}" xmlns="http://www.w3.org/2000/svg">
-          <defs>
-            <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-              <polygon points="0 0, 8 3, 0 6" fill="var(--border)" />
-            </marker>
-          </defs>
-          ${waveSvg}
-          ${edgeSvg}
-          ${nodeSvg}
-        </svg>
-      </div>
-      <div class="graph-legend">
-        ${legendItems.map(l => `<div class="graph-legend-item"><div class="graph-legend-swatch" style="background:${l.color}"></div>${l.label}</div>`).join('')}
-      </div>
-    </section>`;
-}
-
 // ---- Shared search partial-update (both Web and Desktop) ----
 
 function renderMsListArea() {
@@ -3959,7 +5764,7 @@ function renderOnDataChange() {
     // stays intact.
     if (state.searchQuery.trim()) {
       renderMainContentArea();
-    } else if (state.activeTab === 'dashboard' && !state.showGraph && !state.documentContent && !state.retroContent) {
+    } else if (state.activeTab === 'dashboard' && !state.documentContent && !state.retroContent) {
       renderMsListArea();
     } else {
       render();
@@ -4077,8 +5882,16 @@ function handleCommonAction(action, el) {
   switch (action) {
     case 'toggle-ms': {
       const msId = el.dataset.msId;
-      state.expanded.has(msId) ? state.expanded.delete(msId) : state.expanded.add(msId);
-      render(); return true;
+      const wasExpanded = state.expanded.has(msId);
+      wasExpanded ? state.expanded.delete(msId) : state.expanded.add(msId);
+      render();
+      // ms-69 / e-1664: lazy-load related treks the first time this ms is
+      // expanded. Re-renders the card in-place once the data lands; the
+      // widget hides itself when the result is empty.
+      if (!wasExpanded && state.relatedTreks['ms:' + msId] === undefined) {
+        dataSource.loadRelatedTreks('milestone', msId).then(() => render());
+      }
+      return true;
     }
     case 'toggle-entry': {
       const eid = el.dataset.entryId;
@@ -4104,12 +5917,6 @@ function handleCommonAction(action, el) {
       state.hiddenStatuses.clear(); render(); return true;
     case 'toggle-sort':
       state.sortAsc = !state.sortAsc; render(); return true;
-    case 'show-graph':
-      state.showGraph = true; render(); return true;
-    case 'hide-graph':
-      state.showGraph = false; render(); return true;
-    case 'toggle-graph-filter':
-      state.graphFilterDeps = !state.graphFilterDeps; render(); return true;
     case 'toggle-release-graph':
       state.showReleaseGraph = !state.showReleaseGraph; render(); return true;
     case 'switch-releases-tab':
@@ -4213,6 +6020,88 @@ function handleCommonAction(action, el) {
       openDocument(el.dataset.docId); return true;
     case 'open-retro':
       openRetro(el.dataset.week); return true;
+    // ms-69 / e-1659 — Trek detail
+    case 'open-trek':
+      openTrek(el.dataset.trekId); return true;
+    case 'close-trek':
+      closeTrek(); return true;
+    // ms-69 / e-1659 v3 — sidebar trek nav + settings overlay
+    case 'menu-open-trek':
+      closeMenu(); openTrek(el.dataset.trekId); return true;
+    case 'open-settings':
+      openSettings(); return true;
+    case 'close-settings':
+      closeSettings(); return true;
+    case 'settings-set-tab':
+      setSettingsTab(el.dataset.tab); return true;
+    case 'toggle-account-menu':
+      toggleAccountMenu(); return true;
+    case 'close-account-menu':
+      closeAccountMenu(); return true;
+    case 'goto-admin':
+      gotoAdmin(); return true;
+    case 'settings-switch-project': {
+      // Peek at another project's members in Settings — does NOT switch the
+      // currently-opened project. The user can return to the main project
+      // view by closing Settings; their project context is preserved.
+      const pid = el.value || el.dataset.projectId;
+      if (pid) {
+        state.settingsViewProjectId = pid;
+        _resolveMyRole();
+        renderSettings();
+      }
+      return true;
+    }
+    case 'settings-invite-member':
+      _settingsInviteMember(); return true;
+    // ms-78 / e-1909 — Settings > Profile + retroactive prompt.
+    case 'settings-profile-save':
+      _settingsSaveProfile(); return true;
+    case 'display-name-prompt-save':
+      _displayNamePromptSave(); return true;
+    case 'display-name-prompt-dismiss':
+      _displayNamePromptDismiss(); return true;
+    case 'settings-cancel-invitation':
+      // ms-78 e-1803 — Pending invitations row × button. Cancel handlers
+      // attached at render time (= _settingsLoadInvitationList), so this
+      // path is reached only if the row is re-rendered without that hook,
+      // but registering the action keeps frontend-drift check happy and
+      // gives a fallback bind.
+      _settingsCancelInvitation({ currentTarget: el });
+      return true;
+    case 'settings-copy-invite-url':
+      // ms-78 e-1803 — Copy invite URL button. Handler is attached inline
+      // by _settingsInviteMember after the box is built, so this case is
+      // mostly here for frontend-drift coverage. If the inline binding is
+      // missing for any reason, fall back to copying from data-url.
+      try {
+        const u = el.dataset.url || '';
+        if (u) navigator.clipboard.writeText(u);
+      } catch (_) { /* noop */ }
+      return true;
+    case 'settings-archive-project':
+      _settingsArchiveProject(); return true;
+    case 'settings-export-json':
+      if (typeof exportProject === 'function') exportProject(_settingsViewedProjectId());
+      return true;
+    // ms-69 / e-1664 — Related Treks widget on work item detail
+    case 'trek-jump-from-widget': {
+      const tid = el.dataset.trekId;
+      // Close the entry modal (if open) so the Treks tab is unobstructed.
+      if (state.openEntryId) closeEntryModal();
+      switchTab('treks').then(() => openTrek(tid));
+      return true;
+    }
+    // ms-69 / e-1659 v2 — trek detail STOP / Resume buttons surface the CLI
+    // command (= editing is terminal-only per ux-principle-no-terminal CORE doc).
+    case 'trek-cli-hint': {
+      const cmd = el.dataset.cmd || '';
+      try {
+        if (navigator.clipboard) navigator.clipboard.writeText(cmd);
+      } catch (_e) { /* noop */ }
+      window.alert('ターミナルでこのコマンドを実行してください:\n\n' + cmd + '\n\n(クリップボードにコピー済み)');
+      return true;
+    }
   }
   return false;
 }
@@ -4245,6 +6134,17 @@ function openEntryDetail(entryId) {
   if (!result) return;
   state.openEntryId = entryId;
   renderEntryModal(result.entry, result.ms || result.op);
+  // ms-69 / e-1664: lazy-load related treks for this task entry. When the
+  // data lands, re-render the modal so the widget appears (or stays empty,
+  // in which case the widget is silent).
+  if (state.relatedTreks['task:' + entryId] === undefined) {
+    dataSource.loadRelatedTreks('task', entryId).then(() => {
+      // Only re-render the modal if it's still showing the same entry.
+      if (state.openEntryId === entryId) {
+        renderEntryModal(result.entry, result.ms || result.op);
+      }
+    });
+  }
 }
 
 function renderEntryModal(entry, parent) {
@@ -4274,6 +6174,13 @@ function renderEntryModal(entry, parent) {
   const statusText = entryStatusText(entry);
   const msLabel = parent ? `<span style="color:var(--text-dim);font-size:11px;">${esc(parent.id)}</span>` : '';
 
+  // ms-78 / e-1909 — show the human author in the modal (= clickable rows
+  // surface display_name; the modal pins both display_name and email).
+  const authorLabel = renderEntryAuthor(entry);
+  const authorField = authorLabel
+    ? `<div class="entry-modal-field modal-field-author"><div class="entry-modal-field-label">author</div>${authorLabel}</div>`
+    : '';
+
   overlay.innerHTML = `
     <div class="entry-modal" onclick="event.stopPropagation()">
       <div class="entry-modal-header">
@@ -4284,12 +6191,16 @@ function renderEntryModal(entry, parent) {
       <div class="entry-modal-body">
         <div class="entry-modal-desc">${esc(entry.description)}</div>
         <div class="entry-modal-meta">${priorityBadge}${statusText}${reasonMissing}</div>
-        ${motivation}${ac}${behavior}${resolves}${detail}${doneReason}${cancelReason}${restoreReason}
+        ${authorField}${motivation}${ac}${behavior}${resolves}${detail}${doneReason}${cancelReason}${restoreReason}
+        ${renderRelatedTreksWidget('task', entry.id)}
       </div>
     </div>
   `;
   overlay.style.display = 'flex';
   overlay.querySelector('[data-action="close-entry-modal"]')?.addEventListener('click', closeEntryModal);
+  overlay.querySelectorAll('[data-action="trek-jump-from-widget"]').forEach(node => {
+    node.addEventListener('click', handleAction);
+  });
 }
 
 function closeEntryModal() {
@@ -4337,6 +6248,72 @@ function closeDocumentOverlay() {
   const overlay = document.getElementById('document-overlay-modal');
   if (overlay) { overlay.style.display = 'none'; overlay.innerHTML = ''; }
 }
+
+// ms-70 / e-1718 — DM approval history (audit) row rendering.
+//
+// Lives inside the SHARED region so the Web build (server/static/index.html)
+// and the Tauri build (desktop/dist/index.html generated by desktop/build.py)
+// render the same audit table from the same source of truth. If the Tauri
+// side ever wires up a Rust loader, it can reuse this helper unchanged.
+//
+// Read-only by design: per SPEC 設計方針 3 the approve/deny decision is
+// made exclusively in the terminal Claude Code via `beacon dm respond`.
+// The Web UI is the *aftermath* view — who decided what, when. There is
+// no approve / deny button here and there must never be one (= violating
+// the terminal-only invariant would let a curious browser tab smuggle a
+// decision past the receiver's own typing).
+//
+// ``rows`` is the array returned by GET /api/projects/{pid}/dm/approval/history
+// (server-side: db.list_decided_approvals). Each row is the 7-field
+// sidecar shape; we surface 6 of them (sender / receiver / status /
+// decision_at / decision_by / event_id) and omit ``created_at`` to keep
+// the table scannable — created_at differs from decision_at only by the
+// elapsed-pending time, which is rarely useful for human audit.
+function renderDmApprovalHistoryRows(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return '<div class="menu-user" style="color:var(--text-dim);padding:12px;font-style:italic;">承認履歴はまだありません (= 過去に approve / deny された DM action がない)。</div>';
+  }
+  const head = `
+    <thead>
+      <tr>
+        <th style="width:90px;">status</th>
+        <th>sender</th>
+        <th>receiver</th>
+        <th style="width:140px;">decided at</th>
+        <th>decided by</th>
+        <th style="width:120px;">event_id</th>
+      </tr>
+    </thead>`;
+  const body = rows.map(r => {
+    const status = r.approval_status || '';
+    const sender = r.sender_user_id || '';
+    const receiver = r.receiver_user_id || '';
+    const decidedAt = r.decision_at || '';
+    const decidedBy = r.decision_by || '';
+    const eid = r.event_id || '';
+    // Color-tag approved / denied so the eye can sweep the column. Inline
+    // styles only — no new CSS class needed (= minimal blast radius).
+    const statusColor = status === 'approved'
+      ? 'color:#7fb389;'
+      : status === 'denied'
+      ? 'color:#c97a7a;'
+      : 'color:var(--text-dim);';
+    return `
+      <tr>
+        <td><span style="${statusColor}font-weight:600;">${esc(status)}</span></td>
+        <td><span style="font-size:0.72rem;">${esc(sender)}</span></td>
+        <td><span style="font-size:0.72rem;">${esc(receiver)}</span></td>
+        <td><span style="font-size:0.7rem;color:var(--text-dim);">${esc(decidedAt)}</span></td>
+        <td><span style="font-size:0.72rem;">${esc(decidedBy)}</span></td>
+        <td><span style="font-size:0.65rem;color:var(--text-dim);font-family:var(--font-mono,monospace);">${esc(eid)}</span></td>
+      </tr>`;
+  }).join('');
+  return `
+    <table class="settings-table">
+      ${head}
+      <tbody>${body}</tbody>
+    </table>`;
+}
 // @BUILD:SHARED-END
 
 // ---- Hamburger Menu ----
@@ -4352,56 +6329,92 @@ function closeMenu() {
 }
 
 async function renderMenu() {
-  // Load projects list if not loaded
+  // ms-69 / e-1659 v3: sidebar = MENU / PROJECTS / TREKS / ONLINE AGENTS.
+  // Per mock, Members + Project actions move to the Settings overlay
+  // (Projects & Members tab); Account info moves to the avatar dropdown.
+
+  // Load any missing data upfront. The panel only paints **once** after
+  // all loaders resolve so the slide-in CSS animation runs exactly once
+  // (= user-reported "menu animates twice" bug fix).
   if (state.projects.length === 0) {
-    try { await loadProjects(); } catch (e) {}
+    try { await loadProjects(); } catch (_e) {}
   }
+  const trekLoad = (state.treks && state.treks.length)
+    ? Promise.resolve()
+    : dataSource.loadTreks().catch(() => {});
+  const sessionLoad = (state.onlineSessions && state.onlineSessions.length)
+    ? Promise.resolve()
+    : dataSource.loadOnlineSessions().catch(() => {});
+  await Promise.all([trekLoad, sessionLoad]);
 
-  const root = document.getElementById('menu-root');
-  root.innerHTML = `
-    <div class="menu-overlay" data-action="close-menu"></div>
-    <div class="menu-panel">
-      <div class="menu-header">
-        <span class="menu-title">Menu</span>
-        <button class="menu-close" data-action="close-menu">\u00d7</button>
+  const paint = () => {
+    const root = document.getElementById('menu-root');
+    if (!root) return;
+    const treks = state.treks || [];
+    const visibleTreks = treks.filter(t => t.status !== 'archived');
+    const sessions = state.onlineSessions || [];
+
+    root.innerHTML = `
+      <div class="menu-overlay" data-action="close-menu"></div>
+      <div class="menu-panel">
+        <div class="menu-section">
+          <div class="menu-header" style="margin-bottom:14px;">
+            <span class="menu-title">Menu</span>
+            <button class="menu-close" data-action="close-menu">\u00d7</button>
+          </div>
+        </div>
+
+        <div class="menu-section">
+          <div class="menu-section-title">Projects</div>
+          ${state.projects.map(p => `
+            <button class="menu-item ${p.project_id === state.projectId ? 'current' : ''}"
+                    data-action="menu-select-project" data-project-id="${esc(p.project_id)}">
+              ${esc(p.name)}
+              <div class="menu-item-sub">${esc(p.project_id)}</div>
+            </button>
+          `).join('') || '<div class="menu-user" style="color:var(--text-dim);">No projects.</div>'}
+        </div>
+
+        <div class="menu-section">
+          <div class="menu-section-title">Treks</div>
+          ${visibleTreks.length
+            ? visibleTreks.map(t => `
+                <button class="menu-item ${state.openTrekId === t.trek_id ? 'current' : ''}"
+                        data-action="menu-open-trek" data-trek-id="${esc(t.trek_id)}">
+                  ${esc(t.title || '')}${t.halt ? ' \u26a0' : ''}
+                  <div class="menu-item-sub">${esc(t.trek_id)}</div>
+                </button>
+              `).join('')
+            : '<div class="menu-user" style="color:var(--text-dim);">No treks visible to you.</div>'}
+        </div>
+
+        <div class="menu-section">
+          <div class="menu-section-title">Online Agents</div>
+          ${sessions.length
+            ? sessions.slice(0, 12).map(s => {
+                const muted = !!s.shutdown;
+                const sid = (s.session_id || s.actor && s.actor.session_id || '');
+                const email = (s.actor && s.actor.email) || '';
+                const proj = s.project_name || s.project_id || '';
+                return `
+                  <div class="sidebar-agent-row ${muted ? 'muted' : ''}">
+                    <span class="agent-dot"></span>
+                    <div class="agent-meta">
+                      <span class="agent-id">${esc((sid || '').slice(0, 12))}\u2026</span>
+                      <span class="agent-where">${esc(email)}<br>${esc(proj)}</span>
+                    </div>
+                  </div>`;
+              }).join('')
+            : '<div class="menu-user" style="color:var(--text-dim);">No online sessions.</div>'}
+        </div>
       </div>
+    `;
+    document.getElementById('menu-root').querySelectorAll('[data-action]').forEach(el => {
+      el.addEventListener('click', handleAction);
+    });
+  };
 
-      <div class="menu-section">
-        <div class="menu-section-title">Projects</div>
-        ${state.projects.map(p => `
-          <button class="menu-item ${p.project_id === state.projectId ? 'current' : ''}"
-                  data-action="menu-select-project" data-project-id="${esc(p.project_id)}">
-            ${esc(p.name)}
-            <div class="menu-item-sub">${esc(p.project_id)}</div>
-          </button>
-        `).join('')}
-      </div>
-
-      <div class="menu-section">
-        <div class="menu-section-title">Members</div>
-        <div id="menu-members"><div class="menu-user" style="color:var(--text-dim)">Loading...</div></div>
-      </div>
-
-      ${state.projectId ? `
-      <div class="menu-section">
-        <div class="menu-section-title">Project</div>
-        <div id="menu-project-actions"><div class="menu-user" style="color:var(--text-dim)">Loading...</div></div>
-      </div>` : ''}
-
-      <div class="menu-section">
-        <div class="menu-section-title">Account</div>
-        ${state.auth.email ? `<div class="menu-user">${esc(state.auth.email)}</div>` : ''}
-        <a class="menu-item" href="/admin" style="text-decoration:none;display:block">Admin</a>
-        <button class="menu-item" data-action="logout">Sign out</button>
-      </div>
-    </div>
-  `;
-  // Bind menu events
-  document.getElementById('menu-root').querySelectorAll('[data-action]').forEach(el => {
-    el.addEventListener('click', handleAction);
-  });
-  loadMembers();
-  if (state.projectId) loadProjectActions();
+  paint();
 }
 
 async function loadProjectActions() {
@@ -4525,20 +6538,24 @@ async function archiveProject(archive) {
   }
 }
 
-async function exportProject() {
-  if (!state.projectId) return;
+async function exportProject(targetProjectId) {
+  // ms-69 / e-1659 v3 follow-up: Export from Settings overlay must respect
+  // the dropdown-selected project (= peek target). Caller may pass the
+  // viewed projectId; falls back to the active project for legacy callers.
+  const pid = targetProjectId || state.projectId;
+  if (!pid) return;
   try {
     const [project, documents, retros] = await Promise.all([
-      api(`/api/projects/${state.projectId}`),
-      api(`/api/projects/${state.projectId}/documents`).catch(() => []),
-      api(`/api/projects/${state.projectId}/retros`).catch(() => []),
+      api(`/api/projects/${pid}`),
+      api(`/api/projects/${pid}/documents`).catch(() => []),
+      api(`/api/projects/${pid}/retros`).catch(() => []),
     ]);
     const fullExport = { ...project, documents, retros };
     const blob = new Blob([JSON.stringify(fullExport, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${state.projectId}.json`;
+    a.download = `${pid}.json`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -4886,7 +6903,17 @@ async function loadServerVersion() {
 async function init() {
   loadServerVersion();  // non-blocking
   await loadAuthConfig();
+  // e-1628: Cognito Hosted UI からの戻り (?code=) を最初に処理する。
+  // 成功すれば state.auth.token がセットされて以降の isAuthenticated() が true。
+  if (state.auth.provider === 'cognito') {
+    await handleCognitoCallback();
+  }
   if (!isAuthenticated()) {
+    // Cognito 経路では GIS を待つ必要なし、直接 renderLogin する
+    if (state.auth.provider === 'cognito') {
+      renderLogin();
+      return;
+    }
     function waitForGsi() {
       if (window.google?.accounts) renderLogin();
       else setTimeout(waitForGsi, 100);
@@ -4903,6 +6930,13 @@ async function init() {
     else render();
   }
   await handleHashNav();
+
+  // ms-78 / e-1909 — fetch the caller's own profile (= display_name) and
+  // surface the retroactive prompt if it's empty. Non-blocking so a slow
+  // /api/me/profile never holds up the project view.
+  dataSource.loadMyProfile().finally(() => {
+    renderDisplayNamePrompt();
+  });
 }
 
 document.addEventListener('keydown', e => {

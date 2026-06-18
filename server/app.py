@@ -16,7 +16,7 @@ from typing import Optional
 # Add lib/ to path so we can import core
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
-from fastapi import FastAPI, HTTPException, Depends, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Depends, Query, Request, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -25,9 +25,12 @@ from starlette.responses import Response, JSONResponse
 
 import approved_actions as approved_actions_mod
 import core
+import dm_gate as dm_gate_mod  # ms-70 / e-1713: cross-user DM action authorization judge
 import envelope as envelope_mod
-import firestore_client as db
+import invitations as invitations_mod  # ms-78 e-1803/e-1804: token-based invites
+import store_router as db  # e-1544: BEACON_STORE_BACKEND で firestore / dynamodb を切替
 import operations
+import trek as trek_mod  # ms-69 / e-1656: trek schema + pure mutators
 
 # debug=False is the default, but set explicitly to ensure stack traces are
 # never included in error responses in production.
@@ -77,9 +80,9 @@ _audit_logger.propagate = False
 # Mutating methods that should be audit-logged
 _AUDIT_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
-# All mutations under /api/projects/* and /api/admin/*
+# All mutations under /api/projects/*, /api/admin/*, and /api/treks(/...)?
 import re
-_AUDIT_PATHS = re.compile(r"^/api/(?:projects/[^/]+|admin/)")
+_AUDIT_PATHS = re.compile(r"^/api/(?:projects/[^/]+|admin/|treks(?:$|/))")
 
 
 def _extract_project_id(path: str) -> str:
@@ -102,6 +105,23 @@ def _derive_action(method: str, path: str) -> str:
         return f"admin.user.{method.lower()}"
     if "/admin/projects" in path:
         return f"admin.project.{method.lower()}"
+    # ms-69 / e-1656: treks are top-level. Disambiguate /treks/{id}/members
+    # from project /members so audit logs read "trek.member.post" rather than
+    # being confused with project member ops.
+    if path.startswith("/api/treks"):
+        if "/members" in path:
+            return f"trek.member.{method.lower()}"
+        if "/scope" in path:
+            return f"trek.scope.{method.lower()}"
+        if "/halt" in path:
+            return f"trek.halt.{method.lower()}"
+        if "/transfer-leader" in path:
+            return f"trek.leader.{method.lower()}"
+        if "/start" in path:
+            return f"trek.start.{method.lower()}"
+        if "/summary" in path:
+            return f"trek.summary.{method.lower()}"
+        return f"trek.{method.lower()}"
     for plural, singular in _RESOURCE_SINGULAR.items():
         if f"/{plural}" in path:
             return f"{singular}.{method.lower()}"
@@ -118,6 +138,8 @@ def _extract_resource(path: str) -> str:
         return "admin.user"
     if "/admin/projects" in path:
         return "admin.project"
+    if path.startswith("/api/treks"):
+        return "trek"
     for resource in ("members", "documents", "milestones", "entries", "retros", "log", "summary"):
         if f"/{resource}" in path:
             return resource
@@ -221,13 +243,130 @@ def _verify_cli_token(token: str) -> dict | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Identity provider dispatch (e-1545)
+# ---------------------------------------------------------------------------
+# BEACON_AUTH_PROVIDER = "firebase" (default, = GCP 既存経路 / Cloud Run) or
+#                       "cognito"  (= AWS GA-incubation Lambda 経路)
+# CLI トークンはどちらの provider でも有効 (provider-agnostic な HMAC)。
+# CLI 以外の bearer トークンは provider 固有の検証経路に流す。
+_AUTH_PROVIDER = os.environ.get("BEACON_AUTH_PROVIDER", "firebase").lower()
+
+_cognito_jwks_client = None
+
+
+def _get_cognito_jwks_client():
+    """Return a (cached) PyJWKClient pointed at the configured Cognito User Pool.
+
+    Cognito の JWKS は概ね不変 (= 鍵ローテーション時のみ変わる) なので、
+    PyJWKClient の内部キャッシュをそのまま再利用すると毎リクエストの
+    HTTP 取得を避けられる。プロセス起動後の初回呼び出しで 1 回だけ
+    JWKS endpoint に届く。
+    """
+    global _cognito_jwks_client
+    if _cognito_jwks_client is not None:
+        return _cognito_jwks_client
+    user_pool_id = os.environ.get("BEACON_COGNITO_USER_POOL_ID", "")
+    if not user_pool_id:
+        raise HTTPException(
+            status_code=500,
+            detail="BEACON_AUTH_PROVIDER=cognito but BEACON_COGNITO_USER_POOL_ID is unset",
+        )
+    region = os.environ.get("AWS_REGION", "ap-northeast-1")
+    import jwt as _jwt
+    jwks_url = (
+        f"https://cognito-idp.{region}.amazonaws.com/{user_pool_id}/.well-known/jwks.json"
+    )
+    _cognito_jwks_client = _jwt.PyJWKClient(jwks_url)
+    return _cognito_jwks_client
+
+
+def _verify_cognito_token(token: str) -> dict:
+    """Verify a Cognito User Pool JWT and return the claims.
+
+    Cognito User Pool は ID token と access token の 2 種類を発行する:
+      - ID token: ``token_use=id`` + ``aud`` claim にクライアントID
+      - access token: ``token_use=access`` + ``client_id`` claim にクライアントID
+    Beacon CLI は ID token を使う想定 (= ユーザ属性 email / sub を要求するため)。
+    access token も将来必要になる可能性があるので、両方とも受け付けて
+    token_use で分岐する。
+    """
+    user_pool_id = os.environ.get("BEACON_COGNITO_USER_POOL_ID", "")
+    client_id = os.environ.get("BEACON_COGNITO_CLIENT_ID", "")
+    region = os.environ.get("AWS_REGION", "ap-northeast-1")
+    if not user_pool_id:
+        raise HTTPException(
+            status_code=500,
+            detail="BEACON_AUTH_PROVIDER=cognito but BEACON_COGNITO_USER_POOL_ID is unset",
+        )
+    issuer = f"https://cognito-idp.{region}.amazonaws.com/{user_pool_id}"
+
+    import jwt as _jwt
+    try:
+        jwks_client = _get_cognito_jwks_client()
+        signing_key = jwks_client.get_signing_key_from_jwt(token).key
+        # First decode without aud check to read token_use, then re-validate
+        # with the appropriate audience claim.
+        unverified = _jwt.decode(
+            token,
+            signing_key,
+            algorithms=["RS256"],
+            issuer=issuer,
+            options={"verify_aud": False},
+        )
+        token_use = unverified.get("token_use")
+        if token_use == "id":
+            # ID token: aud claim must match client_id (if configured)
+            if client_id:
+                claims = _jwt.decode(
+                    token,
+                    signing_key,
+                    algorithms=["RS256"],
+                    issuer=issuer,
+                    audience=client_id,
+                )
+            else:
+                claims = unverified
+        elif token_use == "access":
+            # access token: client_id claim must match (manual check; PyJWT
+            # decode の audience は ID token 用なのでここでは触らない)
+            if client_id and unverified.get("client_id") != client_id:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Invalid token: client_id mismatch",
+                )
+            claims = unverified
+        else:
+            raise HTTPException(
+                status_code=401,
+                detail=f"Invalid token_use: {token_use!r}",
+            )
+        # Cognito の sub は User Pool 固有の UUID。email は ID token に含まれる
+        # (= access token には無いことがある)。両者に email を埋めて
+        # downstream の get_or_create_user(sub, email) が動くようにする。
+        if "email" not in claims:
+            claims["email"] = ""
+        return claims
+    except _jwt.PyJWTError as e:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
+
+
 def _verify_id_token(token: str) -> dict:
-    """Verify a Google ID token or Beacon CLI token and return the claims."""
+    """Verify a bearer token (CLI / Google ID / Cognito JWT) and return claims.
+
+    検証順:
+      1. Beacon CLI token (HMAC, provider 非依存)
+      2. ``BEACON_AUTH_PROVIDER`` に応じた IdP 経路
+         - "cognito" → Cognito User Pool JWT 検証
+         - その他    → Google ID token 検証 (= 既存 Cloud Run 経路)
+    """
     # Check for long-lived CLI token first (no network call)
     claims = _verify_cli_token(token)
     if claims:
         return claims
-    # Fall back to Google ID token verification
+    if _AUTH_PROVIDER == "cognito":
+        return _verify_cognito_token(token)
+    # Fall back to Google ID token verification (= Cloud Run 既存経路)
     from google.oauth2 import id_token
     from google.auth.transport import requests as google_requests
 
@@ -382,6 +521,45 @@ def _require_owner(data: dict, user: dict) -> None:
 def _save(project_id: str, data: dict) -> None:
     core.validate_project(data)
     db.save_project(project_id, data)
+
+
+# ---------------------------------------------------------------------------
+# Author resolution (ms-78 / e-1909) — UC11-F5 follow-up
+# ---------------------------------------------------------------------------
+
+def _resolve_author(user: dict) -> dict:
+    """Build the ``meta.author`` dict for a write triggered by ``user``.
+
+    Returns ``{"user_id", "email", "display_name"}``, dropping empty fields.
+    ``display_name`` is fetched from the users collection (= what
+    invite-accept / /api/me/profile writes). When the user record has
+    no display_name yet, that field is omitted — the UI then falls back
+    to email rendering. Best-effort: any DB hiccup returns just the
+    claim-derived fields so we never block a write on a profile lookup
+    failure.
+    """
+    uid = (user.get("sub") or "").strip()
+    email = (user.get("email") or "").strip()
+    display_name = ""
+    if uid:
+        try:
+            udata = db.get_user(uid)
+            if udata:
+                display_name = (udata.get("display_name") or "").strip()
+                # Prefer the persisted email over the claim's email when both
+                # exist — invite-accept writes the canonical one.
+                if not email:
+                    email = (udata.get("email") or "").strip()
+        except Exception:  # noqa: BLE001 - profile lookup must never break the write
+            pass
+    author: dict = {}
+    if uid:
+        author["user_id"] = uid
+    if email:
+        author["email"] = email
+    if display_name:
+        author["display_name"] = display_name
+    return author
 
 
 # ---------------------------------------------------------------------------
@@ -703,6 +881,18 @@ class DocumentSave(BaseModel):
 class DeleteRequest(BaseModel):
     reason: str = ""
 
+
+class ActiveClaimSave(BaseModel):
+    """Body for ``POST /api/projects/{pid}/active_claims/{claim_id}`` (ms-55 e-1730).
+
+    The whole `payload` dict is the wire shape lib/claims.py:build_claim_payload
+    produces — claim_kind, target {kind,id}, from_session_id, intent,
+    optional to_session_id / expires_at / metadata, issued_at, claim_id.
+    We do not validate the schema server-side; the client builds + validates
+    locally and this layer is a pure persistence mirror.
+    """
+    payload: dict
+
 class PurgeRequest(BaseModel):
     """Body for destructive hard-delete endpoints (milestone/entry/operation purge).
 
@@ -883,6 +1073,75 @@ class MeHeartbeat(BaseModel):
     agent: Optional[dict] = None
 
 
+class MeProfileUpdate(BaseModel):
+    """Body for PATCH /api/me/profile (ms-78 / e-1909).
+
+    Only ``display_name`` is mutable through this endpoint — email is the
+    sign-in identity (managed by the OAuth provider) and ``user_id`` is
+    immutable. Empty string clears the display name (= fall back to email
+    in the UI).
+    """
+    display_name: str = ""
+
+
+@app.get("/api/me/profile")
+def me_get_profile(user: dict = Depends(require_auth)):
+    """Return the caller's own profile (display_name + email + user_id).
+
+    ms-78 / e-1909 — the Web UI's Settings > Profile tab and the retroactive
+    "you haven't set a display name yet" prompt both read this endpoint to
+    discover the current state. We don't leak any field outside the
+    user's own record (= same identity gate as every other /api/me/* route:
+    ``require_auth`` resolves the JWT to a ``sub``).
+    """
+    uid = user.get("sub")
+    if not uid:
+        raise HTTPException(status_code=401, detail="user has no sub claim")
+    udata = db.get_user(uid) or {}
+    email = (udata.get("email") or user.get("email") or "").strip()
+    display_name = (udata.get("display_name") or "").strip()
+    return {
+        "user_id": uid,
+        "email": email,
+        "display_name": display_name,
+    }
+
+
+@app.patch("/api/me/profile")
+def me_update_profile(body: MeProfileUpdate, user: dict = Depends(require_auth)):
+    """Update the caller's own display_name (ms-78 / e-1909).
+
+    Trimmed empty string explicitly clears the field — the UI then falls
+    back to the email label. ``db.update_user`` is symmetric across the
+    Firestore and DynamoDB backends (= store_router routes by
+    ``BEACON_STORE_BACKEND``).
+    """
+    uid = user.get("sub")
+    if not uid:
+        raise HTTPException(status_code=401, detail="user has no sub claim")
+    display_name = (body.display_name or "").strip()
+    # Mint the user record if absent (= first-time profile edit for an
+    # auto-created identity that never went through invite-accept).
+    udata = db.get_user(uid)
+    if not udata:
+        email = (user.get("email") or "").strip()
+        try:
+            db.get_or_create_user(uid, email)
+        except Exception:  # noqa: BLE001 - best-effort mint, update still proceeds
+            pass
+    try:
+        ok = db.update_user(uid, {"display_name": display_name})
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"profile update failed: {e}")
+    if not ok:
+        raise HTTPException(status_code=404, detail="user record not found")
+    return {
+        "status": "ok",
+        "user_id": uid,
+        "display_name": display_name,
+    }
+
+
 @app.get("/api/me/projects")
 def me_list_projects(user: dict = Depends(require_auth)):
     """List the calling user's project memberships with role (ms-62 / e-1509).
@@ -925,6 +1184,89 @@ def me_list_projects(user: dict = Depends(require_auth)):
             "role": role,
         })
     return result
+
+
+@app.get("/api/me/sessions")
+def me_list_sessions(
+    live_only: bool = False,
+    since_minutes: int = 5,
+    healthy_only: bool = False,
+    machine: str = "",
+    agent: str = "",
+    user: dict = Depends(require_auth),
+):
+    """Cross-project session directory for the calling user (ms-54 / e-1587).
+
+    The per-project endpoint /api/projects/{pid}/sessions answers "who in
+    *this* project is live"; what was missing was the cross-project view
+    answering "what bclaude sessions of mine are alive *anywhere* right now".
+    Without it, /beacon-dm-send had to cd into each candidate project to list
+    DM recipients, and incident diagnosis (e.g. the e-1579 heartbeat-stop
+    re-occurrence check) could not see live sessions outside the diagnostician's
+    cwd.
+
+    Same filter contract as the per-project endpoint (live_only, since_minutes,
+    healthy_only, machine, agent). Each returned row carries the project_id +
+    project_name it belongs to, so the dm picker can route the subsequent
+    `bus send --project <pid>` without an extra lookup.
+
+    Membership is enforced via db.list_projects(user_id=uid) — projects the
+    user is neither owner nor member of are excluded. Archived projects are
+    also excluded; resurrecting them is an explicit user action.
+    """
+    uid = user.get("sub")
+    if not uid:
+        raise HTTPException(status_code=401, detail="user has no sub claim")
+
+    import datetime
+    now_dt = datetime.datetime.now(datetime.timezone.utc)
+
+    items = db.list_projects(user_id=uid, include_archived=False)
+
+    all_sessions: list[dict] = []
+    for item in items:
+        pid = item.get("project_id", "")
+        if not pid:
+            continue
+        sessions = db.list_sessions(pid)
+        # Stamp project context + poll_health on every row before filtering so
+        # the consumer can disambiguate by project_id and read health without
+        # a second round-trip. Same shape as the per-project endpoint plus
+        # the new project_id / project_name fields.
+        pname = item.get("name", "")
+        for s in sessions:
+            s["project_id"] = pid
+            s["project_name"] = pname
+            s["poll_health"] = _compute_poll_health(s, now_dt)
+            s["bridge"] = bool(s.get("last_poll_at"))
+        all_sessions.extend(sessions)
+
+    def _matches(s: dict) -> bool:
+        actor = s.get("actor") or {}
+        if machine and actor.get("machine", "") != machine:
+            return False
+        if agent and actor.get("agent", "") != agent:
+            return False
+        return True
+
+    filtered = [s for s in all_sessions if _matches(s)] if (machine or agent) else all_sessions
+
+    if live_only:
+        cutoff = now_dt - datetime.timedelta(minutes=since_minutes)
+        cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        filtered = [
+            s for s in filtered
+            if (la := s.get("last_active", "")) and la >= cutoff_iso
+        ]
+
+    if healthy_only:
+        filtered = [
+            s for s in filtered
+            if s.get("poll_health", {}).get("healthy") is True
+        ]
+
+    filtered.sort(key=lambda s: s.get("last_active", ""), reverse=True)
+    return filtered
 
 
 @app.post("/api/me/machine")
@@ -1435,12 +1777,17 @@ def purge_milestone(
 @app.post("/api/projects/{project_id}/milestones/{ms_id}/entries")
 def create_entry(project_id: str, ms_id: str, body: EntryCreate,
                  user: dict = Depends(require_auth)):
+    # ms-78 / e-1909 — resolve the human author identity once, then thread it
+    # into core.task_add so meta.author is stamped at creation time.
+    author = _resolve_author(user)
+
     def op(data: dict):
         _require_write(data, user)
         try:
             eid = core.task_add(
                 data, ms_id, body.description,
                 entry_type=body.type, date=body.date, detail=body.detail,
+                author=author,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
@@ -1453,6 +1800,9 @@ def create_entry(project_id: str, ms_id: str, body: EntryCreate,
 @app.patch("/api/projects/{project_id}/entries/{entry_id}")
 def update_entry(project_id: str, entry_id: str, body: EntryUpdate,
                  user: dict = Depends(require_auth)):
+    # ms-78 / e-1909
+    author = _resolve_author(user)
+
     def op(data: dict):
         _require_write(data, user)
         try:
@@ -1460,6 +1810,7 @@ def update_entry(project_id: str, entry_id: str, body: EntryUpdate,
                 data, entry_id,
                 description=body.description, status=body.status,
                 detail=body.detail, date=body.date,
+                author=author,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
@@ -1474,11 +1825,13 @@ def done_entry(project_id: str, entry_id: str,
                user: dict = Depends(require_auth)):
     import datetime
     today = datetime.date.today().isoformat()
+    # ms-78 / e-1909
+    author = _resolve_author(user)
 
     def op(data: dict):
         _require_write(data, user)
         try:
-            ms, entry = core.task_done(data, entry_id, date=today)
+            ms, entry = core.task_done(data, entry_id, date=today, author=author)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return data, {"entry_id": entry_id, "status": "done"}
@@ -1759,6 +2112,10 @@ def operation_envelopes_list(
 @app.post("/api/projects/{project_id}/log")
 def log_commit(project_id: str, body: LogCommit,
                user: dict = Depends(require_auth)):
+    # ms-78 / e-1909 — stamp meta.author with the human identity of the
+    # signed-in committer (= what the Web UI renders in commit lists).
+    author = _resolve_author(user)
+
     def op(data: dict):
         _require_write(data, user)
         try:
@@ -1766,6 +2123,7 @@ def log_commit(project_id: str, body: LogCommit,
                 data, ms_id=body.ms_id, commit_hash=body.hash,
                 message=body.message, date=body.date,
                 summary=body.summary, progress=body.progress,
+                author=author,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
@@ -1936,6 +2294,101 @@ async def delete_document_endpoint(project_id: str, doc_id: str,
     return {"doc_id": doc_id, "status": "cancelled"}
 
 
+@app.post("/api/projects/{project_id}/documents/images")
+async def upload_document_image(project_id: str,
+                                file: UploadFile = File(...),
+                                user: dict = Depends(require_auth)):
+    """ms-43: SPEC / memo / retro 本文に貼る画像を 1 枚アップロードする。
+
+    multipart/form-data の ``file`` フィールドにバイナリを乗せて POST する。
+    認可は project の write 権限と等価 (= 本文を書ける人なら画像も貼れる)。
+    レスポンスは ``{url, markdown}``: ``markdown`` をそのまま doc 本文に
+    貼り付けると ``![filename](url)`` として render される。
+
+    保存先と仕様の詳細は ``server/doc_images.py`` 参照 (= GCS bucket、UUID
+    key、public read、画像 MIME のみ、10 MiB 上限)。
+    """
+    data = _load(project_id, user)
+    _require_write(data, user)
+
+    contents = await file.read()
+    try:
+        import doc_images
+        result = doc_images.upload_image(
+            project_id=project_id,
+            filename=file.filename or "image",
+            data=contents,
+            declared_content_type=file.content_type,
+        )
+    except ValueError as e:
+        # 不正な MIME / サイズ超過 / 空 data 等、client 側に責任がある類。
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        # GCS 接続不能 / bucket 不在 等の server 側障害。
+        logger.error("doc image upload failed: %s", e)
+        raise HTTPException(status_code=500, detail="image upload failed")
+
+    return {
+        "url": result.url,
+        "markdown": result.markdown,
+        "size": result.size,
+        "content_type": result.content_type,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Active claims (ms-55 e-1730)
+# ---------------------------------------------------------------------------
+#
+# Project-wide mirror of lib/claims.py's local active_claims.json store.
+# The CLI in cloud-mode round-trips through these endpoints so:
+#   * `beacon claim list` returns the multi-machine union (= Mac + Win
+#     view the same set), not just one machine's local cache
+#   * `beacon claim post/handoff/request` is idempotent across sessions
+#   * the Web UI can render Active Claims without scanning the bus
+# Schema is opaque to the server — the client owns the wire shape.
+
+@app.get("/api/projects/{project_id}/active_claims")
+def list_active_claims_endpoint(project_id: str,
+                                user: dict = Depends(require_auth)):
+    """List all active claims on a project, sorted by issued_at."""
+    _load(project_id, user)  # access check
+    return db.list_active_claims(project_id)
+
+
+@app.get("/api/projects/{project_id}/active_claims/{claim_id}")
+def get_active_claim_endpoint(project_id: str, claim_id: str,
+                              user: dict = Depends(require_auth)):
+    _load(project_id, user)
+    claim = db.get_active_claim(project_id, claim_id)
+    if claim is None:
+        raise HTTPException(
+            status_code=404, detail=f"Claim '{claim_id}' not found",
+        )
+    return claim
+
+
+@app.post("/api/projects/{project_id}/active_claims/{claim_id}")
+def save_active_claim_endpoint(project_id: str, claim_id: str,
+                               body: ActiveClaimSave,
+                               user: dict = Depends(require_auth)):
+    """Upsert a claim. Idempotent — same claim_id overwrites."""
+    data = _load(project_id, user)
+    _require_write(data, user)
+    db.save_active_claim(project_id, claim_id, body.payload)
+    return {"claim_id": claim_id, "status": "saved"}
+
+
+@app.delete("/api/projects/{project_id}/active_claims/{claim_id}")
+def delete_active_claim_endpoint(project_id: str, claim_id: str,
+                                 user: dict = Depends(require_auth)):
+    """Release a claim from the project-wide store. Idempotent."""
+    data = _load(project_id, user)
+    _require_write(data, user)
+    deleted = db.delete_active_claim(project_id, claim_id)
+    return {"claim_id": claim_id, "deleted": deleted}
+
+
 @app.get("/api/projects/{project_id}/changelog")
 def list_changelog_endpoint(project_id: str,
                             since: Optional[str] = None,
@@ -1954,6 +2407,83 @@ def list_changelog_endpoint(project_id: str,
     # means there is nothing further back.
     next_since = entries[-1]["ts"] if entries else None
     return {"entries": entries, "next_since": next_since, "limit": limit}
+
+
+# ---------------------------------------------------------------------------
+# Related treks (ms-69 / e-1663) — reverse lookup from a project work item
+# (milestone / operation / task) to the treks that include it in scope.
+#
+# Used by the e-1664 Related Treks widget on the project detail page.
+# Archived treks are included by default so the widget can render historic
+# associations ("we worked on this together in trek X, archived 2 weeks ago").
+# ---------------------------------------------------------------------------
+
+def _list_related_treks(project_id: str, *, milestone: str = "",
+                        operation: str = "", task: str = "",
+                        user: dict | None) -> list:
+    """Return treks visible to ``user`` whose scope matches this work item.
+
+    Match rule: an entry counts if it is in the same project AND either
+    (a) narrows to the exact ref, or (b) has no narrowing key (= covers
+    the whole project, so the item is implicitly in scope).
+    """
+    actor = user.get("sub") if (_auth_enabled and user) else None
+    candidates = db.list_treks(
+        actor_id=actor,
+        include_archived=True,  # widget renders historic associations too
+    )
+    out = []
+    for t in candidates:
+        for entry in t.get("scope") or []:
+            if entry.get("project") != project_id:
+                continue
+            has_narrow = bool(
+                entry.get("milestone")
+                or entry.get("operation")
+                or entry.get("task")
+            )
+            if not has_narrow:
+                out.append(t)
+                break
+            if milestone and entry.get("milestone") == milestone:
+                out.append(t)
+                break
+            if operation and entry.get("operation") == operation:
+                out.append(t)
+                break
+            if task and entry.get("task") == task:
+                out.append(t)
+                break
+    return out
+
+
+@app.get("/api/projects/{project_id}/milestones/{ms_id}/related-treks")
+def related_treks_for_milestone(project_id: str, ms_id: str,
+                                user: dict = Depends(require_auth)):
+    """List treks visible to the caller whose scope covers this milestone.
+
+    Includes archived treks (= the widget renders history). Returns the
+    full trek doc per match; the Web UI picks status / title / archived_at
+    for the badge rendering.
+    """
+    _load(project_id, user)  # project-side access check
+    return _list_related_treks(project_id, milestone=ms_id, user=user)
+
+
+@app.get("/api/projects/{project_id}/operations/{op_id}/related-treks")
+def related_treks_for_operation(project_id: str, op_id: str,
+                                user: dict = Depends(require_auth)):
+    """List treks whose scope covers this operation (e-1663 / e-1664)."""
+    _load(project_id, user)
+    return _list_related_treks(project_id, operation=op_id, user=user)
+
+
+@app.get("/api/projects/{project_id}/entries/{entry_id}/related-treks")
+def related_treks_for_entry(project_id: str, entry_id: str,
+                            user: dict = Depends(require_auth)):
+    """List treks whose scope covers this task entry (e-1663 / e-1664)."""
+    _load(project_id, user)
+    return _list_related_treks(project_id, task=entry_id, user=user)
 
 
 # ---------------------------------------------------------------------------
@@ -2024,19 +2554,41 @@ def remove_member(project_id: str, member_email: str,
 
 @app.get("/api/projects/{project_id}/members")
 def list_members(project_id: str, user: dict = Depends(require_auth)):
-    """List project members."""
+    """List project members.
+
+    ms-78 e-1807: enriches each row with the user's `display_name` so the
+    UI / CLI can prefer a human-friendly label over the raw email. The field
+    is empty when the user hasn't set one yet — the UI should fall back to
+    email in that case.
+    """
     data = _load(project_id, user)
     owner_id = data.get("owner", "")
     owner_email = ""
+    owner_display_name = ""
     if owner_id:
         owner_data = db.get_user(owner_id)
         if owner_data:
             owner_email = owner_data.get("email", "")
-    members = data.get("members", [])
+            owner_display_name = owner_data.get("display_name", "")
+    members = data.get("members", []) or []
+    enriched = []
+    for m in members:
+        if not isinstance(m, dict):
+            continue
+        m2 = dict(m)
+        uid = m.get("user_id", "")
+        if uid:
+            udata = db.get_user(uid)
+            if udata:
+                m2["display_name"] = udata.get("display_name", "") or m2.get(
+                    "display_name", ""
+                )
+        enriched.append(m2)
     return {
         "owner": owner_id,
         "owner_email": owner_email,
-        "members": members,
+        "owner_display_name": owner_display_name,
+        "members": enriched,
     }
 
 
@@ -2069,6 +2621,294 @@ def update_member_role(project_id: str, member_email: str, body: MemberRoleUpdat
     return operations.apply_operation(
         project_id, op, op_name="member.update_role", actor=user.get("sub", ""),
     )
+
+
+# ---------------------------------------------------------------------------
+# Member invitations (ms-78 e-1803/e-1804)
+# ---------------------------------------------------------------------------
+#
+# Token-based invite flow (replaces the legacy "must already have a Beacon
+# account" path in invite_member above):
+#
+#   1. Owner POSTs /api/projects/{pid}/invitations with email + role.
+#      Server issues a random token, stores SHA256 hash, returns the
+#      plaintext + the share URL (/join/<token>) ONCE.
+#   2. Invitee opens /join/<token>. The landing page calls
+#      GET /api/invitations/{token} (no auth) to preview project name /
+#      role / inviter, then prompts Google login.
+#   3. After login the landing page calls POST /api/invitations/{token}/accept
+#      with the invitee's display name. Server atomically consumes the
+#      invitation and adds them to members[].
+#
+# All writes go through `apply_operation` so the Firestore vs DynamoDB
+# split is invisible to this layer.
+
+class InvitationCreate(BaseModel):
+    email: str
+    role: str = "viewer"  # viewer | editor
+    expiry_days: int = invitations_mod.DEFAULT_EXPIRY_DAYS
+
+
+class InvitationAccept(BaseModel):
+    display_name: str = ""  # ms-78 e-1807: required-but-allow-server-default
+
+
+def _invite_url(token: str) -> str:
+    """Build the public landing URL for a token. Honours BEACON_PUBLIC_BASE_URL
+    so local dev / staging / prod all produce a clickable link."""
+    base = os.environ.get(
+        "BEACON_PUBLIC_BASE_URL", "https://beacon-ai.dev"
+    ).rstrip("/")
+    return f"{base}/join/{token}"
+
+
+@app.post("/api/projects/{project_id}/invitations")
+def create_invitation(project_id: str, body: InvitationCreate,
+                      user: dict = Depends(require_auth)):
+    """Owner issues a fresh invite token. Returns the plaintext token + URL ONCE.
+
+    The plaintext is *never* returned again — if the inviter loses it they
+    must cancel + re-issue. The DB only ever sees the SHA256 hash.
+    """
+    issued: dict = {}
+
+    def op(data: dict):
+        if _auth_enabled and data.get("owner") != user.get("sub"):
+            raise HTTPException(
+                status_code=403,
+                detail="Only project owner can issue invitations",
+            )
+        try:
+            invitation, token = invitations_mod.invitation_create(
+                data,
+                email=body.email,
+                role=body.role,
+                invited_by_user_id=user.get("sub", ""),
+                invited_by_email=user.get("email", ""),
+                expiry_days=body.expiry_days,
+                project_id=project_id,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        # Stash for outside the txn — the closure may be retried, only the
+        # last successful run's values matter.
+        issued["invitation"] = invitation
+        issued["token"] = token
+        return data, None
+
+    operations.apply_operation(
+        project_id, op,
+        op_name="invitation.create", actor=user.get("sub", ""),
+    )
+    invitation = issued.get("invitation") or {}
+    token = issued.get("token") or ""
+    return {
+        "invitation": invitations_mod.invitation_public_view(invitation),
+        "token": token,                        # plaintext, returned ONCE
+        "url": _invite_url(token),
+        "expires_at": invitation.get("expires_at", ""),
+        "note": (
+            "Beacon project member への招待です。GitHub repo collaborator は別途 "
+            "GitHub 側で `gh repo edit --add-collaborator <user>` 等で設定してください。"
+        ),
+    }
+
+
+@app.get("/api/projects/{project_id}/invitations")
+def list_invitations(project_id: str, user: dict = Depends(require_auth)):
+    """List active (= unexpired) invitations for a project. Owner-only."""
+    data = _load(project_id, user)
+    if _auth_enabled and data.get("owner") != user.get("sub"):
+        raise HTTPException(
+            status_code=403,
+            detail="Only project owner can view invitations",
+        )
+    return {
+        "invitations": [
+            invitations_mod.invitation_public_view(inv)
+            for inv in invitations_mod.invitations_list(data)
+            if not invitations_mod._is_expired(inv.get("expires_at", ""))
+        ],
+    }
+
+
+@app.delete("/api/projects/{project_id}/invitations/{invitation_id}")
+def cancel_invitation(project_id: str, invitation_id: str,
+                      user: dict = Depends(require_auth)):
+    """Cancel an outstanding invitation. Owner-only.
+
+    After cancel, the token becomes invalid — even if the invitee still has
+    the URL, /accept will return 404.
+    """
+    def op(data: dict):
+        if _auth_enabled and data.get("owner") != user.get("sub"):
+            raise HTTPException(
+                status_code=403,
+                detail="Only project owner can cancel invitations",
+            )
+        try:
+            removed = invitations_mod.invitation_cancel(data, invitation_id)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        return data, {
+            "status": "cancelled",
+            "invitation": invitations_mod.invitation_public_view(removed),
+        }
+
+    return operations.apply_operation(
+        project_id, op,
+        op_name="invitation.cancel", actor=user.get("sub", ""),
+    )
+
+
+def _resolve_invitation_project(token: str) -> tuple[str, dict, dict]:
+    """Resolve (project_id, project_data, invitation_dict) from a plaintext token.
+
+    Tokens carry the project_id as a prefix (= ``<pid>.<random>``) so we can
+    look up directly without scanning all projects. Raises 404 on miss.
+    """
+    pid = invitations_mod.parse_token_project_id(token)
+    if not pid:
+        raise HTTPException(
+            status_code=404,
+            detail="Invitation token has no project context. Ask the inviter for a fresh link.",
+        )
+    data = db.get_project(pid)
+    if not data:
+        raise HTTPException(
+            status_code=404,
+            detail="Invitation not found or expired. Ask the inviter for a fresh link.",
+        )
+    inv = invitations_mod.invitation_find_by_token(data, token)
+    if not inv:
+        raise HTTPException(
+            status_code=404,
+            detail="Invitation not found or expired. Ask the inviter for a fresh link.",
+        )
+    return pid, data, inv
+
+
+@app.get("/api/invitations/{token}")
+def preview_invitation(token: str):
+    """Preview an invitation by plaintext token. Public endpoint — no auth.
+
+    Returns project name / role / inviter so the landing page can render
+    "X invited you to Project Y as Z" before the invitee logs in. Does NOT
+    return any secrets and does NOT consume the invitation.
+
+    404 if the token does not match any live invitation (= unknown / expired /
+    cancelled / already accepted).
+    """
+    pid, data, inv = _resolve_invitation_project(token)
+    owner_id = data.get("owner") or ""
+    owner_email = ""
+    if owner_id:
+        owner_data = db.get_user(owner_id)
+        if owner_data:
+            owner_email = owner_data.get("email", "")
+    return {
+        "project_id": pid,
+        "project_name": data.get("name", ""),
+        "role": inv.get("role", ""),
+        "invited_email": inv.get("email", ""),
+        "inviter_email": inv.get("invited_by_email", "") or owner_email,
+        "expires_at": inv.get("expires_at", ""),
+        "owner_email": owner_email,
+    }
+
+
+@app.post("/api/invitations/{token}/accept")
+def accept_invitation(token: str, body: InvitationAccept,
+                      user: dict = Depends(require_auth)):
+    """Consume an invite token and add the caller to the project's members.
+
+    Authenticated — the caller must already be signed in (= Google login on
+    the landing page). The invitee email must match the email the invitation
+    was issued to (= prevents passing the URL to a third party).
+
+    `display_name` is recorded on the user record (= ms-78 e-1807, the
+    UC11-F5 "no more raw emails in author columns" goal).
+
+    Idempotent on success in the trivial sense: invitation is consumed and
+    the member row is added. A second call returns 404 because the token
+    no longer exists.
+    """
+    target_pid = invitations_mod.parse_token_project_id(token)
+    if not target_pid:
+        raise HTTPException(
+            status_code=404,
+            detail="Invitation token has no project context. Ask the inviter for a fresh link.",
+        )
+    caller_id = user.get("sub", "")
+    caller_email = (user.get("email") or "").lower()
+    display_name = (body.display_name or "").strip()
+
+    accepted: dict = {}
+
+    def op(data: dict):
+        try:
+            inv = invitations_mod.invitation_consume(data, token)
+        except ValueError as e:
+            # Race against another consume / cancel attempt
+            raise HTTPException(status_code=404, detail=str(e))
+        # Email match check — server enforces, role cannot be re-targeted
+        invitee_email = (inv.get("email") or "").lower()
+        if caller_email and invitee_email and caller_email != invitee_email:
+            # Re-insert the invitation so the legitimate invitee can still use it
+            data.setdefault("invitations", []).append(inv)
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"This invitation was issued to {invitee_email}, but you "
+                    f"are signed in as {caller_email}. Sign in with the "
+                    "invited account and try again."
+                ),
+            )
+        # Add to project members (= server-side schema, user_id key)
+        members = data.setdefault("members", [])
+        if not isinstance(members, list):
+            members = []
+            data["members"] = members
+        if data.get("owner") == caller_id:
+            # Owner accepting their own invite (= edge case, no-op for membership)
+            pass
+        elif not any(m.get("user_id") == caller_id for m in members
+                     if isinstance(m, dict)):
+            members.append({
+                "user_id": caller_id,
+                "email": caller_email,
+                "role": inv.get("role", "viewer"),
+                "joined_at": invitations_mod._now_iso(),
+                "invited_by": inv.get("invited_by", ""),
+            })
+        accepted["invitation"] = inv
+        return data, None
+
+    operations.apply_operation(
+        target_pid, op,
+        op_name="invitation.accept", actor=caller_id,
+    )
+
+    # Persist display_name on the user record (= UC11-F5 / e-1807).
+    # Best-effort — failure here should not block project membership.
+    if display_name:
+        try:
+            db.update_user(caller_id, {"display_name": display_name})
+        except Exception:
+            pass
+
+    inv = accepted.get("invitation") or {}
+    return {
+        "status": "accepted",
+        "project_id": target_pid,
+        "role": inv.get("role", ""),
+        "display_name": display_name,
+        "next_step_url": f"/?project={target_pid}",
+        "note": (
+            "Beacon project に追加されました。GitHub repo の collaborator は "
+            "別途 GitHub 側で設定が必要です (招待主に依頼してください)。"
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2258,6 +3098,467 @@ def admin_check(user: dict = Depends(require_auth)):
     user_data = db.get_user(user.get("sub", ""))
     is_admin = user_data.get("role") == "admin" if user_data else False
     return {"is_admin": is_admin}
+
+
+# ---------------------------------------------------------------------------
+# Treks (ms-69 / e-1656) — cross-project / cross-session collaboration area
+#
+# Top-level resource (not under /api/projects/) because a trek's whole point
+# is to bridge projects. Storage lives in `treks/` collection (Firestore) or
+# `beacon-{env}-treks` table (DynamoDB), routed through store_router.
+#
+# Membership is at user grain (= user_id + email pair), so a single user
+# with multiple sessions counts as one member. Leader is at session grain
+# (= `leader_session_id` on the trek doc).
+#
+# Authorization model:
+#   - read  (list / get / summary)        : creator OR any member
+#   - write (invite / scope / halt set+clear) : joined member
+#   - leader-only (update / archive / start / transfer) : member with
+#     role="leader" (user grain). Transfer additionally requires the caller's
+#     session to equal trek.leader_session_id (session grain).
+#   - join                                : caller must already appear in
+#     members[] (= invited but not yet joined). Non-invited callers get 403.
+# ---------------------------------------------------------------------------
+
+class TrekCreate(BaseModel):
+    title: str
+    description: str = ""
+    type: str = "persistent"  # temporary | persistent
+    creator_session_id: str   # caller's session_id (becomes leader)
+
+
+class TrekUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    type: Optional[str] = None
+
+
+class TrekInvite(BaseModel):
+    email: str
+
+
+class TrekScopeOp(BaseModel):
+    project: str
+    milestone: Optional[str] = None
+    operation: Optional[str] = None
+    task: Optional[str] = None
+
+
+class TrekHaltSet(BaseModel):
+    issued_by_session_id: str
+    reason: str = ""
+
+
+class TrekTransferLeader(BaseModel):
+    from_session_id: str  # current leader session (caller's session)
+    to_session_id: str    # new leader session
+
+
+def _load_trek_for_read(trek_id: str, user: dict) -> dict:
+    """Load a trek doc. 404 if missing, 403 if caller is neither creator
+    nor a member (per SPEC visibility = creator OR members)."""
+    t = db.get_trek(trek_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail=f"Trek '{trek_id}' not found")
+    if not _auth_enabled:
+        return t
+    uid = user.get("sub", "")
+    creator_uid = (t.get("creator_actor") or {}).get("user_id", "")
+    if creator_uid == uid:
+        return t
+    for m in t.get("members") or []:
+        if m.get("user_id") == uid:
+            return t
+    raise HTTPException(status_code=403, detail="Not a member of this trek")
+
+
+def _trek_member_role(t: dict, user_id: str) -> str:
+    """Return the caller's role ('leader' / 'member' / '' if not a member)."""
+    for m in t.get("members") or []:
+        if m.get("user_id") == user_id:
+            return m.get("role", "member")
+    return ""
+
+
+def _require_trek_leader(t: dict, user: dict) -> None:
+    """Raise 403 if caller does not hold the leader role on this trek."""
+    if not _auth_enabled:
+        return
+    if _trek_member_role(t, user.get("sub", "")) != "leader":
+        raise HTTPException(status_code=403, detail="Trek leader role required")
+
+
+def _require_trek_joined_member(t: dict, user: dict) -> None:
+    """Raise 403 if caller is not a joined member (= invited but not joined
+    is insufficient for write ops; mirrors SPEC 設計方針 12 join-flow)."""
+    if not _auth_enabled:
+        return
+    uid = user.get("sub", "")
+    for m in t.get("members") or []:
+        if m.get("user_id") == uid and m.get("joined_at"):
+            return
+    raise HTTPException(status_code=403, detail="Only joined members can perform this action")
+
+
+@app.get("/api/treks")
+def list_treks_endpoint(
+    status: Optional[str] = None,
+    include_archived: bool = False,
+    all_actors: bool = False,
+    user: dict = Depends(require_auth),
+):
+    """List treks visible to the caller.
+
+    Default: treks where caller is creator OR member.
+    ``?all_actors=true`` returns every trek (admin only; non-admin sees 403).
+    ``?status=`` narrows to a specific lifecycle state.
+    ``?include_archived=true`` includes archived treks (default hides them).
+    """
+    if all_actors:
+        _require_admin(user)
+        actor_filter = None
+    else:
+        actor_filter = user.get("sub") if _auth_enabled else None
+    return db.list_treks(
+        actor_id=actor_filter,
+        status=status,
+        include_archived=include_archived,
+    )
+
+
+@app.post("/api/treks")
+def create_trek_endpoint(body: TrekCreate, user: dict = Depends(require_auth)):
+    """Create a new trek. Caller becomes the creator + initial leader member.
+
+    ``creator_session_id`` is recorded as ``leader_session_id`` (SPEC 設計方針 9).
+    """
+    if not body.creator_session_id:
+        raise HTTPException(status_code=400, detail="creator_session_id required")
+    try:
+        new_doc = trek_mod.new_trek(
+            title=body.title,
+            creator_user_id=user.get("sub", ""),
+            creator_email=user.get("email", ""),
+            creator_session_id=body.creator_session_id,
+            description=body.description,
+            type_=body.type,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.save_trek(new_doc["trek_id"], new_doc)
+    return new_doc
+
+
+@app.get("/api/treks/{trek_id}")
+def get_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
+    """Get a single trek by id. Caller must be creator or member."""
+    return _load_trek_for_read(trek_id, user)
+
+
+@app.patch("/api/treks/{trek_id}")
+def update_trek_endpoint(trek_id: str, body: TrekUpdate,
+                         user: dict = Depends(require_auth)):
+    """Update title / description / type. Leader-only.
+
+    Status / members / scope / halt are mutated through dedicated endpoints
+    so audit logs and authz rules stay sharp per intent.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_leader(t, user)
+    if body.title is not None:
+        title = body.title.strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="title cannot be empty")
+        t["title"] = title
+    if body.description is not None:
+        t["description"] = body.description
+    if body.type is not None:
+        try:
+            trek_mod.validate_type(body.type)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        t["type"] = body.type
+    t["updated_at"] = trek_mod.utcnow_iso()
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.delete("/api/treks/{trek_id}")
+def archive_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
+    """Archive a trek (status → archived). Leader-only. Archive is terminal."""
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_leader(t, user)
+    cur = t.get("status", "")
+    try:
+        trek_mod.validate_transition(cur, "archived")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    now = trek_mod.utcnow_iso()
+    t["status"] = "archived"
+    t["archived_at"] = now
+    t["updated_at"] = now
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.post("/api/treks/{trek_id}/start")
+def start_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
+    """Transition trek planning → active. Leader-only."""
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_leader(t, user)
+    cur = t.get("status", "")
+    try:
+        trek_mod.validate_transition(cur, "active")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    t["status"] = "active"
+    t["updated_at"] = trek_mod.utcnow_iso()
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.post("/api/treks/{trek_id}/members")
+def invite_trek_member_endpoint(trek_id: str, body: TrekInvite,
+                                user: dict = Depends(require_auth)):
+    """Invite a user to the trek by email. Any joined member can invite.
+
+    Invitee must already exist as a Beacon user (= signed in once). The
+    invitation appears in members[] with ``joined_at=""`` until they call
+    POST /api/treks/{id}/members/join.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    found = db.find_user_by_email(body.email)
+    if found is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"User '{body.email}' not found. They must sign in to Beacon first.",
+        )
+    invited_id, _ = found
+    try:
+        trek_mod.add_invitation(
+            t,
+            user_id=invited_id,
+            email=body.email,
+            invited_by_user_id=user.get("sub", ""),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.post("/api/treks/{trek_id}/members/join")
+def join_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
+    """Accept the caller's own invitation (= sets ``joined_at`` to now).
+
+    Caller must already appear in members[] (= owner-issued invitation).
+    Non-invited callers get 403 — there is no self-add path by design.
+
+    We bypass _load_trek_for_read's membership check here because the trek
+    visibility model is "creator OR member" and an invited-but-not-yet-joined
+    user IS a member entry; the visibility check passes. Self-add (= caller
+    not yet in members[] at all) gets caught by trek_mod.accept_invitation.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    try:
+        trek_mod.accept_invitation(t, user_id=user.get("sub", ""))
+    except ValueError as e:
+        # Not invited (no row at all) → 403, not 404. The trek exists; the
+        # caller just cannot self-add.
+        raise HTTPException(status_code=403, detail=str(e))
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.delete("/api/treks/{trek_id}/members/me")
+def leave_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
+    """Caller removes themselves from the trek.
+
+    The leader must transfer leadership first (`POST .../transfer-leader`),
+    and the last member cannot leave (= archive the trek instead).
+    """
+    t = _load_trek_for_read(trek_id, user)
+    try:
+        trek_mod.remove_member(t, user_id=user.get("sub", ""))
+    except ValueError as e:
+        # leader-still-leader / not-a-member / last-member → 400
+        raise HTTPException(status_code=400, detail=str(e))
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.put("/api/treks/{trek_id}/scope")
+def add_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
+                            user: dict = Depends(require_auth)):
+    """Append a scope entry (cross-project ref). Any joined member."""
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    entry: dict = {"project": body.project}
+    if body.milestone:
+        entry["milestone"] = body.milestone
+    if body.operation:
+        entry["operation"] = body.operation
+    if body.task:
+        entry["task"] = body.task
+    try:
+        trek_mod.add_scope_entry(t, entry=entry)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.delete("/api/treks/{trek_id}/scope")
+def remove_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
+                               user: dict = Depends(require_auth)):
+    """Remove a scope entry. Any joined member."""
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    entry: dict = {"project": body.project}
+    if body.milestone:
+        entry["milestone"] = body.milestone
+    if body.operation:
+        entry["operation"] = body.operation
+    if body.task:
+        entry["task"] = body.task
+    try:
+        trek_mod.remove_scope_entry(t, entry=entry)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.put("/api/treks/{trek_id}/halt")
+def set_trek_halt_endpoint(trek_id: str, body: TrekHaltSet,
+                           user: dict = Depends(require_auth)):
+    """Pull the Andon cord. Any joined member may halt an active trek.
+
+    Halt is metadata, not a status: trek stays ``active`` while halted.
+    Sessions observe the halt field and pause autonomous work. Resume by
+    DELETE on this same path.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    if not body.issued_by_session_id:
+        raise HTTPException(status_code=400, detail="issued_by_session_id required")
+    try:
+        trek_mod.set_halt(
+            t,
+            issued_by_session_id=body.issued_by_session_id,
+            reason=body.reason or "",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.delete("/api/treks/{trek_id}/halt")
+def clear_trek_halt_endpoint(trek_id: str, user: dict = Depends(require_auth)):
+    """Release the Andon cord. Any joined member."""
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    trek_mod.clear_halt(t)
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.post("/api/treks/{trek_id}/transfer-leader")
+def transfer_trek_leader_endpoint(trek_id: str, body: TrekTransferLeader,
+                                  user: dict = Depends(require_auth)):
+    """Hand off leadership to another session.
+
+    Two-factor check (session AND user grain):
+      * ``from_session_id`` must equal the current ``leader_session_id`` —
+        confirms the caller is the live leader session.
+      * The calling user must hold the ``leader`` role in members[] —
+        confirms identity at the user grain (= survives session restart).
+    """
+    t = _load_trek_for_read(trek_id, user)
+    if not body.from_session_id or not body.to_session_id:
+        raise HTTPException(status_code=400,
+                            detail="from_session_id and to_session_id required")
+    if t.get("leader_session_id") != body.from_session_id:
+        raise HTTPException(
+            status_code=403,
+            detail="from_session_id does not match current trek leader",
+        )
+    _require_trek_leader(t, user)
+    try:
+        trek_mod.transfer_leader(t, target_session_id=body.to_session_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.get("/api/treks/{trek_id}/documents")
+def list_trek_documents_endpoint(trek_id: str,
+                                 user: dict = Depends(require_auth)):
+    """List documents associated with this trek (= ``trek_id`` field set).
+
+    Iterates the trek's scope to collect candidate projects, then lists
+    documents for each and filters by ``trek_id``. Returns the docs the
+    caller can see (= the caller is already a trek member, so they have
+    visibility into any project that the trek's scope includes).
+    """
+    t = _load_trek_for_read(trek_id, user)
+    out: list = []
+    seen_doc_ids: set[str] = set()
+    project_ids = {
+        s.get("project") for s in t.get("scope") or [] if s.get("project")
+    }
+    for pid in project_ids:
+        try:
+            project_docs = db.list_documents(pid)
+        except Exception:
+            # Stale scope entry pointing at a project the caller cannot
+            # read; skip silently so a single bad ref doesn't break the
+            # whole listing.
+            continue
+        for d in project_docs:
+            if d.get("trek_id") != trek_id:
+                continue
+            doc_id = d.get("doc_id")
+            if doc_id in seen_doc_ids:
+                continue
+            seen_doc_ids.add(doc_id)
+            # Surface the source project_id so the UI can deep-link the doc.
+            d_out = dict(d)
+            d_out["project_id"] = pid
+            out.append(d_out)
+    return out
+
+
+@app.get("/api/treks/{trek_id}/summary")
+def trek_summary_endpoint(trek_id: str, user: dict = Depends(require_auth)):
+    """Compact status snapshot for dashboards / Web UI Treks tab.
+
+    Returns the high-level counts + status fields without exposing the full
+    members[] / scope[] arrays — a separate GET /api/treks/{id} fetches the
+    full doc when the caller drills in.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    members = t.get("members") or []
+    return {
+        "trek_id": t.get("trek_id"),
+        "title": t.get("title"),
+        "type": t.get("type"),
+        "status": t.get("status"),
+        "halted": bool(t.get("halt")),
+        "halt": t.get("halt"),
+        "leader_session_id": t.get("leader_session_id"),
+        "creator_actor": t.get("creator_actor"),
+        "member_count": len(members),
+        "joined_member_count": sum(1 for m in members if m.get("joined_at")),
+        "scope_count": len(t.get("scope") or []),
+        "created_at": t.get("created_at"),
+        "updated_at": t.get("updated_at"),
+        "archived_at": t.get("archived_at"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2596,6 +3897,53 @@ def list_session_logs(
 # Bus events (ms-54 / e-996)
 # ---------------------------------------------------------------------------
 
+def _resolve_bus_event_user_ids(
+    project_id: str,
+    sender_session_id: str,
+    payload: dict | None,
+) -> tuple[str, str]:
+    """Resolve (sender_user_id, receiver_user_id) for a bus envelope.
+
+    Both ids are looked up from the project's session registry
+    (= projects/{project_id}/sessions/{session_id}.user_id, written by
+    upsert_session / mint_session paths). Missing rows return empty
+    string for that side; the caller (``dm_gate.should_gate_dm_action``)
+    treats empty-string sender / receiver as "unknown" and falls through
+    to the standard rule set (= same_user skip is impossible when sender
+    is blank, but the no_actions / shared_trek rules still apply).
+
+    Used only by the post_bus_event gate (ms-70 / e-1713). Kept off the
+    hot path of normal lookups — one ``list_sessions`` call per bus
+    write is acceptable at current dogfood traffic; a directory-style
+    point lookup can replace it if/when scale demands.
+    """
+    if not sender_session_id and not (isinstance(payload, dict) and payload.get("recipient_session_id")):
+        return ("", "")
+    recipient_sid = ""
+    if isinstance(payload, dict):
+        recipient_sid = str(payload.get("recipient_session_id") or "")
+    sender_uid = ""
+    receiver_uid = ""
+    try:
+        sessions = db.list_sessions(project_id)
+    except Exception:
+        # Backend unavailable / table missing in a fresh project: treat
+        # both ids as unknown. The gate's no_actions / shared_trek rules
+        # still cover the safe defaults.
+        return ("", "")
+    for s in sessions:
+        sid = s.get("session_id") or ""
+        if sender_session_id and sid == sender_session_id:
+            sender_uid = str(s.get("user_id") or "")
+        if recipient_sid and sid == recipient_sid:
+            receiver_uid = str(s.get("user_id") or "")
+        if (not sender_session_id or sender_uid) and (
+            not recipient_sid or receiver_uid
+        ):
+            break
+    return (sender_uid, receiver_uid)
+
+
 @app.post("/api/projects/{project_id}/bus")
 async def post_bus_event(
     project_id: str,
@@ -2695,6 +4043,43 @@ async def post_bus_event(
             },
         )
 
+    # ms-70 / e-1713: cross-user DM action authorization gate.
+    # Resolve sender / receiver user_ids from the project session registry,
+    # then ask the pure judge whether this envelope must be held for
+    # receiver-side human approval. The gate writes a pending sidecar row
+    # *and* downgrades effective_delivery to a non-auto-execute mode so
+    # the receiver daemon cannot self-act before the human decides.
+    sender_uid, receiver_uid = _resolve_bus_event_user_ids(
+        project_id=project_id,
+        sender_session_id=body.sender_session_id,
+        payload=body.payload,
+    )
+    env_actions = (body.envelope or {}).get("actions_authorized") or []
+    gate_lookup = dm_gate_mod.build_shared_trek_lookup_from_lists(
+        # Sender-side trek visibility is sufficient — Trek membership
+        # query is symmetric (creator OR members) on either backend.
+        lambda uid: db.list_treks(actor_id=uid) if uid else [],
+    )
+    should_gate, gate_reason = dm_gate_mod.should_gate_dm_action(
+        sender_user_id=sender_uid,
+        receiver_user_id=receiver_uid,
+        actions_authorized=env_actions,
+        shared_trek_lookup=gate_lookup,
+    )
+    audit_record["dm_gate"] = {
+        "should_gate": should_gate,
+        "reason": gate_reason,
+        "sender_user_id": sender_uid,
+        "receiver_user_id": receiver_uid,
+    }
+    if should_gate:
+        # Force a safe, non-auto-execute delivery so legacy receivers
+        # that ignore the sidecar still cannot fire actions. The
+        # canonical "needs human consent" mode is propose-to-ai
+        # (= surface in the AI context but do not auto-run).
+        effective_delivery = "propose-to-ai"
+        audit_record["effective_delivery"] = effective_delivery
+
     data = {
         "channel": body.channel,
         "sender_session_id": body.sender_session_id,
@@ -2714,6 +4099,31 @@ async def post_bus_event(
     event_id = db.append_bus_event(project_id, data)
     audit_record["event_id"] = event_id
     db.append_bus_audit(project_id, audit_record)
+
+    # Sidecar write must happen *after* append_bus_event so the parent
+    # event_id exists. Pending is the only status we record from this
+    # path; approved / denied land via the receiver's CLI/Skill, and
+    # auto-allow events deliberately leave no sidecar (= legacy read
+    # path interprets None as "auto").
+    if should_gate:
+        try:
+            db.put_bus_event_approval(
+                project_id,
+                event_id,
+                approval_status="pending",
+                sender_user_id=sender_uid or "",
+                receiver_user_id=receiver_uid or "",
+            )
+        except Exception as _exc:  # pragma: no cover - defensive
+            # Sidecar write failure must NOT break the dispatcher; the
+            # event is already in bus_events and the audit record
+            # captured the gate decision. Receivers reading the sidecar
+            # will see None == "auto" and an operator can re-stamp by
+            # hand if needed. Log and move on.
+            logging.getLogger(__name__).warning(
+                "put_bus_event_approval failed for event_id=%s: %s",
+                event_id, _exc,
+            )
 
     event = {"event_id": event_id, **data}
     # e-997: push to all WS subscribers of this project. Multi-replica delivery
@@ -2799,6 +4209,326 @@ def list_bus_audit(
     """
     _require_project_role(project_id, user)
     return db.list_bus_audit(project_id, since=since, limit=limit)
+
+
+@app.get("/api/projects/{project_id}/dm/pending")
+def list_pending_dm_actions(
+    project_id: str,
+    receiver_user_id: str = "",
+    limit: int = 100,
+    user: dict = Depends(require_auth),
+):
+    """List pending bus_event_approvals rows (ms-70 / e-1714).
+
+    Used by ``/beacon-session-start`` to surface "保留中の DM action"
+    (= cross-user DM bus envelopes that the receiver's terminal was
+    closed for when ms-70 / e-1713's dispatcher gate held them).
+
+    The endpoint is membership-gated like other project-scoped reads;
+    no extra ACL beyond that because the sidecar's
+    ``receiver_user_id`` query gives the caller scoped-to-self filter
+    semantics — and read-only members can already see bus events in
+    the parent collection.
+
+    ``receiver_user_id`` (optional): restrict to "my pending". Empty
+    string returns rows for all receivers in the project (used by web
+    UI dashboards / debugging; the Skill always passes a value).
+    """
+    _load(project_id, user)
+    return db.list_pending_approvals(
+        project_id,
+        receiver_user_id=(receiver_user_id or None),
+        limit=limit,
+    )
+
+
+@app.get("/api/projects/{project_id}/dm/approval/history")
+def list_dm_approval_history(
+    project_id: str,
+    limit: int = 50,
+    user: dict = Depends(require_auth),
+):
+    """List **decided** bus_event_approvals rows for ``project_id`` (ms-70 / e-1718).
+
+    Audit-trail read used by the Web UI's "DM 承認履歴" (DM approval history)
+    section, which is read-only by design: SPEC 設計方針 3 keeps every
+    approve / deny decision inside the terminal Claude Code that received
+    the action, so the Web UI surfaces only the *aftermath* — who decided
+    what, when — never an approve / deny control.
+
+    Filters out ``pending`` rows specifically so a future contributor cannot
+    casually wire approve / deny buttons on top of this endpoint without
+    noticing they would break the terminal-only invariant. ``auto`` rows
+    are also excluded — they carry no human decision and would drown out
+    the interesting human-decided rows in the audit view.
+
+    Membership-gated like the symmetric ``/dm/pending`` endpoint (e-1714):
+    project members can read; non-members cannot. ``decision_by`` is
+    returned as the raw user_id stamped by the server at decision time;
+    rendering "(you)" suffixes etc. is a presentation concern handled in
+    the Web UI.
+    """
+    _load(project_id, user)
+    # Defensive cap. Frontend default is 50; allowing a few hundred is fine
+    # for human audit scroll, but unbounded would let a curious client slurp
+    # every decision in the project.
+    capped = max(1, min(int(limit or 50), 500))
+    return db.list_decided_approvals(project_id, limit=capped)
+
+
+# ms-70 / e-1716: receiver-side decision endpoint.
+#
+# SPEC 設計方針 3 ("承認は terminal Claude Code 内での user 直接判断のみ") means
+# this endpoint is reached exclusively from `beacon dm respond` typed by the
+# human, never from an autonomous AI loop. The CLI carries the human's Bearer
+# token; the server pulls ``decision_by`` from that token's ``sub`` claim so
+# the CLI cannot spoof "I am someone else" by passing a different user_id.
+#
+# State machine pinned here (idempotency / safety rails):
+#   * sidecar missing (legacy / auto): refuse — there is nothing to decide.
+#   * sidecar pending: write the requested decision_status. Allowed.
+#   * sidecar already approved / denied with the same caller + same decision:
+#       no-op idempotent return (= same user retrying the same press).
+#   * sidecar already approved / denied with a different caller OR different
+#       decision: refuse (= the receiver-of-record already made their call;
+#       a second user or a flip cannot smuggle through this primitive).
+#   * sidecar receiver_user_id != caller's sub: refuse with 403 (= "not your
+#       envelope to decide" — important defense against a curious teammate
+#       clicking a colleague's pending row).
+class DMRespondBody(BaseModel):
+    decision: str  # "approve" | "deny"
+
+
+@app.post("/api/projects/{project_id}/dm/approval/{event_id}")
+def respond_dm_approval(
+    project_id: str,
+    event_id: str,
+    body: DMRespondBody,
+    user: dict = Depends(require_auth),
+):
+    """Receiver decides approve / deny on a pending DM-action sidecar (e-1716).
+
+    Returns the resulting 7-field sidecar row, same shape as
+    :func:`db.get_bus_event_approval`. The caller's identity (= server-side
+    ``user.sub``) is stamped as ``decision_by`` and the server clock is
+    stamped as ``decision_at``; both fields are server-authoritative — the
+    CLI has no way to pass them in.
+    """
+    _load(project_id, user)
+    # Normalize decision verb. "approve" / "deny" only — no auto / pending
+    # flip from this endpoint (auto is set by the dispatcher when blanket-
+    # allowing, pending is set when the gate first fires).
+    decision = (body.decision or "").strip().lower()
+    if decision not in ("approve", "deny"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"invalid decision {body.decision!r}; "
+                "expected 'approve' or 'deny'"
+            ),
+        )
+    target_status = "approved" if decision == "approve" else "denied"
+
+    # Caller's user_id from auth context. In dev (BEACON_API_AUTH=0) the
+    # require_auth dependency returns {'sub': 'dev', 'email': 'dev@local'},
+    # so decision_by = "dev" in that mode — consistent with how other
+    # actor-stamping endpoints (project.archive etc.) behave in dev.
+    caller_uid = user.get("sub") or ""
+
+    existing = db.get_bus_event_approval(project_id, event_id)
+    if existing is None:
+        # No sidecar = legacy/auto envelope. Nothing to decide.
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"no pending approval found for event_id={event_id!r} "
+                f"in project={project_id!r} (the envelope may be legacy / "
+                "auto-allowed, or the event_id is wrong)"
+            ),
+        )
+
+    receiver_uid = existing.get("receiver_user_id") or ""
+    sender_uid = existing.get("sender_user_id") or ""
+
+    # Receiver-of-record check. Only the addressee can decide.
+    if caller_uid and receiver_uid and caller_uid != receiver_uid:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"event_id={event_id!r} is addressed to a different user; "
+                "only the intended receiver can approve or deny"
+            ),
+        )
+
+    current_status = existing.get("approval_status") or ""
+
+    if current_status in ("approved", "denied"):
+        # Already decided. Idempotent only when SAME caller chose the SAME
+        # outcome — anything else is a structural error.
+        if (existing.get("decision_by") == caller_uid
+                and current_status == target_status):
+            # Same press, same user: no-op return.
+            return existing
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"event_id={event_id!r} already decided as "
+                f"{current_status!r} by {existing.get('decision_by')!r} "
+                f"at {existing.get('decision_at')!r}; cannot change to "
+                f"{target_status!r}"
+            ),
+        )
+
+    if current_status == "auto":
+        # Sidecar exists in auto-allowed state (= dispatcher blanket allow).
+        # No human decision required; refuse rather than overwriting.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"event_id={event_id!r} is in auto-allowed state and does "
+                "not require an explicit decision"
+            ),
+        )
+
+    # current_status == "pending" → write the decision. put_bus_event_approval
+    # preserves created_at and updates status/decision_by/decision_at.
+    now = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    row = db.put_bus_event_approval(
+        project_id,
+        event_id,
+        approval_status=target_status,
+        sender_user_id=sender_uid,
+        receiver_user_id=receiver_uid,
+        decision_by=caller_uid,
+        decision_at=now,
+    )
+
+    # ms-70 / e-1717: denied → emit a server-issued T5 reply addressed
+    # back to the original envelope's sender_session_id so the AI that
+    # tried to act doesn't sit in an infinite-await loop on a bus event
+    # whose human gatekeeper just said "no". The approve path needs no
+    # such reply because normal delivery resumes once the sidecar flips
+    # to approved.
+    #
+    # T5 chosen per AC 3: this is server-issued, scope=None, no actions,
+    # info-disclosure-forbidden (= ping-shape payload only). The CORE doc
+    # "高リスク endpoint 一覧" (8iZL1IC92GZ0GwtAUjq5) covers tier escalation
+    # paths, not read-only deny notifications — T5 is the right floor here.
+    #
+    # The payload squeezes into the T5 short-ping schema
+    # ({ping/ack/status/kind/ts}, ≤32 chars per string value) by encoding
+    # the "denied by receiver" semantics in structural fields:
+    #   kind   = "deny"
+    #   status = "denied_by_receiver"   (= AC 2 parse anchor)
+    #   ack    = "<receiver email or sub>"
+    # AC 2 ("body text contains 'denied by receiver' + receiver email")
+    # is satisfied structurally: the substring "denied" + "receiver"
+    # both appear in status, and the email/sub identifying the receiver
+    # is in ack. The literal free-text phrase with a space is not
+    # representable in T5 ping shape (= CORE doc "T5 = 短い ping schema");
+    # this trade-off is the structural realization of the rule.
+    #
+    # Failure here is logged + swallowed (warning, not error): the
+    # receiver's deny decision is already durably recorded in the sidecar
+    # row above; if the reply append fails, that's a downstream-notification
+    # gap, not a state-machine corruption. Mirrors e-1713's dispatcher-
+    # failure-as-warning policy so a transient Firestore hiccup on the
+    # reply path never reverts a human's deny click.
+    if decision == "deny":
+        try:
+            original_event = db.get_bus_event(project_id, event_id)
+            if original_event is None:
+                logging.warning(
+                    "e-1717: original bus_event %s not found in project %s "
+                    "for denied-reply chain; skipping reply append",
+                    event_id, project_id,
+                )
+            else:
+                sender_session_id = (
+                    original_event.get("sender_session_id") or ""
+                )
+                if not sender_session_id:
+                    logging.warning(
+                        "e-1717: original bus_event %s has no "
+                        "sender_session_id; skipping denied-reply chain",
+                        event_id,
+                    )
+                else:
+                    # Receiver identifier — prefer email (= human-readable
+                    # in the AI's context), fall back to sub for dev mode.
+                    receiver_ident = (
+                        user.get("email") or user.get("sub") or ""
+                    )
+                    # Cap ack at the T5 short-ping value max (32 chars) so
+                    # validate_t5_payload accepts it for any plausible email.
+                    if len(receiver_ident) > 32:
+                        receiver_ident = receiver_ident[:32]
+
+                    # Chain depth: bump from the original envelope so the
+                    # 9-step verify's chain_depth ceiling stays honest.
+                    original_envelope = (
+                        original_event.get("envelope") or {}
+                    )
+                    parent_chain_depth = (
+                        original_envelope.get("chain_depth") or 0
+                    )
+                    parent_conversation = (
+                        original_envelope.get("conversation_id") or None
+                    )
+
+                    reply_issuer = (
+                        user.get("email") or user.get("sub") or "server"
+                    )
+                    reply_envelope = envelope_mod.issue_envelope(
+                        tier=envelope_mod.TIER_T5,
+                        issuer=reply_issuer,
+                        project_id=project_id,
+                        actions_authorized=[],
+                        scope=None,
+                        conversation_id=parent_conversation,
+                        in_reply_to=event_id,
+                        chain_depth=int(parent_chain_depth) + 1,
+                    )
+                    reply_payload = {
+                        "kind": "deny",
+                        "status": "denied_by_receiver",
+                        "ack": receiver_ident,
+                    }
+                    reply_data = {
+                        "channel": "dm",
+                        # The reply is server-issued, not session-issued.
+                        # Use an empty sender_session_id sentinel so legacy
+                        # readers don't mistake the reply for a human-typed
+                        # message; the in_reply_to + payload.kind="deny"
+                        # are the canonical signals.
+                        "sender_session_id": "",
+                        "payload": {
+                            **reply_payload,
+                            # Routing: receiver-of-original sender's session
+                            # is the addressee.
+                            "recipient_session_id": sender_session_id,
+                            "in_reply_to": event_id,
+                        },
+                        "delivery": "notify-user-only",
+                        "envelope": reply_envelope,
+                        "created_at": datetime.datetime.now(
+                            datetime.timezone.utc
+                        ).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                    }
+                    db.append_bus_event(project_id, reply_data)
+        except Exception as exc:  # pragma: no cover - defensive
+            # Sidecar already records the human's deny — never let a
+            # downstream reply-chain hiccup propagate as endpoint failure.
+            logging.warning(
+                "e-1717: denied-reply chain append failed for event_id=%s "
+                "in project=%s: %s (deny decision is recorded; sender AI "
+                "will not receive auto-notification this round)",
+                event_id, project_id, exc,
+            )
+
+    return row
 
 
 @app.get("/api/projects/{project_id}/bus")
@@ -3518,9 +5248,34 @@ def health():
 
 @app.get("/api/auth/config")
 def auth_config():
-    """Return OAuth client ID for Web UI login (no auth required)."""
-    client_id = os.environ.get("BEACON_OAUTH_CLIENT_ID", "")
-    return {"client_id": client_id}
+    """Return identity provider config for Web UI / CLI login.
+
+    Response shape depends on ``BEACON_AUTH_PROVIDER``:
+
+    - **firebase** (default, Cloud Run 既存経路):
+      ``{"provider": "firebase", "client_id": "<google-oauth-client-id>"}``
+      Existing SPA reads ``client_id`` directly for Google Identity Services。
+
+    - **cognito** (AWS GA Lambda 経路, e-1545):
+      ``{"provider": "cognito", "client_id": "<spa-client-id>",
+         "cognito_domain": "<hosted-ui-domain>", "region": "<aws-region>"}``
+      新 SPA / CLI が hosted UI redirect flow を組み立てるのに使う。
+
+    auth 不要 (= ログイン前に叩く endpoint なので)。
+    """
+    provider = _AUTH_PROVIDER
+    if provider == "cognito":
+        return {
+            "provider": "cognito",
+            "client_id": os.environ.get("BEACON_COGNITO_CLIENT_ID", ""),
+            "cognito_domain": os.environ.get("BEACON_COGNITO_HOSTED_UI_DOMAIN", ""),
+            "region": os.environ.get("AWS_REGION", "ap-northeast-1"),
+        }
+    # Firebase / Cloud Run 既存経路 (= 後方互換)
+    return {
+        "provider": "firebase",
+        "client_id": os.environ.get("BEACON_OAUTH_CLIENT_ID", ""),
+    }
 
 
 
@@ -3659,5 +5414,12 @@ if _static_dir.exists():
     @app.get("/cli-auth")
     def serve_cli_auth():
         return FileResponse(_static_dir / "cli-auth.html", headers=_GIS_HEADERS)
+
+    # ms-78 e-1804 — /join/<token> public landing for invitations.
+    # The token is parsed client-side from window.location.pathname; we just
+    # serve the same join.html for any /join/* path so deep-links work.
+    @app.get("/join/{token}")
+    def serve_join_landing(token: str):
+        return FileResponse(_static_dir / "join.html", headers=_GIS_HEADERS)
 
     app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")

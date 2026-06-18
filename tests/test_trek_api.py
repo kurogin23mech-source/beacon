@@ -1,0 +1,716 @@
+"""Server-side tests for trek HTTP API (ms-69 / e-1656).
+
+The trek endpoints live at top-level ``/api/treks`` (not under
+``/api/projects/{id}``) because treks are cross-project by nature. These
+tests exercise:
+
+  * CRUD: create / get / list / patch / archive
+  * lifecycle: start (planning → active), archive terminal-ness
+  * members: invite (by email) / join (caller accepts own invitation) /
+    leave (caller removes self, leader-blocked, last-member-blocked)
+  * scope: add / remove (with duplicate detection)
+  * halt: set / clear (Andon cord, any joined member can pull)
+  * transfer-leader: dual session + user grain check
+  * summary endpoint
+
+Authorization rules pinned (per AC #e-1656):
+
+  * un-authenticated (no bearer token, auth enabled) → 401
+  * non-invited caller calling ``POST /members/join`` → 403
+  * non-leader caller calling ``DELETE /{id}`` (archive) → 403
+  * non-member caller calling ``GET /{id}`` → 403
+
+Storage is mocked in-memory (mirrors ``tests/test_purge_api.py``). We do not
+exercise Firestore / DynamoDB integration here — that lives in the dual-
+backend trek schema tests + the e-1658 4-project lifecycle smoke.
+"""
+
+from __future__ import annotations
+
+import copy
+import os
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
+
+# Route operations.apply_operation through the in-memory mock for safety;
+# trek endpoints don't go through apply_operation but other endpoints that
+# share the process might if pytest imported them earlier.
+os.environ["BEACON_OPERATIONS_BACKEND"] = "mock"
+
+import firestore_client  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+import app as app_module  # noqa: E402
+
+# Module-load defense (mirrors tests/test_purge_api.py / tests/test_api.py
+# interaction): store_router captures function references at `from
+# firestore_client import ...` time, so any later mutation to
+# ``firestore_client.get_project = mock`` made by *other* test files is
+# silently lost — they hit real Firestore and get PermissionDenied.
+#
+# By aliasing ``sys.modules["firestore_client"] = app_module.db`` (=
+# store_router), we make subsequent ``import firestore_client; firestore_client.X
+# = mock`` operations rebind ON store_router. That keeps test_api.py's
+# rebinds effective regardless of which test file pytest collects first.
+sys.modules["firestore_client"] = app_module.db
+
+
+# In-memory trek storage + user-by-email index.
+_treks: dict[str, dict] = {}
+_users_by_email: dict[str, tuple[str, dict]] = {}
+
+
+def _mock_get_trek(trek_id: str):
+    data = _treks.get(trek_id)
+    return copy.deepcopy(data) if data else None
+
+
+def _mock_save_trek(trek_id: str, data: dict):
+    payload = {k: v for k, v in data.items() if k != "trek_id"}
+    # Mirror firestore_client: store without trek_id field, re-add on read.
+    _treks[trek_id] = {**copy.deepcopy(payload), "trek_id": trek_id}
+
+
+def _mock_list_treks(actor_id=None, *, status=None, include_archived=False):
+    out = []
+    for t in _treks.values():
+        if not include_archived and t.get("status") == "archived":
+            continue
+        if status and t.get("status") != status:
+            continue
+        if actor_id:
+            creator = (t.get("creator_actor") or {}).get("user_id")
+            members = [m.get("user_id") for m in t.get("members") or []]
+            if creator != actor_id and actor_id not in members:
+                continue
+        out.append(copy.deepcopy(t))
+    out.sort(key=lambda t: (t.get("created_at", ""), t.get("trek_id", "")),
+             reverse=True)
+    return out
+
+
+def _mock_delete_trek(trek_id: str) -> bool:
+    return _treks.pop(trek_id, None) is not None
+
+
+def _mock_find_user_by_email(email: str):
+    return _users_by_email.get(email)
+
+
+def _mock_get_or_create_user(user_id: str, email: str):
+    # auto-register hook in require_auth — make it a no-op for tests.
+    return None
+
+
+def _mock_get_user(user_id: str):
+    for uid, (_, data) in _users_by_email.items():
+        if data.get("sub") == user_id or uid == user_id:
+            return data
+    return None
+
+
+def _rebind_db():
+    db_module = app_module.db
+    prior = {}
+    for name, mock in [
+        ("get_trek", _mock_get_trek),
+        ("save_trek", _mock_save_trek),
+        ("list_treks", _mock_list_treks),
+        ("delete_trek", _mock_delete_trek),
+        ("find_user_by_email", _mock_find_user_by_email),
+        ("get_or_create_user", _mock_get_or_create_user),
+        ("get_user", _mock_get_user),
+    ]:
+        prior[name] = getattr(db_module, name, None)
+        setattr(db_module, name, mock)
+    return prior
+
+
+def _restore_db(prior):
+    db_module = app_module.db
+    for k, v in prior.items():
+        if v is None:
+            if hasattr(db_module, k):
+                delattr(db_module, k)
+        else:
+            setattr(db_module, k, v)
+
+
+client = TestClient(app_module.app)
+
+
+# uids referenced in the seed trek's creator / members.
+LEADER_UID = "uid-leader"
+MEMBER_UID = "uid-member"
+INVITED_UID = "uid-invited"  # invited but not yet joined
+STRANGER_UID = "uid-stranger"
+ADMIN_UID = "uid-admin"
+
+LEADER_EMAIL = "leader@x"
+MEMBER_EMAIL = "member@x"
+INVITED_EMAIL = "invited@x"
+STRANGER_EMAIL = "stranger@x"
+ADMIN_EMAIL = "admin@x"
+
+
+def _impersonate(uid: str, email: str = "") -> None:
+    """Override require_auth so subsequent requests use the given identity."""
+    actual_email = email or f"{uid}@x"
+
+    def _fake_auth():
+        return {"sub": uid, "email": actual_email}
+    app_module.app.dependency_overrides[app_module.require_auth] = _fake_auth
+
+
+@pytest.fixture(autouse=True)
+def reset_store():
+    prior = _rebind_db()
+    _treks.clear()
+    _users_by_email.clear()
+    # Seed the user-by-email index so invite/lookup tests can resolve users.
+    for uid, email in (
+        (LEADER_UID, LEADER_EMAIL),
+        (MEMBER_UID, MEMBER_EMAIL),
+        (INVITED_UID, INVITED_EMAIL),
+        (STRANGER_UID, STRANGER_EMAIL),
+        (ADMIN_UID, ADMIN_EMAIL),
+    ):
+        _users_by_email[email] = (uid, {"sub": uid, "email": email})
+    # Admin role on ADMIN_UID for the all_actors=true list path.
+    _users_by_email[ADMIN_EMAIL] = (ADMIN_UID,
+                                    {"sub": ADMIN_UID, "email": ADMIN_EMAIL,
+                                     "role": "admin"})
+    app_module.app.dependency_overrides.clear()
+    prior_auth = app_module._auth_enabled
+    app_module._auth_enabled = True
+    try:
+        yield
+    finally:
+        app_module._auth_enabled = prior_auth
+        _treks.clear()
+        _users_by_email.clear()
+        app_module.app.dependency_overrides.clear()
+        _restore_db(prior)
+
+
+def _create_seed_trek(*, status: str = "active") -> str:
+    """Create a trek with LEADER as leader + MEMBER joined + INVITED pending.
+
+    Returns the trek_id. Status defaults to ``active`` so members can mutate.
+    """
+    _impersonate(LEADER_UID, LEADER_EMAIL)
+    r = client.post("/api/treks", json={
+        "title": "Seed trek",
+        "description": "for tests",
+        "type": "persistent",
+        "creator_session_id": "sv-leader",
+    })
+    assert r.status_code == 200, r.text
+    trek_id = r.json()["trek_id"]
+
+    # Invite MEMBER and have them join.
+    r = client.post(f"/api/treks/{trek_id}/members",
+                    json={"email": MEMBER_EMAIL})
+    assert r.status_code == 200, r.text
+    _impersonate(MEMBER_UID, MEMBER_EMAIL)
+    r = client.post(f"/api/treks/{trek_id}/members/join")
+    assert r.status_code == 200, r.text
+
+    # Invite INVITED but don't join.
+    _impersonate(LEADER_UID, LEADER_EMAIL)
+    r = client.post(f"/api/treks/{trek_id}/members",
+                    json={"email": INVITED_EMAIL})
+    assert r.status_code == 200, r.text
+
+    if status == "active":
+        # Caller is leader (LEADER_UID).
+        r = client.post(f"/api/treks/{trek_id}/start")
+        assert r.status_code == 200, r.text
+    return trek_id
+
+
+# ---------------------------------------------------------------------------
+# Auth gate (AC: unauthenticated → 401)
+# ---------------------------------------------------------------------------
+
+class TestAuth:
+    def test_unauthenticated_list_returns_401(self):
+        # No dependency override → real require_auth runs, finds no Bearer.
+        app_module.app.dependency_overrides.clear()
+        r = client.get("/api/treks")
+        assert r.status_code == 401
+
+    def test_unauthenticated_create_returns_401(self):
+        app_module.app.dependency_overrides.clear()
+        r = client.post("/api/treks", json={
+            "title": "x", "creator_session_id": "sv-x",
+        })
+        assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# CRUD happy paths
+# ---------------------------------------------------------------------------
+
+class TestCreate:
+    def test_create_minimal(self):
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.post("/api/treks", json={
+            "title": "Hello", "creator_session_id": "sv-leader",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["title"] == "Hello"
+        assert body["status"] == "planning"
+        assert body["type"] == "persistent"
+        assert body["leader_session_id"] == "sv-leader"
+        assert body["creator_actor"]["user_id"] == LEADER_UID
+        # Caller is auto-added as leader-role member.
+        assert any(m["user_id"] == LEADER_UID and m["role"] == "leader"
+                   for m in body["members"])
+
+    def test_create_temporary_type(self):
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.post("/api/treks", json={
+            "title": "T", "type": "temporary",
+            "creator_session_id": "sv-leader",
+        })
+        assert r.status_code == 200
+        assert r.json()["type"] == "temporary"
+
+    def test_create_rejects_blank_title(self):
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.post("/api/treks", json={
+            "title": "   ", "creator_session_id": "sv-leader",
+        })
+        assert r.status_code == 400
+
+    def test_create_rejects_missing_session(self):
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.post("/api/treks", json={
+            "title": "T", "creator_session_id": "",
+        })
+        assert r.status_code == 400
+
+    def test_create_rejects_invalid_type(self):
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.post("/api/treks", json={
+            "title": "T", "type": "bogus",
+            "creator_session_id": "sv-leader",
+        })
+        assert r.status_code == 400
+
+
+class TestGetList:
+    def test_get_as_creator(self):
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.get(f"/api/treks/{trek_id}")
+        assert r.status_code == 200
+        assert r.json()["trek_id"] == trek_id
+
+    def test_get_as_joined_member(self):
+        trek_id = _create_seed_trek()
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.get(f"/api/treks/{trek_id}")
+        assert r.status_code == 200
+
+    def test_get_as_invited_not_joined(self):
+        """Invited (but not joined) still counts as a member entry, so the
+        visibility check passes (they need to see the trek to call /join)."""
+        trek_id = _create_seed_trek()
+        _impersonate(INVITED_UID, INVITED_EMAIL)
+        r = client.get(f"/api/treks/{trek_id}")
+        assert r.status_code == 200
+
+    def test_get_as_stranger_returns_403(self):
+        trek_id = _create_seed_trek()
+        _impersonate(STRANGER_UID, STRANGER_EMAIL)
+        r = client.get(f"/api/treks/{trek_id}")
+        assert r.status_code == 403
+
+    def test_get_missing_returns_404(self):
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.get("/api/treks/tk-doesnotexist")
+        assert r.status_code == 404
+
+    def test_list_filters_to_caller_treks(self):
+        trek_id = _create_seed_trek()
+        # Another user creates a private trek — should NOT appear in
+        # LEADER's listing.
+        _impersonate(STRANGER_UID, STRANGER_EMAIL)
+        r = client.post("/api/treks", json={
+            "title": "Stranger trek", "creator_session_id": "sv-s",
+        })
+        assert r.status_code == 200
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.get("/api/treks")
+        assert r.status_code == 200
+        ids = {t["trek_id"] for t in r.json()}
+        assert trek_id in ids
+        assert all(t["title"] != "Stranger trek" for t in r.json())
+
+    def test_list_status_filter(self):
+        # One active + one planning.
+        trek_id = _create_seed_trek(status="planning")
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        # Start an additional trek to active.
+        r = client.post("/api/treks", json={
+            "title": "Other", "creator_session_id": "sv-l",
+        })
+        other_id = r.json()["trek_id"]
+        r = client.post(f"/api/treks/{other_id}/start")
+        assert r.status_code == 200
+        r = client.get("/api/treks", params={"status": "active"})
+        assert r.status_code == 200
+        ids = {t["trek_id"] for t in r.json()}
+        assert other_id in ids
+        assert trek_id not in ids
+
+
+class TestUpdate:
+    def test_leader_can_update(self):
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.patch(f"/api/treks/{trek_id}", json={
+            "title": "Renamed", "description": "new desc",
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert body["title"] == "Renamed"
+        assert body["description"] == "new desc"
+
+    def test_member_cannot_update(self):
+        trek_id = _create_seed_trek()
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.patch(f"/api/treks/{trek_id}", json={"title": "x"})
+        assert r.status_code == 403
+
+    def test_stranger_cannot_update(self):
+        trek_id = _create_seed_trek()
+        _impersonate(STRANGER_UID, STRANGER_EMAIL)
+        r = client.patch(f"/api/treks/{trek_id}", json={"title": "x"})
+        assert r.status_code == 403  # blocked by _load_trek_for_read
+
+
+class TestArchive:
+    def test_leader_can_archive(self):
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.delete(f"/api/treks/{trek_id}")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "archived"
+        assert body["archived_at"]
+
+    def test_non_leader_member_cannot_archive(self):
+        """AC: 非 owner の archive は 403."""
+        trek_id = _create_seed_trek()
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.delete(f"/api/treks/{trek_id}")
+        assert r.status_code == 403
+
+    def test_stranger_cannot_archive(self):
+        trek_id = _create_seed_trek()
+        _impersonate(STRANGER_UID, STRANGER_EMAIL)
+        r = client.delete(f"/api/treks/{trek_id}")
+        assert r.status_code == 403
+
+    def test_archive_is_terminal(self):
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        client.delete(f"/api/treks/{trek_id}")
+        # Cannot start again.
+        r = client.post(f"/api/treks/{trek_id}/start")
+        assert r.status_code == 400  # ALLOWED_TRANSITIONS rejects archived → *
+
+
+class TestStart:
+    def test_leader_starts_planning_to_active(self):
+        trek_id = _create_seed_trek(status="planning")
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.post(f"/api/treks/{trek_id}/start")
+        assert r.status_code == 200
+        assert r.json()["status"] == "active"
+
+    def test_member_cannot_start(self):
+        trek_id = _create_seed_trek(status="planning")
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.post(f"/api/treks/{trek_id}/start")
+        assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Members
+# ---------------------------------------------------------------------------
+
+class TestInvite:
+    def test_member_can_invite_known_user(self):
+        trek_id = _create_seed_trek()
+        # MEMBER (already joined) invites STRANGER.
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.post(f"/api/treks/{trek_id}/members",
+                        json={"email": STRANGER_EMAIL})
+        assert r.status_code == 200
+        members = r.json()["members"]
+        assert any(m["email"] == STRANGER_EMAIL and not m["joined_at"]
+                   for m in members)
+
+    def test_invite_unknown_email_returns_404(self):
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.post(f"/api/treks/{trek_id}/members",
+                        json={"email": "ghost@nowhere.com"})
+        assert r.status_code == 404
+
+    def test_invite_already_member_returns_409(self):
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.post(f"/api/treks/{trek_id}/members",
+                        json={"email": MEMBER_EMAIL})
+        assert r.status_code == 409
+
+    def test_invited_not_joined_cannot_invite_others(self):
+        """The invited-but-not-joined user is not yet a 'joined member', so
+        cannot perform writes including invite. AC #e-1656."""
+        trek_id = _create_seed_trek()
+        _impersonate(INVITED_UID, INVITED_EMAIL)
+        r = client.post(f"/api/treks/{trek_id}/members",
+                        json={"email": STRANGER_EMAIL})
+        assert r.status_code == 403
+
+
+class TestJoin:
+    def test_invited_can_join(self):
+        trek_id = _create_seed_trek()
+        _impersonate(INVITED_UID, INVITED_EMAIL)
+        r = client.post(f"/api/treks/{trek_id}/members/join")
+        assert r.status_code == 200
+        member = next(m for m in r.json()["members"]
+                      if m["user_id"] == INVITED_UID)
+        assert member["joined_at"]
+
+    def test_non_invited_join_returns_403(self):
+        """AC: 非 invite actor の join は 403."""
+        trek_id = _create_seed_trek()
+        _impersonate(STRANGER_UID, STRANGER_EMAIL)
+        r = client.post(f"/api/treks/{trek_id}/members/join")
+        # Stranger isn't even a member row → _load_trek_for_read denies first.
+        assert r.status_code == 403
+
+    def test_join_is_idempotent(self):
+        trek_id = _create_seed_trek()
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.post(f"/api/treks/{trek_id}/members/join")
+        assert r.status_code == 200
+
+
+class TestLeave:
+    def test_member_can_leave(self):
+        trek_id = _create_seed_trek()
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.delete(f"/api/treks/{trek_id}/members/me")
+        assert r.status_code == 200
+        assert all(m["user_id"] != MEMBER_UID for m in r.json()["members"])
+
+    def test_leader_cannot_leave_directly(self):
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.delete(f"/api/treks/{trek_id}/members/me")
+        # remove_member helper rejects leader removal → 400.
+        assert r.status_code == 400
+
+    def test_last_member_cannot_leave(self):
+        # Leader removes MEMBER + INVITED + transfers; then this is brittle —
+        # just keep it simple by creating a solo trek.
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.post("/api/treks", json={
+            "title": "Solo", "creator_session_id": "sv-l",
+        })
+        trek_id = r.json()["trek_id"]
+        # Leader is the only member, and they cannot leave (=archive instead).
+        r = client.delete(f"/api/treks/{trek_id}/members/me")
+        assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Scope
+# ---------------------------------------------------------------------------
+
+class TestScope:
+    def test_member_can_add_scope(self):
+        trek_id = _create_seed_trek()
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.put(f"/api/treks/{trek_id}/scope", json={
+            "project": "beacon", "milestone": "ms-69",
+        })
+        assert r.status_code == 200
+        scope = r.json()["scope"]
+        assert {"project": "beacon", "milestone": "ms-69"} in scope
+
+    def test_add_scope_project_only(self):
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.put(f"/api/treks/{trek_id}/scope", json={
+            "project": "beacon",
+        })
+        assert r.status_code == 200
+        assert {"project": "beacon"} in r.json()["scope"]
+
+    def test_add_duplicate_scope_returns_409(self):
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        body = {"project": "beacon", "milestone": "ms-69"}
+        client.put(f"/api/treks/{trek_id}/scope", json=body)
+        r = client.put(f"/api/treks/{trek_id}/scope", json=body)
+        assert r.status_code == 409
+
+    def test_remove_scope(self):
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        body = {"project": "beacon", "milestone": "ms-69"}
+        client.put(f"/api/treks/{trek_id}/scope", json=body)
+        r = client.request("DELETE", f"/api/treks/{trek_id}/scope", json=body)
+        assert r.status_code == 200
+        assert body not in r.json()["scope"]
+
+    def test_remove_nonexistent_scope_returns_404(self):
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.request("DELETE", f"/api/treks/{trek_id}/scope", json={
+            "project": "not-in-scope",
+        })
+        assert r.status_code == 404
+
+    def test_invited_not_joined_cannot_edit_scope(self):
+        trek_id = _create_seed_trek()
+        _impersonate(INVITED_UID, INVITED_EMAIL)
+        r = client.put(f"/api/treks/{trek_id}/scope",
+                       json={"project": "beacon"})
+        assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Halt
+# ---------------------------------------------------------------------------
+
+class TestHalt:
+    def test_member_can_set_halt(self):
+        trek_id = _create_seed_trek()
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.put(f"/api/treks/{trek_id}/halt", json={
+            "issued_by_session_id": "sv-member",
+            "reason": "found a bug",
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert body["halt"]["reason"] == "found a bug"
+        assert body["status"] == "active"  # halt is metadata, not a status
+
+    def test_halt_on_planning_trek_returns_400(self):
+        trek_id = _create_seed_trek(status="planning")
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.put(f"/api/treks/{trek_id}/halt", json={
+            "issued_by_session_id": "sv-l",
+        })
+        assert r.status_code == 400  # can only halt active treks
+
+    def test_clear_halt(self):
+        trek_id = _create_seed_trek()
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        client.put(f"/api/treks/{trek_id}/halt", json={
+            "issued_by_session_id": "sv-m",
+        })
+        r = client.delete(f"/api/treks/{trek_id}/halt")
+        assert r.status_code == 200
+        assert r.json()["halt"] is None
+
+    def test_clear_halt_idempotent_when_not_halted(self):
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.delete(f"/api/treks/{trek_id}/halt")
+        assert r.status_code == 200
+
+    def test_stranger_cannot_halt(self):
+        trek_id = _create_seed_trek()
+        _impersonate(STRANGER_UID, STRANGER_EMAIL)
+        r = client.put(f"/api/treks/{trek_id}/halt", json={
+            "issued_by_session_id": "sv-s",
+        })
+        assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Transfer leader
+# ---------------------------------------------------------------------------
+
+class TestTransferLeader:
+    def test_leader_can_transfer_with_matching_session(self):
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.post(f"/api/treks/{trek_id}/transfer-leader", json={
+            "from_session_id": "sv-leader",
+            "to_session_id": "sv-leader-other-terminal",
+        })
+        assert r.status_code == 200
+        assert r.json()["leader_session_id"] == "sv-leader-other-terminal"
+
+    def test_wrong_from_session_returns_403(self):
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.post(f"/api/treks/{trek_id}/transfer-leader", json={
+            "from_session_id": "sv-not-leader",
+            "to_session_id": "sv-elsewhere",
+        })
+        assert r.status_code == 403
+
+    def test_non_leader_cannot_transfer(self):
+        trek_id = _create_seed_trek()
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.post(f"/api/treks/{trek_id}/transfer-leader", json={
+            "from_session_id": "sv-leader",
+            "to_session_id": "sv-member",
+        })
+        assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+
+class TestSummary:
+    def test_summary_returns_counts(self):
+        trek_id = _create_seed_trek()
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.get(f"/api/treks/{trek_id}/summary")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["trek_id"] == trek_id
+        assert body["status"] == "active"
+        assert body["halted"] is False
+        # Leader + Member joined; INVITED is invited but not joined.
+        assert body["member_count"] == 3
+        assert body["joined_member_count"] == 2
+        assert body["scope_count"] == 0
+
+    def test_summary_reflects_halt(self):
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        client.put(f"/api/treks/{trek_id}/halt", json={
+            "issued_by_session_id": "sv-l",
+            "reason": "pause",
+        })
+        r = client.get(f"/api/treks/{trek_id}/summary")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["halted"] is True
+        assert body["halt"]["reason"] == "pause"
+
+    def test_summary_stranger_returns_403(self):
+        trek_id = _create_seed_trek()
+        _impersonate(STRANGER_UID, STRANGER_EMAIL)
+        r = client.get(f"/api/treks/{trek_id}/summary")
+        assert r.status_code == 403

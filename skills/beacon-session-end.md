@@ -164,6 +164,16 @@ Step 1 の情報を元に、以下の基準でサマリーを生成:
 
 ## Step 4: サマリーの書き込み (session log として永続化)
 
+**ms-68 / e-1643 補足 (= entry-writing principle の draft 表示)**: `beacon session end --summary` を実行する **前** に、Step 3 で生成したサマリー本文を 1 度ユーザーに提示し、self-review 4 原則 (読み手目線 1 行 / 横文字 3 段階 / ID 参照に文脈 / 尻切れトンボ禁止) を 1 度通す。session log は次セッションの AI / 人間が **唯一の引き継ぎ手段** として読むため、横文字濫用 / ID 参照に文脈なし / 尻切れトンボ は次セッションの初動を確実に劣化させる。違反があれば書き直してから書き込む。
+
+```
+session log を以下の summary で永続化します:
+
+  <Step3 で生成したサマリー本文>
+
+このまま記録しますか? (= OK / 書き直し)
+```
+
 `beacon summary "<text>"` は ms-57 e-1040 で **廃止** (CLI が ignored を返す)。後継は `beacon session end --summary "<text>"`。これは session log を upsert し、`summary` フィールドに引き継ぎ narrative を書き込む。次回の `/beacon-session-start` Step 1j がこの session log を読み「次セッション最優先 / top of queue / 次にやること」セクションを抽出する経路。
 
 Bash ツールで実行:

@@ -2,6 +2,229 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.39.0] - 2026-06-17
+
+- feat(ms-80): release-marker auto-clear + PR claim 競合検知 (e-1829 / e-1821)
+- feat(ms-80): reviewer 任命動線 + deploy backend 記録 (e-1819 / e-1831)
+- feat(ms-78): 招待 UI / CLI に GitHub repo collaborator は範疇外と明示 (e-1806)
+- feat(ms-80): PR review DM template + 取り込み戦略の構造防御 (e-1820 / e-1823)
+- Merge pull request #157 from kurogin23mech-source/ms-79-beacon-log-retro-retrospect-uc3-uc5
+- Merge pull request #156 from kurogin23mech-source/ms-77-onboarding-beacon-init-archaeology-ux
+- Merge pull request #155 from kurogin23mech-source/ms-61-cli-skill-forcing-function-drift
+- merge e-1862/work into ms-61 branch: cloud push/pull cleanup + resolve conflicts with e-1861 (= cloud off section unified, default picker open/status, alias rename)
+- merge e-1861/work into ms-61 branch: local mode removal
+- merge e-1859/work into ms-61 branch: doc op CLI fix
+- test(ms-79): retrospect fork/Trek/DM 取り込み検証 + source filter (e-1835 / e-1832 / e-1833)
+- feat(ms-79): retro / retrospect Skill markdown を ms-79 拡張に対応 (e-1837 / e-1832 / e-1833 / e-1834 / e-1835)
+- docs(ms-79): /beacon-log と /beacon-task の責務分界 CORE doc 参照誘導 (e-1818)
+- feat(ms-79): /beacon-log Step 4 で actor / source を表示 (e-1815 / e-1817)
+- fix(ms-79): /beacon-log honors fork.json target_ms_id (e-1816)
+- feat(ms-79): tag auto-op commits with meta.source (e-1817)
+- feat(ms-79): retro_prepare uses unified base + catch-up batch (e-1836 / e-1837)
+- feat(ms-79): wire cmd_search to retro_query for ms-79 extensions  (e-1832 / e-1833 / e-1834 / e-1835)
+- feat(ms-79): retro/retrospect unified query base (e-1836)
+- feat(ms-77): extend entry-writing-principle to AI responses (e-1801)
+- feat(ms-61): remove local mode, cloud.json is single source of truth (e-1861)
+- fix(ms-61): doc update --op flag + list --op filter + frontmatter preservation (e-1859)
+- chore(ms-61): align CLI help drift surfaces for cloud upload-initial / force-pull (e-1862 follow-up)
+- feat(ms-61): cloud subaction picker default to open/status only, push/pull → special-purpose with explicit aliases (e-1862)
+- Merge pull request #154 from kurogin23mech-source/ms-74/work
+- Merge pull request #153 from kurogin23mech-source/ms-73/work
+- Merge pull request #152 from kurogin23mech-source/ms-72/work
+- feat(ms-74): /beacon-cloud Skill — push/pull/off/open 4 subaction (e-1770)
+- feat(ms-73): dispatch.py Win parity for 11 session/bus/envelope verbs (e-1762/e-1763/e-1764)
+- feat(ms-72): SHARED purity 復旧 — dataSource に member 系 5 メソッド + PLATFORM.accountMenuItemsHTML (e-1772/e-1773/e-1774/e-1775)
+- feat(ms-74): /beacon-member Skill — invite/role/remove 二段確認 (e-1769)
+- feat(ms-74): /beacon-trek Skill — 8 subaction 統合 (e-1768)
+- feat(ms-74): /beacon-dm-respond Skill (e-1767)
+- docs(release): update README/CHANGELOG for v0.38.1
+- chore(release): bump formula to 0.38.1
+
+## [v0.38.1] - 2026-06-14
+
+- Merge ms-55-amended: follow-up 6 件 (receive-side halt / rollback log / morning doc / dispatch.py mirror / cloud claims / CLI table)
+- fix(ms-55): stop signal の receive 側 halt 実装 (e-1721)
+- fix(ms-55): cloud-mode active_claims subcollection 永続化 (e-1730)
+- fix(ms-55): dispatch.py Windows mirror for 6 coordination verbs (e-1735)
+- docs(ms-55): cmd_help_json + README CLI table — 14 coordination verbs (e-1736)
+- fix(ms-55): morning briefing → report doc (e-1733)
+- fix(ms-55): rollback 履歴記録 — save entry on successful rollback (e-1727)
+- docs(release): update README/CHANGELOG for v0.38.0
+- chore(release): bump formula to 0.38.0
+
+## [v0.38.0] - 2026-06-14
+
+- chore(ms-55): exempt new coordination CLIs from drift gate (Win parity follow-up)
+- Merge ms-55/work: stop / rollback / claim primitives + STUCK detector + morning briefing CLI
+- Merge ms-63/work: envelope disclosure_contract + beacon init --sensitivity + T5 schema enforcement
+- Merge ms-68/work: entry-writing principle marker + draft display step in write Skills
+- feat(ms-55): beacon morning — 4-category briefing of overnight autonomous activity (e-1650)
+- feat(ms-55): STUCK signal detector — idle timeout escalation (e-1649)
+- feat(ms-55): claim primitives (request / handoff / post) + local persistence (e-1648)
+- feat(ms-68): embed draft display step in remaining write Skills (e-1643)
+- feat(ms-55): rollback boundary CLI — auto-undo local, report on pushed (e-1647)
+- feat(ms-63): T5 in_reply_to chain → T3 disclosure promotion (e-1432 方向 A)
+- feat(ms-68): embed draft display step in mid-freq write Skills (e-1642)
+- feat(ms-63): beacon init --sensitivity (default high) writes disclosure_policy (e-1428, e-1441)
+- feat(ms-68): embed draft display step + autonomous-path exceptions in high-freq write Skills (e-1641)
+- feat(ms-55): stop signal CLI + bus broadcast schema (e-1646)
+- feat(ms-63): envelope disclosure_contract schema + receive-side gate (e-1428, e-1429, e-1430, e-1431, e-1432, e-1433, e-1443)
+- feat(ms-68): embed entry-writing principle marker + doctor check (e-1639, e-1640)
+- docs(release): update README/CHANGELOG for v0.37.4
+- chore(release): bump formula to 0.37.4
+
+## [v0.37.4] - 2026-06-14
+
+- fix(ms-69): Settings の Archive ボタン無反応 + Export JSON が別プロジェクト
+- docs(release): update README/CHANGELOG for v0.37.3
+- chore(release): bump formula to 0.37.3
+
+## [v0.37.3] - 2026-06-14
+
+- fix(ms-69): settings dropdown peeks instead of navigating + menu paints once
+- docs(release): update README/CHANGELOG for v0.37.2
+- chore(release): bump formula to 0.37.2
+
+## [v0.37.2] - 2026-06-14
+
+- refactor(ms-69): My Agents & Treks の CLI ラベルを削除 + Milestones の Graph 機能を完全削除
+- fix(ms-69): Settings Projects プルダウンを /api/me/projects 化 + 権限別表示 (e-1659 v3 follow-up)
+- docs(ms-52): version-rules + /beacon-push Skill を MS 駆動 bump ルールに改訂
+- docs(release): update README/CHANGELOG for v0.37.1
+- chore(release): bump formula to 0.37.1
+
+## [v0.37.1] - 2026-06-14
+
+- fix(ms-69): Web UI 9 件の UX 修正 + Settings 機能補完 (e-1659 v3 follow-up)
+- docs(release): update README/CHANGELOG for v0.37.0
+- chore(release): bump formula to 0.37.0
+
+## [v0.37.0] - 2026-06-14
+
+- feat(ms-69): Web UI Navigation を mock 通りに再構成 (e-1659 v3)
+- docs(release): update README/CHANGELOG for v0.36.0
+- chore(release): bump formula to 0.36.0
+
+## [v0.36.0] - 2026-06-14
+
+- feat(ms-69): Web UI Trek 詳細をワイヤーフレームに準拠した full-page に refactor (e-1659 v2)
+- docs(ms-69): README + bin/beacon usage + help_json に Trek を追加
+- docs(release): update README/CHANGELOG for v0.35.0
+- chore(release): bump formula to 0.35.0
+
+## [v0.35.0] - 2026-06-14
+
+- Merge pull request #151 from kurogin23mech-source/ms-69-trek-cross-project-cross-session
+- feat(ms-69): work item 詳細に Related Treks widget を追加 (e-1664)
+- feat(ms-69): Web UI に Treks タブ + trek 詳細ページを追加 (e-1659)
+- feat(ms-69): doc.trek_id field + 関連 trek の逆引き / 順引き API (e-1663)
+- test(ms-69): ms-55 が依存する trek API contract を pin (e-1657)
+- feat(ms-69): beacon trek CLI を cloud-mode 対応 (e-1681)
+- feat(ms-69): server に /api/treks/ CRUD + member ops + halt + transfer + summary endpoint (e-1656)
+- test(ms-69): trek full-lifecycle smoke (SPEC AC #14) — e-1658
+- feat(ms-69): beacon trek stop / resume / transfer-leader (e-1662)
+- feat(ms-69): beacon trek plan — scope 編集 CLI (e-1655)
+- feat(ms-69): beacon trek member CLI (invite / join / leave) — e-1654
+- chore(ms-69): mirror beacon trek in beacon_cli/dispatch.py — Win pipx 対応
+- feat(ms-69): beacon trek CLI 基本 CRUD + schema v2 (e-1653)
+- feat(ms-69): UI mock + lifecycle 簡素化 (3-state, archived terminal)
+- feat(ms-69): trek data schema — top-level collection + dual backend (e-1652)
+- chore: fix CLI drift for beacon doc image-upload
+- feat(ms-43): doc image upload — agent CLI/API for embedding images in SPECs (e-1660)
+- docs(release): update README/CHANGELOG for v0.34.1
+- chore(release): bump formula to 0.34.1
+
+## [v0.34.1] - 2026-06-13
+
+- fix(release): rename PyPI distribution to beacon-ai
+- docs(release): update README/CHANGELOG for v0.34.0
+- chore(release): bump formula to 0.34.0
+
+## [v0.34.0] - 2026-06-13
+
+- refactor: enforce beacon vs beacon-cloud separation principle
+- feat(ms-64): apply_operation routes to DynamoDB when backend=dynamodb (e-1631)
+- feat(ms-64): prompt profile choice at init / first push when multi-login (e-1633)
+- Merge pull request #150 from kurogin23mech-source/ms-64-e1628-spa-cognito
+- feat(ms-64): SPA に Cognito Hosted UI redirect flow を追加 (e-1628)
+- Merge pull request #149 from kurogin23mech-source/ms-64-cloud-json-profile-auto-switch
+- feat(ms-64): cwd cloud.json.profile で自動 profile 切替 (e-1627 follow-up)
+- Merge pull request #148 from kurogin23mech-source/ms-64-load-project-consistent-dynamodb
+- fix(ms-64): load_project_consistent も DynamoDB に対応 (e-1627 follow-up)
+- Merge pull request #147 from kurogin23mech-source/ms-64-e1627-replace-project-dynamodb
+- fix(ms-64): cloud push (replace_project) を DynamoDB バックエンドに対応 + auth profile precedence (e-1627 follow-up)
+- Merge pull request #146 from kurogin23mech-source/ms-64-e1627-cli-cognito-login
+- feat(ms-64): CLI Cognito login flow + /api/auth/config provider switch (e-1627)
+- Merge pull request #145 from kurogin23mech-source/ms-64-e1545-cognito-auth
+- Merge pull request #144 from kurogin23mech-source/ms-64-e1544-phase2-documents-retros
+- feat(ms-64): Cognito User Pool JWT verification path (e-1545)
+- feat(ms-64): DynamoDB bus + sessions + envelopes CRUD (e-1544 Phase 3+4)
+- feat(ms-64): DynamoDB documents + retros CRUD (e-1544 Phase 2)
+- Merge pull request #143 from kurogin23mech-source/ms-64-e1618-server-lib-drift-check
+- feat(ms-64): server/ ↔ lib/ name collision drift check (e-1618)
+- Merge pull request #142 from kurogin23mech-source/ms-64-e1544-phase1-projects-users
+- Merge branch 'main' into ms-64-e1544-phase1-projects-users
+- Merge pull request #141 from kurogin23mech-source/hotfix-ms-64-store-name-collision
+- hotfix(ms-64): rename server/store.py to store_router (e-1544 follow-up)
+- feat(ms-64): DynamoDB projects + users CRUD (e-1544 Phase 1)
+- Merge pull request #140 from kurogin23mech-source/ms-64-e1544-store-router-scaffold
+- feat(ms-64): store.py router + dynamodb_client skeleton (e-1544 Phase 0)
+- Merge pull request #139 from kurogin23mech-source/ms-64-e1542-lambda-entry
+- feat(ms-64): Lambda entry point + zip build script (e-1542 Phase A)
+- Merge pull request #138 from kurogin23mech-source/feat/ms-64-e1458-profile-url-token-unification
+- feat(ms-64): profile-aware desktop + Web UI launch URL + profile list CLI (e-1461)
+- feat(ms-64): route api_url + token through profile resolver (e-1458)
+- docs(release): update README/CHANGELOG for v0.33.0
+- chore(release): bump formula to 0.33.0
+
+## [v0.33.0] - 2026-06-12
+
+- Merge pull request #137 from kurogin23mech-source/feat/ms-54-e1587-cross-project-sessions
+- feat(ms-54): cross-project session directory (e-1587)
+- Merge pull request #134 from kurogin23mech-source/ms-61-fork-4aa06a
+- Merge pull request #135 from kurogin23mech-source/fix/gitignore-iac-private-handoff
+- Merge pull request #136 from kurogin23mech-source/feat/ms-64-e1459-bus-profile-aware
+- fix(ms-61): e-1573 memo の 3 件 drift を解消、e-1363 を吸収 (e-1574)
+- feat(ms-64): channel/bus.mjs を profile-aware に書き換え + Python ↔ Node cross-lang probe test (e-1459)
+- feat(ms-61): /beacon-drift-check Skill 新規作成 (e-1572)
+- Merge remote-tracking branch 'origin/main' into ms-61-fork-4aa06a
+- feat(ms-61): beacon doctor に .beacon/project.json staleness check 追加 (e-1571)
+- chore(ms-64): gitignore で iac/ と terraform 作業ファイルを除外 (private 分離)
+- feat(ms-61): beacon doctor に Skill ↔ CLI 整合性 check 追加 (e-1570)
+- Merge pull request #133 from kurogin23mech-source/ms-64-auth-profile-aware
+- feat(ms-64): lib/auth.py profile-aware path resolution (e-1457)
+- Merge pull request #132 from kurogin23mech-source/fix/ms-67-fork-stale-cache
+- fix(ms-67): force-refresh project cache in forked worktree (e-1554 follow-up)
+- Merge pull request #131 from kurogin23mech-source/fix/ms-67-fork-project-json-symlink
+- fix(ms-67): symlink .beacon/project.json into forked worktree (e-1554)
+- Merge pull request #130 from kurogin23mech-source/ms-67-bclaude-1-worktree-fork-skill-beacon
+- feat(ms-67): fork list CLI + /beacon-session-merge-back Skill (e-1553 + e-1552)
+- feat(ms-67): session-start surfaces parent info from .beacon/fork.json (e-1551)
+- feat(ms-67): /beacon-session-fork Skill + README usage (e-1550)
+- feat(ms-67): beacon session fork — 1-command parallel worktree setup (e-1549)
+- Merge pull request #129 from kurogin23mech-source/ms-64-cli-skill-profile-ga-aws-byoc
+- Merge pull request #128 from kurogin23mech-source/fix/ms-54-bus-heartbeat-shutdown-clear
+- fix(ms-54): bus heartbeat body must always include shutdown:false (e-1518)
+- Merge pull request #127 from kurogin23mech-source/ms-62-cwd-dm-dm-discover
+- fix(ms-62): expose beacon-find-root as a Python console_script (e-1512 follow-up)
+- chore(ms-62): mint_fresh_session / find_my_bridge_claim に deprecation warning を追加 (e-1511 phase 1)
+- test(ms-62): E2E in-process tests for cloud-first identity (e-1506)
+- feat(ms-62): bclaude bootstrap + lib/session.py に server-first 経路を追加 (e-1510)
+- feat(ms-62): dm_discover server-first refactor + picker project annotation (e-1502, e-1504)
+- feat(ms-62): server identity endpoints (/api/me/projects, /machine, /heartbeat) (e-1509)
+- feat(ms-62): Skill 群の .beacon/project.json チェックを walk-up に統一 (e-1512)
+- Merge pull request #126 from kurogin23mech-source/fix/ms-43-dm-discover-bus-mjs-needle
+- fix(ms-43): dm_discover dual-needle for cross-project bridge discovery (e-1498)
+- feat(ms-65): branch/workspace 乖離 warning を session-start と pre-commit に追加 (e-1481)
+- feat(ms-65): /beacon-dispatch に Task Mode を追加 (e-1480、e-1221 吸収)
+- feat(ms-65): cwd-aware milestone start: main root → worktree, in worktree → in-place (e-1477)
+- feat(ms-65): worktree creation helper in lib/worktree.py (e-1476)
+- Merge pull request #125 from kurogin23mech-source/fix/ms-43-webui-milestones-disappear-v2-snapshot
+- fix(ms-43): rehydrate milestones from subcollection in _on_snapshot v2 broadcast (e-1473)
+- docs(release): update README/CHANGELOG for v0.32.0
+- chore(release): bump formula to 0.32.0
+- feat(ms-64): profile resolver + silent migration (e-1456)
+
 ## [v0.32.0] - 2026-06-11
 
 - Merge pull request #124 from kurogin23mech-source/fix/ms-57-e1460-per-bclaude-session-id

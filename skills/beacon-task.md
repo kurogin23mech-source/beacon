@@ -14,6 +14,12 @@ triggers:
 
 > beacon のタスク操作を CLI 経由で行う。
 
+## 責務分界 (= ms-79 / e-1818)
+
+このSkillは「これから取り組む作業のキュー」を意図的に管理する責務に閉じる。コミットの記録 / 進捗率の AI 評価 / commit を起点とした task 自動 done は `/beacon-log` の責務。task の優先順位を推奨する際は、/beacon-log が直前 commit を元に出す「次の塊」 示唆と競合しないように priority highest を除いて log 側を優先する。
+
+詳細は CORE doc `5qySQmOHa9sZhyJiOOjR` (= /beacon-log と /beacon-task の責務分界) 参照。両 Skill の冒頭でこの doc を参照誘導し、新しい finding (= UC3 の追加要望) が来たとき先にこの doc に追記してから実装に入る (= 後付けで境界が動く drift を防ぐ forcing function)。
+
 ## 文章の書き方 (Beacon 全体の哲学)
 
 Beacon に書き込む全ての文章 (task / マイルストーン / Operation / コミット / PR / レビュー / ドキュメント / ノート / セッションログ / リリース / デプロイ) は、**非開発者を含む読み手** が読めるように書く。これは Skill ごとの方針ではなく Beacon プロジェクト全体の哲学。
@@ -99,6 +105,30 @@ beacon status --json
 | `lowest` | 軽微（誤字・表示系など、修正も軽微） |
 
 タスクの性質（バグ修正・新機能・改善・ドキュメント等）と影響範囲から判断する。
+
+#### Step 2.5 (add): draft 表示 → ユーザー確認 → 実行
+
+`beacon task add` を実行する **前** に、生成した description / motivation / acceptance_criteria / priority を **平文で 1 度ユーザーに見せて確認** する。silent な書き込みは Web UI で読み手が見るまで違反に気付けないため、書き込み前に touchpoint を 1 つ挟む。
+
+ユーザーに以下の形式で提示:
+
+```
+タスクを以下の内容で起票します:
+
+  description: <生成した 1 行>
+  motivation:  <生成した 2-4 文>
+  AC:
+    - <項目 1>
+    - <項目 2>
+  priority:    <highest/high/middle/low/lowest>
+  対象 MS:     <ms-id> <ms-title>
+
+このまま起票しますか? (= OK / 書き直し)
+```
+
+- ユーザー応答が `OK` / `はい` / `そのまま` 等 → 下記コマンド実行
+- ユーザー応答が書き直し指示 (= 表現の修正 / AC の追加 / priority の変更等) → 該当箇所を直して再度 draft 表示。OK が出るまで繰り返す
+- **例外 (= 応答待ち不可)**: post-* hook 経由で起動した自律パスでは応答を待てない。その場合のみ self-review (= 上記 4 原則チェック) のみで `beacon task add` を直接実行する。`/beacon-task` 通常起動はこの例外に該当しない (= 必ず draft 表示する)
 
 ```bash
 beacon task add "<description>" --ms <ms-id> \

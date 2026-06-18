@@ -188,13 +188,34 @@ def _maybe_silent_migrate_default() -> None:
 
 
 def _resolve_api_url(profile_config: dict, cwd: Path) -> str:
-    """Apply the api_url precedence chain. See module docstring for order."""
+    """Apply the api_url precedence chain. See module docstring for order.
+
+    ms-64 e-1627: cwd cloud.json.profile が **default 以外** を指定している
+    とき、その profile が「このディレクトリの帰属先」と宣言したとみなして
+    profile.json.api_url を必ず採用する。cwd cloud.json.api_url の override
+    は無視する (= profile と URL の組合せズレで認証経路が混乱するのを防ぐ
+    構造防御)。
+
+    profile == "default" のとき (= 旧 single-profile 時代の cloud.json
+    フォーマット互換) は従来通り cwd cloud.json.api_url を尊重する。
+    """
     env_url = os.environ.get("BEACON_API_URL")
     if env_url:
         return env_url.rstrip("/")
 
     cloud = _read_cwd_cloud_json(cwd)
-    if cloud.get("api_url"):
+    cloud_profile = cloud.get("profile")
+
+    # profile を明示宣言した cloud.json で、profile == default 以外の場合は
+    # profile.json.api_url を強制採用する (= cloud.json.api_url の override を
+    # スキップ)。これで cd だけで自動切替が確実に動く。
+    profile_is_explicit_non_default = (
+        isinstance(cloud_profile, str)
+        and cloud_profile
+        and cloud_profile != DEFAULT_PROFILE
+    )
+
+    if not profile_is_explicit_non_default and cloud.get("api_url"):
         return str(cloud["api_url"]).rstrip("/")
 
     if profile_config.get("api_url"):
@@ -269,3 +290,75 @@ def list_profiles() -> list[str]:
     if not profiles_root.exists():
         return []
     return sorted([p.name for p in profiles_root.iterdir() if p.is_dir()])
+
+
+def list_logged_in_profiles() -> list[str]:
+    """Return profile names that have a usable credentials.json on disk, sorted.
+
+    A profile counts as "logged in" if either:
+      - ~/.beacon/profiles/<name>/credentials.json exists, OR
+      - name == DEFAULT_PROFILE and the legacy ~/.beacon/credentials.json
+        exists (silent migration has not run yet but the user IS logged in)
+
+    Used by cmd_init / first-cloud-push to decide whether to ask the user
+    "which backend should this project use?". Single result = no prompt.
+    """
+    out: list[str] = []
+    profiles_root = _beacon_home() / "profiles"
+    if profiles_root.exists():
+        for p in sorted(profiles_root.iterdir()):
+            if p.is_dir() and (p / "credentials.json").exists():
+                out.append(p.name)
+    if DEFAULT_PROFILE not in out and _legacy_credentials_path().exists():
+        out.append(DEFAULT_PROFILE)
+    return sorted(out)
+
+
+def prompt_choose_profile(
+    candidates: list[str],
+    *,
+    input_fn=None,
+    output_fn=print,
+    default: Optional[str] = None,
+) -> str:
+    """Interactively pick a profile from candidates.
+
+    Returns one of:
+      - candidates[0] if len(candidates) == 1
+      - DEFAULT_PROFILE if candidates is empty
+      - the user-selected name otherwise (validated against candidates)
+
+    Empty input picks `default` (or candidates[0] if default not given).
+    Numeric input picks by 1-based index. Invalid input falls back to default.
+
+    input_fn / output_fn are injectable for tests; default uses real stdin / print.
+    """
+    if not candidates:
+        return DEFAULT_PROFILE
+    if len(candidates) == 1:
+        return candidates[0]
+
+    default = default if default in candidates else candidates[0]
+
+    if input_fn is None:
+        input_fn = input
+
+    output_fn("Multiple Beacon profiles are logged in:")
+    for i, name in enumerate(candidates, 1):
+        marker = " (default)" if name == default else ""
+        output_fn(f"  {i}. {name}{marker}")
+    try:
+        raw = input_fn(f"Which profile should this project use? [{default}]: ")
+    except EOFError:
+        raw = ""
+    raw = (raw or "").strip()
+    if not raw:
+        return default
+    if raw.isdigit():
+        idx = int(raw) - 1
+        if 0 <= idx < len(candidates):
+            return candidates[idx]
+    if raw in candidates:
+        return raw
+    output_fn(f"Invalid choice {raw!r}, using {default}")
+    return default

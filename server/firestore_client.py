@@ -8,7 +8,13 @@ from google.cloud import firestore
 
 _db: firestore.Client | None = None
 
-PROJECT_ID = "beacon-cloud-96f5f"
+# ms-64 (beacon-vs-beacon-cloud-separation 原則): 私たちの特定 Beacon Cloud 運用
+# 環境の GCP project ID をハードコードしない。BEACON_GCP_PROJECT_ID で明示的に
+# 渡すか、google-cloud-firestore の auto-detect (GOOGLE_CLOUD_PROJECT env が
+# 設定された Cloud Run / GAE / GKE runtime、または gcloud config / ADC) に
+# 任せる。後方互換: 既存の Cloud Run 環境は GOOGLE_CLOUD_PROJECT が runtime
+# で自動 inject されるので、移行時に挙動が変わらない。
+PROJECT_ID = os.environ.get("BEACON_GCP_PROJECT_ID") or None
 
 # Environment-based collection prefix: dev uses "projects-dev", prod uses "projects"
 _ENV = os.environ.get("BEACON_ENV", "dev")
@@ -19,7 +25,7 @@ USERS_COLLECTION = "users" if _ENV == "prod" else "users-dev"
 def get_db() -> firestore.Client:
     global _db
     if _db is None:
-        _db = firestore.Client(project=PROJECT_ID)
+        _db = firestore.Client(project=PROJECT_ID) if PROJECT_ID else firestore.Client()
     return _db
 
 
@@ -235,6 +241,13 @@ def list_documents(project_id: str) -> list[dict]:
         milestone = data.get("milestone") or _extract_frontmatter_field(
             data.get("content", ""), "milestone"
         )
+        # e-1859: operation field, same row-first / frontmatter-fallback
+        # pattern as milestone. Without this, op-scoped docs were invisible
+        # to `beacon doc list --op <op-id>` and to /beacon-operation-review
+        # Step 2 discovery (= "beacon doc list --scope spec --op X").
+        operation = data.get("operation") or _extract_frontmatter_field(
+            data.get("content", ""), "operation"
+        )
         entry = {
             "doc_id": doc.id,
             "title": data.get("title", ""),
@@ -243,6 +256,8 @@ def list_documents(project_id: str) -> list[dict]:
         }
         if milestone:
             entry["milestone"] = milestone
+        if operation:
+            entry["operation"] = operation
         result.append(entry)
     return result
 
@@ -290,6 +305,17 @@ def save_document(project_id: str, doc_id: str, title: str, content: str,
     import datetime
     resolved_scope = scope if scope in ("core", "spec", "memo") else _extract_scope(content)
     milestone = _extract_frontmatter_field(content, "milestone")
+    # ms-69 / e-1663: trek_id is optional; lets a doc be associated with a
+    # cross-project trek (= 別 project / 別 session を巻き込んだ協奏作業領域).
+    # Existing docs without trek_id are unaffected (= migration 不要).
+    trek_id = _extract_frontmatter_field(content, "trek_id")
+
+    # e-1859: operation field mirrors milestone — extract it from the body's
+    # frontmatter so the document row keeps an indexable column alongside
+    # the raw content. list_documents reads this back; without it, op-scoped
+    # docs only existed in the content blob and `--op <op-id>` filtering
+    # silently returned [].
+    operation = _extract_frontmatter_field(content, "operation")
 
     col = get_db().collection(COLLECTION).document(project_id).collection(DOCS_SUBCOLLECTION)
     data = {
@@ -301,6 +327,10 @@ def save_document(project_id: str, doc_id: str, title: str, content: str,
     }
     if milestone:
         data["milestone"] = milestone
+    if operation:
+        data["operation"] = operation
+    if trek_id:
+        data["trek_id"] = trek_id
 
     if doc_id:
         doc_ref = col.document(doc_id)
@@ -432,6 +462,111 @@ def sweep_trashed_documents(project_id: str, *, days: int = 30,
             )
             snap.reference.delete()
     return purged
+
+
+# ---------------------------------------------------------------------------
+# Active claims (subcollection: projects/{project_id}/active_claims/{claim_id})
+# ms-55 e-1730
+# ---------------------------------------------------------------------------
+#
+# Server-side mirror of lib/claims.py's local `.beacon/active_claims.json`
+# store. Each session (= one bclaude process) records the claims it has
+# issued so that:
+#
+#   * the issuer can recover "what was I in the middle of?" after a
+#     restart (= `beacon claim list --mine`)
+#   * the Web UI Active Claims tab shows the project-wide picture
+#     without scanning the bus event stream
+#   * cross-machine coordination (= Mac + Win running side by side) sees
+#     the same authoritative claim set instead of two local files that
+#     don't know about each other
+#
+# The wire payload (= what gets stored here) is the same dict
+# lib/claims.py:build_claim_payload returns. We don't validate the
+# schema server-side; the client builds + validates locally, then this
+# layer is a pure mirror. That keeps the schema evolution surface in
+# one place (= the builder).
+
+ACTIVE_CLAIMS_SUBCOLLECTION = "active_claims"
+
+
+def list_active_claims(project_id: str) -> list[dict]:
+    """Return all active claims for a project, ordered by issued_at."""
+    docs = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(ACTIVE_CLAIMS_SUBCOLLECTION)
+        .stream()
+    )
+    out = []
+    for doc in docs:
+        data = doc.to_dict() or {}
+        # Surface the doc id as claim_id even if the stored payload lost
+        # it; the subcollection layout uses claim_id as the document id.
+        data.setdefault("claim_id", doc.id)
+        out.append(data)
+    out.sort(key=lambda r: r.get("issued_at") or "")
+    return out
+
+
+def get_active_claim(project_id: str, claim_id: str) -> dict | None:
+    doc = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(ACTIVE_CLAIMS_SUBCOLLECTION)
+        .document(claim_id)
+        .get()
+    )
+    if not doc.exists:
+        return None
+    data = doc.to_dict() or {}
+    data.setdefault("claim_id", doc.id)
+    return data
+
+
+def save_active_claim(project_id: str, claim_id: str, payload: dict) -> str:
+    """Upsert a claim. Returns the claim_id stored.
+
+    Idempotent: writing the same claim_id overwrites. Matches "the
+    latest issue is the canonical record" semantics from local mode.
+    """
+    if not claim_id:
+        raise ValueError("claim_id is required")
+    if not isinstance(payload, dict):
+        raise TypeError("payload must be a dict")
+    body = dict(payload)
+    body["claim_id"] = claim_id  # ensure stored payload has the id
+    (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(ACTIVE_CLAIMS_SUBCOLLECTION)
+        .document(claim_id)
+        .set(body)
+    )
+    return claim_id
+
+
+def delete_active_claim(project_id: str, claim_id: str) -> bool:
+    """Hard-delete a claim. Returns True iff it existed.
+
+    Unlike documents, claims have no soft-delete / restore concept —
+    a release IS the deletion. The bus event stream retains the
+    full audit trail.
+    """
+    doc_ref = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(ACTIVE_CLAIMS_SUBCOLLECTION)
+        .document(claim_id)
+    )
+    if not doc_ref.get().exists:
+        return False
+    doc_ref.delete()
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -614,6 +749,33 @@ def append_bus_event(project_id: str, data: dict) -> str:
     )
     ref = col.add(data)
     return ref[1].id
+
+
+def get_bus_event(project_id: str, event_id: str) -> dict | None:
+    """Return the bus_event doc for ``event_id`` or None if absent.
+
+    ms-70 / e-1717: the denied-reply chain needs to read the original
+    envelope's ``sender_session_id`` (= where the AI that emitted the
+    action request is listening) to address the "denied by receiver"
+    reply back to it. The append-only bus_events collection is keyed
+    by auto-id, but Firestore lets us address a single doc by id without
+    a query — this helper is the small wrapper around that direct read.
+
+    Returned dict shape mirrors :func:`list_bus_events` rows: the
+    Firestore doc fields plus a top-level ``event_id`` set to the doc id.
+    Returns None if no doc exists for that id.
+    """
+    doc = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(BUS_EVENTS_SUBCOLLECTION)
+        .document(event_id)
+        .get()
+    )
+    if not doc.exists:
+        return None
+    return {"event_id": doc.id, **(doc.to_dict() or {})}
 
 
 # ---------------------------------------------------------------------------
@@ -912,6 +1074,214 @@ def list_bus_events(project_id: str, since: str = "", channel: str = "",
     if limit:
         rows = rows[:limit]
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Bus event approvals (subcollection: projects/{project_id}/bus_event_approvals/{event_id})
+# ms-70 / e-1712: receiver-side decision_stamp sidecar for cross-user DM action
+# envelopes. The envelope itself (in bus_events) is HMAC-signed and therefore
+# immutable — flipping a field on it to record "approved by user X at time T"
+# would break signature verification on every subsequent read.
+#
+# Instead, we keep the envelope intact in bus_events and store the variable
+# decision state in this parallel subcollection, keyed by the same event_id.
+# That gives CLI / Skill / Web UI / another session's AI a single place to
+# ask "is this envelope pending, approved, denied, or auto-allowed right now?"
+# without touching the signed payload.
+#
+# Schema (7 fields, mirrored byte-for-byte in DynamoDB):
+#   event_id           : str           (= parent bus_event auto-id, also doc id here)
+#   approval_status    : str           (= "pending" | "approved" | "denied" | "auto")
+#   decision_by        : str | None    (= user_id of the decider, None while pending)
+#   decision_at        : str | None    (= ISO8601 timestamp of decision, None while pending)
+#   created_at         : str           (= ISO8601 timestamp the sidecar row was first written)
+#   sender_user_id     : str           (= who issued the envelope; carried for cheap UI filtering)
+#   receiver_user_id   : str           (= who needs to approve; carried for cheap "my pending" query)
+#
+# Migration semantics: a bus_event without a matching sidecar row is treated
+# as approval_status="auto" by callers (= existing behaviour, e.g. same-user
+# DMs or Trek-scoped blanket-allow events that never produced a stamp).
+# get_bus_event_approval returns None for that case; the caller is expected
+# to interpret None as "auto" rather than "missing".
+# ---------------------------------------------------------------------------
+
+BUS_EVENT_APPROVALS_SUBCOLLECTION = "bus_event_approvals"
+
+# Allowed approval_status values. "auto" is materialised only when a caller
+# explicitly stamps a sidecar row to record that an auto-allow decision was
+# made (e.g. shared-Trek blanket-allow). Bare absence of a sidecar row is
+# also semantically "auto" but no document is written for it.
+_BUS_EVENT_APPROVAL_STATUSES = ("pending", "approved", "denied", "auto")
+
+
+def get_bus_event_approval(project_id: str, event_id: str) -> dict | None:
+    """Return the sidecar approval doc for ``event_id`` or None if absent.
+
+    None is the **legacy / auto-allow** signal — callers should treat None
+    as ``approval_status="auto"`` for backwards compatibility with bus_events
+    written before this sidecar landed (= ms-70 / e-1712).
+
+    Schema returned (7 fields) — see module-level doc above:
+      event_id / approval_status / decision_by / decision_at /
+      created_at / sender_user_id / receiver_user_id
+    """
+    doc = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(BUS_EVENT_APPROVALS_SUBCOLLECTION)
+        .document(event_id)
+        .get()
+    )
+    if not doc.exists:
+        return None
+    return {"event_id": doc.id, **(doc.to_dict() or {})}
+
+
+def put_bus_event_approval(project_id: str, event_id: str, *,
+                           approval_status: str,
+                           sender_user_id: str,
+                           receiver_user_id: str,
+                           decision_by: str | None = None,
+                           decision_at: str | None = None) -> dict:
+    """Write or update the sidecar approval row for ``event_id``.
+
+    First call on a given event_id creates the row with ``created_at`` set to
+    the server clock; subsequent calls update ``approval_status`` /
+    ``decision_by`` / ``decision_at`` but preserve the original ``created_at``
+    (= ms-70 design: the lifecycle "pending → approved | denied" should not
+    rewrite when the request came in).
+
+    Returns the resulting row as a dict (7 fields), in the same shape as
+    :func:`get_bus_event_approval`.
+
+    Raises ``ValueError`` if ``approval_status`` is not in the allowed set.
+    """
+    import datetime
+    if approval_status not in _BUS_EVENT_APPROVAL_STATUSES:
+        raise ValueError(
+            f"put_bus_event_approval: invalid approval_status "
+            f"{approval_status!r} (allowed: {_BUS_EVENT_APPROVAL_STATUSES})"
+        )
+    now = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    ref = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(BUS_EVENT_APPROVALS_SUBCOLLECTION)
+        .document(event_id)
+    )
+    snap = ref.get()
+    existing = snap.to_dict() if snap.exists else None
+    if existing:
+        created_at = existing.get("created_at") or now
+    else:
+        created_at = now
+    data = {
+        "approval_status": approval_status,
+        "decision_by": decision_by,
+        "decision_at": decision_at,
+        "created_at": created_at,
+        "sender_user_id": sender_user_id,
+        "receiver_user_id": receiver_user_id,
+    }
+    ref.set(data)
+    return {"event_id": event_id, **data}
+
+
+def list_pending_approvals(project_id: str, *,
+                           receiver_user_id: str | None = None,
+                           limit: int = 100) -> list[dict]:
+    """List sidecar rows in ``approval_status="pending"`` ordered by created_at.
+
+    ``receiver_user_id`` (optional): restrict to rows where the receiver
+    matches — the common UI query is "what is *my* inbox waiting on me to
+    decide". Applied in-memory after the equality query on
+    ``approval_status`` so no composite index is required (= same trade-off
+    as :func:`list_bus_events`'s channel filter).
+
+    ``limit``: cap returned rows; defaults to 100. Applied after the
+    in-memory receiver filter so a heavy other-receiver burst does not
+    starve the requested caller.
+    """
+    q = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(BUS_EVENT_APPROVALS_SUBCOLLECTION)
+        .where("approval_status", "==", "pending")
+        .order_by("created_at")
+    )
+    # Fetch slightly more than `limit` when we will post-filter by receiver
+    # so the final result still satisfies the bound.
+    fetch_cap = (limit * 5) if (limit and receiver_user_id) else limit
+    if fetch_cap:
+        q = q.limit(fetch_cap)
+    rows = [{"event_id": doc.id, **(doc.to_dict() or {})} for doc in q.stream()]
+    if receiver_user_id:
+        rows = [r for r in rows if r.get("receiver_user_id") == receiver_user_id]
+    if limit:
+        rows = rows[:limit]
+    return rows
+
+
+def list_decided_approvals(project_id: str, *, limit: int = 50) -> list[dict]:
+    """List sidecar rows in approval_status in {"approved","denied"} (= ms-70 / e-1718).
+
+    Audit-trail read used by the Web UI's "DM 承認履歴" (DM approval history)
+    section. Returns rows newest-first (= ordered by ``decision_at`` DESC where
+    available, falling back to ``created_at`` for any malformed row), which
+    matches the human expectation of "show me the most recent decisions".
+
+    Pending rows are **deliberately excluded** — per SPEC 設計方針 3 the
+    terminal Claude Code is the only surface that decides approvals. The Web
+    UI is read-only audit; surfacing pending rows here would tempt a future
+    contributor to wire approve/deny buttons into the audit table, breaking
+    the "terminal-only decision" invariant.
+
+    ``auto`` rows are also excluded — they carry no human decision and would
+    drown out the interesting human-decided rows.
+
+    No GSI / composite index is required: Firestore enforces a single
+    equality + order_by pair without one, so we do **two** equality queries
+    (approved / denied) and merge in memory. This is fine at dev scale; if
+    decisions ever exceed a few hundred per project we can swap to an "in"
+    query with a composite index.
+    """
+    out: list[dict] = []
+    for status in ("approved", "denied"):
+        q = (
+            get_db()
+            .collection(COLLECTION)
+            .document(project_id)
+            .collection(BUS_EVENT_APPROVALS_SUBCOLLECTION)
+            .where("approval_status", "==", status)
+        )
+        # No order_by on decision_at — that field may be None for legacy rows
+        # and Firestore would skip them. Sort in memory after merge.
+        #
+        # We do NOT apply `.limit(limit)` per-status here. Doing so would
+        # truncate each status independently in created_at order, which is
+        # **not** the same as truncating the merged-and-sorted-by-decision_at
+        # result: e.g. if status=approved has 10 old rows and status=denied
+        # has 1 new row, a per-status limit=3 would surface evt-000..002
+        # plus the denied row, but the actually-newest 3 by decision_at are
+        # evt-007..009. So we fetch everything and truncate after the merge
+        # sort. At dev scale this is fine; if decisions grow large we should
+        # add a GSI on (project_id, decision_at) and switch to a server-side
+        # ORDER BY decision_at DESC LIMIT.
+        for doc in q.stream():
+            out.append({"event_id": doc.id, **(doc.to_dict() or {})})
+    # newest-first by decision_at (fall back to created_at). Rows missing
+    # both sort to the end so they don't displace real decisions.
+    def _sort_key(r: dict) -> str:
+        return r.get("decision_at") or r.get("created_at") or ""
+    out.sort(key=_sort_key, reverse=True)
+    if limit:
+        out = out[:limit]
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1492,3 +1862,108 @@ def get_operation_envelope(
     """Fetch a single envelope record by id, or None if absent."""
     snap = _operation_envelopes_col(project_id).document(envelope_id).get()
     return snap.to_dict() if snap.exists else None
+
+
+# ---------------------------------------------------------------------------
+# Treks (ms-69 / e-1652)
+#
+# Top-level collection ``treks/{trek_id}`` — independent of any single
+# project. SPEC 設計方針 1: trek is its own authorisation surface
+# (= creator + invited members), cross-project by construction. Storing
+# under a project subcollection would formally bias ownership.
+#
+# Schema (Phase 1):
+#   trek_id        string   # "tk-<8 hex>"
+#   title          string
+#   description    string
+#   type           string   # "temporary" | "persistent"
+#   status         string   # "planning" | "active" | "paused" | "archived"
+#   creator_actor  {user_id, email}
+#   leader_actor   {user_id, email}
+#   members        [{user_id, email, role, invited_at, joined_at, invited_by}]
+#   scope          [{project, milestone?, operation?, task?}]
+#   created_at     ISO8601
+#   updated_at     ISO8601
+#   archived_at    ISO8601 | null
+#
+# Activity log / summary docs / claim records are separate subcollections
+# under ``treks/{trek_id}/...`` added in e-1663 / e-1657 — out of scope
+# for this Phase 1 schema slice.
+# ---------------------------------------------------------------------------
+
+TREKS_COLLECTION = "treks" if _ENV == "prod" else "treks-dev"
+
+
+def get_trek(trek_id: str) -> dict | None:
+    """Load a trek document. Returns None if not found.
+
+    The Firestore doc id is the authoritative trek_id; it is merged in
+    last so it always wins over any stale field of the same name.
+    """
+    doc = get_db().collection(TREKS_COLLECTION).document(trek_id).get()
+    if not doc.exists:
+        return None
+    return {**(doc.to_dict() or {}), "trek_id": doc.id}
+
+
+def save_trek(trek_id: str, data: dict) -> None:
+    """Save a trek document (full replace).
+
+    The caller is responsible for assembling the full doc; this mirrors
+    ``save_project`` which is also a full set (no merge). Mutators that
+    need merge semantics should compose get → modify → save.
+
+    ``trek_id`` field in ``data`` is ignored — the doc id is the truth.
+    """
+    payload = {k: v for k, v in data.items() if k != "trek_id"}
+    get_db().collection(TREKS_COLLECTION).document(trek_id).set(payload)
+
+
+def list_treks(actor_id: str | None = None, *,
+               status: str | None = None,
+               include_archived: bool = False) -> list[dict]:
+    """List treks. Optionally filter by visibility / status.
+
+    ``actor_id=None`` returns all treks (= admin view). When set, only
+    treks where the actor is creator OR appears in the members list
+    are returned (= same authorisation model as ``list_projects``).
+
+    ``include_archived=False`` (default) hides archived treks; setting
+    True surfaces them for "show me everything we have ever worked on"
+    auditor queries.
+    """
+    docs = get_db().collection(TREKS_COLLECTION).stream()
+    result: list[dict] = []
+    for doc in docs:
+        data = doc.to_dict() or {}
+        if not include_archived and data.get("status") == "archived":
+            continue
+        if status and data.get("status") != status:
+            continue
+        if actor_id:
+            creator = (data.get("creator_actor") or {}).get("user_id")
+            members = [
+                m.get("user_id") for m in data.get("members", []) or []
+            ]
+            if creator != actor_id and actor_id not in members:
+                continue
+        # Merge doc.id last so it always wins (= mirrors list_sessions).
+        result.append({**data, "trek_id": doc.id})
+    # Newest first by created_at; ties fall back to trek_id for stability.
+    result.sort(key=lambda t: (t.get("created_at", ""), t.get("trek_id", "")),
+                reverse=True)
+    return result
+
+
+def delete_trek(trek_id: str) -> bool:
+    """Delete a trek. Returns True if it existed.
+
+    Phase 1: hard delete of the top-level doc only. Subcollections
+    (activity log, summaries, claims — e-1663) are introduced later;
+    when they land this function will cascade like ``delete_project``.
+    """
+    doc_ref = get_db().collection(TREKS_COLLECTION).document(trek_id)
+    if not doc_ref.get().exists:
+        return False
+    doc_ref.delete()
+    return True

@@ -58,14 +58,16 @@ def get_store(project_file: str | None = None) -> Store:
     beacon_dir = os.path.dirname(project_file) or ".beacon"
     cloud_config = os.path.join(beacon_dir, "cloud.json")
 
-    # Check mode from config.json or BEACON_CLOUD env var
-    config_path = os.path.join(beacon_dir, "config.json")
-    cloud_mode = os.environ.get("BEACON_CLOUD") == "1"
-    if not cloud_mode and os.path.exists(config_path):
-        import json as _json
-        with open(config_path, "r", encoding="utf-8") as f:
-            config = _json.load(f)
-        cloud_mode = config.get("mode") == "cloud"
+    # e-1861 (ms-61): cloud.json existence is the sole source of truth.
+    # The legacy ``config.json["mode"] == "cloud"`` dual-check was retired
+    # because a sub-agent rewriting config.json to ``{"mode": "local"}``
+    # would silently flip every subsequent CLI call back to the stale
+    # LocalStore branch, producing apparent user data loss (2026-06-15
+    # incident). BEACON_CLOUD=1 still forces cloud for test harnesses.
+    cloud_mode = (
+        os.environ.get("BEACON_CLOUD") == "1"
+        or os.path.exists(cloud_config)
+    )
 
     if cloud_mode and os.path.exists(cloud_config):
         import json
@@ -74,7 +76,15 @@ def get_store(project_file: str | None = None) -> Store:
         project_id = cloud_data.get("project_id")
         if not project_id:
             raise ValueError("cloud.json must contain 'project_id'")
-        api_url = cloud_data.get("api_url") or "https://beacon-ai.dev"
+        # ms-64 / e-1458: route api_url through the profile resolver so the
+        # env > cwd cloud.json > profile.json > default precedence chain is
+        # the single source of truth. Falls back to the bare cloud.json read
+        # if profile.py is unimportable for any reason.
+        try:
+            import profile as _profile  # type: ignore[import-not-found]
+            api_url = _profile.resolve_active_profile().api_url
+        except Exception:
+            api_url = cloud_data.get("api_url") or "https://beacon-ai.dev"
         from store_api import StoreApi
 
         def _token_provider():

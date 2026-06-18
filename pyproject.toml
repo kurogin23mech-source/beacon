@@ -23,7 +23,11 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "beacon"
+# PyPI distribution name. ms-64: PyPI 上の "beacon" / "beacon-cli" は無関係の
+# 他作者が先に取得済だったため、我々の公開チャネル (= beacon-ai.dev) と整合する
+# "beacon-ai" を採用。内部の CLI 実体名は引き続き "beacon" (= 利用者は
+# `pipx install beacon-ai` の後に `beacon --help` で叩く形)。
+name = "beacon-ai"
 # Sourced dynamically from lib/commands.py:__version__ to keep a single source
 # of truth. Update there to bump the version.
 dynamic = ["version"]
@@ -97,6 +101,10 @@ beacon-hook-save = "beacon_cli.hooks.save_hook:main"
 # bin/context-usage-monitor.sh; the Python entry-point unblocks Windows where
 # bash/jq are unavailable.
 beacon-hook-context-monitor = "beacon_cli.hooks.context_monitor:main"
+# PostToolUse: surface STOP signals (ms-55 e-1721). Reads the
+# halt-request.json the bus inbox hook drops on disk and injects it as
+# additionalContext so the AI sees the halt request after each tool call.
+beacon-hook-halt-check = "beacon_cli.hooks.halt_check:main"
 
 # -----------------------------------------------------------------------------
 # Packaging layout

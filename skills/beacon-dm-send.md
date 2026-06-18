@@ -107,18 +107,27 @@ UserPromptSubmit hook 経由で DM event が context に inject されている�
 
 ### Step 1-send (send mode のみ)
 
-**v0.25.0 以降**: 同マシン上で動いている全 bridge を ps + lsof で列挙、各 cwd の `.beacon/cloud.json` から project_id を読み、全 project の bus directory を集約する。これで cwd 以外のプロジェクトに居る session も候補に出る。
+**v0.33.0 以降 (ms-54 / e-1587)**: サーバ側 cross-project endpoint `/api/me/sessions` を叩いて、自分が owner / member のすべてのプロジェクトの live session を一発で取得する。マシン跨ぎでも見える (= 旧 dm_discover は同マシン限定だった)。
 
-Bash ツールで実行 (`PYTHONPATH` を beacon repo root に固定する — raw-source install で site-packages に beacon_cli が無い場合の `ModuleNotFoundError` を防ぐ):
+Bash ツールで実行:
+```bash
+beacon sessions --live --healthy --since-min 5 --json
+```
+
+JSON 配列が返る。各 session row は `project_id` + `project_name` field 付き (= 後段で `bus send --project <pid>` に流す)。空 (`[]`) なら fallback へ。
+
+#### Step 1-send-a: fallback A (新 endpoint 未 deploy)
+
+`beacon: unknown command "sessions"` 等が返った場合 (= CLI が v0.33.0 未満)、旧 v0.25.0+ 経路の同マシン bridge スキャンにフォールバック:
 ```bash
 PYTHONPATH="$(dirname $(dirname $(realpath $(which beacon))))" python3 -m beacon_cli.skills_helpers.dm_discover
 ```
 
-JSON 配列が返る。各 session row は `project_id` field annotated 付き。空 (`[]`) の場合は同マシン上に cloud-mode の bridge が動いてないことを意味する → 後段の fallback に進む。
+JSON 配列が返る。各 session row は `project_id` field annotated 付き。
 
-#### Step 1-send-a: fallback (discover module 不在 or 0 件)
+#### Step 1-send-b: fallback B (cwd-scoped 最終手段)
 
-`PYTHONPATH=... python3 -m beacon_cli.skills_helpers.dm_discover` が `ModuleNotFoundError` 等で失敗、または 0 件で返った場合は、cwd の project だけ query する従来動作にフォールバック:
+新 endpoint も dm_discover も失敗または 0 件なら、cwd の project だけ query する最終 fallback:
 
 ```bash
 beacon bus directory --live --healthy --since-min 5 --json
@@ -129,14 +138,14 @@ beacon bus directory --live --healthy --since-min 5 --json
 beacon bus directory --live --since-min 5 --json
 ```
 このフォールバック発生時、ユーザーに 1 行だけ補足:
-「(true-heartbeat filter 未対応、live filter のみで listing)」
+「(cross-project listing 不可、cwd の project のみで listing)」
 
-#### Step 1-send-b: 0 件のときの fallback
+#### Step 1-send-c: 0 件のときの fallback
 
 最終的に sessions 配列が **空** の場合、ユーザーに明示警告:
 「現在 listening 中の受信先がありません。相手側で `beacon bus listen` または MCP 接続が必要です」と伝えて終了。
 
-#### Step 1-send-c: メンバー情報の取得 (best-effort cross-reference)
+#### Step 1-send-d: メンバー情報の取得 (best-effort cross-reference)
 
 Bash ツールで:
 ```bash
@@ -145,7 +154,7 @@ beacon member list --json
 
 session.actor.email がメンバーの email と一致するなら、その人の email + role を picker 行に添える。一致しないなら machine / agent のみで表示する。member list が空でもエラーにせず無視する。
 
-#### Step 1-send-d: 候補表示と選択
+#### Step 1-send-e: 候補表示と選択
 
 各 session を以下のフォーマットで表示する (helpers の `render_candidate_line` と同じ規則):
 
@@ -279,9 +288,86 @@ send mode のみ:
 
 reply mode では `--action` は使わない (= 返信は payload を運ぶだけ、副作用権限の付与は新規送信の役割)。
 
+### Step 5c: テンプレート適用 (任意、PR レビュー依頼など) — ms-80 e-1820
+
+繰り返し送る種類の DM (= PR レビュー依頼、Operation 結果共有など) は、毎回ゼロから本文を書くと受信側が「何を見ればいいか」を読み取るコストが上がる。本 Step では事前定義テンプレートを 1 回プロンプトで提示し、選択された場合のみ Step 5 で入力した本文に **テンプレートの骨格** を被せ直す。
+
+ユーザーに 1 度だけ確認 (空 Enter で skip):
+```
+このメッセージはテンプレート種別がありますか? (空 Enter で skip)
+  1) pr-review     — PR レビュー依頼 (= reviewer が何を見るか即理解できる骨格)
+  2) op-result     — Operation 自律実行結果の共有
+  3) (skip)
+```
+
+#### テンプレート 1: pr-review
+
+PR レビュー依頼。受信側 reviewer は「PR 番号 / 何を変えたか / どこを見てほしいか / 緊急度」 を 1 メッセージで掴める必要がある。以下を順に聞いて埋める (= 既に Step 5 で本文を書いていれば「要点」 欄として再利用):
+
+```
+PR URL or 番号: (例: https://github.com/r-kida2/beacon/pull/157 or #157)
+1 行サマリー: (= この PR で何ができるようになるか、Step 5 本文があれば流用)
+注視ポイント: (例: lib/auth.py の profile resolver 周辺、AWS profile 経路)
+受入条件 / AC: (= 何が満たされれば merge OK か、SPEC doc id / task id があれば添える)
+緊急度: (= asap / today / this-week / 任意期日)
+```
+
+埋まったら以下の骨格で payload.text を組み立てる (= Step 5 入力を上書き、ユーザーには Step 6 draft で見せて confirm):
+
+```
+[PR レビュー依頼]
+PR: <pr_url>
+要点: <1 行サマリー>
+
+見てほしいところ:
+<注視ポイント>
+
+merge 条件:
+<受入条件 / AC>
+
+緊急度: <urgency>
+
+(受信側 AI へ: 上記の見てほしいところ + merge 条件 を起点に /review を起動し、approve / request-changes / reject の判断材料を整理してください)
+```
+
+#### テンプレート 2: op-result
+
+Operation 自律実行 (= ms-60 envelope auto-execute / ms-66 server-side scheduler) の結果共有。送信側 AI が定期実行の record をユーザー or 他セッションに通知する用途。
+
+```
+op-id: (例: op-1)
+実行時刻: (= 自動補完可、ISO8601)
+結果: ok / warning / error
+何を観測したか: (= 1-3 行、incident があれば e-id を添える)
+次のアクション: (= 自動 close / user 承認待ち / 別 Operation 起動 等)
+```
+
+骨格:
+```
+[Operation 実行結果]
+op: <op-id>
+ts: <timestamp>
+status: <result>
+
+観測:
+<観測内容>
+
+次のアクション: <next>
+```
+
+#### テンプレート不要なケース
+
+- 1 行の問いかけ / 雑談 / 確認 → テンプレ skip、Step 5 本文をそのまま使う
+- 既に Step 5 でテンプレート骨格を入力済 → 二重適用しない、skip
+- 受信者が同一ユーザーの並走セッション (= 自分↔自分 multi-machine) → 骨格は省略可、要点だけで足りる
+
+テンプレートはあくまで **読みやすさの骨格** であり、Step 6 の draft 表示でユーザーが自由に edit できる。テンプレ適用後でも横文字 3 段階 / ID 参照に文脈 の self-review 4 原則は同じ強度で適用する (= 横文字濫用が骨格に隠れて見落とされやすい)。
+
 ---
 
 ## Step 6: 送信確認 (mode で表示が変わる)
+
+**ms-68 / e-1643 補足 (= entry-writing principle の draft 表示)**: 本 Step は既に draft 提示型 (= 送信前に full argv + payload 本文をユーザーに見せて yes/edit/cancel を取る形) で設計されており、ms-68 SPEC の「書き込み直前の draft 表示」要件を満たす。送信表示の前に payload 本文について self-review 4 原則 (読み手目線 1 行 / 横文字 3 段階 / ID 参照に文脈 / 尻切れトンボ禁止) を 1 度通す。**特に DM は受信側 AI が「非開発者の代理として読む」可能性がある (受信側 AI は親プロジェクトの文脈を持たない)** ため、横文字濫用 / ID 参照に文脈なし は致命的。違反があれば `edit` で Step 5 に戻して書き直す。
 
 組み立てた argv をユーザーに見せて確認。reply mode と send mode で `--in-reply-to` の有無が変わる:
 
@@ -382,7 +468,7 @@ receipt (3 段):
 | sent ✓ / delivered ✗ / opened ✗ | 受信側 bridge が /unread を fetch していない | 相手の `bridge=True` を directory で確認、`channel install` 漏れの可能性 |
 | sent ✓ / delivered ✓ / opened ✗ | bridge は受け取ったが filter chain で drop or mcp.notification 失敗 | 相手の channel allowlist (`BEACON_CHANNEL_ALLOWLIST`) と DM の channel が一致しているか、受信側 session が allowlist に入っているか確認 |
 | sent ✓ / delivered ✓ / opened ✓ | 完全到達 | 完了 |
-| sent ✓ / delivered ✗ / opened ✗ かつ 8 秒待っても変化なし | 受信側 bridge が **古い beacon バージョン** で ack 経路を持たない可能性 | 相手の `actor.agent.version` を directory で確認 (v0.26.0 未満は receipt 非対応)、`pip install --upgrade beacon-cli` を促す |
+| sent ✓ / delivered ✗ / opened ✗ かつ 8 秒待っても変化なし | 受信側 bridge が **古い beacon バージョン** で ack 経路を持たない可能性 | 相手の `actor.agent.version` を directory で確認 (v0.26.0 未満は receipt 非対応)、`pipx upgrade beacon-ai` (PyPI 名は beacon-ai、内部 CLI は beacon) または `brew upgrade beacon` を促す |
 
 これにより送信者は「届いていない / 開封されていない」を **送信時に即時** に検知できる (e-1348 設計の本質的価値)。
 

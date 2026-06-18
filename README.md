@@ -27,6 +27,7 @@ Beaconが想定するワークフローは**コミット駆動・マイルスト
 - **Always-visible dashboard** — Tauri Desktop App or Web UI shows live progress alongside your working shell
 - **Audit trail** — every commit and task is recorded under a milestone, making AI session handoffs transparent and human-auditable
 - **CLI-first design** — structured JSON output enables seamless integration with Claude Code Skills
+- **Trek (cross-project協奏作業領域)** — `beacon trek` で複数プロジェクト・複数セッションをまたぐ協奏作業を 1 枚の trek にまとめて追跡できる。CLI でも Web UI でも同じ trek を見て協奏でき、参加・離脱・対象 (scope) 編集・非常停止 (halt) も CLI 1 行で。詳細は [CLI Commands → Treks](#treks)
 
 ## Requirements
 
@@ -44,16 +45,16 @@ Beacon ships in two forms that work independently:
 
 | OS | Beacon Desktop | Beacon CLI |
 |---|---|---|
-| **macOS** | `brew install --cask beacon-desktop`<br>or download `.dmg` from [Releases](https://github.com/r-kida2/beacon/releases) | `brew install r-kida2/beacon/beacon`<br>or `pipx install beacon` |
-| **Windows** | `winget install BeaconAI.BeaconDesktop`<br>or download `.msi` from [Releases](https://github.com/r-kida2/beacon/releases) | `pipx install beacon` |
-| **Linux** | Download `.AppImage` from [Releases](https://github.com/r-kida2/beacon/releases) and `chmod +x` | `pipx install beacon`<br>or Homebrew on Linux |
+| **macOS** | `brew install --cask beacon-desktop`<br>or download `.dmg` from [Releases](https://github.com/r-kida2/beacon/releases) | `brew install r-kida2/beacon/beacon`<br>or `pipx install beacon-ai` |
+| **Windows** | `winget install BeaconAI.BeaconDesktop`<br>or download `.msi` from [Releases](https://github.com/r-kida2/beacon/releases) | `pipx install beacon-ai` |
+| **Linux** | Download `.AppImage` from [Releases](https://github.com/r-kida2/beacon/releases) and `chmod +x` | `pipx install beacon-ai`<br>or Homebrew on Linux |
 
-`pipx install beacon` works natively on all three OSes — PowerShell-only Windows users get the full CLI without WSL2.
+`pipx install beacon-ai` works natively on all three OSes — PowerShell-only Windows users get the full CLI without WSL2.
 
 For cloud features (Google auth, team collaboration), add the `cloud` extra:
 
 ```bash
-pipx install 'beacon[cloud]'
+pipx install 'beacon-ai[cloud]'
 ```
 
 See [INSTALL.md](INSTALL.md) for full details: tap setup for maintainers, code-signing status, SmartScreen workarounds, troubleshooting per OS.
@@ -178,12 +179,15 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 |---------|-------------|
 | `beacon auth login` | Sign in with Google / Googleログイン |
 | `beacon auth status` | Show login status / ログイン状態 |
-| `beacon cloud push` | Upload project to cloud / クラウドにアップロード |
-| `beacon cloud pull` | Download project from cloud / クラウドからダウンロード |
-| `beacon cloud join <id>` | Join an existing cloud project / 既存プロジェクトに参加 |
+| `beacon cloud` | Open cloud project (interactive select; daily op) / 日常運用 |
+| `beacon cloud status` | Show cloud config / クラウド設定表示 (read-only) |
 | `beacon cloud list` | List cloud projects / クラウドプロジェクト一覧 |
-| `beacon cloud status` | Show cloud config / クラウド設定表示 |
-| `beacon cloud off` | Switch back to local mode / ローカルモードに戻す |
+| `beacon cloud join <id>` | Join an existing cloud project / 既存プロジェクトに参加 |
+| `beacon cloud upload-initial` | Initial bootstrap upload to new cloud project / 初回 upload (special; e-1862) |
+| `beacon cloud force-pull` | Emergency overwrite local from cloud / 緊急 force pull (special; e-1862) |
+| `beacon cloud push` | Legacy alias of upload-initial (deprecated) / 旧名 |
+| `beacon cloud pull` | Legacy alias of force-pull (deprecated) / 旧名 |
+| `beacon cloud off` | Switch back to local mode (sandbox / offline only) / sandbox 用途のみ |
 
 ## CLI Commands
 
@@ -285,6 +289,7 @@ Requires `gh` CLI authenticated. When a task linked to an Issue is marked done, 
 | `beacon doc list [--scope scope] [--ms ms-id] [--op op-id] [--json]` | List documents / 一覧 |
 | `beacon doc show <doc-id>` | Show document / 内容表示 |
 | `beacon doc update <doc-id> --content "text"` | Update document / 更新 |
+| `beacon doc image-upload <local-file>` | Upload image, get markdown img tag / 画像アップロードして img タグを返す |
 
 Scopes: `core` (design principles / 設計原則), `spec` (technical specs / 仕様), `memo` (notes / メモ)
 
@@ -333,6 +338,30 @@ Operations track recurring operational workloads (daily batch jobs, incident man
 
 The `/beacon-operation-setup` Skill walks through setup conversationally and auto-generates a SPEC document (log fetch instructions). The `/beacon-operation-review` Skill reads that SPEC, fetches logs, interprets them, and records the result — triggered automatically by `operation_check_<op-id>` triggers at session start.
 
+### Treks
+
+Treks (= 協奏作業領域) are cross-project, cross-session work areas. While a Milestone lives inside one project, a trek bundles work that spans several projects (and several teammates' sessions) — for example "v0.35.0 release rehearsal across Beacon + PE + LPS" or "Daily cross-team standup" — and keeps members, scope (= work items in / out of focus), live status, and halt (= Andon cord) state in one place. CLI / Web UI / Tauri Desktop all see the same trek, so a CLI user and a Web UI user can co-drive without diverging.
+
+| Command | Description |
+|---------|-------------|
+| `beacon trek create "title" [--type temporary\|persistent] [--description "..."]` | Create a trek; caller becomes leader / trek 作成、起票者が leader |
+| `beacon trek list [--status s] [--include-archived] [--all-actors] [--json]` | List treks visible to the caller / 自分が member の trek 一覧 |
+| `beacon trek show <trek-id> [--json]` | Show trek detail (members / scope / status / halt) / trek 詳細 |
+| `beacon trek start <trek-id>` | Transition planning → active / planning から active へ |
+| `beacon trek archive <trek-id>` | Archive (= terminal); restart by creating a new trek / 完了化、再開は新 trek 起票 |
+| `beacon trek invite <trek-id> --actor <email> [--notify]` | Invite a user by email; `--notify` sends a live DM (`--notify` is acknowledged but live DM lands later) / メンバー招待 |
+| `beacon trek join <trek-id>` | Accept own invitation / 招待を accept |
+| `beacon trek leave <trek-id>` | Remove self (leader must `transfer-leader` first; last member must `archive` instead) / 離脱 |
+| `beacon trek plan <trek-id> --add-scope <project:ref>` | Add a scope entry (`ms-X` / `op-X` / `e-X` ref, or omit for project-wide) / scope 追加 |
+| `beacon trek plan <trek-id> --remove-scope <project:ref>` | Remove a scope entry / scope 削除 |
+| `beacon trek stop <trek-id> [--reason "..."]` | Pull the Andon cord (= halt signal, sessions pause) / 非常停止 |
+| `beacon trek resume <trek-id>` | Clear the halt signal / 再開 |
+| `beacon trek transfer-leader <trek-id> --to <session-id>` | Hand off `leader_session_id` to another session / leader 引き継ぎ |
+
+In the Web UI / Tauri Desktop, the **Treks** tab on a project page lists every trek that includes the current project in its scope (= active と archived を別表示)。各 trek の詳細では members / scope / status / 関連 docs が並ぶ。逆に milestone / operation / task の詳細を開くと、その作業項目を scope に含む trek 一覧が **Related Treks** widget としてインラインで出る。
+
+Trek の作成・編集・状態遷移はすべて CLI から。Web UI は閲覧と監査 (= 誰が何を見ているか・どこで halt がかかっているか) に専念し、ユーザーをターミナルに戻さない。
+
 ### Session Notes
 
 Ephemeral memos that survive context compaction within a session — cleared at session end.
@@ -377,6 +406,32 @@ walkthrough.
 `bclaude` (shipped alongside `beacon` in Homebrew) launches Claude Code
 with the channel pre-wired, and falls back to plain `claude` when any
 opt-out source is active.
+
+### Coordination signals (ms-55)
+
+The "走る / 止まる両輪" surface for parallel autonomous sessions:
+**STOP** anyone can broadcast a halt, **rollback** undoes the safe local
+portion, **claim** coordinates who's taking what, **stuck** escalates
+idle timeouts, and **morning** is the next-day digest. See
+[SPEC `bnzTXhu6KYIMfVE2Ivy2`](https://beacon-ai.dev/) for the full
+design.
+
+| Command | Description |
+|---------|-------------|
+| `beacon stop scoped <target> [--kind ms\|task\|session] [--reason-kind <k>] [--reason <text>]` | Broadcast STOP at one MS / task / session (Andon cord — anyone can halt) |
+| `beacon stop global [--reason-kind <k>] [--reason <text>]` | Broadcast STOP across every active autonomous session |
+| `beacon stop status [--json]` | Show the latest stop / resume state from the stop-signal channel |
+| `beacon resume scoped <target> [--kind ms\|task\|session] [--reason <text>]` | Clear a scoped STOP, allowing targeted session(s) to resume |
+| `beacon resume global [--reason <text>]` | Clear a global STOP |
+| `beacon rollback [--commits N] [--reason <text>] [--dry-run] [--no-record]` | Undo working tree (`git stash`) + N local commits (`--soft` reset); past upstream → report + compensation proposals only |
+| `beacon claim request <kind>:<id> [--intent <text>]` | Announce intent to take a target (`ms`/`task`/`operation`/`trek`/`free`) |
+| `beacon claim respond <claim-id> [--accept\|--reject] [--reason <text>]` | Respond to another session's claim request |
+| `beacon claim post <kind>:<id> [--intent <text>]` | Post-hoc record (no request/response dance) |
+| `beacon claim handoff <claim-id> --to <session> [--reason <text>]` | Transfer an active claim to another session |
+| `beacon claim release <claim-id> [--outcome completed\|abandoned] [--reason <text>]` | Release a claim (outcome surfaces in `beacon morning`) |
+| `beacon claim list [--json]` | List active claims from local `.beacon/active_claims.json` |
+| `beacon stuck check [--telemetry-file <path>] [--idle-min N]` | Detect sessions idle past `--idle-min`; emit STUCK signals so `beacon morning` surfaces 介入要望 |
+| `beacon morning [--since-hours N] [--events-file <path>] [--no-doc] [--json]` | 4-bucket digest (完了 / 停止 / skip / 介入要望); auto-saves as a `scope=report` doc |
 
 ## Dashboard
 

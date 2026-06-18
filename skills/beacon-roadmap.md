@@ -157,6 +157,8 @@ full モードのみ、ビジョンの「成功基準」「やらないこと」
 
 ## Step 3: 提案の提示 (mode 別)
 
+**ms-68 / e-1643 補足 (= entry-writing principle の draft 表示)**: 本 Step は既に draft 提示型 (= `beacon milestone add` を叩く前に全 MS の title / objective / AC をユーザーに見せて承認を取る形) で設計されており、ms-68 SPEC の「書き込み直前の draft 表示」要件を満たす。提示前に各 MS の objective / AC について self-review 4 原則 (読み手目線 1 行 / 横文字 3 段階 / ID 参照に文脈 / 尻切れトンボ禁止) を 1 度通し、特に MS title は **完成後に何ができるようになるか** をユーザー体験の言葉で書く (技術的な工程名は避ける)。
+
 ### minimal モードの提示 (デフォルト、最速アウトプット)
 
 最初の MS 1〜2 個だけを軽量に提示:

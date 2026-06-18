@@ -283,13 +283,23 @@ def test_freshness_threshold_negative_env_falls_back(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def _write_cloud_config(project_dir: Path, mode: str = "cloud") -> None:
-    """Switch the project into cloud mode by writing .beacon/config.json."""
-    (project_dir / ".beacon" / "config.json").write_text(
-        json.dumps({"mode": mode}), encoding="utf-8"
-    )
+    """Switch the project into cloud mode by writing .beacon/cloud.json.
+
+    e-1861 (ms-61): cloud.json existence is the sole source of truth for
+    cloud mode. The legacy config.json ``{"mode": "cloud"}`` write was
+    retired (silent-drift attack surface). ``mode`` arg kept for back-compat
+    with existing call sites — only ``"cloud"`` materialises cloud.json;
+    any other value is treated as a no-op (= still local).
+    """
+    if mode == "cloud":
+        (project_dir / ".beacon" / "cloud.json").write_text(
+            json.dumps({"project_id": "test-pid", "api_url": "https://example.test"}),
+            encoding="utf-8",
+        )
 
 
-def test_is_cloud_mode_detects_config(project_dir):
+def test_is_cloud_mode_detects_cloud_json(project_dir):
+    """e-1861 (ms-61): cloud.json existence triggers cloud mode."""
     assert session._is_cloud_mode() is False
     _write_cloud_config(project_dir)
     assert session._is_cloud_mode() is True
@@ -298,6 +308,39 @@ def test_is_cloud_mode_detects_config(project_dir):
 def test_is_cloud_mode_honors_env(project_dir, monkeypatch):
     monkeypatch.setenv("BEACON_CLOUD", "1")
     assert session._is_cloud_mode() is True
+
+
+def test_is_cloud_mode_ignores_legacy_config_mode_field(project_dir):
+    """e-1861 (ms-61) reproduction: silent-drift incident prevention.
+
+    On 2026-06-15 a sub-agent overwrote ``.beacon/config.json`` to
+    ``{"mode": "local"}`` and the CLI silently flipped off cloud, causing
+    a data-loss panic. After e-1861 the config.json ``mode`` field is
+    structurally ignored — only cloud.json existence matters.
+
+    This test pins that contract: even with config.json set to
+    ``{"mode": "local"}``, as long as cloud.json exists, cloud mode stays
+    on. Reverse case (cloud.json absent + config.json ``{"mode": "cloud"}``)
+    must NOT trigger cloud mode either.
+    """
+    # Case 1: cloud.json present + hostile config.json => still cloud
+    _write_cloud_config(project_dir)
+    (project_dir / ".beacon" / "config.json").write_text(
+        json.dumps({"mode": "local"}), encoding="utf-8"
+    )
+    assert session._is_cloud_mode() is True, (
+        "Silent-drift regression: a hostile config.json mode=local must not "
+        "disable cloud mode when cloud.json is present."
+    )
+    # Case 2: cloud.json absent + ghost config.json => not cloud
+    (project_dir / ".beacon" / "cloud.json").unlink()
+    (project_dir / ".beacon" / "config.json").write_text(
+        json.dumps({"mode": "cloud"}), encoding="utf-8"
+    )
+    assert session._is_cloud_mode() is False, (
+        "Phantom-cloud regression: a config.json mode=cloud must not enable "
+        "cloud mode when cloud.json is absent (would crash on first cloud op)."
+    )
 
 
 def test_should_cloud_sync_when_never_synced():

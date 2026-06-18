@@ -132,6 +132,8 @@ beacon doc list --scope spec --ms <ms-id> --json
 
 ## Step 4: PR タイトルと本文の draft
 
+**ms-68 / e-1642 補足 (= entry-writing principle の draft 表示)**: 本 Step は既に draft 提示型 (= 書き込み前にユーザー承認を取る形) で設計されており、ms-68 SPEC が要求する「書き込み直前の draft 表示」の要件を満たしている。提示前に self-review 4 原則 (読み手目線 1 行 / 横文字 3 段階 / ID 参照に文脈 / 尻切れトンボ禁止) を 1 度通し、特に **本文 What / Why / How / Test の各セクションで非開発者を排除する横文字や尻切れトンボが無いか** を自問する。PR 本文は merge 後にプロジェクトの歴史記録として残るため、silent write 禁止。
+
 intent と差分コミット履歴から **PR タイトル候補と本文 draft** を生成し、ユーザーに見せる:
 
 ```
@@ -189,7 +191,96 @@ beacon pr create -m ms-42 --intent "..." -- --title "..." --body-file /tmp/pr-bo
   - レビュアーを指定したい場合: gh pr edit <num> --add-reviewer <user>
   - レビューを依頼: /review はレビュアー側の Skill です（このPR作成者は使いません）
   - 1人開発で自己レビューする場合: /review <PR-num> で intent vs 実装の整合をチェックできます (e-611)
+  - merge 時は `gh pr merge --merge` を使う (= hash 保持、CORE doc 0KqFUbmJ7V0lmJZcW230 参照)
 ```
+
+## 取り込み戦略の構造防御 (= ms-80 e-1823)
+
+PR を merge する時は **`gh pr merge --merge`** で merge commit を作る (= linear branch + fast-forward 風)。
+
+| 動線 | 採否 | 理由 |
+|------|------|------|
+| `gh pr merge --merge` | ✓ 採用 | branch 上の commit hash が保持される、beacon entry が指す dead hash 発生せず |
+| `gh pr merge --rebase` | ✗ 禁止 | base に rebase で hash 再生成、過去 `beacon log` entry が dead hash になる |
+| `gh pr merge --squash` | ✗ 禁止 | 全 commit を 1 つに圧縮、commit 単位 1:1 trace が壊れる |
+
+GitHub UI 経路の構造防御 (= repo admin 操作、別 task) は Settings > General > Pull Requests で:
+- Allow merge commits: ✓ ON
+- Allow squash merging: ✗ OFF
+- Allow rebase merging: ✗ OFF
+
+詳細: CORE doc `0KqFUbmJ7V0lmJZcW230` (= PR の取り込み戦略: hash 保持と beacon entry 整合)。
+
+## Reviewer 任命動線 (= ms-80 e-1819)
+
+Step 6 で PR が作成された後、reviewer の任命を 1 度の対話で完結させる。1 名・複数名の両対応、Beacon DM 通知の有無を選択可能。
+
+### Step 6.5: Reviewer の任命確認
+
+PR 作成成功直後、ユーザーに 1 度だけ確認:
+
+```
+Reviewer を任命しますか? (空 Enter で skip)
+  GitHub username をスペース or カンマ区切りで指定:
+    例) alice / alice bob / alice,bob,charlie
+  skip した場合は、後で gh pr edit <num> --add-reviewer <user> を手動で叩けます。
+```
+
+空 Enter で skip した場合は Step 6.5 / 6.6 をスキップして「1人開発時の挙動」 へ。
+
+### Step 6.5a: GitHub 上で reviewer assign
+
+入力された username 群を ',' 区切りで連結し、Bash で実行:
+
+```bash
+gh pr edit <pr_number> --add-reviewer <user1>,<user2>,...
+```
+
+成功すると GitHub UI / 通知メールで reviewer に届く (= GitHub 標準経路)。
+
+失敗時 (= 例: user が repo collaborator でない / typo):
+```
+Reviewer assign に失敗しました。原因:
+  <gh のエラーメッセージ>
+対処:
+  - typo の確認 (GitHub 上の username は大文字小文字を区別)
+  - repo collaborator でない場合は GitHub 側で先に追加 (`gh repo edit --add-collaborator <user>`)
+```
+
+### Step 6.5b: Beacon DM 通知の有無
+
+GitHub 標準通知に加え、Beacon 経由で「何を見ればいいか」 を伝える DM を送るか確認:
+
+```
+GitHub 通知に加えて、Beacon DM で「何を見てほしいか」 も送りますか? (= /beacon-dm-send の pr-review template 経路)
+  [y] = 各 reviewer に DM 送信 → /beacon-dm-send 起動
+  [n] = GitHub 通知のみで完了
+```
+
+y の場合:
+- 各 reviewer に対し /beacon-dm-send を 1 回ずつ起動 (= multi-reviewer なら N 回)
+- /beacon-dm-send は Step 0 mode=send + Step 5c で `pr-review` template を選択するよう内部で hint
+- 注視ポイント / merge 条件 / 緊急度は Step 3 で引き出した intent を流用 (= 二度同じ質問しない)
+- /beacon-dm-send の Step 6 draft 表示で reviewer 個別に edit 可能
+
+### Step 6.6: 完了報告 (= 多 reviewer 対応の Step 6 拡張)
+
+```
+✓ PR 作成 + reviewer 任命完了
+  PR: [URL]
+  reviewers: [user1, user2, ...]
+  beacon DM: [N 件送信 / skip]
+
+次のステップ:
+  - reviewer の応答待ち (= GitHub Notifications / Beacon DM 受信側 /beacon-dm-respond)
+  - 緊急度の変更: gh pr edit <num> --add-label urgent
+```
+
+### multi-reviewer の責務分配メモ (= 参考)
+
+- 2-3 名: 全員 approve 揃いで merge (= safe path)
+- 4+ 名: code-owner 必須 + 任意レビューに分けるのが現実的、Skill は code-owner 強制をしない (= GitHub 側の CODEOWNERS file 機能を使う)
+- reviewer 間の意見対立は author が判断、reviewer 同士の Beacon DM で議論する経路もあり (= 自由形式)
 
 ## 1人開発時の挙動（e-611）
 

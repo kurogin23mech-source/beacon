@@ -32,6 +32,27 @@ def _get_actor() -> str:
     return _os.environ.get("USER", _os.environ.get("USERNAME", "unknown"))
 
 
+def _clean_author(author: dict | None) -> dict:
+    """Strip an ``author`` dict to the canonical {user_id, email, display_name}.
+
+    ms-78 / e-1909 — the server side resolves the *human* identity of the
+    operator and threads it through to ``meta.author`` on commits / tasks
+    so the Web UI can show a human-friendly label without walking the
+    users collection on every render. We allowlist exactly three keys to
+    keep the on-disk shape stable, and drop empty strings / Nones so a
+    user who hasn't set a display_name yet stays absent from that field
+    (= falsy fallback path in the UI).
+    """
+    if not isinstance(author, dict):
+        return {}
+    out: dict = {}
+    for k in ("user_id", "email", "display_name"):
+        v = author.get(k)
+        if isinstance(v, str) and v.strip():
+            out[k] = v.strip()
+    return out
+
+
 VALID_STATUSES = {"todo", "in_progress", "in_review", "approved", "waiting", "done", "observing", "cancelled"}
 VALID_ENTRY_TYPES = {"commit", "task", "note", "save", "pr", "run_record", "incident", "operation_task"}
 
@@ -887,8 +908,16 @@ def task_add(data: dict, ms_id: str, description: str, *,
              entry_type: str = "task", date: str = "",
              detail: str = "", requested_by: str = "",
              priority: str = "", motivation: str = "",
-             acceptance_criteria: str = "") -> str:
-    """Add an entry to a milestone. Returns the new entry id."""
+             acceptance_criteria: str = "",
+             author: dict | None = None) -> str:
+    """Add an entry to a milestone. Returns the new entry id.
+
+    ``author`` (ms-78 / e-1909): optional ``{"user_id", "email",
+    "display_name"}`` dict attached to ``meta.author`` — the *human*
+    identity that created the task on the server side. Distinct from
+    ``meta.created_by`` (= local-agent string for CLI / debug). Empty
+    fields are dropped.
+    """
     target = find_target_milestone(data, ms_id)
     entries = target.setdefault("entries", [])
     eid = next_entry_id(data)
@@ -901,6 +930,9 @@ def task_add(data: dict, ms_id: str, description: str, *,
         meta["priority"] = priority
     now = _now_iso()
     meta["created_by"] = _get_actor()
+    author_clean = _clean_author(author)
+    if author_clean:
+        meta["author"] = author_clean
     entry = {
         "id": eid,
         "type": entry_type,
@@ -921,8 +953,15 @@ def task_add(data: dict, ms_id: str, description: str, *,
     return eid
 
 
-def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "") -> tuple[dict, dict]:
-    """Mark an entry as done. Returns (milestone, entry)."""
+def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "",
+              author: dict | None = None) -> tuple[dict, dict]:
+    """Mark an entry as done. Returns (milestone, entry).
+
+    ``author`` (ms-78 / e-1909): optional ``{"user_id", "email",
+    "display_name"}`` dict attached to ``meta.done_by_user`` — the
+    *human* identity that completed the task on the server side
+    (distinct from ``meta.done_by`` which is the local-agent string).
+    """
     result = find_entry(data, entry_id)
     if not result:
         raise ValueError(f"Entry not found: {entry_id}")
@@ -933,6 +972,9 @@ def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "") ->
         entry["date"] = entry["done_at"]
     meta = entry.setdefault("meta", {})
     meta["done_by"] = _get_actor()
+    author_clean = _clean_author(author)
+    if author_clean:
+        meta["done_by_user"] = author_clean
     if reason:
         meta["done_reason"] = reason
     return ms, entry
@@ -942,19 +984,28 @@ def task_update(data: dict, entry_id: str, *,
                 description: str = "", status: str = "",
                 detail: str = "", date: str = "",
                 motivation: str = "", acceptance_criteria: str = "",
-                behavior: str = "", priority: str = "") -> tuple[dict, dict]:
+                behavior: str = "", priority: str = "",
+                author: dict | None = None) -> tuple[dict, dict]:
     """Update entry fields. Returns (milestone, entry).
 
     The MS-32 "必要十分フォーマット" fields (motivation / acceptance_criteria /
     behavior) and priority are now updatable here. Empty strings are treated as
     "no change" so callers can omit fields they don't want to touch.
+
+    ``author`` (ms-78 / e-1909): optional ``{"user_id", "email",
+    "display_name"}`` dict attached to ``meta.updated_by_user`` — the
+    *human* identity that performed the update. Only stamped when at
+    least one field actually changes, to avoid a "nothing happened"
+    no-op call rewriting the audit field with the latest opener.
     """
     result = find_entry(data, entry_id)
     if not result:
         raise ValueError(f"Entry not found: {entry_id}")
     ms, _, entry, _ = result
+    changed = False
     if description:
         entry["description"] = description
+        changed = True
     if status:
         if status not in VALID_STATUSES:
             raise ValueError(
@@ -963,14 +1014,19 @@ def task_update(data: dict, entry_id: str, *,
         entry["status"] = status
         if status == "done" and not entry.get("done_at"):
             entry["done_at"] = date
+        changed = True
     if detail:
         entry["detail"] = detail
+        changed = True
     if motivation:
         entry["motivation"] = motivation
+        changed = True
     if acceptance_criteria:
         entry["acceptance_criteria"] = acceptance_criteria
+        changed = True
     if behavior:
         entry["behavior"] = behavior
+        changed = True
     if priority:
         if priority not in VALID_PRIORITIES:
             raise ValueError(
@@ -978,6 +1034,12 @@ def task_update(data: dict, entry_id: str, *,
             )
         meta = entry.setdefault("meta", {})
         meta["priority"] = priority
+        changed = True
+    if changed:
+        author_clean = _clean_author(author)
+        if author_clean:
+            meta = entry.setdefault("meta", {})
+            meta["updated_by_user"] = author_clean
     return ms, entry
 
 
@@ -1194,7 +1256,8 @@ def log_commit(data: dict, *, ms_id: str = "", commit_hash: str,
                message: str, date: str, summary: str = "",
                progress: str = "", behavior: str = "",
                resolves: str = "", actor: dict | None = None,
-               session_id: str = "") -> dict:
+               session_id: str = "", source: str = "",
+               author: dict | None = None) -> dict:
     """Record a commit to the target milestone. Returns result info dict.
 
     ``actor`` (ms-51 / e-934): optional ``{"machine": ..., "agent": ...}``
@@ -1210,6 +1273,21 @@ def log_commit(data: dict, *, ms_id: str = "", commit_hash: str,
     Forward-only: past commits without it stay untagged. Empty string
     is the documented "no session" sentinel — those entries simply won't
     appear in aggregation results.
+
+    ``source`` (ms-79 / e-1817): optional axis tag distinguishing AI
+    auto-op commits from human dialog commits. Stored on
+    ``meta.source``. Currently the recognised value is ``"auto-op"``;
+    empty string keeps the historical behaviour (= human-untagged). The
+    field powers the source-breakdown facet in retro_query.
+
+    ``author`` (ms-78 / e-1909): optional ``{"user_id", "email",
+    "display_name"}`` dict attached to ``meta.author``. This is the
+    *human* identity that initiated the commit (= sign-in identity on
+    the server, distinct from ``actor`` which is the machine/agent
+    pair). Server-side callers should pass it whenever they can resolve
+    the calling user record; the Web UI then has a 1-hop label for the
+    author column without walking the users collection. Empty / unset
+    fields are dropped so the persisted shape stays tight.
     """
     target = find_target_milestone(data, ms_id)
     entries = target.setdefault("entries", [])
@@ -1236,6 +1314,16 @@ def log_commit(data: dict, *, ms_id: str = "", commit_hash: str,
             meta["actor"] = clean
     if session_id:
         meta["session_id"] = session_id
+    if source:
+        # ms-79 / e-1817: persist the source axis so retrospect / retro
+        # can filter "AI 自律 commit だけ". No-op when source is empty
+        # (the historical / human default).
+        meta["source"] = source
+    author_clean = _clean_author(author)
+    if author_clean:
+        # ms-78 / e-1909: persist the human identity of the commit author.
+        # See `_clean_author` for the field allowlist.
+        meta["author"] = author_clean
     commit_entry = {
         "id": next_entry_id(data),
         "type": "commit",

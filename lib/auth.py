@@ -75,12 +75,19 @@ def _ensure_deps():
 
 
 def _get_api_url() -> str:
-    """Get API URL from cloud.json if available."""
-    cloud_json = Path(".beacon/cloud.json")
-    if cloud_json.exists():
-        with open(cloud_json, "r", encoding="utf-8") as f:
-            return json.load(f).get("api_url") or "https://beacon-ai.dev"
-    return "https://beacon-ai.dev"
+    """Get API URL via the active profile resolution chain.
+
+    Precedence (= lib/profile.py のドキュメントに従う):
+      1. BEACON_API_URL env var
+      2. cwd .beacon/cloud.json.api_url
+      3. ~/.beacon/profiles/<active>/profile.json.api_url
+      4. DEFAULT_API_URL (= https://beacon-ai.dev)
+
+    旧版は (2) と (4) しか見ておらず、(1)(3) を完全に無視していた。
+    その結果 BEACON_PROFILE=aws-ga で profile を指定しても auth login が
+    https://beacon-ai.dev に向かう regression があった (= e-1627 検証で観測)。
+    """
+    return _active_profile().api_url
 
 
 def _load_firebase_config() -> dict:
@@ -95,7 +102,27 @@ def _load_firebase_config() -> dict:
 
 
 def login():
-    """Run Google OAuth flow and save credentials."""
+    """Run identity-provider login flow and save credentials.
+
+    Dispatches based on the active profile's server-side ``/api/auth/config``:
+      - ``provider == "cognito"`` → Cognito Hosted UI redirect flow
+        (= AWS GA-incubation 経路, e-1545)
+      - else → Firebase / Google OAuth (= 既存 Cloud Run 経路)
+
+    Profile resolution (= どのサーバを見るか) は active profile に従う。
+    """
+    # First discover what auth provider the server uses
+    api_url = _get_api_url()
+    try:
+        with urllib.request.urlopen(f"{api_url}/api/auth/config", timeout=10) as r:
+            server_auth = json.loads(r.read())
+    except Exception:
+        server_auth = {}
+
+    if server_auth.get("provider") == "cognito":
+        login_cognito(server_auth)
+        return
+
     # Check if --web flag is passed (or no firebase_config.json resolvable)
     use_web = "--web" in sys.argv or _firebase_config_path() is None
 
@@ -203,6 +230,198 @@ def login_web():
 
     print("\nTimeout. Run 'beacon auth login' again.")
     sys.exit(1)
+
+
+def login_cognito(server_config: dict) -> None:
+    """Cognito Hosted UI redirect flow (= e-1545 / AWS GA-incubation 経路).
+
+    手順:
+      1. 設定値を server_config から取得 (client_id / cognito_domain / region)
+      2. ローカル HTTP listener を空きポートで立てる
+      3. ブラウザを Cognito Hosted UI に開く (redirect_uri = ローカル listener)
+      4. ?code= callback を受け取る
+      5. POST /oauth2/token で id_token + refresh_token に交換
+      6. active profile の credentials.json に保存
+
+    Cognito SPA Client は ``generate_secret=false`` で立ててあるので
+    client_secret は不要 (= 公開 client、PKCE は dev 段階では未使用、本番化前に追加)。
+    """
+    import http.server
+    import socket
+    import threading
+    import urllib.parse
+
+    client_id = server_config.get("client_id", "")
+    cognito_domain = server_config.get("cognito_domain", "")
+    if not client_id or not cognito_domain:
+        print(
+            "Error: Server returned cognito provider but missing "
+            "client_id / cognito_domain. Check Lambda env vars "
+            "(BEACON_COGNITO_CLIENT_ID / BEACON_COGNITO_HOSTED_UI_DOMAIN)."
+        )
+        sys.exit(1)
+
+    # 1. Cognito SPA Client の callback_urls に登録されている固定ポートから
+    #    空いてるものを選ぶ。Cognito は redirect_uri の完全一致を要求するため
+    #    ランダムポートだと "redirect_uri does not match" でブロックされる
+    #    (= beacon-cloud terraform module.cognito.callback_urls 参照)。
+    candidate_ports = [5173, 8080]
+    port = None
+    for p in candidate_ports:
+        try:
+            test = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            test.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            test.bind(("127.0.0.1", p))
+            test.close()
+            port = p
+            break
+        except OSError:
+            continue
+    if port is None:
+        print(
+            f"Error: All callback ports {candidate_ports} are in use. "
+            "Stop processes listening on these ports and retry "
+            "(or add another port to Cognito's callback_urls)."
+        )
+        sys.exit(1)
+    redirect_uri = f"http://localhost:{port}/"
+
+    # 2. callback 受信用 listener
+    received = {"code": None, "error": None}
+
+    class _CognitoCallbackHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 — http.server interface
+            parsed = urllib.parse.urlparse(self.path)
+            params = urllib.parse.parse_qs(parsed.query)
+            if "code" in params:
+                received["code"] = params["code"][0]
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(
+                    b"<!doctype html><html><head><title>Beacon login</title></head>"
+                    b"<body style='font-family:sans-serif;padding:2em;text-align:center'>"
+                    b"<h1>\xe2\x9c\x93 Login successful</h1>"
+                    b"<p>You can close this tab and return to the terminal.</p>"
+                    b"</body></html>"
+                )
+            elif "error" in params:
+                err = params.get("error_description", params.get("error", ["unknown"]))[0]
+                received["error"] = err
+                self.send_response(400)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(err.encode("utf-8"))
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, fmt, *args):  # noqa: N802 — http.server interface
+            pass  # suppress access log
+
+    server = http.server.HTTPServer(("127.0.0.1", port), _CognitoCallbackHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    # 3. ブラウザを開く
+    login_url = (
+        f"https://{cognito_domain}/login?"
+        f"client_id={urllib.parse.quote(client_id)}"
+        f"&response_type=code"
+        f"&scope={urllib.parse.quote('openid email profile')}"
+        f"&redirect_uri={urllib.parse.quote(redirect_uri)}"
+    )
+    print("Opening browser for Cognito sign-in...")
+    print(f"If the browser does not open, visit:\n  {login_url}\n")
+    webbrowser.open(login_url)
+    print(f"Waiting for callback on {redirect_uri} (5 min timeout)...")
+
+    # 4. callback を待つ
+    timeout_sec = 300
+    start = time.time()
+    try:
+        while received["code"] is None and received["error"] is None:
+            if time.time() - start > timeout_sec:
+                print("Error: Login timed out (5 minutes).")
+                sys.exit(1)
+            time.sleep(0.5)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    if received["error"]:
+        print(f"Error: Cognito returned an error: {received['error']}")
+        sys.exit(1)
+
+    code = received["code"]
+
+    # 5. token 交換
+    token_url = f"https://{cognito_domain}/oauth2/token"
+    token_body = urllib.parse.urlencode({
+        "grant_type": "authorization_code",
+        "client_id": client_id,
+        "code": code,
+        "redirect_uri": redirect_uri,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        token_url,
+        data=token_body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            tokens = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace")
+        print(f"Error: token exchange failed (HTTP {e.code}): {err_body}")
+        sys.exit(1)
+
+    id_token = tokens.get("id_token", "")
+    if not id_token:
+        print(f"Error: token response missing id_token: {tokens}")
+        sys.exit(1)
+
+    # 6. credentials に保存
+    issued_at = int(time.time())
+    expires_in = int(tokens.get("expires_in", 86400))
+    creds_data = {
+        "provider": "cognito",
+        "token": id_token,                          # downstream は creds["token"] を Bearer に使う
+        "id_token": id_token,
+        "access_token": tokens.get("access_token", ""),
+        "refresh_token": tokens.get("refresh_token", ""),
+        "token_type": "cognito_id_token",
+        "expires_in": expires_in,
+        "issued_at": issued_at,
+        "token_expiry": issued_at + expires_in,
+        "web_auth": True,                           # load_credentials の web_auth 経路で扱われる
+        "email": _decode_jwt_email(id_token),
+        "cognito_domain": cognito_domain,
+        "client_id": client_id,
+    }
+    cred_path = _credentials_path()
+    cred_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(cred_path, "w", encoding="utf-8") as f:
+        json.dump(creds_data, f, indent=2)
+    try:
+        cred_path.chmod(0o600)
+    except OSError:
+        pass
+    print(f"Logged in as: {creds_data['email'] or '<unknown email>'}")
+    print(f"Credentials saved to: {cred_path}")
+
+
+def _decode_jwt_email(token: str) -> str:
+    """JWT payload から email claim を抜き出す。失敗時は空文字。"""
+    import base64
+    try:
+        payload_b64 = token.split(".")[1]
+        payload_b64 += "=" * ((4 - len(payload_b64) % 4) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+        return payload.get("email", "")
+    except Exception:
+        return ""
 
 
 def logout():
@@ -343,6 +562,16 @@ def load_credentials():
                 print(
                     "Error: セッションが期限切れです。`beacon auth login` を実行してください。\n"
                     "       (Session expired. Run: beacon auth login)"
+                )
+                return None
+            # Cognito id_token: 現状は refresh 経路未実装、再ログインを促す
+            # (= refresh_token は creds に保存済なので、follow-up で
+            # /oauth2/token grant_type=refresh_token に交換する経路を足せる)
+            if creds_data.get("token_type") == "cognito_id_token":
+                print(
+                    "Error: Cognito セッションが期限切れです (24h)。"
+                    "`beacon auth login` で再ログインしてください。\n"
+                    "       (Cognito session expired. Run: beacon auth login)"
                 )
                 return None
             # Legacy Google ID token: try silent refresh via refresh_token

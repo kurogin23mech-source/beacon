@@ -296,6 +296,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--version", "-V", action="store_true", help="Show version")
     p.add_argument("--help", "-h", action="store_true", help="Show help")
+    # ms-64 / e-1458: top-level --profile <name>. Exported as BEACON_PROFILE
+    # before any subcommand runs, so the profile resolver (lib/profile.py)
+    # honors it for api_url + credentials path resolution. Parity with
+    # bin/beacon's bash-side parser.
+    p.add_argument("--profile", default="", help="Beacon profile to use (overrides BEACON_PROFILE env)")
 
     sub = p.add_subparsers(dest="command", metavar="<command>")
 
@@ -305,6 +310,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--objective")
     p_init.add_argument("--retro-day", dest="retro_day")
     p_init.add_argument("--storage", default="local")
+    # ms-63 / e-1441: project disclosure posture at init time. Default is
+    # ``high`` per SPEC § 設計方針 2 — opt-in low only when the project is
+    # explicitly open (= OSS, public docs).
+    p_init.add_argument(
+        "--sensitivity",
+        choices=("high", "low"),
+        default="high",
+        help="disclosure posture: high (default, schema-only T5 replies) "
+             "or low (open project, free-text T5 replies)",
+    )
     p_init.add_argument("--help", "-h", action="store_true", dest="show_help")
 
     # ---- status ----
@@ -515,6 +530,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc_add.add_argument("--scope", "-s", dest="scope", default="")
     p_doc_add.add_argument("--ms", dest="doc_ms", default="")
     p_doc_add.add_argument("--op", dest="doc_op", default="")
+    p_doc_add.add_argument("--trek", dest="doc_trek", default="")
     p_doc_add.add_argument("--json", action="store_true")
     p_doc_add.add_argument("--content", default="")
     p_doc_add.add_argument("--stdin", action="store_true")
@@ -540,6 +556,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc_update.add_argument("--scope", "-s", dest="scope", default="")
     p_doc_update.add_argument("--ms", dest="doc_ms", default="")
     p_doc_update.add_argument("--op", dest="doc_op", default="")
+    p_doc_update.add_argument("--trek", dest="doc_trek", default="")
     p_doc_update.add_argument("--json", action="store_true")
     p_doc_update.add_argument("--stdin", action="store_true")
     # ms-54 / e-1293: persistence poisoning defense.
@@ -653,8 +670,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_entry_purge.add_argument("--index", default="")
     p_entry_purge.add_argument("--json", action="store_true")
 
-    # ---- operation (purge only — full operation CRUD remains bash-only) ----
-    p_op = sub.add_parser("operation", help="Operation operations (purge)", add_help=False)
+    # ---- operation (purge + envelope verify — full CRUD remains bash-only) ----
+    p_op = sub.add_parser(
+        "operation", help="Operation operations (purge, envelope verify)",
+        add_help=False,
+    )
     p_op.add_argument("--help", "-h", action="store_true", dest="show_help")
     op_sub = p_op.add_subparsers(dest="op_cmd", metavar="<subcmd>")
     p_op_purge = op_sub.add_parser("purge", add_help=False)
@@ -662,6 +682,87 @@ def build_parser() -> argparse.ArgumentParser:
     p_op_purge.add_argument("-r", "--reason", default="")
     p_op_purge.add_argument("--index", default="")
     p_op_purge.add_argument("--json", action="store_true")
+
+    # ms-73 / e-1764: AI self-check primitive for the envelope path
+    # (ms-60 e-1340). `beacon operation envelope verify <op-id> <action>`
+    # asks "is this action permitted by the active envelope?" — the
+    # /beacon-operation-execute Skill calls it before running each
+    # action. Without Win parity, autonomous operations on Windows pipx
+    # could not perform the pre-flight authorization check.
+    p_op_envelope = op_sub.add_parser("envelope", add_help=False)
+    p_op_envelope_sub = p_op_envelope.add_subparsers(
+        dest="op_envelope_cmd", metavar="<subcmd>"
+    )
+    p_op_envelope_verify = p_op_envelope_sub.add_parser("verify", add_help=False)
+    p_op_envelope_verify.add_argument("op_id", nargs="?", default="")
+    p_op_envelope_verify.add_argument("action", nargs="?", default="")
+    p_op_envelope_verify.add_argument("--json", action="store_true")
+
+    # ---- trek (ms-69) ----
+    # Top-level cross-project collaboration area. Storage is local-only
+    # (~/.beacon/treks/) until the HTTP path lands in e-1656.
+    p_trek = sub.add_parser("trek", help="Trek operations (ms-69)", add_help=False)
+    p_trek.add_argument("--help", "-h", action="store_true", dest="show_help")
+    trek_sub = p_trek.add_subparsers(dest="trek_cmd", metavar="<subcmd>")
+
+    p_trek_create = trek_sub.add_parser("create", add_help=False)
+    p_trek_create.add_argument("title", nargs="?", default="")
+    p_trek_create.add_argument("--type", dest="trek_type", default="")
+    p_trek_create.add_argument("--description", "--desc", dest="trek_desc", default="")
+    p_trek_create.add_argument("--json", action="store_true")
+
+    p_trek_list = trek_sub.add_parser("list", aliases=["ls"], add_help=False)
+    p_trek_list.add_argument("--status", default="")
+    p_trek_list.add_argument("--all", "--include-archived",
+                             dest="include_archived", action="store_true")
+    p_trek_list.add_argument("--all-actors", dest="all_actors", action="store_true")
+    p_trek_list.add_argument("--json", action="store_true")
+
+    p_trek_show = trek_sub.add_parser("show", aliases=["get"], add_help=False)
+    p_trek_show.add_argument("trek_id", nargs="?", default="")
+    p_trek_show.add_argument("--json", action="store_true")
+
+    p_trek_start = trek_sub.add_parser("start", add_help=False)
+    p_trek_start.add_argument("trek_id", nargs="?", default="")
+    p_trek_start.add_argument("--json", action="store_true")
+
+    p_trek_archive = trek_sub.add_parser("archive", add_help=False)
+    p_trek_archive.add_argument("trek_id", nargs="?", default="")
+    p_trek_archive.add_argument("--json", action="store_true")
+
+    p_trek_invite = trek_sub.add_parser("invite", add_help=False)
+    p_trek_invite.add_argument("trek_id", nargs="?", default="")
+    p_trek_invite.add_argument("--actor", default="")
+    p_trek_invite.add_argument("--notify", action="store_true")
+    p_trek_invite.add_argument("--json", action="store_true")
+
+    p_trek_join = trek_sub.add_parser("join", add_help=False)
+    p_trek_join.add_argument("trek_id", nargs="?", default="")
+    p_trek_join.add_argument("--json", action="store_true")
+
+    p_trek_leave = trek_sub.add_parser("leave", add_help=False)
+    p_trek_leave.add_argument("trek_id", nargs="?", default="")
+    p_trek_leave.add_argument("--json", action="store_true")
+
+    p_trek_plan = trek_sub.add_parser("plan", add_help=False)
+    p_trek_plan.add_argument("trek_id", nargs="?", default="")
+    p_trek_plan.add_argument("--add-scope", dest="add_scope", default="")
+    p_trek_plan.add_argument("--remove-scope", dest="remove_scope", default="")
+    p_trek_plan.add_argument("--json", action="store_true")
+
+    p_trek_stop = trek_sub.add_parser("stop", add_help=False)
+    p_trek_stop.add_argument("trek_id", nargs="?", default="")
+    p_trek_stop.add_argument("--reason", default="")
+    p_trek_stop.add_argument("--json", action="store_true")
+
+    p_trek_resume = trek_sub.add_parser("resume", add_help=False)
+    p_trek_resume.add_argument("trek_id", nargs="?", default="")
+    p_trek_resume.add_argument("--json", action="store_true")
+
+    p_trek_xfer = trek_sub.add_parser("transfer-leader", add_help=False)
+    p_trek_xfer.add_argument("trek_id", nargs="?", default="")
+    p_trek_xfer.add_argument("--to", dest="to_session_id", default="")
+    p_trek_xfer.add_argument("--json", action="store_true")
 
     # ---- doctor / project / help ----
     sub.add_parser("doctor", add_help=False)
@@ -712,6 +813,81 @@ def build_parser() -> argparse.ArgumentParser:
                                       choices=["true", "false"], default="")
     p_session_attention.add_argument("--json", action="store_true")
 
+    # ms-73 / e-1762: Win parity for session lifecycle / forensics verbs.
+    # `end` aggregates this session's notes/commits/PRs into the session log
+    # (graceful close path). `rescue` aggregates all OTHER sessions (used when
+    # a sibling bclaude died without calling end). `fork` spawns a sibling
+    # worktree for parallel work on a target ms (ms-67). `log` enumerates or
+    # shows session log entries (used by /beacon-session-start to restore
+    # context). The Python paths translate argv → env exactly like the bash
+    # dispatcher in bin/beacon (lines 2659/2677/2688/2770) so commands.py
+    # observes the same env contract regardless of OS.
+    p_session_end = session_sub.add_parser("end", add_help=False)
+    p_session_end.add_argument("--summary", default="")
+    p_session_end.add_argument("--session-id", dest="session_id", default="")
+    p_session_end.add_argument("--bus-origin", dest="bus_origin",
+                                action="store_true",
+                                help="Refuse the write (poisoning defense, e-1293)")
+    p_session_end.add_argument("--json", action="store_true")
+
+    p_session_rescue = session_sub.add_parser("rescue", add_help=False)
+    p_session_rescue.add_argument("--json", action="store_true")
+
+    # `session fork <ms-id>` and `session fork list` share a subparser; the
+    # handler dispatches on the positional. Mirrors the bash branch in
+    # bin/beacon @ line 2770.
+    p_session_fork = session_sub.add_parser("fork", add_help=False)
+    p_session_fork.add_argument("ms_id_or_list", nargs="?", default="",
+                                 help="Target ms-id, or literal 'list'")
+    p_session_fork.add_argument("--json", action="store_true")
+
+    p_session_log = session_sub.add_parser("log", add_help=False)
+    p_session_log_sub = p_session_log.add_subparsers(
+        dest="session_log_cmd", metavar="<list|show>"
+    )
+    p_session_log_list = p_session_log_sub.add_parser(
+        "list", aliases=["ls"], add_help=False
+    )
+    p_session_log_list.add_argument("--limit", default="0")
+    p_session_log_list.add_argument("--json", action="store_true")
+    p_session_log_show = p_session_log_sub.add_parser(
+        "show", aliases=["get"], add_help=False
+    )
+    p_session_log_show.add_argument("session_id", nargs="?", default="")
+    p_session_log_show.add_argument("--json", action="store_true")
+
+    # ---- profile (ms-64 e-1461) ----
+    # `beacon profile list` enumerates ~/.beacon/profiles/* with active marker.
+    # Mirrors bin/beacon's bash dispatch for Windows pipx parity.
+    p_profile = sub.add_parser(
+        "profile",
+        help="Beacon profile management (e-1461)",
+        add_help=False,
+    )
+    p_profile.add_argument("--help", "-h", action="store_true", dest="show_help")
+    profile_sub = p_profile.add_subparsers(dest="profile_cmd", metavar="<subcmd>")
+    p_profile_list = profile_sub.add_parser("list", add_help=False)
+    p_profile_list.add_argument("--json", action="store_true")
+
+    # ---- sessions (ms-54 e-1587) ----
+    # `beacon sessions` is the cross-project counterpart to `bus directory`.
+    # Lists the calling user's live sessions across all their projects in
+    # one shot, so /beacon-dm-send can pick recipients without cd-ing into
+    # each candidate project.
+    p_sessions = sub.add_parser(
+        "sessions",
+        help="Cross-project session directory (e-1587)",
+        add_help=False,
+    )
+    p_sessions.add_argument("--help", "-h", action="store_true", dest="show_help")
+    p_sessions.add_argument("list_arg", nargs="?", default="")
+    p_sessions.add_argument("--live", action="store_true")
+    p_sessions.add_argument("--healthy", action="store_true")
+    p_sessions.add_argument("--since-min", dest="since_min", default="5")
+    p_sessions.add_argument("--machine", default="")
+    p_sessions.add_argument("--agent", default="")
+    p_sessions.add_argument("--json", action="store_true")
+
     # ---- channel install (ms-54 e-1152 / ms-44 e-1171) ----
     # `beacon channel install` writes a project-level .mcp.json that
     # wires the Claude Code beacon-bus MCP server to channel/bus.mjs.
@@ -720,6 +896,126 @@ def build_parser() -> argparse.ArgumentParser:
     p_channel.add_argument("--help", "-h", action="store_true", dest="show_help")
     channel_sub = p_channel.add_subparsers(dest="channel_cmd", metavar="<subcmd>")
     channel_sub.add_parser("install", add_help=False)
+
+    # ---- ms-55 coordination signals (e-1735) ----
+    # Win parity for the 6 ms-55 verbs (stop / resume / rollback / claim /
+    # stuck / morning). Each subparser mirrors bin/beacon's env layout
+    # so the same commands.py subcommand runs end-to-end. Without this,
+    # Windows pipx users hit `argparse invalid choice` for everything in
+    # the 走る / 止まる両輪 surface.
+
+    # `beacon stop scoped|global|status` (ms-55 e-1646).
+    p_stop = sub.add_parser("stop", help="Broadcast STOP signal (Andon cord)", add_help=False)
+    p_stop.add_argument("--help", "-h", action="store_true", dest="show_help")
+    stop_sub = p_stop.add_subparsers(dest="stop_cmd", metavar="<subcmd>")
+    p_stop_scoped = stop_sub.add_parser("scoped", add_help=False)
+    p_stop_scoped.add_argument("--target", default="")
+    p_stop_scoped.add_argument("--reason", default="")
+    p_stop_scoped.add_argument("--reason-kind", dest="reason_kind", default="")
+    p_stop_scoped.add_argument("--machine-reason", dest="machine_reason", default="")
+    p_stop_scoped.add_argument("--json", action="store_true")
+    p_stop_global = stop_sub.add_parser("global", add_help=False)
+    p_stop_global.add_argument("--reason", default="")
+    p_stop_global.add_argument("--reason-kind", dest="reason_kind", default="")
+    p_stop_global.add_argument("--machine-reason", dest="machine_reason", default="")
+    p_stop_global.add_argument("--json", action="store_true")
+    p_stop_status = stop_sub.add_parser("status", add_help=False)
+    p_stop_status.add_argument("--json", action="store_true")
+
+    # `beacon resume scoped|global` (paired with stop).
+    p_resume = sub.add_parser("resume", help="Clear a STOP signal", add_help=False)
+    p_resume.add_argument("--help", "-h", action="store_true", dest="show_help")
+    resume_sub = p_resume.add_subparsers(dest="resume_cmd", metavar="<subcmd>")
+    p_resume_scoped = resume_sub.add_parser("scoped", add_help=False)
+    p_resume_scoped.add_argument("--target", default="")
+    p_resume_scoped.add_argument("--reason", default="")
+    p_resume_scoped.add_argument("--json", action="store_true")
+    p_resume_global = resume_sub.add_parser("global", add_help=False)
+    p_resume_global.add_argument("--reason", default="")
+    p_resume_global.add_argument("--json", action="store_true")
+
+    # `beacon rollback` (ms-55 e-1647).
+    p_rollback = sub.add_parser(
+        "rollback", help="Safe-boundary rollback (e-1647)", add_help=False,
+    )
+    p_rollback.add_argument("--help", "-h", action="store_true", dest="show_help")
+    p_rollback.add_argument("--commits", default="0")
+    p_rollback.add_argument("--reason", default="")
+    p_rollback.add_argument("--dry-run", dest="dry_run", action="store_true")
+    p_rollback.add_argument(
+        "--no-record", dest="no_record", action="store_true",
+    )
+    p_rollback.add_argument("--json", action="store_true")
+
+    # `beacon claim ...` (ms-55 e-1648).
+    p_claim = sub.add_parser("claim", help="Claim primitives", add_help=False)
+    p_claim.add_argument("--help", "-h", action="store_true", dest="show_help")
+    claim_sub = p_claim.add_subparsers(dest="claim_cmd", metavar="<subcmd>")
+    # request / handoff / post share argument shape; only the bash side
+    # name maps to a different commands.py verb (claim_request /
+    # claim_handoff / claim_post).
+    # Loop var must NOT be named `p` — that would shadow the top-level
+    # parser captured at the top of build_parser() and `return p` at the
+    # bottom would silently return claim_sub's last child instead.
+    for _cs in ("request", "handoff", "post"):
+        _pc = claim_sub.add_parser(_cs, add_help=False)
+        _pc.add_argument("--target", default="")
+        _pc.add_argument("--intent", default="")
+        _pc.add_argument("--to", default="")
+        _pc.add_argument("--expires-at", dest="expires_at", default="")
+        _pc.add_argument("--json", action="store_true")
+    p_claim_respond = claim_sub.add_parser("respond", add_help=False)
+    p_claim_respond.add_argument("claim_id", nargs="?", default="")
+    p_claim_respond.add_argument("--accept", action="store_true")
+    p_claim_respond.add_argument("--decline", action="store_true")
+    p_claim_respond.add_argument("--reason", default="")
+    p_claim_respond.add_argument("--json", action="store_true")
+    p_claim_release = claim_sub.add_parser("release", add_help=False)
+    p_claim_release.add_argument("claim_id", nargs="?", default="")
+    p_claim_release.add_argument("--outcome", default="")
+    p_claim_release.add_argument("--reason", default="")
+    p_claim_release.add_argument("--json", action="store_true")
+    p_claim_list = claim_sub.add_parser("list", aliases=["ls"], add_help=False)
+    p_claim_list.add_argument("--mine", action="store_true")
+    p_claim_list.add_argument("--target", default="")
+    p_claim_list.add_argument("--json", action="store_true")
+
+    # `beacon stuck check` (ms-55 e-1649).
+    p_stuck = sub.add_parser(
+        "stuck", help="STUCK signal detector", add_help=False,
+    )
+    p_stuck.add_argument("--help", "-h", action="store_true", dest="show_help")
+    stuck_sub = p_stuck.add_subparsers(dest="stuck_cmd", metavar="<subcmd>")
+    p_stuck_check = stuck_sub.add_parser("check", add_help=False)
+    p_stuck_check.add_argument(
+        "--telemetry-inline", dest="telemetry_inline", default="",
+    )
+    p_stuck_check.add_argument(
+        "--telemetry-file", dest="telemetry_file", default="",
+    )
+    p_stuck_check.add_argument(
+        "--timeout-minutes", dest="timeout_minutes", default="",
+    )
+    p_stuck_check.add_argument(
+        "--dry-run", dest="dry_run", action="store_true",
+    )
+    p_stuck_check.add_argument("--json", action="store_true")
+
+    # `beacon morning` (ms-55 e-1650 + e-1733 --no-doc).
+    p_morning = sub.add_parser(
+        "morning", help="Overnight briefing", add_help=False,
+    )
+    p_morning.add_argument("--help", "-h", action="store_true", dest="show_help")
+    p_morning.add_argument(
+        "--since-hours", dest="since_hours", default="",
+    )
+    p_morning.add_argument(
+        "--events-file", dest="events_file", default="",
+    )
+    p_morning.add_argument(
+        "--no-doc", dest="no_doc", action="store_true",
+    )
+    p_morning.add_argument("--json", action="store_true")
 
     # ---- monitor (ms-44 e-854) ----
     # `beacon monitor context` invokes the Stop hook context-usage monitor on
@@ -755,6 +1051,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_bus_send.add_argument("--delivery", default="")
     p_bus_send.add_argument("--in-reply-to", dest="in_reply_to", default="")
     p_bus_send.add_argument("--project", dest="bus_project_id", default="")
+    # ms-73 / e-1763: DM-routing + envelope-issue flags. `--to <recipient>`
+    # is the cross-user DM target (bash: BEACON_BUS_RECIPIENT_SESSION).
+    # `--action <name>` is the Tier-1 envelope authorized action; bash
+    # accepts repeated flags and comma-joins them server-side (e-1290).
+    # `--no-envelope` opts out of the envelope issuance path (debug /
+    # legacy). Without these flags Windows pipx users could not send
+    # authorized cross-user DMs at all (W1 in ms-73 SPEC).
+    p_bus_send.add_argument("--to", dest="bus_to", default="")
+    p_bus_send.add_argument("--action", dest="bus_action",
+                             action="append", default=[])
+    p_bus_send.add_argument("--no-envelope", dest="no_envelope",
+                             action="store_true")
     p_bus_send.add_argument("--json", action="store_true")
 
     p_bus_listen = bus_sub.add_parser("listen", add_help=False)
@@ -777,6 +1085,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_bus_ack.add_argument("--recipient", default="")
     p_bus_ack.add_argument("--last-seen-at", dest="last_seen_at", default="")
     p_bus_ack.add_argument("--project", dest="bus_project_id", default="")
+    # ms-73 / e-1763: explicit event-id ack (e-1423). Used by
+    # /beacon-operation-execute to structurally clear the triggering
+    # event from the next inbox-hook inject (forcing function).
+    p_bus_ack.add_argument("--event", dest="bus_ack_event_id", default="")
     p_bus_ack.add_argument("--json", action="store_true")
 
     # ms-54 / e-1348: per-event receipt status (sent / delivered / opened).
@@ -809,6 +1121,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_bus_budget_show.add_argument("--json", action="store_true")
     bus_budget_sub.add_parser("clear", add_help=False)
 
+    # ---- dm respond / dm log (ms-70 / e-1716, e-1923) ----
+    # Cross-user DM action decision (respond) + audit-trail viewer (log).
+    # Win mirror for the bash `dm)` dispatch case. Adding here closes
+    # the drift gap that the scripts/check-cli-help-drift.py guard
+    # flagged after e-1716 (= bin/beacon `dm` verb shipped without a
+    # Python sibling, so Windows pipx users hit `argparse invalid
+    # choice: 'dm'`).
+    p_dm = sub.add_parser("dm", help="DM approval ops (ms-70)", add_help=False)
+    p_dm.add_argument("--help", "-h", action="store_true", dest="show_help")
+    dm_sub = p_dm.add_subparsers(dest="dm_cmd", metavar="<subcmd>")
+
+    p_dm_respond = dm_sub.add_parser("respond", add_help=False)
+    # respond accepts approve|deny + event_id in either positional order;
+    # we capture them as raw positionals and let the handler sort it out
+    # (same pattern bin/beacon uses).
+    p_dm_respond.add_argument("respond_args", nargs="*", default=[])
+    p_dm_respond.add_argument("--project", dest="dm_project_id", default="")
+    p_dm_respond.add_argument("--json", action="store_true")
+
+    p_dm_log = dm_sub.add_parser("log", add_help=False)
+    p_dm_log.add_argument("project_id", nargs="?", default="")
+    p_dm_log.add_argument("--limit", default="")
+    p_dm_log.add_argument("--project", dest="dm_project_id", default="")
+    p_dm_log.add_argument("--json", action="store_true")
+
     # ---- auth login / logout / status (cloud OAuth) ----
     # `beacon auth login` opens a browser and signs in with Google so the
     # cloud project APIs (firestore / WS) become reachable. commands.py
@@ -834,7 +1171,11 @@ def build_parser() -> argparse.ArgumentParser:
     cloud_sub = p_cloud.add_subparsers(dest="cloud_cmd", metavar="<subcmd>")
     cloud_sub.add_parser("list", add_help=False)
     cloud_sub.add_parser("status", add_help=False)
-    cloud_sub.add_parser("off", add_help=False)
+    # e-1861 (ms-61): cloud off is sandbox / verification-only and requires
+    # explicit --confirm <project_id> to prevent silent invocation.
+    p_cloud_off = cloud_sub.add_parser("off", add_help=False)
+    p_cloud_off.add_argument("--confirm", default="",
+                             help="cloud project_id (exact match required)")
     p_cloud_join = cloud_sub.add_parser("join", add_help=False)
     p_cloud_join.add_argument("project_id", nargs="?", default="")
     p_cloud_open = cloud_sub.add_parser("open", add_help=False)
@@ -1011,25 +1352,29 @@ def _handle_init(root: Path, args: argparse.Namespace) -> int:
         "BEACON_NAME": name,
         "BEACON_OBJECTIVE": objective,
         "BEACON_RETRO_DAY": retro_day,
+        # ms-63 / e-1441: forward sensitivity choice. cmd_init reads
+        # BEACON_SENSITIVITY and falls back to "high" on any unknown value
+        # (= forgot-to-configure → safe default).
+        "BEACON_SENSITIVITY": getattr(args, "sensitivity", "high") or "high",
     }
     rc = _run_commands_py(root, "init", env)
     if rc != 0:
         return rc
 
     if args.storage == "cloud":
+        # e-1861 (ms-61): cloud.json existence is sole source of truth.
+        # cloud_push above already materialised .beacon/cloud.json — no
+        # need to write the legacy `{"mode": "cloud"}` marker into config.json.
         _run_commands_py(root, "cloud_push", {})
-        try:
-            Path(".beacon/config.json").write_text('{"mode": "cloud"}\n')
-            print("Cloud mode enabled.")
-        except OSError as exc:
-            _eprint(f"Warning: could not write .beacon/config.json: {exc}")
+        print("Cloud mode enabled.")
     return 0
 
 
 def _print_init_help() -> None:
     print(
         "Usage: beacon init [--name NAME] [--objective TEXT] "
-        "[--retro-day mon|tue|...|sun|monday|...] [--storage local|cloud]"
+        "[--retro-day mon|tue|...|sun|monday|...] [--storage local|cloud] "
+        "[--sensitivity high|low]"
     )
 
 
@@ -1486,6 +1831,7 @@ def _handle_doc(root: Path, args: argparse.Namespace) -> int:
             "BEACON_SCOPE": args.scope or "",
             "BEACON_MS": args.doc_ms or "",
             "BEACON_OP": args.doc_op or "",
+            "BEACON_TREK_ID": getattr(args, "doc_trek", "") or "",
             "BEACON_JSON": "1" if args.json else "",
             "BEACON_BUS_ORIGIN": "1" if getattr(args, "bus_origin", False) else "",
         }
@@ -1527,6 +1873,7 @@ def _handle_doc(root: Path, args: argparse.Namespace) -> int:
             "BEACON_SCOPE": args.scope or "",
             "BEACON_MS": args.doc_ms or "",
             "BEACON_OP": args.doc_op or "",
+            "BEACON_TREK_ID": getattr(args, "doc_trek", "") or "",
             "BEACON_JSON": "1" if args.json else "",
             "BEACON_BUS_ORIGIN": "1" if getattr(args, "bus_origin", False) else "",
         }
@@ -1746,14 +2093,18 @@ def _handle_entry(root: Path, args: argparse.Namespace) -> int:
 
 
 def _handle_operation(root: Path, args: argparse.Namespace) -> int:
-    """Operation dispatch — only `purge` is implemented natively (e-893).
+    """Operation dispatch — `purge` (e-893) + `envelope verify` (ms-73 e-1764).
 
     Full operation management (open/close/list/show/run/incident) is still
-    bash-only; we expose just the duplicate-ID recovery path here because
-    that is what must work when the project won't load and bash is absent.
+    bash-only; we expose the duplicate-ID recovery path (purge) and the
+    AI self-check primitive (envelope verify, ms-60 e-1340) which the
+    autonomous /beacon-operation-execute Skill calls before each action.
+    Without envelope verify on Windows pipx, autonomous operations could
+    not perform the pre-flight authorization check (W1 in ms-73 SPEC).
     """
     if args.show_help or args.op_cmd is None:
         print("Usage: beacon operation purge <op-id> --reason <text> [--index <n>]")
+        print("       beacon operation envelope verify <op-id> <action> [--json]")
         print("  (Full operation management is available via the bash CLI.)")
         return 0 if args.show_help else 2
     if args.op_cmd == "purge":
@@ -1762,6 +2113,32 @@ def _handle_operation(root: Path, args: argparse.Namespace) -> int:
             reason=args.reason, index=args.index, json_flag=args.json,
             usage="beacon operation purge <op-id> --reason <text> [--index <n>] [--json]",
         )
+    if args.op_cmd == "envelope":
+        env_sub = getattr(args, "op_envelope_cmd", None)
+        if env_sub is None:
+            print("Usage: beacon operation envelope verify <op-id> <action> [--json]")
+            return 2
+        if env_sub == "verify":
+            op_id = (getattr(args, "op_id", "") or "").strip()
+            action = (getattr(args, "action", "") or "").strip()
+            if not op_id or not action:
+                _eprint(
+                    "Usage: beacon operation envelope verify <op-id> <action> [--json]"
+                )
+                return 2
+            # commands.py:cmd_operation_envelope_verify reads:
+            #   BEACON_OPERATION_ID, BEACON_ACTION, BEACON_JSON
+            # and routes to server/approved_actions for the actual match.
+            # cloud / local mode branching lives there (returns rc=2 with
+            # a clear error if local mode); we don't pre-check it here so
+            # the error message stays identical across OS.
+            return _run_commands_py(root, "operation_envelope_verify", {
+                "BEACON_OPERATION_ID": op_id,
+                "BEACON_ACTION": action,
+                "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+            })
+        _eprint(f"Unknown operation envelope subcommand: {env_sub}")
+        return 2
     return 1
 
 
@@ -1775,6 +2152,137 @@ def _handle_project(root: Path, args: argparse.Namespace) -> int:
         return _run_commands_py(root, "project_archive", {})
     if args.project_cmd == "unarchive":
         return _run_commands_py(root, "project_unarchive", {})
+    return 1
+
+
+def _handle_trek(root: Path, args: argparse.Namespace) -> int:
+    """`beacon trek <create|list|show|start|archive>` (ms-69 / e-1653).
+
+    Mirrors the bash dispatch in bin/beacon. Trek is a top-level
+    cross-project entity so we do **not** call ``_ensure_project`` —
+    the storage layer (~/.beacon/treks/) is project-agnostic.
+
+    BEACON_USER_EMAIL / BEACON_SESSION_ID are inherited from the parent
+    process environment for the ``create`` path (= identity gating lives
+    in commands.py).
+    """
+    if args.show_help or args.trek_cmd is None:
+        print(
+            "Usage: beacon trek <subcommand> [args]\n"
+            "\n"
+            "Subcommands:\n"
+            "  create \"<title>\" [--type temporary|persistent] "
+            "[--description \"...\"]\n"
+            "  list [--status S] [--all] [--all-actors] [--json]\n"
+            "  show <trek-id> [--json]\n"
+            "  start <trek-id>\n"
+            "  archive <trek-id>\n"
+            "  invite <trek-id> --actor <email> [--notify]\n"
+            "  join <trek-id>\n"
+            "  leave <trek-id>\n"
+            "  plan <trek-id> --add-scope <project[:ref]>\n"
+            "  plan <trek-id> --remove-scope <project[:ref]>\n"
+            "  stop <trek-id> [--reason \"...\"]    (= Andon cord、halt 信号)\n"
+            "  resume <trek-id>                     (= halt 信号を clear)\n"
+            "  transfer-leader <trek-id> --to <session-id>\n"
+            "\n"
+            "Env (creator identity, required for 'create'):\n"
+            "  BEACON_USER_EMAIL    creator email\n"
+            "  BEACON_SESSION_ID    creator session id (becomes initial leader)\n"
+            "  BEACON_USER_ID       creator user_id (fallback: whoami)"
+        )
+        return 0 if args.show_help else 2
+    cmd = args.trek_cmd
+    json_env = "1" if getattr(args, "json", False) else ""
+
+    if cmd == "create":
+        return _run_commands_py(
+            root, "trek_create",
+            {
+                "BEACON_TREK_TITLE": args.title or "",
+                "BEACON_TREK_TYPE": args.trek_type or "",
+                "BEACON_TREK_DESCRIPTION": args.trek_desc or "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd in ("list", "ls"):
+        return _run_commands_py(
+            root, "trek_list",
+            {
+                "BEACON_TREK_STATUS": args.status or "",
+                "BEACON_TREK_INCLUDE_ARCHIVED": "1" if args.include_archived else "",
+                "BEACON_TREK_ALL_ACTORS": "1" if args.all_actors else "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd in ("show", "get"):
+        return _run_commands_py(
+            root, "trek_show",
+            {"BEACON_TREK_ID": args.trek_id or "", "BEACON_JSON": json_env},
+        )
+    if cmd == "start":
+        return _run_commands_py(
+            root, "trek_start",
+            {"BEACON_TREK_ID": args.trek_id or "", "BEACON_JSON": json_env},
+        )
+    if cmd == "archive":
+        return _run_commands_py(
+            root, "trek_archive",
+            {"BEACON_TREK_ID": args.trek_id or "", "BEACON_JSON": json_env},
+        )
+    if cmd == "invite":
+        return _run_commands_py(
+            root, "trek_invite",
+            {
+                "BEACON_TREK_ID": args.trek_id or "",
+                "BEACON_TREK_ACTOR": args.actor or "",
+                "BEACON_TREK_NOTIFY": "1" if args.notify else "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd == "join":
+        return _run_commands_py(
+            root, "trek_join",
+            {"BEACON_TREK_ID": args.trek_id or "", "BEACON_JSON": json_env},
+        )
+    if cmd == "leave":
+        return _run_commands_py(
+            root, "trek_leave",
+            {"BEACON_TREK_ID": args.trek_id or "", "BEACON_JSON": json_env},
+        )
+    if cmd == "plan":
+        return _run_commands_py(
+            root, "trek_plan",
+            {
+                "BEACON_TREK_ID": args.trek_id or "",
+                "BEACON_TREK_SCOPE_ADD": args.add_scope or "",
+                "BEACON_TREK_SCOPE_REMOVE": args.remove_scope or "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd == "stop":
+        return _run_commands_py(
+            root, "trek_stop",
+            {
+                "BEACON_TREK_ID": args.trek_id or "",
+                "BEACON_TREK_REASON": args.reason or "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd == "resume":
+        return _run_commands_py(
+            root, "trek_resume",
+            {"BEACON_TREK_ID": args.trek_id or "", "BEACON_JSON": json_env},
+        )
+    if cmd == "transfer-leader":
+        return _run_commands_py(
+            root, "trek_transfer_leader",
+            {
+                "BEACON_TREK_ID": args.trek_id or "",
+                "BEACON_TREK_TO": args.to_session_id or "",
+                "BEACON_JSON": json_env,
+            },
+        )
     return 1
 
 
@@ -1999,14 +2507,16 @@ def _handle_cloud(root: Path, args: argparse.Namespace) -> int:
     """
     if args.show_help or args.cloud_cmd is None:
         print(
-            "Usage: beacon cloud [list|status|open <id>|join <id>|off|push|pull]\n"
+            "Usage: beacon cloud [list|status|open <id>|join <id>|push|pull]\n"
             "  list                 List cloud projects\n"
             "  status               Show current cloud mode + project_id\n"
             "  open <project-id>    Bind cwd to a cloud project + open Web UI\n"
             "  join <project-id>    Bind cwd to a cloud project (no UI launch)\n"
-            "  off                  Switch back to local mode (writes config.json)\n"
-            "  push [-f|--force]    Upload local project (local mode → cloud + auto switch)\n"
-            "  pull                 Sync cloud state into the local read-only cache"
+            "  push [-f|--force]    Upload local project to cloud\n"
+            "  pull                 Sync cloud state into the local read-only cache\n"
+            "\n"
+            "Sandbox / verification only (e-1861, ms-61):\n"
+            "  off --confirm <id>   Disable cloud sync (archives cloud.json into .beacon/.trash/)"
         )
         return 0 if args.show_help else 2
 
@@ -2023,19 +2533,50 @@ def _handle_cloud(root: Path, args: argparse.Namespace) -> int:
             root, "cloud_join", {"BEACON_CLOUD_PROJECT_ID": args.project_id}
         )
     if cmd == "off":
-        # Local Python-side write (no commands.py handler exists for `off` —
-        # bash does it inline). Mirror the bash behaviour byte-for-byte.
-        config_path = Path(".beacon/config.json")
-        if not config_path.exists():
-            print("No .beacon/config.json found.")
+        # e-1861 (ms-61): "cloud off" is sandbox / verification-only. Beacon
+        # = cloud-only in normal operation (Claude Code requires internet).
+        # The subcommand requires --confirm <project_id> to prevent silent
+        # invocation by sub-agents (the same pattern that caused the
+        # 2026-06-15 data-loss panic / e-1776). Mirrors bash bin/beacon.
+        cloud_path = Path(".beacon/cloud.json")
+        if not cloud_path.exists():
+            print("Not in cloud mode (no .beacon/cloud.json found).")
             return 0
         try:
-            config_path.write_text('{"mode": "local"}\n', encoding="utf-8")
-            print("Switched to local mode.")
-            return 0
-        except OSError as exc:
-            _eprint(f"Error writing config.json: {exc}")
+            import json as _json
+            expected_pid = _json.loads(
+                cloud_path.read_text(encoding="utf-8")
+            ).get("project_id", "")
+        except (OSError, ValueError):
+            expected_pid = ""
+        if not expected_pid:
+            _eprint("Error: .beacon/cloud.json is malformed (no project_id).")
             return 1
+        given_pid = getattr(args, "confirm", "") or ""
+        if given_pid != expected_pid:
+            print("Refusing to disable cloud sync without two-factor confirmation.")
+            print()
+            print("  Sandbox / verification only — Beacon assumes cloud mode in production.")
+            print(f"  To disable: beacon cloud off --confirm \"{expected_pid}\"")
+            print()
+            print("  This guard exists because a 2026-06-15 incident (e-1776) saw a")
+            print("  sub-agent silently flip cloud → local and trigger a data-loss panic.")
+            return 1
+        # Move cloud.json into .beacon/.trash/ with timestamp (never delete).
+        from datetime import datetime as _dt
+        trash_dir = Path(".beacon/.trash")
+        trash_dir.mkdir(parents=True, exist_ok=True)
+        ts = _dt.now().strftime("%Y%m%d-%H%M%S")
+        dest = trash_dir / f"cloud.json.disabled-{ts}"
+        try:
+            cloud_path.rename(dest)
+        except OSError as exc:
+            _eprint(f"Error archiving cloud.json: {exc}")
+            return 1
+        print("Cloud sync disabled for this directory.")
+        print(f"  .beacon/cloud.json -> {dest}")
+        print(f"  To re-enable: beacon cloud join {expected_pid}  (or beacon cloud setup)")
+        return 0
     if cmd == "open":
         if not args.project_id:
             print("Usage: beacon cloud open <project-id>")
@@ -2043,9 +2584,11 @@ def _handle_cloud(root: Path, args: argparse.Namespace) -> int:
         return _do_cloud_open(root, args.project_id, args.no_browser)
     if cmd == "push":
         # cmd_cloud_push reads BEACON_FORCE from env. It already enforces the
-        # ms-24 cloud-mode block (refuses without --force) and ms-36 auto-
-        # switch (config.json mode -> cloud after initial migration), so the
-        # dispatch handler is intentionally thin.
+        # ms-24 cloud-mode block (refuses without --force). The historical
+        # ms-36 "config.json mode -> cloud after initial migration" auto-
+        # switch was retired in e-1861 (ms-61) — cloud.json existence is
+        # now the sole source of truth, so no mode-write happens here.
+        # Dispatch handler is intentionally thin.
         return _run_commands_py(
             root, "cloud_push",
             {"BEACON_FORCE": "1" if args.force else ""},
@@ -2097,15 +2640,32 @@ def _do_cloud_open(root: Path, project_id: str, no_browser: bool) -> int:
             f"{existing_id!r}; overwriting with {project_id!r}."
         )
 
-    # 3. Write the cloud / config / project skeleton.
+    # ms-64 / e-1461: resolve api_url via the profile resolver so cloud.json
+    # init + Web UI launch URL track the active profile (BEACON_PROFILE env or
+    # --profile flag). Falls back to beacon-ai.dev when profile.py is not
+    # available — keeps the original default behavior for fresh installs.
+    api_url = "https://beacon-ai.dev"
+    try:
+        # lib/ is on sys.path via the entry point's runtime setup, but be
+        # defensive in case this Python entry point runs before that wiring.
+        import sys as _sys
+        _lib_path = str(Path(__file__).resolve().parents[1] / "lib")
+        if _lib_path not in _sys.path:
+            _sys.path.insert(0, _lib_path)
+        import profile as _profile  # type: ignore[import-not-found]
+        api_url = _profile.resolve_active_profile().api_url
+    except Exception:
+        pass
+
+    # 3. Write the cloud / project skeleton.
+    # e-1861 (ms-61): cloud.json existence is the sole source of truth.
+    # The legacy `{"mode": "cloud"}` write into config.json is no longer
+    # needed (closes the silent-drift attack surface).
     Path(".beacon").mkdir(exist_ok=True)
     cloud_path.write_text(
         '{\n  "project_id": "' + project_id + '",\n'
-        '  "api_url": "https://beacon-ai.dev"\n}\n',
+        '  "api_url": "' + api_url + '"\n}\n',
         encoding="utf-8",
-    )
-    Path(".beacon/config.json").write_text(
-        '{"mode": "cloud"}\n', encoding="utf-8"
     )
     project_file = os.environ.get(
         "BEACON_PROJECT_FILE", ".beacon/project.json"
@@ -2118,7 +2678,7 @@ def _do_cloud_open(root: Path, project_id: str, no_browser: bool) -> int:
     print(f"Bound this directory to cloud project {project_id!r}.")
 
     # 4. Launch the Web UI in the system browser unless suppressed.
-    web_url = f"https://beacon-ai.dev/?project={project_id}"
+    web_url = f"{api_url}/?project={project_id}"
     if no_browser:
         print(f"Web UI: {web_url}")
         return 0
@@ -2177,16 +2737,28 @@ def _handle_skill(root: Path, args: argparse.Namespace) -> int:
 
 
 def _handle_session(root: Path, args: argparse.Namespace) -> int:
-    """`beacon session id` / `focus` / `attention` (ms-44 e-1171, ms-54 e-1369).
+    """`beacon session <id|focus|attention|end|rescue|fork|log>`.
 
-    Bash path: `python3 COMMANDS_PY session_id` / `session_focus` /
-    `session_attention` with env vars carrying flag values. Mirror that
-    exactly so Windows pipx users get the same behavior.
+    Mirrors the bash dispatcher (bin/beacon) so Windows pipx users get the
+    same behavior. Initial 3 verbs (id/focus/attention) landed in ms-44
+    e-1171 + ms-54 e-1369. The remaining 4 (end/rescue/fork/log) were
+    bash-only until ms-73 e-1762 added Win parity here.
+
+    Each branch translates argv → BEACON_* env vars exactly like
+    bin/beacon, then delegates to the matching commands.py entry. lib/
+    modules being pure-Python is what makes this a thin wrapper.
     """
     if args.show_help or args.session_cmd is None:
         print("Usage: beacon session id")
         print("       beacon session focus \"<text>\" | --clear | --show [--json]")
         print("       beacon session attention --set true|false [--json]")
+        print("       beacon session end [--summary <text>] [--session-id <id>] "
+              "[--bus-origin] [--json]")
+        print("       beacon session rescue [--json]")
+        print("       beacon session fork <ms-id> [--json]")
+        print("       beacon session fork list [--json]")
+        print("       beacon session log list [--limit N] [--json]")
+        print("       beacon session log show <session-id> [--json]")
         return 0 if args.show_help else 2
     if args.session_cmd == "id":
         return _run_commands_py(root, "session_id", {})
@@ -2204,6 +2776,60 @@ def _handle_session(root: Path, args: argparse.Namespace) -> int:
             "BEACON_JSON": "1" if args.json else "",
         }
         return _run_commands_py(root, "session_attention", env)
+    # ----- ms-73 e-1762 additions -----
+    if args.session_cmd == "end":
+        env = {
+            "BEACON_SUMMARY": getattr(args, "summary", "") or "",
+            "BEACON_SESSION_ID": getattr(args, "session_id", "") or "",
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+            "BEACON_BUS_ORIGIN": "1" if getattr(args, "bus_origin", False) else "",
+        }
+        return _run_commands_py(root, "session_end", env)
+    if args.session_cmd == "rescue":
+        env = {
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        }
+        return _run_commands_py(root, "session_rescue", env)
+    if args.session_cmd == "fork":
+        # `session fork list [--json]` enumerates active forks; otherwise
+        # `session fork <ms-id> [--json]` spawns one. The bash side uses
+        # positional discrimination on `list`, mirrored here so Skills can
+        # call either path identically.
+        positional = (getattr(args, "ms_id_or_list", "") or "").strip()
+        if positional == "list":
+            env = {
+                "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+            }
+            return _run_commands_py(root, "session_fork_list", env)
+        if not positional:
+            _eprint("Usage: beacon session fork <ms-id> [--json]")
+            _eprint("       beacon session fork list [--json]")
+            return 2
+        env = {
+            "BEACON_SESSION_FORK_MS_ID": positional,
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        }
+        return _run_commands_py(root, "session_fork", env)
+    if args.session_cmd == "log":
+        log_sub = getattr(args, "session_log_cmd", None)
+        if log_sub in ("list", "ls"):
+            env = {
+                "BEACON_LIMIT": str(getattr(args, "limit", "0") or "0"),
+                "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+            }
+            return _run_commands_py(root, "session_log_list", env)
+        if log_sub in ("show", "get"):
+            sid = (getattr(args, "session_id", "") or "").strip()
+            if not sid:
+                _eprint("Error: beacon session log show <session-id>")
+                return 1
+            env = {
+                "BEACON_SESSION_ID": sid,
+                "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+            }
+            return _run_commands_py(root, "session_log_show", env)
+        _eprint("Usage: beacon session log [list|show]")
+        return 2
     print(f"Unknown session subcommand: {args.session_cmd}")
     return 2
 
@@ -2221,6 +2847,228 @@ def _handle_channel(root: Path, args: argparse.Namespace) -> int:
         print(f"Unknown channel subcommand: {args.channel_cmd}")
         return 2
     return _run_commands_py(root, "channel_install", {})
+
+
+# ---------------------------------------------------------------------------
+# ms-55 coordination signal handlers (e-1735) — Win parity for the 6 new
+# verbs (stop / resume / rollback / claim / stuck / morning). The bash side
+# is the source of truth for argv → env shape; each handler replays the
+# same translation a Bash dispatcher would do, then delegates to the
+# matching commands.py subcommand. Lib modules (stop_signal / rollback /
+# claims / stuck_detect / morning) are pure-Python, so the underlying
+# logic runs identically on Windows pipx — we only need to bridge argv.
+# ---------------------------------------------------------------------------
+
+def _split_target(target: str) -> tuple[str, str]:
+    """Split `<kind>:<id>` into (kind, id). Empty string → empty tuple."""
+    if not target:
+        return "", ""
+    if ":" not in target:
+        return target, target  # mirrored bash bug-shape; CLI catches it
+    k, _, i = target.partition(":")
+    return k, i
+
+
+def _handle_stop(root: Path, args: argparse.Namespace) -> int:
+    """`beacon stop scoped|global|status` (ms-55 e-1646)."""
+    if args.show_help or getattr(args, "stop_cmd", None) is None:
+        print(
+            "Usage: beacon stop scoped --target <kind>:<id> [--reason \"...\"] "
+            "[--reason-kind X] [--machine-reason '<json>'] [--json]"
+        )
+        print(
+            "       beacon stop global [--reason \"...\"] "
+            "[--reason-kind X] [--machine-reason '<json>'] [--json]"
+        )
+        print("       beacon stop status [--json]")
+        return 0 if args.show_help else 2
+
+    if args.stop_cmd == "scoped":
+        kind, sid = _split_target(getattr(args, "target", "") or "")
+        if getattr(args, "target", "") and ":" not in args.target:
+            _eprint("Error: --target must be <kind>:<id> (e.g. ms:ms-55)")
+            return 1
+        return _run_commands_py(root, "stop_scoped", {
+            "BEACON_STOP_TARGET_KIND": kind,
+            "BEACON_STOP_TARGET_ID": sid,
+            "BEACON_STOP_REASON": getattr(args, "reason", "") or "",
+            "BEACON_STOP_REASON_KIND": getattr(args, "reason_kind", "") or "",
+            "BEACON_STOP_MACHINE_REASON": getattr(args, "machine_reason", "") or "",
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        })
+    if args.stop_cmd == "global":
+        return _run_commands_py(root, "stop_global", {
+            "BEACON_STOP_REASON": getattr(args, "reason", "") or "",
+            "BEACON_STOP_REASON_KIND": getattr(args, "reason_kind", "") or "",
+            "BEACON_STOP_MACHINE_REASON": getattr(args, "machine_reason", "") or "",
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        })
+    if args.stop_cmd == "status":
+        return _run_commands_py(root, "stop_status", {
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        })
+    _eprint(f"Unknown stop subcommand: {args.stop_cmd}")
+    return 2
+
+
+def _handle_resume(root: Path, args: argparse.Namespace) -> int:
+    """`beacon resume scoped|global` (ms-55 e-1646 / paired with stop)."""
+    if args.show_help or getattr(args, "resume_cmd", None) is None:
+        print(
+            "Usage: beacon resume scoped --target <kind>:<id> [--reason \"...\"] [--json]"
+        )
+        print("       beacon resume global [--reason \"...\"] [--json]")
+        return 0 if args.show_help else 2
+
+    if args.resume_cmd == "scoped":
+        kind, sid = _split_target(getattr(args, "target", "") or "")
+        if getattr(args, "target", "") and ":" not in args.target:
+            _eprint("Error: --target must be <kind>:<id>")
+            return 1
+        return _run_commands_py(root, "resume_scoped", {
+            "BEACON_STOP_TARGET_KIND": kind,
+            "BEACON_STOP_TARGET_ID": sid,
+            "BEACON_STOP_REASON": getattr(args, "reason", "") or "",
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        })
+    if args.resume_cmd == "global":
+        return _run_commands_py(root, "resume_global", {
+            "BEACON_STOP_REASON": getattr(args, "reason", "") or "",
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        })
+    _eprint(f"Unknown resume subcommand: {args.resume_cmd}")
+    return 2
+
+
+def _handle_rollback(root: Path, args: argparse.Namespace) -> int:
+    """`beacon rollback` (ms-55 e-1647 + e-1727 --no-record)."""
+    if args.show_help:
+        print(
+            "Usage: beacon rollback [--commits N] [--reason \"...\"] "
+            "[--dry-run] [--no-record] [--json]"
+        )
+        return 0
+    return _run_commands_py(root, "rollback", {
+        "BEACON_ROLLBACK_COMMITS": str(getattr(args, "commits", "0") or "0"),
+        "BEACON_ROLLBACK_REASON": getattr(args, "reason", "") or "",
+        "BEACON_ROLLBACK_DRY_RUN": "1" if getattr(args, "dry_run", False) else "",
+        "BEACON_ROLLBACK_NO_RECORD": "1" if getattr(args, "no_record", False) else "",
+        "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+    })
+
+
+def _handle_claim(root: Path, args: argparse.Namespace) -> int:
+    """`beacon claim request|handoff|post|respond|release|list` (ms-55 e-1648).
+
+    The bash dispatcher remaps subcommand → commands.py verb name (e.g.
+    `request` → `claim_request`). We do the same; lib/claims.py is pure
+    Python so the underlying logic runs identically on Windows pipx.
+    """
+    sub_cmd = getattr(args, "claim_cmd", None)
+    if args.show_help or sub_cmd is None:
+        print("Usage:")
+        print(
+            "  beacon claim post     --target <kind>:<id> [--intent \"...\"] [--json]"
+        )
+        print(
+            "  beacon claim request  --target <kind>:<id> --to <sid> [--intent \"...\"]"
+        )
+        print(
+            "  beacon claim handoff  --target <kind>:<id> --to <sid> [--intent \"...\"]"
+        )
+        print(
+            "  beacon claim respond  <claim-id> [--accept|--decline] [--reason \"...\"]"
+        )
+        print(
+            "  beacon claim release  <claim-id> [--outcome completed|abandoned] [--reason \"...\"]"
+        )
+        print("  beacon claim list     [--mine] [--target <k>:<id>] [--json]")
+        return 0 if args.show_help else 2
+
+    if sub_cmd in ("request", "handoff", "post"):
+        kind, sid = _split_target(getattr(args, "target", "") or "")
+        if getattr(args, "target", "") and ":" not in args.target:
+            _eprint("Error: --target must be <kind>:<id> (e.g. task:e-1648)")
+            return 1
+        return _run_commands_py(root, f"claim_{sub_cmd}", {
+            "BEACON_CLAIM_TARGET_KIND": kind,
+            "BEACON_CLAIM_TARGET_ID": sid,
+            "BEACON_CLAIM_INTENT": getattr(args, "intent", "") or "",
+            "BEACON_CLAIM_TO": getattr(args, "to", "") or "",
+            "BEACON_CLAIM_EXPIRES_AT": getattr(args, "expires_at", "") or "",
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        })
+    if sub_cmd == "respond":
+        if not args.claim_id:
+            _eprint("Error: beacon claim respond <claim_id> [--accept|--decline]")
+            return 1
+        decision = ""
+        if args.accept:
+            decision = "accept"
+        elif args.decline:
+            decision = "decline"
+        return _run_commands_py(root, "claim_respond", {
+            "BEACON_CLAIM_ID": args.claim_id,
+            "BEACON_CLAIM_DECISION": decision,
+            "BEACON_CLAIM_REASON": getattr(args, "reason", "") or "",
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        })
+    if sub_cmd == "release":
+        if not args.claim_id:
+            _eprint("Error: beacon claim release <claim_id> [--outcome completed|abandoned]")
+            return 1
+        return _run_commands_py(root, "claim_release", {
+            "BEACON_CLAIM_ID": args.claim_id,
+            "BEACON_CLAIM_OUTCOME": getattr(args, "outcome", "") or "",
+            "BEACON_CLAIM_REASON": getattr(args, "reason", "") or "",
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        })
+    if sub_cmd in ("list", "ls"):
+        kind, sid = _split_target(getattr(args, "target", "") or "")
+        return _run_commands_py(root, "claim_list", {
+            "BEACON_CLAIM_MINE": "1" if getattr(args, "mine", False) else "",
+            "BEACON_CLAIM_TARGET_KIND": kind,
+            "BEACON_CLAIM_TARGET_ID": sid,
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        })
+    _eprint(f"Unknown claim subcommand: {sub_cmd}")
+    return 2
+
+
+def _handle_stuck(root: Path, args: argparse.Namespace) -> int:
+    """`beacon stuck check` (ms-55 e-1649)."""
+    if args.show_help or getattr(args, "stuck_cmd", None) is None:
+        print(
+            "Usage: beacon stuck check (--telemetry-inline '<json>' | "
+            "--telemetry-file <path>) [--timeout-minutes N] [--dry-run] [--json]"
+        )
+        return 0 if args.show_help else 2
+    if args.stuck_cmd != "check":
+        _eprint(f"Unknown stuck subcommand: {args.stuck_cmd}")
+        return 2
+    return _run_commands_py(root, "stuck_check", {
+        "BEACON_STUCK_TELEMETRY_INLINE": getattr(args, "telemetry_inline", "") or "",
+        "BEACON_STUCK_TELEMETRY_FILE": getattr(args, "telemetry_file", "") or "",
+        "BEACON_STUCK_TIMEOUT_MINUTES": getattr(args, "timeout_minutes", "") or "30",
+        "BEACON_STUCK_DRY_RUN": "1" if getattr(args, "dry_run", False) else "",
+        "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+    })
+
+
+def _handle_morning(root: Path, args: argparse.Namespace) -> int:
+    """`beacon morning` (ms-55 e-1650 + e-1733 --no-doc)."""
+    if args.show_help:
+        print(
+            "Usage: beacon morning [--since-hours N] [--events-file <path>] "
+            "[--no-doc] [--json]"
+        )
+        return 0
+    return _run_commands_py(root, "morning", {
+        "BEACON_MORNING_SINCE_HOURS": getattr(args, "since_hours", "") or "12",
+        "BEACON_MORNING_EVENTS_FILE": getattr(args, "events_file", "") or "",
+        "BEACON_MORNING_NO_DOC": "1" if getattr(args, "no_doc", False) else "",
+        "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+    })
 
 
 def _handle_monitor(root: Path, args: argparse.Namespace) -> int:
@@ -2261,17 +3109,76 @@ def _handle_monitor(root: Path, args: argparse.Namespace) -> int:
 # every bus_X subparser is collapsed here into BEACON_BUS_PROJECT_ID which
 # commands.py:_resolve_bus_project_id consumes; cross-project sends/receives
 # become possible without flipping cwd.
+def _handle_profile(root: Path, args: argparse.Namespace) -> int:
+    if args.show_help or getattr(args, "profile_cmd", None) is None:
+        print("Usage: beacon profile list [--json]")
+        print("")
+        print("List Beacon profiles under ~/.beacon/profiles/. The active")
+        print("profile (per --profile / BEACON_PROFILE / cwd cloud.json) is")
+        print("marked with `*`.")
+        return 0 if args.show_help else 2
+
+    if args.profile_cmd == "list":
+        return _run_commands_py(root, "profile_list", {
+            "BEACON_JSON": "1" if args.json else "",
+        })
+
+    print(f"Unknown profile subcommand: {args.profile_cmd}")
+    return 2
+
+
+def _handle_sessions(root: Path, args: argparse.Namespace) -> int:
+    if args.show_help:
+        print("Usage: beacon sessions [list] [--live] [--healthy] "
+              "[--since-min <N>] [--machine <name>] [--agent <name>] [--json]")
+        print("")
+        print("Cross-project session directory. Lists the calling user's")
+        print("bclaude sessions across ALL projects they own or are a member")
+        print("of. Use this for picking DM recipients (/beacon-dm-send) and")
+        print("diagnosing cross-project heartbeat-stop incidents.")
+        print("")
+        print("For \"who in this project is live\" use `beacon bus directory --live`.")
+        return 0
+
+    env: Dict[str, str] = {
+        "BEACON_SESSIONS_LIVE": "1" if args.live else "",
+        "BEACON_SESSIONS_HEALTHY": "1" if args.healthy else "",
+        "BEACON_SESSIONS_SINCE_MIN": args.since_min or "5",
+        "BEACON_SESSIONS_MACHINE": args.machine or "",
+        "BEACON_SESSIONS_AGENT": args.agent or "",
+        "BEACON_JSON": "1" if args.json else "",
+    }
+    return _run_commands_py(root, "sessions_list", env)
+
+
 def _handle_bus(root: Path, args: argparse.Namespace) -> int:
+    """`beacon bus <send|listen|receive|ack|status|directory|budget>`.
+
+    Bash↔Python role split (ms-73 e-1763):
+      - **bus.mjs** (Node) is the *transport / persistence* layer. It owns
+        the bridge poll loop that stamps session heartbeat, and is the
+        only writer of bus events into the cloud bus collection.
+      - **commands.py** (Python, via this dispatch) is the *operator
+        surface*: enumerate (directory), enqueue an outbound event (send),
+        block-read (listen / receive), advance the cursor (ack), and
+        inspect (status). It is what humans + Skills call from the CLI.
+      - **dispatch.py** (this file) is the *argv → env shim* that lets
+        Windows pipx callers reach the same commands.py entry points
+        without a bash dispatcher in front.
+    The transport layer (bus.mjs) is not duplicated in Python — it runs
+    out-of-process and is OS-independent.
+    """
     if args.show_help or args.bus_cmd is None:
         print("Usage: beacon bus send      --channel <ch> [--payload '<json>'] "
-              "[--sender <id>] [--delivery <mode>] [--in-reply-to <event_id>] "
-              "[--project <id>]")
+              "[--sender <id>] [--to <recipient>] [--delivery <mode>] "
+              "[--in-reply-to <event_id>] [--action <name> ...] "
+              "[--no-envelope] [--project <id>]")
         print("       beacon bus listen    [--recipient <id>] [--channel <ch>] "
               "[--interval <sec>] [--auto-ack] [--once] [--project <id>]")
         print("       beacon bus receive   [--recipient <id>] [--channel <ch>] "
               "[--timeout <sec>] [--auto-ack] [--project <id>]")
         print("       beacon bus ack       [--recipient <id>] "
-              "--last-seen-at <iso8601> [--project <id>]")
+              "--last-seen-at <iso8601> [--event <event_id>] [--project <id>]")
         print("       beacon bus status    <event_id> [--project <id>] [--json]")
         print("       beacon bus directory [--user <email>] [--machine <name>] "
               "[--agent <name>] [--live] [--healthy] [--since-min <N>] "
@@ -2279,6 +3186,10 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
         print("       beacon bus budget    grant --turns <N>  |  show  |  clear")
         print("")
         print("delivery: auto-execute | propose-to-ai (default) | notify-user-only")
+        print("--to: cross-user DM recipient session id (Tier-1 envelope path)")
+        print("--action: repeat for each authorized action; comma-joined "
+              "for envelope issuance (e-1290).")
+        print("--no-envelope: opt-out of envelope issuance (legacy / debug).")
         print("--in-reply-to: mark as AI-authored reply. Requires `bus budget "
               "grant N` first.")
         print("--project: override the cwd's project_id (e-1151) for cross-"
@@ -2290,12 +3201,19 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
     project_id = getattr(args, "bus_project_id", "") or ""
 
     if cmd == "send":
+        # ms-73 e-1763: comma-join repeated --action values so commands.py
+        # receives the same shape as bin/beacon's BEACON_BUS_ACTION.
+        actions = getattr(args, "bus_action", []) or []
+        bus_action_csv = ",".join([a for a in actions if a])
         env: Dict[str, str] = {
             "BEACON_BUS_CHANNEL": args.channel or "",
             "BEACON_BUS_PAYLOAD": args.payload or "",
             "BEACON_BUS_SENDER": args.sender or "",
+            "BEACON_BUS_RECIPIENT_SESSION": getattr(args, "bus_to", "") or "",
             "BEACON_BUS_DELIVERY": args.delivery or "",
             "BEACON_BUS_IN_REPLY_TO": args.in_reply_to or "",
+            "BEACON_BUS_ACTION": bus_action_csv,
+            "BEACON_BUS_NO_ENVELOPE": "1" if getattr(args, "no_envelope", False) else "",
             "BEACON_JSON": "1" if args.json else "",
         }
         if project_id:
@@ -2327,9 +3245,11 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
         return _run_commands_py(root, "bus_receive", env)
 
     if cmd == "ack":
+        # ms-73 e-1763: --event <id> for explicit single-event ack (e-1423).
         env = {
             "BEACON_BUS_RECIPIENT": args.recipient or "",
             "BEACON_BUS_LAST_SEEN_AT": args.last_seen_at or "",
+            "BEACON_BUS_ACK_EVENT_ID": getattr(args, "bus_ack_event_id", "") or "",
             "BEACON_JSON": "1" if args.json else "",
         }
         if project_id:
@@ -2384,6 +3304,75 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
     return 2
 
 
+def _handle_dm(root: Path, args: argparse.Namespace) -> int:
+    """`beacon dm <respond|log>` (ms-70 / e-1716, e-1923).
+
+    Two subverbs:
+      * ``respond approve|deny <event_id>`` — receiver-side decision on
+        a pending DM-action sidecar. Reaches POST /api/projects/{pid}/
+        dm/approval/{event_id} via cmd_dm_respond. Order of approve|deny
+        and event_id is flexible (both positional shapes accepted).
+      * ``log [<project_id>] [--limit N]`` — audit-trail viewer in the
+        terminal. Mirror of the Web UI Settings > Audit table; reaches
+        GET /api/projects/{pid}/dm/approval/history.
+
+    SPEC 設計方針 3 ("承認は terminal Claude Code 内での user 直接判断のみ")
+    is enforced server-side: the CLI carries the human's Bearer token
+    and the server stamps decision_by from the token's sub claim — neither
+    `dm respond` argv nor `dm log` argv can spoof a different actor.
+    """
+    if args.show_help or getattr(args, "dm_cmd", None) is None:
+        print("Usage: beacon dm respond approve <event_id> [--project <id>] [--json]")
+        print("       beacon dm respond deny    <event_id> [--project <id>] [--json]")
+        print("       beacon dm log    [<project_id>] [--limit N] [--project <id>] [--json]")
+        print("")
+        print("Decide a pending cross-user DM action envelope (respond), or")
+        print("scroll the audit log of already-decided rows (log).")
+        print("")
+        print("respond: only the intended receiver can press approve / deny;")
+        print("         the server enforces this via the Bearer token.")
+        print("log:     read-only mirror of the Web UI Settings > Audit table.")
+        return 0 if args.show_help else 2
+
+    cmd = args.dm_cmd
+
+    if cmd == "respond":
+        # Parse the flexible positional pair: accept either
+        # `respond approve <evt>` or `respond <evt> approve`. Empty / bad
+        # input falls through to the handler's usage error.
+        decision = ""
+        event_id = ""
+        for tok in getattr(args, "respond_args", []) or []:
+            if tok in ("approve", "deny") and not decision:
+                decision = tok
+            elif not event_id:
+                event_id = tok
+        env: Dict[str, str] = {
+            "BEACON_DM_DECISION": decision,
+            "BEACON_DM_EVENT_ID": event_id,
+            "BEACON_BUS_PROJECT_ID": getattr(args, "dm_project_id", "") or "",
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        }
+        return _run_commands_py(root, "dm_respond", env)
+
+    if cmd == "log":
+        # `--project <id>` (override) wins over the positional project_id;
+        # both feed _resolve_bus_project_id in commands.py (matches the
+        # bash dispatch precedence).
+        positional_pid = getattr(args, "project_id", "") or ""
+        override_pid = getattr(args, "dm_project_id", "") or ""
+        env = {
+            "BEACON_DM_LOG_PROJECT_ID": positional_pid,
+            "BEACON_DM_LOG_LIMIT": getattr(args, "limit", "") or "",
+            "BEACON_BUS_PROJECT_ID": override_pid or positional_pid,
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        }
+        return _run_commands_py(root, "dm_log", env)
+
+    print(f"Unknown dm subcommand: {cmd}")
+    return 2
+
+
 # ---------------------------------------------------------------------------
 # Top-level entry — argv parse + dispatch
 # ---------------------------------------------------------------------------
@@ -2409,6 +3398,7 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "deploy": _handle_deploy,
     "entry": _handle_entry,
     "operation": _handle_operation,
+    "trek": _handle_trek,
     "project": _handle_project,
     "doctor": _handle_doctor,
     "skill": _handle_skill,
@@ -2418,9 +3408,22 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "issue": _handle_issue,
     "member": _handle_member,
     "session": _handle_session,
+    "sessions": _handle_sessions,
+    "profile": _handle_profile,
     "channel": _handle_channel,
     "bus": _handle_bus,
+    # ms-70 / e-1716 + e-1923: cross-user DM approval primitives (Win mirror
+    # of bin/beacon's `dm)` case). `dm respond` + `dm log`.
+    "dm": _handle_dm,
     "monitor": _handle_monitor,
+    # ms-55 coordination signals (e-1735) — Win parity for the 6 verbs
+    # in the 走る / 止まる両輪 surface.
+    "stop": _handle_stop,
+    "resume": _handle_resume,
+    "rollback": _handle_rollback,
+    "claim": _handle_claim,
+    "stuck": _handle_stuck,
+    "morning": _handle_morning,
 }
 
 
@@ -2500,6 +3503,11 @@ def dispatch(root: Optional[Path], argv: Sequence[str]) -> int:
     if not args.command:
         _print_top_help()
         return 0
+
+    # ms-64 / e-1458: persist --profile into the env before any handler runs
+    # so child processes (commands.py subprocess) inherit it.
+    if getattr(args, "profile", ""):
+        os.environ["BEACON_PROFILE"] = args.profile
 
     # e-1227 (ms-17): stash the cwd at invocation time *before* the
     # relocate below changes it. Handlers that need git HEAD from the

@@ -121,20 +121,55 @@ release-due トリガー (ms-52 e-958: feat 3+ または fix 5+ で fire) が出
 「リリースの頃合い」のシグナル。fire していなくても、ユーザー意志での release
 判断は妨げない (閾値はあくまで promotion であって gate ではない)。
 
+#### bump 区分の予測 (= MS 駆動ルールに沿った確認)
+
+CORE doc `version-rules` (= spec doc、ms-52) で定義された MS 駆動 bump ルール:
+
+- **MINOR**: 新規 MS の提供価値が初めて land した時 (= その MS の最初の release)
+- **PATCH**: 既存 MS の改善・修正・refactor
+- **MAJOR**: BREAKING change
+
+commit prefix から release.yml が自動判定するが、**Skill 側で「MS 駆動の妥当性」を AI が事前確認** する (= e-1659 v3 期に観測した MINOR 乱発の reset 効果)。
+
+Bash で対象 commits の prefix を集計:
+```bash
+LAST_TAG=$(git tag --sort=-creatordate --merged HEAD | head -1)
+git log --pretty="%s" "$LAST_TAG..HEAD" | head -20
+```
+
+AI が以下を判定:
+
+1. `feat(ms-XX):` の commit があるか?
+2. その `ms-XX` は **これまでに release されていない MS** か? (= MS 別 release 履歴は `version-rules` の編集規律で「`feat:` は新規 MS 初 land のみ」を前提とするため、`feat:` が出ているなら原則「新規 MS land」と扱う)
+3. もし「既存 MS の改修なのに `feat:` を使ってしまった」疑いがあれば、ユーザーに確認:
+
+```
+⚠ 機械判定では MINOR bump になりますが、以下の commit は既存 MS の改修に見えます:
+  - [hash:7] feat(ms-XX): ...
+  - ...
+既存 MS の改修なら fix: / refactor: に書き直す (= amend / rebase で prefix 修正) か、
+今回は PATCH bump 上書きで通す (= 後者は version-rules の編集規律から逸脱)。
+どう進めますか？ [prefix 修正 / PATCH 上書き / そのまま MINOR で続行]
+```
+
 #### ユーザーへの提示
 
 ```
 このプロジェクトは release.yml を持っています (5 配信チャネル整合 forcing function 完備)。
 [release-due trigger があれば その message を 1 行で添える]
+[bump 予測: PATCH / MINOR / MAJOR — 根拠を 1 行で]
 
 リリース起動経路 (推奨):
   1) Dry-run: `gh workflow run release.yml -f dry_run=true` 
      計画 (bump 判定 / 対象 commits) を確認する。
   2) 本番: `gh workflow run release.yml -f dry_run=false`
      bump → tag → formula → tap mirror → deploy-cloud-run.yml (await) → release-build.yml (fan-out)。
+  3) 貯める: いまは release を切らず、もう少し commit を貯めてから出す。
 
-このタイミングで release を切りますか？ [dry-run / 本番 / skip]
+このタイミングで release を切りますか？ [dry-run / 本番 / 貯める / skip]
 ```
+
+「貯める」は **v0.37.x 期の MINOR 乱発反省を反映した新選択肢**: per-commit に release を機械起動するのではなく、まとまった単位 (= MS の最初の release、または積み残しが揃ったタイミング) で出す運用を推す。
 
 #### 承認時の処理
 
@@ -143,7 +178,7 @@ release-due トリガー (ms-52 e-958: feat 3+ または fix 5+ で fire) が出
 - `本番` → `gh workflow run release.yml -f dry_run=false` を実行。release.yml の終了後
   (deploy-cloud-run.yml の health check pass + release-build.yml が fan-out 起動済) に
   `beacon trigger check` を再実行すると `release-X.Y.Z` トリガーが立つ
-- `skip` → 何もせず Step 3 へ
+- `貯める` / `skip` → 何もせず Step 3 へ。次の commit 後の `/beacon-push` で再判断
 
 ### Step 2.5c: 経路 B (fallback) — `release.yml` が存在しない
 
@@ -189,6 +224,16 @@ gh release create vX.Y.Z --title vX.Y.Z --notes "Release vX.Y.Z" 2>/dev/null || 
 却下またはスキップ時は何もしない。Step 3 へ進む。
 
 ## Step 3: 書き込み
+
+**ms-68 / e-1642 補足 (= entry-writing principle の draft 表示)**: `beacon push record` を実行する **前** に、Step 2 で生成した説明文を 1 度ユーザーに提示し、self-review 4 原則 (読み手目線 1 行 / 横文字 3 段階 / ID 参照に文脈 / 尻切れトンボ禁止) で違反が無いか自問する。違反があればその場で書き直してから書き込む。push record の本文は将来 retrospection や release note 生成で参照されるため、silent write は読み手 (非開発者を含む) を排除する。
+
+```
+push を以下の説明文で記録します:
+
+  <Step2 で生成した説明文>
+
+このまま記録しますか? (= OK / 書き直し)
+```
 
 Step 2 で生成した説明文を使って Bash ツールで実行:
 

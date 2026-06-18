@@ -65,6 +65,7 @@ Documents:
   beacon doc show <doc-id>                         Show document content
   beacon doc update <doc-id>                       Update a document
   beacon doc delete <doc-id>                       Delete a document
+  beacon doc image-upload <local-file>             Upload image, get markdown img tag
   (doc add / doc update support --bus-origin to refuse bus-derived
    writes — persistence poisoning defense, ms-54 / e-1293)
 
@@ -83,6 +84,65 @@ Operations:
   beacon incident close <id> --resolution "..."
   beacon incident escalate <id> -m <ms-id>
 
+Treks (cross-project / cross-session 協奏作業領域 — ms-69):
+  beacon trek create "<title>" [--type temporary|persistent] [--description "..."]
+                                    Create a trek; caller becomes leader
+  beacon trek list [--status s] [--include-archived] [--all-actors] [--json]
+                                    List treks visible to the caller
+  beacon trek show <trek-id> [--json]
+                                    Show members / scope / status / halt
+  beacon trek start <trek-id>       Transition planning → active
+  beacon trek archive <trek-id>     Archive (= terminal; restart by new trek)
+  beacon trek invite <trek-id> --actor <email> [--notify]
+                                    Invite by email
+  beacon trek join <trek-id>        Accept own invitation
+  beacon trek leave <trek-id>       Remove self (leader must transfer first)
+  beacon trek plan <trek-id> --add-scope <project:ref> | --remove-scope <project:ref>
+                                    Edit scope (ms-/op-/e- ref, or project-wide)
+  beacon trek stop <trek-id> [--reason "..."]
+                                    Pull the Andon cord (halt signal)
+  beacon trek resume <trek-id>      Clear the halt signal
+  beacon trek transfer-leader <trek-id> --to <session-id>
+                                    Hand off leader_session_id
+
+Stop signal (ms-55: Andon cord — anyone can broadcast a halt):
+  beacon stop scoped --target <kind>:<id> [--reason "..."] [--reason-kind X]
+                                    Halt sessions matching kind:id (ms|task|session)
+  beacon stop global [--reason "..."] [--reason-kind X]
+                                    Halt every active autonomous session in the project
+  beacon stop status [--json]       List currently active stop signals
+  beacon resume scoped --target <kind>:<id> [--reason "..."]
+                                    Clear a scoped stop signal
+  beacon resume global [--reason "..."]
+                                    Clear the global stop signal
+
+Rollback (ms-55: safe boundary — local-only is auto, pushed is report-only):
+  beacon rollback [--commits N] [--reason "..."] [--dry-run] [--json]
+                                    Stash dirty edits + git reset --soft un-pushed
+                                    commits; pushed history surfaces as
+                                    compensation proposals (= revert PR etc.)
+
+Claim primitives (ms-55: who is taking what work — coordination):
+  beacon claim post    --target <kind>:<id> [--intent "..."]
+                                    Broadcast "I'm taking X" (first-publisher-wins)
+  beacon claim request --target <kind>:<id> --to <sid> [--intent "..."]
+                                    Ask a specific session to take X
+  beacon claim handoff --target <kind>:<id> --to <sid> [--intent "..."]
+                                    Hand off in-progress X to another session
+  beacon claim respond <claim_id> [--accept|--decline] [--reason "..."]
+                                    Reply to a request/handoff
+  beacon claim release <claim_id> [--outcome completed|abandoned]
+                                    Mark a claim done
+  beacon claim list    [--mine] [--target <kind>:<id>]
+                                    List local active claims (= restart recovery)
+  beacon stuck check   (--telemetry-inline '<json>' | --telemetry-file <path>)
+                       [--timeout-minutes N] [--dry-run] [--json]
+                                    Detect silent sessions (= idle > N min) and
+                                    emit STUCK signals (= stop with reason="stuck")
+  beacon morning [--since-hours N] [--events-file <path>] [--json]
+                                    4-bucket digest of recent autonomous activity:
+                                    完了 / 停止 / skip / 介入要望
+
 Releases & Deploys:
   beacon deploy record [--revision <rev>] [--semver <v>] [--version <tag>] [--desc <text>]
   beacon deploy list
@@ -91,14 +151,17 @@ Releases & Deploys:
   beacon push list
 
 Cloud:
-  beacon cloud                  Open cloud project (interactive select)
-  beacon cloud list             List accessible cloud projects
-  beacon cloud push             Push local project to cloud
-  beacon cloud pull             Pull project from cloud
-  beacon cloud join <id>        Join an existing cloud project
-  beacon cloud open <id>        Open a specific cloud project
-  beacon cloud status           Show cloud config status
-  beacon cloud off              Switch back to local mode
+  beacon cloud                       Open cloud project (interactive select; daily op)
+  beacon cloud open <id>             Open a specific cloud project in web UI (daily op)
+  beacon cloud status                Show cloud config status (read-only, daily op)
+  beacon cloud list                  List accessible cloud projects (read-only)
+  beacon cloud join <id>             Join an existing cloud project
+  beacon cloud upload-initial        Initial bootstrap upload to a new cloud project (special)
+  beacon cloud push                  Legacy alias for upload-initial (deprecated; e-1862)
+  beacon cloud force-pull            Emergency overwrite local from cloud (special)
+  beacon cloud pull                  Legacy alias for force-pull (deprecated; e-1862)
+  beacon cloud off --confirm <id>    Switch back to local mode (sandbox / verification only;
+                                     e-1861/ms-61: archives cloud.json to .beacon/.trash/, no data loss)
 
 Server (maintainer only):
   gcloud run deploy beacon-api-prod --source . --region asia-northeast1 \
@@ -192,6 +255,8 @@ cmd_init() {
     local objective="${BEACON_INIT_OBJECTIVE:-}"
     local retro_day="${BEACON_INIT_RETRO_DAY:-}"
     local storage="${BEACON_INIT_STORAGE:-local}"
+    # ms-63 / e-1441: default-high sensitivity unless caller opts in to low.
+    local sensitivity="${BEACON_INIT_SENSITIVITY:-high}"
     local storage_choice="1"
     [[ "$storage" == "cloud" ]] && storage_choice="2"
 
@@ -248,12 +313,15 @@ cmd_init() {
 
     BEACON_NAME="$name" BEACON_OBJECTIVE="$objective" \
         BEACON_RETRO_DAY="${retro_day:-friday}" \
+        BEACON_SENSITIVITY="$sensitivity" \
         python3 "$COMMANDS_PY" init
 
     # Cloud setup if selected
     if [ "${storage_choice}" = "2" ]; then
         python3 "$COMMANDS_PY" cloud_push
-        echo '{"mode": "cloud"}' > .beacon/config.json
+        # e-1861 (ms-61): cloud.json existence is sole source of truth.
+        # cmd_cloud_push above already created .beacon/cloud.json — no need
+        # to write the legacy `{"mode": "cloud"}` marker into config.json.
         echo "Cloud mode enabled."
     fi
 }
@@ -318,8 +386,12 @@ cmd_setup() {
                     7) retro_day="sunday" ;;
                     *) retro_day="friday" ;;
                 esac
+                # ms-63 / e-1441: setup-driven init also honours the
+                # default-high sensitivity posture (no opt-in path from the
+                # interactive setup yet; users get the safe default).
                 BEACON_NAME="$proj_name" BEACON_OBJECTIVE="$proj_objective" \
-                    BEACON_RETRO_DAY="$retro_day" python3 "$COMMANDS_PY" init
+                    BEACON_RETRO_DAY="$retro_day" \
+                    BEACON_SENSITIVITY="high" python3 "$COMMANDS_PY" init
             fi
             ;;
         2)
@@ -1259,13 +1331,14 @@ cmd_entry_move() {
 
 cmd_retro() {
     ensure_project
-    local since="" until=""
+    local since="" until="" catch_up=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --since) since="${2:-}"; shift 2 ;;
             --until) until="${2:-}"; shift 2 ;;
             --prepare) shift ;;
+            --catch-up) catch_up="1"; shift ;;
             *) shift ;;
         esac
     done
@@ -1307,7 +1380,7 @@ cmd_retro() {
         fi
     fi
 
-    BEACON_SINCE="$since" BEACON_UNTIL="$until" \
+    BEACON_SINCE="$since" BEACON_UNTIL="$until" BEACON_RETRO_CATCH_UP="$catch_up" \
         python3 "$COMMANDS_PY" retro_prepare
 }
 
@@ -1371,17 +1444,16 @@ cmd_cloud_launch() {
         fi
     fi
 
-    # Ensure .beacon dir, cloud.json, and config.json exist
+    # Ensure .beacon dir and cloud.json exist
+    # e-1861 (ms-61): cloud.json existence is the sole source of truth. The
+    # legacy config.json {"mode": "cloud"} marker is no longer written
+    # (closes the silent-drift attack surface — sub-agents can't flip the
+    # CLI off cloud by rewriting config.json anymore).
     mkdir -p .beacon
     cat > .beacon/cloud.json <<EOJSON
 {
   "project_id": "$project_id",
   "api_url": "https://beacon-ai.dev"
-}
-EOJSON
-    cat > .beacon/config.json <<EOJSON
-{
-  "mode": "cloud"
 }
 EOJSON
 
@@ -1438,6 +1510,7 @@ cmd_doc() {
             local json_flag=""
             local doc_ms=""
             local doc_op=""
+            local doc_trek=""
             local doc_bus_origin=""
 
             while [[ $# -gt 0 ]]; do
@@ -1446,6 +1519,7 @@ cmd_doc() {
                     --scope|-s)   doc_scope="${2:-}"; shift 2 ;;
                     --ms)         doc_ms="${2:-}"; shift 2 ;;
                     --op)         doc_op="${2:-}"; shift 2 ;;
+                    --trek)       doc_trek="${2:-}"; shift 2 ;;
                     --json)       json_flag="1"; shift ;;
                     --content)    doc_content="${2:-}"; shift 2 ;;
                     --bus-origin) doc_bus_origin="1"; shift ;;
@@ -1455,13 +1529,15 @@ cmd_doc() {
             done
 
             if [ -z "$doc_title" ]; then
-                echo "Usage: beacon doc add \"title\" [--scope core|spec|memo|retro|report] [--ms ms-id] [--op op-id] [--id slug] [--content text] [--json]"
+                echo "Usage: beacon doc add \"title\" [--scope core|spec|memo|retro|report] [--ms ms-id] [--op op-id] [--trek trek-id] [--id slug] [--content text] [--json]"
                 echo "  Content can also be piped via stdin."
                 exit 1
             fi
             BEACON_TITLE="$doc_title" BEACON_DOC_ID="$doc_id" \
                 BEACON_CONTENT="$doc_content" BEACON_SCOPE="$doc_scope" \
-                BEACON_MS="$doc_ms" BEACON_OP="$doc_op" BEACON_JSON="$json_flag" \
+                BEACON_MS="$doc_ms" BEACON_OP="$doc_op" \
+                BEACON_TREK_ID="$doc_trek" \
+                BEACON_JSON="$json_flag" \
                 BEACON_BUS_ORIGIN="$doc_bus_origin" \
                 python3 "$COMMANDS_PY" doc_add
             ;;
@@ -1495,16 +1571,26 @@ cmd_doc() {
             local doc_scope=""
             local doc_ms=""
             local doc_op=""
+            local doc_trek=""
             local json_flag=""
             local doc_bus_origin=""
+            # e-1859: distinguish "flag absent" from "flag passed empty".
+            # Without this, --ms ms-1 on an op-scoped doc could not know
+            # whether the user explicitly wants to switch scope (= drop op)
+            # or accidentally keep both. The Python side treats the *_SET
+            # marker as "user explicitly set this; honor their value, even
+            # if empty (= clear the field)".
+            local doc_ms_set=""
+            local doc_op_set=""
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --content)    doc_content="${2:-}"; shift 2 ;;
                     --title)      doc_title="${2:-}"; shift 2 ;;
                     --scope|-s)   doc_scope="${2:-}"; shift 2 ;;
-                    --ms)         doc_ms="${2:-}"; shift 2 ;;
-                    --op)         doc_op="${2:-}"; shift 2 ;;
+                    --ms)         doc_ms="${2:-}"; doc_ms_set="1"; shift 2 ;;
+                    --op)         doc_op="${2:-}"; doc_op_set="1"; shift 2 ;;
+                    --trek)       doc_trek="${2:-}"; shift 2 ;;
                     --json)       json_flag="1"; shift ;;
                     --bus-origin) doc_bus_origin="1"; shift ;;
                     --stdin)      shift ;;
@@ -1513,13 +1599,16 @@ cmd_doc() {
             done
 
             if [ -z "$doc_id" ]; then
-                echo "Usage: beacon doc update <doc-id> [--title text] [--scope core|spec|memo|retro|report] [--ms ms-id] [--op op-id] [--content text] [--json]"
+                echo "Usage: beacon doc update <doc-id> [--title text] [--scope core|spec|memo|retro|report] [--ms ms-id] [--op op-id] [--trek trek-id] [--content text] [--json]"
                 echo "  Content can also be piped via stdin."
                 exit 1
             fi
             BEACON_DOC_ID="$doc_id" BEACON_TITLE="$doc_title" \
                 BEACON_CONTENT="$doc_content" BEACON_SCOPE="$doc_scope" \
-                BEACON_MS="$doc_ms" BEACON_OP="$doc_op" BEACON_JSON="$json_flag" \
+                BEACON_MS="$doc_ms" BEACON_OP="$doc_op" \
+                BEACON_MS_SET="$doc_ms_set" BEACON_OP_SET="$doc_op_set" \
+                BEACON_TREK_ID="$doc_trek" \
+                BEACON_JSON="$json_flag" \
                 BEACON_BUS_ORIGIN="$doc_bus_origin" \
                 python3 "$COMMANDS_PY" doc_update
             ;;
@@ -1576,15 +1665,36 @@ cmd_doc() {
             BEACON_DOC_ID="$doc_id" BEACON_REV="$rev" \
                 python3 "$COMMANDS_PY" doc_restore
             ;;
+        image-upload)
+            ensure_project
+            shift
+            local image_path=""
+            local json_flag=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --json) json_flag="1"; shift ;;
+                    *)      [[ -z "$image_path" ]] && image_path="$1"; shift ;;
+                esac
+            done
+            if [ -z "$image_path" ]; then
+                echo "Usage: beacon doc image-upload <local-file> [--json]"
+                echo "  Uploads an image to GCS and prints a markdown img tag to stdout."
+                echo "  Paste the output into a doc body (or use with beacon doc update)."
+                exit 1
+            fi
+            BEACON_DOC_IMAGE_PATH="$image_path" BEACON_JSON="$json_flag" \
+                python3 "$COMMANDS_PY" doc_image_upload
+            ;;
         *)
-            echo "Usage: beacon doc [add|list|show|update|delete|restore|history]"
-            echo "  add    \"title\" --scope core|spec|memo|retro|report [--ms ms-id]  Create a document"
-            echo "  update <doc-id> [--title text] [--content text]     Update a document"
-            echo "  list   [--scope core|spec|memo|retro|report] [--ms ms-id] [--include-trashed]"
-            echo "  show   <doc-id>                                      Show document content"
-            echo "  delete <doc-id> [--reason \"text\"]                    Soft-delete to trash"
-            echo "  history <doc-id>                                     Show revision history"
-            echo "  restore <doc-id> --rev <n>                           Restore to a revision"
+            echo "Usage: beacon doc [add|list|show|update|delete|restore|history|image-upload]"
+            echo "  add          \"title\" --scope core|spec|memo|retro|report [--ms ms-id]"
+            echo "  update       <doc-id> [--title text] [--content text]"
+            echo "  list         [--scope core|spec|memo|retro|report] [--ms ms-id] [--include-trashed]"
+            echo "  show         <doc-id>"
+            echo "  delete       <doc-id> [--reason \"text\"]"
+            echo "  history      <doc-id>"
+            echo "  restore      <doc-id> --rev <n>"
+            echo "  image-upload <local-file>                           Upload image, get markdown img tag"
             ;;
     esac
 }
@@ -1823,6 +1933,20 @@ find_beacon_root() {
 # the parent repo's HEAD after the relocate below.
 export BEACON_INVOCATION_CWD="$PWD"
 
+# ms-64 / e-1458: top-level `--profile <name>` flag. Parsed early so it
+# affects all subcommands uniformly. Exported as BEACON_PROFILE which the
+# Python-side profile resolver (lib/profile.py) honors above cwd cloud.json
+# and below an explicit `--profile` passed to a Python entry point. The flag
+# is repeatable but only the last value wins.
+while [ "${1:-}" = "--profile" ]; do
+    if [ -z "${2:-}" ]; then
+        echo "Error: --profile requires a value (profile name)" >&2
+        exit 2
+    fi
+    export BEACON_PROFILE="$2"
+    shift 2
+done
+
 # Relocate to the project root before dispatch. `setup`/`init` operate on the
 # current directory by design, so they are exempt.
 case "${1:-}" in
@@ -1848,17 +1972,23 @@ case "${1:-}" in
     init)
         shift
         _init_name="" _init_objective="" _init_retro_day="" _init_storage="local"
+        # ms-63 / e-1441: default sensitivity is high (= SPEC § 設計方針 2
+        # safe default). Opt-in low via --sensitivity low for OSS-style
+        # open projects.
+        _init_sensitivity="high"
         while [[ $# -gt 0 ]]; do
             case "$1" in
-                --name)      _init_name="${2:-}"; shift 2 ;;
-                --objective) _init_objective="${2:-}"; shift 2 ;;
-                --retro-day) _init_retro_day="${2:-}"; shift 2 ;;
-                --storage)   _init_storage="${2:-}"; shift 2 ;;
+                --name)        _init_name="${2:-}"; shift 2 ;;
+                --objective)   _init_objective="${2:-}"; shift 2 ;;
+                --retro-day)   _init_retro_day="${2:-}"; shift 2 ;;
+                --storage)     _init_storage="${2:-}"; shift 2 ;;
+                --sensitivity) _init_sensitivity="${2:-}"; shift 2 ;;
                 *) shift ;;
             esac
         done
         BEACON_INIT_NAME="$_init_name" BEACON_INIT_OBJECTIVE="$_init_objective" \
             BEACON_INIT_RETRO_DAY="$_init_retro_day" BEACON_INIT_STORAGE="$_init_storage" \
+            BEACON_INIT_SENSITIVITY="$_init_sensitivity" \
             cmd_init
         ;;
     status)
@@ -2234,6 +2364,194 @@ except ValueError as e:
                 ;;
         esac
         ;;
+    trek)
+        # Trek is a top-level cross-project entity, so we don't call
+        # ensure_project. Storage is ~/.beacon/treks/ (local mode) until
+        # the HTTP path lands in e-1656.
+        case "${2:-}" in
+            create)
+                shift 2
+                title="" type_="" desc=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --type) type_="${2:-}"; shift 2 ;;
+                        --description|--desc) desc="${2:-}"; shift 2 ;;
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$title" ]] && title="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_TITLE="$title" \
+                    BEACON_TREK_TYPE="$type_" \
+                    BEACON_TREK_DESCRIPTION="$desc" \
+                    python3 "$COMMANDS_PY" trek_create
+                ;;
+            list|ls)
+                shift 2
+                status_filter="" include_archived="" all_actors=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --status) status_filter="${2:-}"; shift 2 ;;
+                        --all|--include-archived) include_archived="1"; shift ;;
+                        --all-actors) all_actors="1"; shift ;;
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) shift ;;
+                    esac
+                done
+                BEACON_TREK_STATUS="$status_filter" \
+                    BEACON_TREK_INCLUDE_ARCHIVED="$include_archived" \
+                    BEACON_TREK_ALL_ACTORS="$all_actors" \
+                    python3 "$COMMANDS_PY" trek_list
+                ;;
+            show|get)
+                shift 2
+                trek_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" python3 "$COMMANDS_PY" trek_show
+                ;;
+            start)
+                shift 2
+                trek_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" python3 "$COMMANDS_PY" trek_start
+                ;;
+            archive)
+                shift 2
+                trek_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" python3 "$COMMANDS_PY" trek_archive
+                ;;
+            invite)
+                shift 2
+                trek_id="" actor="" notify=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --actor) actor="${2:-}"; shift 2 ;;
+                        --notify) notify="1"; shift ;;
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" \
+                    BEACON_TREK_ACTOR="$actor" \
+                    BEACON_TREK_NOTIFY="$notify" \
+                    python3 "$COMMANDS_PY" trek_invite
+                ;;
+            join)
+                shift 2
+                trek_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" python3 "$COMMANDS_PY" trek_join
+                ;;
+            leave)
+                shift 2
+                trek_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" python3 "$COMMANDS_PY" trek_leave
+                ;;
+            plan)
+                shift 2
+                trek_id="" scope_add="" scope_remove=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --add-scope) scope_add="${2:-}"; shift 2 ;;
+                        --remove-scope) scope_remove="${2:-}"; shift 2 ;;
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" \
+                    BEACON_TREK_SCOPE_ADD="$scope_add" \
+                    BEACON_TREK_SCOPE_REMOVE="$scope_remove" \
+                    python3 "$COMMANDS_PY" trek_plan
+                ;;
+            stop)
+                shift 2
+                trek_id="" reason=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --reason) reason="${2:-}"; shift 2 ;;
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" BEACON_TREK_REASON="$reason" \
+                    python3 "$COMMANDS_PY" trek_stop
+                ;;
+            resume)
+                shift 2
+                trek_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" python3 "$COMMANDS_PY" trek_resume
+                ;;
+            transfer-leader)
+                shift 2
+                trek_id="" to_sid=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --to) to_sid="${2:-}"; shift 2 ;;
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" BEACON_TREK_TO="$to_sid" \
+                    python3 "$COMMANDS_PY" trek_transfer_leader
+                ;;
+            *)
+                echo "Usage: beacon trek <subcommand> [args]"
+                echo ""
+                echo "Subcommands:"
+                echo "  create \"<title>\" [--type temporary|persistent] [--description \"...\"]"
+                echo "  list [--status S] [--all] [--all-actors] [--json]"
+                echo "  show <trek-id> [--json]"
+                echo "  start <trek-id>"
+                echo "  archive <trek-id>"
+                echo "  invite <trek-id> --actor <email> [--notify]"
+                echo "  join <trek-id>"
+                echo "  leave <trek-id>"
+                echo "  plan <trek-id> --add-scope <project[:ref]>"
+                echo "  plan <trek-id> --remove-scope <project[:ref]>"
+                echo "  stop <trek-id> [--reason \"...\"]    (= Andon cord、halt 信号を立てる)"
+                echo "  resume <trek-id>                     (= halt 信号を clear)"
+                echo "  transfer-leader <trek-id> --to <session-id>"
+                echo ""
+                echo "Env (creator identity, required for 'create'):"
+                echo "  BEACON_USER_EMAIL    creator email"
+                echo "  BEACON_SESSION_ID    creator session id (becomes initial leader)"
+                echo "  BEACON_USER_ID       creator user_id (fallback: whoami)"
+                exit 1
+                ;;
+        esac
+        ;;
     run)
         ensure_project
         case "${2:-}" in
@@ -2517,6 +2835,85 @@ except ValueError as e:
                 ;;
         esac
         ;;
+    profile)
+        # ms-64 / e-1461: enumerate Beacon profiles under ~/.beacon/profiles/.
+        # cwd-independent: profiles live in the user home, not the project.
+        shift || true
+        _prof_sub="${1:-list}"
+        _prof_json=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                list)     shift ;;
+                --json)   _prof_json="1"; shift ;;
+                -h|--help)
+                    cat <<'EOF'
+Usage: beacon profile list [--json]
+
+List Beacon profiles registered under ~/.beacon/profiles/. The active profile
+(per --profile / BEACON_PROFILE / cwd cloud.json) is marked with `*`. Each row
+also shows whether credentials.json is present and the resolved api_url.
+EOF
+                    exit 0
+                    ;;
+                *) shift ;;
+            esac
+        done
+        case "$_prof_sub" in
+            list|"")
+                BEACON_JSON="$_prof_json" python3 "$COMMANDS_PY" profile_list
+                ;;
+            *)
+                echo "Unknown profile subcommand: $_prof_sub"
+                echo "Usage: beacon profile list [--json]"
+                exit 2
+                ;;
+        esac
+        ;;
+    sessions)
+        # ms-54 / e-1587: cross-project session directory. Cwd-independent —
+        # no ensure_project here, the API resolves the calling user across
+        # all their project memberships.
+        shift || true
+        _ses_live=""
+        _ses_healthy=""
+        _ses_since_min="5"
+        _ses_machine=""
+        _ses_agent=""
+        _ses_json=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                list)         shift ;;
+                --live)       _ses_live="1"; shift ;;
+                --healthy)    _ses_healthy="1"; shift ;;
+                --since-min)  _ses_since_min="${2:-5}"; shift 2 ;;
+                --machine)    _ses_machine="${2:-}"; shift 2 ;;
+                --agent)      _ses_agent="${2:-}"; shift 2 ;;
+                --json)       _ses_json="1"; shift ;;
+                -h|--help)
+                    cat <<'EOF'
+Usage: beacon sessions [list] [--live] [--healthy] [--since-min <N>] [--machine <name>] [--agent <name>] [--json]
+
+Cross-project session directory. Lists the calling user's bclaude sessions
+across ALL projects they own or are a member of. Use this when you need
+"who is live anywhere right now" — e.g. picking a DM recipient in another
+project (/beacon-dm-send), or diagnosing a heartbeat-stop incident
+(e-1579-style) without cd-ing through each project.
+
+For "who in this project is live" use `beacon bus directory --live` instead.
+EOF
+                    exit 0
+                    ;;
+                *) shift ;;
+            esac
+        done
+        BEACON_SESSIONS_LIVE="$_ses_live" \
+            BEACON_SESSIONS_HEALTHY="$_ses_healthy" \
+            BEACON_SESSIONS_SINCE_MIN="$_ses_since_min" \
+            BEACON_SESSIONS_MACHINE="$_ses_machine" \
+            BEACON_SESSIONS_AGENT="$_ses_agent" \
+            BEACON_JSON="$_ses_json" \
+            python3 "$COMMANDS_PY" sessions_list
+        ;;
     note)
         ensure_project
         case "${2:-}" in
@@ -2546,6 +2943,424 @@ except ValueError as e:
                 BEACON_NOTE_TEXT="$note_text" BEACON_NOTE_CONTEXT="$note_context" \
                     BEACON_BUS_ORIGIN="$note_bus_origin" \
                     python3 "$COMMANDS_PY" note_add
+                ;;
+        esac
+        ;;
+    stop)
+        # ms-55 e-1646: Andon-cord-style halt protocol.
+        # `beacon stop scoped --target <kind>:<id>` halts a specific MS / task
+        # / session; `beacon stop global` halts the whole project.
+        # SPEC §2: anyone can broadcast (no envelope-tier gate here).
+        ensure_project
+        _stop_sub="${2:-}"
+        shift 2 || true
+        _stop_target=""
+        _stop_reason=""
+        _stop_reason_kind=""
+        _stop_machine_reason=""
+        _stop_json=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --target)         _stop_target="${2:-}"; shift 2 ;;
+                --reason)         _stop_reason="${2:-}"; shift 2 ;;
+                --reason-kind)    _stop_reason_kind="${2:-}"; shift 2 ;;
+                --machine-reason) _stop_machine_reason="${2:-}"; shift 2 ;;
+                --json)           _stop_json="1"; shift ;;
+                *) shift ;;
+            esac
+        done
+        # --target is "kind:id" (e.g. "ms:ms-55") — split into env vars so the
+        # Python CLI can validate each piece independently.
+        _stop_target_kind=""
+        _stop_target_id=""
+        if [[ -n "$_stop_target" ]]; then
+            _stop_target_kind="${_stop_target%%:*}"
+            _stop_target_id="${_stop_target#*:}"
+            # If no colon was present the substitutions both yield the whole
+            # string — guard against that so a bare `--target ms-55` doesn't
+            # silently encode kind="ms-55" id="ms-55".
+            if [[ "$_stop_target_kind" == "$_stop_target_id" && "$_stop_target" != *:* ]]; then
+                echo "Error: --target must be <kind>:<id> (e.g. ms:ms-55)" >&2
+                exit 1
+            fi
+        fi
+        case "$_stop_sub" in
+            scoped)
+                BEACON_STOP_TARGET_KIND="$_stop_target_kind" \
+                    BEACON_STOP_TARGET_ID="$_stop_target_id" \
+                    BEACON_STOP_REASON="$_stop_reason" \
+                    BEACON_STOP_REASON_KIND="$_stop_reason_kind" \
+                    BEACON_STOP_MACHINE_REASON="$_stop_machine_reason" \
+                    BEACON_JSON="$_stop_json" \
+                    python3 "$COMMANDS_PY" stop_scoped
+                ;;
+            global)
+                BEACON_STOP_REASON="$_stop_reason" \
+                    BEACON_STOP_REASON_KIND="$_stop_reason_kind" \
+                    BEACON_STOP_MACHINE_REASON="$_stop_machine_reason" \
+                    BEACON_JSON="$_stop_json" \
+                    python3 "$COMMANDS_PY" stop_global
+                ;;
+            status)
+                BEACON_JSON="$_stop_json" python3 "$COMMANDS_PY" stop_status
+                ;;
+            "")
+                cat <<'EOF'
+Usage: beacon stop scoped --target <kind>:<id> [--reason "..."] [--reason-kind X] [--machine-reason '<json>'] [--json]
+       beacon stop global [--reason "..."] [--reason-kind X] [--machine-reason '<json>'] [--json]
+       beacon stop status [--json]
+
+target kind: ms | task | session
+reason-kind: manual | build_fail | deploy_fail | test_fail | approved_actions_violation | stuck | other
+
+Examples:
+  beacon stop scoped --target ms:ms-55 --reason "build fail 3 retries" --reason-kind build_fail
+  beacon stop global --reason "hostile prompt detected" --reason-kind approved_actions_violation
+  beacon stop status                # list active stop signals
+EOF
+                ;;
+            *)
+                echo "Error: unknown subcommand 'beacon stop $_stop_sub'" >&2
+                echo "Try 'beacon stop' for usage." >&2
+                exit 1
+                ;;
+        esac
+        ;;
+    rollback)
+        # ms-55 e-1647: SPEC §4 safe-boundary rollback. Working tree edits +
+        # un-pushed commits are auto-undone; anything past upstream is
+        # surfaced as a "report + compensation proposal" instead of being
+        # silently destroyed.
+        ensure_project
+        shift
+        _rb_commits=""
+        _rb_reason=""
+        _rb_dry_run=""
+        _rb_json=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --commits) _rb_commits="${2:-0}"; shift 2 ;;
+                --reason)  _rb_reason="${2:-}"; shift 2 ;;
+                --dry-run) _rb_dry_run="1"; shift ;;
+                --json)    _rb_json="1"; shift ;;
+                -h|--help)
+                    cat <<'EOF'
+Usage: beacon rollback [--commits N] [--reason "..."] [--dry-run] [--json]
+
+Inspect the local git state and roll back the safe portion:
+  • Dirty working tree → `git stash push -u` (preserved, recoverable via `git stash`)
+  • Un-pushed local commits → `git reset --soft HEAD~N` (changes stay staged)
+
+Anything past your branch's upstream (= already pushed / merged / deployed)
+is NOT touched. Instead the report lists concrete compensation proposals
+(open a revert PR, etc.) so a human can decide.
+
+Flags:
+  --commits N    Number of HEAD commits to undo. 0 (default) means
+                 "auto-decide": when an upstream is configured, undo
+                 everything ahead of upstream (capped). Without
+                 upstream, default is 0 — pass --commits explicitly.
+  --reason TEXT  Free-text reason. Recorded into the stash message and
+                 the printed report.
+  --dry-run      Print the plan, do not execute.
+  --json         Machine-readable plan + result.
+EOF
+                    exit 0
+                    ;;
+                *) shift ;;
+            esac
+        done
+        BEACON_ROLLBACK_COMMITS="${_rb_commits:-0}" \
+            BEACON_ROLLBACK_REASON="$_rb_reason" \
+            BEACON_ROLLBACK_DRY_RUN="$_rb_dry_run" \
+            BEACON_JSON="$_rb_json" \
+            python3 "$COMMANDS_PY" rollback
+        ;;
+    resume)
+        # ms-55 e-1646: clear a previously-broadcast stop signal.
+        # Resume itself is also unrestricted at this layer — a workflow that
+        # wants leader-only resume can layer a hook on the receive side.
+        ensure_project
+        _res_sub="${2:-}"
+        shift 2 || true
+        _res_target=""
+        _res_reason=""
+        _res_json=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --target) _res_target="${2:-}"; shift 2 ;;
+                --reason) _res_reason="${2:-}"; shift 2 ;;
+                --json)   _res_json="1"; shift ;;
+                *) shift ;;
+            esac
+        done
+        _res_target_kind=""
+        _res_target_id=""
+        if [[ -n "$_res_target" ]]; then
+            _res_target_kind="${_res_target%%:*}"
+            _res_target_id="${_res_target#*:}"
+            if [[ "$_res_target_kind" == "$_res_target_id" && "$_res_target" != *:* ]]; then
+                echo "Error: --target must be <kind>:<id>" >&2
+                exit 1
+            fi
+        fi
+        case "$_res_sub" in
+            scoped)
+                BEACON_STOP_TARGET_KIND="$_res_target_kind" \
+                    BEACON_STOP_TARGET_ID="$_res_target_id" \
+                    BEACON_STOP_REASON="$_res_reason" \
+                    BEACON_JSON="$_res_json" \
+                    python3 "$COMMANDS_PY" resume_scoped
+                ;;
+            global)
+                BEACON_STOP_REASON="$_res_reason" \
+                    BEACON_JSON="$_res_json" \
+                    python3 "$COMMANDS_PY" resume_global
+                ;;
+            "")
+                cat <<'EOF'
+Usage: beacon resume scoped --target <kind>:<id> [--reason "..."] [--json]
+       beacon resume global [--reason "..."] [--json]
+
+Clears a previously-issued stop signal of matching scope/target.
+See `beacon stop status` for the currently active stops.
+EOF
+                ;;
+            *)
+                echo "Error: unknown subcommand 'beacon resume $_res_sub'" >&2
+                exit 1
+                ;;
+        esac
+        ;;
+    morning)
+        # ms-55 e-1650: 4-category briefing of recent autonomous activity.
+        # Reads stop-signal + claim-signal channels (or a JSON dump for
+        # offline / testing) and renders 完了 / 停止 / skip / 介入要望.
+        ensure_project
+        shift
+        _morning_since=""
+        _morning_file=""
+        _morning_json=""
+        _morning_no_doc=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --since-hours) _morning_since="${2:-}"; shift 2 ;;
+                --events-file) _morning_file="${2:-}"; shift 2 ;;
+                --json)        _morning_json="1"; shift ;;
+                --no-doc)      _morning_no_doc="1"; shift ;;
+                -h|--help)
+                    cat <<'EOF'
+Usage: beacon morning [--since-hours N] [--events-file <path>] [--json] [--no-doc]
+
+Read recent activity on the stop-signal + claim-signal channels and
+render a 4-bucket morning briefing:
+
+  ✓ 完了 (Completed):      claim released with outcome=completed
+  ⚠ 停止 (Halted):         stop signals (manual / build_fail / etc.)
+  ✗ Skip:                  claim released with outcome=abandoned
+  ⏱ 介入要望 (Needs hand): STUCK signals (= idle > timeout)
+
+Flags:
+  --since-hours N       window length, default 12
+  --events-file PATH    skip the bus query and read events from a JSON
+                        array file (= replay / offline / dogfood mode)
+  --json                machine-readable output
+  --no-doc              do not persist the briefing as a `report` doc
+                        (default: save so it shows up in Web UI)
+EOF
+                    exit 0
+                    ;;
+                *) shift ;;
+            esac
+        done
+        BEACON_MORNING_SINCE_HOURS="${_morning_since:-12}" \
+            BEACON_MORNING_EVENTS_FILE="$_morning_file" \
+            BEACON_JSON="$_morning_json" \
+            BEACON_MORNING_NO_DOC="$_morning_no_doc" \
+            python3 "$COMMANDS_PY" morning
+        ;;
+    stuck)
+        # ms-55 e-1649: STUCK detector. Read session telemetry, identify
+        # rows past the idle timeout, emit stop signals with
+        # reason_kind="stuck" so the morning briefing can categorize
+        # them as "intervention needed".
+        ensure_project
+        _stuck_sub="${2:-}"
+        shift 2 || true
+        _stuck_inline=""
+        _stuck_file=""
+        _stuck_timeout=""
+        _stuck_dry_run=""
+        _stuck_json=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --telemetry-inline) _stuck_inline="${2:-}"; shift 2 ;;
+                --telemetry-file)   _stuck_file="${2:-}"; shift 2 ;;
+                --timeout-minutes)  _stuck_timeout="${2:-}"; shift 2 ;;
+                --dry-run)          _stuck_dry_run="1"; shift ;;
+                --json)             _stuck_json="1"; shift ;;
+                *) shift ;;
+            esac
+        done
+        case "$_stuck_sub" in
+            check)
+                BEACON_STUCK_TELEMETRY_INLINE="$_stuck_inline" \
+                    BEACON_STUCK_TELEMETRY_FILE="$_stuck_file" \
+                    BEACON_STUCK_TIMEOUT_MINUTES="${_stuck_timeout:-30}" \
+                    BEACON_STUCK_DRY_RUN="$_stuck_dry_run" \
+                    BEACON_JSON="$_stuck_json" \
+                    python3 "$COMMANDS_PY" stuck_check
+                ;;
+            "")
+                cat <<'EOF'
+Usage: beacon stuck check (--telemetry-inline '<json>' | --telemetry-file <path>)
+                          [--timeout-minutes N] [--dry-run] [--json]
+
+Read session telemetry from a JSON array and emit STUCK signals for
+sessions whose last_active is older than --timeout-minutes (default 30).
+
+Each telemetry record needs at least:
+  { "session_id": "sv-...", "last_active": "2026-06-15T11:00:00Z" }
+
+Optional fields:
+  - "ms_id" / "task_id": included in the emitted signal's machine_reason
+  - "ignore": true → skip this row from detection
+
+STUCK signals are stop-signal channel events with reason_kind="stuck".
+They are processed by the same receivers as any other stop signal —
+this is the same protocol, not a new one.
+
+Examples:
+  beacon stuck check --telemetry-file telemetry.json --timeout-minutes 20
+  beacon stuck check --telemetry-inline '[{"session_id":"sv-A","last_active":"..."}]' --dry-run
+EOF
+                ;;
+            *)
+                echo "Error: unknown subcommand 'beacon stuck $_stuck_sub'" >&2
+                exit 1
+                ;;
+        esac
+        ;;
+    claim)
+        # ms-55 e-1648: claim primitives. request / handoff need a
+        # recipient (--to); plain claim is broadcast. respond / release /
+        # list round out the lifecycle. Local persistence keeps the
+        # issuer's view across session restarts.
+        ensure_project
+        _claim_sub="${2:-}"
+        shift 2 || true
+        _claim_id_positional=""
+        # respond + release take a positional claim_id as the first arg.
+        if [[ "$_claim_sub" == "respond" || "$_claim_sub" == "release" ]]; then
+            if [[ -n "${1:-}" && "${1:0:1}" != "-" ]]; then
+                _claim_id_positional="${1:-}"
+                shift || true
+            fi
+        fi
+        _claim_target=""
+        _claim_intent=""
+        _claim_to=""
+        _claim_expires=""
+        _claim_decision=""
+        _claim_reason=""
+        _claim_outcome=""
+        _claim_mine=""
+        _claim_json=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --target)  _claim_target="${2:-}"; shift 2 ;;
+                --intent)  _claim_intent="${2:-}"; shift 2 ;;
+                --to)      _claim_to="${2:-}"; shift 2 ;;
+                --expires-at) _claim_expires="${2:-}"; shift 2 ;;
+                --accept)  _claim_decision="accept"; shift ;;
+                --decline) _claim_decision="decline"; shift ;;
+                --reason)  _claim_reason="${2:-}"; shift 2 ;;
+                --outcome) _claim_outcome="${2:-}"; shift 2 ;;
+                --mine)    _claim_mine="1"; shift ;;
+                --json)    _claim_json="1"; shift ;;
+                *) shift ;;
+            esac
+        done
+        # Split --target kind:id.
+        _claim_tk=""
+        _claim_ti=""
+        if [[ -n "$_claim_target" ]]; then
+            _claim_tk="${_claim_target%%:*}"
+            _claim_ti="${_claim_target#*:}"
+            if [[ "$_claim_tk" == "$_claim_ti" && "$_claim_target" != *:* ]]; then
+                echo "Error: --target must be <kind>:<id> (e.g. task:e-1648)" >&2
+                exit 1
+            fi
+        fi
+        case "$_claim_sub" in
+            request|handoff|post)
+                # `post` maps to the broadcast `claim` kind on the Python side.
+                _claim_py="claim_$_claim_sub"
+                BEACON_CLAIM_TARGET_KIND="$_claim_tk" \
+                    BEACON_CLAIM_TARGET_ID="$_claim_ti" \
+                    BEACON_CLAIM_INTENT="$_claim_intent" \
+                    BEACON_CLAIM_TO="$_claim_to" \
+                    BEACON_CLAIM_EXPIRES_AT="$_claim_expires" \
+                    BEACON_JSON="$_claim_json" \
+                    python3 "$COMMANDS_PY" "$_claim_py"
+                ;;
+            respond)
+                if [[ -z "$_claim_id_positional" ]]; then
+                    echo "Error: beacon claim respond <claim_id> [--accept|--decline] [--reason ...]" >&2
+                    exit 1
+                fi
+                BEACON_CLAIM_ID="$_claim_id_positional" \
+                    BEACON_CLAIM_DECISION="$_claim_decision" \
+                    BEACON_CLAIM_REASON="$_claim_reason" \
+                    BEACON_JSON="$_claim_json" \
+                    python3 "$COMMANDS_PY" claim_respond
+                ;;
+            release)
+                if [[ -z "$_claim_id_positional" ]]; then
+                    echo "Error: beacon claim release <claim_id> [--outcome completed|abandoned] [--reason ...]" >&2
+                    exit 1
+                fi
+                BEACON_CLAIM_ID="$_claim_id_positional" \
+                    BEACON_CLAIM_OUTCOME="$_claim_outcome" \
+                    BEACON_CLAIM_REASON="$_claim_reason" \
+                    BEACON_JSON="$_claim_json" \
+                    python3 "$COMMANDS_PY" claim_release
+                ;;
+            list)
+                BEACON_CLAIM_MINE="$_claim_mine" \
+                    BEACON_CLAIM_TARGET_KIND="$_claim_tk" \
+                    BEACON_CLAIM_TARGET_ID="$_claim_ti" \
+                    BEACON_JSON="$_claim_json" \
+                    python3 "$COMMANDS_PY" claim_list
+                ;;
+            "")
+                cat <<'EOF'
+Usage:
+  beacon claim post     --target <kind>:<id> [--intent "..."] [--json]
+                                    Broadcast a claim (= "I'm taking X").
+                                    First-publisher-wins; no consent needed.
+  beacon claim request  --target <kind>:<id> --to <sid> [--intent "..."]
+                                    Ask a specific session to take X.
+                                    Recipient must accept.
+  beacon claim handoff  --target <kind>:<id> --to <sid> [--intent "..."]
+                                    Transfer in-progress X to a specific
+                                    session. Recipient must accept.
+  beacon claim respond  <claim_id> [--accept|--decline] [--reason "..."]
+                                    Reply to a pending request / handoff.
+  beacon claim release  <claim_id> [--outcome completed|abandoned] [--reason "..."]
+                                    Mark a claim as done so others can take it.
+  beacon claim list     [--mine] [--target <kind>:<id>] [--json]
+                                    List active claims in the local cache.
+                                    Use --mine after session restart to
+                                    recover what you were in the middle of.
+
+target kind: ms | task | operation | trek | free
+EOF
+                ;;
+            *)
+                echo "Error: unknown subcommand 'beacon claim $_claim_sub'" >&2
+                echo "Try 'beacon claim' for usage." >&2
+                exit 1
                 ;;
         esac
         ;;
@@ -2788,6 +3603,118 @@ EOF
                 ;;
         esac
         ;;
+    # ms-70 / e-1716: receiver-side DM action decision primitive.
+    # Usage: `beacon dm respond approve|deny <event_id>`
+    # The decision is recorded server-side; decision_by comes from the Bearer
+    # token's sub claim — the CLI cannot forge a different actor. Designed
+    # for a human typing the command in their terminal (SPEC 設計方針 3).
+    dm)
+        ensure_project
+        _dm_sub="${2:-}"
+        shift 2 || true
+        case "$_dm_sub" in
+            respond)
+                # Two positional forms are accepted to match both the helper
+                # hint string (= `beacon dm respond approve|deny <event_id>`)
+                # and the natural typing flow some users prefer
+                # (= `beacon dm respond <event_id> approve|deny`).
+                _dm_decision=""
+                _dm_event_id=""
+                _dm_json=""
+                _dm_project_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json)    _dm_json="1"; shift ;;
+                        --project) _dm_project_id="${2:-}"; shift 2 ;;
+                        approve|deny)
+                            _dm_decision="$1"; shift ;;
+                        *)
+                            # First non-flag, non-verb positional is event_id.
+                            if [[ -z "$_dm_event_id" ]]; then
+                                _dm_event_id="$1"
+                            fi
+                            shift ;;
+                    esac
+                done
+                BEACON_DM_DECISION="$_dm_decision" \
+                    BEACON_DM_EVENT_ID="$_dm_event_id" \
+                    BEACON_BUS_PROJECT_ID="$_dm_project_id" \
+                    BEACON_JSON="$_dm_json" \
+                    python3 "$COMMANDS_PY" dm_respond
+                ;;
+            # ms-70 / e-1923 (e-1718 AC 4): audit history viewer in the
+            # terminal. Same endpoint and rows as the Web UI's Settings >
+            # Audit table; 6 columns sized for typical terminal widths.
+            # Usage: `beacon dm log [<project_id>] [--limit N] [--json]
+            #                       [--project <id>]`
+            log)
+                _dm_log_project_positional=""
+                _dm_log_limit=""
+                _dm_log_json=""
+                _dm_log_project_override=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json)    _dm_log_json="1"; shift ;;
+                        --limit)   _dm_log_limit="${2:-}"; shift 2 ;;
+                        --project) _dm_log_project_override="${2:-}"; shift 2 ;;
+                        -h|--help)
+                            cat <<'EOF'
+Usage: beacon dm log [<project_id>] [--limit N] [--project <id>] [--json]
+
+Print the 6-column DM-approval audit log (event_id / sender / receiver /
+status / decision_at / decision_by) for decided rows only — pending and
+auto-allowed rows are excluded by design (SPEC 設計方針 3 keeps every
+decide in the terminal Claude Code, so this view is read-only).
+
+<project_id> (positional): override the cwd's project_id for one-off
+                           cross-project lookups; same semantics as
+                           --project but more terse.
+--limit N:      max rows (default 50, server caps at 500).
+--project <id>: cross-project override; wins over the positional form.
+--json:         emit the raw rows list as JSON (one array, no table).
+EOF
+                            shift; _dm_log_help="1" ;;
+                        *)
+                            if [[ -z "$_dm_log_project_positional" ]]; then
+                                _dm_log_project_positional="$1"
+                            fi
+                            shift ;;
+                    esac
+                done
+                if [[ -n "${_dm_log_help:-}" ]]; then
+                    :
+                else
+                    # --project wins; positional is fallback (= dispatch.py mirror).
+                    _dm_log_resolved_project="${_dm_log_project_override:-$_dm_log_project_positional}"
+                    BEACON_DM_LOG_PROJECT_ID="$_dm_log_project_positional" \
+                        BEACON_DM_LOG_LIMIT="$_dm_log_limit" \
+                        BEACON_BUS_PROJECT_ID="$_dm_log_resolved_project" \
+                        BEACON_JSON="$_dm_log_json" \
+                        python3 "$COMMANDS_PY" dm_log
+                fi
+                ;;
+            *)
+                cat <<'EOF'
+Usage: beacon dm respond approve <event_id> [--project <id>] [--json]
+       beacon dm respond deny    <event_id> [--project <id>] [--json]
+       beacon dm log    [<project_id>] [--limit N] [--project <id>] [--json]
+
+Decide a pending cross-user DM action envelope. Only the intended
+receiver (= the addressee on the sidecar) can press approve / deny;
+the server enforces this via the Bearer token's sub claim, so the
+CLI argument cannot forge a different actor (SPEC 設計方針 3:
+承認は terminal Claude Code 内での user 直接判断のみ).
+
+`dm log` is the read-only audit mirror of the Web UI's Settings >
+Audit table — same endpoint, same rows, 6 fixed columns for terminal
+scanning.
+
+--project: override the cwd's project_id for cross-project decisions
+           (same semantics as `beacon bus --project <id>`).
+EOF
+                ;;
+        esac
+        ;;
     retro)
         shift
         case "${1:-}" in
@@ -2844,13 +3771,37 @@ EOF
         ;;
     cloud)
         case "${2:-}" in
-            push)
+            push|upload-initial)
+                # e-1862: `push` is the legacy alias kept for backward compat.
+                # `upload-initial` is the renamed subcommand making the intent
+                # (= initial bootstrap upload to a new cloud project) explicit.
+                # Daily ops do NOT use this — Cloud-first design (ms-36) means
+                # the CLI reads/writes cloud directly. push/upload-initial is
+                # only for the initial bootstrap of a fresh cloud project, or
+                # an emergency --force overwrite. cmd_cloud_push() itself
+                # already guards against accidental overwrites in cloud mode.
+                if [ "${2}" = "push" ]; then
+                    echo "Note: 'beacon cloud push' is the legacy name." >&2
+                    echo "      Prefer 'beacon cloud upload-initial' for clarity (e-1862)." >&2
+                fi
                 ensure_project
                 force=""
                 [[ "${3:-}" == "--force" || "${3:-}" == "-f" ]] && force="1"
                 BEACON_FORCE="$force" python3 "$COMMANDS_PY" cloud_push
                 ;;
-            pull)   ensure_project; python3 "$COMMANDS_PY" cloud_pull ;;
+            pull|force-pull)
+                # e-1862: `pull` is the legacy alias kept for backward compat.
+                # `force-pull` is the renamed subcommand making the intent
+                # (= emergency overwrite of local from cloud) explicit. Daily
+                # ops do NOT need pull — Cloud-first design means CLI reads
+                # cloud directly, so stale local cache does not affect behavior.
+                if [ "${2}" = "pull" ]; then
+                    echo "Note: 'beacon cloud pull' is the legacy name." >&2
+                    echo "      Prefer 'beacon cloud force-pull' for clarity (e-1862)." >&2
+                fi
+                ensure_project
+                python3 "$COMMANDS_PY" cloud_pull
+                ;;
             join)
                 if [ -z "${3:-}" ]; then
                     echo "Usage: beacon cloud join <project-id>"
@@ -2861,12 +3812,46 @@ EOF
             status) python3 "$COMMANDS_PY" cloud_status ;;
             list)   python3 "$COMMANDS_PY" cloud_list ;;
             off)
-                if [ -f .beacon/config.json ]; then
-                    echo '{"mode": "local"}' > .beacon/config.json
-                    echo "Switched to local mode."
-                else
-                    echo "No .beacon/config.json found."
+                # e-1861 (ms-61): "cloud off" is sandbox / verification-only now.
+                # Beacon = cloud-only in normal operation (Claude Code requires
+                # internet, so local mode has no production use case). This
+                # subcommand stays available for testing and for users who
+                # explicitly want to detach from cloud sync — but it requires
+                # ``--confirm <project_id>`` to prevent silent / accidental
+                # invocation by sub-agents (the same pattern that triggered the
+                # 2026-06-15 data-loss panic incident).
+                if [ ! -f .beacon/cloud.json ]; then
+                    echo "Not in cloud mode (no .beacon/cloud.json found)."
+                    exit 0
                 fi
+                expected_pid=$(python3 -c "import json; print(json.load(open('.beacon/cloud.json')).get('project_id',''))" 2>/dev/null)
+                if [ -z "$expected_pid" ]; then
+                    echo "Error: .beacon/cloud.json is malformed (no project_id)."
+                    exit 1
+                fi
+                # parse --confirm flag
+                given_pid=""
+                if [ "${3:-}" = "--confirm" ] && [ -n "${4:-}" ]; then
+                    given_pid="${4}"
+                fi
+                if [ -z "$given_pid" ] || [ "$given_pid" != "$expected_pid" ]; then
+                    echo "Refusing to disable cloud sync without two-factor confirmation."
+                    echo ""
+                    echo "  Sandbox / verification only — Beacon assumes cloud mode in production."
+                    echo "  To disable: beacon cloud off --confirm \"$expected_pid\""
+                    echo ""
+                    echo "  This guard exists because a 2026-06-15 incident (e-1776) saw a"
+                    echo "  sub-agent silently flip cloud → local and trigger a data-loss panic."
+                    exit 1
+                fi
+                # Move cloud.json into .beacon/.trash/ with timestamp (never rm).
+                trash_dir=".beacon/.trash"
+                mkdir -p "$trash_dir"
+                ts=$(date +%Y%m%d-%H%M%S)
+                mv .beacon/cloud.json "$trash_dir/cloud.json.disabled-$ts"
+                echo "Cloud sync disabled for this directory."
+                echo "  .beacon/cloud.json → $trash_dir/cloud.json.disabled-$ts"
+                echo "  To re-enable: beacon cloud join $expected_pid  (or beacon cloud setup)"
                 ;;
             open)
                 if [ -z "${3:-}" ]; then
@@ -2878,7 +3863,9 @@ EOF
             "")     cmd_cloud_launch ;;
             *)
                 echo "Error: unknown subcommand '${2}'."
-                echo "Usage: beacon cloud [push|pull|join|open|list|status|off]"
+                echo "Usage: beacon cloud [open|status|list|join|upload-initial|force-pull|off]"
+                echo "       (push/pull are deprecated aliases for upload-initial/force-pull)"
+                echo "       (sandbox: cloud off --confirm <project_id>)"
                 exit 1
                 ;;
         esac
@@ -2993,7 +3980,15 @@ EOF
         esac
         ;;
     member)
-        ensure_project
+        # ms-78 e-1805: `member join` / `whoami` and the help banner can be
+        # invoked before any project is bound to this cwd — they're how a
+        # fresh user accepts an invite and inspects their state. All other
+        # member subcmds operate on the active project and require
+        # ensure_project.
+        case "${2:-}" in
+            join|whoami|"") : ;;
+            *) ensure_project ;;
+        esac
         case "${2:-}" in
             add)
                 shift 2
@@ -3055,12 +4050,104 @@ EOF
                 BEACON_MEMBER_ID="$mid" BEACON_MEMBER_ROLE="$mrole" \
                     python3 "$COMMANDS_PY" member_role
                 ;;
+            invite)
+                # ms-78 e-1805 — issue an invite URL for a Beacon project member.
+                shift 2
+                memail="" mrole="viewer" mjson=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --role) mrole="${2:-}"; shift 2 ;;
+                        --json) mjson="1"; shift ;;
+                        *)      [[ -z "$memail" ]] && memail="$1"; shift ;;
+                    esac
+                done
+                if [ -z "$memail" ]; then
+                    echo "Usage: beacon member invite <email> [--role viewer|editor] [--json]"
+                    exit 1
+                fi
+                BEACON_MEMBER_EMAIL="$memail" BEACON_MEMBER_ROLE="$mrole" \
+                    BEACON_JSON="$mjson" \
+                    python3 "$COMMANDS_PY" member_invite
+                ;;
+            invitation)
+                # ms-78 e-1805 — list / cancel pending invitations.
+                case "${3:-}" in
+                    list|ls)
+                        shift 3
+                        mjson=""
+                        while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                --json) mjson="1"; shift ;;
+                                *) shift ;;
+                            esac
+                        done
+                        BEACON_JSON="$mjson" python3 "$COMMANDS_PY" member_invitation_list
+                        ;;
+                    cancel)
+                        shift 3
+                        iid="${1:-}" mjson=""
+                        shift || true
+                        while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                --json) mjson="1"; shift ;;
+                                *) [[ -z "$iid" ]] && iid="$1"; shift ;;
+                            esac
+                        done
+                        if [ -z "$iid" ]; then
+                            echo "Usage: beacon member invitation cancel <id> [--json]"
+                            exit 1
+                        fi
+                        BEACON_INVITATION_ID="$iid" BEACON_JSON="$mjson" \
+                            python3 "$COMMANDS_PY" member_invitation_cancel
+                        ;;
+                    *)
+                        echo "Usage: beacon member invitation [list|cancel <id>]"
+                        ;;
+                esac
+                ;;
+            join)
+                # ms-78 e-1805 — accept an invite token and bind this cwd.
+                shift 2
+                itoken="" dname="" mjson=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --token)         itoken="${2:-}"; shift 2 ;;
+                        --display-name)  dname="${2:-}"; shift 2 ;;
+                        --json)          mjson="1"; shift ;;
+                        *) shift ;;
+                    esac
+                done
+                if [ -z "$itoken" ]; then
+                    echo "Usage: beacon member join --token <token> [--display-name <name>] [--json]"
+                    exit 1
+                fi
+                BEACON_INVITE_TOKEN="$itoken" BEACON_DISPLAY_NAME="$dname" \
+                    BEACON_JSON="$mjson" \
+                    python3 "$COMMANDS_PY" member_join
+                ;;
+            whoami)
+                # ms-78 e-1805 — show your identity + role on the current cloud project.
+                shift 2
+                mjson=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) mjson="1"; shift ;;
+                        *) shift ;;
+                    esac
+                done
+                BEACON_JSON="$mjson" python3 "$COMMANDS_PY" member_whoami
+                ;;
             *)
-                echo "Usage: beacon member [add|list|remove|role]"
+                echo "Usage: beacon member [add|list|remove|role|invite|invitation|join|whoami]"
                 echo "  add <id> [--name N] [--email E] [--role R]   Add a member to the project"
                 echo "  list [--json]                                  List members"
                 echo "  remove <id> --reason <text>                    Remove a member (audit reason required)"
                 echo "  role <id> <role>                               Change role (owner|maintainer|contributor|viewer)"
+                echo "  invite <email> [--role viewer|editor]          Issue a token-based invite URL (ms-78)"
+                echo "  invitation list                                 List pending invitations"
+                echo "  invitation cancel <id>                          Cancel a pending invitation"
+                echo "  join --token <token> [--display-name <name>]    Accept an invite and bind this cwd"
+                echo "  whoami                                          Show your identity + role here"
                 ;;
         esac
         ;;
@@ -3094,7 +4181,7 @@ EOF
         case "${2:-}" in
             record)
                 shift 2
-                revision="" semver="" desc="" hash="" date="" before="" mode="" type="" env="" version=""
+                revision="" semver="" desc="" hash="" date="" before="" mode="" type="" env="" version="" backend=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --prepare)       mode="prepare";    shift ;;
@@ -3108,6 +4195,7 @@ EOF
                         --insert-before) before="${2:-}";   shift 2 ;;
                         --type)          type="${2:-}";     shift 2 ;;
                         --env)           env="${2:-}";      shift 2 ;;
+                        --backend)       backend="${2:-}";  shift 2 ;;
                         *) shift ;;
                     esac
                 done
@@ -3115,20 +4203,21 @@ EOF
                     BEACON_VERSION="$version" \
                     BEACON_DESCRIPTION="$desc" BEACON_HASH="$hash" \
                     BEACON_DATE="$date" BEACON_INSERT_BEFORE="$before" BEACON_TYPE="$type" \
-                    BEACON_ENVIRONMENT="$env" \
+                    BEACON_ENVIRONMENT="$env" BEACON_BACKEND="$backend" \
                     python3 "$COMMANDS_PY" deploy_record
                 ;;
             list)
                 shift 2
-                env="" json=""
+                env="" json="" backend=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
-                        --env)    env="${2:-}"; shift 2 ;;
-                        --json)   json="1";     shift ;;
+                        --env)     env="${2:-}";     shift 2 ;;
+                        --backend) backend="${2:-}"; shift 2 ;;
+                        --json)    json="1";         shift ;;
                         *) shift ;;
                     esac
                 done
-                BEACON_JSON="$json" BEACON_ENVIRONMENT="$env" python3 "$COMMANDS_PY" deploy_list ;;
+                BEACON_JSON="$json" BEACON_ENVIRONMENT="$env" BEACON_BACKEND="$backend" python3 "$COMMANDS_PY" deploy_list ;;
             delete)
                 BEACON_DEPLOY_ID="${3:-}" python3 "$COMMANDS_PY" deploy_delete ;;
             void)
@@ -3301,6 +4390,14 @@ EOF
         search_limit=""
         search_offset=""
         search_json_flag=""
+        # ms-79 extensions for /beacon-retrospect (e-1832 / e-1833 / e-1834 / e-1835).
+        # 旧フラグだけ使う限りは search_project の旧経路で back-compat 維持。
+        search_source=""
+        search_actor=""
+        search_claimant=""
+        search_inc_bus_dm=""
+        search_inc_session_logs=""
+        search_inc_trek=""
         shift
         while [[ $# -gt 0 ]]; do
             case "$1" in
@@ -3318,6 +4415,13 @@ EOF
                 --limit)       search_limit="${2:-}";    shift 2 ;;
                 --offset)      search_offset="${2:-}";   shift 2 ;;
                 --json)        search_json_flag="1";     shift ;;
+                # ms-79 extension flags
+                --source)      search_source="${2:-}";   shift 2 ;;
+                --actor)       search_actor="${2:-}";    shift 2 ;;
+                --claimant)    search_claimant="${2:-}"; shift 2 ;;
+                --include-bus-dm)       search_inc_bus_dm="1"; shift ;;
+                --include-session-logs) search_inc_session_logs="1"; shift ;;
+                --include-trek)         search_inc_trek="1"; shift ;;
                 *) [[ -z "$search_query" ]] && search_query="$1"; shift ;;
             esac
         done
@@ -3336,6 +4440,12 @@ EOF
             BEACON_LIMIT="$search_limit" \
             BEACON_OFFSET="$search_offset" \
             BEACON_JSON="$search_json_flag" \
+            BEACON_SOURCE="$search_source" \
+            BEACON_ACTOR="$search_actor" \
+            BEACON_CLAIMANT="$search_claimant" \
+            BEACON_INCLUDE_BUS_DM="$search_inc_bus_dm" \
+            BEACON_INCLUDE_SESSION_LOGS="$search_inc_session_logs" \
+            BEACON_INCLUDE_TREK="$search_inc_trek" \
             python3 "$COMMANDS_PY" search
         ;;
     doctor)

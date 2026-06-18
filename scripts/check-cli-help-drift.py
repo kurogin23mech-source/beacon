@@ -160,6 +160,16 @@ ALLOW_MISSING_FROM_HELP_JSON: set[str] = {
     "milestone workspace-cleanup",
     "reset",
     "update",
+    # ms-55 coordination signal CLIs — bash-only, help_json + README docs
+    # are a follow-up (= dedicated entries for each verb). Until then, users
+    # discover them via `beacon <verb> --help` (= bash help text).
+    "claim handoff", "claim list", "claim post", "claim release",
+    "claim request", "claim respond",
+    "morning",
+    "resume global", "resume scoped",
+    "rollback",
+    "stop global", "stop scoped", "stop status",
+    "stuck check",
 }
 
 # Top-level verbs intentionally available in bin/beacon (bash) but NOT in
@@ -177,6 +187,10 @@ ALLOW_BASH_ONLY_DISPATCH: set[str] = {
     "reset",       # destructive admin op, bash-only
     "run",         # operation run record (member-aware, not in Python yet)
     "incident",    # incident open/close (operation-coupled, not in Python yet)
+    # ms-73 e-1762/e-1763/e-1764 cleared the ms-55 coordination-signal
+    # exempts (stop / resume / rollback / claim / stuck / morning) once
+    # commit 3b5b64a (e-1735) landed their Python parity. Their entries
+    # have been removed here as part of the ms-73 drift-gate sweep.
     # `help` is handled in dispatch.py BEFORE _HANDLERS is consulted
     # (early return in `dispatch()`), so it intentionally doesn't appear
     # as a key in the dict — but it IS handled. The `-h`/`--help` flag
@@ -214,8 +228,22 @@ ALLOW_MISSING_FROM_README: set[str] = {
     "cloud pull",
     "cloud push",
     "cloud status",
+    # e-1862: renamed aliases live in the Cloud Mode section
+    # (alongside their legacy `push` / `pull` partners), not in the
+    # main `## CLI Commands` table.
+    "cloud upload-initial",
+    "cloud force-pull",
     "help",             # `beacon help` mirrors --help, not a "command"
     "update",           # documented in self-update section, not CLI table
+    # ms-55 coordination signal CLIs — README rows are a follow-up; until
+    # then they're discovered via `beacon <verb> --help`.
+    "claim handoff", "claim list", "claim post", "claim release",
+    "claim request", "claim respond",
+    "morning",
+    "resume global", "resume scoped",
+    "rollback",
+    "stop global", "stop scoped", "stop status",
+    "stuck check",
 }
 
 

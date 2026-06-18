@@ -178,6 +178,61 @@ class ApiClient:
             body,
         )
 
+    def upload_document_image(self, project_id: str, local_path: str) -> dict:
+        """Upload an image to be embedded in document markdown (ms-43).
+
+        Multipart POST against ``/api/projects/<id>/documents/images``.
+        Returns ``{url, markdown, size, content_type}`` on success.
+        Server-side validation gates content-type (image/* only) and size
+        (10 MiB cap) — see ``server/doc_images.py``.
+        """
+        import os as _os
+        import mimetypes as _mt
+        import uuid as _uuid
+
+        with open(local_path, "rb") as f:
+            file_bytes = f.read()
+        filename = _os.path.basename(local_path)
+        content_type = _mt.guess_type(filename)[0] or "application/octet-stream"
+
+        boundary = f"----BeaconCli{_uuid.uuid4().hex}"
+        body_parts: list[bytes] = []
+        body_parts.append(f"--{boundary}\r\n".encode())
+        body_parts.append(
+            (
+                f"Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n"
+                f"Content-Type: {content_type}\r\n\r\n"
+            ).encode()
+        )
+        body_parts.append(file_bytes)
+        body_parts.append(f"\r\n--{boundary}--\r\n".encode())
+        body = b"".join(body_parts)
+
+        url = (
+            f"{self._base_url}/api/projects/"
+            f"{urllib.parse.quote(project_id, safe='')}/documents/images"
+        )
+        req = urllib.request.Request(url, data=body, method="POST")
+        req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+        token = self._get_token()
+        if token:
+            req.add_header("Authorization", f"Bearer {token}")
+
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8", errors="replace")
+            try:
+                detail = json.loads(error_body).get("detail", error_body)
+            except (json.JSONDecodeError, AttributeError):
+                detail = error_body
+            raise RuntimeError(f"API error {e.code}: {detail}") from e
+        except urllib.error.URLError as e:
+            raise ConnectionError(
+                f"Cannot connect to API ({self._base_url}): {e.reason}"
+            ) from e
+
     # Purge operations (owner-only, hard-delete for duplicate-ID recovery — e-1030)
 
     def purge_milestone(self, project_id: str, ms_id: str, *,
@@ -302,6 +357,33 @@ class ApiClient:
             qs.append("healthy_only=true")
         suffix = "?" + "&".join(qs) if qs else ""
         return self.get(f"/api/projects/{project_id}/sessions{suffix}")
+
+    def list_user_sessions(self, *, live_only: bool = False,
+                           since_minutes: int = 5, healthy_only: bool = False,
+                           machine: str = "", agent: str = "") -> list:
+        """List the calling user's sessions across all projects (ms-54 / e-1587).
+
+        Use ``list_sessions(project_id)`` when you know which project to query;
+        use this method when you need the cross-project view — e.g. the
+        /beacon-dm-send picker that spans projects the caller is not currently
+        cd'd into, or cross-project heartbeat watchdogs (op-6).
+
+        Each returned row carries ``project_id`` and ``project_name`` so the
+        consumer can route follow-up calls (``bus send --project <pid>``)
+        without an extra lookup.
+        """
+        qs = []
+        if live_only:
+            qs.append("live_only=true")
+            qs.append(f"since_minutes={since_minutes}")
+        if healthy_only:
+            qs.append("healthy_only=true")
+        if machine:
+            qs.append(f"machine={urllib.parse.quote(machine)}")
+        if agent:
+            qs.append(f"agent={urllib.parse.quote(agent)}")
+        suffix = "?" + "&".join(qs) if qs else ""
+        return self.get(f"/api/me/sessions{suffix}")
 
     # Session log operations (ms-57 / e-1037)
 
@@ -433,6 +515,49 @@ class ApiClient:
             {"stage": stage, "recipient_session_id": recipient_session_id},
         )
 
+    # ms-70 / e-1923 (e-1718 AC 4): audit history listing for decided
+    # (approved | denied) DM-action sidecars. Mirrors the Web UI's
+    # Settings > Audit table but renders 6 columns in the terminal.
+    def list_dm_approval_history(self, project_id: str, *,
+                                  limit: int = 50) -> list[dict]:
+        """List decided DM approval sidecars (audit-only, read-only).
+
+        Wraps ``GET /api/projects/{pid}/dm/approval/history?limit=N``.
+        The server filters out ``pending`` and ``auto`` rows by design
+        (SPEC 設計方針 3: approve/deny lives only in the terminal), so
+        every returned row carries ``approval_status`` in {approved,
+        denied} with non-empty ``decision_by`` / ``decision_at``.
+
+        ``limit`` is capped server-side at 500 to bound audit-scroll
+        surface. Default 50 matches the Web UI.
+        """
+        suffix = f"?limit={int(limit)}" if limit else ""
+        return self.get(
+            f"/api/projects/{urllib.parse.quote(project_id, safe='')}"
+            f"/dm/approval/history{suffix}"
+        )
+
+    # ms-70 / e-1716: receiver-side decision on a pending DM-action sidecar.
+    # The CLI carries the human's Bearer token; the server stamps decision_by
+    # from that token's sub claim — the CLI cannot spoof a different user.
+    def respond_dm_approval(self, project_id: str, event_id: str, *,
+                            decision: str) -> dict:
+        """POST a receiver-side approve / deny decision on a pending sidecar.
+
+        ``decision`` must be ``"approve"`` or ``"deny"``. Returns the resulting
+        7-field sidecar row. Server enforces:
+          * 400 — bad decision verb
+          * 403 — caller is not the addressed receiver
+          * 404 — no sidecar exists for this event_id (= legacy / auto / typo)
+          * 409 — already decided by someone else, or attempt to flip decision
+        Idempotent for "same caller resubmits same decision" (= no-op return).
+        """
+        return self.post(
+            f"/api/projects/{project_id}/dm/approval/"
+            f"{urllib.parse.quote(event_id)}",
+            {"decision": decision},
+        )
+
     # ms-54 / e-1369 Layer 4: AI-authored intent. Set via `beacon session
     # focus "<text>"` / `beacon session attention --set true`. Read by the
     # /beacon-dm-send picker so a sender sees "what is each session doing".
@@ -462,3 +587,204 @@ class ApiClient:
             if s.get("session_id") == session_id:
                 return s
         return {}
+
+    # Trek operations (ms-69 / e-1681)
+    #
+    # Top-level resource (= not under /api/projects/) because treks bridge
+    # projects. Caller does not pass a project_id — trek membership lives at
+    # the user grain (user_id + email), so the auth token alone identifies
+    # the caller. See server/app.py /api/treks/* endpoints (e-1656).
+
+    def list_treks(self, *, status: str = "", include_archived: bool = False,
+                   all_actors: bool = False) -> list:
+        """List treks visible to the caller. Default scope = creator OR member.
+
+        ``status``: filter by lifecycle (planning|active|archived).
+        ``include_archived``: also surface archived treks (default hides).
+        ``all_actors``: admin view (= every trek). Non-admin caller gets 403.
+        """
+        qs = []
+        if status:
+            qs.append(f"status={urllib.parse.quote(status)}")
+        if include_archived:
+            qs.append("include_archived=true")
+        if all_actors:
+            qs.append("all_actors=true")
+        suffix = "?" + "&".join(qs) if qs else ""
+        return self.get(f"/api/treks{suffix}")
+
+    def create_trek(self, *, title: str, creator_session_id: str,
+                    description: str = "", type_: str = "persistent") -> dict:
+        """Create a trek. Caller becomes creator + initial leader.
+
+        ``creator_session_id`` is recorded as ``leader_session_id`` per
+        SPEC 設計方針 9 (= leader is at session grain).
+        """
+        return self.post("/api/treks", {
+            "title": title,
+            "description": description,
+            "type": type_,
+            "creator_session_id": creator_session_id,
+        })
+
+    def get_trek(self, trek_id: str) -> dict:
+        """Fetch a single trek by id. 403 if caller is neither creator nor member."""
+        return self.get(f"/api/treks/{urllib.parse.quote(trek_id, safe='')}")
+
+    def patch_trek(self, trek_id: str, *, title: str | None = None,
+                   description: str | None = None, type_: str | None = None) -> dict:
+        """Update title / description / type. Leader-only."""
+        body: dict = {}
+        if title is not None:
+            body["title"] = title
+        if description is not None:
+            body["description"] = description
+        if type_ is not None:
+            body["type"] = type_
+        return self.patch(f"/api/treks/{urllib.parse.quote(trek_id, safe='')}", body)
+
+    def archive_trek(self, trek_id: str) -> dict:
+        """Archive (= status → archived, terminal). Leader-only."""
+        return self.delete(f"/api/treks/{urllib.parse.quote(trek_id, safe='')}")
+
+    def start_trek(self, trek_id: str) -> dict:
+        """Transition planning → active. Leader-only."""
+        return self.post(f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/start")
+
+    def invite_trek_member(self, trek_id: str, email: str) -> dict:
+        """Invite a user (by email) to the trek. Any joined member may invite."""
+        return self.post(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/members",
+            {"email": email},
+        )
+
+    def join_trek(self, trek_id: str) -> dict:
+        """Caller accepts their own invitation. Non-invited → 403."""
+        return self.post(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/members/join"
+        )
+
+    def leave_trek(self, trek_id: str) -> dict:
+        """Caller removes themselves. Leader must transfer first; last member
+        cannot leave (= archive instead)."""
+        return self.delete(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/members/me"
+        )
+
+    def add_trek_scope(self, trek_id: str, *, project: str,
+                       milestone: str = "", operation: str = "",
+                       task: str = "") -> dict:
+        """Append a scope entry (cross-project ref). Any joined member."""
+        body: dict = {"project": project}
+        if milestone:
+            body["milestone"] = milestone
+        if operation:
+            body["operation"] = operation
+        if task:
+            body["task"] = task
+        return self.put(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/scope", body,
+        )
+
+    def remove_trek_scope(self, trek_id: str, *, project: str,
+                          milestone: str = "", operation: str = "",
+                          task: str = "") -> dict:
+        """Remove a scope entry. Any joined member."""
+        body: dict = {"project": project}
+        if milestone:
+            body["milestone"] = milestone
+        if operation:
+            body["operation"] = operation
+        if task:
+            body["task"] = task
+        return self.delete(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/scope", body,
+        )
+
+    def set_trek_halt(self, trek_id: str, *, issued_by_session_id: str,
+                      reason: str = "") -> dict:
+        """Pull the Andon cord. Any joined member may halt an active trek."""
+        return self.put(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/halt",
+            {"issued_by_session_id": issued_by_session_id, "reason": reason},
+        )
+
+    def clear_trek_halt(self, trek_id: str) -> dict:
+        """Release the Andon cord. Any joined member."""
+        return self.delete(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/halt"
+        )
+
+    def transfer_trek_leader(self, trek_id: str, *, from_session_id: str,
+                             to_session_id: str) -> dict:
+        """Hand off leadership. Caller's session must equal the trek's current
+        ``leader_session_id`` AND the calling user must hold the leader role."""
+        return self.post(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/transfer-leader",
+            {"from_session_id": from_session_id,
+             "to_session_id": to_session_id},
+        )
+
+    def get_trek_summary(self, trek_id: str) -> dict:
+        """Compact status snapshot (counts + status + halt) for dashboards."""
+        return self.get(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/summary"
+        )
+
+    def list_trek_documents(self, trek_id: str) -> list:
+        """List documents associated with this trek (= trek_id field set)."""
+        return self.get(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/documents"
+        )
+
+    # Reverse lookup: project work item → related treks (ms-69 / e-1663)
+    # Used by the Related Treks widget on milestone / operation / task
+    # detail pages (e-1664). Includes archived treks by default.
+
+    def list_related_treks_for_milestone(self, project_id: str, ms_id: str) -> list:
+        return self.get(
+            f"/api/projects/{urllib.parse.quote(project_id, safe='')}"
+            f"/milestones/{urllib.parse.quote(ms_id, safe='')}/related-treks"
+        )
+
+    def list_related_treks_for_operation(self, project_id: str, op_id: str) -> list:
+        return self.get(
+            f"/api/projects/{urllib.parse.quote(project_id, safe='')}"
+            f"/operations/{urllib.parse.quote(op_id, safe='')}/related-treks"
+        )
+
+    def list_related_treks_for_entry(self, project_id: str, entry_id: str) -> list:
+        return self.get(
+            f"/api/projects/{urllib.parse.quote(project_id, safe='')}"
+            f"/entries/{urllib.parse.quote(entry_id, safe='')}/related-treks"
+        )
+
+    # ms-55 e-1730: active claims subcollection (= lib/claims.py mirror).
+    # The wire payload is the dict lib/claims.py:build_claim_payload returns.
+
+    def list_active_claims(self, project_id: str) -> list:
+        """Return all active claims on a project, sorted by issued_at."""
+        return self.get(
+            f"/api/projects/{urllib.parse.quote(project_id, safe='')}/active_claims"
+        )
+
+    def get_active_claim(self, project_id: str, claim_id: str) -> dict:
+        return self.get(
+            f"/api/projects/{urllib.parse.quote(project_id, safe='')}"
+            f"/active_claims/{urllib.parse.quote(claim_id, safe='')}"
+        )
+
+    def save_active_claim(self, project_id: str, claim_id: str, payload: dict) -> dict:
+        """Upsert a claim; returns ``{claim_id, status}``."""
+        return self.post(
+            f"/api/projects/{urllib.parse.quote(project_id, safe='')}"
+            f"/active_claims/{urllib.parse.quote(claim_id, safe='')}",
+            {"payload": payload},
+        )
+
+    def delete_active_claim(self, project_id: str, claim_id: str) -> dict:
+        """Release a claim; returns ``{claim_id, deleted: bool}``."""
+        return self.delete(
+            f"/api/projects/{urllib.parse.quote(project_id, safe='')}"
+            f"/active_claims/{urllib.parse.quote(claim_id, safe='')}"
+        )

@@ -4,7 +4,13 @@ use serde::Serialize;
 use tauri::{Emitter, Manager, State};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
-struct AppState {
+// ms-72 e-1779: HTTP plumbing (PATCH/DELETE/POST-with-body) lives in cloud_http,
+// member/invitation Tauri bindings live in member. Both reuse the auth-token +
+// 401-refresh helpers defined here (load_auth_token, refresh_id_token).
+mod cloud_http;
+mod member;
+
+pub(crate) struct AppState {
     project_dir: Mutex<Option<String>>,
     cloud_project_id: Mutex<Option<String>>,
     watcher: Mutex<Option<RecommendedWatcher>>,
@@ -44,6 +50,63 @@ fn start_file_watcher(app_handle: tauri::AppHandle, project_dir: &str) -> Option
 }
 
 const DEFAULT_API_URL: &str = "https://beacon-ai.dev";
+
+/// ms-64 / e-1461: resolve api_url from the active profile so Tauri talks to
+/// whichever backend the user's CLI is currently configured against. Honors
+/// the same precedence chain as lib/profile.py's `_resolve_api_url`:
+///
+///   1. BEACON_API_URL env var
+///   2. cwd .beacon/cloud.json `api_url` field
+///   3. ~/.beacon/profiles/<BEACON_PROFILE | default>/profile.json `api_url`
+///   4. DEFAULT_API_URL
+pub(crate) fn resolve_api_url() -> String {
+    if let Ok(env_url) = std::env::var("BEACON_API_URL") {
+        if !env_url.is_empty() {
+            return env_url.trim_end_matches('/').to_string();
+        }
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        let cloud_json = cwd.join(".beacon").join("cloud.json");
+        if let Ok(content) = std::fs::read_to_string(&cloud_json) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(url) = json.get("api_url").and_then(|v| v.as_str()) {
+                    if !url.is_empty() {
+                        return url.trim_end_matches('/').to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    let profile_name = std::env::var("BEACON_PROFILE").unwrap_or_else(|_| "default".to_string());
+    if let Ok(home) = std::env::var("HOME") {
+        let profile_json = std::path::Path::new(&home)
+            .join(".beacon")
+            .join("profiles")
+            .join(&profile_name)
+            .join("profile.json");
+        if let Ok(content) = std::fs::read_to_string(&profile_json) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(url) = json.get("api_url").and_then(|v| v.as_str()) {
+                    if !url.is_empty() {
+                        return url.trim_end_matches('/').to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    DEFAULT_API_URL.to_string()
+}
+
+/// Tauri command exposing the active profile's api_url to the JS frontend
+/// (layer.js). Used to build WS URLs + Web deep links instead of hardcoding
+/// `beacon-ai.dev`. Returns a String so JS can `await invoke(...)` it.
+#[tauri::command]
+fn cloud_get_api_url() -> String {
+    resolve_api_url()
+}
 
 /// Find a beacon project by checking multiple sources
 fn find_project_dir() -> Option<String> {
@@ -161,7 +224,7 @@ fn list_projects() -> Vec<ProjectInfo> {
 
 /// Load auth token from ~/.beacon/credentials.json
 /// HOME is used on macOS/Linux; USERPROFILE is used on Windows.
-fn load_auth_token() -> Option<String> {
+pub(crate) fn load_auth_token() -> Option<String> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .ok()?;
@@ -177,7 +240,7 @@ fn load_auth_token() -> Option<String> {
 
 /// Refresh the id_token using the refresh_token from credentials.json.
 /// Updates credentials.json in-place on success and returns the new id_token.
-fn refresh_id_token() -> Option<String> {
+pub(crate) fn refresh_id_token() -> Option<String> {
     let home = std::env::var("HOME").ok()?;
     let creds_path = std::path::Path::new(&home).join(".beacon/credentials.json");
     let content = std::fs::read_to_string(&creds_path).ok()?;
@@ -221,7 +284,7 @@ fn refresh_id_token() -> Option<String> {
 fn cloud_get(path: &str) -> Result<String, String> {
     let token = load_auth_token()
         .ok_or("Not authenticated. Run: beacon auth login")?;
-    let url = format!("{}{}", DEFAULT_API_URL, path);
+    let url = format!("{}{}", resolve_api_url(), path);
 
     match ureq::get(&url).set("Authorization", &format!("Bearer {}", token)).call() {
         Ok(resp) => resp.into_string().map_err(|e| format!("Read error: {}", e)),
@@ -297,7 +360,7 @@ fn cloud_list_session_logs(state: State<AppState>, limit: Option<u32>) -> Result
 fn cloud_post(path: &str) -> Result<String, String> {
     let token = load_auth_token()
         .ok_or("Not authenticated. Run: beacon auth login")?;
-    let url = format!("{}{}", DEFAULT_API_URL, path);
+    let url = format!("{}{}", resolve_api_url(), path);
     match ureq::post(&url).set("Authorization", &format!("Bearer {}", token)).set("Content-Length", "0").call() {
         Ok(resp) => resp.into_string().map_err(|e| format!("Read error: {}", e)),
         Err(ureq::Error::Status(401, _)) => {
@@ -531,7 +594,7 @@ fn cloud_diagnose() -> String {
         None => lines.push("token: None (not authenticated)".into()),
         Some(token) => {
             lines.push(format!("token: {}...", &token[..token.len().min(20)]));
-            let url = format!("{}/api/projects", DEFAULT_API_URL);
+            let url = format!("{}/api/projects", resolve_api_url());
             match ureq::get(&url).set("Authorization", &format!("Bearer {}", token)).call() {
                 Ok(resp) => match resp.into_string() {
                     Ok(body) => lines.push(format!("API OK: {}", &body[..body.len().min(200)])),
@@ -588,6 +651,11 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
+        // ms-72 e-1779: shell plugin enables `window.__TAURI__.shell.open(url)`
+        // from layer.js, used by the account-menu Admin item to open the Web
+        // admin page in the user's default browser. Capability already grants
+        // `shell:allow-open` in capabilities/default.json.
+        .plugin(tauri_plugin_shell::init())
         .manage(AppState {
             project_dir: Mutex::new(find_project_dir()),
             cloud_project_id: Mutex::new(None),
@@ -634,6 +702,18 @@ pub fn run() {
             cloud_refresh_auth_token,
             cloud_list_notes,
             cloud_list_session_logs,
+            cloud_get_api_url,
+            // ms-72 e-1779 — Member admin + invitation flow + sign-out.
+            member::cloud_list_members,
+            member::cloud_invite_member,
+            member::cloud_change_member_role,
+            member::cloud_remove_member,
+            member::cloud_create_invitation,
+            member::cloud_list_invitations,
+            member::cloud_cancel_invitation,
+            member::cloud_preview_invitation,
+            member::cloud_accept_invitation,
+            member::cloud_logout,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -147,6 +147,16 @@ Step 1 の情報を読み、**日本語で1〜3文の説明文**を生成する�
 
 ## Step 3: 書き込み（finalize）
 
+**ms-68 / e-1642 補足 (= entry-writing principle の draft 表示)**: `beacon deploy record --finalize` を実行する **前** に、Step 2 で生成した説明文を 1 度ユーザーに提示し、self-review 4 原則 (読み手目線 1 行 / 横文字 3 段階 / ID 参照に文脈 / 尻切れトンボ禁止) で違反が無いか自問する。違反があればその場で書き直してから書き込む。deploy 説明文は CHANGELOG / リリースノート / Releases タブで広く読まれるため、silent write は読み手 (非開発者を含む) を排除する。
+
+```
+deploy を以下の説明文で記録します:
+
+  <Step2 で生成した説明文>
+
+このまま記録しますか? (= OK / 書き直し)
+```
+
 Step 2 で生成した説明文を使って Bash ツールで実行:
 
 ```bash
@@ -157,6 +167,25 @@ beacon deploy record --finalize --desc "<Step2の説明文>"
 ```bash
 beacon deploy record --finalize --desc "<説明文>" --semver <version>
 ```
+
+### Step 3.5: backend 指定 (= ms-80 e-1831, optional)
+
+multi-backend (= GCP Cloud Run / AWS Lambda / TrailNode) で運用しているプロジェクトでは、deploy 記録に **backend 名** を残しておくと「どの backend に何が反映されたか」 を後から追える。
+
+明示しない場合は **active な cloud profile 名** が自動で backend として採用される (= `BEACON_PROFILE` / `cwd .beacon/cloud.json.profile` / `~/.beacon/profile.json` の precedence で resolve、典型値: `default` / `aws-ga`)。
+
+明示したい場合 (= 例: TrailNode 配布):
+```bash
+beacon deploy record --finalize --desc "<説明文>" --backend trailnode
+```
+
+backend 別に過去 deploy を絞り込む時:
+```bash
+beacon deploy list --backend aws-ga    # AWS だけ列挙
+beacon deploy list --backend default   # GCP Cloud Run だけ列挙
+```
+
+backend 名は固定 enum ではなく **任意文字列** (= 将来 backend が増えてもコード変更不要)。慣例: GCP Cloud Run="default"、AWS GA="aws-ga"、TrailNode 配布="trailnode"、他は profile 名 or 任意の自己説明文字列。
 
 ## Step 4: 結果の提示
 

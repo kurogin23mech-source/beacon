@@ -19,9 +19,9 @@ You can install either one or both depending on how you want to use Beacon.
 
 | OS | Beacon Desktop | Beacon CLI |
 |----|----------------|------------|
-| **macOS** | `brew install --cask beacon-desktop`<br>or download `.dmg` from [Releases](https://github.com/r-kida2/beacon/releases) | `brew install r-kida2/beacon/beacon`<br>or `pipx install beacon` |
-| **Windows** | `winget install BeaconAI.BeaconDesktop`<br>or download `.msi` from [Releases](https://github.com/r-kida2/beacon/releases) | `pipx install beacon` |
-| **Linux** | Download `.AppImage` from [Releases](https://github.com/r-kida2/beacon/releases) and run `chmod +x Beacon-*.AppImage` | `pipx install beacon`<br>or use Homebrew on Linux |
+| **macOS** | `brew install --cask beacon-desktop`<br>or download `.dmg` from [Releases](https://github.com/r-kida2/beacon/releases) | `brew install r-kida2/beacon/beacon`<br>or `pipx install beacon-ai` |
+| **Windows** | `winget install BeaconAI.BeaconDesktop`<br>or download `.msi` from [Releases](https://github.com/r-kida2/beacon/releases) | `pipx install beacon-ai` |
+| **Linux** | Download `.AppImage` from [Releases](https://github.com/r-kida2/beacon/releases) and run `chmod +x Beacon-*.AppImage` | `pipx install beacon-ai`<br>or use Homebrew on Linux |
 
 > **Status (2026-06):** Beacon Desktop distribution (brew cask / WinGet / AppImage releases) is being
 > set up in **ms-44**. Until the first artifact is published you can still build Desktop from source
@@ -57,7 +57,7 @@ brew tap r-kida2/beacon
 brew install beacon
 
 # Or pipx (cross-platform, doesn't require Homebrew)
-pipx install beacon
+pipx install beacon-ai
 ```
 
 `brew install` and `pipx install` both put `beacon` on your `$PATH`. Pick whichever fits your
@@ -68,7 +68,7 @@ existing workflow.
 ```bash
 brew upgrade --cask beacon-desktop   # Desktop
 brew upgrade beacon                  # CLI (Homebrew)
-pipx upgrade beacon                  # CLI (pipx)
+pipx upgrade beacon-ai               # CLI (pipx)
 ```
 
 ---
@@ -128,18 +128,18 @@ Or download `Beacon-<version>-x64.msi` from the
 python -m pip install --user pipx
 python -m pipx ensurepath
 # Restart PowerShell, then:
-pipx install beacon
+pipx install beacon-ai
 ```
 
 The legacy bash entry-point in `bin/beacon` does **not** work in native PowerShell or cmd —
-use `pipx install beacon` (Python entry-point) instead. WSL2 users can also clone the repo and
+use `pipx install beacon-ai` (Python entry-point) instead. WSL2 users can also clone the repo and
 add `bin/` to `$PATH`, but this is not recommended for non-developers.
 
 ### Upgrading on Windows
 
 ```powershell
 winget upgrade BeaconAI.BeaconDesktop  # Desktop
-pipx upgrade beacon                    # CLI
+pipx upgrade beacon-ai                 # CLI
 ```
 
 ---
@@ -182,7 +182,7 @@ sudo apt install pipx                  # Debian/Ubuntu
 # or: sudo dnf install pipx            # Fedora
 # or: brew install pipx                # Homebrew on Linux
 
-pipx install beacon
+pipx install beacon-ai
 ```
 
 Homebrew on Linux is also supported but requires the same tap setup as macOS:
