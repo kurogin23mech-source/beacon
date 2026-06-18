@@ -1,0 +1,57 @@
+# Beacon Cloud server — local development stack
+#
+# ローカルで Beacon Cloud サーバを丸ごと立てて試すための compose 定義。
+# クラウド認証情報 (GCP / AWS) は一切不要。
+#
+#   - beacon-server      : 既存 Dockerfile の FastAPI サーバ (= 本番 Cloud Run と同じイメージ)
+#   - firestore-emulator : Google 公式 Firestore エミュレータ (GCP 接続なしで動く)
+#
+# 認証は BEACON_API_AUTH=0 でバイパスし、全リクエストが dev@local ユーザーとして通る。
+# データはエミュレータのメモリ上に保持され、停止すると消える (= 使い捨て)。
+#
+# 使い方:
+#   docker compose up --build        # 起動 (API は http://localhost:8080)
+#   docker compose down              # 停止 (データ破棄)
+#
+# CLI / Desktop から接続する場合は接続先 api_url を http://localhost:8080 に向ける。
+
+services:
+  firestore-emulator:
+    # 公式 Cloud SDK イメージの emulators タグ (Firestore エミュレータ + Java 同梱)
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command: >
+      gcloud emulators firestore start
+      --host-port=0.0.0.0:8080
+      --project=beacon-local
+    ports:
+      # ホストからエミュレータを直接触りたいとき用 (任意)。8080 はサーバが使うので 8081 に出す。
+      - "8081:8080"
+    healthcheck:
+      # エミュレータがポートを listen し始めたら ready とみなす。サーバはこれを待ってから繋ぐ。
+      # curl 非同梱の可能性があるため bash の /dev/tcp で TCP 接続可否のみを判定する。
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/8080' >/dev/null 2>&1 || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  beacon-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      # 認証バイパス: 全リクエストを dev@local ユーザーとして扱う (app.py:209)
+      BEACON_API_AUTH: "0"
+      # Firestore SDK はこの env を自動検出し、GCP ではなくエミュレータへ接続する
+      FIRESTORE_EMULATOR_HOST: "firestore-emulator:8080"
+      # エミュレータ利用時もプロジェクト ID は必須 (firestore_client.py が参照)
+      BEACON_GCP_PROJECT_ID: "beacon-local"
+      # ストレージバックエンド (既定値だが明示)
+      BEACON_STORE_BACKEND: "firestore"
+      # コレクション接頭辞: dev → projects-dev / users-dev
+      BEACON_ENV: "dev"
+    depends_on:
+      firestore-emulator:
+        condition: service_healthy
