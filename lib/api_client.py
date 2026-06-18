@@ -515,6 +515,28 @@ class ApiClient:
             {"stage": stage, "recipient_session_id": recipient_session_id},
         )
 
+    # ms-70 / e-1923 (e-1718 AC 4): audit history listing for decided
+    # (approved | denied) DM-action sidecars. Mirrors the Web UI's
+    # Settings > Audit table but renders 6 columns in the terminal.
+    def list_dm_approval_history(self, project_id: str, *,
+                                  limit: int = 50) -> list[dict]:
+        """List decided DM approval sidecars (audit-only, read-only).
+
+        Wraps ``GET /api/projects/{pid}/dm/approval/history?limit=N``.
+        The server filters out ``pending`` and ``auto`` rows by design
+        (SPEC 設計方針 3: approve/deny lives only in the terminal), so
+        every returned row carries ``approval_status`` in {approved,
+        denied} with non-empty ``decision_by`` / ``decision_at``.
+
+        ``limit`` is capped server-side at 500 to bound audit-scroll
+        surface. Default 50 matches the Web UI.
+        """
+        suffix = f"?limit={int(limit)}" if limit else ""
+        return self.get(
+            f"/api/projects/{urllib.parse.quote(project_id, safe='')}"
+            f"/dm/approval/history{suffix}"
+        )
+
     # ms-70 / e-1716: receiver-side decision on a pending DM-action sidecar.
     # The CLI carries the human's Bearer token; the server stamps decision_by
     # from that token's sub claim — the CLI cannot spoof a different user.
