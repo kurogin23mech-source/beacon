@@ -1234,6 +1234,65 @@ def _ensure_on_branch(branch_name: str) -> str:
     return "created"
 
 
+def _prompt_close_leftover_worktree(ms_id: str, transition: str) -> None:
+    """ms-81 e-1919: surface leftover worktrees on phase transitions.
+
+    When an MS moves to done / observing / waiting we check whether the
+    branch-specific worktree directory still exists; a leftover worktree
+    is the temptation other sessions could later (re-)check out and
+    accidentally commit against. We prompt rather than block: interactive
+    runs get a [y/N] auto-close; non-interactive runs get a one-line
+    warning and proceed. Per SPEC §4 this is intentionally a forcing
+    function, not enforcement.
+    """
+    try:
+        data = load_project()
+    except Exception:
+        return
+    ms = next((m for m in data.get("milestones", []) if m.get("id") == ms_id), None)
+    if ms is None:
+        return
+    try:
+        import branch as _branch
+        branch_name = _branch.ms_branch_name(ms_id, ms.get("title", ""))
+    except Exception:
+        return
+    workspace_path = os.path.join(".worktrees", branch_name)
+    if not os.path.exists(workspace_path):
+        return
+    msg = (
+        f"\n[ms-81 transition prompt] worktree still present at "
+        f"{workspace_path} after {transition} of [{ms_id}].\n"
+        f"   Leftover worktrees can be (re-)entered by other sessions; "
+        f"cleanup keeps the audit trail tight."
+    )
+    print(msg, file=sys.stderr)
+    if not sys.stdin.isatty():
+        print(
+            "   (non-interactive — leaving the worktree in place; clean up "
+            "with `beacon milestone workspace-cleanup " + ms_id + "` when "
+            "convenient.)",
+            file=sys.stderr,
+        )
+        return
+    try:
+        choice = input("   Auto-close worktree? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        choice = "n"
+    if choice in ("y", "yes"):
+        # Defer to the existing workspace_cleanup command rather than
+        # duplicating the git worktree remove machinery; it already
+        # handles branch checks and idempotency.
+        os.environ["BEACON_MS_ID"] = ms_id
+        cmd_milestone_workspace_cleanup()
+    else:
+        print(
+            f"   leaving worktree in place; run `beacon milestone "
+            f"workspace-cleanup {ms_id}` to remove later.",
+            file=sys.stderr,
+        )
+
+
 def _release_all_occupations_for_session(session_id: str) -> int:
     """ms-81 e-1918 (SPEC AC #15): release every MS this session is occupying.
 
@@ -1298,6 +1357,7 @@ def cmd_milestone_done():
     ms = core.milestone_done(data, ms_id, reason=reason)
     _release_occupation_for_transition(data, ms_id, reason="done")
     save_project(data, op={"op": "milestone_done", "ms_id": ms_id, "reason": reason})
+    _prompt_close_leftover_worktree(ms_id, "done")
     print(f"Completed: {ms['title']}")
     if reason:
         print(f"  Reason: {reason}")
@@ -1325,6 +1385,7 @@ def cmd_milestone_wait():
     _release_occupation_for_transition(data, ms_id, reason="wait")
     save_project(data, op={"op": "milestone_wait", "ms_id": ms_id,
                            "reason": reason})
+    _prompt_close_leftover_worktree(ms_id, "wait")
     print(f"Waiting: [{ms['id']}] {ms['title']}")
     if reason:
         print(f"  Reason: {reason}")
@@ -1402,6 +1463,7 @@ def cmd_milestone_observe():
     _release_occupation_for_transition(data, ms_id, reason="observe")
     save_project(data, op={"op": "milestone_observe", "ms_id": ms_id,
                            "reason": reason})
+    _prompt_close_leftover_worktree(ms_id, "observe")
     print(f"Observing: [{ms['id']}] {ms['title']}")
     if reason:
         print(f"  Reason: {reason}")
@@ -2425,6 +2487,53 @@ def cmd_task_add():
 
     data = load_project()
     target = core.find_target_milestone(data, ms_id)
+
+    # ms-81 e-1919: re-open prompt for done MS. Adding a task to a done
+    # milestone creates a zombie (= the e-1916 write gate then blocks any
+    # commit/done against it, so it would stay in todo forever). Per SPEC
+    # §5 the right move is to surface the choice: re-open into observing
+    # (the natural recovery slot) or active, or abort. Interactive only;
+    # in the non-interactive Skill / hook path we proceed with a warning
+    # so the Skill report can flag the audit trail rather than block.
+    if target.get("status") == "done":
+        if sys.stdin.isatty():
+            print(
+                f"\n[ms-81 re-open prompt] [{target['id']}] {target['title']} "
+                f"is done. Adding a task here will leave it stuck (the "
+                f"write gate blocks commit / done on done milestones).",
+                file=sys.stderr,
+            )
+            print(
+                "   Options: (o) re-open as observing, (a) re-open as active, "
+                "(s) skip prompt and add anyway, (n) abort",
+                file=sys.stderr,
+            )
+            try:
+                choice = input("   Choice [o/a/s/N]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                choice = "n"
+            if choice == "o":
+                core.milestone_update(
+                    data, ms_id, status="observing",
+                    reason="re-opened to add task",
+                )
+                print(f"  re-opened {ms_id} as observing", file=sys.stderr)
+            elif choice == "a":
+                core.milestone_start(data, ms_id)
+                print(f"  re-opened {ms_id} as active", file=sys.stderr)
+            elif choice in ("", "n"):
+                print("  aborted (no task added)", file=sys.stderr)
+                sys.exit(1)
+            # "s" falls through and adds the task without changing status
+        else:
+            print(
+                f"[ms-81 re-open warning] adding to done MS [{target['id']}] "
+                f"{target['title']} — task will be stuck (write gate blocks "
+                f"future commits / done). Re-open with `beacon milestone start "
+                f"{ms_id}` or `beacon milestone observe {ms_id}` first.",
+                file=sys.stderr,
+            )
+
     eid = core.task_add(data, ms_id, description, entry_type=entry_type,
                         date=date, detail=detail, requested_by=requested_by,
                         priority=priority, motivation=motivation,
