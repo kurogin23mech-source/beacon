@@ -6,8 +6,13 @@
 #   - beacon-server      : 既存 Dockerfile の FastAPI サーバ (= 本番 Cloud Run と同じイメージ)
 #   - firestore-emulator : Google 公式 Firestore エミュレータ (GCP 接続なしで動く)
 #
-# 認証は BEACON_API_AUTH=0 でバイパスし、全リクエストが dev@local ユーザーとして通る。
-# データはエミュレータのメモリ上に保持され、停止すると消える (= 使い捨て)。
+# 認証はローカル開発ログイン (BEACON_LOCAL_DEV) で行う。
+#
+# 注意: データはエミュレータのメモリ上に保持され、停止 (down) すると消える (= 使い捨て)。
+# Firestore エミュレータはメモリ専用で、export-on-exit が Docker のシグナル経路と
+# 相性が悪く (gcloud / cloud_firestore_emulator の各ラッパーが SIGINT/SIGTERM を
+# Java 本体へ転送しない) 永続化できない。ディスク永続化は DynamoDB Local バックエンド
+# への切替で対応予定 (task e-1987 = ローカルクラウドのデータ永続化)。
 #
 # 使い方:
 #   docker compose up --build        # 起動 (API は http://localhost:8080)
