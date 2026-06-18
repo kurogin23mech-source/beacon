@@ -1095,6 +1095,32 @@ def cmd_milestone_done():
         print(f"  Reason: {reason}")
 
 
+def cmd_milestone_wait():
+    """Transition a milestone to ``waiting`` status (ms-81 e-1915).
+
+    Requires --reason (same gate as observe / done) so retro can reconstruct
+    why work paused. The transition is rejected by core.milestone_wait if
+    the source status is not active or observing.
+    """
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    reason = _require_reason_or_skip("milestone wait")
+    if not ms_id:
+        print("Usage: beacon milestone wait <ms-id> --reason <text>",
+              file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    try:
+        ms = core.milestone_wait(data, ms_id, reason=reason)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"op": "milestone_wait", "ms_id": ms_id,
+                           "reason": reason})
+    print(f"Waiting: [{ms['id']}] {ms['title']}")
+    if reason:
+        print(f"  Reason: {reason}")
+
+
 def cmd_milestone_observe():
     """Transition a milestone to ``observing`` status with --reason gating
     (e-976).
@@ -14687,6 +14713,7 @@ if __name__ == "__main__":
         "milestone_start": cmd_milestone_start,
         "milestone_done": cmd_milestone_done,
         "milestone_observe": cmd_milestone_observe,
+        "milestone_wait": cmd_milestone_wait,
         "milestone_join": cmd_milestone_join,
         "milestone_show": cmd_milestone_show,
         "milestone_update": cmd_milestone_update,

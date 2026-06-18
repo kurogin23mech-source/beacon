@@ -552,6 +552,44 @@ def milestone_done(data: dict, ms_id: str, *, reason: str = "") -> dict:
     raise ValueError(f"Milestone not found: {ms_id}")
 
 
+# ms-81 e-1915: waiting = a milestone that was active/observing but is now
+# paused, with the explicit intent of returning later. Distinct from todo
+# (= never started) because commit/PR history is already attached and the
+# work has accumulated context. Per CORE doc DqIvAVzDprcq6hsq0AuF §1, the
+# legal source statuses are active (= in_progress) and observing; todo / done
+# / cancelled cannot transition to waiting because their semantics conflict.
+_WAITING_SOURCES = {"in_progress", "active", "observing"}
+
+
+def milestone_wait(data: dict, ms_id: str, *, reason: str = "") -> dict:
+    """Transition a milestone to ``waiting`` status (ms-81 e-1915).
+
+    Rejects the transition if the current status is not in
+    ``_WAITING_SOURCES``. Per the state-machine CORE doc, todo / done /
+    cancelled cannot move to waiting — todo means "never started" (no
+    history to preserve), done means "completed" (re-open via observe or
+    active), cancelled is terminal.
+    """
+    for ms in data["milestones"]:
+        if ms["id"] == ms_id:
+            current = ms.get("status", "todo")
+            if current not in _WAITING_SOURCES:
+                raise ValueError(
+                    f"Cannot wait milestone in status '{current}'. "
+                    f"Only active (in_progress) or observing milestones can "
+                    f"transition to waiting. "
+                    f"(todo → use start; done → use start to re-open)"
+                )
+            ms["status"] = "waiting"
+            meta = ms.setdefault("meta", {})
+            meta["waiting_at"] = _now_iso()
+            meta["waiting_by"] = _get_actor()
+            if reason:
+                meta["waiting_reason"] = reason
+            return ms
+    raise ValueError(f"Milestone not found: {ms_id}")
+
+
 def milestone_update(data: dict, ms_id: str, *,
                      title: str = "", progress: str = "",
                      target_date: str = "", status: str = "",
