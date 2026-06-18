@@ -4624,12 +4624,30 @@ def _current_project_id() -> str:
     Used by trek-show / trek-timeline aggregation to decide which scope
     entries it can resolve locally (= same-project) and which are
     cross-project hints the caller must visit separately.
+
+    Resolution order (ms-83 / e-2007 dogfood finding):
+      1. ``data.id`` / ``data.project_id`` on the local project.json
+         (= local mode and cloud-cached layouts that store the id inline)
+      2. ``.beacon/cloud.json`` ``project_id`` (= cloud mode default —
+         project.json is the cached document and does not embed the id)
+      3. Empty string if neither path resolves
     """
     try:
         data = load_project()
     except Exception:
-        return ""
-    return (data.get("id") or data.get("project_id") or "").strip()
+        data = {}
+    pid = (data.get("id") or data.get("project_id") or "").strip()
+    if pid:
+        return pid
+    try:
+        cloud_path = _get_cloud_config_path()
+        if os.path.exists(cloud_path):
+            with open(cloud_path, "r", encoding="utf-8") as f:
+                cloud_cfg = json.load(f)
+            return (cloud_cfg.get("project_id") or "").strip()
+    except Exception:
+        pass
+    return ""
 
 
 def _scope_matches_entry(scope: list[dict], project_id: str,
