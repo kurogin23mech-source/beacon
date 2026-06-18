@@ -42,8 +42,18 @@ services:
     ports:
       - "8080:8080"
     environment:
-      # 認証バイパス: 全リクエストを dev@local ユーザーとして扱う (app.py:209)
-      BEACON_API_AUTH: "0"
+      # 認証は有効化する。ただしログインは下の BEACON_LOCAL_DEV による IdP 不要の
+      # ローカル開発ログインで行う。認証を有効にすることで、メールごとに別アカウント
+      # として扱われ owner / member 制御が効く (= 複数人での使い分けが可能)。
+      # 認証を完全にバイパスして全員 dev@local 固定にしたい場合は "0" にする。
+      BEACON_API_AUTH: "1"
+      # ローカル開発ログイン (= /api/auth/dev-login) を有効化。本番では絶対に設定しない。
+      BEACON_LOCAL_DEV: "1"
+      # bcli トークンの署名鍵。ローカル固定値 (本番とは別物)。
+      BEACON_CLI_TOKEN_SECRET: "local-dev-secret"
+      # envelope 署名鍵。BEACON_API_AUTH=1 のとき起動ガードが設定を要求する
+      # (= 本番で dev fallback 鍵を使わせない安全装置)。ローカル固定値で満たす。
+      BEACON_ENVELOPE_SECRET: "local-dev-envelope-secret"
       # Firestore SDK はこの env を自動検出し、GCP ではなくエミュレータへ接続する
       FIRESTORE_EMULATOR_HOST: "firestore-emulator:8080"
       # エミュレータ利用時もプロジェクト ID は必須 (firestore_client.py が参照)

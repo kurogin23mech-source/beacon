@@ -208,6 +208,13 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 # Set BEACON_API_AUTH=0 to disable auth (for local dev / testing)
 _auth_enabled = os.environ.get("BEACON_API_AUTH", "1") != "0"
 
+# Set BEACON_LOCAL_DEV=1 to enable the IdP-free local dev login (= /api/auth/dev-login
+# mints a bcli token for an arbitrary email, so multiple people can use a
+# locally-running server under separate accounts without Google/Cognito).
+# HARD off by default: production (Cloud Run) never sets this env, so the
+# dev-login endpoint returns 404 there and can never be reached.
+_local_dev_enabled = os.environ.get("BEACON_LOCAL_DEV", "0") == "1"
+
 
 _CLI_TOKEN_PREFIX = "bcli."
 _CLI_TOKEN_LIFETIME = 86400 * 30  # 30 days
@@ -5270,12 +5277,47 @@ def auth_config():
             "client_id": os.environ.get("BEACON_COGNITO_CLIENT_ID", ""),
             "cognito_domain": os.environ.get("BEACON_COGNITO_HOSTED_UI_DOMAIN", ""),
             "region": os.environ.get("AWS_REGION", "ap-northeast-1"),
+            # local_dev: Web UI がローカル開発ログインフォームを出すかの判定に使う
+            "local_dev": _local_dev_enabled,
         }
     # Firebase / Cloud Run 既存経路 (= 後方互換)
     return {
         "provider": "firebase",
         "client_id": os.environ.get("BEACON_OAUTH_CLIENT_ID", ""),
+        # local_dev: ローカル時のみ true。本番 Cloud Run では env 未設定 = false。
+        "local_dev": _local_dev_enabled,
     }
+
+
+class DevLoginRequest(BaseModel):
+    email: str
+    name: str = ""
+
+
+@app.post("/api/auth/dev-login")
+def dev_login(body: DevLoginRequest):
+    """ローカル専用・IdP 不要のログイン。任意の email に対して bcli トークンを発行する。
+
+    BEACON_LOCAL_DEV=1 のときだけ有効 (= ハードゲート)。本番 (Cloud Run) は
+    この env を設定しないので、ここは常に 404 を返し到達不能。Google / Cognito を
+    立てずに、ローカルサーバを複数人が別アカウントで使い分けられるようにするための
+    入口。発行したトークンは provider 非依存の HMAC なので require_auth が
+    そのまま検証し、sub / email 単位でアカウントが分かれる。
+    """
+    if not _local_dev_enabled:
+        raise HTTPException(status_code=404, detail="Not found")
+    email = (body.email or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="email required")
+    # sub は email から決定論的に導出 (= 同じ email は同じアカウント)。
+    sub = f"dev:{email}"
+    token, expiry = _make_cli_token(sub, email)
+    # member picker 等に出るよう先にユーザー登録しておく。
+    db.get_or_create_user(sub, email)
+    name = (body.name or "").strip()
+    if name:
+        db.update_user(sub, {"display_name": name})
+    return {"status": "ok", "id_token": token, "email": email, "token_expiry": expiry}
 
 
 
