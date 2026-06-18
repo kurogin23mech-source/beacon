@@ -3513,6 +3513,12 @@ EOF
         _bus_in_reply_to=""
         _bus_project_id=""
         _bus_to=""
+        # ms-75 / e-1858: --to repeatable + --to-trek expansion.
+        # _bus_to_list collects every --to value newline-separated; --to-trek
+        # appends the trek's joined leader_session_id via `beacon trek show
+        # --json | jq`. send subcommand fans out per-recipient.
+        _bus_to_list=""
+        _bus_to_trek=""
         _bus_action=""          # e-1290: comma-joined actions_authorized for T1 envelope
         _bus_no_envelope=""     # e-1290: opt-out of envelope path (debug legacy)
         while [[ $# -gt 0 ]]; do
@@ -3521,7 +3527,8 @@ EOF
                 --payload)        _bus_payload="${2:-}"; shift 2 ;;
                 --sender)         _bus_sender="${2:-}"; shift 2 ;;
                 --recipient)      _bus_recipient="${2:-}"; shift 2 ;;
-                --to)             _bus_to="${2:-}"; shift 2 ;;
+                --to)             _bus_to="${2:-}"; _bus_to_list="${_bus_to_list}${2:-}"$'\n'; shift 2 ;;
+                --to-trek)        _bus_to_trek="${2:-}"; shift 2 ;;
                 --delivery)       _bus_delivery="${2:-}"; shift 2 ;;
                 --interval)       _bus_interval="${2:-}"; shift 2 ;;
                 --timeout)        _bus_timeout="${2:-}"; shift 2 ;;
@@ -3560,17 +3567,60 @@ EOF
         done
         case "$_bus_sub" in
             send)
-                BEACON_BUS_CHANNEL="$_bus_channel" \
-                    BEACON_BUS_PAYLOAD="$_bus_payload" \
-                    BEACON_BUS_SENDER="$_bus_sender" \
-                    BEACON_BUS_RECIPIENT_SESSION="$_bus_to" \
-                    BEACON_BUS_DELIVERY="$_bus_delivery" \
-                    BEACON_BUS_IN_REPLY_TO="$_bus_in_reply_to" \
-                    BEACON_BUS_PROJECT_ID="$_bus_project_id" \
-                    BEACON_BUS_ACTION="$_bus_action" \
-                    BEACON_BUS_NO_ENVELOPE="$_bus_no_envelope" \
-                    BEACON_JSON="$_bus_json" \
-                    python3 "$COMMANDS_PY" bus_send
+                # ms-75 / e-1858: --to repeatable + --to-trek expansion.
+                # If --to-trek was passed, append the trek's leader session
+                # id to _bus_to_list. Cloud-mode lookup uses `beacon trek
+                # show --json` which transparently honors the active store.
+                if [[ -n "$_bus_to_trek" ]]; then
+                    if command -v python3 >/dev/null 2>&1; then
+                        _trek_leader=$(BEACON_TREK_ID="$_bus_to_trek" \
+                            python3 "$COMMANDS_PY" trek_show 2>/dev/null \
+                            | python3 -c 'import sys, json, re
+text = sys.stdin.read()
+m = re.search(r"^\s*leader sess:\s*(\S+)", text, re.M)
+print(m.group(1) if m else "")' || true)
+                        if [[ -n "$_trek_leader" ]]; then
+                            _bus_to_list="${_bus_to_list}${_trek_leader}"$'\n'
+                        else
+                            echo "Warning: --to-trek $_bus_to_trek → leader_session_id not resolvable; trek may have no active leader." >&2
+                        fi
+                    fi
+                fi
+                # Dedupe and fan out one send per recipient. The legacy
+                # behavior (single --to) collapses to a single subprocess.
+                if [[ -z "$_bus_to_list" ]]; then
+                    BEACON_BUS_CHANNEL="$_bus_channel" \
+                        BEACON_BUS_PAYLOAD="$_bus_payload" \
+                        BEACON_BUS_SENDER="$_bus_sender" \
+                        BEACON_BUS_RECIPIENT_SESSION="$_bus_to" \
+                        BEACON_BUS_DELIVERY="$_bus_delivery" \
+                        BEACON_BUS_IN_REPLY_TO="$_bus_in_reply_to" \
+                        BEACON_BUS_PROJECT_ID="$_bus_project_id" \
+                        BEACON_BUS_ACTION="$_bus_action" \
+                        BEACON_BUS_NO_ENVELOPE="$_bus_no_envelope" \
+                        BEACON_JSON="$_bus_json" \
+                        python3 "$COMMANDS_PY" bus_send
+                else
+                    _rc=0
+                    _seen=""
+                    while IFS= read -r _recipient; do
+                        [[ -z "$_recipient" ]] && continue
+                        case "$_seen" in *"|$_recipient|"*) continue ;; esac
+                        _seen="${_seen}|$_recipient|"
+                        BEACON_BUS_CHANNEL="$_bus_channel" \
+                            BEACON_BUS_PAYLOAD="$_bus_payload" \
+                            BEACON_BUS_SENDER="$_bus_sender" \
+                            BEACON_BUS_RECIPIENT_SESSION="$_recipient" \
+                            BEACON_BUS_DELIVERY="$_bus_delivery" \
+                            BEACON_BUS_IN_REPLY_TO="$_bus_in_reply_to" \
+                            BEACON_BUS_PROJECT_ID="$_bus_project_id" \
+                            BEACON_BUS_ACTION="$_bus_action" \
+                            BEACON_BUS_NO_ENVELOPE="$_bus_no_envelope" \
+                            BEACON_JSON="$_bus_json" \
+                            python3 "$COMMANDS_PY" bus_send || _rc=$?
+                    done <<< "$_bus_to_list"
+                    [[ "$_rc" -ne 0 ]] && exit "$_rc"
+                fi
                 ;;
             listen)
                 BEACON_BUS_RECIPIENT="$_bus_recipient" \
@@ -3669,7 +3719,7 @@ EOF
                 ;;
             *)
                 cat <<'EOF'
-Usage: beacon bus send         --channel <ch> [--to <session_id>] [--payload '<json>'] [--sender <id>] [--delivery <mode>] [--in-reply-to <event_id>] [--action <name>]... [--no-envelope] [--project <id>]
+Usage: beacon bus send         --channel <ch> [--to <session_id>]... [--to-trek <trek-id>] [--payload '<json>'] [--sender <id>] [--delivery <mode>] [--in-reply-to <event_id>] [--action <name>]... [--no-envelope] [--project <id>]
        beacon bus listen       [--recipient <id>] [--channel <ch>] [--interval <sec>] [--auto-ack] [--once] [--project <id>]
        beacon bus receive      [--recipient <id>] [--channel <ch>] [--timeout <sec>] [--auto-ack] [--project <id>]
        beacon bus ack          [--recipient <id>] (--last-seen-at <iso8601> | --event <event_id>) [--project <id>]

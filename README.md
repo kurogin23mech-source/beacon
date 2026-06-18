@@ -347,9 +347,10 @@ Treks (= 協奏作業領域) are cross-project, cross-session work areas. While 
 
 | Command | Description |
 |---------|-------------|
-| `beacon trek create "title" [--type temporary\|persistent] [--description "..."]` | Create a trek; caller becomes leader / trek 作成、起票者が leader |
-| `beacon trek list [--status s] [--include-archived] [--all-actors] [--json]` | List treks visible to the caller / 自分が member の trek 一覧 |
-| `beacon trek show <trek-id> [--json]` | Show trek detail (members / scope / status / halt) / trek 詳細 |
+| `beacon trek create "title" [--type temporary\|persistent] [--description "..."] [--goal-state "<criterion>"]` | Create a trek; caller becomes leader. `--goal-state` (ms-75 / e-1865) は完了マーカー (acceptance_criteria 相当) |
+| `beacon trek list [--status s] [--include-archived] [--all-actors] [--joined] [--json]` | List treks visible to the caller. `--joined` で自分が join 済の trek だけに絞る (ms-75 / e-1813) |
+| `beacon trek show <trek-id> [--all] [--json]` | Trek 詳細 + scope に紐付く task / commit / 配下 doc の集約ビュー (ms-75 / e-1864)。`--all` で要約 cap を解除 |
+| `beacon trek timeline <trek-id> [--limit N] [--json]` | Trek の lifecycle / scope 内 commit / task done / 配下 doc を時系列で参照 (ms-75 / e-1867) |
 | `beacon trek start <trek-id>` | Transition planning → active / planning から active へ |
 | `beacon trek archive <trek-id>` | Archive (= terminal); restart by creating a new trek / 完了化、再開は新 trek 起票 |
 | `beacon trek invite <trek-id> --actor <email> [--notify]` | Invite a user by email; `--notify` sends a live DM (`--notify` is acknowledged but live DM lands later) / メンバー招待 |
@@ -357,6 +358,7 @@ Treks (= 協奏作業領域) are cross-project, cross-session work areas. While 
 | `beacon trek leave <trek-id>` | Remove self (leader must `transfer-leader` first; last member must `archive` instead) / 離脱 |
 | `beacon trek plan <trek-id> --add-scope <project:ref>` | Add a scope entry (`ms-X` / `op-X` / `e-X` ref, or omit for project-wide) / scope 追加 |
 | `beacon trek plan <trek-id> --remove-scope <project:ref>` | Remove a scope entry / scope 削除 |
+| `beacon trek plan <trek-id> --goal-state "<criterion>"` | Trek の完了マーカーを設定 (空文字で clear、ms-75 / e-1865) |
 | `beacon trek stop <trek-id> [--reason "..."]` | Pull the Andon cord (= halt signal, sessions pause) / 非常停止 |
 | `beacon trek resume <trek-id>` | Clear the halt signal / 再開 |
 | `beacon trek transfer-leader <trek-id> --to <session-id>` | Hand off `leader_session_id` to another session / leader 引き継ぎ |

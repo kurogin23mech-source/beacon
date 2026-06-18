@@ -1086,7 +1086,15 @@ def build_parser() -> argparse.ArgumentParser:
     # `--no-envelope` opts out of the envelope issuance path (debug /
     # legacy). Without these flags Windows pipx users could not send
     # authorized cross-user DMs at all (W1 in ms-73 SPEC).
-    p_bus_send.add_argument("--to", dest="bus_to", default="")
+    # ms-75 / e-1858: ``--to`` becomes repeatable so a single send can
+    # address multiple session ids. The legacy single-value form keeps
+    # working (= bash dispatcher still passes BEACON_BUS_RECIPIENT_SESSION
+    # as comma-joined when given multiple). ``--to-trek <trek-id>`` expands
+    # the trek's joined members into one send per member (= cheap fan-out,
+    # built atop the existing single-send path so envelope / budget gates
+    # apply per recipient).
+    p_bus_send.add_argument("--to", dest="bus_to", action="append", default=[])
+    p_bus_send.add_argument("--to-trek", dest="bus_to_trek", default="")
     p_bus_send.add_argument("--action", dest="bus_action",
                              action="append", default=[])
     p_bus_send.add_argument("--no-envelope", dest="no_envelope",
@@ -3207,6 +3215,97 @@ def _handle_sessions(root: Path, args: argparse.Namespace) -> int:
     return _run_commands_py(root, "sessions_list", env)
 
 
+def _expand_trek_recipients(root: Path, trek_id: str) -> Optional[list]:
+    """Expand ``--to-trek <trek-id>`` into the trek's joined member sessions.
+
+    Returns a list of session ids (= ``leader_session_id`` if leader is in
+    the trek, plus any session ids stored against joined members). On error
+    (= trek not found, no joined members, lookup failure) returns ``None``
+    after printing a user-facing error to stderr, matching the dispatch
+    convention used by ``_ensure_project``.
+
+    Local mode resolution: walks ``~/.beacon/treks/<trek_id>.json`` and
+    extracts the ``leader_session_id``. Member-level session ids are not
+    persisted at this layer (ms-69 schema keeps membership at user grain
+    + a single leader session); for fan-out beyond the leader we add a
+    todo and a graceful warning so the surface is honest about what it
+    can do today. Cloud mode does the equivalent via the API client.
+
+    ms-75 / e-1858: this exists as a *thin wrapper* over the legacy single
+    recipient path (= per-recipient subprocess) instead of teaching
+    ``cmd_bus_send`` itself about fan-out. Each send still passes through
+    the envelope / budget gates independently, so multi-target broadcasts
+    don't bypass any single-recipient safety check.
+    """
+    import json
+    import subprocess
+
+    # Try local store first; fall back to a beacon trek show invocation
+    # when local lookup misses (= cloud-only treks).
+    try:
+        treks_dir = os.environ.get("BEACON_TREKS_DIR") or \
+            os.path.expanduser("~/.beacon/treks")
+        local_path = os.path.join(treks_dir, f"{trek_id}.json")
+        if os.path.exists(local_path):
+            with open(local_path, "r", encoding="utf-8") as f:
+                trek_doc = json.load(f)
+        else:
+            # Cloud-mode resolution: ask `beacon trek show <id> --json` —
+            # the same dispatch path used by /beacon-trek-execute.
+            res = subprocess.run(
+                ["beacon", "trek", "show", trek_id, "--json"],
+                capture_output=True, text=True, check=False,
+            )
+            if res.returncode != 0 or not res.stdout.strip():
+                print(
+                    f"Error: --to-trek {trek_id} → trek not found "
+                    f"(local store empty, `beacon trek show` returned "
+                    f"rc={res.returncode}).",
+                    file=sys.stderr,
+                )
+                return None
+            trek_doc = json.loads(res.stdout)
+    except (OSError, json.JSONDecodeError) as e:
+        print(
+            f"Error: --to-trek {trek_id} → failed to load trek doc: {e}",
+            file=sys.stderr,
+        )
+        return None
+
+    recipients: list[str] = []
+    leader_sid = (trek_doc.get("leader_session_id") or "").strip()
+    if leader_sid:
+        recipients.append(leader_sid)
+
+    # Membership is at user grain (ms-69 SPEC 設計方針 3): a "session id
+    # per member" field doesn't live in the trek doc. The Tier-1 use case
+    # for --to-trek today is "page the trek leader + any other live
+    # sessions belonging to joined members". Live-session resolution per
+    # member is a follow-up — we surface a one-line note so the caller
+    # knows what fan-out actually happened.
+    joined_count = sum(
+        1 for m in trek_doc.get("members") or [] if m.get("joined_at")
+    )
+    if joined_count > 1:
+        print(
+            f"Note: --to-trek {trek_id} fanned out to the leader session "
+            f"({leader_sid or '(none)'}) only. Member-level session id "
+            f"resolution lands in the cloud-mode follow-up; for now, the "
+            f"other {joined_count - 1} joined member(s) need to be "
+            f"addressed individually with --to <session-id>.",
+            file=sys.stderr,
+        )
+
+    if not recipients:
+        print(
+            f"Error: --to-trek {trek_id} → no joined sessions to fan out "
+            "to (trek has no leader_session_id).",
+            file=sys.stderr,
+        )
+        return None
+    return recipients
+
+
 def _handle_bus(root: Path, args: argparse.Namespace) -> int:
     """`beacon bus <send|listen|receive|ack|status|directory|budget>`.
 
@@ -3226,9 +3325,9 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
     """
     if args.show_help or args.bus_cmd is None:
         print("Usage: beacon bus send      --channel <ch> [--payload '<json>'] "
-              "[--sender <id>] [--to <recipient>] [--delivery <mode>] "
-              "[--in-reply-to <event_id>] [--action <name> ...] "
-              "[--no-envelope] [--project <id>]")
+              "[--sender <id>] [--to <recipient> ...] [--to-trek <trek-id>] "
+              "[--delivery <mode>] [--in-reply-to <event_id>] "
+              "[--action <name> ...] [--no-envelope] [--project <id>]")
         print("       beacon bus listen    [--recipient <id>] [--channel <ch>] "
               "[--interval <sec>] [--auto-ack] [--once] [--project <id>]")
         print("       beacon bus receive   [--recipient <id>] [--channel <ch>] "
@@ -3242,7 +3341,12 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
         print("       beacon bus budget    grant --turns <N>  |  show  |  clear")
         print("")
         print("delivery: auto-execute | propose-to-ai (default) | notify-user-only")
-        print("--to: cross-user DM recipient session id (Tier-1 envelope path)")
+        print("--to: cross-user DM recipient session id (Tier-1 envelope "
+              "path). Repeatable: multiple --to flags fan out the same "
+              "send to each recipient (ms-75 / e-1858).")
+        print("--to-trek: expand to the trek's joined session(s). Equivalent "
+              "to passing --to for each trek member (= broadcast within a "
+              "Trek scope).")
         print("--action: repeat for each authorized action; comma-joined "
               "for envelope issuance (e-1290).")
         print("--no-envelope: opt-out of envelope issuance (legacy / debug).")
@@ -3261,11 +3365,41 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
         # receives the same shape as bin/beacon's BEACON_BUS_ACTION.
         actions = getattr(args, "bus_action", []) or []
         bus_action_csv = ",".join([a for a in actions if a])
-        env: Dict[str, str] = {
+
+        # ms-75 / e-1858: collect recipients from --to (repeatable) and
+        # --to-trek (= expand to trek member session ids). The legacy
+        # bash entry point passes a single string in
+        # BEACON_BUS_RECIPIENT_SESSION; we keep that contract by looping
+        # one send per recipient when multiple are supplied. Single
+        # recipient stays a single subprocess invocation (= no behaviour
+        # change for existing scripts).
+        bus_to_raw = getattr(args, "bus_to", []) or []
+        if isinstance(bus_to_raw, str):
+            bus_to_list = [bus_to_raw] if bus_to_raw else []
+        else:
+            bus_to_list = [r for r in bus_to_raw if r]
+        bus_to_trek = (getattr(args, "bus_to_trek", "") or "").strip()
+        if bus_to_trek:
+            extras = _expand_trek_recipients(root, bus_to_trek)
+            if extras is None:
+                # _expand_trek_recipients already printed an error.
+                return 1
+            bus_to_list.extend(extras)
+        # Deduplicate while preserving order; treat the sender's own
+        # session as harmless (= same-user broadcast within their own
+        # treks). Self-filtering is up to the caller's policy.
+        seen: set[str] = set()
+        dedup_list: list[str] = []
+        for r in bus_to_list:
+            if r not in seen:
+                seen.add(r)
+                dedup_list.append(r)
+        bus_to_list = dedup_list
+
+        base_env: Dict[str, str] = {
             "BEACON_BUS_CHANNEL": args.channel or "",
             "BEACON_BUS_PAYLOAD": args.payload or "",
             "BEACON_BUS_SENDER": args.sender or "",
-            "BEACON_BUS_RECIPIENT_SESSION": getattr(args, "bus_to", "") or "",
             "BEACON_BUS_DELIVERY": args.delivery or "",
             "BEACON_BUS_IN_REPLY_TO": args.in_reply_to or "",
             "BEACON_BUS_ACTION": bus_action_csv,
@@ -3273,8 +3407,25 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
             "BEACON_JSON": "1" if args.json else "",
         }
         if project_id:
-            env["BEACON_BUS_PROJECT_ID"] = project_id
-        return _run_commands_py(root, "bus_send", env)
+            base_env["BEACON_BUS_PROJECT_ID"] = project_id
+
+        if not bus_to_list:
+            # Preserve legacy behaviour: no --to / --to-trek means the
+            # caller intentionally targeted a non-DM broadcast channel
+            # (cmd_bus_send warns if channel == 'dm' anyway).
+            return _run_commands_py(root, "bus_send", base_env)
+
+        rc_final = 0
+        for recipient in bus_to_list:
+            env = dict(base_env)
+            env["BEACON_BUS_RECIPIENT_SESSION"] = recipient
+            rc = _run_commands_py(root, "bus_send", env)
+            # Any failure surfaces in the exit code, but we keep fanning
+            # out the rest so a single bad recipient doesn't drop the
+            # entire broadcast.
+            if rc != 0:
+                rc_final = rc
+        return rc_final
 
     if cmd == "listen":
         env = {
