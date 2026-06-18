@@ -976,6 +976,48 @@ def cmd_milestone_start():
     data = load_project()
     ms = core.milestone_start(data, ms_id)
 
+    # ---- 1b. occupation claim (ms-81 e-1918) ----
+    # Tied to milestone_start so status / assignee / occupation always lift
+    # together. If a previous claim exists from another session, warn —
+    # never block (= SPEC §3-3, 努力義務).
+    try:
+        import agent as _agent_for_claim
+        actor_for_claim = _agent_for_claim.get_actor()
+    except Exception:
+        actor_for_claim = {}
+    sid_for_claim = _resolve_session_id() or ""
+    _ms_claim, previous_claim = core.milestone_claim_occupation(
+        data, ms_id,
+        session_id=sid_for_claim,
+        machine=actor_for_claim.get("machine", ""),
+        agent=actor_for_claim.get("agent", ""),
+    )
+    if previous_claim and previous_claim.get("session_id") != sid_for_claim:
+        prev_sid = previous_claim.get("session_id", "?")
+        prev_machine = previous_claim.get("machine", "?")
+        print(
+            f"  [ms-81 occupation] previous claim by session "
+            f"{prev_sid[:12]}... on {prev_machine} (claimed_at: "
+            f"{previous_claim.get('claimed_at', '?')}). Proceeding with "
+            f"takeover; if that session crashed, this is normal — if it is "
+            f"still actively working, coordinate via beacon dm.",
+            file=sys.stderr,
+        )
+        core.milestone_record_occupation_event(
+            data, ms_id=ms_id, event_type="takeover",
+            session_id=sid_for_claim,
+            machine=actor_for_claim.get("machine", ""),
+            agent=actor_for_claim.get("agent", ""),
+            reason=f"superseded session {prev_sid[:12]}",
+        )
+    else:
+        core.milestone_record_occupation_event(
+            data, ms_id=ms_id, event_type="claim",
+            session_id=sid_for_claim,
+            machine=actor_for_claim.get("machine", ""),
+            agent=actor_for_claim.get("agent", ""),
+        )
+
     # ---- 1. assignee auto-add (lib/agent.py is the single source) ----
     actor_str = ""
     if not no_assignee:
@@ -1189,11 +1231,35 @@ def _ensure_on_branch(branch_name: str) -> str:
     return "created"
 
 
+def _release_occupation_for_transition(data, ms_id, *, reason):
+    """ms-81 e-1918: phase transitions auto-release any active occupation
+    on the target MS. Per the SPEC the release happens whether or not the
+    session that claimed it is the same one calling the transition (= a
+    done verb on someone else's claim is implicitly a takeover).
+    """
+    sid = _resolve_session_id() or ""
+    try:
+        import agent as _agent_for_release
+        actor = _agent_for_release.get_actor()
+    except Exception:
+        actor = {}
+    _ms, released = core.milestone_release_occupation(data, ms_id, reason=reason)
+    if released:
+        core.milestone_record_occupation_event(
+            data, ms_id=ms_id, event_type="release",
+            session_id=sid,
+            machine=actor.get("machine", ""),
+            agent=actor.get("agent", ""),
+            reason=reason,
+        )
+
+
 def cmd_milestone_done():
     ms_id = os.environ.get("BEACON_MS_ID", "")
     reason = _require_reason_or_skip("milestone done")
     data = load_project()
     ms = core.milestone_done(data, ms_id, reason=reason)
+    _release_occupation_for_transition(data, ms_id, reason="done")
     save_project(data, op={"op": "milestone_done", "ms_id": ms_id, "reason": reason})
     print(f"Completed: {ms['title']}")
     if reason:
@@ -1219,11 +1285,56 @@ def cmd_milestone_wait():
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    _release_occupation_for_transition(data, ms_id, reason="wait")
     save_project(data, op={"op": "milestone_wait", "ms_id": ms_id,
                            "reason": reason})
     print(f"Waiting: [{ms['id']}] {ms['title']}")
     if reason:
         print(f"  Reason: {reason}")
+
+
+def cmd_milestone_release():
+    """Release the occupation claim on a milestone without changing status
+    (ms-81 e-1918, SPEC AC #16).
+
+    Use this when finishing a working session on an active MS so the next
+    session can pick it up immediately. The MS stays in its current phase;
+    only the per-session occupation marker is cleared.
+    """
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    if not ms_id:
+        print("Usage: beacon milestone release <ms-id>", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    try:
+        _ms, released = core.milestone_release_occupation(
+            data, ms_id, reason="manual"
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    if released:
+        sid = _resolve_session_id() or ""
+        try:
+            import agent as _agent_for_release
+            actor = _agent_for_release.get_actor()
+        except Exception:
+            actor = {}
+        core.milestone_record_occupation_event(
+            data, ms_id=ms_id, event_type="release",
+            session_id=sid,
+            machine=actor.get("machine", ""),
+            agent=actor.get("agent", ""),
+            reason="manual",
+        )
+        save_project(data, op={"op": "milestone_release", "ms_id": ms_id})
+        prev_sid = released.get("session_id", "?")
+        print(
+            f"Released: [{ms_id}] (was claimed by session "
+            f"{prev_sid[:12] if prev_sid else '?'}...)"
+        )
+    else:
+        print(f"Released: [{ms_id}] (was not occupied; no-op)")
 
 
 def cmd_milestone_observe():
@@ -1251,6 +1362,7 @@ def cmd_milestone_observe():
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    _release_occupation_for_transition(data, ms_id, reason="observe")
     save_project(data, op={"op": "milestone_observe", "ms_id": ms_id,
                            "reason": reason})
     print(f"Observing: [{ms['id']}] {ms['title']}")
@@ -11437,6 +11549,7 @@ def cmd_help_json():
         {"command": "beacon milestone close <id>", "flags": [], "description": "Close milestone"},
         {"command": "beacon milestone observe <id>", "flags": [], "description": "Set milestone to observing"},
         {"command": "beacon milestone wait <id>", "flags": ["--reason"], "description": "Pause an active/observing milestone (ms-81)"},
+        {"command": "beacon milestone release <id>", "flags": [], "description": "Release occupation claim without changing status (ms-81)"},
         {"command": "beacon milestone rename <id> <title>", "flags": [], "description": "Rename a milestone"},
         {"command": "beacon milestone depends <id> --on <id>", "flags": [], "description": "Declare milestone dependency"},
         {"command": "beacon milestone purge <id> --reason <text>", "flags": ["--index <n>", "--json"], "description": "Hard-delete a milestone record (recovery for duplicate-ID corruption; Issue #14)"},
@@ -14874,6 +14987,7 @@ if __name__ == "__main__":
         "milestone_done": cmd_milestone_done,
         "milestone_observe": cmd_milestone_observe,
         "milestone_wait": cmd_milestone_wait,
+        "milestone_release": cmd_milestone_release,
         "milestone_join": cmd_milestone_join,
         "milestone_show": cmd_milestone_show,
         "milestone_update": cmd_milestone_update,
