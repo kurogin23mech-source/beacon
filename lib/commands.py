@@ -6974,6 +6974,54 @@ def _push_trigger_to_bus(trigger_data: dict) -> None:
         )
 
 
+def _resolve_operation_trigger_recipient(op_id: str) -> str:
+    """Resolve the unicast recipient_session_id for an operation-trigger event.
+
+    ms-76 / e-1860 / e-1604: operation-trigger default = unicast to a single
+    claimer / owner session. Broadcast (= empty recipient → fan out to every
+    live session in the project) is the LEGACY behaviour and is retained
+    only as fallback when no claimer is registered. The CORE doc
+    QvyVwRU8otQEn5iMfP36 (= AI 自律 action の envelope tier framework)
+    section "構造的禁止" makes default broadcast a禁止帯; this resolver
+    is the structural enforcement point.
+
+    Resolution order (first hit wins):
+      1. ``meta.claimer_session_id`` on the Operation (= explicit
+         claim-based registration, e-1604). A session calls
+         ``beacon operation claim <op-id>`` to register itself as the
+         sole receiver; subsequent triggers route only here.
+      2. ``meta.open_by`` on the Operation (= the session that opened
+         the Operation, treated as default owner when no explicit claim).
+      3. Empty string (= legacy broadcast). Best-effort fallback for
+         pre-ms-76 projects that have no owner/claimer recorded.
+
+    The ``BEACON_OPERATION_TRIGGER_BROADCAST=1`` env flag opts back into
+    legacy broadcast explicitly (= for SPECs that legitimately want all
+    sessions notified, e.g. a release announcement trigger). This is the
+    "explicit opt-in pattern" from ms-76 SPEC EuLwGrAawmMzeKYsxkrd
+    設計方針 7.
+    """
+    # Explicit broadcast opt-in (= rare, only when SPEC declares it).
+    if os.environ.get("BEACON_OPERATION_TRIGGER_BROADCAST", "") == "1":
+        return ""
+    try:
+        data = load_project()
+    except Exception:
+        return ""
+    for op in data.get("operations", []):
+        if op.get("id") != op_id:
+            continue
+        meta = op.get("meta", {}) or {}
+        claimer = (meta.get("claimer_session_id") or "").strip()
+        if claimer:
+            return claimer
+        owner = (meta.get("open_by") or "").strip()
+        if owner:
+            return owner
+        break
+    return ""
+
+
 def _push_operation_trigger_to_bus(op_id: str, log_source: str,
                                    trigger_data: dict,
                                    spec_doc_id: str = "") -> None:
@@ -6995,6 +7043,12 @@ def _push_operation_trigger_to_bus(op_id: str, log_source: str,
     server treats the post as legacy (effective_tier=T5) and degrades
     delivery to notify-user-only, which never injects into AI context —
     silently breaking the autonomous loop (e-1393).
+
+    ms-76 / e-1860 / e-1604: payload now carries ``recipient_session_id``
+    by default (= unicast to the registered claimer/owner). Legacy broadcast
+    is retained only as fallback when no claimer is registered, or when
+    ``BEACON_OPERATION_TRIGGER_BROADCAST=1`` is set for SPECs that
+    explicitly opt into broadcast.
 
     Best-effort — failures don't break the local trigger file write.
     """
@@ -7039,17 +7093,28 @@ def _push_operation_trigger_to_bus(op_id: str, log_source: str,
                 "envelope — delivery will be degraded to notify-user-only.\n"
             )
 
+        # ms-76 / e-1860 / e-1604: stamp the unicast recipient. Empty string
+        # falls through to legacy broadcast (= fan out to every session)
+        # only when no claimer/owner is registered and broadcast was not
+        # explicitly opted into. The server's /bus/unread filter
+        # (server/app.py _bus_event_addressed_to) honours the field for
+        # all channels except dm; for operation-trigger an empty recipient
+        # behaves as legacy fan-out so back-compat is preserved.
+        recipient_session_id = _resolve_operation_trigger_recipient(op_id)
+        payload = {
+            "op_id": op_id,
+            "log_source": log_source,
+            "spec_doc_id": spec_doc_id,
+            "trigger_name": trigger_data.get("name", ""),
+            "message": trigger_data.get("message", ""),
+            "created_at": trigger_data.get("created_at", ""),
+        }
+        if recipient_session_id:
+            payload["recipient_session_id"] = recipient_session_id
         client.post_bus_event(
             project_id, "operation-trigger",
             sender_session_id="",
-            payload={
-                "op_id": op_id,
-                "log_source": log_source,
-                "spec_doc_id": spec_doc_id,
-                "trigger_name": trigger_data.get("name", ""),
-                "message": trigger_data.get("message", ""),
-                "created_at": trigger_data.get("created_at", ""),
-            },
+            payload=payload,
             delivery="auto-execute",
             envelope=envelope_obj,
         )
