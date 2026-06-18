@@ -995,38 +995,48 @@ def cmd_milestone_start():
         except Exception as e:  # pragma: no cover - defensive
             print(f"  warning: could not auto-add assignee: {e}", file=sys.stderr)
 
-    # ---- 2. auto-workspace / auto-branch (cwd-aware) ----
+    # ---- 2. auto-workspace / auto-branch (cwd-aware + project-type-aware) ----
+    # ms-81 e-1917: explicit non-git degrade. If the project isn't a git repo
+    # (= research / writing project, scaffold, fresh dir), we skip the entire
+    # worktree branch silently and only flip status + assignee. Per CORE doc
+    # DqIvAVzDprcq6hsq0AuF §3-2 the physical-boundary mechanism degrades to
+    # logical occupation only; for now occupation is recorded server-side
+    # (handled in e-1918), so degrade simply means "no worktree".
     branch_name = ""
     branch_msg = ""
     workspace_path = ""
+    non_git_skip = False
     if not no_branch:
-        try:
-            import branch as _branch
-            branch_name = _branch.ms_branch_name(ms_id, ms.get("title", ""))
-            if _is_in_main_project_root():
-                import worktree as _worktree
-                workspace_path = os.path.join(".worktrees", branch_name)
-                try:
-                    wt = _worktree.create_workspace(workspace_path, branch_name)
-                    branch_msg = "worktree created" if wt["created"] else "worktree exists"
-                except _worktree.GitNotInstalledError:
-                    # No git → fall through silently (status flip already done).
-                    branch_name = ""
-                    workspace_path = ""
-                except _worktree.WorktreeCreateError as exc:
-                    print(f"  warning: could not create worktree: {exc}", file=sys.stderr)
-                    branch_name = ""
-                    workspace_path = ""
-            else:
-                # Already inside a worktree: in-place checkout is safe
-                # because each worktree owns its own HEAD.
-                branch_msg = _ensure_on_branch(branch_name)
-        except _NotAGitRepoError:
-            # Quiet skip: scaffolds / tests / fresh projects without git
-            # should still be able to start a milestone.
-            branch_name = ""
-        except Exception as e:  # pragma: no cover - defensive
-            print(f"  warning: could not create/switch branch: {e}", file=sys.stderr)
+        if not _is_git_project():
+            non_git_skip = True
+        else:
+            try:
+                import branch as _branch
+                branch_name = _branch.ms_branch_name(ms_id, ms.get("title", ""))
+                if _is_in_main_project_root():
+                    import worktree as _worktree
+                    workspace_path = os.path.join(".worktrees", branch_name)
+                    try:
+                        wt = _worktree.create_workspace(workspace_path, branch_name)
+                        branch_msg = "worktree created" if wt["created"] else "worktree exists"
+                    except _worktree.GitNotInstalledError:
+                        # No git → fall through silently (status flip already done).
+                        branch_name = ""
+                        workspace_path = ""
+                    except _worktree.WorktreeCreateError as exc:
+                        print(f"  warning: could not create worktree: {exc}", file=sys.stderr)
+                        branch_name = ""
+                        workspace_path = ""
+                else:
+                    # Already inside a worktree: in-place checkout is safe
+                    # because each worktree owns its own HEAD.
+                    branch_msg = _ensure_on_branch(branch_name)
+            except _NotAGitRepoError:
+                # Quiet skip: scaffolds / tests / fresh projects without git
+                # should still be able to start a milestone.
+                branch_name = ""
+            except Exception as e:  # pragma: no cover - defensive
+                print(f"  warning: could not create/switch branch: {e}", file=sys.stderr)
 
     save_project(data)
     print(f"Activated: {ms['title']}")
@@ -1038,6 +1048,41 @@ def cmd_milestone_start():
         print(f"  next: cd {workspace_path} && bclaude")
         print(f"        (新しいセッションをこの worktree で開いて作業してください — "
               f"同 cwd で並走すると別マイルストーンの作業を同じ branch に書く事故が起きるため)")
+    if non_git_skip:
+        # ms-81 e-1917: surface the project-type degrade so the user knows
+        # the worktree step was intentionally skipped (= research / writing
+        # project), not silently dropped.
+        print("  workspace: non-git project, worktree step skipped "
+              "(logical occupation only)")
+
+
+def _is_git_project() -> bool:
+    """Return True if the current project root looks like a git repository.
+
+    ms-81 e-1917: explicit project-type detection used by ``milestone start``
+    to decide whether to engage the worktree mechanism. We check the cheap
+    common-case (``.git`` exists at the beacon root / cwd) before falling
+    back to ``git rev-parse``, which would otherwise produce noisy stderr
+    on plain directories.
+    """
+    # Cheapest path: a ``.git`` directory or file at cwd / beacon root.
+    candidates = [os.getcwd()]
+    beacon_root = os.environ.get("BEACON_ROOT", "")
+    if beacon_root and beacon_root not in candidates:
+        candidates.append(beacon_root)
+    for root in candidates:
+        if os.path.exists(os.path.join(root, ".git")):
+            return True
+    # Fall back to git rev-parse (covers the worktree case where ``.git`` is
+    # a pointer file outside cwd).
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return r.returncode == 0
+    except (FileNotFoundError, OSError):
+        return False
 
 
 def _is_in_main_project_root() -> bool:
@@ -5390,6 +5435,16 @@ def cmd_milestone_depends():
 def cmd_milestone_workspace():
     # OSS: git worktree lifecycle core
     # Human Executor notification (beacon trigger fire) is handled below and is closed-source.
+    #
+    # ms-81 e-1917: this verb is being demoted to a deprecated alias of
+    # `milestone start`. The common "create worktree + flip status" path
+    # belongs on `start` so status / assignee / worktree always lift
+    # together. Two legacy sub-modes survive here for back-compat:
+    #   - `--clear`: legacy workspace-field clear (kept; pure data op)
+    #   - `--dir <path>` (BEACON_NO_GIT=1): legacy explicit-path mode that
+    #     bypasses git worktree creation entirely (kept; some scripts use it)
+    # The default no-arg path emits a deprecation warning and delegates to
+    # `cmd_milestone_start` so callers stop accumulating drift.
     import subprocess
     from datetime import datetime, timezone
 
@@ -5405,6 +5460,21 @@ def cmd_milestone_workspace():
         sys.exit(1)
 
     data = load_project()
+
+    # ms-81 e-1917: deprecation alias. If neither legacy sub-mode is in play
+    # (= no --clear, no --dir/no-git), the caller is using the default
+    # worktree-create path which has moved to `milestone start`.
+    if not clear and not no_git:
+        print(
+            "[ms-81 deprecation] `beacon milestone workspace` is being "
+            "absorbed by `beacon milestone start` so that status / assignee "
+            "/ worktree always activate together. Forwarding to "
+            "`milestone start` now; please update callers to use "
+            "`beacon milestone start " + ms_id + "` directly.",
+            file=sys.stderr,
+        )
+        cmd_milestone_start()
+        return
 
     if clear:
         # Legacy --clear: remove the old workspace field only
