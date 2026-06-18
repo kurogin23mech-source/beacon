@@ -4187,6 +4187,44 @@ def _envelope_audit_view(env: Optional[dict]) -> Optional[dict]:
     return {k: env.get(k) for k in keep if k in env}
 
 
+class TrekHeartbeatRequest(BaseModel):
+    """Body for POST /api/treks/{trek_id}/session-heartbeat (ms-83 / e-2001).
+
+    The AI session inside the trek's leader (or any member) pings this
+    endpoint after each tick completes, so the server's idle detector
+    knows the session is alive. Stamps ``meta.last_session_response_at``
+    on the trek doc.
+
+    Identity check: caller must be a joined member of the trek.
+    """
+    session_id: str = ""
+
+
+@app.post("/api/treks/{trek_id}/session-heartbeat")
+def trek_session_heartbeat(
+    trek_id: str,
+    body: TrekHeartbeatRequest,
+    user: dict = Depends(require_auth),
+):
+    """Stamp the trek's last_session_response_at (ms-83 / e-2001)."""
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    import datetime
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    meta = t.setdefault("meta", {})
+    meta["last_session_response_at"] = now_iso
+    if body.session_id:
+        meta["last_session_response_session_id"] = body.session_id
+    t["updated_at"] = trek_mod.utcnow_iso()
+    db.save_trek(trek_id, t)
+    return {
+        "trek_id": trek_id,
+        "last_session_response_at": now_iso,
+    }
+
+
 class TrekSchedulerTickRequest(BaseModel):
     """Body for POST /api/system/trek-scheduler/tick (ms-83 / e-1997).
 
@@ -4247,6 +4285,14 @@ def trek_scheduler_tick_endpoint(
     due_treks = trek_scheduler_mod.select_due_treks(
         candidate_treks, now=now,
     )
+    # ms-83 / e-2001: snapshot idle decisions BEFORE the progress-check
+    # pass stamps last_progress_check_at — otherwise every fire would
+    # reset the idle clock to "now" and we'd never escalate.
+    idle_trek_ids = {
+        t.get("trek_id", "")
+        for t in candidate_treks
+        if trek_scheduler_mod.should_fire_idle_escalation(t, now=now)
+    }
 
     fired: list[dict] = []
     errors: list[dict] = []
@@ -4331,11 +4377,77 @@ def trek_scheduler_tick_endpoint(
             "event_id": event_id,
         })
 
+    # ms-83 / e-2001: idle escalation pass. Use the pre-snapshot
+    # idle_trek_ids so cadence-fire stamps in this same tick don't
+    # silently un-idle the trek.
+    escalations: list[dict] = []
+    for trek_doc in candidate_treks:
+        trek_id = trek_doc.get("trek_id", "")
+        if trek_id not in idle_trek_ids:
+            continue
+        # Re-read the trek so the cadence-pass save lands in our
+        # working copy (= last_idle_escalation_at sits next to the
+        # freshly-stamped last_progress_check_at).
+        fresh = db.get_trek(trek_id)
+        if fresh is not None:
+            trek_doc = fresh
+        scope = trek_doc.get("scope") or []
+        if not scope:
+            # Same fallback path as the progress-check loop; without a
+            # target project we have nowhere to post.
+            continue
+        target_project_id = scope[0].get("project", "")
+        if not target_project_id:
+            continue
+        payload = trek_scheduler_mod.build_idle_escalation_payload(
+            trek_doc, now=now,
+        )
+        # Notify channel is the user-facing audit surface. Delivery is
+        # notify-user-only (= surface in inbox, do not auto-execute).
+        try:
+            envelope_obj = envelope_mod.issue_t1_system_envelope(
+                project_id=target_project_id,
+                trek_id=trek_id,
+                actions_authorized=["trek.idle_escalation"],
+                data_class="free",
+                ttl_seconds=3600,
+            )
+        except ValueError:
+            envelope_obj = None
+        bus_data = {
+            "channel": "notify",
+            "sender_session_id": "",
+            "payload": payload,
+            "envelope": envelope_obj,
+            "delivery": "notify-user-only",
+            "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        }
+        try:
+            event_id = db.append_bus_event(target_project_id, bus_data)
+        except Exception:
+            continue
+        meta = trek_doc.setdefault("meta", {})
+        meta["last_idle_escalation_at"] = now.strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
+        trek_doc["updated_at"] = trek_mod.utcnow_iso()
+        try:
+            db.save_trek(trek_id, trek_doc)
+        except Exception:
+            continue
+        escalations.append({
+            "trek_id": trek_id,
+            "project_id": target_project_id,
+            "event_id": event_id,
+            "idle_minutes": payload.get("idle_minutes"),
+        })
+
     return {
         "now": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "candidates": len(candidate_treks),
         "due": len(due_treks),
         "fired": fired,
+        "escalations": escalations,
         "errors": errors,
     }
 

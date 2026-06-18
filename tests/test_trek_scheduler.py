@@ -239,6 +239,118 @@ def test_payload_with_todo_includes_first_target_entry():
     assert "abc1234" in payload["body"]
 
 
+# ---------------------------------------------------------------------------
+# (d) Idle detection (ms-83 / e-2001)
+# ---------------------------------------------------------------------------
+
+def test_idle_inactive_trek_not_idle():
+    """planning / archived treks are never idle."""
+    t = _build_trek(status="planning")
+    assert scheduler.is_trek_idle(t, now=_utc()) is False
+
+
+def test_idle_halted_trek_not_idle():
+    """Halted trek is intentionally paused — not idle."""
+    t = _build_trek(
+        status="active",
+        halt={"issued_by_session_id": "sv-leader", "reason": "STOP",
+              "issued_at": "2026-06-18T00:00:00.000000Z"},
+    )
+    assert scheduler.is_trek_idle(t, now=_utc()) is False
+
+
+def test_idle_never_pinged_not_idle():
+    """A trek that hasn't received its first progress check yet is NOT
+    idle — the next tick will fire one and start the clock."""
+    t = _build_trek(status="active", cadence_minutes=10)
+    assert scheduler.is_trek_idle(t, now=_utc(hour=12)) is False
+
+
+def test_idle_within_window_not_idle():
+    """cadence=10, last response 25 min ago → 25 < 30 → not idle yet."""
+    t = _build_trek(
+        status="active",
+        cadence_minutes=10,
+        last_at="2026-06-18T11:00:00.000000Z",  # 60 min before now=12:00
+    )
+    # But last_session_response_at is more recent.
+    t["meta"]["last_session_response_at"] = "2026-06-18T11:35:00.000000Z"
+    assert scheduler.is_trek_idle(t, now=_utc(hour=12, minute=0)) is False
+
+
+def test_idle_just_past_threshold_is_idle():
+    """cadence=10, last activity 30 min ago → >= 30 → idle."""
+    t = _build_trek(status="active", cadence_minutes=10)
+    t.setdefault("meta", {})["last_session_response_at"] = (
+        "2026-06-18T11:30:00.000000Z"  # 30 min before 12:00
+    )
+    assert scheduler.is_trek_idle(t, now=_utc(hour=12, minute=0)) is True
+
+
+def test_idle_progress_check_only_used_as_fallback():
+    """If last_session_response_at is unset, last_progress_check_at is
+    the activity anchor."""
+    t = _build_trek(
+        status="active", cadence_minutes=10,
+        last_at="2026-06-18T11:00:00.000000Z",  # 60 min before now
+    )
+    # 60 min > 30 min idle threshold → idle.
+    assert scheduler.is_trek_idle(t, now=_utc(hour=12, minute=0)) is True
+
+
+def test_should_fire_idle_escalation_first_time():
+    t = _build_trek(status="active", cadence_minutes=10)
+    t.setdefault("meta", {})["last_session_response_at"] = (
+        "2026-06-18T11:00:00.000000Z"
+    )
+    assert scheduler.should_fire_idle_escalation(
+        t, now=_utc(hour=12),
+    ) is True
+
+
+def test_should_fire_idle_escalation_cooldown_blocks_refire():
+    t = _build_trek(status="active", cadence_minutes=10)
+    t.setdefault("meta", {})["last_session_response_at"] = (
+        "2026-06-18T11:00:00.000000Z"
+    )
+    t["meta"]["last_idle_escalation_at"] = (
+        "2026-06-18T11:55:00.000000Z"  # 5 min ago — under 30-min cooldown
+    )
+    assert scheduler.should_fire_idle_escalation(
+        t, now=_utc(hour=12, minute=0),
+    ) is False
+
+
+def test_should_fire_idle_escalation_cooldown_elapsed_refire_allowed():
+    t = _build_trek(status="active", cadence_minutes=10)
+    t.setdefault("meta", {})["last_session_response_at"] = (
+        "2026-06-18T10:00:00.000000Z"  # 2 hours ago, idle
+    )
+    t["meta"]["last_idle_escalation_at"] = (
+        "2026-06-18T11:00:00.000000Z"  # 1 hour ago — past 30-min cooldown
+    )
+    assert scheduler.should_fire_idle_escalation(
+        t, now=_utc(hour=12, minute=0),
+    ) is True
+
+
+def test_build_idle_escalation_payload_carries_minutes_and_session():
+    t = _build_trek(status="active", cadence_minutes=10)
+    t.setdefault("meta", {})["last_session_response_at"] = (
+        "2026-06-18T11:00:00.000000Z"  # 60 min ago
+    )
+    payload = scheduler.build_idle_escalation_payload(
+        t, now=_utc(hour=12, minute=0),
+    )
+    assert payload["kind"] == "trek-idle-escalation"
+    assert payload["trek_id"] == t["trek_id"]
+    assert payload["leader_session_id"] == "sv-leader"
+    assert payload["idle_minutes"] == 60
+    assert payload["cadence_minutes"] == 10
+    assert "idle" in payload["body"]
+    assert "60" in payload["body"]
+
+
 def test_payload_unknown_scope_falls_to_all_done():
     """A scope pointing at an MS with zero matching entries lands in the
     all-done branch (= no todos found). The fallback DM still carries

@@ -240,6 +240,86 @@ def test_empty_scope_trek_lands_in_errors_not_fired():
 # (5) 10-min cadence: tick at t=0 fires, immediate tick at t≈0 does NOT
 # ---------------------------------------------------------------------------
 
+def test_idle_trek_fires_escalation_on_notify_channel():
+    """Trek that hasn't responded for cadence × 3 → escalation DM lands
+    on notify channel with kind=trek-idle-escalation."""
+    _seed_trek(
+        trek_id="tk-idle0000",
+        status="active",
+        cadence=10,
+        # last_progress_check fired 60 min ago — well past 30-min idle gate.
+        last_at="2026-06-18T00:00:00.000000Z",
+        scope=[{"project": "beacon-test", "milestone": "ms-83"}],
+    )
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-idle0000"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    # Trek is due AND idle on this tick. The tick fires both progress
+    # check (because cadence elapsed) and escalation (because idle).
+    assert len(body["escalations"]) == 1
+    esc = body["escalations"][0]
+    assert esc["trek_id"] == "tk-idle0000"
+
+    events = _bus_events_by_project["beacon-test"]
+    # One trek-progress-check (cadence due) + one notify (idle).
+    channels = [e["channel"] for e in events]
+    assert "trek-progress-check" in channels
+    assert "notify" in channels
+    notify_event = [e for e in events if e["channel"] == "notify"][0]
+    assert notify_event["payload"]["kind"] == "trek-idle-escalation"
+    assert notify_event["delivery"] == "notify-user-only"
+
+
+def test_session_heartbeat_stamps_last_response_at():
+    """Heartbeat endpoint records the latest activity timestamp."""
+    _seed_trek(
+        trek_id="tk-hb000000",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-83"}],
+    )
+    resp = client.post(
+        "/api/treks/tk-hb000000/session-heartbeat",
+        json={"session_id": "sv-leader"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["trek_id"] == "tk-hb000000"
+    assert body["last_session_response_at"]
+    # Trek doc has been stamped.
+    saved = _treks["tk-hb000000"]
+    assert saved["meta"]["last_session_response_at"]
+    assert saved["meta"]["last_session_response_session_id"] == "sv-leader"
+
+
+def test_idle_escalation_cooldown_prevents_refire_within_30min():
+    """Idle trek already escalated 5 minutes ago → no refire this tick."""
+    _seed_trek(
+        trek_id="tk-cooldown0",
+        status="active",
+        cadence=10,
+        last_at="2026-06-18T00:00:00.000000Z",
+        scope=[{"project": "beacon-test", "milestone": "ms-83"}],
+    )
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    recent = (now - datetime.timedelta(minutes=5)).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    _treks["tk-cooldown0"]["meta"]["last_idle_escalation_at"] = recent
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-cooldown0"]},
+        headers=HEADERS_OK,
+    )
+    body = resp.json()
+    assert body["escalations"] == []
+
+
 def test_10min_cadence_does_not_refire_immediately():
     _seed_trek(
         trek_id="tk-cccc3333",

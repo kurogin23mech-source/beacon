@@ -131,6 +131,153 @@ def select_due_treks(
 
 
 # ---------------------------------------------------------------------------
+# Idle detection (ms-83 / e-2001)
+# ---------------------------------------------------------------------------
+
+# Multiplier on cadence to decide "claim session is silent". cadence × 3
+# (= 30 minutes for the default 10-minute cadence) gives the session
+# three full cadence windows to recover before user escalation, which
+# matches the SPEC § 設計方針 5 / 受入条件 7 wording (= "cadence の 3 倍").
+IDLE_CADENCE_MULTIPLIER = 3
+
+# Avoid flooding the user when the same trek stays idle across many
+# scheduler ticks. We re-fire an escalation DM at most once per this
+# many minutes — the SPEC doesn't pin a number, so we pick 30 minutes
+# (= one default cadence × 3 window) which balances "user notices"
+# against "user is buried".
+ESCALATION_REFIRE_COOLDOWN_MINUTES = 30
+
+
+def get_last_session_response_at(
+    trek_doc: dict,
+) -> Optional[datetime.datetime]:
+    """Return the trek's last session-response time, or None.
+
+    Stamped by ``POST /api/treks/{id}/session-heartbeat`` (= the AI side
+    pings the server after completing each tick) and by bus-event
+    handlers when a message from the leader session lands.
+    """
+    meta = trek_doc.get("meta") or {}
+    return _parse_iso(meta.get("last_session_response_at", ""))
+
+
+def get_last_idle_escalation_at(
+    trek_doc: dict,
+) -> Optional[datetime.datetime]:
+    """Return the trek's last idle-escalation fire time, or None."""
+    meta = trek_doc.get("meta") or {}
+    return _parse_iso(meta.get("last_idle_escalation_at", ""))
+
+
+def is_trek_idle(
+    trek_doc: dict,
+    *,
+    now: datetime.datetime,
+    default_cadence: int = DEFAULT_CADENCE_MINUTES,
+    multiplier: int = IDLE_CADENCE_MULTIPLIER,
+) -> bool:
+    """Decide whether this trek's claim session is idle (= silent N×cadence).
+
+    Rules:
+      * Only ``status == 'active'`` treks can be idle (= planning /
+        archived treks aren't expected to respond).
+      * ``halt`` set → not idle (= leader pulled the cord deliberately).
+      * If ``last_session_response_at`` is unset, fall back to
+        ``last_progress_check_at`` as the activity anchor — the first
+        progress check itself counts as "we know the session is alive"
+        when the AI side hasn't heartbeated yet. If both are unset, the
+        trek has never been pinged, which is NOT idle (the next tick
+        will fire the first progress check and start the clock).
+      * Idle iff now - last_activity >= cadence * multiplier.
+
+    The decision is pure so unit tests pin it without HTTP.
+    """
+    if trek_doc.get("status") != "active":
+        return False
+    if trek_doc.get("halt"):
+        return False
+    cadence = get_cadence_minutes(trek_doc, default=default_cadence)
+    threshold = datetime.timedelta(minutes=cadence * multiplier)
+    last_response = get_last_session_response_at(trek_doc)
+    last_check = get_last_progress_check_at(trek_doc)
+    last_activity = last_response or last_check
+    if last_activity is None:
+        return False
+    now = _ensure_utc(now)
+    last_activity = _ensure_utc(last_activity)
+    return (now - last_activity) >= threshold
+
+
+def should_fire_idle_escalation(
+    trek_doc: dict,
+    *,
+    now: datetime.datetime,
+    default_cadence: int = DEFAULT_CADENCE_MINUTES,
+    multiplier: int = IDLE_CADENCE_MULTIPLIER,
+    refire_cooldown_minutes: int = ESCALATION_REFIRE_COOLDOWN_MINUTES,
+) -> bool:
+    """Wrap is_trek_idle with refire-cooldown check.
+
+    Avoids flooding the user with the same escalation DM every tick.
+    Returns True only when the trek is idle AND we haven't fired an
+    escalation for it within the last ``refire_cooldown_minutes``.
+    """
+    if not is_trek_idle(trek_doc, now=now, default_cadence=default_cadence,
+                        multiplier=multiplier):
+        return False
+    last_fire = get_last_idle_escalation_at(trek_doc)
+    if last_fire is None:
+        return True
+    now = _ensure_utc(now)
+    last_fire = _ensure_utc(last_fire)
+    return (now - last_fire) >= datetime.timedelta(
+        minutes=refire_cooldown_minutes,
+    )
+
+
+def build_idle_escalation_payload(
+    trek_doc: dict,
+    *,
+    now: Optional[datetime.datetime] = None,
+    default_cadence: int = DEFAULT_CADENCE_MINUTES,
+) -> dict:
+    """Render the idle-escalation DM payload (ms-83 / e-2001).
+
+    Pure function. The notify channel posts this so the user sees
+    "trek X session Y が N 分 idle、 要確認" without needing to query
+    further state. Numbers are computed against the same activity anchor
+    is_trek_idle uses (= last_session_response_at or last_progress_check_at).
+    """
+    now = _ensure_utc(now or datetime.datetime.now(datetime.timezone.utc))
+    trek_id = trek_doc.get("trek_id", "")
+    leader_session = trek_doc.get("leader_session_id", "")
+    cadence = get_cadence_minutes(trek_doc, default=default_cadence)
+    last_response = get_last_session_response_at(trek_doc)
+    last_check = get_last_progress_check_at(trek_doc)
+    last_activity = last_response or last_check
+    if last_activity is not None:
+        last_activity = _ensure_utc(last_activity)
+        elapsed_min = int((now - last_activity).total_seconds() // 60)
+    else:
+        elapsed_min = -1  # never pinged — should not normally reach here
+    body = (
+        f"[Trek 自律実行 idle 警告] trek={trek_id} "
+        f"leader_session={leader_session} が {elapsed_min} 分間 idle "
+        f"(cadence={cadence}分の {IDLE_CADENCE_MULTIPLIER} 倍超)。 "
+        f"session 状態を確認してください。"
+    )
+    return {
+        "trek_id": trek_id,
+        "leader_session_id": leader_session,
+        "kind": "trek-idle-escalation",
+        "body": body,
+        "idle_minutes": elapsed_min,
+        "cadence_minutes": cadence,
+        "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+    }
+
+
+# ---------------------------------------------------------------------------
 # DM payload generation (e-1998)
 # ---------------------------------------------------------------------------
 
