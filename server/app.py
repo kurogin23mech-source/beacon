@@ -3126,12 +3126,24 @@ class TrekCreate(BaseModel):
     description: str = ""
     type: str = "persistent"  # temporary | persistent
     creator_session_id: str   # caller's session_id (becomes leader)
+    # ms-83 / e-1994: optional cadence + future-form manager URL at creation
+    # time. Both are recorded on ``meta``; cadence falls back to default
+    # (= 10 minutes) when omitted, manager_agent_url is unused in this MS.
+    cadence_minutes: Optional[int] = None
+    manager_agent_url: Optional[str] = None
 
 
 class TrekUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     type: Optional[str] = None
+    # ms-83 / e-1994 — periodic cadence (= server-side "next, please" DM
+    # interval in minutes) and a future-form manager-agent URL slot.
+    # Both live on ``meta`` so the on-disk shape stays tidy. ``None``
+    # leaves the field unchanged; explicit empty string / explicit 0
+    # behaviours are handled in the setter functions.
+    cadence_minutes: Optional[int] = None
+    manager_agent_url: Optional[str] = None
 
 
 class TrekInvite(BaseModel):
@@ -3243,6 +3255,8 @@ def create_trek_endpoint(body: TrekCreate, user: dict = Depends(require_auth)):
             creator_session_id=body.creator_session_id,
             description=body.description,
             type_=body.type,
+            cadence_minutes=body.cadence_minutes,
+            manager_agent_url=body.manager_agent_url or "",
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -3279,6 +3293,22 @@ def update_trek_endpoint(trek_id: str, body: TrekUpdate,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         t["type"] = body.type
+    # ms-83 / e-1994: cadence_minutes / manager_agent_url live on ``meta``;
+    # use the dedicated setters so validation + idempotency rules stay in
+    # one place (= lib/trek.py). ``cadence_minutes is None`` here means
+    # "field not supplied in this PATCH"; explicit clear uses a future
+    # dedicated endpoint or 0 sentinel — kept out of this MS scope.
+    if body.cadence_minutes is not None:
+        try:
+            trek_mod.set_cadence_minutes(
+                t, cadence_minutes=body.cadence_minutes
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    if body.manager_agent_url is not None:
+        trek_mod.set_manager_agent_url(
+            t, manager_agent_url=body.manager_agent_url
+        )
     t["updated_at"] = trek_mod.utcnow_iso()
     db.save_trek(trek_id, t)
     return t

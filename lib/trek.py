@@ -151,6 +151,16 @@ def normalize_scope_entry(entry: dict) -> dict:
     return out
 
 
+DEFAULT_CADENCE_MINUTES = 10
+"""ms-83 (= server-side execution continuity / e-1994): default cadence
+(= the periodic "next, please" DM interval) in minutes when ``cadence_minutes``
+is not set on a trek. 10 minutes balances responsiveness against bus volume.
+
+Stored on ``trek.meta.cadence_minutes`` as an ``int`` (or ``None`` if the
+trek operator hasn't set one — the scheduler treats None as the default).
+"""
+
+
 def new_trek(*,
              title: str,
              creator_user_id: str,
@@ -159,7 +169,9 @@ def new_trek(*,
              description: str = "",
              type_: str = DEFAULT_TYPE,
              initial_scope: Iterable[dict] | None = None,
-             goal_state: str = "") -> dict:
+             goal_state: str = "",
+             cadence_minutes: int | None = None,
+             manager_agent_url: str = "") -> dict:
     """Build a fresh trek doc (= not yet persisted, no I/O).
 
     The creator is:
@@ -180,6 +192,18 @@ def new_trek(*,
     matching previous behaviour. When non-empty, ``beacon trek show``
     surfaces it so members share a common completion signal, and the
     leader can confidently archive once the criterion is met.
+
+    ``cadence_minutes`` (ms-83 / e-1994) sets how often the server-side
+    scheduler (= the loop that fires "next, please" progress-check DMs
+    into the trek's claimed session) should wake this trek. ``None`` =
+    default 10 minutes (scheduler honours ``DEFAULT_CADENCE_MINUTES``).
+    Stored on ``meta`` so the on-disk shape stays orthogonal to
+    structural fields (= status / members / scope).
+
+    ``manager_agent_url`` (ms-83 / e-1994) is a schema reservation for
+    a future "manager AI" agent endpoint that decides cadence and DM
+    body in place of the built-in template. Always optional in this
+    MS — the value is recorded but no consumer reads it yet.
     """
     if not title.strip():
         raise ValueError("trek title is required")
@@ -189,6 +213,8 @@ def new_trek(*,
             "the trek becomes its initial leader; SPEC 方針 9)"
         )
     validate_type(type_)
+    if cadence_minutes is not None:
+        _validate_cadence_minutes(cadence_minutes)
     now = utcnow_iso()
     creator_actor = build_actor_ref(
         user_id=creator_user_id, email=creator_email
@@ -199,6 +225,12 @@ def new_trek(*,
         invited_by=creator_user_id,
     )
     scope = [normalize_scope_entry(s) for s in (initial_scope or [])]
+    meta: dict = {}
+    if cadence_minutes is not None:
+        meta["cadence_minutes"] = int(cadence_minutes)
+    url = (manager_agent_url or "").strip()
+    if url:
+        meta["manager_agent_url"] = url
     return {
         "trek_id": mint_trek_id(),
         "title": title.strip(),
@@ -211,10 +243,86 @@ def new_trek(*,
         "scope": scope,
         "halt": None,
         "goal_state": (goal_state or "").strip(),
+        "meta": meta,
         "created_at": now,
         "updated_at": now,
         "archived_at": None,
     }
+
+
+def _validate_cadence_minutes(value: int) -> None:
+    """Cadence must be a positive int (= no boolean coercion, no zero).
+
+    Zero would burn the bus by firing every server tick; negative makes
+    no sense. ms-83 / e-1994.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(
+            f"cadence_minutes must be int, got {type(value).__name__}"
+        )
+    if value <= 0:
+        raise ValueError(
+            f"cadence_minutes must be > 0, got {value}"
+        )
+
+
+def get_cadence_minutes(trek_doc: dict) -> int:
+    """Return effective cadence for this trek (= falls back to default).
+
+    Used by the server-side scheduler (= the loop that fires periodic
+    progress-check DMs, ms-83 / e-1997). Decoupling the read from the
+    field name lets callers stay ignorant of the meta location, and the
+    default switch (= ``DEFAULT_CADENCE_MINUTES``) lives in one place.
+    """
+    meta = trek_doc.get("meta") or {}
+    val = meta.get("cadence_minutes")
+    if val is None:
+        return DEFAULT_CADENCE_MINUTES
+    return int(val)
+
+
+def set_cadence_minutes(trek_doc: dict, *,
+                        cadence_minutes: int | None) -> dict:
+    """Set or clear ``meta.cadence_minutes`` on an existing trek (ms-83 / e-1994).
+
+    ``None`` clears the field (= scheduler falls back to default).
+    Idempotent: re-setting the same value is a no-op so fixtures and
+    Skill retries don't churn ``updated_at`` (= mirrors ``set_goal_state``).
+    """
+    meta = trek_doc.setdefault("meta", {})
+    current = meta.get("cadence_minutes")
+    if cadence_minutes is None:
+        if current is None:
+            return trek_doc
+        meta.pop("cadence_minutes", None)
+    else:
+        _validate_cadence_minutes(cadence_minutes)
+        if current == int(cadence_minutes):
+            return trek_doc
+        meta["cadence_minutes"] = int(cadence_minutes)
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
+
+
+def set_manager_agent_url(trek_doc: dict, *,
+                          manager_agent_url: str) -> dict:
+    """Set or clear ``meta.manager_agent_url`` on an existing trek (ms-83 / e-1994).
+
+    Empty string clears the field. Idempotent: re-setting the same value
+    is a no-op. The URL is a **schema reservation** in this MS — no
+    consumer reads it yet, so this setter is the only forward edge.
+    """
+    meta = trek_doc.setdefault("meta", {})
+    current = meta.get("manager_agent_url", "")
+    new_val = (manager_agent_url or "").strip()
+    if new_val == current:
+        return trek_doc
+    if new_val:
+        meta["manager_agent_url"] = new_val
+    else:
+        meta.pop("manager_agent_url", None)
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
 
 
 def set_goal_state(trek_doc: dict, *, goal_state: str) -> dict:
