@@ -111,6 +111,98 @@ HIGH_RISK_ACTIONS = frozenset({
     "member.remove",
 })
 
+
+# ms-83 / e-2000: AI 自律 task add. action name = "task.add". For T2 /
+# T1-system envelopes, server-side verify additionally requires that the
+# MS the task is being added to is **enumerated in the envelope's scope**.
+# A T2 envelope with scope="ms:ms-83" lets the AI add tasks under ms-83
+# autonomously; adding to a different MS falls through to propose-to-ai
+# downstream. The check belongs in this module (= alongside other tier
+# rules) so callers can't accidentally skip it.
+TASK_ADD_ACTION = "task.add"
+
+
+def check_task_add_scope_match(envelope: dict, target_ms: str) -> bool:
+    """Return True if a ``task.add`` action against ``target_ms`` is in
+    the envelope's scope (ms-83 / e-2000).
+
+    Match rules:
+      * T1 envelopes: always permitted (= user signed explicitly, no
+        scope restriction on which MS the AI may add to).
+      * T1-system: scope is ``trek:<id>``. The caller (= app.py)
+        consults the trek's scope list to decide if ``target_ms`` is
+        covered by this trek. This function answers the cheap "tier
+        permits at all?" question; the trek-scope walk is the caller's
+        responsibility because this module deliberately stays I/O-free.
+      * T2: scope is the Operation scope string. The Operation SPEC
+        enumerates which MS the Operation may add to using the form
+        ``ms:<ms-id>``. We accept ``scope="ms:<ms-id>"`` (= scope
+        equals exactly this MS) or ``scope`` containing the literal
+        ``ms:<target_ms>`` substring (= multi-MS Operations).
+      * T3 / T5: never auto-permits; the upstream verify step degrades
+        the action to propose-to-ai or rejects outright.
+
+    The decision is pure: the caller stitches in the trek scope walk
+    when the envelope is T1-system.
+    """
+    if not target_ms:
+        return False
+    tier = envelope.get("tier")
+    if tier == TIER_T1:
+        return True
+    if tier == TIER_T2:
+        scope = envelope.get("scope", "") or ""
+        if scope == f"ms:{target_ms}":
+            return True
+        # Multi-MS scope shape: scope like "op:op-7|ms:ms-83" — accept
+        # if the literal "ms:<target_ms>" substring appears bounded by
+        # delimiters or string ends.
+        return _scope_contains_ms_token(scope, target_ms)
+    if tier == TIER_T1_SYSTEM:
+        # The Trek-scope walk happens in the caller (= app.py) because
+        # this module has no Firestore access. We return True here as
+        # "tier permits, defer to scope walk"; callers must compose with
+        # ``trek_scope_includes_ms`` (see lib/trek_scheduler.py helpers).
+        return True
+    return False
+
+
+def _scope_contains_ms_token(scope: str, target_ms: str) -> bool:
+    """Return True iff ``ms:<target_ms>`` appears as a delimited token.
+
+    Delimiters considered: whitespace, ``|``, ``,``, ``;``, string ends.
+    This lets Operation SPECs declare multi-MS scope without forcing a
+    structured JSON encoding while still resisting accidental
+    substring matches (= e.g. ``ms:ms-8`` should NOT match ``ms-83``).
+    """
+    token = f"ms:{target_ms}"
+    if token not in scope:
+        return False
+    idx = scope.find(token)
+    end = idx + len(token)
+    left_ok = idx == 0 or scope[idx - 1] in " \t|,;"
+    right_ok = end == len(scope) or scope[end] in " \t|,;"
+    return left_ok and right_ok
+
+
+def trek_scope_includes_ms(trek_doc: dict, target_ms: str) -> bool:
+    """Return True iff ``target_ms`` is enumerated in this trek's scope.
+
+    ms-83 / e-2000: paired with ``check_task_add_scope_match`` for the
+    T1-system path. The trek scope is a list of dicts
+    ``{"project": ..., "milestone": "ms-XX"}``; any entry whose
+    ``milestone`` equals ``target_ms`` makes the task add auto-permitted.
+
+    Lives here (= alongside the envelope rules) so app.py doesn't have
+    to know the trek dict layout for a single yes/no question.
+    """
+    if not target_ms or not trek_doc:
+        return False
+    for entry in trek_doc.get("scope") or []:
+        if entry.get("milestone") == target_ms:
+            return True
+    return False
+
 # Short-ping schema (T5 disclosure cap). The payload must be a dict whose
 # keys are a subset of this allowlist, and whose values are all primitive
 # (no free text strings — only enum-like short tokens or numbers/bools).

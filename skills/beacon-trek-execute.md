@@ -211,6 +211,31 @@ cd "$PROJECT_DIR" && beacon task done <eXXX> --reason "<判断軌跡>"
 
 1 候補完了したら **user に「次に行きますか?」 と聞かない**。Step 2 の候補列挙に戻り、次の候補で同じループを回す。Trek scope が空になったか、Step 5.5 の budget 枯渇か、Step 6 の escalation 条件に達するまで継続する。
 
+### Step 4.1: AI 自律 task add (= MS scope 内なら自律、 ms-83 / e-2000)
+
+実装の途中で「現 task を分割したほうがよい」「先にこの fixture / refactor を独立 task で land すべき」 と AI が判断した場合、 **Trek scope (= 自分が引いている envelope の scope) に含まれる MS への task add は user 確認なしで自律実行してよい**。 MS scope 外 (= 別 MS への侵食) は propose-to-ai に降格 (= user 承認待ち)。
+
+**判定フロー**:
+
+1. 追加したい task が属する MS = `ms-XX` を決める
+2. 現在 Step 4 を走らせている envelope (= trek-progress-check の T1-system or trek-trigger の T2) について、 server に `POST /api/projects/<pid>/bus/envelope/check-task-add` を叩き、 `{"envelope": <env>, "target_ms": "ms-XX"}` を渡す
+3. 応答が `{"permit": "auto"}` → `beacon task add "<desc>" -m <ms-XX>` を実行
+4. 応答が `{"permit": "propose"}` → `beacon note add` で「ms-XX への task 追加を提案: <desc>。 user 判断待ち」 を残して **skip**、 続行 (= 現 MS の残作業に集中)
+5. 応答が `{"permit": "reject"}` → envelope 自体が無効。 Step 0.5 の fail-closed 経路に従い停止
+
+**自律 task add の典型例**:
+
+- 現 task の依存先 (= 先に land すべき下準備) を見つけた → 同 MS なら自律 add
+- 現 task に含めるには大きすぎる sub-feature を発見 → 同 MS なら自律 add
+- リファクタ機会の発見 → 同 MS なら自律 add
+
+**自律 add してはいけない例**:
+
+- 別 MS への侵食 (= 「ついでに ms-XX のリファクタもやる」) → propose 降格
+- 緊急の本番修正 task (= user 判断が必要な意思決定を含む) → propose 降格
+
+これにより AI は「目的達成のための計画自体を立てる」 (= Operation との本質的差) loop を Trek scope 内で完結させられる。 自律 add の `description` は entry-writing-principle (= CORE doc `F3ZkqT0pKS6JpR8dn70n` 4 原則: 1 行で読み手目線 / 横文字 3 段階 / ID 参照に文脈 / 尻切れトンボ禁止) を守る。
+
 ## Step 4.5: budget gate 事前チェック (毎 DM 送信前)
 
 `beacon bus send` / `beacon dm send` を呼ぶ前に毎回:

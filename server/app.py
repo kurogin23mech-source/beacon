@@ -4340,6 +4340,131 @@ def trek_scheduler_tick_endpoint(
     }
 
 
+class CheckTaskAddRequest(BaseModel):
+    """Body for POST /api/projects/{id}/bus/envelope/check-task-add (ms-83 / e-2000).
+
+    Pure verify endpoint: given an envelope and a target MS, return
+    whether the AI may add a task autonomously (auto), should propose
+    to the user (propose), or must be rejected outright (reject).
+
+    The endpoint runs the regular 9-step envelope verify pipeline first.
+    If verify passes, it then evaluates the action × tier matrix for
+    ``task.add`` against the target MS. T1 always permits. T2 permits
+    when the Operation scope enumerates the MS. T1-system permits when
+    the Trek scope (= server-side trek doc) includes the MS. Anything
+    else degrades to propose-to-ai.
+    """
+    envelope: dict
+    target_ms: str
+    payload: dict = {}
+
+
+@app.post("/api/projects/{project_id}/bus/envelope/check-task-add")
+def check_task_add_envelope(
+    project_id: str,
+    body: CheckTaskAddRequest,
+    user: dict = Depends(require_auth),
+):
+    """Decide whether ``task.add`` against ``target_ms`` is auto / propose / reject.
+
+    ms-83 / e-2000. Membership-gated read; the receiver project's
+    members are the ones running their AI session through this gate.
+    """
+    _require_project_role(project_id, user)
+    if not body.target_ms:
+        raise HTTPException(
+            status_code=400,
+            detail="target_ms required",
+        )
+
+    # Step 1: 9-step verify. Failure → reject (= envelope is broken,
+    # don't even propose).
+    nonce_store = _get_envelope_nonce_store()
+    parent_lookup = _get_envelope_parent_lookup()
+    result = envelope_mod.verify(
+        body.envelope,
+        project_id=project_id,
+        payload=body.payload or {},
+        requested_action=envelope_mod.TASK_ADD_ACTION,
+        nonce_store=nonce_store,
+        parent_lookup=parent_lookup,
+        sender_session_id="",
+    )
+    if not result.passed:
+        return {
+            "permit": "reject",
+            "reason": result.rejection_reason or "envelope_verify_failed",
+            "steps": result.steps,
+        }
+
+    # Step 2: tier-aware scope match.
+    tier = body.envelope.get("tier", "")
+    if tier == envelope_mod.TIER_T1:
+        return {"permit": "auto", "reason": "t1_unrestricted"}
+    if tier == envelope_mod.TIER_T2:
+        if envelope_mod.check_task_add_scope_match(
+            body.envelope, body.target_ms,
+        ):
+            return {"permit": "auto", "reason": "t2_scope_match"}
+        return {
+            "permit": "propose",
+            "reason": "t2_scope_mismatch_propose_to_ai",
+        }
+    if tier == envelope_mod.TIER_T1_SYSTEM:
+        # T1-system requires a Trek scope walk because the envelope only
+        # carries trek:<id>, not the MS list directly.
+        scope = body.envelope.get("scope", "") or ""
+        if not scope.startswith("trek:"):
+            return {
+                "permit": "reject",
+                "reason": "t1_system_scope_malformed",
+            }
+        trek_id = scope[len("trek:"):]
+        trek_doc = db.get_trek(trek_id)
+        if trek_doc is None:
+            return {
+                "permit": "reject",
+                "reason": "t1_system_trek_not_found",
+            }
+        if trek_doc.get("status") != "active":
+            return {
+                "permit": "reject",
+                "reason": "t1_system_trek_not_active",
+            }
+        if envelope_mod.trek_scope_includes_ms(trek_doc, body.target_ms):
+            return {"permit": "auto", "reason": "t1_system_trek_scope_match"}
+        return {
+            "permit": "propose",
+            "reason": "t1_system_trek_scope_mismatch_propose_to_ai",
+        }
+    # T3 / T5 / unknown → never auto.
+    return {"permit": "propose", "reason": "tier_not_eligible_for_auto"}
+
+
+def _get_envelope_nonce_store():
+    """Lazy-resolve the envelope nonce store binding.
+
+    For the test path we need to reach the same store the bus-event
+    flow uses. The store has process scope so we keep one module-level
+    singleton here.
+    """
+    global _envelope_nonce_store_singleton
+    try:
+        return _envelope_nonce_store_singleton
+    except NameError:
+        _envelope_nonce_store_singleton = envelope_mod.InMemoryNonceStore()
+        return _envelope_nonce_store_singleton
+
+
+def _get_envelope_parent_lookup():
+    """Return a parent_lookup that consults the bus_event store.
+
+    For task.add we never have in_reply_to chains (= scheduler-fired
+    envelopes have no parent), so a constant-None lookup is sufficient.
+    """
+    return envelope_mod.FunctionParentLookup(lambda _pid, _eid: None)
+
+
 class T1SystemEnvelopeRequest(BaseModel):
     """Body for POST /api/projects/{project_id}/bus/envelope/t1-system/issue.
 
