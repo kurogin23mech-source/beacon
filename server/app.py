@@ -4085,16 +4085,22 @@ async def post_bus_event(
         payload=body.payload,
     )
     env_actions = (body.envelope or {}).get("actions_authorized") or []
+    env_tier = (body.envelope or {}).get("tier", "") or ""
+    env_issuer = (body.envelope or {}).get("issuer", "") or ""
     gate_lookup = dm_gate_mod.build_shared_trek_lookup_from_lists(
         # Sender-side trek visibility is sufficient — Trek membership
         # query is symmetric (creator OR members) on either backend.
         lambda uid: db.list_treks(actor_id=uid) if uid else [],
     )
+    # ms-83 / e-1995: pass tier+issuer so the gate can recognise
+    # T1-system server-mint envelopes as T1-equivalent (= bypass).
     should_gate, gate_reason = dm_gate_mod.should_gate_dm_action(
         sender_user_id=sender_uid,
         receiver_user_id=receiver_uid,
         actions_authorized=env_actions,
         shared_trek_lookup=gate_lookup,
+        envelope_tier=env_tier,
+        envelope_issuer=env_issuer,
     )
     audit_record["dm_gate"] = {
         "should_gate": should_gate,
@@ -4178,6 +4184,84 @@ def _envelope_audit_view(env: Optional[dict]) -> Optional[dict]:
             "issued_at", "expires_at", "project_id", "nonce",
             "conversation_id", "in_reply_to", "chain_depth"}
     return {k: env.get(k) for k in keep if k in env}
+
+
+class T1SystemEnvelopeRequest(BaseModel):
+    """Body for POST /api/projects/{project_id}/bus/envelope/t1-system/issue.
+
+    ms-83 / e-1995. Used by the server-side scheduler (= the periodic loop
+    that fires "next, please" progress-check DMs into a Trek's claim
+    session) to mint a T1-equivalent envelope for an active Trek scope.
+    The caller must present the shared scheduler key in the
+    ``X-Beacon-Scheduler-Key`` header so a user account cannot pose as
+    the server.
+    """
+    trek_id: str
+    actions_authorized: list[str] = []
+    data_class: str = "free"
+    ttl_seconds: int = 3600
+    conversation_id: Optional[str] = None
+
+
+@app.post("/api/projects/{project_id}/bus/envelope/t1-system/issue")
+def issue_t1_system_bus_envelope(
+    project_id: str,
+    body: T1SystemEnvelopeRequest,
+    request: Request,
+):
+    """Issue a T1-system bus envelope (ms-83 / e-1995).
+
+    Authorization: the request MUST present a matching
+    ``X-Beacon-Scheduler-Key`` header. This endpoint is the only path
+    that mints ``tier=T1-system`` envelopes; receiver-side verify
+    cross-checks that ``issuer=beacon-system`` and ``scope=trek:<id>``.
+
+    Validation:
+      * The trek must exist and be ``active``. ``planning`` / ``archived``
+        Treks cannot have server-mint authority.
+      * ``actions_authorized`` is validated by the envelope module
+        (strict enumeration, no wildcards).
+    """
+    # Internal-only authorization. The shared secret is rotated out of
+    # band in production; the dev fallback lets the test suite run.
+    provided = request.headers.get("X-Beacon-Scheduler-Key", "")
+    expected = envelope_mod.scheduler_internal_key()
+    if not provided or provided != expected:
+        raise HTTPException(
+            status_code=403,
+            detail="T1-system mint requires X-Beacon-Scheduler-Key",
+        )
+    # Trek validity gate. The mint is bounded to active Treks so a
+    # planning Trek can't accidentally receive auto-execute DMs.
+    trek_doc = db.get_trek(body.trek_id)
+    if trek_doc is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Trek {body.trek_id!r} not found",
+        )
+    if trek_doc.get("status") != "active":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Trek {body.trek_id!r} is not active "
+                f"(status={trek_doc.get('status')!r})"
+            ),
+        )
+    try:
+        env = envelope_mod.issue_t1_system_envelope(
+            project_id=project_id,
+            trek_id=body.trek_id,
+            actions_authorized=body.actions_authorized,
+            data_class=body.data_class,
+            ttl_seconds=body.ttl_seconds,
+            conversation_id=body.conversation_id,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"T1-system envelope issuance rejected: {e}",
+        )
+    return env
 
 
 @app.post("/api/projects/{project_id}/bus/envelope/issue")
