@@ -979,44 +979,47 @@ def cmd_milestone_start():
     # ---- 1b. occupation claim (ms-81 e-1918) ----
     # Tied to milestone_start so status / assignee / occupation always lift
     # together. If a previous claim exists from another session, warn —
-    # never block (= SPEC §3-3, 努力義務).
-    try:
-        import agent as _agent_for_claim
-        actor_for_claim = _agent_for_claim.get_actor()
-    except Exception:
-        actor_for_claim = {}
-    sid_for_claim = _resolve_session_id() or ""
-    _ms_claim, previous_claim = core.milestone_claim_occupation(
-        data, ms_id,
-        session_id=sid_for_claim,
-        machine=actor_for_claim.get("machine", ""),
-        agent=actor_for_claim.get("agent", ""),
-    )
-    if previous_claim and previous_claim.get("session_id") != sid_for_claim:
-        prev_sid = previous_claim.get("session_id", "?")
-        prev_machine = previous_claim.get("machine", "?")
-        print(
-            f"  [ms-81 occupation] previous claim by session "
-            f"{prev_sid[:12]}... on {prev_machine} (claimed_at: "
-            f"{previous_claim.get('claimed_at', '?')}). Proceeding with "
-            f"takeover; if that session crashed, this is normal — if it is "
-            f"still actively working, coordinate via beacon dm.",
-            file=sys.stderr,
-        )
-        core.milestone_record_occupation_event(
-            data, ms_id=ms_id, event_type="takeover",
-            session_id=sid_for_claim,
-            machine=actor_for_claim.get("machine", ""),
-            agent=actor_for_claim.get("agent", ""),
-            reason=f"superseded session {prev_sid[:12]}",
-        )
-    else:
-        core.milestone_record_occupation_event(
-            data, ms_id=ms_id, event_type="claim",
+    # never block (= SPEC §3-3, 努力義務). Gated by BEACON_NO_BRANCH /
+    # BEACON_NO_ASSIGNEE so test sandboxes and scripted scaffolds that
+    # request a pure status flip don't trip session-resolution side effects.
+    if not no_branch and not no_assignee:
+        try:
+            import agent as _agent_for_claim
+            actor_for_claim = _agent_for_claim.get_actor()
+        except Exception:
+            actor_for_claim = {}
+        sid_for_claim = _resolve_session_id() or ""
+        _ms_claim, previous_claim = core.milestone_claim_occupation(
+            data, ms_id,
             session_id=sid_for_claim,
             machine=actor_for_claim.get("machine", ""),
             agent=actor_for_claim.get("agent", ""),
         )
+        if previous_claim and previous_claim.get("session_id") != sid_for_claim:
+            prev_sid = previous_claim.get("session_id", "?")
+            prev_machine = previous_claim.get("machine", "?")
+            print(
+                f"  [ms-81 occupation] previous claim by session "
+                f"{prev_sid[:12]}... on {prev_machine} (claimed_at: "
+                f"{previous_claim.get('claimed_at', '?')}). Proceeding with "
+                f"takeover; if that session crashed, this is normal — if it is "
+                f"still actively working, coordinate via beacon dm.",
+                file=sys.stderr,
+            )
+            core.milestone_record_occupation_event(
+                data, ms_id=ms_id, event_type="takeover",
+                session_id=sid_for_claim,
+                machine=actor_for_claim.get("machine", ""),
+                agent=actor_for_claim.get("agent", ""),
+                reason=f"superseded session {prev_sid[:12]}",
+            )
+        else:
+            core.milestone_record_occupation_event(
+                data, ms_id=ms_id, event_type="claim",
+                session_id=sid_for_claim,
+                machine=actor_for_claim.get("machine", ""),
+                agent=actor_for_claim.get("agent", ""),
+            )
 
     # ---- 1. assignee auto-add (lib/agent.py is the single source) ----
     actor_str = ""
@@ -1229,6 +1232,40 @@ def _ensure_on_branch(branch_name: str) -> str:
         print(f"  warning: could not create {branch_name}: {err}", file=sys.stderr)
         return "preserved"
     return "created"
+
+
+def _release_all_occupations_for_session(session_id: str) -> int:
+    """ms-81 e-1918 (SPEC AC #15): release every MS this session is occupying.
+
+    Called from session-end so a clean exit leaves the next session free
+    to claim. Returns the number of releases performed (0 for sessions
+    that weren't holding anything).
+    """
+    if not session_id:
+        return 0
+    data = load_project()
+    try:
+        import agent as _agent_for_se
+        actor = _agent_for_se.get_actor()
+    except Exception:
+        actor = {}
+    released = 0
+    for ms in data.get("milestones", []):
+        occ = ms.get("occupation")
+        if occ and occ.get("session_id") == session_id:
+            ms_id = ms["id"]
+            core.milestone_release_occupation(data, ms_id, reason="session-end")
+            core.milestone_record_occupation_event(
+                data, ms_id=ms_id, event_type="release",
+                session_id=session_id,
+                machine=actor.get("machine", ""),
+                agent=actor.get("agent", ""),
+                reason="session-end",
+            )
+            released += 1
+    if released:
+        save_project(data, op={"op": "session_end_release", "count": released})
+    return released
 
 
 def _release_occupation_for_transition(data, ms_id, *, reason):
@@ -3079,6 +3116,17 @@ def cmd_session_end():
         print("Error: no session id (no .beacon/session.json and BEACON_SESSION_ID unset)",
               file=sys.stderr)
         sys.exit(1)
+
+    # ms-81 e-1918 (SPEC AC #15): release any MS occupations held by this
+    # session before aggregating. Done here so the session_log includes the
+    # release events; running it after persistence would race the cloud sync.
+    _released_count = _release_all_occupations_for_session(sid)
+    if _released_count:
+        print(
+            f"  released {_released_count} occupation claim(s) held by this "
+            f"session (status unchanged)",
+            file=sys.stderr,
+        )
 
     payload = _aggregate_and_persist(sid, recovered=False,
                                       summary_override=summary_override)
