@@ -215,6 +215,7 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 | `beacon milestone done <id>` | Mark as done / 完了 |
 | `beacon milestone close <id>` | Close milestone / クローズ |
 | `beacon milestone observe <id>` | Set to observing / 監視中に設定 |
+| `beacon milestone wait <id> --reason "..."` | Pause an active/observing milestone (ms-81) / 一時中断（waiting に遷移） |
 | `beacon milestone show <id> [--json]` | Show details / 詳細表示 |
 | `beacon milestone update <id> [options]` | Update fields / 更新 |
 | `beacon milestone delete <id>` | Logical delete (cancelled) / 論理削除 |
