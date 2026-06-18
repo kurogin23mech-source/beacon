@@ -164,6 +164,66 @@ def _require_reason_or_skip(verb: str) -> str:
     return os.environ.get("BEACON_REASON", "")
 
 
+# ms-81 e-1916: forcing function — warn (don't block) when a write targets
+# a milestone whose status doesn't authorise writes per the state-machine
+# CORE doc DqIvAVzDprcq6hsq0AuF §1 + §6.
+#
+# Per the SPEC (warning-based, not block), this emits a stderr warning that
+# names the offending status and the recommended remediation, and:
+#   - on an interactive tty, prompts [y/N] to let the operator decide;
+#   - on a non-interactive run (no tty — Skill / hook / dispatch path),
+#     proceeds after logging the warning (= 努力義務, the operator can act
+#     on the audit trail later);
+#   - if BEACON_BYPASS_STATUS_GATE=1, skips the prompt entirely (= explicit
+#     opt-out for bulk migrations / hook bypass scenarios).
+_WRITE_AUTHORISED_STATUSES = {"in_progress", "active", "observing"}
+
+
+def _check_ms_status_for_write(ms: dict, op_desc: str) -> bool:
+    """Return True if the write may proceed (status authorised or operator
+    consented to override); False only when an interactive operator declines.
+    """
+    status = ms.get("status", "todo")
+    if status in _WRITE_AUTHORISED_STATUSES:
+        return True
+
+    if os.environ.get("BEACON_BYPASS_STATUS_GATE", "") == "1":
+        return True
+
+    title = ms.get("title", "")
+    ms_id = ms.get("id", "")
+    print(
+        f"\n[ms-81 status gate] write to a {status} milestone\n"
+        f"   target:      [{ms_id}] {title}\n"
+        f"   status:      {status} (writes are discouraged — see CORE doc "
+        f"DqIvAVzDprcq6hsq0AuF §1)\n"
+        f"   operation:   {op_desc}\n"
+        f"   suggestion:  transition to active via `beacon milestone start "
+        f"{ms_id}` or to observing via `beacon milestone observe {ms_id} "
+        f"--reason \"...\"` first.\n"
+        f"   bypass:      set BEACON_BYPASS_STATUS_GATE=1 to silence this gate "
+        f"(opt-out for hooks / bulk ops).",
+        file=sys.stderr,
+    )
+
+    if not sys.stdin.isatty():
+        # Non-interactive: proceed after logging the warning. The forcing
+        # function is the visible warning + audit trail, not a block.
+        print(
+            f"   (non-interactive stdin — proceeding; the warning above is "
+            f"the forcing function)",
+            file=sys.stderr,
+        )
+        return True
+
+    try:
+        response = input("   Proceed anyway? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\n   declined (no input)", file=sys.stderr)
+        return False
+    return response in ("y", "yes")
+
+
 def save_project(data, op=None):
     core.validate_project(data)
     store = get_store()
@@ -2051,6 +2111,17 @@ def cmd_log_finalize():
     source = _resolve_commit_source()
 
     data = load_project()
+    # ms-81 e-1916: status gate. Resolve the target MS the same way log_commit
+    # would internally, then surface the warning before mutating state.
+    try:
+        target_ms = core.find_target_milestone(data, ms_id)
+    except ValueError:
+        target_ms = None
+    if target_ms is not None:
+        if not _check_ms_status_for_write(
+            target_ms, f"log commit {commit_hash[:7]}"
+        ):
+            sys.exit(1)
     result = core.log_commit(
         data, ms_id=ms_id, commit_hash=commit_hash,
         message=message, date=date, summary=summary_text, progress=progress,
@@ -2177,10 +2248,16 @@ def cmd_task_done():
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     data = load_project()
-    # PR entries: auto-forward to pr_merge, but warn if status is unexpected
+    # ms-81 e-1916: status gate. Look up the entry's parent MS first so we
+    # can warn if the MS isn't write-authorised. The PR-merge sub-branch
+    # below also goes through the same gate.
     result = core.find_entry(data, entry_id)
     if result:
-        _, _, entry, _ = result
+        parent_ms, _, entry, _ = result
+        if not _check_ms_status_for_write(
+            parent_ms, f"task done {entry_id}"
+        ):
+            sys.exit(1)
         if entry.get("type") == "pr":
             pr_status = entry.get("meta", {}).get("pr_status", "")
             if pr_status not in ("approved", "merged"):
@@ -7764,6 +7841,18 @@ def cmd_pr_add():
             intent = pr_body.strip() if pr_body.strip() else ""
 
     data = load_project()
+    # ms-81 e-1916: status gate. Surface the warning before adding a PR
+    # entry to a non-write-authorised MS so the operator can re-target
+    # rather than discover the issue later in retro.
+    try:
+        target_ms = core.find_target_milestone(data, ms_id)
+    except ValueError:
+        target_ms = None
+    if target_ms is not None:
+        if not _check_ms_status_for_write(
+            target_ms, f"pr add {url}"
+        ):
+            sys.exit(1)
     try:
         eid = core.pr_add(data, ms_id=ms_id, url=url, author=author,
                           intent=intent, date=date, title=title, commits=commits,
