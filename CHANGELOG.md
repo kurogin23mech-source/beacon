@@ -2,6 +2,32 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.41.0] - 2026-06-18
+
+- Merge pull request #168 from kurogin23mech-source/ms-83-trek-server-side-continuity
+- feat(ms-83): trek session idle detection + escalation DM (e-2001)
+- feat(ms-83): AI autonomous task.add envelope decision (e-2000)
+- feat(ms-83): /beacon-trek-execute recognises T1-system envelope (e-1999)
+- feat(ms-83): Cloud Scheduler trek tick endpoint + payload builder (e-1997 e-1998)
+- feat(ms-83): T1-system envelope mint + dm_gate bypass (e-1995)
+- feat(ms-83): trek.meta cadence_minutes + manager_agent_url (e-1994)
+- Merge pull request #167 from kurogin23mech-source/ms-75-phase3-trek-aggregation
+- feat(ms-75): DM multi-recipient + Trek session-start + sensitivity gate
+- feat(ms-75): trek aggregation view + goal_state + timeline + docs filter
+- Merge pull request #166 from kurogin23mech-source/ms-76-ai-framework-envelope-tier-spec-ms-75
+- Merge remote-tracking branch 'origin/main' into ms-76-ai-framework-envelope-tier-spec-ms-75
+- feat(ms-76): operation-trigger unicast default + claim-based receiver (e-1860, e-1604)
+- feat(ms-76): Operation execute に disclosure gate AND check を明文化 (e-1841)
+- feat(ms-76): Operation setup Skill に tier 必須欄追加 (e-1840)
+- feat(ms-76): bus budget grant に T1-only 構造的禁止帯を land (e-1852)
+- Merge pull request #165 from kurogin23mech-source/ms-75-trek-ai-framework-operation-pattern
+- feat(ms-76): DM Skill に envelope tier 判定セクション追加 (e-1850)
+- feat(ms-75): codify Trek scope DM blanket exception (e-1856)
+- feat(ms-75): /beacon-trek-execute Skill (e-1868)
+- feat(ms-75): Trek-aware trigger system (e-1870)
+- docs(release): update README/CHANGELOG for v0.40.0
+- chore(release): bump formula to 0.40.0
+
 ## [v0.40.0] - 2026-06-18
 
 - Merge pull request #163 from kurogin23mech-source/ms-81-ms-status-assignee-worktree
