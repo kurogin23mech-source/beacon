@@ -2201,13 +2201,25 @@ body::after {
 /* SCOPE row: 24px pin | 110px proj-tag | 80px ref | 1fr desc | 90px pill */
 .trek-scope-row {
   display: grid;
-  grid-template-columns: 24px 110px 80px 1fr 90px;
+  grid-template-columns: 14px 24px 110px 80px 1fr;
   align-items: center;
   gap: 10px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border-subtle, var(--border));
   font-size: 0.78rem;
 }
+.trek-scope-row.expandable {
+  cursor: pointer;
+  user-select: none;
+}
+.trek-scope-row.expandable:hover { background: rgba(255,255,255,0.025); }
+.trek-scope-row.expanded { border-bottom-color: transparent; }
+.trek-scope-row .chevron {
+  color: var(--text-dim);
+  font-size: 0.7rem;
+  text-align: center;
+}
+.trek-scope-row .chevron-spacer { width: 14px; }
 .trek-scope-row .pin { color: var(--text-secondary); }
 .trek-scope-row .proj-tag {
   font-size: 0.62rem;
@@ -2232,26 +2244,127 @@ body::after {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.trek-scope-row .pill {
-  font-size: 0.62rem;
-  letter-spacing: 0.06em;
+
+/* Drill-down expansion (= ms-86 / e-2016) — MS / Operation 行を開いた時の配下表示 */
+.trek-scope-expansion {
+  padding: 6px 12px 10px 48px;
+  border-bottom: 1px solid var(--border-subtle, var(--border));
+  background: rgba(255,255,255,0.015);
+}
+.trek-scope-expansion-empty {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  font-style: italic;
+  padding: 4px 0;
+}
+.trek-scope-sub-row {
+  display: grid;
+  grid-template-columns: 14px 60px 1fr 120px;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+  font-size: 0.72rem;
+}
+.trek-scope-sub-row .status { color: var(--text-secondary); text-align: center; }
+.trek-scope-sub-row .ref {
+  color: var(--text-dim);
+  font-family: var(--font-mono, monospace);
+}
+.trek-scope-sub-row .desc {
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.trek-scope-sub-row .trek-state-cell {
   text-align: right;
-  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* Trek aggregate state pill (= ms-86 / e-2058 #3) — header に並ぶ集約バッジ */
+.trek-agg-badge.agg-active {
+  color: var(--accent, #60a5fa);
+  border-color: rgba(96,165,250,0.5);
+}
+.trek-agg-badge.agg-all-done {
+  color: #4ade80;
+  border-color: rgba(74,222,128,0.5);
+}
+.trek-agg-badge.agg-all-waiting {
+  color: var(--warning, #fbbf24);
+  border-color: rgba(251,191,36,0.5);
+}
+.trek-agg-badge.agg-mixed {
+  color: #a78bfa;
+  border-color: rgba(167,139,250,0.5);
+}
+.trek-agg-badge.agg-empty {
   color: var(--text-dim);
 }
-.trek-scope-row .pill.active { color: var(--accent); }
-.trek-scope-row .pill.observing { color: #a78bfa; }
+
+/* Review pending banner (= ms-86 / e-2058 #4) — waiting-review 1 件以上で出る強調帯 */
+.trek-review-pending-banner {
+  margin: 12px 0;
+  padding: 10px 14px;
+  border: 1px solid rgba(251,191,36,0.6);
+  background: rgba(251,191,36,0.08);
+  border-radius: 4px;
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  font-size: 0.78rem;
+}
+.trek-review-pending-banner .icon { font-size: 1.4rem; flex-shrink: 0; }
+.trek-review-pending-banner .text { flex: 1; color: var(--text-primary); line-height: 1.5; }
+.trek-review-pending-banner .text strong {
+  display: block;
+  color: var(--warning, #fbbf24);
+  margin-bottom: 2px;
+}
+
+/* Trek task state machine (= ms-75 / e-2048, ms-86 / e-2058) のバッジ */
+.trek-task-state-badge {
+  display: inline-block;
+  font-size: 0.62rem;
+  letter-spacing: 0.03em;
+  padding: 1px 6px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+.trek-task-state-badge.state-working {
+  color: var(--accent, #60a5fa);
+  border-color: rgba(96,165,250,0.5);
+  background: rgba(96,165,250,0.08);
+}
+.trek-task-state-badge.state-done {
+  color: #4ade80;
+  border-color: rgba(74,222,128,0.5);
+  background: rgba(74,222,128,0.08);
+}
+.trek-task-state-badge.state-waiting {
+  color: var(--warning, #fbbf24);
+  border-color: rgba(251,191,36,0.5);
+  background: rgba(251,191,36,0.08);
+}
 
 /* Member row + nested session rows */
 .trek-member-row {
+  /* ms-86 / e-2017: ⭐ + dot + email + @project + role + joined-date */
   display: grid;
-  grid-template-columns: 14px 1fr 80px 90px 130px;
+  grid-template-columns: 16px 14px 1fr 130px 80px 130px;
   align-items: center;
   gap: 10px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border-subtle, var(--border));
   font-size: 0.78rem;
 }
+.trek-member-row .trek-leader-star {
+  color: #fbbf24;
+  font-size: 0.85rem;
+  text-align: center;
+}
+.trek-member-row .trek-leader-star-spacer { width: 16px; }
 .trek-member-row .dot {
   width: 8px; height: 8px;
   border-radius: 50%;
@@ -2260,8 +2373,14 @@ body::after {
 }
 .trek-member-row.offline .dot { background: var(--text-dim); box-shadow: none; }
 .trek-member-row.invited .dot { background: var(--text-dim); box-shadow: none; opacity: 0.5; }
-.trek-member-row .email { color: var(--text-primary); }
-.trek-member-row .where { color: var(--text-dim); font-size: 0.7rem; display: block; }
+.trek-member-row .user-email { color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trek-member-row .user-proj {
+  color: var(--text-dim);
+  font-size: 0.7rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .trek-member-row .role {
   font-size: 0.62rem;
   letter-spacing: 0.1em;
@@ -2270,6 +2389,48 @@ body::after {
 }
 .trek-member-row .role.leader { color: var(--accent); }
 .trek-member-row .joined { color: var(--text-dim); font-size: 0.7rem; text-align: right; }
+
+/* ms-86 / e-2045: 参加 session の state 可視化 badge.
+   - working          = last_active が直近 5 分以内
+   - idle             = last_active が 5〜30 分前
+   - budget-exhausted = bus budget remaining == 0
+   - user-stop        = Trek halt が立っている
+   現 phase では self の live session 数を user-email の横に小さく示すところまで実装。
+   per-session 別 badge の精緻化は次 slice (= backend per-user sessions API 経由)。 */
+.trek-self-live-count {
+  display: inline-block;
+  margin-left: 8px;
+  font-size: 0.66rem;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-dim);
+  padding: 1px 6px;
+  border: 1px solid var(--border-subtle, var(--border));
+  border-radius: 8px;
+  vertical-align: middle;
+}
+.trek-session-state-badge {
+  display: inline-block;
+  font-size: 0.62rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 8px;
+  border: 1px solid currentColor;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+.trek-session-state-badge.working {
+  color: var(--accent);
+}
+.trek-session-state-badge.idle {
+  color: var(--text-dim);
+}
+.trek-session-state-badge.budget-exhausted {
+  color: var(--warning, #fbbf24);
+}
+.trek-session-state-badge.user-stop {
+  color: var(--danger, #ef4444);
+}
 
 .trek-session-nest {
   margin-left: 24px;
@@ -2333,6 +2494,50 @@ body::after {
   display: block;
   color: var(--text-secondary);
   padding: 1px 0;
+}
+
+/* NEXT FIRE (= ms-83 scheduler の next-fire、 ms-86 e-2019) */
+.trek-next-fire-row {
+  font-size: 0.78rem;
+  color: var(--text-primary);
+  padding: 6px 12px;
+}
+.trek-next-fire-row .abs { font-family: var(--font-mono, monospace); color: var(--accent, #60a5fa); }
+.trek-next-fire-row .rel { color: var(--text-dim); font-size: 0.7rem; margin-left: 8px; }
+
+/* RECENT ACTIVITY timeline (= ms-86 e-2019) — commit / done / state stamp の時系列 */
+.trek-activity-row {
+  display: grid;
+  grid-template-columns: 110px 18px 1fr;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 12px;
+  font-size: 0.72rem;
+  border-bottom: 1px dashed var(--border-subtle, var(--border));
+}
+.trek-activity-row:last-child { border-bottom: none; }
+.trek-activity-row .ts {
+  font-family: var(--font-mono, monospace);
+  color: var(--text-dim);
+}
+.trek-activity-row .icon { text-align: center; }
+.trek-activity-row .text {
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* WHY block (= goal_state テキスト、 ms-86 で新規追加) — Trek 画面の目的を 1-3 行で表示 */
+.trek-why-text {
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  line-height: 1.6;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent, #60a5fa);
+  background: rgba(96,165,250,0.04);
+  border-radius: 0 3px 3px 0;
+  white-space: pre-wrap;
 }
 
 /* Placeholder shown for sections whose backing feature is not yet shipped
@@ -4049,6 +4254,7 @@ async function switchTab(tab) {
 async function openTrek(trekId) {
   state.openTrekId = trekId;
   state.openTrekDocs = [];
+  state.openTrekMemberSessions = {};
   render();
   // Fetch docs in the background; if it fails, the detail view shows
   // "No docs tagged with this trek yet." which is a fine degrade.
@@ -4056,11 +4262,23 @@ async function openTrek(trekId) {
     await dataSource.loadTrekDocs(trekId);
     render();
   } catch (_e) { /* no-op */ }
+  // ms-86 / e-2045: fetch per-member live sessions in parallel so each
+  // member row can show its own live count + state breakdown. Best-effort:
+  // failure to fetch any single member falls back to the self-only path
+  // (= state.onlineSessions) in the render helper.
+  try {
+    const t = (state.treks || []).find(x => x.trek_id === trekId);
+    if (t) {
+      await dataSource.loadTrekMemberSessions(t);
+      render();
+    }
+  } catch (_e) { /* no-op */ }
 }
 
 function closeTrek() {
   state.openTrekId = null;
   state.openTrekDocs = [];
+  state.openTrekMemberSessions = {};
   render();
 }
 
@@ -4838,41 +5056,220 @@ function _trekBadgeClass(s) {
   return '';
 }
 
-function _renderTrekScopeRow(s) {
+function _trekScopeKey(s) {
+  return `${s.project || ''}:${s.milestone || s.operation || s.task || '*'}`;
+}
+
+function _trekScopeStatusIcon(status) {
+  switch (status) {
+    case 'done':        return '●';
+    case 'in_progress': return '◐';
+    case 'waiting':     return '◌';
+    case 'observing':   return '◔';
+    case 'todo':
+    default:            return '○';
+  }
+}
+
+// ms-86 / e-2058 — Trek task state machine (= ms-75 / e-2048) のバッジ表示
+// state: working / done / waiting-review
+function _trekTaskStateBadge(state) {
+  if (!state) return '';
+  const map = {
+    'working':        { label: '🔨 working',  cls: 'state-working' },
+    'done':           { label: '✓ done',       cls: 'state-done' },
+    'waiting-review': { label: '👀 待 review', cls: 'state-waiting' },
+  };
+  const info = map[state];
+  if (!info) return '';
+  return `<span class="trek-task-state-badge ${info.cls}">${esc(info.label)}</span>`;
+}
+
+// ms-86 / e-2058 #3 — Trek 全体の集約 state を判定: active / all-done /
+// all-waiting-review / mixed-terminal / empty
+function _trekAggregateState(t) {
+  const states = t && t.task_states ? Object.values(t.task_states) : [];
+  if (!states.length) return { key: 'empty', label: '宣言なし', cls: 'agg-empty' };
+  const set = new Set(states.map(s => s && s.state).filter(Boolean));
+  if (set.has('working')) return { key: 'active',  label: '🔨 進行中',      cls: 'agg-active' };
+  if (set.size === 1 && set.has('done')) return { key: 'all-done', label: '✓ 全 done', cls: 'agg-all-done' };
+  if (set.size === 1 && set.has('waiting-review')) return { key: 'all-waiting', label: '👀 全 待 review', cls: 'agg-all-waiting' };
+  // 残りは done + waiting-review の terminal mix
+  return { key: 'mixed-terminal', label: '⚡ mixed terminal', cls: 'agg-mixed' };
+}
+
+// ms-86 / e-2058 #4 — waiting-review が 1 件でもあれば emphasis banner
+function _trekReviewPendingBanner(t) {
+  const states = t && t.task_states ? Object.values(t.task_states) : [];
+  const pending = states.filter(s => s && s.state === 'waiting-review');
+  if (!pending.length) return '';
+  const ids = Object.entries(t.task_states || {})
+    .filter(([_, s]) => s && s.state === 'waiting-review')
+    .map(([id]) => id);
+  return `
+    <div class="trek-review-pending-banner">
+      <span class="icon">👀</span>
+      <div class="text">
+        <strong>レビュー待ち task が ${pending.length} 件あります</strong>
+        ${ids.map(esc).join(' / ')}
+        — leader が approve / re-work / forward-to-user を判断します。
+        CLI: <code style="color:var(--accent);">/beacon-trek-review</code>
+      </div>
+    </div>`;
+}
+
+function _renderTrekScopeExpansion(s, t) {
+  // Show child tasks / OperationTasks. Data source: t.aggregation
+  // built by lib/commands.py:_build_trek_aggregation (= e-1864).
+  // Trek task state (= ms-75 / e-2048, displayed for e-2058) は t.task_states から拾う。
+  const agg = (t && t.aggregation) || {};
+  const taskStates = (t && t.task_states) || {};
+  const allTasks = [...(agg.tasks_todo || []), ...(agg.tasks_done_recent || [])];
+  if (s.milestone) {
+    const rows = allTasks.filter(r => r.ms_id === s.milestone);
+    if (!rows.length) {
+      return `<div class="trek-scope-expansion-empty">この MS scope に該当する task はまだありません。</div>`;
+    }
+    return rows.map(r => {
+      const ts = taskStates[r.id || ''] || null;
+      const stateBadge = ts ? _trekTaskStateBadge(ts.state) : '';
+      return `
+      <div class="trek-scope-sub-row">
+        <span class="status">${_trekScopeStatusIcon(r.status)}</span>
+        <span class="ref">${esc(r.id || '')}</span>
+        <span class="desc">${esc(r.description || '')}</span>
+        <span class="trek-state-cell">${stateBadge}</span>
+      </div>`;
+    }).join('');
+  }
+  if (s.operation) {
+    // Operation 配下の OperationTasks + 直近 run records は別 endpoint。 T7 (= e-2019)
+    // で run records が landingしたら同様に展開する。 今は placeholder。
+    return `<div class="trek-scope-expansion-empty">Operation 配下の OperationTasks / 直近 run records 表示は T7 (= e-2019) で実装。</div>`;
+  }
+  // project-wide / task 行は展開不要のはずだが、 安全側で空 placeholder。
+  return '';
+}
+
+function _renderTrekScopeRow(s, t) {
   // ref column: prefer the narrowest known ref (task > operation > milestone > project-wide).
   let refLabel = '';
   let descLabel = '';
+  let expandable = false;
   if (s.task) { refLabel = s.task; descLabel = '(task)'; }
-  else if (s.operation) { refLabel = s.operation; descLabel = '(operation)'; }
-  else if (s.milestone) { refLabel = s.milestone; descLabel = '(milestone)'; }
+  else if (s.operation) { refLabel = s.operation; descLabel = '(operation)'; expandable = true; }
+  else if (s.milestone) { refLabel = s.milestone; descLabel = '(milestone)'; expandable = true; }
   else { refLabel = '—'; descLabel = '<project-wide>'; }
-  return `
-    <div class="trek-scope-row">
+
+  const key = _trekScopeKey(s);
+  const isExpanded = expandable && state.trekScopeExpanded && state.trekScopeExpanded.has(key);
+  const chevron = expandable
+    ? `<span class="chevron">${isExpanded ? '▾' : '▸'}</span>`
+    : `<span class="chevron-spacer"></span>`;
+
+  const rowHtml = `
+    <div class="trek-scope-row${expandable ? ' expandable' : ''}${isExpanded ? ' expanded' : ''}"${expandable ? ` data-action="trek-scope-toggle" data-scope-key="${esc(key)}"` : ''}>
+      ${chevron}
       <span class="pin">📌</span>
       <span class="proj-tag">${esc(s.project)}</span>
       <span class="ref">${esc(refLabel)}</span>
       <span class="desc">${esc(descLabel)}</span>
-      <span class="pill"></span>
+    </div>`;
+
+  if (!isExpanded) return rowHtml;
+  return rowHtml + `
+    <div class="trek-scope-expansion">
+      ${_renderTrekScopeExpansion(s, t)}
     </div>`;
 }
 
-function _renderTrekMemberRow(m) {
+// ms-86 / e-2045 step 1+2+3+4: member ごとの live session 数 + state 内訳 を row に
+// 小さく表示する helper。
+// データソースの優先順:
+//   1. state.openTrekMemberSessions[m.email] が空でなければそれを使う
+//      (= /api/projects/{pid}/sessions?user_id=<email>&live_only=true、 Trek detail
+//      を開いた時に openTrek が並列 fetch して入れる)
+//   2. 1 で取れず、 かつ m.email が currentUserEmail と一致するなら
+//      state.onlineSessions を fallback (= /api/me/sessions で取得済の自セッション)
+//   3. どちらもなければ空文字を返す (= 表示しない、 既存 row 挙動と等価)
+// state 判定の閾値:
+//   - user-stop = Trek.halt が立っている (= 全 session を user-stop 扱いで赤色 badge)
+//   - working   = last_active 直近 5 分以内 (= 通常の active 状態)
+//   - idle      = 5〜30 分前 (= live_only filter で since=10 分が default なのでこの
+//                 範囲は実際には小さいが、 サーバ応答の last_active が静かに古く
+//                 なるケースで出る)
+// budget-exhausted は per-session の bus budget を別経路で取れる API が無いため
+// 本 phase では計算しない (= 将来 backend に budget aggregator を追加した時に有効化)。
+function _renderTrekMemberLiveCount(m, t) {
+  if (!m || !m.email) return '';
+  let sessions = (state && state.openTrekMemberSessions && state.openTrekMemberSessions[m.email]) || null;
+  if (!Array.isArray(sessions) || sessions.length === 0) {
+    const myEmail = currentUserEmail();
+    if (myEmail && m.email === myEmail) {
+      sessions = (state && state.onlineSessions) || [];
+    } else {
+      sessions = [];
+    }
+  }
+  if (!Array.isArray(sessions) || sessions.length === 0) return '';
+  const n = sessions.length;
+  const halted = !!(t && t.halt);
+  const now = Date.now();
+  let working = 0;
+  let idle = 0;
+  for (const s of sessions) {
+    const ts = s && s.last_active ? Date.parse(s.last_active) : NaN;
+    if (Number.isNaN(ts)) continue;
+    const ageMs = now - ts;
+    if (ageMs < 5 * 60 * 1000) working++;
+    else if (ageMs < 30 * 60 * 1000) idle++;
+  }
+  const parts = [];
+  if (halted) {
+    // Trek が halt 状態なら、 全 session を user-stop として表示 (= working / idle
+    // 内訳は raise しない、 「user が止めている」 メッセージを優先する)。
+    parts.push(`<span class="trek-session-state-badge user-stop">${n} user-stop</span>`);
+  } else {
+    if (working > 0) parts.push(`<span class="trek-session-state-badge working">${working} working</span>`);
+    if (idle > 0) parts.push(`<span class="trek-session-state-badge idle">${idle} idle</span>`);
+  }
+  const breakdown = parts.length > 0 ? ` ${parts.join(' ')}` : '';
+  const titleText = halted
+    ? 'Trek halt 中: 全 live session を user-stop として表示しています'
+    : 'live session 数 + working/idle 内訳 (= /api/projects/.../sessions による直近 10 分の生存判定 + last_active 経過時間ベース)';
+  return `<span class="trek-self-live-count" title="${esc(titleText)}">${n} live</span>${breakdown}`;
+}
+
+function _renderTrekMemberRow(m, t) {
+  // ms-86 / e-2017: ⭐ leader + user 名 + project 名 + role を 1 行で。
+  //                 cross-project member の project 名は m.project_id がある場合のみ resolve、
+  //                 無ければ「current project」 として viewer 自身の project を fallback (= 単一 project Trek なら自然)。
   const isLeader = m.role === 'leader';
   const isInvited = !m.joined_at;
-  const dotCls = isInvited ? 'invited' : (isLeader ? '' : '');
+  const dotCls = isInvited ? 'invited' : '';
   const joinedAt = m.joined_at ? (m.joined_at.slice(0, 10)) : '';
   const invitedAt = m.invited_at ? (m.invited_at.slice(0, 10)) : '';
+  const projectName = _trekResolveProjectName(m.project_id) || _trekResolveProjectName(t && t.project_id) || 'this project';
+  const star = isLeader ? '<span class="trek-leader-star" title="leader session">⭐</span>' : '<span class="trek-leader-star-spacer"></span>';
+  const selfLive = _renderTrekMemberLiveCount(m, t);
   return `
     <div class="trek-member-row ${dotCls}">
+      ${star}
       <span class="dot"></span>
-      <div>
-        <span class="email">${esc(m.email || '')}</span>
-        <span class="where">${isInvited ? 'invited' : 'member'}</span>
-      </div>
-      <span class="role ${isLeader ? 'leader' : ''}">${isLeader ? 'Leader' : 'Member'}</span>
-      <span class="joined" style="text-align:left;">${isInvited ? '—' : 'joined'}</span>
+      <span class="user-email">${esc(m.email || '(unknown)')}${selfLive}</span>
+      <span class="user-proj">@ ${esc(projectName)}</span>
+      <span class="role ${isLeader ? 'leader' : ''}">${isLeader ? 'Leader' : (isInvited ? 'Invited' : 'Member')}</span>
       <span class="joined">${isInvited ? ('invited ' + invitedAt) : ('joined ' + joinedAt)}</span>
     </div>`;
+}
+
+// project_id → 表示名解決 (= state.projects から)。 未知の id は null を返す。
+function _trekResolveProjectName(pid) {
+  if (!pid) return null;
+  const projs = (state && state.projects) || [];
+  const hit = projs.find(p => (p.project_id || p.id) === pid);
+  if (!hit) return null;
+  return hit.name || hit.title || pid;
 }
 
 function _renderTrekSummaryRow(d) {
@@ -4901,9 +5298,6 @@ function _renderTrekDetail(t) {
     ...members.filter(m => !m.joined_at),
   ];
 
-  const creatorEmail = (t.creator_actor || {}).email || '';
-  const leaderSid = t.leader_session_id || '';
-
   // STOP / halt card: red while active+unhalted, amber + recovery copy when halted.
   let stopCardHtml = '';
   if (t.status === 'active') {
@@ -4916,7 +5310,7 @@ function _renderTrekDetail(t) {
             ${t.halt.reason ? esc(t.halt.reason) + ' — ' : ''}STOP signal issued by ${esc(_trekShortSessionId(t.halt.issued_by_session_id))} at ${(t.halt.issued_at || '').slice(0,16).replace('T',' ')}.
             Resume from the CLI: <code style="color:var(--accent);">beacon trek resume ${esc(t.trek_id)}</code>
           </div>
-          <button data-action="trek-cli-hint" data-cmd="beacon trek resume ${esc(t.trek_id)}">Resume</button>
+          <button data-action="trek-resume" data-trek-id="${esc(t.trek_id)}">Resume</button>
         </div>`;
     } else {
       stopCardHtml = `
@@ -4924,10 +5318,9 @@ function _renderTrekDetail(t) {
           <span class="icon">🚨</span>
           <div class="text">
             <strong>STOP THIS TREK</strong>
-            All joined sessions halt before their next tool call and persist their state. To resume, tell the leader session to continue.
-            CLI: <code style="color:var(--accent);">beacon trek stop ${esc(t.trek_id)} --reason "..."</code>
+            All joined sessions halt before their next tool call and persist their state. To resume, click Resume on the halted Trek panel.
           </div>
-          <button data-action="trek-cli-hint" data-cmd="beacon trek stop ${esc(t.trek_id)} --reason &quot;...&quot;">STOP</button>
+          <button data-action="trek-stop-prompt" data-trek-id="${esc(t.trek_id)}">STOP</button>
         </div>`;
     }
   }
@@ -4941,8 +5334,6 @@ function _renderTrekDetail(t) {
       </div>
     </div>` : '';
 
-  const docs = state.openTrekDocs || [];
-  const summaryDocs = docs.slice(0, 10);
   return `
     <section class="fade-in">
       <span class="trek-crumb" data-action="close-trek">← Back to TREKS</span>
@@ -4953,25 +5344,24 @@ function _renderTrekDetail(t) {
           <span class="trek-badge ${t.type === 'temporary' ? 'temporary' : 'persistent'}">${esc(t.type || '')}</span>
           <span class="trek-badge ${_trekBadgeClass(t.status)}">${_trekStatusIcon(t.status)} ${esc(t.status || '')}</span>
           ${halted ? `<span class="trek-badge" style="color:var(--warning,#fbbf24);border-color:var(--warning,#fbbf24);">⚠ halted</span>` : ''}
+          ${(() => { const agg = _trekAggregateState(t); return `<span class="trek-badge trek-agg-badge ${agg.cls}">${esc(agg.label)}</span>`; })()}
         </div>
         <div class="trek-stats">
           ${projectsInScope.size} project${projectsInScope.size === 1 ? '' : 's'} · ${workItemsInScope} work item${workItemsInScope === 1 ? '' : 's'} · ${members.length} member${members.length === 1 ? '' : 's'}
         </div>
       </div>
 
-      <div class="trek-meta">
-        <span class="k">Trek ID</span>
-        <span class="v" style="font-family:var(--font-mono,monospace);">${esc(t.trek_id)}</span>
-        <span class="k">Leader session</span>
-        <span class="v">
-          <span class="session-id">${esc(_trekShortSessionId(leaderSid))}</span>
-          ${creatorEmail ? `<span class="sub">(${esc(creatorEmail)})</span>` : ''}
-        </span>
-        <span class="k">Created</span>
-        <span class="v">${(t.created_at || '').slice(0, 16).replace('T', ' ')}</span>
-        ${t.archived_at ? `
-        <span class="k">Archived</span>
-        <span class="v">${t.archived_at.slice(0, 16).replace('T', ' ')}</span>` : ''}
+      ${_trekReviewPendingBanner(t)}
+
+      <!-- ① WHY (= goal_state) -->
+      <div class="trek-section trek-why">
+        <div class="trek-section-title">
+          <span>WHY</span>
+          <span class="right" style="font-family:var(--font-mono,monospace);font-size:0.65rem;color:var(--text-dim);">${esc(t.trek_id)}${t.archived_at ? ` · archived ${t.archived_at.slice(0, 10)}` : ''}</span>
+        </div>
+        ${t.goal_state
+          ? `<div class="trek-why-text">${esc(t.goal_state)}</div>`
+          : `<div class="trek-coming-soon">目的 (= goal_state) が未設定です。 CLI: <code>beacon trek goal ${esc(t.trek_id)} "<目的>"</code></div>`}
       </div>
 
       ${stopCardHtml}
@@ -4984,7 +5374,7 @@ function _renderTrekDetail(t) {
           <span class="right">${scope.length} item${scope.length === 1 ? '' : 's'}</span>
         </div>
         ${scope.length
-          ? scope.map(_renderTrekScopeRow).join('')
+          ? scope.map(s => _renderTrekScopeRow(s, t)).join('')
           : `<div class="trek-coming-soon">No scope entries. Add from the CLI: <code>beacon trek plan ${esc(t.trek_id)} --add-scope &lt;project&gt;:&lt;ref&gt;</code></div>`}
         <div class="trek-cli-hint">
           Add / remove from the terminal:
@@ -4999,7 +5389,7 @@ function _renderTrekDetail(t) {
           <span>MEMBERS &amp; SESSIONS</span>
           <span class="right">${members.length} member${members.length === 1 ? '' : 's'} · ★ = leader session</span>
         </div>
-        ${ordered.map(_renderTrekMemberRow).join('')}
+        ${ordered.map(m => _renderTrekMemberRow(m, t)).join('')}
         <div class="trek-cli-hint">
           Invite, leave, or transfer leader from the terminal:
           <code>beacon trek invite ${esc(t.trek_id)} --actor &lt;email&gt;</code>
@@ -5007,46 +5397,100 @@ function _renderTrekDetail(t) {
         </div>
       </div>
 
-      <!-- ACTIVE CLAIMS — backed by ms-55 (claim primitive, in flight) -->
-      <div class="trek-section">
-        <div class="trek-section-title">
-          <span>ACTIVE CLAIMS</span>
-          <span class="right">Coming with ms-55</span>
-        </div>
-        <div class="trek-coming-soon">
-          The claim list (= who is currently working on which work item) lands together with ms-55
-          (semi-autonomous work-splitting through claim negotiation).
-        </div>
-      </div>
+      <!-- ⑤ NEXT FIRE (= ms-83 server-side scheduler の next-fire、 e-2019) -->
+      ${t.status === 'active' && !halted ? _renderTrekNextFire(t) : ''}
 
-      <!-- RECENT ACTIVITY — backed by e-1696 (Activity log auto-update) -->
-      <div class="trek-section">
-        <div class="trek-section-title">
-          <span>RECENT ACTIVITY</span>
-          <span class="right">Coming with e-1696</span>
-        </div>
-        <div class="trek-coming-soon">
-          The bus event stream inside this trek (= invites / claims / stops / doc updates) will be
-          accumulated in the Activity log doc. Once e-1696 lands, the most recent 5-10 entries appear here.
-        </div>
-      </div>
-
-      <!-- SUMMARIES — trek_id 紐付け doc を表示 (= e-1697/98 が land すると Morning briefing / Weekly summary もここに並ぶ) -->
-      <div class="trek-section">
-        <div class="trek-section-title">
-          <span>SUMMARIES</span>
-          <span class="right">${summaryDocs.length} under this trek · kept after archive</span>
-        </div>
-        ${summaryDocs.length
-          ? summaryDocs.map(_renderTrekSummaryRow).join('')
-          : `<div class="trek-coming-soon">No docs linked to this trek_id yet.<br>CLI: <code>beacon doc add "title" --scope memo --trek ${esc(t.trek_id)} --content "..."</code></div>`}
-        <div class="trek-cli-hint">
-          Automatic generation (= scheduled cron) lands with e-1697 / e-1698. Manual:
-          <code>beacon morning --trek ${esc(t.trek_id)}</code>
-          <code>beacon trek summary ${esc(t.trek_id)} --period weekly</code>
-        </div>
-      </div>
+      <!-- ⑥ RECENT ACTIVITY (= 直近の動き timeline、 e-2019) -->
+      ${_renderTrekRecentActivity(t)}
     </section>`;
+}
+
+// ms-86 / e-2019 — 次回 fire 時刻計算: t.meta.last_progress_check_at + cadence_minutes
+function _renderTrekNextFire(t) {
+  const meta = (t && t.meta) || {};
+  const cadence = meta.cadence_minutes || 10; // default 10 分 (lib/trek.py DEFAULT_CADENCE)
+  const lastStr = meta.last_progress_check_at || '';
+  let bodyHtml = '';
+  if (!lastStr) {
+    bodyHtml = `<div class="trek-coming-soon">scheduler はまだ一度も発火していません (= 初回 fire 待ち)。 cadence ${cadence} 分間隔で動きます。</div>`;
+  } else {
+    const lastDate = new Date(lastStr);
+    const nextDate = new Date(lastDate.getTime() + cadence * 60 * 1000);
+    const now = Date.now();
+    const diffMs = nextDate.getTime() - now;
+    const absStr = nextDate.toISOString().slice(0, 16).replace('T', ' ');
+    let relStr = '';
+    if (diffMs <= 0) relStr = '(now / overdue)';
+    else {
+      const mins = Math.round(diffMs / 60000);
+      relStr = mins < 1 ? '(< 1 分後)' : `(約 ${mins} 分後)`;
+    }
+    bodyHtml = `<div class="trek-next-fire-row"><span class="abs">${esc(absStr)}</span> <span class="rel">${esc(relStr)}</span></div>`;
+  }
+  return `
+    <div class="trek-section trek-next-fire">
+      <div class="trek-section-title">
+        <span>NEXT FIRE</span>
+        <span class="right">cadence ${cadence} 分</span>
+      </div>
+      ${bodyHtml}
+    </div>`;
+}
+
+// ms-86 / e-2019 — 直近の動き timeline: commits + done tasks + state stamps を merge
+function _renderTrekRecentActivity(t) {
+  const agg = (t && t.aggregation) || {};
+  const taskStates = (t && t.task_states) || {};
+  const events = [];
+  for (const c of (agg.commits_recent || [])) {
+    if (!c.date) continue;
+    events.push({
+      ts: c.date,
+      icon: '🔨',
+      text: `commit ${(c.hash || '').slice(0, 7)} — ${c.summary || ''} (${c.ms_id || ''})`,
+    });
+  }
+  for (const r of (agg.tasks_done_recent || [])) {
+    if (!r.done_at) continue;
+    events.push({
+      ts: r.done_at,
+      icon: '✓',
+      text: `done ${r.id || ''} — ${r.description || ''} (${r.ms_id || ''})`,
+    });
+  }
+  for (const [taskId, st] of Object.entries(taskStates)) {
+    if (!st || !st.updated_at) continue;
+    const icon = st.state === 'done' ? '✓' : (st.state === 'waiting-review' ? '👀' : '🔨');
+    events.push({
+      ts: st.updated_at,
+      icon,
+      text: `state ${st.state} — ${taskId}${st.note ? ': ' + st.note.slice(0, 80) : ''}`,
+    });
+  }
+  events.sort((a, b) => (a.ts < b.ts ? 1 : -1));
+  const shown = events.slice(0, 10);
+  let bodyHtml;
+  if (!shown.length) {
+    bodyHtml = `<div class="trek-coming-soon">まだ動きがありません。 Trek scope 内の commit / task done / state stamp がここに並びます。</div>`;
+  } else {
+    bodyHtml = shown.map(e => {
+      const tsShort = (e.ts || '').slice(0, 16).replace('T', ' ');
+      return `
+      <div class="trek-activity-row">
+        <span class="ts">${esc(tsShort)}</span>
+        <span class="icon">${esc(e.icon)}</span>
+        <span class="text">${esc(e.text)}</span>
+      </div>`;
+    }).join('');
+  }
+  return `
+    <div class="trek-section trek-recent-activity">
+      <div class="trek-section-title">
+        <span>RECENT ACTIVITY</span>
+        <span class="right">${shown.length} / ${events.length} 件表示</span>
+      </div>
+      ${bodyHtml}
+    </div>`;
 }
 
 function renderTreksSection() {
@@ -6294,6 +6738,60 @@ function handleCommonAction(action, el) {
         if (navigator.clipboard) navigator.clipboard.writeText(cmd);
       } catch (_e) { /* noop */ }
       window.alert('Run this command in your terminal:\n\n' + cmd + '\n\n(copied to clipboard)');
+      return true;
+    }
+    // ms-86 / e-2016 — Trek detail SCOPE 行の drill-down 切り替え
+    case 'trek-scope-toggle': {
+      const key = el.dataset.scopeKey || '';
+      if (!key) return true;
+      if (!state.trekScopeExpanded) state.trekScopeExpanded = new Set();
+      if (state.trekScopeExpanded.has(key)) {
+        state.trekScopeExpanded.delete(key);
+      } else {
+        state.trekScopeExpanded.add(key);
+      }
+      render();
+      return true;
+    }
+    // ms-86 / e-2018 — Trek halt の Resume (= DELETE /api/treks/<id>/halt 実 call)
+    case 'trek-resume': {
+      const tid = el.dataset.trekId || '';
+      if (!tid) return true;
+      if (!window.confirm('この Trek の halt を解除して再開しますか？')) return true;
+      (async () => {
+        try {
+          await api(`/api/treks/${encodeURIComponent(tid)}/halt`, { method: 'DELETE' });
+          await dataSource.loadTreks();
+          render();
+        } catch (e) {
+          window.alert('Resume に失敗しました: ' + (e.message || e));
+        }
+      })();
+      return true;
+    }
+    // ms-86 / e-2018 — Trek STOP の reason 入力 + PUT /api/treks/<id>/halt 実 call
+    case 'trek-stop-prompt': {
+      const tid = el.dataset.trekId || '';
+      if (!tid) return true;
+      const reason = window.prompt('STOP の理由を入力してください (= 全 session に届きます):', '');
+      if (reason === null) return true; // cancel
+      const trek = (state.treks || []).find(x => x.trek_id === tid);
+      // Web UI 側に固有 session_id が無いため、 leader_session_id を caller として渡す
+      // (= 操作者がリーダー本人の前提、 ms-86 dogfood で挙動を検証する)。
+      const callerSid = (trek && trek.leader_session_id) || '';
+      (async () => {
+        try {
+          await api(`/api/treks/${encodeURIComponent(tid)}/halt`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ issued_by_session_id: callerSid, reason: reason || '' }),
+          });
+          await dataSource.loadTreks();
+          render();
+        } catch (e) {
+          window.alert('STOP に失敗しました: ' + (e.message || e));
+        }
+      })();
       return true;
     }
   }
