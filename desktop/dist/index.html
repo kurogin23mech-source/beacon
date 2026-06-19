@@ -2201,13 +2201,25 @@ body::after {
 /* SCOPE row: 24px pin | 110px proj-tag | 80px ref | 1fr desc | 90px pill */
 .trek-scope-row {
   display: grid;
-  grid-template-columns: 24px 110px 80px 1fr 90px;
+  grid-template-columns: 14px 24px 110px 80px 1fr;
   align-items: center;
   gap: 10px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border-subtle, var(--border));
   font-size: 0.78rem;
 }
+.trek-scope-row.expandable {
+  cursor: pointer;
+  user-select: none;
+}
+.trek-scope-row.expandable:hover { background: rgba(255,255,255,0.025); }
+.trek-scope-row.expanded { border-bottom-color: transparent; }
+.trek-scope-row .chevron {
+  color: var(--text-dim);
+  font-size: 0.7rem;
+  text-align: center;
+}
+.trek-scope-row .chevron-spacer { width: 14px; }
 .trek-scope-row .pin { color: var(--text-secondary); }
 .trek-scope-row .proj-tag {
   font-size: 0.62rem;
@@ -2232,15 +2244,45 @@ body::after {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.trek-scope-row .pill {
-  font-size: 0.62rem;
-  letter-spacing: 0.06em;
-  text-align: right;
-  text-transform: uppercase;
-  color: var(--text-dim);
+
+/* Drill-down expansion (= ms-86 / e-2016) — MS / Operation 行を開いた時の配下表示 */
+.trek-scope-expansion {
+  padding: 6px 12px 10px 48px;
+  border-bottom: 1px solid var(--border-subtle, var(--border));
+  background: rgba(255,255,255,0.015);
 }
-.trek-scope-row .pill.active { color: var(--accent); }
-.trek-scope-row .pill.observing { color: #a78bfa; }
+.trek-scope-expansion-empty {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  font-style: italic;
+  padding: 4px 0;
+}
+.trek-scope-sub-row {
+  display: grid;
+  grid-template-columns: 14px 60px 1fr 160px;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+  font-size: 0.72rem;
+}
+.trek-scope-sub-row .status { color: var(--text-secondary); text-align: center; }
+.trek-scope-sub-row .ref {
+  color: var(--text-dim);
+  font-family: var(--font-mono, monospace);
+}
+.trek-scope-sub-row .desc {
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.trek-scope-sub-row .assignee {
+  font-size: 0.66rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+  text-align: right;
+}
+.trek-scope-sub-row .assignee .muted { font-style: italic; opacity: 0.7; }
 
 /* Member row + nested session rows */
 .trek-member-row {
@@ -4850,21 +4892,77 @@ function _trekBadgeClass(s) {
   return '';
 }
 
-function _renderTrekScopeRow(s) {
+function _trekScopeKey(s) {
+  return `${s.project || ''}:${s.milestone || s.operation || s.task || '*'}`;
+}
+
+function _trekScopeStatusIcon(status) {
+  switch (status) {
+    case 'done':        return '●';
+    case 'in_progress': return '◐';
+    case 'waiting':     return '◌';
+    case 'observing':   return '◔';
+    case 'todo':
+    default:            return '○';
+  }
+}
+
+function _renderTrekScopeExpansion(s, t) {
+  // Show child tasks / OperationTasks. Data source: t.aggregation
+  // built by lib/commands.py:_build_trek_aggregation (= e-1864).
+  const agg = (t && t.aggregation) || {};
+  const allTasks = [...(agg.tasks_todo || []), ...(agg.tasks_done_recent || [])];
+  if (s.milestone) {
+    const rows = allTasks.filter(r => r.ms_id === s.milestone);
+    if (!rows.length) {
+      return `<div class="trek-scope-expansion-empty">この MS scope に該当する task はまだありません。</div>`;
+    }
+    return rows.map(r => `
+      <div class="trek-scope-sub-row">
+        <span class="status">${_trekScopeStatusIcon(r.status)}</span>
+        <span class="ref">${esc(r.id || '')}</span>
+        <span class="desc">${esc(r.description || '')}</span>
+        <span class="assignee">@ <span class="muted">担当未割当</span></span>
+      </div>`).join('');
+  }
+  if (s.operation) {
+    // Operation 配下の OperationTasks + 直近 run records は別 endpoint。 T7 (= e-2019)
+    // で run records が landingしたら同様に展開する。 今は placeholder。
+    return `<div class="trek-scope-expansion-empty">Operation 配下の OperationTasks / 直近 run records 表示は T7 (= e-2019) で実装。</div>`;
+  }
+  // project-wide / task 行は展開不要のはずだが、 安全側で空 placeholder。
+  return '';
+}
+
+function _renderTrekScopeRow(s, t) {
   // ref column: prefer the narrowest known ref (task > operation > milestone > project-wide).
   let refLabel = '';
   let descLabel = '';
+  let expandable = false;
   if (s.task) { refLabel = s.task; descLabel = '(task)'; }
-  else if (s.operation) { refLabel = s.operation; descLabel = '(operation)'; }
-  else if (s.milestone) { refLabel = s.milestone; descLabel = '(milestone)'; }
+  else if (s.operation) { refLabel = s.operation; descLabel = '(operation)'; expandable = true; }
+  else if (s.milestone) { refLabel = s.milestone; descLabel = '(milestone)'; expandable = true; }
   else { refLabel = '—'; descLabel = '<project-wide>'; }
-  return `
-    <div class="trek-scope-row">
+
+  const key = _trekScopeKey(s);
+  const isExpanded = expandable && state.trekScopeExpanded && state.trekScopeExpanded.has(key);
+  const chevron = expandable
+    ? `<span class="chevron">${isExpanded ? '▾' : '▸'}</span>`
+    : `<span class="chevron-spacer"></span>`;
+
+  const rowHtml = `
+    <div class="trek-scope-row${expandable ? ' expandable' : ''}${isExpanded ? ' expanded' : ''}"${expandable ? ` data-action="trek-scope-toggle" data-scope-key="${esc(key)}"` : ''}>
+      ${chevron}
       <span class="pin">📌</span>
       <span class="proj-tag">${esc(s.project)}</span>
       <span class="ref">${esc(refLabel)}</span>
       <span class="desc">${esc(descLabel)}</span>
-      <span class="pill"></span>
+    </div>`;
+
+  if (!isExpanded) return rowHtml;
+  return rowHtml + `
+    <div class="trek-scope-expansion">
+      ${_renderTrekScopeExpansion(s, t)}
     </div>`;
 }
 
@@ -4987,7 +5085,7 @@ function _renderTrekDetail(t) {
           <span class="right">${scope.length} item${scope.length === 1 ? '' : 's'}</span>
         </div>
         ${scope.length
-          ? scope.map(_renderTrekScopeRow).join('')
+          ? scope.map(s => _renderTrekScopeRow(s, t)).join('')
           : `<div class="trek-coming-soon">No scope entries. Add from the CLI: <code>beacon trek plan ${esc(t.trek_id)} --add-scope &lt;project&gt;:&lt;ref&gt;</code></div>`}
         <div class="trek-cli-hint">
           Add / remove from the terminal:
@@ -6280,6 +6378,19 @@ function handleCommonAction(action, el) {
         if (navigator.clipboard) navigator.clipboard.writeText(cmd);
       } catch (_e) { /* noop */ }
       window.alert('Run this command in your terminal:\n\n' + cmd + '\n\n(copied to clipboard)');
+      return true;
+    }
+    // ms-86 / e-2016 — Trek detail SCOPE 行の drill-down 切り替え
+    case 'trek-scope-toggle': {
+      const key = el.dataset.scopeKey || '';
+      if (!key) return true;
+      if (!state.trekScopeExpanded) state.trekScopeExpanded = new Set();
+      if (state.trekScopeExpanded.has(key)) {
+        state.trekScopeExpanded.delete(key);
+      } else {
+        state.trekScopeExpanded.add(key);
+      }
+      render();
       return true;
     }
   }
