@@ -4254,6 +4254,7 @@ async function switchTab(tab) {
 async function openTrek(trekId) {
   state.openTrekId = trekId;
   state.openTrekDocs = [];
+  state.openTrekMemberSessions = {};
   render();
   // Fetch docs in the background; if it fails, the detail view shows
   // "No docs tagged with this trek yet." which is a fine degrade.
@@ -4261,11 +4262,23 @@ async function openTrek(trekId) {
     await dataSource.loadTrekDocs(trekId);
     render();
   } catch (_e) { /* no-op */ }
+  // ms-86 / e-2045: fetch per-member live sessions in parallel so each
+  // member row can show its own live count + state breakdown. Best-effort:
+  // failure to fetch any single member falls back to the self-only path
+  // (= state.onlineSessions) in the render helper.
+  try {
+    const t = (state.treks || []).find(x => x.trek_id === trekId);
+    if (t) {
+      await dataSource.loadTrekMemberSessions(t);
+      render();
+    }
+  } catch (_e) { /* no-op */ }
 }
 
 function closeTrek() {
   state.openTrekId = null;
   state.openTrekDocs = [];
+  state.openTrekMemberSessions = {};
   render();
 }
 
@@ -5170,19 +5183,37 @@ function _renderTrekScopeRow(s, t) {
     </div>`;
 }
 
-// ms-86 / e-2045 step 1+2: self の live session 数 + working/idle 内訳 を member
-// row に小さく表示する helper。 state.onlineSessions は /api/me/sessions?live_only=
-// true&since_minutes=10 で fetch 済 (= 当 user の live sessions のみ可視、 他 member
-// の session 数は別経路で取る必要があり Phase 2 で対応)。 m.email が currentUserEmail
-// と一致しない場合は空文字を返す (= graceful degradation、 既存挙動を壊さない)。
-// state 判定の閾値: working = last_active 直近 5 分以内 / idle = 5〜30 分前 (= 30 分
-// より古いものは /api/me/sessions の since_minutes=10 で既に絞られているので通常出ない)。
-function _renderTrekSelfLiveCount(m) {
-  const myEmail = currentUserEmail();
-  if (!myEmail || m.email !== myEmail) return '';
-  const sessions = (state && state.onlineSessions) || [];
+// ms-86 / e-2045 step 1+2+3+4: member ごとの live session 数 + state 内訳 を row に
+// 小さく表示する helper。
+// データソースの優先順:
+//   1. state.openTrekMemberSessions[m.email] が空でなければそれを使う
+//      (= /api/projects/{pid}/sessions?user_id=<email>&live_only=true、 Trek detail
+//      を開いた時に openTrek が並列 fetch して入れる)
+//   2. 1 で取れず、 かつ m.email が currentUserEmail と一致するなら
+//      state.onlineSessions を fallback (= /api/me/sessions で取得済の自セッション)
+//   3. どちらもなければ空文字を返す (= 表示しない、 既存 row 挙動と等価)
+// state 判定の閾値:
+//   - user-stop = Trek.halt が立っている (= 全 session を user-stop 扱いで赤色 badge)
+//   - working   = last_active 直近 5 分以内 (= 通常の active 状態)
+//   - idle      = 5〜30 分前 (= live_only filter で since=10 分が default なのでこの
+//                 範囲は実際には小さいが、 サーバ応答の last_active が静かに古く
+//                 なるケースで出る)
+// budget-exhausted は per-session の bus budget を別経路で取れる API が無いため
+// 本 phase では計算しない (= 将来 backend に budget aggregator を追加した時に有効化)。
+function _renderTrekMemberLiveCount(m, t) {
+  if (!m || !m.email) return '';
+  let sessions = (state && state.openTrekMemberSessions && state.openTrekMemberSessions[m.email]) || null;
+  if (!Array.isArray(sessions) || sessions.length === 0) {
+    const myEmail = currentUserEmail();
+    if (myEmail && m.email === myEmail) {
+      sessions = (state && state.onlineSessions) || [];
+    } else {
+      sessions = [];
+    }
+  }
   if (!Array.isArray(sessions) || sessions.length === 0) return '';
   const n = sessions.length;
+  const halted = !!(t && t.halt);
   const now = Date.now();
   let working = 0;
   let idle = 0;
@@ -5194,10 +5225,19 @@ function _renderTrekSelfLiveCount(m) {
     else if (ageMs < 30 * 60 * 1000) idle++;
   }
   const parts = [];
-  if (working > 0) parts.push(`<span class="trek-session-state-badge working">${working} working</span>`);
-  if (idle > 0) parts.push(`<span class="trek-session-state-badge idle">${idle} idle</span>`);
+  if (halted) {
+    // Trek が halt 状態なら、 全 session を user-stop として表示 (= working / idle
+    // 内訳は raise しない、 「user が止めている」 メッセージを優先する)。
+    parts.push(`<span class="trek-session-state-badge user-stop">${n} user-stop</span>`);
+  } else {
+    if (working > 0) parts.push(`<span class="trek-session-state-badge working">${working} working</span>`);
+    if (idle > 0) parts.push(`<span class="trek-session-state-badge idle">${idle} idle</span>`);
+  }
   const breakdown = parts.length > 0 ? ` ${parts.join(' ')}` : '';
-  return `<span class="trek-self-live-count" title="self の live sessions の数 + working/idle 内訳 (= /api/me/sessions による直近 10 分の生存判定 + last_active 経過時間ベース)">${n} live</span>${breakdown}`;
+  const titleText = halted
+    ? 'Trek halt 中: 全 live session を user-stop として表示しています'
+    : 'live session 数 + working/idle 内訳 (= /api/projects/.../sessions による直近 10 分の生存判定 + last_active 経過時間ベース)';
+  return `<span class="trek-self-live-count" title="${esc(titleText)}">${n} live</span>${breakdown}`;
 }
 
 function _renderTrekMemberRow(m, t) {
@@ -5211,7 +5251,7 @@ function _renderTrekMemberRow(m, t) {
   const invitedAt = m.invited_at ? (m.invited_at.slice(0, 10)) : '';
   const projectName = _trekResolveProjectName(m.project_id) || _trekResolveProjectName(t && t.project_id) || 'this project';
   const star = isLeader ? '<span class="trek-leader-star" title="leader session">⭐</span>' : '<span class="trek-leader-star-spacer"></span>';
-  const selfLive = _renderTrekSelfLiveCount(m);
+  const selfLive = _renderTrekMemberLiveCount(m, t);
   return `
     <div class="trek-member-row ${dotCls}">
       ${star}
