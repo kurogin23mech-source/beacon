@@ -13600,6 +13600,102 @@ def _bus_budget_consume_one() -> tuple[bool, dict]:
     return True, {**b, "armed": True}
 
 
+def _record_bus_budget_trek_bypass(trek_id: str) -> None:
+    """Bump the per-Trek bypass counter on the budget file (ms-75 / e-2044).
+
+    The counter is informational — it surfaces in ``bus budget show`` so a
+    leader can see "this session sent N DMs that bypassed the budget gate
+    because they were Trek-internal". It does not gate or rate-limit; the
+    structural rationale is that Trek scope IS the gate (= pre-approved
+    blanket consent), and a counter gives observability without re-adding
+    a soft cap that the SPEC explicitly rejected.
+
+    Best-effort write: budget file absent / unreadable / unwritable all
+    silently no-op (= the bypass already happened, audit is the bonus).
+    """
+    if not trek_id:
+        return
+    try:
+        b = _read_bus_budget() or {
+            "total": 0, "used": 0,
+            "channels": [], "armed": False,
+        }
+        bypassed = dict(b.get("trek_bypassed") or {})
+        bypassed[trek_id] = int(bypassed.get(trek_id, 0)) + 1
+        b["trek_bypassed"] = bypassed
+        _write_bus_budget(b)
+    except Exception:
+        return
+
+
+def _is_trek_internal_send(recipient_sid: str) -> tuple[bool, str]:
+    """Decide whether the current --in-reply-to send is Trek-internal.
+
+    Returns ``(True, trek_id)`` iff both the caller and ``recipient_sid``
+    are joined members of the same active Trek; otherwise ``(False, "")``.
+
+    Detection material (= mirror of server-side
+    ``dm_gate.should_gate_dm_action`` shared_trek_member rule):
+      * caller's user_id from the cloud identity (auth.json / credentials.json)
+      * recipient's user_id resolved from the project session registry
+      * caller's joined active treks; intersect ``members[]`` with the
+        recipient_user_id
+
+    Best-effort: any exception or missing material returns ``(False, "")``
+    so the regular budget gate stays in force. The bypass MUST NOT fire
+    on a misconfigured send — that would be a silent budget relaxation.
+    """
+    if not recipient_sid:
+        return False, ""
+    if not _is_cloud_mode():
+        # Local mode uses ~/.beacon/treks/; recipient session lookup
+        # requires a cloud-side directory listing. Keep local mode strict
+        # (= no bypass), the safer side of the SPEC.
+        return False, ""
+    try:
+        my_user_id, _, _ = _resolve_creator_identity()
+        if not my_user_id:
+            return False, ""
+        client, config = _get_api_client()
+        project_id = _resolve_bus_project_id(config)
+        # Resolve recipient session → user.
+        recipient_user_id = ""
+        try:
+            sessions = client.list_sessions(project_id) or []
+        except Exception:
+            return False, ""
+        for s in sessions:
+            if s.get("session_id") == recipient_sid:
+                actor = s.get("actor") or {}
+                recipient_user_id = actor.get("user_id") or ""
+                break
+        if not recipient_user_id or recipient_user_id == my_user_id:
+            return False, ""
+        # Walk my joined active treks.
+        try:
+            my_treks = client.list_treks() or []
+        except Exception:
+            return False, ""
+        for trek in my_treks:
+            if trek.get("status") != "active":
+                continue
+            # Caller must be a joined member of this trek (= joined_at non
+            # empty). Pure invitation does not grant Trek scope yet.
+            am_member = False
+            for m in trek.get("members") or []:
+                if m.get("user_id") == my_user_id and m.get("joined_at"):
+                    am_member = True
+                    break
+            if not am_member:
+                continue
+            for m in trek.get("members") or []:
+                if m.get("user_id") == recipient_user_id and m.get("joined_at"):
+                    return True, str(trek.get("trek_id") or "")
+        return False, ""
+    except Exception:
+        return False, ""
+
+
 def cmd_bus_budget_grant():
     """Set or refresh the outbound-send budget for autonomous mode.
 
@@ -13672,6 +13768,19 @@ def cmd_bus_budget_show():
     print(f"Budget: {used}/{total} used  →  {remaining} remaining  ({state})")
     if b.get("granted_at"):
         print(f"  granted_at: {b['granted_at']}")
+    # ms-75 / e-2044 — Trek-internal bypass audit. The counter is purely
+    # informational; bypassed sends did not consume from total/used. Surface
+    # it here so the leader can see "the executor has been chatty within the
+    # trek but did not draw down the autonomous-loop guardrail".
+    bypassed = b.get("trek_bypassed") or {}
+    if bypassed:
+        total_bypassed = sum(int(v) for v in bypassed.values())
+        print(
+            f"  Trek-internal bypassed: {total_bypassed} send(s) "
+            f"(did NOT count against budget — ms-75 / e-2044)"
+        )
+        for trek_id, n in sorted(bypassed.items()):
+            print(f"    {trek_id}: {n}")
 
 
 def cmd_bus_budget_clear():
@@ -13918,27 +14027,48 @@ def cmd_bus_send():
     #     can't smuggle an extra send past the gate.
     budget: dict = {"armed": False}
     if in_reply_to:
-        b = _read_bus_budget()
-        if b is None:
-            print(
-                "Error: this is a reply (--in-reply-to set) but no auto-reply "
-                "budget is granted. Default state requires human approval per "
-                "reply. Run `beacon bus budget grant <N>` to authorize N "
-                "auto-replies, or omit --in-reply-to for a manual send.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        allowed, budget = _bus_budget_consume_one()
-        if not allowed:
-            total = int(budget.get("total", 0))
-            used = int(budget.get("used", 0))
-            print(
-                f"Error: auto-reply budget exhausted ({used}/{total} used). "
-                "Run `beacon bus budget grant <N>` to re-grant before "
-                "sending again.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+        # ms-75 / e-2044: Trek-internal sends bypass the budget gate. Trek
+        # is an opt-in pre-approval scope (= 缶詰の作業部屋), so the budget
+        # cap (= runaway-autonomy guardrail) is structurally redundant for
+        # member-to-member DMs within an active Trek both sides have
+        # joined. server/dm_gate.should_gate_dm_action already short-
+        # circuits the receiver-side cross-user gate for shared_trek_member
+        # pairs (ms-70 / e-1854); this client-side check brings the budget
+        # layer into parity so a Trek doesn't deadlock on budget exhaustion
+        # while leader/executor DMs keep flowing under blanket consent.
+        # The check is best-effort: any error path (no auth, network blip,
+        # unknown recipient) falls through to the regular budget gate so we
+        # never silently relax enforcement on a misconfigured send.
+        trek_bypass, bypass_trek_id = _is_trek_internal_send(recipient)
+        if trek_bypass:
+            budget = {
+                "armed": True,
+                "trek_bypass": True,
+                "trek_id": bypass_trek_id,
+            }
+            _record_bus_budget_trek_bypass(bypass_trek_id)
+        else:
+            b = _read_bus_budget()
+            if b is None:
+                print(
+                    "Error: this is a reply (--in-reply-to set) but no auto-reply "
+                    "budget is granted. Default state requires human approval per "
+                    "reply. Run `beacon bus budget grant <N>` to authorize N "
+                    "auto-replies, or omit --in-reply-to for a manual send.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            allowed, budget = _bus_budget_consume_one()
+            if not allowed:
+                total = int(budget.get("total", 0))
+                used = int(budget.get("used", 0))
+                print(
+                    f"Error: auto-reply budget exhausted ({used}/{total} used). "
+                    "Run `beacon bus budget grant <N>` to re-grant before "
+                    "sending again.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
     if in_reply_to:
         # Thread the reply by stamping the parent event_id on the payload.
