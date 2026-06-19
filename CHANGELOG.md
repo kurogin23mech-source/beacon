@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.43.0] - 2026-06-19
+
+- Merge pull request #171 from kurogin23mech-source/feat/ms-83-scheduler-session-fanout
+- feat(ms-83): scheduler が Trek member の live session 全部に fanout する (= e-2036, leader 単独受信からの脱却)
+- docs(release): update README/CHANGELOG for v0.42.0
+- chore(release): bump formula to 0.42.0
+
 ## [v0.42.0] - 2026-06-19
 
 - Merge pull request #170 from kurogin23mech-source/feat/ms-83-scheduler-autonomy-reminder
