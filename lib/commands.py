@@ -1789,39 +1789,6 @@ def _cloud_purge_dispatch(action_label: str, fn, *,
             print(line)
 
 
-def _cloud_milestone_purge(ms_id: str, *, reason: str,
-                            index: Optional[int], json_mode: bool) -> None:
-    client, config = _get_api_client()
-    project_id = config["project_id"]
-    data = _cloud_fetch_project_or_exit(client, project_id)
-    matches = core.find_milestones(data, ms_id)
-    if not matches:
-        print(f"Milestone not found: {ms_id}", file=sys.stderr)
-        sys.exit(1)
-    if len(matches) > 1 and index is None:
-        print(
-            f"Milestone '{ms_id}' has {len(matches)} duplicate records. "
-            "Re-run with --index <n>:",
-            file=sys.stderr,
-        )
-        for i, m in enumerate(matches, 1):
-            title = m.get("title", "(no title)")
-            status = m.get("status", "?")
-            print(f"  --index {i}  status={status}  title={title}",
-                  file=sys.stderr)
-        sys.exit(1)
-    _cloud_purge_dispatch(
-        "milestone",
-        lambda: client.purge_milestone(
-            project_id, ms_id, reason=reason, index=index),
-        json_mode=json_mode,
-        success_fmt=lambda r: [
-            f"Purged: [{r.get('id', ms_id)}] {r.get('title', '')}",
-            f"  Reason: {reason}",
-        ],
-    )
-
-
 def _cloud_entry_purge(entry_id: str, *, reason: str,
                         index: Optional[int], json_mode: bool) -> None:
     client, config = _get_api_client()
@@ -1939,16 +1906,18 @@ def cmd_milestone_purge():
                   file=sys.stderr)
             sys.exit(1)
 
-    if _is_cloud_mode():
-        _cloud_milestone_purge(ms_id, reason=reason, index=index,
-                               json_mode=json_mode)
-        return
-
-    data = load_project_unsafe()
-    # Pre-flight: if the operator did not pass --index but duplicates
-    # exist, show a helpful summary before the core raises. The
-    # core.milestone_purge already raises with a clear message; we just
-    # add a list of the duplicates for context.
+    # ms-84 Phase 2 (e-2036): Store.purge_milestone unifies the cloud + local
+    # paths. The CLI no longer branches on ``_is_cloud_mode()``; the Store
+    # implementation knows how to talk to its backend (cloud server enforces
+    # owner-only access + post-purge validation; LocalStore does the local
+    # file mutation + still_dirty bookkeeping). Pre-flight stays here as a
+    # UX layer (= friendly duplicate display before delegating).
+    store = get_store()
+    try:
+        data = store.load_project()
+    except (RuntimeError, ConnectionError) as e:
+        print(f"Error loading project: {e}", file=sys.stderr)
+        sys.exit(1)
     matches = core.find_milestones(data, ms_id)
     if not matches:
         print(f"Milestone not found: {ms_id}", file=sys.stderr)
@@ -1967,33 +1936,26 @@ def cmd_milestone_purge():
         sys.exit(1)
 
     try:
-        purged = core.milestone_purge(data, ms_id, reason=reason, index=index)
+        result = store.purge_milestone(ms_id, reason=reason, index=index)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # After purge, check whether the project is now clean. If still dirty,
-    # save via unsafe path and warn; otherwise normal save (with validation).
-    dup_report = core.find_duplicate_ids(data)
-    still_dirty = any(dup_report.values())
-    op = {
-        "op": "milestone_purge",
-        "ms_id": ms_id,
-        "index": index,
-        "reason": reason,
-        "purged_title": purged.get("title", ""),
-    }
-    if still_dirty:
-        save_project_unsafe(data, op=op)
-    else:
-        try:
-            save_project(data, op=op)
-        except ValueError as e:
-            # Shouldn't happen — purge invariants should leave a valid
-            # project — but if it does, fall back to unsafe save so the
-            # purge isn't lost, and surface the issue.
-            save_project_unsafe(data, op=op)
-            print(f"Warning: post-purge validation failed: {e}", file=sys.stderr)
+    purged = result["purged"]
+    still_dirty = result["still_dirty"]
+    dup_report = result["dup_report"]
+
+    # Local-mode changelog parity: the cloud server records its own audit
+    # trail via operations.apply_operation, so we only append to
+    # .beacon/changelog.jsonl when LocalStore did the mutation.
+    if not store.is_cloud():
+        _append_changelog({
+            "op": "milestone_purge",
+            "ms_id": ms_id,
+            "index": index,
+            "reason": reason,
+            "purged_title": purged.get("title", ""),
+        })
 
     if json_mode:
         out = {

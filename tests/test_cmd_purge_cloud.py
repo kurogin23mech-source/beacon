@@ -56,14 +56,24 @@ def cloud_project_dir(monkeypatch):
 
 def _stub_client(monkeypatch, *, project_data: dict,
                   purge_milestone=None, purge_entry=None, purge_operation=None):
-    """Replace ``commands._get_api_client`` with a MagicMock.
+    """Wire a fake API client into both the legacy ``_get_api_client`` path
+    and the ms-84 Store path.
 
     Returns the mock so individual tests can ``assert_called_with`` etc. The
     fake client exposes ``get_project`` (used by the cloud pre-flight) plus
     the three purge methods — each defaults to "happy path" but can be
     overridden per test.
+
+    ms-84 Phase 2 added a Store-shaped purge path. The new
+    ``cmd_milestone_purge`` calls ``get_store()`` → ``StoreApi`` → the same
+    client methods, so the test patches both ``commands._get_api_client``
+    (legacy entry / cloud_entry_purge / cloud_operation_purge are still on
+    the old route) and ``commands.get_store`` (ms-84 / cmd_milestone_purge
+    is on the new route). When the remaining purge commands are migrated
+    to the Store path, the _get_api_client patch can be dropped.
     """
     import commands  # type: ignore
+    import store_api  # type: ignore
 
     fake = MagicMock()
     fake.get_project.return_value = project_data
@@ -79,7 +89,22 @@ def _stub_client(monkeypatch, *, project_data: dict,
     def _fake_get_api_client():
         return fake, config
 
+    def _fake_get_store():
+        # __new__ + manual attr seeding avoids ApiClient + auth + WebSocket
+        # construction. Only the fields touched by load_project / is_cloud /
+        # purge_milestone are needed for these tests.
+        import threading
+        store = store_api.StoreApi.__new__(store_api.StoreApi)
+        store._client = fake
+        store._project_id = "p-cloud"
+        store._ws_lock = threading.Lock()
+        store._ws_data = None
+        store._ws_client = None
+        store._last_hash = None
+        return store
+
     monkeypatch.setattr(commands, "_get_api_client", _fake_get_api_client)
+    monkeypatch.setattr(commands, "get_store", _fake_get_store)
     return fake
 
 
