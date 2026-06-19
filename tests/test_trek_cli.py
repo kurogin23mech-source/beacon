@@ -295,6 +295,123 @@ def test_trek_join_after_invite(trek_env):
     assert b_member["joined_at"]  # now joined
 
 
+# ---------------------------------------------------------------------------
+# Auto-arm (ms-75 / e-2047): default arms session, --no-arm opts out
+# ---------------------------------------------------------------------------
+
+def test_trek_join_auto_arms_session_by_default(trek_env):
+    """beacon trek join (= without --no-arm) should add 3 trek channels to
+    bus_auto_execute_channels, write .beacon/bus-budget.json with 20 turns,
+    and report the arm summary in JSON output."""
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "invite", tid, "--actor", "b@x.com")
+    env_b = dict(trek_env)
+    env_b.update({
+        "BEACON_USER_ID": "u-b",
+        "BEACON_USER_EMAIL": "b@x.com",
+        "BEACON_SESSION_ID": "sv-b-1",
+    })
+    r = _run(env_b, "join", tid, "--json")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(r.stdout)
+    arm = doc.get("_arm")
+    assert arm is not None
+    assert arm["trek_id"] == tid
+    assert arm["budget_turns"] == 20
+    # All 3 trek channels must be in the post-arm allowlist.
+    expected = {"trek-progress-check", "trek-trigger", "trek-task-review"}
+    assert expected.issubset(set(arm["channels"]))
+    # Three brand-new channels for the first-ever join.
+    assert set(arm["channels_added"]) == expected
+
+    # project.json reflects the channel allowlist write.
+    cwd = trek_env["BEACON_CWD"]
+    with open(Path(cwd) / ".beacon" / "project.json") as f:
+        proj = json.load(f)
+    assert expected.issubset(set(proj.get("bus_auto_execute_channels") or []))
+
+    # bus-budget.json holds the 20-turn grant + trek_id audit marker.
+    with open(Path(cwd) / ".beacon" / "bus-budget.json") as f:
+        budget = json.load(f)
+    assert budget["total"] == 20
+    assert budget["used"] == 0
+    assert budget["trek_id"] == tid
+
+
+def test_trek_join_no_arm_flag_skips_auto_arm(trek_env):
+    """--no-arm: trek joined, but no bus_auto_execute_channels mutation and
+    no bus-budget.json write. JSON output carries _arm.skipped marker."""
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "invite", tid, "--actor", "b@x.com")
+    env_b = dict(trek_env)
+    env_b.update({
+        "BEACON_USER_ID": "u-b",
+        "BEACON_USER_EMAIL": "b@x.com",
+        "BEACON_SESSION_ID": "sv-b-1",
+    })
+    r = _run(env_b, "join", tid, "--no-arm", "--json")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(r.stdout)
+    assert doc["_arm"] == {"skipped": True, "reason": "--no-arm"}
+
+    cwd = trek_env["BEACON_CWD"]
+    with open(Path(cwd) / ".beacon" / "project.json") as f:
+        proj = json.load(f)
+    # No trek channels added with opt-out.
+    auto_chans = set(proj.get("bus_auto_execute_channels") or [])
+    assert "trek-progress-check" not in auto_chans
+    assert "trek-trigger" not in auto_chans
+    # No budget file (= bus-budget.json not created).
+    assert not (Path(cwd) / ".beacon" / "bus-budget.json").exists()
+
+
+def test_trek_join_auto_arm_is_idempotent_on_channels(trek_env):
+    """Re-joining a trek (= after leave + rejoin, or a second member joining
+    the same project's trek) must not duplicate channel entries. Budget
+    is unconditionally refreshed though, since rejoining signals intent
+    to be armed again."""
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "invite", tid, "--actor", "b@x.com")
+    env_b = dict(trek_env)
+    env_b.update({
+        "BEACON_USER_ID": "u-b",
+        "BEACON_USER_EMAIL": "b@x.com",
+        "BEACON_SESSION_ID": "sv-b-1",
+    })
+    r1 = _run(env_b, "join", tid, "--json")
+    assert r1.returncode == 0
+    # leave + re-invite + re-join to exercise the idempotent path.
+    _run(env_b, "leave", tid)
+    _run(trek_env, "invite", tid, "--actor", "b@x.com")
+    r2 = _run(env_b, "join", tid, "--json")
+    assert r2.returncode == 0
+    doc = json.loads(r2.stdout)
+    arm = doc["_arm"]
+    # Second join: channels already in allowlist → channels_added is empty.
+    assert arm["channels_added"] == []
+    # But the channels list still reflects the trek channels.
+    expected = {"trek-progress-check", "trek-trigger", "trek-task-review"}
+    assert expected.issubset(set(arm["channels"]))
+
+
+def test_trek_join_auto_arm_human_output_mentions_skill_hint(trek_env):
+    """Non-JSON output should tell the user to start /beacon-bus-armed
+    Skill — the 3rd auto-arm action per AC 1."""
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "invite", tid, "--actor", "b@x.com")
+    env_b = dict(trek_env)
+    env_b.update({
+        "BEACON_USER_ID": "u-b",
+        "BEACON_USER_EMAIL": "b@x.com",
+        "BEACON_SESSION_ID": "sv-b-1",
+    })
+    r = _run(env_b, "join", tid)
+    assert r.returncode == 0, r.stderr
+    assert "/beacon-bus-armed" in r.stdout
+    assert "budget granted" in r.stdout
+    assert "--no-arm" in r.stdout  # opt-out reminder
+
+
 def test_trek_join_rejects_uninvited(trek_env):
     tid = _make_trek_and_return_id(trek_env)
     env_stranger = dict(trek_env)

@@ -434,3 +434,232 @@ def test_reply_consumes_even_if_cloud_call_would_fail(project_dir, monkeypatch,
     budget = json.loads(
         (project_dir / ".beacon" / "bus-budget.json").read_text())
     assert budget["used"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Trek-internal bypass (ms-75 / e-2044)
+# ---------------------------------------------------------------------------
+
+def test_record_trek_bypass_creates_counter_when_no_budget(project_dir,
+                                                          monkeypatch):
+    """A Trek-internal send that bypasses the budget still leaves an audit
+    trail. When no budget file exists yet, the helper creates one with a
+    counter — armed=False and total/used=0 so the gate semantics are
+    unchanged for non-Trek sends."""
+    _clear_bus_env(monkeypatch)
+    commands._record_bus_budget_trek_bypass("tk-abc")
+    path = project_dir / ".beacon" / "bus-budget.json"
+    assert path.exists()
+    data = json.loads(path.read_text())
+    assert data["trek_bypassed"]["tk-abc"] == 1
+    assert data["used"] == 0
+    assert data["total"] == 0
+    assert data.get("armed") is False
+
+
+def test_record_trek_bypass_increments_existing_counter(project_dir, monkeypatch):
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_BUDGET_N", "5")
+    commands.cmd_bus_budget_grant()
+    commands._record_bus_budget_trek_bypass("tk-abc")
+    commands._record_bus_budget_trek_bypass("tk-abc")
+    commands._record_bus_budget_trek_bypass("tk-xyz")
+    data = json.loads(
+        (project_dir / ".beacon" / "bus-budget.json").read_text())
+    assert data["trek_bypassed"]["tk-abc"] == 2
+    assert data["trek_bypassed"]["tk-xyz"] == 1
+    # Regular budget counters untouched.
+    assert data["total"] == 5
+    assert data["used"] == 0
+
+
+def test_record_trek_bypass_no_op_on_empty_trek_id(project_dir, monkeypatch):
+    _clear_bus_env(monkeypatch)
+    commands._record_bus_budget_trek_bypass("")
+    # No write; if there is no budget file, none is created.
+    path = project_dir / ".beacon" / "bus-budget.json"
+    assert not path.exists()
+
+
+def test_budget_show_displays_trek_bypassed_counts(project_dir, monkeypatch,
+                                                    capsys):
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_BUDGET_N", "5")
+    commands.cmd_bus_budget_grant()
+    capsys.readouterr()
+    commands._record_bus_budget_trek_bypass("tk-trek1")
+    commands._record_bus_budget_trek_bypass("tk-trek1")
+    commands._record_bus_budget_trek_bypass("tk-trek2")
+    commands.cmd_bus_budget_show()
+    out = capsys.readouterr().out
+    assert "0/5 used" in out  # main budget untouched
+    assert "Trek-internal bypassed: 3 send(s)" in out
+    assert "tk-trek1: 2" in out
+    assert "tk-trek2: 1" in out
+
+
+def test_budget_show_omits_trek_section_when_no_bypassed(project_dir,
+                                                         monkeypatch, capsys):
+    """Don't add Trek noise to budgets that never saw a Trek-internal send."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_BUDGET_N", "5")
+    commands.cmd_bus_budget_grant()
+    capsys.readouterr()
+    commands.cmd_bus_budget_show()
+    out = capsys.readouterr().out
+    assert "Trek-internal bypassed" not in out
+
+
+def test_is_trek_internal_send_returns_false_in_local_mode(project_dir,
+                                                            monkeypatch):
+    """Local mode (= no .beacon/cloud.json) keeps the strict budget gate.
+    Trek scope detection requires the cloud-side session directory."""
+    _clear_bus_env(monkeypatch)
+    # Stub _is_cloud_mode to False explicitly.
+    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: False)
+    bypass, trek_id = commands._is_trek_internal_send("sv-recipient")
+    assert bypass is False
+    assert trek_id == ""
+
+
+def test_is_trek_internal_send_returns_false_for_empty_recipient(project_dir,
+                                                                  monkeypatch):
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
+    bypass, trek_id = commands._is_trek_internal_send("")
+    assert bypass is False
+    assert trek_id == ""
+
+
+def test_is_trek_internal_send_returns_true_for_shared_active_trek(project_dir,
+                                                                    monkeypatch):
+    """Both sender and recipient are joined members of an active trek →
+    bypass. Mirrors server-side dm_gate.GATE_REASON_SHARED_TREK."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(commands, "_resolve_creator_identity",
+                         lambda: ("u-sender", "sender@x", "sv-1"))
+
+    class _FakeClient:
+        def list_sessions(self, _project_id):
+            return [
+                {"session_id": "sv-recipient",
+                 "actor": {"user_id": "u-recipient", "email": "rec@x"}},
+            ]
+        def list_treks(self):
+            return [{
+                "trek_id": "tk-shared",
+                "status": "active",
+                "members": [
+                    {"user_id": "u-sender", "joined_at": "2026-06-19T00:00:00Z"},
+                    {"user_id": "u-recipient", "joined_at": "2026-06-19T00:00:00Z"},
+                ],
+            }]
+    monkeypatch.setattr(commands, "_get_api_client",
+                         lambda: (_FakeClient(), {"project_id": "p"}))
+    monkeypatch.setattr(commands, "_resolve_bus_project_id", lambda _c: "p")
+    bypass, trek_id = commands._is_trek_internal_send("sv-recipient")
+    assert bypass is True
+    assert trek_id == "tk-shared"
+
+
+def test_is_trek_internal_send_returns_false_when_only_one_side_joined(project_dir,
+                                                                       monkeypatch):
+    """Pending invitation (= joined_at missing) does not count. Trek scope
+    requires both sides to have actually accepted membership."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(commands, "_resolve_creator_identity",
+                         lambda: ("u-sender", "sender@x", "sv-1"))
+
+    class _FakeClient:
+        def list_sessions(self, _p):
+            return [
+                {"session_id": "sv-recipient",
+                 "actor": {"user_id": "u-recipient"}},
+            ]
+        def list_treks(self):
+            return [{
+                "trek_id": "tk",
+                "status": "active",
+                "members": [
+                    {"user_id": "u-sender", "joined_at": "2026-06-19Z"},
+                    {"user_id": "u-recipient", "joined_at": ""},  # not yet joined
+                ],
+            }]
+    monkeypatch.setattr(commands, "_get_api_client",
+                         lambda: (_FakeClient(), {"project_id": "p"}))
+    monkeypatch.setattr(commands, "_resolve_bus_project_id", lambda _c: "p")
+    bypass, _ = commands._is_trek_internal_send("sv-recipient")
+    assert bypass is False
+
+
+def test_is_trek_internal_send_returns_false_when_trek_not_active(project_dir,
+                                                                   monkeypatch):
+    """Planning / archived treks do not grant Trek scope. The gate must not
+    bypass for treks that aren't actively running work."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(commands, "_resolve_creator_identity",
+                         lambda: ("u-sender", "sender@x", "sv-1"))
+
+    class _FakeClient:
+        def list_sessions(self, _p):
+            return [{"session_id": "sv-r",
+                     "actor": {"user_id": "u-recipient"}}]
+        def list_treks(self):
+            return [{
+                "trek_id": "tk",
+                "status": "planning",  # not active
+                "members": [
+                    {"user_id": "u-sender", "joined_at": "x"},
+                    {"user_id": "u-recipient", "joined_at": "x"},
+                ],
+            }]
+    monkeypatch.setattr(commands, "_get_api_client",
+                         lambda: (_FakeClient(), {"project_id": "p"}))
+    monkeypatch.setattr(commands, "_resolve_bus_project_id", lambda _c: "p")
+    bypass, _ = commands._is_trek_internal_send("sv-r")
+    assert bypass is False
+
+
+def test_is_trek_internal_send_returns_false_for_same_user(project_dir, monkeypatch):
+    """Same user is handled by the higher-level same_user rule, not by
+    Trek scope. Returning False here defers to that — the budget gate
+    itself also doesn't fire (no in_reply_to is a same-user CLI send),
+    so we keep our scope narrow to the actual Trek case."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(commands, "_resolve_creator_identity",
+                         lambda: ("u-same", "x", "sv-1"))
+
+    class _FakeClient:
+        def list_sessions(self, _p):
+            return [{"session_id": "sv-r", "actor": {"user_id": "u-same"}}]
+        def list_treks(self):
+            return [{"trek_id": "tk", "status": "active",
+                     "members": [{"user_id": "u-same", "joined_at": "x"}]}]
+    monkeypatch.setattr(commands, "_get_api_client",
+                         lambda: (_FakeClient(), {"project_id": "p"}))
+    monkeypatch.setattr(commands, "_resolve_bus_project_id", lambda _c: "p")
+    bypass, _ = commands._is_trek_internal_send("sv-r")
+    assert bypass is False
+
+
+def test_is_trek_internal_send_fails_safe_when_api_throws(project_dir, monkeypatch):
+    """Any error in the detection path must keep the regular budget gate
+    in force — silently relaxing on misconfigured infra is exactly what
+    the SPEC forbids."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(commands, "_resolve_creator_identity",
+                         lambda: ("u-sender", "sender@x", "sv-1"))
+
+    class _BoomClient:
+        def list_sessions(self, _p):
+            raise RuntimeError("server is on fire")
+    monkeypatch.setattr(commands, "_get_api_client",
+                         lambda: (_BoomClient(), {"project_id": "p"}))
+    monkeypatch.setattr(commands, "_resolve_bus_project_id", lambda _c: "p")
+    bypass, _ = commands._is_trek_internal_send("sv-r")
+    assert bypass is False

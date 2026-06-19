@@ -756,6 +756,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_trek_join = trek_sub.add_parser("join", add_help=False)
     p_trek_join.add_argument("trek_id", nargs="?", default="")
     p_trek_join.add_argument("--json", action="store_true")
+    # ms-75 / e-2047 — opt-out flag for the post-join auto-arm sequence.
+    p_trek_join.add_argument("--no-arm", dest="no_arm", action="store_true")
 
     p_trek_leave = trek_sub.add_parser("leave", add_help=False)
     p_trek_leave.add_argument("trek_id", nargs="?", default="")
@@ -2302,7 +2304,11 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
     if cmd == "join":
         return _run_commands_py(
             root, "trek_join",
-            {"BEACON_TREK_ID": args.trek_id or "", "BEACON_JSON": json_env},
+            {
+                "BEACON_TREK_ID": args.trek_id or "",
+                "BEACON_TREK_NO_ARM": "1" if getattr(args, "no_arm", False) else "",
+                "BEACON_JSON": json_env,
+            },
         )
     if cmd == "leave":
         return _run_commands_py(

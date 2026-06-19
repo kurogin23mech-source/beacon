@@ -105,7 +105,8 @@ Treks (cross-project / cross-session 協奏作業領域 — ms-69):
   beacon trek archive <trek-id>     Archive (= terminal; restart by new trek)
   beacon trek invite <trek-id> --actor <email> [--notify]
                                     Invite by email
-  beacon trek join <trek-id>        Accept own invitation
+  beacon trek join <trek-id> [--no-arm]
+                                    Accept own invitation (auto-arms by default — ms-75/e-2047)
   beacon trek leave <trek-id>       Remove self (leader must transfer first)
   beacon trek plan <trek-id> --add-scope <project:ref> | --remove-scope <project:ref>
                                     Edit scope (ms-/op-/e- ref, or project-wide)
@@ -2539,13 +2540,17 @@ except ValueError as e:
             join)
                 shift 2
                 trek_id=""
+                no_arm=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --json) export BEACON_JSON=1; shift ;;
+                        --no-arm) no_arm=1; shift ;;
                         *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                     esac
                 done
-                BEACON_TREK_ID="$trek_id" python3 "$COMMANDS_PY" trek_join
+                BEACON_TREK_ID="$trek_id" \
+                    BEACON_TREK_NO_ARM="$no_arm" \
+                    python3 "$COMMANDS_PY" trek_join
                 ;;
             leave)
                 shift 2

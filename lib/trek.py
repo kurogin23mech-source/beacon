@@ -56,6 +56,15 @@ VALID_TASK_STATES = ("working", "done", "waiting-review")
 DEFAULT_TASK_STATE = "working"
 TERMINAL_TASK_STATES = ("done", "waiting-review")
 
+# ms-75 / e-2067 — server-side TTL safety net. Default 30 minutes of no
+# activity on a 'working' task triggers auto-stall to 'waiting-review' so
+# the leader gets a review DM instead of the scheduler firing forever into
+# a silent executor. The leader can re-stamp 'working' to recover from a
+# false positive (= the transition waiting-review → working is allowed in
+# VALID_TASK_STATE_TRANSITIONS). Per-trek override lives at
+# trek.meta.working_ttl_minutes.
+DEFAULT_WORKING_TTL_MINUTES = 30
+
 # Allowed transitions. Strict to prevent rogue rewrites (= a task that
 # reached "done" can only be moved back to "working" via leader review,
 # not directly to "waiting-review"). The reverse path "done → working"
@@ -167,6 +176,12 @@ def set_task_state(trek_doc: dict, *, task_id: str, state: str,
     is responsible for persisting the document (= db.save_trek). A note
     is recorded if supplied (= helps the leader's review judgment).
 
+    ``last_activity_at`` (= ms-75 / e-2067) is stamped to the same moment
+    as ``updated_at``; this is the field the auto-stall scheduler reads to
+    detect "working" tasks that have gone silent past the TTL. State stamp
+    is one of the three documented activity sources (state stamp / commit /
+    DM receipt) — see ``bump_task_activity`` for the non-state-change path.
+
     Raises ValueError if the transition is not allowed.
     """
     if not task_id:
@@ -175,14 +190,73 @@ def set_task_state(trek_doc: dict, *, task_id: str, state: str,
     current = get_task_state(trek_doc, task_id)
     validate_task_state_transition(current, state)
     states = trek_doc.setdefault("task_states", {})
+    now = utcnow_iso()
     states[task_id] = {
         "state": state,
-        "updated_at": utcnow_iso(),
+        "updated_at": now,
         "updated_by_session_id": updated_by_session_id or "",
         "note": (note or "")[:500],
+        "last_activity_at": now,
     }
-    trek_doc["updated_at"] = utcnow_iso()
+    trek_doc["updated_at"] = now
     return trek_doc
+
+
+def bump_task_activity(trek_doc: dict, *, task_id: str,
+                       reason: str = "") -> dict:
+    """Refresh ``last_activity_at`` on a task without changing its state.
+
+    Called from non-state-change activity sources (= ms-75 / e-2067 AC 1:
+    "state stamp / commit / DM 受信で update"). Concretely:
+      * a commit lands on a trek-scoped task → bump
+      * a DM addressed to the trek's executor arrives → bump
+
+    If the task has no entry in ``task_states`` yet (= executor never
+    stamped), we initialise it to the default state with the same
+    ``last_activity_at`` so the next scheduler tick treats the task as
+    "just heard from" rather than dead. This means commits / DMs alone
+    can keep a task off the auto-stall radar even before the executor
+    has formally declared a state.
+
+    Returns the mutated trek_doc. Caller persists.
+    """
+    if not task_id:
+        raise ValueError("task_id is required")
+    states = trek_doc.setdefault("task_states", {})
+    now = utcnow_iso()
+    entry = states.get(task_id)
+    if not entry:
+        entry = {
+            "state": DEFAULT_TASK_STATE,
+            "updated_at": now,
+            "updated_by_session_id": "",
+            "note": "",
+        }
+    entry["last_activity_at"] = now
+    if reason:
+        entry["last_activity_reason"] = reason[:80]
+    states[task_id] = entry
+    trek_doc["updated_at"] = now
+    return trek_doc
+
+
+def get_working_ttl_minutes(trek_doc: dict,
+                            default: int = DEFAULT_WORKING_TTL_MINUTES) -> int:
+    """Return the working-state TTL in minutes (= meta override or default).
+
+    Per ms-75 / e-2067 AC 6: per-trek override at ``trek.meta.
+    working_ttl_minutes``. Non-numeric or missing values fall back to the
+    SPEC default (30 minutes), which gives an executor three full cadence
+    windows (= cadence 10 × 3) of silence before the safety net fires.
+    """
+    meta = trek_doc.get("meta") or {}
+    val = meta.get("working_ttl_minutes")
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return default
 
 
 def aggregate_task_state(trek_doc: dict, *, task_ids: list[str]) -> dict:

@@ -413,3 +413,174 @@ def test_aggregate_terminal_true_when_mixed_terminal():
         "e-2": {"state": "waiting-review"},
     }}
     assert scheduler.is_trek_task_aggregate_terminal(trek) is True
+
+
+# ---------------------------------------------------------------------------
+# Auto-stall detection (ms-75 / e-2067)
+# ---------------------------------------------------------------------------
+
+def _now_minus(minutes: int) -> datetime.datetime:
+    base = datetime.datetime(2026, 6, 19, 12, 0, 0,
+                             tzinfo=datetime.timezone.utc)
+    return base - datetime.timedelta(minutes=minutes)
+
+
+def _iso(dt: datetime.datetime) -> str:
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+_BASE_NOW = datetime.datetime(2026, 6, 19, 12, 0, 0,
+                              tzinfo=datetime.timezone.utc)
+
+
+def test_detect_auto_stalled_returns_empty_for_planning_trek():
+    """Safety nets must not fire while the leader is still drafting."""
+    trek = {
+        "status": "planning",
+        "task_states": {
+            "e-1": {"state": "working",
+                    "last_activity_at": _iso(_now_minus(60))},
+        },
+    }
+    assert scheduler.detect_auto_stalled_tasks(trek, now=_BASE_NOW) == []
+
+
+def test_detect_auto_stalled_returns_empty_for_halted_trek():
+    """Halt = leader deliberately paused; auto-stall is duplicate signal."""
+    trek = {
+        "status": "active",
+        "halt": {"reason": "manual stop"},
+        "task_states": {
+            "e-1": {"state": "working",
+                    "last_activity_at": _iso(_now_minus(60))},
+        },
+    }
+    assert scheduler.detect_auto_stalled_tasks(trek, now=_BASE_NOW) == []
+
+
+def test_detect_auto_stalled_returns_empty_when_no_states_stamped():
+    trek = {"status": "active", "task_states": {}}
+    assert scheduler.detect_auto_stalled_tasks(trek, now=_BASE_NOW) == []
+
+
+def test_detect_auto_stalled_skips_task_under_ttl():
+    """Working task with recent activity (< TTL) must not stall."""
+    trek = {
+        "status": "active",
+        "task_states": {
+            "e-1": {"state": "working",
+                    "last_activity_at": _iso(_now_minus(15))},
+        },
+    }
+    assert scheduler.detect_auto_stalled_tasks(trek, now=_BASE_NOW) == []
+
+
+def test_detect_auto_stalled_detects_task_past_default_ttl():
+    """31 min silence with default 30 min TTL → stall."""
+    trek = {
+        "status": "active",
+        "task_states": {
+            "e-1": {"state": "working",
+                    "last_activity_at": _iso(_now_minus(31))},
+        },
+    }
+    out = scheduler.detect_auto_stalled_tasks(trek, now=_BASE_NOW)
+    assert len(out) == 1
+    assert out[0]["task_id"] == "e-1"
+    assert out[0]["silence_minutes"] == 31
+    assert out[0]["ttl_minutes"] == 30
+
+
+def test_detect_auto_stalled_skips_terminal_states():
+    """Done / waiting-review tasks must never auto-stall."""
+    trek = {
+        "status": "active",
+        "task_states": {
+            "e-done": {"state": "done",
+                       "last_activity_at": _iso(_now_minus(120))},
+            "e-wait": {"state": "waiting-review",
+                       "last_activity_at": _iso(_now_minus(120))},
+        },
+    }
+    assert scheduler.detect_auto_stalled_tasks(trek, now=_BASE_NOW) == []
+
+
+def test_detect_auto_stalled_honors_per_trek_ttl_override():
+    """meta.working_ttl_minutes per AC 6."""
+    trek = {
+        "status": "active",
+        "meta": {"working_ttl_minutes": 5},
+        "task_states": {
+            "e-1": {"state": "working",
+                    "last_activity_at": _iso(_now_minus(6))},
+        },
+    }
+    out = scheduler.detect_auto_stalled_tasks(trek, now=_BASE_NOW)
+    assert len(out) == 1
+    assert out[0]["ttl_minutes"] == 5
+    assert out[0]["silence_minutes"] == 6
+
+
+def test_detect_auto_stalled_falls_back_to_updated_at_for_legacy_entries():
+    """task_states entries written before e-2067 land have no
+    last_activity_at field. The detector falls back to updated_at so
+    legacy stamps are still evaluated."""
+    trek = {
+        "status": "active",
+        "task_states": {
+            "e-1": {"state": "working",
+                    "updated_at": _iso(_now_minus(45))},
+        },
+    }
+    out = scheduler.detect_auto_stalled_tasks(trek, now=_BASE_NOW)
+    assert len(out) == 1
+    assert out[0]["task_id"] == "e-1"
+
+
+def test_detect_auto_stalled_skips_entry_with_no_activity_anchor():
+    """No last_activity_at AND no updated_at → never had activity.
+    Skipping avoids stalling a brand-new trek the moment it appears."""
+    trek = {
+        "status": "active",
+        "task_states": {
+            "e-1": {"state": "working"},
+        },
+    }
+    assert scheduler.detect_auto_stalled_tasks(trek, now=_BASE_NOW) == []
+
+
+def test_detect_auto_stalled_returns_multiple_tasks():
+    """All working + stalled tasks in a single trek are returned together."""
+    trek = {
+        "status": "active",
+        "task_states": {
+            "e-1": {"state": "working",
+                    "last_activity_at": _iso(_now_minus(45))},
+            "e-2": {"state": "working",
+                    "last_activity_at": _iso(_now_minus(60))},
+            "e-3": {"state": "working",
+                    "last_activity_at": _iso(_now_minus(10))},  # under TTL
+        },
+    }
+    out = scheduler.detect_auto_stalled_tasks(trek, now=_BASE_NOW)
+    task_ids = sorted(s["task_id"] for s in out)
+    assert task_ids == ["e-1", "e-2"]
+
+
+def test_build_auto_stall_note_includes_silence_minutes():
+    """Stable wording so the leader's review Skill + dogfood retro can
+    grep the marker."""
+    note = scheduler.build_auto_stall_note(42)
+    assert "42 min" in note
+    assert "auto-stalled" in note
+    # Recovery path must be mentioned so the leader knows how to undo.
+    assert "re-stamp working" in note
+
+
+def test_get_working_ttl_minutes_in_scheduler_module_matches_default():
+    """Scheduler-side getter is the operational read path; it must agree
+    with the schema-side getter so server + CLI render the same number."""
+    assert scheduler.get_working_ttl_minutes({}) == 30
+    assert scheduler.get_working_ttl_minutes(
+        {"meta": {"working_ttl_minutes": 7}}
+    ) == 7

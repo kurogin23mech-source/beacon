@@ -44,6 +44,9 @@ try:
 except Exception:
     DEFAULT_TASK_STATE = "working"
 
+# ms-75 / e-2067 — server-side TTL safety net default.
+DEFAULT_WORKING_TTL_MINUTES = 30
+
 
 # ---------------------------------------------------------------------------
 # Time helpers
@@ -165,6 +168,110 @@ def is_trek_task_aggregate_terminal(trek_doc: dict) -> bool:
         if (entry or {}).get("state") == DEFAULT_TASK_STATE:
             return False
     return True
+
+
+# ---------------------------------------------------------------------------
+# Auto-stall detection (ms-75 / e-2067)
+# ---------------------------------------------------------------------------
+
+def get_working_ttl_minutes(trek_doc: dict,
+                            default: int = DEFAULT_WORKING_TTL_MINUTES) -> int:
+    """Return the trek's working-state TTL (= meta override or default).
+
+    Mirror of ``lib.trek.get_working_ttl_minutes`` kept here so the
+    scheduler can stay decoupled from the schema module (= same pattern
+    we use for DEFAULT_TASK_STATE). Both functions must read the same
+    field name; a divergence would cause the server to interpret the
+    TTL one way and the CLI to render it another.
+    """
+    meta = trek_doc.get("meta") or {}
+    val = meta.get("working_ttl_minutes")
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return default
+
+
+def detect_auto_stalled_tasks(
+    trek_doc: dict,
+    *,
+    now: datetime.datetime,
+    default_ttl: int = DEFAULT_WORKING_TTL_MINUTES,
+) -> list[dict]:
+    """Return the list of trek task entries that should auto-stall.
+
+    A task qualifies iff:
+      * Trek is ``status == 'active'`` and not halted (= safety nets do not
+        fire while the leader has deliberately paused the trek).
+      * Its current ``task_states[task_id].state`` is ``working`` (= we
+        never re-stall a terminal task).
+      * Its ``last_activity_at`` is older than the trek's effective TTL.
+        Tasks without ``last_activity_at`` fall back to ``updated_at`` so
+        legacy entries (= pre-e-2067 stamps) still get evaluated; if both
+        are missing we treat the task as "never active" and skip it (= a
+        Trek can't auto-stall something that was never started).
+
+    Each returned entry is::
+
+        {
+            "task_id": str,
+            "last_activity_at": str | None,
+            "silence_minutes": int,
+            "ttl_minutes": int,
+        }
+
+    Pure / I/O-free so unit tests pin the threshold semantics. The
+    server orchestrator (server/app.py) consumes the list, transitions
+    each task via lib.trek.set_task_state, and emits the leader DMs.
+    """
+    if trek_doc.get("status") != "active":
+        return []
+    if trek_doc.get("halt"):
+        return []
+    states = trek_doc.get("task_states") or {}
+    if not states:
+        return []
+    ttl_minutes = get_working_ttl_minutes(trek_doc, default=default_ttl)
+    threshold = datetime.timedelta(minutes=ttl_minutes)
+    now = _ensure_utc(now)
+    out: list[dict] = []
+    for tid, entry in states.items():
+        if not entry or entry.get("state") != DEFAULT_TASK_STATE:
+            continue
+        last_str = entry.get("last_activity_at") or entry.get("updated_at") or ""
+        last = _parse_iso(last_str)
+        if last is None:
+            # Never active and no anchor — skip; the scheduler will fire
+            # progress-check obligation DMs anyway, which will eventually
+            # produce a state stamp and an anchor.
+            continue
+        last = _ensure_utc(last)
+        elapsed = now - last
+        if elapsed < threshold:
+            continue
+        out.append({
+            "task_id": tid,
+            "last_activity_at": last_str,
+            "silence_minutes": int(elapsed.total_seconds() // 60),
+            "ttl_minutes": ttl_minutes,
+        })
+    return out
+
+
+def build_auto_stall_note(silence_minutes: int) -> str:
+    """Render the system-generated note attached to an auto-stalled task.
+
+    Stable wording so the leader's review Skill can recognise the auto
+    transition (= "did the executor stamp this or did the server?") and
+    the dogfood retro can grep for the marker.
+    """
+    return (
+        f"auto-stalled by TTL: {silence_minutes} min 無活動 "
+        f"(executor が working のまま reaffirm を忘れた可能性、"
+        f"leader が re-stamp working で復旧できます)"
+    )
 
 
 # ---------------------------------------------------------------------------
