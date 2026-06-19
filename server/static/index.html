@@ -2418,6 +2418,8 @@ body::after {
   padding: 1px 6px;
   border-radius: 8px;
   border: 1px solid currentColor;
+  margin-left: 4px;
+  vertical-align: middle;
 }
 .trek-session-state-badge.working {
   color: var(--accent);
@@ -5094,19 +5096,34 @@ function _renderTrekScopeRow(s, t) {
     </div>`;
 }
 
-// ms-86 / e-2045 step 1: self の live session 数を member row に小さく表示する
-// helper。 state.onlineSessions は /api/me/sessions?live_only=true&since_minutes=10
-// で fetch 済 (= 当 user の live sessions のみ可視、 他 member の session 数は
-// 別経路で取る必要があり Phase 2 で対応)。 m.email が currentUserEmail と一致
-// しない場合は空文字を返す (= graceful degradation、 graceful フォールバックで
-// 既存挙動を壊さない)。
+// ms-86 / e-2045 step 1+2: self の live session 数 + working/idle 内訳 を member
+// row に小さく表示する helper。 state.onlineSessions は /api/me/sessions?live_only=
+// true&since_minutes=10 で fetch 済 (= 当 user の live sessions のみ可視、 他 member
+// の session 数は別経路で取る必要があり Phase 2 で対応)。 m.email が currentUserEmail
+// と一致しない場合は空文字を返す (= graceful degradation、 既存挙動を壊さない)。
+// state 判定の閾値: working = last_active 直近 5 分以内 / idle = 5〜30 分前 (= 30 分
+// より古いものは /api/me/sessions の since_minutes=10 で既に絞られているので通常出ない)。
 function _renderTrekSelfLiveCount(m) {
   const myEmail = currentUserEmail();
   if (!myEmail || m.email !== myEmail) return '';
   const sessions = (state && state.onlineSessions) || [];
   if (!Array.isArray(sessions) || sessions.length === 0) return '';
   const n = sessions.length;
-  return `<span class="trek-self-live-count" title="self の live sessions の数 (= /api/me/sessions による直近 10 分の生存判定)">${n} live</span>`;
+  const now = Date.now();
+  let working = 0;
+  let idle = 0;
+  for (const s of sessions) {
+    const ts = s && s.last_active ? Date.parse(s.last_active) : NaN;
+    if (Number.isNaN(ts)) continue;
+    const ageMs = now - ts;
+    if (ageMs < 5 * 60 * 1000) working++;
+    else if (ageMs < 30 * 60 * 1000) idle++;
+  }
+  const parts = [];
+  if (working > 0) parts.push(`<span class="trek-session-state-badge working">${working} working</span>`);
+  if (idle > 0) parts.push(`<span class="trek-session-state-badge idle">${idle} idle</span>`);
+  const breakdown = parts.length > 0 ? ` ${parts.join(' ')}` : '';
+  return `<span class="trek-self-live-count" title="self の live sessions の数 + working/idle 内訳 (= /api/me/sessions による直近 10 分の生存判定 + last_active 経過時間ベース)">${n} live</span>${breakdown}`;
 }
 
 function _renderTrekMemberRow(m, t) {
