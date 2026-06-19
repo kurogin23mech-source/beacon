@@ -5297,22 +5297,98 @@ def cmd_trek_invite():
                   "live DM lands in e-1662)")
 
 
+# ms-75 / e-2047 — Trek auto-arm constants. The 3 channels covered here
+# match CHANNEL_TO_SKILL in channel/bus-autonomous-content.mjs (= e-2069)
+# so the bus.mjs side has a Skill mapping for every channel we mark as
+# auto-execute. Default budget = 20 outbound turns gives the executor
+# roughly two cadence cycles' worth of room before requiring a re-grant,
+# which is the SPEC-pinned starting envelope per AC 1.
+TREK_AUTO_ARM_CHANNELS = (
+    "trek-progress-check",
+    "trek-trigger",
+    "trek-task-review",
+)
+TREK_AUTO_ARM_DEFAULT_BUDGET = 20
+
+
+def _arm_for_trek(trek_id: str) -> dict:
+    """Run the 3 auto-arm actions for a freshly-joined Trek.
+
+    ms-75 / e-2047 AC 1 — pre-armed Trek participation: a session that
+    joins a Trek should be ready to act on scope-internal DMs without
+    requiring the user to remember to add channels + grant budget + start
+    the /beacon-bus-armed Skill. This helper performs the first two
+    structurally (= file writes) and surfaces a hint for the third (=
+    Skill invocation belongs to the AI side, not CLI).
+
+    Idempotency:
+      * channel allowlist add is idempotent — re-running for the same
+        trek is a no-op for channels already present.
+      * budget set is unconditional (= refresh to default). Re-joining a
+        trek effectively re-arms; this matches the user intent (= "I am
+        rejoining this work, give me a fresh runway").
+
+    Returns a dict with the actions taken so callers can render an audit
+    summary or emit JSON without re-reading the files.
+    """
+    import datetime
+    data = load_project()
+    channels = _bus_auto_execute_channels(data)
+    added: list[str] = []
+    for ch in TREK_AUTO_ARM_CHANNELS:
+        if ch not in channels:
+            channels.append(ch)
+            added.append(ch)
+    if added:
+        data["bus_auto_execute_channels"] = channels
+        save_project(data, op={
+            "op": "trek_auto_arm",
+            "trek_id": trek_id,
+            "channels_added": added,
+        })
+        _mirror_auto_execute_channels_to_local(channels)
+    budget_data = {
+        "total": TREK_AUTO_ARM_DEFAULT_BUDGET,
+        "used": 0,
+        "granted_at": datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"),
+        "channels": [],
+        "trek_id": trek_id,  # audit marker (= auto-arm source)
+    }
+    _write_bus_budget(budget_data)
+    return {
+        "trek_id": trek_id,
+        "channels": list(channels),
+        "channels_added": added,
+        "budget_turns": TREK_AUTO_ARM_DEFAULT_BUDGET,
+    }
+
+
 def cmd_trek_join():
     """Accept an invitation (= set member.joined_at = now for the current user).
 
+    ms-75 / e-2047 — by default also auto-arms the session for the joined
+    Trek: adds trek-progress-check / trek-trigger / trek-task-review to
+    bus_auto_execute_channels (idempotent), sets the outbound-send budget
+    to 20 turns, and prints a hint to start the /beacon-bus-armed Skill.
+    Opt-out: ``BEACON_TREK_NO_ARM=1`` (mapped from ``--no-arm`` at the
+    bash / dispatch.py shim).
+
     Env:
-      BEACON_TREK_ID    (required)
-      BEACON_USER_EMAIL (required, matched against the invitee's email)
-      BEACON_USER_ID    inviter's recorded user_id (fallback: whoami).
-                        Used as the local-mode identity match.
-      BEACON_SESSION_ID (informational, recorded if leader_session_id is empty)
-      BEACON_JSON       "1" → json output
+      BEACON_TREK_ID     (required)
+      BEACON_USER_EMAIL  (required, matched against the invitee's email)
+      BEACON_USER_ID     inviter's recorded user_id (fallback: whoami).
+                         Used as the local-mode identity match.
+      BEACON_SESSION_ID  (informational, recorded if leader_session_id is empty)
+      BEACON_TREK_NO_ARM "1" → skip auto-arm post-join
+      BEACON_JSON        "1" → json output
     """
     import trek
     import trek_store
 
     trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    no_arm = os.environ.get("BEACON_TREK_NO_ARM", "") == "1"
     if not trek_id:
         print("Error: trek_id is required", file=sys.stderr)
         sys.exit(1)
@@ -5360,10 +5436,66 @@ def cmd_trek_join():
             sys.exit(1)
         trek_store.save_trek(t)
 
+    arm_summary: Optional[dict] = None
+    if not no_arm:
+        try:
+            arm_summary = _arm_for_trek(trek_id)
+        except Exception as exc:
+            # Best-effort: join succeeded; arm is a UX enhancement. Surface
+            # the failure but do not unwind the join (= the user can re-run
+            # the arm steps manually if needed).
+            print(
+                f"[warning] join succeeded but auto-arm failed: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+
     if json_mode:
-        print(json.dumps(t, ensure_ascii=False))
+        # Keep the trek doc as the top-level shape so existing consumers
+        # (= tests / Skill bodies parsing the trek doc directly) keep
+        # working. The arm summary rides on a meta key (= `_arm`, the
+        # underscore prefix signals "extra context, not part of the trek
+        # schema").
+        out = dict(t)
+        if arm_summary is not None:
+            out["_arm"] = arm_summary
+        elif no_arm:
+            out["_arm"] = {"skipped": True, "reason": "--no-arm"}
+        print(json.dumps(out, ensure_ascii=False))
     else:
         print(f"Joined trek {trek_id} as {email}")
+        if arm_summary is not None:
+            added = arm_summary.get("channels_added") or []
+            if added:
+                print(
+                    f"  auto-arm: added {len(added)} channel(s) to "
+                    f"bus_auto_execute_channels: {', '.join(added)}"
+                )
+            else:
+                print(
+                    "  auto-arm: bus_auto_execute_channels already covers "
+                    f"trek channels ({', '.join(TREK_AUTO_ARM_CHANNELS)})"
+                )
+            print(
+                f"  auto-arm: budget granted "
+                f"{arm_summary['budget_turns']} outbound sends "
+                f"(refresh: `beacon bus budget grant --turns N`)"
+            )
+            print(
+                "  next step: start the autonomous loop in this session via "
+                "`/beacon-bus-armed` Skill so trek-progress-check events "
+                "wake the executor without a user prompt."
+            )
+            print(
+                "  opt-out: re-run with `--no-arm` to skip auto-arm "
+                "(= only join, no channel / budget changes)."
+            )
+        elif no_arm:
+            print(
+                "  auto-arm skipped (--no-arm). "
+                "Run `beacon bus auto-execute add --channel trek-progress-check` "
+                "and `beacon bus budget grant --turns 20` manually to arm later."
+            )
 
 
 def cmd_trek_stop():

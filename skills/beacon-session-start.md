@@ -424,6 +424,33 @@ planning や archived な trek は blanket 例外の対象外なので、 表示
 
 local mode (= `.beacon/cloud.json` 不在) でも `~/.beacon/treks/` から拾うので動作する。
 
+### Step 1o-2: 自律実行モード (= armed) のセルフチェック (ms-75 / e-2047)
+
+active な Trek に join 中なら、 このセッションが **armed (= 自律実行モード)** であることを確認する。 `beacon trek join` は AC 1 で auto-arm が default になっているが、 以下のケースで not-armed が起こりうる:
+
+- `--no-arm` で opt-out した
+- 古いバージョンで join 済 (= auto-arm 前の trek)
+- 別 worktree で join したため `.beacon/bus-budget.json` がこの cwd に無い
+
+判定材料を Bash で並列取得:
+
+```bash
+beacon bus auto-execute list --json 2>/dev/null
+beacon bus budget show --json 2>/dev/null
+```
+
+armed 条件 (AND): `bus_auto_execute_channels` に **少なくとも 1 つの trek 系 channel (= trek-progress-check / trek-trigger / trek-task-review)** が含まれている、 かつ budget が `armed` 状態 (= total > 0 かつ used < total)。
+
+armed でない場合、 Step 3 のヘッダに以下を 1 行で添える:
+
+```
+⚠ Trek 参加中だが自律実行モードが not-armed です。 `/beacon-bus-armed` で起動するか、 `beacon trek join <trek-id>` を再実行して auto-arm し直してください (= 進行 DM が wake せず silent-ack 病理を再生します)。
+```
+
+armed なら何も表示しない (= ノイズ削減)。
+
+archived / planning trek にしか join していない場合は判定不要 (= scope 内 action が事前承認の対象外)。 この Step は **読み取り専用**。
+
 ## Step 1j: 前セッションの session log 読み込み（ms-43 e-1360）
 
 前セッション末で `/beacon-session-end` Skill が `beacon session end` で集約した session log には、**「次セッション最優先 / top of queue / 次にやること」セクションが summary 内に明文化されている**ことが多い。これは trigger より優先順位が高い (人間/AI が curate した継続意図そのもの)。
