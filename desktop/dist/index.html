@@ -4914,7 +4914,7 @@ function _renderTrekDetail(t) {
           <div class="text">
             <strong>HALTED — sessions are paused</strong>
             ${t.halt.reason ? esc(t.halt.reason) + ' — ' : ''}STOP signal issued by ${esc(_trekShortSessionId(t.halt.issued_by_session_id))} at ${(t.halt.issued_at || '').slice(0,16).replace('T',' ')}.
-            CLI で再開: <code style="color:var(--accent);">beacon trek resume ${esc(t.trek_id)}</code>
+            Resume from the CLI: <code style="color:var(--accent);">beacon trek resume ${esc(t.trek_id)}</code>
           </div>
           <button data-action="trek-cli-hint" data-cmd="beacon trek resume ${esc(t.trek_id)}">Resume</button>
         </div>`;
@@ -4924,7 +4924,7 @@ function _renderTrekDetail(t) {
           <span class="icon">🚨</span>
           <div class="text">
             <strong>STOP THIS TREK</strong>
-            参加中の全 session が現在の tool call の手前で halt し、状態を保存します。再開は leader session に「再開」を指示すれば OK。
+            All joined sessions halt before their next tool call and persist their state. To resume, tell the leader session to continue.
             CLI: <code style="color:var(--accent);">beacon trek stop ${esc(t.trek_id)} --reason "..."</code>
           </div>
           <button data-action="trek-cli-hint" data-cmd="beacon trek stop ${esc(t.trek_id)} --reason &quot;...&quot;">STOP</button>
@@ -4936,7 +4936,7 @@ function _renderTrekDetail(t) {
     <div class="trek-archive-card">
       <span class="ico">📦</span>
       <div class="text">
-        この trek を <strong>archive</strong> する (= 一時 trek なら完了、永続 trek なら休眠)。記録は残り、参照は archive 後も可能。
+        <strong>Archive</strong> this trek (= complete for temporary treks, hibernate for persistent treks). Records remain accessible after archiving.
         CLI: <code style="color:var(--accent);">beacon trek archive ${esc(t.trek_id)}</code>
       </div>
     </div>` : '';
@@ -4985,9 +4985,9 @@ function _renderTrekDetail(t) {
         </div>
         ${scope.length
           ? scope.map(_renderTrekScopeRow).join('')
-          : `<div class="trek-coming-soon">No scope entries. CLI で追加: <code>beacon trek plan ${esc(t.trek_id)} --add-scope &lt;project&gt;:&lt;ref&gt;</code></div>`}
+          : `<div class="trek-coming-soon">No scope entries. Add from the CLI: <code>beacon trek plan ${esc(t.trek_id)} --add-scope &lt;project&gt;:&lt;ref&gt;</code></div>`}
         <div class="trek-cli-hint">
-          追加・削除はターミナルから:
+          Add / remove from the terminal:
           <code>beacon trek plan ${esc(t.trek_id)} --add-scope &lt;project&gt;:&lt;ms-XX|op-X|e-X&gt;</code>
           <code>beacon trek plan ${esc(t.trek_id)} --remove-scope &lt;project&gt;:&lt;ref&gt;</code>
         </div>
@@ -5001,7 +5001,7 @@ function _renderTrekDetail(t) {
         </div>
         ${ordered.map(_renderTrekMemberRow).join('')}
         <div class="trek-cli-hint">
-          招待・離脱・リーダー譲渡はターミナルから:
+          Invite, leave, or transfer leader from the terminal:
           <code>beacon trek invite ${esc(t.trek_id)} --actor &lt;email&gt;</code>
           <code>beacon trek transfer-leader ${esc(t.trek_id)} --to &lt;session-id&gt;</code>
         </div>
@@ -5011,12 +5011,11 @@ function _renderTrekDetail(t) {
       <div class="trek-section">
         <div class="trek-section-title">
           <span>ACTIVE CLAIMS</span>
-          <span class="right">ms-55 で実装予定</span>
+          <span class="right">Coming with ms-55</span>
         </div>
         <div class="trek-coming-soon">
-          claim 一覧 (= 誰が今どの work item を取り組んでいるか) は ms-55
-          (走れて止まれる両輪 — claim 交渉で半自律的に作業分担) と同時に
-          ここに出ます。
+          The claim list (= who is currently working on which work item) lands together with ms-55
+          (semi-autonomous work-splitting through claim negotiation).
         </div>
       </div>
 
@@ -5024,12 +5023,11 @@ function _renderTrekDetail(t) {
       <div class="trek-section">
         <div class="trek-section-title">
           <span>RECENT ACTIVITY</span>
-          <span class="right">e-1696 で実装予定</span>
+          <span class="right">Coming with e-1696</span>
         </div>
         <div class="trek-coming-soon">
-          trek 内の bus event ストリーム (= 招待・claim・stop・doc 更新等)
-          は Activity log doc に累積記録される予定。e-1696 が land すると
-          ここに直近 5-10 件が表示されます。
+          The bus event stream inside this trek (= invites / claims / stops / doc updates) will be
+          accumulated in the Activity log doc. Once e-1696 lands, the most recent 5-10 entries appear here.
         </div>
       </div>
 
@@ -5037,13 +5035,13 @@ function _renderTrekDetail(t) {
       <div class="trek-section">
         <div class="trek-section-title">
           <span>SUMMARIES</span>
-          <span class="right">trek 配下 ${summaryDocs.length}件 · archive 後も残る</span>
+          <span class="right">${summaryDocs.length} under this trek · kept after archive</span>
         </div>
         ${summaryDocs.length
           ? summaryDocs.map(_renderTrekSummaryRow).join('')
-          : `<div class="trek-coming-soon">trek_id 紐付けされた doc がまだありません。<br>CLI: <code>beacon doc add "title" --scope memo --trek ${esc(t.trek_id)} --content "..."</code></div>`}
+          : `<div class="trek-coming-soon">No docs linked to this trek_id yet.<br>CLI: <code>beacon doc add "title" --scope memo --trek ${esc(t.trek_id)} --content "..."</code></div>`}
         <div class="trek-cli-hint">
-          自動生成 (= 定期 cron) は e-1697 / e-1698 で実装予定。手動は:
+          Automatic generation (= scheduled cron) lands with e-1697 / e-1698. Manual:
           <code>beacon morning --trek ${esc(t.trek_id)}</code>
           <code>beacon trek summary ${esc(t.trek_id)} --period weekly</code>
         </div>
@@ -5077,10 +5075,10 @@ function renderTreksSection() {
           <span class="milestones-count">0</span>
         </div>
         <div class="retro-empty" style="margin-top:10px;">
-          このプロジェクトを scope に含む trek (= プロジェクト横断 ・ セッション横断の協奏作業領域) はまだありません。
+          No treks include this project in their scope yet (a trek is a cross-project, cross-session coordination workspace).
         </div>
         <div style="margin-top:14px;padding:10px 12px;font-size:0.72rem;color:var(--text-dim);background:var(--bg-surface);border:1px solid var(--border);border-radius:4px;line-height:1.5;">
-          ℹ trek はターミナルから作成します:
+          ℹ Treks are created from the terminal:
           <code style="display:block;margin-top:6px;color:var(--accent);">beacon trek create "title" --type persistent</code>
         </div>
       </section>`;
