@@ -225,8 +225,12 @@ import json, sys, os
 d = json.load(sys.stdin)
 me = os.environ.get('BEACON_SESSION_ID', '')
 leader = d.get('leader_session_id', '')
-peers = [m.get('session_id','') for m in (d.get('members') or [])
-         if m.get('session_id') and m.get('session_id') != me and m.get('session_id') != leader]
+# kickoff_status (= ms-88 / e-2138) は per-session map で key が session_id 直接。
+# trek_doc.members[] は user-grain (= user_id / email / role) で session_id を持たない
+# ため、 session 一覧の真値源は kickoff_status keys 側を使う。 「kickoff 完了済の
+# session」 = 「Trek 内で peer-first 動線に乗っている session」 と意味も整合。
+peers = [sid for sid in (d.get('kickoff_status') or {}).keys()
+         if sid != me and sid != leader]
 print('\n'.join(peers))
 ")
 # 1 件しかなければそれに送る、 複数なら relevant な担当の peer を AI 自己判断で 1 件選ぶ
