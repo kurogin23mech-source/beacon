@@ -4080,7 +4080,12 @@ function _renderSettingsMembersTab() {
   const isPeeking = viewedPid && viewedPid !== state.projectId;
   return `
     <div class="settings-section">
-      <div class="label">View members of ${role ? `(your role: <strong style="color:var(--accent);">${esc(role)}</strong>)` : ''}</div>
+      <div class="label">
+        View members of ${role ? `(your role: <strong style="color:var(--accent);">${esc(role)}</strong>)` : ''}
+        <span class="beacon-tooltip" data-tooltip="Switch to peek at another project's members. Closing Settings returns to your current project.">
+          <span class="beacon-tooltip-icon">?</span>
+        </span>
+      </div>
       <select id="settings-project-select" data-action="settings-switch-project"
               style="background:var(--bg-surface);border:1px solid var(--border);color:var(--text-primary);padding:6px 8px;border-radius:3px;font-family:var(--font-mono);font-size:0.78rem;width:100%;max-width:480px;">
         ${projects.length
@@ -4091,16 +4096,19 @@ function _renderSettingsMembersTab() {
             `).join('')
           : `<option value="${esc(viewedPid)}" selected>${esc(state.project ? state.project.name : viewedPid)}</option>`}
       </select>
-      <div style="font-size:0.7rem;color:var(--text-dim);margin-top:6px;">
-        ${isPeeking
-          ? '別プロジェクトのメンバーを覗いています — Settings を閉じると元のプロジェクト画面に戻ります。'
-          : (projects.length <= 1
-              ? '所属プロジェクトが 1 つだけです。招待を受けると追加で表示されます。'
-              : `${projects.length} project(s) you belong to. 他プロジェクトを選ぶとそこのメンバーを覗けます。`)}
-      </div>
+      ${isPeeking
+        ? `<div style="font-size:0.7rem;color:var(--text-dim);margin-top:6px;">Peeking at another project. Close Settings to return.</div>`
+        : (projects.length <= 1
+            ? ''
+            : `<div style="font-size:0.7rem;color:var(--text-dim);margin-top:6px;">${projects.length} projects.</div>`)}
     </div>
     <div class="settings-section">
-      <div class="label">Members</div>
+      <div class="label">
+        Members
+        <span class="beacon-tooltip" data-tooltip="Beacon project members (Web UI / CLI access). GitHub repo access is separate — manage it with 'gh repo edit --add-collaborator'.">
+          <span class="beacon-tooltip-icon">?</span>
+        </span>
+      </div>
       ${isOwner ? `
       <div class="settings-invite-row">
         <input class="email" id="settings-invite-email" placeholder="email">
@@ -4108,7 +4116,12 @@ function _renderSettingsMembersTab() {
           <option value="viewer">viewer</option>
           <option value="editor">editor</option>
         </select>
-        <button class="primary" data-action="settings-invite-member">Generate invite URL</button>
+        <button class="primary" data-action="settings-invite-member">
+          Generate invite URL
+          <span class="beacon-tooltip" data-tooltip="Invite URL is shown only once. Copy it before closing.">
+            <span class="beacon-tooltip-icon">!</span>
+          </span>
+        </button>
       </div>
       <div id="settings-invite-msg" style="font-size:0.7rem;color:var(--text-dim);margin:4px 0 10px;"></div>
       <div id="settings-invite-url-box"
@@ -4117,14 +4130,10 @@ function _renderSettingsMembersTab() {
                   border-radius:3px;font-family:var(--font-mono);font-size:0.7rem;
                   word-break:break-all;">
       </div>
-      <div style="font-size:0.65rem;color:var(--text-dim);margin:0 0 10px;line-height:1.5;">
-        ※ ここで招待するのは Beacon プロジェクトのメンバー (= Web UI / CLI でこのプロジェクトを見られる人) です。GitHub repo の collaborator 招待は Beacon の責任範囲外で、GitHub 側で別途設定してください (例: <code style="font-family:var(--font-mono);font-size:0.65rem;">gh repo edit --add-collaborator &lt;user&gt;</code>)。<br>
-        ※ 招待 URL は <strong>発行直後にしか表示されません</strong>。誘いたい相手にコピーして渡してください。
-      </div>
       <div id="settings-invitation-list" style="margin-top:6px;"></div>
       ` : `
       <div style="font-size:0.7rem;color:var(--text-dim);margin-bottom:10px;">
-        メンバー一覧は閲覧のみ可能です (= owner のみが招待 / 役割変更 / 削除を行えます)
+        View only. Only owners can invite, change roles, or remove members.
       </div>
       `}
       <div id="settings-member-list">
@@ -4139,6 +4148,11 @@ function _renderSettingsMembersTab() {
                 style="background:transparent;color:var(--text-secondary);border:1px solid var(--border);padding:6px 14px;border-radius:3px;cursor:pointer;font-family:var(--font-mono);font-size:0.75rem;">
           ${state.project && state.project.archived ? 'Unarchive' : 'Archive'}
         </button>
+        <span class="beacon-tooltip" data-tooltip="${state.project && state.project.archived
+            ? 'Currently archived. Unarchive returns it to your project list.'
+            : 'Hides this project from your project list. Reversible.'}">
+          <span class="beacon-tooltip-icon">?</span>
+        </span>
         ` : `
         <button disabled title="owner-only"
                 style="background:transparent;color:var(--text-dim);border:1px dashed var(--border-subtle);padding:6px 14px;border-radius:3px;cursor:not-allowed;font-family:var(--font-mono);font-size:0.75rem;">
@@ -4149,12 +4163,8 @@ function _renderSettingsMembersTab() {
                 style="background:transparent;color:var(--text-secondary);border:1px solid var(--border);padding:6px 14px;border-radius:3px;cursor:pointer;font-family:var(--font-mono);font-size:0.75rem;">
           Export JSON
         </button>
-        <span style="color:var(--text-dim);font-size:0.7rem;margin-left:8px;">
-          ${isOwner
-            ? (state.project && state.project.archived
-                ? '(現在 archived。Unarchive で project list に戻る)'
-                : 'Archive すると project list から隠れます。Export はその場で JSON ダウンロード。')
-            : 'Export はあなたの権限で読める範囲を JSON でダウンロードします。'}
+        <span class="beacon-tooltip" data-tooltip="Download the project state as JSON, limited to what your role can read.">
+          <span class="beacon-tooltip-icon">?</span>
         </span>
       </div>
     </div>`;
@@ -4176,9 +4186,11 @@ function _renderSettingsMembersTab() {
 function _renderSettingsAuditTab() {
   return `
     <div class="settings-section">
-      <div class="label">DM 承認履歴 (DM approval history)</div>
-      <div style="font-size:0.7rem;color:var(--text-dim);margin:4px 0 12px;line-height:1.5;">
-        他のユーザーがあなた宛 (または逆方向) に送った DM action のうち、すでに <strong>approve / deny の判断が下されたもの</strong>を新しい順に表示します。判断は terminal Claude Code の <code style="font-family:var(--font-mono);">beacon dm respond</code> で行うため、ここでは承認 / 拒否ボタンは出ません (= 監査専用の後追い参照)。pending な envelope は <code style="font-family:var(--font-mono);">/api/projects/{pid}/dm/pending</code> 経由で session-start 時に terminal へ流れます。
+      <div class="label">
+        DM approval history
+        <span class="beacon-tooltip" data-tooltip="Read-only audit of cross-user DM action decisions. Approve / deny is done in the terminal via 'beacon dm respond'. Pending envelopes are pushed to your terminal on session start.">
+          <span class="beacon-tooltip-icon">?</span>
+        </span>
       </div>
       <div id="settings-dm-approval-history">
         <div class="menu-user" style="color:var(--text-dim);">Loading approval history…</div>
@@ -4407,9 +4419,11 @@ function _renderSettingsAgentsTab() {
   };
   return `
     <div class="settings-section">
-      <div class="label" style="margin-bottom:4px;">${esc(myEmail || 'You')} の現在オンラインなセッション</div>
-      <div style="font-size:0.7rem;color:var(--text-dim);margin-bottom:14px;">
-        自分のセッションのみ表示。参加中の Trek で絞り込み、Trek から離脱はターミナルから (= beacon trek leave)
+      <div class="label" style="margin-bottom:4px;">
+        ${esc(myEmail || 'You')} — online sessions
+        <span class="beacon-tooltip" data-tooltip="Lists only your own online sessions. Filter by Trek. Leave a Trek from the terminal (beacon trek leave).">
+          <span class="beacon-tooltip-icon">?</span>
+        </span>
       </div>
       <div style="margin-bottom:12px;">
         <select id="settings-filter-trek" data-action="settings-set-filter-trek">
