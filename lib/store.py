@@ -112,6 +112,18 @@ class Store(Protocol):
         """
         ...
 
+    def get_session_log(self, session_id: str) -> dict | None:
+        """Fetch a persisted session log document by session_id, or None
+        if the backend has no record (= 404 / local 不在 / transport 失敗)。
+
+        Used by the session aggregation path so the merge-with-remote step
+        is uniform regardless of backend. LocalStore returns None
+        (= session_log subcollection is cloud-only); StoreApi calls the
+        API and translates 404 / transport failures to None so the caller
+        can just check truthiness.
+        """
+        ...
+
     def purge_milestone(self, ms_id: str, *,
                         reason: str, index: int | None = None) -> dict:
         """Hard-delete a milestone record (= 物理削除、duplicate-ID 回復用、Issue #14)。

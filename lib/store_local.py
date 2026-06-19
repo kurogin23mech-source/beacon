@@ -163,6 +163,11 @@ class LocalStore:
         """
         return []
 
+    def get_session_log(self, session_id: str) -> dict | None:
+        """No-op for local mode. The local session log cache lives next to
+        project.json and is read separately via _read_local_session_log."""
+        return None
+
     def purge_milestone(self, ms_id: str, *,
                         reason: str, index: int | None = None) -> dict:
         """Match StoreApi.purge_milestone shape, applied to the local file.

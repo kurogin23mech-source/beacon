@@ -277,6 +277,15 @@ class StoreApi:
             return []
         return [r.get("session_id") for r in rows if r.get("session_id")]
 
+    def get_session_log(self, session_id: str) -> dict | None:
+        """Fetch the persisted session log from the cloud. Returns None for
+        404 (= no entry yet) or any transport failure so the caller can
+        check truthiness instead of catching."""
+        try:
+            return self._client.get_session_log(self._project_id, session_id)
+        except (RuntimeError, ConnectionError):
+            return None
+
     def purge_milestone(self, ms_id: str, *,
                         reason: str, index: int | None = None) -> dict:
         """Match LocalStore.purge_milestone shape, applied via the cloud API.

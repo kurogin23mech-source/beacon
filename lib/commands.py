@@ -3068,25 +3068,28 @@ def _aggregate_and_persist(session_id: str, *, recovered: bool,
     data = load_project()
     existing_local = _read_local_session_log(session_id)
 
+    # ms-84 Phase 2 (e-2036): fetch any persisted remote session log via
+    # Store.get_session_log so the merge step is backend-uniform. LocalStore
+    # returns None; StoreApi returns the persisted dict (or None on 404 /
+    # transport failure). The cloud_client / cloud_pid pass-through to
+    # aggregate_session is left as a separate slice because session_log.py
+    # still talks to ApiClient directly via collect_cloud_notes; folding
+    # that into the Store interface is a follow-up commit.
+    store = get_store()
+    remote = store.get_session_log(session_id)
+    if remote and (not existing_local
+                   or remote.get("last_aggregated_at", "")
+                      >= existing_local.get("last_aggregated_at", "")):
+        existing_local = remote
+
     cloud_client = None
     cloud_pid = ""
-    if _is_cloud_mode():
+    if store.is_cloud():
         try:
             from auth import load_credentials
             if load_credentials() is not None:
                 cloud_client, cfg = _get_api_client()
                 cloud_pid = cfg.get("project_id", "")
-                try:
-                    remote = cloud_client.get_session_log(cloud_pid, session_id)
-                    # Server returns the persisted dict on success; on 404 the
-                    # api_client raises RuntimeError("API error 404: ..."), which
-                    # we treat as "no existing entry".
-                except RuntimeError:
-                    remote = None
-                if remote and (not existing_local
-                               or remote.get("last_aggregated_at", "")
-                                  >= existing_local.get("last_aggregated_at", "")):
-                    existing_local = remote
         except BaseException:
             if os.environ.get("BEACON_DEBUG") == "1":
                 import traceback as _tb
