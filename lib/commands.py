@@ -5751,6 +5751,123 @@ def cmd_trek_pulse_ack():
         )
 
 
+def cmd_trek_kickoff():
+    """Mark Kickoff Ritual completion for the calling session (ms-88 / e-2138).
+
+    Why this exists:
+    - PR #177 (= e-2138 server side) added the schema (``kickoff_status``
+      map) + endpoint (``POST /api/treks/<id>/kickoff``) + helpers
+      (``trek.mark_kickoff_completed``) but landed without a CLI wrapper.
+    - ``/beacon-trek-pulse`` Skill's Step 0.4 references
+      ``beacon trek kickoff <trek-id>`` which would have failed with
+      "command not found" — this wrapper closes that gap (= e-2139 残作業 #1,
+      leader が ownership 譲渡経由で依頼)。
+
+    Behavior:
+    - **Cloud mode**: posts to ``/api/treks/<trek-id>/kickoff`` via
+      ``client.kickoff_trek``. Server verifies caller is a trek member
+      (user-grain) and stamps. Returns the per-session entry.
+    - **Local mode**: loads trek from ``~/.beacon/treks/``, checks caller
+      is a joined member (user-grain), calls ``trek.mark_kickoff_completed``,
+      saves. Returns the same shape so callers can treat both modes the
+      same.
+
+    Env:
+      BEACON_TREK_ID                 (required)
+      BEACON_SESSION_ID              (required) — keyed in kickoff_status[]
+      BEACON_TREK_KICKOFF_DM_EVENT_ID optional — bus.send 結果の event_id
+                                     (= audit trace; '' で省略可)
+      BEACON_JSON                    "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    session_id = os.environ.get("BEACON_SESSION_ID", "").strip()
+    kickoff_dm_event_id = os.environ.get(
+        "BEACON_TREK_KICKOFF_DM_EVENT_ID", ""
+    ).strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+    if not session_id:
+        print(
+            "Error: BEACON_SESSION_ID is required "
+            "(= the session whose kickoff DM was sent)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    user_id, email, _ = _resolve_creator_identity()
+
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            entry = client.kickoff_trek(
+                trek_id,
+                session_id=session_id,
+                kickoff_dm_event_id=kickoff_dm_event_id,
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        if json_mode:
+            print(json.dumps(entry, ensure_ascii=False))
+        else:
+            sent_at = entry.get("sent_at") or "(empty)"
+            print(
+                f"Stamped trek {trek_id} kickoff for session "
+                f"{session_id} (sent_at={sent_at})"
+            )
+        return
+
+    # Local mode — same authorization rule as take-over: caller must be a
+    # joined member at the user-grain. We don't require leader role here
+    # because kickoff stamp is per-session, not a leadership transfer
+    # (any joined member can declare their plan to peers).
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    member = trek.find_member_by_email(t, email) if email else None
+    if member is None:
+        member = trek.find_member(t, user_id)
+    if member is None:
+        print(
+            f"Error: you are not a member of trek {trek_id} "
+            f"(user_id={user_id!r}, email={email!r}). kickoff stamping "
+            f"only works for joined members.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not member.get("joined_at"):
+        print(
+            f"Error: you have not joined trek {trek_id} yet "
+            f"(invitation pending). Run `beacon trek join` first.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    trek.mark_kickoff_completed(
+        t,
+        session_id=session_id,
+        user_id=user_id or "",
+        kickoff_dm_event_id=kickoff_dm_event_id,
+    )
+    trek_store.save_trek(t)
+    entry = (t.get(trek.KICKOFF_HISTORY_KEY) or {}).get(session_id) or {}
+    if json_mode:
+        print(json.dumps(entry, ensure_ascii=False))
+    else:
+        sent_at = entry.get("sent_at") or "(empty)"
+        print(
+            f"Stamped trek {trek_id} kickoff for session "
+            f"{session_id} (sent_at={sent_at})"
+        )
+
+
 def cmd_trek_take_over():
     """Take over leader_session_id for a fresh session of the same user (ms-88 / e-2089).
 
@@ -13092,6 +13209,7 @@ def cmd_help_json():
         {"command": "beacon trek resume <trek-id>", "flags": ["--json"], "description": "Clear the halt signal"},
         {"command": "beacon trek transfer-leader <trek-id> --to <session-id>", "flags": ["--json"], "description": "Hand off leader_session_id to another session"},
         {"command": "beacon trek take-over <trek-id>", "flags": ["--json"], "description": "Fresh session (= same user, leader role) を新 leader_session_id に bind し直す (= dead session 引き継ぎ、ms-88 e-2089)"},
+        {"command": "beacon trek kickoff <trek-id>", "flags": ["--session-id <sid>", "--kickoff-dm-event-id <eid>", "--json"], "description": "Kickoff Ritual の完了 stamp (= /beacon-trek-pulse Step 0.4 が叩く、 ms-88 e-2138)。 server endpoint だけ先に land した PR #177 の CLI wrapper 補完 (e-2139 残作業 #1)"},
         # ms-54 e-1266: DM channel lifecycle commands (install / uninstall / opt-out / opt-in / status)
         {"command": "beacon channel install", "flags": [], "description": "Install beacon-bus MCP entry into .mcp.json (DM channel for multi-session messaging)"},
         {"command": "beacon channel uninstall", "flags": ["--purge-files", "--keep-files"], "description": "Remove beacon-bus MCP entry; --purge-files also wipes channel/node_modules (moved to .trash/)"},
@@ -16823,6 +16941,7 @@ if __name__ == "__main__":
         "trek_resume": cmd_trek_resume,
         "trek_pulse_ack": cmd_trek_pulse_ack,
         "trek_take_over": cmd_trek_take_over,
+        "trek_kickoff": cmd_trek_kickoff,
         "trek_transfer_leader": cmd_trek_transfer_leader,
         "trek_timeline": cmd_trek_timeline,
         "version": lambda: print(f"beacon {__version__}"),
