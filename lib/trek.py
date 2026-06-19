@@ -37,6 +37,45 @@ VALID_TREK_TYPES = ("temporary", "persistent")
 VALID_TREK_STATUSES = ("planning", "active", "archived")
 VALID_MEMBER_ROLES = ("leader", "member")
 
+# ms-75 / e-2048 — Trek-internal task state machine. Independent of MS
+# task status (= todo/in_progress/done) since the Trek tracks "this task
+# is being autonomously worked on" semantics, not "this task is registered
+# in the project". A task can be MS-todo but Trek-state="working" while
+# an executor session is implementing it; can be MS-done but Trek-state=
+# "done" after the executor declares completion. The Trek state is the
+# **autonomous execution lifecycle** signal that scheduler honors:
+#   - working: scheduler keeps firing obligation DMs (= "next action required")
+#   - done: executor declared completion; scheduler stops firing for this
+#     task and emits one review-required DM to the leader. Default goal.
+#   - waiting-review: executor declared "user judgment needed beyond AI";
+#     scheduler stops firing for this task and emits one review-required
+#     DM to the leader (= leader forwards to user). Also a terminal goal.
+# When all task_states aggregate to terminal (= done or waiting-review),
+# the Trek itself becomes idle (scheduler stops, archive candidate).
+VALID_TASK_STATES = ("working", "done", "waiting-review")
+DEFAULT_TASK_STATE = "working"
+TERMINAL_TASK_STATES = ("done", "waiting-review")
+
+# ms-75 / e-2067 — server-side TTL safety net. Default 30 minutes of no
+# activity on a 'working' task triggers auto-stall to 'waiting-review' so
+# the leader gets a review DM instead of the scheduler firing forever into
+# a silent executor. The leader can re-stamp 'working' to recover from a
+# false positive (= the transition waiting-review → working is allowed in
+# VALID_TASK_STATE_TRANSITIONS). Per-trek override lives at
+# trek.meta.working_ttl_minutes.
+DEFAULT_WORKING_TTL_MINUTES = 30
+
+# Allowed transitions. Strict to prevent rogue rewrites (= a task that
+# reached "done" can only be moved back to "working" via leader review,
+# not directly to "waiting-review"). The reverse path "done → working"
+# exists so the leader can re-open a task that needs more work after
+# their review.
+VALID_TASK_STATE_TRANSITIONS = {
+    "working": ("done", "waiting-review"),
+    "done": ("working",),
+    "waiting-review": ("working",),
+}
+
 DEFAULT_STATUS = "planning"
 DEFAULT_TYPE = "persistent"
 
@@ -79,6 +118,194 @@ def validate_role(r: str) -> str:
             f"invalid trek role {r!r} — expected one of {VALID_MEMBER_ROLES}"
         )
     return r
+
+
+def validate_task_state(s: str) -> str:
+    """Validate Trek-internal task state (= ms-75 / e-2048)."""
+    if s not in VALID_TASK_STATES:
+        raise ValueError(
+            f"invalid trek task state {s!r} — expected one of {VALID_TASK_STATES}"
+        )
+    return s
+
+
+def validate_task_state_transition(from_state: str, to_state: str) -> None:
+    """Enforce the state machine transitions.
+
+    Raises ValueError when the proposed transition is not allowed by
+    VALID_TASK_STATE_TRANSITIONS. ``from_state`` of "" or None is treated
+    as the default (= "working"); this lets executors declare done in
+    one step from never-set without a prior explicit "working" stamp.
+    """
+    if not from_state:
+        from_state = DEFAULT_TASK_STATE
+    validate_task_state(from_state)
+    if from_state == to_state:
+        # No-op transition is allowed (= idempotent re-affirmation by the
+        # executor; useful for periodic state heartbeat without forcing
+        # a fake intermediate hop).
+        validate_task_state(to_state)
+        return
+    allowed = VALID_TASK_STATE_TRANSITIONS.get(from_state) or ()
+    if to_state not in allowed:
+        raise ValueError(
+            f"invalid trek task state transition {from_state!r} → {to_state!r} "
+            f"(allowed: {allowed})"
+        )
+
+
+def get_task_state(trek_doc: dict, task_id: str) -> str:
+    """Return the Trek-internal state for ``task_id``, default 'working'.
+
+    Untracked tasks (= no entry in trek_doc.task_states) collapse to the
+    default. This means a newly-added scope task starts in 'working'
+    implicitly; explicit state writes via ``set_task_state`` only happen
+    when the executor declares a transition.
+    """
+    states = trek_doc.get("task_states") or {}
+    entry = states.get(task_id) or {}
+    return entry.get("state") or DEFAULT_TASK_STATE
+
+
+def set_task_state(trek_doc: dict, *, task_id: str, state: str,
+                   updated_by_session_id: str = "",
+                   note: str = "") -> dict:
+    """Mutate ``trek_doc.task_states[task_id]`` after validating transition.
+
+    Returns the mutated trek_doc (= chained writes friendly). The caller
+    is responsible for persisting the document (= db.save_trek). A note
+    is recorded if supplied (= helps the leader's review judgment).
+
+    ``last_activity_at`` (= ms-75 / e-2067) is stamped to the same moment
+    as ``updated_at``; this is the field the auto-stall scheduler reads to
+    detect "working" tasks that have gone silent past the TTL. State stamp
+    is one of the three documented activity sources (state stamp / commit /
+    DM receipt) — see ``bump_task_activity`` for the non-state-change path.
+
+    Raises ValueError if the transition is not allowed.
+    """
+    if not task_id:
+        raise ValueError("task_id is required")
+    validate_task_state(state)
+    current = get_task_state(trek_doc, task_id)
+    validate_task_state_transition(current, state)
+    states = trek_doc.setdefault("task_states", {})
+    now = utcnow_iso()
+    states[task_id] = {
+        "state": state,
+        "updated_at": now,
+        "updated_by_session_id": updated_by_session_id or "",
+        "note": (note or "")[:500],
+        "last_activity_at": now,
+    }
+    trek_doc["updated_at"] = now
+    return trek_doc
+
+
+def bump_task_activity(trek_doc: dict, *, task_id: str,
+                       reason: str = "") -> dict:
+    """Refresh ``last_activity_at`` on a task without changing its state.
+
+    Called from non-state-change activity sources (= ms-75 / e-2067 AC 1:
+    "state stamp / commit / DM 受信で update"). Concretely:
+      * a commit lands on a trek-scoped task → bump
+      * a DM addressed to the trek's executor arrives → bump
+
+    If the task has no entry in ``task_states`` yet (= executor never
+    stamped), we initialise it to the default state with the same
+    ``last_activity_at`` so the next scheduler tick treats the task as
+    "just heard from" rather than dead. This means commits / DMs alone
+    can keep a task off the auto-stall radar even before the executor
+    has formally declared a state.
+
+    Returns the mutated trek_doc. Caller persists.
+    """
+    if not task_id:
+        raise ValueError("task_id is required")
+    states = trek_doc.setdefault("task_states", {})
+    now = utcnow_iso()
+    entry = states.get(task_id)
+    if not entry:
+        entry = {
+            "state": DEFAULT_TASK_STATE,
+            "updated_at": now,
+            "updated_by_session_id": "",
+            "note": "",
+        }
+    entry["last_activity_at"] = now
+    if reason:
+        entry["last_activity_reason"] = reason[:80]
+    states[task_id] = entry
+    trek_doc["updated_at"] = now
+    return trek_doc
+
+
+def get_working_ttl_minutes(trek_doc: dict,
+                            default: int = DEFAULT_WORKING_TTL_MINUTES) -> int:
+    """Return the working-state TTL in minutes (= meta override or default).
+
+    Per ms-75 / e-2067 AC 6: per-trek override at ``trek.meta.
+    working_ttl_minutes``. Non-numeric or missing values fall back to the
+    SPEC default (30 minutes), which gives an executor three full cadence
+    windows (= cadence 10 × 3) of silence before the safety net fires.
+    """
+    meta = trek_doc.get("meta") or {}
+    val = meta.get("working_ttl_minutes")
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return default
+
+
+def aggregate_task_state(trek_doc: dict, *, task_ids: list[str]) -> dict:
+    """Summarise Trek state across the given task IDs.
+
+    Returns a dict with counts per state + overall classification:
+
+        {"working": N, "done": M, "waiting-review": K, "total": T,
+         "overall": "active" | "all-done" | "all-waiting-review" |
+                    "all-terminal-mixed" | "empty"}
+
+    "active": at least one task is 'working' — scheduler keeps firing.
+    "all-done": all tasks reached 'done' — Trek complete, archive candidate.
+    "all-waiting-review": all tasks waiting for human review — Trek paused
+        pending external decision.
+    "all-terminal-mixed": all tasks terminal but mix of done + waiting —
+        Trek paused, leader sees both outcomes.
+    "empty": no task IDs supplied (= scope is empty / no scope tasks
+        registered). Scheduler treats as the pre-existing "scope empty"
+        message, not as terminal.
+
+    Untracked task IDs collapse to 'working' (= the default), so a fresh
+    task added to scope keeps the Trek "active" until an executor stamps
+    a terminal state.
+    """
+    counts = {s: 0 for s in VALID_TASK_STATES}
+    total = 0
+    for tid in task_ids:
+        if not tid:
+            continue
+        total += 1
+        counts[get_task_state(trek_doc, tid)] += 1
+    if total == 0:
+        overall = "empty"
+    elif counts["working"] > 0:
+        overall = "active"
+    elif counts["done"] == total:
+        overall = "all-done"
+    elif counts["waiting-review"] == total:
+        overall = "all-waiting-review"
+    else:
+        overall = "all-terminal-mixed"
+    return {
+        "working": counts["working"],
+        "done": counts["done"],
+        "waiting-review": counts["waiting-review"],
+        "total": total,
+        "overall": overall,
+    }
 
 
 def build_actor_ref(*, user_id: str, email: str) -> dict:
@@ -151,6 +378,16 @@ def normalize_scope_entry(entry: dict) -> dict:
     return out
 
 
+DEFAULT_CADENCE_MINUTES = 10
+"""ms-83 (= server-side execution continuity / e-1994): default cadence
+(= the periodic "next, please" DM interval) in minutes when ``cadence_minutes``
+is not set on a trek. 10 minutes balances responsiveness against bus volume.
+
+Stored on ``trek.meta.cadence_minutes`` as an ``int`` (or ``None`` if the
+trek operator hasn't set one — the scheduler treats None as the default).
+"""
+
+
 def new_trek(*,
              title: str,
              creator_user_id: str,
@@ -158,7 +395,10 @@ def new_trek(*,
              creator_session_id: str,
              description: str = "",
              type_: str = DEFAULT_TYPE,
-             initial_scope: Iterable[dict] | None = None) -> dict:
+             initial_scope: Iterable[dict] | None = None,
+             goal_state: str = "",
+             cadence_minutes: int | None = None,
+             manager_agent_url: str = "") -> dict:
     """Build a fresh trek doc (= not yet persisted, no I/O).
 
     The creator is:
@@ -172,6 +412,25 @@ def new_trek(*,
     Status starts at ``planning`` so the caller can stage scope / invites
     before any session joins. ``halt`` starts None — STOP / resume toggle
     it without changing status (SPEC 方針 2).
+
+    ``goal_state`` (ms-75 / e-1865) is a free-form acceptance criterion
+    describing "what completion looks like" for this trek. Optional —
+    if empty, the trek's end is decided by the leader's manual archive,
+    matching previous behaviour. When non-empty, ``beacon trek show``
+    surfaces it so members share a common completion signal, and the
+    leader can confidently archive once the criterion is met.
+
+    ``cadence_minutes`` (ms-83 / e-1994) sets how often the server-side
+    scheduler (= the loop that fires "next, please" progress-check DMs
+    into the trek's claimed session) should wake this trek. ``None`` =
+    default 10 minutes (scheduler honours ``DEFAULT_CADENCE_MINUTES``).
+    Stored on ``meta`` so the on-disk shape stays orthogonal to
+    structural fields (= status / members / scope).
+
+    ``manager_agent_url`` (ms-83 / e-1994) is a schema reservation for
+    a future "manager AI" agent endpoint that decides cadence and DM
+    body in place of the built-in template. Always optional in this
+    MS — the value is recorded but no consumer reads it yet.
     """
     if not title.strip():
         raise ValueError("trek title is required")
@@ -181,6 +440,8 @@ def new_trek(*,
             "the trek becomes its initial leader; SPEC 方針 9)"
         )
     validate_type(type_)
+    if cadence_minutes is not None:
+        _validate_cadence_minutes(cadence_minutes)
     now = utcnow_iso()
     creator_actor = build_actor_ref(
         user_id=creator_user_id, email=creator_email
@@ -191,6 +452,12 @@ def new_trek(*,
         invited_by=creator_user_id,
     )
     scope = [normalize_scope_entry(s) for s in (initial_scope or [])]
+    meta: dict = {}
+    if cadence_minutes is not None:
+        meta["cadence_minutes"] = int(cadence_minutes)
+    url = (manager_agent_url or "").strip()
+    if url:
+        meta["manager_agent_url"] = url
     return {
         "trek_id": mint_trek_id(),
         "title": title.strip(),
@@ -202,10 +469,103 @@ def new_trek(*,
         "members": [leader_member],
         "scope": scope,
         "halt": None,
+        "goal_state": (goal_state or "").strip(),
+        "meta": meta,
+        "task_states": {},
         "created_at": now,
         "updated_at": now,
         "archived_at": None,
     }
+
+
+def _validate_cadence_minutes(value: int) -> None:
+    """Cadence must be a positive int (= no boolean coercion, no zero).
+
+    Zero would burn the bus by firing every server tick; negative makes
+    no sense. ms-83 / e-1994.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(
+            f"cadence_minutes must be int, got {type(value).__name__}"
+        )
+    if value <= 0:
+        raise ValueError(
+            f"cadence_minutes must be > 0, got {value}"
+        )
+
+
+def get_cadence_minutes(trek_doc: dict) -> int:
+    """Return effective cadence for this trek (= falls back to default).
+
+    Used by the server-side scheduler (= the loop that fires periodic
+    progress-check DMs, ms-83 / e-1997). Decoupling the read from the
+    field name lets callers stay ignorant of the meta location, and the
+    default switch (= ``DEFAULT_CADENCE_MINUTES``) lives in one place.
+    """
+    meta = trek_doc.get("meta") or {}
+    val = meta.get("cadence_minutes")
+    if val is None:
+        return DEFAULT_CADENCE_MINUTES
+    return int(val)
+
+
+def set_cadence_minutes(trek_doc: dict, *,
+                        cadence_minutes: int | None) -> dict:
+    """Set or clear ``meta.cadence_minutes`` on an existing trek (ms-83 / e-1994).
+
+    ``None`` clears the field (= scheduler falls back to default).
+    Idempotent: re-setting the same value is a no-op so fixtures and
+    Skill retries don't churn ``updated_at`` (= mirrors ``set_goal_state``).
+    """
+    meta = trek_doc.setdefault("meta", {})
+    current = meta.get("cadence_minutes")
+    if cadence_minutes is None:
+        if current is None:
+            return trek_doc
+        meta.pop("cadence_minutes", None)
+    else:
+        _validate_cadence_minutes(cadence_minutes)
+        if current == int(cadence_minutes):
+            return trek_doc
+        meta["cadence_minutes"] = int(cadence_minutes)
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
+
+
+def set_manager_agent_url(trek_doc: dict, *,
+                          manager_agent_url: str) -> dict:
+    """Set or clear ``meta.manager_agent_url`` on an existing trek (ms-83 / e-1994).
+
+    Empty string clears the field. Idempotent: re-setting the same value
+    is a no-op. The URL is a **schema reservation** in this MS — no
+    consumer reads it yet, so this setter is the only forward edge.
+    """
+    meta = trek_doc.setdefault("meta", {})
+    current = meta.get("manager_agent_url", "")
+    new_val = (manager_agent_url or "").strip()
+    if new_val == current:
+        return trek_doc
+    if new_val:
+        meta["manager_agent_url"] = new_val
+    else:
+        meta.pop("manager_agent_url", None)
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
+
+
+def set_goal_state(trek_doc: dict, *, goal_state: str) -> dict:
+    """Set or update ``goal_state`` on an existing trek (ms-75 / e-1865).
+
+    Empty string clears the field (= back to "leader decides when done").
+    Idempotent: re-setting the same value is a no-op (no updated_at bump)
+    so test fixtures and Skill retries don't churn the modification time.
+    """
+    new_val = (goal_state or "").strip()
+    if trek_doc.get("goal_state", "") == new_val:
+        return trek_doc
+    trek_doc["goal_state"] = new_val
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
 
 
 # Lifecycle transition rules (= server / CLI enforce on state changes).

@@ -105,6 +105,21 @@ cd "$PROJECT_DIR" && beacon operation envelope verify <op-id> "<action>" --json
 - 終了コード 1 = scope 外。**実行せず**、後で人間にエスカレーション (Step 6)。
 - 終了コード 2 = 仕組み側のエラー (auth / cloud / op id)。停止して人間レビューに送る。
 
+### 4.1 外部送信 action は disclosure gate × tier の AND check 必須 (= ms-76 / ms-63 統合)
+
+action が **外部送信を含む** 場合 (= 別 project への DM / Slack post / Discord notify / メール送信 等)、envelope verify (Step 4) に **加えて** ms-63 disclosure gate (= 受信側応答の機密フィルタ) の通過が必須。これは CORE doc `QvyVwRU8otQEn5iMfP36` (= AI 自律 action の envelope tier framework) の action × tier matrix に基づく構造的禁止帯。
+
+**重要**: disclosure gate は server-side envelope verify pipeline (= `server/envelope.py` の `_payload_disclosure_ok`) に既に組み込まれており、`beacon bus send` 経由で外部送信する payload は自動的に gate を通る。Skill 側で gate を bypass する経路 (= 直接 HTTP / 他 CLI 経由の送信) は使わない。
+
+判定手順:
+
+1. action が外部送信を含むか? (= verb が `notify` / `post` / `send` / `dm` / `slack` / `discord` 等)
+2. 含む場合: SPEC の Tier 要件章で「外部送信 action: yes」 と明示宣言されているか確認
+3. 宣言されていなければ scope 外として Step 6 に escalate (= autonomous で外部送信しない)
+4. 宣言されている場合: `beacon bus send` 経由で送信、server-side gate が disclosure policy × tier の AND check を行う。gate に拒否されたら server がレスポンスで refuse、Skill は incident 起票して停止
+
+CORE doc 参照: `QvyVwRU8otQEn5iMfP36` の DM 受信側自律応答ルール + 構造的禁止帯。ms-63 disclosure_contract は envelope mint 時に baked-in されるため、AI が envelope 取得後に contract を改竄する経路は存在しない (= 物理的に塞がれている)。
+
 action 表記は SPEC の `approved_actions` と同じ syntax で書く (`<verb>:<subject>[:<qualifier>]`)。例:
 
 - 「user-123 の profile を抽出」→ `extract:profile:user-123`

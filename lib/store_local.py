@@ -12,6 +12,38 @@ import os
 from _file_lock import lock_exclusive, lock_shared, unlock
 
 
+def _read_frontmatter(text: str) -> tuple[dict, str]:
+    """Minimal YAML-like frontmatter parser for document files.
+
+    Returns ``(metadata_dict, body_text)``. Handles only the single-line
+    ``key: value`` form used by ``.beacon/documents/*.md`` (scope /
+    milestone / operation / trek_id / status / trashed_*); inline / block
+    list values are ignored (= not used by document frontmatter). Kept
+    inline here to avoid importing ``commands._parse_frontmatter`` and
+    creating a circular dependency. The richer parser in commands.py
+    handles complex envelope frontmatter; documents are simple key:value.
+    """
+    if not text.startswith("---"):
+        return {}, text
+    end = text.find("\n---", 3)
+    if end == -1:
+        return {}, text
+    header = text[4:end]
+    body = text[end + 4:].lstrip("\n")
+    meta: dict = {}
+    for line in header.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if ":" not in stripped:
+            continue
+        key, val = stripped.split(":", 1)
+        val = val.strip()
+        if val:
+            meta[key.strip()] = val
+    return meta, body
+
+
 class LocalStore:
     """Store implementation backed by a local JSON file."""
 
@@ -60,7 +92,15 @@ class LocalStore:
         return False
 
     def list_documents(self) -> list:
-        """List documents from local .beacon/documents/."""
+        """List documents from local .beacon/documents/.
+
+        Returns entries matching the cloud API shape so the CLI does not
+        branch on backend (= ms-84 Phase 2 受入条件 10、 _read_local_doc が
+        commands.py に持っていた parse 経路の Store 化)。 各 entry は
+        doc_id / title / scope plus optional milestone / operation /
+        trek_id / status / trashed_at / trashed_by / trash_reason /
+        updated_at を持つ。
+        """
         import glob as g
         doc_dir = os.path.join(os.path.dirname(self._project_file), "documents")
         if not os.path.isdir(doc_dir):
@@ -69,52 +109,228 @@ class LocalStore:
         for fpath in sorted(g.glob(os.path.join(doc_dir, "*.md"))):
             fname = os.path.basename(fpath)
             doc_id = fname[:-3]
-            scope, title, milestone = "memo", doc_id, ""
             try:
                 with open(fpath, "r", encoding="utf-8") as f:
                     raw = f.read()
-                # Parse frontmatter
-                if raw.startswith("---"):
-                    parts = raw.split("---", 2)
-                    if len(parts) >= 3:
-                        for line in parts[1].strip().splitlines():
-                            if line.startswith("scope:"):
-                                scope = line.split(":", 1)[1].strip()
-                            elif line.startswith("milestone:"):
-                                milestone = line.split(":", 1)[1].strip()
-                        body = parts[2]
-                    else:
-                        body = raw
-                else:
-                    body = raw
-                for line in body.strip().splitlines():
-                    if line.startswith("# "):
-                        title = line[2:].strip()
-                        break
             except (IOError, UnicodeDecodeError):
-                pass
-            entry = {"doc_id": doc_id, "title": title, "scope": scope}
-            if milestone:
-                entry["milestone"] = milestone
+                continue
+            meta, body = _read_frontmatter(raw)
+            scope = meta.get("scope", "memo")
+            title = doc_id
+            for line in body.strip().splitlines():
+                line = line.strip()
+                if line.startswith("# "):
+                    title = line[2:].strip()
+                    break
+                if line:
+                    break
+            try:
+                import datetime
+                stat = os.stat(fpath)
+                updated_at = datetime.datetime.fromtimestamp(stat.st_mtime).isoformat()
+            except OSError:
+                updated_at = ""
+            entry = {
+                "doc_id": doc_id,
+                "title": title,
+                "scope": scope,
+                "updated_at": updated_at,
+            }
+            for k in ("milestone", "operation", "trek_id", "status",
+                      "trashed_at", "trashed_by", "trash_reason"):
+                if meta.get(k):
+                    entry[k] = meta[k]
             results.append(entry)
         return results
 
     def get_document(self, doc_id: str) -> dict:
-        """Get a single document from local .beacon/documents/."""
+        """Get a single document from local .beacon/documents/.
+
+        Returns full parsed shape (doc_id / title / scope / content /
+        updated_at plus optional milestone / operation / trek_id /
+        status / trashed_*) matching the cloud GET /documents/{id} shape
+        so the CLI does not branch on backend.
+        """
         doc_dir = os.path.join(os.path.dirname(self._project_file), "documents")
         fpath = os.path.join(doc_dir, f"{doc_id}.md")
         try:
             with open(fpath, "r", encoding="utf-8") as f:
                 content = f.read()
-            return {"doc_id": doc_id, "content": content}
         except (FileNotFoundError, IOError):
             return {}
+        meta, body = _read_frontmatter(content)
+        title = doc_id
+        for line in body.strip().splitlines():
+            line = line.strip()
+            if line.startswith("# "):
+                title = line[2:].strip()
+                break
+            if line:
+                break
+        try:
+            import datetime
+            stat = os.stat(fpath)
+            updated_at = datetime.datetime.fromtimestamp(stat.st_mtime).isoformat()
+        except OSError:
+            updated_at = ""
+        result = {
+            "doc_id": doc_id,
+            "title": title,
+            "scope": meta.get("scope", "memo"),
+            "content": content,
+            "updated_at": updated_at,
+        }
+        for k in ("milestone", "operation", "trek_id", "status",
+                  "trashed_at", "trashed_by", "trash_reason"):
+            if meta.get(k):
+                result[k] = meta[k]
+        return result
+
+    def list_treks(self, *, actor_id: str | None = None,
+                   status: str = "", include_archived: bool = False,
+                   all_actors: bool = False) -> list[dict]:
+        """List trek docs from the local trek_store directory.
+
+        ``all_actors`` is honored by the cloud backend (= admin view) and
+        ignored locally because there is no remote registry to broaden
+        beyond the actor filter.
+        """
+        import trek_store
+        return trek_store.list_treks(
+            actor_id=actor_id,
+            status=status or None,
+            include_archived=include_archived,
+        )
+
+    def get_trek(self, trek_id: str) -> dict:
+        """Load a trek doc from the local trek_store directory.
+
+        Raises ``ValueError`` when the trek is unknown so the CLI side
+        can show the same ``trek '<id>' not found`` message regardless
+        of backend (= matches StoreApi.get_trek contract)。
+        """
+        import trek_store
+        doc = trek_store.load_trek(trek_id)
+        if doc is None:
+            raise ValueError(f"trek '{trek_id}' not found")
+        return doc
 
     def start_watching(self) -> None:
         pass
 
     def stop_watching(self) -> None:
         pass
+
+    # ms-84 Phase 2 — fine-grained mutation (purge family)
+
+    def purge_entry(self, entry_id: str, *,
+                    reason: str, index: int | None = None) -> dict:
+        """Match StoreApi.purge_entry shape, applied to the local file."""
+        import core
+        data = self.load_project()
+        purged = core.entry_purge(data, entry_id, reason=reason, index=index)
+        dup_report = core.find_duplicate_ids(data)
+        self.save_project(data)
+        return {
+            "purged": purged,
+            "still_dirty": any(dup_report.values()),
+            "dup_report": dup_report,
+        }
+
+    def purge_operation(self, op_id: str, *,
+                        reason: str, index: int | None = None) -> dict:
+        """Match StoreApi.purge_operation shape, applied to the local file."""
+        import core
+        data = self.load_project()
+        purged = core.operation_purge(data, op_id, reason=reason, index=index)
+        dup_report = core.find_duplicate_ids(data)
+        self.save_project(data)
+        return {
+            "purged": purged,
+            "still_dirty": any(dup_report.values()),
+            "dup_report": dup_report,
+        }
+
+    def upsert_session_log(self, session_id: str, body: dict) -> bool:
+        """No-op for local mode (= session log cloud subcollection 不在)。
+
+        The local cache is written separately via
+        ``commands._write_local_session_log``; this method exists for API
+        symmetry with StoreApi so the CLI caller does not need to branch.
+        """
+        return False
+
+    def list_session_ids(self) -> list[str]:
+        """No-op for local mode (= remote session registry 不在)。
+
+        Returns ``[]`` so the caller can do an unconditional set-union with
+        locally-known ids.
+        """
+        return []
+
+    def get_session_log(self, session_id: str) -> dict | None:
+        """No-op for local mode. The local session log cache lives next to
+        project.json and is read separately via _read_local_session_log."""
+        return None
+
+    def list_session_logs(self, limit: int = 0) -> list[dict]:
+        """No-op for local mode. The CLI walks the local
+        ``.beacon/session_logs/`` directory directly because the on-disk
+        layout (= one file per session) does not match the cloud row shape."""
+        return []
+
+    def purge_milestone(self, ms_id: str, *,
+                        reason: str, index: int | None = None) -> dict:
+        """Match StoreApi.purge_milestone shape, applied to the local file.
+
+        Wraps ``core.milestone_purge`` (= the actual mutation) with the
+        load / save book-keeping that cmd_milestone_purge previously had
+        inline. ``save_project`` is the bare file-write path that does not
+        run ``validate_project`` — purge intentionally has to function on
+        a project document that is already invalid (= the recovery flow's
+        whole purpose), and the still-dirty case is surfaced in the return
+        value so the CLI can warn without an extra retry path.
+        """
+        import core
+        data = self.load_project()
+        purged = core.milestone_purge(data, ms_id, reason=reason, index=index)
+        dup_report = core.find_duplicate_ids(data)
+        still_dirty = any(dup_report.values())
+        self.save_project(data)
+        return {
+            "purged": purged,
+            "still_dirty": still_dirty,
+            "dup_report": dup_report,
+        }
+
+    # ms-84 Phase 1 — fine-grained reads
+
+    def get_milestone(self, ms_id: str) -> dict:
+        """Match StoreApi.get_milestone shape, sourced from the local file."""
+        import core
+        data = self.load_project()
+        matches = core.find_milestones(data, ms_id)
+        if not matches:
+            raise ValueError(f"Milestone '{ms_id}' not found")
+        ms = matches[0]
+        entries = ms.get("entries", []) or []
+        total, done = core.count_task_status(entries)
+        return {
+            **ms,
+            "total_tasks": total,
+            "done_tasks": done,
+            "entries": core.entries_to_json(entries),
+        }
+
+    # ms-84 Phase 2 — trek read passthrough.
+
+    def get_trek(self, trek_id: str) -> dict:
+        """Match StoreApi.get_trek shape, sourced from the local trek store."""
+        import trek_store
+        t = trek_store.load_trek(trek_id)
+        if t is None:
+            raise ValueError(f"trek '{trek_id}' not found")
+        return t
 
     def _file_hash(self) -> str | None:
         try:

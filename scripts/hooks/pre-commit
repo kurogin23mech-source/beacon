@@ -98,6 +98,29 @@ if echo "$STAGED" | grep -qE "^desktop/src-tauri/(Cargo\.toml|src/|tauri\.conf\.
 fi
 
 # ==============================================================================
+# Check 5a: Deprecated CLI verb in skill markdown (added 2026-06-18, ms-81 e-1920)
+# ==============================================================================
+# Skills should call `beacon milestone start` rather than the deprecated
+# `beacon milestone workspace` verb so status / assignee / occupation /
+# worktree always activate atomically. Warn-only; `workspace-cleanup`
+# (the unrelated lifecycle verb) is kept legitimate via the exclusion.
+if echo "$STAGED" | grep -qE "^skills/.*\.md$"; then
+  HITS=""
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    matched=$(grep -nE "beacon milestone workspace([^-]|$)" "$f" 2>/dev/null || true)
+    if [ -n "$matched" ]; then
+      HITS="$HITS\n$f:\n$matched"
+    fi
+  done < <(echo "$STAGED" | grep -E "^skills/.*\.md$")
+  if [ -n "$HITS" ]; then
+    echo "[pre-commit] [ms-81 skill-deprecated-verb] Skills reference deprecated 'beacon milestone workspace':"
+    echo -e "$HITS" | sed 's/^/[pre-commit]   /'
+    echo "[pre-commit]   Switch to 'beacon milestone start <ms-id>' so status / assignee / occupation / worktree activate together (e-1920)."
+  fi
+fi
+
+# ==============================================================================
 # Check 5: Skill drift detection (added 2026-06-02, ms-10 e-722)
 # ==============================================================================
 # Any change under skills/ should be mirrored into ~/.claude/skills/ via
@@ -155,6 +178,21 @@ fi
 if echo "$STAGED" | grep -q "^INSTALL\.md$"; then
   if [ -f scripts/check-install-md.py ]; then
     python3 scripts/check-install-md.py 2>&1 | sed 's/^/[pre-commit] /' || true
+  fi
+fi
+
+# ==============================================================================
+# Check 8a: UI text Japanese grep gate (added 2026-06-19, ms-82 e-1978)
+# ==============================================================================
+# Warn (do NOT block) when staged changes to server/static/index.html or
+# desktop/layer.js contain Japanese characters outside developer comments.
+# Goal: catch English-ization regressions early. BEACON_SKIP_UI_JP_CHECK=1
+# silences the check.
+if [ "${BEACON_SKIP_UI_JP_CHECK:-0}" != "1" ]; then
+  if echo "$STAGED" | grep -qE "^(server/static/index\.html|desktop/layer\.js)$"; then
+    if [ -f scripts/check-ui-japanese-text.py ]; then
+      python3 scripts/check-ui-japanese-text.py 2>&1 | sed 's/^/[pre-commit] /' || true
+    fi
   fi
 fi
 

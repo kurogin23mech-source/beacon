@@ -181,3 +181,158 @@ def test_content_mentions_budget_degradation_path():
     })
     assert "budget" in out
     assert "Skill" in out
+
+
+# -----------------------------------------------------------------------------
+# Trek channels (ms-75 / e-2069): hardcoded CHANNEL_TO_SKILL mapping so the
+# MCP push route directly emits a "launch /beacon-trek-execute" or
+# "launch /beacon-trek-review" imperative without AI interpretation.
+# -----------------------------------------------------------------------------
+
+
+def _probe_channel_to_skill(channel: str) -> str | None:
+    script = textwrap.dedent(f"""
+        import {{ CHANNEL_TO_SKILL }} from '{HELPER_MJS.as_posix()}'
+        const out = CHANNEL_TO_SKILL[process.argv[1]] || null
+        process.stdout.write(JSON.stringify({{ out }}))
+    """)
+    proc = subprocess.run(
+        ["node", "--input-type=module", "-e", script, "--", channel],
+        capture_output=True, text=True, timeout=30,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"node probe failed (rc={proc.returncode}): "
+            f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+        )
+    return json.loads(proc.stdout)["out"]
+
+
+def test_channel_to_skill_mapping_covers_operation_and_trek_channels():
+    assert _probe_channel_to_skill("operation-trigger") == "/beacon-operation-execute"
+    assert _probe_channel_to_skill("trek-progress-check") == "/beacon-trek-execute"
+    assert _probe_channel_to_skill("trek-trigger") == "/beacon-trek-execute"
+    assert _probe_channel_to_skill("trek-task-review") == "/beacon-trek-review"
+
+
+def test_channel_to_skill_returns_null_for_unmapped_channel():
+    assert _probe_channel_to_skill("dm") is None
+    assert _probe_channel_to_skill("unknown-channel") is None
+
+
+def test_gate_passes_for_trek_progress_check_auto_execute():
+    assert _probe_gate("trek-progress-check", "auto-execute", False) is True
+
+
+def test_gate_passes_for_trek_trigger_auto_execute():
+    assert _probe_gate("trek-trigger", "auto-execute", False) is True
+
+
+def test_gate_passes_for_trek_task_review_auto_execute():
+    assert _probe_gate("trek-task-review", "auto-execute", False) is True
+
+
+def test_gate_blocks_trek_channel_with_non_auto_execute_delivery():
+    """Trek channels still require auto-execute delivery; a propose-to-ai
+    trek event must defer to the user, not silently launch the Skill."""
+    assert _probe_gate("trek-progress-check", "propose-to-ai", False) is False
+    assert _probe_gate("trek-task-review", "notify-user-only", False) is False
+
+
+def test_gate_blocks_all_trek_channels_when_opt_out_env_set():
+    """The opt-out env var must disable trek auto-launch the same way it
+    disables operation auto-launch, so rollback paths are uniform."""
+    assert _probe_gate("trek-progress-check", "auto-execute", True) is False
+    assert _probe_gate("trek-trigger", "auto-execute", True) is False
+    assert _probe_gate("trek-task-review", "auto-execute", True) is False
+
+
+def test_trek_progress_check_content_carries_launch_directive():
+    out = _probe_content({
+        "event_id": "evt-trek-1",
+        "channel": "trek-progress-check",
+        "payload": {
+            "trek_id": "tk-abc",
+            "trigger_name": "trek_progress_tk-abc",
+        },
+    })
+    assert "## TREK ACTION" in out
+    assert "Run this autonomously without asking the user first." in out
+    assert "/beacon-trek-execute tk-abc" in out
+    assert "no confirmation prompt" in out
+    assert "trek_id: tk-abc" in out
+    assert "trigger_name: trek_progress_tk-abc" in out
+
+
+def test_trek_trigger_content_uses_same_executor_skill():
+    """trek-trigger and trek-progress-check both route to /beacon-trek-execute
+    so executors invoked by either path enter the same flow."""
+    out = _probe_content({
+        "event_id": "evt-trek-2",
+        "channel": "trek-trigger",
+        "payload": {"trek_id": "tk-xyz"},
+    })
+    assert "## TREK ACTION" in out
+    assert "/beacon-trek-execute tk-xyz" in out
+
+
+def test_trek_task_review_content_carries_picker_directive():
+    """trek-task-review routes to /beacon-trek-review with the trek_id +
+    task_id positional args, matching the Skill's invocation contract."""
+    out = _probe_content({
+        "event_id": "evt-trek-3",
+        "channel": "trek-task-review",
+        "payload": {
+            "trek_id": "tk-abc",
+            "task_id": "e-2048",
+            "state": "waiting-review",
+            "note": "implementation chunk done, leader review needed",
+        },
+    })
+    assert "## TREK ACTION — trek task review required" in out
+    assert "/beacon-trek-review tk-abc e-2048" in out
+    assert "approve / re-work / forward-to-user" in out
+    assert "task_id: e-2048" in out
+    assert "state: waiting-review" in out
+    # Executor note must be preserved (truncated only if long).
+    assert "implementation chunk done" in out
+
+
+def test_trek_task_review_content_truncates_long_executor_note():
+    long_note = "x" * 300
+    out = _probe_content({
+        "event_id": "evt-trek-4",
+        "channel": "trek-task-review",
+        "payload": {
+            "trek_id": "tk-1",
+            "task_id": "e-1",
+            "state": "done",
+            "note": long_note,
+        },
+    })
+    # 200-char cap with ellipsis matches the bus.mjs cap on free-form text.
+    assert "x" * 200 + "…" in out
+    assert "x" * 201 not in out
+
+
+def test_trek_content_defaults_to_question_mark_when_payload_empty():
+    out = _probe_content({
+        "event_id": "evt-trek-5",
+        "channel": "trek-progress-check",
+        "payload": {},
+    })
+    assert "trek_id: ?" in out
+    assert "/beacon-trek-execute ?" in out
+
+
+def test_unknown_channel_falls_back_to_operation_format():
+    """For backward compatibility, an event without a recognised channel
+    (e.g. a legacy operation-trigger event with no channel field) still
+    produces the operation imperative — this avoids breaking existing
+    operation-trigger flows during the rollout."""
+    out = _probe_content({
+        "event_id": "evt-legacy",
+        "payload": {"op_id": "op-1"},
+    })
+    assert "## AUTONOMOUS ACTION" in out
+    assert "/beacon-operation-execute op-1" in out

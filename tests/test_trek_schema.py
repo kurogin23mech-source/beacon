@@ -272,3 +272,464 @@ def test_validate_transition_rejects_invalid_states():
         trek.validate_transition("unknown", "active")
     with pytest.raises(ValueError):
         trek.validate_transition("active", "closed")
+
+
+# ---------------------------------------------------------------------------
+# goal_state (ms-75 / e-1865)
+# ---------------------------------------------------------------------------
+
+def test_new_trek_goal_state_defaults_to_empty():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+    )
+    # Field is always present so consumers can branch on "" without
+    # KeyError. Empty = "leader decides", matching pre-e-1865 behaviour.
+    assert t["goal_state"] == ""
+
+
+def test_new_trek_with_goal_state():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+        goal_state="customer profile diff < 1% across both projects",
+    )
+    assert t["goal_state"] == \
+        "customer profile diff < 1% across both projects"
+
+
+def test_set_goal_state_updates_value_and_bumps_updated_at():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+    )
+    prior_updated = t["updated_at"]
+    # ensure now() advances to a different microsecond
+    import time
+    time.sleep(0.001)
+    out = trek.set_goal_state(t, goal_state="ship release v1.0")
+    assert out["goal_state"] == "ship release v1.0"
+    assert out["updated_at"] >= prior_updated
+
+
+def test_set_goal_state_idempotent_no_op():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+        goal_state="same value",
+    )
+    prior_updated = t["updated_at"]
+    out = trek.set_goal_state(t, goal_state="same value")
+    # No mutation when value is unchanged — keeps fixtures stable.
+    assert out["updated_at"] == prior_updated
+
+
+def test_set_goal_state_clear_via_empty_string():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+        goal_state="something",
+    )
+    trek.set_goal_state(t, goal_state="")
+    assert t["goal_state"] == ""
+
+
+# ---------------------------------------------------------------------------
+# cadence_minutes / manager_agent_url (ms-83 / e-1994)
+# ---------------------------------------------------------------------------
+
+def test_new_trek_defaults_meta_empty():
+    """No cadence + no manager URL → meta is present but empty.
+
+    Always-present empty dict keeps consumers from branching on KeyError
+    vs. empty-dict (= the same pattern goal_state uses with empty string).
+    """
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+    )
+    assert t["meta"] == {}
+
+
+def test_new_trek_with_cadence_minutes():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+        cadence_minutes=15,
+    )
+    assert t["meta"]["cadence_minutes"] == 15
+
+
+def test_new_trek_with_manager_agent_url():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+        manager_agent_url="https://agents.example.com/trek-1",
+    )
+    assert (
+        t["meta"]["manager_agent_url"]
+        == "https://agents.example.com/trek-1"
+    )
+
+
+def test_new_trek_strips_manager_agent_url_whitespace():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+        manager_agent_url="  https://x  ",
+    )
+    assert t["meta"]["manager_agent_url"] == "https://x"
+
+
+@pytest.mark.parametrize("bad", [0, -1, -10])
+def test_new_trek_rejects_non_positive_cadence(bad):
+    with pytest.raises(ValueError):
+        trek.new_trek(
+            title="x", creator_user_id="u-1", creator_email="a@b.com",
+            creator_session_id="sv-x",
+            cadence_minutes=bad,
+        )
+
+
+def test_new_trek_rejects_bool_cadence():
+    """``True`` is technically ``isinstance(True, int)`` → guard against
+    accidental boolean coercion."""
+    with pytest.raises(ValueError):
+        trek.new_trek(
+            title="x", creator_user_id="u-1", creator_email="a@b.com",
+            creator_session_id="sv-x",
+            cadence_minutes=True,  # type: ignore[arg-type]
+        )
+
+
+def test_get_cadence_minutes_default_when_unset():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+    )
+    assert trek.get_cadence_minutes(t) == trek.DEFAULT_CADENCE_MINUTES
+    assert trek.DEFAULT_CADENCE_MINUTES == 10
+
+
+def test_get_cadence_minutes_returns_set_value():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+        cadence_minutes=30,
+    )
+    assert trek.get_cadence_minutes(t) == 30
+
+
+def test_set_cadence_minutes_updates():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+    )
+    prior = t["updated_at"]
+    import time
+    time.sleep(0.001)
+    trek.set_cadence_minutes(t, cadence_minutes=20)
+    assert t["meta"]["cadence_minutes"] == 20
+    assert t["updated_at"] > prior
+
+
+def test_set_cadence_minutes_idempotent():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+        cadence_minutes=20,
+    )
+    prior = t["updated_at"]
+    trek.set_cadence_minutes(t, cadence_minutes=20)
+    # No mutation → updated_at unchanged (fixtures stay stable).
+    assert t["updated_at"] == prior
+
+
+def test_set_cadence_minutes_clear_via_none():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+        cadence_minutes=20,
+    )
+    trek.set_cadence_minutes(t, cadence_minutes=None)
+    assert "cadence_minutes" not in t["meta"]
+    # After clear, get_cadence_minutes falls back to default.
+    assert trek.get_cadence_minutes(t) == trek.DEFAULT_CADENCE_MINUTES
+
+
+def test_set_manager_agent_url_updates_and_idempotent():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+    )
+    trek.set_manager_agent_url(
+        t, manager_agent_url="https://example.com/agent"
+    )
+    assert (
+        t["meta"]["manager_agent_url"] == "https://example.com/agent"
+    )
+    prior = t["updated_at"]
+    trek.set_manager_agent_url(
+        t, manager_agent_url="https://example.com/agent"
+    )
+    assert t["updated_at"] == prior
+
+
+def test_set_manager_agent_url_clear_via_empty():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-x",
+        manager_agent_url="https://example.com/agent",
+    )
+    trek.set_manager_agent_url(t, manager_agent_url="")
+    assert "manager_agent_url" not in t["meta"]
+
+
+# ---------------------------------------------------------------------------
+# Trek task state machine (ms-75 / e-2048)
+# ---------------------------------------------------------------------------
+
+def test_new_trek_initializes_task_states_empty():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    assert t["task_states"] == {}
+
+
+@pytest.mark.parametrize("good", ["working", "done", "waiting-review"])
+def test_validate_task_state_accepts_valid(good):
+    assert trek.validate_task_state(good) == good
+
+
+@pytest.mark.parametrize("bad", ["", "WORKING", "Done", "pending", None])
+def test_validate_task_state_rejects_invalid(bad):
+    with pytest.raises(ValueError):
+        trek.validate_task_state(bad)  # type: ignore[arg-type]
+
+
+def test_get_task_state_returns_default_for_unknown():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    assert trek.get_task_state(t, "e-9999") == "working"
+
+
+def test_set_task_state_records_state_and_metadata():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(
+        t, task_id="e-100", state="done",
+        updated_by_session_id="sv-exec", note="phase 2 land",
+    )
+    entry = t["task_states"]["e-100"]
+    assert entry["state"] == "done"
+    assert entry["updated_by_session_id"] == "sv-exec"
+    assert entry["note"] == "phase 2 land"
+    assert entry["updated_at"]
+
+
+def test_set_task_state_validates_transition_from_default():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    # Default state is "working", so "done" is allowed.
+    trek.set_task_state(t, task_id="e-1", state="done")
+    # From done, only "working" allowed.
+    with pytest.raises(ValueError):
+        trek.set_task_state(t, task_id="e-1", state="waiting-review")
+
+
+def test_set_task_state_allows_done_back_to_working_then_waiting_review():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-1", state="done")
+    trek.set_task_state(t, task_id="e-1", state="working")
+    trek.set_task_state(t, task_id="e-1", state="waiting-review")
+    assert t["task_states"]["e-1"]["state"] == "waiting-review"
+
+
+def test_set_task_state_no_op_transition_allowed():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-1", state="working")
+    # Re-affirming working state should not raise.
+    trek.set_task_state(t, task_id="e-1", state="working")
+    assert t["task_states"]["e-1"]["state"] == "working"
+
+
+def test_set_task_state_requires_task_id():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    with pytest.raises(ValueError):
+        trek.set_task_state(t, task_id="", state="done")
+
+
+def test_aggregate_task_state_empty_scope():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    agg = trek.aggregate_task_state(t, task_ids=[])
+    assert agg["overall"] == "empty"
+    assert agg["total"] == 0
+
+
+def test_aggregate_task_state_active_when_default_state():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    agg = trek.aggregate_task_state(t, task_ids=["e-1", "e-2"])
+    assert agg["overall"] == "active"
+    assert agg["working"] == 2
+    assert agg["done"] == 0
+
+
+def test_aggregate_task_state_all_done():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-1", state="done")
+    trek.set_task_state(t, task_id="e-2", state="done")
+    agg = trek.aggregate_task_state(t, task_ids=["e-1", "e-2"])
+    assert agg["overall"] == "all-done"
+    assert agg["done"] == 2
+
+
+def test_aggregate_task_state_all_waiting_review():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-1", state="waiting-review")
+    trek.set_task_state(t, task_id="e-2", state="waiting-review")
+    agg = trek.aggregate_task_state(t, task_ids=["e-1", "e-2"])
+    assert agg["overall"] == "all-waiting-review"
+
+
+def test_aggregate_task_state_all_terminal_mixed():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-1", state="done")
+    trek.set_task_state(t, task_id="e-2", state="waiting-review")
+    agg = trek.aggregate_task_state(t, task_ids=["e-1", "e-2"])
+    assert agg["overall"] == "all-terminal-mixed"
+    assert agg["done"] == 1
+    assert agg["waiting-review"] == 1
+
+
+def test_aggregate_task_state_active_when_any_working():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-1", state="done")
+    # e-2 stays at default working
+    agg = trek.aggregate_task_state(t, task_ids=["e-1", "e-2"])
+    assert agg["overall"] == "active"
+    assert agg["working"] == 1
+    assert agg["done"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Working-state TTL safety net (ms-75 / e-2067)
+# ---------------------------------------------------------------------------
+
+def test_set_task_state_stamps_last_activity_at():
+    """ms-75 / e-2067 AC 1 — state stamp is one of the documented activity
+    sources, so it must seed ``last_activity_at`` alongside ``updated_at``."""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-1", state="working")
+    entry = t["task_states"]["e-1"]
+    assert entry["last_activity_at"]
+    # last_activity_at matches the same moment as updated_at on initial
+    # write (= no clock drift between the two stamps).
+    assert entry["last_activity_at"] == entry["updated_at"]
+
+
+def test_bump_task_activity_refreshes_last_activity_at_without_state_change():
+    """ms-75 / e-2067 AC 1 — commits / DM receipts bump activity without
+    transitioning the state. The state stays 'working' but the auto-stall
+    clock resets."""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-1", state="working")
+    initial_state = t["task_states"]["e-1"]["state"]
+    initial_activity = t["task_states"]["e-1"]["last_activity_at"]
+    import time
+    time.sleep(0.01)  # Force a different ISO timestamp.
+    trek.bump_task_activity(t, task_id="e-1", reason="commit:abc123")
+    entry = t["task_states"]["e-1"]
+    assert entry["state"] == initial_state  # No state change.
+    assert entry["last_activity_at"] > initial_activity
+    assert entry["last_activity_reason"] == "commit:abc123"
+
+
+def test_bump_task_activity_initializes_entry_for_unknown_task():
+    """A commit / DM landing on a task that no executor has stamped yet
+    should still anchor the auto-stall clock — otherwise the scheduler
+    would treat the brand-new task as 'never active' and skip it."""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.bump_task_activity(t, task_id="e-new", reason="dm-receipt")
+    entry = t["task_states"]["e-new"]
+    assert entry["state"] == "working"  # Default state.
+    assert entry["last_activity_at"]
+
+
+def test_bump_task_activity_requires_task_id():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    with pytest.raises(ValueError):
+        trek.bump_task_activity(t, task_id="", reason="x")
+
+
+def test_get_working_ttl_minutes_default_when_unset():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    # Default is 30 min per SPEC.
+    assert trek.get_working_ttl_minutes(t) == 30
+
+
+def test_get_working_ttl_minutes_honors_meta_override():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    t.setdefault("meta", {})["working_ttl_minutes"] = 5
+    assert trek.get_working_ttl_minutes(t) == 5
+
+
+def test_get_working_ttl_minutes_falls_back_on_non_numeric_override():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    t.setdefault("meta", {})["working_ttl_minutes"] = "garbage"
+    # Bad config must not crash; fall back to default so safety net stays on.
+    assert trek.get_working_ttl_minutes(t) == 30

@@ -68,6 +68,10 @@ GATE_REASON_SAME_USER = "same_user"
 GATE_REASON_SHARED_TREK = "shared_trek_member"
 GATE_REASON_NO_ACTIONS = "no_actions_authorized"
 GATE_REASON_CROSS_USER_ACTION = "cross_user_action_pending_approval"
+# ms-83 / e-1995: T1-system envelopes minted by the Beacon server itself
+# bypass the cross-user human gate. The server-signed envelope IS the
+# structural re-issuance of the user's "Trek で進めて" pre-approval.
+GATE_REASON_T1_SYSTEM = "t1_system_envelope"
 
 
 def should_gate_dm_action(
@@ -75,6 +79,8 @@ def should_gate_dm_action(
     receiver_user_id: str,
     actions_authorized: Iterable[str] | None,
     shared_trek_lookup: Callable[[str, str], bool],
+    envelope_tier: str = "",
+    envelope_issuer: str = "",
 ) -> tuple[bool, str]:
     """Return (should_gate, reason) for one bus envelope.
 
@@ -112,6 +118,15 @@ def should_gate_dm_action(
         dispatcher records it in the audit log so post-hoc analysis
         can answer "why did this envelope skip the gate?".
     """
+    # Rule 0 (ms-83 / e-1995): T1-system envelope signed by beacon-system
+    # bypasses the gate. The server-mint authority is the structural
+    # re-execution of the user's "Trek で進めて" pre-approval — the
+    # receiver has already consented at trek-activation time. The verify
+    # pipeline (envelope.verify) is what proves the signature + scope /
+    # tier rules; this gate just defers to that result.
+    if envelope_tier == "T1-system" and envelope_issuer == "beacon-system":
+        return (False, GATE_REASON_T1_SYSTEM)
+
     # Rule 1: same user → always skip. A single human's sessions talking
     # to themselves never need cross-human approval, even when the DM
     # carries action implication.

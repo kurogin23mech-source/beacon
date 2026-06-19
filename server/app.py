@@ -31,6 +31,7 @@ import invitations as invitations_mod  # ms-78 e-1803/e-1804: token-based invite
 import store_router as db  # e-1544: BEACON_STORE_BACKEND で firestore / dynamodb を切替
 import operations
 import trek as trek_mod  # ms-69 / e-1656: trek schema + pure mutators
+import trek_scheduler as trek_scheduler_mod  # ms-83 / e-1997: progress-check cadence logic
 
 # debug=False is the default, but set explicitly to ensure stack traces are
 # never included in error responses in production.
@@ -207,6 +208,13 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 
 # Set BEACON_API_AUTH=0 to disable auth (for local dev / testing)
 _auth_enabled = os.environ.get("BEACON_API_AUTH", "1") != "0"
+
+# Set BEACON_LOCAL_DEV=1 to enable the IdP-free local dev login (= /api/auth/dev-login
+# mints a bcli token for an arbitrary email, so multiple people can use a
+# locally-running server under separate accounts without Google/Cognito).
+# HARD off by default: production (Cloud Run) never sets this env, so the
+# dev-login endpoint returns 404 there and can never be reached.
+_local_dev_enabled = os.environ.get("BEACON_LOCAL_DEV", "0") == "1"
 
 
 _CLI_TOKEN_PREFIX = "bcli."
@@ -3126,12 +3134,24 @@ class TrekCreate(BaseModel):
     description: str = ""
     type: str = "persistent"  # temporary | persistent
     creator_session_id: str   # caller's session_id (becomes leader)
+    # ms-83 / e-1994: optional cadence + future-form manager URL at creation
+    # time. Both are recorded on ``meta``; cadence falls back to default
+    # (= 10 minutes) when omitted, manager_agent_url is unused in this MS.
+    cadence_minutes: Optional[int] = None
+    manager_agent_url: Optional[str] = None
 
 
 class TrekUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     type: Optional[str] = None
+    # ms-83 / e-1994 — periodic cadence (= server-side "next, please" DM
+    # interval in minutes) and a future-form manager-agent URL slot.
+    # Both live on ``meta`` so the on-disk shape stays tidy. ``None``
+    # leaves the field unchanged; explicit empty string / explicit 0
+    # behaviours are handled in the setter functions.
+    cadence_minutes: Optional[int] = None
+    manager_agent_url: Optional[str] = None
 
 
 class TrekInvite(BaseModel):
@@ -3143,6 +3163,20 @@ class TrekScopeOp(BaseModel):
     milestone: Optional[str] = None
     operation: Optional[str] = None
     task: Optional[str] = None
+
+
+class TrekTaskStateSet(BaseModel):
+    """ms-75 / e-2048 — Trek-internal task state declaration.
+
+    ``task_id`` is the project entry id (e-XXXX) the executor is stamping.
+    ``state`` is one of ``working``, ``done``, ``waiting-review``. ``note``
+    is a short freeform string (≤500 chars) attached to the state record
+    so the leader review surface can show executor rationale without a
+    separate DM round-trip.
+    """
+    task_id: str
+    state: str
+    note: Optional[str] = ""
 
 
 class TrekHaltSet(BaseModel):
@@ -3243,6 +3277,8 @@ def create_trek_endpoint(body: TrekCreate, user: dict = Depends(require_auth)):
             creator_session_id=body.creator_session_id,
             description=body.description,
             type_=body.type,
+            cadence_minutes=body.cadence_minutes,
+            manager_agent_url=body.manager_agent_url or "",
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -3279,6 +3315,22 @@ def update_trek_endpoint(trek_id: str, body: TrekUpdate,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         t["type"] = body.type
+    # ms-83 / e-1994: cadence_minutes / manager_agent_url live on ``meta``;
+    # use the dedicated setters so validation + idempotency rules stay in
+    # one place (= lib/trek.py). ``cadence_minutes is None`` here means
+    # "field not supplied in this PATCH"; explicit clear uses a future
+    # dedicated endpoint or 0 sentinel — kept out of this MS scope.
+    if body.cadence_minutes is not None:
+        try:
+            trek_mod.set_cadence_minutes(
+                t, cadence_minutes=body.cadence_minutes
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    if body.manager_agent_url is not None:
+        trek_mod.set_manager_agent_url(
+            t, manager_agent_url=body.manager_agent_url
+        )
     t["updated_at"] = trek_mod.utcnow_iso()
     db.save_trek(trek_id, t)
     return t
@@ -3492,6 +3544,112 @@ def transfer_trek_leader_endpoint(trek_id: str, body: TrekTransferLeader,
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     db.save_trek(trek_id, t)
+    return t
+
+
+@app.patch("/api/treks/{trek_id}/task-state")
+def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
+                                 request: Request,
+                                 user: dict = Depends(require_auth)):
+    """Stamp Trek-internal task state (ms-75 / e-2048).
+
+    Executor sessions call this after each commit / chunk completion
+    to declare whether they are still ``working`` on the task, have
+    reached ``done``, or need ``waiting-review`` (= user judgment).
+
+    Side effects:
+      * Update ``trek_doc.task_states[task_id]`` (= validated transition)
+      * Persist trek doc
+      * When the stamped state is terminal (= done / waiting-review),
+        emit a one-time ``trek-task-review`` bus event addressed to the
+        leader's home project so ``/beacon-trek-review`` Skill can
+        surface the transition to the human leader (= push model that
+        spares the leader from polling).
+
+    Authorisation: caller must be a trek member (= identity at user
+    grain). Leader-only is not required — any member session can stamp
+    on behalf of the work they performed.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    # Member check
+    user_id = user.get("sub") or ""
+    if not trek_mod.find_member(t, user_id):
+        raise HTTPException(
+            status_code=403,
+            detail="only trek members can stamp task state",
+        )
+    if not body.task_id:
+        raise HTTPException(status_code=400, detail="task_id required")
+    try:
+        trek_mod.validate_task_state(body.state)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    # Determine the calling session_id (best-effort — bridges include
+    # X-Beacon-Session header; CLI/curl callers may omit it).
+    caller_sid = request.headers.get("X-Beacon-Session", "") or ""
+    try:
+        trek_mod.set_task_state(
+            t,
+            task_id=body.task_id,
+            state=body.state,
+            updated_by_session_id=caller_sid,
+            note=body.note or "",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.save_trek(trek_id, t)
+    # If the new state is terminal, fan out a review-required notice to
+    # the leader. The leader's review Skill (/beacon-trek-review)
+    # surfaces this as a forced 3-choice action. We use the trek's home
+    # project (= first scope entry's project) as the bus event target,
+    # and address it to the current leader_session_id so only the
+    # responsible session sees it (= no project-wide broadcast).
+    if body.state in trek_mod.TERMINAL_TASK_STATES:
+        leader_sid = t.get("leader_session_id") or ""
+        scope = t.get("scope") or []
+        target_pid = scope[0].get("project") if scope else ""
+        if leader_sid and target_pid:
+            try:
+                envelope = envelope_mod.issue_t1_system_envelope(
+                    project_id=target_pid,
+                    trek_id=trek_id,
+                    actions_authorized=["trek.task_review"],
+                    data_class="free",
+                    ttl_seconds=3600,
+                )
+            except Exception:
+                envelope = None
+            review_payload = {
+                "kind": "trek-task-review",
+                "trek_id": trek_id,
+                "task_id": body.task_id,
+                "state": body.state,
+                "note": body.note or "",
+                "updated_by_session_id": caller_sid,
+                "recipient_session_id": leader_sid,
+                "body": (
+                    f"[Trek task review required] trek_id={trek_id} "
+                    f"task_id={body.task_id} state={body.state}\n"
+                    f"executor note: {(body.note or '').strip()[:200]}\n"
+                    f"次の action: /beacon-trek-review {trek_id} {body.task_id} "
+                    f"で approve / re-work / forward-to-user の 3 択を実行してください。"
+                ),
+                "created_at": trek_mod.utcnow_iso(),
+            }
+            bus_data = {
+                "channel": "trek-task-review",
+                "sender_session_id": "",
+                "payload": review_payload,
+                "envelope": envelope,
+                "delivery": "auto-execute",
+                "created_at": trek_mod.utcnow_iso(),
+            }
+            try:
+                db.append_bus_event(target_pid, bus_data)
+            except Exception:
+                # Best-effort notification; the leader can still discover
+                # the terminal state via `beacon trek show` polling.
+                pass
     return t
 
 
@@ -4055,16 +4213,22 @@ async def post_bus_event(
         payload=body.payload,
     )
     env_actions = (body.envelope or {}).get("actions_authorized") or []
+    env_tier = (body.envelope or {}).get("tier", "") or ""
+    env_issuer = (body.envelope or {}).get("issuer", "") or ""
     gate_lookup = dm_gate_mod.build_shared_trek_lookup_from_lists(
         # Sender-side trek visibility is sufficient — Trek membership
         # query is symmetric (creator OR members) on either backend.
         lambda uid: db.list_treks(actor_id=uid) if uid else [],
     )
+    # ms-83 / e-1995: pass tier+issuer so the gate can recognise
+    # T1-system server-mint envelopes as T1-equivalent (= bypass).
     should_gate, gate_reason = dm_gate_mod.should_gate_dm_action(
         sender_user_id=sender_uid,
         receiver_user_id=receiver_uid,
         actions_authorized=env_actions,
         shared_trek_lookup=gate_lookup,
+        envelope_tier=env_tier,
+        envelope_issuer=env_issuer,
     )
     audit_record["dm_gate"] = {
         "should_gate": should_gate,
@@ -4148,6 +4312,658 @@ def _envelope_audit_view(env: Optional[dict]) -> Optional[dict]:
             "issued_at", "expires_at", "project_id", "nonce",
             "conversation_id", "in_reply_to", "chain_depth"}
     return {k: env.get(k) for k in keep if k in env}
+
+
+class TrekHeartbeatRequest(BaseModel):
+    """Body for POST /api/treks/{trek_id}/session-heartbeat (ms-83 / e-2001).
+
+    The AI session inside the trek's leader (or any member) pings this
+    endpoint after each tick completes, so the server's idle detector
+    knows the session is alive. Stamps ``meta.last_session_response_at``
+    on the trek doc.
+
+    Identity check: caller must be a joined member of the trek.
+    """
+    session_id: str = ""
+
+
+@app.post("/api/treks/{trek_id}/session-heartbeat")
+def trek_session_heartbeat(
+    trek_id: str,
+    body: TrekHeartbeatRequest,
+    user: dict = Depends(require_auth),
+):
+    """Stamp the trek's last_session_response_at (ms-83 / e-2001)."""
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    import datetime
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    meta = t.setdefault("meta", {})
+    meta["last_session_response_at"] = now_iso
+    if body.session_id:
+        meta["last_session_response_session_id"] = body.session_id
+    t["updated_at"] = trek_mod.utcnow_iso()
+    db.save_trek(trek_id, t)
+    return {
+        "trek_id": trek_id,
+        "last_session_response_at": now_iso,
+    }
+
+
+class TrekSchedulerTickRequest(BaseModel):
+    """Body for POST /api/system/trek-scheduler/tick (ms-83 / e-1997).
+
+    Cloud Scheduler calls this endpoint at a fixed cadence (= every minute
+    by default). The endpoint walks all active Treks, decides which are
+    due based on each trek's ``meta.cadence_minutes`` and previous fire
+    time, mints a T1-system envelope for each due trek, and posts a
+    ``trek-progress-check`` bus event with auto-execute delivery into
+    the trek's leader-session project.
+
+    Authentication: ``X-Beacon-Scheduler-Key`` header (same key as
+    T1-system mint endpoint — they share a trust boundary).
+
+    Body is empty by default; ``project_id`` / ``trek_ids`` overrides let
+    integration tests scope the tick to a single trek without iterating
+    every project in the backend.
+    """
+    # Optional scoping for tests / staged rollout. None = iterate all.
+    project_ids: Optional[list[str]] = None
+    trek_ids: Optional[list[str]] = None
+
+
+@app.post("/api/system/trek-scheduler/tick")
+def trek_scheduler_tick_endpoint(
+    body: TrekSchedulerTickRequest,
+    request: Request,
+):
+    """Run one Trek scheduler tick (ms-83 / e-1997).
+
+    Returns a structured report of which treks were considered, which
+    fired, and any per-trek errors. The report is what Cloud Scheduler
+    logs hold onto for observability.
+
+    Decision logic (= pure) lives in ``lib/trek_scheduler.py`` so unit
+    tests pin the cadence math without standing up an HTTP server.
+    """
+    provided = request.headers.get("X-Beacon-Scheduler-Key", "")
+    expected = envelope_mod.scheduler_internal_key()
+    if not provided or provided != expected:
+        raise HTTPException(
+            status_code=403,
+            detail="trek scheduler tick requires X-Beacon-Scheduler-Key",
+        )
+
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    # Fan out across active treks. Without project scoping we list every
+    # trek in the backend (admin-style enumeration); the scheduler tick is
+    # an internal service, not a user-driven query, so this is acceptable
+    # and matches Operation scheduler's behaviour for the same reason.
+    candidate_treks = db.list_treks(actor_id=None)
+    if body.trek_ids:
+        wanted = set(body.trek_ids)
+        candidate_treks = [t for t in candidate_treks
+                           if t.get("trek_id") in wanted]
+    candidate_treks = [t for t in candidate_treks
+                       if t.get("status") == "active"]
+    due_treks = trek_scheduler_mod.select_due_treks(
+        candidate_treks, now=now,
+    )
+    # ms-83 / e-2001: snapshot idle decisions BEFORE the progress-check
+    # pass stamps last_progress_check_at — otherwise every fire would
+    # reset the idle clock to "now" and we'd never escalate.
+    idle_trek_ids = {
+        t.get("trek_id", "")
+        for t in candidate_treks
+        if trek_scheduler_mod.should_fire_idle_escalation(t, now=now)
+    }
+
+    fired: list[dict] = []
+    errors: list[dict] = []
+    quiesced: list[dict] = []
+    for trek_doc in due_treks:
+        trek_id = trek_doc.get("trek_id", "")
+        # ms-75 / e-2048 — Trek task state machine integration. When every
+        # task that an executor has stamped state for has reached terminal
+        # (= done or waiting-review), the scheduler goes silent for this
+        # trek. The leader review notification was already emitted by the
+        # PATCH /api/treks/{id}/task-state endpoint at the moment of the
+        # terminal stamp, so re-firing here would just be noise. A trek
+        # with no stamped states is NOT terminal — the scheduler still
+        # fires obligation DMs to wake an executor that has not yet
+        # declared anything (= pre-state-machine compatible).
+        if trek_scheduler_mod.is_trek_task_aggregate_terminal(trek_doc):
+            quiesced.append({
+                "trek_id": trek_id,
+                "reason": "task_state_aggregate_terminal",
+            })
+            # Still stamp last_progress_check_at so the next cadence
+            # window does not re-flag this trek as "never fired".
+            meta = trek_doc.setdefault("meta", {})
+            meta["last_progress_check_at"] = now.strftime(
+                "%Y-%m-%dT%H:%M:%S.%fZ"
+            )
+            trek_doc["updated_at"] = trek_mod.utcnow_iso()
+            try:
+                db.save_trek(trek_id, trek_doc)
+            except Exception:
+                pass
+            continue
+        # Determine the target project for the bus event. The trek's first
+        # scope entry's project is the canonical "home project" for the
+        # progress-check; treks with no scope are skipped by the payload
+        # builder (= empty-scope fallback DM still fires, into the leader
+        # session's home project resolved from its actor).
+        scope = trek_doc.get("scope") or []
+        if not scope:
+            errors.append({
+                "trek_id": trek_id,
+                "error": "empty_scope_no_target_project",
+            })
+            continue
+        target_project_id = scope[0].get("project", "")
+        if not target_project_id:
+            errors.append({
+                "trek_id": trek_id,
+                "error": "scope_entry_missing_project",
+            })
+            continue
+        try:
+            envelope = envelope_mod.issue_t1_system_envelope(
+                project_id=target_project_id,
+                trek_id=trek_id,
+                actions_authorized=["trek.progress_check"],
+                data_class="free",
+                ttl_seconds=3600,
+            )
+        except ValueError as exc:
+            errors.append({
+                "trek_id": trek_id,
+                "error": f"envelope_mint_failed: {exc}",
+            })
+            continue
+        # Build the DM body from a project-data snapshot. We don't have
+        # live local project.json here on the server side, so the body
+        # is the minimal "scope-aware" fallback (= scope refs only). The
+        # AI side enriches it from the receiving session's local repo.
+        payload = trek_scheduler_mod.build_progress_check_payload(
+            trek_doc,
+            project_data=None,
+            now=now,
+        )
+        # ms-83 / e-2036 — fan out to every live session of every Trek
+        # member, not just one project-wide broadcast. Per the dogfood
+        # observation (2026-06-19): trek.members[] is keyed by user_id,
+        # so self-dogfood (= multiple sessions of one user) collapsed to
+        # 1 member, leaving executor sessions unreached. The fix queries
+        # the project's session registry, filters by member user_ids and
+        # a 10-minute live cutoff, then writes one bus event per session
+        # with a session-addressed payload (= payload.recipient_session_id).
+        # If no live sessions resolve (= empty members or all stale), the
+        # broadcast fallback fires (sid="") so behaviour stays compatible.
+        member_user_ids = {
+            (m.get("user_id") or "")
+            for m in (trek_doc.get("members") or [])
+            if m.get("user_id")
+        }
+        target_sids: list[str] = []
+        if member_user_ids:
+            try:
+                project_sessions = db.list_sessions(target_project_id)
+            except Exception:
+                project_sessions = []
+            live_cutoff = (now - datetime.timedelta(minutes=10)).strftime(
+                "%Y-%m-%dT%H:%M:%S.%fZ"
+            )
+            target_sids = [
+                (s.get("session_id") or "")
+                for s in project_sessions
+                if (s.get("user_id") or "") in member_user_ids
+                and (s.get("last_active") or "") >= live_cutoff
+                and s.get("session_id")
+            ]
+        if not target_sids:
+            # Fallback: broadcast (= sid empty). Preserves behaviour when
+            # member resolution fails (= no live sessions / empty members /
+            # backend hiccup) so the trek still surfaces in some inbox.
+            target_sids = [""]
+        event_ids: list[str] = []
+        any_send_succeeded = False
+        for sid in target_sids:
+            send_payload = dict(payload)
+            if sid:
+                send_payload["recipient_session_id"] = sid
+            bus_data = {
+                "channel": "trek-progress-check",
+                "sender_session_id": "",
+                "payload": send_payload,
+                "envelope": envelope,
+                "delivery": "auto-execute",
+                "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            }
+            try:
+                event_ids.append(db.append_bus_event(target_project_id, bus_data))
+                any_send_succeeded = True
+            except Exception as exc:
+                errors.append({
+                    "trek_id": trek_id,
+                    "recipient_session_id": sid,
+                    "error": f"bus_append_failed: {type(exc).__name__}: {exc}",
+                })
+        if not any_send_succeeded:
+            # Every send for this trek failed; skip the stamp so the next
+            # tick retries instead of silently swallowing the failure.
+            continue
+        # Stamp last_progress_check_at so the next tick skips this trek
+        # until its cadence elapses again.
+        meta = trek_doc.setdefault("meta", {})
+        meta["last_progress_check_at"] = now.strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
+        trek_doc["updated_at"] = trek_mod.utcnow_iso()
+        try:
+            db.save_trek(trek_id, trek_doc)
+        except Exception as exc:
+            errors.append({
+                "trek_id": trek_id,
+                "error": f"trek_save_failed: {type(exc).__name__}: {exc}",
+            })
+            continue
+        fired.append({
+            "trek_id": trek_id,
+            "project_id": target_project_id,
+            "event_ids": event_ids,
+            "recipients": target_sids,
+        })
+
+    # ms-83 / e-2001: idle escalation pass. Use the pre-snapshot
+    # idle_trek_ids so cadence-fire stamps in this same tick don't
+    # silently un-idle the trek.
+    escalations: list[dict] = []
+    for trek_doc in candidate_treks:
+        trek_id = trek_doc.get("trek_id", "")
+        if trek_id not in idle_trek_ids:
+            continue
+        # Re-read the trek so the cadence-pass save lands in our
+        # working copy (= last_idle_escalation_at sits next to the
+        # freshly-stamped last_progress_check_at).
+        fresh = db.get_trek(trek_id)
+        if fresh is not None:
+            trek_doc = fresh
+        scope = trek_doc.get("scope") or []
+        if not scope:
+            # Same fallback path as the progress-check loop; without a
+            # target project we have nowhere to post.
+            continue
+        target_project_id = scope[0].get("project", "")
+        if not target_project_id:
+            continue
+        payload = trek_scheduler_mod.build_idle_escalation_payload(
+            trek_doc, now=now,
+        )
+        # Notify channel is the user-facing audit surface. Delivery is
+        # notify-user-only (= surface in inbox, do not auto-execute).
+        try:
+            envelope_obj = envelope_mod.issue_t1_system_envelope(
+                project_id=target_project_id,
+                trek_id=trek_id,
+                actions_authorized=["trek.idle_escalation"],
+                data_class="free",
+                ttl_seconds=3600,
+            )
+        except ValueError:
+            envelope_obj = None
+        bus_data = {
+            "channel": "notify",
+            "sender_session_id": "",
+            "payload": payload,
+            "envelope": envelope_obj,
+            "delivery": "notify-user-only",
+            "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        }
+        try:
+            event_id = db.append_bus_event(target_project_id, bus_data)
+        except Exception:
+            continue
+        meta = trek_doc.setdefault("meta", {})
+        meta["last_idle_escalation_at"] = now.strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
+        trek_doc["updated_at"] = trek_mod.utcnow_iso()
+        try:
+            db.save_trek(trek_id, trek_doc)
+        except Exception:
+            continue
+        escalations.append({
+            "trek_id": trek_id,
+            "project_id": target_project_id,
+            "event_id": event_id,
+            "idle_minutes": payload.get("idle_minutes"),
+        })
+
+    # ms-75 / e-2067: auto-stall pass. Independent of cadence-fire because
+    # the safety net must fire whenever a working task crosses its TTL —
+    # regardless of whether the trek's progress-check is due this tick.
+    # This catches executors that recognised the trek-progress-check event
+    # but skipped state transition (= silent-ack pathology empirically
+    # observed in the 2026-06-19 dogfood). The transition to waiting-review
+    # is reversible: VALID_TASK_STATE_TRANSITIONS allows waiting-review →
+    # working, so a false-positive auto-stall is recoverable by the leader.
+    auto_stalled: list[dict] = []
+    for trek_doc in candidate_treks:
+        trek_id = trek_doc.get("trek_id", "")
+        # Re-read to pick up in-tick mutations (= the cadence-fire pass
+        # above may have bumped last_progress_check_at on this trek and
+        # we want the freshest task_states view for stall detection).
+        fresh = db.get_trek(trek_id)
+        if fresh is not None:
+            trek_doc = fresh
+        stalled = trek_scheduler_mod.detect_auto_stalled_tasks(
+            trek_doc, now=now,
+        )
+        if not stalled:
+            continue
+        scope = trek_doc.get("scope") or []
+        if not scope:
+            continue
+        target_pid = scope[0].get("project", "")
+        if not target_pid:
+            continue
+        leader_sid = trek_doc.get("leader_session_id") or ""
+        for s in stalled:
+            task_id = s["task_id"]
+            silence = s["silence_minutes"]
+            ttl = s["ttl_minutes"]
+            note = trek_scheduler_mod.build_auto_stall_note(silence)
+            try:
+                trek_mod.set_task_state(
+                    trek_doc,
+                    task_id=task_id,
+                    state="waiting-review",
+                    updated_by_session_id="",  # = server-initiated
+                    note=note,
+                )
+            except ValueError:
+                # Another tick already transitioned this task (= race
+                # window); skip silently and continue with other stalls.
+                continue
+            try:
+                db.save_trek(trek_id, trek_doc)
+            except Exception:
+                continue
+            event_id = ""
+            if leader_sid:
+                try:
+                    envelope = envelope_mod.issue_t1_system_envelope(
+                        project_id=target_pid,
+                        trek_id=trek_id,
+                        actions_authorized=["trek.task_review"],
+                        data_class="free",
+                        ttl_seconds=3600,
+                    )
+                except Exception:
+                    envelope = None
+                review_payload = {
+                    "kind": "trek-task-review",
+                    "trek_id": trek_id,
+                    "task_id": task_id,
+                    "state": "waiting-review",
+                    "note": note,
+                    "updated_by_session_id": "",
+                    "recipient_session_id": leader_sid,
+                    "auto_stalled": True,
+                    "silence_minutes": silence,
+                    "ttl_minutes": ttl,
+                    "body": (
+                        f"[Trek task auto-stalled] trek_id={trek_id} "
+                        f"task_id={task_id} silence={silence} min "
+                        f"(TTL={ttl})\n"
+                        f"executor が working state のまま {silence} 分無活動。"
+                        f" server-side TTL safety net (= e-2067) が "
+                        f"waiting-review に降格しました。\n"
+                        f"次の action: /beacon-trek-review {trek_id} "
+                        f"{task_id} で approve / re-work / forward-to-user "
+                        f"を選んでください。 false-positive なら "
+                        f"waiting-review → working に re-stamp で復旧可能。"
+                    ),
+                    "created_at": trek_mod.utcnow_iso(),
+                }
+                bus_data = {
+                    "channel": "trek-task-review",
+                    "sender_session_id": "",
+                    "payload": review_payload,
+                    "envelope": envelope,
+                    "delivery": "auto-execute",
+                    "created_at": trek_mod.utcnow_iso(),
+                }
+                try:
+                    event_id = db.append_bus_event(target_pid, bus_data)
+                except Exception:
+                    event_id = ""
+            auto_stalled.append({
+                "trek_id": trek_id,
+                "task_id": task_id,
+                "silence_minutes": silence,
+                "ttl_minutes": ttl,
+                "event_id": event_id,
+            })
+
+    return {
+        "now": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "candidates": len(candidate_treks),
+        "due": len(due_treks),
+        "fired": fired,
+        "escalations": escalations,
+        "auto_stalled": auto_stalled,
+        "errors": errors,
+        "quiesced": quiesced,
+    }
+
+
+class CheckTaskAddRequest(BaseModel):
+    """Body for POST /api/projects/{id}/bus/envelope/check-task-add (ms-83 / e-2000).
+
+    Pure verify endpoint: given an envelope and a target MS, return
+    whether the AI may add a task autonomously (auto), should propose
+    to the user (propose), or must be rejected outright (reject).
+
+    The endpoint runs the regular 9-step envelope verify pipeline first.
+    If verify passes, it then evaluates the action × tier matrix for
+    ``task.add`` against the target MS. T1 always permits. T2 permits
+    when the Operation scope enumerates the MS. T1-system permits when
+    the Trek scope (= server-side trek doc) includes the MS. Anything
+    else degrades to propose-to-ai.
+    """
+    envelope: dict
+    target_ms: str
+    payload: dict = {}
+
+
+@app.post("/api/projects/{project_id}/bus/envelope/check-task-add")
+def check_task_add_envelope(
+    project_id: str,
+    body: CheckTaskAddRequest,
+    user: dict = Depends(require_auth),
+):
+    """Decide whether ``task.add`` against ``target_ms`` is auto / propose / reject.
+
+    ms-83 / e-2000. Membership-gated read; the receiver project's
+    members are the ones running their AI session through this gate.
+    """
+    _require_project_role(project_id, user)
+    if not body.target_ms:
+        raise HTTPException(
+            status_code=400,
+            detail="target_ms required",
+        )
+
+    # Step 1: 9-step verify. Failure → reject (= envelope is broken,
+    # don't even propose).
+    nonce_store = _get_envelope_nonce_store()
+    parent_lookup = _get_envelope_parent_lookup()
+    result = envelope_mod.verify(
+        body.envelope,
+        project_id=project_id,
+        payload=body.payload or {},
+        requested_action=envelope_mod.TASK_ADD_ACTION,
+        nonce_store=nonce_store,
+        parent_lookup=parent_lookup,
+        sender_session_id="",
+    )
+    if not result.passed:
+        return {
+            "permit": "reject",
+            "reason": result.rejection_reason or "envelope_verify_failed",
+            "steps": result.steps,
+        }
+
+    # Step 2: tier-aware scope match.
+    tier = body.envelope.get("tier", "")
+    if tier == envelope_mod.TIER_T1:
+        return {"permit": "auto", "reason": "t1_unrestricted"}
+    if tier == envelope_mod.TIER_T2:
+        if envelope_mod.check_task_add_scope_match(
+            body.envelope, body.target_ms,
+        ):
+            return {"permit": "auto", "reason": "t2_scope_match"}
+        return {
+            "permit": "propose",
+            "reason": "t2_scope_mismatch_propose_to_ai",
+        }
+    if tier == envelope_mod.TIER_T1_SYSTEM:
+        # T1-system requires a Trek scope walk because the envelope only
+        # carries trek:<id>, not the MS list directly.
+        scope = body.envelope.get("scope", "") or ""
+        if not scope.startswith("trek:"):
+            return {
+                "permit": "reject",
+                "reason": "t1_system_scope_malformed",
+            }
+        trek_id = scope[len("trek:"):]
+        trek_doc = db.get_trek(trek_id)
+        if trek_doc is None:
+            return {
+                "permit": "reject",
+                "reason": "t1_system_trek_not_found",
+            }
+        if trek_doc.get("status") != "active":
+            return {
+                "permit": "reject",
+                "reason": "t1_system_trek_not_active",
+            }
+        if envelope_mod.trek_scope_includes_ms(trek_doc, body.target_ms):
+            return {"permit": "auto", "reason": "t1_system_trek_scope_match"}
+        return {
+            "permit": "propose",
+            "reason": "t1_system_trek_scope_mismatch_propose_to_ai",
+        }
+    # T3 / T5 / unknown → never auto.
+    return {"permit": "propose", "reason": "tier_not_eligible_for_auto"}
+
+
+def _get_envelope_nonce_store():
+    """Lazy-resolve the envelope nonce store binding.
+
+    For the test path we need to reach the same store the bus-event
+    flow uses. The store has process scope so we keep one module-level
+    singleton here.
+    """
+    global _envelope_nonce_store_singleton
+    try:
+        return _envelope_nonce_store_singleton
+    except NameError:
+        _envelope_nonce_store_singleton = envelope_mod.InMemoryNonceStore()
+        return _envelope_nonce_store_singleton
+
+
+def _get_envelope_parent_lookup():
+    """Return a parent_lookup that consults the bus_event store.
+
+    For task.add we never have in_reply_to chains (= scheduler-fired
+    envelopes have no parent), so a constant-None lookup is sufficient.
+    """
+    return envelope_mod.FunctionParentLookup(lambda _pid, _eid: None)
+
+
+class T1SystemEnvelopeRequest(BaseModel):
+    """Body for POST /api/projects/{project_id}/bus/envelope/t1-system/issue.
+
+    ms-83 / e-1995. Used by the server-side scheduler (= the periodic loop
+    that fires "next, please" progress-check DMs into a Trek's claim
+    session) to mint a T1-equivalent envelope for an active Trek scope.
+    The caller must present the shared scheduler key in the
+    ``X-Beacon-Scheduler-Key`` header so a user account cannot pose as
+    the server.
+    """
+    trek_id: str
+    actions_authorized: list[str] = []
+    data_class: str = "free"
+    ttl_seconds: int = 3600
+    conversation_id: Optional[str] = None
+
+
+@app.post("/api/projects/{project_id}/bus/envelope/t1-system/issue")
+def issue_t1_system_bus_envelope(
+    project_id: str,
+    body: T1SystemEnvelopeRequest,
+    request: Request,
+):
+    """Issue a T1-system bus envelope (ms-83 / e-1995).
+
+    Authorization: the request MUST present a matching
+    ``X-Beacon-Scheduler-Key`` header. This endpoint is the only path
+    that mints ``tier=T1-system`` envelopes; receiver-side verify
+    cross-checks that ``issuer=beacon-system`` and ``scope=trek:<id>``.
+
+    Validation:
+      * The trek must exist and be ``active``. ``planning`` / ``archived``
+        Treks cannot have server-mint authority.
+      * ``actions_authorized`` is validated by the envelope module
+        (strict enumeration, no wildcards).
+    """
+    # Internal-only authorization. The shared secret is rotated out of
+    # band in production; the dev fallback lets the test suite run.
+    provided = request.headers.get("X-Beacon-Scheduler-Key", "")
+    expected = envelope_mod.scheduler_internal_key()
+    if not provided or provided != expected:
+        raise HTTPException(
+            status_code=403,
+            detail="T1-system mint requires X-Beacon-Scheduler-Key",
+        )
+    # Trek validity gate. The mint is bounded to active Treks so a
+    # planning Trek can't accidentally receive auto-execute DMs.
+    trek_doc = db.get_trek(body.trek_id)
+    if trek_doc is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Trek {body.trek_id!r} not found",
+        )
+    if trek_doc.get("status") != "active":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Trek {body.trek_id!r} is not active "
+                f"(status={trek_doc.get('status')!r})"
+            ),
+        )
+    try:
+        env = envelope_mod.issue_t1_system_envelope(
+            project_id=project_id,
+            trek_id=body.trek_id,
+            actions_authorized=body.actions_authorized,
+            data_class=body.data_class,
+            ttl_seconds=body.ttl_seconds,
+            conversation_id=body.conversation_id,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"T1-system envelope issuance rejected: {e}",
+        )
+    return env
 
 
 @app.post("/api/projects/{project_id}/bus/envelope/issue")
@@ -5270,12 +6086,47 @@ def auth_config():
             "client_id": os.environ.get("BEACON_COGNITO_CLIENT_ID", ""),
             "cognito_domain": os.environ.get("BEACON_COGNITO_HOSTED_UI_DOMAIN", ""),
             "region": os.environ.get("AWS_REGION", "ap-northeast-1"),
+            # local_dev: Web UI がローカル開発ログインフォームを出すかの判定に使う
+            "local_dev": _local_dev_enabled,
         }
     # Firebase / Cloud Run 既存経路 (= 後方互換)
     return {
         "provider": "firebase",
         "client_id": os.environ.get("BEACON_OAUTH_CLIENT_ID", ""),
+        # local_dev: ローカル時のみ true。本番 Cloud Run では env 未設定 = false。
+        "local_dev": _local_dev_enabled,
     }
+
+
+class DevLoginRequest(BaseModel):
+    email: str
+    name: str = ""
+
+
+@app.post("/api/auth/dev-login")
+def dev_login(body: DevLoginRequest):
+    """ローカル専用・IdP 不要のログイン。任意の email に対して bcli トークンを発行する。
+
+    BEACON_LOCAL_DEV=1 のときだけ有効 (= ハードゲート)。本番 (Cloud Run) は
+    この env を設定しないので、ここは常に 404 を返し到達不能。Google / Cognito を
+    立てずに、ローカルサーバを複数人が別アカウントで使い分けられるようにするための
+    入口。発行したトークンは provider 非依存の HMAC なので require_auth が
+    そのまま検証し、sub / email 単位でアカウントが分かれる。
+    """
+    if not _local_dev_enabled:
+        raise HTTPException(status_code=404, detail="Not found")
+    email = (body.email or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="email required")
+    # sub は email から決定論的に導出 (= 同じ email は同じアカウント)。
+    sub = f"dev:{email}"
+    token, expiry = _make_cli_token(sub, email)
+    # member picker 等に出るよう先にユーザー登録しておく。
+    db.get_or_create_user(sub, email)
+    name = (body.name or "").strip()
+    if name:
+        db.update_user(sub, {"display_name": name})
+    return {"status": "ok", "id_token": token, "email": email, "token_expiry": expiry}
 
 
 

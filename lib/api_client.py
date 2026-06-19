@@ -233,6 +233,21 @@ class ApiClient:
                 f"Cannot connect to API ({self._base_url}): {e.reason}"
             ) from e
 
+    # Milestone operations (ms-84 Phase 1 — fine-grained Store wiring)
+
+    def get_milestone(self, project_id: str, ms_id: str) -> dict:
+        """Fetch a single milestone (with task counts) from the cloud project.
+
+        Mirrors ``GET /api/projects/{project_id}/milestones/{ms_id}`` which
+        returns the milestone dict augmented with ``total_tasks`` / ``done_tasks``
+        / ``entries`` (JSON-serialised). Raises ``RuntimeError`` (HTTP 404) when
+        the milestone is unknown so callers can map to a CLI-friendly error.
+        """
+        return self.get(
+            f"/api/projects/{project_id}/milestones/"
+            f"{urllib.parse.quote(ms_id, safe='')}"
+        )
+
     # Purge operations (owner-only, hard-delete for duplicate-ID recovery — e-1030)
 
     def purge_milestone(self, project_id: str, ms_id: str, *,
@@ -723,6 +738,20 @@ class ApiClient:
             f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/transfer-leader",
             {"from_session_id": from_session_id,
              "to_session_id": to_session_id},
+        )
+
+    def set_trek_task_state(self, trek_id: str, *, task_id: str,
+                             state: str, note: str = "") -> dict:
+        """ms-75 / e-2048 — Stamp Trek-internal task state.
+
+        Member-only (= server-side check). The server validates the
+        state transition and emits a one-time trek-task-review DM to
+        the leader when the new state is terminal (= done /
+        waiting-review). Returns the updated trek doc.
+        """
+        return self.patch(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/task-state",
+            {"task_id": task_id, "state": state, "note": note},
         )
 
     def get_trek_summary(self, trek_id: str) -> dict:

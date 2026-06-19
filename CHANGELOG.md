@@ -2,6 +2,153 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.46.0] - 2026-06-19
+
+- Merge pull request #175 from kurogin23mech-source/ms-86-trek-ui-ms-83-dogfood-server-side-ui
+- feat(ms-86): live session 表示を他 member + user-stop state まで拡張 (e-2045 step 3+4)
+- feat(ms-86): self の live session を working/idle 別に内訳表示 (e-2045 step 2)
+- Merge pull request #174 from kurogin23mech-source/ms-84/cloud-store
+- feat(ms-86): self の live session 数を member row に小さく表示 (e-2045 step 1)
+- refactor(ms-84): _load_session_logs を Store.list_session_logs 経由化 (e-2036)
+- refactor(ms-84): cmd_cycle_status の document fetch を Store 経由化 (e-2036)
+- refactor(ms-84): cmd_doc_image_upload と project_export source_mode を Store.is_cloud() 経由化 (e-2036)
+- refactor(ms-84): cmd_trek_list を Store.list_treks 経由に統一 (e-2036)
+- refactor(ms-84): cmd_trek_show を Store.get_trek 経由に統一 (e-2036)
+- refactor(ms-84): cmd_doc_add / cmd_doc_update の read 経路を Store 経由化 (e-2036)
+- refactor(ms-84): cmd_doc_list / cmd_doc_show を Store 経由に統一 (e-2036)
+- refactor(ms-84): trek + document の read 経路を Store 経由に統一 (e-2036)
+- docs(release): update README/CHANGELOG for v0.45.0
+- chore(release): bump formula to 0.45.0
+- feat(ms-86): aggregate state pill + review-pending banner (e-2058 #3+#4)
+- feat(ms-86): Trek state の realtime 反映経路 — project frame piggyback (e-2022)
+- refactor(ms-84): session log list / show を Store 経由に統一 (e-2036)
+- feat(ms-86): NEXT FIRE 時刻 + RECENT ACTIVITY timeline 実装 (e-2019)
+- feat(ms-86): halt UI を実 API call で wire-through (e-2018)
+- feat(ms-86): 参加 session row 再構成 + task state badge 統合 (e-2017 + e-2058 #1+#2)
+- refactor(ms-84): _aggregate_and_persist の session log fetch を Store 経由化 (e-2036)
+- refactor(ms-84): _list_other_session_ids を Store 経由に統一 (e-2036)
+- refactor(ms-84): session log push を Store 経由に統一 (e-2036)
+- refactor(ms-84): cmd_operation_purge を Store 経由に統一 (e-2036)
+- refactor(ms-84): cmd_entry_purge を Store 経由に統一 (e-2036)
+- refactor(ms-84): cmd_milestone_purge を Store 経由に統一 (e-2036)
+- feat(ms-86): Trek scope 行に drill-down (= 展開) 機構を追加 (e-2016)
+- feat(ms-84): Phase 2 prep — Store.purge_milestone abstraction (e-2036)
+- feat(ms-86): Trek detail page 骨格を 7 ブロック構造に書き換え (e-2015)
+- feat(ms-84): Phase 1 — Store.get_milestone fine-grained read (e-2035)
+
+## [v0.45.0] - 2026-06-19
+
+- Merge pull request #164 from kurogin23mech-source/feat/local-cloud-docker-compose
+- Merge pull request #173 from kurogin23mech-source/feat/ms-75-trek-autonomous-execution-completion
+- feat(ms-75): Trek scope 内 DM の budget gate bypass + bus budget show に bypass 数を可視化 (= e-2044)
+- feat(ms-75): beacon trek join に auto-arm を default 化 + --no-arm opt-out + session-start not-armed 警告 (= e-2047)
+- feat(ms-75): server-side TTL safety net で working state の silent silence を auto-stall (= e-2067)
+- feat(ms-75): bus.mjs CHANNEL_TO_SKILL hardcode で trek 系 channel を AI compliance 介さず自律起動 (= e-2069)
+- docs(release): update README/CHANGELOG for v0.44.0
+- chore(release): bump formula to 0.44.0
+- feat(cli): ローカル開発ログインの口を CLI に追加 (ms-12 e-2041)
+- feat(server): ローカルクラウドを DynamoDB Local で永続化 (ms-12 e-1987)
+- docs(compose): note Firestore emulator non-persistence + DynamoDB plan (ms-12)
+- feat(server): IdP不要のローカル開発ログイン (account分離対応) (ms-12)
+- feat(server): add local docker-compose stack for cloud server (ms-12)
+
+## [v0.44.0] - 2026-06-19
+
+- Merge pull request #172 from kurogin23mech-source/feat/ms-75-trek-task-state-machine
+- feat(ms-75): Trek task state machine + leader review 強制経路 (= e-2048)
+- docs(release): update README/CHANGELOG for v0.43.0
+- chore(release): bump formula to 0.43.0
+
+## [v0.43.0] - 2026-06-19
+
+- Merge pull request #171 from kurogin23mech-source/feat/ms-83-scheduler-session-fanout
+- feat(ms-83): scheduler が Trek member の live session 全部に fanout する (= e-2036, leader 単独受信からの脱却)
+- docs(release): update README/CHANGELOG for v0.42.0
+- chore(release): bump formula to 0.42.0
+
+## [v0.42.0] - 2026-06-19
+
+- Merge pull request #170 from kurogin23mech-source/feat/ms-83-scheduler-autonomy-reminder
+- feat(ms-83): scheduler payload に Trek 自律権限 reminder を埋め込む (= protocol drift 構造的防止)
+- feat(ms-82): pre-commit に UI text 日本語 grep gate を追加 (e-1978)
+- feat(ms-82): ハンバーガーメニュー Online Agents 行に renderName 適用 (e-1971)
+- feat(ms-82): Trek detail / 一覧ページの UI text を英語化 (e-1976)
+- feat(ms-82): server/static/index.html の非 Trek UI text を英語化 (e-1975)
+- feat(ms-82): Settings panel から Profile タブを削除 (e-1973)
+- feat(ms-82): avatar クリックで開く Profile modal を新設 (e-1972)
+- feat(ms-82): Settings 各 section の長文 paragraph を tooltip 化 + 英語化 (e-1974)
+- feat(ms-82): CSS hover tooltip card 機構を追加 (e-1970)
+- docs(release): update README/CHANGELOG for v0.41.1
+- chore(release): bump formula to 0.41.1
+
+## [v0.41.1] - 2026-06-18
+
+- Merge pull request #169 from kurogin23mech-source/fix/ms-83-current-project-id-e2007
+- fix(ms-83): _current_project_id cloud-mode fallback (e-2007)
+- docs(release): update README/CHANGELOG for v0.41.0
+- chore(release): bump formula to 0.41.0
+
+## [v0.41.0] - 2026-06-18
+
+- Merge pull request #168 from kurogin23mech-source/ms-83-trek-server-side-continuity
+- feat(ms-83): trek session idle detection + escalation DM (e-2001)
+- feat(ms-83): AI autonomous task.add envelope decision (e-2000)
+- feat(ms-83): /beacon-trek-execute recognises T1-system envelope (e-1999)
+- feat(ms-83): Cloud Scheduler trek tick endpoint + payload builder (e-1997 e-1998)
+- feat(ms-83): T1-system envelope mint + dm_gate bypass (e-1995)
+- feat(ms-83): trek.meta cadence_minutes + manager_agent_url (e-1994)
+- Merge pull request #167 from kurogin23mech-source/ms-75-phase3-trek-aggregation
+- feat(ms-75): DM multi-recipient + Trek session-start + sensitivity gate
+- feat(ms-75): trek aggregation view + goal_state + timeline + docs filter
+- Merge pull request #166 from kurogin23mech-source/ms-76-ai-framework-envelope-tier-spec-ms-75
+- Merge remote-tracking branch 'origin/main' into ms-76-ai-framework-envelope-tier-spec-ms-75
+- feat(ms-76): operation-trigger unicast default + claim-based receiver (e-1860, e-1604)
+- feat(ms-76): Operation execute に disclosure gate AND check を明文化 (e-1841)
+- feat(ms-76): Operation setup Skill に tier 必須欄追加 (e-1840)
+- feat(ms-76): bus budget grant に T1-only 構造的禁止帯を land (e-1852)
+- Merge pull request #165 from kurogin23mech-source/ms-75-trek-ai-framework-operation-pattern
+- feat(ms-76): DM Skill に envelope tier 判定セクション追加 (e-1850)
+- feat(ms-75): codify Trek scope DM blanket exception (e-1856)
+- feat(ms-75): /beacon-trek-execute Skill (e-1868)
+- feat(ms-75): Trek-aware trigger system (e-1870)
+- docs(release): update README/CHANGELOG for v0.40.0
+- chore(release): bump formula to 0.40.0
+
+## [v0.40.0] - 2026-06-18
+
+- Merge pull request #163 from kurogin23mech-source/ms-81-ms-status-assignee-worktree
+- feat(ms-81): doctor state-machine warnings + occupations CLI verb (e-1921)
+- feat(ms-81): swap /beacon-dispatch workspace verb for start + skill drift detector (e-1920)
+- feat(ms-81): transition + done-MS re-open prompts (e-1919)
+- fix(ms-81): gate occupation claim with NO_BRANCH/NO_ASSIGNEE + add session-end auto-release (e-1918 follow-up)
+- feat(ms-81): session occupation model + worktree_sessions audit log (e-1918)
+- feat(ms-81): unify activation entry + project-type detect for milestone start (e-1917)
+- feat(ms-81): CLI status write gate — warn before writing to non-active MS (e-1916)
+- docs(ms-81): register beacon milestone wait in cmd_help_json (e-1915 follow-up)
+- docs(ms-81): add `beacon milestone wait` row to README CLI table (e-1915 follow-up)
+- feat(ms-81): waiting status formal CLI + transition rules (e-1915)
+- Merge pull request #162 from kurogin23mech-source/ms-78/work
+- Merge pull request #161 from kurogin23mech-source/ms-70/work
+- feat(ms-78): display_name end-to-end propagation (e-1909)
+- feat(ms-70): beacon dm log CLI for approval audit history (e-1923 / e-1718 AC 4)
+- Merge pull request #159 from kurogin23mech-source/ms-72/work
+- Merge origin/main into ms-72/work: resolve conflicts in desktop/layer.js + regen dist
+- Merge pull request #160 from kurogin23mech-source/ms-78/work
+- Merge pull request #158 from kurogin23mech-source/ms-70/work
+- fix(ms-78): setup prompt に skill install + restart 動線を追加 (UC11-F6 ギャップ補修)
+- feat(ms-70): DM approval history audit view (e-1718)
+- feat(ms-70): denied notification reply chain to sender (e-1717)
+- feat(ms-72): Tauri Rust member + invitation commands + UI parity (e-1774 / e-1779)
+- feat(ms-70): beacon dm respond CLI primitive (e-1716)
+- feat(ms-70): inline pending-DM banner in bus listen / receive (e-1715)
+- feat(ms-78): beacon member invite CLI + display_name 優先表示 (e-1805/e-1807)
+- feat(ms-70): cross-session pending DM action flush at session-start (e-1714)
+- feat(ms-78): token-based invitation flow + /join landing (e-1803/e-1804)
+- feat(ms-70): cross-user DM action authorization gate (e-1713)
+- feat(ms-70): bus_event_approvals sidecar subcollection (e-1712)
+- docs(release): update README/CHANGELOG for v0.39.0
+- chore(release): bump formula to 0.39.0
+
 ## [v0.39.0] - 2026-06-17
 
 - feat(ms-80): release-marker auto-clear + PR claim 競合検知 (e-1829 / e-1821)

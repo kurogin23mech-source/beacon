@@ -115,13 +115,25 @@ class FakeApiClient:
 
 @pytest.fixture
 def fake_client(monkeypatch):
-    """Patch _is_cloud_mode → True and _get_api_client → fake."""
+    """Patch _is_cloud_mode → True, _get_api_client → fake, get_store → StoreApi(fake).
+
+    ms-84 Phase 2: cmd_trek_show が Store.get_trek 経由になったため、 legacy
+    _is_cloud_mode + _get_api_client patch だけでは新経路を捕えられない。
+    fake_client を wrap した StoreApi を get_store にも仕込んで、 旧経路 (=
+    まだ Store 化していない trek subcommand) と新経路 (= cmd_trek_show) の
+    両方が同じ fake に届くようにする。
+    """
+    from store_api import StoreApi
     fake = FakeApiClient()
     monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
     monkeypatch.setattr(
         commands, "_get_api_client",
         lambda: (fake, {"project_id": "fake-project"})
     )
+    store_api = StoreApi.__new__(StoreApi)
+    store_api._client = fake
+    store_api._project_id = "fake-project"
+    monkeypatch.setattr(commands, "get_store", lambda: store_api)
     return fake
 
 

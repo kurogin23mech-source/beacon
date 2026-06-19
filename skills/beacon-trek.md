@@ -333,6 +333,54 @@ role の意味を 1 行ずつ補足表示 (= 招待者が間違えないよう�
 - `editor`: trek 内の commit / task 操作が可能 (= 普通の作業者)
 - `viewer`: 読み取りのみ (= 監査 / 報告閲覧)
 
+### 6-b-prime: scope sensitivity 確認 (= ms-75 / e-1863、構造的に挟む step)
+
+**この step は必ず draft 表示より前に実行する。** AI が候補提示する前に scope に含まれる各 project の data class (= データ機密度 / sensitivity) を user に提示し、 外部 user (= scope 内 project の member ではない人) 初回招待時には明示確認を構造的に強制する。 2026-06-16 LPS dogfood で「同 project の live セッション」 を根拠に外部 user を silent inclusion した事故 (= event g3rhokmRrTF9KoRarA3w) が顕在化したため、 この確認を AI 自身も飛ばせない動線にする。
+
+#### Step 6-b-prime-1: trek scope の各 project の sensitivity を取得
+
+trek の `scope` 配列を 1 つずつ歩いて、 各 `project` フィールドの sensitivity を取得する:
+
+```bash
+# 各 project root に cd して disclosure_policy を取得
+for pid in <project-ids>; do
+  cd $PROJECT_ROOT_FOR_PID && \
+    python3 -c "import json; d = json.load(open('.beacon/project.json')); \
+      pol = d.get('disclosure_policy', {}); \
+      print(pid, pol.get('sensitivity', 'unknown'))"
+done
+```
+
+cloud mode では `beacon project show <pid> --json` 相当が使える (= 同 user が読める project に限る)。 自分が member ではない project の sensitivity は取得不可なので **その時点で「unknown」 として扱い user に確認する**。
+
+#### Step 6-b-prime-2: data class の集約 + 表示
+
+scope 内 project の sensitivity を 1 つでも `high` (= 機密度 high 以上) を含むか判定する:
+
+```
+以下の Trek scope に含まれる project の機密度 (data class) を確認してください:
+
+  - beacon-b95643         sensitivity = high     (= 機密度 high)
+  - lps-customer-profile  sensitivity = high     (= 機密度 high)
+  - trailnode-public      sensitivity = low      (= 機密度 low)
+
+⚠ scope に sensitivity=high の project が含まれます。
+   招待先 <invitee> は外部 user (= 上記 project のいずれにも未参加) です。
+   それでも招待を進めますか? (yes / cancel)
+```
+
+判定ロジック:
+- **外部 user 判定**: 招待先 email が scope 内 project の members[] に **1 つも含まれない** 場合 → 外部 user
+- **high sensitivity 判定**: scope 内 project の `disclosure_policy.sensitivity == "high"` が **1 つでもあれば** high
+
+**外部 user + high sensitivity の組合せ** のみが yes/cancel 強制確認を発火する (= LPS 事故の再現条件)。 それ以外 (= 内部 user / すべて low / unknown のみ) は表示するが 強制確認 step を挟まずに 6-b の draft 表示に進む (= 過剰な動線を避ける、 Beacon Philosophy「過剰なサポートはそれ自体が摩擦」)。
+
+#### Step 6-b-prime-3: AI 自身も飛ばせない
+
+**重要**: この step は user 確認の前段ではなく、 **AI が picker に候補を並べる時点でも同確認を自動付与する** (= AI 自身がこの事故を起こさない)。 `beacon trek invite` を AI 自律で呼ぶ Skill (= `/beacon-trek-execute` 等) も Step 5/7 の境界判定に「外部 user 初回招待 + high sensitivity」 を含めて escalation 対象とする。
+
+具体的には: `/beacon-trek-execute` Step 5 (= デプロイ / リリースの境界 detection) に「Trek member 招待 (= 外部 user 初回招待 + high sensitivity scope の組合せ)」 を境界アクションとして列挙する。 これにより autonomous run でも本 step が構造的に通る。
+
 ### 6-b: draft 表示
 
 ```

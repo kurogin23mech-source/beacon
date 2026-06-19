@@ -396,6 +396,61 @@ local mode (= `.beacon/cloud.json` 不在) / 未認証 / endpoint タイムア�
 
 この Step は **読み取り専用**。sidecar の書き換え (= approved / denied 決定) は `/beacon-dm-respond` Skill 経由でのみ行う。
 
+## Step 1o: 現在 join 中の Trek 一覧 (ms-75 / e-1813 + e-1854)
+
+Trek (= 缶詰の徹夜作業部屋、 user が join した瞬間に scope 内 action が事前承認スコープになる作業空間) に join 済の場合、 そのリストと goal_state / halt 状態を session-start で必ず可視化する。 ms-70 (= cross-user DM 承認ゲート) は Trek 参加中だけ blanket 自動承認 (= 都度確認なしで配信) になるため、 「自分が今どの Trek の blanket 例外を受けているか」 を session 開始時に user 自身が把握できる必要がある。
+
+Bash ツールで実行:
+
+```bash
+beacon trek list --joined --json 2>/dev/null
+```
+
+出力が空配列 `[]` ならセクションごと省略。 1 件以上あれば、 各 trek について以下を抽出して **Step 3 ヘッダに転記**:
+
+- `trek_id` と `title` (= 1 行)
+- `status` (= active / planning / archived)
+- `halt` が non-null なら 「⚠ HALTED: {halt.reason}」 を強調表示
+- `goal_state` が空でなければ 「目標: {goal_state}」 を 1 行で追加
+- `members` の自分以外の数を 「他 N 名」 と要約
+
+加えて、 Trek 参加中であれば user に以下を 1 行で必ず伝える:
+
+> Trek 参加中: 同 Trek scope 内の DM (= 計画 / 議論 / 実装計画) は自動承認 (= blanket 例外、 ms-70/e-1854) で配信されています。 撤回したい場合は `beacon trek leave <trek-id>` を実行してください。 デプロイ / リリースのみ user 確認境界です。
+
+これは「自分が今 blanket 自動承認の対象になっている」 ことを毎セッション可視化する e-1854 AC 1 の構造的実装。 user が知らないうちに自律応答が走るリスクを構造的に低減する (= 表示は読み取り専用、 実際の承認自体は server 側 dm_gate.py が `shared_trek_member` 判定で行う)。
+
+planning や archived な trek は blanket 例外の対象外なので、 表示はするが警告メッセージは active な trek だけに添える。
+
+local mode (= `.beacon/cloud.json` 不在) でも `~/.beacon/treks/` から拾うので動作する。
+
+### Step 1o-2: 自律実行モード (= armed) のセルフチェック (ms-75 / e-2047)
+
+active な Trek に join 中なら、 このセッションが **armed (= 自律実行モード)** であることを確認する。 `beacon trek join` は AC 1 で auto-arm が default になっているが、 以下のケースで not-armed が起こりうる:
+
+- `--no-arm` で opt-out した
+- 古いバージョンで join 済 (= auto-arm 前の trek)
+- 別 worktree で join したため `.beacon/bus-budget.json` がこの cwd に無い
+
+判定材料を Bash で並列取得:
+
+```bash
+beacon bus auto-execute list --json 2>/dev/null
+beacon bus budget show --json 2>/dev/null
+```
+
+armed 条件 (AND): `bus_auto_execute_channels` に **少なくとも 1 つの trek 系 channel (= trek-progress-check / trek-trigger / trek-task-review)** が含まれている、 かつ budget が `armed` 状態 (= total > 0 かつ used < total)。
+
+armed でない場合、 Step 3 のヘッダに以下を 1 行で添える:
+
+```
+⚠ Trek 参加中だが自律実行モードが not-armed です。 `/beacon-bus-armed` で起動するか、 `beacon trek join <trek-id>` を再実行して auto-arm し直してください (= 進行 DM が wake せず silent-ack 病理を再生します)。
+```
+
+armed なら何も表示しない (= ノイズ削減)。
+
+archived / planning trek にしか join していない場合は判定不要 (= scope 内 action が事前承認の対象外)。 この Step は **読み取り専用**。
+
 ## Step 1j: 前セッションの session log 読み込み（ms-43 e-1360）
 
 前セッション末で `/beacon-session-end` Skill が `beacon session end` で集約した session log には、**「次セッション最優先 / top of queue / 次にやること」セクションが summary 内に明文化されている**ことが多い。これは trigger より優先順位が高い (人間/AI が curate した継続意図そのもの)。

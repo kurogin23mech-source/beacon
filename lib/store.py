@@ -44,6 +44,175 @@ class Store(Protocol):
         """Stop receiving push notifications."""
         ...
 
+    # ms-84 Phase 1 — fine-grained reads.
+    # The legacy ``load_project()`` returns the whole project document and
+    # the dashboard and CLI both pivot on it. Fine-grained reads let CLI
+    # branches that currently call ``client.get(...)`` or scan ``data`` go
+    # through the Store, which is what ms-84 Phase 2 then exploits to
+    # collapse the 27+ ``_is_cloud_mode()`` branches into a single Store
+    # call site.
+
+    def get_milestone(self, ms_id: str) -> dict:
+        """Fetch a single milestone (with task counts + entries).
+
+        The returned dict carries ``total_tasks`` / ``done_tasks`` and a
+        JSON-serialised ``entries`` list, matching the cloud
+        ``GET /milestones/{ms_id}`` shape. Raises ``ValueError`` when the
+        milestone is unknown so callers can show a CLI-friendly error
+        without distinguishing local vs cloud.
+        """
+        ...
+
+    # ms-84 Phase 2 — fine-grained mutation (purge family).
+    # The cmd_milestone_purge cloud branch currently delegates to a
+    # dedicated _cloud_milestone_purge helper; folding it into Store
+    # lets the CLI drop the _is_cloud_mode branch entirely (= 受入条件 10
+    # で要請される直接呼びの削減)。
+
+    def purge_entry(self, entry_id: str, *,
+                    reason: str, index: int | None = None) -> dict:
+        """Hard-delete an entry record (= タスク / コミット / ノート等の物理削除)。
+
+        Same contract as purge_milestone — returns ``{purged, still_dirty,
+        dup_report}`` and translates HTTP / value errors uniformly so the
+        CLI does not have to branch on backend.
+        """
+        ...
+
+    def purge_operation(self, op_id: str, *,
+                        reason: str, index: int | None = None) -> dict:
+        """Hard-delete an operation record (= 運用ジョブの物理削除)。
+
+        Same contract as purge_milestone / purge_entry.
+        """
+        ...
+
+    def upsert_session_log(self, session_id: str, body: dict) -> bool:
+        """Upsert a session log document by session_id (= セッション集約の保存)。
+
+        Returns True on successful persistence, False on failure or no-op.
+        LocalStore returns False (= the cloud session log subcollection is
+        a cloud-only artifact; local sessions persist via _write_local_session_log
+        on the caller side). StoreApi calls the upsert endpoint with the
+        same failure-swallowing contract as the legacy
+        ``_push_session_log_to_cloud`` (= network / auth / 4xx all → False),
+        so the caller does not need to branch on backend.
+        """
+        ...
+
+    def list_session_ids(self) -> list[str]:
+        """List session_ids visible to the backend (= cloud registry の列挙)。
+
+        Used by the session rescue path to discover other sessions whose
+        entries the local cache may have missed (= cross-machine orphans).
+        LocalStore returns ``[]`` because there is no remote registry to
+        consult; StoreApi calls the API and swallows transport failures,
+        same best-effort contract as ``upsert_session_log``. The caller
+        merges this result with locally-known ids without checking backend.
+        """
+        ...
+
+    def get_session_log(self, session_id: str) -> dict | None:
+        """Fetch a persisted session log document by session_id, or None
+        if the backend has no record (= 404 / local 不在 / transport 失敗)。
+
+        Used by the session aggregation path so the merge-with-remote step
+        is uniform regardless of backend. LocalStore returns None
+        (= session_log subcollection is cloud-only); StoreApi calls the
+        API and translates 404 / transport failures to None so the caller
+        can just check truthiness.
+        """
+        ...
+
+    def list_session_logs(self, limit: int = 0) -> list[dict]:
+        """List persisted session log documents (= most-recent-first)。
+
+        LocalStore returns ``[]`` because session log persistence in local
+        mode is per-file on disk and the caller handles directory listing
+        directly (cmd_session_log_list keeps this fallback). StoreApi calls
+        the API and returns the rows, swallowing transport failures.
+        """
+        ...
+
+    # ms-84 Phase 2 — document read passthrough.
+    # cmd_doc_list / cmd_doc_show / _spec_exists_for_ms all carry their own
+    # ``_is_cloud_mode()`` branch today. Exposing these on Store lets the
+    # CLI call ``store.list_documents()`` / ``store.get_document(doc_id)``
+    # once and drop the branch (= 受入条件 10 の direct-call 削減 にカウント)。
+
+    def list_documents(self) -> list[dict]:
+        """List document metadata (= doc_id / title / scope / milestone /
+        operation / trek_id / status / updated_at の一覧)。
+
+        Both LocalStore and StoreApi return the same shape so the CLI can
+        post-filter (scope / ms / op / trek / include_trashed) without
+        branching on backend. LocalStore parses ``.beacon/documents/*.md``
+        frontmatter; StoreApi calls the cloud API and swallows transport
+        failures (= 空 list を返す best-effort、 cmd_doc_list 既存挙動と整合)。
+        """
+        ...
+
+    def get_document(self, doc_id: str) -> dict:
+        """Fetch a single document body + metadata by doc_id.
+
+        Returns a dict with at least ``doc_id`` and ``content`` keys plus
+        frontmatter fields (scope / milestone / operation / trek_id /
+        status / updated_at) when available. Returns ``{}`` when not found
+        (= LocalStore: ファイル不在、 StoreApi: 404 / transport 失敗)。
+        """
+        ...
+
+    # ms-84 Phase 2 — trek read passthrough.
+    # cmd_trek_show / cmd_trek_timeline / cmd_trek_aggregate 等が
+    # ``_is_cloud_mode()`` で client.get_trek / trek_store.load_trek を
+    # 切り替えている。Store に集約することで CLI から分岐を消す。
+
+    def list_treks(self, *, actor_id: str | None = None,
+                   status: str = "", include_archived: bool = False,
+                   all_actors: bool = False) -> list[dict]:
+        """List trek docs visible to the caller.
+
+        Both backends honor ``status`` filter and ``include_archived``
+        switch. ``all_actors`` is server-side only (= admin view) — local
+        backend ignores it because there is no remote registry; ``actor_id``
+        is local-only (= cloud server resolves the caller from auth token).
+        Cloud transport / 403 errors propagate as RuntimeError, matching
+        the legacy cloud branch behavior.
+        """
+        ...
+
+    def get_trek(self, trek_id: str) -> dict:
+        """Fetch a single trek doc by id.
+
+        Both backends return the trek dict (members / scope / halt /
+        leader_session_id 等を含む完全な doc)。Raises ``ValueError`` when the
+        trek is unknown so CLI sites can show a uniform ``trek 'X' not
+        found`` message regardless of backend (= LocalStore: ファイル不在、
+        StoreApi: API 404)。Other transport / auth errors propagate as
+        ``RuntimeError`` (= 既存の cloud path の挙動と一致)。
+        """
+        ...
+
+    def purge_milestone(self, ms_id: str, *,
+                        reason: str, index: int | None = None) -> dict:
+        """Hard-delete a milestone record (= 物理削除、duplicate-ID 回復用、Issue #14)。
+
+        Returns a dict shaped::
+
+            {
+                "purged": {...the removed milestone fields...},
+                "still_dirty": bool,    # True iff residual duplicates remain (local only)
+                "dup_report": dict,     # find_duplicate_ids output (local only; {} in cloud)
+            }
+
+        Cloud-backed implementations return ``still_dirty=False`` + empty
+        ``dup_report`` because the server enforces single-record purge per
+        request and re-validates the project document afterwards. Raises
+        ``ValueError`` on invalid input (missing reason, unknown id,
+        out-of-range index, etc.) so the CLI can branch uniformly.
+        """
+        ...
+
 
 def get_store(project_file: str | None = None) -> Store:
     """Return the appropriate Store instance.

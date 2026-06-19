@@ -111,6 +111,15 @@ def login():
 
     Profile resolution (= どのサーバを見るか) は active profile に従う。
     """
+    # IdP 不要のローカル開発ログイン (= ローカルクラウド / docker-compose 経路)。
+    # サーバが BEACON_LOCAL_DEV=1 で立てた /api/auth/dev-login にメールを投げて
+    # bcli トークンを受け取る。provider discovery も firebase config も不要なので
+    # 最優先で分岐する (ms-12 e-2041)。dispatch.py / bin/beacon が --dev を
+    # BEACON_AUTH_DEV=1 に翻訳して渡す。
+    if os.environ.get("BEACON_AUTH_DEV") == "1":
+        login_dev()
+        return
+
     # First discover what auth provider the server uses
     api_url = _get_api_url()
     try:
@@ -230,6 +239,98 @@ def login_web():
 
     print("\nTimeout. Run 'beacon auth login' again.")
     sys.exit(1)
+
+
+def _git_user_email() -> str:
+    """Best-effort `git config user.email` lookup (= dev login の email 既定値)."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["git", "config", "user.email"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return (out.stdout or "").strip()
+    except Exception:
+        return ""
+
+
+def login_dev() -> None:
+    """IdP 不要のローカル開発ログイン (= server /api/auth/dev-login, ms-12 e-2041)。
+
+    ローカルクラウド (docker-compose) は Google / Cognito を立てないので、本番の
+    Web UI 承認フロー (login_web) が使えない。代わりにサーバの dev-login
+    エンドポイントへ任意のメールアドレスを投げて bcli トークンを受け取り、
+    active profile の credentials.json に保存する。本番サーバ (= dev-login 未有効)
+    に対しては 404 が返るので、その旨を案内して中断する。
+
+    メールの解決順:
+      1. BEACON_DEV_EMAIL env (= dispatch.py が --email を翻訳)
+      2. git config user.email
+    表示名は BEACON_DEV_NAME env (= --name、任意)。
+
+    本番用の認証情報を壊さないために、--profile / cloud.json.profile で
+    ローカル専用プロファイルに切ってから実行するのが安全 (= credentials.json は
+    profile 単位の共有ファイル)。
+    """
+    api_url = _get_api_url()
+    email = os.environ.get("BEACON_DEV_EMAIL", "").strip() or _git_user_email()
+    if not email:
+        print("Error: dev login にはメールアドレスが必要です。")
+        print("  `beacon auth login --dev --email you@example.com` のように渡すか、")
+        print("  `git config user.email` を設定してください。")
+        sys.exit(1)
+    name = os.environ.get("BEACON_DEV_NAME", "").strip()
+
+    payload: dict = {"email": email}
+    if name:
+        payload["name"] = name
+    try:
+        req = urllib.request.Request(
+            f"{api_url}/api/auth/dev-login",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print(f"Error: {api_url} は dev login 非対応です。")
+            print("  サーバが BEACON_LOCAL_DEV=1 で起動しているか確認してください")
+            print("  (本番サーバは dev login を常に 404 にします)。")
+        else:
+            body = ""
+            try:
+                body = e.read().decode("utf-8")[:300]
+            except Exception:
+                pass
+            print(f"Error: dev login に失敗しました (HTTP {e.code}): {body}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error: {api_url} に接続できません: {e}")
+        sys.exit(1)
+
+    id_token = result.get("id_token", "")
+    if not id_token:
+        print(f"Error: サーバ応答にトークンが含まれていません: {result}")
+        sys.exit(1)
+
+    cred_path = _credentials_path()
+    cred_path.parent.mkdir(parents=True, exist_ok=True)
+    creds_data: dict = {
+        "token": id_token,
+        "email": result.get("email", email),
+        "web_auth": True,
+        "token_type": "beacon_cli",
+    }
+    if result.get("token_expiry"):
+        creds_data["token_expiry"] = result["token_expiry"]
+    with open(cred_path, "w", encoding="utf-8") as f:
+        json.dump(creds_data, f, indent=2)
+
+    print(f"Logged in (dev) as: {creds_data['email']}")
+    print(f"Server: {api_url}")
+    print(f"Credentials saved to: {cred_path}")
 
 
 def login_cognito(server_config: dict) -> None:

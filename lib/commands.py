@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Beacon CLI commands - thin adapter over core.py logic."""
 
-__version__ = "0.39.0"
+__version__ = "0.46.0"
 
 import json
 import os
@@ -162,6 +162,66 @@ def _require_reason_or_skip(verb: str) -> str:
         )
         sys.exit(1)
     return os.environ.get("BEACON_REASON", "")
+
+
+# ms-81 e-1916: forcing function — warn (don't block) when a write targets
+# a milestone whose status doesn't authorise writes per the state-machine
+# CORE doc DqIvAVzDprcq6hsq0AuF §1 + §6.
+#
+# Per the SPEC (warning-based, not block), this emits a stderr warning that
+# names the offending status and the recommended remediation, and:
+#   - on an interactive tty, prompts [y/N] to let the operator decide;
+#   - on a non-interactive run (no tty — Skill / hook / dispatch path),
+#     proceeds after logging the warning (= 努力義務, the operator can act
+#     on the audit trail later);
+#   - if BEACON_BYPASS_STATUS_GATE=1, skips the prompt entirely (= explicit
+#     opt-out for bulk migrations / hook bypass scenarios).
+_WRITE_AUTHORISED_STATUSES = {"in_progress", "active", "observing"}
+
+
+def _check_ms_status_for_write(ms: dict, op_desc: str) -> bool:
+    """Return True if the write may proceed (status authorised or operator
+    consented to override); False only when an interactive operator declines.
+    """
+    status = ms.get("status", "todo")
+    if status in _WRITE_AUTHORISED_STATUSES:
+        return True
+
+    if os.environ.get("BEACON_BYPASS_STATUS_GATE", "") == "1":
+        return True
+
+    title = ms.get("title", "")
+    ms_id = ms.get("id", "")
+    print(
+        f"\n[ms-81 status gate] write to a {status} milestone\n"
+        f"   target:      [{ms_id}] {title}\n"
+        f"   status:      {status} (writes are discouraged — see CORE doc "
+        f"DqIvAVzDprcq6hsq0AuF §1)\n"
+        f"   operation:   {op_desc}\n"
+        f"   suggestion:  transition to active via `beacon milestone start "
+        f"{ms_id}` or to observing via `beacon milestone observe {ms_id} "
+        f"--reason \"...\"` first.\n"
+        f"   bypass:      set BEACON_BYPASS_STATUS_GATE=1 to silence this gate "
+        f"(opt-out for hooks / bulk ops).",
+        file=sys.stderr,
+    )
+
+    if not sys.stdin.isatty():
+        # Non-interactive: proceed after logging the warning. The forcing
+        # function is the visible warning + audit trail, not a block.
+        print(
+            f"   (non-interactive stdin — proceeding; the warning above is "
+            f"the forcing function)",
+            file=sys.stderr,
+        )
+        return True
+
+    try:
+        response = input("   Proceed anyway? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\n   declined (no input)", file=sys.stderr)
+        return False
+    return response in ("y", "yes")
 
 
 def save_project(data, op=None):
@@ -916,6 +976,51 @@ def cmd_milestone_start():
     data = load_project()
     ms = core.milestone_start(data, ms_id)
 
+    # ---- 1b. occupation claim (ms-81 e-1918) ----
+    # Tied to milestone_start so status / assignee / occupation always lift
+    # together. If a previous claim exists from another session, warn —
+    # never block (= SPEC §3-3, 努力義務). Gated by BEACON_NO_BRANCH /
+    # BEACON_NO_ASSIGNEE so test sandboxes and scripted scaffolds that
+    # request a pure status flip don't trip session-resolution side effects.
+    if not no_branch and not no_assignee:
+        try:
+            import agent as _agent_for_claim
+            actor_for_claim = _agent_for_claim.get_actor()
+        except Exception:
+            actor_for_claim = {}
+        sid_for_claim = _resolve_session_id() or ""
+        _ms_claim, previous_claim = core.milestone_claim_occupation(
+            data, ms_id,
+            session_id=sid_for_claim,
+            machine=actor_for_claim.get("machine", ""),
+            agent=actor_for_claim.get("agent", ""),
+        )
+        if previous_claim and previous_claim.get("session_id") != sid_for_claim:
+            prev_sid = previous_claim.get("session_id", "?")
+            prev_machine = previous_claim.get("machine", "?")
+            print(
+                f"  [ms-81 occupation] previous claim by session "
+                f"{prev_sid[:12]}... on {prev_machine} (claimed_at: "
+                f"{previous_claim.get('claimed_at', '?')}). Proceeding with "
+                f"takeover; if that session crashed, this is normal — if it is "
+                f"still actively working, coordinate via beacon dm.",
+                file=sys.stderr,
+            )
+            core.milestone_record_occupation_event(
+                data, ms_id=ms_id, event_type="takeover",
+                session_id=sid_for_claim,
+                machine=actor_for_claim.get("machine", ""),
+                agent=actor_for_claim.get("agent", ""),
+                reason=f"superseded session {prev_sid[:12]}",
+            )
+        else:
+            core.milestone_record_occupation_event(
+                data, ms_id=ms_id, event_type="claim",
+                session_id=sid_for_claim,
+                machine=actor_for_claim.get("machine", ""),
+                agent=actor_for_claim.get("agent", ""),
+            )
+
     # ---- 1. assignee auto-add (lib/agent.py is the single source) ----
     actor_str = ""
     if not no_assignee:
@@ -935,38 +1040,48 @@ def cmd_milestone_start():
         except Exception as e:  # pragma: no cover - defensive
             print(f"  warning: could not auto-add assignee: {e}", file=sys.stderr)
 
-    # ---- 2. auto-workspace / auto-branch (cwd-aware) ----
+    # ---- 2. auto-workspace / auto-branch (cwd-aware + project-type-aware) ----
+    # ms-81 e-1917: explicit non-git degrade. If the project isn't a git repo
+    # (= research / writing project, scaffold, fresh dir), we skip the entire
+    # worktree branch silently and only flip status + assignee. Per CORE doc
+    # DqIvAVzDprcq6hsq0AuF §3-2 the physical-boundary mechanism degrades to
+    # logical occupation only; for now occupation is recorded server-side
+    # (handled in e-1918), so degrade simply means "no worktree".
     branch_name = ""
     branch_msg = ""
     workspace_path = ""
+    non_git_skip = False
     if not no_branch:
-        try:
-            import branch as _branch
-            branch_name = _branch.ms_branch_name(ms_id, ms.get("title", ""))
-            if _is_in_main_project_root():
-                import worktree as _worktree
-                workspace_path = os.path.join(".worktrees", branch_name)
-                try:
-                    wt = _worktree.create_workspace(workspace_path, branch_name)
-                    branch_msg = "worktree created" if wt["created"] else "worktree exists"
-                except _worktree.GitNotInstalledError:
-                    # No git → fall through silently (status flip already done).
-                    branch_name = ""
-                    workspace_path = ""
-                except _worktree.WorktreeCreateError as exc:
-                    print(f"  warning: could not create worktree: {exc}", file=sys.stderr)
-                    branch_name = ""
-                    workspace_path = ""
-            else:
-                # Already inside a worktree: in-place checkout is safe
-                # because each worktree owns its own HEAD.
-                branch_msg = _ensure_on_branch(branch_name)
-        except _NotAGitRepoError:
-            # Quiet skip: scaffolds / tests / fresh projects without git
-            # should still be able to start a milestone.
-            branch_name = ""
-        except Exception as e:  # pragma: no cover - defensive
-            print(f"  warning: could not create/switch branch: {e}", file=sys.stderr)
+        if not _is_git_project():
+            non_git_skip = True
+        else:
+            try:
+                import branch as _branch
+                branch_name = _branch.ms_branch_name(ms_id, ms.get("title", ""))
+                if _is_in_main_project_root():
+                    import worktree as _worktree
+                    workspace_path = os.path.join(".worktrees", branch_name)
+                    try:
+                        wt = _worktree.create_workspace(workspace_path, branch_name)
+                        branch_msg = "worktree created" if wt["created"] else "worktree exists"
+                    except _worktree.GitNotInstalledError:
+                        # No git → fall through silently (status flip already done).
+                        branch_name = ""
+                        workspace_path = ""
+                    except _worktree.WorktreeCreateError as exc:
+                        print(f"  warning: could not create worktree: {exc}", file=sys.stderr)
+                        branch_name = ""
+                        workspace_path = ""
+                else:
+                    # Already inside a worktree: in-place checkout is safe
+                    # because each worktree owns its own HEAD.
+                    branch_msg = _ensure_on_branch(branch_name)
+            except _NotAGitRepoError:
+                # Quiet skip: scaffolds / tests / fresh projects without git
+                # should still be able to start a milestone.
+                branch_name = ""
+            except Exception as e:  # pragma: no cover - defensive
+                print(f"  warning: could not create/switch branch: {e}", file=sys.stderr)
 
     save_project(data)
     print(f"Activated: {ms['title']}")
@@ -978,6 +1093,41 @@ def cmd_milestone_start():
         print(f"  next: cd {workspace_path} && bclaude")
         print(f"        (新しいセッションをこの worktree で開いて作業してください — "
               f"同 cwd で並走すると別マイルストーンの作業を同じ branch に書く事故が起きるため)")
+    if non_git_skip:
+        # ms-81 e-1917: surface the project-type degrade so the user knows
+        # the worktree step was intentionally skipped (= research / writing
+        # project), not silently dropped.
+        print("  workspace: non-git project, worktree step skipped "
+              "(logical occupation only)")
+
+
+def _is_git_project() -> bool:
+    """Return True if the current project root looks like a git repository.
+
+    ms-81 e-1917: explicit project-type detection used by ``milestone start``
+    to decide whether to engage the worktree mechanism. We check the cheap
+    common-case (``.git`` exists at the beacon root / cwd) before falling
+    back to ``git rev-parse``, which would otherwise produce noisy stderr
+    on plain directories.
+    """
+    # Cheapest path: a ``.git`` directory or file at cwd / beacon root.
+    candidates = [os.getcwd()]
+    beacon_root = os.environ.get("BEACON_ROOT", "")
+    if beacon_root and beacon_root not in candidates:
+        candidates.append(beacon_root)
+    for root in candidates:
+        if os.path.exists(os.path.join(root, ".git")):
+            return True
+    # Fall back to git rev-parse (covers the worktree case where ``.git`` is
+    # a pointer file outside cwd).
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return r.returncode == 0
+    except (FileNotFoundError, OSError):
+        return False
 
 
 def _is_in_main_project_root() -> bool:
@@ -1084,15 +1234,241 @@ def _ensure_on_branch(branch_name: str) -> str:
     return "created"
 
 
+def _prompt_close_leftover_worktree(ms_id: str, transition: str) -> None:
+    """ms-81 e-1919: surface leftover worktrees on phase transitions.
+
+    When an MS moves to done / observing / waiting we check whether the
+    branch-specific worktree directory still exists; a leftover worktree
+    is the temptation other sessions could later (re-)check out and
+    accidentally commit against. We prompt rather than block: interactive
+    runs get a [y/N] auto-close; non-interactive runs get a one-line
+    warning and proceed. Per SPEC §4 this is intentionally a forcing
+    function, not enforcement.
+    """
+    try:
+        data = load_project()
+    except Exception:
+        return
+    ms = next((m for m in data.get("milestones", []) if m.get("id") == ms_id), None)
+    if ms is None:
+        return
+    try:
+        import branch as _branch
+        branch_name = _branch.ms_branch_name(ms_id, ms.get("title", ""))
+    except Exception:
+        return
+    workspace_path = os.path.join(".worktrees", branch_name)
+    if not os.path.exists(workspace_path):
+        return
+    msg = (
+        f"\n[ms-81 transition prompt] worktree still present at "
+        f"{workspace_path} after {transition} of [{ms_id}].\n"
+        f"   Leftover worktrees can be (re-)entered by other sessions; "
+        f"cleanup keeps the audit trail tight."
+    )
+    print(msg, file=sys.stderr)
+    if not sys.stdin.isatty():
+        print(
+            "   (non-interactive — leaving the worktree in place; clean up "
+            "with `beacon milestone workspace-cleanup " + ms_id + "` when "
+            "convenient.)",
+            file=sys.stderr,
+        )
+        return
+    try:
+        choice = input("   Auto-close worktree? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        choice = "n"
+    if choice in ("y", "yes"):
+        # Defer to the existing workspace_cleanup command rather than
+        # duplicating the git worktree remove machinery; it already
+        # handles branch checks and idempotency.
+        os.environ["BEACON_MS_ID"] = ms_id
+        cmd_milestone_workspace_cleanup()
+    else:
+        print(
+            f"   leaving worktree in place; run `beacon milestone "
+            f"workspace-cleanup {ms_id}` to remove later.",
+            file=sys.stderr,
+        )
+
+
+def _release_all_occupations_for_session(session_id: str) -> int:
+    """ms-81 e-1918 (SPEC AC #15): release every MS this session is occupying.
+
+    Called from session-end so a clean exit leaves the next session free
+    to claim. Returns the number of releases performed (0 for sessions
+    that weren't holding anything).
+    """
+    if not session_id:
+        return 0
+    data = load_project()
+    try:
+        import agent as _agent_for_se
+        actor = _agent_for_se.get_actor()
+    except Exception:
+        actor = {}
+    released = 0
+    for ms in data.get("milestones", []):
+        occ = ms.get("occupation")
+        if occ and occ.get("session_id") == session_id:
+            ms_id = ms["id"]
+            core.milestone_release_occupation(data, ms_id, reason="session-end")
+            core.milestone_record_occupation_event(
+                data, ms_id=ms_id, event_type="release",
+                session_id=session_id,
+                machine=actor.get("machine", ""),
+                agent=actor.get("agent", ""),
+                reason="session-end",
+            )
+            released += 1
+    if released:
+        save_project(data, op={"op": "session_end_release", "count": released})
+    return released
+
+
+def _release_occupation_for_transition(data, ms_id, *, reason):
+    """ms-81 e-1918: phase transitions auto-release any active occupation
+    on the target MS. Per the SPEC the release happens whether or not the
+    session that claimed it is the same one calling the transition (= a
+    done verb on someone else's claim is implicitly a takeover).
+    """
+    sid = _resolve_session_id() or ""
+    try:
+        import agent as _agent_for_release
+        actor = _agent_for_release.get_actor()
+    except Exception:
+        actor = {}
+    _ms, released = core.milestone_release_occupation(data, ms_id, reason=reason)
+    if released:
+        core.milestone_record_occupation_event(
+            data, ms_id=ms_id, event_type="release",
+            session_id=sid,
+            machine=actor.get("machine", ""),
+            agent=actor.get("agent", ""),
+            reason=reason,
+        )
+
+
 def cmd_milestone_done():
     ms_id = os.environ.get("BEACON_MS_ID", "")
     reason = _require_reason_or_skip("milestone done")
     data = load_project()
     ms = core.milestone_done(data, ms_id, reason=reason)
+    _release_occupation_for_transition(data, ms_id, reason="done")
     save_project(data, op={"op": "milestone_done", "ms_id": ms_id, "reason": reason})
+    _prompt_close_leftover_worktree(ms_id, "done")
     print(f"Completed: {ms['title']}")
     if reason:
         print(f"  Reason: {reason}")
+
+
+def cmd_milestone_wait():
+    """Transition a milestone to ``waiting`` status (ms-81 e-1915).
+
+    Requires --reason (same gate as observe / done) so retro can reconstruct
+    why work paused. The transition is rejected by core.milestone_wait if
+    the source status is not active or observing.
+    """
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    reason = _require_reason_or_skip("milestone wait")
+    if not ms_id:
+        print("Usage: beacon milestone wait <ms-id> --reason <text>",
+              file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    try:
+        ms = core.milestone_wait(data, ms_id, reason=reason)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    _release_occupation_for_transition(data, ms_id, reason="wait")
+    save_project(data, op={"op": "milestone_wait", "ms_id": ms_id,
+                           "reason": reason})
+    _prompt_close_leftover_worktree(ms_id, "wait")
+    print(f"Waiting: [{ms['id']}] {ms['title']}")
+    if reason:
+        print(f"  Reason: {reason}")
+
+
+def cmd_milestone_occupations():
+    """List worktree_sessions / occupation log entries (ms-81 e-1921).
+
+    Surfaces the audit trail recorded by milestone_record_occupation_event.
+    Filtered with --ms <ms-id> to scope to one milestone; --json emits the
+    raw shape for downstream tools (= Web UI audit tab in a later iteration
+    can hit this endpoint via the standard project sync rather than a new
+    subcollection plumbing).
+    """
+    ms_filter = os.environ.get("BEACON_MS_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    log = data.get("worktree_sessions", [])
+    if ms_filter:
+        log = [e for e in log if e.get("ms_id") == ms_filter]
+    if json_mode:
+        print(json.dumps(log, ensure_ascii=False))
+        return
+    if not log:
+        print("(no occupation events recorded)")
+        return
+    for ev in log:
+        ev_type = ev.get("event_type", "?")
+        ev_ms = ev.get("ms_id", "?")
+        ev_sid = (ev.get("session_id") or "?")[:14]
+        ev_machine = ev.get("machine", "")
+        ev_agent = ev.get("agent", "")
+        ev_at = ev.get("at", "")
+        ev_reason = ev.get("reason", "")
+        actor_str = f"{ev_machine}/{ev_agent}" if ev_machine or ev_agent else "?"
+        line = f"  {ev_at[:19]} [{ev_type:8}] {ev_ms:6} by {ev_sid}... ({actor_str})"
+        if ev_reason:
+            line += f"  — {ev_reason}"
+        print(line)
+
+
+def cmd_milestone_release():
+    """Release the occupation claim on a milestone without changing status
+    (ms-81 e-1918, SPEC AC #16).
+
+    Use this when finishing a working session on an active MS so the next
+    session can pick it up immediately. The MS stays in its current phase;
+    only the per-session occupation marker is cleared.
+    """
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    if not ms_id:
+        print("Usage: beacon milestone release <ms-id>", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    try:
+        _ms, released = core.milestone_release_occupation(
+            data, ms_id, reason="manual"
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    if released:
+        sid = _resolve_session_id() or ""
+        try:
+            import agent as _agent_for_release
+            actor = _agent_for_release.get_actor()
+        except Exception:
+            actor = {}
+        core.milestone_record_occupation_event(
+            data, ms_id=ms_id, event_type="release",
+            session_id=sid,
+            machine=actor.get("machine", ""),
+            agent=actor.get("agent", ""),
+            reason="manual",
+        )
+        save_project(data, op={"op": "milestone_release", "ms_id": ms_id})
+        prev_sid = released.get("session_id", "?")
+        print(
+            f"Released: [{ms_id}] (was claimed by session "
+            f"{prev_sid[:12] if prev_sid else '?'}...)"
+        )
+    else:
+        print(f"Released: [{ms_id}] (was not occupied; no-op)")
 
 
 def cmd_milestone_observe():
@@ -1120,8 +1496,10 @@ def cmd_milestone_observe():
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    _release_occupation_for_transition(data, ms_id, reason="observe")
     save_project(data, op={"op": "milestone_observe", "ms_id": ms_id,
                            "reason": reason})
+    _prompt_close_leftover_worktree(ms_id, "observe")
     print(f"Observing: [{ms['id']}] {ms['title']}")
     if reason:
         print(f"  Reason: {reason}")
@@ -1411,106 +1789,6 @@ def _cloud_purge_dispatch(action_label: str, fn, *,
             print(line)
 
 
-def _cloud_milestone_purge(ms_id: str, *, reason: str,
-                            index: Optional[int], json_mode: bool) -> None:
-    client, config = _get_api_client()
-    project_id = config["project_id"]
-    data = _cloud_fetch_project_or_exit(client, project_id)
-    matches = core.find_milestones(data, ms_id)
-    if not matches:
-        print(f"Milestone not found: {ms_id}", file=sys.stderr)
-        sys.exit(1)
-    if len(matches) > 1 and index is None:
-        print(
-            f"Milestone '{ms_id}' has {len(matches)} duplicate records. "
-            "Re-run with --index <n>:",
-            file=sys.stderr,
-        )
-        for i, m in enumerate(matches, 1):
-            title = m.get("title", "(no title)")
-            status = m.get("status", "?")
-            print(f"  --index {i}  status={status}  title={title}",
-                  file=sys.stderr)
-        sys.exit(1)
-    _cloud_purge_dispatch(
-        "milestone",
-        lambda: client.purge_milestone(
-            project_id, ms_id, reason=reason, index=index),
-        json_mode=json_mode,
-        success_fmt=lambda r: [
-            f"Purged: [{r.get('id', ms_id)}] {r.get('title', '')}",
-            f"  Reason: {reason}",
-        ],
-    )
-
-
-def _cloud_entry_purge(entry_id: str, *, reason: str,
-                        index: Optional[int], json_mode: bool) -> None:
-    client, config = _get_api_client()
-    project_id = config["project_id"]
-    data = _cloud_fetch_project_or_exit(client, project_id)
-    matches = core.find_entries(data, entry_id)
-    if not matches:
-        print(f"Entry not found: {entry_id}", file=sys.stderr)
-        sys.exit(1)
-    if len(matches) > 1 and index is None:
-        print(
-            f"Entry '{entry_id}' has {len(matches)} duplicate records. "
-            "Re-run with --index <n>:",
-            file=sys.stderr,
-        )
-        for i, e in enumerate(matches, 1):
-            desc = e.get("description", "(no description)")
-            etype = e.get("type", "?")
-            print(f"  --index {i}  type={etype}  desc={desc[:60]}",
-                  file=sys.stderr)
-        sys.exit(1)
-    _cloud_purge_dispatch(
-        "entry",
-        lambda: client.purge_entry(
-            project_id, entry_id, reason=reason, index=index),
-        json_mode=json_mode,
-        success_fmt=lambda r: [
-            f"Purged entry: [{r.get('entry_id', entry_id)}] "
-            f"{r.get('description', '')[:80]}",
-            f"  Reason: {reason}",
-        ],
-    )
-
-
-def _cloud_operation_purge(op_id: str, *, reason: str,
-                            index: Optional[int], json_mode: bool) -> None:
-    client, config = _get_api_client()
-    project_id = config["project_id"]
-    data = _cloud_fetch_project_or_exit(client, project_id)
-    matches = core.find_operations(data, op_id)
-    if not matches:
-        print(f"Operation not found: {op_id}", file=sys.stderr)
-        sys.exit(1)
-    if len(matches) > 1 and index is None:
-        print(
-            f"Operation '{op_id}' has {len(matches)} duplicate records. "
-            "Re-run with --index <n>:",
-            file=sys.stderr,
-        )
-        for i, o in enumerate(matches, 1):
-            title = o.get("title", "(no title)")
-            status = o.get("status", "?")
-            print(f"  --index {i}  status={status}  title={title}",
-                  file=sys.stderr)
-        sys.exit(1)
-    _cloud_purge_dispatch(
-        "operation",
-        lambda: client.purge_operation(
-            project_id, op_id, reason=reason, index=index),
-        json_mode=json_mode,
-        success_fmt=lambda r: [
-            f"Purged operation: [{r.get('id', op_id)}] {r.get('title', '')}",
-            f"  Reason: {reason}",
-        ],
-    )
-
-
 def cmd_milestone_purge():
     """Hard-delete a milestone record (Issue #14 recovery path).
 
@@ -1561,16 +1839,18 @@ def cmd_milestone_purge():
                   file=sys.stderr)
             sys.exit(1)
 
-    if _is_cloud_mode():
-        _cloud_milestone_purge(ms_id, reason=reason, index=index,
-                               json_mode=json_mode)
-        return
-
-    data = load_project_unsafe()
-    # Pre-flight: if the operator did not pass --index but duplicates
-    # exist, show a helpful summary before the core raises. The
-    # core.milestone_purge already raises with a clear message; we just
-    # add a list of the duplicates for context.
+    # ms-84 Phase 2 (e-2036): Store.purge_milestone unifies the cloud + local
+    # paths. The CLI no longer branches on ``_is_cloud_mode()``; the Store
+    # implementation knows how to talk to its backend (cloud server enforces
+    # owner-only access + post-purge validation; LocalStore does the local
+    # file mutation + still_dirty bookkeeping). Pre-flight stays here as a
+    # UX layer (= friendly duplicate display before delegating).
+    store = get_store()
+    try:
+        data = store.load_project()
+    except (RuntimeError, ConnectionError) as e:
+        print(f"Error loading project: {e}", file=sys.stderr)
+        sys.exit(1)
     matches = core.find_milestones(data, ms_id)
     if not matches:
         print(f"Milestone not found: {ms_id}", file=sys.stderr)
@@ -1589,33 +1869,26 @@ def cmd_milestone_purge():
         sys.exit(1)
 
     try:
-        purged = core.milestone_purge(data, ms_id, reason=reason, index=index)
+        result = store.purge_milestone(ms_id, reason=reason, index=index)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # After purge, check whether the project is now clean. If still dirty,
-    # save via unsafe path and warn; otherwise normal save (with validation).
-    dup_report = core.find_duplicate_ids(data)
-    still_dirty = any(dup_report.values())
-    op = {
-        "op": "milestone_purge",
-        "ms_id": ms_id,
-        "index": index,
-        "reason": reason,
-        "purged_title": purged.get("title", ""),
-    }
-    if still_dirty:
-        save_project_unsafe(data, op=op)
-    else:
-        try:
-            save_project(data, op=op)
-        except ValueError as e:
-            # Shouldn't happen — purge invariants should leave a valid
-            # project — but if it does, fall back to unsafe save so the
-            # purge isn't lost, and surface the issue.
-            save_project_unsafe(data, op=op)
-            print(f"Warning: post-purge validation failed: {e}", file=sys.stderr)
+    purged = result["purged"]
+    still_dirty = result["still_dirty"]
+    dup_report = result["dup_report"]
+
+    # Local-mode changelog parity: the cloud server records its own audit
+    # trail via operations.apply_operation, so we only append to
+    # .beacon/changelog.jsonl when LocalStore did the mutation.
+    if not store.is_cloud():
+        _append_changelog({
+            "op": "milestone_purge",
+            "ms_id": ms_id,
+            "index": index,
+            "reason": reason,
+            "purged_title": purged.get("title", ""),
+        })
 
     if json_mode:
         out = {
@@ -1682,12 +1955,13 @@ def cmd_entry_purge():
                   file=sys.stderr)
             sys.exit(1)
 
-    if _is_cloud_mode():
-        _cloud_entry_purge(entry_id, reason=reason, index=index,
-                           json_mode=json_mode)
-        return
-
-    data = load_project_unsafe()
+    # ms-84 Phase 2 (e-2036): Store.purge_entry unifies cloud + local paths.
+    store = get_store()
+    try:
+        data = store.load_project()
+    except (RuntimeError, ConnectionError) as e:
+        print(f"Error loading project: {e}", file=sys.stderr)
+        sys.exit(1)
     matches = core.find_entries(data, entry_id)
     if not matches:
         print(f"Entry not found: {entry_id}", file=sys.stderr)
@@ -1702,28 +1976,23 @@ def cmd_entry_purge():
         sys.exit(1)
 
     try:
-        purged = core.entry_purge(data, entry_id, reason=reason, index=index)
+        result = store.purge_entry(entry_id, reason=reason, index=index)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    dup_report = core.find_duplicate_ids(data)
-    still_dirty = any(dup_report.values())
-    op = {
-        "op": "entry_purge",
-        "entry_id": entry_id,
-        "index": index,
-        "reason": reason,
-        "purged_desc": purged.get("description", ""),
-    }
-    if still_dirty:
-        save_project_unsafe(data, op=op)
-    else:
-        try:
-            save_project(data, op=op)
-        except ValueError as e:
-            save_project_unsafe(data, op=op)
-            print(f"Warning: post-purge validation failed: {e}", file=sys.stderr)
+    purged = result["purged"]
+    still_dirty = result["still_dirty"]
+    dup_report = result["dup_report"]
+
+    if not store.is_cloud():
+        _append_changelog({
+            "op": "entry_purge",
+            "entry_id": entry_id,
+            "index": index,
+            "reason": reason,
+            "purged_desc": purged.get("description", ""),
+        })
 
     if json_mode:
         print(json.dumps({
@@ -1772,12 +2041,13 @@ def cmd_operation_purge():
                   file=sys.stderr)
             sys.exit(1)
 
-    if _is_cloud_mode():
-        _cloud_operation_purge(op_id, reason=reason, index=index,
-                               json_mode=json_mode)
-        return
-
-    data = load_project_unsafe()
+    # ms-84 Phase 2 (e-2036): Store.purge_operation unifies cloud + local.
+    store = get_store()
+    try:
+        data = store.load_project()
+    except (RuntimeError, ConnectionError) as e:
+        print(f"Error loading project: {e}", file=sys.stderr)
+        sys.exit(1)
     matches = core.find_operations(data, op_id)
     if not matches:
         print(f"Operation not found: {op_id}", file=sys.stderr)
@@ -1792,28 +2062,23 @@ def cmd_operation_purge():
         sys.exit(1)
 
     try:
-        purged = core.operation_purge(data, op_id, reason=reason, index=index)
+        result = store.purge_operation(op_id, reason=reason, index=index)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    dup_report = core.find_duplicate_ids(data)
-    still_dirty = any(dup_report.values())
-    op = {
-        "op": "operation_purge",
-        "op_id": op_id,
-        "index": index,
-        "reason": reason,
-        "purged_title": purged.get("title", ""),
-    }
-    if still_dirty:
-        save_project_unsafe(data, op=op)
-    else:
-        try:
-            save_project(data, op=op)
-        except ValueError as e:
-            save_project_unsafe(data, op=op)
-            print(f"Warning: post-purge validation failed: {e}", file=sys.stderr)
+    purged = result["purged"]
+    still_dirty = result["still_dirty"]
+    dup_report = result["dup_report"]
+
+    if not store.is_cloud():
+        _append_changelog({
+            "op": "operation_purge",
+            "op_id": op_id,
+            "index": index,
+            "reason": reason,
+            "purged_title": purged.get("title", ""),
+        })
 
     if json_mode:
         print(json.dumps({
@@ -2025,6 +2290,17 @@ def cmd_log_finalize():
     source = _resolve_commit_source()
 
     data = load_project()
+    # ms-81 e-1916: status gate. Resolve the target MS the same way log_commit
+    # would internally, then surface the warning before mutating state.
+    try:
+        target_ms = core.find_target_milestone(data, ms_id)
+    except ValueError:
+        target_ms = None
+    if target_ms is not None:
+        if not _check_ms_status_for_write(
+            target_ms, f"log commit {commit_hash[:7]}"
+        ):
+            sys.exit(1)
     result = core.log_commit(
         data, ms_id=ms_id, commit_hash=commit_hash,
         message=message, date=date, summary=summary_text, progress=progress,
@@ -2134,6 +2410,53 @@ def cmd_task_add():
 
     data = load_project()
     target = core.find_target_milestone(data, ms_id)
+
+    # ms-81 e-1919: re-open prompt for done MS. Adding a task to a done
+    # milestone creates a zombie (= the e-1916 write gate then blocks any
+    # commit/done against it, so it would stay in todo forever). Per SPEC
+    # §5 the right move is to surface the choice: re-open into observing
+    # (the natural recovery slot) or active, or abort. Interactive only;
+    # in the non-interactive Skill / hook path we proceed with a warning
+    # so the Skill report can flag the audit trail rather than block.
+    if target.get("status") == "done":
+        if sys.stdin.isatty():
+            print(
+                f"\n[ms-81 re-open prompt] [{target['id']}] {target['title']} "
+                f"is done. Adding a task here will leave it stuck (the "
+                f"write gate blocks commit / done on done milestones).",
+                file=sys.stderr,
+            )
+            print(
+                "   Options: (o) re-open as observing, (a) re-open as active, "
+                "(s) skip prompt and add anyway, (n) abort",
+                file=sys.stderr,
+            )
+            try:
+                choice = input("   Choice [o/a/s/N]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                choice = "n"
+            if choice == "o":
+                core.milestone_update(
+                    data, ms_id, status="observing",
+                    reason="re-opened to add task",
+                )
+                print(f"  re-opened {ms_id} as observing", file=sys.stderr)
+            elif choice == "a":
+                core.milestone_start(data, ms_id)
+                print(f"  re-opened {ms_id} as active", file=sys.stderr)
+            elif choice in ("", "n"):
+                print("  aborted (no task added)", file=sys.stderr)
+                sys.exit(1)
+            # "s" falls through and adds the task without changing status
+        else:
+            print(
+                f"[ms-81 re-open warning] adding to done MS [{target['id']}] "
+                f"{target['title']} — task will be stuck (write gate blocks "
+                f"future commits / done). Re-open with `beacon milestone start "
+                f"{ms_id}` or `beacon milestone observe {ms_id}` first.",
+                file=sys.stderr,
+            )
+
     eid = core.task_add(data, ms_id, description, entry_type=entry_type,
                         date=date, detail=detail, requested_by=requested_by,
                         priority=priority, motivation=motivation,
@@ -2151,10 +2474,16 @@ def cmd_task_done():
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     data = load_project()
-    # PR entries: auto-forward to pr_merge, but warn if status is unexpected
+    # ms-81 e-1916: status gate. Look up the entry's parent MS first so we
+    # can warn if the MS isn't write-authorised. The PR-merge sub-branch
+    # below also goes through the same gate.
     result = core.find_entry(data, entry_id)
     if result:
-        _, _, entry, _ = result
+        parent_ms, _, entry, _ = result
+        if not _check_ms_status_for_write(
+            parent_ms, f"task done {entry_id}"
+        ):
+            sys.exit(1)
         if entry.get("type") == "pr":
             pr_status = entry.get("meta", {}).get("pr_status", "")
             if pr_status not in ("approved", "merged"):
@@ -2639,26 +2968,21 @@ def _write_local_session_log(payload: dict) -> None:
 
 
 def _push_session_log_to_cloud(payload: dict) -> bool:
-    """Best-effort upsert to the cloud session log endpoint.
+    """Best-effort upsert via Store.upsert_session_log (ms-84 Phase 2 e-2036).
 
-    Returns True on success, False on any failure (network / auth / etc.).
-    Mirrors the failure-swallowing contract of session._cloud_sync — the
-    session log primary truth is the local cache when cloud is unreachable;
-    a later run will re-aggregate and resync.
+    LocalStore returns False unconditionally (= cloud session log subcollection
+    has no local analogue); StoreApi calls the API and swallows transport
+    failures the same way the legacy inline cloud branch did. The session
+    log primary truth is the local cache when cloud is unreachable — a later
+    run will re-aggregate and resync.
     """
-    if not _is_cloud_mode():
+    sid = payload.get("session_id", "")
+    if not sid:
         return False
+    body = {k: v for k, v in payload.items()
+            if k != "session_id" and v is not None}
     try:
-        from auth import load_credentials
-        if load_credentials() is None:
-            return False
-        client, config = _get_api_client()
-        sid = payload.get("session_id", "")
-        if not sid:
-            return False
-        body = {k: v for k, v in payload.items() if k != "session_id" and v is not None}
-        client.upsert_session_log(config["project_id"], sid, body)
-        return True
+        return get_store().upsert_session_log(sid, body)
     except BaseException:
         if os.environ.get("BEACON_DEBUG") == "1":
             import traceback as _tb
@@ -2714,19 +3038,17 @@ def _list_other_session_ids() -> list:
         except OSError:
             pass
 
-    if _is_cloud_mode():
-        try:
-            from auth import load_credentials
-            if load_credentials() is not None:
-                client, config = _get_api_client()
-                for s in client.list_sessions(config["project_id"]) or []:
-                    sid = s.get("session_id")
-                    if sid and sid != current:
-                        seen.add(sid)
-        except BaseException:
-            if os.environ.get("BEACON_DEBUG") == "1":
-                import traceback as _tb
-                _tb.print_exc()
+    # ms-84 Phase 2 (e-2036): Store.list_session_ids unifies cloud + local.
+    # LocalStore returns []; StoreApi returns the API list (swallowing
+    # transport failures), so the union below does not branch on backend.
+    try:
+        for sid in get_store().list_session_ids():
+            if sid and sid != current:
+                seen.add(sid)
+    except BaseException:
+        if os.environ.get("BEACON_DEBUG") == "1":
+            import traceback as _tb
+            _tb.print_exc()
 
     return sorted(seen)
 
@@ -2746,25 +3068,28 @@ def _aggregate_and_persist(session_id: str, *, recovered: bool,
     data = load_project()
     existing_local = _read_local_session_log(session_id)
 
+    # ms-84 Phase 2 (e-2036): fetch any persisted remote session log via
+    # Store.get_session_log so the merge step is backend-uniform. LocalStore
+    # returns None; StoreApi returns the persisted dict (or None on 404 /
+    # transport failure). The cloud_client / cloud_pid pass-through to
+    # aggregate_session is left as a separate slice because session_log.py
+    # still talks to ApiClient directly via collect_cloud_notes; folding
+    # that into the Store interface is a follow-up commit.
+    store = get_store()
+    remote = store.get_session_log(session_id)
+    if remote and (not existing_local
+                   or remote.get("last_aggregated_at", "")
+                      >= existing_local.get("last_aggregated_at", "")):
+        existing_local = remote
+
     cloud_client = None
     cloud_pid = ""
-    if _is_cloud_mode():
+    if store.is_cloud():
         try:
             from auth import load_credentials
             if load_credentials() is not None:
                 cloud_client, cfg = _get_api_client()
                 cloud_pid = cfg.get("project_id", "")
-                try:
-                    remote = cloud_client.get_session_log(cloud_pid, session_id)
-                    # Server returns the persisted dict on success; on 404 the
-                    # api_client raises RuntimeError("API error 404: ..."), which
-                    # we treat as "no existing entry".
-                except RuntimeError:
-                    remote = None
-                if remote and (not existing_local
-                               or remote.get("last_aggregated_at", "")
-                                  >= existing_local.get("last_aggregated_at", "")):
-                    existing_local = remote
         except BaseException:
             if os.environ.get("BEACON_DEBUG") == "1":
                 import traceback as _tb
@@ -2819,6 +3144,17 @@ def cmd_session_end():
         print("Error: no session id (no .beacon/session.json and BEACON_SESSION_ID unset)",
               file=sys.stderr)
         sys.exit(1)
+
+    # ms-81 e-1918 (SPEC AC #15): release any MS occupations held by this
+    # session before aggregating. Done here so the session_log includes the
+    # release events; running it after persistence would race the cloud sync.
+    _released_count = _release_all_occupations_for_session(sid)
+    if _released_count:
+        print(
+            f"  released {_released_count} occupation claim(s) held by this "
+            f"session (status unchanged)",
+            file=sys.stderr,
+        )
 
     payload = _aggregate_and_persist(sid, recovered=False,
                                       summary_override=summary_override)
@@ -2876,15 +3212,11 @@ def cmd_session_log_list():
     except ValueError:
         limit = 0
 
-    entries: list[dict] = []
-    if _is_cloud_mode():
-        try:
-            from auth import load_credentials
-            if load_credentials() is not None:
-                client, config = _get_api_client()
-                entries = client.list_session_logs(config["project_id"], limit=limit) or []
-        except BaseException:
-            entries = []
+    # ms-84 Phase 2 (e-2036): Store.list_session_logs returns the cloud
+    # rows in cloud mode or [] in local mode, so the fallback to walking
+    # ``.beacon/session_logs/`` directly only fires when the Store could
+    # not supply anything.
+    entries: list[dict] = get_store().list_session_logs(limit=limit)
     if not entries:
         # Local cache fallback
         d = _session_logs_dir()
@@ -2921,17 +3253,12 @@ def cmd_session_log_show():
         print("Error: session id required", file=sys.stderr)
         sys.exit(1)
     entry = _read_local_session_log(sid)
-    if entry is None and _is_cloud_mode():
-        try:
-            from auth import load_credentials
-            if load_credentials() is not None:
-                client, config = _get_api_client()
-                try:
-                    entry = client.get_session_log(config["project_id"], sid)
-                except RuntimeError:
-                    entry = None
-        except BaseException:
-            entry = None
+    # ms-84 Phase 2 (e-2036): when the local cache is empty, ask the Store
+    # for any persisted remote copy. LocalStore returns None (= no cloud
+    # registry to consult); StoreApi returns the fetched dict or None on
+    # 404 / transport failure, so the caller only checks truthiness.
+    if entry is None:
+        entry = get_store().get_session_log(sid)
     if entry is None:
         print(f"Session log not found: {sid}", file=sys.stderr)
         sys.exit(1)
@@ -4003,6 +4330,10 @@ def cmd_trek_create():
     title = os.environ.get("BEACON_TREK_TITLE", "").strip()
     type_ = os.environ.get("BEACON_TREK_TYPE", "").strip() or "persistent"
     description = os.environ.get("BEACON_TREK_DESCRIPTION", "")
+    # ms-75 / e-1865: optional acceptance criterion / completion marker for the
+    # trek. Empty = "leader decides", non-empty = explicit signal that members
+    # can match against to suggest archive.
+    goal_state = os.environ.get("BEACON_TREK_GOAL_STATE", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not title:
@@ -4050,6 +4381,7 @@ def cmd_trek_create():
                 creator_session_id=session_id,
                 description=description,
                 type_=type_,
+                goal_state=goal_state,
             )
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)
@@ -4085,39 +4417,57 @@ def cmd_trek_list():
     status_filter = os.environ.get("BEACON_TREK_STATUS", "").strip() or None
     include_archived = os.environ.get("BEACON_TREK_INCLUDE_ARCHIVED", "") == "1"
     all_actors = os.environ.get("BEACON_TREK_ALL_ACTORS", "") == "1"
+    # ms-75 / e-1813: filter to treks the current user has actually joined
+    # (= members[].joined_at non-empty for them). Pending invitations stay
+    # out of the joined list so /beacon-session-start can display "current
+    # treks" without mixing in invitations the user hasn't yet accepted.
+    joined_only = os.environ.get("BEACON_TREK_JOINED_ONLY", "") == "1"
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if all_actors:
         actor_id = None
+        actor_email = ""
     else:
-        user_id, _, _ = _resolve_creator_identity()
+        user_id, actor_email, _ = _resolve_creator_identity()
         actor_id = user_id or None
 
-    if _is_cloud_mode():
-        # Cloud path: server filters by auth token's user (= ignores actor_id).
-        # ``all_actors`` requires admin role server-side; non-admin gets 403.
-        try:
-            client, _config = _get_api_client()
-            treks = client.list_treks(
-                status=status_filter or "",
-                include_archived=include_archived,
-                all_actors=all_actors,
-            )
-        except RuntimeError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
-    else:
-        treks = trek_store.list_treks(
-            actor_id=actor_id, status=status_filter,
+    # ms-84 Phase 2: Store 経由で cloud / local を統一。 actor_id (= local-only
+    # filter) と all_actors (= cloud admin view) はそれぞれ片方の backend が
+    # ignore する設計。 cloud transport / 403 は RuntimeError として呼び出し
+    # 側 (= ここ) で従来通り display する。
+    try:
+        treks = get_store().list_treks(
+            actor_id=actor_id,
+            status=status_filter or "",
             include_archived=include_archived,
+            all_actors=all_actors,
         )
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if joined_only:
+        # Walk members[] for an entry matching the caller (user_id or email)
+        # whose ``joined_at`` is non-empty. This is the only structurally
+        # reliable join check — bare visibility (= creator/member presence)
+        # would include treks the user was invited to but never accepted.
+        def _is_joined(t: dict) -> bool:
+            for m in t.get("members") or []:
+                if (actor_id and m.get("user_id") == actor_id) \
+                        or (actor_email and m.get("email") == actor_email):
+                    if m.get("joined_at"):
+                        return True
+            return False
+        treks = [t for t in treks if _is_joined(t)]
 
     if json_mode:
         print(json.dumps(treks, ensure_ascii=False, indent=2))
         return
 
     if not treks:
-        if actor_id:
+        if joined_only:
+            print("(no joined treks — `beacon trek join <id>` で招待を承諾)")
+        elif actor_id:
             print(f"(no treks visible to {actor_id} — try --all で全件)")
         else:
             print("(no treks yet — `beacon trek create \"title\"` で最初の trek を起票)")
@@ -4138,37 +4488,283 @@ def cmd_trek_list():
               f"{halt_marker}, {member_count}m/{scope_count}s")
 
 
+def _current_project_id() -> str:
+    """Return the current project's id (= what ``load_project()`` operates on).
+
+    Used by trek-show / trek-timeline aggregation to decide which scope
+    entries it can resolve locally (= same-project) and which are
+    cross-project hints the caller must visit separately.
+
+    Resolution order (ms-83 / e-2007 dogfood finding):
+      1. ``data.id`` / ``data.project_id`` on the local project.json
+         (= local mode and cloud-cached layouts that store the id inline)
+      2. ``.beacon/cloud.json`` ``project_id`` (= cloud mode default —
+         project.json is the cached document and does not embed the id)
+      3. Empty string if neither path resolves
+    """
+    try:
+        data = load_project()
+    except Exception:
+        data = {}
+    pid = (data.get("id") or data.get("project_id") or "").strip()
+    if pid:
+        return pid
+    try:
+        cloud_path = _get_cloud_config_path()
+        if os.path.exists(cloud_path):
+            with open(cloud_path, "r", encoding="utf-8") as f:
+                cloud_cfg = json.load(f)
+            return (cloud_cfg.get("project_id") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _scope_matches_entry(scope: list[dict], project_id: str,
+                         entry: dict, ms_id: str) -> bool:
+    """Return True if ``entry`` (in milestone ``ms_id``) is in the trek scope.
+
+    A scope row matches when its ``project`` matches AND any narrowing key
+    (milestone / task) matches. Project-wide scope (= no narrowing) is a
+    catch-all that includes every milestone/task in the project.
+    """
+    if not scope or not project_id:
+        return False
+    eid = entry.get("id", "")
+    for row in scope:
+        if (row.get("project") or "") != project_id:
+            continue
+        # Project-wide scope row → always matches.
+        narrow_keys = [k for k in ("milestone", "task", "operation")
+                       if row.get(k)]
+        if not narrow_keys:
+            return True
+        if row.get("milestone") and row.get("milestone") == ms_id:
+            return True
+        if row.get("task") and row.get("task") == eid:
+            return True
+        # operation narrowing doesn't apply to milestone entries; let the
+        # operation-walk pick it up instead.
+    return False
+
+
+def _scope_matches_operation(scope: list[dict], project_id: str,
+                             op_id: str) -> bool:
+    if not scope or not project_id:
+        return False
+    for row in scope:
+        if (row.get("project") or "") != project_id:
+            continue
+        if not any(row.get(k) for k in ("milestone", "task", "operation")):
+            return True  # project-wide
+        if row.get("operation") and row.get("operation") == op_id:
+            return True
+    return False
+
+
+def _scope_matches_milestone(scope: list[dict], project_id: str,
+                             ms_id: str) -> bool:
+    if not scope or not project_id:
+        return False
+    for row in scope:
+        if (row.get("project") or "") != project_id:
+            continue
+        if not any(row.get(k) for k in ("milestone", "task", "operation")):
+            return True
+        if row.get("milestone") and row.get("milestone") == ms_id:
+            return True
+    return False
+
+
+def _collect_trek_local_aggregation(trek_doc: dict) -> dict:
+    """Walk the current project and collect items in this trek's scope.
+
+    Returns a dict shaped as::
+
+        {
+          "project_id": "<pid or empty>",
+          "tasks_todo": [{ms_id, ms_title, id, description, status, priority}],
+          "tasks_done_recent": [...],
+          "commits_recent": [{ms_id, hash, summary, date}],
+          "docs": [{doc_id, title, scope, milestone, trek_id}],
+          "cross_project_scope": [{project, milestone/task/operation}],
+        }
+
+    Cross-project scope rows are surfaced as hints so the CLI prompts the
+    user to cd into the other project; only the current project's items
+    are walked here (= e-1864 CLI-side aggregation lives at the project
+    grain, no remote fetch).
+    """
+    scope = trek_doc.get("scope") or []
+    pid = _current_project_id()
+    out: dict = {
+        "project_id": pid,
+        "tasks_todo": [],
+        "tasks_done_recent": [],
+        "commits_recent": [],
+        "docs": [],
+        "cross_project_scope": [s for s in scope
+                                if (s.get("project") or "") != pid],
+    }
+    if not pid:
+        return out
+    try:
+        data = load_project()
+    except Exception:
+        return out
+
+    done_recent: list[dict] = []
+    commits: list[dict] = []
+    for ms in data.get("milestones", []) or []:
+        ms_id = ms.get("id", "")
+        ms_title = ms.get("title", "")
+        for entry in ms.get("entries", []) or []:
+            etype = entry.get("type", "")
+            if etype == "commit":
+                if _scope_matches_milestone(scope, pid, ms_id) or \
+                   _scope_matches_entry(scope, pid, entry, ms_id):
+                    commits.append({
+                        "ms_id": ms_id,
+                        "hash": (entry.get("meta") or {}).get("hash", ""),
+                        "summary": entry.get("description", ""),
+                        "date": entry.get("created_at", ""),
+                    })
+                continue
+            if not _scope_matches_entry(scope, pid, entry, ms_id):
+                continue
+            row = {
+                "ms_id": ms_id,
+                "ms_title": ms_title,
+                "id": entry.get("id", ""),
+                "description": entry.get("description", ""),
+                "status": entry.get("status", ""),
+                "priority": (entry.get("meta") or {}).get("priority", ""),
+                "type": etype,
+            }
+            if entry.get("status") == "todo":
+                out["tasks_todo"].append(row)
+            elif entry.get("status") == "done":
+                done_recent.append(row | {"done_at": entry.get("done_at", "")})
+
+    # Operations matched at trek scope (= ms-75 4.4 UC7-F4 ハイブリッド入口、
+    # ここでは entries は別途扱わず、Operation 自体の状況を要約)
+    ops_in_scope = []
+    for op in data.get("operations", []) or []:
+        op_id = op.get("id", "")
+        if _scope_matches_operation(scope, pid, op_id):
+            ops_in_scope.append({
+                "id": op_id,
+                "title": op.get("title", ""),
+                "status": op.get("status", ""),
+            })
+    out["operations"] = ops_in_scope
+
+    # Sort recent commits / done tasks newest-first, cap to 5 each so the
+    # default view stays readable. --detail / --all in the caller can lift
+    # the cap if we want a full expansion (= e-1864 AC 2).
+    commits.sort(key=lambda c: c.get("date", ""), reverse=True)
+    done_recent.sort(key=lambda r: r.get("done_at", ""), reverse=True)
+    out["commits_recent"] = commits[:5]
+    out["tasks_done_recent"] = done_recent[:5]
+
+    # Forward doc lookup (= e-1866): docs tagged with this trek_id in the
+    # current project's docs/ directory. Cross-project doc lookup lives
+    # behind /api/treks/{tid}/documents (cloud-mode).
+    docs: list[dict] = []
+    docs_dir = _get_docs_dir()
+    if os.path.isdir(docs_dir):
+        for fname in sorted(os.listdir(docs_dir)):
+            if not fname.endswith(".md"):
+                continue
+            try:
+                doc = _read_local_doc(os.path.join(docs_dir, fname))
+            except (OSError, UnicodeDecodeError):
+                continue
+            if doc.get("trek_id") != trek_doc.get("trek_id"):
+                continue
+            docs.append({
+                "doc_id": doc.get("doc_id", ""),
+                "title": doc.get("title", ""),
+                "scope": doc.get("scope", ""),
+                "milestone": doc.get("milestone", ""),
+                "updated_at": doc.get("updated_at", ""),
+            })
+    out["docs"] = docs
+    return out
+
+
+def _goal_state_status(trek_doc: dict, agg: dict) -> str:
+    """Return a 1-line readable status of the trek's goal_state field.
+
+    The criterion itself is free-form text, so we cannot programmatically
+    score completion. Instead we surface a simple counter ("3 todo / 7
+    done") that members can match against the text to decide whether to
+    suggest archive. This is intentionally lightweight — the SPEC explicitly
+    rejects "completion enforcement" as overdesign.
+    """
+    goal = (trek_doc.get("goal_state") or "").strip()
+    if not goal:
+        return ""
+    todo = len(agg.get("tasks_todo") or [])
+    done = len(agg.get("tasks_done_recent") or [])
+    return (
+        f"goal:        {goal}\n"
+        f"  progress (current project): {todo} todo / {done} recently-done"
+        + (" — consider `beacon trek archive` if criterion is met."
+           if todo == 0 and done > 0 else "")
+    )
+
+
 def cmd_trek_show():
-    """Show a single trek by id.
+    """Show a single trek by id with task / commit / doc aggregation.
 
     Reads from env:
       BEACON_TREK_ID  required
-      BEACON_JSON     "1" → emit json
+      BEACON_JSON     "1" → emit json (= raw trek doc + ``aggregation`` key)
+      BEACON_ALL      "1" → uncap recent lists (= --detail equivalent)
+
+    ms-75 / e-1864: human output now surfaces the trek's scoped tasks /
+    commits / docs from the *current* project so a CLI-driven workflow can
+    see Trek-wide progress without bouncing to the Web UI. Cross-project
+    scope rows are surfaced as hints (= the user must cd into the other
+    project) — the CLI intentionally does not fan out into other
+    project.json files to keep aggregation cheap and unambiguous.
     """
     import trek_store
 
     trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    expand = os.environ.get("BEACON_ALL", "") == "1"
 
     if not trek_id:
         print("Error: trek_id is required", file=sys.stderr)
         sys.exit(1)
 
-    if _is_cloud_mode():
-        try:
-            client, _config = _get_api_client()
-            t = client.get_trek(trek_id)
-        except RuntimeError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
-    else:
-        t = trek_store.load_trek(trek_id)
-        if t is None:
-            print(f"Error: trek {trek_id} not found", file=sys.stderr)
-            sys.exit(1)
+    # ms-84 Phase 2: Store 経由で cloud / local を統一。 Store.get_trek は
+    # ValueError on unknown / RuntimeError on transport の error contract を
+    # 両 backend で共有しているため、 CLI 側はバックエンドを意識せず
+    # 同じ except 分岐で扱える。
+    try:
+        t = get_store().get_trek(trek_id)
+    except ValueError:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Build local aggregation regardless of cloud/local — the current
+    # project view is always available.
+    agg = _collect_trek_local_aggregation(t)
 
     if json_mode:
-        print(json.dumps(t, ensure_ascii=False, indent=2))
+        # Emit the trek doc as-is, plus an ``aggregation`` key. Existing
+        # consumers (= /beacon-trek-execute Step 1) that only read top-level
+        # fields are unaffected; new consumers can opt into the aggregation
+        # block by name (= forward-compatible).
+        out = dict(t)
+        out["aggregation"] = agg
+        print(json.dumps(out, ensure_ascii=False, indent=2))
         return
 
     halt_marker = " [HALTED]" if t.get("halt") else ""
@@ -4183,6 +4779,12 @@ def cmd_trek_show():
     print(f"  leader sess: {t.get('leader_session_id')}")
     if t.get("description"):
         print(f"  description: {t['description']}")
+    goal_line = _goal_state_status(t, agg)
+    if goal_line:
+        # _goal_state_status returns 1-2 lines, prefix each with two spaces
+        # so it visually aligns with the other show fields.
+        for line in goal_line.split("\n"):
+            print(f"  {line}" if not line.startswith("  ") else line)
     members = t.get("members") or []
     print(f"  members ({len(members)}):")
     for m in members:
@@ -4191,12 +4793,232 @@ def cmd_trek_show():
     scope = t.get("scope") or []
     print(f"  scope ({len(scope)}):")
     for s in scope:
-        ref = " / ".join(f"{k}={v}" for k, v in s.items() if k != "project")
-        print(f"    - {s.get('project')}" + (f" / {ref}" if ref else ""))
+        # ms-75 / e-1864 AC 6: surface bind grain (project / project:task=eXXX /
+        # project:ms=msXX / project:op=opXX) explicitly so members understand
+        # whether the trek covers a whole project or a narrow item.
+        narrow = [(k, v) for k, v in s.items() if k != "project"]
+        if narrow:
+            ref_str = ", ".join(f"{k}={v}" for k, v in narrow)
+            print(f"    - {s.get('project')}:{ref_str}")
+        else:
+            print(f"    - {s.get('project')} (project-wide)")
     if t.get("halt"):
         h = t["halt"]
         print(f"  halt: at={h.get('issued_at')} by={h.get('issued_by_session_id')}"
               + (f" reason={h.get('reason')}" if h.get("reason") else ""))
+
+    # ms-75 / e-1864: aggregation sections. Cross-project scope rows can't
+    # be expanded locally, so we surface them as hints rather than silently
+    # omitting items the user expects to see.
+    if agg.get("cross_project_scope"):
+        print()
+        print(f"  cross-project scope (not aggregated locally; cd into the "
+              f"other project for detail):")
+        for s in agg["cross_project_scope"]:
+            narrow = [(k, v) for k, v in s.items() if k != "project"]
+            if narrow:
+                ref_str = ", ".join(f"{k}={v}" for k, v in narrow)
+                print(f"    - {s.get('project')}:{ref_str}")
+            else:
+                print(f"    - {s.get('project')} (project-wide)")
+
+    todos = agg.get("tasks_todo") or []
+    if todos:
+        print()
+        print(f"  open tasks in scope ({len(todos)}):")
+        shown = todos if expand else todos[:10]
+        for row in shown:
+            pri = f" [{row['priority']}]" if row.get("priority") else ""
+            print(f"    ○ [{row['id']}]{pri} {row['description'][:80]}")
+        if not expand and len(todos) > len(shown):
+            print(f"    … {len(todos) - len(shown)} more (pass --all to "
+                  f"expand)")
+
+    done_recent = agg.get("tasks_done_recent") or []
+    if done_recent:
+        print()
+        print(f"  recently done in scope ({len(done_recent)} shown):")
+        for row in done_recent:
+            print(f"    ● [{row['id']}] {row['description'][:80]}")
+
+    ops_in_scope = agg.get("operations") or []
+    if ops_in_scope:
+        print()
+        print(f"  Operations in scope ({len(ops_in_scope)}):")
+        for op in ops_in_scope:
+            print(f"    - [{op['id']}] {op['title'][:60]} ({op['status']})")
+
+    commits = agg.get("commits_recent") or []
+    if commits:
+        print()
+        print(f"  recent commits in scope ({len(commits)} shown):")
+        for c in commits:
+            short = (c.get("hash") or "")[:8]
+            print(f"    {short:8s} {c['summary'][:80]}")
+
+    docs = agg.get("docs") or []
+    if docs:
+        print()
+        print(f"  trek docs ({len(docs)}):")
+        scope_icons = {"core": "*", "spec": "+", "memo": "-",
+                       "retro": "~", "report": "!"}
+        for d in docs:
+            icon = scope_icons.get(d.get("scope") or "memo", "?")
+            print(f"    {icon} [{d.get('scope', 'memo')}] "
+                  f"{d['doc_id']}: {d['title'][:60]}")
+
+
+def cmd_trek_timeline():
+    """Show a chronological timeline of trek-scoped events (ms-75 / e-1867).
+
+    Combines (a) trek lifecycle events (= created / status / halt / scope
+    changes / members) reconstructed from the trek doc's timestamps,
+    (b) scope-matching commits and task done events from the current
+    project, (c) trek-scoped doc additions, and (d) Trek-scope DM events
+    if a local bus_log file is available. Cross-project events live behind
+    the Tauri / Web UI (ms-72) and are surfaced here only as a one-line
+    hint pointing to the trek_id.
+
+    Reads from env:
+      BEACON_TREK_ID  required
+      BEACON_JSON     "1" → emit json (list of events, newest first)
+      BEACON_LIMIT    integer (default 50) — cap event count
+    """
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    try:
+        limit = int(os.environ.get("BEACON_LIMIT", "50") or "50")
+    except ValueError:
+        limit = 50
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+
+    # ms-84 Phase 2 (e-2036): Store.get_trek unifies the cloud / local
+    # branch. ValueError on not-found, RuntimeError on auth / transport
+    # propagates as the original cloud branch behavior.
+    try:
+        t = get_store().get_trek(trek_id)
+    except ValueError:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    events: list[dict] = []
+
+    # (a) trek lifecycle.
+    if t.get("created_at"):
+        events.append({"at": t["created_at"], "kind": "trek_created",
+                       "summary": f"trek {trek_id} created"})
+    if t.get("archived_at"):
+        events.append({"at": t["archived_at"], "kind": "trek_archived",
+                       "summary": "trek archived"})
+    for m in t.get("members") or []:
+        if m.get("invited_at"):
+            events.append({
+                "at": m["invited_at"], "kind": "member_invited",
+                "summary": f"invited {m.get('email')} [{m.get('role')}]",
+            })
+        if m.get("joined_at"):
+            events.append({
+                "at": m["joined_at"], "kind": "member_joined",
+                "summary": f"joined {m.get('email')} [{m.get('role')}]",
+            })
+    halt = t.get("halt") or {}
+    if halt.get("issued_at"):
+        reason = halt.get("reason") or "(no reason)"
+        events.append({
+            "at": halt["issued_at"], "kind": "halt_engaged",
+            "summary": f"halt engaged: {reason}",
+        })
+
+    # (b) scoped commits + done tasks from current project.
+    pid = _current_project_id()
+    if pid:
+        try:
+            data = load_project()
+        except Exception:
+            data = {}
+        scope = t.get("scope") or []
+        for ms in data.get("milestones", []) or []:
+            ms_id = ms.get("id", "")
+            for entry in ms.get("entries", []) or []:
+                etype = entry.get("type", "")
+                if etype == "commit":
+                    if not (_scope_matches_milestone(scope, pid, ms_id)
+                            or _scope_matches_entry(scope, pid, entry, ms_id)):
+                        continue
+                    events.append({
+                        "at": entry.get("created_at", ""),
+                        "kind": "commit",
+                        "summary": (
+                            f"[{ms_id}] {entry.get('description', '')[:80]}"
+                        ),
+                    })
+                    continue
+                if not _scope_matches_entry(scope, pid, entry, ms_id):
+                    continue
+                if entry.get("done_at"):
+                    events.append({
+                        "at": entry["done_at"],
+                        "kind": "task_done",
+                        "summary": (
+                            f"[{entry.get('id', '')}] "
+                            f"{entry.get('description', '')[:80]}"
+                        ),
+                    })
+
+    # (c) trek-scoped docs.
+    docs_dir = _get_docs_dir()
+    if os.path.isdir(docs_dir):
+        for fname in sorted(os.listdir(docs_dir)):
+            if not fname.endswith(".md"):
+                continue
+            try:
+                doc = _read_local_doc(os.path.join(docs_dir, fname))
+            except (OSError, UnicodeDecodeError):
+                continue
+            if doc.get("trek_id") != trek_id:
+                continue
+            events.append({
+                "at": doc.get("updated_at", ""),
+                "kind": "doc",
+                "summary": (
+                    f"[{doc.get('scope', 'memo')}] {doc.get('doc_id', '')}: "
+                    f"{doc.get('title', '')[:70]}"
+                ),
+            })
+
+    # Newest first; cap.
+    events.sort(key=lambda e: e.get("at", ""), reverse=True)
+    events = events[:max(limit, 0)] if limit > 0 else events
+
+    if json_mode:
+        print(json.dumps(events, ensure_ascii=False))
+        return
+
+    if not events:
+        print(f"Trek {trek_id} timeline: (no events found in current "
+              f"project; cross-project events are visible via the Web / "
+              f"Tauri UI)")
+        return
+
+    print(f"Trek {trek_id} timeline ({len(events)} events shown, newest "
+          f"first):")
+    kind_icons = {
+        "trek_created": "*", "trek_archived": "!", "member_invited": "+",
+        "member_joined": "+", "halt_engaged": "!", "commit": ">",
+        "task_done": "●", "doc": "-",
+    }
+    for ev in events:
+        when = (ev.get("at") or "")[:19]
+        icon = kind_icons.get(ev.get("kind", ""), "?")
+        print(f"  {when}  {icon} [{ev.get('kind')}] {ev.get('summary', '')}")
 
 
 def _trek_transition(trek_id: str, to_status: str):
@@ -4344,22 +5166,98 @@ def cmd_trek_invite():
                   "live DM lands in e-1662)")
 
 
+# ms-75 / e-2047 — Trek auto-arm constants. The 3 channels covered here
+# match CHANNEL_TO_SKILL in channel/bus-autonomous-content.mjs (= e-2069)
+# so the bus.mjs side has a Skill mapping for every channel we mark as
+# auto-execute. Default budget = 20 outbound turns gives the executor
+# roughly two cadence cycles' worth of room before requiring a re-grant,
+# which is the SPEC-pinned starting envelope per AC 1.
+TREK_AUTO_ARM_CHANNELS = (
+    "trek-progress-check",
+    "trek-trigger",
+    "trek-task-review",
+)
+TREK_AUTO_ARM_DEFAULT_BUDGET = 20
+
+
+def _arm_for_trek(trek_id: str) -> dict:
+    """Run the 3 auto-arm actions for a freshly-joined Trek.
+
+    ms-75 / e-2047 AC 1 — pre-armed Trek participation: a session that
+    joins a Trek should be ready to act on scope-internal DMs without
+    requiring the user to remember to add channels + grant budget + start
+    the /beacon-bus-armed Skill. This helper performs the first two
+    structurally (= file writes) and surfaces a hint for the third (=
+    Skill invocation belongs to the AI side, not CLI).
+
+    Idempotency:
+      * channel allowlist add is idempotent — re-running for the same
+        trek is a no-op for channels already present.
+      * budget set is unconditional (= refresh to default). Re-joining a
+        trek effectively re-arms; this matches the user intent (= "I am
+        rejoining this work, give me a fresh runway").
+
+    Returns a dict with the actions taken so callers can render an audit
+    summary or emit JSON without re-reading the files.
+    """
+    import datetime
+    data = load_project()
+    channels = _bus_auto_execute_channels(data)
+    added: list[str] = []
+    for ch in TREK_AUTO_ARM_CHANNELS:
+        if ch not in channels:
+            channels.append(ch)
+            added.append(ch)
+    if added:
+        data["bus_auto_execute_channels"] = channels
+        save_project(data, op={
+            "op": "trek_auto_arm",
+            "trek_id": trek_id,
+            "channels_added": added,
+        })
+        _mirror_auto_execute_channels_to_local(channels)
+    budget_data = {
+        "total": TREK_AUTO_ARM_DEFAULT_BUDGET,
+        "used": 0,
+        "granted_at": datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"),
+        "channels": [],
+        "trek_id": trek_id,  # audit marker (= auto-arm source)
+    }
+    _write_bus_budget(budget_data)
+    return {
+        "trek_id": trek_id,
+        "channels": list(channels),
+        "channels_added": added,
+        "budget_turns": TREK_AUTO_ARM_DEFAULT_BUDGET,
+    }
+
+
 def cmd_trek_join():
     """Accept an invitation (= set member.joined_at = now for the current user).
 
+    ms-75 / e-2047 — by default also auto-arms the session for the joined
+    Trek: adds trek-progress-check / trek-trigger / trek-task-review to
+    bus_auto_execute_channels (idempotent), sets the outbound-send budget
+    to 20 turns, and prints a hint to start the /beacon-bus-armed Skill.
+    Opt-out: ``BEACON_TREK_NO_ARM=1`` (mapped from ``--no-arm`` at the
+    bash / dispatch.py shim).
+
     Env:
-      BEACON_TREK_ID    (required)
-      BEACON_USER_EMAIL (required, matched against the invitee's email)
-      BEACON_USER_ID    inviter's recorded user_id (fallback: whoami).
-                        Used as the local-mode identity match.
-      BEACON_SESSION_ID (informational, recorded if leader_session_id is empty)
-      BEACON_JSON       "1" → json output
+      BEACON_TREK_ID     (required)
+      BEACON_USER_EMAIL  (required, matched against the invitee's email)
+      BEACON_USER_ID     inviter's recorded user_id (fallback: whoami).
+                         Used as the local-mode identity match.
+      BEACON_SESSION_ID  (informational, recorded if leader_session_id is empty)
+      BEACON_TREK_NO_ARM "1" → skip auto-arm post-join
+      BEACON_JSON        "1" → json output
     """
     import trek
     import trek_store
 
     trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    no_arm = os.environ.get("BEACON_TREK_NO_ARM", "") == "1"
     if not trek_id:
         print("Error: trek_id is required", file=sys.stderr)
         sys.exit(1)
@@ -4407,10 +5305,66 @@ def cmd_trek_join():
             sys.exit(1)
         trek_store.save_trek(t)
 
+    arm_summary: Optional[dict] = None
+    if not no_arm:
+        try:
+            arm_summary = _arm_for_trek(trek_id)
+        except Exception as exc:
+            # Best-effort: join succeeded; arm is a UX enhancement. Surface
+            # the failure but do not unwind the join (= the user can re-run
+            # the arm steps manually if needed).
+            print(
+                f"[warning] join succeeded but auto-arm failed: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+
     if json_mode:
-        print(json.dumps(t, ensure_ascii=False))
+        # Keep the trek doc as the top-level shape so existing consumers
+        # (= tests / Skill bodies parsing the trek doc directly) keep
+        # working. The arm summary rides on a meta key (= `_arm`, the
+        # underscore prefix signals "extra context, not part of the trek
+        # schema").
+        out = dict(t)
+        if arm_summary is not None:
+            out["_arm"] = arm_summary
+        elif no_arm:
+            out["_arm"] = {"skipped": True, "reason": "--no-arm"}
+        print(json.dumps(out, ensure_ascii=False))
     else:
         print(f"Joined trek {trek_id} as {email}")
+        if arm_summary is not None:
+            added = arm_summary.get("channels_added") or []
+            if added:
+                print(
+                    f"  auto-arm: added {len(added)} channel(s) to "
+                    f"bus_auto_execute_channels: {', '.join(added)}"
+                )
+            else:
+                print(
+                    "  auto-arm: bus_auto_execute_channels already covers "
+                    f"trek channels ({', '.join(TREK_AUTO_ARM_CHANNELS)})"
+                )
+            print(
+                f"  auto-arm: budget granted "
+                f"{arm_summary['budget_turns']} outbound sends "
+                f"(refresh: `beacon bus budget grant --turns N`)"
+            )
+            print(
+                "  next step: start the autonomous loop in this session via "
+                "`/beacon-bus-armed` Skill so trek-progress-check events "
+                "wake the executor without a user prompt."
+            )
+            print(
+                "  opt-out: re-run with `--no-arm` to skip auto-arm "
+                "(= only join, no channel / budget changes)."
+            )
+        elif no_arm:
+            print(
+                "  auto-arm skipped (--no-arm). "
+                "Run `beacon bus auto-execute add --channel trek-progress-check` "
+                "and `beacon bus budget grant --turns 20` manually to arm later."
+            )
 
 
 def cmd_trek_stop():
@@ -4591,6 +5545,91 @@ def cmd_trek_transfer_leader():
               f"{prior_leader} → {target}")
 
 
+def cmd_trek_task_state():
+    """Stamp Trek-internal task state (ms-75 / e-2048).
+
+    Env:
+      BEACON_TREK_ID         (required)
+      BEACON_TREK_TASK_ID    (required, the entry id e-XXXX)
+      BEACON_TREK_STATE      (required, one of working/done/waiting-review)
+      BEACON_TREK_NOTE       (optional)
+      BEACON_JSON            "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    task_id = os.environ.get("BEACON_TREK_TASK_ID", "").strip()
+    state = os.environ.get("BEACON_TREK_STATE", "").strip()
+    note = os.environ.get("BEACON_TREK_NOTE", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+    if not task_id:
+        print("Error: task_id is required (e.g. e-2034)", file=sys.stderr)
+        sys.exit(1)
+    if not state:
+        print(
+            "Error: state is required (one of working/done/waiting-review)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    try:
+        trek.validate_task_state(state)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            t = client.set_trek_task_state(
+                trek_id, task_id=task_id, state=state, note=note,
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        if json_mode:
+            print(json.dumps(t, ensure_ascii=False))
+        else:
+            print(
+                f"Stamped trek {trek_id} task {task_id} state → {state}"
+            )
+            if state in trek.TERMINAL_TASK_STATES:
+                print(
+                    "  Leader has been notified via trek-task-review DM "
+                    "(= /beacon-trek-review surface)."
+                )
+        return
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    caller_sid = os.environ.get("BEACON_SESSION_ID", "")
+    try:
+        trek.set_task_state(
+            t,
+            task_id=task_id,
+            state=state,
+            updated_by_session_id=caller_sid,
+            note=note,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    trek_store.save_trek(t)
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        print(
+            f"Stamped trek {trek_id} task {task_id} state → {state} "
+            "(local mode; review notification skipped — no bus path)"
+        )
+
+
 def cmd_trek_plan():
     """Edit a trek's scope (= what work items the trek is concerned with).
 
@@ -4609,14 +5648,22 @@ def cmd_trek_plan():
     trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
     add_arg = os.environ.get("BEACON_TREK_SCOPE_ADD", "").strip()
     remove_arg = os.environ.get("BEACON_TREK_SCOPE_REMOVE", "").strip()
+    # ms-75 / e-1865: optional goal_state setter. Empty string clears it.
+    # ``BEACON_TREK_GOAL_STATE_SET`` distinguishes "user passed --goal-state ''"
+    # (= clear) from "user did not pass --goal-state at all" (= preserve).
+    goal_state_arg = os.environ.get("BEACON_TREK_GOAL_STATE", "")
+    goal_state_explicit = (
+        os.environ.get("BEACON_TREK_GOAL_STATE_SET", "") == "1"
+    )
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not trek_id:
         print("Error: trek_id is required", file=sys.stderr)
         sys.exit(1)
-    if not add_arg and not remove_arg:
+    if not add_arg and not remove_arg and not goal_state_explicit:
         print(
-            "Error: --add-scope <ref> or --remove-scope <ref> is required",
+            "Error: --add-scope <ref>, --remove-scope <ref>, or --goal-state "
+            "<text> is required",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -4629,26 +5676,52 @@ def cmd_trek_plan():
 
     # Parse the scope arg with the shared helper so cloud and local agree on
     # the entry shape. We do this BEFORE branching so syntax errors surface
-    # the same way regardless of mode.
-    try:
-        entry = trek.parse_scope_arg(add_arg or remove_arg)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+    # the same way regardless of mode. goal_state-only calls skip parsing.
+    entry: dict | None = None
+    if add_arg or remove_arg:
+        try:
+            entry = trek.parse_scope_arg(add_arg or remove_arg)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
 
     if _is_cloud_mode():
         try:
             client, _config = _get_api_client()
-            kwargs = {
-                "project": entry["project"],
-                "milestone": entry.get("milestone", ""),
-                "operation": entry.get("operation", ""),
-                "task": entry.get("task", ""),
-            }
-            if add_arg:
-                t = client.add_trek_scope(trek_id, **kwargs)
-            else:
-                t = client.remove_trek_scope(trek_id, **kwargs)
+            t = None
+            if entry is not None:
+                kwargs = {
+                    "project": entry["project"],
+                    "milestone": entry.get("milestone", ""),
+                    "operation": entry.get("operation", ""),
+                    "task": entry.get("task", ""),
+                }
+                if add_arg:
+                    t = client.add_trek_scope(trek_id, **kwargs)
+                else:
+                    t = client.remove_trek_scope(trek_id, **kwargs)
+            if goal_state_explicit:
+                # ms-75 / e-1865: goal_state setter via cloud API. The server
+                # endpoint is wired in a follow-up (cloud-mode parity will
+                # land alongside the rest of e-1865 server work); in the
+                # meantime cloud users get a graceful warning rather than a
+                # silent no-op.
+                if hasattr(client, "set_trek_goal_state"):
+                    t = client.set_trek_goal_state(
+                        trek_id, goal_state=goal_state_arg,
+                    )
+                else:
+                    print(
+                        "warn: --goal-state is local-mode only until the "
+                        "server endpoint lands (e-1865 cloud parity). "
+                        "Set it locally first; the cloud copy will be "
+                        "updated by the next sync.",
+                        file=sys.stderr,
+                    )
+                    if t is None:
+                        # Nothing to print downstream — bail without error so
+                        # the user sees the warning and can re-plan.
+                        sys.exit(0)
         except RuntimeError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
@@ -4658,10 +5731,13 @@ def cmd_trek_plan():
             print(f"Error: trek {trek_id} not found", file=sys.stderr)
             sys.exit(1)
         try:
-            if add_arg:
-                trek.add_scope_entry(t, entry=entry)
-            else:
-                trek.remove_scope_entry(t, entry=entry)
+            if entry is not None:
+                if add_arg:
+                    trek.add_scope_entry(t, entry=entry)
+                else:
+                    trek.remove_scope_entry(t, entry=entry)
+            if goal_state_explicit:
+                trek.set_goal_state(t, goal_state=goal_state_arg)
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
@@ -4670,10 +5746,17 @@ def cmd_trek_plan():
     if json_mode:
         print(json.dumps(t, ensure_ascii=False))
     else:
-        verb = "Added" if add_arg else "Removed"
-        ref_display = (add_arg or remove_arg)
-        print(f"{verb} scope {ref_display} on trek {trek_id} "
-              f"(scope: {len(t.get('scope') or [])} items)")
+        if add_arg or remove_arg:
+            verb = "Added" if add_arg else "Removed"
+            ref_display = (add_arg or remove_arg)
+            print(f"{verb} scope {ref_display} on trek {trek_id} "
+                  f"(scope: {len(t.get('scope') or [])} items)")
+        if goal_state_explicit:
+            new_val = (goal_state_arg or "").strip()
+            if new_val:
+                print(f"goal_state set on trek {trek_id}: \"{new_val}\"")
+            else:
+                print(f"goal_state cleared on trek {trek_id}")
 
 
 def cmd_trek_leave():
@@ -5287,6 +6370,16 @@ def cmd_milestone_depends():
 def cmd_milestone_workspace():
     # OSS: git worktree lifecycle core
     # Human Executor notification (beacon trigger fire) is handled below and is closed-source.
+    #
+    # ms-81 e-1917: this verb is being demoted to a deprecated alias of
+    # `milestone start`. The common "create worktree + flip status" path
+    # belongs on `start` so status / assignee / worktree always lift
+    # together. Two legacy sub-modes survive here for back-compat:
+    #   - `--clear`: legacy workspace-field clear (kept; pure data op)
+    #   - `--dir <path>` (BEACON_NO_GIT=1): legacy explicit-path mode that
+    #     bypasses git worktree creation entirely (kept; some scripts use it)
+    # The default no-arg path emits a deprecation warning and delegates to
+    # `cmd_milestone_start` so callers stop accumulating drift.
     import subprocess
     from datetime import datetime, timezone
 
@@ -5302,6 +6395,21 @@ def cmd_milestone_workspace():
         sys.exit(1)
 
     data = load_project()
+
+    # ms-81 e-1917: deprecation alias. If neither legacy sub-mode is in play
+    # (= no --clear, no --dir/no-git), the caller is using the default
+    # worktree-create path which has moved to `milestone start`.
+    if not clear and not no_git:
+        print(
+            "[ms-81 deprecation] `beacon milestone workspace` is being "
+            "absorbed by `beacon milestone start` so that status / assignee "
+            "/ worktree always activate together. Forwarding to "
+            "`milestone start` now; please update callers to use "
+            "`beacon milestone start " + ms_id + "` directly.",
+            file=sys.stderr,
+        )
+        cmd_milestone_start()
+        return
 
     if clear:
         # Legacy --clear: remove the old workspace field only
@@ -6218,33 +7326,19 @@ def _auto_fire_release_marker_trigger() -> None:
 def _spec_exists_for_ms(ms_id: str) -> bool:
     """Return True if any spec-scoped document is attached to ms_id.
 
-    Works for both local mode (reads .beacon/documents/*.md frontmatter)
-    and cloud mode (queries the API). Cloud mode failures degrade silently
-    to False (no trigger cleanup is best-effort).
+    ms-84 Phase 2: ``_is_cloud_mode()`` 分岐を Store 経由に統一。 LocalStore /
+    StoreApi の list_documents() がどちらも scope / milestone を含む同形
+    dict 列を返すため、 CLI 側 (= ここ) は backend を意識せず post-filter
+    だけで判定できる。 cloud transport 失敗は StoreApi 側で [] に丸める
+    best-effort 契約 (= 既存挙動と等価)。
     """
     if not ms_id:
         return False
-    if _is_cloud_mode():
-        try:
-            client, config = _get_api_client()
-            docs = client.list_documents(config["project_id"])
-        except Exception:
-            return False
-        for doc in docs:
-            if doc.get("scope") == "spec" and doc.get("milestone") == ms_id:
-                return True
+    try:
+        docs = get_store().list_documents()
+    except Exception:
         return False
-    # Local mode: read frontmatter from .beacon/documents/*.md
-    docs_dir = _get_docs_dir()
-    if not os.path.isdir(docs_dir):
-        return False
-    for fname in os.listdir(docs_dir):
-        if not fname.endswith(".md"):
-            continue
-        try:
-            doc = _read_local_doc(os.path.join(docs_dir, fname))
-        except Exception:
-            continue
+    for doc in docs:
         if doc.get("scope") == "spec" and doc.get("milestone") == ms_id:
             return True
     return False
@@ -6421,6 +7515,14 @@ def _auto_fire_operation_triggers():
 def cmd_trigger_fire():
     trigger_name = os.environ.get("BEACON_TRIGGER_NAME", "")
     trigger_message = os.environ.get("BEACON_TRIGGER_MESSAGE", "")
+    # ms-75 / e-1870: Trek-aware trigger. When a trek-id is supplied
+    # (= via `beacon trigger fire --trek <id> <name> [msg]`), the trigger
+    # rides a dedicated ``trek-trigger`` channel on the bus with
+    # ``delivery=auto-execute`` so opted-in sessions can run
+    # ``/beacon-trek-execute`` autonomously — twin of the
+    # ``operation-trigger`` path. Without --trek the legacy
+    # ``trigger`` channel + ``propose-to-ai`` delivery is unchanged.
+    trek_id = os.environ.get("BEACON_TRIGGER_TREK_ID", "").strip()
     if not trigger_name:
         print("Error: trigger name required")
         sys.exit(1)
@@ -6435,6 +7537,11 @@ def cmd_trigger_fire():
         "message": trigger_message,
         "created_at": datetime.datetime.now().isoformat(),
     }
+    # Persist trek_id on the on-disk trigger so `beacon trigger check`
+    # readers (= session-start, dispatch) can detect a trek-scoped
+    # trigger without re-querying the bus event.
+    if trek_id:
+        trigger_data["trek_id"] = trek_id
     with open(trigger_path, "w", encoding="utf-8") as f:
         json.dump(trigger_data, f, ensure_ascii=False)
         f.write("\n")
@@ -6445,8 +7552,12 @@ def cmd_trigger_fire():
     # The post is best-effort: a network failure, missing creds, or local-mode
     # project must NOT prevent the trigger file from being written. Triggers
     # are the existing single source of truth; the bus event is a propagation
-    # layer on top. _push_trigger_to_bus swallows every error path to stderr.
-    _push_trigger_to_bus(trigger_data)
+    # layer on top. _push_trigger_to_bus / _push_trek_trigger_to_bus swallow
+    # every error path to stderr.
+    if trek_id:
+        _push_trek_trigger_to_bus(trek_id, trigger_data)
+    else:
+        _push_trigger_to_bus(trigger_data)
 
 
 def _push_trigger_to_bus(trigger_data: dict) -> None:
@@ -6496,6 +7607,54 @@ def _push_trigger_to_bus(trigger_data: dict) -> None:
         )
 
 
+def _resolve_operation_trigger_recipient(op_id: str) -> str:
+    """Resolve the unicast recipient_session_id for an operation-trigger event.
+
+    ms-76 / e-1860 / e-1604: operation-trigger default = unicast to a single
+    claimer / owner session. Broadcast (= empty recipient → fan out to every
+    live session in the project) is the LEGACY behaviour and is retained
+    only as fallback when no claimer is registered. The CORE doc
+    QvyVwRU8otQEn5iMfP36 (= AI 自律 action の envelope tier framework)
+    section "構造的禁止" makes default broadcast a禁止帯; this resolver
+    is the structural enforcement point.
+
+    Resolution order (first hit wins):
+      1. ``meta.claimer_session_id`` on the Operation (= explicit
+         claim-based registration, e-1604). A session calls
+         ``beacon operation claim <op-id>`` to register itself as the
+         sole receiver; subsequent triggers route only here.
+      2. ``meta.open_by`` on the Operation (= the session that opened
+         the Operation, treated as default owner when no explicit claim).
+      3. Empty string (= legacy broadcast). Best-effort fallback for
+         pre-ms-76 projects that have no owner/claimer recorded.
+
+    The ``BEACON_OPERATION_TRIGGER_BROADCAST=1`` env flag opts back into
+    legacy broadcast explicitly (= for SPECs that legitimately want all
+    sessions notified, e.g. a release announcement trigger). This is the
+    "explicit opt-in pattern" from ms-76 SPEC EuLwGrAawmMzeKYsxkrd
+    設計方針 7.
+    """
+    # Explicit broadcast opt-in (= rare, only when SPEC declares it).
+    if os.environ.get("BEACON_OPERATION_TRIGGER_BROADCAST", "") == "1":
+        return ""
+    try:
+        data = load_project()
+    except Exception:
+        return ""
+    for op in data.get("operations", []):
+        if op.get("id") != op_id:
+            continue
+        meta = op.get("meta", {}) or {}
+        claimer = (meta.get("claimer_session_id") or "").strip()
+        if claimer:
+            return claimer
+        owner = (meta.get("open_by") or "").strip()
+        if owner:
+            return owner
+        break
+    return ""
+
+
 def _push_operation_trigger_to_bus(op_id: str, log_source: str,
                                    trigger_data: dict,
                                    spec_doc_id: str = "") -> None:
@@ -6517,6 +7676,12 @@ def _push_operation_trigger_to_bus(op_id: str, log_source: str,
     server treats the post as legacy (effective_tier=T5) and degrades
     delivery to notify-user-only, which never injects into AI context —
     silently breaking the autonomous loop (e-1393).
+
+    ms-76 / e-1860 / e-1604: payload now carries ``recipient_session_id``
+    by default (= unicast to the registered claimer/owner). Legacy broadcast
+    is retained only as fallback when no claimer is registered, or when
+    ``BEACON_OPERATION_TRIGGER_BROADCAST=1`` is set for SPECs that
+    explicitly opt into broadcast.
 
     Best-effort — failures don't break the local trigger file write.
     """
@@ -6561,13 +7726,106 @@ def _push_operation_trigger_to_bus(op_id: str, log_source: str,
                 "envelope — delivery will be degraded to notify-user-only.\n"
             )
 
+        # ms-76 / e-1860 / e-1604: stamp the unicast recipient. Empty string
+        # falls through to legacy broadcast (= fan out to every session)
+        # only when no claimer/owner is registered and broadcast was not
+        # explicitly opted into. The server's /bus/unread filter
+        # (server/app.py _bus_event_addressed_to) honours the field for
+        # all channels except dm; for operation-trigger an empty recipient
+        # behaves as legacy fan-out so back-compat is preserved.
+        recipient_session_id = _resolve_operation_trigger_recipient(op_id)
+        payload = {
+            "op_id": op_id,
+            "log_source": log_source,
+            "spec_doc_id": spec_doc_id,
+            "trigger_name": trigger_data.get("name", ""),
+            "message": trigger_data.get("message", ""),
+            "created_at": trigger_data.get("created_at", ""),
+        }
+        if recipient_session_id:
+            payload["recipient_session_id"] = recipient_session_id
         client.post_bus_event(
             project_id, "operation-trigger",
             sender_session_id="",
+            payload=payload,
+            delivery="auto-execute",
+            envelope=envelope_obj,
+        )
+    except Exception as exc:
+        sys.stderr.write(
+            f"[beacon] operation-trigger bus mirror failed silently: "
+            f"{type(exc).__name__}: {exc}\n"
+        )
+
+
+def _push_trek_trigger_to_bus(trek_id: str, trigger_data: dict) -> None:
+    """Mirror a trek-scoped trigger onto the bus (ms-75 / e-1870).
+
+    Twin of ``_push_operation_trigger_to_bus`` for Trek scope. Posts on the
+    ``trek-trigger`` channel with ``delivery=auto-execute`` and a T2 Trek-
+    scope envelope. Sessions opted in via
+    ``beacon bus auto-execute add --channel trek-trigger`` see the event
+    routed by the inbox hook into a structured "TREK ACTION" block that
+    launches ``/beacon-trek-execute <trek-id>`` without a confirmation
+    prompt. Without opt-in the event is downgraded to ``propose-to-ai``
+    (= safe fallback, user reviews before launching).
+
+    Why a dedicated channel:
+    - operation-trigger is scoped to one ``op_id`` (= a single periodic
+      check). Trek-trigger is scoped to a ``trek_id`` (= an entire
+      workspace of MS / task / Operation). Sharing one channel would force
+      every receiver to inspect the payload before they can decide whether
+      to act.
+    - Opt-in is per-channel. A project that auto-executes Operations
+      may still want to keep Trek autonomy gated behind manual review
+      until it has dogfooded the trek-execute Skill once.
+
+    Best-effort: failures don't break the local trigger file write.
+    """
+    try:
+        config_path = _get_cloud_config_path()
+        if not os.path.exists(config_path):
+            return
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        project_id = config.get("project_id")
+        if not project_id:
+            return
+        from auth import load_credentials
+        creds = load_credentials()
+        if creds is None:
+            return
+        from api_client import ApiClient
+        api_url = _resolve_active_api_url()
+        client = ApiClient(api_url, _extract_token(creds))
+
+        # Mint a T2 Trek-scope envelope so the server's verify pipeline
+        # keeps ``delivery=auto-execute`` instead of degrading it to
+        # ``notify-user-only`` (same gate as e-1393 for operations).
+        # ``scope=trek:<trek-id>`` mirrors the ``op:<op-id>`` convention
+        # used by operation-trigger so the audit log carries the trek id
+        # in a uniform shape.
+        envelope_obj = None
+        try:
+            envelope_obj = client.issue_bus_envelope(
+                project_id,
+                tier="T2",
+                actions_authorized=["trek.trigger.fire"],
+                scope=f"trek:{trek_id}",
+                data_class="free",
+            )
+        except Exception as env_exc:
+            sys.stderr.write(
+                f"[beacon] trek-trigger envelope mint failed "
+                f"({type(env_exc).__name__}: {env_exc}); posting without "
+                "envelope — delivery will be degraded to notify-user-only.\n"
+            )
+
+        client.post_bus_event(
+            project_id, "trek-trigger",
+            sender_session_id="",
             payload={
-                "op_id": op_id,
-                "log_source": log_source,
-                "spec_doc_id": spec_doc_id,
+                "trek_id": trek_id,
                 "trigger_name": trigger_data.get("name", ""),
                 "message": trigger_data.get("message", ""),
                 "created_at": trigger_data.get("created_at", ""),
@@ -6577,7 +7835,7 @@ def _push_operation_trigger_to_bus(op_id: str, log_source: str,
         )
     except Exception as exc:
         sys.stderr.write(
-            f"[beacon] operation-trigger bus mirror failed silently: "
+            f"[beacon] trek-trigger bus mirror failed silently: "
             f"{type(exc).__name__}: {exc}\n"
         )
 
@@ -6850,36 +8108,22 @@ def cmd_doc_list():
     scope_filter = os.environ.get("BEACON_SCOPE", "")
     ms_filter = os.environ.get("BEACON_MS", "")
     op_filter = os.environ.get("BEACON_OP", "")
+    # ms-75 / e-1866: ``--trek <trek-id>`` filter — surfaces all docs
+    # whose frontmatter is tagged with the given trek_id. The trek_id
+    # frontmatter field has existed since ms-69 / e-1663; this filter
+    # makes it usable from the CLI (= mirrors what the server-side
+    # /api/treks/{tid}/documents lookup does for the Web UI).
+    trek_filter = os.environ.get("BEACON_TREK_ID", "")
     # Trashed docs are hidden by default — pass --include-trashed to see
     # them in line with active ones (ms-14 e-973).
     include_trashed = os.environ.get("BEACON_INCLUDE_TRASHED", "") == "1"
 
-    if _is_cloud_mode():
-        client, config = _get_api_client()
-        docs = client.list_documents(config["project_id"])
-    else:
-        docs_dir = _get_docs_dir()
-        docs = []
-        if os.path.isdir(docs_dir):
-            for fname in sorted(os.listdir(docs_dir)):
-                if not fname.endswith(".md"):
-                    continue
-                doc = _read_local_doc(os.path.join(docs_dir, fname))
-                if not include_trashed and doc.get("status") == "cancelled":
-                    continue
-                entry = {
-                    "doc_id": doc["doc_id"],
-                    "title": doc["title"],
-                    "scope": doc["scope"],
-                    "updated_at": doc["updated_at"],
-                }
-                if doc.get("milestone"):
-                    entry["milestone"] = doc["milestone"]
-                if doc.get("operation"):
-                    entry["operation"] = doc["operation"]
-                if doc.get("status"):
-                    entry["status"] = doc["status"]
-                docs.append(entry)
+    # ms-84 Phase 2: Store 経由で local / cloud を統一。 LocalStore.list_documents
+    # は frontmatter 解析済の同形 dict 列を返すため、 ここでは soft-delete filter
+    # と post-filter (scope / ms / op / trek) を一括で適用するだけ。
+    docs = get_store().list_documents()
+    if not include_trashed:
+        docs = [d for d in docs if d.get("status") != "cancelled"]
 
     if scope_filter:
         docs = [d for d in docs if d.get("scope") == scope_filter]
@@ -6887,6 +8131,8 @@ def cmd_doc_list():
         docs = [d for d in docs if d.get("milestone") == ms_filter]
     if op_filter:
         docs = [d for d in docs if d.get("operation") == op_filter]
+    if trek_filter:
+        docs = [d for d in docs if d.get("trek_id") == trek_filter]
 
     if json_mode:
         print(json.dumps(docs, ensure_ascii=False))
@@ -6908,16 +8154,12 @@ def cmd_doc_show():
         print("Error: doc_id required")
         sys.exit(1)
 
-    if _is_cloud_mode():
-        client, config = _get_api_client()
-        doc = client.get_document(config["project_id"], doc_id)
-    else:
-        docs_dir = _get_docs_dir()
-        fpath = os.path.join(docs_dir, f"{doc_id}.md")
-        if not os.path.exists(fpath):
-            print(f"Document not found: {doc_id}")
-            sys.exit(1)
-        doc = _read_local_doc(fpath)
+    # ms-84 Phase 2: Store 経由で local / cloud を統一。 Store.get_document は
+    # 両 backend で同形 ({} on not-found / full dict on hit) を返す契約。
+    doc = get_store().get_document(doc_id)
+    if not doc:
+        print(f"Document not found: {doc_id}")
+        sys.exit(1)
 
     if json_mode:
         print(json.dumps(doc, ensure_ascii=False))
@@ -6963,16 +8205,20 @@ def cmd_doc_add():
         print("Error: content required (pass via BEACON_CONTENT or stdin)")
         sys.exit(1)
 
-    # Duplicate check: warn if same title+scope already exists
-    if _is_cloud_mode():
-        try:
-            client, config = _get_api_client()
-            existing = client.list_documents(config["project_id"])
-            dupes = [d for d in existing if d.get("title") == title and d.get("scope") == scope]
-            if dupes:
-                print(f"Warning: document with same title+scope already exists ({dupes[0]['doc_id']}). Proceeding anyway.")
-        except Exception:
-            pass
+    # Duplicate check: warn if same title+scope already exists.
+    # ms-84 Phase 2: Store 経由で local / cloud を統一 (= 受入条件 10 の _is_cloud_mode
+    # 分岐削減)。 失敗時は best-effort で skip する従来挙動を維持。
+    try:
+        existing = get_store().list_documents()
+        dupes = [d for d in existing
+                 if d.get("title") == title and d.get("scope") == scope]
+        if dupes:
+            print(
+                f"Warning: document with same title+scope already exists "
+                f"({dupes[0]['doc_id']}). Proceeding anyway."
+            )
+    except Exception:
+        pass
 
     # Add frontmatter with scope, milestone, operation, and trek_id
     content = _add_frontmatter(content, scope, milestone or "", operation or "",
@@ -7057,17 +8303,13 @@ def cmd_doc_update():
 
     content = _resolve_content_input(content)
 
-    # Fetch existing document to merge fields
-    if _is_cloud_mode():
-        client, config = _get_api_client()
-        existing = client.get_document(config["project_id"], doc_id)
-    else:
-        docs_dir = _get_docs_dir()
-        fpath = os.path.join(docs_dir, f"{doc_id}.md")
-        if not os.path.exists(fpath):
-            print(f"Document not found: {doc_id}")
-            sys.exit(1)
-        existing = _read_local_doc(fpath)
+    # Fetch existing document to merge fields.
+    # ms-84 Phase 2: Store 経由で local / cloud を統一。 Store.get_document は
+    # 両 backend で同形 ({} on not-found / full dict on hit) を返す契約。
+    existing = get_store().get_document(doc_id)
+    if not existing:
+        print(f"Document not found: {doc_id}")
+        sys.exit(1)
 
     operation = os.environ.get("BEACON_OP", "")
     # Use existing values as defaults
@@ -7113,9 +8355,14 @@ def cmd_doc_update():
         drop_operation=(ms_explicit and not op_explicit),
     )
 
+    # Write path still branches per backend (Phase 3 で Store.save_document
+    # 化予定)。 read だけ Phase 2 で Store 経由化したので、 ここで client /
+    # docs_dir を遅延 resolve する。
     if _is_cloud_mode():
+        client, config = _get_api_client()
         client.update_document(config["project_id"], doc_id, title, content)
     else:
+        docs_dir = _get_docs_dir()
         fpath = os.path.join(docs_dir, f"{doc_id}.md")
         with open(fpath, "w", encoding="utf-8") as f:
             f.write(content)
@@ -7483,7 +8730,10 @@ def cmd_doc_image_upload():
         print(f"Error: file not found: {local_path}")
         sys.exit(1)
 
-    if not _is_cloud_mode():
+    # ms-84 Phase 2: 直接 _is_cloud_mode 呼び出しを Store 経由に統一 (= 受入条件
+    # 10 の direct-call 削減)。 image upload は cloud-only operation のため、
+    # ここでは mode guard として is_cloud() を確認するだけ。
+    if not get_store().is_cloud():
         print("Error: image upload requires cloud mode (run 'beacon cloud push' first)")
         sys.exit(1)
 
@@ -7738,6 +8988,18 @@ def cmd_pr_add():
             intent = pr_body.strip() if pr_body.strip() else ""
 
     data = load_project()
+    # ms-81 e-1916: status gate. Surface the warning before adding a PR
+    # entry to a non-write-authorised MS so the operator can re-target
+    # rather than discover the issue later in retro.
+    try:
+        target_ms = core.find_target_milestone(data, ms_id)
+    except ValueError:
+        target_ms = None
+    if target_ms is not None:
+        if not _check_ms_status_for_write(
+            target_ms, f"pr add {url}"
+        ):
+            sys.exit(1)
     try:
         eid = core.pr_add(data, ms_id=ms_id, url=url, author=author,
                           intent=intent, date=date, title=title, commits=commits,
@@ -9883,7 +11145,7 @@ def cmd_project_export():
         "project_name": project_data.get("name", ""),
         "project_id": snapshot.get("project_id", ""),
         "beacon_version": __version__,
-        "source_mode": "cloud" if _is_cloud_mode() else "local",
+        "source_mode": "cloud" if get_store().is_cloud() else "local",
         "entry_counts": entry_counts,
     }
 
@@ -10230,31 +11492,13 @@ def cmd_cycle_status():
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     data = load_project()
 
-    # In cloud mode the document list may live in a Firestore subcollection;
-    # we ask the doc list command's helper to fetch them lazily. Failure here
-    # is non-fatal — we degrade to "no docs known" which is the same as the
-    # legacy behavior of the per-cycle predicates.
-    documents: list[dict] = []
+    # ms-84 Phase 2: Store.list_documents() で local / cloud を統一。
+    # 失敗時は空 list に degrade する best-effort 契約 (= push / deploy /
+    # operation 系の cycle 判定は document に依存しないので、 ここで空でも
+    # snapshot は正しく作れる)。
     try:
-        if _is_cloud_mode():
-            client, config = _get_api_client()
-            documents = client.list_documents(config["project_id"]) or []
-        else:
-            docs_dir = _get_docs_dir()
-            if os.path.isdir(docs_dir):
-                for fname in sorted(os.listdir(docs_dir)):
-                    if not fname.endswith(".md"):
-                        continue
-                    try:
-                        documents.append(_read_local_doc(os.path.join(docs_dir, fname)))
-                    except Exception:
-                        # Best-effort: a single unparsable doc shouldn't abort the
-                        # whole snapshot. We just won't see it in the retro signal.
-                        continue
+        documents = get_store().list_documents() or []
     except Exception:
-        # If doc fetch fails entirely (e.g. cloud auth glitch), keep going
-        # with an empty list. push / deploy / operation cycles do not depend
-        # on documents and will still report correctly.
         documents = []
 
     snapshot = cycle_mod.cycle_status_snapshot(data, documents=documents)
@@ -10489,17 +11733,17 @@ def _load_session_logs() -> list[dict]:
     session_log subcollection.
     """
     try:
-        if _is_cloud_mode():
-            client, config = _get_api_client()
-            try:
-                rows = client.list_session_logs(config["project_id"]) or []
-                # tolerate either dict or list responses
-                if isinstance(rows, dict):
-                    rows = rows.get("session_logs") or rows.get("items") or []
-                return rows if isinstance(rows, list) else []
-            except Exception:
-                return []
-        # Local mode: look for .beacon/session_logs/*.json
+        # ms-84 Phase 2: Store.list_session_logs() で cloud / local 二経路を
+        # 単一の呼び出しに寄せる。 StoreApi 側が transport 失敗を [] に丸める
+        # best-effort 契約を持つので、 cloud auth glitch も同じ try/except で
+        # 拾える。 LocalStore は no-op で [] を返す設計 (= Protocol docstring
+        # 参照) のため、 local モード時は下の directory walk fallback が拾う。
+        rows = get_store().list_session_logs() or []
+        if isinstance(rows, dict):
+            rows = rows.get("session_logs") or rows.get("items") or []
+        if isinstance(rows, list) and rows:
+            return rows
+        # Local mode (or empty cloud): walk .beacon/session_logs/*.json
         project_dir = os.path.dirname(get_project_file())
         sl_dir = os.path.join(project_dir, "session_logs")
         if not os.path.isdir(sl_dir):
@@ -10943,6 +12187,125 @@ def _doctor_check_claude_md_principle_marker():
     ]
 
 
+def _doctor_check_ms81_state_machine():
+    """ms-81 e-1921: surface the four state-machine warnings named in SPEC AC #9.
+
+    Each is warning-level only; the state machine is a forcing function,
+    not enforcement. Returns a list of warning strings.
+
+    Checks:
+      A. active or observing MS missing assignee — work is happening but
+         nobody's name is on it; audit trail loses provenance.
+      B. done MS still has a worktree directory at `.worktrees/<branch>/`
+         — another session could check it out and accidentally commit
+         against a closed branch.
+      C. occupation field present but `session_id` empty — a half-written
+         claim that nothing can release; usually a sign of a crash that
+         left the field stale.
+      D. waiting MS has commits/PRs being attached after it was paused —
+         we approximate this by checking whether the most recent commit
+         entry's `created_at` is *after* `meta.waiting_at`.
+    """
+    warnings: list[str] = []
+    try:
+        data = load_project()
+    except Exception:
+        return warnings
+
+    try:
+        import branch as _branch
+    except Exception:
+        _branch = None
+
+    cwd_root = os.getcwd()
+    a_hits: list[str] = []
+    b_hits: list[str] = []
+    c_hits: list[str] = []
+    d_hits: list[str] = []
+
+    for ms in data.get("milestones", []):
+        ms_id = ms.get("id", "")
+        title = ms.get("title", "")
+        status = ms.get("status", "")
+        # A: active / observing without assignee
+        if status in ("in_progress", "active", "observing"):
+            assignee = ms.get("assignee", "")
+            if not assignee or (
+                isinstance(assignee, list) and not any(a.strip() for a in assignee)
+            ):
+                a_hits.append(f"{ms_id} ({status}, {title[:60]})")
+        # B: done MS with leftover worktree
+        if status == "done" and _branch is not None:
+            try:
+                branch_name = _branch.ms_branch_name(ms_id, title)
+                if os.path.exists(os.path.join(cwd_root, ".worktrees", branch_name)):
+                    b_hits.append(f"{ms_id} (worktree: .worktrees/{branch_name})")
+            except Exception:
+                pass
+        # C: occupation field present but stale shape (no session_id)
+        occ = ms.get("occupation")
+        if occ and not occ.get("session_id"):
+            c_hits.append(f"{ms_id} (occupation present without session_id)")
+        # D: waiting MS with commits attached after the wait transition
+        if status == "waiting":
+            waiting_at = ms.get("meta", {}).get("waiting_at", "")
+            if waiting_at:
+                for e in ms.get("entries", []):
+                    if e.get("type") in ("commit", "pr"):
+                        created = e.get("created_at", "") or e.get("date", "")
+                        if created and created > waiting_at:
+                            d_hits.append(
+                                f"{ms_id} ({title[:50]}) — {e.get('type')} "
+                                f"[{e.get('id')}] attached after waiting_at"
+                            )
+                            break
+
+    def _fmt(label, code, hits, suggestion):
+        if not hits:
+            return None
+        return (
+            f"WARN [{code}] {label}:\n"
+            + "\n".join(f"       - {h}" for h in hits[:8])
+            + (f"\n       (+{len(hits) - 8} more)" if len(hits) > 8 else "")
+            + f"\n       {suggestion}"
+        )
+
+    for w in (
+        _fmt(
+            "Active/observing milestones without an assignee",
+            "ms81-assignee-missing",
+            a_hits,
+            "Run: beacon milestone update <ms-id> --assignee <name> "
+            "(or `beacon milestone join <ms-id>` to self-add).",
+        ),
+        _fmt(
+            "Done milestones with a leftover worktree directory",
+            "ms81-leftover-worktree",
+            b_hits,
+            "Run: beacon milestone workspace-cleanup <ms-id> to remove the "
+            "worktree; leftover dirs are a takeover-by-mistake hazard.",
+        ),
+        _fmt(
+            "Occupation field stuck without a session_id",
+            "ms81-stale-occupation",
+            c_hits,
+            "Run: beacon milestone release <ms-id> to clear the half-written "
+            "occupation marker.",
+        ),
+        _fmt(
+            "Waiting milestones with commits/PRs attached after wait_at",
+            "ms81-waiting-write",
+            d_hits,
+            "Re-activate with `beacon milestone start <ms-id>` before adding "
+            "more commit / PR entries — the write gate (e-1916) catches new "
+            "writes but does not retroactively clean up past attachments.",
+        ),
+    ):
+        if w:
+            warnings.append(w)
+    return warnings
+
+
 def cmd_doctor():
     """Lightweight environment health check for Beacon.
 
@@ -11228,6 +12591,15 @@ def cmd_doctor():
         warnings.extend(_doctor_check_claude_md_principle_marker())
 
     # ------------------------------------------------------------------ #
+    # 11. ms-81 state-machine warnings (e-1921)
+    # ------------------------------------------------------------------ #
+    # Surface the four SPEC §9 conditions where the state-machine and
+    # occupation model is being violated — warning-level only because the
+    # whole MS is designed as a forcing function, not a wall.
+    if os.environ.get("BEACON_DOCTOR_SKIP_MS81") != "1":
+        warnings.extend(_doctor_check_ms81_state_machine())
+
+    # ------------------------------------------------------------------ #
     # Summary
     # ------------------------------------------------------------------ #
     if warnings:
@@ -11251,6 +12623,9 @@ def cmd_help_json():
         {"command": "beacon milestone join <id>", "flags": ["--checkout"], "description": "Add self as assignee on a milestone (and optionally switch to its branch)"},
         {"command": "beacon milestone close <id>", "flags": [], "description": "Close milestone"},
         {"command": "beacon milestone observe <id>", "flags": [], "description": "Set milestone to observing"},
+        {"command": "beacon milestone wait <id>", "flags": ["--reason"], "description": "Pause an active/observing milestone (ms-81)"},
+        {"command": "beacon milestone release <id>", "flags": [], "description": "Release occupation claim without changing status (ms-81)"},
+        {"command": "beacon milestone occupations", "flags": ["--ms <id>", "--json"], "description": "List occupation event log (ms-81)"},
         {"command": "beacon milestone rename <id> <title>", "flags": [], "description": "Rename a milestone"},
         {"command": "beacon milestone depends <id> --on <id>", "flags": [], "description": "Declare milestone dependency"},
         {"command": "beacon milestone purge <id> --reason <text>", "flags": ["--index <n>", "--json"], "description": "Hard-delete a milestone record (recovery for duplicate-ID corruption; Issue #14)"},
@@ -11291,15 +12666,16 @@ def cmd_help_json():
         {"command": "beacon skill install", "flags": [], "description": "Install Claude Code Skills to ~/.claude/skills/"},
         {"command": "beacon monitor context", "flags": ["--dry-run"], "description": "Stop hook: context-usage threshold monitor (e-854); --dry-run skips note/state writes"},
         # ms-69 e-1652+: Trek = cross-project / cross-session collaboration area
-        {"command": "beacon trek create <title>", "flags": ["--type temporary|persistent", "--description <text>", "--json"], "description": "Create a trek (cross-project協奏作業領域); caller becomes leader (ms-69)"},
-        {"command": "beacon trek list", "flags": ["--status <s>", "--include-archived", "--all-actors", "--json"], "description": "List treks visible to the caller"},
-        {"command": "beacon trek show <trek-id>", "flags": ["--json"], "description": "Show trek detail (members / scope / status / halt)"},
+        {"command": "beacon trek create <title>", "flags": ["--type temporary|persistent", "--description <text>", "--goal-state <criterion>", "--json"], "description": "Create a trek (cross-project協奏作業領域); caller becomes leader (ms-69). --goal-state は ms-75/e-1865 完了マーカー"},
+        {"command": "beacon trek list", "flags": ["--status <s>", "--include-archived", "--all-actors", "--joined", "--json"], "description": "List treks visible to the caller. --joined で自分が join 済の trek だけ"},
+        {"command": "beacon trek show <trek-id>", "flags": ["--all", "--json"], "description": "Show trek detail + 集約ビュー (task / commit / doc, ms-75/e-1864). --all で cap 解除"},
+        {"command": "beacon trek timeline <trek-id>", "flags": ["--limit N", "--json"], "description": "Trek の lifecycle / commit / task done / doc を時系列で参照 (ms-75/e-1867)"},
         {"command": "beacon trek start <trek-id>", "flags": ["--json"], "description": "Transition trek planning → active"},
         {"command": "beacon trek archive <trek-id>", "flags": ["--json"], "description": "Archive trek (= terminal); restart by creating a new one"},
         {"command": "beacon trek invite <trek-id> --actor <email>", "flags": ["--notify", "--json"], "description": "Invite a user (by email) into the trek"},
         {"command": "beacon trek join <trek-id>", "flags": ["--json"], "description": "Accept own invitation"},
         {"command": "beacon trek leave <trek-id>", "flags": ["--json"], "description": "Remove self from the trek (leader must transfer first)"},
-        {"command": "beacon trek plan <trek-id>", "flags": ["--add-scope <project:ref>", "--remove-scope <project:ref>", "--json"], "description": "Edit trek scope (cross-project refs ms-/op-/e-)"},
+        {"command": "beacon trek plan <trek-id>", "flags": ["--add-scope <project:ref>", "--remove-scope <project:ref>", "--goal-state <criterion>", "--json"], "description": "Edit trek scope or goal_state (ms-75/e-1865)"},
         {"command": "beacon trek stop <trek-id>", "flags": ["--reason <text>", "--json"], "description": "Pull the Andon cord (= halt signal, sessions pause)"},
         {"command": "beacon trek resume <trek-id>", "flags": ["--json"], "description": "Clear the halt signal"},
         {"command": "beacon trek transfer-leader <trek-id> --to <session-id>", "flags": ["--json"], "description": "Hand off leader_session_id to another session"},
@@ -12043,8 +13419,132 @@ def _bus_budget_consume_one() -> tuple[bool, dict]:
     return True, {**b, "armed": True}
 
 
+def _record_bus_budget_trek_bypass(trek_id: str) -> None:
+    """Bump the per-Trek bypass counter on the budget file (ms-75 / e-2044).
+
+    The counter is informational — it surfaces in ``bus budget show`` so a
+    leader can see "this session sent N DMs that bypassed the budget gate
+    because they were Trek-internal". It does not gate or rate-limit; the
+    structural rationale is that Trek scope IS the gate (= pre-approved
+    blanket consent), and a counter gives observability without re-adding
+    a soft cap that the SPEC explicitly rejected.
+
+    Best-effort write: budget file absent / unreadable / unwritable all
+    silently no-op (= the bypass already happened, audit is the bonus).
+    """
+    if not trek_id:
+        return
+    try:
+        b = _read_bus_budget() or {
+            "total": 0, "used": 0,
+            "channels": [], "armed": False,
+        }
+        bypassed = dict(b.get("trek_bypassed") or {})
+        bypassed[trek_id] = int(bypassed.get(trek_id, 0)) + 1
+        b["trek_bypassed"] = bypassed
+        _write_bus_budget(b)
+    except Exception:
+        return
+
+
+def _is_trek_internal_send(recipient_sid: str) -> tuple[bool, str]:
+    """Decide whether the current --in-reply-to send is Trek-internal.
+
+    Returns ``(True, trek_id)`` iff both the caller and ``recipient_sid``
+    are joined members of the same active Trek; otherwise ``(False, "")``.
+
+    Detection material (= mirror of server-side
+    ``dm_gate.should_gate_dm_action`` shared_trek_member rule):
+      * caller's user_id from the cloud identity (auth.json / credentials.json)
+      * recipient's user_id resolved from the project session registry
+      * caller's joined active treks; intersect ``members[]`` with the
+        recipient_user_id
+
+    Best-effort: any exception or missing material returns ``(False, "")``
+    so the regular budget gate stays in force. The bypass MUST NOT fire
+    on a misconfigured send — that would be a silent budget relaxation.
+    """
+    if not recipient_sid:
+        return False, ""
+    if not _is_cloud_mode():
+        # Local mode uses ~/.beacon/treks/; recipient session lookup
+        # requires a cloud-side directory listing. Keep local mode strict
+        # (= no bypass), the safer side of the SPEC.
+        return False, ""
+    try:
+        my_user_id, _, _ = _resolve_creator_identity()
+        if not my_user_id:
+            return False, ""
+        client, config = _get_api_client()
+        project_id = _resolve_bus_project_id(config)
+        # Resolve recipient session → user.
+        recipient_user_id = ""
+        try:
+            sessions = client.list_sessions(project_id) or []
+        except Exception:
+            return False, ""
+        for s in sessions:
+            if s.get("session_id") == recipient_sid:
+                actor = s.get("actor") or {}
+                recipient_user_id = actor.get("user_id") or ""
+                break
+        if not recipient_user_id or recipient_user_id == my_user_id:
+            return False, ""
+        # Walk my joined active treks.
+        try:
+            my_treks = client.list_treks() or []
+        except Exception:
+            return False, ""
+        for trek in my_treks:
+            if trek.get("status") != "active":
+                continue
+            # Caller must be a joined member of this trek (= joined_at non
+            # empty). Pure invitation does not grant Trek scope yet.
+            am_member = False
+            for m in trek.get("members") or []:
+                if m.get("user_id") == my_user_id and m.get("joined_at"):
+                    am_member = True
+                    break
+            if not am_member:
+                continue
+            for m in trek.get("members") or []:
+                if m.get("user_id") == recipient_user_id and m.get("joined_at"):
+                    return True, str(trek.get("trek_id") or "")
+        return False, ""
+    except Exception:
+        return False, ""
+
+
 def cmd_bus_budget_grant():
-    """Set or refresh the outbound-send budget for autonomous mode."""
+    """Set or refresh the outbound-send budget for autonomous mode.
+
+    ms-76 / e-1852 structural禁止帯 (= 構造的禁止): budget grant requires a
+    human (T1 envelope-equivalent) signal — Operation auto-execute (T2) is
+    NOT allowed to self-escalate. The whole point of the budget is to cap
+    autonomous-loop runaway. If T2 Operations could re-grant the budget,
+    an AI inside a long-running Operation could write a "grant N more
+    turns" Operation, schedule itself, and bypass the cap silently. We
+    block the path at the CLI entry: if the process is running under
+    BEACON_OPERATION_AUTO_EXECUTE=1 (= the Operation runner's marker),
+    refuse with a non-zero exit and a message pointing the human to run
+    the grant interactively.
+
+    See CORE doc QvyVwRU8otQEn5iMfP36 (= AI 自律 action の envelope tier
+    framework) 「構造的禁止」 section. Mirrors the explicit T1-only
+    guarantee in ms-76 SPEC EuLwGrAawmMzeKYsxkrd 設計方針 8.
+    """
+    if os.environ.get("BEACON_OPERATION_AUTO_EXECUTE", "") == "1" or \
+       os.environ.get("BEACON_OPERATION_ENVELOPE_ID", "").strip():
+        print(
+            "Error: bus budget grant is T1-only (= human-signature required).\n"
+            "  This process is running under an Operation auto-execute "
+            "context (T2 envelope); structural禁止帯 forbids AI self-escalation.\n"
+            "  See CORE doc QvyVwRU8otQEn5iMfP36 (= AI 自律 action の envelope "
+            "tier framework). Run `beacon bus budget grant --turns N` "
+            "interactively (= outside the Operation runner) to refresh.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     import datetime
     raw = os.environ.get("BEACON_BUS_BUDGET_N", "").strip()
     try:
@@ -12087,6 +13587,19 @@ def cmd_bus_budget_show():
     print(f"Budget: {used}/{total} used  →  {remaining} remaining  ({state})")
     if b.get("granted_at"):
         print(f"  granted_at: {b['granted_at']}")
+    # ms-75 / e-2044 — Trek-internal bypass audit. The counter is purely
+    # informational; bypassed sends did not consume from total/used. Surface
+    # it here so the leader can see "the executor has been chatty within the
+    # trek but did not draw down the autonomous-loop guardrail".
+    bypassed = b.get("trek_bypassed") or {}
+    if bypassed:
+        total_bypassed = sum(int(v) for v in bypassed.values())
+        print(
+            f"  Trek-internal bypassed: {total_bypassed} send(s) "
+            f"(did NOT count against budget — ms-75 / e-2044)"
+        )
+        for trek_id, n in sorted(bypassed.items()):
+            print(f"    {trek_id}: {n}")
 
 
 def cmd_bus_budget_clear():
@@ -12333,27 +13846,48 @@ def cmd_bus_send():
     #     can't smuggle an extra send past the gate.
     budget: dict = {"armed": False}
     if in_reply_to:
-        b = _read_bus_budget()
-        if b is None:
-            print(
-                "Error: this is a reply (--in-reply-to set) but no auto-reply "
-                "budget is granted. Default state requires human approval per "
-                "reply. Run `beacon bus budget grant <N>` to authorize N "
-                "auto-replies, or omit --in-reply-to for a manual send.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        allowed, budget = _bus_budget_consume_one()
-        if not allowed:
-            total = int(budget.get("total", 0))
-            used = int(budget.get("used", 0))
-            print(
-                f"Error: auto-reply budget exhausted ({used}/{total} used). "
-                "Run `beacon bus budget grant <N>` to re-grant before "
-                "sending again.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+        # ms-75 / e-2044: Trek-internal sends bypass the budget gate. Trek
+        # is an opt-in pre-approval scope (= 缶詰の作業部屋), so the budget
+        # cap (= runaway-autonomy guardrail) is structurally redundant for
+        # member-to-member DMs within an active Trek both sides have
+        # joined. server/dm_gate.should_gate_dm_action already short-
+        # circuits the receiver-side cross-user gate for shared_trek_member
+        # pairs (ms-70 / e-1854); this client-side check brings the budget
+        # layer into parity so a Trek doesn't deadlock on budget exhaustion
+        # while leader/executor DMs keep flowing under blanket consent.
+        # The check is best-effort: any error path (no auth, network blip,
+        # unknown recipient) falls through to the regular budget gate so we
+        # never silently relax enforcement on a misconfigured send.
+        trek_bypass, bypass_trek_id = _is_trek_internal_send(recipient)
+        if trek_bypass:
+            budget = {
+                "armed": True,
+                "trek_bypass": True,
+                "trek_id": bypass_trek_id,
+            }
+            _record_bus_budget_trek_bypass(bypass_trek_id)
+        else:
+            b = _read_bus_budget()
+            if b is None:
+                print(
+                    "Error: this is a reply (--in-reply-to set) but no auto-reply "
+                    "budget is granted. Default state requires human approval per "
+                    "reply. Run `beacon bus budget grant <N>` to authorize N "
+                    "auto-replies, or omit --in-reply-to for a manual send.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            allowed, budget = _bus_budget_consume_one()
+            if not allowed:
+                total = int(budget.get("total", 0))
+                used = int(budget.get("used", 0))
+                print(
+                    f"Error: auto-reply budget exhausted ({used}/{total} used). "
+                    "Run `beacon bus budget grant <N>` to re-grant before "
+                    "sending again.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
     if in_reply_to:
         # Thread the reply by stamping the parent event_id on the payload.
@@ -14687,6 +16221,9 @@ if __name__ == "__main__":
         "milestone_start": cmd_milestone_start,
         "milestone_done": cmd_milestone_done,
         "milestone_observe": cmd_milestone_observe,
+        "milestone_wait": cmd_milestone_wait,
+        "milestone_release": cmd_milestone_release,
+        "milestone_occupations": cmd_milestone_occupations,
         "milestone_join": cmd_milestone_join,
         "milestone_show": cmd_milestone_show,
         "milestone_update": cmd_milestone_update,
@@ -14868,9 +16405,11 @@ if __name__ == "__main__":
         "trek_join": cmd_trek_join,
         "trek_leave": cmd_trek_leave,
         "trek_plan": cmd_trek_plan,
+        "trek_task_state": cmd_trek_task_state,
         "trek_stop": cmd_trek_stop,
         "trek_resume": cmd_trek_resume,
         "trek_transfer_leader": cmd_trek_transfer_leader,
+        "trek_timeline": cmd_trek_timeline,
         "version": lambda: print(f"beacon {__version__}"),
         "help_json": cmd_help_json,
         "doctor": cmd_doctor,
