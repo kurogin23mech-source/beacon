@@ -7992,16 +7992,20 @@ def cmd_doc_add():
         print("Error: content required (pass via BEACON_CONTENT or stdin)")
         sys.exit(1)
 
-    # Duplicate check: warn if same title+scope already exists
-    if _is_cloud_mode():
-        try:
-            client, config = _get_api_client()
-            existing = client.list_documents(config["project_id"])
-            dupes = [d for d in existing if d.get("title") == title and d.get("scope") == scope]
-            if dupes:
-                print(f"Warning: document with same title+scope already exists ({dupes[0]['doc_id']}). Proceeding anyway.")
-        except Exception:
-            pass
+    # Duplicate check: warn if same title+scope already exists.
+    # ms-84 Phase 2: Store 経由で local / cloud を統一 (= 受入条件 10 の _is_cloud_mode
+    # 分岐削減)。 失敗時は best-effort で skip する従来挙動を維持。
+    try:
+        existing = get_store().list_documents()
+        dupes = [d for d in existing
+                 if d.get("title") == title and d.get("scope") == scope]
+        if dupes:
+            print(
+                f"Warning: document with same title+scope already exists "
+                f"({dupes[0]['doc_id']}). Proceeding anyway."
+            )
+    except Exception:
+        pass
 
     # Add frontmatter with scope, milestone, operation, and trek_id
     content = _add_frontmatter(content, scope, milestone or "", operation or "",
@@ -8086,17 +8090,13 @@ def cmd_doc_update():
 
     content = _resolve_content_input(content)
 
-    # Fetch existing document to merge fields
-    if _is_cloud_mode():
-        client, config = _get_api_client()
-        existing = client.get_document(config["project_id"], doc_id)
-    else:
-        docs_dir = _get_docs_dir()
-        fpath = os.path.join(docs_dir, f"{doc_id}.md")
-        if not os.path.exists(fpath):
-            print(f"Document not found: {doc_id}")
-            sys.exit(1)
-        existing = _read_local_doc(fpath)
+    # Fetch existing document to merge fields.
+    # ms-84 Phase 2: Store 経由で local / cloud を統一。 Store.get_document は
+    # 両 backend で同形 ({} on not-found / full dict on hit) を返す契約。
+    existing = get_store().get_document(doc_id)
+    if not existing:
+        print(f"Document not found: {doc_id}")
+        sys.exit(1)
 
     operation = os.environ.get("BEACON_OP", "")
     # Use existing values as defaults
@@ -8142,9 +8142,14 @@ def cmd_doc_update():
         drop_operation=(ms_explicit and not op_explicit),
     )
 
+    # Write path still branches per backend (Phase 3 で Store.save_document
+    # 化予定)。 read だけ Phase 2 で Store 経由化したので、 ここで client /
+    # docs_dir を遅延 resolve する。
     if _is_cloud_mode():
+        client, config = _get_api_client()
         client.update_document(config["project_id"], doc_id, title, content)
     else:
+        docs_dir = _get_docs_dir()
         fpath = os.path.join(docs_dir, f"{doc_id}.md")
         with open(fpath, "w", encoding="utf-8") as f:
             f.write(content)
