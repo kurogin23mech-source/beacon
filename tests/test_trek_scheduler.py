@@ -373,3 +373,43 @@ def test_payload_unknown_scope_falls_to_all_done():
     assert "todo task が見当たりません" in payload["body"]
     # No matching todo + no matching done → no anchor.
     assert payload["target_entries"] == []
+
+
+# ---------------------------------------------------------------------------
+# Trek task aggregate terminal (ms-75 / e-2048)
+# ---------------------------------------------------------------------------
+
+def test_aggregate_terminal_false_when_no_states_stamped():
+    trek = {"task_states": {}}
+    assert scheduler.is_trek_task_aggregate_terminal(trek) is False
+
+
+def test_aggregate_terminal_false_when_any_working():
+    trek = {"task_states": {
+        "e-1": {"state": "done"},
+        "e-2": {"state": "working"},
+    }}
+    assert scheduler.is_trek_task_aggregate_terminal(trek) is False
+
+
+def test_aggregate_terminal_true_when_all_done():
+    trek = {"task_states": {
+        "e-1": {"state": "done"},
+        "e-2": {"state": "done"},
+    }}
+    assert scheduler.is_trek_task_aggregate_terminal(trek) is True
+
+
+def test_aggregate_terminal_true_when_all_waiting_review():
+    trek = {"task_states": {
+        "e-1": {"state": "waiting-review"},
+    }}
+    assert scheduler.is_trek_task_aggregate_terminal(trek) is True
+
+
+def test_aggregate_terminal_true_when_mixed_terminal():
+    trek = {"task_states": {
+        "e-1": {"state": "done"},
+        "e-2": {"state": "waiting-review"},
+    }}
+    assert scheduler.is_trek_task_aggregate_terminal(trek) is True

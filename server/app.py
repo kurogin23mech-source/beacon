@@ -3158,6 +3158,20 @@ class TrekScopeOp(BaseModel):
     task: Optional[str] = None
 
 
+class TrekTaskStateSet(BaseModel):
+    """ms-75 / e-2048 — Trek-internal task state declaration.
+
+    ``task_id`` is the project entry id (e-XXXX) the executor is stamping.
+    ``state`` is one of ``working``, ``done``, ``waiting-review``. ``note``
+    is a short freeform string (≤500 chars) attached to the state record
+    so the leader review surface can show executor rationale without a
+    separate DM round-trip.
+    """
+    task_id: str
+    state: str
+    note: Optional[str] = ""
+
+
 class TrekHaltSet(BaseModel):
     issued_by_session_id: str
     reason: str = ""
@@ -3523,6 +3537,112 @@ def transfer_trek_leader_endpoint(trek_id: str, body: TrekTransferLeader,
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     db.save_trek(trek_id, t)
+    return t
+
+
+@app.patch("/api/treks/{trek_id}/task-state")
+def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
+                                 request: Request,
+                                 user: dict = Depends(require_auth)):
+    """Stamp Trek-internal task state (ms-75 / e-2048).
+
+    Executor sessions call this after each commit / chunk completion
+    to declare whether they are still ``working`` on the task, have
+    reached ``done``, or need ``waiting-review`` (= user judgment).
+
+    Side effects:
+      * Update ``trek_doc.task_states[task_id]`` (= validated transition)
+      * Persist trek doc
+      * When the stamped state is terminal (= done / waiting-review),
+        emit a one-time ``trek-task-review`` bus event addressed to the
+        leader's home project so ``/beacon-trek-review`` Skill can
+        surface the transition to the human leader (= push model that
+        spares the leader from polling).
+
+    Authorisation: caller must be a trek member (= identity at user
+    grain). Leader-only is not required — any member session can stamp
+    on behalf of the work they performed.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    # Member check
+    user_id = user.get("sub") or ""
+    if not trek_mod.find_member(t, user_id):
+        raise HTTPException(
+            status_code=403,
+            detail="only trek members can stamp task state",
+        )
+    if not body.task_id:
+        raise HTTPException(status_code=400, detail="task_id required")
+    try:
+        trek_mod.validate_task_state(body.state)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    # Determine the calling session_id (best-effort — bridges include
+    # X-Beacon-Session header; CLI/curl callers may omit it).
+    caller_sid = request.headers.get("X-Beacon-Session", "") or ""
+    try:
+        trek_mod.set_task_state(
+            t,
+            task_id=body.task_id,
+            state=body.state,
+            updated_by_session_id=caller_sid,
+            note=body.note or "",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.save_trek(trek_id, t)
+    # If the new state is terminal, fan out a review-required notice to
+    # the leader. The leader's review Skill (/beacon-trek-review)
+    # surfaces this as a forced 3-choice action. We use the trek's home
+    # project (= first scope entry's project) as the bus event target,
+    # and address it to the current leader_session_id so only the
+    # responsible session sees it (= no project-wide broadcast).
+    if body.state in trek_mod.TERMINAL_TASK_STATES:
+        leader_sid = t.get("leader_session_id") or ""
+        scope = t.get("scope") or []
+        target_pid = scope[0].get("project") if scope else ""
+        if leader_sid and target_pid:
+            try:
+                envelope = envelope_mod.issue_t1_system_envelope(
+                    project_id=target_pid,
+                    trek_id=trek_id,
+                    actions_authorized=["trek.task_review"],
+                    data_class="free",
+                    ttl_seconds=3600,
+                )
+            except Exception:
+                envelope = None
+            review_payload = {
+                "kind": "trek-task-review",
+                "trek_id": trek_id,
+                "task_id": body.task_id,
+                "state": body.state,
+                "note": body.note or "",
+                "updated_by_session_id": caller_sid,
+                "recipient_session_id": leader_sid,
+                "body": (
+                    f"[Trek task review required] trek_id={trek_id} "
+                    f"task_id={body.task_id} state={body.state}\n"
+                    f"executor note: {(body.note or '').strip()[:200]}\n"
+                    f"次の action: /beacon-trek-review {trek_id} {body.task_id} "
+                    f"で approve / re-work / forward-to-user の 3 択を実行してください。"
+                ),
+                "created_at": trek_mod.utcnow_iso(),
+            }
+            bus_data = {
+                "channel": "trek-task-review",
+                "sender_session_id": "",
+                "payload": review_payload,
+                "envelope": envelope,
+                "delivery": "auto-execute",
+                "created_at": trek_mod.utcnow_iso(),
+            }
+            try:
+                db.append_bus_event(target_pid, bus_data)
+            except Exception:
+                # Best-effort notification; the leader can still discover
+                # the terminal state via `beacon trek show` polling.
+                pass
     return t
 
 
@@ -4296,8 +4416,35 @@ def trek_scheduler_tick_endpoint(
 
     fired: list[dict] = []
     errors: list[dict] = []
+    quiesced: list[dict] = []
     for trek_doc in due_treks:
         trek_id = trek_doc.get("trek_id", "")
+        # ms-75 / e-2048 — Trek task state machine integration. When every
+        # task that an executor has stamped state for has reached terminal
+        # (= done or waiting-review), the scheduler goes silent for this
+        # trek. The leader review notification was already emitted by the
+        # PATCH /api/treks/{id}/task-state endpoint at the moment of the
+        # terminal stamp, so re-firing here would just be noise. A trek
+        # with no stamped states is NOT terminal — the scheduler still
+        # fires obligation DMs to wake an executor that has not yet
+        # declared anything (= pre-state-machine compatible).
+        if trek_scheduler_mod.is_trek_task_aggregate_terminal(trek_doc):
+            quiesced.append({
+                "trek_id": trek_id,
+                "reason": "task_state_aggregate_terminal",
+            })
+            # Still stamp last_progress_check_at so the next cadence
+            # window does not re-flag this trek as "never fired".
+            meta = trek_doc.setdefault("meta", {})
+            meta["last_progress_check_at"] = now.strftime(
+                "%Y-%m-%dT%H:%M:%S.%fZ"
+            )
+            trek_doc["updated_at"] = trek_mod.utcnow_iso()
+            try:
+                db.save_trek(trek_id, trek_doc)
+            except Exception:
+                pass
+            continue
         # Determine the target project for the bus event. The trek's first
         # scope entry's project is the canonical "home project" for the
         # progress-check; treks with no scope are skipped by the payload
@@ -4497,6 +4644,7 @@ def trek_scheduler_tick_endpoint(
         "fired": fired,
         "escalations": escalations,
         "errors": errors,
+        "quiesced": quiesced,
     }
 
 

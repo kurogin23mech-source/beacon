@@ -37,6 +37,36 @@ VALID_TREK_TYPES = ("temporary", "persistent")
 VALID_TREK_STATUSES = ("planning", "active", "archived")
 VALID_MEMBER_ROLES = ("leader", "member")
 
+# ms-75 / e-2048 — Trek-internal task state machine. Independent of MS
+# task status (= todo/in_progress/done) since the Trek tracks "this task
+# is being autonomously worked on" semantics, not "this task is registered
+# in the project". A task can be MS-todo but Trek-state="working" while
+# an executor session is implementing it; can be MS-done but Trek-state=
+# "done" after the executor declares completion. The Trek state is the
+# **autonomous execution lifecycle** signal that scheduler honors:
+#   - working: scheduler keeps firing obligation DMs (= "next action required")
+#   - done: executor declared completion; scheduler stops firing for this
+#     task and emits one review-required DM to the leader. Default goal.
+#   - waiting-review: executor declared "user judgment needed beyond AI";
+#     scheduler stops firing for this task and emits one review-required
+#     DM to the leader (= leader forwards to user). Also a terminal goal.
+# When all task_states aggregate to terminal (= done or waiting-review),
+# the Trek itself becomes idle (scheduler stops, archive candidate).
+VALID_TASK_STATES = ("working", "done", "waiting-review")
+DEFAULT_TASK_STATE = "working"
+TERMINAL_TASK_STATES = ("done", "waiting-review")
+
+# Allowed transitions. Strict to prevent rogue rewrites (= a task that
+# reached "done" can only be moved back to "working" via leader review,
+# not directly to "waiting-review"). The reverse path "done → working"
+# exists so the leader can re-open a task that needs more work after
+# their review.
+VALID_TASK_STATE_TRANSITIONS = {
+    "working": ("done", "waiting-review"),
+    "done": ("working",),
+    "waiting-review": ("working",),
+}
+
 DEFAULT_STATUS = "planning"
 DEFAULT_TYPE = "persistent"
 
@@ -79,6 +109,129 @@ def validate_role(r: str) -> str:
             f"invalid trek role {r!r} — expected one of {VALID_MEMBER_ROLES}"
         )
     return r
+
+
+def validate_task_state(s: str) -> str:
+    """Validate Trek-internal task state (= ms-75 / e-2048)."""
+    if s not in VALID_TASK_STATES:
+        raise ValueError(
+            f"invalid trek task state {s!r} — expected one of {VALID_TASK_STATES}"
+        )
+    return s
+
+
+def validate_task_state_transition(from_state: str, to_state: str) -> None:
+    """Enforce the state machine transitions.
+
+    Raises ValueError when the proposed transition is not allowed by
+    VALID_TASK_STATE_TRANSITIONS. ``from_state`` of "" or None is treated
+    as the default (= "working"); this lets executors declare done in
+    one step from never-set without a prior explicit "working" stamp.
+    """
+    if not from_state:
+        from_state = DEFAULT_TASK_STATE
+    validate_task_state(from_state)
+    if from_state == to_state:
+        # No-op transition is allowed (= idempotent re-affirmation by the
+        # executor; useful for periodic state heartbeat without forcing
+        # a fake intermediate hop).
+        validate_task_state(to_state)
+        return
+    allowed = VALID_TASK_STATE_TRANSITIONS.get(from_state) or ()
+    if to_state not in allowed:
+        raise ValueError(
+            f"invalid trek task state transition {from_state!r} → {to_state!r} "
+            f"(allowed: {allowed})"
+        )
+
+
+def get_task_state(trek_doc: dict, task_id: str) -> str:
+    """Return the Trek-internal state for ``task_id``, default 'working'.
+
+    Untracked tasks (= no entry in trek_doc.task_states) collapse to the
+    default. This means a newly-added scope task starts in 'working'
+    implicitly; explicit state writes via ``set_task_state`` only happen
+    when the executor declares a transition.
+    """
+    states = trek_doc.get("task_states") or {}
+    entry = states.get(task_id) or {}
+    return entry.get("state") or DEFAULT_TASK_STATE
+
+
+def set_task_state(trek_doc: dict, *, task_id: str, state: str,
+                   updated_by_session_id: str = "",
+                   note: str = "") -> dict:
+    """Mutate ``trek_doc.task_states[task_id]`` after validating transition.
+
+    Returns the mutated trek_doc (= chained writes friendly). The caller
+    is responsible for persisting the document (= db.save_trek). A note
+    is recorded if supplied (= helps the leader's review judgment).
+
+    Raises ValueError if the transition is not allowed.
+    """
+    if not task_id:
+        raise ValueError("task_id is required")
+    validate_task_state(state)
+    current = get_task_state(trek_doc, task_id)
+    validate_task_state_transition(current, state)
+    states = trek_doc.setdefault("task_states", {})
+    states[task_id] = {
+        "state": state,
+        "updated_at": utcnow_iso(),
+        "updated_by_session_id": updated_by_session_id or "",
+        "note": (note or "")[:500],
+    }
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
+
+
+def aggregate_task_state(trek_doc: dict, *, task_ids: list[str]) -> dict:
+    """Summarise Trek state across the given task IDs.
+
+    Returns a dict with counts per state + overall classification:
+
+        {"working": N, "done": M, "waiting-review": K, "total": T,
+         "overall": "active" | "all-done" | "all-waiting-review" |
+                    "all-terminal-mixed" | "empty"}
+
+    "active": at least one task is 'working' — scheduler keeps firing.
+    "all-done": all tasks reached 'done' — Trek complete, archive candidate.
+    "all-waiting-review": all tasks waiting for human review — Trek paused
+        pending external decision.
+    "all-terminal-mixed": all tasks terminal but mix of done + waiting —
+        Trek paused, leader sees both outcomes.
+    "empty": no task IDs supplied (= scope is empty / no scope tasks
+        registered). Scheduler treats as the pre-existing "scope empty"
+        message, not as terminal.
+
+    Untracked task IDs collapse to 'working' (= the default), so a fresh
+    task added to scope keeps the Trek "active" until an executor stamps
+    a terminal state.
+    """
+    counts = {s: 0 for s in VALID_TASK_STATES}
+    total = 0
+    for tid in task_ids:
+        if not tid:
+            continue
+        total += 1
+        counts[get_task_state(trek_doc, tid)] += 1
+    if total == 0:
+        overall = "empty"
+    elif counts["working"] > 0:
+        overall = "active"
+    elif counts["done"] == total:
+        overall = "all-done"
+    elif counts["waiting-review"] == total:
+        overall = "all-waiting-review"
+    else:
+        overall = "all-terminal-mixed"
+    return {
+        "working": counts["working"],
+        "done": counts["done"],
+        "waiting-review": counts["waiting-review"],
+        "total": total,
+        "overall": overall,
+    }
 
 
 def build_actor_ref(*, user_id: str, email: str) -> dict:
@@ -244,6 +397,7 @@ def new_trek(*,
         "halt": None,
         "goal_state": (goal_state or "").strip(),
         "meta": meta,
+        "task_states": {},
         "created_at": now,
         "updated_at": now,
         "archived_at": None,

@@ -483,3 +483,163 @@ def test_set_manager_agent_url_clear_via_empty():
     )
     trek.set_manager_agent_url(t, manager_agent_url="")
     assert "manager_agent_url" not in t["meta"]
+
+
+# ---------------------------------------------------------------------------
+# Trek task state machine (ms-75 / e-2048)
+# ---------------------------------------------------------------------------
+
+def test_new_trek_initializes_task_states_empty():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    assert t["task_states"] == {}
+
+
+@pytest.mark.parametrize("good", ["working", "done", "waiting-review"])
+def test_validate_task_state_accepts_valid(good):
+    assert trek.validate_task_state(good) == good
+
+
+@pytest.mark.parametrize("bad", ["", "WORKING", "Done", "pending", None])
+def test_validate_task_state_rejects_invalid(bad):
+    with pytest.raises(ValueError):
+        trek.validate_task_state(bad)  # type: ignore[arg-type]
+
+
+def test_get_task_state_returns_default_for_unknown():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    assert trek.get_task_state(t, "e-9999") == "working"
+
+
+def test_set_task_state_records_state_and_metadata():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(
+        t, task_id="e-100", state="done",
+        updated_by_session_id="sv-exec", note="phase 2 land",
+    )
+    entry = t["task_states"]["e-100"]
+    assert entry["state"] == "done"
+    assert entry["updated_by_session_id"] == "sv-exec"
+    assert entry["note"] == "phase 2 land"
+    assert entry["updated_at"]
+
+
+def test_set_task_state_validates_transition_from_default():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    # Default state is "working", so "done" is allowed.
+    trek.set_task_state(t, task_id="e-1", state="done")
+    # From done, only "working" allowed.
+    with pytest.raises(ValueError):
+        trek.set_task_state(t, task_id="e-1", state="waiting-review")
+
+
+def test_set_task_state_allows_done_back_to_working_then_waiting_review():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-1", state="done")
+    trek.set_task_state(t, task_id="e-1", state="working")
+    trek.set_task_state(t, task_id="e-1", state="waiting-review")
+    assert t["task_states"]["e-1"]["state"] == "waiting-review"
+
+
+def test_set_task_state_no_op_transition_allowed():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-1", state="working")
+    # Re-affirming working state should not raise.
+    trek.set_task_state(t, task_id="e-1", state="working")
+    assert t["task_states"]["e-1"]["state"] == "working"
+
+
+def test_set_task_state_requires_task_id():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    with pytest.raises(ValueError):
+        trek.set_task_state(t, task_id="", state="done")
+
+
+def test_aggregate_task_state_empty_scope():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    agg = trek.aggregate_task_state(t, task_ids=[])
+    assert agg["overall"] == "empty"
+    assert agg["total"] == 0
+
+
+def test_aggregate_task_state_active_when_default_state():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    agg = trek.aggregate_task_state(t, task_ids=["e-1", "e-2"])
+    assert agg["overall"] == "active"
+    assert agg["working"] == 2
+    assert agg["done"] == 0
+
+
+def test_aggregate_task_state_all_done():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-1", state="done")
+    trek.set_task_state(t, task_id="e-2", state="done")
+    agg = trek.aggregate_task_state(t, task_ids=["e-1", "e-2"])
+    assert agg["overall"] == "all-done"
+    assert agg["done"] == 2
+
+
+def test_aggregate_task_state_all_waiting_review():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-1", state="waiting-review")
+    trek.set_task_state(t, task_id="e-2", state="waiting-review")
+    agg = trek.aggregate_task_state(t, task_ids=["e-1", "e-2"])
+    assert agg["overall"] == "all-waiting-review"
+
+
+def test_aggregate_task_state_all_terminal_mixed():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-1", state="done")
+    trek.set_task_state(t, task_id="e-2", state="waiting-review")
+    agg = trek.aggregate_task_state(t, task_ids=["e-1", "e-2"])
+    assert agg["overall"] == "all-terminal-mixed"
+    assert agg["done"] == 1
+    assert agg["waiting-review"] == 1
+
+
+def test_aggregate_task_state_active_when_any_working():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-1", state="done")
+    # e-2 stays at default working
+    agg = trek.aggregate_task_state(t, task_ids=["e-1", "e-2"])
+    assert agg["overall"] == "active"
+    assert agg["working"] == 1
+    assert agg["done"] == 1
