@@ -811,6 +811,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_trek_take_over.add_argument("trek_id", nargs="?", default="")
     p_trek_take_over.add_argument("--json", action="store_true")
 
+    # ms-88 / e-2138 — Kickoff Ritual completion stamp (= /beacon-trek-pulse Step 0.4)
+    p_trek_kickoff = trek_sub.add_parser("kickoff", add_help=False)
+    p_trek_kickoff.add_argument("trek_id", nargs="?", default="")
+    p_trek_kickoff.add_argument("--session-id", dest="session_id_override",
+                                 default="")
+    p_trek_kickoff.add_argument("--kickoff-dm-event-id",
+                                 dest="kickoff_dm_event_id", default="")
+    p_trek_kickoff.add_argument("--json", action="store_true")
+
     # ms-88 / e-2106 — pulse-ack (= /beacon-trek-pulse self-report)
     p_trek_pulse = trek_sub.add_parser("pulse-ack", add_help=False)
     p_trek_pulse.add_argument("trek_id", nargs="?", default="")
@@ -2406,6 +2415,21 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
                 "BEACON_JSON": json_env,
             },
         )
+    if cmd == "kickoff":
+        # session_id override is optional — when absent, cmd_trek_kickoff
+        # reads BEACON_SESSION_ID from the inherited env (= same default
+        # as take-over / pulse-ack). Passing through "" is safe; the
+        # commands-side resolver only honors a non-empty override.
+        env = {
+            "BEACON_TREK_ID": args.trek_id or "",
+            "BEACON_TREK_KICKOFF_DM_EVENT_ID":
+                getattr(args, "kickoff_dm_event_id", "") or "",
+            "BEACON_JSON": json_env,
+        }
+        sid_override = getattr(args, "session_id_override", "") or ""
+        if sid_override:
+            env["BEACON_SESSION_ID"] = sid_override
+        return _run_commands_py(root, "trek_kickoff", env)
     if cmd == "pulse-ack":
         return _run_commands_py(
             root, "trek_pulse_ack",

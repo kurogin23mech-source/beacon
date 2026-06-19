@@ -762,6 +762,25 @@ class ApiClient:
             f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/pulse-acks"
         )
 
+    def kickoff_trek(self, trek_id: str, *, session_id: str,
+                     kickoff_dm_event_id: str = "") -> dict:
+        """Mark a session's Kickoff Ritual DM as sent (ms-88 / e-2138).
+
+        Called by ``/beacon-trek-pulse`` Skill's Step 0.4 after the kickoff
+        DM has been generated and posted to the trek leader. Until this is
+        called, ``pulse-ack`` rejects further progress with HTTP 400
+        ``kickoff_required`` — so this stamp is the structural gate that
+        forces every fresh session to declare its plan to peers first.
+
+        Returns the per-session ``kickoff_status`` entry so the caller can
+        echo "stamped" back to the user.
+        """
+        return self.post(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/kickoff",
+            {"session_id": session_id,
+             "kickoff_dm_event_id": kickoff_dm_event_id},
+        )
+
     def take_over_trek(self, trek_id: str, *, session_id: str) -> dict:
         """Re-bind leader_session_id to the caller's fresh session (ms-88 / e-2089).
 

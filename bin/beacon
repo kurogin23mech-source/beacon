@@ -2654,6 +2654,28 @@ except ValueError as e:
                 done
                 BEACON_TREK_ID="$trek_id" python3 "$COMMANDS_PY" trek_take_over
                 ;;
+            # ms-88 / e-2138 — Kickoff Ritual completion stamp。
+            # /beacon-trek-pulse Skill の Step 0.4 がこれを叩く。 server
+            # endpoint だけ先に land した PR #177 の follow-up (e-2139 残作業)
+            # で CLI wrapper を補完。
+            kickoff)
+                shift 2
+                trek_id="" session_override="" kickoff_dm_event_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        --session-id) session_override="${2:-}"; shift 2 ;;
+                        --kickoff-dm-event-id) kickoff_dm_event_id="${2:-}"; shift 2 ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                if [[ -n "$session_override" ]]; then
+                    export BEACON_SESSION_ID="$session_override"
+                fi
+                BEACON_TREK_ID="$trek_id" \
+                    BEACON_TREK_KICKOFF_DM_EVENT_ID="$kickoff_dm_event_id" \
+                    python3 "$COMMANDS_PY" trek_kickoff
+                ;;
             # ms-88 / e-2106 — Layer 2 (= observability) self-report endpoint。
             # /beacon-trek-pulse Skill が Step 3 でこれを叩く前提。 CLI からも
             # 直接叩ける (= execute Skill 内で inline 使う / dogfood で test)。
@@ -2711,6 +2733,7 @@ except ValueError as e:
                 echo "  resume <trek-id>                     (= halt 信号を clear)"
                 echo "  transfer-leader <trek-id> --to <session-id>"
                 echo "  take-over <trek-id>                  (= dead leader_session_id を fresh session に bind し直す、 ms-88 e-2089)"
+                echo "  kickoff <trek-id> [--session-id X] [--kickoff-dm-event-id Y]  (= Kickoff Ritual 完了 stamp、 /beacon-trek-pulse Step 0.4、 ms-88 e-2138)"
                 echo "  pulse-ack <trek-id> [--picked-choice X] [--note '...']  (= /beacon-trek-pulse Skill が叩く observability ack、 ms-88 e-2106)"
                 echo "  task-state <trek-id> <task-id> <state> [--note '...']  (= ms-75/e-2048、 state: working|done|waiting-review)"
                 echo ""

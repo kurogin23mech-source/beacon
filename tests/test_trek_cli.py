@@ -766,6 +766,77 @@ def test_trek_take_over_requires_session_id(trek_env):
 
 
 # ---------------------------------------------------------------------------
+# kickoff (ms-88 / e-2138 + e-2139 #1 CLI wrapper) — Kickoff Ritual stamp
+#
+# PR #177 で server endpoint + schema は land 済、 ここでは CLI wrapper の
+# round-trip を pin する (= /beacon-trek-pulse Step 0.4 が呼ぶ経路の前提)。
+# ---------------------------------------------------------------------------
+
+def test_trek_kickoff_stamps_session_as_completed(trek_env):
+    """kickoff CLI で local mode で stamp すると kickoff_status に pending=false が乗る。"""
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "kickoff", tid,
+             "--kickoff-dm-event-id", "evt-test-kickoff", "--json")
+    assert r.returncode == 0, r.stderr
+    entry = json.loads(r.stdout)
+    # creator session (= sv-test-1 in trek_env fixture) が stamp 対象になる
+    assert entry["session_id"] == "sv-test-1"
+    assert entry["pending"] is False
+    assert entry["sent_at"]  # non-empty ISO
+    assert entry["kickoff_dm_event_id"] == "evt-test-kickoff"
+
+
+def test_trek_kickoff_session_id_override_via_flag(trek_env):
+    """`--session-id` flag が env を上書きして別 session の stamp ができる。"""
+    tid = _make_trek_and_return_id(trek_env)
+    # creator は trek_env BEACON_SESSION_ID = sv-test-1。 別 session を override
+    # で渡す (= dogfood で executor が leader 経路で別 session を stamp する想定)。
+    r = _run(trek_env, "kickoff", tid,
+             "--session-id", "sv-other-session",
+             "--kickoff-dm-event-id", "evt-other", "--json")
+    assert r.returncode == 0, r.stderr
+    entry = json.loads(r.stdout)
+    assert entry["session_id"] == "sv-other-session"
+    assert entry["pending"] is False
+
+
+def test_trek_kickoff_is_idempotent(trek_env):
+    """同 session で 2 度 kickoff → 2 度目も exit 0、 既存 sent_at 保持。"""
+    tid = _make_trek_and_return_id(trek_env)
+    r1 = _run(trek_env, "kickoff", tid, "--json")
+    assert r1.returncode == 0
+    first_sent_at = json.loads(r1.stdout)["sent_at"]
+    r2 = _run(trek_env, "kickoff", tid, "--json")
+    assert r2.returncode == 0, r2.stderr
+    # idempotent — first stamp is preserved (= mark_kickoff_completed の契約)
+    assert json.loads(r2.stdout)["sent_at"] == first_sent_at
+
+
+def test_trek_kickoff_rejects_non_member(trek_env):
+    """member ですらない user が kickoff → エラー (member 限定)。"""
+    tid = _make_trek_and_return_id(trek_env)
+    stranger_env = dict(trek_env)
+    stranger_env.update({
+        "BEACON_USER_ID": "u-stranger",
+        "BEACON_USER_EMAIL": "stranger@x.com",
+        "BEACON_SESSION_ID": "sv-stranger",
+    })
+    r = _run(stranger_env, "kickoff", tid)
+    assert r.returncode != 0
+    assert "member" in r.stderr.lower()
+
+
+def test_trek_kickoff_requires_session_id(trek_env):
+    """BEACON_SESSION_ID 未設定 + --session-id 未指定で kickoff → エラー。"""
+    tid = _make_trek_and_return_id(trek_env)
+    env_no_sid = dict(trek_env)
+    env_no_sid.pop("BEACON_SESSION_ID", None)
+    r = _run(env_no_sid, "kickoff", tid)
+    assert r.returncode != 0
+    assert "session" in r.stderr.lower()
+
+
+# ---------------------------------------------------------------------------
 # pulse-ack (ms-88 / e-2106) — Layer 2 observability self-report
 # ---------------------------------------------------------------------------
 
