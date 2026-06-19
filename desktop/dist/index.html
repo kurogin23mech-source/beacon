@@ -2281,6 +2281,47 @@ body::after {
   white-space: nowrap;
 }
 
+/* Trek aggregate state pill (= ms-86 / e-2058 #3) — header に並ぶ集約バッジ */
+.trek-agg-badge.agg-active {
+  color: var(--accent, #60a5fa);
+  border-color: rgba(96,165,250,0.5);
+}
+.trek-agg-badge.agg-all-done {
+  color: #4ade80;
+  border-color: rgba(74,222,128,0.5);
+}
+.trek-agg-badge.agg-all-waiting {
+  color: var(--warning, #fbbf24);
+  border-color: rgba(251,191,36,0.5);
+}
+.trek-agg-badge.agg-mixed {
+  color: #a78bfa;
+  border-color: rgba(167,139,250,0.5);
+}
+.trek-agg-badge.agg-empty {
+  color: var(--text-dim);
+}
+
+/* Review pending banner (= ms-86 / e-2058 #4) — waiting-review 1 件以上で出る強調帯 */
+.trek-review-pending-banner {
+  margin: 12px 0;
+  padding: 10px 14px;
+  border: 1px solid rgba(251,191,36,0.6);
+  background: rgba(251,191,36,0.08);
+  border-radius: 4px;
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  font-size: 0.78rem;
+}
+.trek-review-pending-banner .icon { font-size: 1.4rem; flex-shrink: 0; }
+.trek-review-pending-banner .text { flex: 1; color: var(--text-primary); line-height: 1.5; }
+.trek-review-pending-banner .text strong {
+  display: block;
+  color: var(--warning, #fbbf24);
+  margin-bottom: 2px;
+}
+
 /* Trek task state machine (= ms-75 / e-2048, ms-86 / e-2058) のバッジ */
 .trek-task-state-badge {
   display: inline-block;
@@ -4989,6 +5030,39 @@ function _trekTaskStateBadge(state) {
   return `<span class="trek-task-state-badge ${info.cls}">${esc(info.label)}</span>`;
 }
 
+// ms-86 / e-2058 #3 — Trek 全体の集約 state を判定: active / all-done /
+// all-waiting-review / mixed-terminal / empty
+function _trekAggregateState(t) {
+  const states = t && t.task_states ? Object.values(t.task_states) : [];
+  if (!states.length) return { key: 'empty', label: '宣言なし', cls: 'agg-empty' };
+  const set = new Set(states.map(s => s && s.state).filter(Boolean));
+  if (set.has('working')) return { key: 'active',  label: '🔨 進行中',      cls: 'agg-active' };
+  if (set.size === 1 && set.has('done')) return { key: 'all-done', label: '✓ 全 done', cls: 'agg-all-done' };
+  if (set.size === 1 && set.has('waiting-review')) return { key: 'all-waiting', label: '👀 全 待 review', cls: 'agg-all-waiting' };
+  // 残りは done + waiting-review の terminal mix
+  return { key: 'mixed-terminal', label: '⚡ mixed terminal', cls: 'agg-mixed' };
+}
+
+// ms-86 / e-2058 #4 — waiting-review が 1 件でもあれば emphasis banner
+function _trekReviewPendingBanner(t) {
+  const states = t && t.task_states ? Object.values(t.task_states) : [];
+  const pending = states.filter(s => s && s.state === 'waiting-review');
+  if (!pending.length) return '';
+  const ids = Object.entries(t.task_states || {})
+    .filter(([_, s]) => s && s.state === 'waiting-review')
+    .map(([id]) => id);
+  return `
+    <div class="trek-review-pending-banner">
+      <span class="icon">👀</span>
+      <div class="text">
+        <strong>レビュー待ち task が ${pending.length} 件あります</strong>
+        ${ids.map(esc).join(' / ')}
+        — leader が approve / re-work / forward-to-user を判断します。
+        CLI: <code style="color:var(--accent);">/beacon-trek-review</code>
+      </div>
+    </div>`;
+}
+
 function _renderTrekScopeExpansion(s, t) {
   // Show child tasks / OperationTasks. Data source: t.aggregation
   // built by lib/commands.py:_build_trek_aggregation (= e-1864).
@@ -5157,11 +5231,14 @@ function _renderTrekDetail(t) {
           <span class="trek-badge ${t.type === 'temporary' ? 'temporary' : 'persistent'}">${esc(t.type || '')}</span>
           <span class="trek-badge ${_trekBadgeClass(t.status)}">${_trekStatusIcon(t.status)} ${esc(t.status || '')}</span>
           ${halted ? `<span class="trek-badge" style="color:var(--warning,#fbbf24);border-color:var(--warning,#fbbf24);">⚠ halted</span>` : ''}
+          ${(() => { const agg = _trekAggregateState(t); return `<span class="trek-badge trek-agg-badge ${agg.cls}">${esc(agg.label)}</span>`; })()}
         </div>
         <div class="trek-stats">
           ${projectsInScope.size} project${projectsInScope.size === 1 ? '' : 's'} · ${workItemsInScope} work item${workItemsInScope === 1 ? '' : 's'} · ${members.length} member${members.length === 1 ? '' : 's'}
         </div>
       </div>
+
+      ${_trekReviewPendingBanner(t)}
 
       <!-- ① WHY (= goal_state) -->
       <div class="trek-section trek-why">
