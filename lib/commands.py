@@ -1789,39 +1789,6 @@ def _cloud_purge_dispatch(action_label: str, fn, *,
             print(line)
 
 
-def _cloud_operation_purge(op_id: str, *, reason: str,
-                            index: Optional[int], json_mode: bool) -> None:
-    client, config = _get_api_client()
-    project_id = config["project_id"]
-    data = _cloud_fetch_project_or_exit(client, project_id)
-    matches = core.find_operations(data, op_id)
-    if not matches:
-        print(f"Operation not found: {op_id}", file=sys.stderr)
-        sys.exit(1)
-    if len(matches) > 1 and index is None:
-        print(
-            f"Operation '{op_id}' has {len(matches)} duplicate records. "
-            "Re-run with --index <n>:",
-            file=sys.stderr,
-        )
-        for i, o in enumerate(matches, 1):
-            title = o.get("title", "(no title)")
-            status = o.get("status", "?")
-            print(f"  --index {i}  status={status}  title={title}",
-                  file=sys.stderr)
-        sys.exit(1)
-    _cloud_purge_dispatch(
-        "operation",
-        lambda: client.purge_operation(
-            project_id, op_id, reason=reason, index=index),
-        json_mode=json_mode,
-        success_fmt=lambda r: [
-            f"Purged operation: [{r.get('id', op_id)}] {r.get('title', '')}",
-            f"  Reason: {reason}",
-        ],
-    )
-
-
 def cmd_milestone_purge():
     """Hard-delete a milestone record (Issue #14 recovery path).
 
@@ -2074,12 +2041,13 @@ def cmd_operation_purge():
                   file=sys.stderr)
             sys.exit(1)
 
-    if _is_cloud_mode():
-        _cloud_operation_purge(op_id, reason=reason, index=index,
-                               json_mode=json_mode)
-        return
-
-    data = load_project_unsafe()
+    # ms-84 Phase 2 (e-2036): Store.purge_operation unifies cloud + local.
+    store = get_store()
+    try:
+        data = store.load_project()
+    except (RuntimeError, ConnectionError) as e:
+        print(f"Error loading project: {e}", file=sys.stderr)
+        sys.exit(1)
     matches = core.find_operations(data, op_id)
     if not matches:
         print(f"Operation not found: {op_id}", file=sys.stderr)
@@ -2094,28 +2062,23 @@ def cmd_operation_purge():
         sys.exit(1)
 
     try:
-        purged = core.operation_purge(data, op_id, reason=reason, index=index)
+        result = store.purge_operation(op_id, reason=reason, index=index)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    dup_report = core.find_duplicate_ids(data)
-    still_dirty = any(dup_report.values())
-    op = {
-        "op": "operation_purge",
-        "op_id": op_id,
-        "index": index,
-        "reason": reason,
-        "purged_title": purged.get("title", ""),
-    }
-    if still_dirty:
-        save_project_unsafe(data, op=op)
-    else:
-        try:
-            save_project(data, op=op)
-        except ValueError as e:
-            save_project_unsafe(data, op=op)
-            print(f"Warning: post-purge validation failed: {e}", file=sys.stderr)
+    purged = result["purged"]
+    still_dirty = result["still_dirty"]
+    dup_report = result["dup_report"]
+
+    if not store.is_cloud():
+        _append_changelog({
+            "op": "operation_purge",
+            "op_id": op_id,
+            "index": index,
+            "reason": reason,
+            "purged_title": purged.get("title", ""),
+        })
 
     if json_mode:
         print(json.dumps({

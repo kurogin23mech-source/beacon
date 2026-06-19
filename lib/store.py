@@ -79,6 +79,14 @@ class Store(Protocol):
         """
         ...
 
+    def purge_operation(self, op_id: str, *,
+                        reason: str, index: int | None = None) -> dict:
+        """Hard-delete an operation record (= 運用ジョブの物理削除)。
+
+        Same contract as purge_milestone / purge_entry.
+        """
+        ...
+
     def purge_milestone(self, ms_id: str, *,
                         reason: str, index: int | None = None) -> dict:
         """Hard-delete a milestone record (= 物理削除、duplicate-ID 回復用、Issue #14)。

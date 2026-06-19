@@ -251,3 +251,72 @@ def test_cloud_purge_entry_403_becomes_value_error():
     store._project_id = "proj-1"
     with pytest.raises(ValueError, match="owner"):
         store.purge_entry("e-1", reason="cleanup")
+
+
+# ---------------------------------------------------------------------------
+# Store.purge_operation — same contract, different backing call
+# ---------------------------------------------------------------------------
+
+
+def _operation_project() -> dict:
+    return {
+        "name": "Fixture",
+        "summary": "",
+        "milestones": [],
+        "operations": [
+            {"id": "op-1", "title": "monitor", "status": "open",
+             "kind": "watcher", "entries": []},
+            {"id": "op-2", "title": "rotate", "status": "todo",
+             "kind": "scheduled", "entries": []},
+        ],
+    }
+
+
+def test_local_purge_operation_removes_record():
+    store = _make_local_store(_operation_project())
+    out = store.purge_operation("op-1", reason="cleanup")
+    assert out["purged"]["id"] == "op-1"
+    assert out["still_dirty"] is False
+    reloaded = store.load_project()
+    assert [o["id"] for o in reloaded["operations"]] == ["op-2"]
+
+
+def test_local_purge_operation_unknown_raises():
+    store = _make_local_store(_operation_project())
+    with pytest.raises(ValueError, match="op-404"):
+        store.purge_operation("op-404", reason="cleanup")
+
+
+class FakeOpClient:
+    def __init__(self, *, response: dict | None = None,
+                 raise_msg: str | None = None):
+        self._response = response or {"id": "op-1", "title": "stub",
+                                      "purged": True}
+        self._raise_msg = raise_msg
+        self.calls: list[tuple] = []
+
+    def purge_operation(self, project_id: str, op_id: str, *,
+                        reason: str, index: int | None = None) -> dict:
+        self.calls.append((project_id, op_id, reason, index))
+        if self._raise_msg:
+            raise RuntimeError(self._raise_msg)
+        return self._response
+
+
+def test_cloud_purge_operation_passes_args_through():
+    fake = FakeOpClient()
+    store = StoreApi.__new__(StoreApi)
+    store._client = fake
+    store._project_id = "proj-1"
+    out = store.purge_operation("op-1", reason="cleanup")
+    assert fake.calls == [("proj-1", "op-1", "cleanup", None)]
+    assert out["still_dirty"] is False
+
+
+def test_cloud_purge_operation_403_becomes_value_error():
+    fake = FakeOpClient(raise_msg="API error 403: owner only")
+    store = StoreApi.__new__(StoreApi)
+    store._client = fake
+    store._project_id = "proj-1"
+    with pytest.raises(ValueError, match="owner"):
+        store.purge_operation("op-1", reason="cleanup")
