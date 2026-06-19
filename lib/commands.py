@@ -5848,12 +5848,14 @@ def cmd_trek_transfer_leader():
 
 
 def cmd_trek_task_state():
-    """Stamp Trek-internal task state (ms-75 / e-2048).
+    """Stamp Trek-internal task state (ms-75 / e-2048 + ms-88 / e-2107).
 
     Env:
       BEACON_TREK_ID         (required)
       BEACON_TREK_TASK_ID    (required, the entry id e-XXXX)
-      BEACON_TREK_STATE      (required, one of working/done/waiting-review)
+      BEACON_TREK_STATE      (required, one of todo/working/leader_review/
+                              user_review/done; legacy `waiting-review`
+                              auto-migrates to leader_review)
       BEACON_TREK_NOTE       (optional)
       BEACON_JSON            "1" → json output
     """
@@ -5874,7 +5876,8 @@ def cmd_trek_task_state():
         sys.exit(1)
     if not state:
         print(
-            "Error: state is required (one of working/done/waiting-review)",
+            "Error: state is required (one of todo/working/leader_review/"
+            "user_review/done; legacy `waiting-review` も accepted、 ms-88 e-2107)",
             file=sys.stderr,
         )
         sys.exit(1)

@@ -36,16 +36,28 @@ from typing import Iterable, Optional
 # constant.
 DEFAULT_CADENCE_MINUTES = 10
 
-# ms-75 / e-2048 — Trek task state machine constant. Re-export the default
-# state so we can recognise "working" without dragging the whole lib.trek
-# import (= keeps module pure for tests that mock that side).
+# ms-75 / e-2048 + ms-88 / e-2107 — Trek task state machine constants.
+# Re-export so we can recognise terminal vs working states without dragging
+# the whole lib.trek import (= keeps module pure for tests that mock that
+# side). Note: ms-88 / e-2107 changed DEFAULT_TASK_STATE from `working` to
+# `todo`, so we now use a dedicated `WORKING_TASK_STATE` constant to anchor
+# the auto-stall TTL check (= "tasks that are actively progressing").
 try:
-    from lib.trek import DEFAULT_TASK_STATE  # noqa: F401
+    from lib.trek import (
+        DEFAULT_TASK_STATE,  # noqa: F401  (= "todo")
+        TERMINAL_TASK_STATES,  # noqa: F401  (= ("done", "user_review"))
+    )
 except Exception:
-    DEFAULT_TASK_STATE = "working"
+    DEFAULT_TASK_STATE = "todo"
+    TERMINAL_TASK_STATES = ("done", "user_review")
 
-# ms-75 / e-2067 — server-side TTL safety net default.
-DEFAULT_WORKING_TTL_MINUTES = 30
+WORKING_TASK_STATE = "working"
+
+# ms-75 / e-2067 + ms-88 / e-2107 — server-side TTL safety net default.
+# Shortened 30 → 12 min so silent halts are caught within one scheduler
+# cadence (+ 2 min buffer). 罰則 = 全 working を leader_review に強制遷移
+# (= server/app.py の orchestrator 経路、 ここは検出のみ)。
+DEFAULT_WORKING_TTL_MINUTES = 12
 
 
 # ---------------------------------------------------------------------------
@@ -144,12 +156,10 @@ def select_due_treks(
 def is_trek_task_aggregate_terminal(trek_doc: dict) -> bool:
     """Return True iff every stamped Trek task state is terminal.
 
-    ms-75 / e-2048 — scheduler honors the Trek-internal task state machine.
-    The state map lives on ``trek_doc.task_states`` and is written by the
-    PATCH /api/treks/{id}/task-state endpoint. When **every** stamped task
-    is in a terminal state (= done or waiting-review), the scheduler stops
-    firing progress-check DMs for this trek (= leader review is the next
-    structural step, handled out-of-band via the PATCH-driven notification).
+    ms-88 / e-2107 — terminal = ``done`` OR ``user_review`` (per the
+    5-state model and CORE doc 5nfTSmCDVUzD4SLzIhI5 § "Trek 完遂判定").
+    ``todo`` / ``working`` / ``leader_review`` keep the scheduler firing
+    because there is still active work or a pending leader judgment.
 
     A trek with **no** stamped states (= empty task_states map) is NOT
     terminal — it means "no executor has declared anything yet", and the
@@ -157,15 +167,26 @@ def is_trek_task_aggregate_terminal(trek_doc: dict) -> bool:
     act and stamp state. This preserves the existing pre-state-machine
     behaviour when no one is using the new API.
 
-    A trek with **at least one** stamped state of "working" is NOT
-    terminal either — there is still active work, so the scheduler keeps
-    firing.
+    Legacy ``waiting-review`` is migrated transparently via lib.trek
+    (= maps to ``leader_review`` = non-terminal) so old data keeps the
+    scheduler running until the leader makes a call.
     """
     states = trek_doc.get("task_states") or {}
     if not states:
         return False
-    for entry in states.values():
-        if (entry or {}).get("state") == DEFAULT_TASK_STATE:
+    try:
+        # Lazy import inside the call so the module stays light when
+        # imported by tests that mock lib.trek.
+        from lib.trek import get_task_state as _get_state
+    except Exception:
+        _get_state = None
+    for tid, entry in states.items():
+        if _get_state is not None:
+            # Use the canonical getter so legacy tokens migrate.
+            state = _get_state(trek_doc, tid)
+        else:
+            state = (entry or {}).get("state") or DEFAULT_TASK_STATE
+        if state not in TERMINAL_TASK_STATES:
             return False
     return True
 
@@ -238,7 +259,12 @@ def detect_auto_stalled_tasks(
     now = _ensure_utc(now)
     out: list[dict] = []
     for tid, entry in states.items():
-        if not entry or entry.get("state") != DEFAULT_TASK_STATE:
+        # ms-88 / e-2107: auto-stall は `working` task のみ対象 (= 旧 default
+        # `working` = 「実行中」 だった意味的位置を新 `WORKING_TASK_STATE`
+        # に明示移管)。 todo / leader_review / user_review は対象外。
+        # legacy `waiting-review` は migrate されて leader_review 扱いに
+        # なるので自然に対象外。
+        if not entry or (entry or {}).get("state") != WORKING_TASK_STATE:
             continue
         last_str = entry.get("last_activity_at") or entry.get("updated_at") or ""
         last = _parse_iso(last_str)
@@ -449,13 +475,16 @@ _AGGREGATE_ALL_DONE = (
     "leader review (= /beacon-trek-review) で archive 判断、 もしくは "
     "scope に追加 task を入れるかを決めてください。"
 )
-_AGGREGATE_ALL_WAITING_REVIEW = (
-    "Trek scope 内の全 task が waiting-review に到達しました (= user 介入要)。 "
-    "leader review (= /beacon-trek-review) で各 task の処遇 (forward-to-user / "
-    "re-work / accept) を決めてください。"
+_AGGREGATE_ALL_USER_REVIEW = (
+    "Trek scope 内の全 task が user_review に到達しました (= user 介入要)。 "
+    "leader review (= /beacon-trek-review) で各 task の処遇 (forward-to-user の "
+    "user 対話 / working 復帰) を決めてください。"
 )
+# 旧 name (= old aggregate output) を読む coller 用の alias、 ms-88 / e-2107
+# transition で消えるが backward-compat 表面として残す (= 未読リンク防止)。
+_AGGREGATE_ALL_WAITING_REVIEW = _AGGREGATE_ALL_USER_REVIEW
 _AGGREGATE_ALL_TERMINAL_MIXED = (
-    "Trek scope 内の全 task が terminal state (= done / waiting-review の混在) に "
+    "Trek scope 内の全 task が terminal state (= done / user_review の混在) に "
     "到達しました。 leader review で各 task ごとに処遇を決めてください。"
 )
 # ms-83 / e-2013: 自律権限の reminder。 受信側の /beacon-trek-execute Skill

@@ -4623,6 +4623,16 @@ def trek_scheduler_tick_endpoint(
         # with a session-addressed payload (= payload.recipient_session_id).
         # If no live sessions resolve (= empty members or all stale), the
         # broadcast fallback fires (sid="") so behaviour stays compatible.
+        #
+        # ms-88 / e-2109 — per-session task_state filter. The dogfood also
+        # showed that fanning out to every live session even when their
+        # claimed tasks were all terminal (= leader_review / user_review /
+        # done) burned executor inboxes with ticks they couldn't act on.
+        # Filter target_sids down to sessions that either (a) hold at least
+        # one todo / working claim, or (b) have no claims yet (= fresh
+        # executor about to pick up). Sessions whose claims are all in
+        # terminal-ish states get NO tick — they explicitly finished and
+        # should stay quiet until the leader re-stamps them working.
         member_user_ids = {
             (m.get("user_id") or "")
             for m in (trek_doc.get("members") or [])
@@ -4637,13 +4647,22 @@ def trek_scheduler_tick_endpoint(
             live_cutoff = (now - datetime.timedelta(minutes=10)).strftime(
                 "%Y-%m-%dT%H:%M:%S.%fZ"
             )
-            target_sids = [
+            live_sids = [
                 (s.get("session_id") or "")
                 for s in project_sessions
                 if (s.get("user_id") or "") in member_user_ids
                 and (s.get("last_active") or "") >= live_cutoff
                 and s.get("session_id")
             ]
+            # ms-88 / e-2109 — per-session filter.
+            for sid in live_sids:
+                if trek_mod.session_has_active_claim(trek_doc, session_id=sid):
+                    target_sids.append(sid)
+                elif not trek_mod.session_has_any_claim(trek_doc, session_id=sid):
+                    # Fresh session, no claims yet — still tick so it picks
+                    # up a todo task.
+                    target_sids.append(sid)
+                # else: every claim is terminal-ish → skip this session.
         if not target_sids:
             # Fallback: broadcast (= sid empty). Preserves behaviour when
             # member resolution fails (= no live sessions / empty members /
@@ -4797,11 +4816,15 @@ def trek_scheduler_tick_endpoint(
             silence = s["silence_minutes"]
             ttl = s["ttl_minutes"]
             note = trek_scheduler_mod.build_auto_stall_note(silence)
+            # ms-88 / e-2107: 罰則先 を `waiting-review` → `leader_review` に変更
+            # (= 5 状態 state machine 厳密化、 「leader 判断要請」 と「user 判断
+            # 要請」 の conflate 解消)。 set_task_state は legacy migration を
+            # 経由するので old-schema 既存データとの interop は silent。
             try:
                 trek_mod.set_task_state(
                     trek_doc,
                     task_id=task_id,
-                    state="waiting-review",
+                    state="leader_review",
                     updated_by_session_id="",  # = server-initiated
                     note=note,
                 )
@@ -4829,7 +4852,7 @@ def trek_scheduler_tick_endpoint(
                     "kind": "trek-task-review",
                     "trek_id": trek_id,
                     "task_id": task_id,
-                    "state": "waiting-review",
+                    "state": "leader_review",
                     "note": note,
                     "updated_by_session_id": "",
                     "recipient_session_id": leader_sid,
@@ -4841,12 +4864,13 @@ def trek_scheduler_tick_endpoint(
                         f"task_id={task_id} silence={silence} min "
                         f"(TTL={ttl})\n"
                         f"executor が working state のまま {silence} 分無活動。"
-                        f" server-side TTL safety net (= e-2067) が "
-                        f"waiting-review に降格しました。\n"
+                        f" server-side TTL safety net (= e-2067 / ms-88 e-2107) "
+                        f"が leader_review に降格しました。\n"
                         f"次の action: /beacon-trek-review {trek_id} "
-                        f"{task_id} で approve / re-work / forward-to-user "
-                        f"を選んでください。 false-positive なら "
-                        f"waiting-review → working に re-stamp で復旧可能。"
+                        f"{task_id} で done / user_review (forward) / "
+                        f"working (re-work + 方針 DM) を選んでください。 "
+                        f"false-positive なら leader_review → working に "
+                        f"re-stamp で復旧可能。"
                     ),
                     "created_at": trek_mod.utcnow_iso(),
                 }

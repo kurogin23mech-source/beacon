@@ -400,17 +400,35 @@ def test_aggregate_terminal_true_when_all_done():
     assert scheduler.is_trek_task_aggregate_terminal(trek) is True
 
 
-def test_aggregate_terminal_true_when_all_waiting_review():
+def test_aggregate_terminal_false_when_all_leader_review():
+    """ms-88 / e-2107: leader_review は NON-terminal (= leader 判断要請、
+    scheduler 走り続け)。 legacy `waiting-review` も leader_review に
+    migrate するので同じく non-terminal。"""
     trek = {"task_states": {
+        "e-1": {"state": "leader_review"},
+    }}
+    assert scheduler.is_trek_task_aggregate_terminal(trek) is False
+    # legacy alias も同じ挙動 (migrate されて leader_review 扱い)
+    trek_legacy = {"task_states": {
         "e-1": {"state": "waiting-review"},
+    }}
+    assert scheduler.is_trek_task_aggregate_terminal(trek_legacy) is False
+
+
+def test_aggregate_terminal_true_when_all_user_review():
+    """ms-88 / e-2107: user_review は terminal (= Trek 完遂等価、 leader が
+    user に forward 済)。"""
+    trek = {"task_states": {
+        "e-1": {"state": "user_review"},
     }}
     assert scheduler.is_trek_task_aggregate_terminal(trek) is True
 
 
 def test_aggregate_terminal_true_when_mixed_terminal():
+    """ms-88 / e-2107: terminal mixed = done + user_review。"""
     trek = {"task_states": {
         "e-1": {"state": "done"},
-        "e-2": {"state": "waiting-review"},
+        "e-2": {"state": "user_review"},
     }}
     assert scheduler.is_trek_task_aggregate_terminal(trek) is True
 
@@ -464,31 +482,32 @@ def test_detect_auto_stalled_returns_empty_when_no_states_stamped():
 
 
 def test_detect_auto_stalled_skips_task_under_ttl():
-    """Working task with recent activity (< TTL) must not stall."""
+    """Working task with recent activity (< TTL) must not stall.
+    ms-88 / e-2107: TTL 12 min default → 5 min は明らかに under。"""
     trek = {
         "status": "active",
         "task_states": {
             "e-1": {"state": "working",
-                    "last_activity_at": _iso(_now_minus(15))},
+                    "last_activity_at": _iso(_now_minus(5))},
         },
     }
     assert scheduler.detect_auto_stalled_tasks(trek, now=_BASE_NOW) == []
 
 
 def test_detect_auto_stalled_detects_task_past_default_ttl():
-    """31 min silence with default 30 min TTL → stall."""
+    """ms-88 / e-2107: TTL default 30 → 12 min。 13 min silence で stall。"""
     trek = {
         "status": "active",
         "task_states": {
             "e-1": {"state": "working",
-                    "last_activity_at": _iso(_now_minus(31))},
+                    "last_activity_at": _iso(_now_minus(13))},
         },
     }
     out = scheduler.detect_auto_stalled_tasks(trek, now=_BASE_NOW)
     assert len(out) == 1
     assert out[0]["task_id"] == "e-1"
-    assert out[0]["silence_minutes"] == 31
-    assert out[0]["ttl_minutes"] == 30
+    assert out[0]["silence_minutes"] == 13
+    assert out[0]["ttl_minutes"] == 12
 
 
 def test_detect_auto_stalled_skips_terminal_states():
@@ -506,7 +525,7 @@ def test_detect_auto_stalled_skips_terminal_states():
 
 
 def test_detect_auto_stalled_honors_per_trek_ttl_override():
-    """meta.working_ttl_minutes per AC 6."""
+    """meta.working_ttl_minutes per AC 6 (= per-trek override も 12 min default を上書き)。"""
     trek = {
         "status": "active",
         "meta": {"working_ttl_minutes": 5},
@@ -524,12 +543,12 @@ def test_detect_auto_stalled_honors_per_trek_ttl_override():
 def test_detect_auto_stalled_falls_back_to_updated_at_for_legacy_entries():
     """task_states entries written before e-2067 land have no
     last_activity_at field. The detector falls back to updated_at so
-    legacy stamps are still evaluated."""
+    legacy stamps are still evaluated. ms-88 / e-2107: TTL 12 min。"""
     trek = {
         "status": "active",
         "task_states": {
             "e-1": {"state": "working",
-                    "updated_at": _iso(_now_minus(45))},
+                    "updated_at": _iso(_now_minus(15))},
         },
     }
     out = scheduler.detect_auto_stalled_tasks(trek, now=_BASE_NOW)
@@ -550,16 +569,17 @@ def test_detect_auto_stalled_skips_entry_with_no_activity_anchor():
 
 
 def test_detect_auto_stalled_returns_multiple_tasks():
-    """All working + stalled tasks in a single trek are returned together."""
+    """All working + stalled tasks in a single trek are returned together.
+    ms-88 / e-2107: TTL 12 min。"""
     trek = {
         "status": "active",
         "task_states": {
             "e-1": {"state": "working",
-                    "last_activity_at": _iso(_now_minus(45))},
+                    "last_activity_at": _iso(_now_minus(20))},
             "e-2": {"state": "working",
-                    "last_activity_at": _iso(_now_minus(60))},
+                    "last_activity_at": _iso(_now_minus(30))},
             "e-3": {"state": "working",
-                    "last_activity_at": _iso(_now_minus(10))},  # under TTL
+                    "last_activity_at": _iso(_now_minus(5))},  # under TTL
         },
     }
     out = scheduler.detect_auto_stalled_tasks(trek, now=_BASE_NOW)
@@ -579,8 +599,9 @@ def test_build_auto_stall_note_includes_silence_minutes():
 
 def test_get_working_ttl_minutes_in_scheduler_module_matches_default():
     """Scheduler-side getter is the operational read path; it must agree
-    with the schema-side getter so server + CLI render the same number."""
-    assert scheduler.get_working_ttl_minutes({}) == 30
+    with the schema-side getter so server + CLI render the same number.
+    ms-88 / e-2107: default 30 → 12 min。"""
+    assert scheduler.get_working_ttl_minutes({}) == 12
     assert scheduler.get_working_ttl_minutes(
         {"meta": {"working_ttl_minutes": 7}}
     ) == 7
