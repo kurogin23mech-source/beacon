@@ -13090,6 +13090,7 @@ def cmd_help_json():
         {"command": "beacon trek stop <trek-id>", "flags": ["--reason <text>", "--json"], "description": "Pull the Andon cord (= halt signal, sessions pause)"},
         {"command": "beacon trek resume <trek-id>", "flags": ["--json"], "description": "Clear the halt signal"},
         {"command": "beacon trek transfer-leader <trek-id> --to <session-id>", "flags": ["--json"], "description": "Hand off leader_session_id to another session"},
+        {"command": "beacon trek take-over <trek-id>", "flags": ["--json"], "description": "Fresh session (= same user, leader role) を新 leader_session_id に bind し直す (= dead session 引き継ぎ、ms-88 e-2089)"},
         # ms-54 e-1266: DM channel lifecycle commands (install / uninstall / opt-out / opt-in / status)
         {"command": "beacon channel install", "flags": [], "description": "Install beacon-bus MCP entry into .mcp.json (DM channel for multi-session messaging)"},
         {"command": "beacon channel uninstall", "flags": ["--purge-files", "--keep-files"], "description": "Remove beacon-bus MCP entry; --purge-files also wipes channel/node_modules (moved to .trash/)"},
