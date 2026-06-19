@@ -1789,106 +1789,6 @@ def _cloud_purge_dispatch(action_label: str, fn, *,
             print(line)
 
 
-def _cloud_milestone_purge(ms_id: str, *, reason: str,
-                            index: Optional[int], json_mode: bool) -> None:
-    client, config = _get_api_client()
-    project_id = config["project_id"]
-    data = _cloud_fetch_project_or_exit(client, project_id)
-    matches = core.find_milestones(data, ms_id)
-    if not matches:
-        print(f"Milestone not found: {ms_id}", file=sys.stderr)
-        sys.exit(1)
-    if len(matches) > 1 and index is None:
-        print(
-            f"Milestone '{ms_id}' has {len(matches)} duplicate records. "
-            "Re-run with --index <n>:",
-            file=sys.stderr,
-        )
-        for i, m in enumerate(matches, 1):
-            title = m.get("title", "(no title)")
-            status = m.get("status", "?")
-            print(f"  --index {i}  status={status}  title={title}",
-                  file=sys.stderr)
-        sys.exit(1)
-    _cloud_purge_dispatch(
-        "milestone",
-        lambda: client.purge_milestone(
-            project_id, ms_id, reason=reason, index=index),
-        json_mode=json_mode,
-        success_fmt=lambda r: [
-            f"Purged: [{r.get('id', ms_id)}] {r.get('title', '')}",
-            f"  Reason: {reason}",
-        ],
-    )
-
-
-def _cloud_entry_purge(entry_id: str, *, reason: str,
-                        index: Optional[int], json_mode: bool) -> None:
-    client, config = _get_api_client()
-    project_id = config["project_id"]
-    data = _cloud_fetch_project_or_exit(client, project_id)
-    matches = core.find_entries(data, entry_id)
-    if not matches:
-        print(f"Entry not found: {entry_id}", file=sys.stderr)
-        sys.exit(1)
-    if len(matches) > 1 and index is None:
-        print(
-            f"Entry '{entry_id}' has {len(matches)} duplicate records. "
-            "Re-run with --index <n>:",
-            file=sys.stderr,
-        )
-        for i, e in enumerate(matches, 1):
-            desc = e.get("description", "(no description)")
-            etype = e.get("type", "?")
-            print(f"  --index {i}  type={etype}  desc={desc[:60]}",
-                  file=sys.stderr)
-        sys.exit(1)
-    _cloud_purge_dispatch(
-        "entry",
-        lambda: client.purge_entry(
-            project_id, entry_id, reason=reason, index=index),
-        json_mode=json_mode,
-        success_fmt=lambda r: [
-            f"Purged entry: [{r.get('entry_id', entry_id)}] "
-            f"{r.get('description', '')[:80]}",
-            f"  Reason: {reason}",
-        ],
-    )
-
-
-def _cloud_operation_purge(op_id: str, *, reason: str,
-                            index: Optional[int], json_mode: bool) -> None:
-    client, config = _get_api_client()
-    project_id = config["project_id"]
-    data = _cloud_fetch_project_or_exit(client, project_id)
-    matches = core.find_operations(data, op_id)
-    if not matches:
-        print(f"Operation not found: {op_id}", file=sys.stderr)
-        sys.exit(1)
-    if len(matches) > 1 and index is None:
-        print(
-            f"Operation '{op_id}' has {len(matches)} duplicate records. "
-            "Re-run with --index <n>:",
-            file=sys.stderr,
-        )
-        for i, o in enumerate(matches, 1):
-            title = o.get("title", "(no title)")
-            status = o.get("status", "?")
-            print(f"  --index {i}  status={status}  title={title}",
-                  file=sys.stderr)
-        sys.exit(1)
-    _cloud_purge_dispatch(
-        "operation",
-        lambda: client.purge_operation(
-            project_id, op_id, reason=reason, index=index),
-        json_mode=json_mode,
-        success_fmt=lambda r: [
-            f"Purged operation: [{r.get('id', op_id)}] {r.get('title', '')}",
-            f"  Reason: {reason}",
-        ],
-    )
-
-
 def cmd_milestone_purge():
     """Hard-delete a milestone record (Issue #14 recovery path).
 
@@ -1939,16 +1839,18 @@ def cmd_milestone_purge():
                   file=sys.stderr)
             sys.exit(1)
 
-    if _is_cloud_mode():
-        _cloud_milestone_purge(ms_id, reason=reason, index=index,
-                               json_mode=json_mode)
-        return
-
-    data = load_project_unsafe()
-    # Pre-flight: if the operator did not pass --index but duplicates
-    # exist, show a helpful summary before the core raises. The
-    # core.milestone_purge already raises with a clear message; we just
-    # add a list of the duplicates for context.
+    # ms-84 Phase 2 (e-2036): Store.purge_milestone unifies the cloud + local
+    # paths. The CLI no longer branches on ``_is_cloud_mode()``; the Store
+    # implementation knows how to talk to its backend (cloud server enforces
+    # owner-only access + post-purge validation; LocalStore does the local
+    # file mutation + still_dirty bookkeeping). Pre-flight stays here as a
+    # UX layer (= friendly duplicate display before delegating).
+    store = get_store()
+    try:
+        data = store.load_project()
+    except (RuntimeError, ConnectionError) as e:
+        print(f"Error loading project: {e}", file=sys.stderr)
+        sys.exit(1)
     matches = core.find_milestones(data, ms_id)
     if not matches:
         print(f"Milestone not found: {ms_id}", file=sys.stderr)
@@ -1967,33 +1869,26 @@ def cmd_milestone_purge():
         sys.exit(1)
 
     try:
-        purged = core.milestone_purge(data, ms_id, reason=reason, index=index)
+        result = store.purge_milestone(ms_id, reason=reason, index=index)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # After purge, check whether the project is now clean. If still dirty,
-    # save via unsafe path and warn; otherwise normal save (with validation).
-    dup_report = core.find_duplicate_ids(data)
-    still_dirty = any(dup_report.values())
-    op = {
-        "op": "milestone_purge",
-        "ms_id": ms_id,
-        "index": index,
-        "reason": reason,
-        "purged_title": purged.get("title", ""),
-    }
-    if still_dirty:
-        save_project_unsafe(data, op=op)
-    else:
-        try:
-            save_project(data, op=op)
-        except ValueError as e:
-            # Shouldn't happen — purge invariants should leave a valid
-            # project — but if it does, fall back to unsafe save so the
-            # purge isn't lost, and surface the issue.
-            save_project_unsafe(data, op=op)
-            print(f"Warning: post-purge validation failed: {e}", file=sys.stderr)
+    purged = result["purged"]
+    still_dirty = result["still_dirty"]
+    dup_report = result["dup_report"]
+
+    # Local-mode changelog parity: the cloud server records its own audit
+    # trail via operations.apply_operation, so we only append to
+    # .beacon/changelog.jsonl when LocalStore did the mutation.
+    if not store.is_cloud():
+        _append_changelog({
+            "op": "milestone_purge",
+            "ms_id": ms_id,
+            "index": index,
+            "reason": reason,
+            "purged_title": purged.get("title", ""),
+        })
 
     if json_mode:
         out = {
@@ -2060,12 +1955,13 @@ def cmd_entry_purge():
                   file=sys.stderr)
             sys.exit(1)
 
-    if _is_cloud_mode():
-        _cloud_entry_purge(entry_id, reason=reason, index=index,
-                           json_mode=json_mode)
-        return
-
-    data = load_project_unsafe()
+    # ms-84 Phase 2 (e-2036): Store.purge_entry unifies cloud + local paths.
+    store = get_store()
+    try:
+        data = store.load_project()
+    except (RuntimeError, ConnectionError) as e:
+        print(f"Error loading project: {e}", file=sys.stderr)
+        sys.exit(1)
     matches = core.find_entries(data, entry_id)
     if not matches:
         print(f"Entry not found: {entry_id}", file=sys.stderr)
@@ -2080,28 +1976,23 @@ def cmd_entry_purge():
         sys.exit(1)
 
     try:
-        purged = core.entry_purge(data, entry_id, reason=reason, index=index)
+        result = store.purge_entry(entry_id, reason=reason, index=index)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    dup_report = core.find_duplicate_ids(data)
-    still_dirty = any(dup_report.values())
-    op = {
-        "op": "entry_purge",
-        "entry_id": entry_id,
-        "index": index,
-        "reason": reason,
-        "purged_desc": purged.get("description", ""),
-    }
-    if still_dirty:
-        save_project_unsafe(data, op=op)
-    else:
-        try:
-            save_project(data, op=op)
-        except ValueError as e:
-            save_project_unsafe(data, op=op)
-            print(f"Warning: post-purge validation failed: {e}", file=sys.stderr)
+    purged = result["purged"]
+    still_dirty = result["still_dirty"]
+    dup_report = result["dup_report"]
+
+    if not store.is_cloud():
+        _append_changelog({
+            "op": "entry_purge",
+            "entry_id": entry_id,
+            "index": index,
+            "reason": reason,
+            "purged_desc": purged.get("description", ""),
+        })
 
     if json_mode:
         print(json.dumps({
@@ -2150,12 +2041,13 @@ def cmd_operation_purge():
                   file=sys.stderr)
             sys.exit(1)
 
-    if _is_cloud_mode():
-        _cloud_operation_purge(op_id, reason=reason, index=index,
-                               json_mode=json_mode)
-        return
-
-    data = load_project_unsafe()
+    # ms-84 Phase 2 (e-2036): Store.purge_operation unifies cloud + local.
+    store = get_store()
+    try:
+        data = store.load_project()
+    except (RuntimeError, ConnectionError) as e:
+        print(f"Error loading project: {e}", file=sys.stderr)
+        sys.exit(1)
     matches = core.find_operations(data, op_id)
     if not matches:
         print(f"Operation not found: {op_id}", file=sys.stderr)
@@ -2170,28 +2062,23 @@ def cmd_operation_purge():
         sys.exit(1)
 
     try:
-        purged = core.operation_purge(data, op_id, reason=reason, index=index)
+        result = store.purge_operation(op_id, reason=reason, index=index)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    dup_report = core.find_duplicate_ids(data)
-    still_dirty = any(dup_report.values())
-    op = {
-        "op": "operation_purge",
-        "op_id": op_id,
-        "index": index,
-        "reason": reason,
-        "purged_title": purged.get("title", ""),
-    }
-    if still_dirty:
-        save_project_unsafe(data, op=op)
-    else:
-        try:
-            save_project(data, op=op)
-        except ValueError as e:
-            save_project_unsafe(data, op=op)
-            print(f"Warning: post-purge validation failed: {e}", file=sys.stderr)
+    purged = result["purged"]
+    still_dirty = result["still_dirty"]
+    dup_report = result["dup_report"]
+
+    if not store.is_cloud():
+        _append_changelog({
+            "op": "operation_purge",
+            "op_id": op_id,
+            "index": index,
+            "reason": reason,
+            "purged_title": purged.get("title", ""),
+        })
 
     if json_mode:
         print(json.dumps({
@@ -3081,26 +2968,21 @@ def _write_local_session_log(payload: dict) -> None:
 
 
 def _push_session_log_to_cloud(payload: dict) -> bool:
-    """Best-effort upsert to the cloud session log endpoint.
+    """Best-effort upsert via Store.upsert_session_log (ms-84 Phase 2 e-2036).
 
-    Returns True on success, False on any failure (network / auth / etc.).
-    Mirrors the failure-swallowing contract of session._cloud_sync — the
-    session log primary truth is the local cache when cloud is unreachable;
-    a later run will re-aggregate and resync.
+    LocalStore returns False unconditionally (= cloud session log subcollection
+    has no local analogue); StoreApi calls the API and swallows transport
+    failures the same way the legacy inline cloud branch did. The session
+    log primary truth is the local cache when cloud is unreachable — a later
+    run will re-aggregate and resync.
     """
-    if not _is_cloud_mode():
+    sid = payload.get("session_id", "")
+    if not sid:
         return False
+    body = {k: v for k, v in payload.items()
+            if k != "session_id" and v is not None}
     try:
-        from auth import load_credentials
-        if load_credentials() is None:
-            return False
-        client, config = _get_api_client()
-        sid = payload.get("session_id", "")
-        if not sid:
-            return False
-        body = {k: v for k, v in payload.items() if k != "session_id" and v is not None}
-        client.upsert_session_log(config["project_id"], sid, body)
-        return True
+        return get_store().upsert_session_log(sid, body)
     except BaseException:
         if os.environ.get("BEACON_DEBUG") == "1":
             import traceback as _tb
@@ -3156,19 +3038,17 @@ def _list_other_session_ids() -> list:
         except OSError:
             pass
 
-    if _is_cloud_mode():
-        try:
-            from auth import load_credentials
-            if load_credentials() is not None:
-                client, config = _get_api_client()
-                for s in client.list_sessions(config["project_id"]) or []:
-                    sid = s.get("session_id")
-                    if sid and sid != current:
-                        seen.add(sid)
-        except BaseException:
-            if os.environ.get("BEACON_DEBUG") == "1":
-                import traceback as _tb
-                _tb.print_exc()
+    # ms-84 Phase 2 (e-2036): Store.list_session_ids unifies cloud + local.
+    # LocalStore returns []; StoreApi returns the API list (swallowing
+    # transport failures), so the union below does not branch on backend.
+    try:
+        for sid in get_store().list_session_ids():
+            if sid and sid != current:
+                seen.add(sid)
+    except BaseException:
+        if os.environ.get("BEACON_DEBUG") == "1":
+            import traceback as _tb
+            _tb.print_exc()
 
     return sorted(seen)
 
@@ -3188,25 +3068,28 @@ def _aggregate_and_persist(session_id: str, *, recovered: bool,
     data = load_project()
     existing_local = _read_local_session_log(session_id)
 
+    # ms-84 Phase 2 (e-2036): fetch any persisted remote session log via
+    # Store.get_session_log so the merge step is backend-uniform. LocalStore
+    # returns None; StoreApi returns the persisted dict (or None on 404 /
+    # transport failure). The cloud_client / cloud_pid pass-through to
+    # aggregate_session is left as a separate slice because session_log.py
+    # still talks to ApiClient directly via collect_cloud_notes; folding
+    # that into the Store interface is a follow-up commit.
+    store = get_store()
+    remote = store.get_session_log(session_id)
+    if remote and (not existing_local
+                   or remote.get("last_aggregated_at", "")
+                      >= existing_local.get("last_aggregated_at", "")):
+        existing_local = remote
+
     cloud_client = None
     cloud_pid = ""
-    if _is_cloud_mode():
+    if store.is_cloud():
         try:
             from auth import load_credentials
             if load_credentials() is not None:
                 cloud_client, cfg = _get_api_client()
                 cloud_pid = cfg.get("project_id", "")
-                try:
-                    remote = cloud_client.get_session_log(cloud_pid, session_id)
-                    # Server returns the persisted dict on success; on 404 the
-                    # api_client raises RuntimeError("API error 404: ..."), which
-                    # we treat as "no existing entry".
-                except RuntimeError:
-                    remote = None
-                if remote and (not existing_local
-                               or remote.get("last_aggregated_at", "")
-                                  >= existing_local.get("last_aggregated_at", "")):
-                    existing_local = remote
         except BaseException:
             if os.environ.get("BEACON_DEBUG") == "1":
                 import traceback as _tb
@@ -3329,15 +3212,11 @@ def cmd_session_log_list():
     except ValueError:
         limit = 0
 
-    entries: list[dict] = []
-    if _is_cloud_mode():
-        try:
-            from auth import load_credentials
-            if load_credentials() is not None:
-                client, config = _get_api_client()
-                entries = client.list_session_logs(config["project_id"], limit=limit) or []
-        except BaseException:
-            entries = []
+    # ms-84 Phase 2 (e-2036): Store.list_session_logs returns the cloud
+    # rows in cloud mode or [] in local mode, so the fallback to walking
+    # ``.beacon/session_logs/`` directly only fires when the Store could
+    # not supply anything.
+    entries: list[dict] = get_store().list_session_logs(limit=limit)
     if not entries:
         # Local cache fallback
         d = _session_logs_dir()
@@ -3374,17 +3253,12 @@ def cmd_session_log_show():
         print("Error: session id required", file=sys.stderr)
         sys.exit(1)
     entry = _read_local_session_log(sid)
-    if entry is None and _is_cloud_mode():
-        try:
-            from auth import load_credentials
-            if load_credentials() is not None:
-                client, config = _get_api_client()
-                try:
-                    entry = client.get_session_log(config["project_id"], sid)
-                except RuntimeError:
-                    entry = None
-        except BaseException:
-            entry = None
+    # ms-84 Phase 2 (e-2036): when the local cache is empty, ask the Store
+    # for any persisted remote copy. LocalStore returns None (= no cloud
+    # registry to consult); StoreApi returns the fetched dict or None on
+    # 404 / transport failure, so the caller only checks truthiness.
+    if entry is None:
+        entry = get_store().get_session_log(sid)
     if entry is None:
         print(f"Session log not found: {sid}", file=sys.stderr)
         sys.exit(1)
@@ -4557,24 +4431,20 @@ def cmd_trek_list():
         user_id, actor_email, _ = _resolve_creator_identity()
         actor_id = user_id or None
 
-    if _is_cloud_mode():
-        # Cloud path: server filters by auth token's user (= ignores actor_id).
-        # ``all_actors`` requires admin role server-side; non-admin gets 403.
-        try:
-            client, _config = _get_api_client()
-            treks = client.list_treks(
-                status=status_filter or "",
-                include_archived=include_archived,
-                all_actors=all_actors,
-            )
-        except RuntimeError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
-    else:
-        treks = trek_store.list_treks(
-            actor_id=actor_id, status=status_filter,
+    # ms-84 Phase 2: Store 経由で cloud / local を統一。 actor_id (= local-only
+    # filter) と all_actors (= cloud admin view) はそれぞれ片方の backend が
+    # ignore する設計。 cloud transport / 403 は RuntimeError として呼び出し
+    # 側 (= ここ) で従来通り display する。
+    try:
+        treks = get_store().list_treks(
+            actor_id=actor_id,
+            status=status_filter or "",
             include_archived=include_archived,
+            all_actors=all_actors,
         )
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     if joined_only:
         # Walk members[] for an entry matching the caller (user_id or email)
@@ -4870,18 +4740,18 @@ def cmd_trek_show():
         print("Error: trek_id is required", file=sys.stderr)
         sys.exit(1)
 
-    if _is_cloud_mode():
-        try:
-            client, _config = _get_api_client()
-            t = client.get_trek(trek_id)
-        except RuntimeError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
-    else:
-        t = trek_store.load_trek(trek_id)
-        if t is None:
-            print(f"Error: trek {trek_id} not found", file=sys.stderr)
-            sys.exit(1)
+    # ms-84 Phase 2: Store 経由で cloud / local を統一。 Store.get_trek は
+    # ValueError on unknown / RuntimeError on transport の error contract を
+    # 両 backend で共有しているため、 CLI 側はバックエンドを意識せず
+    # 同じ except 分岐で扱える。
+    try:
+        t = get_store().get_trek(trek_id)
+    except ValueError:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     # Build local aggregation regardless of cloud/local — the current
     # project view is always available.
@@ -5027,18 +4897,17 @@ def cmd_trek_timeline():
         print("Error: trek_id is required", file=sys.stderr)
         sys.exit(1)
 
-    if _is_cloud_mode():
-        try:
-            client, _config = _get_api_client()
-            t = client.get_trek(trek_id)
-        except RuntimeError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
-    else:
-        t = trek_store.load_trek(trek_id)
-        if t is None:
-            print(f"Error: trek {trek_id} not found", file=sys.stderr)
-            sys.exit(1)
+    # ms-84 Phase 2 (e-2036): Store.get_trek unifies the cloud / local
+    # branch. ValueError on not-found, RuntimeError on auth / transport
+    # propagates as the original cloud branch behavior.
+    try:
+        t = get_store().get_trek(trek_id)
+    except ValueError:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     events: list[dict] = []
 
@@ -7457,33 +7326,19 @@ def _auto_fire_release_marker_trigger() -> None:
 def _spec_exists_for_ms(ms_id: str) -> bool:
     """Return True if any spec-scoped document is attached to ms_id.
 
-    Works for both local mode (reads .beacon/documents/*.md frontmatter)
-    and cloud mode (queries the API). Cloud mode failures degrade silently
-    to False (no trigger cleanup is best-effort).
+    ms-84 Phase 2: ``_is_cloud_mode()`` 分岐を Store 経由に統一。 LocalStore /
+    StoreApi の list_documents() がどちらも scope / milestone を含む同形
+    dict 列を返すため、 CLI 側 (= ここ) は backend を意識せず post-filter
+    だけで判定できる。 cloud transport 失敗は StoreApi 側で [] に丸める
+    best-effort 契約 (= 既存挙動と等価)。
     """
     if not ms_id:
         return False
-    if _is_cloud_mode():
-        try:
-            client, config = _get_api_client()
-            docs = client.list_documents(config["project_id"])
-        except Exception:
-            return False
-        for doc in docs:
-            if doc.get("scope") == "spec" and doc.get("milestone") == ms_id:
-                return True
+    try:
+        docs = get_store().list_documents()
+    except Exception:
         return False
-    # Local mode: read frontmatter from .beacon/documents/*.md
-    docs_dir = _get_docs_dir()
-    if not os.path.isdir(docs_dir):
-        return False
-    for fname in os.listdir(docs_dir):
-        if not fname.endswith(".md"):
-            continue
-        try:
-            doc = _read_local_doc(os.path.join(docs_dir, fname))
-        except Exception:
-            continue
+    for doc in docs:
         if doc.get("scope") == "spec" and doc.get("milestone") == ms_id:
             return True
     return False
@@ -8263,34 +8118,12 @@ def cmd_doc_list():
     # them in line with active ones (ms-14 e-973).
     include_trashed = os.environ.get("BEACON_INCLUDE_TRASHED", "") == "1"
 
-    if _is_cloud_mode():
-        client, config = _get_api_client()
-        docs = client.list_documents(config["project_id"])
-    else:
-        docs_dir = _get_docs_dir()
-        docs = []
-        if os.path.isdir(docs_dir):
-            for fname in sorted(os.listdir(docs_dir)):
-                if not fname.endswith(".md"):
-                    continue
-                doc = _read_local_doc(os.path.join(docs_dir, fname))
-                if not include_trashed and doc.get("status") == "cancelled":
-                    continue
-                entry = {
-                    "doc_id": doc["doc_id"],
-                    "title": doc["title"],
-                    "scope": doc["scope"],
-                    "updated_at": doc["updated_at"],
-                }
-                if doc.get("milestone"):
-                    entry["milestone"] = doc["milestone"]
-                if doc.get("operation"):
-                    entry["operation"] = doc["operation"]
-                if doc.get("trek_id"):
-                    entry["trek_id"] = doc["trek_id"]
-                if doc.get("status"):
-                    entry["status"] = doc["status"]
-                docs.append(entry)
+    # ms-84 Phase 2: Store 経由で local / cloud を統一。 LocalStore.list_documents
+    # は frontmatter 解析済の同形 dict 列を返すため、 ここでは soft-delete filter
+    # と post-filter (scope / ms / op / trek) を一括で適用するだけ。
+    docs = get_store().list_documents()
+    if not include_trashed:
+        docs = [d for d in docs if d.get("status") != "cancelled"]
 
     if scope_filter:
         docs = [d for d in docs if d.get("scope") == scope_filter]
@@ -8321,16 +8154,12 @@ def cmd_doc_show():
         print("Error: doc_id required")
         sys.exit(1)
 
-    if _is_cloud_mode():
-        client, config = _get_api_client()
-        doc = client.get_document(config["project_id"], doc_id)
-    else:
-        docs_dir = _get_docs_dir()
-        fpath = os.path.join(docs_dir, f"{doc_id}.md")
-        if not os.path.exists(fpath):
-            print(f"Document not found: {doc_id}")
-            sys.exit(1)
-        doc = _read_local_doc(fpath)
+    # ms-84 Phase 2: Store 経由で local / cloud を統一。 Store.get_document は
+    # 両 backend で同形 ({} on not-found / full dict on hit) を返す契約。
+    doc = get_store().get_document(doc_id)
+    if not doc:
+        print(f"Document not found: {doc_id}")
+        sys.exit(1)
 
     if json_mode:
         print(json.dumps(doc, ensure_ascii=False))
@@ -8376,16 +8205,20 @@ def cmd_doc_add():
         print("Error: content required (pass via BEACON_CONTENT or stdin)")
         sys.exit(1)
 
-    # Duplicate check: warn if same title+scope already exists
-    if _is_cloud_mode():
-        try:
-            client, config = _get_api_client()
-            existing = client.list_documents(config["project_id"])
-            dupes = [d for d in existing if d.get("title") == title and d.get("scope") == scope]
-            if dupes:
-                print(f"Warning: document with same title+scope already exists ({dupes[0]['doc_id']}). Proceeding anyway.")
-        except Exception:
-            pass
+    # Duplicate check: warn if same title+scope already exists.
+    # ms-84 Phase 2: Store 経由で local / cloud を統一 (= 受入条件 10 の _is_cloud_mode
+    # 分岐削減)。 失敗時は best-effort で skip する従来挙動を維持。
+    try:
+        existing = get_store().list_documents()
+        dupes = [d for d in existing
+                 if d.get("title") == title and d.get("scope") == scope]
+        if dupes:
+            print(
+                f"Warning: document with same title+scope already exists "
+                f"({dupes[0]['doc_id']}). Proceeding anyway."
+            )
+    except Exception:
+        pass
 
     # Add frontmatter with scope, milestone, operation, and trek_id
     content = _add_frontmatter(content, scope, milestone or "", operation or "",
@@ -8470,17 +8303,13 @@ def cmd_doc_update():
 
     content = _resolve_content_input(content)
 
-    # Fetch existing document to merge fields
-    if _is_cloud_mode():
-        client, config = _get_api_client()
-        existing = client.get_document(config["project_id"], doc_id)
-    else:
-        docs_dir = _get_docs_dir()
-        fpath = os.path.join(docs_dir, f"{doc_id}.md")
-        if not os.path.exists(fpath):
-            print(f"Document not found: {doc_id}")
-            sys.exit(1)
-        existing = _read_local_doc(fpath)
+    # Fetch existing document to merge fields.
+    # ms-84 Phase 2: Store 経由で local / cloud を統一。 Store.get_document は
+    # 両 backend で同形 ({} on not-found / full dict on hit) を返す契約。
+    existing = get_store().get_document(doc_id)
+    if not existing:
+        print(f"Document not found: {doc_id}")
+        sys.exit(1)
 
     operation = os.environ.get("BEACON_OP", "")
     # Use existing values as defaults
@@ -8526,9 +8355,14 @@ def cmd_doc_update():
         drop_operation=(ms_explicit and not op_explicit),
     )
 
+    # Write path still branches per backend (Phase 3 で Store.save_document
+    # 化予定)。 read だけ Phase 2 で Store 経由化したので、 ここで client /
+    # docs_dir を遅延 resolve する。
     if _is_cloud_mode():
+        client, config = _get_api_client()
         client.update_document(config["project_id"], doc_id, title, content)
     else:
+        docs_dir = _get_docs_dir()
         fpath = os.path.join(docs_dir, f"{doc_id}.md")
         with open(fpath, "w", encoding="utf-8") as f:
             f.write(content)
@@ -8896,7 +8730,10 @@ def cmd_doc_image_upload():
         print(f"Error: file not found: {local_path}")
         sys.exit(1)
 
-    if not _is_cloud_mode():
+    # ms-84 Phase 2: 直接 _is_cloud_mode 呼び出しを Store 経由に統一 (= 受入条件
+    # 10 の direct-call 削減)。 image upload は cloud-only operation のため、
+    # ここでは mode guard として is_cloud() を確認するだけ。
+    if not get_store().is_cloud():
         print("Error: image upload requires cloud mode (run 'beacon cloud push' first)")
         sys.exit(1)
 
@@ -11308,7 +11145,7 @@ def cmd_project_export():
         "project_name": project_data.get("name", ""),
         "project_id": snapshot.get("project_id", ""),
         "beacon_version": __version__,
-        "source_mode": "cloud" if _is_cloud_mode() else "local",
+        "source_mode": "cloud" if get_store().is_cloud() else "local",
         "entry_counts": entry_counts,
     }
 
@@ -11655,31 +11492,13 @@ def cmd_cycle_status():
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     data = load_project()
 
-    # In cloud mode the document list may live in a Firestore subcollection;
-    # we ask the doc list command's helper to fetch them lazily. Failure here
-    # is non-fatal — we degrade to "no docs known" which is the same as the
-    # legacy behavior of the per-cycle predicates.
-    documents: list[dict] = []
+    # ms-84 Phase 2: Store.list_documents() で local / cloud を統一。
+    # 失敗時は空 list に degrade する best-effort 契約 (= push / deploy /
+    # operation 系の cycle 判定は document に依存しないので、 ここで空でも
+    # snapshot は正しく作れる)。
     try:
-        if _is_cloud_mode():
-            client, config = _get_api_client()
-            documents = client.list_documents(config["project_id"]) or []
-        else:
-            docs_dir = _get_docs_dir()
-            if os.path.isdir(docs_dir):
-                for fname in sorted(os.listdir(docs_dir)):
-                    if not fname.endswith(".md"):
-                        continue
-                    try:
-                        documents.append(_read_local_doc(os.path.join(docs_dir, fname)))
-                    except Exception:
-                        # Best-effort: a single unparsable doc shouldn't abort the
-                        # whole snapshot. We just won't see it in the retro signal.
-                        continue
+        documents = get_store().list_documents() or []
     except Exception:
-        # If doc fetch fails entirely (e.g. cloud auth glitch), keep going
-        # with an empty list. push / deploy / operation cycles do not depend
-        # on documents and will still report correctly.
         documents = []
 
     snapshot = cycle_mod.cycle_status_snapshot(data, documents=documents)
@@ -11914,17 +11733,17 @@ def _load_session_logs() -> list[dict]:
     session_log subcollection.
     """
     try:
-        if _is_cloud_mode():
-            client, config = _get_api_client()
-            try:
-                rows = client.list_session_logs(config["project_id"]) or []
-                # tolerate either dict or list responses
-                if isinstance(rows, dict):
-                    rows = rows.get("session_logs") or rows.get("items") or []
-                return rows if isinstance(rows, list) else []
-            except Exception:
-                return []
-        # Local mode: look for .beacon/session_logs/*.json
+        # ms-84 Phase 2: Store.list_session_logs() で cloud / local 二経路を
+        # 単一の呼び出しに寄せる。 StoreApi 側が transport 失敗を [] に丸める
+        # best-effort 契約を持つので、 cloud auth glitch も同じ try/except で
+        # 拾える。 LocalStore は no-op で [] を返す設計 (= Protocol docstring
+        # 参照) のため、 local モード時は下の directory walk fallback が拾う。
+        rows = get_store().list_session_logs() or []
+        if isinstance(rows, dict):
+            rows = rows.get("session_logs") or rows.get("items") or []
+        if isinstance(rows, list) and rows:
+            return rows
+        # Local mode (or empty cloud): walk .beacon/session_logs/*.json
         project_dir = os.path.dirname(get_project_file())
         sl_dir = os.path.join(project_dir, "session_logs")
         if not os.path.isdir(sl_dir):

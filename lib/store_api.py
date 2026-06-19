@@ -204,6 +204,181 @@ class StoreApi:
     def is_cloud(self) -> bool:
         return True
 
+    # ms-84 Phase 2 — fine-grained mutation (purge family)
+
+    def purge_entry(self, entry_id: str, *,
+                    reason: str, index: int | None = None) -> dict:
+        """Match LocalStore.purge_entry shape, applied via the cloud API."""
+        try:
+            response = self._client.purge_entry(
+                self._project_id, entry_id, reason=reason, index=index,
+            )
+        except RuntimeError as e:
+            msg = str(e)
+            if "404" in msg or "not found" in msg.lower():
+                raise ValueError(f"Entry '{entry_id}' not found") from e
+            if "403" in msg or "forbidden" in msg.lower():
+                raise ValueError(
+                    "Permission denied: only the project owner can "
+                    "purge entries"
+                ) from e
+            if "400" in msg:
+                raise ValueError(str(e)) from e
+            raise
+        return {
+            "purged": response,
+            "still_dirty": False,
+            "dup_report": {},
+        }
+
+    def purge_operation(self, op_id: str, *,
+                        reason: str, index: int | None = None) -> dict:
+        """Match LocalStore.purge_operation shape, applied via the cloud API."""
+        try:
+            response = self._client.purge_operation(
+                self._project_id, op_id, reason=reason, index=index,
+            )
+        except RuntimeError as e:
+            msg = str(e)
+            if "404" in msg or "not found" in msg.lower():
+                raise ValueError(f"Operation '{op_id}' not found") from e
+            if "403" in msg or "forbidden" in msg.lower():
+                raise ValueError(
+                    "Permission denied: only the project owner can "
+                    "purge operations"
+                ) from e
+            if "400" in msg:
+                raise ValueError(str(e)) from e
+            raise
+        return {
+            "purged": response,
+            "still_dirty": False,
+            "dup_report": {},
+        }
+
+    def upsert_session_log(self, session_id: str, body: dict) -> bool:
+        """Upsert via API. Swallows all failures and returns True / False
+        so the caller can keep the legacy ``_push_session_log_to_cloud``
+        contract (= cloud is best-effort; local cache is the primary
+        source of truth on failure)."""
+        try:
+            self._client.upsert_session_log(self._project_id, session_id, body)
+            return True
+        except (RuntimeError, ConnectionError):
+            return False
+
+    def list_session_ids(self) -> list[str]:
+        """List session_ids known to the cloud session registry. Returns
+        ``[]`` on transport failure so the caller can union-merge without
+        backend-branching."""
+        try:
+            rows = self._client.list_sessions(self._project_id) or []
+        except (RuntimeError, ConnectionError):
+            return []
+        return [r.get("session_id") for r in rows if r.get("session_id")]
+
+    def get_session_log(self, session_id: str) -> dict | None:
+        """Fetch the persisted session log from the cloud. Returns None for
+        404 (= no entry yet) or any transport failure so the caller can
+        check truthiness instead of catching."""
+        try:
+            return self._client.get_session_log(self._project_id, session_id)
+        except (RuntimeError, ConnectionError):
+            return None
+
+    def list_session_logs(self, limit: int = 0) -> list[dict]:
+        """List persisted session logs from the cloud. Returns ``[]`` on
+        transport failure so the caller can fall back to its local-disk
+        listing without backend-branching."""
+        try:
+            return self._client.list_session_logs(
+                self._project_id, limit=limit
+            ) or []
+        except (RuntimeError, ConnectionError):
+            return []
+
+    def purge_milestone(self, ms_id: str, *,
+                        reason: str, index: int | None = None) -> dict:
+        """Match LocalStore.purge_milestone shape, applied via the cloud API.
+
+        The server enforces owner-only access + post-purge validation, so
+        ``still_dirty`` is always False here — duplicate-id recovery in
+        cloud mode is the server's responsibility (= it does not let an
+        invalid project document persist). 404 / 403 / 400 are translated
+        to ``ValueError`` so cmd code can branch on a single exception
+        type regardless of backend.
+        """
+        try:
+            response = self._client.purge_milestone(
+                self._project_id, ms_id, reason=reason, index=index,
+            )
+        except RuntimeError as e:
+            msg = str(e)
+            if "404" in msg or "not found" in msg.lower():
+                raise ValueError(f"Milestone '{ms_id}' not found") from e
+            if "403" in msg or "forbidden" in msg.lower():
+                raise ValueError(
+                    "Permission denied: only the project owner can "
+                    "purge milestones"
+                ) from e
+            if "400" in msg:
+                raise ValueError(str(e)) from e
+            raise
+        return {
+            "purged": response,
+            "still_dirty": False,
+            "dup_report": {},
+        }
+
+    # ms-84 Phase 1 — fine-grained reads
+
+    def get_milestone(self, ms_id: str) -> dict:
+        """Match LocalStore.get_milestone shape, sourced from the cloud API.
+
+        Maps HTTP 404 → ``ValueError`` so callers can present the same
+        ``Milestone '<id>' not found`` message regardless of backend.
+        """
+        try:
+            return self._client.get_milestone(self._project_id, ms_id)
+        except RuntimeError as e:
+            if "404" in str(e):
+                raise ValueError(f"Milestone '{ms_id}' not found") from e
+            raise
+
+    # ms-84 Phase 2 — trek read passthrough.
+
+    def list_treks(self, *, actor_id: str | None = None,
+                   status: str = "", include_archived: bool = False,
+                   all_actors: bool = False) -> list[dict]:
+        """List trek docs via the cloud API.
+
+        ``actor_id`` is ignored on cloud (= server filters by auth token's
+        user); ``all_actors`` requires admin role server-side (non-admin
+        gets 403 as RuntimeError, which propagates up to the CLI for
+        display, matching legacy cloud branch behavior).
+        """
+        return self._client.list_treks(
+            status=status or "",
+            include_archived=include_archived,
+            all_actors=all_actors,
+        )
+
+    def get_trek(self, trek_id: str) -> dict:
+        """Match LocalStore.get_trek shape, sourced from the cloud API.
+
+        Maps HTTP 404 → ``ValueError`` so callers can present the same
+        ``trek '<id>' not found`` message regardless of backend.
+        Auth / 403 / transport errors propagate as RuntimeError, matching
+        the legacy cloud branch behavior (= cmd_trek_show sys.exit(1) で
+        Error: <msg> を出す経路に乗せたまま)。
+        """
+        try:
+            return self._client.get_trek(trek_id)
+        except RuntimeError as e:
+            if "404" in str(e):
+                raise ValueError(f"trek '{trek_id}' not found") from e
+            raise
+
     def list_documents(self) -> list:
         """List documents from cloud API."""
         try:
