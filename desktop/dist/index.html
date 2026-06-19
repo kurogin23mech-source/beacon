@@ -2335,6 +2335,18 @@ body::after {
   padding: 1px 0;
 }
 
+/* WHY block (= goal_state テキスト、 ms-86 で新規追加) — Trek 画面の目的を 1-3 行で表示 */
+.trek-why-text {
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  line-height: 1.6;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent, #60a5fa);
+  background: rgba(96,165,250,0.04);
+  border-radius: 0 3px 3px 0;
+  white-space: pre-wrap;
+}
+
 /* Placeholder shown for sections whose backing feature is not yet shipped
    (= "this section will populate when e-XXXX lands"). */
 .trek-coming-soon {
@@ -4901,9 +4913,6 @@ function _renderTrekDetail(t) {
     ...members.filter(m => !m.joined_at),
   ];
 
-  const creatorEmail = (t.creator_actor || {}).email || '';
-  const leaderSid = t.leader_session_id || '';
-
   // STOP / halt card: red while active+unhalted, amber + recovery copy when halted.
   let stopCardHtml = '';
   if (t.status === 'active') {
@@ -4941,8 +4950,6 @@ function _renderTrekDetail(t) {
       </div>
     </div>` : '';
 
-  const docs = state.openTrekDocs || [];
-  const summaryDocs = docs.slice(0, 10);
   return `
     <section class="fade-in">
       <span class="trek-crumb" data-action="close-trek">← Back to TREKS</span>
@@ -4959,19 +4966,15 @@ function _renderTrekDetail(t) {
         </div>
       </div>
 
-      <div class="trek-meta">
-        <span class="k">Trek ID</span>
-        <span class="v" style="font-family:var(--font-mono,monospace);">${esc(t.trek_id)}</span>
-        <span class="k">Leader session</span>
-        <span class="v">
-          <span class="session-id">${esc(_trekShortSessionId(leaderSid))}</span>
-          ${creatorEmail ? `<span class="sub">(${esc(creatorEmail)})</span>` : ''}
-        </span>
-        <span class="k">Created</span>
-        <span class="v">${(t.created_at || '').slice(0, 16).replace('T', ' ')}</span>
-        ${t.archived_at ? `
-        <span class="k">Archived</span>
-        <span class="v">${t.archived_at.slice(0, 16).replace('T', ' ')}</span>` : ''}
+      <!-- ① WHY (= goal_state) -->
+      <div class="trek-section trek-why">
+        <div class="trek-section-title">
+          <span>WHY</span>
+          <span class="right" style="font-family:var(--font-mono,monospace);font-size:0.65rem;color:var(--text-dim);">${esc(t.trek_id)}${t.archived_at ? ` · archived ${t.archived_at.slice(0, 10)}` : ''}</span>
+        </div>
+        ${t.goal_state
+          ? `<div class="trek-why-text">${esc(t.goal_state)}</div>`
+          : `<div class="trek-coming-soon">目的 (= goal_state) が未設定です。 CLI: <code>beacon trek goal ${esc(t.trek_id)} "<目的>"</code></div>`}
       </div>
 
       ${stopCardHtml}
@@ -5007,43 +5010,26 @@ function _renderTrekDetail(t) {
         </div>
       </div>
 
-      <!-- ACTIVE CLAIMS — backed by ms-55 (claim primitive, in flight) -->
-      <div class="trek-section">
+      <!-- ⑤ NEXT FIRE (= ms-83 server-side scheduler の next-fire 時刻、 T7 で実装) -->
+      ${t.status === 'active' && !halted ? `
+      <div class="trek-section trek-next-fire">
         <div class="trek-section-title">
-          <span>ACTIVE CLAIMS</span>
-          <span class="right">Coming with ms-55</span>
+          <span>NEXT FIRE</span>
+          <span class="right">cadence ${(t.scheduler && t.scheduler.cadence_minutes) || '—'} 分</span>
         </div>
         <div class="trek-coming-soon">
-          The claim list (= who is currently working on which work item) lands together with ms-55
-          (semi-autonomous work-splitting through claim negotiation).
+          ms-83 server-side scheduler の次回 fire 時刻表示は T7 (= e-2019) で実装。 現状は scheduler 状態のみ。
         </div>
-      </div>
+      </div>` : ''}
 
-      <!-- RECENT ACTIVITY — backed by e-1696 (Activity log auto-update) -->
-      <div class="trek-section">
+      <!-- ⑥ RECENT ACTIVITY (= 直近の動き / run records timeline、 T7 で実装) -->
+      <div class="trek-section trek-recent-activity">
         <div class="trek-section-title">
           <span>RECENT ACTIVITY</span>
-          <span class="right">Coming with e-1696</span>
+          <span class="right">直近 5〜10 件</span>
         </div>
         <div class="trek-coming-soon">
-          The bus event stream inside this trek (= invites / claims / stops / doc updates) will be
-          accumulated in the Activity log doc. Once e-1696 lands, the most recent 5-10 entries appear here.
-        </div>
-      </div>
-
-      <!-- SUMMARIES — trek_id 紐付け doc を表示 (= e-1697/98 が land すると Morning briefing / Weekly summary もここに並ぶ) -->
-      <div class="trek-section">
-        <div class="trek-section-title">
-          <span>SUMMARIES</span>
-          <span class="right">${summaryDocs.length} under this trek · kept after archive</span>
-        </div>
-        ${summaryDocs.length
-          ? summaryDocs.map(_renderTrekSummaryRow).join('')
-          : `<div class="trek-coming-soon">No docs linked to this trek_id yet.<br>CLI: <code>beacon doc add "title" --scope memo --trek ${esc(t.trek_id)} --content "..."</code></div>`}
-        <div class="trek-cli-hint">
-          Automatic generation (= scheduled cron) lands with e-1697 / e-1698. Manual:
-          <code>beacon morning --trek ${esc(t.trek_id)}</code>
-          <code>beacon trek summary ${esc(t.trek_id)} --period weekly</code>
+          Trek scope 内の bus event / commit / task add / scheduler tick を時系列で表示します。 T7 (= e-2019) で実装。
         </div>
       </div>
     </section>`;
