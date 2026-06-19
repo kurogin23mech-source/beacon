@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.44.0] - 2026-06-19
+
+- Merge pull request #172 from kurogin23mech-source/feat/ms-75-trek-task-state-machine
+- feat(ms-75): Trek task state machine + leader review 強制経路 (= e-2048)
+- docs(release): update README/CHANGELOG for v0.43.0
+- chore(release): bump formula to 0.43.0
+
 ## [v0.43.0] - 2026-06-19
 
 - Merge pull request #171 from kurogin23mech-source/feat/ms-83-scheduler-session-fanout
