@@ -256,6 +256,17 @@ class StoreApi:
             "dup_report": {},
         }
 
+    def upsert_session_log(self, session_id: str, body: dict) -> bool:
+        """Upsert via API. Swallows all failures and returns True / False
+        so the caller can keep the legacy ``_push_session_log_to_cloud``
+        contract (= cloud is best-effort; local cache is the primary
+        source of truth on failure)."""
+        try:
+            self._client.upsert_session_log(self._project_id, session_id, body)
+            return True
+        except (RuntimeError, ConnectionError):
+            return False
+
     def purge_milestone(self, ms_id: str, *,
                         reason: str, index: int | None = None) -> dict:
         """Match LocalStore.purge_milestone shape, applied via the cloud API.

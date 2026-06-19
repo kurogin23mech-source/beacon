@@ -87,6 +87,19 @@ class Store(Protocol):
         """
         ...
 
+    def upsert_session_log(self, session_id: str, body: dict) -> bool:
+        """Upsert a session log document by session_id (= セッション集約の保存)。
+
+        Returns True on successful persistence, False on failure or no-op.
+        LocalStore returns False (= the cloud session log subcollection is
+        a cloud-only artifact; local sessions persist via _write_local_session_log
+        on the caller side). StoreApi calls the upsert endpoint with the
+        same failure-swallowing contract as the legacy
+        ``_push_session_log_to_cloud`` (= network / auth / 4xx all → False),
+        so the caller does not need to branch on backend.
+        """
+        ...
+
     def purge_milestone(self, ms_id: str, *,
                         reason: str, index: int | None = None) -> dict:
         """Hard-delete a milestone record (= 物理削除、duplicate-ID 回復用、Issue #14)。

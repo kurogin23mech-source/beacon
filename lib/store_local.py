@@ -146,6 +146,15 @@ class LocalStore:
             "dup_report": dup_report,
         }
 
+    def upsert_session_log(self, session_id: str, body: dict) -> bool:
+        """No-op for local mode (= session log cloud subcollection 不在)。
+
+        The local cache is written separately via
+        ``commands._write_local_session_log``; this method exists for API
+        symmetry with StoreApi so the CLI caller does not need to branch.
+        """
+        return False
+
     def purge_milestone(self, ms_id: str, *,
                         reason: str, index: int | None = None) -> dict:
         """Match StoreApi.purge_milestone shape, applied to the local file.

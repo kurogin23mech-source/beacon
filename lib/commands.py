@@ -2968,26 +2968,21 @@ def _write_local_session_log(payload: dict) -> None:
 
 
 def _push_session_log_to_cloud(payload: dict) -> bool:
-    """Best-effort upsert to the cloud session log endpoint.
+    """Best-effort upsert via Store.upsert_session_log (ms-84 Phase 2 e-2036).
 
-    Returns True on success, False on any failure (network / auth / etc.).
-    Mirrors the failure-swallowing contract of session._cloud_sync — the
-    session log primary truth is the local cache when cloud is unreachable;
-    a later run will re-aggregate and resync.
+    LocalStore returns False unconditionally (= cloud session log subcollection
+    has no local analogue); StoreApi calls the API and swallows transport
+    failures the same way the legacy inline cloud branch did. The session
+    log primary truth is the local cache when cloud is unreachable — a later
+    run will re-aggregate and resync.
     """
-    if not _is_cloud_mode():
+    sid = payload.get("session_id", "")
+    if not sid:
         return False
+    body = {k: v for k, v in payload.items()
+            if k != "session_id" and v is not None}
     try:
-        from auth import load_credentials
-        if load_credentials() is None:
-            return False
-        client, config = _get_api_client()
-        sid = payload.get("session_id", "")
-        if not sid:
-            return False
-        body = {k: v for k, v in payload.items() if k != "session_id" and v is not None}
-        client.upsert_session_log(config["project_id"], sid, body)
-        return True
+        return get_store().upsert_session_log(sid, body)
     except BaseException:
         if os.environ.get("BEACON_DEBUG") == "1":
             import traceback as _tb
