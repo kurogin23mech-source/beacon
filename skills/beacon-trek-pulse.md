@@ -51,6 +51,98 @@ cd "$PROJECT_DIR" 2>/dev/null; beacon-find-root >/dev/null && echo "OK" || echo 
 
 `NO_BEACON` なら何もせず終了。
 
+## Step 0: Kickoff Ritual (= 初回 invoke 時のみ、 ms-88 / e-2138)
+
+本 session が当該 Trek で **初めて pulse-ack を打つ前**、 または既存 `pulse-ack` が HTTP 400 `kickoff_required` を返してきた時に走る。 peer (= leader + 他 executor) に対し自分の plan を 4 セクションで宣言する **kickoff DM** を 1 件送り、 完了 endpoint で stamp する。
+
+### なぜ要るか (= 設計背景)
+
+2026-06-20 tk-3045b8d1 dogfood で観測された race (= 3 session が同 cwd を共有して unstaged 編集が 5 分間消失) を構造的に塞ぐ。 同 user の複数 session が peer の状況 (= 「いま誰が何を触っているか」) を共有できていなかったため、 leader / executor が独立に同 file を触り、 git stash 経路で他 session の WIP が一時消滅する事故が起きた。 narrative reinforcement では弱いので:
+
+- **Layer 2 (= server validation)**: `POST /api/treks/<id>/pulse-ack` が `kickoff_pending=true` の session を HTTP 400 `kickoff_required` で reject (= server side が物理 gate、 ms-88 / e-2138 server side)
+- **Layer 1 (= Skill body 強制)**: 本 Step 0 が kickoff DM 生成 → 送信 → endpoint stamp の 3 段を順に走らせる。 narrative ではなく順序で強制
+
+この 2 層で「kickoff 未送信のままでは progress 不能」 を構造的に閉じる。
+
+### Step 0.1: kickoff_pending 判定 (= lazy 推奨)
+
+判定経路は 2 通り。 **lazy パターンを推奨** (= overhead 最小):
+
+- **lazy (推奨)**: Step 3 の `pulse-ack` を最初に叩いて、 HTTP 400 `kickoff_required` が返ってきた場合のみ Step 0 に戻る。 GET 不要、 RTT (= round trip 時間) 1 回。
+- **eager**: 先に `beacon trek show --json` で `kickoff_status[<自 session id>].pending` を確認。 ただし trek doc 全体を取るので payload が大きい、 cadence 高い session では負荷が積む。
+
+判定材料:
+
+```bash
+cd "$PROJECT_DIR" && beacon session id
+# → 自セッションの sv-XXX 取得
+```
+
+`beacon trek show --json` で取得した `kickoff_status` map に自セッション ID が居ない、 または `pending=true` なら Step 0.2 へ。 居て `pending=false` なら Step 0 はスキップして Step 1 へ。
+
+### Step 0.2: kickoff DM 生成 (= 4 セクション必須)
+
+leader 宛に送る本文を以下 4 セクションで構成する。 1 つでも欠けていたら **送らずに retry** (= race の根本原因「peer 状況の不可視」 を再現するため)。
+
+1. **自分の session_id / agent**: `beacon session id` で取得した sv-XXX、 agent 名 (= Claude Code / Cursor 等)、 担当 user (= email)
+2. **担当予定 (= MS / task / scope)**: 取り組む MS と task ID (= `ms-XX` / `e-XXXX`)、 1 行で完了定義 (= 何が land すれば終わりか)
+3. **使う worktree path**: `.worktrees/<slug>/` の絶対 path、 branch 名。 同 cwd race 再発を構造的に防ぐため worktree 隔離は必須前提
+4. **触らない範囲 (= 明示宣言)**: 他 executor の担当領域 (= 「lib/* は私担当じゃない」 「server/* には触らない」 等) を予め言葉にする。 leader が peer snapshot で reply に使う材料、 また自身のガード role を兼ねる
+
+本文は Markdown、 各セクション 1-3 行で簡潔に。 「読み手は非開発者を含む」 の Beacon 文章原則 (= CORE doc `entry-writing-principle`) を守る。
+
+### Step 0.3: DM を leader 宛に送信
+
+leader の session id は `beacon trek show --json` の `leader_session_id` field から取得:
+
+```bash
+cd "$PROJECT_DIR" && LEADER_SID=$(beacon trek show "<trek-id>" --json 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('leader_session_id',''))")
+```
+
+`/beacon-dm-send` Skill 経由で送るのが推奨 (= live-check + budget gate + envelope 自動付与):
+
+```bash
+/beacon-dm-send  # 引数: --to "$LEADER_SID" --channel dm --payload '{"text":"<kickoff DM 本文>"}'
+```
+
+Trek scope 内 DM なので server 側 `dm_gate.py` が `shared_trek_member` 判定で blanket bypass (= 受信側 user の都度承認なし、 cross-user 承認 ms-70 の例外、 ms-75 / e-1854)。 送信に成功したら返ってきた `event_id` (= bus.send レスポンスの `event_id` field) を控える。 次の Step 0.4 で stamp に使う。
+
+直接 CLI で送る場合 (= Skill 経由が難しい dogfood 等):
+
+```bash
+cd "$PROJECT_DIR" && KICKOFF_EVENT_ID=$(beacon bus send --channel dm \
+  --to "$LEADER_SID" \
+  --payload "$(jq -n --arg text "$KICKOFF_BODY" '{text:$text}')" \
+  --json | jq -r .event_id)
+```
+
+### Step 0.4: kickoff completion を server に stamp
+
+`POST /api/treks/<trek-id>/kickoff` を叩いて、 server に「DM 送信した」 と stamp する。 これを叩くまで `pulse-ack` は 400 で reject され続けるので、 **送信成功直後に必ず叩く**。
+
+```bash
+cd "$PROJECT_DIR" && beacon trek kickoff "<trek-id>" \
+  --session-id "$(beacon session id)" \
+  --kickoff-dm-event-id "$KICKOFF_EVENT_ID"
+```
+
+(= 内部的に `POST /api/treks/<trek-id>/kickoff` body=`{session_id, kickoff_dm_event_id}` を叩く)
+
+成功時 stdout に `{session_id, user_id, pending:false, sent_at, kickoff_dm_event_id}` が返る。 `pending:false` を確認したら Step 1 に進む。 失敗 (= 403 / 401 / network) なら 1 度だけ retry、 それでも失敗するなら note 残しに降格 (= `/beacon-trek-execute` Step 5.5 と同等の graceful stop) して停止。
+
+### Step 0.5: take-over 経路の自動 reset
+
+`POST /api/treks/<id>/take-over` を直前に叩いた場合、 server が新 session に対して `kickoff_pending=true` を強制 reset している (= `trek.reset_kickoff_pending` 経由、 ms-88 / e-2138 server side 仕様)。 つまり take-over 直後の最初の pulse-ack は必ず 400 で reject される。 take-over 後は本 Step 0 を **再度** 経由する想定で動く。 1 度 stamp 済でも take-over で reset されたら kickoff を再送する (= 新 leader / 新 executor の plan は前 session の plan と別物の前提)。
+
+### Step 0.6: 完了確認
+
+`pending:false` を確認したら以降の Step 1 / 2 / 3 / 4 を通常通り進める。 同 Trek 内では二度目以降の pulse-ack で Step 0 は skip される (= server 側 `kickoff_status[sid].pending == false` のため pulse-ack が 200 通る)。
+
+### Step 0 補足: deploy timing と template 例
+
+- **endpoint の live timing**: `POST /api/treks/<id>/kickoff` 経路は **v0.48.0 deploy 以降に live**。 v0.47.0 までは未 deploy のため、 移行期は Skill 側で endpoint 呼び出しを skip して DM 送信だけ行ってもよい (= 暫定運用)。 deploy 後の最初の dogfood で endpoint 経路を含む正常 flow を検証する想定。
+- **template 例 (= 4 セクション宣言の良い具体例)**: ms-88 dogfood で executor B (= sv-77e81553-1781883249698-de65dadb) が手作業で送信した kickoff DM (= bus event_id `IYtm6kMKOoCZPQ1CiVya`、 2026-06-20 dogfood) が本機能の **completed shadow dogfood** に該当する。 同 DM の本文 4 セクション構成 (= 自分 / 担当 / worktree / 触らない範囲) をそのまま生成形 template として参照可。 audit trace で event を引けば、 「現に効いた kickoff DM はこの形」 を後段で確認できる。
+
 ## Step 1: trek_id の確定
 
 - bus event 由来: TREK ACTION REQUIRED block の `trek_id:` 行から抽出
