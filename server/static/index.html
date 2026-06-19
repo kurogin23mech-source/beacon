@@ -2102,6 +2102,20 @@ body::after {
 .trek-badge.archived { color: var(--text-dim); }
 .trek-badge.planning { color: var(--text-secondary); }
 
+/* ms-86 v2 / e-2126 — trek-id badge in title (small, monospace, dim).
+   Replaces the legacy "trek-meta Trek ID" row by surfacing the id inline
+   next to the title so URL / CLI integrations stay possible without a
+   dedicated metadata block. */
+.trek-id-badge {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  letter-spacing: 0;
+}
+
 .trek-stats {
   font-size: 0.75rem;
   color: var(--text-dim);
@@ -3695,18 +3709,20 @@ function renderShell(app) {
       ${PLATFORM.accountMenuItemsHTML()}
     </div>
 
-    ${(p.objective || retro) ? `
+    ${(!state.openTrekId && (p.objective || retro)) ? `
     <div class="project-info fade-in stagger-1">
       ${p.objective ? `<div class="project-info-item"><span class="project-info-label">Objective</span><span class="project-info-value">${esc(p.objective)}</span></div>` : ''}
       ${retro ? `<div class="project-info-item${retro.isToday ? ' review-due' : ''}"><span class="project-info-label">${retro.isToday ? '⚠ Review Due Today' : 'Next Review'}</span><span class="project-info-value">${retro.date} (${esc(p.retro_day || 'friday')})</span></div>` : ''}
     </div>
     ` : ''}
 
+    ${!state.openTrekId ? `
     <div class="global-search fade-in stagger-1">
       <input class="ms-search-inline" id="search-input" type="search"
              placeholder="Search everything: milestones, tasks, commits, documents, pushes, deploys..."
              value="${esc(state.searchQuery)}" autocomplete="off">
     </div>
+    ` : ''}
 
     <div id="main-content">${renderMainContent()}</div>
 
@@ -4158,6 +4174,8 @@ async function switchTab(tab) {
 async function openTrek(trekId) {
   state.openTrekId = trekId;
   state.openTrekDocs = [];
+  state.openTrekExpanded = new Set();
+  state.openTrekShowDone = false;
   render();
   // Fetch docs in the background; if it fails, the detail view shows
   // "No docs tagged with this trek yet." which is a fine degrade.
@@ -4170,6 +4188,8 @@ async function openTrek(trekId) {
 function closeTrek() {
   state.openTrekId = null;
   state.openTrekDocs = [];
+  state.openTrekExpanded = new Set();
+  state.openTrekShowDone = false;
   render();
 }
 
@@ -5384,7 +5404,7 @@ function _renderTrekRecentActivity(t) {
         <div class="activity-text" title="${esc(text)}">${esc(text)}</div>
       </div>`;
   }).join('') + (events.length > shown.length
-    ? `<div class="trek-cli-hint" style="margin-top:6px;">${events.length - shown.length} older event(s) hidden.</div>`
+    ? `<div style="margin-top:6px;font-size:0.7rem;color:var(--text-dim);">${events.length - shown.length} older event(s) hidden.</div>`
     : '');
 }
 
@@ -5398,19 +5418,28 @@ function _renderTrekDetail(t) {
   const creatorEmail = (t.creator_actor || {}).email || '';
   const leaderSid = t.leader_session_id || '';
 
-  // STOP / halt card: red while active+unhalted, amber + recovery copy when halted.
+  // ms-86 v2 layout (= mockups/trek-detail.html, e-2126):
+  // - drop project subpage decorations (breadcrumb / trek-meta / archive card)
+  // - WebUI 哲学への return: 全 CLI hints を削除、 read-only 監査 view に統一
+  // - keep: HEADER (= trek title + halted pill) / WHY / HALT / TREK TASKS /
+  //   MEMBERS table / PULSE-ACK / RECENT ACTIVITY
+  // STOP / HALT card: no CLI hint text — operation は CLI + Skill (= Claude
+  // Code) 経由、 ボタンは将来 fetch で叩く placeholder。
   let stopCardHtml = '';
   if (t.status === 'active') {
     if (halted) {
+      const haltedReason = (t.halt && t.halt.reason) ? esc(t.halt.reason) : '(no reason given)';
+      const haltedBy = _trekShortSessionId((t.halt && t.halt.issued_by_session_id) || '');
+      const haltedAt = ((t.halt && t.halt.issued_at) || '').slice(0, 16).replace('T', ' ');
       stopCardHtml = `
         <div class="trek-stop-card halted">
           <span class="icon">⏸</span>
           <div class="text">
             <strong>HALTED — sessions are paused</strong>
-            ${t.halt.reason ? esc(t.halt.reason) + ' — ' : ''}STOP signal issued by ${esc(_trekShortSessionId(t.halt.issued_by_session_id))} at ${(t.halt.issued_at || '').slice(0,16).replace('T',' ')}.
-            Resume from the CLI: <code style="color:var(--accent);">beacon trek resume ${esc(t.trek_id)}</code>
+            reason: ${haltedReason}<br>
+            issued by ${esc(haltedBy)} at ${esc(haltedAt)}.
           </div>
-          <button data-action="trek-cli-hint" data-cmd="beacon trek resume ${esc(t.trek_id)}">Resume</button>
+          <button data-action="trek-resume-noop" data-trek="${esc(t.trek_id)}">Resume</button>
         </div>`;
     } else {
       stopCardHtml = `
@@ -5418,42 +5447,25 @@ function _renderTrekDetail(t) {
           <span class="icon">🚨</span>
           <div class="text">
             <strong>STOP THIS TREK</strong>
-            All joined sessions halt before their next tool call and persist their state. To resume, tell the leader session to continue.
-            CLI: <code style="color:var(--accent);">beacon trek stop ${esc(t.trek_id)} --reason "..."</code>
+            All joined sessions halt before their next tool call and persist their state.
           </div>
-          <button data-action="trek-cli-hint" data-cmd="beacon trek stop ${esc(t.trek_id)} --reason &quot;...&quot;">STOP</button>
+          <button data-action="trek-stop-noop" data-trek="${esc(t.trek_id)}">STOP</button>
         </div>`;
     }
   }
 
-  const archiveCardHtml = t.status !== 'archived' ? `
-    <div class="trek-archive-card">
-      <span class="ico">📦</span>
-      <div class="text">
-        <strong>Archive</strong> this trek (= complete for temporary treks, hibernate for persistent treks). Records remain accessible after archiving.
-        CLI: <code style="color:var(--accent);">beacon trek archive ${esc(t.trek_id)}</code>
-      </div>
-    </div>` : '';
-
-  // ms-86 v2 layout (= mockups/trek-detail.html, e-2126): the wireframe
-  // collapsed SCOPE / SUMMARIES / ACTIVE CLAIMS placeholders and replaced
-  // them with WHY (goal_state) + TREK TASKS (state-aware accordion) +
-  // real-data RECENT ACTIVITY. Member rendering moved to a table so the
-  // leader can read user × session × role × task in one glance.
   const goalState = (t.goal_state || '').trim();
   const whyHtml = goalState
     ? `<div class="trek-why-block">${esc(goalState)}</div>`
-    : `<div class="trek-why-block empty">No goal_state set. CLI: <code>beacon trek goal-state ${esc(t.trek_id)} --text "..."</code></div>`;
+    : `<div class="trek-why-block empty">No goal_state set yet.</div>`;
 
   return `
-    <section class="fade-in">
-      <span class="trek-crumb" data-action="close-trek">← Back to TREKS</span>
+    <section class="fade-in trek-detail-v2">
 
       <div class="trek-head">
         <div class="trek-title-row">
           <span class="trek-title-text">${esc(t.title || '')}</span>
-          <span class="trek-badge ${t.type === 'temporary' ? 'temporary' : 'persistent'}">${esc(t.type || '')}</span>
-          <span class="trek-badge ${_trekBadgeClass(t.status)}">${_trekStatusIcon(t.status)} ${esc(t.status || '')}</span>
+          <span class="trek-id-badge" title="${esc(t.trek_id)}">${esc(t.trek_id)}</span>
           ${halted ? `<span class="trek-badge" style="color:var(--warning,#fbbf24);border-color:var(--warning,#fbbf24);">⚠ halted</span>` : ''}
         </div>
         <div class="trek-stats">
@@ -5461,32 +5473,15 @@ function _renderTrekDetail(t) {
         </div>
       </div>
 
-      <div class="trek-meta">
-        <span class="k">Trek ID</span>
-        <span class="v" style="font-family:var(--font-mono,monospace);">${esc(t.trek_id)}</span>
-        <span class="k">Leader session</span>
-        <span class="v">
-          <span class="session-id">${esc(_trekShortSessionId(leaderSid))}</span>
-          ${creatorEmail ? `<span class="sub">(${esc(creatorEmail)})</span>` : ''}
-        </span>
-        <span class="k">Created</span>
-        <span class="v">${(t.created_at || '').slice(0, 16).replace('T', ' ')}</span>
-        ${t.archived_at ? `
-        <span class="k">Archived</span>
-        <span class="v">${t.archived_at.slice(0, 16).replace('T', ' ')}</span>` : ''}
-      </div>
-
-      <!-- WHY (= goal_state, ms-86 v2 / e-2126) -->
+      <!-- WHY (= goal_state) -->
       <div class="trek-section">
         <div class="trek-section-title"><span>WHY</span></div>
         ${whyHtml}
       </div>
 
       ${stopCardHtml}
-      ${archiveCardHtml}
 
-      <!-- TREK TASKS — MS accordion + leaf rows, 5-state badges
-           (= ms-86 v2 / e-2126, replaces the older SCOPE table). -->
+      <!-- TREK TASKS — MS accordion + leaf rows, 5-state badges -->
       <div class="trek-section">
         <div class="trek-section-title">
           <span>TREK TASKS</span>
@@ -5494,37 +5489,22 @@ function _renderTrekDetail(t) {
         </div>
         ${scope.length
           ? scope.map((s, i) => _renderTrekTaskRow(t, s, i)).join('')
-          : `<div class="trek-tasks-empty">No scope entries yet. CLI: <code>beacon trek plan ${esc(t.trek_id)} --add-scope &lt;project&gt;:&lt;ms-XX|op-X|e-X&gt;</code></div>`}
-        <div class="trek-cli-hint">
-          Add / remove scope entries from the terminal:
-          <code>beacon trek plan ${esc(t.trek_id)} --add-scope &lt;project&gt;:&lt;ms-XX|op-X|e-X&gt;</code>
-          <code>beacon trek plan ${esc(t.trek_id)} --remove-scope &lt;project&gt;:&lt;ref&gt;</code>
-          <code>beacon trek task-state ${esc(t.trek_id)} &lt;task-id&gt; &lt;working|leader_review|user_review|done&gt;</code>
-        </div>
+          : `<div class="trek-tasks-empty">No scope entries yet.</div>`}
       </div>
 
-      <!-- MEMBERS & AGENTS — table layout (= ms-86 v2 / e-2126). -->
+      <!-- MEMBERS & AGENTS — table layout -->
       <div class="trek-section">
         <div class="trek-section-title">
           <span>MEMBERS &amp; AGENTS</span>
           <span class="right">${members.length} member${members.length === 1 ? '' : 's'} · LEADER = leader session</span>
         </div>
         ${_renderTrekMembersTable(t)}
-        <div class="trek-cli-hint">
-          Invite, leave, or transfer leader from the terminal:
-          <code>beacon trek invite ${esc(t.trek_id)} --actor &lt;email&gt;</code>
-          <code>beacon trek transfer-leader ${esc(t.trek_id)} --to &lt;session-id&gt;</code>
-        </div>
       </div>
 
-      <!-- PULSE-ACK COMPLIANCE — ms-88 / e-2108. Repositioned (= ms-86 v2)
-           below MEMBERS so the leader sees who is pulse-ack'ing right after
-           reading the agent roster. -->
+      <!-- PULSE-ACK COMPLIANCE — ms-88 / e-2108 Layer 2 observability -->
       ${_renderTrekPulseAckSection(t)}
 
-      <!-- RECENT ACTIVITY — task-state transitions + halt events (= real
-           data, ms-86 v2). A richer commit / DM / scope-change feed lands
-           with e-1696. -->
+      <!-- RECENT ACTIVITY — task-state transitions + halt events -->
       <div class="trek-section">
         <div class="trek-section-title">
           <span>RECENT ACTIVITY</span>
