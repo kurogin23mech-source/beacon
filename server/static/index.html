@@ -5010,7 +5010,7 @@ function _renderTrekDetail(t) {
             ${t.halt.reason ? esc(t.halt.reason) + ' — ' : ''}STOP signal issued by ${esc(_trekShortSessionId(t.halt.issued_by_session_id))} at ${(t.halt.issued_at || '').slice(0,16).replace('T',' ')}.
             Resume from the CLI: <code style="color:var(--accent);">beacon trek resume ${esc(t.trek_id)}</code>
           </div>
-          <button data-action="trek-cli-hint" data-cmd="beacon trek resume ${esc(t.trek_id)}">Resume</button>
+          <button data-action="trek-resume" data-trek-id="${esc(t.trek_id)}">Resume</button>
         </div>`;
     } else {
       stopCardHtml = `
@@ -5018,10 +5018,9 @@ function _renderTrekDetail(t) {
           <span class="icon">🚨</span>
           <div class="text">
             <strong>STOP THIS TREK</strong>
-            All joined sessions halt before their next tool call and persist their state. To resume, tell the leader session to continue.
-            CLI: <code style="color:var(--accent);">beacon trek stop ${esc(t.trek_id)} --reason "..."</code>
+            All joined sessions halt before their next tool call and persist their state. To resume, click Resume on the halted Trek panel.
           </div>
-          <button data-action="trek-cli-hint" data-cmd="beacon trek stop ${esc(t.trek_id)} --reason &quot;...&quot;">STOP</button>
+          <button data-action="trek-stop-prompt" data-trek-id="${esc(t.trek_id)}">STOP</button>
         </div>`;
     }
   }
@@ -6378,6 +6377,47 @@ function handleCommonAction(action, el) {
         state.trekScopeExpanded.add(key);
       }
       render();
+      return true;
+    }
+    // ms-86 / e-2018 — Trek halt の Resume (= DELETE /api/treks/<id>/halt 実 call)
+    case 'trek-resume': {
+      const tid = el.dataset.trekId || '';
+      if (!tid) return true;
+      if (!window.confirm('この Trek の halt を解除して再開しますか？')) return true;
+      (async () => {
+        try {
+          await api(`/api/treks/${encodeURIComponent(tid)}/halt`, { method: 'DELETE' });
+          await dataSource.loadTreks();
+          render();
+        } catch (e) {
+          window.alert('Resume に失敗しました: ' + (e.message || e));
+        }
+      })();
+      return true;
+    }
+    // ms-86 / e-2018 — Trek STOP の reason 入力 + PUT /api/treks/<id>/halt 実 call
+    case 'trek-stop-prompt': {
+      const tid = el.dataset.trekId || '';
+      if (!tid) return true;
+      const reason = window.prompt('STOP の理由を入力してください (= 全 session に届きます):', '');
+      if (reason === null) return true; // cancel
+      const trek = (state.treks || []).find(x => x.trek_id === tid);
+      // Web UI 側に固有 session_id が無いため、 leader_session_id を caller として渡す
+      // (= 操作者がリーダー本人の前提、 ms-86 dogfood で挙動を検証する)。
+      const callerSid = (trek && trek.leader_session_id) || '';
+      (async () => {
+        try {
+          await api(`/api/treks/${encodeURIComponent(tid)}/halt`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ issued_by_session_id: callerSid, reason: reason || '' }),
+          });
+          await dataSource.loadTreks();
+          render();
+        } catch (e) {
+          window.alert('STOP に失敗しました: ' + (e.message || e));
+        }
+      })();
       return true;
     }
   }
