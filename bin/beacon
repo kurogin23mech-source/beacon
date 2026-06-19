@@ -4065,7 +4065,23 @@ EOF
     auth)
         case "${2:-}" in
             login)
-                python3 "$COMMANDS_PY" auth_login
+                # --dev / --email / --name: IdP 不要のローカル開発ログイン
+                # (ms-12 e-2041)。Windows pip 経路 (dispatch.py) と同じ env 契約に
+                # 翻訳して commands.py へ渡す。--dev 無しなら従来の Google/Cognito。
+                shift 2 2>/dev/null || shift $#
+                _auth_dev=""; _auth_email=""; _auth_name=""
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        --dev)   _auth_dev="1";        shift ;;
+                        --email) _auth_email="${2:-}"; shift 2 ;;
+                        --name)  _auth_name="${2:-}";  shift 2 ;;
+                        *)       shift ;;
+                    esac
+                done
+                BEACON_AUTH_DEV="$_auth_dev" \
+                BEACON_DEV_EMAIL="$_auth_email" \
+                BEACON_DEV_NAME="$_auth_name" \
+                    python3 "$COMMANDS_PY" auth_login
                 if [ ! -d "${HOME}/.claude/skills/beacon-log" ]; then
                     echo ""
                     echo "Tip: Run 'beacon skill install' to set up Claude Code Skills."

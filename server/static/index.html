@@ -2646,6 +2646,8 @@ async function loadAuthConfig() {
       state.auth.provider = config.provider || 'firebase';
       state.auth.cognitoDomain = config.cognito_domain || '';
       state.auth.region = config.region || '';
+      // local_dev: ローカル開発サーバのときだけ true。IdP 不要のログインフォームを出す。
+      state.auth.localDev = !!config.local_dev;
     }
   } catch (e) {}
 }
@@ -2767,7 +2769,20 @@ function renderLogin() {
       <p class="login-tagline">Where humans and AI are bound together.</p>
       <p class="login-note">Beacon is an AI-driven project monitoring tool.<br>Track milestones, tasks, and commits in real time.</p>
       <div class="login-divider"></div>
-      ${cognitoLoginUrl
+      ${state.auth.localDev
+        ? `<div class="dev-login-box" style="display:flex;flex-direction:column;gap:8px;width:260px;margin:0 auto;">
+             <div class="login-note" style="margin-bottom:2px;">ローカル開発ログイン (= IdP 不要)</div>
+             <input id="dev-email" type="email" placeholder="you@local" value="dev@local"
+                    style="padding:8px 10px;border-radius:6px;border:1px solid #555;background:#1b1b1b;color:#fff;font-size:14px;" />
+             <input id="dev-name" type="text" placeholder="表示名 (任意)"
+                    style="padding:8px 10px;border-radius:6px;border:1px solid #555;background:#1b1b1b;color:#fff;font-size:14px;" />
+             <button id="dev-login-btn"
+                     style="padding:10px 24px;background:#4285f4;color:#fff;border:none;border-radius:6px;font-weight:600;font-size:14px;cursor:pointer;">
+               このアカウントで入る
+             </button>
+             <div class="login-note" style="font-size:11px;">メールごとに別アカウントとして扱われます</div>
+           </div>`
+        : cognitoLoginUrl
         ? `<a class="cognito-signin-button" href="${cognitoLoginUrl}"
              style="display:inline-block;padding:10px 24px;background:#4285f4;
                     color:#fff;border-radius:6px;text-decoration:none;
@@ -2779,6 +2794,18 @@ function renderLogin() {
       <div class="login-note"><a href="https://beacon-ai.dev/privacy">Privacy Policy</a> · <a href="https://beacon-ai.dev/terms">Terms of Service</a></div>
     </div>
   `;
+  // ローカル開発ログイン: フォーム送信を配線 (GIS 初期化は不要)
+  if (state.auth.localDev) {
+    const btn = document.getElementById('dev-login-btn');
+    const submit = () => devLogin();
+    if (btn) btn.addEventListener('click', submit);
+    const emailInput = document.getElementById('dev-email');
+    const nameInput = document.getElementById('dev-name');
+    [emailInput, nameInput].forEach(el => el && el.addEventListener('keydown', e => {
+      if (e.key === 'Enter') submit();
+    }));
+    return;
+  }
   // Cognito 経路では GIS の初期化はせず、上記 <a> リンクから直接 redirect する
   if (state.auth.provider === 'cognito') return;
   if (state.auth.clientId && window.google?.accounts) {
@@ -2802,6 +2829,38 @@ function logout() {
   closeWebSocket();
   closeMenu();
   renderLogin();
+}
+
+// ローカル開発ログイン: email を /api/auth/dev-login に送り bcli トークンを受け取る。
+// BEACON_LOCAL_DEV=1 のサーバでのみ動く (それ以外は 404)。
+async function devLogin() {
+  const email = (document.getElementById('dev-email')?.value || '').trim();
+  const name = (document.getElementById('dev-name')?.value || '').trim();
+  if (!email) { alert('メールアドレスを入力してください'); return; }
+  const btn = document.getElementById('dev-login-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'ログイン中…'; }
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/dev-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, name }),
+    });
+    if (!res.ok) {
+      let detail = await res.text().catch(() => res.statusText);
+      try { detail = JSON.parse(detail).detail || detail; } catch {}
+      throw new Error(detail);
+    }
+    const data = await res.json();
+    state.auth.token = data.id_token;
+    state.auth.email = data.email;
+    localStorage.setItem('beacon_token', data.id_token);
+    localStorage.setItem('beacon_email', data.email);
+    init();
+  } catch (e) {
+    console.error('[beacon] dev-login failed', e);
+    if (btn) { btn.disabled = false; btn.textContent = 'このアカウントで入る'; }
+    alert('ローカルログインに失敗しました: ' + e.message);
+  }
 }
 
 function isTokenExpired(token) {
@@ -7023,8 +7082,9 @@ async function init() {
     await handleCognitoCallback();
   }
   if (!isAuthenticated()) {
-    // Cognito 経路では GIS を待つ必要なし、直接 renderLogin する
-    if (state.auth.provider === 'cognito') {
+    // Cognito 経路 / ローカル開発ログインは GIS を待つ必要なし、直接 renderLogin する。
+    // (ローカルは GIS スクリプトがブロックされていても確実にフォームを出すため)
+    if (state.auth.provider === 'cognito' || state.auth.localDev) {
       renderLogin();
       return;
     }

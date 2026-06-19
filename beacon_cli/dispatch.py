@@ -1200,7 +1200,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_auth = sub.add_parser("auth", help="Cloud authentication", add_help=False)
     p_auth.add_argument("--help", "-h", action="store_true", dest="show_help")
     auth_sub = p_auth.add_subparsers(dest="auth_cmd", metavar="<subcmd>")
-    auth_sub.add_parser("login", add_help=False)
+    # `login` accepts --dev / --email / --name for IdP-free local dev login
+    # against a docker-compose cloud server (ms-12 e-2041). Without --dev the
+    # flow is unchanged (Google / Cognito / web-mediated).
+    p_auth_login = auth_sub.add_parser("login", add_help=False)
+    p_auth_login.add_argument("--dev", action="store_true", dest="auth_dev")
+    p_auth_login.add_argument("--email", dest="auth_email", default="")
+    p_auth_login.add_argument("--name", dest="auth_name", default="")
     auth_sub.add_parser("logout", add_help=False)
     auth_sub.add_parser("status", add_help=False)
 
@@ -2799,7 +2805,19 @@ def _handle_auth(root: Path, args: argparse.Namespace) -> int:
     if args.auth_cmd not in ("login", "logout", "status"):
         print(f"Unknown auth subcommand: {args.auth_cmd}")
         return 2
-    return _run_commands_py(root, f"auth_{args.auth_cmd}", {})
+    # --dev / --email / --name → BEACON_* env (= auth.login() が読む契約)。
+    # 他の subcommand / 非 dev login では空なので従来挙動のまま。
+    env: Dict[str, str] = {}
+    if args.auth_cmd == "login":
+        if getattr(args, "auth_dev", False):
+            env["BEACON_AUTH_DEV"] = "1"
+        email = getattr(args, "auth_email", "") or ""
+        if email:
+            env["BEACON_DEV_EMAIL"] = email
+        name = getattr(args, "auth_name", "") or ""
+        if name:
+            env["BEACON_DEV_NAME"] = name
+    return _run_commands_py(root, f"auth_{args.auth_cmd}", env)
 
 
 def _handle_skill(root: Path, args: argparse.Namespace) -> int:

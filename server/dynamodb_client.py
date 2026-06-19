@@ -38,9 +38,13 @@ def _get_resource():
     if _RESOURCE is None:
         if boto3 is None:
             raise RuntimeError("boto3 is not installed (= DynamoDB backend cannot be used)")
+        # BEACON_DYNAMODB_ENDPOINT (e-1987): ローカル検証で amazon/dynamodb-local
+        # へ向けるための endpoint 上書き。未設定なら None を渡す (= boto3 既定の
+        # 実 AWS DynamoDB エンドポイント解決にそのまま委ねる、本番経路は無影響)。
         _RESOURCE = boto3.resource(
             "dynamodb",
             region_name=os.environ.get("AWS_REGION", "ap-northeast-1"),
+            endpoint_url=os.environ.get("BEACON_DYNAMODB_ENDPOINT") or None,
         )
     return _RESOURCE
 
@@ -108,6 +112,28 @@ TABLES = {
     # users/{uid}/* subcollections
     "machines": f"{TABLE_PREFIX}-machines",
     "session_lookup": f"{TABLE_PREFIX}-session_lookup",
+}
+
+
+# Authoritative PK / SK schema per entity (= 単一の真値源)。
+# 実 AWS では terraform が、ローカル検証では create_local_tables.py
+# (e-1987) と tests の moto fixture がこの形でテーブルを作る。
+# top-level エンティティは PK のみ (sk=None)、project / user 配下の
+# subcollection は composite key を持つ。
+# 不変条件: TABLES の全 entity が必ずここにも現れること
+# (create_local_tables.py 起動時に検証する)。
+TABLE_KEY_SCHEMA: dict[str, tuple[str, str | None]] = {
+    # top-level (PK only, no sort key)
+    "projects": ("project_id", None),
+    "users": ("user_id", None),
+    "treks": ("trek_id", None),
+    # users/{uid}/* subcollections
+    "machines": ("user_id", "fingerprint_id"),
+    # projects/{pid}/active_claims (_SUBCOLLECTION_SK_NAMES には載らないが
+    # PK=project_id, SK=claim_id の subcollection — ms-55 e-1730)
+    "active_claims": ("project_id", "claim_id"),
+    # projects/{pid}/* subcollections (PK=project_id, SK は各 subcollection 固有)
+    **{entity: ("project_id", sk) for entity, sk in _SUBCOLLECTION_SK_NAMES.items()},
 }
 
 

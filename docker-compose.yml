@@ -1,0 +1,105 @@
+# Beacon Cloud server — local development stack (e-1987: 永続化対応版)
+#
+# ローカルで Beacon Cloud サーバを丸ごと立てて試すための compose 定義。
+# クラウド認証情報 (GCP / AWS) は一切不要。
+#
+#   - dynamodb-local : amazon/dynamodb-local。データをディスク (named volume)
+#                      へ永続化する。docker compose down → up してもプロジェクト
+#                      が残る (= Firestore エミュレータがメモリ専用だった問題の解決)。
+#   - dynamodb-init  : 起動時に 16+ テーブルを作成する使い捨てサービス (冪等)。
+#   - beacon-server  : 既存 Dockerfile の FastAPI サーバ (= 本番 Cloud Run と同じコード)。
+#                      ローカルでは BEACON_STORE_BACKEND=dynamodb で DynamoDB Local に繋ぐ。
+#
+# 認証はローカル開発ログイン (BEACON_LOCAL_DEV) で行う。
+#
+# データ永続化: dynamodb-data ボリュームに保存されるため、down してもデータは残る。
+# 完全に消したいときは: docker compose down -v
+#
+# 使い方:
+#   docker compose up --build        # 起動 (API は http://localhost:8080)
+#   docker compose down              # 停止 (データは残る)
+#   docker compose down -v           # 停止 + データ破棄
+#
+# CLI / Desktop から接続する場合は接続先 api_url を http://localhost:8080 に向ける。
+#
+# 補足: 本番 (Cloud Run) は引き続き Firestore 経路。ローカル検証=DynamoDB /
+# 本番=Firestore の対称構成。両 backend は server/store.py 経由で同じ public API
+# を提供するので、サーバコードは無改修で両対応する。
+
+services:
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    # -sharedDb: 単一の共有 DB ファイルを使う (region/credentials で分かれない)。
+    # -dbPath /data: 永続ボリュームへ書き出す (= down→up でデータ残存)。
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-dbPath", "/data"]
+    working_dir: /home/dynamodblocal
+    # named volume (root 所有) へ書けるよう root で動かす。
+    user: root
+    volumes:
+      - dynamodb-data:/data
+    ports:
+      # ホストから直接 DynamoDB Local を触りたいとき用 (任意、aws cli 等)。
+      - "8000:8000"
+
+  dynamodb-init:
+    # beacon-server と同一イメージ (boto3 入り) を再利用してテーブルを作る。
+    image: beacon-local-server:dev
+    depends_on:
+      - dynamodb-local
+    environment:
+      BEACON_DYNAMODB_ENDPOINT: "http://dynamodb-local:8000"
+      BEACON_ENV: "dev"
+      AWS_REGION: "ap-northeast-1"
+      AWS_ACCESS_KEY_ID: "local"
+      AWS_SECRET_ACCESS_KEY: "local"
+    # WORKDIR は Dockerfile で /app/server。スクリプトが DynamoDB Local の
+    # listen 開始を内部で待ってからテーブルを冪等作成する。
+    command: ["python", "create_local_tables.py"]
+    restart: "no"
+
+  beacon-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # ローカル検証は DynamoDB 経路なので boto3 を入れる。
+        INSTALL_DYNAMODB: "1"
+    # dynamodb-init が同じイメージを参照できるよう明示タグを付ける
+    # (= イメージのビルドは 1 回で済む)。
+    image: beacon-local-server:dev
+    ports:
+      - "8080:8080"
+    environment:
+      # 認証は有効化する。ただしログインは下の BEACON_LOCAL_DEV による IdP 不要の
+      # ローカル開発ログインで行う。認証を有効にすることで、メールごとに別アカウント
+      # として扱われ owner / member 制御が効く (= 複数人での使い分けが可能)。
+      # 認証を完全にバイパスして全員 dev@local 固定にしたい場合は "0" にする。
+      BEACON_API_AUTH: "1"
+      # ローカル開発ログイン (= /api/auth/dev-login) を有効化。本番では絶対に設定しない。
+      BEACON_LOCAL_DEV: "1"
+      # bcli トークンの署名鍵。ローカル固定値 (本番とは別物)。
+      BEACON_CLI_TOKEN_SECRET: "local-dev-secret"
+      # envelope 署名鍵。BEACON_API_AUTH=1 のとき起動ガードが設定を要求する
+      # (= 本番で dev fallback 鍵を使わせない安全装置)。ローカル固定値で満たす。
+      BEACON_ENVELOPE_SECRET: "local-dev-envelope-secret"
+      # ストレージバックエンド: ローカル検証は DynamoDB Local (= 永続化)。
+      BEACON_STORE_BACKEND: "dynamodb"
+      # DynamoDB Local の接続先 (server/dynamodb_client.py が endpoint_url に使う)。
+      BEACON_DYNAMODB_ENDPOINT: "http://dynamodb-local:8000"
+      # テーブル接頭辞: dev → beacon-dev-projects / beacon-dev-users ...
+      BEACON_ENV: "dev"
+      # boto3 用。DynamoDB Local は任意値で可だが、未設定だと boto3 が
+      # 「credentials が見つからない」で落ちるのでダミーを渡す。
+      AWS_REGION: "ap-northeast-1"
+      AWS_ACCESS_KEY_ID: "local"
+      AWS_SECRET_ACCESS_KEY: "local"
+    depends_on:
+      # テーブル作成 (init) が成功裏に完了してからサーバを起動する。
+      dynamodb-init:
+        condition: service_completed_successfully
+      dynamodb-local:
+        condition: service_started
+
+volumes:
+  # プロジェクトデータの永続ボリューム。down では消えず、down -v で消える。
+  dynamodb-data:

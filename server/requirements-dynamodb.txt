@@ -1,0 +1,7 @@
+# DynamoDB backend 用 SDK (e-1987)。
+#
+# 本番 Cloud Run は Firestore 経路なので boto3 を読まない。zip / イメージ
+# サイズの無駄を避けるため requirements.txt には入れず、ここに分離する。
+# ローカル検証スタック (= docker-compose / BEACON_STORE_BACKEND=dynamodb)
+# だけが Dockerfile の INSTALL_DYNAMODB ビルド引数経由でこれを入れる。
+boto3>=1.35.0
