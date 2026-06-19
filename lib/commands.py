@@ -4744,18 +4744,18 @@ def cmd_trek_show():
         print("Error: trek_id is required", file=sys.stderr)
         sys.exit(1)
 
-    if _is_cloud_mode():
-        try:
-            client, _config = _get_api_client()
-            t = client.get_trek(trek_id)
-        except RuntimeError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
-    else:
-        t = trek_store.load_trek(trek_id)
-        if t is None:
-            print(f"Error: trek {trek_id} not found", file=sys.stderr)
-            sys.exit(1)
+    # ms-84 Phase 2: Store 経由で cloud / local を統一。 Store.get_trek は
+    # ValueError on unknown / RuntimeError on transport の error contract を
+    # 両 backend で共有しているため、 CLI 側はバックエンドを意識せず
+    # 同じ except 分岐で扱える。
+    try:
+        t = get_store().get_trek(trek_id)
+    except ValueError:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     # Build local aggregation regardless of cloud/local — the current
     # project view is always available.
