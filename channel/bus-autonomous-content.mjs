@@ -21,9 +21,31 @@
  * Opt-out: `BEACON_BRIDGE_MCP_AUTONOMOUS_DISABLE=1` returns false from the
  * gate, restoring the slim-ping-only push behaviour for callers that hit a
  * regression during the dogfood and need to roll back without redeploying.
+ *
+ * e-2069 (ms-75): extended to trek-progress-check / trek-trigger /
+ * trek-task-review channels. The CHANNEL_TO_SKILL mapping makes the Skill
+ * invocation structural — bus.mjs directly emits the launch directive based
+ * on the channel name, without depending on AI interpretation of the
+ * payload. This closes the silent-ack hole observed in the 2026-06-19
+ * dogfood (executor recognised the trek-progress-check event but skipped
+ * the Skill launch because compliance to the inbox-hook narrative depended
+ * on AI pattern-matching).
  */
 
-export function buildAutonomousActionContent(evt) {
+/**
+ * Hardcoded mapping from bus channel name to Claude Code Skill invocation.
+ * bus.mjs uses this to translate an incoming event into a "launch this Skill
+ * now" directive without depending on AI interpretation of the channel
+ * semantics. Add new channels here when introducing new autonomous flows.
+ */
+export const CHANNEL_TO_SKILL = Object.freeze({
+  'operation-trigger': '/beacon-operation-execute',
+  'trek-progress-check': '/beacon-trek-execute',
+  'trek-trigger': '/beacon-trek-execute',
+  'trek-task-review': '/beacon-trek-review',
+})
+
+function _buildOperationActionContent(evt) {
   const payload = (evt && evt.payload) || {}
   const opId = String(payload.op_id || '?')
   const specDocId = String(payload.spec_doc_id || '')
@@ -46,13 +68,91 @@ export function buildAutonomousActionContent(evt) {
   return lines.join('\n')
 }
 
+function _buildTrekProgressContent(evt) {
+  const payload = (evt && evt.payload) || {}
+  const trekId = String(payload.trek_id || '?')
+  const triggerName = String(payload.trigger_name || '')
+  const eventId = String((evt && evt.event_id) || '?')
+  const channel = String((evt && evt.channel) || '?')
+  const lines = [
+    '## TREK ACTION — trek autonomy active',
+    '',
+    '以下の ' + channel + ' event は Trek scope (= 缶詰の徹夜作業部屋、 事前承認スコープ) 内の作業継続経路。**確認を取らず autonomous に実行する**。',
+    'Trek scope (= MS / task / Operation) の作業は user 確認なしで進めてよい。**例外: デプロイ / リリース** のみ user 承認境界として escalate する。',
+    'Run this autonomously without asking the user first.',
+    '',
+    `- event_id: ${eventId}`,
+    `  - trek_id: ${trekId}`,
+  ]
+  if (triggerName) lines.push(`  - trigger_name: ${triggerName}`)
+  lines.push(`  - launch: \`/beacon-trek-execute ${trekId}\`  (no confirmation prompt)`)
+  lines.push('')
+  lines.push('budget が枯渇していたら Skill 側 (Step 4.5) が自動で停止 → incident open → note 残しに降格する。Skill の責務なのでこの inject 側で事前判定はしない。')
+  return lines.join('\n')
+}
+
+function _buildTrekTaskReviewContent(evt) {
+  const payload = (evt && evt.payload) || {}
+  const trekId = String(payload.trek_id || '?')
+  const taskId = String(payload.task_id || '?')
+  const state = String(payload.state || '?')
+  const note = String(payload.note || '').trim()
+  const eventId = String((evt && evt.event_id) || '?')
+  const lines = [
+    '## TREK ACTION — trek task review required',
+    '',
+    '以下の trek-task-review event は executor が terminal state を宣言した task の leader review 必須経路。**確認を取らず autonomous に実行する** (= forced 3-択 picker)。',
+    'leader は approve / re-work / forward-to-user のいずれかを必ず選ぶ。 「後で見る」 は許可しない構造 (= leader bottleneck 病理の構造解消)。',
+    'Run this autonomously without asking the user first.',
+    '',
+    `- event_id: ${eventId}`,
+    `  - trek_id: ${trekId}`,
+    `  - task_id: ${taskId}`,
+    `  - state: ${state}`,
+  ]
+  if (note) {
+    const notePreview = note.length > 200 ? note.slice(0, 200) + '…' : note
+    lines.push(`  - executor note: ${notePreview}`)
+  }
+  lines.push(`  - launch: \`/beacon-trek-review ${trekId} ${taskId}\`  (no confirmation prompt)`)
+  lines.push('')
+  return lines.join('\n')
+}
+
+/**
+ * Build the autonomous-action content block for the MCP push route.
+ *
+ * Dispatches on the channel name to produce a channel-specific imperative:
+ *   - operation-trigger  → AUTONOMOUS ACTION block (op launch)
+ *   - trek-progress-check / trek-trigger → TREK ACTION (executor invocation)
+ *   - trek-task-review   → TREK ACTION (leader review picker)
+ *
+ * For backward compatibility, events without a recognised channel fall back
+ * to the operation-trigger format (the historical default).
+ */
+export function buildAutonomousActionContent(evt) {
+  const ch = String((evt && evt.channel) || '')
+  if (ch === 'trek-progress-check' || ch === 'trek-trigger') {
+    return _buildTrekProgressContent(evt)
+  }
+  if (ch === 'trek-task-review') {
+    return _buildTrekTaskReviewContent(evt)
+  }
+  return _buildOperationActionContent(evt)
+}
+
+/**
+ * Gate: only emit the autonomous-action imperative when the channel × delivery
+ * combination is one we have a hardcoded Skill mapping for, and the user has
+ * not opted out via `BEACON_BRIDGE_MCP_AUTONOMOUS_DISABLE`.
+ */
 export function shouldEmitAutonomousImperative({
   channel,
   delivery,
   autonomousImperativeDisabled,
 }) {
   if (autonomousImperativeDisabled) return false
-  if (channel !== 'operation-trigger') return false
   if (delivery !== 'auto-execute') return false
+  if (!Object.prototype.hasOwnProperty.call(CHANNEL_TO_SKILL, channel)) return false
   return true
 }
