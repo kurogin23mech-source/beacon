@@ -4431,24 +4431,20 @@ def cmd_trek_list():
         user_id, actor_email, _ = _resolve_creator_identity()
         actor_id = user_id or None
 
-    if _is_cloud_mode():
-        # Cloud path: server filters by auth token's user (= ignores actor_id).
-        # ``all_actors`` requires admin role server-side; non-admin gets 403.
-        try:
-            client, _config = _get_api_client()
-            treks = client.list_treks(
-                status=status_filter or "",
-                include_archived=include_archived,
-                all_actors=all_actors,
-            )
-        except RuntimeError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
-    else:
-        treks = trek_store.list_treks(
-            actor_id=actor_id, status=status_filter,
+    # ms-84 Phase 2: Store 経由で cloud / local を統一。 actor_id (= local-only
+    # filter) と all_actors (= cloud admin view) はそれぞれ片方の backend が
+    # ignore する設計。 cloud transport / 403 は RuntimeError として呼び出し
+    # 側 (= ここ) で従来通り display する。
+    try:
+        treks = get_store().list_treks(
+            actor_id=actor_id,
+            status=status_filter or "",
             include_archived=include_archived,
+            all_actors=all_actors,
         )
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     if joined_only:
         # Walk members[] for an entry matching the caller (user_id or email)

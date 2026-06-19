@@ -167,6 +167,20 @@ class Store(Protocol):
     # ``_is_cloud_mode()`` で client.get_trek / trek_store.load_trek を
     # 切り替えている。Store に集約することで CLI から分岐を消す。
 
+    def list_treks(self, *, actor_id: str | None = None,
+                   status: str = "", include_archived: bool = False,
+                   all_actors: bool = False) -> list[dict]:
+        """List trek docs visible to the caller.
+
+        Both backends honor ``status`` filter and ``include_archived``
+        switch. ``all_actors`` is server-side only (= admin view) — local
+        backend ignores it because there is no remote registry; ``actor_id``
+        is local-only (= cloud server resolves the caller from auth token).
+        Cloud transport / 403 errors propagate as RuntimeError, matching
+        the legacy cloud branch behavior.
+        """
+        ...
+
     def get_trek(self, trek_id: str) -> dict:
         """Fetch a single trek doc by id.
 

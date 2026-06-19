@@ -347,6 +347,22 @@ class StoreApi:
 
     # ms-84 Phase 2 — trek read passthrough.
 
+    def list_treks(self, *, actor_id: str | None = None,
+                   status: str = "", include_archived: bool = False,
+                   all_actors: bool = False) -> list[dict]:
+        """List trek docs via the cloud API.
+
+        ``actor_id`` is ignored on cloud (= server filters by auth token's
+        user); ``all_actors`` requires admin role server-side (non-admin
+        gets 403 as RuntimeError, which propagates up to the CLI for
+        display, matching legacy cloud branch behavior).
+        """
+        return self._client.list_treks(
+            status=status or "",
+            include_archived=include_archived,
+            all_actors=all_actors,
+        )
+
     def get_trek(self, trek_id: str) -> dict:
         """Match LocalStore.get_trek shape, sourced from the cloud API.
 

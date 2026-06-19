@@ -186,6 +186,22 @@ class LocalStore:
                 result[k] = meta[k]
         return result
 
+    def list_treks(self, *, actor_id: str | None = None,
+                   status: str = "", include_archived: bool = False,
+                   all_actors: bool = False) -> list[dict]:
+        """List trek docs from the local trek_store directory.
+
+        ``all_actors`` is honored by the cloud backend (= admin view) and
+        ignored locally because there is no remote registry to broaden
+        beyond the actor filter.
+        """
+        import trek_store
+        return trek_store.list_treks(
+            actor_id=actor_id,
+            status=status or None,
+            include_archived=include_archived,
+        )
+
     def get_trek(self, trek_id: str) -> dict:
         """Load a trek doc from the local trek_store directory.
 
