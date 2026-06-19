@@ -2336,6 +2336,102 @@ body::after {
 .trek-list-row .counts { color: var(--text-dim); font-size: 0.72rem; text-align: right; }
 .trek-list-row .halt-mark { color: var(--warning, #fbbf24); margin-left: 6px; }
 
+/* ---- Tooltip card (ms-82 e-1970) ----
+   Use `.beacon-tooltip` + `data-tooltip="..."` on any inline element to show
+   a hover card. Replaces verbose paragraphs in Settings (ms-82 e-1974). */
+.beacon-tooltip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  cursor: help;
+}
+.beacon-tooltip::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%) translateY(4px);
+  background: var(--bg-raised);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 0.72rem;
+  font-family: var(--font-body);
+  font-weight: 400;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  width: max-content;
+  max-width: 280px;
+  text-align: left;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease, transform 120ms ease;
+  z-index: 1000;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+.beacon-tooltip::before {
+  content: '';
+  position: absolute;
+  bottom: calc(100% + 1px);
+  left: 50%;
+  transform: translateX(-50%) translateY(4px);
+  border: 5px solid transparent;
+  border-top-color: var(--border);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease, transform 120ms ease;
+  z-index: 1000;
+}
+.beacon-tooltip:hover::after,
+.beacon-tooltip:focus-visible::after,
+.beacon-tooltip:hover::before,
+.beacon-tooltip:focus-visible::before {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+.beacon-tooltip[data-tooltip-pos="right"]::after {
+  bottom: 50%;
+  left: calc(100% + 8px);
+  transform: translate(4px, 50%);
+}
+.beacon-tooltip[data-tooltip-pos="right"]::before {
+  bottom: 50%;
+  left: 100%;
+  transform: translate(-1px, 50%);
+  border: 5px solid transparent;
+  border-right-color: var(--border);
+  border-top-color: transparent;
+}
+.beacon-tooltip[data-tooltip-pos="right"]:hover::after,
+.beacon-tooltip[data-tooltip-pos="right"]:focus-visible::after {
+  transform: translate(0, 50%);
+}
+.beacon-tooltip[data-tooltip-pos="right"]:hover::before,
+.beacon-tooltip[data-tooltip-pos="right"]:focus-visible::before {
+  transform: translate(0, 50%);
+}
+.beacon-tooltip-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid var(--text-dim);
+  color: var(--text-dim);
+  font-size: 0.65rem;
+  font-weight: 600;
+  line-height: 1;
+  margin-left: 6px;
+  font-family: var(--font-mono);
+}
+.beacon-tooltip:hover .beacon-tooltip-icon,
+.beacon-tooltip:focus-visible .beacon-tooltip-icon {
+  border-color: var(--text-primary);
+  color: var(--text-primary);
+}
+
 </style>
 </head>
 <body>
