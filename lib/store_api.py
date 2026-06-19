@@ -204,6 +204,41 @@ class StoreApi:
     def is_cloud(self) -> bool:
         return True
 
+    # ms-84 Phase 2 — fine-grained mutation (purge family)
+
+    def purge_milestone(self, ms_id: str, *,
+                        reason: str, index: int | None = None) -> dict:
+        """Match LocalStore.purge_milestone shape, applied via the cloud API.
+
+        The server enforces owner-only access + post-purge validation, so
+        ``still_dirty`` is always False here — duplicate-id recovery in
+        cloud mode is the server's responsibility (= it does not let an
+        invalid project document persist). 404 / 403 / 400 are translated
+        to ``ValueError`` so cmd code can branch on a single exception
+        type regardless of backend.
+        """
+        try:
+            response = self._client.purge_milestone(
+                self._project_id, ms_id, reason=reason, index=index,
+            )
+        except RuntimeError as e:
+            msg = str(e)
+            if "404" in msg or "not found" in msg.lower():
+                raise ValueError(f"Milestone '{ms_id}' not found") from e
+            if "403" in msg or "forbidden" in msg.lower():
+                raise ValueError(
+                    "Permission denied: only the project owner can "
+                    "purge milestones"
+                ) from e
+            if "400" in msg:
+                raise ValueError(str(e)) from e
+            raise
+        return {
+            "purged": response,
+            "still_dirty": False,
+            "dup_report": {},
+        }
+
     # ms-84 Phase 1 — fine-grained reads
 
     def get_milestone(self, ms_id: str) -> dict:

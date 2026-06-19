@@ -116,6 +116,32 @@ class LocalStore:
     def stop_watching(self) -> None:
         pass
 
+    # ms-84 Phase 2 — fine-grained mutation (purge family)
+
+    def purge_milestone(self, ms_id: str, *,
+                        reason: str, index: int | None = None) -> dict:
+        """Match StoreApi.purge_milestone shape, applied to the local file.
+
+        Wraps ``core.milestone_purge`` (= the actual mutation) with the
+        load / save book-keeping that cmd_milestone_purge previously had
+        inline. ``save_project`` is the bare file-write path that does not
+        run ``validate_project`` — purge intentionally has to function on
+        a project document that is already invalid (= the recovery flow's
+        whole purpose), and the still-dirty case is surfaced in the return
+        value so the CLI can warn without an extra retry path.
+        """
+        import core
+        data = self.load_project()
+        purged = core.milestone_purge(data, ms_id, reason=reason, index=index)
+        dup_report = core.find_duplicate_ids(data)
+        still_dirty = any(dup_report.values())
+        self.save_project(data)
+        return {
+            "purged": purged,
+            "still_dirty": still_dirty,
+            "dup_report": dup_report,
+        }
+
     # ms-84 Phase 1 — fine-grained reads
 
     def get_milestone(self, ms_id: str) -> dict:

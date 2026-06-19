@@ -63,6 +63,32 @@ class Store(Protocol):
         """
         ...
 
+    # ms-84 Phase 2 — fine-grained mutation (purge family).
+    # The cmd_milestone_purge cloud branch currently delegates to a
+    # dedicated _cloud_milestone_purge helper; folding it into Store
+    # lets the CLI drop the _is_cloud_mode branch entirely (= 受入条件 10
+    # で要請される直接呼びの削減)。
+
+    def purge_milestone(self, ms_id: str, *,
+                        reason: str, index: int | None = None) -> dict:
+        """Hard-delete a milestone record (= 物理削除、duplicate-ID 回復用、Issue #14)。
+
+        Returns a dict shaped::
+
+            {
+                "purged": {...the removed milestone fields...},
+                "still_dirty": bool,    # True iff residual duplicates remain (local only)
+                "dup_report": dict,     # find_duplicate_ids output (local only; {} in cloud)
+            }
+
+        Cloud-backed implementations return ``still_dirty=False`` + empty
+        ``dup_report`` because the server enforces single-record purge per
+        request and re-validates the project document afterwards. Raises
+        ``ValueError`` on invalid input (missing reason, unknown id,
+        out-of-range index, etc.) so the CLI can branch uniformly.
+        """
+        ...
+
 
 def get_store(project_file: str | None = None) -> Store:
     """Return the appropriate Store instance.
