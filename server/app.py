@@ -1499,7 +1499,7 @@ def archive_project(
     def op(data: dict):
         data["archived"] = True
         return data, {"status": "archived", "project_id": project_id}
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="project.archive", actor=user.get("sub", ""),
     )
 
@@ -1512,7 +1512,7 @@ def unarchive_project(project_id: str, user: dict = Depends(require_auth)):
     def op(data: dict):
         data["archived"] = False
         return data, {"status": "unarchived", "project_id": project_id}
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="project.unarchive", actor=user.get("sub", ""),
     )
 
@@ -1623,6 +1623,10 @@ def put_project(project_id: str, body: dict,
         actor=user.get("sub", ""),
         reason="PUT /api/projects (whole-document replace)",
     )
+    # ms-43 / e-2128 — explicit WS broadcast after every write. The Firestore
+    # on_snapshot listener is unreliable (silent disconnect, multi-instance
+    # watcher偏り, identical-content dedup), so we don't rely on it alone.
+    _broadcast_project_after_write(project_id)
     return {"status": "ok", "project_id": project_id}
 
 
@@ -1646,7 +1650,7 @@ def create_milestone(project_id: str, body: MilestoneCreate,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return data, {"ms_id": ms_id, "title": body.title}
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="milestone.create", actor=user.get("sub", ""),
     )
 
@@ -1689,7 +1693,7 @@ def update_milestone(project_id: str, ms_id: str, body: MilestoneUpdate,
             "id": ms["id"], "title": ms["title"], "status": ms["status"],
             "progress": ms.get("progress", 0),
         }
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="milestone.update", actor=user.get("sub", ""),
     )
 
@@ -1704,7 +1708,7 @@ def start_milestone(project_id: str, ms_id: str,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return data, {"id": ms["id"], "title": ms["title"], "status": "in_progress"}
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="milestone.start", actor=user.get("sub", ""),
     )
 
@@ -1719,7 +1723,7 @@ def done_milestone(project_id: str, ms_id: str,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return data, {"id": ms["id"], "title": ms["title"], "status": "done"}
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="milestone.done", actor=user.get("sub", ""),
     )
 
@@ -1736,7 +1740,7 @@ def delete_milestone(project_id: str, ms_id: str,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return data, {"id": ms["id"], "status": "cancelled"}
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="milestone.delete", actor=user.get("sub", ""),
     )
 
@@ -1772,7 +1776,7 @@ def purge_milestone(
         return data, {
             "id": ms["id"], "title": ms.get("title", ""), "purged": True,
         }
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="milestone.purge", actor=user.get("sub", ""),
         reason=body.reason,
     )
@@ -1800,7 +1804,7 @@ def create_entry(project_id: str, ms_id: str, body: EntryCreate,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return data, {"entry_id": eid, "description": body.description}
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="entry.create", actor=user.get("sub", ""),
     )
 
@@ -1823,7 +1827,7 @@ def update_entry(project_id: str, entry_id: str, body: EntryUpdate,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return data, core.entries_to_json([entry])[0]
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="entry.update", actor=user.get("sub", ""),
     )
 
@@ -1843,7 +1847,7 @@ def done_entry(project_id: str, entry_id: str,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return data, {"entry_id": entry_id, "status": "done"}
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="entry.done", actor=user.get("sub", ""),
     )
 
@@ -1860,7 +1864,7 @@ def delete_entry(project_id: str, entry_id: str,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return data, {"entry_id": entry_id, "status": "cancelled"}
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="entry.delete", actor=user.get("sub", ""),
     )
 
@@ -1897,7 +1901,7 @@ def purge_entry(
             "description": entry.get("description", ""),
             "purged": True,
         }
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="entry.purge", actor=user.get("sub", ""),
         reason=body.reason,
     )
@@ -1936,7 +1940,7 @@ def purge_operation(
             "title": purged.get("title", ""),
             "purged": True,
         }
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="operation.purge", actor=user.get("sub", ""),
         reason=body.reason,
     )
@@ -2136,7 +2140,7 @@ def log_commit(project_id: str, body: LogCommit,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return data, result
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="project.log", actor=user.get("sub", ""),
     )
 
@@ -2532,7 +2536,7 @@ def invite_member(project_id: str, body: MemberInvite,
         data["members"] = members
         return data, {"status": "invited", "email": body.email, "role": body.role}
 
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="member.invite", actor=user.get("sub", ""),
     )
 
@@ -2555,7 +2559,7 @@ def remove_member(project_id: str, member_email: str,
         data["members"] = new_members
         return data, {"status": "removed", "email": member_email}
 
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="member.remove", actor=user.get("sub", ""),
     )
 
@@ -2626,7 +2630,7 @@ def update_member_role(project_id: str, member_email: str, body: MemberRoleUpdat
             status_code=404, detail=f"Member '{member_email}' not found"
         )
 
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="member.update_role", actor=user.get("sub", ""),
     )
 
@@ -2704,7 +2708,7 @@ def create_invitation(project_id: str, body: InvitationCreate,
         issued["token"] = token
         return data, None
 
-    operations.apply_operation(
+    _apply_op_and_broadcast(
         project_id, op,
         op_name="invitation.create", actor=user.get("sub", ""),
     )
@@ -2763,7 +2767,7 @@ def cancel_invitation(project_id: str, invitation_id: str,
             "invitation": invitations_mod.invitation_public_view(removed),
         }
 
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op,
         op_name="invitation.cancel", actor=user.get("sub", ""),
     )
@@ -2892,7 +2896,7 @@ def accept_invitation(token: str, body: InvitationAccept,
         accepted["invitation"] = inv
         return data, None
 
-    operations.apply_operation(
+    _apply_op_and_broadcast(
         target_pid, op,
         op_name="invitation.accept", actor=caller_id,
     )
@@ -3026,7 +3030,7 @@ def admin_trash_sweep(days: int = 30,
                     data, days=_days, apply=True,
                 )
                 return data, result
-            per_proj_result = operations.apply_operation(
+            per_proj_result = _apply_op_and_broadcast(
                 pid, _sweep_op,
                 op_name="trash.sweep",
                 actor="system",
@@ -3095,7 +3099,7 @@ def admin_transfer_owner(project_id: str, body: AdminOwnerTransfer,
             "email": new_owner.get("email", ""),
         }
 
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="admin.transfer_owner", actor=user.get("sub", ""),
     )
 
@@ -5969,6 +5973,80 @@ async def _broadcast(project_id: str, data: dict):
             await ws.send_json(msg)
         except Exception:
             _ws_connections.get(project_id, set()).discard(ws)
+
+
+def _apply_op_and_broadcast(project_id: str, op, *,
+                            op_name: str = "project.update",
+                            actor: str = "",
+                            reason: str = "",
+                            project_file: Optional[str] = None):
+    """``operations.apply_operation`` + explicit WS broadcast (ms-43 / e-2128).
+
+    Thin wrapper: run apply_operation normally; on success, fan out the new
+    project state to subscribed WS clients via ``_broadcast_project_after_write``.
+    Use this from HTTP write endpoints in place of ``operations.apply_operation``
+    so every write deterministically reaches live clients (= dogfood病理
+    の構造解、 listener 不在経路で dark にならない)。
+
+    Errors from apply_operation propagate normally (= HTTP 4xx/5xx is fired by
+    the caller). Broadcast itself is fail-safe (= broadcast 失敗で write を
+    巻き戻さない、 _broadcast_project_after_write が内部で吸収)。
+    """
+    result = operations.apply_operation(
+        project_id, op,
+        op_name=op_name,
+        actor=actor,
+        reason=reason,
+        project_file=project_file,
+    )
+    _broadcast_project_after_write(project_id)
+    return result
+
+
+def _broadcast_project_after_write(project_id: str) -> None:
+    """Explicit fan-out of the latest project state after a write (ms-43).
+
+    Background — dogfood (2026-06-19) で観測された病理: cloud mode で
+    ``beacon milestone add`` を打っても WebUI に live 反映されない。 原因は
+    PUT /api/projects + apply_operation 経路が broadcast を Firestore の
+    ``on_snapshot`` listener に **完全に委ねている** 設計にあった。 listener は
+    silent disconnect (= 長時間 idle 後の Firestore SDK 仕様)、 multi-instance
+    Cloud Run の watcher 偏り、 identical-content write の SDK dedup 等で
+    fire しなくなる経路を持つ。 fire しないと WebUI 側は **dark** のままに
+    なる (= 「broadcast されない write」 が物理的に存在する状態)。
+
+    構造解 (= ms-43 / e-2128 path): broadcast を listener に依存させない。
+    write 経路の HTTP endpoint で必ず本 helper を呼んで explicit broadcast を
+    打つ。 listener (= ``_on_snapshot``) は cross-instance fallback として残す
+    (= 削除しない、 listener が動く環境では冗長 broadcast、 client 側 JSON
+    dedup で吸収)。
+
+    Behavior:
+      * No-op when no WS clients are subscribed to ``project_id`` (= 速攻 return)
+      * No-op when ``_event_loop`` is unset (= startup hook 未発火、 lambda
+        lifespan=off 経路、 cold-start race)
+      * fail-safe: load_project_consistent 失敗 / broadcast 失敗で write 経路
+        を巻き戻さない、 caller 視点では fire-and-forget
+      * thread-safe: ``asyncio.run_coroutine_threadsafe`` で worker thread から
+        event loop に乗せる (= apply_operation は同期 path で呼ばれる)
+    """
+    if not _ws_connections.get(project_id):
+        return
+    if _event_loop is None:
+        return
+    try:
+        data = operations.load_project_consistent(project_id)
+    except Exception:
+        # load 失敗で broadcast 諦め、 write の成功は影響させない (= UX 上の
+        # 遅延は許容、 listener fallback が後から拾うかもしれない)。
+        return
+    try:
+        asyncio.run_coroutine_threadsafe(
+            _broadcast(project_id, data), _event_loop
+        )
+    except Exception:
+        # event loop が閉じてる等の race。 fire-and-forget なので silent skip。
+        return
 
 
 async def _broadcast_bus_event(project_id: str, event: dict):
