@@ -3038,19 +3038,17 @@ def _list_other_session_ids() -> list:
         except OSError:
             pass
 
-    if _is_cloud_mode():
-        try:
-            from auth import load_credentials
-            if load_credentials() is not None:
-                client, config = _get_api_client()
-                for s in client.list_sessions(config["project_id"]) or []:
-                    sid = s.get("session_id")
-                    if sid and sid != current:
-                        seen.add(sid)
-        except BaseException:
-            if os.environ.get("BEACON_DEBUG") == "1":
-                import traceback as _tb
-                _tb.print_exc()
+    # ms-84 Phase 2 (e-2036): Store.list_session_ids unifies cloud + local.
+    # LocalStore returns []; StoreApi returns the API list (swallowing
+    # transport failures), so the union below does not branch on backend.
+    try:
+        for sid in get_store().list_session_ids():
+            if sid and sid != current:
+                seen.add(sid)
+    except BaseException:
+        if os.environ.get("BEACON_DEBUG") == "1":
+            import traceback as _tb
+            _tb.print_exc()
 
     return sorted(seen)
 

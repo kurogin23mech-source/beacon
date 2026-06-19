@@ -267,6 +267,16 @@ class StoreApi:
         except (RuntimeError, ConnectionError):
             return False
 
+    def list_session_ids(self) -> list[str]:
+        """List session_ids known to the cloud session registry. Returns
+        ``[]`` on transport failure so the caller can union-merge without
+        backend-branching."""
+        try:
+            rows = self._client.list_sessions(self._project_id) or []
+        except (RuntimeError, ConnectionError):
+            return []
+        return [r.get("session_id") for r in rows if r.get("session_id")]
+
     def purge_milestone(self, ms_id: str, *,
                         reason: str, index: int | None = None) -> dict:
         """Match LocalStore.purge_milestone shape, applied via the cloud API.

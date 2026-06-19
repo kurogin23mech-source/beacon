@@ -155,6 +155,14 @@ class LocalStore:
         """
         return False
 
+    def list_session_ids(self) -> list[str]:
+        """No-op for local mode (= remote session registry 不在)。
+
+        Returns ``[]`` so the caller can do an unconditional set-union with
+        locally-known ids.
+        """
+        return []
+
     def purge_milestone(self, ms_id: str, *,
                         reason: str, index: int | None = None) -> dict:
         """Match StoreApi.purge_milestone shape, applied to the local file.

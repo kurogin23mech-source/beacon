@@ -100,6 +100,18 @@ class Store(Protocol):
         """
         ...
 
+    def list_session_ids(self) -> list[str]:
+        """List session_ids visible to the backend (= cloud registry の列挙)。
+
+        Used by the session rescue path to discover other sessions whose
+        entries the local cache may have missed (= cross-machine orphans).
+        LocalStore returns ``[]`` because there is no remote registry to
+        consult; StoreApi calls the API and swallows transport failures,
+        same best-effort contract as ``upsert_session_log``. The caller
+        merges this result with locally-known ids without checking backend.
+        """
+        ...
+
     def purge_milestone(self, ms_id: str, *,
                         reason: str, index: int | None = None) -> dict:
         """Hard-delete a milestone record (= 物理削除、duplicate-ID 回復用、Issue #14)。
