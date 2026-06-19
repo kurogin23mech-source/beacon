@@ -928,6 +928,92 @@ def test_force_stall_session_working_tasks_bulk_transitions():
 
 
 # ---------------------------------------------------------------------------
+# ms-88 / e-2138 — Trek Kickoff Ritual helpers
+# ---------------------------------------------------------------------------
+
+def test_get_kickoff_pending_returns_true_for_unknown_session():
+    """lazy init: kickoff_status に entry がなければ pending=True (= 未送信)。
+    既存 trek docs (= deploy 前データ) も次の interaction で kickoff 強制。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-leader",
+    )
+    assert trek.get_kickoff_pending(t, session_id="sv-fresh") is True
+
+
+def test_mark_kickoff_completed_flips_pending_and_stamps():
+    """mark_kickoff_completed が pending=false + sent_at を立てる。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-leader",
+    )
+    trek.mark_kickoff_completed(
+        t, session_id="sv-exec-1", user_id="u-1",
+        kickoff_dm_event_id="ev-abc",
+    )
+    assert trek.get_kickoff_pending(t, session_id="sv-exec-1") is False
+    entry = (t.get("kickoff_status") or {}).get("sv-exec-1")
+    assert entry is not None
+    assert entry["pending"] is False
+    assert entry["user_id"] == "u-1"
+    assert entry["kickoff_dm_event_id"] == "ev-abc"
+    assert entry["sent_at"]
+
+
+def test_mark_kickoff_completed_is_idempotent():
+    """既 完了 session に対する再 mark は sent_at を上書きしない (= 1 回送ったらそのまま)。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-leader",
+    )
+    trek.mark_kickoff_completed(t, session_id="sv-exec-1", user_id="u-1")
+    first_stamp = (t.get("kickoff_status") or {})["sv-exec-1"]["sent_at"]
+    import time
+    time.sleep(0.01)
+    trek.mark_kickoff_completed(t, session_id="sv-exec-1", user_id="u-1")
+    second_stamp = (t.get("kickoff_status") or {})["sv-exec-1"]["sent_at"]
+    assert first_stamp == second_stamp
+
+
+def test_reset_kickoff_pending_forces_pending_true_for_take_over():
+    """take-over で fresh session が leadership を継ぐ時、 kickoff 強制 reset。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-leader-old",
+    )
+    # 前 session で kickoff 完了済
+    trek.mark_kickoff_completed(t, session_id="sv-leader-new", user_id="u-1")
+    assert trek.get_kickoff_pending(t, session_id="sv-leader-new") is False
+    # take-over → 新 session の kickoff_pending を再 true 化
+    trek.reset_kickoff_pending(t, session_id="sv-leader-new", user_id="u-1")
+    assert trek.get_kickoff_pending(t, session_id="sv-leader-new") is True
+
+
+def test_mark_kickoff_completed_requires_session_id():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    with pytest.raises(ValueError):
+        trek.mark_kickoff_completed(t, session_id="", user_id="u-1")
+
+
+def test_summarize_kickoff_status_pending_vs_completed():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-leader",
+    )
+    # 1 件完了、 1 件 pending (= reset で強制)
+    trek.mark_kickoff_completed(t, session_id="sv-done", user_id="u-1")
+    trek.reset_kickoff_pending(t, session_id="sv-pending", user_id="u-2")
+    s = trek.summarize_kickoff_status(t)
+    assert s["pending_count"] == 1
+    assert s["completed_count"] == 1
+    assert s["pending_sessions"][0]["session_id"] == "sv-pending"
+    assert s["completed_sessions"][0]["session_id"] == "sv-done"
+
+
+# ---------------------------------------------------------------------------
 # Working-state TTL safety net (ms-75 / e-2067)
 # ---------------------------------------------------------------------------
 
