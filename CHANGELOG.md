@@ -2,6 +2,40 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.46.0] - 2026-06-19
+
+- Merge pull request #175 from kurogin23mech-source/ms-86-trek-ui-ms-83-dogfood-server-side-ui
+- feat(ms-86): live session 表示を他 member + user-stop state まで拡張 (e-2045 step 3+4)
+- feat(ms-86): self の live session を working/idle 別に内訳表示 (e-2045 step 2)
+- Merge pull request #174 from kurogin23mech-source/ms-84/cloud-store
+- feat(ms-86): self の live session 数を member row に小さく表示 (e-2045 step 1)
+- refactor(ms-84): _load_session_logs を Store.list_session_logs 経由化 (e-2036)
+- refactor(ms-84): cmd_cycle_status の document fetch を Store 経由化 (e-2036)
+- refactor(ms-84): cmd_doc_image_upload と project_export source_mode を Store.is_cloud() 経由化 (e-2036)
+- refactor(ms-84): cmd_trek_list を Store.list_treks 経由に統一 (e-2036)
+- refactor(ms-84): cmd_trek_show を Store.get_trek 経由に統一 (e-2036)
+- refactor(ms-84): cmd_doc_add / cmd_doc_update の read 経路を Store 経由化 (e-2036)
+- refactor(ms-84): cmd_doc_list / cmd_doc_show を Store 経由に統一 (e-2036)
+- refactor(ms-84): trek + document の read 経路を Store 経由に統一 (e-2036)
+- docs(release): update README/CHANGELOG for v0.45.0
+- chore(release): bump formula to 0.45.0
+- feat(ms-86): aggregate state pill + review-pending banner (e-2058 #3+#4)
+- feat(ms-86): Trek state の realtime 反映経路 — project frame piggyback (e-2022)
+- refactor(ms-84): session log list / show を Store 経由に統一 (e-2036)
+- feat(ms-86): NEXT FIRE 時刻 + RECENT ACTIVITY timeline 実装 (e-2019)
+- feat(ms-86): halt UI を実 API call で wire-through (e-2018)
+- feat(ms-86): 参加 session row 再構成 + task state badge 統合 (e-2017 + e-2058 #1+#2)
+- refactor(ms-84): _aggregate_and_persist の session log fetch を Store 経由化 (e-2036)
+- refactor(ms-84): _list_other_session_ids を Store 経由に統一 (e-2036)
+- refactor(ms-84): session log push を Store 経由に統一 (e-2036)
+- refactor(ms-84): cmd_operation_purge を Store 経由に統一 (e-2036)
+- refactor(ms-84): cmd_entry_purge を Store 経由に統一 (e-2036)
+- refactor(ms-84): cmd_milestone_purge を Store 経由に統一 (e-2036)
+- feat(ms-86): Trek scope 行に drill-down (= 展開) 機構を追加 (e-2016)
+- feat(ms-84): Phase 2 prep — Store.purge_milestone abstraction (e-2036)
+- feat(ms-86): Trek detail page 骨格を 7 ブロック構造に書き換え (e-2015)
+- feat(ms-84): Phase 1 — Store.get_milestone fine-grained read (e-2035)
+
 ## [v0.45.0] - 2026-06-19
 
 - Merge pull request #164 from kurogin23mech-source/feat/local-cloud-docker-compose
