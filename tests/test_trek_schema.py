@@ -643,3 +643,93 @@ def test_aggregate_task_state_active_when_any_working():
     assert agg["overall"] == "active"
     assert agg["working"] == 1
     assert agg["done"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Working-state TTL safety net (ms-75 / e-2067)
+# ---------------------------------------------------------------------------
+
+def test_set_task_state_stamps_last_activity_at():
+    """ms-75 / e-2067 AC 1 — state stamp is one of the documented activity
+    sources, so it must seed ``last_activity_at`` alongside ``updated_at``."""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-1", state="working")
+    entry = t["task_states"]["e-1"]
+    assert entry["last_activity_at"]
+    # last_activity_at matches the same moment as updated_at on initial
+    # write (= no clock drift between the two stamps).
+    assert entry["last_activity_at"] == entry["updated_at"]
+
+
+def test_bump_task_activity_refreshes_last_activity_at_without_state_change():
+    """ms-75 / e-2067 AC 1 — commits / DM receipts bump activity without
+    transitioning the state. The state stays 'working' but the auto-stall
+    clock resets."""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-1", state="working")
+    initial_state = t["task_states"]["e-1"]["state"]
+    initial_activity = t["task_states"]["e-1"]["last_activity_at"]
+    import time
+    time.sleep(0.01)  # Force a different ISO timestamp.
+    trek.bump_task_activity(t, task_id="e-1", reason="commit:abc123")
+    entry = t["task_states"]["e-1"]
+    assert entry["state"] == initial_state  # No state change.
+    assert entry["last_activity_at"] > initial_activity
+    assert entry["last_activity_reason"] == "commit:abc123"
+
+
+def test_bump_task_activity_initializes_entry_for_unknown_task():
+    """A commit / DM landing on a task that no executor has stamped yet
+    should still anchor the auto-stall clock — otherwise the scheduler
+    would treat the brand-new task as 'never active' and skip it."""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.bump_task_activity(t, task_id="e-new", reason="dm-receipt")
+    entry = t["task_states"]["e-new"]
+    assert entry["state"] == "working"  # Default state.
+    assert entry["last_activity_at"]
+
+
+def test_bump_task_activity_requires_task_id():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    with pytest.raises(ValueError):
+        trek.bump_task_activity(t, task_id="", reason="x")
+
+
+def test_get_working_ttl_minutes_default_when_unset():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    # Default is 30 min per SPEC.
+    assert trek.get_working_ttl_minutes(t) == 30
+
+
+def test_get_working_ttl_minutes_honors_meta_override():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    t.setdefault("meta", {})["working_ttl_minutes"] = 5
+    assert trek.get_working_ttl_minutes(t) == 5
+
+
+def test_get_working_ttl_minutes_falls_back_on_non_numeric_override():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    t.setdefault("meta", {})["working_ttl_minutes"] = "garbage"
+    # Bad config must not crash; fall back to default so safety net stays on.
+    assert trek.get_working_ttl_minutes(t) == 30

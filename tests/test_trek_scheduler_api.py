@@ -346,3 +346,216 @@ def test_10min_cadence_does_not_refire_immediately():
     # Only one bus event landed.
     events = _bus_events_by_project["beacon-test"]
     assert len(events) == 1
+
+
+# ---------------------------------------------------------------------------
+# Auto-stall pass (ms-75 / e-2067) — HTTP integration
+# ---------------------------------------------------------------------------
+
+def test_auto_stall_transitions_stalled_task_to_waiting_review():
+    """A working task with last_activity 31 min ago + default 30 min TTL
+    triggers the safety net: the server transitions to waiting-review and
+    fires a trek-task-review DM to the leader."""
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    stale = (now - datetime.timedelta(minutes=31)).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    _seed_trek(
+        trek_id="tk-stall0001",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-75"}],
+        last_at=stale,  # prevent cadence-fire from also running
+    )
+    _treks["tk-stall0001"]["task_states"] = {
+        "e-1": {
+            "state": "working",
+            "updated_at": stale,
+            "last_activity_at": stale,
+            "updated_by_session_id": "sv-exec",
+            "note": "",
+        },
+    }
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-stall0001"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "auto_stalled" in body
+    assert len(body["auto_stalled"]) == 1
+    entry = body["auto_stalled"][0]
+    assert entry["trek_id"] == "tk-stall0001"
+    assert entry["task_id"] == "e-1"
+    assert entry["silence_minutes"] >= 31
+    assert entry["ttl_minutes"] == 30
+
+    # Trek doc has the new terminal state.
+    saved = _treks["tk-stall0001"]
+    assert saved["task_states"]["e-1"]["state"] == "waiting-review"
+    assert "auto-stalled" in saved["task_states"]["e-1"]["note"]
+
+    # Leader received a trek-task-review DM with auto_stalled flag.
+    events = _bus_events_by_project["beacon-test"]
+    review_events = [
+        e for e in events if e["channel"] == "trek-task-review"
+    ]
+    assert len(review_events) == 1
+    rev = review_events[0]
+    assert rev["delivery"] == "auto-execute"
+    assert rev["payload"]["trek_id"] == "tk-stall0001"
+    assert rev["payload"]["task_id"] == "e-1"
+    assert rev["payload"]["state"] == "waiting-review"
+    assert rev["payload"]["auto_stalled"] is True
+    assert rev["payload"]["silence_minutes"] >= 31
+    assert rev["payload"]["recipient_session_id"] == "sv-leader"
+
+
+def test_auto_stall_does_not_fire_for_task_under_ttl():
+    """Working task with 5 min silence + default 30 min TTL stays in working."""
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    recent = (now - datetime.timedelta(minutes=5)).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    _seed_trek(
+        trek_id="tk-stall0002",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-75"}],
+        last_at=recent,
+    )
+    _treks["tk-stall0002"]["task_states"] = {
+        "e-1": {
+            "state": "working",
+            "updated_at": recent,
+            "last_activity_at": recent,
+        },
+    }
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-stall0002"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.json()["auto_stalled"] == []
+    assert _treks["tk-stall0002"]["task_states"]["e-1"]["state"] == "working"
+
+
+def test_auto_stall_honors_per_trek_ttl_override():
+    """meta.working_ttl_minutes=5: a task 6 min silent triggers the safety
+    net even though the default TTL is 30 min (= AC 6)."""
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    stale = (now - datetime.timedelta(minutes=6)).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    _seed_trek(
+        trek_id="tk-stall0003",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-75"}],
+        last_at=stale,
+    )
+    _treks["tk-stall0003"]["meta"]["working_ttl_minutes"] = 5
+    _treks["tk-stall0003"]["task_states"] = {
+        "e-1": {
+            "state": "working",
+            "updated_at": stale,
+            "last_activity_at": stale,
+        },
+    }
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-stall0003"]},
+        headers=HEADERS_OK,
+    )
+    body = resp.json()
+    assert len(body["auto_stalled"]) == 1
+    assert body["auto_stalled"][0]["ttl_minutes"] == 5
+
+
+def test_auto_stall_skips_halted_trek():
+    """halt set = leader paused; safety net stays silent (= AC: not duplicate
+    signal to a leader who already engaged the cord)."""
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    stale = (now - datetime.timedelta(minutes=60)).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    _seed_trek(
+        trek_id="tk-stall0004",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-75"}],
+        last_at=stale,
+    )
+    _treks["tk-stall0004"]["halt"] = {
+        "issued_at": stale,
+        "issued_by_session_id": "sv-leader",
+        "reason": "manual stop",
+    }
+    _treks["tk-stall0004"]["task_states"] = {
+        "e-1": {"state": "working", "last_activity_at": stale},
+    }
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-stall0004"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.json()["auto_stalled"] == []
+
+
+def test_auto_stall_leader_can_recover_via_re_stamp_working():
+    """AC 5: false-positive recovery path. After auto-stall, the leader
+    transitions waiting-review → working and the next tick treats the
+    task as fresh."""
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    stale = (now - datetime.timedelta(minutes=31)).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    _seed_trek(
+        trek_id="tk-stall0005",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-75"}],
+        last_at=stale,
+    )
+    _treks["tk-stall0005"]["task_states"] = {
+        "e-1": {
+            "state": "working",
+            "updated_at": stale,
+            "last_activity_at": stale,
+        },
+    }
+    # Auto-stall fires.
+    r1 = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-stall0005"]},
+        headers=HEADERS_OK,
+    )
+    assert len(r1.json()["auto_stalled"]) == 1
+    assert _treks["tk-stall0005"]["task_states"]["e-1"]["state"] == "waiting-review"
+
+    # Leader simulates re-stamping working (= the lib operation behind the
+    # PATCH endpoint). The transition is allowed by
+    # VALID_TASK_STATE_TRANSITIONS so this works.
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
+    import trek as trek_mod
+    trek_mod.set_task_state(
+        _treks["tk-stall0005"],
+        task_id="e-1",
+        state="working",
+        updated_by_session_id="sv-leader",
+        note="false positive — executor was busy committing",
+    )
+    assert _treks["tk-stall0005"]["task_states"]["e-1"]["state"] == "working"
+    # last_activity_at refreshed → next tick does NOT auto-stall.
+    r2 = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-stall0005"]},
+        headers=HEADERS_OK,
+    )
+    assert r2.json()["auto_stalled"] == []

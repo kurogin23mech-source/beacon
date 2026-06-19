@@ -4637,12 +4637,120 @@ def trek_scheduler_tick_endpoint(
             "idle_minutes": payload.get("idle_minutes"),
         })
 
+    # ms-75 / e-2067: auto-stall pass. Independent of cadence-fire because
+    # the safety net must fire whenever a working task crosses its TTL —
+    # regardless of whether the trek's progress-check is due this tick.
+    # This catches executors that recognised the trek-progress-check event
+    # but skipped state transition (= silent-ack pathology empirically
+    # observed in the 2026-06-19 dogfood). The transition to waiting-review
+    # is reversible: VALID_TASK_STATE_TRANSITIONS allows waiting-review →
+    # working, so a false-positive auto-stall is recoverable by the leader.
+    auto_stalled: list[dict] = []
+    for trek_doc in candidate_treks:
+        trek_id = trek_doc.get("trek_id", "")
+        # Re-read to pick up in-tick mutations (= the cadence-fire pass
+        # above may have bumped last_progress_check_at on this trek and
+        # we want the freshest task_states view for stall detection).
+        fresh = db.get_trek(trek_id)
+        if fresh is not None:
+            trek_doc = fresh
+        stalled = trek_scheduler_mod.detect_auto_stalled_tasks(
+            trek_doc, now=now,
+        )
+        if not stalled:
+            continue
+        scope = trek_doc.get("scope") or []
+        if not scope:
+            continue
+        target_pid = scope[0].get("project", "")
+        if not target_pid:
+            continue
+        leader_sid = trek_doc.get("leader_session_id") or ""
+        for s in stalled:
+            task_id = s["task_id"]
+            silence = s["silence_minutes"]
+            ttl = s["ttl_minutes"]
+            note = trek_scheduler_mod.build_auto_stall_note(silence)
+            try:
+                trek_mod.set_task_state(
+                    trek_doc,
+                    task_id=task_id,
+                    state="waiting-review",
+                    updated_by_session_id="",  # = server-initiated
+                    note=note,
+                )
+            except ValueError:
+                # Another tick already transitioned this task (= race
+                # window); skip silently and continue with other stalls.
+                continue
+            try:
+                db.save_trek(trek_id, trek_doc)
+            except Exception:
+                continue
+            event_id = ""
+            if leader_sid:
+                try:
+                    envelope = envelope_mod.issue_t1_system_envelope(
+                        project_id=target_pid,
+                        trek_id=trek_id,
+                        actions_authorized=["trek.task_review"],
+                        data_class="free",
+                        ttl_seconds=3600,
+                    )
+                except Exception:
+                    envelope = None
+                review_payload = {
+                    "kind": "trek-task-review",
+                    "trek_id": trek_id,
+                    "task_id": task_id,
+                    "state": "waiting-review",
+                    "note": note,
+                    "updated_by_session_id": "",
+                    "recipient_session_id": leader_sid,
+                    "auto_stalled": True,
+                    "silence_minutes": silence,
+                    "ttl_minutes": ttl,
+                    "body": (
+                        f"[Trek task auto-stalled] trek_id={trek_id} "
+                        f"task_id={task_id} silence={silence} min "
+                        f"(TTL={ttl})\n"
+                        f"executor が working state のまま {silence} 分無活動。"
+                        f" server-side TTL safety net (= e-2067) が "
+                        f"waiting-review に降格しました。\n"
+                        f"次の action: /beacon-trek-review {trek_id} "
+                        f"{task_id} で approve / re-work / forward-to-user "
+                        f"を選んでください。 false-positive なら "
+                        f"waiting-review → working に re-stamp で復旧可能。"
+                    ),
+                    "created_at": trek_mod.utcnow_iso(),
+                }
+                bus_data = {
+                    "channel": "trek-task-review",
+                    "sender_session_id": "",
+                    "payload": review_payload,
+                    "envelope": envelope,
+                    "delivery": "auto-execute",
+                    "created_at": trek_mod.utcnow_iso(),
+                }
+                try:
+                    event_id = db.append_bus_event(target_pid, bus_data)
+                except Exception:
+                    event_id = ""
+            auto_stalled.append({
+                "trek_id": trek_id,
+                "task_id": task_id,
+                "silence_minutes": silence,
+                "ttl_minutes": ttl,
+                "event_id": event_id,
+            })
+
     return {
         "now": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "candidates": len(candidate_treks),
         "due": len(due_treks),
         "fired": fired,
         "escalations": escalations,
+        "auto_stalled": auto_stalled,
         "errors": errors,
         "quiesced": quiesced,
     }
