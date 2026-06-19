@@ -6506,13 +6506,16 @@ async function renderMenu() {
                 const muted = !!s.shutdown;
                 const sid = (s.session_id || s.actor && s.actor.session_id || '');
                 const email = (s.actor && s.actor.email) || '';
+                // ms-82 / e-1971 \u2014 apply renderName so display_name (if set)
+                // appears here too, closing the ms-78 / e-1909 propagation gap.
+                const displayName = (s.actor && s.actor.display_name) || '';
                 const proj = s.project_name || s.project_id || '';
                 return `
                   <div class="sidebar-agent-row ${muted ? 'muted' : ''}">
                     <span class="agent-dot"></span>
                     <div class="agent-meta">
                       <span class="agent-id">${esc((sid || '').slice(0, 12))}\u2026</span>
-                      <span class="agent-where">${esc(email)}<br>${esc(proj)}</span>
+                      <span class="agent-where">${renderName(displayName, email)}<br>${esc(proj)}</span>
                     </div>
                   </div>`;
               }).join('')
