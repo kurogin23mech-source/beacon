@@ -503,8 +503,8 @@ body::after {
   background: var(--bg-raised);
   border: 1px solid var(--border);
   border-radius: 6px;
-  min-width: 240px;
-  padding: 8px 0;
+  min-width: 280px;
+  padding: 10px 0 6px;
   font-size: 0.78rem;
   display: none;
   z-index: 1600;
@@ -521,9 +521,53 @@ body::after {
 .account-menu-email {
   padding: 0 14px 10px;
   color: var(--text-primary);
+  word-break: break-all;
+  font-size: 0.78rem;
+}
+/* ---- Profile modal section (ms-82 e-1972) ----
+   Avatar-opened Profile editor consolidating display_name + email + Sign out. */
+.account-menu-profile-row {
+  padding: 8px 14px 10px;
   border-bottom: 1px solid var(--border-subtle);
   margin-bottom: 6px;
-  word-break: break-all;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.account-menu-profile-row .label {
+  font-size: 0.62rem;
+  color: var(--text-dim);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.account-menu-profile-row input {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: 0.78rem;
+  padding: 5px 8px;
+  border-radius: 3px;
+  width: 100%;
+}
+.account-menu-profile-row .actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.account-menu-profile-row .save-btn {
+  background: var(--accent);
+  color: #000;
+  border: 0;
+  padding: 5px 12px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+.account-menu-profile-row .save-msg {
+  color: var(--text-dim);
+  font-size: 0.68rem;
 }
 .account-menu-item {
   display: block;
@@ -3438,12 +3482,24 @@ function renderShell(app) {
       </div>
     </header>
 
-    <!-- Account menu (modal-style: overlay backdrop + lifted z-index so the
-         Objective block can't paint over the popup) -->
+    <!-- Profile modal (ms-82 e-1972) — opens from avatar.
+         Replaces the legacy account-menu dropdown. Holds display_name editor,
+         email (read-only), Admin link, and Sign out, so Settings > Profile tab
+         can be removed (= follow-up e-1973). -->
     <div id="account-menu-backdrop" class="account-menu-backdrop ${state.accountMenuOpen ? 'open' : ''}" data-action="close-account-menu"></div>
     <div id="account-menu" class="account-menu ${state.accountMenuOpen ? 'open' : ''}">
-      <div class="account-menu-head">ACCOUNT</div>
+      <div class="account-menu-head">Profile</div>
       <div class="account-menu-email">${esc((state.auth && state.auth.email) || 'unknown')}</div>
+      <div class="account-menu-profile-row">
+        <div class="label">Display name</div>
+        <input id="account-profile-display-name" type="text"
+               value="${esc((state.myProfile && state.myProfile.display_name) || '')}"
+               placeholder="(blank shows email)" maxlength="60">
+        <div class="actions">
+          <button class="save-btn" data-action="account-profile-save">Save</button>
+          <span class="save-msg" id="account-profile-msg"></span>
+        </div>
+      </div>
       ${PLATFORM.accountMenuItemsHTML()}
     </div>
 
@@ -4200,6 +4256,33 @@ async function _settingsSaveProfile() {
     } catch (_) { /* private mode — ignore */ }
   } catch (e) {
     if (msg) msg.textContent = `エラー: ${e && e.message ? e.message : 'unknown'}`;
+  }
+}
+
+// ms-82 / e-1972 — save handler for avatar Profile modal.
+// Same endpoint as Settings > Profile, but rendered inside the avatar popup.
+// Once e-1973 deletes the Settings > Profile tab, this becomes the sole UI
+// path for editing display_name from the Web UI.
+async function _accountProfileSave() {
+  const input = document.getElementById('account-profile-display-name');
+  const msg = document.getElementById('account-profile-msg');
+  if (!input) return;
+  const value = (input.value || '').trim();
+  if (msg) msg.textContent = 'Saving…';
+  try {
+    const res = await dataSource.updateMyProfile(value);
+    state.myProfile = state.myProfile || {};
+    state.myProfile.display_name = (res && typeof res.display_name === 'string')
+      ? res.display_name : value;
+    if (msg) msg.textContent = value ? 'Saved.' : 'Cleared (email shown).';
+    try {
+      localStorage.setItem(
+        'beacon_display_name_prompt_dismissed_at',
+        new Date().toISOString()
+      );
+    } catch (_) { /* private mode — ignore */ }
+  } catch (e) {
+    if (msg) msg.textContent = `Error: ${e && e.message ? e.message : 'unknown'}`;
   }
 }
 
@@ -6167,6 +6250,9 @@ function handleCommonAction(action, el) {
     // ms-78 / e-1909 — Settings > Profile + retroactive prompt.
     case 'settings-profile-save':
       _settingsSaveProfile(); return true;
+    // ms-82 / e-1972 — avatar-opened Profile modal save handler.
+    case 'account-profile-save':
+      _accountProfileSave(); return true;
     case 'display-name-prompt-save':
       _displayNamePromptSave(); return true;
     case 'display-name-prompt-dismiss':
