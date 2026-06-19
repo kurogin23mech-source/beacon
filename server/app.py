@@ -3205,6 +3205,12 @@ class TrekPulseAck(BaseModel):
     note: str = ""
 
 
+# ms-88 / e-2138 — kickoff completion body (= /beacon-trek-pulse Step 0 が呼ぶ)
+class TrekKickoff(BaseModel):
+    session_id: str
+    kickoff_dm_event_id: str = ""  # bus.send 結果の event_id (= audit trace)
+
+
 def _load_trek_for_read(trek_id: str, user: dict) -> dict:
     """Load a trek doc. 404 if missing, 403 if caller is neither creator
     nor a member (per SPEC visibility = creator OR members)."""
@@ -3604,8 +3610,73 @@ def take_over_trek_endpoint(trek_id: str, body: TrekTakeOver,
         trek_mod.transfer_leader(t, target_session_id=body.session_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # ms-88 / e-2138 — take-over した fresh session は kickoff_pending=true に
+    # 強制 reset。 前 session の kickoff が完了済でも、 新 session は別の plan
+    # / worktree を持つ可能性があるので、 peer に再度 announce する義務を持つ。
+    uid_for_reset = (user.get("sub") if _auth_enabled else "") or ""
+    trek_mod.reset_kickoff_pending(
+        t, session_id=body.session_id, user_id=uid_for_reset,
+    )
     db.save_trek(trek_id, t)
     return t
+
+
+@app.post("/api/treks/{trek_id}/kickoff")
+def trek_kickoff_endpoint(trek_id: str, body: TrekKickoff,
+                          user: dict = Depends(require_auth)):
+    """Mark a session's kickoff DM as sent (ms-88 / e-2138).
+
+    Called by ``/beacon-trek-pulse`` Skill's Step 0 after it has generated
+    and sent the kickoff DM to the trek leader. Until this endpoint is
+    called, ``pulse-ack`` rejects further progress for the same session
+    with HTTP 400 ``kickoff_required``.
+
+    Auth: caller must be a trek member at the user grain. The endpoint
+    itself does not verify the DM was actually sent — that is a Skill /
+    audit-side concern. The structural enforcement is "no pulse-ack
+    progress until kickoff endpoint is called", which is sufficient to
+    force the executor through the Skill body's Step 0.
+
+    Returns the updated per-session kickoff_status entry so the Skill can
+    echo "stamped" back to the user.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    if _auth_enabled:
+        uid = user.get("sub") or ""
+        if not trek_mod.find_member(t, uid):
+            raise HTTPException(
+                status_code=403,
+                detail="only trek members can mark kickoff completed",
+            )
+    if not body.session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+    try:
+        uid_for_stamp = (user.get("sub") if _auth_enabled else "") or ""
+        trek_mod.mark_kickoff_completed(
+            t,
+            session_id=body.session_id,
+            user_id=uid_for_stamp,
+            kickoff_dm_event_id=body.kickoff_dm_event_id or "",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.save_trek(trek_id, t)
+    return (t.get(trek_mod.KICKOFF_HISTORY_KEY) or {}).get(body.session_id) or {}
+
+
+@app.get("/api/treks/{trek_id}/kickoff")
+def trek_kickoff_status_endpoint(trek_id: str,
+                                  user: dict = Depends(require_auth)):
+    """Per-session kickoff summary (ms-88 / e-2138)."""
+    t = _load_trek_for_read(trek_id, user)
+    if _auth_enabled:
+        uid = user.get("sub") or ""
+        if not trek_mod.find_member(t, uid):
+            raise HTTPException(
+                status_code=403,
+                detail="only trek members can read kickoff status",
+            )
+    return trek_mod.summarize_kickoff_status(t)
 
 
 @app.post("/api/treks/{trek_id}/pulse-ack")
@@ -3637,6 +3708,21 @@ def trek_pulse_ack_endpoint(trek_id: str, body: TrekPulseAck,
             )
     if not body.session_id:
         raise HTTPException(status_code=400, detail="session_id required")
+    # ms-88 / e-2138 — Kickoff Ritual physical gate. 自セッションが kickoff DM を
+    # 送信していなければ pulse-ack を拒否し、 Skill side の Step 0 (= kickoff DM
+    # 自動生成 + leader 宛送信) を走らせる。 narrative ではなく server-side
+    # validation で「kickoff 未送信なら progress 不可」 を物理的に閉じる。
+    if trek_mod.get_kickoff_pending(t, session_id=body.session_id):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "kickoff_required: this session has not yet sent its kickoff DM. "
+                "Run /beacon-trek-pulse Step 0 to send the kickoff DM to the trek "
+                "leader (= self-info + plan + worktree + non-touch range), then "
+                "POST /api/treks/{trek_id}/kickoff to mark it completed, then "
+                "retry pulse-ack."
+            ),
+        )
     try:
         trek_mod.record_pulse_ack(
             t,

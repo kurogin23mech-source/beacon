@@ -37,6 +37,29 @@ VALID_TREK_TYPES = ("temporary", "persistent")
 VALID_TREK_STATUSES = ("planning", "active", "archived")
 VALID_MEMBER_ROLES = ("leader", "member")
 
+# ms-88 / e-2138 — Trek Kickoff Ritual (= per-session kickoff state map).
+# 同 user の複数 session が peer 状況を共有できていなかった race (= 2026-06-20
+# tk-3045b8d1 dogfood で観測、 3 session が同 cwd を共有して unstaged 編集が
+# 5 分間消失) を構造的に塞ぐため、 join / take-over した session に「peer に
+# 1 度は声をかけて自分の plan を共有する」 を強制する。
+#
+# Schema: trek_doc.kickoff_status: dict[session_id -> KickoffStatusEntry]
+#     KickoffStatusEntry {
+#       session_id: str,
+#       user_id: str,           # session が所属する member の user_id
+#       pending: bool,          # True = まだ kickoff 未送信、 pulse-ack 拒否対象
+#       sent_at: ISO timestamp, # 完了時のスタンプ
+#       kickoff_dm_event_id: str (optional, トレース用)
+#     }
+#
+# Lazy init 設計: join / take-over 時に pre-populate しない。 pulse-ack endpoint
+# で session_id が status map に居なければ「未 kickoff」 と判定して 400 reject。
+# /beacon-trek-pulse Skill の Step 0 が kickoff DM 送信 + kickoff endpoint call で
+# 状態を完了に flip する。 既存 member (= deploy 前から joined) も次の pulse-ack で
+# 初めて触れた時点で「kickoff 未」 として扱われる (= migration なし、 backward
+# compat は existing trek docs の kickoff_status 不在 default 経由で吸収)。
+KICKOFF_HISTORY_KEY = "kickoff_status"
+
 # ms-75 / e-2048 + ms-88 / e-2107 — Trek-internal task state machine.
 # 5-state model (= CORE doc 5nfTSmCDVUzD4SLzIhI5 § "Trek task state machine"):
 #   - todo: scope-registered but executor has not claimed yet
@@ -473,6 +496,104 @@ def summarize_pulse_acks(trek_doc: dict) -> dict:
     return {
         "sessions": sessions,
         "total_acks_across_sessions": total,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Trek Kickoff Ritual (ms-88 / e-2138)
+# ---------------------------------------------------------------------------
+
+def get_kickoff_pending(trek_doc: dict, *, session_id: str) -> bool:
+    """Return True if ``session_id`` has NOT yet sent its kickoff DM (ms-88 / e-2138).
+
+    Lazy init semantics: missing entry → pending=True (= session never touched
+    kickoff endpoint). Existing entry with ``pending=False`` → done. This
+    means existing trek docs (= pre-deploy data) treat every session as
+    "pending" on first interaction, which is exactly the desired backward-
+    compat behaviour (= 「post-deploy で初めて見えた session は必ず kickoff
+    から始める」)。
+    """
+    status_map = trek_doc.get(KICKOFF_HISTORY_KEY) or {}
+    entry = status_map.get(session_id) or {}
+    if not entry:
+        return True
+    return bool(entry.get("pending", True))
+
+
+def mark_kickoff_completed(trek_doc: dict, *, session_id: str,
+                           user_id: str = "",
+                           kickoff_dm_event_id: str = "") -> dict:
+    """Stamp ``session_id`` as having sent its kickoff DM (ms-88 / e-2138).
+
+    Caller (= server endpoint) verifies the kickoff DM was actually sent
+    before calling this; we just record the fact. Idempotent — re-calling
+    keeps ``sent_at`` of the first call (= 1 回送れば OK)、 後続で kickoff
+    DM を再送しても新 stamp は付かない。
+
+    Returns the mutated trek_doc.
+    """
+    if not session_id:
+        raise ValueError("session_id is required")
+    status_map = trek_doc.setdefault(KICKOFF_HISTORY_KEY, {})
+    existing = status_map.get(session_id) or {}
+    if existing.get("pending") is False and existing.get("sent_at"):
+        # Already completed; keep original stamp.
+        return trek_doc
+    now = utcnow_iso()
+    status_map[session_id] = {
+        "session_id": session_id,
+        "user_id": user_id or "",
+        "pending": False,
+        "sent_at": now,
+        "kickoff_dm_event_id": kickoff_dm_event_id or "",
+    }
+    trek_doc["updated_at"] = now
+    return trek_doc
+
+
+def reset_kickoff_pending(trek_doc: dict, *, session_id: str,
+                          user_id: str = "") -> dict:
+    """Force a session back into ``pending=True`` state (ms-88 / e-2138).
+
+    Used after ``take-over`` when a fresh session inherits leadership and
+    the new session has not yet announced its plan to peers. Resetting
+    forces the new leader session to send its own kickoff DM before any
+    further pulse-ack progresses.
+    """
+    if not session_id:
+        raise ValueError("session_id is required")
+    status_map = trek_doc.setdefault(KICKOFF_HISTORY_KEY, {})
+    status_map[session_id] = {
+        "session_id": session_id,
+        "user_id": user_id or "",
+        "pending": True,
+        "sent_at": "",
+        "kickoff_dm_event_id": "",
+    }
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
+
+
+def summarize_kickoff_status(trek_doc: dict) -> dict:
+    """Per-session kickoff snapshot for dashboards (ms-88 / e-2138)。"""
+    status_map = trek_doc.get(KICKOFF_HISTORY_KEY) or {}
+    pending = []
+    completed = []
+    for sid, entry in status_map.items():
+        if entry.get("pending"):
+            pending.append({"session_id": sid,
+                            "user_id": entry.get("user_id") or ""})
+        else:
+            completed.append({
+                "session_id": sid,
+                "user_id": entry.get("user_id") or "",
+                "sent_at": entry.get("sent_at") or "",
+            })
+    return {
+        "pending_count": len(pending),
+        "completed_count": len(completed),
+        "pending_sessions": pending,
+        "completed_sessions": completed,
     }
 
 
