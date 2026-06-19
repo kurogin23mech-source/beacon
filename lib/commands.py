@@ -11516,17 +11516,17 @@ def _load_session_logs() -> list[dict]:
     session_log subcollection.
     """
     try:
-        if _is_cloud_mode():
-            client, config = _get_api_client()
-            try:
-                rows = client.list_session_logs(config["project_id"]) or []
-                # tolerate either dict or list responses
-                if isinstance(rows, dict):
-                    rows = rows.get("session_logs") or rows.get("items") or []
-                return rows if isinstance(rows, list) else []
-            except Exception:
-                return []
-        # Local mode: look for .beacon/session_logs/*.json
+        # ms-84 Phase 2: Store.list_session_logs() で cloud / local 二経路を
+        # 単一の呼び出しに寄せる。 StoreApi 側が transport 失敗を [] に丸める
+        # best-effort 契約を持つので、 cloud auth glitch も同じ try/except で
+        # 拾える。 LocalStore は no-op で [] を返す設計 (= Protocol docstring
+        # 参照) のため、 local モード時は下の directory walk fallback が拾う。
+        rows = get_store().list_session_logs() or []
+        if isinstance(rows, dict):
+            rows = rows.get("session_logs") or rows.get("items") or []
+        if isinstance(rows, list) and rows:
+            return rows
+        # Local mode (or empty cloud): walk .beacon/session_logs/*.json
         project_dir = os.path.dirname(get_project_file())
         sl_dir = os.path.join(project_dir, "session_logs")
         if not os.path.isdir(sl_dir):
