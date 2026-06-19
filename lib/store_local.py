@@ -118,6 +118,20 @@ class LocalStore:
 
     # ms-84 Phase 2 — fine-grained mutation (purge family)
 
+    def purge_entry(self, entry_id: str, *,
+                    reason: str, index: int | None = None) -> dict:
+        """Match StoreApi.purge_entry shape, applied to the local file."""
+        import core
+        data = self.load_project()
+        purged = core.entry_purge(data, entry_id, reason=reason, index=index)
+        dup_report = core.find_duplicate_ids(data)
+        self.save_project(data)
+        return {
+            "purged": purged,
+            "still_dirty": any(dup_report.values()),
+            "dup_report": dup_report,
+        }
+
     def purge_milestone(self, ms_id: str, *,
                         reason: str, index: int | None = None) -> dict:
         """Match StoreApi.purge_milestone shape, applied to the local file.

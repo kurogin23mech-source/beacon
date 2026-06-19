@@ -69,6 +69,16 @@ class Store(Protocol):
     # lets the CLI drop the _is_cloud_mode branch entirely (= 受入条件 10
     # で要請される直接呼びの削減)。
 
+    def purge_entry(self, entry_id: str, *,
+                    reason: str, index: int | None = None) -> dict:
+        """Hard-delete an entry record (= タスク / コミット / ノート等の物理削除)。
+
+        Same contract as purge_milestone — returns ``{purged, still_dirty,
+        dup_report}`` and translates HTTP / value errors uniformly so the
+        CLI does not have to branch on backend.
+        """
+        ...
+
     def purge_milestone(self, ms_id: str, *,
                         reason: str, index: int | None = None) -> dict:
         """Hard-delete a milestone record (= 物理削除、duplicate-ID 回復用、Issue #14)。

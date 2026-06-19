@@ -1789,40 +1789,6 @@ def _cloud_purge_dispatch(action_label: str, fn, *,
             print(line)
 
 
-def _cloud_entry_purge(entry_id: str, *, reason: str,
-                        index: Optional[int], json_mode: bool) -> None:
-    client, config = _get_api_client()
-    project_id = config["project_id"]
-    data = _cloud_fetch_project_or_exit(client, project_id)
-    matches = core.find_entries(data, entry_id)
-    if not matches:
-        print(f"Entry not found: {entry_id}", file=sys.stderr)
-        sys.exit(1)
-    if len(matches) > 1 and index is None:
-        print(
-            f"Entry '{entry_id}' has {len(matches)} duplicate records. "
-            "Re-run with --index <n>:",
-            file=sys.stderr,
-        )
-        for i, e in enumerate(matches, 1):
-            desc = e.get("description", "(no description)")
-            etype = e.get("type", "?")
-            print(f"  --index {i}  type={etype}  desc={desc[:60]}",
-                  file=sys.stderr)
-        sys.exit(1)
-    _cloud_purge_dispatch(
-        "entry",
-        lambda: client.purge_entry(
-            project_id, entry_id, reason=reason, index=index),
-        json_mode=json_mode,
-        success_fmt=lambda r: [
-            f"Purged entry: [{r.get('entry_id', entry_id)}] "
-            f"{r.get('description', '')[:80]}",
-            f"  Reason: {reason}",
-        ],
-    )
-
-
 def _cloud_operation_purge(op_id: str, *, reason: str,
                             index: Optional[int], json_mode: bool) -> None:
     client, config = _get_api_client()
@@ -2022,12 +1988,13 @@ def cmd_entry_purge():
                   file=sys.stderr)
             sys.exit(1)
 
-    if _is_cloud_mode():
-        _cloud_entry_purge(entry_id, reason=reason, index=index,
-                           json_mode=json_mode)
-        return
-
-    data = load_project_unsafe()
+    # ms-84 Phase 2 (e-2036): Store.purge_entry unifies cloud + local paths.
+    store = get_store()
+    try:
+        data = store.load_project()
+    except (RuntimeError, ConnectionError) as e:
+        print(f"Error loading project: {e}", file=sys.stderr)
+        sys.exit(1)
     matches = core.find_entries(data, entry_id)
     if not matches:
         print(f"Entry not found: {entry_id}", file=sys.stderr)
@@ -2042,28 +2009,23 @@ def cmd_entry_purge():
         sys.exit(1)
 
     try:
-        purged = core.entry_purge(data, entry_id, reason=reason, index=index)
+        result = store.purge_entry(entry_id, reason=reason, index=index)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    dup_report = core.find_duplicate_ids(data)
-    still_dirty = any(dup_report.values())
-    op = {
-        "op": "entry_purge",
-        "entry_id": entry_id,
-        "index": index,
-        "reason": reason,
-        "purged_desc": purged.get("description", ""),
-    }
-    if still_dirty:
-        save_project_unsafe(data, op=op)
-    else:
-        try:
-            save_project(data, op=op)
-        except ValueError as e:
-            save_project_unsafe(data, op=op)
-            print(f"Warning: post-purge validation failed: {e}", file=sys.stderr)
+    purged = result["purged"]
+    still_dirty = result["still_dirty"]
+    dup_report = result["dup_report"]
+
+    if not store.is_cloud():
+        _append_changelog({
+            "op": "entry_purge",
+            "entry_id": entry_id,
+            "index": index,
+            "reason": reason,
+            "purged_desc": purged.get("description", ""),
+        })
 
     if json_mode:
         print(json.dumps({

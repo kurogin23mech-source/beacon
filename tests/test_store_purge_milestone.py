@@ -176,3 +176,78 @@ def test_cloud_purge_other_runtime_error_passes_through():
     store = _make_store_api(fake)
     with pytest.raises(RuntimeError, match="500"):
         store.purge_milestone("ms-1", reason="cleanup")
+
+
+# ---------------------------------------------------------------------------
+# Store.purge_entry — same contract, different backing call
+# ---------------------------------------------------------------------------
+
+
+def _entry_project() -> dict:
+    return {
+        "name": "Fixture",
+        "summary": "",
+        "milestones": [
+            {"id": "ms-1", "title": "first", "status": "in_progress",
+             "progress": 0, "target_date": "", "entries": [
+                 {"id": "e-100", "type": "task", "description": "alpha",
+                  "status": "todo", "date": "2026-06-19",
+                  "created_at": "2026-06-19T00:00:00"},
+                 {"id": "e-101", "type": "task", "description": "beta",
+                  "status": "todo", "date": "2026-06-19",
+                  "created_at": "2026-06-19T00:00:00"},
+             ]},
+        ],
+    }
+
+
+def test_local_purge_entry_removes_record():
+    store = _make_local_store(_entry_project())
+    out = store.purge_entry("e-100", reason="cleanup")
+    assert out["purged"]["id"] == "e-100"
+    assert out["still_dirty"] is False
+    reloaded = store.load_project()
+    remaining = [e["id"] for e in reloaded["milestones"][0]["entries"]]
+    assert remaining == ["e-101"]
+
+
+def test_local_purge_entry_unknown_raises():
+    store = _make_local_store(_entry_project())
+    with pytest.raises(ValueError, match="e-404"):
+        store.purge_entry("e-404", reason="cleanup")
+
+
+class FakeEntryClient:
+    def __init__(self, *, response: dict | None = None,
+                 raise_msg: str | None = None):
+        self._response = response or {"entry_id": "e-1", "description": "stub",
+                                      "purged": True}
+        self._raise_msg = raise_msg
+        self.calls: list[tuple] = []
+
+    def purge_entry(self, project_id: str, entry_id: str, *,
+                    reason: str, index: int | None = None) -> dict:
+        self.calls.append((project_id, entry_id, reason, index))
+        if self._raise_msg:
+            raise RuntimeError(self._raise_msg)
+        return self._response
+
+
+def test_cloud_purge_entry_passes_args_through():
+    fake = FakeEntryClient()
+    store = StoreApi.__new__(StoreApi)
+    store._client = fake
+    store._project_id = "proj-1"
+    out = store.purge_entry("e-1", reason="cleanup")
+    assert fake.calls == [("proj-1", "e-1", "cleanup", None)]
+    assert out["still_dirty"] is False
+    assert out["dup_report"] == {}
+
+
+def test_cloud_purge_entry_403_becomes_value_error():
+    fake = FakeEntryClient(raise_msg="API error 403: owner only")
+    store = StoreApi.__new__(StoreApi)
+    store._client = fake
+    store._project_id = "proj-1"
+    with pytest.raises(ValueError, match="owner"):
+        store.purge_entry("e-1", reason="cleanup")
