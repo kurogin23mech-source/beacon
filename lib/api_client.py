@@ -740,6 +740,45 @@ class ApiClient:
              "to_session_id": to_session_id},
         )
 
+    def pulse_ack_trek(self, trek_id: str, *, session_id: str,
+                       picked_choice: str = "", note: str = "") -> dict:
+        """Self-report /beacon-trek-pulse Skill invocation (ms-88 / e-2106).
+
+        Layer 2 observability: the Skill calls this as Step 1 so the server
+        knows the Skill actually fired in response to a scheduler tick.
+
+        Returns the updated per-session pulse_acks entry so the Skill can
+        echo the recorded state back to the user.
+        """
+        return self.post(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/pulse-ack",
+            {"session_id": session_id, "picked_choice": picked_choice,
+             "note": note},
+        )
+
+    def list_trek_pulse_acks(self, trek_id: str) -> dict:
+        """Per-session pulse-ack summary for dashboards (ms-88 / e-2108)."""
+        return self.get(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/pulse-acks"
+        )
+
+    def take_over_trek(self, trek_id: str, *, session_id: str) -> dict:
+        """Re-bind leader_session_id to the caller's fresh session (ms-88 / e-2089).
+
+        Unlike ``transfer-leader``, this does **not** require the prior
+        ``leader_session_id`` to authorize — the caller proves leader role
+        at user-grain (= joined member with ``role == 'leader'``), and the
+        server overwrites ``leader_session_id`` with ``session_id``. This is
+        the fresh-session recovery path for the case where the original
+        leader session is dead (= Mac restart, terminal closed, bclaude
+        relaunched from clean env) and ``transfer-leader`` cannot recover
+        because it needs the dead session as origin.
+        """
+        return self.post(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/take-over",
+            {"session_id": session_id},
+        )
+
     def set_trek_task_state(self, trek_id: str, *, task_id: str,
                              state: str, note: str = "") -> dict:
         """ms-75 / e-2048 — Stamp Trek-internal task state.

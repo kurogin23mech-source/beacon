@@ -3189,6 +3189,18 @@ class TrekTransferLeader(BaseModel):
     to_session_id: str    # new leader session
 
 
+# ms-88 / e-2089 — fresh session take-over (= dead leader_session_id 引き継ぎ)
+class TrekTakeOver(BaseModel):
+    session_id: str  # 新 leader_session_id (= 呼び出し session の sid)
+
+
+# ms-88 / e-2106 — pulse-ack body (= /beacon-trek-pulse Skill self-report)
+class TrekPulseAck(BaseModel):
+    session_id: str
+    picked_choice: str = ""  # 'terminal' / 'continue' / 'dm-leader' / 'no-op' / ''
+    note: str = ""
+
+
 def _load_trek_for_read(trek_id: str, user: dict) -> dict:
     """Load a trek doc. 404 if missing, 403 if caller is neither creator
     nor a member (per SPEC visibility = creator OR members)."""
@@ -3545,6 +3557,113 @@ def transfer_trek_leader_endpoint(trek_id: str, body: TrekTransferLeader,
         raise HTTPException(status_code=400, detail=str(e))
     db.save_trek(trek_id, t)
     return t
+
+
+@app.post("/api/treks/{trek_id}/take-over")
+def take_over_trek_endpoint(trek_id: str, body: TrekTakeOver,
+                            user: dict = Depends(require_auth)):
+    """Fresh-session leader take-over (ms-88 / e-2089).
+
+    Unlike ``transfer-leader`` which requires the **live** prior leader
+    session to authorize, take-over only checks the user-grain leader role
+    — so a fresh bclaude session of the same user can recover when the
+    original leader session is dead (= Mac restart, terminal closed,
+    bclaude relaunched). This closes the dogfood Finding 1 silent-ack
+    path: a dead ``leader_session_id`` was stale-but-non-null, scheduler
+    fan-out kept aiming at it, and there was no way to re-bind without
+    going through the dead session.
+
+    Auth (user grain only, no from_session check):
+      * Caller must be a joined member (= ``find_member`` non-null AND
+        ``joined_at`` non-empty)
+      * Caller must hold the ``leader`` role (= ``_require_trek_leader``)
+
+    Idempotent: re-binding to the same ``session_id`` is a no-op
+    (``trek_mod.transfer_leader`` already handles the equality case).
+    """
+    t = _load_trek_for_read(trek_id, user)
+    if not body.session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+    _require_trek_leader(t, user)
+    # joined check is implicit in _require_trek_leader (= role only set
+    # after joining), but we re-affirm here so the error message is precise
+    # if a future refactor splits role from joined_at.
+    if _auth_enabled:
+        uid = user.get("sub") or ""
+        member = trek_mod.find_member(t, uid)
+        if not member or not member.get("joined_at"):
+            raise HTTPException(
+                status_code=403,
+                detail="take-over requires a joined leader member",
+            )
+    try:
+        trek_mod.transfer_leader(t, target_session_id=body.session_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.post("/api/treks/{trek_id}/pulse-ack")
+def trek_pulse_ack_endpoint(trek_id: str, body: TrekPulseAck,
+                            user: dict = Depends(require_auth)):
+    """Record /beacon-trek-pulse Skill invocation (ms-88 / e-2106).
+
+    Layer 2 (= observability) of the 3-layer trek autonomy harness
+    (CORE doc 5nfTSmCDVUzD4SLzIhI5). The Skill calls this endpoint as its
+    very first Step so the server has **ground truth** about whether the
+    Skill actually fired in response to a scheduler tick. This closes the
+    "Skill marker visible in executor terminal" verification hole that
+    dogfood (= tk-40b0b27c) could not check directly.
+
+    Auth: caller must be a trek member (= user grain, same as task-state).
+    The Skill is invoked by the executor session, so the calling user is
+    naturally a joined member.
+
+    Returns the updated pulse_acks entry for the caller's session so the
+    Skill can echo the recorded state back to the user.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    if _auth_enabled:
+        uid = user.get("sub") or ""
+        if not trek_mod.find_member(t, uid):
+            raise HTTPException(
+                status_code=403,
+                detail="only trek members can pulse-ack",
+            )
+    if not body.session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+    try:
+        trek_mod.record_pulse_ack(
+            t,
+            session_id=body.session_id,
+            picked_choice=body.picked_choice or "",
+            note=body.note or "",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.save_trek(trek_id, t)
+    return (t.get("pulse_acks") or {}).get(body.session_id) or {}
+
+
+@app.get("/api/treks/{trek_id}/pulse-acks")
+def list_trek_pulse_acks_endpoint(trek_id: str,
+                                  user: dict = Depends(require_auth)):
+    """Per-session pulse-ack summary for dashboards (ms-88 / e-2108).
+
+    Returns the compact summary built by ``trek_mod.summarize_pulse_acks``
+    so the Phase 4 Trek detail page can render compliance widgets without
+    pulling the full trek doc. Any joined member may read.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    if _auth_enabled:
+        uid = user.get("sub") or ""
+        if not trek_mod.find_member(t, uid):
+            raise HTTPException(
+                status_code=403,
+                detail="only trek members can read pulse-ack stats",
+            )
+    return trek_mod.summarize_pulse_acks(t)
 
 
 @app.patch("/api/treks/{trek_id}/task-state")

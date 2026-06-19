@@ -202,6 +202,140 @@ def set_task_state(trek_doc: dict, *, task_id: str, state: str,
     return trek_doc
 
 
+# ms-88 / e-2106 — pulse-ack log. Layer 2 (= observability) of the 3-layer
+# trek autonomy harness (CORE doc 5nfTSmCDVUzD4SLzIhI5). The pulse Skill
+# (= /beacon-trek-pulse) calls the server's POST /api/treks/<id>/pulse-ack
+# endpoint as its very first step, before any other action. That gives the
+# server **ground truth** about whether the Skill actually fired in response
+# to a scheduler tick — the "Skill marker visible in executor terminal"
+# observation that dogfood (= tk-40b0b27c) found could not be verified
+# directly by the server.
+#
+# Schema on the trek doc:
+#   trek_doc.pulse_acks: dict[session_id -> SessionPulseAcks]
+#     SessionPulseAcks {
+#       session_id: str,
+#       total_acks: int,                    # monotonically increasing
+#       last_pulse_ack_at: ISO timestamp,
+#       last_picked_choice: str,            # 'terminal' / 'continue' / 'dm-leader' / ''
+#       history: list[PulseAckEntry] (cap 20),  # recent ring buffer
+#     }
+#     PulseAckEntry {
+#       timestamp: ISO,
+#       picked_choice: str,
+#       note: str (cap 200),
+#     }
+#
+# 20-entry cap on history keeps the trek doc small while preserving enough
+# data for time-series visualisation in the Phase 4 UI dashboard (e-2108).
+# Per-session aggregation (vs flat list) lets the Phase 4 UI compute
+# compliance rate per session cheaply (= no scan).
+PULSE_ACK_HISTORY_CAP = 20
+
+VALID_PULSE_PICKED_CHOICES = (
+    "terminal",       # executor declared a terminal transition this tick
+    "continue",       # executor continues working
+    "dm-leader",      # executor asked leader for judgment
+    "no-op",          # explicit "I see the tick but nothing to act on"
+    "",               # unspecified (= legacy / minimum-info pulse)
+)
+
+
+def validate_pulse_picked_choice(choice: str) -> str:
+    """Validate the picked_choice token (ms-88 / e-2106)."""
+    if choice not in VALID_PULSE_PICKED_CHOICES:
+        raise ValueError(
+            f"invalid pulse picked_choice {choice!r} — expected one of "
+            f"{VALID_PULSE_PICKED_CHOICES}"
+        )
+    return choice
+
+
+def record_pulse_ack(trek_doc: dict, *, session_id: str,
+                     picked_choice: str = "",
+                     note: str = "") -> dict:
+    """Append a pulse-ack record for ``session_id`` and bump the counter.
+
+    Called by the server endpoint when /beacon-trek-pulse Skill self-reports
+    invocation. Idempotency: each call appends a new history entry (= the
+    Skill is supposed to call exactly once per tick; if it calls twice that
+    is recorded so observability is honest — dedupe is the caller's choice).
+
+    Returns the mutated trek_doc; caller persists with ``db.save_trek``.
+    """
+    if not session_id:
+        raise ValueError("session_id is required")
+    validate_pulse_picked_choice(picked_choice)
+    acks = trek_doc.setdefault("pulse_acks", {})
+    entry = acks.get(session_id) or {
+        "session_id": session_id,
+        "total_acks": 0,
+        "last_pulse_ack_at": "",
+        "last_picked_choice": "",
+        "history": [],
+    }
+    now = utcnow_iso()
+    record = {
+        "timestamp": now,
+        "picked_choice": picked_choice,
+        "note": (note or "")[:200],
+    }
+    entry["total_acks"] = int(entry.get("total_acks") or 0) + 1
+    entry["last_pulse_ack_at"] = now
+    entry["last_picked_choice"] = picked_choice
+    history = entry.get("history") or []
+    history.append(record)
+    # Ring buffer cap — drop oldest beyond PULSE_ACK_HISTORY_CAP.
+    if len(history) > PULSE_ACK_HISTORY_CAP:
+        history = history[-PULSE_ACK_HISTORY_CAP:]
+    entry["history"] = history
+    acks[session_id] = entry
+    trek_doc["updated_at"] = now
+    return trek_doc
+
+
+def summarize_pulse_acks(trek_doc: dict) -> dict:
+    """Compact per-session summary for dashboards (ms-88 / e-2108 Phase 4).
+
+    Returns:
+      {
+        "sessions": {
+          session_id: {
+            "total_acks": int,
+            "last_pulse_ack_at": ISO,
+            "last_picked_choice": str,
+            "choice_counts": {choice: count, ...},
+          }
+        },
+        "total_acks_across_sessions": int,
+      }
+
+    Compliance rate (= acks / expected ticks) requires per-session tick
+    history which we don't track yet — Phase 4 can either compute it from
+    bus event log scans or extend this struct. For now we expose the raw
+    counters; the UI can render "session X: 5 acks since Y" without needing
+    the denominator.
+    """
+    sessions: dict = {}
+    total = 0
+    for sid, entry in (trek_doc.get("pulse_acks") or {}).items():
+        choice_counts: dict = {}
+        for h in entry.get("history") or []:
+            c = h.get("picked_choice") or ""
+            choice_counts[c] = choice_counts.get(c, 0) + 1
+        sessions[sid] = {
+            "total_acks": int(entry.get("total_acks") or 0),
+            "last_pulse_ack_at": entry.get("last_pulse_ack_at") or "",
+            "last_picked_choice": entry.get("last_picked_choice") or "",
+            "choice_counts": choice_counts,
+        }
+        total += int(entry.get("total_acks") or 0)
+    return {
+        "sessions": sessions,
+        "total_acks_across_sessions": total,
+    }
+
+
 def bump_task_activity(trek_doc: dict, *, task_id: str,
                        reason: str = "") -> dict:
     """Refresh ``last_activity_at`` on a task without changing its state.

@@ -5233,6 +5233,75 @@ def _arm_for_trek(trek_id: str) -> dict:
     }
 
 
+# ms-88 / e-2090 — Trek 参加 per-session 明示同意 gate。
+# Trek 参加 = scope 内 DM blanket 自動承認 + autonomous loop 入場の合算で
+# turn 制限なく AI を動かす権限委譲。 typed-ack を求めることで user が
+# consequence を理解せず参加する構造的危険を塞ぐ。
+TREK_JOIN_CONSENT_PHRASE = "I UNDERSTAND"
+
+
+def _trek_join_consent_gate(trek_id: str, email: str, *, json_mode: bool) -> None:
+    """Gate ``beacon trek join`` on per-session 明示同意 (ms-88 / e-2090).
+
+    Behavior:
+    - TTY stdin → prompt for the literal phrase ``I UNDERSTAND``. Mismatch =
+      abort with exit 1 and a one-line explanation. Case-sensitive (= a
+      thoughtful enough action to require precise typing, not a reflexive y).
+    - Non-TTY stdin (= bot / CI / Skill pipe) → refuse and instruct caller
+      to use ``--i-understand-the-implications`` flag explicitly. We never
+      auto-accept on non-TTY because that path is exactly the silent bypass
+      this gate exists to close.
+    - ``json_mode`` is irrelevant to the gate itself but affects the abort
+      payload (= keep stderr human-readable either way; the gate is a UX
+      checkpoint, not a JSON API).
+    """
+    explanation = (
+        f"\n⚠ Trek 参加 = AI を turn 制限なく走らせる権限委譲です\n"
+        f"  trek_id: {trek_id}\n"
+        f"  joining as: {email}\n"
+        f"\n"
+        f"  参加すると次の挙動が unlock されます:\n"
+        f"  - scope 内 DM が blanket 自動承認 (= ms-70 / e-1854) で配信される\n"
+        f"  - trek-progress-check 等の channel が autonomous execution に乗る\n"
+        f"  - server-side scheduler が定期的に「次やって」 と push してくる\n"
+        f"  - 不可逆 action (= deploy / release / external write) は user_review に\n"
+        f"    forward されますが、 それ以外は AI 判断で実行されます\n"
+        f"\n"
+        f"  撤回したい場合: `beacon trek leave {trek_id}` で同等の手順で抜けられます。\n"
+    )
+
+    if not sys.stdin.isatty():
+        # Non-TTY (= bot / CI / Skill pipe) は typed prompt を取れない。
+        # silent auto-accept は本 gate の趣旨に反するので明示 flag を要求。
+        sys.stderr.write(explanation)
+        sys.stderr.write(
+            "\n  非 TTY 経由のため typed-ack を取れません。 自動化 / bot 経路で\n"
+            "  参加する場合は `--i-understand-the-implications` を明示的に渡してください。\n"
+        )
+        sys.exit(1)
+
+    sys.stderr.write(explanation)
+    sys.stderr.write(
+        f"\n  意味を理解したうえで参加する場合は次のフレーズを正確に入力してください\n"
+        f"  (case-sensitive、 余分な空白なし):\n"
+        f"    {TREK_JOIN_CONSENT_PHRASE}\n"
+        f"\n  > "
+    )
+    sys.stderr.flush()
+    try:
+        typed = input("").strip()
+    except (EOFError, KeyboardInterrupt):
+        sys.stderr.write("\n  aborted by user — Trek 参加を中止しました。\n")
+        sys.exit(1)
+    if typed != TREK_JOIN_CONSENT_PHRASE:
+        sys.stderr.write(
+            f"\n  入力 {typed!r} が期待値と一致しません — Trek 参加を中止しました。\n"
+            f"  必要なら再度 `beacon trek join {trek_id}` から実行してください。\n"
+        )
+        sys.exit(1)
+    # consent OK; fall through
+
+
 def cmd_trek_join():
     """Accept an invitation (= set member.joined_at = now for the current user).
 
@@ -5258,6 +5327,7 @@ def cmd_trek_join():
     trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     no_arm = os.environ.get("BEACON_TREK_NO_ARM", "") == "1"
+    consent_ack = os.environ.get("BEACON_TREK_CONSENT_ACK", "") == "1"
     if not trek_id:
         print("Error: trek_id is required", file=sys.stderr)
         sys.exit(1)
@@ -5269,6 +5339,16 @@ def cmd_trek_join():
             file=sys.stderr,
         )
         sys.exit(1)
+
+    # ms-88 / e-2090 — per-session 明示同意 gate。 Trek 参加 = scope 内 DM blanket
+    # 自動承認 (= ms-70 / e-1854) + autonomous loop 入場の合算で turn 制限なく
+    # AI を動かす権限委譲。 user が consequence を理解せず参加する構造的危険を
+    # 構造的に塞ぐため、 typed-ack または明示 flag を要求。
+    # bypass 経路: --i-understand-the-implications flag (dispatch.py で
+    # BEACON_TREK_CONSENT_ACK=1 にマップされる)、 または BEACON_TREK_CONSENT_ACK=1
+    # 環境変数 (= テスト fixture / 自動化用)。
+    if not consent_ack:
+        _trek_join_consent_gate(trek_id, email, json_mode=json_mode)
 
     if _is_cloud_mode():
         # Cloud path: server identifies the joiner from auth token (no
@@ -5473,6 +5553,228 @@ def cmd_trek_resume():
             print(f"Resumed trek {trek_id} — sessions can continue work")
         else:
             print(f"Trek {trek_id} was not halted (no-op)")
+
+
+def cmd_trek_pulse_ack():
+    """Self-report /beacon-trek-pulse Skill invocation (ms-88 / e-2106).
+
+    Layer 2 (= observability) of the 3-layer trek autonomy harness. The
+    Skill calls this as Step 3 (after picking a choice) so the server has
+    ground truth that the Skill actually fired in response to a scheduler
+    tick. Without this self-report, the server can only infer compliance
+    from indirect signals (= commit / DM activity), and dogfood (=
+    tk-40b0b27c) showed those signals are insufficient.
+
+    Env:
+      BEACON_TREK_ID            (required)
+      BEACON_SESSION_ID         (required) — keyed in pulse_acks[]
+      BEACON_TREK_PICKED_CHOICE optional — 'terminal' / 'continue' /
+                                'dm-leader' / 'no-op' / ''
+      BEACON_TREK_NOTE          optional short context (= 200 char cap)
+      BEACON_JSON               "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    session_id = os.environ.get("BEACON_SESSION_ID", "").strip()
+    picked_choice = os.environ.get("BEACON_TREK_PICKED_CHOICE", "").strip()
+    note = os.environ.get("BEACON_TREK_NOTE", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+    if not session_id:
+        print(
+            "Error: BEACON_SESSION_ID is required (= recorded as the "
+            "pulse-ack source)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            entry = client.pulse_ack_trek(
+                trek_id, session_id=session_id,
+                picked_choice=picked_choice, note=note,
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        if json_mode:
+            print(json.dumps(entry, ensure_ascii=False))
+        else:
+            total = entry.get("total_acks", 0)
+            last = entry.get("last_pulse_ack_at", "")
+            choice = entry.get("last_picked_choice", "")
+            print(
+                f"pulse-ack recorded: trek={trek_id} session={session_id} "
+                f"total_acks={total} last_choice={choice or '(unset)'} "
+                f"last_at={last}"
+            )
+        return
+
+    # Local mode: directly mutate trek_doc.
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    try:
+        trek.record_pulse_ack(
+            t, session_id=session_id,
+            picked_choice=picked_choice, note=note,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    trek_store.save_trek(t)
+    entry = (t.get("pulse_acks") or {}).get(session_id) or {}
+    if json_mode:
+        print(json.dumps(entry, ensure_ascii=False))
+    else:
+        total = entry.get("total_acks", 0)
+        last = entry.get("last_pulse_ack_at", "")
+        choice = entry.get("last_picked_choice", "")
+        print(
+            f"pulse-ack recorded: trek={trek_id} session={session_id} "
+            f"total_acks={total} last_choice={choice or '(unset)'} "
+            f"last_at={last}"
+        )
+
+
+def cmd_trek_take_over():
+    """Take over leader_session_id for a fresh session of the same user (ms-88 / e-2089).
+
+    Why this exists:
+    - ``leader_session_id`` is bound to whatever session called
+      ``beacon trek create`` (or the last ``transfer-leader`` target).
+    - When that session dies (= Mac restart / terminal closed / fresh bclaude
+      from clean env), the leader_session_id is **stale-but-non-null**:
+      scheduler still fan-outs to it, DM gates still treat it as leader,
+      but there's no live bclaude on the other side.
+    - ``transfer-leader`` can't recover this because it requires the
+      *current* leader session to authorize the swap — the dead session
+      can't do that.
+    - ``take-over`` is the fresh-session recovery path: any joined member
+      with ``role == 'leader'`` (= user-grain check) can claim the
+      ``leader_session_id`` for their **current** session in one call.
+
+    This is *not* the same as ``join`` (= acceptance of invitation, member
+    creation) or ``transfer-leader`` (= consensual handoff between live
+    sessions). It is specifically for "the durable leader role is mine
+    (user-grain), the live binding pointed at a dead session — bind it to
+    me now".
+
+    Env:
+      BEACON_TREK_ID       (required)
+      BEACON_SESSION_ID    (required) — becomes the new leader_session_id
+      BEACON_JSON          "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    session_id = os.environ.get("BEACON_SESSION_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+    if not session_id:
+        print(
+            "Error: BEACON_SESSION_ID is required "
+            "(= the calling session becomes the new leader_session_id)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    user_id, email, _ = _resolve_creator_identity()
+
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            t = client.take_over_trek(trek_id, session_id=session_id)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        t = trek_store.load_trek(trek_id)
+        if t is None:
+            print(f"Error: trek {trek_id} not found", file=sys.stderr)
+            sys.exit(1)
+
+        # Local-mode authorization: caller must be a *joined leader* member
+        # of this trek (user-grain). Email lookup first (= simpler UX), then
+        # user_id. The point of take-over is that the calling user already
+        # holds the durable leader role — we only re-bind the live session
+        # pointer to a fresh session_id under that user.
+        member = trek.find_member_by_email(t, email) if email else None
+        if member is None:
+            member = trek.find_member(t, user_id)
+        if member is None:
+            print(
+                f"Error: you are not a member of trek {trek_id} "
+                f"(user_id={user_id!r}, email={email!r}). take-over only "
+                f"works for joined leader members.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if not member.get("joined_at"):
+            print(
+                f"Error: you have not joined trek {trek_id} yet "
+                f"(invitation pending). Run `beacon trek join` first.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if member.get("role") != "leader":
+            print(
+                f"Error: only leader members can take over a trek "
+                f"(your role: {member.get('role')!r}). Use "
+                f"`beacon trek transfer-leader` from the current leader's "
+                f"session if you need to be promoted first.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        prior_leader = t.get("leader_session_id") or ""
+        if prior_leader == session_id:
+            # Already bound — idempotent. Print a friendly notice and exit
+            # 0 so chained scripts don't trip on a re-run.
+            if json_mode:
+                print(json.dumps(t, ensure_ascii=False))
+            else:
+                print(
+                    f"Leader of trek {trek_id} already bound to this session "
+                    f"({session_id}); no-op."
+                )
+            return
+
+        trek.transfer_leader(t, target_session_id=session_id)
+        trek_store.save_trek(t)
+        if json_mode:
+            out = dict(t)
+            out["_take_over"] = {
+                "prior_leader_session_id": prior_leader,
+                "new_leader_session_id": session_id,
+            }
+            print(json.dumps(out, ensure_ascii=False))
+        else:
+            print(
+                f"Took over leader of trek {trek_id}: "
+                f"{prior_leader or '(unset)'} → {session_id}"
+            )
+        return
+
+    # Cloud mode — server already validated leader role; just print result.
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        print(
+            f"Took over leader of trek {trek_id}: "
+            f"new leader_session_id = {session_id}"
+        )
 
 
 def cmd_trek_transfer_leader():
@@ -16408,6 +16710,8 @@ if __name__ == "__main__":
         "trek_task_state": cmd_trek_task_state,
         "trek_stop": cmd_trek_stop,
         "trek_resume": cmd_trek_resume,
+        "trek_pulse_ack": cmd_trek_pulse_ack,
+        "trek_take_over": cmd_trek_take_over,
         "trek_transfer_leader": cmd_trek_transfer_leader,
         "trek_timeline": cmd_trek_timeline,
         "version": lambda: print(f"beacon {__version__}"),

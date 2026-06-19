@@ -248,6 +248,10 @@ def test_gate_blocks_all_trek_channels_when_opt_out_env_set():
 
 
 def test_trek_progress_check_content_carries_launch_directive():
+    # ms-88 / e-2105 (Phase 1 narrative 強化) で header と本文が更新された。
+    # 新仕様: 「必須アクション」 + 「12 分以内」 + auto-stall 罰則明示 + 3 経路
+    # (= pulse / execute / task-state) を提示する。 旧 "Run this autonomously"
+    # は consequence 強度が足りなかったため置換。
     out = _probe_content({
         "event_id": "evt-trek-1",
         "channel": "trek-progress-check",
@@ -256,24 +260,60 @@ def test_trek_progress_check_content_carries_launch_directive():
             "trigger_name": "trek_progress_tk-abc",
         },
     })
-    assert "## TREK ACTION" in out
-    assert "Run this autonomously without asking the user first." in out
+    assert "TREK ACTION REQUIRED" in out
+    # consequence 明示 (= 怠ると auto-stall) は narrative 強度の核
+    assert "auto-stall" in out
+    assert "12 分以内" in out or "12分以内" in out
+    # 3 経路 (pulse 推奨 + execute 既存 + task-state manual) が出る
+    assert "/beacon-trek-pulse tk-abc" in out
     assert "/beacon-trek-execute tk-abc" in out
-    assert "no confirmation prompt" in out
+    assert "beacon trek task-state" in out
     assert "trek_id: tk-abc" in out
     assert "trigger_name: trek_progress_tk-abc" in out
 
 
 def test_trek_trigger_content_uses_same_executor_skill():
-    """trek-trigger and trek-progress-check both route to /beacon-trek-execute
-    so executors invoked by either path enter the same flow."""
+    """trek-trigger and trek-progress-check both share the strengthened
+    narrative (ms-88 e-2105). Both events should expose the same enforcement
+    framing so executors invoked by either path enter the same flow."""
     out = _probe_content({
         "event_id": "evt-trek-2",
         "channel": "trek-trigger",
         "payload": {"trek_id": "tk-xyz"},
     })
-    assert "## TREK ACTION" in out
+    assert "TREK ACTION REQUIRED" in out
     assert "/beacon-trek-execute tk-xyz" in out
+
+
+def test_trek_progress_check_content_carries_ttl_metadata_when_provided():
+    """server (ms-88 / e-2107) sends ttl_deadline_at + last_activity_at +
+    ttl_minutes so the narrative carries actionable "by when" data. The
+    builder must surface these when present, but degrade gracefully when
+    the server hasn't been redeployed yet (= older payloads omit them)."""
+    out = _probe_content({
+        "event_id": "evt-trek-ttl",
+        "channel": "trek-progress-check",
+        "payload": {
+            "trek_id": "tk-ttl-1",
+            "last_activity_at": "2026-06-19T22:00:00Z",
+            "ttl_deadline_at": "2026-06-19T22:12:00Z",
+            "ttl_minutes": 12,
+        },
+    })
+    assert "last_activity_at: 2026-06-19T22:00:00Z" in out
+    assert "ttl_deadline_at: 2026-06-19T22:12:00Z" in out
+    assert "ttl_minutes: 12" in out
+
+
+def test_trek_progress_check_content_omits_ttl_metadata_when_absent():
+    out = _probe_content({
+        "event_id": "evt-trek-no-ttl",
+        "channel": "trek-progress-check",
+        "payload": {"trek_id": "tk-no-ttl"},
+    })
+    assert "ttl_deadline_at:" not in out
+    assert "last_activity_at:" not in out
+    assert "ttl_minutes:" not in out
 
 
 def test_trek_task_review_content_carries_picker_directive():

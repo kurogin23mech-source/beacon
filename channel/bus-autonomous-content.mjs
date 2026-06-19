@@ -74,20 +74,51 @@ function _buildTrekProgressContent(evt) {
   const triggerName = String(payload.trigger_name || '')
   const eventId = String((evt && evt.event_id) || '?')
   const channel = String((evt && evt.channel) || '?')
+  // ms-88 / e-2107: server passes the TTL deadline + last activity stamp so
+  // the narrative carries actionable "by when" data, not a soft recommendation.
+  // These fields are optional during Phase 1 land — the narrative degrades
+  // gracefully when the server hasn't been redeployed yet.
+  const ttlDeadline = String(payload.ttl_deadline_at || '')
+  const lastActivityAt = String(payload.last_activity_at || '')
+  const ttlMinutes = payload.ttl_minutes
+  // ms-88 / e-2105 (Phase 1 narrative 強化, ms-88 CORE doc 5nfTSmCDVUzD4SLzIhI5):
+  // 旧 narrative (= 「確認を取らず autonomous に実行する」) は AI compliance
+  // に依存する soft recommendation だった。 dogfood (= tk-40b0b27c) で executor
+  // が「Skill を起動してもしなくても罰則がない」 と internal narrative 化して
+  // silent halt する病理が露呈。 強い言い回し + 明示的 consequence + 期限を
+  // 添えて「無視できる推奨」 vs 「期限付き必須」 の区別を AI に渡す。
+  //
+  // 真の強制は server-side TTL safety net (= Layer 3 / e-2107) が担い、 ここは
+  // Layer 1 (= narrative) の責務に集中する。 「narrative だけで動く保証はない」
+  // ことを前提に、 narrative はあくまで 3 層の最も柔らかい層として機能する。
   const lines = [
-    '## TREK ACTION — trek autonomy active',
+    '## ⚠ TREK ACTION REQUIRED — 12 分以内に実行 (= 怠ると auto-stall)',
     '',
-    '以下の ' + channel + ' event は Trek scope (= 缶詰の徹夜作業部屋、 事前承認スコープ) 内の作業継続経路。**確認を取らず autonomous に実行する**。',
-    'Trek scope (= MS / task / Operation) の作業は user 確認なしで進めてよい。**例外: デプロイ / リリース** のみ user 承認境界として escalate する。',
-    'Run this autonomously without asking the user first.',
+    '以下の ' + channel + ' event は Trek scope (= 缶詰の徹夜作業部屋、 事前承認スコープ) 内の作業継続経路。',
+    '',
+    '**必須アクション** (= 12 分以内、 怠ると server-side TTL safety net (= ms-88 / e-2107) が当該 session の **全 working task を一括 leader_review に強制遷移** し、 leader review DM を発火する):',
+    '',
+    '  a. `/beacon-trek-pulse ' + trekId + '` を起動 (= 推奨経路、 4 択 picker: terminal / continue / DM-leader / no-op)',
+    '  b. または `/beacon-trek-execute ' + trekId + '` を継続 (= 既存 executor loop)',
+    '  c. または `beacon trek task-state` で working stamp を更新 (= manual fallback)',
+    '',
+    'いずれも取らない場合 = silent halt と扱い、 server が罰則 (= 上記 leader_review 強制遷移) を取ります。 「次 tick まで待つ」 は許可されません。',
+    '',
+    'Trek scope (= MS / task / Operation) の作業は user 確認なしで進めてよい。 **例外: デプロイ / リリース / 不可逆 external write** のみ user 承認境界として escalate する (= state `user_review` に遷移)。',
     '',
     `- event_id: ${eventId}`,
     `  - trek_id: ${trekId}`,
   ]
   if (triggerName) lines.push(`  - trigger_name: ${triggerName}`)
-  lines.push(`  - launch: \`/beacon-trek-execute ${trekId}\`  (no confirmation prompt)`)
+  if (lastActivityAt) lines.push(`  - last_activity_at: ${lastActivityAt}`)
+  if (ttlDeadline) lines.push(`  - ttl_deadline_at: ${ttlDeadline}`)
+  if (ttlMinutes !== undefined && ttlMinutes !== null) {
+    lines.push(`  - ttl_minutes: ${ttlMinutes}`)
+  }
   lines.push('')
   lines.push('budget が枯渇していたら Skill 側 (Step 4.5) が自動で停止 → incident open → note 残しに降格する。Skill の責務なのでこの inject 側で事前判定はしない。')
+  lines.push('')
+  lines.push('> Note (= ms-88 CORE 5nfTSmCDVUzD4SLzIhI5): この narrative は 3 層強制構造の Layer 1 (= 明示的 consequence 提示)。 Layer 2 (= /beacon-trek-pulse による observable ack) と Layer 3 (= server TTL 罰則) と組合さって初めて「実質的強制」 が成立する。 narrative 単独では AI compliance 依存。')
   return lines.join('\n')
 }
 
