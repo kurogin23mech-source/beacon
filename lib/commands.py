@@ -5674,8 +5674,9 @@ def cmd_trek_pulse_ack():
     Env:
       BEACON_TREK_ID            (required)
       BEACON_SESSION_ID         (required) — keyed in pulse_acks[]
-      BEACON_TREK_PICKED_CHOICE optional — 'terminal' / 'continue' /
-                                'dm-leader' / 'no-op' / ''
+      BEACON_TREK_PICKED_CHOICE optional — 5-choice token: 'terminal' /
+                                'continue' / 'dm-leader' / 'dm-peer' (ms-88
+                                / e-2140) / 'no-op' / '' (= 空文字 legacy)
       BEACON_TREK_NOTE          optional short context (= 200 char cap)
       BEACON_JSON               "1" → json output
     """
