@@ -4289,20 +4289,126 @@ def _project_id_for_ops() -> str:
 # ~/.beacon/treks/). Cloud HTTP path lands in e-1656.
 # ---------------------------------------------------------------------------
 
+def _read_credentials_for_identity() -> tuple[str, str]:
+    """Read (user_id, email) from the active-profile credentials.json (ms-61 / e-2132).
+
+    Returns ``("", "")`` if no credentials file exists, the file is malformed,
+    or no usable fields are present. Never raises — this is a best-effort
+    fallback for ``_resolve_creator_identity``; the caller still treats
+    missing email as a hard error if env is also empty.
+
+    Implementation:
+      * Resolves the credentials path via ``profile.resolve_active_profile()``
+        so cwd ``cloud.json.profile`` and ``BEACON_PROFILE`` are honored.
+      * Falls back to legacy ``~/.beacon/credentials.json`` if the per-profile
+        path doesn't exist yet (= pre-migration installs).
+      * ``user_id`` is decoded from the JWT ``sub`` claim (= Google sub, e.g.
+        Cognito/Cloud Identity uid). The token is split as ``bcli.<payload>.<sig>``
+        or stdlib JWT ``<header>.<payload>.<sig>``; we read the middle segment.
+      * ``email`` is read from the top-level ``email`` field directly.
+
+    Why this exists:
+      ms-84 dogfood (2026-06-19) で観測された病理: fork session で
+      ``BEACON_USER_EMAIL`` 設定漏れ → ``beacon trek create / join / dm send``
+      が hard error。 credentials.json には email がある (= login 済) のに
+      env を要求するため、 fork 経路で identity 漏れる導線が温存されていた。
+      本 helper で auto-read 経路を足し、 env override は最優先のまま
+      (= test / CI / multi-account 用)。
+    """
+    import base64
+    import json as _json
+    try:
+        import profile as _profile
+        cred_path = _profile.resolve_active_profile().credentials_path
+    except Exception:
+        cred_path = None
+
+    candidates = []
+    if cred_path is not None:
+        candidates.append(cred_path)
+    # Legacy singleton location (= pre-profile installs). Honor BEACON_HOME
+    # so tests / multi-account flows can isolate it the same way the profile
+    # module does (= profile._beacon_home contract).
+    beacon_home = os.environ.get("BEACON_HOME") or os.path.expanduser("~/.beacon")
+    candidates.append(os.path.join(beacon_home, "credentials.json"))
+
+    for path in candidates:
+        try:
+            if not os.path.exists(path):
+                continue
+            with open(path, "r", encoding="utf-8") as f:
+                data = _json.load(f)
+        except Exception:
+            continue
+
+        email = (data.get("email") or "").strip()
+        token = (data.get("token") or "").strip()
+
+        # Decode token payload to recover sub (= user_id). Two formats
+        # supported:
+        #   * ``bcli.<payload_b64>.<sig_hex>`` — Beacon CLI long-lived token
+        #     (= 2 segments after the "bcli." prefix, payload is segment[0])
+        #   * ``<header>.<payload>.<sig>`` — standard 3-segment JWT (= Cognito
+        #     id_token, Google id_token; payload is segment[1])
+        user_id = ""
+        if token:
+            tok = token
+            is_bcli = False
+            if tok.startswith("bcli."):
+                tok = tok[5:]
+                is_bcli = True
+            segments = tok.split(".")
+            payload_b64 = ""
+            if is_bcli and len(segments) >= 1:
+                payload_b64 = segments[0]
+            elif len(segments) >= 2:
+                payload_b64 = segments[1]
+            if payload_b64:
+                # Re-pad base64 (JWT strips '='); urlsafe alphabet.
+                padding = "=" * (-len(payload_b64) % 4)
+                try:
+                    payload_bytes = base64.urlsafe_b64decode(
+                        payload_b64 + padding
+                    )
+                    payload = _json.loads(payload_bytes.decode("utf-8"))
+                    user_id = str(payload.get("sub") or "").strip()
+                except Exception:
+                    user_id = ""
+
+        if email or user_id:
+            return user_id, email
+    return "", ""
+
+
 def _resolve_creator_identity() -> tuple[str, str, str]:
     """Return (user_id, email, session_id) for the trek creator.
 
-    Reads from env vars first so tests and bash can override freely.
-    Falls back to ``whoami`` for user_id when no env var is set so a
-    user running ``beacon trek create`` in dev mode without explicit env
-    still gets a meaningful creator record. Email and session_id have no
-    safe fallback — they MUST be supplied (= error out otherwise) because
-    fabricating them silently would corrupt member/leader records that
-    later identity flows depend on.
+    Resolution order (ms-61 / e-2132):
+      1. Env vars (``BEACON_USER_ID`` / ``BEACON_USER_EMAIL`` / ``BEACON_SESSION_ID``)
+         — highest precedence so tests, CI, multi-account flows override freely.
+      2. ``credentials.json`` of the active profile (= login 済セッションは
+         自動継承)。 email と user_id のうち env で埋まらなかったものだけ
+         credentials から補う。 env と credentials の値が共存している場合は
+         **env が勝つ**。
+      3. ``whoami`` for ``user_id`` only — final fallback so dev-mode runs
+         without login still produce a non-empty user_id (= just the OS user).
+
+    Email と session_id は credentials 経路でも埋まらなければ呼び出し側で
+    hard error にする (= ``BEACON_USER_EMAIL`` 要求 など)。 fabricating
+    silently は member/leader 記録を破壊するので構造的に避ける。
     """
     user_id = os.environ.get("BEACON_USER_ID", "").strip()
     email = os.environ.get("BEACON_USER_EMAIL", "").strip()
     session_id = os.environ.get("BEACON_SESSION_ID", "").strip()
+
+    # ms-61 / e-2132 — credentials.json fallback for env-missing case.
+    if not email or not user_id:
+        cred_user_id, cred_email = _read_credentials_for_identity()
+        if not email:
+            email = cred_email
+        if not user_id:
+            user_id = cred_user_id
+
     if not user_id:
         try:
             import getpass

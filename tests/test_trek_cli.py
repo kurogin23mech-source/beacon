@@ -61,12 +61,19 @@ def trek_env(tmp_path):
     project_file = tmp_path / ".beacon" / "project.json"
     project_file.parent.mkdir(parents=True, exist_ok=True)
     project_file.write_text('{"name":"test","milestones":[],"operations":[]}\n')
+    # ms-61 / e-2132 — isolate ~/.beacon/ via BEACON_HOME so the credentials
+    # auto-read fallback (_resolve_creator_identity) doesn't pick up the host
+    # developer's real login. Tests that assert env-removal-hard-errors stay
+    # valid; tests that pass env continue to work (= env wins regardless).
+    fake_beacon_home = tmp_path / "fake-beacon-home"
+    fake_beacon_home.mkdir()
     return {
         "BEACON_TREKS_DIR": str(treks_dir),
         "BEACON_USER_ID": "u-test",
         "BEACON_USER_EMAIL": "test@example.com",
         "BEACON_SESSION_ID": "sv-test-1",
         "BEACON_CWD": str(tmp_path),
+        "BEACON_HOME": str(fake_beacon_home),
         # ms-88 / e-2090 — bypass typed-ack gate for subprocess fixtures.
         # 個別の gate behavior は test_trek_join_consent_gate_* で別途検証する。
         "BEACON_TREK_CONSENT_ACK": "1",
@@ -89,9 +96,21 @@ def test_trek_create_basic(trek_env):
     assert doc["halt"] is None
 
 
-def test_trek_create_requires_email(trek_env):
+def test_trek_create_requires_email(trek_env, tmp_path):
+    """ms-61 / e-2132: env も credentials.json も無い時のみ email error。
+
+    旧テストは env 削除だけで hard error を assert していたが、 ms-61 fix で
+    credentials.json auto-read fallback が入ったので、 真の error 条件は
+    「env + credentials の両方とも欠落」 になった。 HOME を tmp に向けて
+    credentials の fallback も無効化する。
+    """
     env = dict(trek_env)
     env.pop("BEACON_USER_EMAIL")
+    # Isolate HOME so the auto-read fallback can't pick up the host's
+    # ~/.beacon/credentials.json (= ms-61 / e-2132 のテスト前提)。
+    fake_home = tmp_path / "no-credentials-home"
+    fake_home.mkdir()
+    env["HOME"] = str(fake_home)
     r = _run(env, "create", "x", "--json")
     assert r.returncode != 0
     assert "EMAIL" in r.stderr
