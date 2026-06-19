@@ -4340,21 +4340,68 @@ def trek_scheduler_tick_endpoint(
             project_data=None,
             now=now,
         )
-        bus_data = {
-            "channel": "trek-progress-check",
-            "sender_session_id": "",
-            "payload": payload,
-            "envelope": envelope,
-            "delivery": "auto-execute",
-            "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        # ms-83 / e-2036 — fan out to every live session of every Trek
+        # member, not just one project-wide broadcast. Per the dogfood
+        # observation (2026-06-19): trek.members[] is keyed by user_id,
+        # so self-dogfood (= multiple sessions of one user) collapsed to
+        # 1 member, leaving executor sessions unreached. The fix queries
+        # the project's session registry, filters by member user_ids and
+        # a 10-minute live cutoff, then writes one bus event per session
+        # with a session-addressed payload (= payload.recipient_session_id).
+        # If no live sessions resolve (= empty members or all stale), the
+        # broadcast fallback fires (sid="") so behaviour stays compatible.
+        member_user_ids = {
+            (m.get("user_id") or "")
+            for m in (trek_doc.get("members") or [])
+            if m.get("user_id")
         }
-        try:
-            event_id = db.append_bus_event(target_project_id, bus_data)
-        except Exception as exc:
-            errors.append({
-                "trek_id": trek_id,
-                "error": f"bus_append_failed: {type(exc).__name__}: {exc}",
-            })
+        target_sids: list[str] = []
+        if member_user_ids:
+            try:
+                project_sessions = db.list_sessions(target_project_id)
+            except Exception:
+                project_sessions = []
+            live_cutoff = (now - datetime.timedelta(minutes=10)).strftime(
+                "%Y-%m-%dT%H:%M:%S.%fZ"
+            )
+            target_sids = [
+                (s.get("session_id") or "")
+                for s in project_sessions
+                if (s.get("user_id") or "") in member_user_ids
+                and (s.get("last_active") or "") >= live_cutoff
+                and s.get("session_id")
+            ]
+        if not target_sids:
+            # Fallback: broadcast (= sid empty). Preserves behaviour when
+            # member resolution fails (= no live sessions / empty members /
+            # backend hiccup) so the trek still surfaces in some inbox.
+            target_sids = [""]
+        event_ids: list[str] = []
+        any_send_succeeded = False
+        for sid in target_sids:
+            send_payload = dict(payload)
+            if sid:
+                send_payload["recipient_session_id"] = sid
+            bus_data = {
+                "channel": "trek-progress-check",
+                "sender_session_id": "",
+                "payload": send_payload,
+                "envelope": envelope,
+                "delivery": "auto-execute",
+                "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            }
+            try:
+                event_ids.append(db.append_bus_event(target_project_id, bus_data))
+                any_send_succeeded = True
+            except Exception as exc:
+                errors.append({
+                    "trek_id": trek_id,
+                    "recipient_session_id": sid,
+                    "error": f"bus_append_failed: {type(exc).__name__}: {exc}",
+                })
+        if not any_send_succeeded:
+            # Every send for this trek failed; skip the stamp so the next
+            # tick retries instead of silently swallowing the failure.
             continue
         # Stamp last_progress_check_at so the next tick skips this trek
         # until its cadence elapses again.
@@ -4374,7 +4421,8 @@ def trek_scheduler_tick_endpoint(
         fired.append({
             "trek_id": trek_id,
             "project_id": target_project_id,
-            "event_id": event_id,
+            "event_ids": event_ids,
+            "recipients": target_sids,
         })
 
     # ms-83 / e-2001: idle escalation pass. Use the pre-snapshot
