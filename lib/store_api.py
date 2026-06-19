@@ -204,6 +204,21 @@ class StoreApi:
     def is_cloud(self) -> bool:
         return True
 
+    # ms-84 Phase 1 — fine-grained reads
+
+    def get_milestone(self, ms_id: str) -> dict:
+        """Match LocalStore.get_milestone shape, sourced from the cloud API.
+
+        Maps HTTP 404 → ``ValueError`` so callers can present the same
+        ``Milestone '<id>' not found`` message regardless of backend.
+        """
+        try:
+            return self._client.get_milestone(self._project_id, ms_id)
+        except RuntimeError as e:
+            if "404" in str(e):
+                raise ValueError(f"Milestone '{ms_id}' not found") from e
+            raise
+
     def list_documents(self) -> list:
         """List documents from cloud API."""
         try:

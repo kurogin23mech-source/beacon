@@ -116,6 +116,25 @@ class LocalStore:
     def stop_watching(self) -> None:
         pass
 
+    # ms-84 Phase 1 — fine-grained reads
+
+    def get_milestone(self, ms_id: str) -> dict:
+        """Match StoreApi.get_milestone shape, sourced from the local file."""
+        import core
+        data = self.load_project()
+        matches = core.find_milestones(data, ms_id)
+        if not matches:
+            raise ValueError(f"Milestone '{ms_id}' not found")
+        ms = matches[0]
+        entries = ms.get("entries", []) or []
+        total, done = core.count_task_status(entries)
+        return {
+            **ms,
+            "total_tasks": total,
+            "done_tasks": done,
+            "entries": core.entries_to_json(entries),
+        }
+
     def _file_hash(self) -> str | None:
         try:
             with open(self._project_file, "rb") as f:

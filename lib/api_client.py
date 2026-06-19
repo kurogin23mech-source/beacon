@@ -233,6 +233,21 @@ class ApiClient:
                 f"Cannot connect to API ({self._base_url}): {e.reason}"
             ) from e
 
+    # Milestone operations (ms-84 Phase 1 — fine-grained Store wiring)
+
+    def get_milestone(self, project_id: str, ms_id: str) -> dict:
+        """Fetch a single milestone (with task counts) from the cloud project.
+
+        Mirrors ``GET /api/projects/{project_id}/milestones/{ms_id}`` which
+        returns the milestone dict augmented with ``total_tasks`` / ``done_tasks``
+        / ``entries`` (JSON-serialised). Raises ``RuntimeError`` (HTTP 404) when
+        the milestone is unknown so callers can map to a CLI-friendly error.
+        """
+        return self.get(
+            f"/api/projects/{project_id}/milestones/"
+            f"{urllib.parse.quote(ms_id, safe='')}"
+        )
+
     # Purge operations (owner-only, hard-delete for duplicate-ID recovery — e-1030)
 
     def purge_milestone(self, project_id: str, ms_id: str, *,

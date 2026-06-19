@@ -44,6 +44,25 @@ class Store(Protocol):
         """Stop receiving push notifications."""
         ...
 
+    # ms-84 Phase 1 — fine-grained reads.
+    # The legacy ``load_project()`` returns the whole project document and
+    # the dashboard and CLI both pivot on it. Fine-grained reads let CLI
+    # branches that currently call ``client.get(...)`` or scan ``data`` go
+    # through the Store, which is what ms-84 Phase 2 then exploits to
+    # collapse the 27+ ``_is_cloud_mode()`` branches into a single Store
+    # call site.
+
+    def get_milestone(self, ms_id: str) -> dict:
+        """Fetch a single milestone (with task counts + entries).
+
+        The returned dict carries ``total_tasks`` / ``done_tasks`` and a
+        JSON-serialised ``entries`` list, matching the cloud
+        ``GET /milestones/{ms_id}`` shape. Raises ``ValueError`` when the
+        milestone is unknown so callers can show a CLI-friendly error
+        without distinguishing local vs cloud.
+        """
+        ...
+
 
 def get_store(project_file: str | None = None) -> Store:
     """Return the appropriate Store instance.
