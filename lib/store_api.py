@@ -345,6 +345,24 @@ class StoreApi:
                 raise ValueError(f"Milestone '{ms_id}' not found") from e
             raise
 
+    # ms-84 Phase 2 — trek read passthrough.
+
+    def get_trek(self, trek_id: str) -> dict:
+        """Match LocalStore.get_trek shape, sourced from the cloud API.
+
+        Maps HTTP 404 → ``ValueError`` so callers can present the same
+        ``trek '<id>' not found`` message regardless of backend.
+        Auth / 403 / transport errors propagate as RuntimeError, matching
+        the legacy cloud branch behavior (= cmd_trek_show sys.exit(1) で
+        Error: <msg> を出す経路に乗せたまま)。
+        """
+        try:
+            return self._client.get_trek(trek_id)
+        except RuntimeError as e:
+            if "404" in str(e):
+                raise ValueError(f"trek '{trek_id}' not found") from e
+            raise
+
     def list_documents(self) -> list:
         """List documents from cloud API."""
         try:

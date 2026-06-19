@@ -134,6 +134,51 @@ class Store(Protocol):
         """
         ...
 
+    # ms-84 Phase 2 — document read passthrough.
+    # cmd_doc_list / cmd_doc_show / _spec_exists_for_ms all carry their own
+    # ``_is_cloud_mode()`` branch today. Exposing these on Store lets the
+    # CLI call ``store.list_documents()`` / ``store.get_document(doc_id)``
+    # once and drop the branch (= 受入条件 10 の direct-call 削減 にカウント)。
+
+    def list_documents(self) -> list[dict]:
+        """List document metadata (= doc_id / title / scope / milestone /
+        operation / trek_id / status / updated_at の一覧)。
+
+        Both LocalStore and StoreApi return the same shape so the CLI can
+        post-filter (scope / ms / op / trek / include_trashed) without
+        branching on backend. LocalStore parses ``.beacon/documents/*.md``
+        frontmatter; StoreApi calls the cloud API and swallows transport
+        failures (= 空 list を返す best-effort、 cmd_doc_list 既存挙動と整合)。
+        """
+        ...
+
+    def get_document(self, doc_id: str) -> dict:
+        """Fetch a single document body + metadata by doc_id.
+
+        Returns a dict with at least ``doc_id`` and ``content`` keys plus
+        frontmatter fields (scope / milestone / operation / trek_id /
+        status / updated_at) when available. Returns ``{}`` when not found
+        (= LocalStore: ファイル不在、 StoreApi: 404 / transport 失敗)。
+        """
+        ...
+
+    # ms-84 Phase 2 — trek read passthrough.
+    # cmd_trek_show / cmd_trek_timeline / cmd_trek_aggregate 等が
+    # ``_is_cloud_mode()`` で client.get_trek / trek_store.load_trek を
+    # 切り替えている。Store に集約することで CLI から分岐を消す。
+
+    def get_trek(self, trek_id: str) -> dict:
+        """Fetch a single trek doc by id.
+
+        Both backends return the trek dict (members / scope / halt /
+        leader_session_id 等を含む完全な doc)。Raises ``ValueError`` when the
+        trek is unknown so CLI sites can show a uniform ``trek 'X' not
+        found`` message regardless of backend (= LocalStore: ファイル不在、
+        StoreApi: API 404)。Other transport / auth errors propagate as
+        ``RuntimeError`` (= 既存の cloud path の挙動と一致)。
+        """
+        ...
+
     def purge_milestone(self, ms_id: str, *,
                         reason: str, index: int | None = None) -> dict:
         """Hard-delete a milestone record (= 物理削除、duplicate-ID 回復用、Issue #14)。

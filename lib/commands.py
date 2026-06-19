@@ -4901,18 +4901,17 @@ def cmd_trek_timeline():
         print("Error: trek_id is required", file=sys.stderr)
         sys.exit(1)
 
-    if _is_cloud_mode():
-        try:
-            client, _config = _get_api_client()
-            t = client.get_trek(trek_id)
-        except RuntimeError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
-    else:
-        t = trek_store.load_trek(trek_id)
-        if t is None:
-            print(f"Error: trek {trek_id} not found", file=sys.stderr)
-            sys.exit(1)
+    # ms-84 Phase 2 (e-2036): Store.get_trek unifies the cloud / local
+    # branch. ValueError on not-found, RuntimeError on auth / transport
+    # propagates as the original cloud branch behavior.
+    try:
+        t = get_store().get_trek(trek_id)
+    except ValueError:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     events: list[dict] = []
 
@@ -7114,33 +7113,19 @@ def _auto_fire_release_marker_trigger() -> None:
 def _spec_exists_for_ms(ms_id: str) -> bool:
     """Return True if any spec-scoped document is attached to ms_id.
 
-    Works for both local mode (reads .beacon/documents/*.md frontmatter)
-    and cloud mode (queries the API). Cloud mode failures degrade silently
-    to False (no trigger cleanup is best-effort).
+    ms-84 Phase 2: ``_is_cloud_mode()`` 分岐を Store 経由に統一。 LocalStore /
+    StoreApi の list_documents() がどちらも scope / milestone を含む同形
+    dict 列を返すため、 CLI 側 (= ここ) は backend を意識せず post-filter
+    だけで判定できる。 cloud transport 失敗は StoreApi 側で [] に丸める
+    best-effort 契約 (= 既存挙動と等価)。
     """
     if not ms_id:
         return False
-    if _is_cloud_mode():
-        try:
-            client, config = _get_api_client()
-            docs = client.list_documents(config["project_id"])
-        except Exception:
-            return False
-        for doc in docs:
-            if doc.get("scope") == "spec" and doc.get("milestone") == ms_id:
-                return True
+    try:
+        docs = get_store().list_documents()
+    except Exception:
         return False
-    # Local mode: read frontmatter from .beacon/documents/*.md
-    docs_dir = _get_docs_dir()
-    if not os.path.isdir(docs_dir):
-        return False
-    for fname in os.listdir(docs_dir):
-        if not fname.endswith(".md"):
-            continue
-        try:
-            doc = _read_local_doc(os.path.join(docs_dir, fname))
-        except Exception:
-            continue
+    for doc in docs:
         if doc.get("scope") == "spec" and doc.get("milestone") == ms_id:
             return True
     return False
