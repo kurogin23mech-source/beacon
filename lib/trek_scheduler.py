@@ -293,6 +293,16 @@ _PROGRESS_ALL_DONE = (
     "Trek scope 内の todo task が見当たりません。 goal_state 達成済か、 "
     "新規タスク追加を検討してください。"
 )
+# ms-83 / e-2013: 自律権限の reminder。 受信側の /beacon-trek-execute Skill
+# は判断境界 protocol を持つが、 scheduler 経由の周期 DM 本体にも明示することで
+# 「scope 内は事前承認、 判断境界は leader DM で AI 間決定、 user 停止は限定的」
+# という権限の輪郭を毎 fire ごとに想起させる (= protocol drift 構造的防止)。
+_AUTONOMY_REMINDER = (
+    "\n\n[Trek 自律権限の再確認] Trek scope 内 action は事前承認 (= user 確認不要)。 "
+    "判断境界は leader DM 経路で AI 間決定する (= /beacon-trek-execute Skill の判断境界 "
+    "protocol 参照)。 user 停止は 不可逆操作 / 嗜好 / cross-Trek 副作用 / 権限・secret / "
+    "scope 外 のみに限定。"
+)
 
 
 def _collect_scope_task_ids(scope: list[dict]) -> list[str]:
@@ -414,7 +424,7 @@ def _payload(trek_id: str, body: str, target_entries: list[str],
              now: datetime.datetime) -> dict:
     return {
         "trek_id": trek_id,
-        "body": body,
+        "body": body + _AUTONOMY_REMINDER,
         "target_entries": [e for e in target_entries if e],
         "kind": "trek-progress-check",
         "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),

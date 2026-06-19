@@ -182,6 +182,21 @@ if echo "$STAGED" | grep -q "^INSTALL\.md$"; then
 fi
 
 # ==============================================================================
+# Check 8a: UI text Japanese grep gate (added 2026-06-19, ms-82 e-1978)
+# ==============================================================================
+# Warn (do NOT block) when staged changes to server/static/index.html or
+# desktop/layer.js contain Japanese characters outside developer comments.
+# Goal: catch English-ization regressions early. BEACON_SKIP_UI_JP_CHECK=1
+# silences the check.
+if [ "${BEACON_SKIP_UI_JP_CHECK:-0}" != "1" ]; then
+  if echo "$STAGED" | grep -qE "^(server/static/index\.html|desktop/layer\.js)$"; then
+    if [ -f scripts/check-ui-japanese-text.py ]; then
+      python3 scripts/check-ui-japanese-text.py 2>&1 | sed 's/^/[pre-commit] /' || true
+    fi
+  fi
+fi
+
+# ==============================================================================
 # Check 8: Branch / workspace divergence warning (added 2026-06-11, ms-65 e-1481)
 # ==============================================================================
 # Warn (do NOT block) when this session is in the main project root on a
