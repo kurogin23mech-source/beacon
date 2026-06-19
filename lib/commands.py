@@ -11275,31 +11275,13 @@ def cmd_cycle_status():
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     data = load_project()
 
-    # In cloud mode the document list may live in a Firestore subcollection;
-    # we ask the doc list command's helper to fetch them lazily. Failure here
-    # is non-fatal — we degrade to "no docs known" which is the same as the
-    # legacy behavior of the per-cycle predicates.
-    documents: list[dict] = []
+    # ms-84 Phase 2: Store.list_documents() で local / cloud を統一。
+    # 失敗時は空 list に degrade する best-effort 契約 (= push / deploy /
+    # operation 系の cycle 判定は document に依存しないので、 ここで空でも
+    # snapshot は正しく作れる)。
     try:
-        if _is_cloud_mode():
-            client, config = _get_api_client()
-            documents = client.list_documents(config["project_id"]) or []
-        else:
-            docs_dir = _get_docs_dir()
-            if os.path.isdir(docs_dir):
-                for fname in sorted(os.listdir(docs_dir)):
-                    if not fname.endswith(".md"):
-                        continue
-                    try:
-                        documents.append(_read_local_doc(os.path.join(docs_dir, fname)))
-                    except Exception:
-                        # Best-effort: a single unparsable doc shouldn't abort the
-                        # whole snapshot. We just won't see it in the retro signal.
-                        continue
+        documents = get_store().list_documents() or []
     except Exception:
-        # If doc fetch fails entirely (e.g. cloud auth glitch), keep going
-        # with an empty list. push / deploy / operation cycles do not depend
-        # on documents and will still report correctly.
         documents = []
 
     snapshot = cycle_mod.cycle_status_snapshot(data, documents=documents)
