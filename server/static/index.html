@@ -2995,6 +2995,13 @@ function connectWebSocket(projectId) {
         state.lastUpdate = new Date();
         state.connected = true;
         renderOnDataChange();
+        // ms-86 / e-2022 — Trek detail page を開いている時は、 project 更新を
+        // trek 側 (= scope 内 task_states / commits_recent) の更新シグナル
+        // とみなして trek 一覧も再 fetch (= 別 session の state stamp を <1 WS
+        // round trip で反映)。
+        if (state.openTrekId) {
+          dataSource.loadTreks().then(() => render()).catch(() => {});
+        }
       }
     } else if (msg.type === 'document_change') {
       // ms-43 e-809: Documents live in a Firestore subcollection that the
