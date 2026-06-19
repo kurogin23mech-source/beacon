@@ -2,6 +2,22 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.45.0] - 2026-06-19
+
+- Merge pull request #164 from kurogin23mech-source/feat/local-cloud-docker-compose
+- Merge pull request #173 from kurogin23mech-source/feat/ms-75-trek-autonomous-execution-completion
+- feat(ms-75): Trek scope 内 DM の budget gate bypass + bus budget show に bypass 数を可視化 (= e-2044)
+- feat(ms-75): beacon trek join に auto-arm を default 化 + --no-arm opt-out + session-start not-armed 警告 (= e-2047)
+- feat(ms-75): server-side TTL safety net で working state の silent silence を auto-stall (= e-2067)
+- feat(ms-75): bus.mjs CHANNEL_TO_SKILL hardcode で trek 系 channel を AI compliance 介さず自律起動 (= e-2069)
+- docs(release): update README/CHANGELOG for v0.44.0
+- chore(release): bump formula to 0.44.0
+- feat(cli): ローカル開発ログインの口を CLI に追加 (ms-12 e-2041)
+- feat(server): ローカルクラウドを DynamoDB Local で永続化 (ms-12 e-1987)
+- docs(compose): note Firestore emulator non-persistence + DynamoDB plan (ms-12)
+- feat(server): IdP不要のローカル開発ログイン (account分離対応) (ms-12)
+- feat(server): add local docker-compose stack for cloud server (ms-12)
+
 ## [v0.44.0] - 2026-06-19
 
 - Merge pull request #172 from kurogin23mech-source/feat/ms-75-trek-task-state-machine
