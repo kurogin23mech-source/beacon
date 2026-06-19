@@ -2392,6 +2392,46 @@ body::after {
 .trek-member-row .role.leader { color: var(--accent); }
 .trek-member-row .joined { color: var(--text-dim); font-size: 0.7rem; text-align: right; }
 
+/* ms-86 / e-2045: 参加 session の state 可視化 badge.
+   - working          = last_active が直近 5 分以内
+   - idle             = last_active が 5〜30 分前
+   - budget-exhausted = bus budget remaining == 0
+   - user-stop        = Trek halt が立っている
+   現 phase では self の live session 数を user-email の横に小さく示すところまで実装。
+   per-session 別 badge の精緻化は次 slice (= backend per-user sessions API 経由)。 */
+.trek-self-live-count {
+  display: inline-block;
+  margin-left: 8px;
+  font-size: 0.66rem;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-dim);
+  padding: 1px 6px;
+  border: 1px solid var(--border-subtle, var(--border));
+  border-radius: 8px;
+  vertical-align: middle;
+}
+.trek-session-state-badge {
+  display: inline-block;
+  font-size: 0.62rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 8px;
+  border: 1px solid currentColor;
+}
+.trek-session-state-badge.working {
+  color: var(--accent);
+}
+.trek-session-state-badge.idle {
+  color: var(--text-dim);
+}
+.trek-session-state-badge.budget-exhausted {
+  color: var(--warning, #fbbf24);
+}
+.trek-session-state-badge.user-stop {
+  color: var(--danger, #ef4444);
+}
+
 .trek-session-nest {
   margin-left: 24px;
   border-left: 1px solid var(--border-subtle, var(--border));
@@ -5054,6 +5094,21 @@ function _renderTrekScopeRow(s, t) {
     </div>`;
 }
 
+// ms-86 / e-2045 step 1: self の live session 数を member row に小さく表示する
+// helper。 state.onlineSessions は /api/me/sessions?live_only=true&since_minutes=10
+// で fetch 済 (= 当 user の live sessions のみ可視、 他 member の session 数は
+// 別経路で取る必要があり Phase 2 で対応)。 m.email が currentUserEmail と一致
+// しない場合は空文字を返す (= graceful degradation、 graceful フォールバックで
+// 既存挙動を壊さない)。
+function _renderTrekSelfLiveCount(m) {
+  const myEmail = currentUserEmail();
+  if (!myEmail || m.email !== myEmail) return '';
+  const sessions = (state && state.onlineSessions) || [];
+  if (!Array.isArray(sessions) || sessions.length === 0) return '';
+  const n = sessions.length;
+  return `<span class="trek-self-live-count" title="self の live sessions の数 (= /api/me/sessions による直近 10 分の生存判定)">${n} live</span>`;
+}
+
 function _renderTrekMemberRow(m, t) {
   // ms-86 / e-2017: ⭐ leader + user 名 + project 名 + role を 1 行で。
   //                 cross-project member の project 名は m.project_id がある場合のみ resolve、
@@ -5065,11 +5120,12 @@ function _renderTrekMemberRow(m, t) {
   const invitedAt = m.invited_at ? (m.invited_at.slice(0, 10)) : '';
   const projectName = _trekResolveProjectName(m.project_id) || _trekResolveProjectName(t && t.project_id) || 'this project';
   const star = isLeader ? '<span class="trek-leader-star" title="leader session">⭐</span>' : '<span class="trek-leader-star-spacer"></span>';
+  const selfLive = _renderTrekSelfLiveCount(m);
   return `
     <div class="trek-member-row ${dotCls}">
       ${star}
       <span class="dot"></span>
-      <span class="user-email">${esc(m.email || '(unknown)')}</span>
+      <span class="user-email">${esc(m.email || '(unknown)')}${selfLive}</span>
       <span class="user-proj">@ ${esc(projectName)}</span>
       <span class="role ${isLeader ? 'leader' : ''}">${isLeader ? 'Leader' : (isInvited ? 'Invited' : 'Member')}</span>
       <span class="joined">${isInvited ? ('invited ' + invitedAt) : ('joined ' + joinedAt)}</span>
