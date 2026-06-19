@@ -8513,7 +8513,10 @@ def cmd_doc_image_upload():
         print(f"Error: file not found: {local_path}")
         sys.exit(1)
 
-    if not _is_cloud_mode():
+    # ms-84 Phase 2: 直接 _is_cloud_mode 呼び出しを Store 経由に統一 (= 受入条件
+    # 10 の direct-call 削減)。 image upload は cloud-only operation のため、
+    # ここでは mode guard として is_cloud() を確認するだけ。
+    if not get_store().is_cloud():
         print("Error: image upload requires cloud mode (run 'beacon cloud push' first)")
         sys.exit(1)
 
@@ -10925,7 +10928,7 @@ def cmd_project_export():
         "project_name": project_data.get("name", ""),
         "project_id": snapshot.get("project_id", ""),
         "beacon_version": __version__,
-        "source_mode": "cloud" if _is_cloud_mode() else "local",
+        "source_mode": "cloud" if get_store().is_cloud() else "local",
         "entry_counts": entry_counts,
     }
 
