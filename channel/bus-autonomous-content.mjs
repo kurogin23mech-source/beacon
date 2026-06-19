@@ -98,7 +98,7 @@ function _buildTrekProgressContent(evt) {
     '',
     '**必須アクション** (= 12 分以内、 怠ると server-side TTL safety net (= ms-88 / e-2107) が当該 session の **全 working task を一括 leader_review に強制遷移** し、 leader review DM を発火する):',
     '',
-    '  a. `/beacon-trek-pulse ' + trekId + '` を起動 (= 推奨経路、 4 択 picker: terminal / continue / DM-leader / no-op)',
+    '  a. `/beacon-trek-pulse ' + trekId + '` を起動 (= 推奨経路、 5 択 picker: terminal / continue / dm-leader / dm-peer (= 横向き相談、 ms-88 / e-2140 peer-first) / no-op)',
     '  b. または `/beacon-trek-execute ' + trekId + '` を継続 (= 既存 executor loop)',
     '  c. または `beacon trek task-state` で working stamp を更新 (= manual fallback)',
     '',
