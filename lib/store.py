@@ -124,6 +124,16 @@ class Store(Protocol):
         """
         ...
 
+    def list_session_logs(self, limit: int = 0) -> list[dict]:
+        """List persisted session log documents (= most-recent-first)。
+
+        LocalStore returns ``[]`` because session log persistence in local
+        mode is per-file on disk and the caller handles directory listing
+        directly (cmd_session_log_list keeps this fallback). StoreApi calls
+        the API and returns the rows, swallowing transport failures.
+        """
+        ...
+
     def purge_milestone(self, ms_id: str, *,
                         reason: str, index: int | None = None) -> dict:
         """Hard-delete a milestone record (= 物理削除、duplicate-ID 回復用、Issue #14)。

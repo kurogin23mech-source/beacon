@@ -168,6 +168,12 @@ class LocalStore:
         project.json and is read separately via _read_local_session_log."""
         return None
 
+    def list_session_logs(self, limit: int = 0) -> list[dict]:
+        """No-op for local mode. The CLI walks the local
+        ``.beacon/session_logs/`` directory directly because the on-disk
+        layout (= one file per session) does not match the cloud row shape."""
+        return []
+
     def purge_milestone(self, ms_id: str, *,
                         reason: str, index: int | None = None) -> dict:
         """Match StoreApi.purge_milestone shape, applied to the local file.

@@ -286,6 +286,17 @@ class StoreApi:
         except (RuntimeError, ConnectionError):
             return None
 
+    def list_session_logs(self, limit: int = 0) -> list[dict]:
+        """List persisted session logs from the cloud. Returns ``[]`` on
+        transport failure so the caller can fall back to its local-disk
+        listing without backend-branching."""
+        try:
+            return self._client.list_session_logs(
+                self._project_id, limit=limit
+            ) or []
+        except (RuntimeError, ConnectionError):
+            return []
+
     def purge_milestone(self, ms_id: str, *,
                         reason: str, index: int | None = None) -> dict:
         """Match LocalStore.purge_milestone shape, applied via the cloud API.

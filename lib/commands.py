@@ -3212,15 +3212,11 @@ def cmd_session_log_list():
     except ValueError:
         limit = 0
 
-    entries: list[dict] = []
-    if _is_cloud_mode():
-        try:
-            from auth import load_credentials
-            if load_credentials() is not None:
-                client, config = _get_api_client()
-                entries = client.list_session_logs(config["project_id"], limit=limit) or []
-        except BaseException:
-            entries = []
+    # ms-84 Phase 2 (e-2036): Store.list_session_logs returns the cloud
+    # rows in cloud mode or [] in local mode, so the fallback to walking
+    # ``.beacon/session_logs/`` directly only fires when the Store could
+    # not supply anything.
+    entries: list[dict] = get_store().list_session_logs(limit=limit)
     if not entries:
         # Local cache fallback
         d = _session_logs_dir()
@@ -3257,17 +3253,12 @@ def cmd_session_log_show():
         print("Error: session id required", file=sys.stderr)
         sys.exit(1)
     entry = _read_local_session_log(sid)
-    if entry is None and _is_cloud_mode():
-        try:
-            from auth import load_credentials
-            if load_credentials() is not None:
-                client, config = _get_api_client()
-                try:
-                    entry = client.get_session_log(config["project_id"], sid)
-                except RuntimeError:
-                    entry = None
-        except BaseException:
-            entry = None
+    # ms-84 Phase 2 (e-2036): when the local cache is empty, ask the Store
+    # for any persisted remote copy. LocalStore returns None (= no cloud
+    # registry to consult); StoreApi returns the fetched dict or None on
+    # 404 / transport failure, so the caller only checks truthiness.
+    if entry is None:
+        entry = get_store().get_session_log(sid)
     if entry is None:
         print(f"Session log not found: {sid}", file=sys.stderr)
         sys.exit(1)
