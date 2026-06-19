@@ -32,6 +32,54 @@ triggers:
 
 詳細は CORE doc `b1XOKXQeC0JXaKkO0CRt` (= 「Trek の位置づけ: 缶詰の徹夜作業部屋」)。
 
+## leader / executor 役割分担 (= ms-88 / e-2140 coordinator norm)
+
+Trek の autonomous 実行では、 leader (= Trek の `leader_session_id`) と executor (= leader 以外の joined session) で **default の役割が違う**。 用語と動き:
+
+| 役割 | default の振る舞い | user override |
+|---|---|---|
+| **leader** | **作業を持たない**。 coordination / review / integration に集中。 executor の kickoff DM を受けて peer snapshot を共有、 計画系 DM の意思決定を裁く、 PR review + merge を担当 | user が「leader も実装で動いて」 と明示指示した場合のみ executor 役の task を持って動く (= 例外) |
+| **executor** | scope 内の task を 1 つ持って実装ループに入る。 起動時に leader へ kickoff DM を 1 回送って plan を peer 公開、 以降は scope 内 action を自律実行、 詰まったら dm-peer (= 他 executor) or dm-leader で相談 | (= default のまま) |
+
+### なぜ default を分けるか (= 設計背景)
+
+2026-06-20 tk-3045b8d1 dogfood の race incident で、 leader が「自分も実装で手を動かしていた」 ことが直接の引き金になった (= 同 user・ 同 cwd で 3 session が並列実装し、 git stash 経路で他 session の unstaged 編集が 5 分間消失)。 leader が coordination 専従なら以下 3 点で構造的に race を減らせる:
+
+1. **同 file 編集の race を構造的に減らす**: leader は実装 file を触らないので、 衝突 surface が executor 同士の作業領域だけに縮む (= 3 人並列 → 実質 2 人並列)
+2. **判断 latency を下げる**: leader が独自実装で context-switch している時間が消える、 peer からの計画 DM (= kickoff / dm-peer / dm-leader) に即座に返せる
+3. **review 経路が活きる**: leader が自分で land した PR を自分でレビューする独白パターン (= review 価値 0、 独立目線の欠落) を回避する
+
+### user override 経路
+
+user が「leader も手を動かして」 と **明示指示** した場合のみ leader が executor 役を併任する。 default ではない。 leader 自身が override しないこと (= 「私も手伝ったほうが早い」 という思考は default の coordinator 役を毀す方向、 race の根本原因に戻る)。 override の判定材料:
+
+- user 発話に「leader も実装」 / 「leader も手伝う」 / 「全員で並列」 等の明示語が含まれる
+- または会話直前に user が「人手が足りないので」 / 「急ぎなので」 等で並列稼働を依頼している
+
+これらが揃わない場合は default (= leader coordinator only) で動く。 leader が「自発判断で executor 役を兼ねる」 のは禁止。
+
+### Skill body 起動時の確認順序
+
+本 Skill (`/beacon-trek-execute`) が起動した時、 Step 1 (= Trek 有効性確認) の直後に **自分の役割を判定**:
+
+```bash
+cd "$PROJECT_DIR" && SID=$(beacon session id)
+LEADER_SID=$(beacon trek show "<trek-id>" --json | python3 -c "import json,sys; print(json.load(sys.stdin).get('leader_session_id',''))")
+ROLE=$([ "$SID" = "$LEADER_SID" ] && echo "leader" || echo "executor")
+```
+
+`ROLE` の値に応じて以降の Step の動きが変わる:
+
+- **`ROLE=leader`** (= default coordinator):
+  - Step 2 / 4 (= 候補列挙 / 実装ループ) は **default skip**
+  - Step 3 (= 計画系 DM) と peer DM 受信待機 + review 待機に専念
+  - user override が明示されている場合のみ Step 2 / 4 を通常通り走らせる
+- **`ROLE=executor`**:
+  - 通常通り Step 0 (= /beacon-trek-pulse Step 0 で kickoff DM 送信 + endpoint stamp) → Step 1 → Step 2 → Step 4 の実装ループ
+  - kickoff DM は 1 回送れば以降は不要 (= ms-88 / e-2138 server 側 `kickoff_status[sid].pending=false` で stamp 済)
+
+この default 分担が初期化される時点は **本 Skill の起動時** (= 1 セッション内で複数回起動されても毎回判定する)。 同 session が role 切替する局面 (= leader が user override 解除で coordinator に戻る等) は user 発話で signal が来た時に再判定する。
+
 ## いつ起動するか
 
 以下のいずれか:
