@@ -2,6 +2,21 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.42.0] - 2026-06-19
+
+- Merge pull request #170 from kurogin23mech-source/feat/ms-83-scheduler-autonomy-reminder
+- feat(ms-83): scheduler payload に Trek 自律権限 reminder を埋め込む (= protocol drift 構造的防止)
+- feat(ms-82): pre-commit に UI text 日本語 grep gate を追加 (e-1978)
+- feat(ms-82): ハンバーガーメニュー Online Agents 行に renderName 適用 (e-1971)
+- feat(ms-82): Trek detail / 一覧ページの UI text を英語化 (e-1976)
+- feat(ms-82): server/static/index.html の非 Trek UI text を英語化 (e-1975)
+- feat(ms-82): Settings panel から Profile タブを削除 (e-1973)
+- feat(ms-82): avatar クリックで開く Profile modal を新設 (e-1972)
+- feat(ms-82): Settings 各 section の長文 paragraph を tooltip 化 + 英語化 (e-1974)
+- feat(ms-82): CSS hover tooltip card 機構を追加 (e-1970)
+- docs(release): update README/CHANGELOG for v0.41.1
+- chore(release): bump formula to 0.41.1
+
 ## [v0.41.1] - 2026-06-18
 
 - Merge pull request #169 from kurogin23mech-source/fix/ms-83-current-project-id-e2007
