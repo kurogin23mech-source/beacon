@@ -2415,6 +2415,38 @@ body::after {
   padding: 1px 0;
 }
 
+/* NEXT FIRE (= ms-83 scheduler の next-fire、 ms-86 e-2019) */
+.trek-next-fire-row {
+  font-size: 0.78rem;
+  color: var(--text-primary);
+  padding: 6px 12px;
+}
+.trek-next-fire-row .abs { font-family: var(--font-mono, monospace); color: var(--accent, #60a5fa); }
+.trek-next-fire-row .rel { color: var(--text-dim); font-size: 0.7rem; margin-left: 8px; }
+
+/* RECENT ACTIVITY timeline (= ms-86 e-2019) — commit / done / state stamp の時系列 */
+.trek-activity-row {
+  display: grid;
+  grid-template-columns: 110px 18px 1fr;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 12px;
+  font-size: 0.72rem;
+  border-bottom: 1px dashed var(--border-subtle, var(--border));
+}
+.trek-activity-row:last-child { border-bottom: none; }
+.trek-activity-row .ts {
+  font-family: var(--font-mono, monospace);
+  color: var(--text-dim);
+}
+.trek-activity-row .icon { text-align: center; }
+.trek-activity-row .text {
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* WHY block (= goal_state テキスト、 ms-86 で新規追加) — Trek 画面の目的を 1-3 行で表示 */
 .trek-why-text {
   font-size: 0.85rem;
@@ -5094,29 +5126,100 @@ function _renderTrekDetail(t) {
         </div>
       </div>
 
-      <!-- ⑤ NEXT FIRE (= ms-83 server-side scheduler の next-fire 時刻、 T7 で実装) -->
-      ${t.status === 'active' && !halted ? `
-      <div class="trek-section trek-next-fire">
-        <div class="trek-section-title">
-          <span>NEXT FIRE</span>
-          <span class="right">cadence ${(t.scheduler && t.scheduler.cadence_minutes) || '—'} 分</span>
-        </div>
-        <div class="trek-coming-soon">
-          ms-83 server-side scheduler の次回 fire 時刻表示は T7 (= e-2019) で実装。 現状は scheduler 状態のみ。
-        </div>
-      </div>` : ''}
+      <!-- ⑤ NEXT FIRE (= ms-83 server-side scheduler の next-fire、 e-2019) -->
+      ${t.status === 'active' && !halted ? _renderTrekNextFire(t) : ''}
 
-      <!-- ⑥ RECENT ACTIVITY (= 直近の動き / run records timeline、 T7 で実装) -->
-      <div class="trek-section trek-recent-activity">
-        <div class="trek-section-title">
-          <span>RECENT ACTIVITY</span>
-          <span class="right">直近 5〜10 件</span>
-        </div>
-        <div class="trek-coming-soon">
-          Trek scope 内の bus event / commit / task add / scheduler tick を時系列で表示します。 T7 (= e-2019) で実装。
-        </div>
-      </div>
+      <!-- ⑥ RECENT ACTIVITY (= 直近の動き timeline、 e-2019) -->
+      ${_renderTrekRecentActivity(t)}
     </section>`;
+}
+
+// ms-86 / e-2019 — 次回 fire 時刻計算: t.meta.last_progress_check_at + cadence_minutes
+function _renderTrekNextFire(t) {
+  const meta = (t && t.meta) || {};
+  const cadence = meta.cadence_minutes || 10; // default 10 分 (lib/trek.py DEFAULT_CADENCE)
+  const lastStr = meta.last_progress_check_at || '';
+  let bodyHtml = '';
+  if (!lastStr) {
+    bodyHtml = `<div class="trek-coming-soon">scheduler はまだ一度も発火していません (= 初回 fire 待ち)。 cadence ${cadence} 分間隔で動きます。</div>`;
+  } else {
+    const lastDate = new Date(lastStr);
+    const nextDate = new Date(lastDate.getTime() + cadence * 60 * 1000);
+    const now = Date.now();
+    const diffMs = nextDate.getTime() - now;
+    const absStr = nextDate.toISOString().slice(0, 16).replace('T', ' ');
+    let relStr = '';
+    if (diffMs <= 0) relStr = '(now / overdue)';
+    else {
+      const mins = Math.round(diffMs / 60000);
+      relStr = mins < 1 ? '(< 1 分後)' : `(約 ${mins} 分後)`;
+    }
+    bodyHtml = `<div class="trek-next-fire-row"><span class="abs">${esc(absStr)}</span> <span class="rel">${esc(relStr)}</span></div>`;
+  }
+  return `
+    <div class="trek-section trek-next-fire">
+      <div class="trek-section-title">
+        <span>NEXT FIRE</span>
+        <span class="right">cadence ${cadence} 分</span>
+      </div>
+      ${bodyHtml}
+    </div>`;
+}
+
+// ms-86 / e-2019 — 直近の動き timeline: commits + done tasks + state stamps を merge
+function _renderTrekRecentActivity(t) {
+  const agg = (t && t.aggregation) || {};
+  const taskStates = (t && t.task_states) || {};
+  const events = [];
+  for (const c of (agg.commits_recent || [])) {
+    if (!c.date) continue;
+    events.push({
+      ts: c.date,
+      icon: '🔨',
+      text: `commit ${(c.hash || '').slice(0, 7)} — ${c.summary || ''} (${c.ms_id || ''})`,
+    });
+  }
+  for (const r of (agg.tasks_done_recent || [])) {
+    if (!r.done_at) continue;
+    events.push({
+      ts: r.done_at,
+      icon: '✓',
+      text: `done ${r.id || ''} — ${r.description || ''} (${r.ms_id || ''})`,
+    });
+  }
+  for (const [taskId, st] of Object.entries(taskStates)) {
+    if (!st || !st.updated_at) continue;
+    const icon = st.state === 'done' ? '✓' : (st.state === 'waiting-review' ? '👀' : '🔨');
+    events.push({
+      ts: st.updated_at,
+      icon,
+      text: `state ${st.state} — ${taskId}${st.note ? ': ' + st.note.slice(0, 80) : ''}`,
+    });
+  }
+  events.sort((a, b) => (a.ts < b.ts ? 1 : -1));
+  const shown = events.slice(0, 10);
+  let bodyHtml;
+  if (!shown.length) {
+    bodyHtml = `<div class="trek-coming-soon">まだ動きがありません。 Trek scope 内の commit / task done / state stamp がここに並びます。</div>`;
+  } else {
+    bodyHtml = shown.map(e => {
+      const tsShort = (e.ts || '').slice(0, 16).replace('T', ' ');
+      return `
+      <div class="trek-activity-row">
+        <span class="ts">${esc(tsShort)}</span>
+        <span class="icon">${esc(e.icon)}</span>
+        <span class="text">${esc(e.text)}</span>
+      </div>`;
+    }).join('');
+  }
+  return `
+    <div class="trek-section trek-recent-activity">
+      <div class="trek-section-title">
+        <span>RECENT ACTIVITY</span>
+        <span class="right">${shown.length} / ${events.length} 件表示</span>
+      </div>
+      ${bodyHtml}
+    </div>`;
 }
 
 function renderTreksSection() {
