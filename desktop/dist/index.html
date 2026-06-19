@@ -3570,10 +3570,10 @@ function reasonMissingBadge(entry) {
   const status = entry.status;
   const meta = entry.meta || {};
   if (status === 'done' && !meta.done_reason) {
-    return `<span class="entry-reason-missing" title="done_reason 未記録">⚠ 理由未記録</span>`;
+    return `<span class="entry-reason-missing" title="done_reason missing">⚠ no reason</span>`;
   }
   if (status === 'cancelled' && !meta.cancel_reason) {
-    return `<span class="entry-reason-missing" title="cancel_reason 未記録">⚠ 理由未記録</span>`;
+    return `<span class="entry-reason-missing" title="cancel_reason missing">⚠ no reason</span>`;
   }
   return '';
 }
@@ -4272,7 +4272,7 @@ async function _settingsLoadDmApprovalHistory() {
     const rows = await dataSource.loadDmApprovalHistory(pid, 50);
     dst.innerHTML = renderDmApprovalHistoryRows(rows);
   } catch (e) {
-    dst.innerHTML = `<div class="menu-user" style="color:var(--text-dim);">承認履歴を読み込めませんでした (${esc(String(e && e.message ? e.message : e))})。</div>`;
+    dst.innerHTML = `<div class="menu-user" style="color:var(--text-dim);">Could not load approval history (${esc(String(e && e.message ? e.message : e))}).</div>`;
   }
 }
 
@@ -4335,24 +4335,24 @@ function renderDisplayNamePrompt() {
                 border-radius:6px;padding:14px 16px;max-width:340px;
                 box-shadow:0 4px 12px rgba(0,0,0,0.4);">
       <div style="font-size:0.8rem;color:var(--text-primary);margin-bottom:6px;font-weight:600;">
-        表示名を設定しませんか？
+        Set your display name?
       </div>
       <div style="font-size:0.7rem;color:var(--text-dim);line-height:1.5;margin-bottom:10px;">
-        現在 author 列には ${esc(email)} がそのまま表示されています。
-        表示名 (display name) を設定すると、commit / task の作者欄が読みやすくなります。
+        Your author column currently shows ${esc(email)}.
+        A display name makes commit and task author labels easier to scan.
       </div>
       <div style="display:flex;gap:6px;flex-direction:column;">
         <input id="display-name-prompt-input" type="text" maxlength="60"
-               placeholder="例: 山田太郎"
+               placeholder="e.g. Taro Yamada"
                style="background:var(--bg);border:1px solid var(--border);color:var(--text-primary);font-size:0.8rem;padding:6px 8px;border-radius:3px;"/>
         <div style="display:flex;gap:6px;">
           <button data-action="display-name-prompt-save"
                   style="background:var(--accent);color:#000;border:0;padding:5px 12px;border-radius:3px;font-family:var(--font-mono);font-size:0.7rem;cursor:pointer;flex:1;">
-            保存
+            Save
           </button>
           <button data-action="display-name-prompt-dismiss"
                   style="background:transparent;color:var(--text-dim);border:1px solid var(--border);padding:5px 12px;border-radius:3px;font-family:var(--font-mono);font-size:0.7rem;cursor:pointer;">
-            後で
+            Later
           </button>
         </div>
       </div>
@@ -4630,9 +4630,9 @@ async function _settingsInviteMember() {
                          cursor:pointer;">Copy</button>
         </div>
         <div style="margin-top:6px;color:var(--text-dim);font-size:0.65rem;line-height:1.4;">
-          このリンクを ${esc(email)} に渡してください。Beacon project member への参加が成立します
-          (GitHub repo の collaborator 招待は別経路 = <code>gh repo edit --add-collaborator</code>)。
-          リンクは一度だけ表示されます — 失くしたら cancel して再発行してください。
+          Share this link with ${esc(email)} to add them as a Beacon project member.
+          (GitHub repo access is separate — use <code>gh repo edit --add-collaborator</code>.)
+          The link is shown only once. If you lose it, cancel and regenerate.
         </div>
       `;
       // Hook the copy button (innerHTML resets data-action wires).
@@ -5484,8 +5484,8 @@ function lookupEntry(hashMap, shortHash) {
 function renderReleasesSection() {
   const p = state.project;
   const subtabs = `<div class="releases-subtabs">
-    <button class="releases-subtab-btn ${state.releasesSubTab === 'service' ? 'active' : ''}" data-action="switch-releases-tab" data-subtab="service">サービス</button>
-    <button class="releases-subtab-btn ${state.releasesSubTab === 'code' ? 'active' : ''}" data-action="switch-releases-tab" data-subtab="code">コード</button>
+    <button class="releases-subtab-btn ${state.releasesSubTab === 'service' ? 'active' : ''}" data-action="switch-releases-tab" data-subtab="service">Service</button>
+    <button class="releases-subtab-btn ${state.releasesSubTab === 'code' ? 'active' : ''}" data-action="switch-releases-tab" data-subtab="code">Code</button>
   </div>`;
 
   if (state.releasesSubTab === 'code') {
@@ -5616,7 +5616,7 @@ function renderReleasesSection() {
 
   // Env filter bar (only shown when multiple environments exist)
   const envFilter = envList.length > 1 ? `<div class="deploy-env-filter">
-    <button class="deploy-env-btn ${!state.selectedDeployEnv ? 'active' : ''}" data-action="switch-deploy-env" data-env="">すべて</button>
+    <button class="deploy-env-btn ${!state.selectedDeployEnv ? 'active' : ''}" data-action="switch-deploy-env" data-env="">All</button>
     ${envList.map(e => `<button class="deploy-env-btn ${state.selectedDeployEnv === e ? 'active' : ''}" data-action="switch-deploy-env" data-env="${esc(e)}">${esc(e)}</button>`).join('')}
   </div>` : '';
 
@@ -5716,7 +5716,7 @@ function renderOperationsSection() {
 
     const opTasksHtml = opTasks.length ? `
       <div class="op-tasks">
-        <div class="op-section-label">OperationTasks <span class="op-task-progress">(${opTasksDone}/${opTasks.length} 完了)</span></div>
+        <div class="op-section-label">OperationTasks <span class="op-task-progress">(${opTasksDone}/${opTasks.length} done)</span></div>
         ${opTasks.map(t => {
           const isDone = t.status === 'done';
           const icon = isDone ? '●' : '○';
@@ -5738,7 +5738,7 @@ function renderOperationsSection() {
             <span class="op-run-date">${localDate(r.date)}</span>
             <span class="op-run-batch">${esc(r.batch||'')}</span>
             <span class="op-run-desc">${esc(r.description||'')}</span>
-          </div>`).join('') : '<div class="op-empty">まだ記録なし</div>'}
+          </div>`).join('') : '<div class="op-empty">No runs yet</div>'}
       </div>` : '';
 
     const incidentsHtml = incidents.map(i => `
@@ -5766,7 +5766,7 @@ function renderOperationsSection() {
         ${priorityBadge}
         <span class="op-badge">${esc((op.schedule||{}).frequency||'')}</span>
         <span class="op-source">${esc(op.log_source||'')}</span>
-        ${incidents.length ? `<span class="op-incident-count">⚠ ${incidents.length}件</span>` : ''}
+        ${incidents.length ? `<span class="op-incident-count">⚠ ${incidents.length}</span>` : ''}
       </div>
       ${objectiveBlock}${hintBlock}
       ${opTasksHtml}
@@ -5826,10 +5826,10 @@ function renderSessionLogsSection() {
   const logs = state.sessionLogs || [];
   if (!logs.length) {
     return `<div class="op-empty" style="padding:16px 0;">
-      まだセッションログがありません。<br>
+      No session logs yet.<br>
       <span style="font-size:0.72rem;color:var(--text-dim);">
-        セッション終了時 (<code>beacon session end</code> または /beacon-session-end Skill) に
-        当該セッションの notes/commits/PRs が集約されてここに残ります。
+        On session end (<code>beacon session end</code> or /beacon-session-end Skill),
+        notes / commits / PRs for that session are aggregated and appear here.
       </span>
     </div>`;
   }
@@ -5852,10 +5852,10 @@ function renderSessionLogsSection() {
     </div>`;
   }).join('');
   return `<div class="op-section-label" style="margin-bottom:10px;">
-    セッションログ（per-session 集約、意思決定の軌跡）
+    Session logs (per-session summaries, decision trail)
   </div>
   ${rows}
-  <div style="margin-top:12px;font-size:0.7rem;color:var(--text-dim);">${logs.length}件 · 直近のみ</div>`;
+  <div style="margin-top:12px;font-size:0.7rem;color:var(--text-dim);">${logs.length} entries · most recent only</div>`;
 }
 
 
@@ -5869,15 +5869,15 @@ function renderNotesSection() {
 
   return `<section class="retro-section fade-in">
     <div class="op-section-label" style="margin-bottom:10px;">
-      セッションメモ（ephemeral — セッション終了時にクリア）
+      Session notes (ephemeral — cleared on session end)
     </div>
     ${notes.length === 0
       ? `<div class="op-empty" style="padding:16px 0;">
-          メモなし。<br>
-          <span style="font-size:0.72rem;color:var(--text-dim);">Claude Codeで「メモして」と言うか、<code>beacon note "text"</code> で追加できます。</span>
+          No notes.<br>
+          <span style="font-size:0.72rem;color:var(--text-dim);">In Claude Code, say "memo this", or run <code>beacon note "text"</code> to add one.</span>
         </div>`
       : noteRows}
-    ${notes.length > 0 ? `<div style="margin-top:12px;font-size:0.7rem;color:var(--text-dim);">${notes.length}件 · beacon note clear でクリア</div>` : ''}
+    ${notes.length > 0 ? `<div style="margin-top:12px;font-size:0.7rem;color:var(--text-dim);">${notes.length} notes · clear with beacon note clear</div>` : ''}
   </section>`;
 }
 
@@ -6295,7 +6295,7 @@ function handleCommonAction(action, el) {
       try {
         if (navigator.clipboard) navigator.clipboard.writeText(cmd);
       } catch (_e) { /* noop */ }
-      window.alert('ターミナルでこのコマンドを実行してください:\n\n' + cmd + '\n\n(クリップボードにコピー済み)');
+      window.alert('Run this command in your terminal:\n\n' + cmd + '\n\n(copied to clipboard)');
       return true;
     }
   }
@@ -6467,7 +6467,7 @@ function closeDocumentOverlay() {
 // elapsed-pending time, which is rarely useful for human audit.
 function renderDmApprovalHistoryRows(rows) {
   if (!Array.isArray(rows) || rows.length === 0) {
-    return '<div class="menu-user" style="color:var(--text-dim);padding:12px;font-style:italic;">承認履歴はまだありません (= 過去に approve / deny された DM action がない)。</div>';
+    return '<div class="menu-user" style="color:var(--text-dim);padding:12px;font-style:italic;">No approval history yet (= no DM actions have been approved or denied).</div>';
   }
   const head = `
     <thead>
