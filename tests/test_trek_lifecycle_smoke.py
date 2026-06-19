@@ -72,6 +72,8 @@ def smoke_env(tmp_path):
     base = {
         "BEACON_TREKS_DIR": str(tmp_path / "treks"),
         "BEACON_CWD": str(tmp_path),
+        # ms-88 / e-2090 — bypass typed-ack gate for subprocess fixtures.
+        "BEACON_TREK_CONSENT_ACK": "1",
     }
     alice = {
         **base,

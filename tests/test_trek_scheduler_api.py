@@ -37,6 +37,13 @@ sys.modules["firestore_client"] = app_module.db
 
 _treks: dict[str, dict] = {}
 _bus_events_by_project: dict[str, list[dict]] = {}
+# ms-88 / e-2109 — per-project live session registry stub for the fan-out
+# filter integration test. Tests can populate this directly.
+_sessions_by_project: dict[str, list[dict]] = {}
+
+
+def _mock_list_sessions(project_id: str):
+    return copy.deepcopy(_sessions_by_project.get(project_id, []))
 
 
 def _mock_get_trek(trek_id: str):
@@ -77,12 +84,14 @@ def _rebind_db():
         ("save_trek", _mock_save_trek),
         ("list_treks", _mock_list_treks),
         ("append_bus_event", _mock_append_bus_event),
+        ("list_sessions", _mock_list_sessions),
     ]
     for name, mock in binds:
         prior[name] = getattr(db_module, name, None)
         setattr(db_module, name, mock)
     _treks.clear()
     _bus_events_by_project.clear()
+    _sessions_by_project.clear()
     yield
     for name, val in prior.items():
         if val is None:
@@ -352,13 +361,13 @@ def test_10min_cadence_does_not_refire_immediately():
 # Auto-stall pass (ms-75 / e-2067) — HTTP integration
 # ---------------------------------------------------------------------------
 
-def test_auto_stall_transitions_stalled_task_to_waiting_review():
-    """A working task with last_activity 31 min ago + default 30 min TTL
-    triggers the safety net: the server transitions to waiting-review and
-    fires a trek-task-review DM to the leader."""
+def test_auto_stall_transitions_stalled_task_to_leader_review():
+    """ms-88 / e-2107: auto-stall 罰則先が `waiting-review` → `leader_review` に
+    変更され、 TTL default が 30 → 12 min 短縮された。 13 min 沈黙の working
+    task で safety net が発火、 leader_review に遷移 + trek-task-review DM 発火。"""
     import datetime
     now = datetime.datetime.now(datetime.timezone.utc)
-    stale = (now - datetime.timedelta(minutes=31)).strftime(
+    stale = (now - datetime.timedelta(minutes=13)).strftime(
         "%Y-%m-%dT%H:%M:%S.%fZ"
     )
     _seed_trek(
@@ -389,12 +398,12 @@ def test_auto_stall_transitions_stalled_task_to_waiting_review():
     entry = body["auto_stalled"][0]
     assert entry["trek_id"] == "tk-stall0001"
     assert entry["task_id"] == "e-1"
-    assert entry["silence_minutes"] >= 31
-    assert entry["ttl_minutes"] == 30
+    assert entry["silence_minutes"] >= 13
+    assert entry["ttl_minutes"] == 12  # ms-88 / e-2107: 30 → 12 min 短縮
 
-    # Trek doc has the new terminal state.
+    # Trek doc has the new leader_review state (= ms-88 / e-2107)。
     saved = _treks["tk-stall0001"]
-    assert saved["task_states"]["e-1"]["state"] == "waiting-review"
+    assert saved["task_states"]["e-1"]["state"] == "leader_review"
     assert "auto-stalled" in saved["task_states"]["e-1"]["note"]
 
     # Leader received a trek-task-review DM with auto_stalled flag.
@@ -407,9 +416,10 @@ def test_auto_stall_transitions_stalled_task_to_waiting_review():
     assert rev["delivery"] == "auto-execute"
     assert rev["payload"]["trek_id"] == "tk-stall0001"
     assert rev["payload"]["task_id"] == "e-1"
-    assert rev["payload"]["state"] == "waiting-review"
+    # ms-88 / e-2107: state も leader_review に統一
+    assert rev["payload"]["state"] == "leader_review"
     assert rev["payload"]["auto_stalled"] is True
-    assert rev["payload"]["silence_minutes"] >= 31
+    assert rev["payload"]["silence_minutes"] >= 13
     assert rev["payload"]["recipient_session_id"] == "sv-leader"
 
 
@@ -508,12 +518,12 @@ def test_auto_stall_skips_halted_trek():
 
 
 def test_auto_stall_leader_can_recover_via_re_stamp_working():
-    """AC 5: false-positive recovery path. After auto-stall, the leader
-    transitions waiting-review → working and the next tick treats the
-    task as fresh."""
+    """AC 5: false-positive recovery path. ms-88 / e-2107: 罰則先が
+    leader_review に変更されたので leader は leader_review → working で復帰。
+    TTL も 12 min 短縮なので 13 min stale で発火する。"""
     import datetime
     now = datetime.datetime.now(datetime.timezone.utc)
-    stale = (now - datetime.timedelta(minutes=31)).strftime(
+    stale = (now - datetime.timedelta(minutes=13)).strftime(
         "%Y-%m-%dT%H:%M:%S.%fZ"
     )
     _seed_trek(
@@ -530,18 +540,17 @@ def test_auto_stall_leader_can_recover_via_re_stamp_working():
             "last_activity_at": stale,
         },
     }
-    # Auto-stall fires.
+    # Auto-stall fires → leader_review (ms-88 / e-2107)。
     r1 = client.post(
         "/api/system/trek-scheduler/tick",
         json={"trek_ids": ["tk-stall0005"]},
         headers=HEADERS_OK,
     )
     assert len(r1.json()["auto_stalled"]) == 1
-    assert _treks["tk-stall0005"]["task_states"]["e-1"]["state"] == "waiting-review"
+    assert _treks["tk-stall0005"]["task_states"]["e-1"]["state"] == "leader_review"
 
     # Leader simulates re-stamping working (= the lib operation behind the
-    # PATCH endpoint). The transition is allowed by
-    # VALID_TASK_STATE_TRANSITIONS so this works.
+    # PATCH endpoint). leader_review → working は新 5-state machine で許可。
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
     import trek as trek_mod
     trek_mod.set_task_state(
@@ -559,3 +568,128 @@ def test_auto_stall_leader_can_recover_via_re_stamp_working():
         headers=HEADERS_OK,
     )
     assert r2.json()["auto_stalled"] == []
+
+
+# ---------------------------------------------------------------------------
+# Per-session scheduler fanout filter (ms-88 / e-2109)
+# ---------------------------------------------------------------------------
+
+def _seed_live_sessions_for_trek(project_id: str, *,
+                                 user_id: str,
+                                 session_ids: list[str]) -> None:
+    """Register a set of live sessions for a project (= each one is fresh,
+    last_active = now). ms-88 / e-2109 helper."""
+    import datetime
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    _sessions_by_project[project_id] = [
+        {"session_id": sid, "user_id": user_id, "last_active": now_iso}
+        for sid in session_ids
+    ]
+
+
+def test_fanout_skips_session_with_only_terminal_claims():
+    """ms-88 / e-2109: session whose claims are all in leader_review /
+    user_review / done が tick を受け取らない (= 「work_review 後も scheduler
+    届く」 問題の構造解)。"""
+    _seed_trek(
+        trek_id="tk-fan0001",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-88"}],
+    )
+    # 2 sessions for leader user: 1 active claim + 1 all-terminal
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-leader",
+        session_ids=["sv-active", "sv-finished", "sv-fresh"],
+    )
+    # sv-active が working な claim を持つ
+    _treks["tk-fan0001"]["task_states"] = {
+        "e-w": {"state": "working", "updated_by_session_id": "sv-active"},
+        "e-d": {"state": "done", "updated_by_session_id": "sv-finished"},
+        # sv-fresh は claim 無し → fallback で tick もらう
+    }
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-fan0001"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200
+    events = _bus_events_by_project["beacon-test"]
+    progress_events = [
+        e for e in events if e["channel"] == "trek-progress-check"
+    ]
+    recipients = sorted(
+        e["payload"].get("recipient_session_id", "") for e in progress_events
+    )
+    # sv-active と sv-fresh は届く、 sv-finished は届かない
+    assert "sv-active" in recipients
+    assert "sv-fresh" in recipients
+    assert "sv-finished" not in recipients
+
+
+def test_fanout_skips_all_sessions_when_all_have_only_terminal_claims():
+    """全 live session の claim が terminal-ish → fanout は broadcast fallback
+    のみ (= 全 session が黙る方向 = 「誰にも届かない」 状態が emerge)。"""
+    _seed_trek(
+        trek_id="tk-fan0002",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-88"}],
+    )
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-leader",
+        session_ids=["sv-a", "sv-b"],
+    )
+    # 両 session ともに done claim のみ
+    _treks["tk-fan0002"]["task_states"] = {
+        "e-1": {"state": "done", "updated_by_session_id": "sv-a"},
+        "e-2": {"state": "leader_review", "updated_by_session_id": "sv-b"},
+    }
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-fan0002"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200
+    events = _bus_events_by_project.get("beacon-test", [])
+    progress_events = [
+        e for e in events if e["channel"] == "trek-progress-check"
+    ]
+    # broadcast fallback (= recipient_session_id 未設定 or "") 1 件のみ
+    assert len(progress_events) == 1
+    assert progress_events[0]["payload"].get("recipient_session_id", "") == ""
+
+
+def test_fanout_fresh_session_with_no_claims_still_receives_tick():
+    """fresh session (= 何も claim していない) は fallback 経路で tick を貰う
+    (= todo task を pick up する経路)。"""
+    _seed_trek(
+        trek_id="tk-fan0003",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-88"}],
+    )
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-leader",
+        session_ids=["sv-fresh"],
+    )
+    # task_states 空 = どの session も claim していない
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-fan0003"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200
+    events = _bus_events_by_project["beacon-test"]
+    progress_events = [
+        e for e in events if e["channel"] == "trek-progress-check"
+    ]
+    recipients = [
+        e["payload"].get("recipient_session_id", "") for e in progress_events
+    ]
+    assert "sv-fresh" in recipients
