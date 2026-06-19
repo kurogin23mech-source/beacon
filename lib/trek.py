@@ -380,7 +380,7 @@ def force_stall_session_working_tasks(trek_doc: dict, *,
 #       session_id: str,
 #       total_acks: int,                    # monotonically increasing
 #       last_pulse_ack_at: ISO timestamp,
-#       last_picked_choice: str,            # 'terminal' / 'continue' / 'dm-leader' / ''
+#       last_picked_choice: str,            # 5-choice picker token, see VALID_PULSE_PICKED_CHOICES
 #       history: list[PulseAckEntry] (cap 20),  # recent ring buffer
 #     }
 #     PulseAckEntry {
@@ -395,10 +395,17 @@ def force_stall_session_working_tasks(trek_doc: dict, *,
 # compliance rate per session cheaply (= no scan).
 PULSE_ACK_HISTORY_CAP = 20
 
+# ms-88 / e-2139 — 5-choice executor picker (= /beacon-trek-pulse Step body).
+# 'dm-peer' は ms-88 / e-2140 で導入された peer-first culture の構造実装:
+# 詰まった時の default action を「user に問う」 から「peer に相談する」 に
+# 移すことで、 user 起床まで Trek が autonomous に走り続ける経路を作る。
+# 元の 4 択 (terminal / continue / dm-leader / no-op) のうち dm-leader が
+# 「上向き相談」、 dm-peer が「横向き相談」 で responsibility 分担される。
 VALID_PULSE_PICKED_CHOICES = (
     "terminal",       # executor declared a terminal transition this tick
     "continue",       # executor continues working
-    "dm-leader",      # executor asked leader for judgment
+    "dm-leader",      # executor asked leader for judgment (= 上向き相談)
+    "dm-peer",        # executor asked a peer executor for judgment (= 横向き相談、 ms-88 / e-2140)
     "no-op",          # explicit "I see the tick but nothing to act on"
     "",               # unspecified (= legacy / minimum-info pulse)
 )

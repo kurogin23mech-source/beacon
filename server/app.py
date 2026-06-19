@@ -3201,7 +3201,7 @@ class TrekTakeOver(BaseModel):
 # ms-88 / e-2106 — pulse-ack body (= /beacon-trek-pulse Skill self-report)
 class TrekPulseAck(BaseModel):
     session_id: str
-    picked_choice: str = ""  # 'terminal' / 'continue' / 'dm-leader' / 'no-op' / ''
+    picked_choice: str = ""  # 5-choice token, see lib/trek.VALID_PULSE_PICKED_CHOICES (ms-88 / e-2139)
     note: str = ""
 
 

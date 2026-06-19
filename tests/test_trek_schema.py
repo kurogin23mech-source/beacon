@@ -1101,3 +1101,55 @@ def test_get_working_ttl_minutes_falls_back_on_non_numeric_override():
     # Bad config must not crash; fall back to default so safety net stays on.
     # ms-88 / e-2107: default 30 → 12 min。
     assert trek.get_working_ttl_minutes(t) == 12
+
+
+# ---------------------------------------------------------------------------
+# ms-88 / e-2139 — 5-choice executor picker (= /beacon-trek-pulse)
+#
+# `dm-peer` を 4 択 (terminal / continue / dm-leader / no-op) に加えて 5 択
+# 化する。 詰まった時の default を「user に問う」 から「peer に相談する」 に
+# 移すことで、 user 起床まで Trek が autonomous に走り続ける経路を確立する
+# (= peer-first culture の構造実装、 ms-88 / e-2140 と組み合わせる)。
+# ---------------------------------------------------------------------------
+
+def test_valid_pulse_picked_choices_includes_5_executor_choices_plus_legacy_empty():
+    """5 択 (terminal / continue / dm-leader / dm-peer / no-op) + legacy '' を含む。"""
+    expected = {"terminal", "continue", "dm-leader", "dm-peer", "no-op", ""}
+    assert set(trek.VALID_PULSE_PICKED_CHOICES) == expected
+
+
+def test_validate_pulse_picked_choice_accepts_dm_peer():
+    """e-2139 で追加した 'dm-peer' (= 横向き相談) が validation を通る。"""
+    assert trek.validate_pulse_picked_choice("dm-peer") == "dm-peer"
+
+
+def test_validate_pulse_picked_choice_accepts_each_of_the_5_choices():
+    """5 択すべてと空文字が known token として通る。"""
+    for choice in ("terminal", "continue", "dm-leader", "dm-peer", "no-op", ""):
+        assert trek.validate_pulse_picked_choice(choice) == choice
+
+
+def test_validate_pulse_picked_choice_rejects_unknown_token():
+    """known 5 + '' 以外は ValueError、 期待 list を error 文に含む。"""
+    with pytest.raises(ValueError) as excinfo:
+        trek.validate_pulse_picked_choice("bogus")
+    msg = str(excinfo.value)
+    # Sanity-check the diagnostic mentions both the bad token and the
+    # canonical list so executors can fix typos without grep'ing source.
+    assert "bogus" in msg
+    assert "dm-peer" in msg
+
+
+def test_record_pulse_ack_persists_dm_peer_choice():
+    """record_pulse_ack が dm-peer を last_picked_choice / history に書き込む。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.record_pulse_ack(t, session_id="sv-exec-x", picked_choice="dm-peer",
+                          note="peer に設計判断を相談")
+    entry = t["pulse_acks"]["sv-exec-x"]
+    assert entry["total_acks"] == 1
+    assert entry["last_picked_choice"] == "dm-peer"
+    assert entry["history"][0]["picked_choice"] == "dm-peer"
+    assert entry["history"][0]["note"] == "peer に設計判断を相談"
