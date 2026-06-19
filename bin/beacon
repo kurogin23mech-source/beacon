@@ -2627,6 +2627,26 @@ except ValueError as e:
                 BEACON_TREK_ID="$trek_id" BEACON_TREK_TO="$to_sid" \
                     python3 "$COMMANDS_PY" trek_transfer_leader
                 ;;
+            task-state)
+                shift 2
+                trek_id="" task_id="" state="" note=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --note) note="${2:-}"; shift 2 ;;
+                        --json) export BEACON_JSON=1; shift ;;
+                        *)
+                            if [[ -z "$trek_id" ]]; then trek_id="$1"
+                            elif [[ -z "$task_id" ]]; then task_id="$1"
+                            elif [[ -z "$state" ]]; then state="$1"
+                            fi
+                            shift
+                            ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" BEACON_TREK_TASK_ID="$task_id" \
+                BEACON_TREK_STATE="$state" BEACON_TREK_NOTE="$note" \
+                    python3 "$COMMANDS_PY" trek_task_state
+                ;;
             *)
                 echo "Usage: beacon trek <subcommand> [args]"
                 echo ""
@@ -2644,6 +2664,7 @@ except ValueError as e:
                 echo "  stop <trek-id> [--reason \"...\"]    (= Andon cord、halt 信号を立てる)"
                 echo "  resume <trek-id>                     (= halt 信号を clear)"
                 echo "  transfer-leader <trek-id> --to <session-id>"
+                echo "  task-state <trek-id> <task-id> <state> [--note '...']  (= ms-75/e-2048、 state: working|done|waiting-review)"
                 echo ""
                 echo "Env (creator identity, required for 'create'):"
                 echo "  BEACON_USER_EMAIL    creator email"

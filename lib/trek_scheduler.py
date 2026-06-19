@@ -36,6 +36,14 @@ from typing import Iterable, Optional
 # constant.
 DEFAULT_CADENCE_MINUTES = 10
 
+# ms-75 / e-2048 — Trek task state machine constant. Re-export the default
+# state so we can recognise "working" without dragging the whole lib.trek
+# import (= keeps module pure for tests that mock that side).
+try:
+    from lib.trek import DEFAULT_TASK_STATE  # noqa: F401
+except Exception:
+    DEFAULT_TASK_STATE = "working"
+
 
 # ---------------------------------------------------------------------------
 # Time helpers
@@ -128,6 +136,35 @@ def select_due_treks(
     return [t for t in treks if is_trek_due(
         t, now=now, default_cadence=default_cadence,
     )]
+
+
+def is_trek_task_aggregate_terminal(trek_doc: dict) -> bool:
+    """Return True iff every stamped Trek task state is terminal.
+
+    ms-75 / e-2048 — scheduler honors the Trek-internal task state machine.
+    The state map lives on ``trek_doc.task_states`` and is written by the
+    PATCH /api/treks/{id}/task-state endpoint. When **every** stamped task
+    is in a terminal state (= done or waiting-review), the scheduler stops
+    firing progress-check DMs for this trek (= leader review is the next
+    structural step, handled out-of-band via the PATCH-driven notification).
+
+    A trek with **no** stamped states (= empty task_states map) is NOT
+    terminal — it means "no executor has declared anything yet", and the
+    scheduler should keep firing obligation DMs so the executor knows to
+    act and stamp state. This preserves the existing pre-state-machine
+    behaviour when no one is using the new API.
+
+    A trek with **at least one** stamped state of "working" is NOT
+    terminal either — there is still active work, so the scheduler keeps
+    firing.
+    """
+    states = trek_doc.get("task_states") or {}
+    if not states:
+        return False
+    for entry in states.values():
+        if (entry or {}).get("state") == DEFAULT_TASK_STATE:
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +329,27 @@ _PROGRESS_EMPTY_SCOPE = (
 _PROGRESS_ALL_DONE = (
     "Trek scope 内の todo task が見当たりません。 goal_state 達成済か、 "
     "新規タスク追加を検討してください。"
+)
+# ms-75 / e-2048 — Trek task state machine integration. When the aggregate
+# of Trek-internal task_states reaches terminal (= all done /
+# waiting-review / mixed), scheduler stops firing obligation DMs and
+# instead emits a one-time "review required" summary so the leader
+# sees the transition without having to poll. Once the leader records
+# their review decision (= moves a task back to "working" or accepts
+# the terminal state via archive), the message is not re-sent.
+_AGGREGATE_ALL_DONE = (
+    "Trek scope 内の全 task が done に到達しました (= AI 自律実行完了)。 "
+    "leader review (= /beacon-trek-review) で archive 判断、 もしくは "
+    "scope に追加 task を入れるかを決めてください。"
+)
+_AGGREGATE_ALL_WAITING_REVIEW = (
+    "Trek scope 内の全 task が waiting-review に到達しました (= user 介入要)。 "
+    "leader review (= /beacon-trek-review) で各 task の処遇 (forward-to-user / "
+    "re-work / accept) を決めてください。"
+)
+_AGGREGATE_ALL_TERMINAL_MIXED = (
+    "Trek scope 内の全 task が terminal state (= done / waiting-review の混在) に "
+    "到達しました。 leader review で各 task ごとに処遇を決めてください。"
 )
 # ms-83 / e-2013: 自律権限の reminder。 受信側の /beacon-trek-execute Skill
 # は判断境界 protocol を持つが、 scheduler 経由の周期 DM 本体にも明示することで

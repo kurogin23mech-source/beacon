@@ -5544,6 +5544,91 @@ def cmd_trek_transfer_leader():
               f"{prior_leader} → {target}")
 
 
+def cmd_trek_task_state():
+    """Stamp Trek-internal task state (ms-75 / e-2048).
+
+    Env:
+      BEACON_TREK_ID         (required)
+      BEACON_TREK_TASK_ID    (required, the entry id e-XXXX)
+      BEACON_TREK_STATE      (required, one of working/done/waiting-review)
+      BEACON_TREK_NOTE       (optional)
+      BEACON_JSON            "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    task_id = os.environ.get("BEACON_TREK_TASK_ID", "").strip()
+    state = os.environ.get("BEACON_TREK_STATE", "").strip()
+    note = os.environ.get("BEACON_TREK_NOTE", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+    if not task_id:
+        print("Error: task_id is required (e.g. e-2034)", file=sys.stderr)
+        sys.exit(1)
+    if not state:
+        print(
+            "Error: state is required (one of working/done/waiting-review)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    try:
+        trek.validate_task_state(state)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            t = client.set_trek_task_state(
+                trek_id, task_id=task_id, state=state, note=note,
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        if json_mode:
+            print(json.dumps(t, ensure_ascii=False))
+        else:
+            print(
+                f"Stamped trek {trek_id} task {task_id} state → {state}"
+            )
+            if state in trek.TERMINAL_TASK_STATES:
+                print(
+                    "  Leader has been notified via trek-task-review DM "
+                    "(= /beacon-trek-review surface)."
+                )
+        return
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    caller_sid = os.environ.get("BEACON_SESSION_ID", "")
+    try:
+        trek.set_task_state(
+            t,
+            task_id=task_id,
+            state=state,
+            updated_by_session_id=caller_sid,
+            note=note,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    trek_store.save_trek(t)
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        print(
+            f"Stamped trek {trek_id} task {task_id} state → {state} "
+            "(local mode; review notification skipped — no bus path)"
+        )
+
+
 def cmd_trek_plan():
     """Edit a trek's scope (= what work items the trek is concerned with).
 
@@ -16239,6 +16324,7 @@ if __name__ == "__main__":
         "trek_join": cmd_trek_join,
         "trek_leave": cmd_trek_leave,
         "trek_plan": cmd_trek_plan,
+        "trek_task_state": cmd_trek_task_state,
         "trek_stop": cmd_trek_stop,
         "trek_resume": cmd_trek_resume,
         "trek_transfer_leader": cmd_trek_transfer_leader,

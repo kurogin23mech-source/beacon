@@ -725,6 +725,20 @@ class ApiClient:
              "to_session_id": to_session_id},
         )
 
+    def set_trek_task_state(self, trek_id: str, *, task_id: str,
+                             state: str, note: str = "") -> dict:
+        """ms-75 / e-2048 — Stamp Trek-internal task state.
+
+        Member-only (= server-side check). The server validates the
+        state transition and emits a one-time trek-task-review DM to
+        the leader when the new state is terminal (= done /
+        waiting-review). Returns the updated trek doc.
+        """
+        return self.patch(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/task-state",
+            {"task_id": task_id, "state": state, "note": note},
+        )
+
     def get_trek_summary(self, trek_id: str) -> dict:
         """Compact status snapshot (counts + status + halt) for dashboards."""
         return self.get(

@@ -792,6 +792,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_trek_xfer.add_argument("--to", dest="to_session_id", default="")
     p_trek_xfer.add_argument("--json", action="store_true")
 
+    # ms-75 / e-2048 — Trek task state machine declaration
+    p_trek_state = trek_sub.add_parser("task-state", add_help=False)
+    p_trek_state.add_argument("trek_id", nargs="?", default="")
+    p_trek_state.add_argument("task_id", nargs="?", default="")
+    p_trek_state.add_argument("state", nargs="?", default="")
+    p_trek_state.add_argument("--note", default="")
+    p_trek_state.add_argument("--json", action="store_true")
+
     # ---- doctor / project / help ----
     sub.add_parser("doctor", add_help=False)
     p_project = sub.add_parser("project", add_help=False)
@@ -2344,6 +2352,17 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
             {
                 "BEACON_TREK_ID": args.trek_id or "",
                 "BEACON_TREK_TO": args.to_session_id or "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd == "task-state":
+        return _run_commands_py(
+            root, "trek_task_state",
+            {
+                "BEACON_TREK_ID": args.trek_id or "",
+                "BEACON_TREK_TASK_ID": args.task_id or "",
+                "BEACON_TREK_STATE": args.state or "",
+                "BEACON_TREK_NOTE": args.note or "",
                 "BEACON_JSON": json_env,
             },
         )
