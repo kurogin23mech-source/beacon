@@ -2259,7 +2259,7 @@ body::after {
 }
 .trek-scope-sub-row {
   display: grid;
-  grid-template-columns: 14px 60px 1fr 160px;
+  grid-template-columns: 14px 60px 1fr 120px;
   align-items: center;
   gap: 10px;
   padding: 4px 0;
@@ -2276,24 +2276,54 @@ body::after {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.trek-scope-sub-row .assignee {
-  font-size: 0.66rem;
-  color: var(--text-dim);
-  white-space: nowrap;
+.trek-scope-sub-row .trek-state-cell {
   text-align: right;
+  white-space: nowrap;
 }
-.trek-scope-sub-row .assignee .muted { font-style: italic; opacity: 0.7; }
+
+/* Trek task state machine (= ms-75 / e-2048, ms-86 / e-2058) のバッジ */
+.trek-task-state-badge {
+  display: inline-block;
+  font-size: 0.62rem;
+  letter-spacing: 0.03em;
+  padding: 1px 6px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+.trek-task-state-badge.state-working {
+  color: var(--accent, #60a5fa);
+  border-color: rgba(96,165,250,0.5);
+  background: rgba(96,165,250,0.08);
+}
+.trek-task-state-badge.state-done {
+  color: #4ade80;
+  border-color: rgba(74,222,128,0.5);
+  background: rgba(74,222,128,0.08);
+}
+.trek-task-state-badge.state-waiting {
+  color: var(--warning, #fbbf24);
+  border-color: rgba(251,191,36,0.5);
+  background: rgba(251,191,36,0.08);
+}
 
 /* Member row + nested session rows */
 .trek-member-row {
+  /* ms-86 / e-2017: ⭐ + dot + email + @project + role + joined-date */
   display: grid;
-  grid-template-columns: 14px 1fr 80px 90px 130px;
+  grid-template-columns: 16px 14px 1fr 130px 80px 130px;
   align-items: center;
   gap: 10px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border-subtle, var(--border));
   font-size: 0.78rem;
 }
+.trek-member-row .trek-leader-star {
+  color: #fbbf24;
+  font-size: 0.85rem;
+  text-align: center;
+}
+.trek-member-row .trek-leader-star-spacer { width: 16px; }
 .trek-member-row .dot {
   width: 8px; height: 8px;
   border-radius: 50%;
@@ -2302,8 +2332,14 @@ body::after {
 }
 .trek-member-row.offline .dot { background: var(--text-dim); box-shadow: none; }
 .trek-member-row.invited .dot { background: var(--text-dim); box-shadow: none; opacity: 0.5; }
-.trek-member-row .email { color: var(--text-primary); }
-.trek-member-row .where { color: var(--text-dim); font-size: 0.7rem; display: block; }
+.trek-member-row .user-email { color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trek-member-row .user-proj {
+  color: var(--text-dim);
+  font-size: 0.7rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .trek-member-row .role {
   font-size: 0.62rem;
   letter-spacing: 0.1em;
@@ -4907,23 +4943,43 @@ function _trekScopeStatusIcon(status) {
   }
 }
 
+// ms-86 / e-2058 — Trek task state machine (= ms-75 / e-2048) のバッジ表示
+// state: working / done / waiting-review
+function _trekTaskStateBadge(state) {
+  if (!state) return '';
+  const map = {
+    'working':        { label: '🔨 working',  cls: 'state-working' },
+    'done':           { label: '✓ done',       cls: 'state-done' },
+    'waiting-review': { label: '👀 待 review', cls: 'state-waiting' },
+  };
+  const info = map[state];
+  if (!info) return '';
+  return `<span class="trek-task-state-badge ${info.cls}">${esc(info.label)}</span>`;
+}
+
 function _renderTrekScopeExpansion(s, t) {
   // Show child tasks / OperationTasks. Data source: t.aggregation
   // built by lib/commands.py:_build_trek_aggregation (= e-1864).
+  // Trek task state (= ms-75 / e-2048, displayed for e-2058) は t.task_states から拾う。
   const agg = (t && t.aggregation) || {};
+  const taskStates = (t && t.task_states) || {};
   const allTasks = [...(agg.tasks_todo || []), ...(agg.tasks_done_recent || [])];
   if (s.milestone) {
     const rows = allTasks.filter(r => r.ms_id === s.milestone);
     if (!rows.length) {
       return `<div class="trek-scope-expansion-empty">この MS scope に該当する task はまだありません。</div>`;
     }
-    return rows.map(r => `
+    return rows.map(r => {
+      const ts = taskStates[r.id || ''] || null;
+      const stateBadge = ts ? _trekTaskStateBadge(ts.state) : '';
+      return `
       <div class="trek-scope-sub-row">
         <span class="status">${_trekScopeStatusIcon(r.status)}</span>
         <span class="ref">${esc(r.id || '')}</span>
         <span class="desc">${esc(r.description || '')}</span>
-        <span class="assignee">@ <span class="muted">担当未割当</span></span>
-      </div>`).join('');
+        <span class="trek-state-cell">${stateBadge}</span>
+      </div>`;
+    }).join('');
   }
   if (s.operation) {
     // Operation 配下の OperationTasks + 直近 run records は別 endpoint。 T7 (= e-2019)
@@ -4966,23 +5022,35 @@ function _renderTrekScopeRow(s, t) {
     </div>`;
 }
 
-function _renderTrekMemberRow(m) {
+function _renderTrekMemberRow(m, t) {
+  // ms-86 / e-2017: ⭐ leader + user 名 + project 名 + role を 1 行で。
+  //                 cross-project member の project 名は m.project_id がある場合のみ resolve、
+  //                 無ければ「current project」 として viewer 自身の project を fallback (= 単一 project Trek なら自然)。
   const isLeader = m.role === 'leader';
   const isInvited = !m.joined_at;
-  const dotCls = isInvited ? 'invited' : (isLeader ? '' : '');
+  const dotCls = isInvited ? 'invited' : '';
   const joinedAt = m.joined_at ? (m.joined_at.slice(0, 10)) : '';
   const invitedAt = m.invited_at ? (m.invited_at.slice(0, 10)) : '';
+  const projectName = _trekResolveProjectName(m.project_id) || _trekResolveProjectName(t && t.project_id) || 'this project';
+  const star = isLeader ? '<span class="trek-leader-star" title="leader session">⭐</span>' : '<span class="trek-leader-star-spacer"></span>';
   return `
     <div class="trek-member-row ${dotCls}">
+      ${star}
       <span class="dot"></span>
-      <div>
-        <span class="email">${esc(m.email || '')}</span>
-        <span class="where">${isInvited ? 'invited' : 'member'}</span>
-      </div>
-      <span class="role ${isLeader ? 'leader' : ''}">${isLeader ? 'Leader' : 'Member'}</span>
-      <span class="joined" style="text-align:left;">${isInvited ? '—' : 'joined'}</span>
+      <span class="user-email">${esc(m.email || '(unknown)')}</span>
+      <span class="user-proj">@ ${esc(projectName)}</span>
+      <span class="role ${isLeader ? 'leader' : ''}">${isLeader ? 'Leader' : (isInvited ? 'Invited' : 'Member')}</span>
       <span class="joined">${isInvited ? ('invited ' + invitedAt) : ('joined ' + joinedAt)}</span>
     </div>`;
+}
+
+// project_id → 表示名解決 (= state.projects から)。 未知の id は null を返す。
+function _trekResolveProjectName(pid) {
+  if (!pid) return null;
+  const projs = (state && state.projects) || [];
+  const hit = projs.find(p => (p.project_id || p.id) === pid);
+  if (!hit) return null;
+  return hit.name || hit.title || pid;
 }
 
 function _renderTrekSummaryRow(d) {
@@ -5100,7 +5168,7 @@ function _renderTrekDetail(t) {
           <span>MEMBERS &amp; SESSIONS</span>
           <span class="right">${members.length} member${members.length === 1 ? '' : 's'} · ★ = leader session</span>
         </div>
-        ${ordered.map(_renderTrekMemberRow).join('')}
+        ${ordered.map(m => _renderTrekMemberRow(m, t)).join('')}
         <div class="trek-cli-hint">
           Invite, leave, or transfer leader from the terminal:
           <code>beacon trek invite ${esc(t.trek_id)} --actor &lt;email&gt;</code>
