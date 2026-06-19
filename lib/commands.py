@@ -7905,34 +7905,12 @@ def cmd_doc_list():
     # them in line with active ones (ms-14 e-973).
     include_trashed = os.environ.get("BEACON_INCLUDE_TRASHED", "") == "1"
 
-    if _is_cloud_mode():
-        client, config = _get_api_client()
-        docs = client.list_documents(config["project_id"])
-    else:
-        docs_dir = _get_docs_dir()
-        docs = []
-        if os.path.isdir(docs_dir):
-            for fname in sorted(os.listdir(docs_dir)):
-                if not fname.endswith(".md"):
-                    continue
-                doc = _read_local_doc(os.path.join(docs_dir, fname))
-                if not include_trashed and doc.get("status") == "cancelled":
-                    continue
-                entry = {
-                    "doc_id": doc["doc_id"],
-                    "title": doc["title"],
-                    "scope": doc["scope"],
-                    "updated_at": doc["updated_at"],
-                }
-                if doc.get("milestone"):
-                    entry["milestone"] = doc["milestone"]
-                if doc.get("operation"):
-                    entry["operation"] = doc["operation"]
-                if doc.get("trek_id"):
-                    entry["trek_id"] = doc["trek_id"]
-                if doc.get("status"):
-                    entry["status"] = doc["status"]
-                docs.append(entry)
+    # ms-84 Phase 2: Store 経由で local / cloud を統一。 LocalStore.list_documents
+    # は frontmatter 解析済の同形 dict 列を返すため、 ここでは soft-delete filter
+    # と post-filter (scope / ms / op / trek) を一括で適用するだけ。
+    docs = get_store().list_documents()
+    if not include_trashed:
+        docs = [d for d in docs if d.get("status") != "cancelled"]
 
     if scope_filter:
         docs = [d for d in docs if d.get("scope") == scope_filter]
@@ -7963,16 +7941,12 @@ def cmd_doc_show():
         print("Error: doc_id required")
         sys.exit(1)
 
-    if _is_cloud_mode():
-        client, config = _get_api_client()
-        doc = client.get_document(config["project_id"], doc_id)
-    else:
-        docs_dir = _get_docs_dir()
-        fpath = os.path.join(docs_dir, f"{doc_id}.md")
-        if not os.path.exists(fpath):
-            print(f"Document not found: {doc_id}")
-            sys.exit(1)
-        doc = _read_local_doc(fpath)
+    # ms-84 Phase 2: Store 経由で local / cloud を統一。 Store.get_document は
+    # 両 backend で同形 ({} on not-found / full dict on hit) を返す契約。
+    doc = get_store().get_document(doc_id)
+    if not doc:
+        print(f"Document not found: {doc_id}")
+        sys.exit(1)
 
     if json_mode:
         print(json.dumps(doc, ensure_ascii=False))
