@@ -4276,71 +4276,6 @@ async function _settingsLoadDmApprovalHistory() {
   }
 }
 
-// ms-78 / e-1909 — Settings > Profile tab.
-//
-// Lets the signed-in user edit their own display_name (= the human-friendly
-// label that appears in author columns and member lists). Email is shown
-// read-only because it is the sign-in identity, owned by the OAuth provider.
-function _renderSettingsProfileTab() {
-  const prof = state.myProfile || {};
-  const email = prof.email || (state.auth && state.auth.email) || '';
-  const displayName = prof.display_name || '';
-  return `
-    <div class="settings-section">
-      <div class="label">プロフィール (Profile)</div>
-      <div style="font-size:0.7rem;color:var(--text-dim);margin:4px 0 12px;line-height:1.5;">
-        表示名 (display name) は author 列 / メンバー一覧で email の代わりに表示されます。空欄に戻すと email に戻ります。email はサインイン ID なのでここでは変更できません (= OAuth provider 側で管理)。
-      </div>
-      <div style="display:flex;flex-direction:column;gap:10px;max-width:480px;">
-        <label style="display:flex;flex-direction:column;gap:4px;">
-          <span style="font-size:0.7rem;color:var(--text-dim);">Email (read-only)</span>
-          <input type="text" value="${esc(email)}" readonly
-                 style="background:var(--bg-surface);border:1px solid var(--border-subtle);color:var(--text-dim);font-size:0.75rem;padding:6px 8px;border-radius:3px;font-family:var(--font-mono);"/>
-        </label>
-        <label style="display:flex;flex-direction:column;gap:4px;">
-          <span style="font-size:0.7rem;color:var(--text-dim);">Display name</span>
-          <input id="settings-profile-display-name" type="text" value="${esc(displayName)}"
-                 placeholder="(空欄にすると email を表示します)"
-                 maxlength="60"
-                 style="background:var(--bg-surface);border:1px solid var(--border);color:var(--text-primary);font-size:0.8rem;padding:6px 8px;border-radius:3px;"/>
-        </label>
-        <div style="display:flex;gap:8px;align-items:center;">
-          <button data-action="settings-profile-save"
-                  style="background:var(--accent);color:#000;border:0;padding:6px 14px;border-radius:3px;font-family:var(--font-mono);font-size:0.75rem;cursor:pointer;">
-            保存 (Save)
-          </button>
-          <span id="settings-profile-msg" style="color:var(--text-dim);font-size:0.7rem;"></span>
-        </div>
-      </div>
-    </div>`;
-}
-
-// ms-78 / e-1909 — save handler for Settings > Profile.
-async function _settingsSaveProfile() {
-  const input = document.getElementById('settings-profile-display-name');
-  const msg = document.getElementById('settings-profile-msg');
-  if (!input) return;
-  const value = (input.value || '').trim();
-  if (msg) msg.textContent = '保存中…';
-  try {
-    const res = await dataSource.updateMyProfile(value);
-    // Reflect the canonical server state locally so the next render uses it.
-    state.myProfile = state.myProfile || {};
-    state.myProfile.display_name = (res && typeof res.display_name === 'string')
-      ? res.display_name : value;
-    if (msg) msg.textContent = value ? '保存しました。' : '表示名をクリアしました (email にフォールバック)。';
-    // Mark the retroactive prompt dismissed so it doesn't reappear.
-    try {
-      localStorage.setItem(
-        'beacon_display_name_prompt_dismissed_at',
-        new Date().toISOString()
-      );
-    } catch (_) { /* private mode — ignore */ }
-  } catch (e) {
-    if (msg) msg.textContent = `エラー: ${e && e.message ? e.message : 'unknown'}`;
-  }
-}
-
 // ms-82 / e-1972 — save handler for avatar Profile modal.
 // Same endpoint as Settings > Profile, but rendered inside the avatar popup.
 // Once e-1973 deletes the Settings > Profile tab, this becomes the sole UI
@@ -4549,14 +4484,11 @@ function renderSettings() {
         <button class="tab ${tab === 'members' ? 'active' : ''}" data-action="settings-set-tab" data-tab="members">Projects &amp; Members</button>
         <button class="tab ${tab === 'agents' ? 'active' : ''}" data-action="settings-set-tab" data-tab="agents">My Agents &amp; Treks</button>
         <button class="tab ${tab === 'audit' ? 'active' : ''}" data-action="settings-set-tab" data-tab="audit">Audit</button>
-        <button class="tab ${tab === 'profile' ? 'active' : ''}" data-action="settings-set-tab" data-tab="profile">Profile</button>
       </div>
       ${tab === 'members'
         ? _renderSettingsMembersTab()
         : tab === 'audit'
         ? _renderSettingsAuditTab()
-        : tab === 'profile'
-        ? _renderSettingsProfileTab()
         : _renderSettingsAgentsTab()}
     </div>
   `;
@@ -4591,18 +4523,6 @@ function renderSettings() {
   // settings panel.
   if (tab === 'audit' && state.projectId) {
     _settingsLoadDmApprovalHistory();
-  }
-  // ms-78 / e-1909 — Profile tab: refresh myProfile so the input shows the
-  // current persisted display_name. The renderSettings shell renders the
-  // initial value from the cached state.myProfile; we kick a fresh fetch
-  // and re-render once it lands so the field stays in sync across tabs /
-  // devices.
-  if (tab === 'profile') {
-    dataSource.loadMyProfile().then(() => {
-      if (state.settingsOpen && state.settingsTab === 'profile') {
-        renderSettings();
-      }
-    });
   }
 }
 
@@ -6329,10 +6249,8 @@ function handleCommonAction(action, el) {
     }
     case 'settings-invite-member':
       _settingsInviteMember(); return true;
-    // ms-78 / e-1909 — Settings > Profile + retroactive prompt.
-    case 'settings-profile-save':
-      _settingsSaveProfile(); return true;
     // ms-82 / e-1972 — avatar-opened Profile modal save handler.
+    // (Legacy Settings > Profile tab handler removed in e-1973.)
     case 'account-profile-save':
       _accountProfileSave(); return true;
     case 'display-name-prompt-save':
