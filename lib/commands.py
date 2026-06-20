@@ -6001,6 +6001,141 @@ def cmd_trek_take_over():
         )
 
 
+def cmd_trek_reconcile():
+    """Reconcile Trek task_states with task pool (ms-88 / e-2167).
+
+    2026-06-19 dogfood で観測した「task pool で done になっているのに Trek の
+    task_states stamp は waiting-review / leader_review / working で残ってる」
+    stuck 状態を一括修復する。
+
+    Default は dry-run (= 変更前 diff のみ表示)。 ``--apply`` を渡すと server
+    が mirror で done に書き換える (= updated_by_session_id="task-pool-mirror")。
+
+    Env:
+      BEACON_TREK_ID         (required)
+      BEACON_TREK_APPLY      "1" → apply (= 実適用)、 default は dry-run
+      BEACON_JSON            "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    apply_flag = os.environ.get("BEACON_TREK_APPLY", "") == "1"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            result = client.reconcile_trek(trek_id, apply=apply_flag)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        # Local-mode reconcile: read the trek doc and the project task pool
+        # from the local filesystem, compute diff, optionally apply.
+        t = trek_store.load_trek(trek_id)
+        if t is None:
+            print(f"Error: trek {trek_id} not found", file=sys.stderr)
+            sys.exit(1)
+        states = t.get("task_states") or {}
+        scope_pids = [
+            (s or {}).get("project") for s in (t.get("scope") or [])
+            if (s or {}).get("project")
+        ]
+        # Local mode: scope project は cwd の project.json と一致する想定。
+        # cross-project scope の局所 reconcile は cloud mode のみで完全対応。
+        try:
+            data = read_project()
+        except Exception:
+            data = None
+        pool_status: dict[str, str] = {}
+        if data:
+            import core
+            for entry_id in states.keys():
+                found = core.find_entry(data, entry_id)
+                if found:
+                    _, _, entry, _ = found
+                    pool_status[entry_id] = (entry or {}).get("status") or ""
+        diff: list[dict] = []
+        for entry_id, entry in states.items():
+            try:
+                current_state = trek.get_task_state(t, entry_id)
+            except Exception:
+                current_state = (entry or {}).get("state") or ""
+            pool = pool_status.get(entry_id, "")
+            if pool == "done" and current_state not in trek.TERMINAL_TASK_STATES:
+                diff.append({
+                    "entry_id": entry_id,
+                    "trek_state": current_state,
+                    "pool_status": pool,
+                    "would_change_to": "done",
+                })
+        applied: list[str] = []
+        if apply_flag and diff:
+            import datetime
+            now_iso = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            for item in diff:
+                entry_id = item["entry_id"]
+                existing = states.get(entry_id) or {}
+                states[entry_id] = {
+                    **existing,
+                    "state": "done",
+                    "updated_at": now_iso,
+                    "last_activity_at": now_iso,
+                    "updated_by_session_id": "task-pool-mirror",
+                    "note": (
+                        "task pool で done 化、 mirror 同期 "
+                        "(= ms-88 / e-2167 reconcile)"
+                    ),
+                }
+                applied.append(entry_id)
+            t["task_states"] = states
+            t["updated_at"] = now_iso
+            trek_store.save_trek(t)
+        result = {
+            "trek_id": trek_id,
+            "applied": apply_flag,
+            "diff": diff,
+            "applied_entry_ids": applied,
+        }
+
+    if json_mode:
+        print(json.dumps(result, ensure_ascii=False))
+        return
+
+    diff = result.get("diff") or []
+    applied_flag = result.get("applied")
+    applied_ids = result.get("applied_entry_ids") or []
+    if not diff:
+        print(
+            f"Trek {trek_id}: 整合済 (= task pool と Trek stamp が乖離している "
+            f"task は見つかりません)"
+        )
+        return
+    print(f"Trek {trek_id}: 乖離 {len(diff)} 件")
+    for item in diff:
+        print(
+            f"  {item.get('entry_id')}: trek_state="
+            f"{item.get('trek_state')!r} → would_change_to="
+            f"{item.get('would_change_to')!r} (pool_status="
+            f"{item.get('pool_status')!r})"
+        )
+    if applied_flag:
+        print(
+            f"\nApplied (= mirror で done 化): {len(applied_ids)} 件 "
+            f"{applied_ids}"
+        )
+    else:
+        print(
+            "\n(dry-run、 適用するには --apply を渡してください: "
+            f"`beacon trek reconcile {trek_id} --apply`)"
+        )
+
+
 def cmd_trek_transfer_leader():
     """Hand off leader_session_id to another session.
 
@@ -13210,6 +13345,7 @@ def cmd_help_json():
         {"command": "beacon trek transfer-leader <trek-id> --to <session-id>", "flags": ["--json"], "description": "Hand off leader_session_id to another session"},
         {"command": "beacon trek take-over <trek-id>", "flags": ["--json"], "description": "Fresh session (= same user, leader role) を新 leader_session_id に bind し直す (= dead session 引き継ぎ、ms-88 e-2089)"},
         {"command": "beacon trek kickoff <trek-id>", "flags": ["--session-id <sid>", "--kickoff-dm-event-id <eid>", "--json"], "description": "Kickoff Ritual の完了 stamp (= /beacon-trek-pulse Step 0.4 が叩く、 ms-88 e-2138)。 server endpoint だけ先に land した PR #177 の CLI wrapper 補完 (e-2139 残作業 #1)"},
+        {"command": "beacon trek reconcile <trek-id>", "flags": ["--apply", "--json"], "description": "task pool ↔ Trek stamp 同期の reconcile (= 「pool で done だが Trek stamp が waiting-review / leader_review / working で残ってる」 stuck 状態を一括修復、 default dry-run、 ms-88 e-2167)"},
         # ms-54 e-1266: DM channel lifecycle commands (install / uninstall / opt-out / opt-in / status)
         {"command": "beacon channel install", "flags": [], "description": "Install beacon-bus MCP entry into .mcp.json (DM channel for multi-session messaging)"},
         {"command": "beacon channel uninstall", "flags": ["--purge-files", "--keep-files"], "description": "Remove beacon-bus MCP entry; --purge-files also wipes channel/node_modules (moved to .trash/)"},
@@ -16942,6 +17078,7 @@ if __name__ == "__main__":
         "trek_pulse_ack": cmd_trek_pulse_ack,
         "trek_take_over": cmd_trek_take_over,
         "trek_kickoff": cmd_trek_kickoff,
+        "trek_reconcile": cmd_trek_reconcile,
         "trek_transfer_leader": cmd_trek_transfer_leader,
         "trek_timeline": cmd_trek_timeline,
         "version": lambda: print(f"beacon {__version__}"),

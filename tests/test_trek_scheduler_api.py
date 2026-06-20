@@ -693,3 +693,80 @@ def test_fanout_fresh_session_with_no_claims_still_receives_tick():
         e["payload"].get("recipient_session_id", "") for e in progress_events
     ]
     assert "sv-fresh" in recipients
+
+
+# ---------------------------------------------------------------------------
+# ms-88 / e-2109 second pass — leader 除外を fanout filter に追加 (2026-06-20)
+# ---------------------------------------------------------------------------
+
+def test_fanout_excludes_leader_session_from_progress_check():
+    """ms-88 / e-2109 (補完): leader_session_id は progress-check の宛先から
+    除外される。 leader は executor の進捗を促す立場ではない (= 役割が違う、
+    CORE doc trek-leader-stance / e-2166 と整合)、 progress-check は executor
+    だけに届く。"""
+    _seed_trek(
+        trek_id="tk-leader-excl",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-88"}],
+    )
+    # leader (sv-leader) + executor (sv-exec) の 2 session
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-leader",
+        session_ids=["sv-leader", "sv-exec"],
+    )
+    # sv-exec が working な claim
+    _treks["tk-leader-excl"]["task_states"] = {
+        "e-1": {"state": "working", "updated_by_session_id": "sv-exec"},
+    }
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-leader-excl"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200
+    events = _bus_events_by_project["beacon-test"]
+    progress_events = [
+        e for e in events if e["channel"] == "trek-progress-check"
+    ]
+    recipients = [
+        e["payload"].get("recipient_session_id", "") for e in progress_events
+    ]
+    # leader (sv-leader) は受け取らない、 executor (sv-exec) だけ
+    assert "sv-leader" not in recipients
+    assert "sv-exec" in recipients
+
+
+def test_fanout_leader_excluded_even_with_no_claims():
+    """leader_session_id は claim 0 件 (= fresh session 扱い) でも除外される。
+    e-2109 の補完 (fresh fallback) は executor のみに適用、 leader には適用
+    しない。 そうしないと leader が「fresh session、 todo 取りに行ってもらう
+    ため tick」 扱いされて 永久 tick の温床になる (= 2026-06-19 tk-40b0b27c
+    観測の根本原因)。"""
+    _seed_trek(
+        trek_id="tk-leader-no-claim",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-88"}],
+    )
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-leader",
+        session_ids=["sv-leader"],
+    )
+    # leader だけ、 claim も無し
+    _treks["tk-leader-no-claim"]["task_states"] = {}
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-leader-no-claim"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200
+    events = _bus_events_by_project.get("beacon-test", [])
+    progress_events = [
+        e for e in events if e["channel"] == "trek-progress-check"
+    ]
+    # 全 live session が leader (= 除外) → broadcast fallback (空 recipient) のみ
+    assert len(progress_events) == 1
+    assert progress_events[0]["payload"].get("recipient_session_id", "") == ""

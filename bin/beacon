@@ -2695,6 +2695,23 @@ except ValueError as e:
                     BEACON_TREK_NOTE="$note" \
                     python3 "$COMMANDS_PY" trek_pulse_ack
                 ;;
+            # ms-88 / e-2167 — task pool ↔ Trek stamp 同期 (= reconcile)。
+            # 2026-06-19 dogfood で観測した「task pool で done だが Trek stamp
+            # は waiting-review / leader_review / working で残ってる」 stuck
+            # 状態を一括修復する。 default は dry-run、 --apply で実適用。
+            reconcile)
+                shift 2
+                trek_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        --apply) export BEACON_TREK_APPLY=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" \
+                    python3 "$COMMANDS_PY" trek_reconcile
+                ;;
             task-state)
                 shift 2
                 trek_id="" task_id="" state="" note=""
@@ -2735,6 +2752,7 @@ except ValueError as e:
                 echo "  take-over <trek-id>                  (= dead leader_session_id を fresh session に bind し直す、 ms-88 e-2089)"
                 echo "  kickoff <trek-id> [--session-id X] [--kickoff-dm-event-id Y]  (= Kickoff Ritual 完了 stamp、 /beacon-trek-pulse Step 0.4、 ms-88 e-2138)"
                 echo "  pulse-ack <trek-id> [--picked-choice X] [--note '...']  (= /beacon-trek-pulse Skill が叩く observability ack、 ms-88 e-2106)"
+                echo "  reconcile <trek-id> [--apply]                  (= task pool ↔ Trek stamp の乖離を修復、 default dry-run、 ms-88 e-2167)"
                 echo "  task-state <trek-id> <task-id> <state> [--note '...']  (= ms-75/e-2048、 state: working|done|waiting-review)"
                 echo ""
                 echo "Env (creator identity, required for 'create'):"

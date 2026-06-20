@@ -61,6 +61,17 @@ sys.modules["firestore_client"] = app_module.db
 # In-memory trek storage + user-by-email index.
 _treks: dict[str, dict] = {}
 _users_by_email: dict[str, tuple[str, dict]] = {}
+# ms-88 / e-2168 — bus events recorded by mock append_bus_event so tests can
+# assert on review event mint / suppression.
+_bus_events_by_project: dict[str, list[dict]] = {}
+
+
+def _mock_append_bus_event(project_id: str, data: dict) -> str:
+    import copy
+    bus = _bus_events_by_project.setdefault(project_id, [])
+    event_id = f"ev-{len(bus)}"
+    bus.append({"event_id": event_id, **copy.deepcopy(data)})
+    return event_id
 
 
 def _mock_get_trek(trek_id: str):
@@ -123,9 +134,11 @@ def _rebind_db():
         ("find_user_by_email", _mock_find_user_by_email),
         ("get_or_create_user", _mock_get_or_create_user),
         ("get_user", _mock_get_user),
+        ("append_bus_event", _mock_append_bus_event),
     ]:
         prior[name] = getattr(db_module, name, None)
         setattr(db_module, name, mock)
+    _bus_events_by_project.clear()
     return prior
 
 
@@ -713,4 +726,240 @@ class TestSummary:
         trek_id = _create_seed_trek()
         _impersonate(STRANGER_UID, STRANGER_EMAIL)
         r = client.get(f"/api/treks/{trek_id}/summary")
+        assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# ms-88 / e-2168 — leader 自己循環 suppress
+# ---------------------------------------------------------------------------
+
+class TestLeaderSelfLoopSuppress:
+    """leader 自身が stamp した task-state transition で trek-task-review event を
+    leader 宛に mint しない (= 「自分が判断したものを自分に review 依頼」 ループの
+    構造解消、 2026-06-20 議論)。"""
+
+    def test_leader_self_stamp_suppresses_review_event(self):
+        # Active trek with leader_session_id = sv-leader (= seed default).
+        trek_id = _create_seed_trek()
+        _treks[trek_id]["scope"] = [
+            {"project": "beacon-test", "milestone": "ms-88"}
+        ]
+        # Pre-populate task_states[e-x] in working state owned by leader sid
+        _treks[trek_id]["task_states"] = {
+            "e-x": {
+                "state": "working",
+                "updated_by_session_id": "sv-leader",
+                "updated_at": "2026-06-19T00:00:00.000000Z",
+                "last_activity_at": "2026-06-19T00:00:00.000000Z",
+                "note": "",
+            }
+        }
+        # Clear any prior bus events
+        for k in list(_bus_events_by_project.keys()):
+            _bus_events_by_project[k].clear()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        # Caller session header == leader_session_id
+        r = client.patch(
+            f"/api/treks/{trek_id}/task-state",
+            json={"task_id": "e-x", "state": "done", "note": "leader done"},
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r.status_code == 200, r.text
+        # No trek-task-review event should be appended
+        bus = _bus_events_by_project.get("beacon-test", [])
+        review_events = [
+            e for e in bus if e.get("channel") == "trek-task-review"
+        ]
+        assert review_events == [], (
+            f"Expected no trek-task-review event for self-judgment, "
+            f"got {review_events}"
+        )
+        # Suppression recorded in meta
+        t = _treks[trek_id]
+        suppressions = (t.get("meta") or {}).get("review_suppressions") or []
+        assert len(suppressions) == 1
+        assert suppressions[0]["suppression_reason"] == "self_judgment"
+        assert suppressions[0]["task_id"] == "e-x"
+        assert suppressions[0]["state"] == "done"
+        # State transition preserved
+        assert (t.get("task_states") or {}).get("e-x", {}).get("state") == "done"
+
+    def test_non_leader_member_stamp_emits_review_event(self):
+        """control: non-leader member が stamp → review event 発火 (= 既存挙動)。"""
+        trek_id = _create_seed_trek()
+        _treks[trek_id]["scope"] = [
+            {"project": "beacon-test", "milestone": "ms-88"}
+        ]
+        _treks[trek_id]["task_states"] = {
+            "e-y": {
+                "state": "working",
+                "updated_by_session_id": "sv-member",
+                "updated_at": "2026-06-19T00:00:00.000000Z",
+                "last_activity_at": "2026-06-19T00:00:00.000000Z",
+                "note": "",
+            }
+        }
+        for k in list(_bus_events_by_project.keys()):
+            _bus_events_by_project[k].clear()
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.patch(
+            f"/api/treks/{trek_id}/task-state",
+            json={"task_id": "e-y", "state": "done", "note": "member done"},
+            headers={"X-Beacon-Session": "sv-member"},
+        )
+        assert r.status_code == 200, r.text
+        bus = _bus_events_by_project.get("beacon-test", [])
+        review_events = [
+            e for e in bus if e.get("channel") == "trek-task-review"
+        ]
+        assert len(review_events) == 1
+        # No suppression for non-leader caller
+        t = _treks[trek_id]
+        suppressions = (t.get("meta") or {}).get("review_suppressions") or []
+        assert suppressions == []
+
+
+# ---------------------------------------------------------------------------
+# ms-88 / e-2167 — Trek task_states ↔ task pool reconcile endpoint
+# ---------------------------------------------------------------------------
+
+class TestTrekReconcileEndpoint:
+    """task pool で done だが Trek stamp が non-terminal で stuck の状態を
+    一括検知 + 修復する reconcile endpoint。 default dry-run、 apply=true で
+    mirror 適用。"""
+
+    def _seed_active_trek_with_scope(self) -> str:
+        trek_id = _create_seed_trek()
+        _treks[trek_id]["scope"] = [
+            {"project": "beacon-test", "milestone": "ms-88"}
+        ]
+        return trek_id
+
+    def test_reconcile_dry_run_returns_diff_no_changes(self):
+        trek_id = self._seed_active_trek_with_scope()
+        _treks[trek_id]["task_states"] = {
+            "e-stuck": {
+                "state": "leader_review",
+                "updated_by_session_id": "sv-x",
+                "updated_at": "2026-06-19T00:00:00.000000Z",
+                "last_activity_at": "2026-06-19T00:00:00.000000Z",
+                "note": "stuck",
+            }
+        }
+        from unittest.mock import patch
+
+        def _fake_get_project(pid: str):
+            if pid == "beacon-test":
+                return {
+                    "milestones": [
+                        {"id": "ms-88", "entries": [
+                            {"id": "e-stuck", "type": "task", "status": "done"}
+                        ]}
+                    ],
+                    "operations": [],
+                }
+            return None
+
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        with patch.object(app_module.db, "get_project", _fake_get_project):
+            r = client.post(
+                f"/api/treks/{trek_id}/reconcile",
+                json={"apply": False},
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["trek_id"] == trek_id
+        assert body["applied"] is False
+        assert len(body["diff"]) == 1
+        assert body["diff"][0]["entry_id"] == "e-stuck"
+        assert body["diff"][0]["trek_state"] == "leader_review"
+        assert body["diff"][0]["would_change_to"] == "done"
+        # Unchanged
+        assert (
+            _treks[trek_id]["task_states"]["e-stuck"]["state"]
+            == "leader_review"
+        )
+
+    def test_reconcile_apply_mirrors_to_done(self):
+        trek_id = self._seed_active_trek_with_scope()
+        _treks[trek_id]["task_states"] = {
+            "e-stuck": {
+                "state": "waiting-review",  # legacy token → leader_review
+                "updated_by_session_id": "sv-x",
+                "updated_at": "2026-06-19T00:00:00.000000Z",
+                "last_activity_at": "2026-06-19T00:00:00.000000Z",
+                "note": "legacy stuck",
+            }
+        }
+        from unittest.mock import patch
+
+        def _fake_get_project(pid: str):
+            if pid == "beacon-test":
+                return {
+                    "milestones": [
+                        {"id": "ms-88", "entries": [
+                            {"id": "e-stuck", "type": "task", "status": "done"}
+                        ]}
+                    ],
+                    "operations": [],
+                }
+            return None
+
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        with patch.object(app_module.db, "get_project", _fake_get_project):
+            r = client.post(
+                f"/api/treks/{trek_id}/reconcile",
+                json={"apply": True},
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["applied"] is True
+        assert body["applied_entry_ids"] == ["e-stuck"]
+        new_state = _treks[trek_id]["task_states"]["e-stuck"]
+        assert new_state["state"] == "done"
+        assert new_state["updated_by_session_id"] == "task-pool-mirror"
+        assert "mirror 同期" in new_state["note"]
+
+    def test_reconcile_no_diff_when_aligned(self):
+        trek_id = self._seed_active_trek_with_scope()
+        _treks[trek_id]["task_states"] = {
+            "e-aligned": {
+                "state": "done",
+                "updated_by_session_id": "sv-x",
+                "updated_at": "2026-06-19T00:00:00.000000Z",
+                "last_activity_at": "2026-06-19T00:00:00.000000Z",
+                "note": "",
+            }
+        }
+        from unittest.mock import patch
+
+        def _fake_get_project(pid: str):
+            if pid == "beacon-test":
+                return {
+                    "milestones": [
+                        {"id": "ms-88", "entries": [
+                            {"id": "e-aligned", "type": "task", "status": "done"}
+                        ]}
+                    ],
+                    "operations": [],
+                }
+            return None
+
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        with patch.object(app_module.db, "get_project", _fake_get_project):
+            r = client.post(
+                f"/api/treks/{trek_id}/reconcile",
+                json={"apply": False},
+            )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["diff"] == []
+
+    def test_reconcile_non_member_returns_403(self):
+        trek_id = self._seed_active_trek_with_scope()
+        _impersonate(STRANGER_UID, STRANGER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/reconcile",
+            json={"apply": False},
+        )
         assert r.status_code == 403
