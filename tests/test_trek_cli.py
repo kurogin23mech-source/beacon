@@ -61,12 +61,22 @@ def trek_env(tmp_path):
     project_file = tmp_path / ".beacon" / "project.json"
     project_file.parent.mkdir(parents=True, exist_ok=True)
     project_file.write_text('{"name":"test","milestones":[],"operations":[]}\n')
+    # ms-61 / e-2132 — isolate ~/.beacon/ via BEACON_HOME so the credentials
+    # auto-read fallback (_resolve_creator_identity) doesn't pick up the host
+    # developer's real login. Tests that assert env-removal-hard-errors stay
+    # valid; tests that pass env continue to work (= env wins regardless).
+    fake_beacon_home = tmp_path / "fake-beacon-home"
+    fake_beacon_home.mkdir()
     return {
         "BEACON_TREKS_DIR": str(treks_dir),
         "BEACON_USER_ID": "u-test",
         "BEACON_USER_EMAIL": "test@example.com",
         "BEACON_SESSION_ID": "sv-test-1",
         "BEACON_CWD": str(tmp_path),
+        "BEACON_HOME": str(fake_beacon_home),
+        # ms-88 / e-2090 — bypass typed-ack gate for subprocess fixtures.
+        # 個別の gate behavior は test_trek_join_consent_gate_* で別途検証する。
+        "BEACON_TREK_CONSENT_ACK": "1",
     }
 
 
@@ -86,9 +96,21 @@ def test_trek_create_basic(trek_env):
     assert doc["halt"] is None
 
 
-def test_trek_create_requires_email(trek_env):
+def test_trek_create_requires_email(trek_env, tmp_path):
+    """ms-61 / e-2132: env も credentials.json も無い時のみ email error。
+
+    旧テストは env 削除だけで hard error を assert していたが、 ms-61 fix で
+    credentials.json auto-read fallback が入ったので、 真の error 条件は
+    「env + credentials の両方とも欠落」 になった。 HOME を tmp に向けて
+    credentials の fallback も無効化する。
+    """
     env = dict(trek_env)
     env.pop("BEACON_USER_EMAIL")
+    # Isolate HOME so the auto-read fallback can't pick up the host's
+    # ~/.beacon/credentials.json (= ms-61 / e-2132 のテスト前提)。
+    fake_home = tmp_path / "no-credentials-home"
+    fake_home.mkdir()
+    env["HOME"] = str(fake_home)
     r = _run(env, "create", "x", "--json")
     assert r.returncode != 0
     assert "EMAIL" in r.stderr
@@ -424,6 +446,69 @@ def test_trek_join_rejects_uninvited(trek_env):
     assert "no invitation" in r.stderr.lower() or "not invited" in r.stderr.lower()
 
 
+# ---------------------------------------------------------------------------
+# Consent gate (ms-88 / e-2090) — Trek 参加は autonomous loop 入場の権限委譲なので
+# CLI 直叩きで無音成立しないことを構造的に担保する。
+# ---------------------------------------------------------------------------
+
+def test_trek_join_consent_gate_blocks_non_tty_without_flag(trek_env):
+    """Non-TTY (= subprocess pipe) + consent_ack 未指定 → 拒否。
+
+    pytest subprocess は非 TTY なので、 BEACON_TREK_CONSENT_ACK env を
+    敢えて除外して typed-ack も flag bypass も無い状態を作る。
+    """
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "invite", tid, "--actor", "b@x.com")
+    env_b = dict(trek_env)
+    env_b.update({
+        "BEACON_USER_ID": "u-b",
+        "BEACON_USER_EMAIL": "b@x.com",
+        "BEACON_SESSION_ID": "sv-b-1",
+    })
+    # consent_ack bypass を fixture から外す
+    env_b.pop("BEACON_TREK_CONSENT_ACK", None)
+    r = _run(env_b, "join", tid)
+    assert r.returncode != 0, (
+        "non-TTY 経路は typed-ack を取れないので join を block すべき"
+    )
+    # explanation には participation 意味を書いてある
+    assert "blanket" in r.stderr.lower() or "implications" in r.stderr.lower()
+
+
+def test_trek_join_consent_gate_bypass_with_flag(trek_env):
+    """--i-understand-the-implications flag が CLI から渡されたら gate を通過する。"""
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "invite", tid, "--actor", "b@x.com")
+    env_b = dict(trek_env)
+    env_b.update({
+        "BEACON_USER_ID": "u-b",
+        "BEACON_USER_EMAIL": "b@x.com",
+        "BEACON_SESSION_ID": "sv-b-1",
+    })
+    env_b.pop("BEACON_TREK_CONSENT_ACK", None)
+    # flag 経路: dispatch.py が BEACON_TREK_CONSENT_ACK=1 に展開する。
+    r = _run(env_b, "join", tid, "--i-understand-the-implications", "--no-arm", "--json")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(r.stdout)
+    b_member = next(m for m in doc["members"] if m["email"] == "b@x.com")
+    assert b_member["joined_at"]
+
+
+def test_trek_join_consent_gate_bypass_with_env_var(trek_env):
+    """BEACON_TREK_CONSENT_ACK=1 env var 経路でも gate を通過する (= fixture default の挙動を明示テスト)。"""
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "invite", tid, "--actor", "b@x.com")
+    env_b = dict(trek_env)
+    env_b.update({
+        "BEACON_USER_ID": "u-b",
+        "BEACON_USER_EMAIL": "b@x.com",
+        "BEACON_SESSION_ID": "sv-b-1",
+        "BEACON_TREK_CONSENT_ACK": "1",
+    })
+    r = _run(env_b, "join", tid, "--no-arm", "--json")
+    assert r.returncode == 0, r.stderr
+
+
 def test_trek_leave_removes_member(trek_env):
     tid = _make_trek_and_return_id(trek_env)
     _run(trek_env, "invite", tid, "--actor", "b@x.com")
@@ -609,3 +694,203 @@ def test_trek_transfer_leader_requires_to(trek_env):
     r = _run(trek_env, "transfer-leader", tid)
     assert r.returncode != 0
     assert "to" in r.stderr.lower() or "session" in r.stderr.lower()
+
+
+# ---------------------------------------------------------------------------
+# take-over (ms-88 / e-2089) — fresh session leader recovery path
+# ---------------------------------------------------------------------------
+
+def test_trek_take_over_rebinds_leader_session_to_fresh_session(trek_env):
+    """同 user / 別 session で take-over すると leader_session_id が新 session に bind し直る。"""
+    tid = _make_trek_and_return_id(trek_env)
+
+    # Fresh session of the same user (= dogfood の Mac restart 後シナリオ)
+    fresh_env = dict(trek_env)
+    fresh_env["BEACON_SESSION_ID"] = "sv-fresh-leader"
+    r = _run(fresh_env, "take-over", tid, "--json")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(r.stdout)
+    assert doc["leader_session_id"] == "sv-fresh-leader"
+    assert doc.get("_take_over", {}).get("new_leader_session_id") == "sv-fresh-leader"
+
+
+def test_trek_take_over_rejects_non_leader_member(trek_env):
+    """role=member の参加者は take-over できない (leader 専用)。"""
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "invite", tid, "--actor", "b@x.com")
+    env_b = dict(trek_env)
+    env_b.update({
+        "BEACON_USER_ID": "u-b",
+        "BEACON_USER_EMAIL": "b@x.com",
+        "BEACON_SESSION_ID": "sv-b-1",
+    })
+    _run(env_b, "join", tid)  # b joins as role="member"
+    r = _run(env_b, "take-over", tid)
+    assert r.returncode != 0
+    assert "leader" in r.stderr.lower()
+
+
+def test_trek_take_over_rejects_non_member(trek_env):
+    """member ですらない user は take-over 不可。"""
+    tid = _make_trek_and_return_id(trek_env)
+    stranger_env = dict(trek_env)
+    stranger_env.update({
+        "BEACON_USER_ID": "u-stranger",
+        "BEACON_USER_EMAIL": "stranger@x.com",
+        "BEACON_SESSION_ID": "sv-stranger",
+    })
+    r = _run(stranger_env, "take-over", tid)
+    assert r.returncode != 0
+    assert "member" in r.stderr.lower()
+
+
+def test_trek_take_over_is_idempotent_when_already_bound(trek_env):
+    """同 session で再 take-over → exit 0、 既 bind を保持。"""
+    tid = _make_trek_and_return_id(trek_env)
+    r1 = _run(trek_env, "take-over", tid, "--json")
+    assert r1.returncode == 0, r1.stderr
+    # trek_env の BEACON_SESSION_ID は sv-test-1 → 既に leader として bind 済
+    r2 = _run(trek_env, "take-over", tid, "--json")
+    assert r2.returncode == 0, r2.stderr
+    assert "sv-test-1" in r2.stdout or "no-op" in r2.stdout.lower()
+
+
+def test_trek_take_over_requires_session_id(trek_env):
+    """BEACON_SESSION_ID 未設定で take-over → エラー。"""
+    tid = _make_trek_and_return_id(trek_env)
+    env_no_sid = dict(trek_env)
+    env_no_sid.pop("BEACON_SESSION_ID", None)
+    r = _run(env_no_sid, "take-over", tid)
+    assert r.returncode != 0
+    assert "session" in r.stderr.lower()
+
+
+# ---------------------------------------------------------------------------
+# kickoff (ms-88 / e-2138 + e-2139 #1 CLI wrapper) — Kickoff Ritual stamp
+#
+# PR #177 で server endpoint + schema は land 済、 ここでは CLI wrapper の
+# round-trip を pin する (= /beacon-trek-pulse Step 0.4 が呼ぶ経路の前提)。
+# ---------------------------------------------------------------------------
+
+def test_trek_kickoff_stamps_session_as_completed(trek_env):
+    """kickoff CLI で local mode で stamp すると kickoff_status に pending=false が乗る。"""
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "kickoff", tid,
+             "--kickoff-dm-event-id", "evt-test-kickoff", "--json")
+    assert r.returncode == 0, r.stderr
+    entry = json.loads(r.stdout)
+    # creator session (= sv-test-1 in trek_env fixture) が stamp 対象になる
+    assert entry["session_id"] == "sv-test-1"
+    assert entry["pending"] is False
+    assert entry["sent_at"]  # non-empty ISO
+    assert entry["kickoff_dm_event_id"] == "evt-test-kickoff"
+
+
+def test_trek_kickoff_session_id_override_via_flag(trek_env):
+    """`--session-id` flag が env を上書きして別 session の stamp ができる。"""
+    tid = _make_trek_and_return_id(trek_env)
+    # creator は trek_env BEACON_SESSION_ID = sv-test-1。 別 session を override
+    # で渡す (= dogfood で executor が leader 経路で別 session を stamp する想定)。
+    r = _run(trek_env, "kickoff", tid,
+             "--session-id", "sv-other-session",
+             "--kickoff-dm-event-id", "evt-other", "--json")
+    assert r.returncode == 0, r.stderr
+    entry = json.loads(r.stdout)
+    assert entry["session_id"] == "sv-other-session"
+    assert entry["pending"] is False
+
+
+def test_trek_kickoff_is_idempotent(trek_env):
+    """同 session で 2 度 kickoff → 2 度目も exit 0、 既存 sent_at 保持。"""
+    tid = _make_trek_and_return_id(trek_env)
+    r1 = _run(trek_env, "kickoff", tid, "--json")
+    assert r1.returncode == 0
+    first_sent_at = json.loads(r1.stdout)["sent_at"]
+    r2 = _run(trek_env, "kickoff", tid, "--json")
+    assert r2.returncode == 0, r2.stderr
+    # idempotent — first stamp is preserved (= mark_kickoff_completed の契約)
+    assert json.loads(r2.stdout)["sent_at"] == first_sent_at
+
+
+def test_trek_kickoff_rejects_non_member(trek_env):
+    """member ですらない user が kickoff → エラー (member 限定)。"""
+    tid = _make_trek_and_return_id(trek_env)
+    stranger_env = dict(trek_env)
+    stranger_env.update({
+        "BEACON_USER_ID": "u-stranger",
+        "BEACON_USER_EMAIL": "stranger@x.com",
+        "BEACON_SESSION_ID": "sv-stranger",
+    })
+    r = _run(stranger_env, "kickoff", tid)
+    assert r.returncode != 0
+    assert "member" in r.stderr.lower()
+
+
+def test_trek_kickoff_requires_session_id(trek_env):
+    """BEACON_SESSION_ID 未設定 + --session-id 未指定で kickoff → エラー。"""
+    tid = _make_trek_and_return_id(trek_env)
+    env_no_sid = dict(trek_env)
+    env_no_sid.pop("BEACON_SESSION_ID", None)
+    r = _run(env_no_sid, "kickoff", tid)
+    assert r.returncode != 0
+    assert "session" in r.stderr.lower()
+
+
+# ---------------------------------------------------------------------------
+# pulse-ack (ms-88 / e-2106) — Layer 2 observability self-report
+# ---------------------------------------------------------------------------
+
+def test_trek_pulse_ack_records_invocation(trek_env):
+    """pulse-ack を打つと total_acks が増え、 last_picked_choice が記録される。"""
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "pulse-ack", tid, "--picked-choice", "continue",
+             "--note", "self-test", "--json")
+    assert r.returncode == 0, r.stderr
+    entry = json.loads(r.stdout)
+    assert entry["session_id"] == "sv-test-1"
+    assert entry["total_acks"] == 1
+    assert entry["last_picked_choice"] == "continue"
+    assert len(entry["history"]) == 1
+    assert entry["history"][0]["picked_choice"] == "continue"
+    assert entry["history"][0]["note"] == "self-test"
+
+
+def test_trek_pulse_ack_increments_total_on_repeated_call(trek_env):
+    """同 session で 2 回 ack → total_acks=2 + history 2 件。"""
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "pulse-ack", tid, "--picked-choice", "continue")
+    r = _run(trek_env, "pulse-ack", tid, "--picked-choice", "no-op", "--json")
+    assert r.returncode == 0, r.stderr
+    entry = json.loads(r.stdout)
+    assert entry["total_acks"] == 2
+    assert entry["last_picked_choice"] == "no-op"
+    assert len(entry["history"]) == 2
+
+
+def test_trek_pulse_ack_rejects_invalid_picked_choice(trek_env):
+    """validate_pulse_picked_choice が known token のみ受け入れる。"""
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "pulse-ack", tid, "--picked-choice", "bogus")
+    assert r.returncode != 0
+    assert "picked_choice" in r.stderr.lower() or "expected one of" in r.stderr.lower()
+
+
+def test_trek_pulse_ack_allows_empty_picked_choice(trek_env):
+    """picked_choice 省略 (= 空文字) は許可 (= 最小情報 ack)。"""
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "pulse-ack", tid, "--json")
+    assert r.returncode == 0, r.stderr
+    entry = json.loads(r.stdout)
+    assert entry["total_acks"] == 1
+    assert entry["last_picked_choice"] == ""
+
+
+def test_trek_pulse_ack_caps_note_at_200_chars(trek_env):
+    """200 文字 cap で長文を切り詰める (= history 肥大防止)。"""
+    tid = _make_trek_and_return_id(trek_env)
+    long_note = "x" * 500
+    r = _run(trek_env, "pulse-ack", tid, "--picked-choice", "continue",
+             "--note", long_note, "--json")
+    assert r.returncode == 0, r.stderr
+    entry = json.loads(r.stdout)
+    assert len(entry["history"][0]["note"]) == 200

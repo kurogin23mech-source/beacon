@@ -497,9 +497,17 @@ def test_new_trek_initializes_task_states_empty():
     assert t["task_states"] == {}
 
 
-@pytest.mark.parametrize("good", ["working", "done", "waiting-review"])
+# ms-88 / e-2107 — 5-state model: working/done/waiting-review に加え todo /
+# leader_review / user_review が valid。 legacy `waiting-review` も accept
+# (= silent migration to leader_review)。
+@pytest.mark.parametrize("good", [
+    "todo", "working", "leader_review", "user_review", "done",
+    "waiting-review",  # legacy alias, migrated transparently
+])
 def test_validate_task_state_accepts_valid(good):
-    assert trek.validate_task_state(good) == good
+    # legacy token は migrate されて新 token を返す
+    expected = trek.migrate_legacy_task_state(good)
+    assert trek.validate_task_state(good) == expected
 
 
 @pytest.mark.parametrize("bad", ["", "WORKING", "Done", "pending", None])
@@ -509,18 +517,22 @@ def test_validate_task_state_rejects_invalid(bad):
 
 
 def test_get_task_state_returns_default_for_unknown():
+    """ms-88 / e-2107: default が `working` → `todo` に変更 (= claim 経由を強制)。"""
     t = trek.new_trek(
         title="t", creator_user_id="u-1", creator_email="a@b.com",
         creator_session_id="sv-1",
     )
-    assert trek.get_task_state(t, "e-9999") == "working"
+    assert trek.get_task_state(t, "e-9999") == "todo"
 
 
 def test_set_task_state_records_state_and_metadata():
+    """ms-88 / e-2107: 5 状態 model 経由でメタデータが残る (claim → done)。"""
     t = trek.new_trek(
         title="t", creator_user_id="u-1", creator_email="a@b.com",
         creator_session_id="sv-1",
     )
+    trek.set_task_state(t, task_id="e-100", state="working",
+                        updated_by_session_id="sv-exec")
     trek.set_task_state(
         t, task_id="e-100", state="done",
         updated_by_session_id="sv-exec", note="phase 2 land",
@@ -533,26 +545,33 @@ def test_set_task_state_records_state_and_metadata():
 
 
 def test_set_task_state_validates_transition_from_default():
+    """ms-88 / e-2107: default = `todo` から `done` 直接遷移は禁止 (claim 必須)。"""
     t = trek.new_trek(
         title="t", creator_user_id="u-1", creator_email="a@b.com",
         creator_session_id="sv-1",
     )
-    # Default state is "working", so "done" is allowed.
-    trek.set_task_state(t, task_id="e-1", state="done")
-    # From done, only "working" allowed.
+    # todo → done は禁止
     with pytest.raises(ValueError):
-        trek.set_task_state(t, task_id="e-1", state="waiting-review")
+        trek.set_task_state(t, task_id="e-1", state="done")
+    # todo → working なら可、 working → done OK
+    trek.set_task_state(t, task_id="e-1", state="working")
+    trek.set_task_state(t, task_id="e-1", state="done")
+    # done → leader_review は禁止 (= done から working 経由のみ)
+    with pytest.raises(ValueError):
+        trek.set_task_state(t, task_id="e-1", state="leader_review")
 
 
-def test_set_task_state_allows_done_back_to_working_then_waiting_review():
+def test_set_task_state_allows_done_back_to_working_then_user_review():
+    """ms-88 / e-2107: done → working → user_review の経路。"""
     t = trek.new_trek(
         title="t", creator_user_id="u-1", creator_email="a@b.com",
         creator_session_id="sv-1",
     )
+    trek.set_task_state(t, task_id="e-1", state="working")
     trek.set_task_state(t, task_id="e-1", state="done")
     trek.set_task_state(t, task_id="e-1", state="working")
-    trek.set_task_state(t, task_id="e-1", state="waiting-review")
-    assert t["task_states"]["e-1"]["state"] == "waiting-review"
+    trek.set_task_state(t, task_id="e-1", state="user_review")
+    assert t["task_states"]["e-1"]["state"] == "user_review"
 
 
 def test_set_task_state_no_op_transition_allowed():
@@ -586,13 +605,17 @@ def test_aggregate_task_state_empty_scope():
 
 
 def test_aggregate_task_state_active_when_default_state():
+    """ms-88 / e-2107: default state is now `todo` (= 着手前)、 active 判定は
+    todo / working / leader_review のいずれかが残っていれば真。"""
     t = trek.new_trek(
         title="t", creator_user_id="u-1", creator_email="a@b.com",
         creator_session_id="sv-1",
     )
     agg = trek.aggregate_task_state(t, task_ids=["e-1", "e-2"])
     assert agg["overall"] == "active"
-    assert agg["working"] == 2
+    # default が todo に変わったため todo=2、 working=0
+    assert agg["todo"] == 2
+    assert agg["working"] == 0
     assert agg["done"] == 0
 
 
@@ -601,34 +624,56 @@ def test_aggregate_task_state_all_done():
         title="t", creator_user_id="u-1", creator_email="a@b.com",
         creator_session_id="sv-1",
     )
-    trek.set_task_state(t, task_id="e-1", state="done")
-    trek.set_task_state(t, task_id="e-2", state="done")
+    # todo → working → done (= claim 経路を通る)
+    for tid in ("e-1", "e-2"):
+        trek.set_task_state(t, task_id=tid, state="working")
+        trek.set_task_state(t, task_id=tid, state="done")
     agg = trek.aggregate_task_state(t, task_ids=["e-1", "e-2"])
     assert agg["overall"] == "all-done"
     assert agg["done"] == 2
 
 
-def test_aggregate_task_state_all_waiting_review():
+def test_aggregate_task_state_all_user_review():
+    """ms-88 / e-2107: all-user-review は Trek 完遂等価 (= leader が user に forward 済)。"""
     t = trek.new_trek(
         title="t", creator_user_id="u-1", creator_email="a@b.com",
         creator_session_id="sv-1",
     )
-    trek.set_task_state(t, task_id="e-1", state="waiting-review")
-    trek.set_task_state(t, task_id="e-2", state="waiting-review")
+    for tid in ("e-1", "e-2"):
+        trek.set_task_state(t, task_id=tid, state="working")
+        trek.set_task_state(t, task_id=tid, state="user_review")
     agg = trek.aggregate_task_state(t, task_ids=["e-1", "e-2"])
-    assert agg["overall"] == "all-waiting-review"
+    assert agg["overall"] == "all-user-review"
+
+
+def test_aggregate_task_state_leader_review_keeps_trek_active():
+    """leader_review は terminal ではない (= Trek 完遂判定で active) ことを確認。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-1", state="working")
+    trek.set_task_state(t, task_id="e-1", state="leader_review")
+    agg = trek.aggregate_task_state(t, task_ids=["e-1"])
+    assert agg["overall"] == "active"
+    assert agg["leader_review"] == 1
 
 
 def test_aggregate_task_state_all_terminal_mixed():
+    """ms-88 / e-2107: terminal mixed は done + user_review の組合せ。"""
     t = trek.new_trek(
         title="t", creator_user_id="u-1", creator_email="a@b.com",
         creator_session_id="sv-1",
     )
+    trek.set_task_state(t, task_id="e-1", state="working")
     trek.set_task_state(t, task_id="e-1", state="done")
-    trek.set_task_state(t, task_id="e-2", state="waiting-review")
+    trek.set_task_state(t, task_id="e-2", state="working")
+    trek.set_task_state(t, task_id="e-2", state="user_review")
     agg = trek.aggregate_task_state(t, task_ids=["e-1", "e-2"])
     assert agg["overall"] == "all-terminal-mixed"
     assert agg["done"] == 1
+    assert agg["user_review"] == 1
+    # backward-compat alias: waiting-review = leader_review + user_review
     assert agg["waiting-review"] == 1
 
 
@@ -637,12 +682,335 @@ def test_aggregate_task_state_active_when_any_working():
         title="t", creator_user_id="u-1", creator_email="a@b.com",
         creator_session_id="sv-1",
     )
+    trek.set_task_state(t, task_id="e-1", state="working")
     trek.set_task_state(t, task_id="e-1", state="done")
-    # e-2 stays at default working
+    # e-2 stays at default todo
     agg = trek.aggregate_task_state(t, task_ids=["e-1", "e-2"])
     assert agg["overall"] == "active"
-    assert agg["working"] == 1
+    assert agg["todo"] == 1
     assert agg["done"] == 1
+
+
+# ---------------------------------------------------------------------------
+# ms-88 / e-2107 — 5-state state machine + legacy migration
+# ---------------------------------------------------------------------------
+
+def test_5_state_machine_full_executor_path():
+    """todo → working → done の executor 経路が通る。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    assert trek.get_task_state(t, "e-x") == "todo"
+    trek.set_task_state(t, task_id="e-x", state="working")
+    assert trek.get_task_state(t, "e-x") == "working"
+    trek.set_task_state(t, task_id="e-x", state="done")
+    assert trek.get_task_state(t, "e-x") == "done"
+
+
+def test_5_state_machine_leader_review_path():
+    """working → leader_review → done (= leader approve) の経路。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-x", state="working")
+    trek.set_task_state(t, task_id="e-x", state="leader_review")
+    trek.set_task_state(t, task_id="e-x", state="done")
+    assert trek.get_task_state(t, "e-x") == "done"
+
+
+def test_5_state_machine_leader_forward_to_user_path():
+    """working → leader_review → user_review → done (= leader forward + user OK)。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-x", state="working")
+    trek.set_task_state(t, task_id="e-x", state="leader_review")
+    trek.set_task_state(t, task_id="e-x", state="user_review")
+    trek.set_task_state(t, task_id="e-x", state="done")
+    assert trek.get_task_state(t, "e-x") == "done"
+
+
+def test_5_state_machine_leader_rework_path():
+    """leader_review → working (= leader re-work) の経路。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-x", state="working")
+    trek.set_task_state(t, task_id="e-x", state="leader_review")
+    trek.set_task_state(t, task_id="e-x", state="working")  # rework
+    assert trek.get_task_state(t, "e-x") == "working"
+
+
+def test_5_state_machine_user_rework_path():
+    """user_review → working (= user 修正要請) の経路。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-x", state="working")
+    trek.set_task_state(t, task_id="e-x", state="user_review")
+    trek.set_task_state(t, task_id="e-x", state="working")
+    assert trek.get_task_state(t, "e-x") == "working"
+
+
+def test_5_state_machine_invalid_transitions_rejected():
+    """todo → done は禁止 (= claim 経由必須)、 leader_review → leader_review 以外
+    の不正経路は ValueError。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    # todo → done は禁止 (claim 経由必須)
+    with pytest.raises(ValueError):
+        trek.set_task_state(t, task_id="e-x", state="done")
+    # working → todo も禁止
+    trek.set_task_state(t, task_id="e-y", state="working")
+    with pytest.raises(ValueError):
+        trek.set_task_state(t, task_id="e-y", state="todo")
+
+
+def test_legacy_waiting_review_migrates_to_leader_review_on_set():
+    """旧 `waiting-review` を set すると 透過的に `leader_review` に migrate される。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-x", state="working")
+    trek.set_task_state(t, task_id="e-x", state="waiting-review")
+    # 内部 state は新 token、 get_task_state も新 token を返す
+    assert trek.get_task_state(t, "e-x") == "leader_review"
+    assert t["task_states"]["e-x"]["state"] == "leader_review"
+
+
+def test_legacy_waiting_review_migrates_on_read():
+    """既存 data に `state="waiting-review"` で書かれていても get で `leader_review` を返す。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    # 旧 schema を直接埋め込む (= migration 経路を通さない)
+    t["task_states"] = {"e-old": {"state": "waiting-review"}}
+    assert trek.get_task_state(t, "e-old") == "leader_review"
+
+
+def test_default_ttl_changed_to_12_minutes():
+    """ms-88 / e-2107: DEFAULT_WORKING_TTL_MINUTES 30 → 12 短縮。"""
+    assert trek.DEFAULT_WORKING_TTL_MINUTES == 12
+
+
+# ---------------------------------------------------------------------------
+# ms-88 / e-2109 — per-session scheduler fanout filter helpers
+# ---------------------------------------------------------------------------
+
+def test_session_has_active_claim_true_for_working_claim():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-1", state="working",
+                        updated_by_session_id="sv-exec")
+    assert trek.session_has_active_claim(t, session_id="sv-exec") is True
+
+
+def test_session_has_active_claim_false_for_leader_review_claim():
+    """leader_review は scheduler に「leader 待ち」 を伝える状態、 当該 session
+    には tick 不要。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-1", state="working",
+                        updated_by_session_id="sv-exec")
+    trek.set_task_state(t, task_id="e-1", state="leader_review",
+                        updated_by_session_id="sv-exec")
+    assert trek.session_has_active_claim(t, session_id="sv-exec") is False
+
+
+def test_session_has_active_claim_false_for_done_claim():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-1", state="working",
+                        updated_by_session_id="sv-exec")
+    trek.set_task_state(t, task_id="e-1", state="done",
+                        updated_by_session_id="sv-exec")
+    assert trek.session_has_active_claim(t, session_id="sv-exec") is False
+
+
+def test_session_has_active_claim_true_when_one_of_multiple_is_working():
+    """A session with 1 done + 1 working should still be active (= 1 claim 残り)。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-1", state="working",
+                        updated_by_session_id="sv-exec")
+    trek.set_task_state(t, task_id="e-1", state="done",
+                        updated_by_session_id="sv-exec")
+    trek.set_task_state(t, task_id="e-2", state="working",
+                        updated_by_session_id="sv-exec")
+    assert trek.session_has_active_claim(t, session_id="sv-exec") is True
+
+
+def test_session_has_active_claim_false_for_session_with_no_claims():
+    """Fresh session with no claims should return False (= caller decides
+    fallback)。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    assert trek.session_has_active_claim(t, session_id="sv-fresh") is False
+
+
+def test_session_has_any_claim_distinguishes_fresh_vs_finished():
+    """fresh session (= no claims at all) vs finished session (= claims but
+    all terminal) を区別する helper。 fan-out fallback の核。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    # sv-fresh: 何も claim していない
+    assert trek.session_has_any_claim(t, session_id="sv-fresh") is False
+    # sv-finished: 全部 done
+    trek.set_task_state(t, task_id="e-1", state="working",
+                        updated_by_session_id="sv-finished")
+    trek.set_task_state(t, task_id="e-1", state="done",
+                        updated_by_session_id="sv-finished")
+    assert trek.session_has_any_claim(t, session_id="sv-finished") is True
+    # 同 trek でも別 session
+    assert trek.session_has_active_claim(t, session_id="sv-finished") is False
+    assert trek.session_has_active_claim(t, session_id="sv-fresh") is False
+
+
+def test_session_has_active_claim_legacy_waiting_review_treated_as_terminal_ish():
+    """legacy `waiting-review` (= 旧 schema) は migrate されて leader_review
+    扱い、 active claim ではなくなる。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    # 古い data を直接埋め込む (= migration を経由しない)
+    t["task_states"] = {
+        "e-old": {
+            "state": "waiting-review",
+            "updated_by_session_id": "sv-legacy",
+        }
+    }
+    assert trek.session_has_active_claim(t, session_id="sv-legacy") is False
+    assert trek.session_has_any_claim(t, session_id="sv-legacy") is True
+
+
+def test_force_stall_session_working_tasks_bulk_transitions():
+    """server-side 罰則: 当該 session の全 working を leader_review に一括遷移。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.set_task_state(t, task_id="e-1", state="working",
+                        updated_by_session_id="sv-target")
+    trek.set_task_state(t, task_id="e-2", state="working",
+                        updated_by_session_id="sv-target")
+    trek.set_task_state(t, task_id="e-3", state="working",
+                        updated_by_session_id="sv-other")
+    transitioned = trek.force_stall_session_working_tasks(
+        t, session_id="sv-target", reason="ttl-12min-expired",
+    )
+    assert set(transitioned) == {"e-1", "e-2"}
+    assert trek.get_task_state(t, "e-1") == "leader_review"
+    assert trek.get_task_state(t, "e-2") == "leader_review"
+    # 別 session の task は unchanged
+    assert trek.get_task_state(t, "e-3") == "working"
+
+
+# ---------------------------------------------------------------------------
+# ms-88 / e-2138 — Trek Kickoff Ritual helpers
+# ---------------------------------------------------------------------------
+
+def test_get_kickoff_pending_returns_true_for_unknown_session():
+    """lazy init: kickoff_status に entry がなければ pending=True (= 未送信)。
+    既存 trek docs (= deploy 前データ) も次の interaction で kickoff 強制。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-leader",
+    )
+    assert trek.get_kickoff_pending(t, session_id="sv-fresh") is True
+
+
+def test_mark_kickoff_completed_flips_pending_and_stamps():
+    """mark_kickoff_completed が pending=false + sent_at を立てる。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-leader",
+    )
+    trek.mark_kickoff_completed(
+        t, session_id="sv-exec-1", user_id="u-1",
+        kickoff_dm_event_id="ev-abc",
+    )
+    assert trek.get_kickoff_pending(t, session_id="sv-exec-1") is False
+    entry = (t.get("kickoff_status") or {}).get("sv-exec-1")
+    assert entry is not None
+    assert entry["pending"] is False
+    assert entry["user_id"] == "u-1"
+    assert entry["kickoff_dm_event_id"] == "ev-abc"
+    assert entry["sent_at"]
+
+
+def test_mark_kickoff_completed_is_idempotent():
+    """既 完了 session に対する再 mark は sent_at を上書きしない (= 1 回送ったらそのまま)。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-leader",
+    )
+    trek.mark_kickoff_completed(t, session_id="sv-exec-1", user_id="u-1")
+    first_stamp = (t.get("kickoff_status") or {})["sv-exec-1"]["sent_at"]
+    import time
+    time.sleep(0.01)
+    trek.mark_kickoff_completed(t, session_id="sv-exec-1", user_id="u-1")
+    second_stamp = (t.get("kickoff_status") or {})["sv-exec-1"]["sent_at"]
+    assert first_stamp == second_stamp
+
+
+def test_reset_kickoff_pending_forces_pending_true_for_take_over():
+    """take-over で fresh session が leadership を継ぐ時、 kickoff 強制 reset。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-leader-old",
+    )
+    # 前 session で kickoff 完了済
+    trek.mark_kickoff_completed(t, session_id="sv-leader-new", user_id="u-1")
+    assert trek.get_kickoff_pending(t, session_id="sv-leader-new") is False
+    # take-over → 新 session の kickoff_pending を再 true 化
+    trek.reset_kickoff_pending(t, session_id="sv-leader-new", user_id="u-1")
+    assert trek.get_kickoff_pending(t, session_id="sv-leader-new") is True
+
+
+def test_mark_kickoff_completed_requires_session_id():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    with pytest.raises(ValueError):
+        trek.mark_kickoff_completed(t, session_id="", user_id="u-1")
+
+
+def test_summarize_kickoff_status_pending_vs_completed():
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-leader",
+    )
+    # 1 件完了、 1 件 pending (= reset で強制)
+    trek.mark_kickoff_completed(t, session_id="sv-done", user_id="u-1")
+    trek.reset_kickoff_pending(t, session_id="sv-pending", user_id="u-2")
+    s = trek.summarize_kickoff_status(t)
+    assert s["pending_count"] == 1
+    assert s["completed_count"] == 1
+    assert s["pending_sessions"][0]["session_id"] == "sv-pending"
+    assert s["completed_sessions"][0]["session_id"] == "sv-done"
 
 
 # ---------------------------------------------------------------------------
@@ -685,16 +1053,15 @@ def test_bump_task_activity_refreshes_last_activity_at_without_state_change():
 
 
 def test_bump_task_activity_initializes_entry_for_unknown_task():
-    """A commit / DM landing on a task that no executor has stamped yet
-    should still anchor the auto-stall clock — otherwise the scheduler
-    would treat the brand-new task as 'never active' and skip it."""
+    """ms-88 / e-2107: default state is now `todo`、 bump_task_activity が
+    fresh task に対して刻む entry も `todo` を seed する (= claim 未経路)。"""
     t = trek.new_trek(
         title="t", creator_user_id="u-1", creator_email="a@b.com",
         creator_session_id="sv-1",
     )
     trek.bump_task_activity(t, task_id="e-new", reason="dm-receipt")
     entry = t["task_states"]["e-new"]
-    assert entry["state"] == "working"  # Default state.
+    assert entry["state"] == "todo"  # ms-88 / e-2107: default が todo に変更
     assert entry["last_activity_at"]
 
 
@@ -712,8 +1079,8 @@ def test_get_working_ttl_minutes_default_when_unset():
         title="t", creator_user_id="u-1", creator_email="a@b.com",
         creator_session_id="sv-1",
     )
-    # Default is 30 min per SPEC.
-    assert trek.get_working_ttl_minutes(t) == 30
+    # ms-88 / e-2107: TTL default 30 → 12 min (= scheduler cadence + 2 min バッファ)。
+    assert trek.get_working_ttl_minutes(t) == 12
 
 
 def test_get_working_ttl_minutes_honors_meta_override():
@@ -732,4 +1099,57 @@ def test_get_working_ttl_minutes_falls_back_on_non_numeric_override():
     )
     t.setdefault("meta", {})["working_ttl_minutes"] = "garbage"
     # Bad config must not crash; fall back to default so safety net stays on.
-    assert trek.get_working_ttl_minutes(t) == 30
+    # ms-88 / e-2107: default 30 → 12 min。
+    assert trek.get_working_ttl_minutes(t) == 12
+
+
+# ---------------------------------------------------------------------------
+# ms-88 / e-2139 — 5-choice executor picker (= /beacon-trek-pulse)
+#
+# `dm-peer` を 4 択 (terminal / continue / dm-leader / no-op) に加えて 5 択
+# 化する。 詰まった時の default を「user に問う」 から「peer に相談する」 に
+# 移すことで、 user 起床まで Trek が autonomous に走り続ける経路を確立する
+# (= peer-first culture の構造実装、 ms-88 / e-2140 と組み合わせる)。
+# ---------------------------------------------------------------------------
+
+def test_valid_pulse_picked_choices_includes_5_executor_choices_plus_legacy_empty():
+    """5 択 (terminal / continue / dm-leader / dm-peer / no-op) + legacy '' を含む。"""
+    expected = {"terminal", "continue", "dm-leader", "dm-peer", "no-op", ""}
+    assert set(trek.VALID_PULSE_PICKED_CHOICES) == expected
+
+
+def test_validate_pulse_picked_choice_accepts_dm_peer():
+    """e-2139 で追加した 'dm-peer' (= 横向き相談) が validation を通る。"""
+    assert trek.validate_pulse_picked_choice("dm-peer") == "dm-peer"
+
+
+def test_validate_pulse_picked_choice_accepts_each_of_the_5_choices():
+    """5 択すべてと空文字が known token として通る。"""
+    for choice in ("terminal", "continue", "dm-leader", "dm-peer", "no-op", ""):
+        assert trek.validate_pulse_picked_choice(choice) == choice
+
+
+def test_validate_pulse_picked_choice_rejects_unknown_token():
+    """known 5 + '' 以外は ValueError、 期待 list を error 文に含む。"""
+    with pytest.raises(ValueError) as excinfo:
+        trek.validate_pulse_picked_choice("bogus")
+    msg = str(excinfo.value)
+    # Sanity-check the diagnostic mentions both the bad token and the
+    # canonical list so executors can fix typos without grep'ing source.
+    assert "bogus" in msg
+    assert "dm-peer" in msg
+
+
+def test_record_pulse_ack_persists_dm_peer_choice():
+    """record_pulse_ack が dm-peer を last_picked_choice / history に書き込む。"""
+    t = trek.new_trek(
+        title="t", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+    trek.record_pulse_ack(t, session_id="sv-exec-x", picked_choice="dm-peer",
+                          note="peer に設計判断を相談")
+    entry = t["pulse_acks"]["sv-exec-x"]
+    assert entry["total_acks"] == 1
+    assert entry["last_picked_choice"] == "dm-peer"
+    assert entry["history"][0]["picked_choice"] == "dm-peer"
+    assert entry["history"][0]["note"] == "peer に設計判断を相談"

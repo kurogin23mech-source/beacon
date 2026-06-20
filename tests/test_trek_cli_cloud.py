@@ -244,6 +244,9 @@ class TestInviteJoinLeaveCloudDispatch:
 
     def test_join_routes_to_join_trek(self, fake_client, monkeypatch):
         monkeypatch.setenv("BEACON_TREK_ID", "tk-fake01")
+        # ms-88 / e-2090 — bypass typed-ack gate (= the rest of this test
+        # is about cloud routing, not the consent gate).
+        monkeypatch.setenv("BEACON_TREK_CONSENT_ACK", "1")
         _capture_stdout(monkeypatch)
         commands.cmd_trek_join()
         assert fake_client.calls[0] == ("join_trek", {"trek_id": "tk-fake01"})

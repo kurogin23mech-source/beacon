@@ -120,6 +120,9 @@ Treks (cross-project / cross-session 協奏作業領域 — ms-69):
   beacon trek resume <trek-id>      Clear the halt signal
   beacon trek transfer-leader <trek-id> --to <session-id>
                                     Hand off leader_session_id
+  beacon trek take-over <trek-id>   Fresh session (= same user, leader role) を
+                                    新 leader_session_id に bind し直す
+                                    (= dead session 引き継ぎ、ms-88 e-2089)
 
 Stop signal (ms-55: Andon cord — anyone can broadcast a halt):
   beacon stop scoped --target <kind>:<id> [--reason "..."] [--reason-kind X]
@@ -2545,6 +2548,12 @@ except ValueError as e:
                     case "$1" in
                         --json) export BEACON_JSON=1; shift ;;
                         --no-arm) no_arm=1; shift ;;
+                        # ms-88 / e-2090 — Trek 参加 consent gate bypass。
+                        # 長い flag は意味理解の forcing function (= 短縮 -y や
+                        # 反射的 typo で抜けない長さ)。 export 経路にして親 env の
+                        # BEACON_TREK_CONSENT_ACK を上書きしない (= bot / fixture
+                        # 経由の env-based bypass と独立 / 共存可)。
+                        --i-understand-the-implications) export BEACON_TREK_CONSENT_ACK=1; shift ;;
                         *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                     esac
                 done
@@ -2632,6 +2641,60 @@ except ValueError as e:
                 BEACON_TREK_ID="$trek_id" BEACON_TREK_TO="$to_sid" \
                     python3 "$COMMANDS_PY" trek_transfer_leader
                 ;;
+            # ms-88 / e-2089 — fresh session recovery path. 親 dead session を
+            # 引き継いで現在の session を leader_session_id に bind し直す。
+            take-over)
+                shift 2
+                trek_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" python3 "$COMMANDS_PY" trek_take_over
+                ;;
+            # ms-88 / e-2138 — Kickoff Ritual completion stamp。
+            # /beacon-trek-pulse Skill の Step 0.4 がこれを叩く。 server
+            # endpoint だけ先に land した PR #177 の follow-up (e-2139 残作業)
+            # で CLI wrapper を補完。
+            kickoff)
+                shift 2
+                trek_id="" session_override="" kickoff_dm_event_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        --session-id) session_override="${2:-}"; shift 2 ;;
+                        --kickoff-dm-event-id) kickoff_dm_event_id="${2:-}"; shift 2 ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                if [[ -n "$session_override" ]]; then
+                    export BEACON_SESSION_ID="$session_override"
+                fi
+                BEACON_TREK_ID="$trek_id" \
+                    BEACON_TREK_KICKOFF_DM_EVENT_ID="$kickoff_dm_event_id" \
+                    python3 "$COMMANDS_PY" trek_kickoff
+                ;;
+            # ms-88 / e-2106 — Layer 2 (= observability) self-report endpoint。
+            # /beacon-trek-pulse Skill が Step 3 でこれを叩く前提。 CLI からも
+            # 直接叩ける (= execute Skill 内で inline 使う / dogfood で test)。
+            pulse-ack)
+                shift 2
+                trek_id="" picked_choice="" note=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        --picked-choice) picked_choice="${2:-}"; shift 2 ;;
+                        --note) note="${2:-}"; shift 2 ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" \
+                    BEACON_TREK_PICKED_CHOICE="$picked_choice" \
+                    BEACON_TREK_NOTE="$note" \
+                    python3 "$COMMANDS_PY" trek_pulse_ack
+                ;;
             task-state)
                 shift 2
                 trek_id="" task_id="" state="" note=""
@@ -2669,6 +2732,9 @@ except ValueError as e:
                 echo "  stop <trek-id> [--reason \"...\"]    (= Andon cord、halt 信号を立てる)"
                 echo "  resume <trek-id>                     (= halt 信号を clear)"
                 echo "  transfer-leader <trek-id> --to <session-id>"
+                echo "  take-over <trek-id>                  (= dead leader_session_id を fresh session に bind し直す、 ms-88 e-2089)"
+                echo "  kickoff <trek-id> [--session-id X] [--kickoff-dm-event-id Y]  (= Kickoff Ritual 完了 stamp、 /beacon-trek-pulse Step 0.4、 ms-88 e-2138)"
+                echo "  pulse-ack <trek-id> [--picked-choice X] [--note '...']  (= /beacon-trek-pulse Skill が叩く observability ack、 ms-88 e-2106)"
                 echo "  task-state <trek-id> <task-id> <state> [--note '...']  (= ms-75/e-2048、 state: working|done|waiting-review)"
                 echo ""
                 echo "Env (creator identity, required for 'create'):"

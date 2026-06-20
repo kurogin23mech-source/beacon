@@ -37,43 +37,87 @@ VALID_TREK_TYPES = ("temporary", "persistent")
 VALID_TREK_STATUSES = ("planning", "active", "archived")
 VALID_MEMBER_ROLES = ("leader", "member")
 
-# ms-75 / e-2048 — Trek-internal task state machine. Independent of MS
-# task status (= todo/in_progress/done) since the Trek tracks "this task
-# is being autonomously worked on" semantics, not "this task is registered
-# in the project". A task can be MS-todo but Trek-state="working" while
-# an executor session is implementing it; can be MS-done but Trek-state=
-# "done" after the executor declares completion. The Trek state is the
-# **autonomous execution lifecycle** signal that scheduler honors:
-#   - working: scheduler keeps firing obligation DMs (= "next action required")
-#   - done: executor declared completion; scheduler stops firing for this
-#     task and emits one review-required DM to the leader. Default goal.
-#   - waiting-review: executor declared "user judgment needed beyond AI";
-#     scheduler stops firing for this task and emits one review-required
-#     DM to the leader (= leader forwards to user). Also a terminal goal.
-# When all task_states aggregate to terminal (= done or waiting-review),
-# the Trek itself becomes idle (scheduler stops, archive candidate).
-VALID_TASK_STATES = ("working", "done", "waiting-review")
-DEFAULT_TASK_STATE = "working"
-TERMINAL_TASK_STATES = ("done", "waiting-review")
+# ms-88 / e-2138 — Trek Kickoff Ritual (= per-session kickoff state map).
+# 同 user の複数 session が peer 状況を共有できていなかった race (= 2026-06-20
+# tk-3045b8d1 dogfood で観測、 3 session が同 cwd を共有して unstaged 編集が
+# 5 分間消失) を構造的に塞ぐため、 join / take-over した session に「peer に
+# 1 度は声をかけて自分の plan を共有する」 を強制する。
+#
+# Schema: trek_doc.kickoff_status: dict[session_id -> KickoffStatusEntry]
+#     KickoffStatusEntry {
+#       session_id: str,
+#       user_id: str,           # session が所属する member の user_id
+#       pending: bool,          # True = まだ kickoff 未送信、 pulse-ack 拒否対象
+#       sent_at: ISO timestamp, # 完了時のスタンプ
+#       kickoff_dm_event_id: str (optional, トレース用)
+#     }
+#
+# Lazy init 設計: join / take-over 時に pre-populate しない。 pulse-ack endpoint
+# で session_id が status map に居なければ「未 kickoff」 と判定して 400 reject。
+# /beacon-trek-pulse Skill の Step 0 が kickoff DM 送信 + kickoff endpoint call で
+# 状態を完了に flip する。 既存 member (= deploy 前から joined) も次の pulse-ack で
+# 初めて触れた時点で「kickoff 未」 として扱われる (= migration なし、 backward
+# compat は existing trek docs の kickoff_status 不在 default 経由で吸収)。
+KICKOFF_HISTORY_KEY = "kickoff_status"
 
-# ms-75 / e-2067 — server-side TTL safety net. Default 30 minutes of no
-# activity on a 'working' task triggers auto-stall to 'waiting-review' so
-# the leader gets a review DM instead of the scheduler firing forever into
-# a silent executor. The leader can re-stamp 'working' to recover from a
-# false positive (= the transition waiting-review → working is allowed in
-# VALID_TASK_STATE_TRANSITIONS). Per-trek override lives at
-# trek.meta.working_ttl_minutes.
-DEFAULT_WORKING_TTL_MINUTES = 30
+# ms-75 / e-2048 + ms-88 / e-2107 — Trek-internal task state machine.
+# 5-state model (= CORE doc 5nfTSmCDVUzD4SLzIhI5 § "Trek task state machine"):
+#   - todo: scope-registered but executor has not claimed yet
+#   - working: executor actively progressing (= scheduler keeps firing tick)
+#   - leader_review: leader judgment requested (executor 自発 OR server 強制).
+#     Leader picks 3-way: done / user_review / working with guidance DM.
+#   - user_review: user judgment requested (= leader can't decide, or
+#     deploy / release / external write 等の不可逆 action 含むため leader が
+#     forward した経路). Terminal-ish (= Trek 完遂判定に算入)。
+#   - done: full completion, irreversible terminal.
+#
+# Why 5 vs the older 3 (= ms-75 / e-2048 の working/done/waiting-review):
+# 旧 `waiting-review` 1 状態が「leader 判断要請」 と「user 判断要請」 を
+# conflate しており、 dogfood (tk-40b0b27c, 2026-06-19) で「ms-84 executor
+# が PR submit 後に leader が見れば判断つく場合でも waiting-review (= 文面上
+# 『user 介入要請』) を選ばざるを得ず混乱」 が露呈した。 5 状態に厳密化して
+# leader / user 判断境界を構造的に分離する。
+#
+# Trek 完遂判定: 全 task が `done` OR `user_review` に至った時点で完遂。
+# todo / working / leader_review が 1 つでもあれば scheduler + leader は
+# 走り続ける (= leader_review は中途中継、 user_review は terminal 扱い)。
+VALID_TASK_STATES = ("todo", "working", "leader_review", "user_review", "done")
+DEFAULT_TASK_STATE = "todo"
+TERMINAL_TASK_STATES = ("done", "user_review")
 
-# Allowed transitions. Strict to prevent rogue rewrites (= a task that
-# reached "done" can only be moved back to "working" via leader review,
-# not directly to "waiting-review"). The reverse path "done → working"
-# exists so the leader can re-open a task that needs more work after
-# their review.
+# Backward compat (= ms-88 / e-2107 migration). 旧 `waiting-review` で書かれた
+# 既存データは server-forced auto-stall 経路 (= old e-2067) からのものが多く、
+# semantic 的には新 `leader_review` (= 「leader 判断要請、 server 強制」) に
+# 最も近い。 set_task_state は新コードに対して waiting-review を拒否し
+# (= 新コードは 5 状態を直接使う) 、 get_task_state は読み出し時に migrate
+# して呼び出し側に新 token を返す。
+LEGACY_TASK_STATE_MIGRATIONS = {
+    "waiting-review": "leader_review",
+}
+
+# ms-75 / e-2067 + ms-88 / e-2107 — server-side TTL safety net.
+# **TTL 短縮 30 → 12 min**: scheduler cadence (= 10 min) + 2 min バッファ。
+# 旧 30 min は 3 cadence 分 silent を許す緩さで dogfood (tk-40b0b27c) の
+# silent halt 病理を許容してしまっていた。 12 min は 1 cadence 内に必ず罰則が
+# fire する設計。 罰則 = 当該 session の全 working task を **一括 leader_review に
+# 強制遷移** (= 旧 「該当 1 task のみ stall」 から強化、 silent silent 経路を
+# 構造的に絶つ)。 Per-trek override は trek.meta.working_ttl_minutes。
+DEFAULT_WORKING_TTL_MINUTES = 12
+
+# Allowed transitions (5 状態、 計 10 経路 + idempotent no-op):
+# - claim 1 経路: todo → working
+# - executor 3 経路 (= pulse Skill の terminal 選択): working → {done, leader_review, user_review}
+# - leader 3 経路 (= /beacon-trek-review forced picker): leader_review → {done, user_review, working}
+# - user 2 経路 (= 会話 + leader CLI 代行): user_review → {done, working}
+# - server 強制 1 経路 (= 罰則): working → leader_review (= 全 working 一括)
+#
+# CORE doc `5nfTSmCDVUzD4SLzIhI5` § "1 枚 transition diagram" 参照。
 VALID_TASK_STATE_TRANSITIONS = {
-    "working": ("done", "waiting-review"),
+    "todo": ("working",),
+    "working": ("done", "leader_review", "user_review"),
+    "leader_review": ("done", "user_review", "working"),
+    "user_review": ("done", "working"),
     "done": ("working",),
-    "waiting-review": ("working",),
 }
 
 DEFAULT_STATUS = "planning"
@@ -120,8 +164,25 @@ def validate_role(r: str) -> str:
     return r
 
 
+def migrate_legacy_task_state(s: str) -> str:
+    """Translate legacy task-state tokens to the 5-state model (ms-88 / e-2107).
+
+    Maps old ``waiting-review`` → ``leader_review`` (= the semantic match
+    for past server-forced auto-stalls). Unknown tokens pass through
+    unchanged so downstream validation can flag them properly.
+    """
+    return LEGACY_TASK_STATE_MIGRATIONS.get(s, s)
+
+
 def validate_task_state(s: str) -> str:
-    """Validate Trek-internal task state (= ms-75 / e-2048)."""
+    """Validate Trek-internal task state (= ms-88 / e-2107).
+
+    Legacy tokens (= ``waiting-review``) are migrated transparently to the
+    5-state model before validation, so callers passing old data are
+    accepted but normalised. New code should pass canonical 5-state
+    tokens directly.
+    """
+    s = migrate_legacy_task_state(s)
     if s not in VALID_TASK_STATES:
         raise ValueError(
             f"invalid trek task state {s!r} — expected one of {VALID_TASK_STATES}"
@@ -130,15 +191,21 @@ def validate_task_state(s: str) -> str:
 
 
 def validate_task_state_transition(from_state: str, to_state: str) -> None:
-    """Enforce the state machine transitions.
+    """Enforce the 5-state machine transitions (ms-88 / e-2107).
 
     Raises ValueError when the proposed transition is not allowed by
     VALID_TASK_STATE_TRANSITIONS. ``from_state`` of "" or None is treated
-    as the default (= "working"); this lets executors declare done in
-    one step from never-set without a prior explicit "working" stamp.
+    as the default (= ``todo``); this lets a fresh executor claim a task
+    in one step (todo → working) without a prior explicit todo stamp.
+
+    Both ``from_state`` and ``to_state`` are migrated through legacy
+    tokens (= ``waiting-review`` → ``leader_review``) before checking,
+    so old data + new code interop is silent.
     """
     if not from_state:
         from_state = DEFAULT_TASK_STATE
+    from_state = migrate_legacy_task_state(from_state)
+    to_state = migrate_legacy_task_state(to_state)
     validate_task_state(from_state)
     if from_state == to_state:
         # No-op transition is allowed (= idempotent re-affirmation by the
@@ -155,16 +222,20 @@ def validate_task_state_transition(from_state: str, to_state: str) -> None:
 
 
 def get_task_state(trek_doc: dict, task_id: str) -> str:
-    """Return the Trek-internal state for ``task_id``, default 'working'.
+    """Return the Trek-internal state for ``task_id``, default 'todo'.
 
     Untracked tasks (= no entry in trek_doc.task_states) collapse to the
-    default. This means a newly-added scope task starts in 'working'
+    default. This means a newly-added scope task starts in 'todo'
     implicitly; explicit state writes via ``set_task_state`` only happen
-    when the executor declares a transition.
+    when the executor claims (todo → working) or transitions further.
+
+    Legacy ``waiting-review`` stored on existing trek docs is migrated
+    transparently to ``leader_review`` so callers see the 5-state token.
     """
     states = trek_doc.get("task_states") or {}
     entry = states.get(task_id) or {}
-    return entry.get("state") or DEFAULT_TASK_STATE
+    raw = entry.get("state") or DEFAULT_TASK_STATE
+    return migrate_legacy_task_state(raw)
 
 
 def set_task_state(trek_doc: dict, *, task_id: str, state: str,
@@ -176,16 +247,22 @@ def set_task_state(trek_doc: dict, *, task_id: str, state: str,
     is responsible for persisting the document (= db.save_trek). A note
     is recorded if supplied (= helps the leader's review judgment).
 
+    Legacy tokens (= ``waiting-review``) are migrated transparently to
+    the 5-state model on input (ms-88 / e-2107), so old callers keep
+    working while new code is expected to pass canonical state names.
+
     ``last_activity_at`` (= ms-75 / e-2067) is stamped to the same moment
     as ``updated_at``; this is the field the auto-stall scheduler reads to
     detect "working" tasks that have gone silent past the TTL. State stamp
     is one of the three documented activity sources (state stamp / commit /
     DM receipt) — see ``bump_task_activity`` for the non-state-change path.
 
-    Raises ValueError if the transition is not allowed.
+    Raises ValueError if the transition is not allowed by the 5-state
+    machine (see VALID_TASK_STATE_TRANSITIONS).
     """
     if not task_id:
         raise ValueError("task_id is required")
+    state = migrate_legacy_task_state(state)
     validate_task_state(state)
     current = get_task_state(trek_doc, task_id)
     validate_task_state_transition(current, state)
@@ -200,6 +277,331 @@ def set_task_state(trek_doc: dict, *, task_id: str, state: str,
     }
     trek_doc["updated_at"] = now
     return trek_doc
+
+
+def session_has_active_claim(trek_doc: dict, *, session_id: str) -> bool:
+    """Return True iff ``session_id`` has at least one non-terminal claim (ms-88 / e-2109).
+
+    "Active claim" = a task whose ``updated_by_session_id == session_id``
+    AND current state is one of ``todo`` / ``working`` (= per CORE doc
+    5nfTSmCDVUzD4SLzIhI5 § 設計方針 3, "the session has work to advance").
+    Sessions whose claims are all in ``leader_review`` / ``user_review`` /
+    ``done`` should not receive periodic ticks — they are waiting on
+    someone else (leader / user) or fully done.
+
+    Returns False if the session has no claims at all in this trek
+    (= fresh session that hasn't stamped any state yet). The caller
+    typically combines this with a "broadcast fallback for sessions
+    without claims" so fresh executors still get tickled, matching the
+    pre-filter behaviour while excluding sessions that explicitly finished.
+    """
+    if not session_id:
+        return False
+    states = trek_doc.get("task_states") or {}
+    for entry in states.values():
+        if not entry:
+            continue
+        if entry.get("updated_by_session_id") != session_id:
+            continue
+        # We use the raw 'state' field rather than get_task_state() to
+        # avoid the migration shim — the LEGACY token (= waiting-review)
+        # is terminal-ish in old data, so treating it as such is the
+        # correct conservative default.
+        st = entry.get("state") or DEFAULT_TASK_STATE
+        st = migrate_legacy_task_state(st)
+        if st in ("todo", "working"):
+            return True
+    return False
+
+
+def session_has_any_claim(trek_doc: dict, *, session_id: str) -> bool:
+    """Return True iff ``session_id`` has stamped any task state (ms-88 / e-2109).
+
+    Helper for the fan-out path: a session with **no claims at all** is
+    likely a fresh executor about to pick up a todo task — the scheduler
+    should keep tickling them. A session with claims only in terminal-ish
+    states (= leader_review / user_review / done) has explicitly finished
+    and should be quiet.
+    """
+    if not session_id:
+        return False
+    states = trek_doc.get("task_states") or {}
+    for entry in states.values():
+        if not entry:
+            continue
+        if entry.get("updated_by_session_id") == session_id:
+            return True
+    return False
+
+
+def force_stall_session_working_tasks(trek_doc: dict, *,
+                                      session_id: str,
+                                      reason: str = "ttl-expired") -> list[str]:
+    """Server-side 罰則: 当該 session の全 working task を leader_review に強制遷移する (ms-88 / e-2107).
+
+    pulse 不発火 + TTL 経過時に server から呼ばれる。 「該当 1 task のみ stall」
+    の旧設計から強化された罰則経路 (= silent silent 経路を構造的に絶つ)。
+
+    Returns the list of task_ids that were transitioned (= caller can
+    emit one leader-review DM per task or batch them).
+    """
+    if not session_id:
+        raise ValueError("session_id is required")
+    transitioned: list[str] = []
+    states = trek_doc.get("task_states") or {}
+    for tid, entry in list(states.items()):
+        # 「当該 session が claim 済の working task」 だけが対象。
+        # updated_by_session_id が一致する working state を全部拾う。
+        if get_task_state(trek_doc, tid) != "working":
+            continue
+        if (entry or {}).get("updated_by_session_id") != session_id:
+            continue
+        set_task_state(
+            trek_doc, task_id=tid, state="leader_review",
+            updated_by_session_id=session_id,
+            note=f"server-forced: {reason}",
+        )
+        transitioned.append(tid)
+    return transitioned
+
+
+# ms-88 / e-2106 — pulse-ack log. Layer 2 (= observability) of the 3-layer
+# trek autonomy harness (CORE doc 5nfTSmCDVUzD4SLzIhI5). The pulse Skill
+# (= /beacon-trek-pulse) calls the server's POST /api/treks/<id>/pulse-ack
+# endpoint as its very first step, before any other action. That gives the
+# server **ground truth** about whether the Skill actually fired in response
+# to a scheduler tick — the "Skill marker visible in executor terminal"
+# observation that dogfood (= tk-40b0b27c) found could not be verified
+# directly by the server.
+#
+# Schema on the trek doc:
+#   trek_doc.pulse_acks: dict[session_id -> SessionPulseAcks]
+#     SessionPulseAcks {
+#       session_id: str,
+#       total_acks: int,                    # monotonically increasing
+#       last_pulse_ack_at: ISO timestamp,
+#       last_picked_choice: str,            # 5-choice picker token, see VALID_PULSE_PICKED_CHOICES
+#       history: list[PulseAckEntry] (cap 20),  # recent ring buffer
+#     }
+#     PulseAckEntry {
+#       timestamp: ISO,
+#       picked_choice: str,
+#       note: str (cap 200),
+#     }
+#
+# 20-entry cap on history keeps the trek doc small while preserving enough
+# data for time-series visualisation in the Phase 4 UI dashboard (e-2108).
+# Per-session aggregation (vs flat list) lets the Phase 4 UI compute
+# compliance rate per session cheaply (= no scan).
+PULSE_ACK_HISTORY_CAP = 20
+
+# ms-88 / e-2139 — 5-choice executor picker (= /beacon-trek-pulse Step body).
+# 'dm-peer' は ms-88 / e-2140 で導入された peer-first culture の構造実装:
+# 詰まった時の default action を「user に問う」 から「peer に相談する」 に
+# 移すことで、 user 起床まで Trek が autonomous に走り続ける経路を作る。
+# 元の 4 択 (terminal / continue / dm-leader / no-op) のうち dm-leader が
+# 「上向き相談」、 dm-peer が「横向き相談」 で responsibility 分担される。
+VALID_PULSE_PICKED_CHOICES = (
+    "terminal",       # executor declared a terminal transition this tick
+    "continue",       # executor continues working
+    "dm-leader",      # executor asked leader for judgment (= 上向き相談)
+    "dm-peer",        # executor asked a peer executor for judgment (= 横向き相談、 ms-88 / e-2140)
+    "no-op",          # explicit "I see the tick but nothing to act on"
+    "",               # unspecified (= legacy / minimum-info pulse)
+)
+
+
+def validate_pulse_picked_choice(choice: str) -> str:
+    """Validate the picked_choice token (ms-88 / e-2106)."""
+    if choice not in VALID_PULSE_PICKED_CHOICES:
+        raise ValueError(
+            f"invalid pulse picked_choice {choice!r} — expected one of "
+            f"{VALID_PULSE_PICKED_CHOICES}"
+        )
+    return choice
+
+
+def record_pulse_ack(trek_doc: dict, *, session_id: str,
+                     picked_choice: str = "",
+                     note: str = "") -> dict:
+    """Append a pulse-ack record for ``session_id`` and bump the counter.
+
+    Called by the server endpoint when /beacon-trek-pulse Skill self-reports
+    invocation. Idempotency: each call appends a new history entry (= the
+    Skill is supposed to call exactly once per tick; if it calls twice that
+    is recorded so observability is honest — dedupe is the caller's choice).
+
+    Returns the mutated trek_doc; caller persists with ``db.save_trek``.
+    """
+    if not session_id:
+        raise ValueError("session_id is required")
+    validate_pulse_picked_choice(picked_choice)
+    acks = trek_doc.setdefault("pulse_acks", {})
+    entry = acks.get(session_id) or {
+        "session_id": session_id,
+        "total_acks": 0,
+        "last_pulse_ack_at": "",
+        "last_picked_choice": "",
+        "history": [],
+    }
+    now = utcnow_iso()
+    record = {
+        "timestamp": now,
+        "picked_choice": picked_choice,
+        "note": (note or "")[:200],
+    }
+    entry["total_acks"] = int(entry.get("total_acks") or 0) + 1
+    entry["last_pulse_ack_at"] = now
+    entry["last_picked_choice"] = picked_choice
+    history = entry.get("history") or []
+    history.append(record)
+    # Ring buffer cap — drop oldest beyond PULSE_ACK_HISTORY_CAP.
+    if len(history) > PULSE_ACK_HISTORY_CAP:
+        history = history[-PULSE_ACK_HISTORY_CAP:]
+    entry["history"] = history
+    acks[session_id] = entry
+    trek_doc["updated_at"] = now
+    return trek_doc
+
+
+def summarize_pulse_acks(trek_doc: dict) -> dict:
+    """Compact per-session summary for dashboards (ms-88 / e-2108 Phase 4).
+
+    Returns:
+      {
+        "sessions": {
+          session_id: {
+            "total_acks": int,
+            "last_pulse_ack_at": ISO,
+            "last_picked_choice": str,
+            "choice_counts": {choice: count, ...},
+          }
+        },
+        "total_acks_across_sessions": int,
+      }
+
+    Compliance rate (= acks / expected ticks) requires per-session tick
+    history which we don't track yet — Phase 4 can either compute it from
+    bus event log scans or extend this struct. For now we expose the raw
+    counters; the UI can render "session X: 5 acks since Y" without needing
+    the denominator.
+    """
+    sessions: dict = {}
+    total = 0
+    for sid, entry in (trek_doc.get("pulse_acks") or {}).items():
+        choice_counts: dict = {}
+        for h in entry.get("history") or []:
+            c = h.get("picked_choice") or ""
+            choice_counts[c] = choice_counts.get(c, 0) + 1
+        sessions[sid] = {
+            "total_acks": int(entry.get("total_acks") or 0),
+            "last_pulse_ack_at": entry.get("last_pulse_ack_at") or "",
+            "last_picked_choice": entry.get("last_picked_choice") or "",
+            "choice_counts": choice_counts,
+        }
+        total += int(entry.get("total_acks") or 0)
+    return {
+        "sessions": sessions,
+        "total_acks_across_sessions": total,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Trek Kickoff Ritual (ms-88 / e-2138)
+# ---------------------------------------------------------------------------
+
+def get_kickoff_pending(trek_doc: dict, *, session_id: str) -> bool:
+    """Return True if ``session_id`` has NOT yet sent its kickoff DM (ms-88 / e-2138).
+
+    Lazy init semantics: missing entry → pending=True (= session never touched
+    kickoff endpoint). Existing entry with ``pending=False`` → done. This
+    means existing trek docs (= pre-deploy data) treat every session as
+    "pending" on first interaction, which is exactly the desired backward-
+    compat behaviour (= 「post-deploy で初めて見えた session は必ず kickoff
+    から始める」)。
+    """
+    status_map = trek_doc.get(KICKOFF_HISTORY_KEY) or {}
+    entry = status_map.get(session_id) or {}
+    if not entry:
+        return True
+    return bool(entry.get("pending", True))
+
+
+def mark_kickoff_completed(trek_doc: dict, *, session_id: str,
+                           user_id: str = "",
+                           kickoff_dm_event_id: str = "") -> dict:
+    """Stamp ``session_id`` as having sent its kickoff DM (ms-88 / e-2138).
+
+    Caller (= server endpoint) verifies the kickoff DM was actually sent
+    before calling this; we just record the fact. Idempotent — re-calling
+    keeps ``sent_at`` of the first call (= 1 回送れば OK)、 後続で kickoff
+    DM を再送しても新 stamp は付かない。
+
+    Returns the mutated trek_doc.
+    """
+    if not session_id:
+        raise ValueError("session_id is required")
+    status_map = trek_doc.setdefault(KICKOFF_HISTORY_KEY, {})
+    existing = status_map.get(session_id) or {}
+    if existing.get("pending") is False and existing.get("sent_at"):
+        # Already completed; keep original stamp.
+        return trek_doc
+    now = utcnow_iso()
+    status_map[session_id] = {
+        "session_id": session_id,
+        "user_id": user_id or "",
+        "pending": False,
+        "sent_at": now,
+        "kickoff_dm_event_id": kickoff_dm_event_id or "",
+    }
+    trek_doc["updated_at"] = now
+    return trek_doc
+
+
+def reset_kickoff_pending(trek_doc: dict, *, session_id: str,
+                          user_id: str = "") -> dict:
+    """Force a session back into ``pending=True`` state (ms-88 / e-2138).
+
+    Used after ``take-over`` when a fresh session inherits leadership and
+    the new session has not yet announced its plan to peers. Resetting
+    forces the new leader session to send its own kickoff DM before any
+    further pulse-ack progresses.
+    """
+    if not session_id:
+        raise ValueError("session_id is required")
+    status_map = trek_doc.setdefault(KICKOFF_HISTORY_KEY, {})
+    status_map[session_id] = {
+        "session_id": session_id,
+        "user_id": user_id or "",
+        "pending": True,
+        "sent_at": "",
+        "kickoff_dm_event_id": "",
+    }
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
+
+
+def summarize_kickoff_status(trek_doc: dict) -> dict:
+    """Per-session kickoff snapshot for dashboards (ms-88 / e-2138)。"""
+    status_map = trek_doc.get(KICKOFF_HISTORY_KEY) or {}
+    pending = []
+    completed = []
+    for sid, entry in status_map.items():
+        if entry.get("pending"):
+            pending.append({"session_id": sid,
+                            "user_id": entry.get("user_id") or ""})
+        else:
+            completed.append({
+                "session_id": sid,
+                "user_id": entry.get("user_id") or "",
+                "sent_at": entry.get("sent_at") or "",
+            })
+    return {
+        "pending_count": len(pending),
+        "completed_count": len(completed),
+        "pending_sessions": pending,
+        "completed_sessions": completed,
+    }
 
 
 def bump_task_activity(trek_doc: dict, *, task_id: str,
@@ -260,27 +662,37 @@ def get_working_ttl_minutes(trek_doc: dict,
 
 
 def aggregate_task_state(trek_doc: dict, *, task_ids: list[str]) -> dict:
-    """Summarise Trek state across the given task IDs.
+    """Summarise Trek state across the given task IDs (5 状態、 ms-88 / e-2107).
 
-    Returns a dict with counts per state + overall classification:
+    Returns counts per state + an overall classification:
 
-        {"working": N, "done": M, "waiting-review": K, "total": T,
-         "overall": "active" | "all-done" | "all-waiting-review" |
-                    "all-terminal-mixed" | "empty"}
+        {
+          "todo": N0, "working": N1, "leader_review": N2,
+          "user_review": N3, "done": N4, "total": T,
+          "overall": "active" | "all-done" | "all-user-review" |
+                     "all-terminal-mixed" | "empty",
 
-    "active": at least one task is 'working' — scheduler keeps firing.
-    "all-done": all tasks reached 'done' — Trek complete, archive candidate.
-    "all-waiting-review": all tasks waiting for human review — Trek paused
-        pending external decision.
-    "all-terminal-mixed": all tasks terminal but mix of done + waiting —
-        Trek paused, leader sees both outcomes.
-    "empty": no task IDs supplied (= scope is empty / no scope tasks
-        registered). Scheduler treats as the pre-existing "scope empty"
-        message, not as terminal.
+          # Backward-compat alias for callers that still read the old
+          # "waiting-review" key — combines leader_review + user_review
+          # (= the conflate behaviour of the old 3-state model).
+          "waiting-review": N2 + N3,
+        }
 
-    Untracked task IDs collapse to 'working' (= the default), so a fresh
-    task added to scope keeps the Trek "active" until an executor stamps
-    a terminal state.
+    "active":  at least one task is `todo` / `working` / `leader_review`
+               — scheduler keeps firing for some executor or leader queue.
+    "all-done": every task reached `done` — Trek complete, archive candidate.
+    "all-user-review": every task waiting for user judgment — terminal at
+               Trek-completion granularity, pending external decision.
+    "all-terminal-mixed": all tasks terminal but mix of done + user_review
+               — Trek complete enough for archive after user消化.
+    "empty":   no task IDs supplied.
+
+    Untracked tasks collapse to `todo` (= default), so a freshly-added
+    scope task keeps Trek active until claimed (todo → working).
+
+    Trek 完遂判定 (= scheduler / leader 走り続け判定): `todo` / `working` /
+    `leader_review` のいずれかが 1 つでもあれば走り続ける、 全部 `done` OR
+    `user_review` で停止 (= CORE doc 5nfTSmCDVUzD4SLzIhI5 § "Trek 完遂判定")。
     """
     counts = {s: 0 for s in VALID_TASK_STATES}
     total = 0
@@ -289,22 +701,29 @@ def aggregate_task_state(trek_doc: dict, *, task_ids: list[str]) -> dict:
             continue
         total += 1
         counts[get_task_state(trek_doc, tid)] += 1
+    # active = scheduler / leader が走り続けるべき状態 (= todo / working /
+    # leader_review のいずれかが残っている)。 完遂判定の補集合。
+    non_terminal_count = counts["todo"] + counts["working"] + counts["leader_review"]
     if total == 0:
         overall = "empty"
-    elif counts["working"] > 0:
+    elif non_terminal_count > 0:
         overall = "active"
     elif counts["done"] == total:
         overall = "all-done"
-    elif counts["waiting-review"] == total:
-        overall = "all-waiting-review"
+    elif counts["user_review"] == total:
+        overall = "all-user-review"
     else:
         overall = "all-terminal-mixed"
     return {
+        "todo": counts["todo"],
         "working": counts["working"],
+        "leader_review": counts["leader_review"],
+        "user_review": counts["user_review"],
         "done": counts["done"],
-        "waiting-review": counts["waiting-review"],
         "total": total,
         "overall": overall,
+        # Legacy alias for callers still reading old key.
+        "waiting-review": counts["leader_review"] + counts["user_review"],
     }
 
 

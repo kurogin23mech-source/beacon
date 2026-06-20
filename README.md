@@ -362,6 +362,7 @@ Treks (= 協奏作業領域) are cross-project, cross-session work areas. While 
 | `beacon trek stop <trek-id> [--reason "..."]` | Pull the Andon cord (= halt signal, sessions pause) / 非常停止 |
 | `beacon trek resume <trek-id>` | Clear the halt signal / 再開 |
 | `beacon trek transfer-leader <trek-id> --to <session-id>` | Hand off `leader_session_id` to another session / leader 引き継ぎ |
+| `beacon trek take-over <trek-id>` | Re-bind `leader_session_id` to a fresh session of the same leader user (= dead-session recovery without the prior leader's authorization, ms-88 e-2089) |
 
 In the Web UI / Tauri Desktop, the **Treks** tab on a project page lists every trek that includes the current project in its scope (= active と archived を別表示)。各 trek の詳細では members / scope / status / 関連 docs が並ぶ。逆に milestone / operation / task の詳細を開くと、その作業項目を scope に含む trek 一覧が **Related Treks** widget としてインラインで出る。
 

@@ -2,6 +2,17 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.47.0] - 2026-06-19
+
+- Merge pull request #176 from kurogin23mech-source/deploy/ms-88-server-tick-v0.47
+- chore: register beacon trek take-over in cmd_help_json + README (= cli-drift CI fix)
+- fix(ms-61): credentials.json から identity を auto-read (= e-2132)
+- fix(ms-43): explicit WS broadcast after every project write (= e-2128)
+- feat(ms-88): Phase 3 state machine + TTL 12min + per-session fanout filter (= e-2107 / e-2109)
+- feat(ms-88): Phase 1+2 Trek autonomy harness — consent gate / take-over / pulse-ack (= e-2090 / e-2089 / e-2105 / e-2106)
+- docs(release): update README/CHANGELOG for v0.46.0
+- chore(release): bump formula to 0.46.0
+
 ## [v0.46.0] - 2026-06-19
 
 - Merge pull request #175 from kurogin23mech-source/ms-86-trek-ui-ms-83-dogfood-server-side-ui

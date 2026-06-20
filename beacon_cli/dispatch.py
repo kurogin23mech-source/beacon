@@ -756,6 +756,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_trek_join = trek_sub.add_parser("join", add_help=False)
     p_trek_join.add_argument("trek_id", nargs="?", default="")
     p_trek_join.add_argument("--json", action="store_true")
+    # ms-88 / e-2090 — Trek 参加 = scope 内 DM blanket 自動承認 (= ms-70 / e-1854)
+    # + autonomous loop 入場の合算で turn 制限なく AI を動かす権限委譲。 CLI 直叩きで
+    # 無音成立すると user が consequence を理解せず参加する構造的危険があるため、
+    # 明示同意 gate を挟む。 long flag は意味理解の forcing function (= short flag
+    # では typo / 反射的 -y で bypass される温床)。
+    p_trek_join.add_argument(
+        "--i-understand-the-implications", dest="consent_ack",
+        action="store_true",
+        help="Skip the typed-ack prompt (= 自動化 / bot 用 bypass)。 "
+             "Trek 参加が turn 制限なく AI を走らせる権限委譲であることを "
+             "理解している前提で使う。",
+    )
     # ms-75 / e-2047 — opt-out flag for the post-join auto-arm sequence.
     p_trek_join.add_argument("--no-arm", dest="no_arm", action="store_true")
 
@@ -793,6 +805,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_trek_xfer.add_argument("trek_id", nargs="?", default="")
     p_trek_xfer.add_argument("--to", dest="to_session_id", default="")
     p_trek_xfer.add_argument("--json", action="store_true")
+
+    # ms-88 / e-2089 — fresh session recovery (dead leader_session_id 引き継ぎ)
+    p_trek_take_over = trek_sub.add_parser("take-over", add_help=False)
+    p_trek_take_over.add_argument("trek_id", nargs="?", default="")
+    p_trek_take_over.add_argument("--json", action="store_true")
+
+    # ms-88 / e-2138 — Kickoff Ritual completion stamp (= /beacon-trek-pulse Step 0.4)
+    p_trek_kickoff = trek_sub.add_parser("kickoff", add_help=False)
+    p_trek_kickoff.add_argument("trek_id", nargs="?", default="")
+    p_trek_kickoff.add_argument("--session-id", dest="session_id_override",
+                                 default="")
+    p_trek_kickoff.add_argument("--kickoff-dm-event-id",
+                                 dest="kickoff_dm_event_id", default="")
+    p_trek_kickoff.add_argument("--json", action="store_true")
+
+    # ms-88 / e-2106 — pulse-ack (= /beacon-trek-pulse self-report)
+    p_trek_pulse = trek_sub.add_parser("pulse-ack", add_help=False)
+    p_trek_pulse.add_argument("trek_id", nargs="?", default="")
+    p_trek_pulse.add_argument("--picked-choice", dest="picked_choice",
+                              default="")
+    p_trek_pulse.add_argument("--note", default="")
+    p_trek_pulse.add_argument("--json", action="store_true")
 
     # ms-75 / e-2048 — Trek task state machine declaration
     p_trek_state = trek_sub.add_parser("task-state", add_help=False)
@@ -2314,6 +2348,12 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
             {
                 "BEACON_TREK_ID": args.trek_id or "",
                 "BEACON_TREK_NO_ARM": "1" if getattr(args, "no_arm", False) else "",
+                # ms-88 / e-2090 — consent gate bypass。 CLI から渡された場合のみ
+                # commands.py 側の typed-ack prompt を skip する。 環境変数で
+                # bypass する経路は意図しない (= テスト fixture など特殊用途は
+                # 別途 BEACON_TREK_CONSENT_ACK=1 を明示する手があるが、 default
+                # は flag 経由のみ通る運用)。
+                "BEACON_TREK_CONSENT_ACK": "1" if getattr(args, "consent_ack", False) else "",
                 "BEACON_JSON": json_env,
             },
         )
@@ -2365,6 +2405,39 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
             {
                 "BEACON_TREK_ID": args.trek_id or "",
                 "BEACON_TREK_TO": args.to_session_id or "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd == "take-over":
+        return _run_commands_py(
+            root, "trek_take_over",
+            {
+                "BEACON_TREK_ID": args.trek_id or "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd == "kickoff":
+        # session_id override is optional — when absent, cmd_trek_kickoff
+        # reads BEACON_SESSION_ID from the inherited env (= same default
+        # as take-over / pulse-ack). Passing through "" is safe; the
+        # commands-side resolver only honors a non-empty override.
+        env = {
+            "BEACON_TREK_ID": args.trek_id or "",
+            "BEACON_TREK_KICKOFF_DM_EVENT_ID":
+                getattr(args, "kickoff_dm_event_id", "") or "",
+            "BEACON_JSON": json_env,
+        }
+        sid_override = getattr(args, "session_id_override", "") or ""
+        if sid_override:
+            env["BEACON_SESSION_ID"] = sid_override
+        return _run_commands_py(root, "trek_kickoff", env)
+    if cmd == "pulse-ack":
+        return _run_commands_py(
+            root, "trek_pulse_ack",
+            {
+                "BEACON_TREK_ID": args.trek_id or "",
+                "BEACON_TREK_PICKED_CHOICE": getattr(args, "picked_choice", "") or "",
+                "BEACON_TREK_NOTE": getattr(args, "note", "") or "",
                 "BEACON_JSON": json_env,
             },
         )

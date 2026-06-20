@@ -1499,7 +1499,7 @@ def archive_project(
     def op(data: dict):
         data["archived"] = True
         return data, {"status": "archived", "project_id": project_id}
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="project.archive", actor=user.get("sub", ""),
     )
 
@@ -1512,7 +1512,7 @@ def unarchive_project(project_id: str, user: dict = Depends(require_auth)):
     def op(data: dict):
         data["archived"] = False
         return data, {"status": "unarchived", "project_id": project_id}
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="project.unarchive", actor=user.get("sub", ""),
     )
 
@@ -1623,6 +1623,10 @@ def put_project(project_id: str, body: dict,
         actor=user.get("sub", ""),
         reason="PUT /api/projects (whole-document replace)",
     )
+    # ms-43 / e-2128 — explicit WS broadcast after every write. The Firestore
+    # on_snapshot listener is unreliable (silent disconnect, multi-instance
+    # watcher偏り, identical-content dedup), so we don't rely on it alone.
+    _broadcast_project_after_write(project_id)
     return {"status": "ok", "project_id": project_id}
 
 
@@ -1646,7 +1650,7 @@ def create_milestone(project_id: str, body: MilestoneCreate,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return data, {"ms_id": ms_id, "title": body.title}
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="milestone.create", actor=user.get("sub", ""),
     )
 
@@ -1689,7 +1693,7 @@ def update_milestone(project_id: str, ms_id: str, body: MilestoneUpdate,
             "id": ms["id"], "title": ms["title"], "status": ms["status"],
             "progress": ms.get("progress", 0),
         }
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="milestone.update", actor=user.get("sub", ""),
     )
 
@@ -1704,7 +1708,7 @@ def start_milestone(project_id: str, ms_id: str,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return data, {"id": ms["id"], "title": ms["title"], "status": "in_progress"}
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="milestone.start", actor=user.get("sub", ""),
     )
 
@@ -1719,7 +1723,7 @@ def done_milestone(project_id: str, ms_id: str,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return data, {"id": ms["id"], "title": ms["title"], "status": "done"}
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="milestone.done", actor=user.get("sub", ""),
     )
 
@@ -1736,7 +1740,7 @@ def delete_milestone(project_id: str, ms_id: str,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return data, {"id": ms["id"], "status": "cancelled"}
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="milestone.delete", actor=user.get("sub", ""),
     )
 
@@ -1772,7 +1776,7 @@ def purge_milestone(
         return data, {
             "id": ms["id"], "title": ms.get("title", ""), "purged": True,
         }
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="milestone.purge", actor=user.get("sub", ""),
         reason=body.reason,
     )
@@ -1800,7 +1804,7 @@ def create_entry(project_id: str, ms_id: str, body: EntryCreate,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return data, {"entry_id": eid, "description": body.description}
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="entry.create", actor=user.get("sub", ""),
     )
 
@@ -1823,7 +1827,7 @@ def update_entry(project_id: str, entry_id: str, body: EntryUpdate,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return data, core.entries_to_json([entry])[0]
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="entry.update", actor=user.get("sub", ""),
     )
 
@@ -1843,7 +1847,7 @@ def done_entry(project_id: str, entry_id: str,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return data, {"entry_id": entry_id, "status": "done"}
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="entry.done", actor=user.get("sub", ""),
     )
 
@@ -1860,7 +1864,7 @@ def delete_entry(project_id: str, entry_id: str,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return data, {"entry_id": entry_id, "status": "cancelled"}
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="entry.delete", actor=user.get("sub", ""),
     )
 
@@ -1897,7 +1901,7 @@ def purge_entry(
             "description": entry.get("description", ""),
             "purged": True,
         }
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="entry.purge", actor=user.get("sub", ""),
         reason=body.reason,
     )
@@ -1936,7 +1940,7 @@ def purge_operation(
             "title": purged.get("title", ""),
             "purged": True,
         }
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="operation.purge", actor=user.get("sub", ""),
         reason=body.reason,
     )
@@ -2136,7 +2140,7 @@ def log_commit(project_id: str, body: LogCommit,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return data, result
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="project.log", actor=user.get("sub", ""),
     )
 
@@ -2532,7 +2536,7 @@ def invite_member(project_id: str, body: MemberInvite,
         data["members"] = members
         return data, {"status": "invited", "email": body.email, "role": body.role}
 
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="member.invite", actor=user.get("sub", ""),
     )
 
@@ -2555,7 +2559,7 @@ def remove_member(project_id: str, member_email: str,
         data["members"] = new_members
         return data, {"status": "removed", "email": member_email}
 
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="member.remove", actor=user.get("sub", ""),
     )
 
@@ -2626,7 +2630,7 @@ def update_member_role(project_id: str, member_email: str, body: MemberRoleUpdat
             status_code=404, detail=f"Member '{member_email}' not found"
         )
 
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="member.update_role", actor=user.get("sub", ""),
     )
 
@@ -2704,7 +2708,7 @@ def create_invitation(project_id: str, body: InvitationCreate,
         issued["token"] = token
         return data, None
 
-    operations.apply_operation(
+    _apply_op_and_broadcast(
         project_id, op,
         op_name="invitation.create", actor=user.get("sub", ""),
     )
@@ -2763,7 +2767,7 @@ def cancel_invitation(project_id: str, invitation_id: str,
             "invitation": invitations_mod.invitation_public_view(removed),
         }
 
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op,
         op_name="invitation.cancel", actor=user.get("sub", ""),
     )
@@ -2892,7 +2896,7 @@ def accept_invitation(token: str, body: InvitationAccept,
         accepted["invitation"] = inv
         return data, None
 
-    operations.apply_operation(
+    _apply_op_and_broadcast(
         target_pid, op,
         op_name="invitation.accept", actor=caller_id,
     )
@@ -3026,7 +3030,7 @@ def admin_trash_sweep(days: int = 30,
                     data, days=_days, apply=True,
                 )
                 return data, result
-            per_proj_result = operations.apply_operation(
+            per_proj_result = _apply_op_and_broadcast(
                 pid, _sweep_op,
                 op_name="trash.sweep",
                 actor="system",
@@ -3095,7 +3099,7 @@ def admin_transfer_owner(project_id: str, body: AdminOwnerTransfer,
             "email": new_owner.get("email", ""),
         }
 
-    return operations.apply_operation(
+    return _apply_op_and_broadcast(
         project_id, op, op_name="admin.transfer_owner", actor=user.get("sub", ""),
     )
 
@@ -3187,6 +3191,24 @@ class TrekHaltSet(BaseModel):
 class TrekTransferLeader(BaseModel):
     from_session_id: str  # current leader session (caller's session)
     to_session_id: str    # new leader session
+
+
+# ms-88 / e-2089 — fresh session take-over (= dead leader_session_id 引き継ぎ)
+class TrekTakeOver(BaseModel):
+    session_id: str  # 新 leader_session_id (= 呼び出し session の sid)
+
+
+# ms-88 / e-2106 — pulse-ack body (= /beacon-trek-pulse Skill self-report)
+class TrekPulseAck(BaseModel):
+    session_id: str
+    picked_choice: str = ""  # 5-choice token, see lib/trek.VALID_PULSE_PICKED_CHOICES (ms-88 / e-2139)
+    note: str = ""
+
+
+# ms-88 / e-2138 — kickoff completion body (= /beacon-trek-pulse Step 0 が呼ぶ)
+class TrekKickoff(BaseModel):
+    session_id: str
+    kickoff_dm_event_id: str = ""  # bus.send 結果の event_id (= audit trace)
 
 
 def _load_trek_for_read(trek_id: str, user: dict) -> dict:
@@ -3545,6 +3567,193 @@ def transfer_trek_leader_endpoint(trek_id: str, body: TrekTransferLeader,
         raise HTTPException(status_code=400, detail=str(e))
     db.save_trek(trek_id, t)
     return t
+
+
+@app.post("/api/treks/{trek_id}/take-over")
+def take_over_trek_endpoint(trek_id: str, body: TrekTakeOver,
+                            user: dict = Depends(require_auth)):
+    """Fresh-session leader take-over (ms-88 / e-2089).
+
+    Unlike ``transfer-leader`` which requires the **live** prior leader
+    session to authorize, take-over only checks the user-grain leader role
+    — so a fresh bclaude session of the same user can recover when the
+    original leader session is dead (= Mac restart, terminal closed,
+    bclaude relaunched). This closes the dogfood Finding 1 silent-ack
+    path: a dead ``leader_session_id`` was stale-but-non-null, scheduler
+    fan-out kept aiming at it, and there was no way to re-bind without
+    going through the dead session.
+
+    Auth (user grain only, no from_session check):
+      * Caller must be a joined member (= ``find_member`` non-null AND
+        ``joined_at`` non-empty)
+      * Caller must hold the ``leader`` role (= ``_require_trek_leader``)
+
+    Idempotent: re-binding to the same ``session_id`` is a no-op
+    (``trek_mod.transfer_leader`` already handles the equality case).
+    """
+    t = _load_trek_for_read(trek_id, user)
+    if not body.session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+    _require_trek_leader(t, user)
+    # joined check is implicit in _require_trek_leader (= role only set
+    # after joining), but we re-affirm here so the error message is precise
+    # if a future refactor splits role from joined_at.
+    if _auth_enabled:
+        uid = user.get("sub") or ""
+        member = trek_mod.find_member(t, uid)
+        if not member or not member.get("joined_at"):
+            raise HTTPException(
+                status_code=403,
+                detail="take-over requires a joined leader member",
+            )
+    try:
+        trek_mod.transfer_leader(t, target_session_id=body.session_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    # ms-88 / e-2138 — take-over した fresh session は kickoff_pending=true に
+    # 強制 reset。 前 session の kickoff が完了済でも、 新 session は別の plan
+    # / worktree を持つ可能性があるので、 peer に再度 announce する義務を持つ。
+    uid_for_reset = (user.get("sub") if _auth_enabled else "") or ""
+    trek_mod.reset_kickoff_pending(
+        t, session_id=body.session_id, user_id=uid_for_reset,
+    )
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.post("/api/treks/{trek_id}/kickoff")
+def trek_kickoff_endpoint(trek_id: str, body: TrekKickoff,
+                          user: dict = Depends(require_auth)):
+    """Mark a session's kickoff DM as sent (ms-88 / e-2138).
+
+    Called by ``/beacon-trek-pulse`` Skill's Step 0 after it has generated
+    and sent the kickoff DM to the trek leader. Until this endpoint is
+    called, ``pulse-ack`` rejects further progress for the same session
+    with HTTP 400 ``kickoff_required``.
+
+    Auth: caller must be a trek member at the user grain. The endpoint
+    itself does not verify the DM was actually sent — that is a Skill /
+    audit-side concern. The structural enforcement is "no pulse-ack
+    progress until kickoff endpoint is called", which is sufficient to
+    force the executor through the Skill body's Step 0.
+
+    Returns the updated per-session kickoff_status entry so the Skill can
+    echo "stamped" back to the user.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    if _auth_enabled:
+        uid = user.get("sub") or ""
+        if not trek_mod.find_member(t, uid):
+            raise HTTPException(
+                status_code=403,
+                detail="only trek members can mark kickoff completed",
+            )
+    if not body.session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+    try:
+        uid_for_stamp = (user.get("sub") if _auth_enabled else "") or ""
+        trek_mod.mark_kickoff_completed(
+            t,
+            session_id=body.session_id,
+            user_id=uid_for_stamp,
+            kickoff_dm_event_id=body.kickoff_dm_event_id or "",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.save_trek(trek_id, t)
+    return (t.get(trek_mod.KICKOFF_HISTORY_KEY) or {}).get(body.session_id) or {}
+
+
+@app.get("/api/treks/{trek_id}/kickoff")
+def trek_kickoff_status_endpoint(trek_id: str,
+                                  user: dict = Depends(require_auth)):
+    """Per-session kickoff summary (ms-88 / e-2138)."""
+    t = _load_trek_for_read(trek_id, user)
+    if _auth_enabled:
+        uid = user.get("sub") or ""
+        if not trek_mod.find_member(t, uid):
+            raise HTTPException(
+                status_code=403,
+                detail="only trek members can read kickoff status",
+            )
+    return trek_mod.summarize_kickoff_status(t)
+
+
+@app.post("/api/treks/{trek_id}/pulse-ack")
+def trek_pulse_ack_endpoint(trek_id: str, body: TrekPulseAck,
+                            user: dict = Depends(require_auth)):
+    """Record /beacon-trek-pulse Skill invocation (ms-88 / e-2106).
+
+    Layer 2 (= observability) of the 3-layer trek autonomy harness
+    (CORE doc 5nfTSmCDVUzD4SLzIhI5). The Skill calls this endpoint as its
+    very first Step so the server has **ground truth** about whether the
+    Skill actually fired in response to a scheduler tick. This closes the
+    "Skill marker visible in executor terminal" verification hole that
+    dogfood (= tk-40b0b27c) could not check directly.
+
+    Auth: caller must be a trek member (= user grain, same as task-state).
+    The Skill is invoked by the executor session, so the calling user is
+    naturally a joined member.
+
+    Returns the updated pulse_acks entry for the caller's session so the
+    Skill can echo the recorded state back to the user.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    if _auth_enabled:
+        uid = user.get("sub") or ""
+        if not trek_mod.find_member(t, uid):
+            raise HTTPException(
+                status_code=403,
+                detail="only trek members can pulse-ack",
+            )
+    if not body.session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+    # ms-88 / e-2138 — Kickoff Ritual physical gate. 自セッションが kickoff DM を
+    # 送信していなければ pulse-ack を拒否し、 Skill side の Step 0 (= kickoff DM
+    # 自動生成 + leader 宛送信) を走らせる。 narrative ではなく server-side
+    # validation で「kickoff 未送信なら progress 不可」 を物理的に閉じる。
+    if trek_mod.get_kickoff_pending(t, session_id=body.session_id):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "kickoff_required: this session has not yet sent its kickoff DM. "
+                "Run /beacon-trek-pulse Step 0 to send the kickoff DM to the trek "
+                "leader (= self-info + plan + worktree + non-touch range), then "
+                "POST /api/treks/{trek_id}/kickoff to mark it completed, then "
+                "retry pulse-ack."
+            ),
+        )
+    try:
+        trek_mod.record_pulse_ack(
+            t,
+            session_id=body.session_id,
+            picked_choice=body.picked_choice or "",
+            note=body.note or "",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.save_trek(trek_id, t)
+    return (t.get("pulse_acks") or {}).get(body.session_id) or {}
+
+
+@app.get("/api/treks/{trek_id}/pulse-acks")
+def list_trek_pulse_acks_endpoint(trek_id: str,
+                                  user: dict = Depends(require_auth)):
+    """Per-session pulse-ack summary for dashboards (ms-88 / e-2108).
+
+    Returns the compact summary built by ``trek_mod.summarize_pulse_acks``
+    so the Phase 4 Trek detail page can render compliance widgets without
+    pulling the full trek doc. Any joined member may read.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    if _auth_enabled:
+        uid = user.get("sub") or ""
+        if not trek_mod.find_member(t, uid):
+            raise HTTPException(
+                status_code=403,
+                detail="only trek members can read pulse-ack stats",
+            )
+    return trek_mod.summarize_pulse_acks(t)
 
 
 @app.patch("/api/treks/{trek_id}/task-state")
@@ -4504,6 +4713,16 @@ def trek_scheduler_tick_endpoint(
         # with a session-addressed payload (= payload.recipient_session_id).
         # If no live sessions resolve (= empty members or all stale), the
         # broadcast fallback fires (sid="") so behaviour stays compatible.
+        #
+        # ms-88 / e-2109 — per-session task_state filter. The dogfood also
+        # showed that fanning out to every live session even when their
+        # claimed tasks were all terminal (= leader_review / user_review /
+        # done) burned executor inboxes with ticks they couldn't act on.
+        # Filter target_sids down to sessions that either (a) hold at least
+        # one todo / working claim, or (b) have no claims yet (= fresh
+        # executor about to pick up). Sessions whose claims are all in
+        # terminal-ish states get NO tick — they explicitly finished and
+        # should stay quiet until the leader re-stamps them working.
         member_user_ids = {
             (m.get("user_id") or "")
             for m in (trek_doc.get("members") or [])
@@ -4518,13 +4737,22 @@ def trek_scheduler_tick_endpoint(
             live_cutoff = (now - datetime.timedelta(minutes=10)).strftime(
                 "%Y-%m-%dT%H:%M:%S.%fZ"
             )
-            target_sids = [
+            live_sids = [
                 (s.get("session_id") or "")
                 for s in project_sessions
                 if (s.get("user_id") or "") in member_user_ids
                 and (s.get("last_active") or "") >= live_cutoff
                 and s.get("session_id")
             ]
+            # ms-88 / e-2109 — per-session filter.
+            for sid in live_sids:
+                if trek_mod.session_has_active_claim(trek_doc, session_id=sid):
+                    target_sids.append(sid)
+                elif not trek_mod.session_has_any_claim(trek_doc, session_id=sid):
+                    # Fresh session, no claims yet — still tick so it picks
+                    # up a todo task.
+                    target_sids.append(sid)
+                # else: every claim is terminal-ish → skip this session.
         if not target_sids:
             # Fallback: broadcast (= sid empty). Preserves behaviour when
             # member resolution fails (= no live sessions / empty members /
@@ -4678,11 +4906,15 @@ def trek_scheduler_tick_endpoint(
             silence = s["silence_minutes"]
             ttl = s["ttl_minutes"]
             note = trek_scheduler_mod.build_auto_stall_note(silence)
+            # ms-88 / e-2107: 罰則先 を `waiting-review` → `leader_review` に変更
+            # (= 5 状態 state machine 厳密化、 「leader 判断要請」 と「user 判断
+            # 要請」 の conflate 解消)。 set_task_state は legacy migration を
+            # 経由するので old-schema 既存データとの interop は silent。
             try:
                 trek_mod.set_task_state(
                     trek_doc,
                     task_id=task_id,
-                    state="waiting-review",
+                    state="leader_review",
                     updated_by_session_id="",  # = server-initiated
                     note=note,
                 )
@@ -4710,7 +4942,7 @@ def trek_scheduler_tick_endpoint(
                     "kind": "trek-task-review",
                     "trek_id": trek_id,
                     "task_id": task_id,
-                    "state": "waiting-review",
+                    "state": "leader_review",
                     "note": note,
                     "updated_by_session_id": "",
                     "recipient_session_id": leader_sid,
@@ -4722,12 +4954,13 @@ def trek_scheduler_tick_endpoint(
                         f"task_id={task_id} silence={silence} min "
                         f"(TTL={ttl})\n"
                         f"executor が working state のまま {silence} 分無活動。"
-                        f" server-side TTL safety net (= e-2067) が "
-                        f"waiting-review に降格しました。\n"
+                        f" server-side TTL safety net (= e-2067 / ms-88 e-2107) "
+                        f"が leader_review に降格しました。\n"
                         f"次の action: /beacon-trek-review {trek_id} "
-                        f"{task_id} で approve / re-work / forward-to-user "
-                        f"を選んでください。 false-positive なら "
-                        f"waiting-review → working に re-stamp で復旧可能。"
+                        f"{task_id} で done / user_review (forward) / "
+                        f"working (re-work + 方針 DM) を選んでください。 "
+                        f"false-positive なら leader_review → working に "
+                        f"re-stamp で復旧可能。"
                     ),
                     "created_at": trek_mod.utcnow_iso(),
                 }
@@ -5826,6 +6059,80 @@ async def _broadcast(project_id: str, data: dict):
             await ws.send_json(msg)
         except Exception:
             _ws_connections.get(project_id, set()).discard(ws)
+
+
+def _apply_op_and_broadcast(project_id: str, op, *,
+                            op_name: str = "project.update",
+                            actor: str = "",
+                            reason: str = "",
+                            project_file: Optional[str] = None):
+    """``operations.apply_operation`` + explicit WS broadcast (ms-43 / e-2128).
+
+    Thin wrapper: run apply_operation normally; on success, fan out the new
+    project state to subscribed WS clients via ``_broadcast_project_after_write``.
+    Use this from HTTP write endpoints in place of ``operations.apply_operation``
+    so every write deterministically reaches live clients (= dogfood病理
+    の構造解、 listener 不在経路で dark にならない)。
+
+    Errors from apply_operation propagate normally (= HTTP 4xx/5xx is fired by
+    the caller). Broadcast itself is fail-safe (= broadcast 失敗で write を
+    巻き戻さない、 _broadcast_project_after_write が内部で吸収)。
+    """
+    result = operations.apply_operation(
+        project_id, op,
+        op_name=op_name,
+        actor=actor,
+        reason=reason,
+        project_file=project_file,
+    )
+    _broadcast_project_after_write(project_id)
+    return result
+
+
+def _broadcast_project_after_write(project_id: str) -> None:
+    """Explicit fan-out of the latest project state after a write (ms-43).
+
+    Background — dogfood (2026-06-19) で観測された病理: cloud mode で
+    ``beacon milestone add`` を打っても WebUI に live 反映されない。 原因は
+    PUT /api/projects + apply_operation 経路が broadcast を Firestore の
+    ``on_snapshot`` listener に **完全に委ねている** 設計にあった。 listener は
+    silent disconnect (= 長時間 idle 後の Firestore SDK 仕様)、 multi-instance
+    Cloud Run の watcher 偏り、 identical-content write の SDK dedup 等で
+    fire しなくなる経路を持つ。 fire しないと WebUI 側は **dark** のままに
+    なる (= 「broadcast されない write」 が物理的に存在する状態)。
+
+    構造解 (= ms-43 / e-2128 path): broadcast を listener に依存させない。
+    write 経路の HTTP endpoint で必ず本 helper を呼んで explicit broadcast を
+    打つ。 listener (= ``_on_snapshot``) は cross-instance fallback として残す
+    (= 削除しない、 listener が動く環境では冗長 broadcast、 client 側 JSON
+    dedup で吸収)。
+
+    Behavior:
+      * No-op when no WS clients are subscribed to ``project_id`` (= 速攻 return)
+      * No-op when ``_event_loop`` is unset (= startup hook 未発火、 lambda
+        lifespan=off 経路、 cold-start race)
+      * fail-safe: load_project_consistent 失敗 / broadcast 失敗で write 経路
+        を巻き戻さない、 caller 視点では fire-and-forget
+      * thread-safe: ``asyncio.run_coroutine_threadsafe`` で worker thread から
+        event loop に乗せる (= apply_operation は同期 path で呼ばれる)
+    """
+    if not _ws_connections.get(project_id):
+        return
+    if _event_loop is None:
+        return
+    try:
+        data = operations.load_project_consistent(project_id)
+    except Exception:
+        # load 失敗で broadcast 諦め、 write の成功は影響させない (= UX 上の
+        # 遅延は許容、 listener fallback が後から拾うかもしれない)。
+        return
+    try:
+        asyncio.run_coroutine_threadsafe(
+            _broadcast(project_id, data), _event_loop
+        )
+    except Exception:
+        # event loop が閉じてる等の race。 fire-and-forget なので silent skip。
+        return
 
 
 async def _broadcast_bus_event(project_id: str, event: dict):
