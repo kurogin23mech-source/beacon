@@ -284,3 +284,158 @@ class TestDesktopUI_v3Parity:
                     ".trek-task-row", ".trek-members-table",
                     ".trek-why-block", ".trek-activity-row-v2"):
             assert cls in self.src, f"CSS class {cls!r} missing"
+
+
+# ---------------------------------------------------------------------------
+# ms-86 v2 bug fixes (= 2026-06-22 dogfood) — pin behaviours so simplify
+# passes don't silently regress them again.
+# ---------------------------------------------------------------------------
+
+
+class TestWebUI_TrekHeaderHidesProjectChrome:
+    """e-2219: Trek detail page ヘッダから project 名 / project tag / version
+    badge を隠す。 Trek は cross-project entity であり project に従属しない。
+    """
+
+    def setup_method(self, _method):
+        self.src = _read(WEB_INDEX)
+
+    def test_header_branches_on_open_trek(self):
+        # renderShell must branch on openTrekId so the project chrome is
+        # suppressed when a trek detail page is on screen.
+        assert "const trekOpen = !!state.openTrekId;" in self.src
+        # Brand fallback used when trekOpen — mockup top-bar shows just "Beacon".
+        assert '<span class="project-name brand">Beacon</span>' in self.src
+
+    def test_project_chrome_still_rendered_when_no_trek(self):
+        # The original project-name + header-tag + version-badge cluster
+        # must still be reachable for the non-trek path.
+        assert 'esc(PLATFORM.headerTag)' in self.src
+        assert 'PLATFORM.versionBadgeHTML()' in self.src
+
+
+class TestWebUI_TrekProjectSwitchClearsOpenTrek:
+    """e-2220 (ms-43): Trek detail を開いた状態から hamburger menu 経由で project
+    を選び直したり、 同じ project を再選択した時に main content が project
+    page に戻ること (= state.openTrekId が解除される routing 経路)。
+    """
+
+    def setup_method(self, _method):
+        self.src = _read(WEB_INDEX)
+
+    def test_menu_select_project_clears_open_trek(self):
+        # menuSelectProject 内で state.openTrekId を明示クリアしている必要がある
+        # (= 別 project 選択時 / 同 project 再選択時の両方を構造的にカバー)。
+        assert "function menuSelectProject(" in self.src
+        # state.openTrekId = null が menuSelectProject 配下に必ず存在する。
+        idx = self.src.index("async function menuSelectProject(")
+        end = self.src.index("\n}\n", idx)
+        body = self.src[idx:end]
+        assert "state.openTrekId = null" in body, (
+            "menuSelectProject must reset state.openTrekId so trek detail "
+            "doesn't bleed across project switches (e-2220 / ms-43)"
+        )
+
+    def test_select_project_clears_open_trek(self):
+        # selectProject 自体も openTrekId を解除する (= URL / refresh / initial
+        # bootstrap 経由の project 選択でも trek 状態が漏れないため)。
+        idx = self.src.index("async function selectProject(projectId)")
+        end = self.src.index("\nfunction toggleMilestone", idx)
+        body = self.src[idx:end]
+        assert "state.openTrekId = null" in body, (
+            "selectProject must reset state.openTrekId so any project-load "
+            "path drops the open trek (e-2220)"
+        )
+
+
+class TestWebUI_TrekStopCardMaxWidth:
+    """e-2221: STOP card は画面幅の半分程度 (= mockup L137-141 halt-block の
+    max-width 700px) で center 揃え。 leaf width で読みやすい形にする。
+    """
+
+    def setup_method(self, _method):
+        self.src = _read(WEB_INDEX)
+
+    def test_stop_card_has_max_width(self):
+        # CSS 矩形 .trek-stop-card { ... } 内に max-width が含まれる。
+        idx = self.src.index(".trek-stop-card {")
+        end = self.src.index("}", idx)
+        block = self.src[idx:end]
+        assert "max-width" in block, (
+            ".trek-stop-card must have max-width so it doesn't span full leaf "
+            "width (e-2221 / mockup halt-block max-width: 700px)"
+        )
+
+
+class TestWebUI_TrekChevronAccordionWired:
+    """e-2222: TREK TASKS の MS / Op 行 chevron クリックで配下 task が accordion
+    展開される。 既存 _trekLookupMilestoneInProject helper を流用し、 user の
+    expand 状態は state.openTrekExpanded で保持する。
+    """
+
+    def setup_method(self, _method):
+        self.src = _read(WEB_INDEX)
+
+    def test_scope_toggle_action_handler_present(self):
+        # data-action="trek-scope-toggle" が chevron に紐づき、 dispatcher
+        # 側の handleCommonAction で case 処理されている。
+        assert 'data-action="trek-scope-toggle"' in self.src
+        assert "case 'trek-scope-toggle':" in self.src
+
+    def test_open_trek_expanded_state_field(self):
+        # 既存 state.openTrekExpanded (= Set<string>) が dispatcher で
+        # ms-id を toggle する経路を持つ。
+        assert "openTrekExpanded: new Set()" in self.src
+
+
+class TestWebUI_TrekTaskLeafOpensEntryModal:
+    """e-2223: task leaf 行クリックで既存 entry-detail-modal が overlay 表示
+    される。 既存 openEntryDetail / entry-detail-modal 機構をそのまま流用し、
+    leaf 行に data-action="open-entry-detail" + data-entry-id を渡す。
+    """
+
+    def setup_method(self, _method):
+        self.src = _read(WEB_INDEX)
+
+    def test_leaf_row_wires_open_entry_detail(self):
+        # leaf task row 描画関数 (_renderTrekTaskRow の s.task 分岐) で
+        # open-entry-detail action と data-entry-id が出力されていること。
+        idx = self.src.index("// Leaf task row.")
+        end = self.src.index("// Operation row", idx)
+        leaf_block = self.src[idx:end]
+        assert 'data-action="open-entry-detail"' in leaf_block, (
+            "leaf task row must wire open-entry-detail action so clicking "
+            "opens the existing entry-detail-modal overlay (e-2223)"
+        )
+        assert 'data-entry-id=' in leaf_block
+
+    def test_open_entry_detail_handler_still_dispatched(self):
+        # handleCommonAction の既存 case を流用する想定。 リネームされていない
+        # ことを確認することで wiring が空振りしない構造を pin する。
+        assert "case 'open-entry-detail':" in self.src
+
+
+class TestWebUI_TrekShowDoneToggle:
+    """e-2224: show done ボタンが accordion 展開中に表示され、 click で done
+    状態 task が inline 追加表示される (toggle)。 toggle 状態は MS id 単位で
+    state.openTrekShowDone (Set) に保持し、 別 Trek / 別 MS で混じらない。
+    """
+
+    def setup_method(self, _method):
+        self.src = _read(WEB_INDEX)
+
+    def test_show_done_button_rendered(self):
+        # show-done ボタンは class="trek-task-show-done-btn" でレンダリングされ、
+        # data-action="trek-toggle-done" を持つ。
+        assert 'class="trek-task-show-done-btn"' in self.src
+        assert 'data-action="trek-toggle-done"' in self.src
+
+    def test_show_done_dispatcher_case_present(self):
+        # dispatcher 側で case 'trek-toggle-done' が登録されていない限り
+        # クリックは無視されるので、 配線済みであることを構造的に pin。
+        assert "case 'trek-toggle-done':" in self.src
+
+    def test_show_done_state_is_set_keyed_by_ms(self):
+        # ms-id 単位の toggle 保持。 boolean 1 つだと別 MS の done 表示が
+        # 同時に切り替わってしまうので、 Set 化されていることを pin。
+        assert "openTrekShowDone: new Set()" in self.src

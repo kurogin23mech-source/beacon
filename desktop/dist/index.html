@@ -2139,13 +2139,18 @@ body::after {
 }
 
 /* STOP card — prominent red, always rendered on active trek so the
-   "kill switch" is one click away. */
+   "kill switch" is one click away.
+   ms-86 / e-2221 — mockups/trek-detail.html L131-141 halt-block と同じ
+   max-width 700px + center 揃え。 leaf 全幅に広げると視線が走らないので
+   画面幅の半分程度に絞り、 icon + content + STOP button の 3 横並びが
+   読みやすいリズムに収める。 */
 .trek-stop-card {
   border: 1px solid var(--danger, #ef4444);
   background: rgba(239,68,68,0.06);
   border-radius: 6px;
   padding: 20px;
-  margin-bottom: 18px;
+  margin: 22px auto;
+  max-width: 700px;
   display: flex;
   align-items: center;
   gap: 18px;
@@ -3985,15 +3990,22 @@ function renderShell(app) {
   const doneCount = (p.milestones || []).filter(m => m.status === 'done').length;
   const retro = nextRetroDate(p.retro_day);
 
+  // ms-86 / e-2219 — Trek detail page を開いている時は、 ヘッダから project 名 /
+  // project tag / project version badge を隠す。 Trek は cross-project entity で
+  // あり、 「今どの project を見てるか」 ではなく 「今どの Trek に居るか」 が
+  // ヘッダ文脈になる (= mockups/trek-detail.html L422-430 top-bar 参照)。
+  const trekOpen = !!state.openTrekId;
   app.innerHTML = `
     <header class="header fade-in">
       <div class="header-top">
         <button class="hamburger-btn" data-action="open-menu" title="Menu">
           <span></span><span></span><span></span>
         </button>
-        <span class="project-name">${esc(p.name)}</span>
-        <span class="header-tag">${esc(PLATFORM.headerTag)}</span>
-        ${PLATFORM.versionBadgeHTML()}
+        ${trekOpen
+          ? `<span class="project-name brand">Beacon</span>`
+          : `<span class="project-name">${esc(p.name)}</span>
+             <span class="header-tag">${esc(PLATFORM.headerTag)}</span>
+             ${PLATFORM.versionBadgeHTML()}`}
         <div class="connection-status" title="${esc(PLATFORM.getConnectionTitle())}">
           <div class="status-dot ${state.connected ? '' : 'offline'}"></div>
           <span class="connection-label">${state.connected ? 'live' : 'offline'}</span>
@@ -4193,8 +4205,12 @@ async function switchTab(tab) {
   // ms-69 / e-1659 v3: switching tabs leaves any open trek detail and
   // returns the user to the project view (trek detail is a sidebar-driven
   // standalone page, not a tab in the project chrome).
+  // ms-86 / e-2220 — accordion / show-done 状態も Trek を閉じる経路で必ず
+  // クリアする (= 別 Trek を後で開いた時に前 Trek の expand 状態が漏れない)。
   state.openTrekId = null;
   state.openTrekDocs = [];
+  state.openTrekExpanded = new Set();
+  state.openTrekShowDone = new Set();
   if (tab === 'documents') {
     const loads = [];
     if (state.documents.length === 0) loads.push(dataSource.loadDocuments().catch(() => {}));
@@ -4230,7 +4246,7 @@ async function openTrek(trekId) {
   state.openTrekId = trekId;
   state.openTrekDocs = [];
   state.openTrekExpanded = new Set();
-  state.openTrekShowDone = false;
+  state.openTrekShowDone = new Set();
   render();
   // Fetch docs in the background; if it fails, the detail view shows
   // "No docs tagged with this trek yet." which is a fine degrade.
@@ -4244,7 +4260,7 @@ function closeTrek() {
   state.openTrekId = null;
   state.openTrekDocs = [];
   state.openTrekExpanded = new Set();
-  state.openTrekShowDone = false;
+  state.openTrekShowDone = new Set();
   render();
 }
 
@@ -5199,8 +5215,12 @@ function _renderTrekChildTask(t, taskEntry) {
     ? stState
     : (taskEntry.status === 'done' ? 'done' : 'todo');
   const desc = taskEntry.description || '';
+  // ms-86 / e-2223 — accordion 展開時の MS 配下 task 行もクリックで既存
+  // entry-detail-modal を開く (= openEntryDetail / findEntryInProject 流用、
+  // motivation / acceptance_criteria / state transitions を表示)。
   return `
-    <div class="trek-child-task" data-task-state="${esc(effective)}">
+    <div class="trek-child-task" data-task-state="${esc(effective)}"
+         data-action="open-entry-detail" data-entry-id="${esc(taskEntry.id || '')}">
       <span class="trek-child-task-tag">task</span>
       <span class="trek-child-task-id">${esc(taskEntry.id || '')}</span>
       <span class="trek-child-task-desc" title="${esc(desc)}">${esc(desc)}</span>
@@ -5220,6 +5240,13 @@ function _renderTrekTaskRow(t, s, slotIndex) {
   const pid = s.project || '';
   const projTag = pid ? `<span class="trek-task-project-tag">${esc(pid.split('-')[0].toUpperCase())}</span>` : '';
   // Leaf task row.
+  // ms-86 / e-2223 — task leaf 行クリックで既存 entry-detail-modal を overlay
+  // 表示する (= mockup L504-532 click for detail UX)。 既存 openEntryDetail
+  // helper をそのまま流用するため data-action="open-entry-detail" + data-entry-id
+  // を leaf 全体に付ける。 MS / Op 行 (= chevron 持ち) は trek-scope-toggle 側
+  // で扱うので modal は開かない。 lookup 失敗 (= cross-project scope の task)
+  // は entry id だけでも modal 側 findEntryInProject が null を返して silent
+  // skip するため、 wiring は付けっぱなしで安全。
   if (s.task) {
     const lookup = _trekLookupTaskInProject(s.task);
     const desc = (lookup && lookup.entry && lookup.entry.description) || s.task;
@@ -5230,7 +5257,8 @@ function _renderTrekTaskRow(t, s, slotIndex) {
     const assignee = _trekTaskAssignee(t, s.task);
     const refLabel = lookup && lookup.ms_id ? lookup.ms_id : s.task;
     return `
-      <div class="trek-task-row leaf state-${esc(effective)}">
+      <div class="trek-task-row leaf state-${esc(effective)}"
+           data-action="open-entry-detail" data-entry-id="${esc(s.task)}">
         <div class="trek-task-row-head">
           <div class="trek-task-chevron-spacer"></div>
           <div class="trek-task-tk-id">${esc(slotLabel)}</div>
@@ -5298,10 +5326,17 @@ function _renderTrekTaskRow(t, s, slotIndex) {
       const at = ent.updated_at || '';
       if (at && at > parentTs) { parentTs = at; parentAssignee = ent.updated_by_session_id || ''; }
     }
-    const expanded = pendingChildren.length > 0;
+    // ms-86 / e-2222 — accordion 展開は state.openTrekExpanded (= Set keyed by
+    // ms-id) で制御。 default は折りたたみ (= mockup L460 t-1 row が collapsed
+    // で並ぶ姿に揃える)。 chevron / row head クリックで toggle される。
+    const expanded = state.openTrekExpanded && state.openTrekExpanded.has(s.milestone);
+    // ms-86 / e-2224 — show-done toggle は MS-id 単位で state.openTrekShowDone
+    // (= Set) に保持。 true の MS だけ done 状態 child を inline 追加表示する。
+    // Set で持つことで別 MS の done 表示が同時に切り替わらない。
+    const showDone = state.openTrekShowDone && state.openTrekShowDone.has(s.milestone);
     return `
       <div class="trek-task-row ${expanded ? 'expanded' : ''} state-${esc(parentState)}">
-        <div class="trek-task-row-head">
+        <div class="trek-task-row-head" data-action="trek-scope-toggle" data-ms="${esc(s.milestone)}">
           <div class="trek-task-chevron">${expanded ? '▾' : '▸'}</div>
           <div class="trek-task-tk-id">${esc(slotLabel)}</div>
           <div class="trek-task-desc">
@@ -5314,8 +5349,11 @@ function _renderTrekTaskRow(t, s, slotIndex) {
         </div>
         ${expanded ? `
           <div class="trek-task-children">
-            ${doneChildren.length ? `<button class="trek-task-show-done-btn" data-action="trek-toggle-done" data-ms="${esc(s.milestone)}">show ${doneChildren.length} done</button>` : ''}
+            ${doneChildren.length
+              ? `<button class="trek-task-show-done-btn" data-action="trek-toggle-done" data-ms="${esc(s.milestone)}">${showDone ? 'hide' : 'show'} ${doneChildren.length} done</button>`
+              : ''}
             ${pendingChildren.map(tk => _renderTrekChildTask(t, tk)).join('')}
+            ${showDone ? doneChildren.map(tk => _renderTrekChildTask(t, tk)).join('') : ''}
           </div>` : ''}
       </div>`;
   }
@@ -6875,6 +6913,29 @@ function handleCommonAction(action, el) {
         if (navigator.clipboard) navigator.clipboard.writeText(cmd);
       } catch (_e) { /* noop */ }
       window.alert('Run this command in your terminal:\n\n' + cmd + '\n\n(copied to clipboard)');
+      return true;
+    }
+    // ms-86 / e-2222 — TREK TASKS の MS / Op 行 chevron 経由の accordion
+    // 開閉。 mockup L460-502 の collapsed / expanded 状態を user 操作で切替。
+    case 'trek-scope-toggle': {
+      const msId = el.dataset.ms || '';
+      if (!msId) return true;
+      if (!state.openTrekExpanded) state.openTrekExpanded = new Set();
+      if (state.openTrekExpanded.has(msId)) state.openTrekExpanded.delete(msId);
+      else state.openTrekExpanded.add(msId);
+      render();
+      return true;
+    }
+    // ms-86 / e-2224 — accordion 内 「show done」 ボタン。 ms-id 単位で
+    // done 状態 task の inline 表示を toggle (= 別 MS の done 表示が同時に
+    // 切り替わらないよう、 state は Set keyed by ms-id で保持)。
+    case 'trek-toggle-done': {
+      const msId = el.dataset.ms || '';
+      if (!msId) return true;
+      if (!state.openTrekShowDone) state.openTrekShowDone = new Set();
+      if (state.openTrekShowDone.has(msId)) state.openTrekShowDone.delete(msId);
+      else state.openTrekShowDone.add(msId);
+      render();
       return true;
     }
   }
