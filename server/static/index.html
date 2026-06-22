@@ -5141,8 +5141,12 @@ function _renderTrekChildTask(t, taskEntry) {
     ? stState
     : (taskEntry.status === 'done' ? 'done' : 'todo');
   const desc = taskEntry.description || '';
+  // ms-86 / e-2223 — accordion 展開時の MS 配下 task 行もクリックで既存
+  // entry-detail-modal を開く (= openEntryDetail / findEntryInProject 流用、
+  // motivation / acceptance_criteria / state transitions を表示)。
   return `
-    <div class="trek-child-task" data-task-state="${esc(effective)}">
+    <div class="trek-child-task" data-task-state="${esc(effective)}"
+         data-action="open-entry-detail" data-entry-id="${esc(taskEntry.id || '')}">
       <span class="trek-child-task-tag">task</span>
       <span class="trek-child-task-id">${esc(taskEntry.id || '')}</span>
       <span class="trek-child-task-desc" title="${esc(desc)}">${esc(desc)}</span>
@@ -5162,6 +5166,13 @@ function _renderTrekTaskRow(t, s, slotIndex) {
   const pid = s.project || '';
   const projTag = pid ? `<span class="trek-task-project-tag">${esc(pid.split('-')[0].toUpperCase())}</span>` : '';
   // Leaf task row.
+  // ms-86 / e-2223 — task leaf 行クリックで既存 entry-detail-modal を overlay
+  // 表示する (= mockup L504-532 click for detail UX)。 既存 openEntryDetail
+  // helper をそのまま流用するため data-action="open-entry-detail" + data-entry-id
+  // を leaf 全体に付ける。 MS / Op 行 (= chevron 持ち) は trek-scope-toggle 側
+  // で扱うので modal は開かない。 lookup 失敗 (= cross-project scope の task)
+  // は entry id だけでも modal 側 findEntryInProject が null を返して silent
+  // skip するため、 wiring は付けっぱなしで安全。
   if (s.task) {
     const lookup = _trekLookupTaskInProject(s.task);
     const desc = (lookup && lookup.entry && lookup.entry.description) || s.task;
@@ -5172,7 +5183,8 @@ function _renderTrekTaskRow(t, s, slotIndex) {
     const assignee = _trekTaskAssignee(t, s.task);
     const refLabel = lookup && lookup.ms_id ? lookup.ms_id : s.task;
     return `
-      <div class="trek-task-row leaf state-${esc(effective)}">
+      <div class="trek-task-row leaf state-${esc(effective)}"
+           data-action="open-entry-detail" data-entry-id="${esc(s.task)}">
         <div class="trek-task-row-head">
           <div class="trek-task-chevron-spacer"></div>
           <div class="trek-task-tk-id">${esc(slotLabel)}</div>
