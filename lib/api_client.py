@@ -825,6 +825,41 @@ class ApiClient:
             {"task_id": task_id, "state": state, "note": note},
         )
 
+    def add_trek_task(self, trek_id: str, *,
+                      target_project: str,
+                      target_milestone: str,
+                      description: str,
+                      entry_type: str = "task",
+                      priority: str = "",
+                      motivation: str = "",
+                      acceptance_criteria: str = "") -> dict:
+        """ms-92 / e-2141 — cross-project task add via Trek scope.
+
+        Server walks ``trek.check_trek_task_add_allowed`` and either:
+          * 200 with {"entry_id": "e-XXX", "project_id": ..., "milestone_id": ...}
+            on success (task is written under target project's MS),
+          * 403 ``scope-reject`` (project / milestone not in scope, or
+            scope-only-task-narrowing — same 4 reason codes the CLI knows),
+          * 404 when trek does not exist,
+          * 400 when ``target`` is malformed.
+
+        ``meta.trek_id`` is stamped on the created entry for audit trail
+        — that lets ``/beacon-retrospect`` query "which tasks were
+        sprouted via Trek X" later.
+        """
+        return self.post(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/task-add",
+            {
+                "target_project": target_project,
+                "target_milestone": target_milestone,
+                "description": description,
+                "type": entry_type,
+                "priority": priority,
+                "motivation": motivation,
+                "acceptance_criteria": acceptance_criteria,
+            },
+        )
+
     def get_trek_summary(self, trek_id: str) -> dict:
         """Compact status snapshot (counts + status + halt) for dashboards."""
         return self.get(

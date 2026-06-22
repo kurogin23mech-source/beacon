@@ -2738,6 +2738,52 @@ except ValueError as e:
                 BEACON_TREK_STATE="$state" BEACON_TREK_NOTE="$note" \
                     python3 "$COMMANDS_PY" trek_task_state
                 ;;
+            # ms-92 / e-2141 — cross-project task add via Trek scope。
+            # Trek scope に含まれる project の MS 配下にのみ task を起票できる
+            # (= scope-guard で structural enforce、 envelope は T1-system 経由)。
+            # scope 外 / 単独 task 下 への起票は 403 で reject される。
+            task)
+                case "${3:-}" in
+                    add)
+                        shift 3
+                        trek_id="" target="" description="" priority=""
+                        motivation="" acceptance_criteria="" entry_type="task"
+                        while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                --target) target="${2:-}"; shift 2 ;;
+                                --priority) priority="${2:-}"; shift 2 ;;
+                                --motivation) motivation="${2:-}"; shift 2 ;;
+                                --acceptance-criteria) acceptance_criteria="${2:-}"; shift 2 ;;
+                                --type) entry_type="${2:-task}"; shift 2 ;;
+                                --json) export BEACON_JSON=1; shift ;;
+                                *)
+                                    if [[ -z "$trek_id" ]]; then trek_id="$1"
+                                    elif [[ -z "$description" ]]; then description="$1"
+                                    fi
+                                    shift
+                                    ;;
+                            esac
+                        done
+                        BEACON_TREK_ID="$trek_id" \
+                            BEACON_TREK_TASK_TARGET="$target" \
+                            BEACON_DESCRIPTION="$description" \
+                            BEACON_PRIORITY="$priority" \
+                            BEACON_MOTIVATION="$motivation" \
+                            BEACON_ACCEPTANCE_CRITERIA="$acceptance_criteria" \
+                            BEACON_TYPE="$entry_type" \
+                            python3 "$COMMANDS_PY" trek_task_add
+                        ;;
+                    *)
+                        echo "Usage: beacon trek task add <trek-id> --target <project-id>:<ms-id> \"<description>\" [--motivation \"...\"] [--acceptance-criteria \"...\"] [--priority L] [--type task|...]" >&2
+                        echo "" >&2
+                        echo "  cross-project task add through Trek scope (ms-92 / e-2141)." >&2
+                        echo "  scope-guard: target project + milestone must be enumerated in trek.scope," >&2
+                        echo "  and the matching scope entry must be project-wide or milestone-narrowed." >&2
+                        echo "  scope に含まれる単独 task の下への起票は禁止 (= MS 単位の user 意思を保つ)。" >&2
+                        exit 1
+                        ;;
+                esac
+                ;;
             *)
                 echo "Usage: beacon trek <subcommand> [args]"
                 echo ""
@@ -2760,6 +2806,7 @@ except ValueError as e:
                 echo "  pulse-ack <trek-id> [--picked-choice X] [--note '...']  (= /beacon-trek-pulse Skill が叩く observability ack、 ms-88 e-2106)"
                 echo "  reconcile <trek-id> [--apply]                  (= task pool ↔ Trek stamp の乖離を修復、 default dry-run、 ms-88 e-2167)"
                 echo "  task-state <trek-id> <task-id> <state> [--note '...']  (= ms-75/e-2048、 state: working|done|waiting-review)"
+                echo "  task add <trek-id> --target <pid>:<ms-id> \"<desc>\" [--motivation \"...\"] [--acceptance-criteria \"...\"] [--priority L]  (= cross-project task add via Trek scope、 ms-92/e-2141)"
                 echo ""
                 echo "Env (creator identity, required for 'create'):"
                 echo "  BEACON_USER_EMAIL    creator email"

@@ -1131,6 +1131,103 @@ def parse_scope_arg(arg: str) -> dict:
     return normalize_scope_entry({"project": arg})
 
 
+# ---------------------------------------------------------------------------
+# Cross-project task add via Trek scope (ms-92 / e-2141)
+# ---------------------------------------------------------------------------
+
+
+# Outcomes returned by ``check_trek_task_add_allowed``. Kept as plain
+# string constants so server-side rejections can map them to HTTP codes
+# (allowed / project_not_in_scope / milestone_not_in_scope /
+# scope_only_has_task_narrowing) without exposing internal helpers.
+TASK_ADD_ALLOWED = "allowed"
+TASK_ADD_REJECT_PROJECT_NOT_IN_SCOPE = "project_not_in_scope"
+TASK_ADD_REJECT_MILESTONE_NOT_IN_SCOPE = "milestone_not_in_scope"
+TASK_ADD_REJECT_SCOPE_ONLY_HAS_TASK_NARROWING = "scope_only_has_task_narrowing"
+
+
+def check_trek_task_add_allowed(
+    trek_doc: dict, *,
+    target_project: str,
+    target_milestone: str,
+) -> tuple[bool, str]:
+    """Decide whether the trek's scope authorises ``task.add`` on a target.
+
+    ms-92 / e-2141. The CLI / server share the same yes/no question:
+    *given this Trek's recorded scope, is the caller allowed to add a
+    task under ``target_project`` / ``target_milestone``?* Returning
+    ``(False, <reason>)`` lets callers map a single reason to either a
+    403 (server) or a friendly CLI error.
+
+    Rules (= SPEC of e-2141, also tracked by 4 unit-test paths):
+
+    1. Empty ``target_project`` or ``target_milestone`` → reject as
+       ``project_not_in_scope`` / ``milestone_not_in_scope`` respectively.
+       Callers must always supply both. Empty inputs mean the picker /
+       parser upstream is buggy; we refuse rather than guess.
+
+    2. The trek's ``scope`` must contain at least one entry matching
+       ``project == target_project``. Otherwise reject as
+       ``project_not_in_scope``.
+
+    3. Among the matching project entries, at least one must be **wide
+       enough** to cover the target milestone:
+
+       * project-wide entry (= ``{"project": pid}`` with no milestone /
+         operation / task narrowing) → covers anything under that
+         project. allowed.
+       * milestone entry (= ``{"project": pid, "milestone": ms-id}``)
+         whose ``milestone`` equals ``target_milestone`` → allowed.
+
+       Otherwise reject as ``milestone_not_in_scope``.
+
+    4. The "task-only narrowing" forbidden case (= AC #4): if **every**
+       matching project entry is task-narrowed (= ``{"project": pid,
+       "task": e-XXX}``) and none of them is project-wide or matches
+       the target milestone, reject as
+       ``scope_only_has_task_narrowing``. This preserves the user
+       responsibility frame: tasks are MS-grained decisions. Letting
+       Treks add tasks under another Trek's single-task scope would
+       let trees of tasks sprout sideways without any MS-level intent.
+
+    Operation-narrowed scope entries (= ``{"project": pid,
+    "operation": op-XX}``) are treated like task narrowings here — they
+    don't authorise sideways task creation; we reject the same way so
+    Operation work also stays MS-grained. (If someone needs cross-Op
+    task add later, that's its own design decision.)
+    """
+    if not target_project or not target_milestone:
+        if not target_project:
+            return False, TASK_ADD_REJECT_PROJECT_NOT_IN_SCOPE
+        return False, TASK_ADD_REJECT_MILESTONE_NOT_IN_SCOPE
+    scope = trek_doc.get("scope") or []
+    matching_project_entries = [
+        s for s in scope if s.get("project") == target_project
+    ]
+    if not matching_project_entries:
+        return False, TASK_ADD_REJECT_PROJECT_NOT_IN_SCOPE
+    for entry in matching_project_entries:
+        ms_ref = entry.get("milestone") or ""
+        op_ref = entry.get("operation") or ""
+        task_ref = entry.get("task") or ""
+        if not ms_ref and not op_ref and not task_ref:
+            # Project-wide scope entry — covers anything under this project.
+            return True, TASK_ADD_ALLOWED
+        if ms_ref and ms_ref == target_milestone:
+            return True, TASK_ADD_ALLOWED
+    # No project-wide and no milestone-matching entry. Distinguish the
+    # "task-only narrowing" pathology (= AC #4) from a generic milestone
+    # mismatch so the CLI can show the right hint.
+    only_task_or_op_narrowed = all(
+        (entry.get("task") or entry.get("operation"))
+        and not entry.get("milestone")
+        for entry in matching_project_entries
+    )
+    if only_task_or_op_narrowed:
+        return False, TASK_ADD_REJECT_SCOPE_ONLY_HAS_TASK_NARROWING
+    return False, TASK_ADD_REJECT_MILESTONE_NOT_IN_SCOPE
+
+
 def add_scope_entry(trek_doc: dict, *, entry: dict) -> dict:
     """Append a scope entry; raises ValueError if it already exists."""
     norm = normalize_scope_entry(entry)

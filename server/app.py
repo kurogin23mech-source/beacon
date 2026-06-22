@@ -3250,6 +3250,22 @@ class TrekHaltSet(BaseModel):
     reason: str = ""
 
 
+# ms-92 / e-2141 — cross-project task add via Trek scope.
+# Body for POST /api/treks/{trek_id}/task-add. The server walks
+# trek.check_trek_task_add_allowed and either writes the task to the
+# target project's milestone (stamping meta.trek_id for audit) or
+# returns 403 with the scope-guard reason code so the CLI can show
+# the right remediation hint.
+class TrekTaskAddRequest(BaseModel):
+    target_project: str
+    target_milestone: str
+    description: str
+    type: str = "task"
+    priority: str = ""
+    motivation: str = ""
+    acceptance_criteria: str = ""
+
+
 class TrekTransferLeader(BaseModel):
     from_session_id: str  # current leader session (caller's session)
     to_session_id: str    # new leader session
@@ -3947,6 +3963,110 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
                 # the terminal state via `beacon trek show` polling.
                 pass
     return t
+
+
+@app.post("/api/treks/{trek_id}/task-add")
+def add_trek_task_endpoint(
+    trek_id: str,
+    body: TrekTaskAddRequest,
+    user: dict = Depends(require_auth),
+):
+    """Cross-project task add through Trek scope (ms-92 / e-2141).
+
+    Walks ``trek.check_trek_task_add_allowed(t, target_project,
+    target_milestone)`` first. On allowed: writes the task to the
+    target project's milestone via the existing ``core.task_add``
+    primitive, stamping ``meta.trek_id`` for audit traceability. On
+    rejected: 403 with the scope-guard reason code so callers can
+    show the right remediation hint.
+
+    Authorisation: caller must be a trek member (= same as
+    ``task-state``). The scope-guard does the cross-project
+    authorisation; the membership check is the "are you allowed to
+    drive this Trek at all" gate.
+
+    Reason codes returned in the 403 detail (= mirror the lib/trek.py
+    constants so the CLI / docs share a vocabulary):
+      * ``project_not_in_scope`` — target_project absent from scope
+      * ``milestone_not_in_scope`` — project present, MS not enumerated
+      * ``scope_only_has_task_narrowing`` — AC #4 of e-2141 (= MS-grain
+        enforcement; task-level scope entries don't sprout sideways)
+    """
+    t = _load_trek_for_read(trek_id, user)
+    user_id = user.get("sub") or ""
+    if _auth_enabled and not trek_mod.find_member(t, user_id):
+        raise HTTPException(
+            status_code=403,
+            detail="only trek members can add tasks through trek scope",
+        )
+    if not body.target_project:
+        raise HTTPException(status_code=400, detail="target_project required")
+    if not body.target_milestone:
+        raise HTTPException(status_code=400, detail="target_milestone required")
+    if not body.description:
+        raise HTTPException(status_code=400, detail="description required")
+    if not body.target_milestone.startswith("ms-"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"target_milestone {body.target_milestone!r} must start with "
+                "'ms-' (operations / single tasks are not valid task-add "
+                "targets — see SPEC ms-92 e-2141 AC #4 MS-grain enforcement)"
+            ),
+        )
+    allowed, reason = trek_mod.check_trek_task_add_allowed(
+        t,
+        target_project=body.target_project,
+        target_milestone=body.target_milestone,
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=f"trek scope rejects task add: {reason}",
+        )
+    # Scope check passed. Write to the target project via the existing
+    # task_add op. We stamp meta.trek_id on the entry (= audit trail).
+    author = _resolve_author(user)
+
+    def op(data: dict):
+        # ms-81 / e-1916 write-status gate is intentionally NOT applied
+        # here — the Trek scope authorisation is the relevant gate for
+        # cross-project writes, and Trek scope only enumerates active
+        # work. If the target MS is in a bad write status the entry-add
+        # CLI surfaces that locally; cross-project we trust the Trek
+        # scope owner's intent.
+        try:
+            eid = core.task_add(
+                data, body.target_milestone, body.description,
+                entry_type=body.type, priority=body.priority,
+                motivation=body.motivation,
+                acceptance_criteria=body.acceptance_criteria,
+                author=author,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        # Stamp meta.trek_id on the freshly-created entry so future
+        # /beacon-retrospect queries can answer "which tasks were
+        # sprouted via Trek X". core.task_add returns just the id, so
+        # we re-find the entry and patch its meta.
+        find_result = core.find_entry(data, eid)
+        if find_result:
+            _, _, entry, _ = find_result
+            meta = entry.setdefault("meta", {})
+            meta["trek_id"] = trek_id
+            meta["origin"] = "trek.task_add"
+        return data, {
+            "entry_id": eid,
+            "project_id": body.target_project,
+            "milestone_id": body.target_milestone,
+            "trek_id": trek_id,
+        }
+    return _apply_op_and_broadcast(
+        body.target_project,
+        op,
+        op_name="entry.create.trek_scope",
+        actor=user.get("sub", ""),
+    )
 
 
 class TrekReconcileRequest(BaseModel):

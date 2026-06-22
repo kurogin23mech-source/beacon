@@ -6423,6 +6423,164 @@ def cmd_trek_plan():
                 print(f"goal_state cleared on trek {trek_id}")
 
 
+def cmd_trek_task_add():
+    """Cross-project task add through Trek scope (ms-92 / e-2141).
+
+    The caller specifies a target ``<pid>:<ms-id>`` plus task description.
+    The CLI (here) and the server share one scope-guard helper
+    (``trek.check_trek_task_add_allowed``) so a single decision drives
+    both a 403 reject server-side and a friendly CLI error here.
+
+    Local mode does not (yet) support cross-project task add because the
+    local data store doesn't carry a project_id → path registry — the
+    feature is genuinely cloud-shaped and the local refuse keeps the
+    failure mode explicit instead of pretending to work. Cloud mode
+    posts to ``POST /api/treks/{trek_id}/task-add`` which performs the
+    same scope walk + writes the task to the target project's MS,
+    stamping ``meta.trek_id`` on the entry for audit-trail traceability.
+
+    Env:
+      BEACON_TREK_ID                (required, e.g. tk-abcd1234)
+      BEACON_TREK_TASK_TARGET       (required, "<project-id>:<ms-id>")
+      BEACON_DESCRIPTION            (required, the task description)
+      BEACON_PRIORITY               (optional, lowest/low/middle/high/highest)
+      BEACON_MOTIVATION             (optional)
+      BEACON_ACCEPTANCE_CRITERIA    (optional)
+      BEACON_TYPE                   (optional, default "task")
+      BEACON_JSON                   "1" → json output
+    """
+    import trek
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    target = os.environ.get("BEACON_TREK_TASK_TARGET", "").strip()
+    description = os.environ.get("BEACON_DESCRIPTION", "").strip()
+    priority = os.environ.get("BEACON_PRIORITY", "").strip()
+    motivation = os.environ.get("BEACON_MOTIVATION", "")
+    acceptance_criteria = os.environ.get("BEACON_ACCEPTANCE_CRITERIA", "")
+    entry_type = os.environ.get("BEACON_TYPE", "task").strip() or "task"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required (e.g. tk-abcd1234)", file=sys.stderr)
+        sys.exit(1)
+    if not target:
+        print(
+            "Error: --target <project-id>:<ms-id> is required",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not description:
+        print("Error: task description is required", file=sys.stderr)
+        sys.exit(1)
+    if ":" not in target:
+        print(
+            f"Error: --target {target!r} must be <project-id>:<ms-id> "
+            "(omit the colon → project-wide scope which is not allowed "
+            "for task add; pick an MS explicitly)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    target_project, target_ms = target.split(":", 1)
+    target_project = target_project.strip()
+    target_ms = target_ms.strip()
+    if not target_project:
+        print(
+            f"Error: --target {target!r} missing project_id before ':'",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not target_ms or not target_ms.startswith("ms-"):
+        print(
+            f"Error: --target {target!r} must end with ms-XX "
+            "(operations / single tasks are not valid task-add targets; "
+            "see SPEC ms-92 e-2141 AC #4 — MS-grain enforcement)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # ----------- Cloud mode (= the actual cross-project use case) -----------
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            if not hasattr(client, "add_trek_task"):
+                print(
+                    "Error: this CLI is paired with an older cloud server "
+                    "that doesn't expose POST /api/treks/{trek_id}/task-add. "
+                    "Upgrade the server (= ms-92 e-2141 endpoint) or fall "
+                    "back to single-project `beacon task add -m <ms-id>` "
+                    "for now.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            result = client.add_trek_task(
+                trek_id,
+                target_project=target_project,
+                target_milestone=target_ms,
+                description=description,
+                entry_type=entry_type,
+                priority=priority,
+                motivation=motivation,
+                acceptance_criteria=acceptance_criteria,
+            )
+        except RuntimeError as e:
+            # Server-side 403 / 400 / 404 surfaces here. The server's
+            # rejection ``reason`` is included in the error message so
+            # the CLI tail line tells the user *why* (project not in
+            # scope vs. task-only narrowing vs. milestone mismatch).
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        if json_mode:
+            print(json.dumps(result, ensure_ascii=False))
+        else:
+            eid = result.get("entry_id", "<unknown>")
+            print(
+                f"Added cross-project task [{eid}] under "
+                f"{target_project}:{target_ms} via trek {trek_id}: "
+                f"{description}"
+            )
+        return
+
+    # ----------- Local mode (= rejected with an honest message) -----------
+    # We could in principle traverse a registry of local projects, but the
+    # local data model doesn't carry one (= local mode is single-project by
+    # design). Pretending to succeed by writing into the current cwd's
+    # project.json would silently strip the cross-project semantics.
+    # The local-mode scope guard *can* still surface the decision so users
+    # see the same error vocabulary they'd see from the server.
+    import trek_store
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(
+            f"Error: trek {trek_id} not found in local store. Cross-project "
+            "task add through Trek requires cloud mode (= server endpoint "
+            "POST /api/treks/{trek_id}/task-add walks the scope and writes "
+            "into the target project). Switch to cloud mode (`beacon cloud "
+            "setup`) or add the task directly with `beacon task add -m "
+            f"{target_ms}` from inside the target project's cwd.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    allowed, reason = trek.check_trek_task_add_allowed(
+        t, target_project=target_project, target_milestone=target_ms,
+    )
+    if not allowed:
+        print(
+            f"Error: trek scope rejects this task add ({reason}). "
+            f"trek {trek_id} scope: {t.get('scope') or []}",
+            file=sys.stderr,
+        )
+        sys.exit(2)  # 2 → "scope reject" so callers can distinguish
+    print(
+        "Error: scope check passed but local mode cannot write across "
+        "projects — the local data store is single-project by design. "
+        "Switch to cloud mode for cross-project task add, or use "
+        f"`beacon task add -m {target_ms}` from inside the target "
+        "project's cwd.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def cmd_trek_leave():
     """Leave a trek (= remove self from members[]).
 
@@ -17073,6 +17231,8 @@ if __name__ == "__main__":
         "trek_leave": cmd_trek_leave,
         "trek_plan": cmd_trek_plan,
         "trek_task_state": cmd_trek_task_state,
+        # ms-92 / e-2141 — cross-project task add via Trek scope
+        "trek_task_add": cmd_trek_task_add,
         "trek_stop": cmd_trek_stop,
         "trek_resume": cmd_trek_resume,
         "trek_pulse_ack": cmd_trek_pulse_ack,
