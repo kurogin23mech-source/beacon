@@ -2547,6 +2547,53 @@ body::after {
   white-space: nowrap;
 }
 
+/* ms-86 / e-2133: Trek-local 番号 (= s-N) badge. raw session id (= sv-77...) を
+   置換する short reference。 hover で実 session id を tooltip 表示、 click で
+   clipboard コピー。 */
+.trek-session-ref {
+  display: inline-block;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.72rem;
+  padding: 0 6px;
+  margin: 0 2px;
+  color: var(--accent);
+  border: 1px solid var(--border-subtle, var(--border));
+  border-radius: 8px;
+  cursor: pointer;
+  vertical-align: middle;
+  user-select: none;
+  transition: background 0.1s ease;
+}
+.trek-session-ref:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+}
+.trek-session-ref.copied {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+
+/* ms-86 / e-2133: toast — clipboard copy 完了通知。 画面下中央に 1.5 秒だけ出す。 */
+.beacon-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 40px;
+  transform: translateX(-50%);
+  background: var(--bg-raised, #1a1a1a);
+  color: var(--text-primary);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 8px 14px;
+  font-size: 0.78rem;
+  font-family: var(--font-mono, monospace);
+  z-index: 10000;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.beacon-toast.show { opacity: 1; }
+
 /* List view (= Treks tab on the project page) — mock-style row. */
 .trek-list-row {
   display: grid;
@@ -4960,6 +5007,104 @@ function _trekShortSessionId(sid) {
   return s.slice(0, 10) + '…' + s.slice(-8);
 }
 
+// ms-86 / e-2133 — Trek-local 番号化: raw session_id (= sv-77...2b4d312b) 表示を
+// Trek 単位の s-N (1-origin) に置換し、 読み手に短くて識別しやすい id を提示する。
+//
+// 番号付与ルール (= AC4 不変・一意・client/server 一致):
+//   1. trek.members を joined_at 昇順 (同値時 email lex 昇順)
+//   2. 各 member について leader_session_id (= leader 行) を最優先で 1 つ、
+//      続いて state.openTrekMemberSessions[email] の live session を
+//      created_at + session_id 昇順で
+//   3. halt.issued_by_session_id が含まれていなければ末尾に追加
+//   4. 並んだ順に s-1, s-2, ... を 1-origin で割り当てる
+//
+// returns: Map<session_id, "s-N">
+function _trekLocalSessionMap(t) {
+  const m = new Map();
+  if (!t) return m;
+  const ordered = [];
+  const seen = new Set();
+  const push = (sid) => {
+    if (!sid) return;
+    const s = String(sid);
+    if (seen.has(s)) return;
+    seen.add(s);
+    ordered.push(s);
+  };
+  const members = Array.isArray(t.members) ? t.members.slice() : [];
+  members.sort((a, b) => {
+    const aj = (a && a.joined_at) ? String(a.joined_at) : '';
+    const bj = (b && b.joined_at) ? String(b.joined_at) : '';
+    if (aj !== bj) return aj < bj ? -1 : 1;
+    const ae = (a && a.email) ? String(a.email) : '';
+    const be = (b && b.email) ? String(b.email) : '';
+    return ae < be ? -1 : 1;
+  });
+  const liveByEmail = (typeof state !== 'undefined' && state && state.openTrekMemberSessions) || {};
+  for (const mem of members) {
+    if (!mem || !mem.email) continue;
+    if (mem.role === 'leader' && t.leader_session_id) {
+      push(t.leader_session_id);
+    }
+    const live = Array.isArray(liveByEmail[mem.email]) ? liveByEmail[mem.email].slice() : [];
+    live.sort((a, b) => {
+      const ac = (a && a.created_at) ? String(a.created_at) : '';
+      const bc = (b && b.created_at) ? String(b.created_at) : '';
+      if (ac !== bc) return ac < bc ? -1 : 1;
+      const asid = (a && a.session_id) ? String(a.session_id) : '';
+      const bsid = (b && b.session_id) ? String(b.session_id) : '';
+      return asid < bsid ? -1 : 1;
+    });
+    for (const s of live) {
+      if (s && s.session_id) push(s.session_id);
+    }
+  }
+  if (t.halt && t.halt.issued_by_session_id) {
+    push(t.halt.issued_by_session_id);
+  }
+  ordered.forEach((sid, i) => m.set(sid, `s-${i + 1}`));
+  return m;
+}
+
+// ms-86 / e-2133 — session reference の汎用レンダラ。
+//   1. 局所番号 (= s-N) を表示
+//   2. 不明 session (= members[] に居ない、 ex: halt 発火時の外部 session) は
+//      _trekShortSessionId fallback
+//   3. tooltip (= title 属性) で実 session id 全文を hover 表示
+//   4. クリックで実 session id を clipboard コピー + toast 表示
+//      → handleCommonAction の 'copy-trek-sid' で配線
+function _trekRenderSessionRef(t, sid) {
+  if (!sid) return '';
+  const fullSid = String(sid);
+  const map = _trekLocalSessionMap(t);
+  const localLabel = map.get(fullSid);
+  const displayLabel = localLabel || _trekShortSessionId(fullSid);
+  const tooltip = localLabel
+    ? `${fullSid} (click to copy)`
+    : `${fullSid} (click to copy) — このセッションは Trek members に居ません (= 外部/離脱 session)`;
+  return `<span class="trek-session-ref" data-action="copy-trek-sid" data-sid="${esc(fullSid)}" title="${esc(tooltip)}">${esc(displayLabel)}</span>`;
+}
+
+// ms-86 / e-2133 — minimal toast helper. 画面下中央に 1.5 秒だけ出して fade out。
+let _beaconToastTimer = null;
+function _beaconShowToast(text) {
+  try {
+    let el = document.getElementById('beacon-toast');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'beacon-toast';
+      el.className = 'beacon-toast';
+      document.body.appendChild(el);
+    }
+    el.textContent = text;
+    requestAnimationFrame(() => el.classList.add('show'));
+    if (_beaconToastTimer) clearTimeout(_beaconToastTimer);
+    _beaconToastTimer = setTimeout(() => {
+      try { el.classList.remove('show'); } catch (_e) {}
+    }, 1500);
+  } catch (_e) { /* noop — toast は best-effort */ }
+}
+
 function _trekBadgeClass(s) {
   if (s === 'active') return 'active';
   if (s === 'planning') return 'planning';
@@ -5319,8 +5464,10 @@ function _renderTrekMembersTable(t) {
       const taskCell = slots.length
         ? `<span class="task-link">${slots.map(esc).join(', ')}</span>`
         : `<span class="task-link none">—</span>`;
+      // ms-86 / e-2133: session cell は Trek-local 番号 (= s-N) badge で表示。
+      // hover で実 session id tooltip、 click で clipboard コピー + toast。
       const sessionCell = sid
-        ? `<span class="session-local" title="${esc(sid)}">${esc(_trekShortSessionId(sid))}</span>`
+        ? _trekRenderSessionRef(t, sid)
         : `<span class="session-full">(no session yet)</span>`;
       rows.push(`
         <tr class="${isFirstRow ? '' : 'continued'}">
@@ -5429,7 +5576,8 @@ function _renderTrekDetail(t) {
   if (t.status === 'active') {
     if (halted) {
       const haltedReason = (t.halt && t.halt.reason) ? esc(t.halt.reason) : '(no reason given)';
-      const haltedBy = _trekShortSessionId((t.halt && t.halt.issued_by_session_id) || '');
+      // ms-86 / e-2133: halt 発令 session は Trek-local 番号 (= s-N) badge で表示。
+      const haltedByHtml = _trekRenderSessionRef(t, (t.halt && t.halt.issued_by_session_id) || '');
       const haltedAt = ((t.halt && t.halt.issued_at) || '').slice(0, 16).replace('T', ' ');
       stopCardHtml = `
         <div class="trek-stop-card halted">
@@ -5437,7 +5585,7 @@ function _renderTrekDetail(t) {
           <div class="text">
             <strong>HALTED — sessions are paused</strong>
             reason: ${haltedReason}<br>
-            issued by ${esc(haltedBy)} at ${esc(haltedAt)}.
+            issued by ${haltedByHtml} at ${esc(haltedAt)}.
           </div>
           <button data-action="trek-resume-noop" data-trek="${esc(t.trek_id)}">Resume</button>
         </div>`;
@@ -6684,6 +6832,40 @@ function handleCommonAction(action, el) {
       openTrek(el.dataset.trekId); return true;
     case 'close-trek':
       closeTrek(); return true;
+    // ms-86 / e-2133 — session ref (= s-N badge) クリックで実 session id を
+    // clipboard にコピー + 短い toast 表示。
+    case 'copy-trek-sid': {
+      const sid = el.dataset.sid || '';
+      if (!sid) return true;
+      const fallbackToast = (txt) => _beaconShowToast(txt);
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(sid).then(
+            () => fallbackToast('Copied session id: ' + sid),
+            () => fallbackToast('Copy failed — session id: ' + sid)
+          );
+        } else {
+          // fallback: 古い browser / 非 secure context での execCommand 経路
+          const ta = document.createElement('textarea');
+          ta.value = sid;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          try { document.execCommand('copy'); } catch (_e) { /* noop */ }
+          document.body.removeChild(ta);
+          fallbackToast('Copied session id: ' + sid);
+        }
+      } catch (_e) {
+        fallbackToast('Copy failed — session id: ' + sid);
+      }
+      // visual feedback on the clicked badge (= short flash)
+      try {
+        el.classList.add('copied');
+        setTimeout(() => { try { el.classList.remove('copied'); } catch (_e) {} }, 600);
+      } catch (_e) { /* noop */ }
+      return true;
+    }
     // ms-69 / e-1659 v3 — sidebar trek nav + settings overlay
     case 'menu-open-trek':
       closeMenu(); openTrek(el.dataset.trekId); return true;
