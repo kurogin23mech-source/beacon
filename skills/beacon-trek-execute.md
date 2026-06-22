@@ -329,7 +329,7 @@ cd "$PROJECT_DIR" && beacon bus budget show --json
 - `remaining > 0` → 続行
 - `remaining == 0` → Step 5.5 の降格 3 点セット (= note + incident + 停止) に入る
 
-`beacon task done` / `beacon commit` / `git push` / `beacon run record` / `beacon incident open` は budget 対象外 (= 局所書き込み)。
+`beacon task done` / `git commit` / `git push` / `beacon run record` / `beacon incident open` は budget 対象外 (= 局所書き込み)。
 
 ## Step 5: デプロイ / リリースの境界 detection
 
@@ -337,7 +337,7 @@ Step 2 / 3 / 4 のいずれかで以下のいずれかに該当するアクシ�
 
 - `git push origin main` (= main への直接 push)
 - `gh pr merge` (= 本番ブランチへのマージ)
-- `beacon release create` / `beacon release publish`
+- `python3 scripts/release.py` (= maintainer-only release pipeline、 タグ打ち + bump + brew formula 更新)
 - `beacon deploy` / 外部 deploy コマンド (= `cdk deploy` / `gcloud run deploy` / `aws ...` / `terraform apply` 等)
 - 本番環境への secret / config 書き込み
 - 外部送信 (= Slack / Discord / 外部 email、UC7-F3 e-1841 と整合)
