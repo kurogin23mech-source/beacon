@@ -798,6 +798,19 @@ class ApiClient:
             {"session_id": session_id},
         )
 
+    def reconcile_trek(self, trek_id: str, *, apply: bool = False) -> dict:
+        """ms-88 / e-2167 — reconcile Trek task_states with task pool.
+
+        Scans the Trek's task_states and compares each entry's pool status
+        across the Trek's scope projects. Returns a diff of "pool done but
+        Trek stamp non-terminal" stuck entries. If ``apply=True``, the
+        server mirrors them to ``done`` with ``task-pool-mirror`` actor.
+        """
+        return self.post(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/reconcile",
+            {"apply": apply},
+        )
+
     def set_trek_task_state(self, trek_id: str, *, task_id: str,
                              state: str, note: str = "") -> dict:
         """ms-75 / e-2048 — Stamp Trek-internal task state.

@@ -1832,6 +1832,61 @@ def update_entry(project_id: str, entry_id: str, body: EntryUpdate,
     )
 
 
+def _mirror_task_done_to_treks(entry_id: str) -> list[str]:
+    """ms-88 / e-2167 — task pool ↔ Trek stamp 同期 (= mirror sync).
+
+    task pool 側で task が ``done`` に成った瞬間に、 active な Trek の
+    ``task_states[<entry_id>]`` が non-terminal で stamp 済 なら自動で
+    ``done`` に mirror する。 「task pool で done だが Trek stamp は
+    waiting-review / leader_review / working で残ってる」 stuck 状態 (=
+    2026-06-19 dogfood の e-2045 14h 放置事例) を構造的に排除する。
+
+    state transition validation は bypass する (= 直接書き換え)。 これは
+    server-forced reconciliation であり、 「executor / leader / user が
+    意図的に state を進める」 normal transition とは性質が違う。
+
+    Returns trek_ids that were touched.
+    """
+    touched: list[str] = []
+    try:
+        all_treks = db.list_treks(actor_id=None)
+    except Exception:
+        return touched
+    for t in all_treks:
+        if t.get("status") != "active":
+            continue
+        states = t.get("task_states") or {}
+        existing = states.get(entry_id)
+        if not existing:
+            continue
+        try:
+            current_state = trek_mod.get_task_state(t, entry_id)
+        except Exception:
+            current_state = (existing or {}).get("state") or ""
+        if current_state in trek_mod.TERMINAL_TASK_STATES:
+            continue
+        # Direct mirror write (= bypass transition validation).
+        now_iso = trek_mod.utcnow_iso()
+        states[entry_id] = {
+            **existing,
+            "state": "done",
+            "updated_at": now_iso,
+            "last_activity_at": now_iso,
+            "updated_by_session_id": "task-pool-mirror",
+            "note": (
+                "task pool で done 化、 mirror 同期 (= ms-88 / e-2167)"
+            ),
+        }
+        t["task_states"] = states
+        t["updated_at"] = now_iso
+        try:
+            db.save_trek(t.get("trek_id", ""), t)
+            touched.append(t.get("trek_id", ""))
+        except Exception:
+            continue
+    return touched
+
+
 @app.post("/api/projects/{project_id}/entries/{entry_id}/done")
 def done_entry(project_id: str, entry_id: str,
                user: dict = Depends(require_auth)):
@@ -1847,9 +1902,16 @@ def done_entry(project_id: str, entry_id: str,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return data, {"entry_id": entry_id, "status": "done"}
-    return _apply_op_and_broadcast(
+    result = _apply_op_and_broadcast(
         project_id, op, op_name="entry.done", actor=user.get("sub", ""),
     )
+    # ms-88 / e-2167 — mirror task pool done into Trek task_states.
+    # Best-effort: failure does not block the task done response.
+    try:
+        _mirror_task_done_to_treks(entry_id)
+    except Exception:
+        pass
+    return result
 
 
 @app.delete("/api/projects/{project_id}/entries/{entry_id}")
@@ -3817,7 +3879,32 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
         leader_sid = t.get("leader_session_id") or ""
         scope = t.get("scope") or []
         target_pid = scope[0].get("project") if scope else ""
-        if leader_sid and target_pid:
+        # ms-88 / e-2168 — self-loop suppress: leader が自分で stamp した
+        # transition では、 leader 宛 review event を mint しない。 「自分が判断
+        # したものを自分にもう一度 review 依頼する」 ループによる envelope mint +
+        # DM 配送 + 通知 noise を構造的に排除。 state 遷移自体は normal に
+        # 保存されており、 suppress した事実だけ meta.review_suppressions に
+        # 残して後から audit 可能化する。
+        self_judgment = bool(
+            caller_sid and leader_sid and caller_sid == leader_sid
+        )
+        if self_judgment:
+            meta = t.setdefault("meta", {})
+            suppressions = meta.setdefault("review_suppressions", [])
+            suppressions.append({
+                "task_id": body.task_id,
+                "state": body.state,
+                "suppression_reason": "self_judgment",
+                "suppressed_at": trek_mod.utcnow_iso(),
+                "caller_session_id": caller_sid,
+            })
+            try:
+                db.save_trek(trek_id, t)
+            except Exception:
+                # Best-effort audit trail; suppression decision still
+                # holds even if save fails.
+                pass
+        elif leader_sid and target_pid:
             try:
                 envelope = envelope_mod.issue_t1_system_envelope(
                     project_id=target_pid,
@@ -3860,6 +3947,99 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
                 # the terminal state via `beacon trek show` polling.
                 pass
     return t
+
+
+class TrekReconcileRequest(BaseModel):
+    apply: bool = False
+
+
+@app.post("/api/treks/{trek_id}/reconcile")
+def reconcile_trek_endpoint(trek_id: str, body: TrekReconcileRequest,
+                            user: dict = Depends(require_auth)):
+    """ms-88 / e-2167 — Trek task_states を task pool と整合させる reconcile.
+
+    Trek 内に既に stamp 済の各 task について scope project の task pool を
+    引いて、 「pool 上は done だが Trek stamp は non-terminal で残ってる」
+    stuck 状態を一覧化する。 ``apply=true`` なら mirror で done に書き換え。
+    ``apply=false`` (= default) は dry-run、 diff だけ返す。
+
+    Authorisation: caller must be a trek member.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    user_id = user.get("sub") or ""
+    if not trek_mod.find_member(t, user_id):
+        raise HTTPException(
+            status_code=403,
+            detail="only trek members can reconcile task state",
+        )
+    states = t.get("task_states") or {}
+    scope_project_ids = [
+        s.get("project") for s in t.get("scope") or [] if s.get("project")
+    ]
+    # Build a single dict of entry_id → pool_status across scope projects.
+    pool_status: dict[str, str] = {}
+    for pid in scope_project_ids:
+        try:
+            project_data = db.get_project(pid)
+        except Exception:
+            continue
+        if not project_data:
+            continue
+        for entry_id in states.keys():
+            if entry_id in pool_status:
+                continue
+            found = core.find_entry(project_data, entry_id)
+            if found:
+                _, _, entry, _ = found
+                pool_status[entry_id] = (entry or {}).get("status") or ""
+    # Compute diff: pool done but trek state non-terminal.
+    diff: list[dict] = []
+    for entry_id, entry in states.items():
+        try:
+            current_state = trek_mod.get_task_state(t, entry_id)
+        except Exception:
+            current_state = (entry or {}).get("state") or ""
+        pool = pool_status.get(entry_id, "")
+        if pool == "done" and current_state not in trek_mod.TERMINAL_TASK_STATES:
+            diff.append({
+                "entry_id": entry_id,
+                "trek_state": current_state,
+                "pool_status": pool,
+                "would_change_to": "done",
+            })
+    applied: list[str] = []
+    if body.apply and diff:
+        now_iso = trek_mod.utcnow_iso()
+        for item in diff:
+            entry_id = item["entry_id"]
+            existing = states.get(entry_id) or {}
+            states[entry_id] = {
+                **existing,
+                "state": "done",
+                "updated_at": now_iso,
+                "last_activity_at": now_iso,
+                "updated_by_session_id": "task-pool-mirror",
+                "note": (
+                    "task pool で done 化、 mirror 同期 (= ms-88 / e-2167 "
+                    "reconcile)"
+                ),
+            }
+            applied.append(entry_id)
+        t["task_states"] = states
+        t["updated_at"] = now_iso
+        try:
+            db.save_trek(trek_id, t)
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"trek save failed: {type(e).__name__}: {e}",
+            )
+    return {
+        "trek_id": trek_id,
+        "applied": body.apply,
+        "diff": diff,
+        "applied_entry_ids": applied,
+    }
 
 
 @app.get("/api/treks/{trek_id}/documents")
@@ -4745,7 +4925,17 @@ def trek_scheduler_tick_endpoint(
                 and s.get("session_id")
             ]
             # ms-88 / e-2109 — per-session filter.
+            # 2026-06-20 補完 (e-2109 second pass): leader 除外を追加。 leader は
+            # executor の進捗を促す立場ではない (= 役割が違う、 CORE doc
+            # trek-leader-stance / e-2166 と整合)、 progress-check の宛先から外す。
+            # 残された claim 0 件の executor は「fresh、 これから todo を引き受ける」
+            # と扱われ tick が届く。 leader 専用の集約 surface (= trek-leader-digest
+            # channel、 e-2164) は別 channel で配信する設計。
+            leader_sid_for_filter = trek_doc.get("leader_session_id") or ""
             for sid in live_sids:
+                if leader_sid_for_filter and sid == leader_sid_for_filter:
+                    # leader は progress-check の宛先ではない。
+                    continue
                 if trek_mod.session_has_active_claim(trek_doc, session_id=sid):
                     target_sids.append(sid)
                 elif not trek_mod.session_has_any_claim(trek_doc, session_id=sid):
