@@ -5330,6 +5330,10 @@ function _renderTrekTaskRow(t, s, slotIndex) {
     // ms-id) で制御。 default は折りたたみ (= mockup L460 t-1 row が collapsed
     // で並ぶ姿に揃える)。 chevron / row head クリックで toggle される。
     const expanded = state.openTrekExpanded && state.openTrekExpanded.has(s.milestone);
+    // ms-86 / e-2224 — show-done toggle は MS-id 単位で state.openTrekShowDone
+    // (= Set) に保持。 true の MS だけ done 状態 child を inline 追加表示する。
+    // Set で持つことで別 MS の done 表示が同時に切り替わらない。
+    const showDone = state.openTrekShowDone && state.openTrekShowDone.has(s.milestone);
     return `
       <div class="trek-task-row ${expanded ? 'expanded' : ''} state-${esc(parentState)}">
         <div class="trek-task-row-head" data-action="trek-scope-toggle" data-ms="${esc(s.milestone)}">
@@ -5345,8 +5349,11 @@ function _renderTrekTaskRow(t, s, slotIndex) {
         </div>
         ${expanded ? `
           <div class="trek-task-children">
-            ${doneChildren.length ? `<button class="trek-task-show-done-btn" data-action="trek-toggle-done" data-ms="${esc(s.milestone)}">show ${doneChildren.length} done</button>` : ''}
+            ${doneChildren.length
+              ? `<button class="trek-task-show-done-btn" data-action="trek-toggle-done" data-ms="${esc(s.milestone)}">${showDone ? 'hide' : 'show'} ${doneChildren.length} done</button>`
+              : ''}
             ${pendingChildren.map(tk => _renderTrekChildTask(t, tk)).join('')}
+            ${showDone ? doneChildren.map(tk => _renderTrekChildTask(t, tk)).join('') : ''}
           </div>` : ''}
       </div>`;
   }
@@ -6916,6 +6923,18 @@ function handleCommonAction(action, el) {
       if (!state.openTrekExpanded) state.openTrekExpanded = new Set();
       if (state.openTrekExpanded.has(msId)) state.openTrekExpanded.delete(msId);
       else state.openTrekExpanded.add(msId);
+      render();
+      return true;
+    }
+    // ms-86 / e-2224 — accordion 内 「show done」 ボタン。 ms-id 単位で
+    // done 状態 task の inline 表示を toggle (= 別 MS の done 表示が同時に
+    // 切り替わらないよう、 state は Set keyed by ms-id で保持)。
+    case 'trek-toggle-done': {
+      const msId = el.dataset.ms || '';
+      if (!msId) return true;
+      if (!state.openTrekShowDone) state.openTrekShowDone = new Set();
+      if (state.openTrekShowDone.has(msId)) state.openTrekShowDone.delete(msId);
+      else state.openTrekShowDone.add(msId);
       render();
       return true;
     }
