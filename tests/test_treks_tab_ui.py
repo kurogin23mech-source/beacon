@@ -176,6 +176,11 @@ class TestWebUI_TrekDetailMockParity:
         self.src = _read(WEB_INDEX)
 
     def test_palette_classes_present(self):
+        # ms-86 v2 (= mockups/trek-detail.html / e-2126): SCOPE + MEMBERS row
+        # + CLAIMS placeholder + SUMMARIES were collapsed into the new
+        # TREK TASKS / MEMBERS table / RECENT ACTIVITY (real) trio. Older
+        # row classes intentionally dropped — assertions reflect the v2
+        # invariants instead.
         for cls in (
             ".trek-crumb",
             ".trek-head",
@@ -186,35 +191,48 @@ class TestWebUI_TrekDetailMockParity:
             ".trek-stop-card",
             ".trek-archive-card",
             ".trek-section",
-            ".trek-scope-row",
-            ".trek-member-row",
-            ".trek-claim-row",
-            ".trek-activity-row",
-            ".trek-summary-row",
+            ".trek-why-block",
+            ".trek-task-row",
+            ".trek-task-state",
+            ".trek-task-children",
+            ".trek-child-task",
+            ".trek-members-table",
+            ".trek-activity-row-v2",
             ".trek-cli-hint",
             ".trek-coming-soon",
         ):
             assert cls in self.src, f"CSS class {cls!r} missing"
 
     def test_detail_view_mock_sections(self):
+        # ms-86 v2 section order (= mockups/trek-detail.html):
+        # WHY → TREK TASKS → MEMBERS & AGENTS → PULSE-ACK → RECENT ACTIVITY.
         for header in (
-            "SCOPE",
-            "MEMBERS &amp; SESSIONS",
-            "ACTIVE CLAIMS",
-            "RECENT ACTIVITY",
-            "SUMMARIES",
+            "<span>WHY</span>",
+            "<span>TREK TASKS</span>",
+            "MEMBERS &amp; AGENTS",
+            "PULSE-ACK COMPLIANCE",
+            "<span>RECENT ACTIVITY</span>",
         ):
-            assert header in self.src
+            assert header in self.src, f"section header {header!r} missing"
 
     def test_stop_card_invokes_cli(self):
         assert "STOP THIS TREK" in self.src
         assert "case 'trek-cli-hint':" in self.src
 
-    def test_unimplemented_sections_placeholders(self):
-        assert "ms-55" in self.src
-        assert "e-1696" in self.src
-        assert ("e-1697" in self.src) or ("beacon morning" in self.src)
-        assert ("e-1698" in self.src) or ("beacon trek summary" in self.src)
+    def test_v2_task_state_machine_classes(self):
+        # 5-state machine (= ms-88 / e-2107) must render with one CSS class
+        # per state so the leader can scan badges at a glance.
+        for state in ("working", "todo", "leader_review", "user_review", "done"):
+            assert f".trek-task-state.{state}" in self.src, f"task-state.{state} missing"
+
+    def test_v2_drops_placeholder_sections(self):
+        # ACTIVE CLAIMS / SUMMARIES / SCOPE placeholders were intentionally
+        # removed in v2. Match the rendered section header (= <span>X</span>)
+        # so the assertion ignores narrative comments that still mention the
+        # old names for historical context.
+        assert "<span>ACTIVE CLAIMS</span>" not in self.src, "ACTIVE CLAIMS placeholder re-added"
+        assert "<span>SUMMARIES</span>" not in self.src, "SUMMARIES placeholder re-added"
+        assert "<span>SCOPE</span>" not in self.src, "SCOPE section re-added (use TREK TASKS)"
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +271,10 @@ class TestDesktopUI_v3Parity:
         assert "function renderSettings(" in self.src
 
     def test_trek_detail_palette_carried(self):
+        # ms-86 v2 carry-over: same trek-* palette must survive the desktop
+        # build so layer.js can render the new layout when it adopts the
+        # 4-section treatment.
         for cls in (".trek-crumb", ".trek-head", ".trek-stop-card",
-                    ".trek-scope-row", ".trek-member-row"):
+                    ".trek-task-row", ".trek-members-table",
+                    ".trek-why-block", ".trek-activity-row-v2"):
             assert cls in self.src, f"CSS class {cls!r} missing"
