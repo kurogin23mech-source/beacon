@@ -773,14 +773,21 @@ def cmd_cloud_join():
     # write created a silent-drift attack surface (= sub-agent overwriting
     # config.json could flip cloud → local without touching cloud.json).
 
-    # Write project.json directly (LocalStore.save_project requires the file to exist)
+    # ms-84 Phase 3 (e-2037): no longer write a local project.json on
+    # cloud join. The CLI reads through Store → StoreApi in cloud mode,
+    # so a local cache file just decays into a silent-drift source the
+    # moment another writer (web UI / server-side scheduler / another
+    # session) touches the cloud document. If a stale project.json
+    # already exists at this path (= migrating an old install or a
+    # leftover from a prior local-mode invocation), rename it to keep a
+    # one-shot recovery copy and unblock the cut-over.
     pf = get_project_file()
-    with open(pf, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    renamed = _rename_local_project_json_for_cloud_cutover(pf)
 
     print(f"Joined cloud project: {project_id}")
     print(f"Project: {data.get('name', 'unnamed')}")
+    if renamed:
+        print(f"  local cache: {pf} → {renamed} (ms-84 Phase 3 cut-over)")
 
 
 # ---------------------------------------------------------------------------
@@ -3751,46 +3758,46 @@ def _write_user_beacon_config(d: dict) -> None:
 
 
 def _read_project_bus_disabled() -> bool:
-    """True if the active project sets `bus.disabled` in project.json.
+    """True if the active project sets `bus.disabled`.
 
     Project-scoped opt-out lives under a top-level `bus` object:
         { "bus": {"disabled": true}, ... }
     This shape mirrors the global config schema so a user inspecting
-    either file sees the same idiom. Missing project file → not opted out
-    (consistent with how install requires .beacon/project.json anyway).
+    either source (cloud doc or local project.json) sees the same idiom.
+
+    ms-84 Phase 3 (e-2037): cloud mode reads the project document via
+    Store → StoreApi instead of the local project.json, so the bus flag
+    survives cloud truth-model cut-over. Local mode keeps reading the
+    file. Missing or unreadable project → not opted out (consistent with
+    how install requires a Beacon root anyway).
     """
     try:
-        pf = get_project_file()
+        store = get_store()
+        data = store.load_project()
     except Exception:
         return False
-    if not os.path.exists(pf):
-        return False
-    try:
-        with open(pf, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return False
-    bus = data.get("bus") or {}
+    bus = (data or {}).get("bus") or {}
     return bool(bus.get("disabled"))
 
 
 def _write_project_bus_flag(disabled: bool) -> bool:
     """Set or clear the project-local `bus.disabled` flag.
 
-    Returns True on write. False if no project file exists (caller decides
-    whether to fail or treat as no-op). When `disabled=False`, the bus
-    object is removed entirely if empty so project.json stays minimal.
+    Returns True on write. False if no project document is available
+    (caller decides whether to fail or treat as no-op). When
+    ``disabled=False``, the bus object is removed entirely if empty so
+    the document stays minimal.
+
+    ms-84 Phase 3 (e-2037): routes through Store so cloud mode writes
+    the flag to the cloud document (= survives across sessions / web UI),
+    matching where ``_read_project_bus_disabled`` now reads from.
     """
     try:
-        pf = get_project_file()
+        store = get_store()
+        data = store.load_project()
     except Exception:
         return False
-    if not os.path.exists(pf):
-        return False
-    try:
-        with open(pf, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    if not isinstance(data, dict):
         return False
     bus = data.get("bus") or {}
     if disabled:
@@ -3802,9 +3809,10 @@ def _write_project_bus_flag(disabled: bool) -> bool:
             data.pop("bus", None)
         else:
             data["bus"] = bus
-    with open(pf, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    try:
+        store.save_project(data)
+    except Exception:
+        return False
     return True
 
 
@@ -3860,8 +3868,15 @@ def cmd_channel_install():
     """
     from pathlib import Path  # local import — pathlib not yet at module level
     cwd = Path.cwd()
-    if not (cwd / ".beacon" / "project.json").exists():
-        print("Error: no .beacon/project.json in this directory. Run `beacon init` first.",
+    # ms-84 Phase 3 (e-2037): accept either marker — cloud mode has no
+    # local project.json after cut-over.
+    if not (
+        (cwd / ".beacon" / "project.json").exists()
+        or (cwd / ".beacon" / "cloud.json").exists()
+    ):
+        print("Error: no Beacon project in this directory "
+              "(looked for .beacon/project.json or .beacon/cloud.json). "
+              "Run `beacon init` (local) or `beacon cloud join <project-id>` (cloud) first.",
               file=sys.stderr)
         sys.exit(1)
 
@@ -3974,9 +3989,15 @@ def cmd_channel_uninstall():
     """
     from pathlib import Path
     cwd = Path.cwd()
-    if not (cwd / ".beacon" / "project.json").exists():
-        print("Error: no .beacon/project.json in this directory. Run from a "
-              "project root.", file=sys.stderr)
+    # ms-84 Phase 3 (e-2037): cloud mode has no local project.json after
+    # cut-over; cloud.json is an equivalent root marker.
+    if not (
+        (cwd / ".beacon" / "project.json").exists()
+        or (cwd / ".beacon" / "cloud.json").exists()
+    ):
+        print("Error: no Beacon project in this directory "
+              "(looked for .beacon/project.json or .beacon/cloud.json). "
+              "Run from a project root.", file=sys.stderr)
         sys.exit(1)
 
     purge = os.environ.get("BEACON_CHANNEL_PURGE_FILES", "") == "1"
@@ -4078,23 +4099,30 @@ def cmd_channel_opt_out():
             print(f"Global opt-out written to {p}")
             print("  → DM auto-install will be skipped in every project.")
     else:
-        # project scope (default)
-        try:
-            pf = get_project_file()
-        except Exception:
-            pf = ""
-        if not pf or not os.path.exists(pf):
-            print("Error: no .beacon/project.json in this directory. Run from "
-                  "a project root, or use --global.", file=sys.stderr)
+        # project scope (default). ms-84 Phase 3 (e-2037): accept either
+        # marker — cloud mode keeps the bus flag in the cloud document
+        # via Store, so a local project.json may not exist.
+        from pathlib import Path as _Path
+        cwd = _Path.cwd()
+        has_marker = (
+            (cwd / ".beacon" / "project.json").exists()
+            or (cwd / ".beacon" / "cloud.json").exists()
+        )
+        if not has_marker:
+            print("Error: no Beacon project in this directory "
+                  "(looked for .beacon/project.json or .beacon/cloud.json). "
+                  "Run from a project root, or use --global.",
+                  file=sys.stderr)
             sys.exit(1)
         already = _read_project_bus_disabled()
         if not _write_project_bus_flag(True):
-            print("Error: failed to write project.json", file=sys.stderr)
+            print("Error: failed to persist project bus flag", file=sys.stderr)
             sys.exit(1)
+        location = "cloud project document" if (cwd / ".beacon" / "cloud.json").exists() else get_project_file()
         if already:
-            print(f"Project opt-out already set in {pf}")
+            print(f"Project opt-out already set in {location}")
         else:
-            print(f"Project opt-out written to {pf}")
+            print(f"Project opt-out written to {location}")
             print("  → DM auto-install will be skipped in this project only.")
 
     print()
@@ -4121,18 +4149,25 @@ def cmd_channel_opt_in():
         else:
             print(f"Global opt-out was not set (nothing to clear).")
     else:
-        try:
-            pf = get_project_file()
-        except Exception:
-            pf = ""
-        if not pf or not os.path.exists(pf):
-            print("Error: no .beacon/project.json in this directory. Run from "
-                  "a project root, or use --global.", file=sys.stderr)
+        # ms-84 Phase 3 (e-2037): accept either marker — cloud mode
+        # stores the flag in the cloud document via Store.
+        from pathlib import Path as _Path
+        cwd = _Path.cwd()
+        has_marker = (
+            (cwd / ".beacon" / "project.json").exists()
+            or (cwd / ".beacon" / "cloud.json").exists()
+        )
+        if not has_marker:
+            print("Error: no Beacon project in this directory "
+                  "(looked for .beacon/project.json or .beacon/cloud.json). "
+                  "Run from a project root, or use --global.",
+                  file=sys.stderr)
             sys.exit(1)
         had = _read_project_bus_disabled()
+        location = "cloud project document" if (cwd / ".beacon" / "cloud.json").exists() else get_project_file()
         if had:
             _write_project_bus_flag(False)
-            print(f"Project opt-out cleared from {pf}")
+            print(f"Project opt-out cleared from {location}")
         else:
             print(f"Project opt-out was not set (nothing to clear).")
 
@@ -6805,8 +6840,10 @@ def cmd_member_join():
     if not pid:
         print(f"Server returned no project_id: {resp}", file=sys.stderr)
         sys.exit(1)
-    # Bind this cwd to the joined project by writing cloud.json + project.json,
-    # mirroring `beacon cloud join`.
+    # Bind this cwd to the joined project by writing cloud.json. ms-84
+    # Phase 3 (e-2037): the matching local project.json write was retired
+    # — cloud mode reads through Store → StoreApi, so a local cache file
+    # just decays into a silent-drift source.
     try:
         data = client.get_project(pid)
     except RuntimeError as e:
@@ -6821,10 +6858,9 @@ def cmd_member_join():
         json.dump({"project_id": pid, "api_url": api_url}, f,
                   indent=2, ensure_ascii=False)
         f.write("\n")
-    pf = get_project_file()
-    with open(pf, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    # Rename any leftover project.json (= migration from a previous local
+    # install) so the cut-over is final.
+    _rename_local_project_json_for_cloud_cutover(get_project_file())
     if json_mode:
         print(json.dumps({
             "status": "joined",
@@ -9352,7 +9388,7 @@ def _get_api_client():
 
     config_path = _get_cloud_config_path()
     if not os.path.exists(config_path):
-        print("No cloud.json found. Run 'beacon cloud push' first.")
+        print("No cloud.json found. Run 'beacon cloud upload-initial' first.")
         sys.exit(1)
 
     with open(config_path, "r", encoding="utf-8") as f:
@@ -9398,7 +9434,8 @@ def cmd_doc_image_upload():
     # 10 の direct-call 削減)。 image upload は cloud-only operation のため、
     # ここでは mode guard として is_cloud() を確認するだけ。
     if not get_store().is_cloud():
-        print("Error: image upload requires cloud mode (run 'beacon cloud push' first)")
+        print("Error: image upload requires cloud mode "
+              "(run 'beacon cloud upload-initial' first)")
         sys.exit(1)
 
     client, config = _get_api_client()
@@ -9454,12 +9491,65 @@ def cmd_cloud_list():
     else:
         if not projects:
             print("No cloud projects found.")
-            print("Run 'beacon cloud push' to upload a project.")
+            print("Run 'beacon cloud upload-initial' to upload a project.")
             return
         for i, p in enumerate(projects, 1):
             print(f"  {i}. {p['project_id']}: {p['name']}")
             if p.get('objective'):
                 print(f"     {p['objective'][:60]}")
+
+
+def _rename_local_project_json_for_cloud_cutover(project_file: str) -> Optional[str]:
+    """Rename ``.beacon/project.json`` to ``.before-cloud-YYYYMMDD`` (ms-84 Phase 3).
+
+    Idempotent insurance for the local→cloud migration: after upload-initial
+    succeeds the local file becomes the silent-drift source from the moment
+    of cloud cut-over (any later cloud write will not propagate to disk).
+    Renaming it to a dated suffix:
+
+      - hides it from ``beacon-find-root`` style markers (cloud.json now
+        carries that role; see ``bin/beacon-find-root``);
+      - keeps a one-shot recovery copy on disk (= we never ``rm``);
+      - encodes the cut-over date so multiple runs (re-uploads, sandbox
+        tests) do not collide.
+
+    No-op when the source file is missing (= already cut over or never
+    existed for a from-scratch cloud project). Returns the destination
+    path on rename, ``None`` otherwise. Failures are logged to stderr
+    but do not raise — the cut-over should not be blocked by a stat /
+    rename hiccup, the user can rename manually post-hoc.
+    """
+    if not os.path.exists(project_file):
+        return None
+    import datetime as _dt
+    stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d")
+    base_dir = os.path.dirname(project_file) or ".beacon"
+    base_name = os.path.basename(project_file)
+    dest = os.path.join(base_dir, f"{base_name}.before-cloud-{stamp}")
+    # If the destination already exists (= re-run on the same day), append
+    # a short suffix to keep the rename idempotent without overwriting the
+    # earlier recovery copy. Never delete an existing backup.
+    if os.path.exists(dest):
+        suffix = 1
+        while os.path.exists(f"{dest}.{suffix}"):
+            suffix += 1
+        dest = f"{dest}.{suffix}"
+    try:
+        os.rename(project_file, dest)
+    except OSError as exc:
+        print(
+            f"Warning: failed to rename {project_file} → {dest}: {exc}\n"
+            f"  The cloud cut-over succeeded but the local cache is still on disk.\n"
+            f"  Rename it manually to prevent drift confusion.",
+            file=sys.stderr,
+        )
+        return None
+    _append_changelog({
+        "op": "cloud_cutover_rename",
+        "from": project_file,
+        "to": dest,
+    })
+    return dest
 
 
 def cmd_cloud_push():
@@ -9482,11 +9572,12 @@ def cmd_cloud_push():
             print("Error: already in cloud mode.")
             print("")
             print("  In cloud mode, all CLI changes go directly to the cloud.")
-            print("  Pushing the local project.json (which may be stale) would")
-            print("  overwrite cloud state and cause data loss.")
+            print("  The local project.json (if any) is a stale recovery copy.")
             print("")
-            print("  To sync cloud state to local:  beacon cloud pull")
-            print("  To force-push local state:     beacon cloud push --force")
+            print("  upload-initial is a one-shot local→cloud migration only;")
+            print("  re-running it after cut-over would overwrite cloud state.")
+            print("  Use --force to override (cloud → local round-trip was")
+            print("  retired in ms-84 Phase 4).")
             sys.exit(1)
         print("Warning: --force specified. Overwriting cloud project data with local file.")
         print("  documents and retros will NOT be pushed (they are managed in cloud).")
@@ -9555,36 +9646,33 @@ def cmd_cloud_push():
     # e-1861 (ms-61): cloud.json existence already marks us as cloud-mode
     # (written above during the push setup), so the legacy config.json
     # ``{"mode": "cloud"}`` write was retired. Single source of truth = cloud.json.
+
+    # ms-84 Phase 3 (e-2037): after the upload succeeds, rename the local
+    # project.json to ``.before-cloud-YYYYMMDD`` so the cut-over to a
+    # cloud-only truth model is final. The local file becomes the silent
+    # drift source from this point onward (any later cloud write does not
+    # propagate to it), so leaving it in place would re-introduce the
+    # exact failure mode ms-84 is closing. Helper is idempotent + never
+    # deletes — it keeps a one-shot recovery copy on disk.
+    pf = get_project_file()
+    renamed = _rename_local_project_json_for_cloud_cutover(pf)
+    if renamed:
+        print(f"  local cache: {pf} → {renamed}")
     print("Switched to cloud mode.")
 
 
-def cmd_cloud_pull():
-    client, config = _get_api_client()
-    project_id = config["project_id"]
-
-    try:
-        data = client.get_project(project_id)
-    except RuntimeError as e:
-        if "404" in str(e):
-            print(f"Project '{project_id}' not found in cloud.")
-            print("Run 'beacon cloud push' to upload first.")
-        else:
-            print(f"Error: {e}")
-        sys.exit(1)
-
-    core.validate_project(data)
-
-    from store_local import LocalStore
-    local = LocalStore(get_project_file())
-    local.save_project(data)
-    print(f"Pulled from cloud: projects/{project_id}")
+# ms-84 Phase 4 (e-2038): cmd_cloud_pull was removed structurally. The
+# cloud → local round-trip is now impossible (= no local cache to refresh
+# into), so the function and its dispatcher entry are gone. Any operator
+# script that called it should be deleted — `beacon status` reads cloud
+# directly and replaces every legitimate use of pull.
 
 
 def cmd_cloud_status():
     config_path = _get_cloud_config_path()
     if not os.path.exists(config_path):
         print("Cloud: not configured")
-        print("Run 'beacon cloud push' to set up.")
+        print("Run 'beacon cloud upload-initial' to bootstrap a new cloud project.")
         return
 
     with open(config_path, "r", encoding="utf-8") as f:
@@ -12717,99 +12805,20 @@ def _doctor_check_skill_cli_drift(home):
 
 
 def _doctor_check_project_staleness():
-    """Detect when local .beacon/project.json is out of sync with cloud.
+    """No-op since ms-84 Phase 5 (e-2039): the project-stale check is gone.
 
-    Compares local milestone / operation counts against the cloud copy.
-    Catches the ms-61 P3 case observed in fork worktrees on 2026-06-12:
-    a session sees ms-1..ms-22 locally while cloud already holds ms-43
-    onwards because ``beacon cloud pull`` was never run from this cwd.
-    The CLI surface ``beacon status`` happily returned the stale local
-    snapshot, hiding the cloud's authoritative state.
+    Background: this check existed because cloud mode kept a local
+    ``.beacon/project.json`` cache that could drift from the cloud truth
+    source. ms-84 Phase 3 cut that cache over (= cloud mode no longer has
+    a local project.json; cloud.json is the only on-disk marker), so the
+    "stale" concept stops applying — there is no local cache to compare
+    against the cloud document anymore.
 
-    Cloud project has no top-level ``updated_at`` field on the response,
-    so we compare counts (= a proxy that captures the common drift case:
-    another session / Web UI added milestones or operations). Same counts
-    but altered state (= same N items, but renames / status changes)
-    are not detected by this check; the milestone count drift is the
-    high-value attack surface.
-
-    Returns a list of warning strings. Empty list = in sync, or skipped.
-
-    Skip cases:
-    - .beacon/project.json absent (= no project in cwd)
-    - .beacon/cloud.json absent (= local mode)
-    - Local mtime < 5 min (= obviously fresh, no network call needed)
-    - BEACON_DOCTOR_SKIP_CLOUD_SYNC=1
-    - Network / auth error fetching cloud (best-effort; doctor must
-      stay usable offline).
+    Keeping the function as a no-op (rather than deleting it outright)
+    avoids breaking any in-flight Skill / doctor caller that imports the
+    name. The doctor entry that ran it (= ``warnings.extend(...)``) was
+    removed from cmd_doctor; this stub stays as a tombstone.
     """
-    if os.environ.get("BEACON_DOCTOR_SKIP_CLOUD_SYNC") == "1":
-        return []
-
-    proj_path = os.path.join(".beacon", "project.json")
-    cloud_cfg = os.path.join(".beacon", "cloud.json")
-    if not os.path.exists(proj_path) or not os.path.exists(cloud_cfg):
-        return []  # not a cloud-mode beacon project from this cwd
-
-    import time as _time
-    try:
-        mtime = os.stat(proj_path).st_mtime
-    except OSError:
-        return []
-    age_sec = _time.time() - mtime
-
-    # AC#3 honor: threshold for "very old" warn even when counts match.
-    threshold_sec = int(os.environ.get("BEACON_DOCTOR_STALENESS_SEC", "1800"))
-
-    # Avoid network call when local activity is recent (= obviously fresh).
-    # 300s = 5 min, far below threshold_sec default 30 min.
-    if age_sec < 300:
-        return []
-
-    try:
-        client, config = _get_api_client()
-        cloud_data = client.get_project(config["project_id"])
-    except Exception:
-        return []  # offline / auth issue — doctor stays usable
-
-    try:
-        with open(proj_path, "r", encoding="utf-8") as f:
-            local_data = json.load(f)
-    except Exception:
-        return []
-
-    cloud_ms = len(cloud_data.get("milestones", []))
-    local_ms = len(local_data.get("milestones", []))
-    cloud_op = len(cloud_data.get("operations", []))
-    local_op = len(local_data.get("operations", []))
-
-    diffs = []
-    if cloud_ms != local_ms:
-        diffs.append(f"milestones: local={local_ms}, cloud={cloud_ms}")
-    if cloud_op != local_op:
-        diffs.append(f"operations: local={local_op}, cloud={cloud_op}")
-
-    if diffs:
-        return [
-            "WARN [project-stale] .beacon/project.json differs from cloud:\n"
-            + "\n".join(f"       {d}" for d in diffs)
-            + f"\n       (local mtime: {int(age_sec / 60)} min ago)\n"
-            "       Run: beacon cloud pull   (to refresh local cache)\n"
-            "       Opt-out: BEACON_DOCTOR_SKIP_CLOUD_SYNC=1"
-        ]
-
-    # Counts match but file is very old — soft warn so external writes
-    # (another session, Web UI) are noticed even when counts coincide.
-    if age_sec > threshold_sec:
-        return [
-            f"WARN [project-stale] .beacon/project.json was last touched "
-            f"{int(age_sec / 60)} minutes ago (threshold {int(threshold_sec / 60)} min).\n"
-            "       Counts match cloud, but external state changes\n"
-            "       (renames / status shifts) may have happened. Run\n"
-            "       `beacon cloud pull` if uncertain.\n"
-            "       Threshold override: BEACON_DOCTOR_STALENESS_SEC=<seconds>"
-        ]
-
     return []
 
 
@@ -13139,12 +13148,12 @@ def cmd_doctor():
             if not _cloud.get("api_url"):
                 warnings.append(
                     "WARN [cloud.json] api_url is not set in .beacon/cloud.json.\n"
-                    "       Run: beacon cloud push"
+                    "       Run: beacon cloud upload-initial"
                 )
         except Exception:
             warnings.append(
                 "WARN [cloud.json] .beacon/cloud.json is unreadable.\n"
-                "       Run: beacon cloud push"
+                "       Run: beacon cloud upload-initial"
             )
     if os.path.exists(config_json_path):
         try:
@@ -13235,14 +13244,13 @@ def cmd_doctor():
         warnings.extend(_doctor_check_skill_cli_drift(home))
 
     # ------------------------------------------------------------------ #
-    # 9. .beacon/project.json staleness vs cloud (ms-61 / e-1571)
+    # 9. project-stale check retired in ms-84 Phase 5 (e-2039)
     # ------------------------------------------------------------------ #
-    # Detect when local project cache is out of sync with cloud — the
-    # exact P3 case observed on 2026-06-12 in this fork worktree, where
-    # `beacon status` returned 22 milestones while cloud held 67 because
-    # `beacon cloud pull` had never run from this cwd. Best-effort: skips
-    # on local mode, recent local writes (<5 min), and network errors.
-    warnings.extend(_doctor_check_project_staleness())
+    # Cloud mode no longer keeps a local .beacon/project.json cache after
+    # Phase 3, so the concept of "stale local relative to cloud" no longer
+    # applies. The helper above is now a no-op tombstone; the doctor call
+    # is left commented for audit-trail clarity.
+    # warnings.extend(_doctor_check_project_staleness())  # ms-84 Phase 5
 
     # ------------------------------------------------------------------ #
     # 10. CLAUDE.md entry-writing-principle marker (ms-68 / e-1640)
@@ -13319,10 +13327,11 @@ def cmd_help_json():
         {"command": "beacon retro", "flags": [], "description": "Start weekly retrospective (interactive)"},
         {"command": "beacon trigger check", "flags": [], "description": "Check pending triggers (JSON array)"},
         {"command": "beacon cloud list", "flags": [], "description": "List cloud projects"},
-        {"command": "beacon cloud upload-initial", "flags": ["--force"], "description": "Initial bootstrap upload to a new cloud project (e-1862); alias of legacy 'push'"},
-        {"command": "beacon cloud force-pull", "flags": [], "description": "Emergency overwrite local from cloud (e-1862); alias of legacy 'pull'"},
-        {"command": "beacon cloud push", "flags": ["--force"], "description": "Legacy alias for upload-initial (deprecated, kept for backward compat)"},
-        {"command": "beacon cloud pull", "flags": [], "description": "Legacy alias for force-pull (deprecated, kept for backward compat)"},
+        {"command": "beacon cloud upload-initial", "flags": ["--force"], "description": "Initial bootstrap upload to a new cloud project (one-shot local→cloud migration; ms-84 Phase 4)"},
+        # ms-84 Phase 4 (e-2038): push / pull / force-pull entries removed.
+        # The cloud → local round-trip is structurally impossible (= cloud
+        # is the sole truth source). bin/beacon now routes these names to
+        # the wildcard 'unknown subcommand' branch.
         {"command": "beacon cloud join <id>", "flags": [], "description": "Join an existing cloud project"},
         {"command": "beacon auth login", "flags": [], "description": "Sign in with Google"},
         {"command": "beacon auth logout", "flags": [], "description": "Remove cached credentials"},
@@ -13631,7 +13640,7 @@ def cmd_operation_approve():
     if not _is_cloud_mode():
         print("Error: operation approve requires cloud mode "
               "(envelope signing needs a server key). Run "
-              "'beacon cloud push' first.", file=sys.stderr)
+              "'beacon cloud upload-initial' first.", file=sys.stderr)
         sys.exit(1)
 
     ttl_seconds = None
@@ -16934,7 +16943,9 @@ if __name__ == "__main__":
         "doc_image_upload": cmd_doc_image_upload,
         "cloud_list": cmd_cloud_list,
         "cloud_push": cmd_cloud_push,
-        "cloud_pull": cmd_cloud_pull,
+        # ms-84 Phase 4 (e-2038): cloud_pull dispatch entry removed.
+        # cmd_cloud_pull was deleted; the bin/beacon `pull` / `force-pull`
+        # subcommands now hit the wildcard 'unknown subcommand' branch.
         "cloud_status": cmd_cloud_status,
         "cloud_check_project": cmd_cloud_check_project,
         "cloud_join": cmd_cloud_join,
