@@ -88,6 +88,94 @@ def test_skill_documents_key_workflow_steps():
 
 
 # ---------------------------------------------------------------------------
+# ms-92 e-2181: 確認 step を 1 回に集約
+# ---------------------------------------------------------------------------
+
+
+def test_skill_documents_unified_one_confirm_path():
+    """ms-92 e-2181: 旧 Step 5 / 5b / 5c / Step 6 を 1 step に統合。
+
+    本文入力直後に組み立てた draft + send/edit/cancel が **1 prompt** で完結
+    する経路を Skill 本文に明示すること。 これが落ちると user が同じ内容を
+    2 回見る冗長 UX が回帰する。
+    """
+    body = SKILL_PATH.read_text(encoding="utf-8")
+    # 統合経路の自己言及 (= ms-92 e-2181 で集約された旨)
+    assert "e-2181" in body, "consolidation must reference its driving task"
+    assert "1 prompt" in body or "1 confirm" in body or "統合" in body, (
+        "Skill must document that send-confirmation is one merged prompt"
+    )
+    # 旧 Step 6 が独立した「## Step 6: 送信確認」 として復活していないことを保証
+    assert "## Step 6: 送信確認" not in body, (
+        "old standalone Step 6 must not be re-introduced — that brings back "
+        "the redundant two-prompt UX from before ms-92 e-2181"
+    )
+
+
+def test_skill_documents_skip_dialog_when_launch_message_is_complete():
+    """AC #2: 起動メッセージで recipient + content が揃っていれば追加対話を skip。"""
+    body = SKILL_PATH.read_text(encoding="utf-8")
+    # 入力経路判定の存在 (Step 5a)
+    assert "Step 5a" in body, "Step 5a (= 入力経路判定) must be present"
+    assert "recipient" in body and "content" in body, (
+        "Skill must explain that recipient + content are the gating fields"
+    )
+    # skip 経路の語彙が明示されていること
+    assert "skip" in body.lower(), (
+        "Skill must mention the skip path for fully-specified launch messages"
+    )
+
+
+def test_skill_documents_inline_warnings_in_single_prompt():
+    """AC #3: live check / cross-project / budget / template は draft と同じ 1 prompt 内 inline。"""
+    body = SKILL_PATH.read_text(encoding="utf-8")
+    # draft セクション内で 4 つの inline 表示要素が言及されていること
+    assert "live check" in body, "live check warning must be inline in draft"
+    assert "cross-project" in body, "cross-project warning must be inline"
+    assert "budget" in body, "budget status must be inline"
+    assert "template" in body or "テンプレート" in body, (
+        "template selection must be inline"
+    )
+    # inline 化の語彙
+    assert "inline" in body, (
+        "Skill must explicitly state warnings/status are rendered inline "
+        "in the single draft prompt"
+    )
+
+
+def test_skill_documents_force_confirm_for_dangerous_paths():
+    """AC #4: dangerous 経路 (= cross-project / 外部 user 初回 / sensitivity high) は明示確認 force 維持。"""
+    body = SKILL_PATH.read_text(encoding="utf-8")
+    # force-confirm セクション
+    assert "Step 5d" in body, "Step 5d (= force-confirm for dangerous paths) must exist"
+    # 3 つの危険条件
+    assert "cross-project" in body
+    assert "外部 user 初回" in body or "外部 user" in body
+    assert "sensitivity high" in body or "sensitivity" in body
+    # 明示文言入力強制 (= 単純 yes ではない)
+    assert "risk understood" in body, (
+        "dangerous paths must require an explicit force-yes phrase to "
+        "prevent silent dispatch under cross-project / first-time external / "
+        "sensitivity-high conditions"
+    )
+
+
+def test_skill_preserves_receipt_verify_step():
+    """AC #5: 既存 receipt verify (= sent / delivered / opened の 3 段 stamp) はそのまま残す。"""
+    body = SKILL_PATH.read_text(encoding="utf-8")
+    # 3 段 receipt 確認の語彙
+    assert "sent" in body.lower()
+    assert "delivered" in body.lower()
+    assert "opened" in body.lower()
+    # bus status による receipt 取得
+    assert "bus status" in body, (
+        "receipt verification via `beacon bus status` must remain part of "
+        "the post-send flow (Step 8) — e-2181 consolidates Step 5/6 only, "
+        "not the receipt path"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Helpers: build_candidates / member cross-ref
 # ---------------------------------------------------------------------------
 

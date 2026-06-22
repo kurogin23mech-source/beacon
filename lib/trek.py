@@ -421,9 +421,52 @@ def validate_pulse_picked_choice(choice: str) -> str:
     return choice
 
 
+# ms-92 / e-2165 — pulse-ack payload structured fields. The free-form
+# `note` keeps working for backward compatibility, but executors are
+# encouraged to populate the structured fields so the leader-digest
+# (= e-2164) can mechanically aggregate "stuck=N idle=M" counts without
+# parsing natural-language notes. Hard caps protect both the doc size
+# and the server-side aggregation cost.
+PULSE_ACK_STATE_SUMMARY_MAX = 100  # 1-line snapshot, ≤100 chars
+PULSE_ACK_BLOCKER_MAX = 200        # ≤200 chars per blocker
+PULSE_ACK_BLOCKERS_CAP = 3         # at most 3 blockers per pulse
+
+
+def _normalize_pulse_blockers(blockers) -> list[str]:
+    """Coerce + trim the blockers list (= optional structured field).
+
+    Accepts None / list / tuple; each item is str-coerced, stripped,
+    and truncated at PULSE_ACK_BLOCKER_MAX. Empty strings are dropped.
+    Excess items beyond PULSE_ACK_BLOCKERS_CAP are silently truncated
+    so a buggy executor can't blow up the trek doc.
+    """
+    if not blockers:
+        return []
+    if isinstance(blockers, str):
+        # Some callers may pass a single string; treat as one blocker.
+        items = [blockers]
+    else:
+        items = list(blockers)
+    out: list[str] = []
+    for item in items:
+        s = str(item or "").strip()
+        if not s:
+            continue
+        if len(s) > PULSE_ACK_BLOCKER_MAX:
+            s = s[:PULSE_ACK_BLOCKER_MAX]
+        out.append(s)
+        if len(out) >= PULSE_ACK_BLOCKERS_CAP:
+            break
+    return out
+
+
 def record_pulse_ack(trek_doc: dict, *, session_id: str,
                      picked_choice: str = "",
-                     note: str = "") -> dict:
+                     note: str = "",
+                     state_summary: str = "",
+                     blockers=None,
+                     needs_leader_judgment: bool = False,
+                     time_on_task_seconds: int = 0) -> dict:
     """Append a pulse-ack record for ``session_id`` and bump the counter.
 
     Called by the server endpoint when /beacon-trek-pulse Skill self-reports
@@ -431,11 +474,48 @@ def record_pulse_ack(trek_doc: dict, *, session_id: str,
     Skill is supposed to call exactly once per tick; if it calls twice that
     is recorded so observability is honest — dedupe is the caller's choice).
 
+    ms-92 / e-2165 — structured payload fields (= the leader-digest needs
+    machine-aggregatable status, free-form ``note`` alone can't be
+    counted):
+
+      * ``state_summary`` (str, ≤100 chars): 1-line state snapshot, e.g.
+        ``"working on e-100"`` / ``"stuck on e-200"`` / ``"idle"``.
+        Truncated silently if too long.
+      * ``blockers`` (list[str], ≤3 items, ≤200 chars each): when the
+        executor is stuck. Use specific descriptions ("OOM in
+        test_foo.py", not "test broken") so the leader-digest highlight
+        is actionable.
+      * ``needs_leader_judgment`` (bool, default False): set True when
+        the executor wants the leader's attention even if not formally
+        ``stuck``. Bubbles up to the leader-digest highlight band.
+      * ``time_on_task_seconds`` (int, default 0): seconds the executor
+        has been on the current task (= 0 if idle). Lets the digest
+        sort by "longest stuck" without timestamp math.
+
+    All structured fields are **optional and backward-compat**: existing
+    callers that only pass ``picked_choice`` + ``note`` continue to work
+    unchanged. The fields are stored on the history record and on the
+    session-level summary so the digest can read either.
+
     Returns the mutated trek_doc; caller persists with ``db.save_trek``.
     """
     if not session_id:
         raise ValueError("session_id is required")
     validate_pulse_picked_choice(picked_choice)
+    # Normalise structured fields. Truncation is silent (= caller buggy
+    # but record is still useful) rather than raising — pulse-ack is an
+    # observability event, not a write-path. We'd rather record a
+    # truncated snapshot than reject and leave the digest blind.
+    state_summary_norm = (state_summary or "").strip()
+    if len(state_summary_norm) > PULSE_ACK_STATE_SUMMARY_MAX:
+        state_summary_norm = state_summary_norm[:PULSE_ACK_STATE_SUMMARY_MAX]
+    blockers_norm = _normalize_pulse_blockers(blockers)
+    try:
+        time_on_task_norm = max(0, int(time_on_task_seconds or 0))
+    except (TypeError, ValueError):
+        time_on_task_norm = 0
+    needs_leader_judgment_norm = bool(needs_leader_judgment)
+
     acks = trek_doc.setdefault("pulse_acks", {})
     entry = acks.get(session_id) or {
         "session_id": session_id,
@@ -449,10 +529,24 @@ def record_pulse_ack(trek_doc: dict, *, session_id: str,
         "timestamp": now,
         "picked_choice": picked_choice,
         "note": (note or "")[:200],
+        # Structured fields (= e-2165). Always present in records so the
+        # digest can rely on the keys without per-record existence checks.
+        "state_summary": state_summary_norm,
+        "blockers": blockers_norm,
+        "needs_leader_judgment": needs_leader_judgment_norm,
+        "time_on_task_seconds": time_on_task_norm,
     }
     entry["total_acks"] = int(entry.get("total_acks") or 0) + 1
     entry["last_pulse_ack_at"] = now
     entry["last_picked_choice"] = picked_choice
+    # Mirror the structured fields on the session-level summary so a
+    # digest can read "latest snapshot per session" without scanning
+    # history. Same backward-compat guarantee — pre-e-2165 callers leave
+    # them empty / False / 0.
+    entry["last_state_summary"] = state_summary_norm
+    entry["last_blockers"] = blockers_norm
+    entry["last_needs_leader_judgment"] = needs_leader_judgment_norm
+    entry["last_time_on_task_seconds"] = time_on_task_norm
     history = entry.get("history") or []
     history.append(record)
     # Ring buffer cap — drop oldest beyond PULSE_ACK_HISTORY_CAP.
@@ -475,9 +569,19 @@ def summarize_pulse_acks(trek_doc: dict) -> dict:
             "last_pulse_ack_at": ISO,
             "last_picked_choice": str,
             "choice_counts": {choice: count, ...},
+            # ms-92 / e-2165 structured snapshot fields:
+            "state_summary": str,
+            "blockers": [str, ...],
+            "needs_leader_judgment": bool,
+            "time_on_task_seconds": int,
           }
         },
         "total_acks_across_sessions": int,
+        # ms-92 / e-2165 — aggregates for the leader-digest (e-2164):
+        "active_session_count": int,    # session who reported in this digest window
+        "stuck_session_count": int,     # session whose latest snapshot has blockers
+        "idle_session_count": int,      # session whose latest state_summary contains "idle" or time_on_task=0
+        "needs_leader_judgment_count": int,
       }
 
     Compliance rate (= acks / expected ticks) requires per-session tick
@@ -485,24 +589,59 @@ def summarize_pulse_acks(trek_doc: dict) -> dict:
     bus event log scans or extend this struct. For now we expose the raw
     counters; the UI can render "session X: 5 acks since Y" without needing
     the denominator.
+
+    ms-92 / e-2165 — the structured-field aggregates lean on the
+    session-level mirrors written by ``record_pulse_ack``. Sessions
+    predating e-2165 simply contribute empty / False / 0 values so
+    counts stay accurate (= no false "stuck" alarms from legacy data).
     """
     sessions: dict = {}
     total = 0
+    active = 0
+    stuck = 0
+    idle = 0
+    needs_leader = 0
     for sid, entry in (trek_doc.get("pulse_acks") or {}).items():
         choice_counts: dict = {}
         for h in entry.get("history") or []:
             c = h.get("picked_choice") or ""
             choice_counts[c] = choice_counts.get(c, 0) + 1
+        last_state = entry.get("last_state_summary") or ""
+        last_blockers = entry.get("last_blockers") or []
+        last_needs_leader = bool(entry.get("last_needs_leader_judgment") or False)
+        last_time_on_task = int(entry.get("last_time_on_task_seconds") or 0)
         sessions[sid] = {
             "total_acks": int(entry.get("total_acks") or 0),
             "last_pulse_ack_at": entry.get("last_pulse_ack_at") or "",
             "last_picked_choice": entry.get("last_picked_choice") or "",
             "choice_counts": choice_counts,
+            # Structured snapshot mirrors (= e-2165).
+            "state_summary": last_state,
+            "blockers": list(last_blockers),
+            "needs_leader_judgment": last_needs_leader,
+            "time_on_task_seconds": last_time_on_task,
         }
         total += int(entry.get("total_acks") or 0)
+        # Aggregate counts only when the session has actually pulsed at
+        # least once — otherwise legacy noise (= empty placeholder)
+        # would inflate idle counts.
+        if int(entry.get("total_acks") or 0) > 0:
+            active += 1
+            if last_blockers:
+                stuck += 1
+            if last_needs_leader:
+                needs_leader += 1
+            # idle ≈ "no work going on right now": either explicit
+            # `state_summary` containing "idle" or time_on_task=0.
+            if (last_state and "idle" in last_state.lower()) or last_time_on_task == 0:
+                idle += 1
     return {
         "sessions": sessions,
         "total_acks_across_sessions": total,
+        "active_session_count": active,
+        "stuck_session_count": stuck,
+        "idle_session_count": idle,
+        "needs_leader_judgment_count": needs_leader,
     }
 
 
@@ -1129,6 +1268,103 @@ def parse_scope_arg(arg: str) -> dict:
             )
         return normalize_scope_entry(entry)
     return normalize_scope_entry({"project": arg})
+
+
+# ---------------------------------------------------------------------------
+# Cross-project task add via Trek scope (ms-92 / e-2141)
+# ---------------------------------------------------------------------------
+
+
+# Outcomes returned by ``check_trek_task_add_allowed``. Kept as plain
+# string constants so server-side rejections can map them to HTTP codes
+# (allowed / project_not_in_scope / milestone_not_in_scope /
+# scope_only_has_task_narrowing) without exposing internal helpers.
+TASK_ADD_ALLOWED = "allowed"
+TASK_ADD_REJECT_PROJECT_NOT_IN_SCOPE = "project_not_in_scope"
+TASK_ADD_REJECT_MILESTONE_NOT_IN_SCOPE = "milestone_not_in_scope"
+TASK_ADD_REJECT_SCOPE_ONLY_HAS_TASK_NARROWING = "scope_only_has_task_narrowing"
+
+
+def check_trek_task_add_allowed(
+    trek_doc: dict, *,
+    target_project: str,
+    target_milestone: str,
+) -> tuple[bool, str]:
+    """Decide whether the trek's scope authorises ``task.add`` on a target.
+
+    ms-92 / e-2141. The CLI / server share the same yes/no question:
+    *given this Trek's recorded scope, is the caller allowed to add a
+    task under ``target_project`` / ``target_milestone``?* Returning
+    ``(False, <reason>)`` lets callers map a single reason to either a
+    403 (server) or a friendly CLI error.
+
+    Rules (= SPEC of e-2141, also tracked by 4 unit-test paths):
+
+    1. Empty ``target_project`` or ``target_milestone`` → reject as
+       ``project_not_in_scope`` / ``milestone_not_in_scope`` respectively.
+       Callers must always supply both. Empty inputs mean the picker /
+       parser upstream is buggy; we refuse rather than guess.
+
+    2. The trek's ``scope`` must contain at least one entry matching
+       ``project == target_project``. Otherwise reject as
+       ``project_not_in_scope``.
+
+    3. Among the matching project entries, at least one must be **wide
+       enough** to cover the target milestone:
+
+       * project-wide entry (= ``{"project": pid}`` with no milestone /
+         operation / task narrowing) → covers anything under that
+         project. allowed.
+       * milestone entry (= ``{"project": pid, "milestone": ms-id}``)
+         whose ``milestone`` equals ``target_milestone`` → allowed.
+
+       Otherwise reject as ``milestone_not_in_scope``.
+
+    4. The "task-only narrowing" forbidden case (= AC #4): if **every**
+       matching project entry is task-narrowed (= ``{"project": pid,
+       "task": e-XXX}``) and none of them is project-wide or matches
+       the target milestone, reject as
+       ``scope_only_has_task_narrowing``. This preserves the user
+       responsibility frame: tasks are MS-grained decisions. Letting
+       Treks add tasks under another Trek's single-task scope would
+       let trees of tasks sprout sideways without any MS-level intent.
+
+    Operation-narrowed scope entries (= ``{"project": pid,
+    "operation": op-XX}``) are treated like task narrowings here — they
+    don't authorise sideways task creation; we reject the same way so
+    Operation work also stays MS-grained. (If someone needs cross-Op
+    task add later, that's its own design decision.)
+    """
+    if not target_project or not target_milestone:
+        if not target_project:
+            return False, TASK_ADD_REJECT_PROJECT_NOT_IN_SCOPE
+        return False, TASK_ADD_REJECT_MILESTONE_NOT_IN_SCOPE
+    scope = trek_doc.get("scope") or []
+    matching_project_entries = [
+        s for s in scope if s.get("project") == target_project
+    ]
+    if not matching_project_entries:
+        return False, TASK_ADD_REJECT_PROJECT_NOT_IN_SCOPE
+    for entry in matching_project_entries:
+        ms_ref = entry.get("milestone") or ""
+        op_ref = entry.get("operation") or ""
+        task_ref = entry.get("task") or ""
+        if not ms_ref and not op_ref and not task_ref:
+            # Project-wide scope entry — covers anything under this project.
+            return True, TASK_ADD_ALLOWED
+        if ms_ref and ms_ref == target_milestone:
+            return True, TASK_ADD_ALLOWED
+    # No project-wide and no milestone-matching entry. Distinguish the
+    # "task-only narrowing" pathology (= AC #4) from a generic milestone
+    # mismatch so the CLI can show the right hint.
+    only_task_or_op_narrowed = all(
+        (entry.get("task") or entry.get("operation"))
+        and not entry.get("milestone")
+        for entry in matching_project_entries
+    )
+    if only_task_or_op_narrowed:
+        return False, TASK_ADD_REJECT_SCOPE_ONLY_HAS_TASK_NARROWING
+    return False, TASK_ADD_REJECT_MILESTONE_NOT_IN_SCOPE
 
 
 def add_scope_entry(trek_doc: dict, *, entry: dict) -> dict:

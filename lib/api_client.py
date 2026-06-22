@@ -741,19 +741,38 @@ class ApiClient:
         )
 
     def pulse_ack_trek(self, trek_id: str, *, session_id: str,
-                       picked_choice: str = "", note: str = "") -> dict:
+                       picked_choice: str = "", note: str = "",
+                       state_summary: str = "",
+                       blockers=None,
+                       needs_leader_judgment: bool = False,
+                       time_on_task_seconds: int = 0) -> dict:
         """Self-report /beacon-trek-pulse Skill invocation (ms-88 / e-2106).
 
         Layer 2 observability: the Skill calls this as Step 1 so the server
         knows the Skill actually fired in response to a scheduler tick.
 
+        ms-92 / e-2165 — the structured fields (``state_summary`` /
+        ``blockers`` / ``needs_leader_judgment`` / ``time_on_task_seconds``)
+        are sent alongside the legacy ``picked_choice`` + ``note`` so
+        the leader-digest (e-2164) can mechanically aggregate counts
+        without parsing natural-language notes. All are optional —
+        pre-e-2165 servers ignore the unknown keys.
+
         Returns the updated per-session pulse_acks entry so the Skill can
         echo the recorded state back to the user.
         """
+        payload = {
+            "session_id": session_id,
+            "picked_choice": picked_choice,
+            "note": note,
+            "state_summary": state_summary,
+            "blockers": list(blockers or []),
+            "needs_leader_judgment": bool(needs_leader_judgment),
+            "time_on_task_seconds": int(time_on_task_seconds or 0),
+        }
         return self.post(
             f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/pulse-ack",
-            {"session_id": session_id, "picked_choice": picked_choice,
-             "note": note},
+            payload,
         )
 
     def list_trek_pulse_acks(self, trek_id: str) -> dict:
@@ -823,6 +842,41 @@ class ApiClient:
         return self.patch(
             f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/task-state",
             {"task_id": task_id, "state": state, "note": note},
+        )
+
+    def add_trek_task(self, trek_id: str, *,
+                      target_project: str,
+                      target_milestone: str,
+                      description: str,
+                      entry_type: str = "task",
+                      priority: str = "",
+                      motivation: str = "",
+                      acceptance_criteria: str = "") -> dict:
+        """ms-92 / e-2141 — cross-project task add via Trek scope.
+
+        Server walks ``trek.check_trek_task_add_allowed`` and either:
+          * 200 with {"entry_id": "e-XXX", "project_id": ..., "milestone_id": ...}
+            on success (task is written under target project's MS),
+          * 403 ``scope-reject`` (project / milestone not in scope, or
+            scope-only-task-narrowing — same 4 reason codes the CLI knows),
+          * 404 when trek does not exist,
+          * 400 when ``target`` is malformed.
+
+        ``meta.trek_id`` is stamped on the created entry for audit trail
+        — that lets ``/beacon-retrospect`` query "which tasks were
+        sprouted via Trek X" later.
+        """
+        return self.post(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/task-add",
+            {
+                "target_project": target_project,
+                "target_milestone": target_milestone,
+                "description": description,
+                "type": entry_type,
+                "priority": priority,
+                "motivation": motivation,
+                "acceptance_criteria": acceptance_criteria,
+            },
         )
 
     def get_trek_summary(self, trek_id: str) -> dict:

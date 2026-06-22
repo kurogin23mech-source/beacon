@@ -614,6 +614,150 @@ def build_progress_check_payload(
     return _payload(trek_id, body, target_entries, now)
 
 
+# ---------------------------------------------------------------------------
+# ms-92 / e-2164 — leader-digest payload builder.
+# ---------------------------------------------------------------------------
+
+_LEADER_DIGEST_HEADER = "Trek leader digest"
+_LEADER_DIGEST_KIND = "trek-leader-digest"
+
+
+def build_leader_digest_payload(
+    trek_doc: dict,
+    *,
+    now: Optional[datetime.datetime] = None,
+) -> dict:
+    """Render the leader-only aggregated status snapshot for one trek tick.
+
+    ms-92 / e-2164 — fires on the same cadence as ``trek-progress-check``
+    but goes **only to the leader's session** so the leader sees "what
+    is everyone doing right now" without polling each executor. The
+    payload is structured (= ``sessions[]`` + ``summary`` aggregate)
+    so the leader-side AI can render it deterministically without
+    parsing natural language.
+
+    Inputs come from ``trek.summarize_pulse_acks(trek_doc)`` so the
+    digest stays in sync with the structured pulse-ack schema
+    (= e-2165). Sessions that have never pulsed are omitted from
+    ``sessions[]`` (= no false silence alarms from fresh joins).
+
+    Returned shape (= the bus event payload field):
+        {
+          "kind": "trek-leader-digest",
+          "trek_id": "tk-...",
+          "created_at": "<ISO8601>",
+          "summary": {
+            "active": int,
+            "stuck": int,
+            "idle": int,
+            "needs_leader_judgment": int,
+            "total_acks_across_sessions": int,
+          },
+          "sessions": [
+            {
+              "session_id": str,
+              "state_summary": str,
+              "blockers": [str, ...],
+              "needs_leader_judgment": bool,
+              "time_on_task_seconds": int,
+              "last_pulse_ack_at": ISO,
+              "last_picked_choice": str,
+              "total_acks": int,
+            },
+            ...
+          ],
+          "body": "<one-paragraph human-readable fallback so the
+                   leader's AI can echo it to the user without going
+                   through structured rendering if they choose>",
+        }
+    """
+    # Local import to keep module-level imports light (= the scheduler
+    # module is imported in lots of hot test paths and trek is a
+    # comparatively heavy module).
+    import trek as trek_mod
+
+    now = _ensure_utc(now or datetime.datetime.now(datetime.timezone.utc))
+    trek_id = trek_doc.get("trek_id", "")
+    summary = trek_mod.summarize_pulse_acks(trek_doc)
+
+    sessions_list: list[dict] = []
+    for sid, entry in summary["sessions"].items():
+        if int(entry.get("total_acks") or 0) <= 0:
+            # Skip placeholders so the digest doesn't claim sessions
+            # that never actually pulsed. (summarize_pulse_acks already
+            # excludes them from aggregate counts but keeps them in
+            # the per-session dict for completeness.)
+            continue
+        sessions_list.append({
+            "session_id": sid,
+            "state_summary": entry.get("state_summary") or "",
+            "blockers": list(entry.get("blockers") or []),
+            "needs_leader_judgment": bool(entry.get("needs_leader_judgment")),
+            "time_on_task_seconds": int(entry.get("time_on_task_seconds") or 0),
+            "last_pulse_ack_at": entry.get("last_pulse_ack_at") or "",
+            "last_picked_choice": entry.get("last_picked_choice") or "",
+            "total_acks": int(entry.get("total_acks") or 0),
+        })
+    # Sort by time_on_task descending so "longest stuck" surfaces first —
+    # the most likely candidate for leader attention.
+    sessions_list.sort(
+        key=lambda s: s.get("time_on_task_seconds") or 0,
+        reverse=True,
+    )
+
+    summary_block = {
+        "active": int(summary.get("active_session_count") or 0),
+        "stuck": int(summary.get("stuck_session_count") or 0),
+        "idle": int(summary.get("idle_session_count") or 0),
+        "needs_leader_judgment": int(
+            summary.get("needs_leader_judgment_count") or 0
+        ),
+        "total_acks_across_sessions": int(
+            summary.get("total_acks_across_sessions") or 0
+        ),
+    }
+
+    # Human-readable fallback body. The leader-side AI may choose to
+    # render the structured sessions[] instead, but having a body lets
+    # legacy Skills / un-upgraded bridges still surface something.
+    if sessions_list:
+        per_session_lines = []
+        for s in sessions_list[:6]:  # cap to 6 lines for readability
+            tag = ""
+            if s["blockers"]:
+                tag = " [stuck]"
+            elif "idle" in (s["state_summary"] or "").lower():
+                tag = " [idle]"
+            elif s["needs_leader_judgment"]:
+                tag = " [needs leader]"
+            per_session_lines.append(
+                f"  - {s['session_id'][:8]}…{tag}: "
+                f"{s['state_summary'] or '(no summary)'} "
+                f"(on task {s['time_on_task_seconds']}s)"
+            )
+        sessions_block_str = "\n".join(per_session_lines)
+    else:
+        sessions_block_str = "  (まだ pulse-ack を打った session がありません)"
+
+    body = (
+        f"[{_LEADER_DIGEST_HEADER}] trek_id={trek_id}\n"
+        f"active={summary_block['active']} "
+        f"stuck={summary_block['stuck']} "
+        f"idle={summary_block['idle']} "
+        f"needs_leader_judgment={summary_block['needs_leader_judgment']}\n"
+        f"{sessions_block_str}"
+    )
+
+    return {
+        "kind": _LEADER_DIGEST_KIND,
+        "trek_id": trek_id,
+        "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "summary": summary_block,
+        "sessions": sessions_list,
+        "body": body,
+    }
+
+
 def _payload(trek_id: str, body: str, target_entries: list[str],
              now: datetime.datetime) -> dict:
     return {

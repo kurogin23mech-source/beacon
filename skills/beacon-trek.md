@@ -139,6 +139,36 @@ beacon trek create --name "<name>" --description "<description>" [--include-proj
   - 現状確認:     /beacon-trek status trek-XXXX
 ```
 
+### 1-d: leader 自覚 reminder (= ms-92 / e-2166、 read-and-acknowledge)
+
+trek 作成者は自動で leader role に就く。 leader は調停者 (= 仲裁する立場) ではなく **推進者** (= Trek を完遂させる意志を能動的に発火させる人) として振る舞う必要がある。 ぬるっと開始しないため、 作成直後に CORE doc `trek-leader-stance` を参照し、 期待される能動行動を 1 度確認する:
+
+```
+─── あなたは Trek leader role を引き受けました (= ms-92 / e-2166) ────────
+
+leader stance (= 取りまとめ役の姿勢) — 詳しくは CORE doc `trek-leader-stance` 参照:
+
+  1. leader は調停者ではなく **推進者**: Trek を完遂させる意志は scheduler / TTL
+     罰則ではなく leader 自身が source。 「気付いたら動かしてあげる」 立場。
+
+  2. 能動行動の例:
+     - 他 session の最新 pulse 時刻を自分から query して状態把握する
+       (例: `beacon trek show <trek-id>` → pulse_acks の last_pulse_ack_at を見る)
+     - 12 分以上 stuck の session に自分から push DM を送る (= peer-first ではなく
+       leader 直接介入が必要な合図)
+     - task が leader_review に降格したら即座に 3 択 (approve / re-work /
+       forward-to-user) を選ぶ (= /beacon-trek-review surface)
+     - Trek 完遂は scheduler 任せではなく、 leader 意志で「もう archive する」
+       と判断して archive まで持っていく
+
+  3. NG (= 落とし穴): scheduler が黙ったから済んだ / 全員 stuck で待ってる /
+     誰かが動かしてくれるはず
+
+(= read-and-acknowledge。 OK と入力で trek 起動を続ける)
+```
+
+「OK」 や同意の応答を受け取ったら create を完了扱いにする。 拒否 / cancel なら trek は作成済 (= 既に CLI で land 済) なので 「leader role を継続する場合は `beacon trek transfer-leader <trek-id> --to <session_id>` で後任を立てるか、 改めて自覚を持って動いてください」 と伝える。
+
 ---
 
 ## Step 2: join (= 既存 trek に参加)

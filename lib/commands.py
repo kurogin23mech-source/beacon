@@ -5317,6 +5317,12 @@ TREK_AUTO_ARM_CHANNELS = (
     "trek-progress-check",
     "trek-trigger",
     "trek-task-review",
+    # ms-92 / e-2164 — leader-digest channel. Leaders receive an
+    # aggregated per-session status snapshot on the same cadence as
+    # trek-progress-check. The channel is auto-execute so the leader's
+    # AI session can render the digest immediately without waiting for
+    # human Skill invocation.
+    "trek-leader-digest",
 )
 TREK_AUTO_ARM_DEFAULT_BUDGET = 20
 
@@ -5381,6 +5387,60 @@ def _arm_for_trek(trek_id: str) -> dict:
 TREK_JOIN_CONSENT_PHRASE = "I UNDERSTAND"
 
 
+def _build_trek_join_consent_explanation(trek_id: str, email: str) -> str:
+    """Build the 4-section consent explanation text (ms-92 / e-2182).
+
+    Sections (= AC #1 of e-2182, mirroring CORE doc trek-positioning
+    `b1XOKXQeC0JXaKkO0CRt`「缶詰の徹夜作業部屋」 vocabulary):
+
+      (a) **Trek とは何か** — what the user is opting into in 1 line
+      (b) **委譲する権限** — concrete actions AI gains permission for,
+          each with a one-line example so the user can recognise the
+          shape of the autonomy being granted
+      (c) **user 確認境界** — concrete things AI still must not do
+          (= deploy / release / scope-out / 不可逆 actions / PR merge),
+          so the user knows where their judgment is still required
+      (d) **撤回方法** — how to leave the Trek, what happens after
+
+    Split into a builder so cloud / local paths share the same text
+    (= AC #6) and tests can assert the 4 sections via plain string
+    search without mocking stdin / stderr.
+    """
+    return (
+        f"\n─── Trek 参加同意 (ms-92 e-2182) ─────────────────────\n"
+        f"trek_id:    {trek_id}\n"
+        f"joining as: {email}\n"
+        f"\n"
+        f"(a) Trek とは何か\n"
+        f"   Trek (= 缶詰の徹夜作業部屋) は 「事前承認スコープを持つ自律実行の作業空間」 です。\n"
+        f"   一度参加すると、 scope 内の DM や action は AI 判断で進みます (= turn 制限なし)。\n"
+        f"   詳細: CORE doc trek-positioning (b1XOKXQeC0JXaKkO0CRt)。\n"
+        f"\n"
+        f"(b) 参加で委譲する権限 (= 個別承認なしで AI が実行できるようになる行為)\n"
+        f"   - scope 内 DM が blanket 自動承認 (= 一括許可) で配信される\n"
+        f"     例: 別 session からの「次やって」 DM が user 確認なく届く (= ms-70 / e-1854 blanket bypass)\n"
+        f"   - executor (= 実行担当 session) が working / done / waiting-review を自分で宣言できる\n"
+        f"     例: subagent が task 完了を自己判断で stamp、 leader が後でまとめて review\n"
+        f"   - leader が PR (= プルリクエスト) の approve / reject を AI 自律で進められる\n"
+        f"     例: PR 内容が intent (= 目的) と整合していれば AI 単独で approve、 merge は別境界 (= (c) 参照)\n"
+        f"   - server-side scheduler が定期的に「次やって」 progress-check を push してくる\n"
+        f"     例: trek-progress-check / trek-trigger / trek-task-review channel が autonomous loop に乗る\n"
+        f"\n"
+        f"(c) user 確認境界 (= AI が touched せず、 必ず user に escalate される領域)\n"
+        f"   - deploy (= 本番への配置) / release (= リリース ceremony) は必ず user 承認\n"
+        f"   - Trek scope 外の action (= 別 project / 別 MS への直接 write) は user 確認必須\n"
+        f"   - 不可逆 action (= git force-push / hard delete / 外部 email 送信 等) は user_review に forward、 AI 単独 NG\n"
+        f"   - 個別 PR の merge は AI 自律 NG。 Trek 終結時に user 1 confirm で集約承認\n"
+        f"     (= e-2169 で確立した 「approve = AI / merge = Trek 単位 user / release = user」 の 3 段境界)\n"
+        f"\n"
+        f"(d) 撤回方法\n"
+        f"   いつでも `beacon trek leave {trek_id}` で抜けられます。\n"
+        f"   leave 後は blanket 自動承認が解除され、 以後の DM は通常の user 確認経路に戻ります。\n"
+        f"   leader role を持っている場合は先に `beacon trek transfer-leader {trek_id} --to <session_id>` で\n"
+        f"   後任を立ててから leave してください (= last-leader 抜けは server が 400 で reject)。\n"
+    )
+
+
 def _trek_join_consent_gate(trek_id: str, email: str, *, json_mode: bool) -> None:
     """Gate ``beacon trek join`` on per-session 明示同意 (ms-88 / e-2090).
 
@@ -5395,38 +5455,33 @@ def _trek_join_consent_gate(trek_id: str, email: str, *, json_mode: bool) -> Non
     - ``json_mode`` is irrelevant to the gate itself but affects the abort
       payload (= keep stderr human-readable either way; the gate is a UX
       checkpoint, not a JSON API).
+
+    The explanation text is built by ``_build_trek_join_consent_explanation``
+    (ms-92 / e-2182) so cloud / local paths share the same 4-section
+    structure and tests can assert section presence without driving
+    stdin / stderr.
     """
-    explanation = (
-        f"\n⚠ Trek 参加 = AI を turn 制限なく走らせる権限委譲です\n"
-        f"  trek_id: {trek_id}\n"
-        f"  joining as: {email}\n"
-        f"\n"
-        f"  参加すると次の挙動が unlock されます:\n"
-        f"  - scope 内 DM が blanket 自動承認 (= ms-70 / e-1854) で配信される\n"
-        f"  - trek-progress-check 等の channel が autonomous execution に乗る\n"
-        f"  - server-side scheduler が定期的に「次やって」 と push してくる\n"
-        f"  - 不可逆 action (= deploy / release / external write) は user_review に\n"
-        f"    forward されますが、 それ以外は AI 判断で実行されます\n"
-        f"\n"
-        f"  撤回したい場合: `beacon trek leave {trek_id}` で同等の手順で抜けられます。\n"
-    )
+    explanation = _build_trek_join_consent_explanation(trek_id, email)
 
     if not sys.stdin.isatty():
         # Non-TTY (= bot / CI / Skill pipe) は typed prompt を取れない。
         # silent auto-accept は本 gate の趣旨に反するので明示 flag を要求。
         sys.stderr.write(explanation)
         sys.stderr.write(
-            "\n  非 TTY 経由のため typed-ack を取れません。 自動化 / bot 経路で\n"
-            "  参加する場合は `--i-understand-the-implications` を明示的に渡してください。\n"
+            "\n─── 自動化 / bot 経路 ────────────────────────────────\n"
+            "非 TTY 経由のため typed-ack を取れません。 自動化 / bot 経路で\n"
+            "参加する場合は `--i-understand-the-implications` を明示的に渡してください\n"
+            "(= flag enforcement、 e-2090 で land した forcing function)。\n"
         )
         sys.exit(1)
 
     sys.stderr.write(explanation)
     sys.stderr.write(
-        f"\n  意味を理解したうえで参加する場合は次のフレーズを正確に入力してください\n"
-        f"  (case-sensitive、 余分な空白なし):\n"
-        f"    {TREK_JOIN_CONSENT_PHRASE}\n"
-        f"\n  > "
+        f"\n─── 同意確認 ───────────────────────────────────────\n"
+        f"上記 (a)-(d) を理解したうえで参加する場合は次のフレーズを正確に入力してください\n"
+        f"(case-sensitive、 余分な空白なし):\n"
+        f"   {TREK_JOIN_CONSENT_PHRASE}\n"
+        f"\n> "
     )
     sys.stderr.flush()
     try:
@@ -5713,6 +5768,10 @@ def cmd_trek_pulse_ack():
                                 'continue' / 'dm-leader' / 'dm-peer' (ms-88
                                 / e-2140) / 'no-op' / '' (= 空文字 legacy)
       BEACON_TREK_NOTE          optional short context (= 200 char cap)
+      BEACON_TREK_STATE_SUMMARY    optional 1-line state snapshot (= ms-92 / e-2165, ≤100 chars)
+      BEACON_TREK_BLOCKERS         optional newline-separated blocker list (= ms-92 / e-2165, ≤3 items × ≤200 chars)
+      BEACON_TREK_NEEDS_LEADER     "1" → flag the pulse as needs_leader_judgment (= ms-92 / e-2165)
+      BEACON_TREK_TIME_ON_TASK     optional integer seconds on current task (= ms-92 / e-2165, default 0)
       BEACON_JSON               "1" → json output
     """
     import trek
@@ -5722,6 +5781,19 @@ def cmd_trek_pulse_ack():
     session_id = os.environ.get("BEACON_SESSION_ID", "").strip()
     picked_choice = os.environ.get("BEACON_TREK_PICKED_CHOICE", "").strip()
     note = os.environ.get("BEACON_TREK_NOTE", "")
+    # ms-92 / e-2165 — structured fields. Newline-separated blockers
+    # match the CLI shape "--blocker A --blocker B" expanding into a
+    # bash array joined with \n at the dispatcher boundary.
+    state_summary = os.environ.get("BEACON_TREK_STATE_SUMMARY", "")
+    blockers_raw = os.environ.get("BEACON_TREK_BLOCKERS", "")
+    blockers = [
+        b for b in (blockers_raw or "").split("\n") if b.strip()
+    ]
+    needs_leader = os.environ.get("BEACON_TREK_NEEDS_LEADER", "") == "1"
+    try:
+        time_on_task = int(os.environ.get("BEACON_TREK_TIME_ON_TASK", "0") or 0)
+    except ValueError:
+        time_on_task = 0
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not trek_id:
@@ -5741,6 +5813,10 @@ def cmd_trek_pulse_ack():
             entry = client.pulse_ack_trek(
                 trek_id, session_id=session_id,
                 picked_choice=picked_choice, note=note,
+                state_summary=state_summary,
+                blockers=blockers,
+                needs_leader_judgment=needs_leader,
+                time_on_task_seconds=time_on_task,
             )
         except RuntimeError as e:
             print(f"Error: {e}", file=sys.stderr)
@@ -5767,6 +5843,10 @@ def cmd_trek_pulse_ack():
         trek.record_pulse_ack(
             t, session_id=session_id,
             picked_choice=picked_choice, note=note,
+            state_summary=state_summary,
+            blockers=blockers,
+            needs_leader_judgment=needs_leader,
+            time_on_task_seconds=time_on_task,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -6456,6 +6536,164 @@ def cmd_trek_plan():
                 print(f"goal_state set on trek {trek_id}: \"{new_val}\"")
             else:
                 print(f"goal_state cleared on trek {trek_id}")
+
+
+def cmd_trek_task_add():
+    """Cross-project task add through Trek scope (ms-92 / e-2141).
+
+    The caller specifies a target ``<pid>:<ms-id>`` plus task description.
+    The CLI (here) and the server share one scope-guard helper
+    (``trek.check_trek_task_add_allowed``) so a single decision drives
+    both a 403 reject server-side and a friendly CLI error here.
+
+    Local mode does not (yet) support cross-project task add because the
+    local data store doesn't carry a project_id → path registry — the
+    feature is genuinely cloud-shaped and the local refuse keeps the
+    failure mode explicit instead of pretending to work. Cloud mode
+    posts to ``POST /api/treks/{trek_id}/task-add`` which performs the
+    same scope walk + writes the task to the target project's MS,
+    stamping ``meta.trek_id`` on the entry for audit-trail traceability.
+
+    Env:
+      BEACON_TREK_ID                (required, e.g. tk-abcd1234)
+      BEACON_TREK_TASK_TARGET       (required, "<project-id>:<ms-id>")
+      BEACON_DESCRIPTION            (required, the task description)
+      BEACON_PRIORITY               (optional, lowest/low/middle/high/highest)
+      BEACON_MOTIVATION             (optional)
+      BEACON_ACCEPTANCE_CRITERIA    (optional)
+      BEACON_TYPE                   (optional, default "task")
+      BEACON_JSON                   "1" → json output
+    """
+    import trek
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    target = os.environ.get("BEACON_TREK_TASK_TARGET", "").strip()
+    description = os.environ.get("BEACON_DESCRIPTION", "").strip()
+    priority = os.environ.get("BEACON_PRIORITY", "").strip()
+    motivation = os.environ.get("BEACON_MOTIVATION", "")
+    acceptance_criteria = os.environ.get("BEACON_ACCEPTANCE_CRITERIA", "")
+    entry_type = os.environ.get("BEACON_TYPE", "task").strip() or "task"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required (e.g. tk-abcd1234)", file=sys.stderr)
+        sys.exit(1)
+    if not target:
+        print(
+            "Error: --target <project-id>:<ms-id> is required",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not description:
+        print("Error: task description is required", file=sys.stderr)
+        sys.exit(1)
+    if ":" not in target:
+        print(
+            f"Error: --target {target!r} must be <project-id>:<ms-id> "
+            "(omit the colon → project-wide scope which is not allowed "
+            "for task add; pick an MS explicitly)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    target_project, target_ms = target.split(":", 1)
+    target_project = target_project.strip()
+    target_ms = target_ms.strip()
+    if not target_project:
+        print(
+            f"Error: --target {target!r} missing project_id before ':'",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not target_ms or not target_ms.startswith("ms-"):
+        print(
+            f"Error: --target {target!r} must end with ms-XX "
+            "(operations / single tasks are not valid task-add targets; "
+            "see SPEC ms-92 e-2141 AC #4 — MS-grain enforcement)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # ----------- Cloud mode (= the actual cross-project use case) -----------
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            if not hasattr(client, "add_trek_task"):
+                print(
+                    "Error: this CLI is paired with an older cloud server "
+                    "that doesn't expose POST /api/treks/{trek_id}/task-add. "
+                    "Upgrade the server (= ms-92 e-2141 endpoint) or fall "
+                    "back to single-project `beacon task add -m <ms-id>` "
+                    "for now.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            result = client.add_trek_task(
+                trek_id,
+                target_project=target_project,
+                target_milestone=target_ms,
+                description=description,
+                entry_type=entry_type,
+                priority=priority,
+                motivation=motivation,
+                acceptance_criteria=acceptance_criteria,
+            )
+        except RuntimeError as e:
+            # Server-side 403 / 400 / 404 surfaces here. The server's
+            # rejection ``reason`` is included in the error message so
+            # the CLI tail line tells the user *why* (project not in
+            # scope vs. task-only narrowing vs. milestone mismatch).
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        if json_mode:
+            print(json.dumps(result, ensure_ascii=False))
+        else:
+            eid = result.get("entry_id", "<unknown>")
+            print(
+                f"Added cross-project task [{eid}] under "
+                f"{target_project}:{target_ms} via trek {trek_id}: "
+                f"{description}"
+            )
+        return
+
+    # ----------- Local mode (= rejected with an honest message) -----------
+    # We could in principle traverse a registry of local projects, but the
+    # local data model doesn't carry one (= local mode is single-project by
+    # design). Pretending to succeed by writing into the current cwd's
+    # project.json would silently strip the cross-project semantics.
+    # The local-mode scope guard *can* still surface the decision so users
+    # see the same error vocabulary they'd see from the server.
+    import trek_store
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(
+            f"Error: trek {trek_id} not found in local store. Cross-project "
+            "task add through Trek requires cloud mode (= server endpoint "
+            "POST /api/treks/{trek_id}/task-add walks the scope and writes "
+            "into the target project). Switch to cloud mode (`beacon cloud "
+            "setup`) or add the task directly with `beacon task add -m "
+            f"{target_ms}` from inside the target project's cwd.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    allowed, reason = trek.check_trek_task_add_allowed(
+        t, target_project=target_project, target_milestone=target_ms,
+    )
+    if not allowed:
+        print(
+            f"Error: trek scope rejects this task add ({reason}). "
+            f"trek {trek_id} scope: {t.get('scope') or []}",
+            file=sys.stderr,
+        )
+        sys.exit(2)  # 2 → "scope reject" so callers can distinguish
+    print(
+        "Error: scope check passed but local mode cannot write across "
+        "projects — the local data store is single-project by design. "
+        "Switch to cloud mode for cross-project task add, or use "
+        f"`beacon task add -m {target_ms}` from inside the target "
+        "project's cwd.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 def cmd_trek_leave():
@@ -10087,12 +10325,82 @@ def cmd_pr_request_changes():
 
 
 
+def _trek_finalize_consent_active() -> bool:
+    """ms-92 / e-2169 — Trek 終結 1 confirm path opt-in detection.
+
+    The structural ban on AI-session pr-merge (see below) has one explicit
+    escape hatch: the ``/beacon-trek-finalize`` 1-confirm collective
+    merge path. That Skill exports ``BEACON_TREK_FINALIZE_CONSENT=1``
+    before delegating to ``beacon pr merge`` so the ban knows the merge
+    is happening with user collective approval, not as an AI-side
+    individual-PR self-merge.
+
+    The env var is **per-process** (not persisted), so a forgotten leak
+    cannot turn a future AI session into an unrestricted merger.
+    """
+    return os.environ.get("BEACON_TREK_FINALIZE_CONSENT", "") == "1"
+
+
+def _ai_session_merge_ban_active() -> bool:
+    """ms-92 / e-2169 — refuse AI-session individual PR merge.
+
+    See CORE doc ``pr-review-autonomy-boundary`` for the rationale: AI
+    sessions are authorised to approve / reject / request-changes on
+    PRs, but **merge** belongs to the Trek-unit user collective
+    confirmation (= ``/beacon-trek-finalize``) so the AI can't
+    self-loop "I wrote it, I approved it, I merged it" without the
+    user ever exercising codebase ownership.
+
+    The ban is on by default for AI sessions and bypassed only when
+    one of three explicit signals is present:
+
+      * ``BEACON_TREK_FINALIZE_CONSENT=1`` — Trek-finalize Skill is
+        the merger (= the 1-confirm collective approval path).
+      * ``BEACON_PR_MERGE_USER_OVERRIDE=1`` — user explicit opt-in
+        escape hatch (= user prompt phrased the merge directly).
+      * ``BEACON_SESSION_KIND=human`` — non-AI session (= straight
+        terminal usage). Default ``BEACON_SESSION_KIND`` (unset) is
+        treated as AI for safety; humans wanting straight-line merge
+        can either set the env var globally or use the override.
+
+    Returns True if the ban should fire (= refuse the merge).
+    """
+    if _trek_finalize_consent_active():
+        return False
+    if os.environ.get("BEACON_PR_MERGE_USER_OVERRIDE", "") == "1":
+        return False
+    kind = (os.environ.get("BEACON_SESSION_KIND", "") or "").strip().lower()
+    if kind == "human":
+        return False
+    return True
+
+
 def cmd_pr_merge():
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     if not entry_id:
         print("Error: entry ID required", file=sys.stderr)
         sys.exit(1)
+    # ms-92 / e-2169 — AI-session merge ban. Refuses the call when the
+    # 3 escape hatches (Trek-finalize consent / user override / human
+    # session kind) are all absent. The error message names every escape
+    # so a stuck user can pick the right one for their context.
+    if _ai_session_merge_ban_active():
+        print(
+            "Error: individual PR merge from an AI session is refused "
+            "(ms-92 / e-2169 structural ban).\n"
+            "  See CORE doc `pr-review-autonomy-boundary` for the role "
+            "split (= AI approves, Trek-unit user merges, user releases).\n"
+            "  Bypass paths (= one of these makes the merge proceed):\n"
+            "    1. /beacon-trek-finalize <trek-id> — 1-confirm "
+            "collective merge with the rest of the Trek's PRs.\n"
+            "    2. BEACON_PR_MERGE_USER_OVERRIDE=1 — explicit user "
+            "opt-in for one-off merges.\n"
+            "    3. BEACON_SESSION_KIND=human — declare the calling "
+            "session is human-driven (= straight terminal use).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     import datetime
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     data = load_project()
@@ -17084,6 +17392,8 @@ if __name__ == "__main__":
         "trek_leave": cmd_trek_leave,
         "trek_plan": cmd_trek_plan,
         "trek_task_state": cmd_trek_task_state,
+        # ms-92 / e-2141 — cross-project task add via Trek scope
+        "trek_task_add": cmd_trek_task_add,
         "trek_stop": cmd_trek_stop,
         "trek_resume": cmd_trek_resume,
         "trek_pulse_ack": cmd_trek_pulse_ack,

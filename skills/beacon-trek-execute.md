@@ -108,7 +108,41 @@ cd "$PROJECT_DIR" 2>/dev/null; beacon-find-root >/dev/null && echo "OK" || echo 
 
 `.beacon/cloud.json` が無い (= local mode) でも Trek 自体は local store (`~/.beacon/treks/`) で動くので続行可。ただし trek-trigger 経由起動は cloud 前提なので、引数経由 (= path 2 or 3) のみ受け付ける。
 
-## Step 0: 起動コンテキストの確定
+## Step 0: leader 自覚 reminder (= ms-92 / e-2166、 forcing function)
+
+この Skill を実行する session は **leader role を持つ可能性が高い** (= trek-progress-check は ms-88 / e-2109 で leader を除外する fan-out 設計、 残るは executor 自身 / leader-digest 受信時 / 引数経由起動)。 自分が leader として動くかを毎起動で 1 度自問する。 CORE doc `trek-leader-stance` の要点を ここに inline で再掲 し、 自律 action 開始前に読まれることを保証する (= 「Skill 起動 = leader 自覚 reminder 通過」 の構造を作る):
+
+```
+─── leader stance reminder (= ms-92 / e-2166) ────────────────────────
+
+あなたが leader role の session として起動した場合 (= 自 session_id が
+trek_doc.leader_session_id と一致 / 起動が trek-leader-digest 由来 /
+引数経由で leader role を確認している場合):
+
+  - leader は **調停者ではなく推進者**: Trek 完遂は scheduler 任せでは
+    なく、 leader 意志が source。 「動かなければ動かしてあげる」 立場
+  - 期待される能動行動:
+    1. 他 session の最終 pulse_at を能動的に query (= beacon trek show
+       --json から pulse_acks の last_pulse_ack_at を読む)
+    2. 12 分以上 stuck の session に自分から push DM (= leader 直接介入
+       を peer-first ではなく leader role として実行)
+    3. task が leader_review に降格していたら即座に 3 択を選ぶ
+       (= /beacon-trek-review surface 経由、 放置 = silent halt 病理)
+    4. Trek 完遂は leader 意志で 「もう archive する」 と判断して
+       archive まで持っていく
+  - 構造的 enforcement (= 「N 分ごと DM 強制」 / punitive 構造) は導入
+    しない: philosophy 違反として CORE doc trek-leader-stance に明示
+    されている。 reminder は意志を起こす forcing function に留める
+
+詳細: CORE doc `trek-leader-stance` 参照 (beacon doc show trek-leader-stance)。
+
+executor role (= leader でない) として起動した場合は本 reminder は
+information only。 通常の Step 1-4 に進む。
+```
+
+reminder を読み終えたら Step 1 に進む (= 確認 prompt は取らない、 reminder は意志を起こすトリガー、 user 介入は不要)。
+
+## Step 0-context: 起動コンテキストの確定 (= 旧 Step 0)
 
 bus event 由来 (= inbox hook の "TREK ACTION" block or "TREK PROGRESS CHECK" block) か、user 引数か、会話文脈かを判定し、`trek_id` を確定する。
 

@@ -262,57 +262,70 @@ grant コマンドが失敗した場合 (ネットワークエラー等) は、�
 
 ---
 
-## Step 5: 本文の入力 (両モード共通)
+## Step 5: 本文入力 + 統合 draft + 1 prompt 確認 (両モード共通) — ms-92 e-2181 で旧 Step 5 / 5b / 5c / Step 6 を集約
 
-ユーザーに本文を尋ねる:
+**変更の意図 (= ms-92 e-2181)**: 旧設計は 「本文 prompt → action prompt → template prompt → draft + yes/edit/cancel prompt」 と user が同じ内容を 2 回以上見る冗長経路だった。 user の起動メッセージで recipient + content が既に明示されていれば追加対話を完全 skip し、 normal な DM は 「draft + 1 confirm」 の 1 prompt で送れるようにする。 安全境界 (= cross-project / sensitivity high / 外部 user 初回 等) は 1 prompt 内 inline の警告表示 + 危険経路では明示 force-yes 文言入力 で構造的に維持する (= 2 prompt 化しない、 安全性は犠牲にしない)。
 
-```
-本文を入力してください (改行 OK、空行 + Enter で送信):
-```
+**ms-68 / e-1643 補足 (= entry-writing principle の draft 表示)**: 本 Step は draft 提示型 (= 送信前に full argv + payload 本文をユーザーに見せて yes/edit/cancel を取る形)、 ms-68 SPEC の「書き込み直前の draft 表示」要件を満たす。 draft 表示前に payload 本文について self-review 4 原則 (読み手目線 1 行 / 横文字 3 段階 / ID 参照に文脈 / 尻切れトンボ禁止) を 1 度通す。 **特に DM は受信側 AI が「非開発者の代理として読む」可能性がある (= 受信側 AI は親プロジェクトの文脈を持たない)** ため、横文字濫用 / ID 参照に文脈なし は致命的。 違反があれば `edit` で Step 5a に戻して書き直す。
 
-reply mode のときは親 DM を引用形式で添える:
+---
+
+### Step 5a: 入力経路の判定 (= 起動メッセージから recipient + content を拾えるか)
+
+user の Skill 起動メッセージ (= /beacon-dm-send の引数や直前 user 発話) を読み、 以下が全て揃っているか確認:
+
+- **recipient** (= picker で選んだ session_id、 または起動メッセージで「<sid> に送って」 / 「@<machine名> に」 等で明示)
+- **content** (= 送信本文、 起動メッセージで「<本文>」 のように明示)
+- **action** / **template** 種別 (= 不要が default、 明示無ければ skip 扱い)
+
+判定結果による分岐:
+
+| 状態 | 分岐 |
+|---|---|
+| 全部揃っている | Step 5b (= 対話入力) を skip、 直接 Step 5c (= draft + 1 confirm) へ |
+| 一部欠落 | Step 5b で **不足分のみ** 対話入力 (= 既に決まっている項目は再質問しない) |
+
+これにより 「user が完全形式で叩いた DM 送信」 は 1 confirm round-trip、 「不完全な起動」 は対話 + 1 confirm の 2 path で同じ最終 confirm prompt を共有する (= AC #2 / #6)。
+
+---
+
+### Step 5b: 不足分のみ対話で取得 (= 必要時のみ実行)
+
+Step 5a で欠落と判定された項目だけを聞く。 複数項目を 1 prompt に束ねて尋ねてよい (= 「本文 + action + template の有無 を一括で書いてください」 等)。
+
+聞く可能性のある項目:
+
+- **本文** (不足時): 「本文を入力してください (改行 OK、 空行 + Enter で送信)」
+- **reply mode の引用** (任意、 default yes): 親 DM の先頭 3 行を引用形式で本文先頭に添えるか
+- **send mode の action 指定** (任意、 default なし): 「受信側に auto-execute 権限を渡す action 名はありますか? 普通は空 Enter」 (reply mode では skip = 副作用権限付与は新規送信の役割)
+- **テンプレート種別** (任意、 default skip): 「pr-review / op-result / skip」 の picker (詳細は Step 5b-ext)
+
+入力された本文は **そのまま文字列として** 保持する。 **JSON エスケープは Skill が自動で行う** (= user が `--payload '{"text":"..."}'` 形式で書く必要は無い)。
+
+reply mode で引用 yes を選んだ場合の引用フォーマット:
 ```
 [親 DM 引用]
 from: <from_session の頭8文字>
 > <親 payload.text の先頭3行 or 全体>
 ```
 
-本文を **そのまま文字列として** 保持する。**JSON エスケープは Skill が自動で行う** — ユーザーが `--payload '{"text":"..."}'` 形式で書く必要は無い。
+#### Step 5b-ext: テンプレート骨格 (= 選択された場合のみ Step 5c の draft 組み立て前に適用)
 
-### Step 5b: action 指定 (send mode、任意)
+繰り返し送る種類の DM (= PR レビュー依頼 / Operation 結果共有) は、 毎回ゼロから本文を書くと受信側が「何を見ればいいか」 を読み取るコストが上がる。 ms-80 e-1820 で導入した骨格テンプレートを Step 5a の起動メッセージ または Step 5b の picker で選択された場合のみ適用する。
 
-send mode のみ:
-```
-受信側に auto-execute 権限を与える action 名はありますか? (普通は空でEnter)
-```
+##### テンプレート 1: pr-review
 
-reply mode では `--action` は使わない (= 返信は payload を運ぶだけ、副作用権限の付与は新規送信の役割)。
-
-### Step 5c: テンプレート適用 (任意、PR レビュー依頼など) — ms-80 e-1820
-
-繰り返し送る種類の DM (= PR レビュー依頼、Operation 結果共有など) は、毎回ゼロから本文を書くと受信側が「何を見ればいいか」を読み取るコストが上がる。本 Step では事前定義テンプレートを 1 回プロンプトで提示し、選択された場合のみ Step 5 で入力した本文に **テンプレートの骨格** を被せ直す。
-
-ユーザーに 1 度だけ確認 (空 Enter で skip):
-```
-このメッセージはテンプレート種別がありますか? (空 Enter で skip)
-  1) pr-review     — PR レビュー依頼 (= reviewer が何を見るか即理解できる骨格)
-  2) op-result     — Operation 自律実行結果の共有
-  3) (skip)
-```
-
-#### テンプレート 1: pr-review
-
-PR レビュー依頼。受信側 reviewer は「PR 番号 / 何を変えたか / どこを見てほしいか / 緊急度」 を 1 メッセージで掴める必要がある。以下を順に聞いて埋める (= 既に Step 5 で本文を書いていれば「要点」 欄として再利用):
+PR レビュー依頼。 受信側 reviewer は 「PR 番号 / 何を変えたか / どこを見てほしいか / 緊急度」 を 1 メッセージで掴める必要がある。 以下を順に聞いて埋める (= 既に Step 5b で本文を書いていれば「要点」 欄として再利用):
 
 ```
 PR URL or 番号: (例: https://github.com/r-kida2/beacon/pull/157 or #157)
-1 行サマリー: (= この PR で何ができるようになるか、Step 5 本文があれば流用)
-注視ポイント: (例: lib/auth.py の profile resolver 周辺、AWS profile 経路)
-受入条件 / AC: (= 何が満たされれば merge OK か、SPEC doc id / task id があれば添える)
+1 行サマリー: (= この PR で何ができるようになるか、 Step 5b 本文があれば流用)
+注視ポイント: (例: lib/auth.py の profile resolver 周辺、 AWS profile 経路)
+受入条件 / AC: (= 何が満たされれば merge OK か、 SPEC doc id / task id があれば添える)
 緊急度: (= asap / today / this-week / 任意期日)
 ```
 
-埋まったら以下の骨格で payload.text を組み立てる (= Step 5 入力を上書き、ユーザーには Step 6 draft で見せて confirm):
+埋まったら以下の骨格で payload.text を組み立てる (= Step 5b 入力を上書き、 user には Step 5c draft で見せて confirm):
 
 ```
 [PR レビュー依頼]
@@ -327,18 +340,18 @@ merge 条件:
 
 緊急度: <urgency>
 
-(受信側 AI へ: 上記の見てほしいところ + merge 条件 を起点に /review を起動し、approve / request-changes / reject の判断材料を整理してください)
+(受信側 AI へ: 上記の見てほしいところ + merge 条件 を起点に /review を起動し、 approve / request-changes / reject の判断材料を整理してください)
 ```
 
-#### テンプレート 2: op-result
+##### テンプレート 2: op-result
 
-Operation 自律実行 (= ms-60 envelope auto-execute / ms-66 server-side scheduler) の結果共有。送信側 AI が定期実行の record をユーザー or 他セッションに通知する用途。
+Operation 自律実行 (= ms-60 envelope auto-execute / ms-66 server-side scheduler) の結果共有。 送信側 AI が定期実行の record を user or 他セッションに通知する用途。
 
 ```
 op-id: (例: op-1)
-実行時刻: (= 自動補完可、ISO8601)
+実行時刻: (= 自動補完可、 ISO8601)
 結果: ok / warning / error
-何を観測したか: (= 1-3 行、incident があれば e-id を添える)
+何を観測したか: (= 1-3 行、 incident があれば e-id を添える)
 次のアクション: (= 自動 close / user 承認待ち / 別 Operation 起動 等)
 ```
 
@@ -355,43 +368,78 @@ status: <result>
 次のアクション: <next>
 ```
 
-#### テンプレート不要なケース
+##### テンプレート不要なケース
 
-- 1 行の問いかけ / 雑談 / 確認 → テンプレ skip、Step 5 本文をそのまま使う
-- 既に Step 5 でテンプレート骨格を入力済 → 二重適用しない、skip
-- 受信者が同一ユーザーの並走セッション (= 自分↔自分 multi-machine) → 骨格は省略可、要点だけで足りる
+- 1 行の問いかけ / 雑談 / 確認 → テンプレ skip、 Step 5b 本文をそのまま使う
+- 既に Step 5a 起動メッセージでテンプレート骨格を入力済 → 二重適用しない、 skip
+- 受信者が同一 user の並走セッション (= 自分↔自分 multi-machine) → 骨格は省略可、 要点だけで足りる
 
-テンプレートはあくまで **読みやすさの骨格** であり、Step 6 の draft 表示でユーザーが自由に edit できる。テンプレ適用後でも横文字 3 段階 / ID 参照に文脈 の self-review 4 原則は同じ強度で適用する (= 横文字濫用が骨格に隠れて見落とされやすい)。
+テンプレートはあくまで **読みやすさの骨格** であり、 Step 5c の draft 表示で user が自由に edit できる。 テンプレ適用後でも横文字 3 段階 / ID 参照に文脈 の self-review 4 原則は同じ強度で適用する (= 横文字濫用が骨格に隠れて見落とされやすい)。
 
 ---
 
-## Step 6: 送信確認 (mode で表示が変わる)
+### Step 5c: 統合 draft + 1 prompt 確認 (= 旧 Step 6 を本 Step に inline 化)
 
-**ms-68 / e-1643 補足 (= entry-writing principle の draft 表示)**: 本 Step は既に draft 提示型 (= 送信前に full argv + payload 本文をユーザーに見せて yes/edit/cancel を取る形) で設計されており、ms-68 SPEC の「書き込み直前の draft 表示」要件を満たす。送信表示の前に payload 本文について self-review 4 原則 (読み手目線 1 行 / 横文字 3 段階 / ID 参照に文脈 / 尻切れトンボ禁止) を 1 度通す。**特に DM は受信側 AI が「非開発者の代理として読む」可能性がある (受信側 AI は親プロジェクトの文脈を持たない)** ため、横文字濫用 / ID 参照に文脈なし は致命的。違反があれば `edit` で Step 5 に戻して書き直す。
+Step 5a / 5b までで揃った材料を draft で組み立てて、 **1 prompt で send/edit/cancel を取る**。 警告表示・budget 状態・template 適用は全て同じ 1 prompt 内に inline で並べる (= AC #3、 2 prompt 化しない)。
 
-組み立てた argv をユーザーに見せて確認。reply mode と send mode で `--in-reply-to` の有無が変わる:
+#### draft 表示フォーマット
 
-### send mode
 ```
-以下のコマンドで送信します:
+─── DM 送信 draft (1 confirm 経路、 ms-92 e-2181) ───
+mode:        send | reply
+recipient:   <sid 頭 8 文字>… [machine=<machine>, project=<proj_label>]
+in-reply-to: <parent_event_id>            ← reply mode のみ
 
-  beacon bus send --channel dm --to <recipient_sid> --payload '{"text":"<本文>"}' [--project <id>] [--action <name>]... --json
+[警告] (= 該当時のみ inline 表示、 不要なら省略)
+  ⚠ live check: 相手は stale (age 12m)、 配送されない可能性 (= Step 2 で soft-warn の場合)
+  ⚠ cross-project: 相手 project=<rid>、 cwd=<cid> (= Step 3 で cross-project の場合)
+  ⚠ sensitivity high: 外部 user 初回 / 機密内容 (= 後述 Step 5d で明示入力 強制)
+  budget:      armed=true, 3/3 grant 済               (= reply mode、 Step 4 で grant した場合)
+  budget:      armed=true, 2/3 remaining              (= reply mode、 既存 budget があった場合)
+
+本文 (送信されるもの、 self-review 4 原則を 1 度通す):
+> <本文 line 1>
+> <本文 line 2>
+> ...
+
+action (任意): <action_name 1>, <action_name 2>   ← 指定時のみ
+template:      pr-review / op-result / なし
+
+----
+組み立て argv:
+  beacon bus send --channel dm --to <sid> --payload '{"text":"..."}' [--project <id>] [--in-reply-to <eid>] [--action ...] --json
 
 送信しますか? (yes / edit / cancel)
 ```
 
-### reply mode
-```
-以下のコマンドで返信します:
+#### user 応答の解釈
 
-  beacon bus send --channel dm --to <recipient_sid> --in-reply-to <parent_event_id> --payload '{"text":"<本文>"}' [--project <id>] --json
-
-送信しますか? (yes / edit / cancel)
-```
-
-- `yes` → Step 7
-- `edit` → Step 5 に戻る
+- `yes` → Step 7 (= 実 execute) へ
+- `edit` → Step 5b に戻る (= 本文 / action / template の修正したい項目だけ聞き直す、 完成済項目は引き継ぐ)
 - `cancel` → 中止
+
+---
+
+### Step 5d: 危険経路の force-confirm (= AC #4 維持、 安全境界の構造的保持)
+
+Step 5c draft 内警告が以下のいずれかを含む場合、 単一 `yes` ではなく **明示 force-yes 文言** を 1 prompt 内 inline で要求する (= 安全境界を犠牲にしない構造的歯止め):
+
+| 条件 | 検知方法 |
+|---|---|
+| cross-project | `recipient_project_id != cwd_project_id` (= Step 3 で yes 既選択でも本 Step で再確認) |
+| 外部 user 初回 | member list に email 不在の recipient への **初回** 送信 (= dm 履歴に該当 sid との往復ゼロ) |
+| sensitivity high | 起動オプション `--sensitivity high` or 起動メッセージで「機密」 「sensitive」 「confidential」 を含む |
+
+force-confirm の inline 文言 (= Step 5c の draft 末尾に直接添える):
+
+```
+⚠ 上記 draft は警告付きです (cross-project / 外部 user 初回 / sensitivity high のいずれか)。
+   通常 yes ではなく、 「risk understood」 と入力してください (= cancel で中止)。
+```
+
+これにより danger 経路は 「draft 表示 + 警告閲覧 + 明示文言入力」 を同じ 1 prompt round-trip で完結し、 通常 DM の 1 prompt yes 経路と構造を共有する (= 安全性は 「prompt の数」 ではなく 「force 文言の入力」 で担保)。
+
+normal な DM (= cross-project でも 外部 user 初回 でも sensitivity high でもない) は `yes` 1 文字で送れる。
 
 ---
 
