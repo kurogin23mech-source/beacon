@@ -2688,17 +2688,38 @@ except ValueError as e:
             pulse-ack)
                 shift 2
                 trek_id="" picked_choice="" note=""
+                # ms-92 / e-2165 — structured payload fields. Each
+                # --blocker appends to the array; the joined value is
+                # passed to the Python helper as a \n-separated string
+                # (= simpler than serialising JSON through env vars).
+                state_summary=""
+                blockers=""
+                needs_leader=""
+                time_on_task=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --json) export BEACON_JSON=1; shift ;;
                         --picked-choice) picked_choice="${2:-}"; shift 2 ;;
                         --note) note="${2:-}"; shift 2 ;;
+                        --state-summary) state_summary="${2:-}"; shift 2 ;;
+                        --blocker)
+                            if [[ -z "$blockers" ]]; then blockers="${2:-}"
+                            else blockers="${blockers}"$'\n'"${2:-}"
+                            fi
+                            shift 2
+                            ;;
+                        --needs-leader-judgment) needs_leader=1; shift ;;
+                        --time-on-task) time_on_task="${2:-0}"; shift 2 ;;
                         *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                     esac
                 done
                 BEACON_TREK_ID="$trek_id" \
                     BEACON_TREK_PICKED_CHOICE="$picked_choice" \
                     BEACON_TREK_NOTE="$note" \
+                    BEACON_TREK_STATE_SUMMARY="$state_summary" \
+                    BEACON_TREK_BLOCKERS="$blockers" \
+                    BEACON_TREK_NEEDS_LEADER="$needs_leader" \
+                    BEACON_TREK_TIME_ON_TASK="$time_on_task" \
                     python3 "$COMMANDS_PY" trek_pulse_ack
                 ;;
             # ms-88 / e-2167 — task pool ↔ Trek stamp 同期 (= reconcile)。
@@ -2803,7 +2824,7 @@ except ValueError as e:
                 echo "  transfer-leader <trek-id> --to <session-id>"
                 echo "  take-over <trek-id>                  (= dead leader_session_id を fresh session に bind し直す、 ms-88 e-2089)"
                 echo "  kickoff <trek-id> [--session-id X] [--kickoff-dm-event-id Y]  (= Kickoff Ritual 完了 stamp、 /beacon-trek-pulse Step 0.4、 ms-88 e-2138)"
-                echo "  pulse-ack <trek-id> [--picked-choice X] [--note '...']  (= /beacon-trek-pulse Skill が叩く observability ack、 ms-88 e-2106)"
+                echo "  pulse-ack <trek-id> [--picked-choice X] [--note '...'] [--state-summary '...'] [--blocker '...'] [--needs-leader-judgment] [--time-on-task N]  (= /beacon-trek-pulse Skill observability ack、 ms-88 e-2106 + ms-92 e-2165 構造化 payload)"
                 echo "  reconcile <trek-id> [--apply]                  (= task pool ↔ Trek stamp の乖離を修復、 default dry-run、 ms-88 e-2167)"
                 echo "  task-state <trek-id> <task-id> <state> [--note '...']  (= ms-75/e-2048、 state: working|done|waiting-review)"
                 echo "  task add <trek-id> --target <pid>:<ms-id> \"<desc>\" [--motivation \"...\"] [--acceptance-criteria \"...\"] [--priority L]  (= cross-project task add via Trek scope、 ms-92/e-2141)"

@@ -3276,11 +3276,21 @@ class TrekTakeOver(BaseModel):
     session_id: str  # 新 leader_session_id (= 呼び出し session の sid)
 
 
-# ms-88 / e-2106 — pulse-ack body (= /beacon-trek-pulse Skill self-report)
+# ms-88 / e-2106 — pulse-ack body (= /beacon-trek-pulse Skill self-report).
+# ms-92 / e-2165 — structured payload fields added so the leader-digest
+# (e-2164) can mechanically aggregate "stuck=N idle=M" counts without
+# parsing natural-language notes. All structured fields are optional and
+# backward-compat: pre-e-2165 callers (= bridge versions / scripts that
+# only set picked_choice + note) keep working.
 class TrekPulseAck(BaseModel):
     session_id: str
     picked_choice: str = ""  # 5-choice token, see lib/trek.VALID_PULSE_PICKED_CHOICES (ms-88 / e-2139)
     note: str = ""
+    # Structured fields — see lib/trek.record_pulse_ack docstring for shape.
+    state_summary: str = ""
+    blockers: list[str] = []
+    needs_leader_judgment: bool = False
+    time_on_task_seconds: int = 0
 
 
 # ms-88 / e-2138 — kickoff completion body (= /beacon-trek-pulse Step 0 が呼ぶ)
@@ -3807,6 +3817,15 @@ def trek_pulse_ack_endpoint(trek_id: str, body: TrekPulseAck,
             session_id=body.session_id,
             picked_choice=body.picked_choice or "",
             note=body.note or "",
+            # ms-92 / e-2165 — structured payload. Server passes them
+            # through as-is; record_pulse_ack handles normalisation +
+            # truncation. Pre-e-2165 bridges omit these (Pydantic
+            # default-fills empty values), so behaviour is unchanged
+            # for legacy callers.
+            state_summary=body.state_summary or "",
+            blockers=body.blockers or [],
+            needs_leader_judgment=bool(body.needs_leader_judgment),
+            time_on_task_seconds=int(body.time_on_task_seconds or 0),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

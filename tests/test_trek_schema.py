@@ -1153,3 +1153,179 @@ def test_record_pulse_ack_persists_dm_peer_choice():
     assert entry["last_picked_choice"] == "dm-peer"
     assert entry["history"][0]["picked_choice"] == "dm-peer"
     assert entry["history"][0]["note"] == "peer に設計判断を相談"
+
+
+# ---------------------------------------------------------------------------
+# ms-92 / e-2165 — pulse-ack structured payload fields
+# ---------------------------------------------------------------------------
+
+
+def _seed_trek_for_pulse():
+    return trek.new_trek(
+        title="e2165-test", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-1",
+    )
+
+
+def test_record_pulse_ack_persists_structured_state_summary():
+    """state_summary は record_pulse_ack で history + session-summary に書かれる。"""
+    t = _seed_trek_for_pulse()
+    trek.record_pulse_ack(
+        t, session_id="sv-exec", picked_choice="continue",
+        state_summary="working on e-2165 schema fields",
+        time_on_task_seconds=1200,
+    )
+    entry = t["pulse_acks"]["sv-exec"]
+    # session-level summary mirror (= for digest aggregation)
+    assert entry["last_state_summary"] == "working on e-2165 schema fields"
+    assert entry["last_time_on_task_seconds"] == 1200
+    # history record
+    h = entry["history"][0]
+    assert h["state_summary"] == "working on e-2165 schema fields"
+    assert h["time_on_task_seconds"] == 1200
+
+
+def test_record_pulse_ack_persists_blockers_with_cap():
+    """blockers リストは ≤3 件 ≤200 字 / 件で truncate される。"""
+    t = _seed_trek_for_pulse()
+    long_blocker = "x" * 250  # over 200-char cap
+    trek.record_pulse_ack(
+        t, session_id="sv-exec", picked_choice="dm-leader",
+        blockers=["OOM in test_foo.py", long_blocker, "blk-3", "blk-4 ignored"],
+        needs_leader_judgment=True,
+        time_on_task_seconds=5400,
+    )
+    entry = t["pulse_acks"]["sv-exec"]
+    # CAP of 3 + per-item ≤200 truncation
+    assert len(entry["last_blockers"]) == 3
+    assert entry["last_blockers"][0] == "OOM in test_foo.py"
+    assert len(entry["last_blockers"][1]) == 200
+    assert entry["last_blockers"][1] == "x" * 200
+    assert entry["last_blockers"][2] == "blk-3"
+    assert entry["last_needs_leader_judgment"] is True
+    # history record carries the same shape
+    h = entry["history"][0]
+    assert h["blockers"] == entry["last_blockers"]
+    assert h["needs_leader_judgment"] is True
+
+
+def test_record_pulse_ack_truncates_long_state_summary():
+    """state_summary は ≤100 字で silent truncate される。"""
+    t = _seed_trek_for_pulse()
+    long_state = "y" * 250
+    trek.record_pulse_ack(
+        t, session_id="sv-exec", picked_choice="continue",
+        state_summary=long_state,
+    )
+    entry = t["pulse_acks"]["sv-exec"]
+    assert len(entry["last_state_summary"]) == 100
+    assert entry["last_state_summary"] == "y" * 100
+
+
+def test_record_pulse_ack_coerces_invalid_time_on_task():
+    """time_on_task_seconds が int 変換不能 / 負値の場合 0 にフォールバック。"""
+    t = _seed_trek_for_pulse()
+    trek.record_pulse_ack(
+        t, session_id="sv-1", picked_choice="no-op",
+        time_on_task_seconds=-10,
+    )
+    assert t["pulse_acks"]["sv-1"]["last_time_on_task_seconds"] == 0
+    trek.record_pulse_ack(
+        t, session_id="sv-2", picked_choice="no-op",
+        time_on_task_seconds="not-a-number",  # type: ignore[arg-type]
+    )
+    assert t["pulse_acks"]["sv-2"]["last_time_on_task_seconds"] == 0
+
+
+def test_record_pulse_ack_backward_compat_omits_structured_fields():
+    """構造化フィールド未指定でも record は通る (= 旧 Skill / 旧 bridge 経路)。"""
+    t = _seed_trek_for_pulse()
+    trek.record_pulse_ack(
+        t, session_id="sv-old", picked_choice="continue", note="legacy",
+    )
+    entry = t["pulse_acks"]["sv-old"]
+    assert entry["last_state_summary"] == ""
+    assert entry["last_blockers"] == []
+    assert entry["last_needs_leader_judgment"] is False
+    assert entry["last_time_on_task_seconds"] == 0
+    # history record still gets structured field placeholders (= keys
+    # always present so downstream code doesn't need existence checks)
+    h = entry["history"][0]
+    assert h["state_summary"] == ""
+    assert h["blockers"] == []
+    assert h["needs_leader_judgment"] is False
+    assert h["time_on_task_seconds"] == 0
+
+
+def test_summarize_pulse_acks_aggregates_active_stuck_idle_counts():
+    """summarize_pulse_acks は active / stuck / idle / needs-leader 集計を返す。"""
+    t = _seed_trek_for_pulse()
+    # 1 active working session
+    trek.record_pulse_ack(
+        t, session_id="sv-working", picked_choice="continue",
+        state_summary="working on e-2165", time_on_task_seconds=1800,
+    )
+    # 1 stuck session with blockers + needs-leader flag
+    trek.record_pulse_ack(
+        t, session_id="sv-stuck", picked_choice="dm-leader",
+        state_summary="stuck on e-2200", blockers=["OOM"],
+        needs_leader_judgment=True, time_on_task_seconds=5400,
+    )
+    # 1 idle session (= state_summary contains "idle")
+    trek.record_pulse_ack(
+        t, session_id="sv-idle", picked_choice="no-op",
+        state_summary="idle, waiting for peer", time_on_task_seconds=0,
+    )
+    summary = trek.summarize_pulse_acks(t)
+    assert summary["active_session_count"] == 3
+    assert summary["stuck_session_count"] == 1   # has blockers
+    # idle: state_summary contains "idle" OR time_on_task=0 → sv-idle + sv-stuck
+    # don't trip (state_summary != idle, time_on_task=5400). sv-idle: both
+    # conditions true. sv-working: neither. So idle=1.
+    # but wait sv-stuck time_on_task=5400 and state_summary="stuck on e-2200"
+    # neither matches idle. sv-working state_summary="working on e-2165" and
+    # time_on_task=1800, neither matches. So idle=1 (just sv-idle).
+    assert summary["idle_session_count"] == 1
+    assert summary["needs_leader_judgment_count"] == 1
+
+
+def test_summarize_pulse_acks_per_session_carries_structured_snapshot():
+    """summarize per-session dict carries the structured snapshot fields."""
+    t = _seed_trek_for_pulse()
+    trek.record_pulse_ack(
+        t, session_id="sv-A", picked_choice="continue",
+        state_summary="working on e-X", blockers=["b1"],
+        needs_leader_judgment=False, time_on_task_seconds=999,
+    )
+    summary = trek.summarize_pulse_acks(t)
+    s = summary["sessions"]["sv-A"]
+    assert s["state_summary"] == "working on e-X"
+    assert s["blockers"] == ["b1"]
+    assert s["needs_leader_judgment"] is False
+    assert s["time_on_task_seconds"] == 999
+
+
+def test_summarize_pulse_acks_ignores_legacy_empty_sessions():
+    """pulse_acks に session があるが total_acks=0 (= placeholder) なら
+    aggregate 計算 (active/stuck/idle) には数えない。
+    """
+    t = _seed_trek_for_pulse()
+    # Forcibly create a placeholder entry with total_acks=0 (= simulating
+    # legacy / pre-e-2165 doc shape that has the key but no real data).
+    t["pulse_acks"] = {
+        "sv-placeholder": {
+            "session_id": "sv-placeholder",
+            "total_acks": 0,
+            "last_pulse_ack_at": "",
+            "last_picked_choice": "",
+            "history": [],
+            "last_state_summary": "",
+            "last_blockers": [],
+            "last_needs_leader_judgment": False,
+            "last_time_on_task_seconds": 0,
+        }
+    }
+    summary = trek.summarize_pulse_acks(t)
+    assert summary["active_session_count"] == 0
+    assert summary["stuck_session_count"] == 0
+    assert summary["idle_session_count"] == 0

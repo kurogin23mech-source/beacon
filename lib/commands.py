@@ -5727,6 +5727,10 @@ def cmd_trek_pulse_ack():
                                 'continue' / 'dm-leader' / 'dm-peer' (ms-88
                                 / e-2140) / 'no-op' / '' (= 空文字 legacy)
       BEACON_TREK_NOTE          optional short context (= 200 char cap)
+      BEACON_TREK_STATE_SUMMARY    optional 1-line state snapshot (= ms-92 / e-2165, ≤100 chars)
+      BEACON_TREK_BLOCKERS         optional newline-separated blocker list (= ms-92 / e-2165, ≤3 items × ≤200 chars)
+      BEACON_TREK_NEEDS_LEADER     "1" → flag the pulse as needs_leader_judgment (= ms-92 / e-2165)
+      BEACON_TREK_TIME_ON_TASK     optional integer seconds on current task (= ms-92 / e-2165, default 0)
       BEACON_JSON               "1" → json output
     """
     import trek
@@ -5736,6 +5740,19 @@ def cmd_trek_pulse_ack():
     session_id = os.environ.get("BEACON_SESSION_ID", "").strip()
     picked_choice = os.environ.get("BEACON_TREK_PICKED_CHOICE", "").strip()
     note = os.environ.get("BEACON_TREK_NOTE", "")
+    # ms-92 / e-2165 — structured fields. Newline-separated blockers
+    # match the CLI shape "--blocker A --blocker B" expanding into a
+    # bash array joined with \n at the dispatcher boundary.
+    state_summary = os.environ.get("BEACON_TREK_STATE_SUMMARY", "")
+    blockers_raw = os.environ.get("BEACON_TREK_BLOCKERS", "")
+    blockers = [
+        b for b in (blockers_raw or "").split("\n") if b.strip()
+    ]
+    needs_leader = os.environ.get("BEACON_TREK_NEEDS_LEADER", "") == "1"
+    try:
+        time_on_task = int(os.environ.get("BEACON_TREK_TIME_ON_TASK", "0") or 0)
+    except ValueError:
+        time_on_task = 0
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not trek_id:
@@ -5755,6 +5772,10 @@ def cmd_trek_pulse_ack():
             entry = client.pulse_ack_trek(
                 trek_id, session_id=session_id,
                 picked_choice=picked_choice, note=note,
+                state_summary=state_summary,
+                blockers=blockers,
+                needs_leader_judgment=needs_leader,
+                time_on_task_seconds=time_on_task,
             )
         except RuntimeError as e:
             print(f"Error: {e}", file=sys.stderr)
@@ -5781,6 +5802,10 @@ def cmd_trek_pulse_ack():
         trek.record_pulse_ack(
             t, session_id=session_id,
             picked_choice=picked_choice, note=note,
+            state_summary=state_summary,
+            blockers=blockers,
+            needs_leader_judgment=needs_leader,
+            time_on_task_seconds=time_on_task,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
