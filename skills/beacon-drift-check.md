@@ -50,12 +50,13 @@ Bash ツールで実行:
 beacon doctor 2>&1
 ```
 
-`beacon doctor` は全 check (1〜9) を回し、各 check 由来の warning を `WARN [<tag>] <message>` 形式で stdout に書く。本 Skill が拾う tag は **2 種類**:
+`beacon doctor` は全 check (1〜9) を回し、各 check 由来の warning を `WARN [<tag>] <message>` 形式で stdout に書く。本 Skill が拾う tag は **1 種類** (ms-84 Phase 5 / e-2039 で `project-stale` は廃止された):
 
 | tag | 出典 check | 意味 |
 |---|---|---|
 | `skill-cli-drift` | check #8 (ms-61 / e-1570) | `~/.claude/skills/<name>/*.md` が叩く `beacon <subcmd>` のうち、現在 CLI に存在しないものがある |
-| `project-stale` | check #9 (ms-61 / e-1571) | ローカル `.beacon/project.json` と cloud の milestone / operation 件数が食い違っている、または mtime が閾値超で古い |
+
+> 退役 tag: `project-stale` は ms-84 Phase 5 (e-2039) で削除された。cloud モード時にローカル `.beacon/project.json` を保持しなくなった (= cloud が唯一の真値) ので drift を検出する対象そのものが消えた。古い stdout を parse する経路があってもこの tag は出現しなくなる。
 
 他 tag (`PATH` / `hooks` / `skills` / `token` / `cloud.json` / `dup-id` / `skills-drift`) は環境設定系で本 Skill のスコープ外。素通りさせる。
 
@@ -73,20 +74,7 @@ WARN [skill-cli-drift] Skill NAME references unknown subcommand(s):
 
 (↑ 上記の `NAME` プレースホルダは実出力では Skill 名が入る。本 markdown では doctor の Skill ↔ CLI drift check 自身に誤検知されないよう、テンプレートを `beacon <word>` パターンと一致しない形に書き換えてある)
 
-`WARN [project-stale]` ブロックの構造:
-```
-WARN [project-stale] .beacon/project.json differs from cloud:
-       milestones: local=N, cloud=M
-       operations: local=N, cloud=M
-       (local mtime: NN min ago)
-       Run: beacon cloud pull   (to refresh local cache)
-       Opt-out: BEACON_DOCTOR_SKIP_CLOUD_SYNC=1
-```
-または mtime 超過 soft warn:
-```
-WARN [project-stale] .beacon/project.json was last touched NN minutes ago (threshold MM min).
-       <説明 + cloud pull 推奨>
-```
+`WARN [project-stale]` は ms-84 Phase 5 (e-2039) で **削除済**。doctor は出力しないので parse 不要。古いログを後追いで見ている場合、tag 自体を historical artefact として扱ってよい (= 同形式の差分 warn は出ない)。
 
 正規表現または heredoc Python で各 WARN ブロックを切り出し、tag / Skill 名 / 行番号 / コマンド句 / count diff 等を構造体として保持する。
 
@@ -104,14 +92,9 @@ WARN [project-stale] .beacon/project.json was last touched NN minutes ago (thres
 
 **「最も似た現存コマンド」の推定**: `beacon help --json` で取得した command list の各エントリと、drift コマンド句との **Levenshtein 距離** または **prefix 一致** で類推。完全自動推定が困難なら、`beacon help` を実行して候補を出力するよう案内するだけでよい。
 
-### project-stale の場合
+### project-stale (退役)
 
-`beacon cloud pull` の実行を推奨する 1 行を添える:
-```
-推奨: `beacon cloud pull` でローカル cache を最新に更新
-```
-
-mtime 超過 soft warn の場合は、外部セッションの書き込みがあったか確認した上で同じ pull を推奨。
+ms-84 Phase 5 (e-2039) で `project-stale` check は削除された (= cloud モードでローカル `.beacon/project.json` を持たなくなったので drift 自体が起こり得ない)。 本セクションは empty / no-op として保持する (= 古い session の transcripts に出てくるとき混乱しないよう case として残す)。
 
 ## Step 3: 構造化テキストで提示
 
@@ -128,11 +111,9 @@ Beacon drift check 結果 (beacon doctor check #8 / #9 由来)
       関連: ms-61 SPEC (= CLI ↔ Skill 整合性の forcing function 化) / `entry-writing-principle` CORE doc
   ... (skill 毎にグループ)
 
-【プロジェクトキャッシュずれ】 N 件 / OK
-  milestones: local=NN, cloud=MM
-  operations: local=NN, cloud=MM
-  推奨: beacon cloud pull
-  関連: ms-61 SPEC 受入条件 2 / fork worktree の symlink 経路 (ms-67 e-1554)
+【プロジェクトキャッシュずれ】 (退役 — ms-84 Phase 5 / e-2039)
+  cloud モード時にローカル project.json を持たなくなったため drift 検出対象が無くなった。
+  古いセッションログにこのセクションが出現することがあるが、最新の doctor 出力には含まれない。
 
 ---
 修正は自動実行しません。各 推奨 を読んで該当 Skill markdown を直接編集してください。
@@ -141,10 +122,10 @@ Beacon drift check 結果 (beacon doctor check #8 / #9 由来)
 
 ### Step 3a: 0 件 (= drift なし) の場合
 
-`beacon doctor` の stdout に `skill-cli-drift` も `project-stale` も無ければ、**1 行だけ** 返して終了:
+`beacon doctor` の stdout に `skill-cli-drift` が無ければ、**1 行だけ** 返して終了:
 
 ```
-Beacon drift check: drift なし。`beacon doctor` の Skill 由来 / cache 由来 warn は 0 件です。
+Beacon drift check: drift なし。`beacon doctor` の Skill 由来 warn は 0 件です。
 ```
 
 ms-61 SPEC 受入条件 5 が満たされている状態のシグナル。

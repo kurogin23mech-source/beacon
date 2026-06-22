@@ -11924,99 +11924,20 @@ def _doctor_check_skill_cli_drift(home):
 
 
 def _doctor_check_project_staleness():
-    """Detect when local .beacon/project.json is out of sync with cloud.
+    """No-op since ms-84 Phase 5 (e-2039): the project-stale check is gone.
 
-    Compares local milestone / operation counts against the cloud copy.
-    Catches the ms-61 P3 case observed in fork worktrees on 2026-06-12:
-    a session sees ms-1..ms-22 locally while cloud already holds ms-43
-    onwards because ``beacon cloud pull`` was never run from this cwd.
-    The CLI surface ``beacon status`` happily returned the stale local
-    snapshot, hiding the cloud's authoritative state.
+    Background: this check existed because cloud mode kept a local
+    ``.beacon/project.json`` cache that could drift from the cloud truth
+    source. ms-84 Phase 3 cut that cache over (= cloud mode no longer has
+    a local project.json; cloud.json is the only on-disk marker), so the
+    "stale" concept stops applying — there is no local cache to compare
+    against the cloud document anymore.
 
-    Cloud project has no top-level ``updated_at`` field on the response,
-    so we compare counts (= a proxy that captures the common drift case:
-    another session / Web UI added milestones or operations). Same counts
-    but altered state (= same N items, but renames / status changes)
-    are not detected by this check; the milestone count drift is the
-    high-value attack surface.
-
-    Returns a list of warning strings. Empty list = in sync, or skipped.
-
-    Skip cases:
-    - .beacon/project.json absent (= no project in cwd)
-    - .beacon/cloud.json absent (= local mode)
-    - Local mtime < 5 min (= obviously fresh, no network call needed)
-    - BEACON_DOCTOR_SKIP_CLOUD_SYNC=1
-    - Network / auth error fetching cloud (best-effort; doctor must
-      stay usable offline).
+    Keeping the function as a no-op (rather than deleting it outright)
+    avoids breaking any in-flight Skill / doctor caller that imports the
+    name. The doctor entry that ran it (= ``warnings.extend(...)``) was
+    removed from cmd_doctor; this stub stays as a tombstone.
     """
-    if os.environ.get("BEACON_DOCTOR_SKIP_CLOUD_SYNC") == "1":
-        return []
-
-    proj_path = os.path.join(".beacon", "project.json")
-    cloud_cfg = os.path.join(".beacon", "cloud.json")
-    if not os.path.exists(proj_path) or not os.path.exists(cloud_cfg):
-        return []  # not a cloud-mode beacon project from this cwd
-
-    import time as _time
-    try:
-        mtime = os.stat(proj_path).st_mtime
-    except OSError:
-        return []
-    age_sec = _time.time() - mtime
-
-    # AC#3 honor: threshold for "very old" warn even when counts match.
-    threshold_sec = int(os.environ.get("BEACON_DOCTOR_STALENESS_SEC", "1800"))
-
-    # Avoid network call when local activity is recent (= obviously fresh).
-    # 300s = 5 min, far below threshold_sec default 30 min.
-    if age_sec < 300:
-        return []
-
-    try:
-        client, config = _get_api_client()
-        cloud_data = client.get_project(config["project_id"])
-    except Exception:
-        return []  # offline / auth issue — doctor stays usable
-
-    try:
-        with open(proj_path, "r", encoding="utf-8") as f:
-            local_data = json.load(f)
-    except Exception:
-        return []
-
-    cloud_ms = len(cloud_data.get("milestones", []))
-    local_ms = len(local_data.get("milestones", []))
-    cloud_op = len(cloud_data.get("operations", []))
-    local_op = len(local_data.get("operations", []))
-
-    diffs = []
-    if cloud_ms != local_ms:
-        diffs.append(f"milestones: local={local_ms}, cloud={cloud_ms}")
-    if cloud_op != local_op:
-        diffs.append(f"operations: local={local_op}, cloud={cloud_op}")
-
-    if diffs:
-        return [
-            "WARN [project-stale] .beacon/project.json differs from cloud:\n"
-            + "\n".join(f"       {d}" for d in diffs)
-            + f"\n       (local mtime: {int(age_sec / 60)} min ago)\n"
-            "       Run: beacon cloud pull   (to refresh local cache)\n"
-            "       Opt-out: BEACON_DOCTOR_SKIP_CLOUD_SYNC=1"
-        ]
-
-    # Counts match but file is very old — soft warn so external writes
-    # (another session, Web UI) are noticed even when counts coincide.
-    if age_sec > threshold_sec:
-        return [
-            f"WARN [project-stale] .beacon/project.json was last touched "
-            f"{int(age_sec / 60)} minutes ago (threshold {int(threshold_sec / 60)} min).\n"
-            "       Counts match cloud, but external state changes\n"
-            "       (renames / status shifts) may have happened. Run\n"
-            "       `beacon cloud pull` if uncertain.\n"
-            "       Threshold override: BEACON_DOCTOR_STALENESS_SEC=<seconds>"
-        ]
-
     return []
 
 
@@ -12442,14 +12363,13 @@ def cmd_doctor():
         warnings.extend(_doctor_check_skill_cli_drift(home))
 
     # ------------------------------------------------------------------ #
-    # 9. .beacon/project.json staleness vs cloud (ms-61 / e-1571)
+    # 9. project-stale check retired in ms-84 Phase 5 (e-2039)
     # ------------------------------------------------------------------ #
-    # Detect when local project cache is out of sync with cloud — the
-    # exact P3 case observed on 2026-06-12 in this fork worktree, where
-    # `beacon status` returned 22 milestones while cloud held 67 because
-    # `beacon cloud pull` had never run from this cwd. Best-effort: skips
-    # on local mode, recent local writes (<5 min), and network errors.
-    warnings.extend(_doctor_check_project_staleness())
+    # Cloud mode no longer keeps a local .beacon/project.json cache after
+    # Phase 3, so the concept of "stale local relative to cloud" no longer
+    # applies. The helper above is now a no-op tombstone; the doctor call
+    # is left commented for audit-trail clarity.
+    # warnings.extend(_doctor_check_project_staleness())  # ms-84 Phase 5
 
     # ------------------------------------------------------------------ #
     # 10. CLAUDE.md entry-writing-principle marker (ms-68 / e-1640)
