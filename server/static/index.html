@@ -5240,10 +5240,13 @@ function _renderTrekTaskRow(t, s, slotIndex) {
       const at = ent.updated_at || '';
       if (at && at > parentTs) { parentTs = at; parentAssignee = ent.updated_by_session_id || ''; }
     }
-    const expanded = pendingChildren.length > 0;
+    // ms-86 / e-2222 — accordion 展開は state.openTrekExpanded (= Set keyed by
+    // ms-id) で制御。 default は折りたたみ (= mockup L460 t-1 row が collapsed
+    // で並ぶ姿に揃える)。 chevron / row head クリックで toggle される。
+    const expanded = state.openTrekExpanded && state.openTrekExpanded.has(s.milestone);
     return `
       <div class="trek-task-row ${expanded ? 'expanded' : ''} state-${esc(parentState)}">
-        <div class="trek-task-row-head">
+        <div class="trek-task-row-head" data-action="trek-scope-toggle" data-ms="${esc(s.milestone)}">
           <div class="trek-task-chevron">${expanded ? '▾' : '▸'}</div>
           <div class="trek-task-tk-id">${esc(slotLabel)}</div>
           <div class="trek-task-desc">
@@ -6817,6 +6820,17 @@ function handleCommonAction(action, el) {
         if (navigator.clipboard) navigator.clipboard.writeText(cmd);
       } catch (_e) { /* noop */ }
       window.alert('Run this command in your terminal:\n\n' + cmd + '\n\n(copied to clipboard)');
+      return true;
+    }
+    // ms-86 / e-2222 — TREK TASKS の MS / Op 行 chevron 経由の accordion
+    // 開閉。 mockup L460-502 の collapsed / expanded 状態を user 操作で切替。
+    case 'trek-scope-toggle': {
+      const msId = el.dataset.ms || '';
+      if (!msId) return true;
+      if (!state.openTrekExpanded) state.openTrekExpanded = new Set();
+      if (state.openTrekExpanded.has(msId)) state.openTrekExpanded.delete(msId);
+      else state.openTrekExpanded.add(msId);
+      render();
       return true;
     }
   }
