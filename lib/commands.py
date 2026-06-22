@@ -8507,7 +8507,7 @@ def _get_api_client():
 
     config_path = _get_cloud_config_path()
     if not os.path.exists(config_path):
-        print("No cloud.json found. Run 'beacon cloud push' first.")
+        print("No cloud.json found. Run 'beacon cloud upload-initial' first.")
         sys.exit(1)
 
     with open(config_path, "r", encoding="utf-8") as f:
@@ -8553,7 +8553,8 @@ def cmd_doc_image_upload():
     # 10 の direct-call 削減)。 image upload は cloud-only operation のため、
     # ここでは mode guard として is_cloud() を確認するだけ。
     if not get_store().is_cloud():
-        print("Error: image upload requires cloud mode (run 'beacon cloud push' first)")
+        print("Error: image upload requires cloud mode "
+              "(run 'beacon cloud upload-initial' first)")
         sys.exit(1)
 
     client, config = _get_api_client()
@@ -8609,7 +8610,7 @@ def cmd_cloud_list():
     else:
         if not projects:
             print("No cloud projects found.")
-            print("Run 'beacon cloud push' to upload a project.")
+            print("Run 'beacon cloud upload-initial' to upload a project.")
             return
         for i, p in enumerate(projects, 1):
             print(f"  {i}. {p['project_id']}: {p['name']}")
@@ -8690,11 +8691,12 @@ def cmd_cloud_push():
             print("Error: already in cloud mode.")
             print("")
             print("  In cloud mode, all CLI changes go directly to the cloud.")
-            print("  Pushing the local project.json (which may be stale) would")
-            print("  overwrite cloud state and cause data loss.")
+            print("  The local project.json (if any) is a stale recovery copy.")
             print("")
-            print("  To sync cloud state to local:  beacon cloud pull")
-            print("  To force-push local state:     beacon cloud push --force")
+            print("  upload-initial is a one-shot local→cloud migration only;")
+            print("  re-running it after cut-over would overwrite cloud state.")
+            print("  Use --force to override (cloud → local round-trip was")
+            print("  retired in ms-84 Phase 4).")
             sys.exit(1)
         print("Warning: --force specified. Overwriting cloud project data with local file.")
         print("  documents and retros will NOT be pushed (they are managed in cloud).")
@@ -8778,33 +8780,18 @@ def cmd_cloud_push():
     print("Switched to cloud mode.")
 
 
-def cmd_cloud_pull():
-    client, config = _get_api_client()
-    project_id = config["project_id"]
-
-    try:
-        data = client.get_project(project_id)
-    except RuntimeError as e:
-        if "404" in str(e):
-            print(f"Project '{project_id}' not found in cloud.")
-            print("Run 'beacon cloud push' to upload first.")
-        else:
-            print(f"Error: {e}")
-        sys.exit(1)
-
-    core.validate_project(data)
-
-    from store_local import LocalStore
-    local = LocalStore(get_project_file())
-    local.save_project(data)
-    print(f"Pulled from cloud: projects/{project_id}")
+# ms-84 Phase 4 (e-2038): cmd_cloud_pull was removed structurally. The
+# cloud → local round-trip is now impossible (= no local cache to refresh
+# into), so the function and its dispatcher entry are gone. Any operator
+# script that called it should be deleted — `beacon status` reads cloud
+# directly and replaces every legitimate use of pull.
 
 
 def cmd_cloud_status():
     config_path = _get_cloud_config_path()
     if not os.path.exists(config_path):
         print("Cloud: not configured")
-        print("Run 'beacon cloud push' to set up.")
+        print("Run 'beacon cloud upload-initial' to bootstrap a new cloud project.")
         return
 
     with open(config_path, "r", encoding="utf-8") as f:
@@ -12359,12 +12346,12 @@ def cmd_doctor():
             if not _cloud.get("api_url"):
                 warnings.append(
                     "WARN [cloud.json] api_url is not set in .beacon/cloud.json.\n"
-                    "       Run: beacon cloud push"
+                    "       Run: beacon cloud upload-initial"
                 )
         except Exception:
             warnings.append(
                 "WARN [cloud.json] .beacon/cloud.json is unreadable.\n"
-                "       Run: beacon cloud push"
+                "       Run: beacon cloud upload-initial"
             )
     if os.path.exists(config_json_path):
         try:
@@ -12539,10 +12526,11 @@ def cmd_help_json():
         {"command": "beacon retro", "flags": [], "description": "Start weekly retrospective (interactive)"},
         {"command": "beacon trigger check", "flags": [], "description": "Check pending triggers (JSON array)"},
         {"command": "beacon cloud list", "flags": [], "description": "List cloud projects"},
-        {"command": "beacon cloud upload-initial", "flags": ["--force"], "description": "Initial bootstrap upload to a new cloud project (e-1862); alias of legacy 'push'"},
-        {"command": "beacon cloud force-pull", "flags": [], "description": "Emergency overwrite local from cloud (e-1862); alias of legacy 'pull'"},
-        {"command": "beacon cloud push", "flags": ["--force"], "description": "Legacy alias for upload-initial (deprecated, kept for backward compat)"},
-        {"command": "beacon cloud pull", "flags": [], "description": "Legacy alias for force-pull (deprecated, kept for backward compat)"},
+        {"command": "beacon cloud upload-initial", "flags": ["--force"], "description": "Initial bootstrap upload to a new cloud project (one-shot local→cloud migration; ms-84 Phase 4)"},
+        # ms-84 Phase 4 (e-2038): push / pull / force-pull entries removed.
+        # The cloud → local round-trip is structurally impossible (= cloud
+        # is the sole truth source). bin/beacon now routes these names to
+        # the wildcard 'unknown subcommand' branch.
         {"command": "beacon cloud join <id>", "flags": [], "description": "Join an existing cloud project"},
         {"command": "beacon auth login", "flags": [], "description": "Sign in with Google"},
         {"command": "beacon auth logout", "flags": [], "description": "Remove cached credentials"},
@@ -12848,7 +12836,7 @@ def cmd_operation_approve():
     if not _is_cloud_mode():
         print("Error: operation approve requires cloud mode "
               "(envelope signing needs a server key). Run "
-              "'beacon cloud push' first.", file=sys.stderr)
+              "'beacon cloud upload-initial' first.", file=sys.stderr)
         sys.exit(1)
 
     ttl_seconds = None
@@ -16021,7 +16009,9 @@ if __name__ == "__main__":
         "doc_image_upload": cmd_doc_image_upload,
         "cloud_list": cmd_cloud_list,
         "cloud_push": cmd_cloud_push,
-        "cloud_pull": cmd_cloud_pull,
+        # ms-84 Phase 4 (e-2038): cloud_pull dispatch entry removed.
+        # cmd_cloud_pull was deleted; the bin/beacon `pull` / `force-pull`
+        # subcommands now hit the wildcard 'unknown subcommand' branch.
         "cloud_status": cmd_cloud_status,
         "cloud_check_project": cmd_cloud_check_project,
         "cloud_join": cmd_cloud_join,
