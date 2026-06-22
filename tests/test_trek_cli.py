@@ -340,10 +340,14 @@ def test_trek_join_auto_arms_session_by_default(trek_env):
     assert arm is not None
     assert arm["trek_id"] == tid
     assert arm["budget_turns"] == 20
-    # All 3 trek channels must be in the post-arm allowlist.
-    expected = {"trek-progress-check", "trek-trigger", "trek-task-review"}
+    # All 4 trek channels must be in the post-arm allowlist (= ms-92 / e-2164
+    # added trek-leader-digest as the 4th alongside the 3 from ms-75 / e-2047).
+    expected = {
+        "trek-progress-check", "trek-trigger", "trek-task-review",
+        "trek-leader-digest",
+    }
     assert expected.issubset(set(arm["channels"]))
-    # Three brand-new channels for the first-ever join.
+    # Four brand-new channels for the first-ever join.
     assert set(arm["channels_added"]) == expected
 
     # project.json reflects the channel allowlist write.

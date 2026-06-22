@@ -605,3 +605,127 @@ def test_get_working_ttl_minutes_in_scheduler_module_matches_default():
     assert scheduler.get_working_ttl_minutes(
         {"meta": {"working_ttl_minutes": 7}}
     ) == 7
+
+
+# ---------------------------------------------------------------------------
+# ms-92 / e-2164 — build_leader_digest_payload
+# ---------------------------------------------------------------------------
+
+
+def _trek_with_pulse_acks() -> dict:
+    """A minimal trek doc with 3 sessions in 3 different states.
+
+    Constructs ``pulse_acks`` via the real ``trek.record_pulse_ack`` so
+    we exercise the actual e-2165 schema-write path.
+    """
+    t = trek_mod.new_trek(
+        title="digest test", creator_user_id="u-1",
+        creator_email="a@b.com", creator_session_id="sv-leader",
+    )
+    # Active working session.
+    trek_mod.record_pulse_ack(
+        t, session_id="sv-working", picked_choice="continue",
+        state_summary="working on e-2165", time_on_task_seconds=1200,
+    )
+    # Stuck session with blockers + needs-leader flag.
+    trek_mod.record_pulse_ack(
+        t, session_id="sv-stuck", picked_choice="dm-leader",
+        state_summary="stuck on e-2200", blockers=["OOM in CI"],
+        needs_leader_judgment=True, time_on_task_seconds=5400,
+    )
+    # Idle session.
+    trek_mod.record_pulse_ack(
+        t, session_id="sv-idle", picked_choice="no-op",
+        state_summary="idle, waiting for peer", time_on_task_seconds=0,
+    )
+    return t
+
+
+def test_leader_digest_payload_includes_kind_and_trek_id():
+    """Channel dispatcher routes on payload.kind, so the field is fragile."""
+    t = _trek_with_pulse_acks()
+    payload = scheduler.build_leader_digest_payload(t)
+    assert payload["kind"] == "trek-leader-digest"
+    assert payload["trek_id"] == t["trek_id"]
+    assert payload["created_at"]
+
+
+def test_leader_digest_payload_summary_carries_aggregates():
+    t = _trek_with_pulse_acks()
+    payload = scheduler.build_leader_digest_payload(t)
+    s = payload["summary"]
+    assert s["active"] == 3
+    assert s["stuck"] == 1   # sv-stuck has blockers
+    assert s["idle"] == 1    # sv-idle: state contains "idle" AND time_on_task=0
+    assert s["needs_leader_judgment"] == 1
+    assert s["total_acks_across_sessions"] == 3
+
+
+def test_leader_digest_payload_sessions_sorted_by_time_on_task_desc():
+    """Longest-stuck-first surface so the leader's eye lands on the most
+    likely attention candidate."""
+    t = _trek_with_pulse_acks()
+    payload = scheduler.build_leader_digest_payload(t)
+    sids = [s["session_id"] for s in payload["sessions"]]
+    assert sids == ["sv-stuck", "sv-working", "sv-idle"]
+
+
+def test_leader_digest_payload_sessions_carry_structured_snapshot():
+    t = _trek_with_pulse_acks()
+    payload = scheduler.build_leader_digest_payload(t)
+    stuck = next(s for s in payload["sessions"] if s["session_id"] == "sv-stuck")
+    assert stuck["state_summary"] == "stuck on e-2200"
+    assert stuck["blockers"] == ["OOM in CI"]
+    assert stuck["needs_leader_judgment"] is True
+    assert stuck["time_on_task_seconds"] == 5400
+    assert stuck["last_picked_choice"] == "dm-leader"
+    assert stuck["total_acks"] == 1
+
+
+def test_leader_digest_payload_body_carries_human_readable_summary():
+    t = _trek_with_pulse_acks()
+    payload = scheduler.build_leader_digest_payload(t)
+    body = payload["body"]
+    assert "Trek leader digest" in body
+    assert "active=3" in body
+    assert "stuck=1" in body
+    assert "idle=1" in body
+    # Per-session lines with type tags
+    assert "[stuck]" in body
+    assert "[idle]" in body
+
+
+def test_leader_digest_payload_excludes_placeholder_sessions():
+    """pulse_acks entry with total_acks=0 (= legacy placeholder) is filtered out."""
+    t = trek_mod.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-leader",
+    )
+    t["pulse_acks"] = {
+        "sv-ghost": {
+            "session_id": "sv-ghost",
+            "total_acks": 0,
+            "last_pulse_ack_at": "",
+            "last_picked_choice": "",
+            "history": [],
+            "last_state_summary": "",
+            "last_blockers": [],
+            "last_needs_leader_judgment": False,
+            "last_time_on_task_seconds": 0,
+        },
+    }
+    payload = scheduler.build_leader_digest_payload(t)
+    assert payload["sessions"] == []
+    assert payload["summary"]["active"] == 0
+
+
+def test_leader_digest_payload_empty_trek_fallback_body():
+    """Trek with no pulse-acks still produces a valid payload."""
+    t = trek_mod.new_trek(
+        title="empty", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-leader",
+    )
+    payload = scheduler.build_leader_digest_payload(t)
+    assert payload["summary"]["active"] == 0
+    assert payload["sessions"] == []
+    assert "まだ pulse-ack" in payload["body"]

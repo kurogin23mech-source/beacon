@@ -5282,6 +5282,12 @@ TREK_AUTO_ARM_CHANNELS = (
     "trek-progress-check",
     "trek-trigger",
     "trek-task-review",
+    # ms-92 / e-2164 — leader-digest channel. Leaders receive an
+    # aggregated per-session status snapshot on the same cadence as
+    # trek-progress-check. The channel is auto-execute so the leader's
+    # AI session can render the digest immediately without waiting for
+    # human Skill invocation.
+    "trek-leader-digest",
 )
 TREK_AUTO_ARM_DEFAULT_BUDGET = 20
 

@@ -5114,12 +5114,67 @@ def trek_scheduler_tick_endpoint(
             # Every send for this trek failed; skip the stamp so the next
             # tick retries instead of silently swallowing the failure.
             continue
+        # ms-92 / e-2164 — leader-digest fan-out (= one event to the
+        # leader's session carrying aggregated per-executor status).
+        # Same cadence as trek-progress-check (= they fire together so
+        # the leader sees "what is everyone doing right now" without
+        # polling). Leader session id may be missing on planning-era
+        # treks; skip in that case (= can't deliver without a target).
+        leader_sid = trek_doc.get("leader_session_id") or ""
+        leader_digest_event_id = ""
+        if leader_sid:
+            try:
+                digest_envelope = envelope_mod.issue_t1_system_envelope(
+                    project_id=target_project_id,
+                    trek_id=trek_id,
+                    actions_authorized=["trek.leader_digest"],
+                    data_class="free",
+                    ttl_seconds=3600,
+                )
+            except ValueError as exc:
+                errors.append({
+                    "trek_id": trek_id,
+                    "error": f"leader_digest_envelope_mint_failed: {exc}",
+                })
+                digest_envelope = None
+            if digest_envelope is not None:
+                digest_payload = trek_scheduler_mod.build_leader_digest_payload(
+                    trek_doc, now=now,
+                )
+                digest_payload["recipient_session_id"] = leader_sid
+                digest_bus_data = {
+                    "channel": "trek-leader-digest",
+                    "sender_session_id": "",
+                    "payload": digest_payload,
+                    "envelope": digest_envelope,
+                    "delivery": "auto-execute",
+                    "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                }
+                try:
+                    leader_digest_event_id = db.append_bus_event(
+                        target_project_id, digest_bus_data,
+                    )
+                except Exception as exc:
+                    errors.append({
+                        "trek_id": trek_id,
+                        "error": (
+                            f"leader_digest_send_failed: "
+                            f"{type(exc).__name__}: {exc}"
+                        ),
+                    })
         # Stamp last_progress_check_at so the next tick skips this trek
         # until its cadence elapses again.
         meta = trek_doc.setdefault("meta", {})
         meta["last_progress_check_at"] = now.strftime(
             "%Y-%m-%dT%H:%M:%S.%fZ"
         )
+        # ms-92 / e-2164 — record the latest leader-digest fire so the
+        # dashboard can show "last leader digest at X". Sits next to
+        # last_progress_check_at since they are co-scheduled.
+        if leader_digest_event_id:
+            meta["last_leader_digest_at"] = now.strftime(
+                "%Y-%m-%dT%H:%M:%S.%fZ"
+            )
         trek_doc["updated_at"] = trek_mod.utcnow_iso()
         try:
             db.save_trek(trek_id, trek_doc)
@@ -5134,6 +5189,8 @@ def trek_scheduler_tick_endpoint(
             "project_id": target_project_id,
             "event_ids": event_ids,
             "recipients": target_sids,
+            "leader_digest_event_id": leader_digest_event_id,
+            "leader_session_id": leader_sid,
         })
 
     # ms-83 / e-2001: idle escalation pass. Use the pre-snapshot

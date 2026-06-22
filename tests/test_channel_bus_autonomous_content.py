@@ -213,6 +213,37 @@ def test_channel_to_skill_mapping_covers_operation_and_trek_channels():
     assert _probe_channel_to_skill("trek-progress-check") == "/beacon-trek-execute"
     assert _probe_channel_to_skill("trek-trigger") == "/beacon-trek-execute"
     assert _probe_channel_to_skill("trek-task-review") == "/beacon-trek-review"
+    # ms-92 / e-2164 — leader-digest channel maps to /beacon-trek-execute
+    # (the leader's stance reminder lives inside that Skill, see e-2166).
+    assert _probe_channel_to_skill("trek-leader-digest") == "/beacon-trek-execute"
+
+
+def test_gate_passes_for_trek_leader_digest_auto_execute():
+    """ms-92 / e-2164 — leader-digest is auto-execute and must launch
+    the Skill without user confirmation, same as the other trek channels.
+    """
+    assert _probe_gate("trek-leader-digest", "auto-execute", False) is True
+
+
+def test_trek_leader_digest_content_carries_summary_and_launch_directive():
+    """leader-digest narrative must surface active/stuck/idle counts +
+    the launch directive so the leader-side AI knows what to do."""
+    out = _probe_content({
+        "event_id": "evt-digest-1",
+        "channel": "trek-leader-digest",
+        "payload": {
+            "trek_id": "tk-leader-x",
+            "summary": {
+                "active": 3, "stuck": 1, "idle": 1,
+                "needs_leader_judgment": 1,
+            },
+        },
+    })
+    assert "TREK LEADER DIGEST" in out
+    assert "tk-leader-x" in out
+    assert "active=3" in out
+    assert "stuck=1" in out
+    assert "/beacon-trek-execute" in out
 
 
 def test_channel_to_skill_returns_null_for_unmapped_channel():

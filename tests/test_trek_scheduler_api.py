@@ -205,11 +205,15 @@ def test_due_trek_fires_t1_system_envelope_on_progress_check_channel():
     assert body["fired"][0]["trek_id"] == "tk-aaaa1111"
     assert body["fired"][0]["project_id"] == "beacon-test"
 
-    # Bus event landed with the right channel + envelope tier + delivery.
+    # Bus events landed: the cadence tick fires both trek-progress-check
+    # (= executor surface) and trek-leader-digest (= leader surface,
+    # added in ms-92 / e-2164). Pin the progress-check event shape here;
+    # the digest shape has its own dedicated test below.
     events = _bus_events_by_project["beacon-test"]
-    assert len(events) == 1
-    ev = events[0]
-    assert ev["channel"] == "trek-progress-check"
+    progress_events = [e for e in events
+                       if e["channel"] == "trek-progress-check"]
+    assert len(progress_events) == 1
+    ev = progress_events[0]
     assert ev["delivery"] == "auto-execute"
     assert ev["envelope"]["tier"] == "T1-system"
     assert ev["envelope"]["issuer"] == "beacon-system"
@@ -226,6 +230,108 @@ def test_due_trek_fires_t1_system_envelope_on_progress_check_channel():
 # ---------------------------------------------------------------------------
 # (4) Trek without scope → recorded in errors, not fired
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# ms-92 / e-2164 — leader-digest fires alongside progress-check
+# ---------------------------------------------------------------------------
+
+
+def test_due_trek_fires_leader_digest_on_separate_channel():
+    """The same scheduler tick that fires trek-progress-check must also
+    fire one trek-leader-digest addressed to the leader's session.
+    """
+    _seed_trek(
+        trek_id="tk-digest01",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-92"}],
+    )
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-digest01"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["fired"]) == 1
+    fired = body["fired"][0]
+    assert fired["leader_session_id"] == "sv-leader"
+    assert fired["leader_digest_event_id"], (
+        "scheduler must record the leader-digest event id alongside the "
+        "progress-check event ids"
+    )
+
+    # Two bus events landed: one progress-check + one leader-digest.
+    events = _bus_events_by_project["beacon-test"]
+    channels = [e["channel"] for e in events]
+    assert "trek-progress-check" in channels
+    assert "trek-leader-digest" in channels
+
+    # Inspect the digest event shape.
+    digest_event = next(e for e in events
+                        if e["channel"] == "trek-leader-digest")
+    assert digest_event["delivery"] == "auto-execute"
+    assert digest_event["envelope"]["tier"] == "T1-system"
+    assert digest_event["envelope"]["scope"] == "trek:tk-digest01"
+    assert digest_event["envelope"]["actions_authorized"] == \
+        ["trek.leader_digest"]
+    # Payload addressed to the leader only.
+    payload = digest_event["payload"]
+    assert payload["kind"] == "trek-leader-digest"
+    assert payload["recipient_session_id"] == "sv-leader"
+    assert payload["trek_id"] == "tk-digest01"
+    # Aggregate counts are present even when there are no pulse-acks yet
+    # (= legitimate "fresh trek, no executors pulsed" snapshot).
+    assert payload["summary"]["active"] == 0
+    assert payload["sessions"] == []
+
+
+def test_due_trek_without_leader_session_id_skips_digest():
+    """A trek without a leader_session_id (= planning-era trek migrated
+    badly) must skip the digest but still fire progress-check."""
+    _seed_trek(
+        trek_id="tk-noleader01",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-92"}],
+    )
+    # Manually drop leader_session_id.
+    _treks["tk-noleader01"]["leader_session_id"] = ""
+
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-noleader01"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["fired"]) == 1
+    fired = body["fired"][0]
+    assert fired["leader_digest_event_id"] == ""
+
+    # No leader-digest event in the bus.
+    events = _bus_events_by_project["beacon-test"]
+    channels = [e["channel"] for e in events]
+    assert "trek-progress-check" in channels
+    assert "trek-leader-digest" not in channels
+
+
+def test_due_trek_stamps_last_leader_digest_at_when_fired():
+    _seed_trek(
+        trek_id="tk-stamp001",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-92"}],
+    )
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-stamp001"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200
+    saved = _treks["tk-stamp001"]
+    assert saved["meta"]["last_leader_digest_at"]
+
 
 def test_empty_scope_trek_lands_in_errors_not_fired():
     _seed_trek(
@@ -352,9 +458,13 @@ def test_10min_cadence_does_not_refire_immediately():
     )
     assert r2.status_code == 200
     assert r2.json()["due"] == 0
-    # Only one bus event landed.
+    # Only one cadence-fire landed. Each fire emits both a
+    # trek-progress-check and a trek-leader-digest (= ms-92 / e-2164),
+    # so 2 events total for one fire.
     events = _bus_events_by_project["beacon-test"]
-    assert len(events) == 1
+    assert len(events) == 2
+    channels = sorted(e["channel"] for e in events)
+    assert channels == ["trek-leader-digest", "trek-progress-check"]
 
 
 # ---------------------------------------------------------------------------
