@@ -2,6 +2,24 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.48.0] - 2026-06-22
+
+- Merge pull request #182 from kurogin23mech-source/fix/ms-88-server-bugs-A
+- fix(ms-88): server-side scheduler / task-state の 3 件の構造修正 (= 2026-06-19 dogfood で発見)
+- Merge pull request #181 from kurogin23mech-source/feat/ms-88-trek-kickoff-cli
+- Merge pull request #180 from kurogin23mech-source/feat/ms-88-pulse-picker-narrative
+- fix(ms-88): peer 列挙 helper を kickoff_status keys 経由に修正 (= leader review)
+- feat(ms-88): beacon trek kickoff CLI wrapper (= e-2139 残作業 #1)
+- feat(ms-88): pulse picker narrative 4→5 択 + bus-autonomous-content 整流 (= e-2139 残作業)
+- Merge pull request #178 from kurogin23mech-source/feat/ms-88-five-choice-picker
+- Merge pull request #179 from kurogin23mech-source/feat/ms-88-kickoff-skill-side
+- feat(ms-88): Trek Kickoff Ritual Skill side + coordinator norm narrative (= e-2138 / e-2140)
+- feat(ms-88): 5-choice executor picker — 'dm-peer' を追加 (= e-2139)
+- Merge pull request #177 from kurogin23mech-source/feat/ms-88-kickoff-server-side
+- feat(ms-88): Trek Kickoff Ritual server-side (= e-2138 server part)
+- docs(release): update README/CHANGELOG for v0.47.0
+- chore(release): bump formula to 0.47.0
+
 ## [v0.47.0] - 2026-06-19
 
 - Merge pull request #176 from kurogin23mech-source/deploy/ms-88-server-tick-v0.47
