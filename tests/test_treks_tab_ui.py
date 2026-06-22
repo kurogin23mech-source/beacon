@@ -425,9 +425,9 @@ class TestWebUI_TrekShowDoneToggle:
         self.src = _read(WEB_INDEX)
 
     def test_show_done_button_rendered(self):
-        # show-done ボタンは class="trek-task-show-done-btn" でレンダリングされ、
-        # data-action="trek-toggle-done" を持つ。
-        assert 'class="trek-task-show-done-btn"' in self.src
+        # show-done ボタンは class="trek-task-show-done-btn..." で render される
+        # (= hide-mode class が showDone=true 時に suffix される、 base class 名で grep)。
+        assert 'class="trek-task-show-done-btn' in self.src
         assert 'data-action="trek-toggle-done"' in self.src
 
     def test_show_done_dispatcher_case_present(self):
@@ -439,3 +439,14 @@ class TestWebUI_TrekShowDoneToggle:
         # ms-id 単位の toggle 保持。 boolean 1 つだと別 MS の done 表示が
         # 同時に切り替わってしまうので、 Set 化されていることを pin。
         assert "openTrekShowDone: new Set()" in self.src
+
+    def test_show_done_button_has_hide_mode_class_when_expanded(self):
+        # done タスク表示中 (= showDone=true) はボタンに hide-mode class が付与され
+        # gray にスタイル切替される。 done タスクと視覚揃え (= 2026-06-23 user 指摘)。
+        assert "hide-mode" in self.src
+        assert ".trek-task-show-done-btn.hide-mode" in self.src
+
+    def test_done_child_task_tag_grayed_out(self):
+        # done タスクの TASK タグは grayout 専用 CSS が当たる (= done と todo を
+        # 視覚分離、 2026-06-23 user 指摘)。
+        assert '.trek-child-task[data-task-state="done"] .trek-child-task-tag' in self.src
