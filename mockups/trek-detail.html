@@ -359,8 +359,8 @@ body {
   font-family: var(--font-mono);
   color: var(--text-dim);
   font-size: 0.72rem;
-  margin-left: 8px;
   cursor: pointer;
+  white-space: nowrap;
 }
 .session-full:hover { color: var(--text-secondary); }
 .role-leader {
@@ -532,12 +532,16 @@ body {
   </div>
 
   <!-- MEMBERS & AGENTS -->
+  <!-- 2026-06-23 dogfood: session 列を session-local (= s-N badge) と
+       session id (= raw 短縮 sid) の 2 列に分割。 leader / member 両方が
+       「自分の raw session id がどれか」 を 1 列で読めるようにする。 -->
   <div class="section-label">MEMBERS &amp; AGENTS</div>
   <table class="members-table">
     <thead>
       <tr>
         <th>user</th>
         <th>session</th>
+        <th>session id</th>
         <th>role</th>
         <th>task</th>
       </tr>
@@ -545,27 +549,21 @@ body {
     <tbody>
       <tr>
         <td rowspan="2" class="member-email member-email-cell">kurogin23mech@gmail.com</td>
-        <td>
-          <span class="session-local">s-1</span>
-          <span class="session-full" title="クリックでコピー: sv-77e81553-1781580651500-a648e110">sv-…a648e110 ⓘ</span>
-        </td>
+        <td><span class="session-local">s-1</span></td>
+        <td><span class="session-full" title="クリックでコピー: sv-77e81553-1781580651500-a648e110">sv-77e815…a648e110</span></td>
         <td><span class="role-leader">LEADER</span></td>
         <td><span class="task-link">t-1</span></td>
       </tr>
       <tr class="continued">
-        <td>
-          <span class="session-local">s-2</span>
-          <span class="session-full" title="クリックでコピー: sv-77e81553-1781855889166-04ecd10d">sv-…04ecd10d ⓘ</span>
-        </td>
+        <td><span class="session-local">s-2</span></td>
+        <td><span class="session-full" title="クリックでコピー: sv-77e81553-1781855889166-04ecd10d">sv-77e815…04ecd10d</span></td>
         <td></td>
         <td><span class="task-link">t-2</span></td>
       </tr>
       <tr>
         <td class="member-email member-email-cell">******@gmail.com</td>
-        <td>
-          <span class="session-local">s-3</span>
-          <span class="session-full" title="クリックでコピー: sv-77e81553-1781855906826-0390b162">sv-…0390b162 ⓘ</span>
-        </td>
+        <td><span class="session-local">s-3</span></td>
+        <td><span class="session-full" title="クリックでコピー: sv-77e81553-1781855906826-0390b162">sv-77e815…0390b162</span></td>
         <td></td>
         <td><span class="task-link">t-3, t-4</span></td>
       </tr>

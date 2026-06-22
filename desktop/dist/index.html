@@ -2448,9 +2448,18 @@ body::after {
 .trek-members-table .session-full {
   font-family: var(--font-mono, monospace);
   color: var(--text-dim);
-  font-size: 0.68rem;
-  margin-left: 6px;
+  font-size: 0.7rem;
 }
+.trek-members-table .session-full.none,
+.trek-members-table .session-local.none {
+  color: var(--text-dim);
+  font-style: italic;
+  font-weight: normal;
+}
+.trek-members-table .session-local-cell { white-space: nowrap; }
+.trek-members-table .session-full-cell { white-space: nowrap; }
+.trek-members-table .session-full-clickable { cursor: pointer; }
+.trek-members-table .session-full-clickable:hover { color: var(--text-secondary); }
 .trek-members-table .role-leader {
   color: #a78bfa;
   font-weight: 600;
@@ -5455,17 +5464,31 @@ function _renderTrekMembersTable(t) {
       const taskCell = slots.length
         ? `<span class="task-link">${slots.map(esc).join(', ')}</span>`
         : `<span class="task-link none">—</span>`;
-      // ms-86 / e-2133: session cell は Trek-local 番号 (= s-N) badge で表示。
-      // hover で実 session id tooltip、 click で clipboard コピー + toast。
-      const sessionCell = sid
-        ? _trekRenderSessionRef(t, sid)
-        : `<span class="session-full">(no session yet)</span>`;
+      // ms-86 / e-2133: session-local 列 = Trek-local 番号 (= s-N) badge。
+      // ms-86 / 2026-06-23 dogfood: session-full 列 = raw session id 短縮形
+      // (= sv-77...a648e110) を別列で表示。 leader / member 両方が「自分の raw
+      // session id がどれか」 を 1 列で読めるようにする (= dogfood 観察、 s-N
+      // だけだと local 番号化された結果が見えても raw id が紐付かない問題)。
+      // 両セルとも hover で full sid tooltip、 click で clipboard コピー + toast。
+      let sessionLocalCell;
+      let sessionFullCell;
+      if (sid) {
+        const fullSid = String(sid);
+        sessionLocalCell = _trekRenderSessionRef(t, fullSid);
+        const shortLabel = _trekShortSessionId(fullSid);
+        const tooltip = `${fullSid} (click to copy)`;
+        sessionFullCell = `<span class="session-full session-full-clickable" data-action="copy-trek-sid" data-sid="${esc(fullSid)}" title="${esc(tooltip)}">${esc(shortLabel)}</span>`;
+      } else {
+        sessionLocalCell = `<span class="session-local none">—</span>`;
+        sessionFullCell = `<span class="session-full none">(no session yet)</span>`;
+      }
       rows.push(`
         <tr class="${isFirstRow ? '' : 'continued'}">
           ${isFirstRow
             ? `<td class="member-email member-email-cell" rowspan="${group.length}">${esc(email)}</td>`
             : ''}
-          <td>${sessionCell}</td>
+          <td class="session-local-cell">${sessionLocalCell}</td>
+          <td class="session-full-cell">${sessionFullCell}</td>
           <td>${roleHtml}</td>
           <td>${taskCell}</td>
         </tr>`);
@@ -5477,6 +5500,7 @@ function _renderTrekMembersTable(t) {
         <tr>
           <th>user</th>
           <th>session</th>
+          <th>session id</th>
           <th>role</th>
           <th>task</th>
         </tr>
