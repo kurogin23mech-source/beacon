@@ -450,3 +450,60 @@ class TestWebUI_TrekShowDoneToggle:
         # done タスクの TASK タグは grayout 専用 CSS が当たる (= done と todo を
         # 視覚分離、 2026-06-23 user 指摘)。
         assert '.trek-child-task[data-task-state="done"] .trek-child-task-tag' in self.src
+
+
+class TestWebUI_TrekMembersTableSessionFullColumn:
+    """2026-06-23 dogfood: MEMBERS & AGENTS table の session 列を 2 列に分割。
+    既存 s-N badge (= session-local) と並んで raw session id 短縮形
+    (= sv-77...a648e110) を別列で表示し、 leader / member が自分の raw sid を
+    1 列で読めるようにする。 click で clipboard コピーは両セル共通。
+    """
+
+    def setup_method(self, _method):
+        self.src = _read(WEB_INDEX)
+
+    def test_thead_has_five_columns(self):
+        # thead の <th> ラベル順序 (user / session / session id / role / task)
+        # を render 文字列内で構造的に pin する。
+        thead_marker = "<table class=\"trek-members-table\">"
+        idx = self.src.index(thead_marker)
+        end = self.src.index("</thead>", idx)
+        block = self.src[idx:end]
+        for label in ("<th>user</th>", "<th>session</th>", "<th>session id</th>",
+                      "<th>role</th>", "<th>task</th>"):
+            assert label in block, f"thead missing column header {label!r}"
+
+    def test_separate_session_local_and_full_cells(self):
+        # td 単位で session-local-cell と session-full-cell が render される
+        # (= 1 td に span 2 つ並べる従来案ではなく、 5 列 table に再構築)。
+        assert 'class="session-local-cell"' in self.src
+        assert 'class="session-full-cell"' in self.src
+
+    def test_session_full_cell_is_clickable_for_copy(self):
+        # session-full cell にも copy-trek-sid action が紐づき、 既存の
+        # handleCommonAction 'copy-trek-sid' case で clipboard コピーが走る。
+        assert "session-full-clickable" in self.src
+        assert 'data-action="copy-trek-sid"' in self.src
+        assert "case 'copy-trek-sid':" in self.src
+
+    def test_session_full_cell_uses_short_session_id_helper(self):
+        # session-full セルは _trekShortSessionId helper で短縮済 raw sid を
+        # 表示する (= 既存 helper を再利用し、 短縮ルール一元化)。
+        idx = self.src.index("// ms-86 / 2026-06-23 dogfood: session-full")
+        end = self.src.index("rows.push(", idx)
+        block = self.src[idx:end]
+        assert "_trekShortSessionId(fullSid)" in block, (
+            "session-full cell must reuse _trekShortSessionId helper so the "
+            "shortening rule (sv-77e815…a648e110) stays consistent"
+        )
+
+    def test_mockup_synced_to_five_columns(self):
+        # mockup 自体も 5 列構造に同期されている (= visual reference と実装の
+        # drift を構造的に防ぐ)。
+        mockup = _read(REPO_ROOT / "mockups" / "trek-detail.html")
+        idx = mockup.index('<table class="members-table">')
+        end = mockup.index("</thead>", idx)
+        block = mockup[idx:end]
+        for label in ("<th>user</th>", "<th>session</th>", "<th>session id</th>",
+                      "<th>role</th>", "<th>task</th>"):
+            assert label in block, f"mockup thead missing {label!r}"
