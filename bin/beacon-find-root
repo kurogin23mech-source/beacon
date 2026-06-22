@@ -1,8 +1,15 @@
 #!/bin/sh
 # beacon-find-root: walk up from cwd to find a Beacon project root.
 #
-# Outputs the absolute path of the directory containing .beacon/project.json
-# and exits 0 if found, exits 1 (with no output) if not.
+# Outputs the absolute path of the directory containing the Beacon root
+# marker and exits 0 if found, exits 1 (with no output) if not.
+#
+# A directory qualifies as a Beacon root iff `.beacon/` contains EITHER
+# `project.json` (local mode marker) OR `cloud.json` (cloud mode marker).
+# ms-84 Phase 3 cut over the truth model so cloud projects no longer keep
+# a local project.json — cloud.json is the sole on-disk marker after
+# `beacon cloud upload-initial`. Both markers are accepted here for the
+# transition period and for sandbox flows that still have both.
 #
 # Used by Beacon Skills (= Claude Code Skill files) as the prerequisite
 # check, replacing the cwd-only `test -f .beacon/project.json` pattern.
@@ -17,7 +24,7 @@
 
 d=$(pwd)
 while [ "$d" != "/" ] && [ -n "$d" ]; do
-    if [ -f "$d/.beacon/project.json" ]; then
+    if [ -f "$d/.beacon/project.json" ] || [ -f "$d/.beacon/cloud.json" ]; then
         echo "$d"
         exit 0
     fi

@@ -219,9 +219,12 @@ EOF
 }
 
 ensure_project() {
-    if [ ! -f "$BEACON_PROJECT_FILE" ]; then
-        echo "Error: No .beacon/project.json found."
-        echo "Run 'beacon init' first."
+    # ms-84 Phase 3 (e-2037): cloud projects no longer keep a local
+    # project.json after `cloud upload-initial`. cloud.json is the
+    # equivalent root marker in cloud mode, so either is sufficient.
+    if [ ! -f "$BEACON_PROJECT_FILE" ] && [ ! -f ".beacon/cloud.json" ]; then
+        echo "Error: No Beacon project found here (looked for .beacon/project.json or .beacon/cloud.json)."
+        echo "Run 'beacon init' (local) or 'beacon cloud join <project-id>' (cloud) first."
         exit 1
     fi
 }
@@ -1988,10 +1991,15 @@ cmd_pr() {
 
 # --- Locate the project root by walking up from CWD (like git) so beacon
 #     works from any subdirectory, not just the dir that holds .beacon/ (e-862).
+#     ms-84 Phase 3 (e-2037): cloud mode no longer keeps a local
+#     project.json, so cloud.json is also accepted as a root marker. The
+#     two markers are equivalent for discovery; the truth-source decision
+#     (local file vs cloud API) is made later in `get_store()` based on
+#     cloud.json existence alone.
 find_beacon_root() {
     local dir="$PWD"
     while [ -n "$dir" ]; do
-        if [ -f "$dir/.beacon/project.json" ]; then
+        if [ -f "$dir/.beacon/project.json" ] || [ -f "$dir/.beacon/cloud.json" ]; then
             printf '%s\n' "$dir"
             return 0
         fi
@@ -2025,10 +2033,13 @@ done
 
 # Relocate to the project root before dispatch. `setup`/`init` operate on the
 # current directory by design, so they are exempt.
+# ms-84 Phase 3 (e-2037): cloud mode has no local project.json. We
+# therefore relocate whenever neither marker is present in CWD, accepting
+# .beacon/cloud.json as a sufficient root signal as well.
 case "${1:-}" in
     setup|init) ;;
     *)
-        if [ ! -f "$BEACON_PROJECT_FILE" ]; then
+        if [ ! -f "$BEACON_PROJECT_FILE" ] && [ ! -f ".beacon/cloud.json" ]; then
             _beacon_root="$(find_beacon_root || true)"
             if [ -n "${_beacon_root:-}" ]; then
                 cd "$_beacon_root"
