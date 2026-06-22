@@ -3985,15 +3985,22 @@ function renderShell(app) {
   const doneCount = (p.milestones || []).filter(m => m.status === 'done').length;
   const retro = nextRetroDate(p.retro_day);
 
+  // ms-86 / e-2219 — Trek detail page を開いている時は、 ヘッダから project 名 /
+  // project tag / project version badge を隠す。 Trek は cross-project entity で
+  // あり、 「今どの project を見てるか」 ではなく 「今どの Trek に居るか」 が
+  // ヘッダ文脈になる (= mockups/trek-detail.html L422-430 top-bar 参照)。
+  const trekOpen = !!state.openTrekId;
   app.innerHTML = `
     <header class="header fade-in">
       <div class="header-top">
         <button class="hamburger-btn" data-action="open-menu" title="Menu">
           <span></span><span></span><span></span>
         </button>
-        <span class="project-name">${esc(p.name)}</span>
-        <span class="header-tag">${esc(PLATFORM.headerTag)}</span>
-        ${PLATFORM.versionBadgeHTML()}
+        ${trekOpen
+          ? `<span class="project-name brand">Beacon</span>`
+          : `<span class="project-name">${esc(p.name)}</span>
+             <span class="header-tag">${esc(PLATFORM.headerTag)}</span>
+             ${PLATFORM.versionBadgeHTML()}`}
         <div class="connection-status" title="${esc(PLATFORM.getConnectionTitle())}">
           <div class="status-dot ${state.connected ? '' : 'offline'}"></div>
           <span class="connection-label">${state.connected ? 'live' : 'offline'}</span>
