@@ -2366,6 +2366,12 @@ body::after {
   letter-spacing: 0.05em;
 }
 .trek-task-show-done-btn:hover { background: rgba(74,222,128,0.08); }
+/* hide mode (= done タスク表示中) は done と視覚揃えるため gray にする */
+.trek-task-show-done-btn.hide-mode {
+  border-color: var(--border-subtle, var(--border));
+  color: var(--text-dim);
+}
+.trek-task-show-done-btn.hide-mode:hover { background: rgba(160,160,170,0.06); }
 .trek-child-task {
   display: grid;
   grid-template-columns: 56px 90px 1fr 100px;
@@ -2385,6 +2391,12 @@ body::after {
   background: rgba(96,165,250,0.05);
   text-transform: uppercase;
   letter-spacing: 0.06em;
+}
+/* done タスクの TASK タグは grayout (= todo / working 等と視覚分離) */
+.trek-child-task[data-task-state="done"] .trek-child-task-tag {
+  color: var(--text-dim);
+  border-color: var(--border-subtle, var(--border));
+  background: transparent;
 }
 .trek-child-task-id { font-family: var(--font-mono, monospace); color: var(--text-dim); }
 .trek-child-task-desc { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -5276,7 +5288,7 @@ function _renderTrekTaskRow(t, s, slotIndex) {
         ${expanded ? `
           <div class="trek-task-children">
             ${doneChildren.length
-              ? `<button class="trek-task-show-done-btn" data-action="trek-toggle-done" data-ms="${esc(s.milestone)}">${showDone ? 'hide' : 'show'} ${doneChildren.length} done</button>`
+              ? `<button class="trek-task-show-done-btn${showDone ? ' hide-mode' : ''}" data-action="trek-toggle-done" data-ms="${esc(s.milestone)}">${showDone ? 'hide' : 'show'} ${doneChildren.length} done</button>`
               : ''}
             ${pendingChildren.map(tk => _renderTrekChildTask(t, tk)).join('')}
             ${showDone ? doneChildren.map(tk => _renderTrekChildTask(t, tk)).join('') : ''}
@@ -5351,7 +5363,12 @@ function _renderTrekMembersTable(t) {
   const rows = [];
   for (const [email, group] of byEmail.entries()) {
     group.forEach((m, idx) => {
-      const sid = m.session_id || '';
+      // ms-86 / 2026-06-23: server 側 members[] は user-grain で session_id 持たない、
+      // leader 行は trek.leader_session_id を fallback として取る。
+      // 非 leader 行は session_history (= e-2225) 未実装の現状 「(no session yet)」
+      // 表示で OK、 e-2225 land 後に member.session_id / session_history から拾い直す。
+      let sid = m.session_id || '';
+      if (!sid && m.role === 'leader') sid = leaderSid;
       const isFirstRow = idx === 0;
       const isLeader = m.role === 'leader' || (sid && sid === leaderSid);
       const isInvited = !m.joined_at;
