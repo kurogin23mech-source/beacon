@@ -2240,74 +2240,6 @@ body::after {
   border-radius: 3px;
 }
 
-/* ms-88 / e-2108 — pulse-ack compliance widget rows.
-   Each row: session_id (short) | total acks | last picked + when | choice distribution. */
-.trek-pulse-explain {
-  font-size: 0.7rem;
-  color: var(--text-dim);
-  padding: 4px 0 10px;
-  line-height: 1.5;
-}
-.trek-pulse-explain code {
-  color: var(--accent);
-  font-family: var(--font-mono, monospace);
-  font-size: 0.7rem;
-}
-.trek-pulse-explain em {
-  color: var(--text-secondary);
-  font-style: italic;
-}
-.trek-pulse-row {
-  display: grid;
-  grid-template-columns: 1fr 80px 1fr;
-  gap: 8px;
-  align-items: center;
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--border-subtle);
-  font-size: 0.74rem;
-}
-.trek-pulse-row:last-child { border-bottom: none; }
-.trek-pulse-row .pulse-sid {
-  color: var(--text-primary);
-}
-.trek-pulse-row .pulse-count {
-  color: var(--accent);
-  font-weight: 600;
-  text-align: right;
-}
-.trek-pulse-row .pulse-last {
-  color: var(--text-secondary);
-  font-size: 0.7rem;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.trek-pulse-row .pulse-dist {
-  grid-column: 1 / -1;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding-top: 4px;
-}
-.pulse-choice {
-  font-size: 0.65rem;
-  color: var(--text-secondary);
-  background: var(--bg-raised);
-  border: 1px solid var(--border-subtle);
-  border-radius: 2px;
-  padding: 2px 6px;
-}
-.pulse-choice-n {
-  color: var(--accent);
-  font-weight: 600;
-  margin-left: 4px;
-}
-.pulse-empty {
-  font-size: 0.65rem;
-  color: var(--text-dim);
-  font-style: italic;
-}
-
 /* ms-86 v2 layout (mockups/trek-detail.html / e-2126) — wireframe reflow:
    WHY (goal_state) / TREK TASKS (MS accordion + 5-state badges) /
    MEMBERS & AGENTS (table) / RECENT ACTIVITY (real task-state stream). */
@@ -5112,78 +5044,6 @@ function _trekBadgeClass(s) {
   return '';
 }
 
-// ms-88 / e-2108 — Trek pulse-ack compliance widget. Reads `t.pulse_acks`
-// (= per-session aggregation written by POST /api/treks/<id>/pulse-ack) and
-// renders one row per session: total ack count, last picked choice, last
-// ack timestamp, and a mini choice-distribution bar. Self-contained — no
-// extra fetch needed because pulse_acks lives on the trek doc itself.
-function _renderTrekPulseAckRow(sid, entry) {
-  const total = Number(entry.total_acks || 0);
-  const lastAt = (entry.last_pulse_ack_at || '').slice(0, 16).replace('T', ' ');
-  const lastChoice = entry.last_picked_choice || '(unset)';
-  // Tally choice counts from the history ring buffer (= last 20 acks).
-  const history = entry.history || [];
-  const counts = {};
-  for (const h of history) {
-    const c = h.picked_choice || '(unset)';
-    counts[c] = (counts[c] || 0) + 1;
-  }
-  // Render a compact distribution bar: choice — count.
-  const distParts = Object.keys(counts)
-    .sort((a, b) => counts[b] - counts[a])
-    .map(c => `<span class="pulse-choice">${esc(c)}<span class="pulse-choice-n">${counts[c]}</span></span>`)
-    .join('');
-  return `
-    <div class="trek-pulse-row">
-      <span class="pulse-sid" style="font-family:var(--font-mono,monospace);">${esc(_trekShortSessionId(sid))}</span>
-      <span class="pulse-count">${total} ack${total === 1 ? '' : 's'}</span>
-      <span class="pulse-last">${esc(lastChoice)} · ${esc(lastAt) || '—'}</span>
-      <div class="pulse-dist">${distParts || '<span class="pulse-empty">no history</span>'}</div>
-    </div>`;
-}
-
-function _renderTrekPulseAckSection(t) {
-  const acks = t.pulse_acks || {};
-  const sids = Object.keys(acks);
-  let totalAcrossAll = 0;
-  for (const sid of sids) {
-    totalAcrossAll += Number((acks[sid] || {}).total_acks || 0);
-  }
-  // Sort by last_pulse_ack_at descending so the most recently-active
-  // sessions appear first.
-  sids.sort((a, b) => {
-    const aT = (acks[a] || {}).last_pulse_ack_at || '';
-    const bT = (acks[b] || {}).last_pulse_ack_at || '';
-    return bT.localeCompare(aT);
-  });
-  const rows = sids.length
-    ? sids.map(sid => _renderTrekPulseAckRow(sid, acks[sid])).join('')
-    : `<div class="trek-coming-soon">
-         No pulse-ack records yet. Each scheduler tick is supposed to be
-         acknowledged by an executor session calling
-         <code>/beacon-trek-pulse ${esc(t.trek_id)}</code> or
-         <code>beacon trek pulse-ack ${esc(t.trek_id)}</code>. Zero acks
-         means either no ticks have fired yet, or the autonomy harness
-         is not converting tick-receipts into observable self-reports.
-       </div>`;
-  return `
-    <div class="trek-section">
-      <div class="trek-section-title">
-        <span>PULSE-ACK COMPLIANCE</span>
-        <span class="right">${sids.length} session${sids.length === 1 ? '' : 's'} · ${totalAcrossAll} ack${totalAcrossAll === 1 ? '' : 's'} total</span>
-      </div>
-      <div class="trek-pulse-explain">
-        Each row records how often a session has self-reported via
-        <code>/beacon-trek-pulse</code> (= ms-88 e-2106 Layer 2). The
-        choice distribution shows what action the session picked at each
-        tick — high <em>continue</em> = autonomous progress, high
-        <em>dm-leader</em> = consultation pattern, frequent <em>terminal</em>
-        = many state transitions.
-      </div>
-      ${rows}
-    </div>`;
-}
-
 // ms-86 v2 (= e-2126 mockup) — TREK TASKS / MEMBERS table / RECENT ACTIVITY helpers.
 //
 // _trekTaskStateLabel — return the 5-state token for a scope entry, looking
@@ -5648,9 +5508,6 @@ function _renderTrekDetail(t) {
         </div>
         ${_renderTrekMembersTable(t)}
       </div>
-
-      <!-- PULSE-ACK COMPLIANCE — ms-88 / e-2108 Layer 2 observability -->
-      ${_renderTrekPulseAckSection(t)}
 
       <!-- RECENT ACTIVITY — task-state transitions + halt events -->
       <div class="trek-section">

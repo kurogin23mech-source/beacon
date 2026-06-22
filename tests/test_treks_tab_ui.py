@@ -205,15 +205,21 @@ class TestWebUI_TrekDetailMockParity:
 
     def test_detail_view_mock_sections(self):
         # ms-86 v2 section order (= mockups/trek-detail.html):
-        # WHY → TREK TASKS → MEMBERS & AGENTS → PULSE-ACK → RECENT ACTIVITY.
+        # WHY → TREK TASKS → MEMBERS & AGENTS → RECENT ACTIVITY (5 sections only).
+        # PULSE-ACK COMPLIANCE は ms-88 / e-2108 由来で mockup には無く、 user dogfood (2026-06-22)
+        # で spec creep として撤去された (= AI / leader が server data を直接読めば足り、 human surface 不要)。
         for header in (
             "<span>WHY</span>",
             "<span>TREK TASKS</span>",
             "MEMBERS &amp; AGENTS",
-            "PULSE-ACK COMPLIANCE",
             "<span>RECENT ACTIVITY</span>",
         ):
             assert header in self.src, f"section header {header!r} missing"
+        # PULSE-ACK COMPLIANCE は撤去済 — もし再追加されたら mockup 整合を再評価
+        assert "PULSE-ACK COMPLIANCE" not in self.src, (
+            "PULSE-ACK COMPLIANCE は mockup スコープ外として 2026-06-22 に撤去済。 "
+            "再追加するなら mockup 更新 + user 承認が必要"
+        )
 
     def test_stop_card_invokes_cli(self):
         assert "STOP THIS TREK" in self.src
