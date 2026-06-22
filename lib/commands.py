@@ -5346,6 +5346,60 @@ def _arm_for_trek(trek_id: str) -> dict:
 TREK_JOIN_CONSENT_PHRASE = "I UNDERSTAND"
 
 
+def _build_trek_join_consent_explanation(trek_id: str, email: str) -> str:
+    """Build the 4-section consent explanation text (ms-92 / e-2182).
+
+    Sections (= AC #1 of e-2182, mirroring CORE doc trek-positioning
+    `b1XOKXQeC0JXaKkO0CRt`「缶詰の徹夜作業部屋」 vocabulary):
+
+      (a) **Trek とは何か** — what the user is opting into in 1 line
+      (b) **委譲する権限** — concrete actions AI gains permission for,
+          each with a one-line example so the user can recognise the
+          shape of the autonomy being granted
+      (c) **user 確認境界** — concrete things AI still must not do
+          (= deploy / release / scope-out / 不可逆 actions / PR merge),
+          so the user knows where their judgment is still required
+      (d) **撤回方法** — how to leave the Trek, what happens after
+
+    Split into a builder so cloud / local paths share the same text
+    (= AC #6) and tests can assert the 4 sections via plain string
+    search without mocking stdin / stderr.
+    """
+    return (
+        f"\n─── Trek 参加同意 (ms-92 e-2182) ─────────────────────\n"
+        f"trek_id:    {trek_id}\n"
+        f"joining as: {email}\n"
+        f"\n"
+        f"(a) Trek とは何か\n"
+        f"   Trek (= 缶詰の徹夜作業部屋) は 「事前承認スコープを持つ自律実行の作業空間」 です。\n"
+        f"   一度参加すると、 scope 内の DM や action は AI 判断で進みます (= turn 制限なし)。\n"
+        f"   詳細: CORE doc trek-positioning (b1XOKXQeC0JXaKkO0CRt)。\n"
+        f"\n"
+        f"(b) 参加で委譲する権限 (= 個別承認なしで AI が実行できるようになる行為)\n"
+        f"   - scope 内 DM が blanket 自動承認 (= 一括許可) で配信される\n"
+        f"     例: 別 session からの「次やって」 DM が user 確認なく届く (= ms-70 / e-1854 blanket bypass)\n"
+        f"   - executor (= 実行担当 session) が working / done / waiting-review を自分で宣言できる\n"
+        f"     例: subagent が task 完了を自己判断で stamp、 leader が後でまとめて review\n"
+        f"   - leader が PR (= プルリクエスト) の approve / reject を AI 自律で進められる\n"
+        f"     例: PR 内容が intent (= 目的) と整合していれば AI 単独で approve、 merge は別境界 (= (c) 参照)\n"
+        f"   - server-side scheduler が定期的に「次やって」 progress-check を push してくる\n"
+        f"     例: trek-progress-check / trek-trigger / trek-task-review channel が autonomous loop に乗る\n"
+        f"\n"
+        f"(c) user 確認境界 (= AI が touched せず、 必ず user に escalate される領域)\n"
+        f"   - deploy (= 本番への配置) / release (= リリース ceremony) は必ず user 承認\n"
+        f"   - Trek scope 外の action (= 別 project / 別 MS への直接 write) は user 確認必須\n"
+        f"   - 不可逆 action (= git force-push / hard delete / 外部 email 送信 等) は user_review に forward、 AI 単独 NG\n"
+        f"   - 個別 PR の merge は AI 自律 NG。 Trek 終結時に user 1 confirm で集約承認\n"
+        f"     (= e-2169 で確立した 「approve = AI / merge = Trek 単位 user / release = user」 の 3 段境界)\n"
+        f"\n"
+        f"(d) 撤回方法\n"
+        f"   いつでも `beacon trek leave {trek_id}` で抜けられます。\n"
+        f"   leave 後は blanket 自動承認が解除され、 以後の DM は通常の user 確認経路に戻ります。\n"
+        f"   leader role を持っている場合は先に `beacon trek transfer-leader {trek_id} --to <session_id>` で\n"
+        f"   後任を立ててから leave してください (= last-leader 抜けは server が 400 で reject)。\n"
+    )
+
+
 def _trek_join_consent_gate(trek_id: str, email: str, *, json_mode: bool) -> None:
     """Gate ``beacon trek join`` on per-session 明示同意 (ms-88 / e-2090).
 
@@ -5360,38 +5414,33 @@ def _trek_join_consent_gate(trek_id: str, email: str, *, json_mode: bool) -> Non
     - ``json_mode`` is irrelevant to the gate itself but affects the abort
       payload (= keep stderr human-readable either way; the gate is a UX
       checkpoint, not a JSON API).
+
+    The explanation text is built by ``_build_trek_join_consent_explanation``
+    (ms-92 / e-2182) so cloud / local paths share the same 4-section
+    structure and tests can assert section presence without driving
+    stdin / stderr.
     """
-    explanation = (
-        f"\n⚠ Trek 参加 = AI を turn 制限なく走らせる権限委譲です\n"
-        f"  trek_id: {trek_id}\n"
-        f"  joining as: {email}\n"
-        f"\n"
-        f"  参加すると次の挙動が unlock されます:\n"
-        f"  - scope 内 DM が blanket 自動承認 (= ms-70 / e-1854) で配信される\n"
-        f"  - trek-progress-check 等の channel が autonomous execution に乗る\n"
-        f"  - server-side scheduler が定期的に「次やって」 と push してくる\n"
-        f"  - 不可逆 action (= deploy / release / external write) は user_review に\n"
-        f"    forward されますが、 それ以外は AI 判断で実行されます\n"
-        f"\n"
-        f"  撤回したい場合: `beacon trek leave {trek_id}` で同等の手順で抜けられます。\n"
-    )
+    explanation = _build_trek_join_consent_explanation(trek_id, email)
 
     if not sys.stdin.isatty():
         # Non-TTY (= bot / CI / Skill pipe) は typed prompt を取れない。
         # silent auto-accept は本 gate の趣旨に反するので明示 flag を要求。
         sys.stderr.write(explanation)
         sys.stderr.write(
-            "\n  非 TTY 経由のため typed-ack を取れません。 自動化 / bot 経路で\n"
-            "  参加する場合は `--i-understand-the-implications` を明示的に渡してください。\n"
+            "\n─── 自動化 / bot 経路 ────────────────────────────────\n"
+            "非 TTY 経由のため typed-ack を取れません。 自動化 / bot 経路で\n"
+            "参加する場合は `--i-understand-the-implications` を明示的に渡してください\n"
+            "(= flag enforcement、 e-2090 で land した forcing function)。\n"
         )
         sys.exit(1)
 
     sys.stderr.write(explanation)
     sys.stderr.write(
-        f"\n  意味を理解したうえで参加する場合は次のフレーズを正確に入力してください\n"
-        f"  (case-sensitive、 余分な空白なし):\n"
-        f"    {TREK_JOIN_CONSENT_PHRASE}\n"
-        f"\n  > "
+        f"\n─── 同意確認 ───────────────────────────────────────\n"
+        f"上記 (a)-(d) を理解したうえで参加する場合は次のフレーズを正確に入力してください\n"
+        f"(case-sensitive、 余分な空白なし):\n"
+        f"   {TREK_JOIN_CONSENT_PHRASE}\n"
+        f"\n> "
     )
     sys.stderr.flush()
     try:
