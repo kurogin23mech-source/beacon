@@ -4200,8 +4200,12 @@ async function switchTab(tab) {
   // ms-69 / e-1659 v3: switching tabs leaves any open trek detail and
   // returns the user to the project view (trek detail is a sidebar-driven
   // standalone page, not a tab in the project chrome).
+  // ms-86 / e-2220 — accordion / show-done 状態も Trek を閉じる経路で必ず
+  // クリアする (= 別 Trek を後で開いた時に前 Trek の expand 状態が漏れない)。
   state.openTrekId = null;
   state.openTrekDocs = [];
+  state.openTrekExpanded = new Set();
+  state.openTrekShowDone = new Set();
   if (tab === 'documents') {
     const loads = [];
     if (state.documents.length === 0) loads.push(dataSource.loadDocuments().catch(() => {}));
@@ -4237,7 +4241,7 @@ async function openTrek(trekId) {
   state.openTrekId = trekId;
   state.openTrekDocs = [];
   state.openTrekExpanded = new Set();
-  state.openTrekShowDone = false;
+  state.openTrekShowDone = new Set();
   render();
   // Fetch docs in the background; if it fails, the detail view shows
   // "No docs tagged with this trek yet." which is a fine degrade.
@@ -4251,7 +4255,7 @@ function closeTrek() {
   state.openTrekId = null;
   state.openTrekDocs = [];
   state.openTrekExpanded = new Set();
-  state.openTrekShowDone = false;
+  state.openTrekShowDone = new Set();
   render();
 }
 
