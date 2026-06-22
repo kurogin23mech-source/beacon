@@ -363,6 +363,8 @@ Treks (= 協奏作業領域) are cross-project, cross-session work areas. While 
 | `beacon trek resume <trek-id>` | Clear the halt signal / 再開 |
 | `beacon trek transfer-leader <trek-id> --to <session-id>` | Hand off `leader_session_id` to another session / leader 引き継ぎ |
 | `beacon trek take-over <trek-id>` | Re-bind `leader_session_id` to a fresh session of the same leader user (= dead-session recovery without the prior leader's authorization, ms-88 e-2089) |
+| `beacon trek kickoff <trek-id> [--session-id <sid>] [--kickoff-dm-event-id <eid>]` | Mark a session's Kickoff Ritual DM as sent (= `/beacon-trek-pulse` Step 0.4 が叩く、ms-88 e-2138)。kickoff_status を立てるまで pulse-ack は `kickoff_required` で reject される |
+| `beacon trek reconcile <trek-id> [--apply]` | Trek の `task_states` を task pool と整合させる (= 「pool で done だが Trek stamp が waiting-review / leader_review / working で残ってる」 stuck 状態を一括検知 + 修復、default dry-run、`--apply` で実適用、ms-88 e-2167) |
 
 In the Web UI / Tauri Desktop, the **Treks** tab on a project page lists every trek that includes the current project in its scope (= active と archived を別表示)。各 trek の詳細では members / scope / status / 関連 docs が並ぶ。逆に milestone / operation / task の詳細を開くと、その作業項目を scope に含む trek 一覧が **Related Treks** widget としてインラインで出る。
 

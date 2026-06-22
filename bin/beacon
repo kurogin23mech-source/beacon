@@ -123,6 +123,12 @@ Treks (cross-project / cross-session 協奏作業領域 — ms-69):
   beacon trek take-over <trek-id>   Fresh session (= same user, leader role) を
                                     新 leader_session_id に bind し直す
                                     (= dead session 引き継ぎ、ms-88 e-2089)
+  beacon trek kickoff <trek-id> [--session-id X] [--kickoff-dm-event-id Y]
+                                    Kickoff Ritual の完了 stamp
+                                    (= /beacon-trek-pulse Step 0.4、ms-88 e-2138)
+  beacon trek reconcile <trek-id> [--apply]
+                                    task pool ↔ Trek stamp の乖離を修復
+                                    (= default dry-run、--apply で実適用、ms-88 e-2167)
 
 Stop signal (ms-55: Andon cord — anyone can broadcast a halt):
   beacon stop scoped --target <kind>:<id> [--reason "..."] [--reason-kind X]
