@@ -2141,13 +2141,18 @@ body::after {
 }
 
 /* STOP card — prominent red, always rendered on active trek so the
-   "kill switch" is one click away. */
+   "kill switch" is one click away.
+   ms-86 / e-2221 — mockups/trek-detail.html L131-141 halt-block と同じ
+   max-width 700px + center 揃え。 leaf 全幅に広げると視線が走らないので
+   画面幅の半分程度に絞り、 icon + content + STOP button の 3 横並びが
+   読みやすいリズムに収める。 */
 .trek-stop-card {
   border: 1px solid var(--danger, #ef4444);
   background: rgba(239,68,68,0.06);
   border-radius: 6px;
   padding: 20px;
-  margin-bottom: 18px;
+  margin: 22px auto;
+  max-width: 700px;
   display: flex;
   align-items: center;
   gap: 18px;
