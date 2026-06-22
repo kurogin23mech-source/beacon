@@ -3762,7 +3762,14 @@ const PLATFORM = {
   headerTag: 'beacon',
   getConnectionTitle: () => 'live = WebSocket push from server',
   versionBadgeHTML: () => renderVersionBadge(),
-  getFooterLeftHTML: () => `<div>${esc(state.projectId)}</div>`,
+  // ms-86 / 2026-06-23 dogfood — Trek detail page を開いている時は footer の
+  // project id (= state.projectId) も隠す。 Trek は cross-project entity であり、
+  // 「今どの project に居るか」 という情報自体が user の認知を Trek scope から
+  // 引き戻すノイズになる (= e-2219 / 2026-06-23 user 指摘 「ヘッダだけでなく
+  // footer にも project name が残っている」)。
+  getFooterLeftHTML: () => state.openTrekId
+    ? `<div>Beacon</div>`
+    : `<div>${esc(state.projectId)}</div>`,
   getArchiveButtonHTML: (p) => state.projectId
     ? `<button class="sort-toggle" data-action="archive-project" style="font-size:0.65rem;color:var(--text-dim);">Archive</button>`
     : '',

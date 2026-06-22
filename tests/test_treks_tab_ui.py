@@ -452,6 +452,45 @@ class TestWebUI_TrekShowDoneToggle:
         assert '.trek-child-task[data-task-state="done"] .trek-child-task-tag' in self.src
 
 
+class TestWebUI_TrekFooterHidesProjectId:
+    """2026-06-23 dogfood: e-2219 で header の project name 系は隠したが、 footer
+    の `state.projectId` (= beacon-b95643 等) が残っており 「いまだに project
+    名が見える」 と user 報告。 Trek 詳細を開いている時は footer も brand
+    「Beacon」 に置換し、 state.project / state.projectId 関連表示を全 surface
+    で抑制する。 mockup の footer 文言とは差分が出るが、 mockup より
+    cross-project entity としての一貫性を優先 (= user 指示)。
+    """
+
+    def setup_method(self, _method):
+        self.src = _read(WEB_INDEX)
+
+    def test_footer_left_branches_on_open_trek(self):
+        # PLATFORM.getFooterLeftHTML が state.openTrekId で brand fallback する。
+        idx = self.src.index("getFooterLeftHTML:")
+        end = self.src.index(",", idx)
+        block = self.src[idx:end]
+        assert "state.openTrekId" in block, (
+            "PLATFORM.getFooterLeftHTML must branch on state.openTrekId so the "
+            "footer doesn't leak project id while a trek detail page is open "
+            "(2026-06-23 dogfood)"
+        )
+        assert "Beacon" in block, (
+            "PLATFORM.getFooterLeftHTML must show brand 'Beacon' fallback for "
+            "open trek (mirrors header brand swap)"
+        )
+
+    def test_non_trek_footer_still_shows_project_id(self):
+        # 通常 (non-trek) 経路では state.projectId が表示される (= retro / dashboard
+        # 視点で 「今どの project に居るか」 を判別するため、 mockup footer と同じ)。
+        idx = self.src.index("getFooterLeftHTML:")
+        end = self.src.index(",", idx)
+        block = self.src[idx:end]
+        assert "state.projectId" in block, (
+            "non-trek path must still surface state.projectId so users keep "
+            "the project context when they aren't inside a trek"
+        )
+
+
 class TestWebUI_TrekMembersTableSessionFullColumn:
     """2026-06-23 dogfood: MEMBERS & AGENTS table の session 列を 2 列に分割。
     既存 s-N badge (= session-local) と並んで raw session id 短縮形
