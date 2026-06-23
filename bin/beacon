@@ -3813,7 +3813,21 @@ print(m.group(1) if m else "")' || true)
                             BEACON_JSON="$_bus_json" \
                             python3 "$COMMANDS_PY" bus_send || _rc=$?
                     done <<< "$_bus_to_list"
-                    [[ "$_rc" -ne 0 ]] && exit "$_rc"
+                    # ms-93 / e-2274: explicit `exit "$_rc"` rather than the
+                    # legacy `[[ -ne 0 ]] && exit "$_rc"` idiom.
+                    #
+                    # The old idiom is poisonous when `_rc=0`: the `[[ ]]`
+                    # test returns false (= exit status 1), the `&&` short-
+                    # circuits, and because this line is the LAST executed
+                    # simple command before the case block ends, bash
+                    # propagates exit 1 as the script's exit code even though
+                    # every recipient succeeded. Direct `python3 commands.py
+                    # bus_send` returned 0 (success path), but `beacon bus
+                    # send --to <sid>` returned 1, breaking Codex CLI
+                    # agents that gate next-action on `$?`. Always exit
+                    # with the explicit `_rc` so success path = 0 / failure
+                    # path = the failing recipient's exit code.
+                    exit "$_rc"
                 fi
                 ;;
             listen)
@@ -3944,6 +3958,18 @@ delivery: auto-execute | propose-to-ai (default) | notify-user-only
                backward-compat lane. Envelope is on by default (e-1290).
 auto-execute:  receiver-side opt-in allowlist. Default empty ⇒ all auto-execute
                events get downgraded to propose-to-ai by the inbox hook.
+
+Exit codes (ms-93 / e-2274):
+  send:     0 on success (= every recipient's event posted, delivery / opened
+            stamped). Non-zero on validation error (= missing --channel /
+            malformed --payload), envelope-verify failure, or any recipient
+            subprocess returning non-zero. When --to is repeated (= fan-out),
+            the exit code is the LAST non-zero recipient status, or 0 if all
+            succeeded. CLI agents (Codex, Claude Code) can safely branch on
+            `$?` to detect success vs. failure.
+  receive:  0 = got events, 2 = timed out without events, 1 = error.
+  listen:   blocks until SIGINT (or --once); exit 0 on clean shutdown.
+  ack/status/directory: 0 on success, non-zero on validation / network errors.
 EOF
                 ;;
         esac
