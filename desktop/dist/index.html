@@ -1106,8 +1106,19 @@ body::after {
   transition: max-height 0.3s ease;
 }
 
+/* ms-43 / e-2304: drop the 8000px max-height clamp on the expanded body.
+ * Previously `max-height: 8000px` + inherited `overflow: hidden` silently
+ * truncated MS cards that grew taller than 8000px (= ms-43 with 160 entries
+ * easily exceeded the cap; bottom rows were in the DOM but unreachable).
+ * Using `max-height: none` lets the body grow to fit all entries and lets
+ * the outer page scroll handle navigation. The collapse animation still
+ * runs on close (max-height transitions from a computed pixel value down
+ * to 0). Open transition is instant — acceptable trade-off for guaranteed
+ * full visibility of all entries. Same rule lives in desktop/dist/index.html
+ * (separate update path via e-2253 pattern). */
 .ms-card.expanded .ms-body {
-  max-height: 8000px;
+  max-height: none;
+  overflow: visible;
 }
 
 .ms-entries {
