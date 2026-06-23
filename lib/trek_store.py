@@ -35,11 +35,34 @@ def _path_for(trek_id: str) -> str:
 
 
 def load_trek(trek_id: str) -> dict | None:
+    """Load a trek doc by id. Returns None if not found.
+
+    ms-86 / e-2225 — also lazy-hydrates ``session_history`` from the
+    pre-existing session_id locations (= ``leader_session_id`` /
+    ``halt.issued_by_session_id`` / ``task_states[].updated_by_session_id``)
+    when the field is absent. The hydration is read-only here (= we do
+    not write the doc back); the next write path (= ``save_trek``) will
+    persist the hydrated history automatically. This keeps the read path
+    side-effect-free for callers that only want a view.
+    """
     path = _path_for(trek_id)
     if not os.path.exists(path):
         return None
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        doc = json.load(f)
+    # Lazy hydration: existing Treks predate session_history and need to be
+    # backfilled from the three legacy session_id locations so the UI can
+    # render MEMBERS & AGENTS without depending on a one-shot migration.
+    if "session_history" not in doc or not doc.get("session_history"):
+        try:
+            # Local import to avoid trek_store importing trek at module load
+            # (= keeps the import graph: trek_store ← commands ← trek).
+            from . import trek as _trek_mod  # type: ignore
+        except ImportError:
+            import trek as _trek_mod  # type: ignore
+        doc.setdefault("session_history", [])
+        _trek_mod.backfill_session_history(doc)
+    return doc
 
 
 def save_trek(trek: dict) -> None:

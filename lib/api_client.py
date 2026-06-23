@@ -33,6 +33,15 @@ class ApiClient:
         token = self._get_token()
         if token:
             req.add_header("Authorization", f"Bearer {token}")
+        # ms-86 / e-2225 — forward the local session id to the server so
+        # endpoints that record session-grained provenance (= trek join,
+        # task-state stamps, etc.) can attribute the call to a session
+        # without inventing a new auth path. Empty / unset is fine — the
+        # server treats missing header as anonymous-session.
+        import os as _os
+        sid = _os.environ.get("BEACON_SESSION_ID", "").strip()
+        if sid:
+            req.add_header("X-Beacon-Session", sid)
 
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
