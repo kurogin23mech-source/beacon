@@ -804,10 +804,17 @@ def cmd_milestone_add():
     owner = os.environ.get("BEACON_OWNER", "")
     assignee = os.environ.get("BEACON_ASSIGNEE", "")
     data = load_project()
+    # ms-43 / e-2281 — stamp the human author on the milestone so the Web
+    # UI surfaces the creator label (= 起票者) instead of the legacy
+    # ``"claude"`` literal in ``created_by``. Resolution falls back to
+    # env > credentials.json > project members[]; unauthenticated local
+    # mode returns ``{}`` and the create proceeds without ``meta.author``.
+    author = _resolve_current_author(data)
     ms_id = core.milestone_add(data, title, target_date, description=description,
                                priority=priority, objective=objective,
                                acceptance_criteria=acceptance_criteria,
-                               owner=owner, assignee=assignee)
+                               owner=owner, assignee=assignee,
+                               author=author or None)
     save_project(data)
     print(f"Added milestone {ms_id}: {title}")
     if owner or assignee:
@@ -2464,10 +2471,16 @@ def cmd_task_add():
                 file=sys.stderr,
             )
 
+    # ms-43 / e-2281 — stamp the human author on the task so the Web UI
+    # surfaces the creator label (= 起票者) instead of the legacy
+    # ``"claude"`` literal in ``meta.created_by``. Same resolution path
+    # as cmd_milestone_add / cmd_operation_open.
+    author = _resolve_current_author(data)
     eid = core.task_add(data, ms_id, description, entry_type=entry_type,
                         date=date, detail=detail, requested_by=requested_by,
                         priority=priority, motivation=motivation,
-                        acceptance_criteria=acceptance_criteria)
+                        acceptance_criteria=acceptance_criteria,
+                        author=author or None)
     save_project(data)
     from_str = f" (from {requested_by})" if requested_by else ""
     print(f"Added {entry_type} [{eid}] to {target['title']}: {description}{from_str}")
@@ -4413,6 +4426,82 @@ def _read_credentials_for_identity() -> tuple[str, str]:
         if email or user_id:
             return user_id, email
     return "", ""
+
+
+def _resolve_current_author(data: Optional[dict] = None) -> dict:
+    """Return ``{"user_id", "email", "display_name"}`` for the current operator.
+
+    ms-43 / e-2281 — mirror of the server-side ``_resolve_author`` contract
+    (server/app.py L538) on the CLI side so MS / task / Operation creates
+    initiated from the local CLI also stamp ``meta.author`` with the
+    *human* identity rather than leaving the field absent and falling
+    back to the ``"claude"`` literal in ``created_by``.
+
+    Resolution order (= env > credentials.json > project members[]):
+
+      1. ``BEACON_USER_ID`` / ``BEACON_USER_EMAIL`` / ``BEACON_DISPLAY_NAME``
+         env vars take precedence — tests / CI / multi-account flows
+         override freely without touching credentials.json.
+      2. ``credentials.json`` of the active profile (= login 済セッションは
+         自動継承) supplies user_id (= JWT sub claim) and email when env
+         is empty. Reuses ``_read_credentials_for_identity`` so the JWT
+         parsing path stays in one place.
+      3. ``display_name`` is not in credentials.json. As a best-effort
+         fallback, scan ``data["members"][]`` for a member whose id /
+         user_id / email matches the caller and lift the member's
+         ``display_name`` (or ``name``) field. Empty when no match.
+
+    Empty fields are dropped via ``core._clean_author`` so the on-disk
+    shape stays exactly ``{user_id, email, display_name}`` minus the
+    empties. Unauthenticated / no-credentials local mode returns ``{}``
+    — the caller passes ``author=None`` (or this empty dict, same effect)
+    and the create proceeds without a ``meta.author`` field, which the
+    Web UI then renders via the legacy ``created_by`` fallback.
+
+    Best-effort: any exception in member lookup is swallowed so the
+    create path never fails due to display_name resolution.
+    """
+    user_id = (os.environ.get("BEACON_USER_ID") or "").strip()
+    email = (os.environ.get("BEACON_USER_EMAIL") or "").strip()
+    display_name = (os.environ.get("BEACON_DISPLAY_NAME") or "").strip()
+
+    # credentials.json fallback for env-missing case (ms-61 / e-2132 parity).
+    if not email or not user_id:
+        try:
+            cred_user_id, cred_email = _read_credentials_for_identity()
+            if not email:
+                email = cred_email
+            if not user_id:
+                user_id = cred_user_id
+        except Exception:
+            pass
+
+    # display_name fallback via project members[] (ms-78 e-1807 shape).
+    if not display_name and isinstance(data, dict):
+        try:
+            members = data.get("members")
+            if isinstance(members, list):
+                for m in members:
+                    if not isinstance(m, dict):
+                        continue
+                    m_uid = (m.get("user_id") or m.get("id") or "").strip()
+                    m_email = (m.get("email") or "").strip()
+                    if user_id and m_uid == user_id:
+                        display_name = (m.get("display_name") or m.get("name")
+                                        or "").strip()
+                        break
+                    if email and m_email and m_email == email:
+                        display_name = (m.get("display_name") or m.get("name")
+                                        or "").strip()
+                        break
+        except Exception:
+            pass
+
+    return core._clean_author({
+        "user_id": user_id,
+        "email": email,
+        "display_name": display_name,
+    })
 
 
 def _resolve_creator_identity() -> tuple[str, str, str]:
@@ -13709,12 +13798,18 @@ def cmd_operation_open():
         print("Error: operation title required")
         sys.exit(1)
     data = load_project()
+    # ms-43 / e-2281 — stamp the human author on the Operation so the Web
+    # UI surfaces the creator label (= 起票者) instead of the legacy
+    # ``"claude"`` literal in ``created_by``. Same resolution path as
+    # cmd_milestone_add / cmd_task_add.
+    author = _resolve_current_author(data)
     try:
         data, op = core.operation_open(
             data, title, schedule=schedule, log_source=log_source,
             status=status, activation_hint=activation_hint,
             objective=objective, acceptance_criteria=acceptance_criteria,
             priority=priority,
+            author=author or None,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
