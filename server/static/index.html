@@ -4322,12 +4322,63 @@ async function switchTab(tab) {
 
 // ---- Treks (ms-69 / e-1659) ----
 
+// ms-86 / e-2250 — read ``?trek=<trek_id>`` from the URL. Trek detail is a
+// cross-project entity (= it can be shared across projects via DM / link)
+// and its URL must be project-agnostic so a shared "?trek=<id>" link doesn't
+// silently rebind the receiver's current project. Returns null when absent.
+function getTrekIdFromUrl() {
+  try {
+    if (typeof window === 'undefined' || !window.location) return null;
+    return new URLSearchParams(window.location.search).get('trek');
+  } catch (_) { return null; }
+}
+
+// ms-86 / e-2250 — rewrite the URL when entering Trek detail. The "?project="
+// query param is dropped (= Trek is not project-owned, the param would be
+// noise on shared links) and replaced by "?trek=<trek_id>". The hash
+// fragment (= #ms/..., #doc/..., etc.) is preserved so deep links inside
+// the Trek's scope survive. ``replaceState`` (not pushState) because the
+// previous URL is not a meaningful Back target — browser Back from a Trek
+// detail should leave the app or go to the previous history entry, not
+// silently swap the URL bar between two project axes.
+function _setUrlForTrekDetail(trekId) {
+  try {
+    if (typeof history === 'undefined' || !history.replaceState || !trekId) return;
+    const params = new URLSearchParams();
+    params.set('trek', trekId);
+    const newUrl = window.location.pathname + '?' + params.toString() + window.location.hash;
+    history.replaceState(null, '', newUrl);
+  } catch (_) { /* non-fatal: URL sync is best-effort */ }
+}
+
+// ms-86 / e-2250 — restore the "?project=<pid>" URL when closing Trek
+// detail. Required so the user returns to a sensible project-anchored URL
+// (= one they can copy / share) after leaving the Trek view. If no project
+// is currently in scope (= edge case, Trek was opened cold from a shared
+// link with no project loaded), we clear the trek param without picking a
+// fallback so the address bar reflects "no project chosen" honestly.
+function _setUrlForProjectView(projectId) {
+  try {
+    if (typeof history === 'undefined' || !history.replaceState) return;
+    const params = new URLSearchParams();
+    if (projectId) params.set('project', projectId);
+    const search = params.toString();
+    const newUrl = window.location.pathname
+      + (search ? '?' + search : '')
+      + window.location.hash;
+    history.replaceState(null, '', newUrl);
+  } catch (_) { /* non-fatal: URL sync is best-effort */ }
+}
+
 async function openTrek(trekId) {
   state.openTrekId = trekId;
   state.openTrekDocs = [];
   state.openTrekScope = { milestones: [], operations: [], tasks: [] };
   state.openTrekExpanded = new Set();
   state.openTrekShowDone = new Set();
+  // ms-86 / e-2250 — drop "?project=" and switch to "?trek=<id>" so
+  // shared links don't carry the opener's current project context.
+  _setUrlForTrekDetail(trekId);
   render();
   // ms-86 / e-2249 — fetch the cross-project scope aggregate (= MS /
   // Op / Task across every project the Trek reaches) in parallel with
@@ -4352,6 +4403,10 @@ function closeTrek() {
   state.openTrekScope = { milestones: [], operations: [], tasks: [] };
   state.openTrekExpanded = new Set();
   state.openTrekShowDone = new Set();
+  // ms-86 / e-2250 — restore "?project=<pid>" so the post-Trek URL
+  // reflects the project the user returns to (or, if none is loaded,
+  // clear the trek param honestly without inventing a fallback project).
+  _setUrlForProjectView(state.projectId || '');
   render();
 }
 
@@ -7644,8 +7699,14 @@ async function selectProject(projectId) {
   // because the previous project's URL is not a meaningful "back" target — a
   // browser Back from project B should leave the app, not silently rebind A.
   // Hash is preserved so deep links (#doc/..., #ms/..., etc.) survive a switch.
+  //
+  // ms-86 / e-2250: skip the project param write while a Trek detail is open
+  // (= state.openTrekId set). Trek detail owns the URL with ?trek=<id>, and
+  // overwriting with ?project=<pid> would silently flip the address bar back
+  // to a project-anchored URL while the user is still viewing the Trek.
   try {
-    if (typeof history !== 'undefined' && history.replaceState && projectId) {
+    if (typeof history !== 'undefined' && history.replaceState && projectId
+        && !state.openTrekId) {
       const params = new URLSearchParams(window.location.search);
       if (params.get('project') !== projectId) {
         params.set('project', projectId);
@@ -7946,13 +8007,32 @@ async function init() {
     waitForGsi();
     return;
   }
+  // ms-86 / e-2250 — Trek detail is project-agnostic. If the URL carries
+  // ?trek=<id>, honor it after the normal project load resolves so the
+  // shell has a project to render under but the Trek detail view comes up
+  // immediately. URL-side ``?project=`` is still respected when present
+  // (= it just gets dropped once openTrek() runs and rewrites the URL).
   const urlProjectId = getProjectIdFromUrl();
+  const urlTrekId = getTrekIdFromUrl();
   if (urlProjectId) {
     await selectProject(urlProjectId);
+  } else if (urlTrekId) {
+    // Cold link with no project context — pick the caller's first
+    // project so the shell can render, then openTrek() takes over.
+    await loadProjects();
+    if (state.projects.length >= 1) await selectProject(state.projects[0].project_id);
   } else {
     await loadProjects();
     if (state.projects.length === 1) await selectProject(state.projects[0].project_id);
     else render();
+  }
+  // ms-86 / e-2250 — once any project (if needed) is in place, open the
+  // Trek the URL pointed at. Treks are loaded by loadTreks() inside
+  // selectProject; openTrek() will fall back to a fresh fetch if it
+  // can't find the trek in the cache. Wrap in a try/catch so a stale
+  // URL doesn't break the rest of init.
+  if (urlTrekId) {
+    try { await openTrek(urlTrekId); } catch (_e) { /* stale ?trek= */ }
   }
   await handleHashNav();
 
