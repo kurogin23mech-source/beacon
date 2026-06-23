@@ -3216,25 +3216,13 @@ async function connectCloudWebSocket(projectId) {
       return;
     }
     // ms-84 / e-2326 — signal-only WS. ws_ready / project_changed mean
-    // "refetch via the existing Tauri IPC pull" (loadProject). Legacy
-    // type=project frames are still handled for rollover safety.
+    // "refetch via the existing Tauri IPC pull" (loadProject).
     if (msg.type === 'ws_ready' || msg.type === 'project_changed') {
       state.connected = true;
       state.error = null;
       loadProject();
       return;
     }
-    if (msg.type !== 'project') return;
-    const data = msg.data || {};
-    const newJson = JSON.stringify(data);
-    if (newJson === lastProjectJson) return;
-    lastProjectJson = newJson;
-    state.project = hydrateProjectEntries(data);
-    state.lastUpdate = new Date();
-    state.connected = true;
-    state.error = null;
-    renderOnDataChange();
-    refreshExpandedMilestoneEntries();
   };
 
   ws.onerror = () => {

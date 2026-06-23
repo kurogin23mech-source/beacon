@@ -3182,19 +3182,6 @@ function connectWebSocket(projectId) {
       // back-to-back signals collapse into a single refetch.
       state.connected = true;
       fetchSlimProjectIfChanged();
-    } else if (msg.type === 'project') {
-      // Legacy fall-through — older server revisions during rollover may
-      // still push the full slim payload. Keep the hydrate path so the
-      // UI doesn't break during the deploy window.
-      const newJson = JSON.stringify(msg.data);
-      if (newJson !== lastProjectJson) {
-        lastProjectJson = newJson;
-        state.project = hydrateProjectEntries(msg.data);
-        state.lastUpdate = new Date();
-        state.connected = true;
-        renderOnDataChange();
-        refreshExpandedMilestoneEntries();
-      }
     } else if (msg.type === 'document_change') {
       // ms-43 e-809: Documents live in a Firestore subcollection that the
       // project on_snapshot watcher doesn't see, so add/update/delete events
