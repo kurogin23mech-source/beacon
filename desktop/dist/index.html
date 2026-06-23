@@ -6784,6 +6784,18 @@ document.addEventListener('wheel', _markUserScrolling, { passive: true });
 document.addEventListener('touchmove', _markUserScrolling, { passive: true });
 
 function renderOnDataChange() {
+  // ms-86 / e-2270 — when Trek detail is open, WS-driven project frames
+  // must NOT trigger a re-render. Trek detail reads from
+  // ``state.openTrekScope`` (= the cross-project aggregate fetched once
+  // by openTrek), which is independent of ``state.project`` (= the
+  // background project that the WS is subscribed to). A project frame
+  // arriving for the background project carries no Trek-relevant delta,
+  // but the existing fall-through (renderMsListArea → missing
+  // ``#ms-list-container`` → render()) used to rebuild the whole shell
+  // on every push, producing visible flicker for the user in Trek
+  // detail. Skipping the re-render here preserves the Trek view
+  // verbatim until the user explicitly closes it.
+  if (state.openTrekId) return;
   const doRender = () => {
     // Use the partial #main-content swap (no header/search-box re-render)
     // whenever the project is loaded. When showing the dashboard MS list,
