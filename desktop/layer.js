@@ -103,6 +103,12 @@ let state = {
   openTrekExpanded: new Set(),
   openTrekShowDone: new Set(),
   relatedTreks: {},
+  // ms-84 / e-2326 — entries lazy-load cache. WS broadcasts a slim payload
+  // (no milestones[].entries[]); cached entries are re-attached on slim WS
+  // arrival so the SHARED render code keeps working unchanged. See
+  // server/static/index.html for the Web parity.
+  milestoneEntries: {},
+  entriesLoading: new Set(),
 };
 
 // ---- Data loading (Tauri invoke) ----
@@ -120,6 +126,10 @@ async function loadProject() {
     const newJson = JSON.stringify(data);
     if (newJson !== lastProjectJson) {
       lastProjectJson = newJson;
+      // ms-84 / e-2326 — IPC still returns the full project (incl. entries[]).
+      // Seed the milestoneEntries cache so subsequent slim WS broadcasts can
+      // hydrate without an extra round-trip per MS.
+      seedMilestoneEntriesCache(data);
       state.project = data;
       state.lastUpdate = new Date();
       state.connected = true;
@@ -343,6 +353,59 @@ async function _trekApi(path, fallback) {
   }
 }
 
+// ms-84 / e-2326 — entries lazy-load helpers (mirror server/static/index.html).
+// Tauri's initial loadProject() pulls the full project (entries included), so
+// the cache is seeded immediately. Slim WS broadcasts then preserve those
+// entries via hydrateProjectEntries, and per-MS REST refetch keeps the cache
+// fresh when an expanded MS's counts change.
+
+function seedMilestoneEntriesCache(project) {
+  if (!project || !Array.isArray(project.milestones)) return;
+  for (const ms of project.milestones) {
+    if (Array.isArray(ms.entries)) {
+      state.milestoneEntries[ms.id] = ms.entries;
+    }
+  }
+}
+
+function hydrateProjectEntries(project) {
+  if (!project || !Array.isArray(project.milestones)) return project;
+  for (const ms of project.milestones) {
+    if (ms.entries === undefined) {
+      ms.entries = state.milestoneEntries[ms.id] || [];
+    }
+  }
+  return project;
+}
+
+async function fetchMilestoneEntries(msId) {
+  if (!cloudMode || !state.cloudProjectId) return;
+  if (state.entriesLoading.has(msId)) return;
+  state.entriesLoading.add(msId);
+  try {
+    const data = await _trekApi(
+      `/api/projects/${encodeURIComponent(state.cloudProjectId)}/milestones/${encodeURIComponent(msId)}/entries`,
+      null,
+    );
+    const entries = (data && data.entries) || [];
+    state.milestoneEntries[msId] = entries;
+    if (state.project && Array.isArray(state.project.milestones)) {
+      const ms = state.project.milestones.find(m => m.id === msId);
+      if (ms) ms.entries = entries;
+    }
+  } finally {
+    state.entriesLoading.delete(msId);
+    render();
+  }
+}
+
+function refreshExpandedMilestoneEntries() {
+  if (!cloudMode) return;
+  for (const msId of state.expanded) {
+    fetchMilestoneEntries(msId);
+  }
+}
+
 function startPolling() { if (!pollTimer) pollTimer = setInterval(loadProject, 2000); }
 function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
 
@@ -413,11 +476,14 @@ async function connectCloudWebSocket(projectId) {
     const newJson = JSON.stringify(data);
     if (newJson === lastProjectJson) return;
     lastProjectJson = newJson;
-    state.project = data;
+    // ms-84 / e-2326 — slim WS payload: reattach cached entries (seeded on
+    // initial IPC load) so the SHARED render code keeps reading ms.entries.
+    state.project = hydrateProjectEntries(data);
     state.lastUpdate = new Date();
     state.connected = true;
     state.error = null;
     renderOnDataChange();
+    refreshExpandedMilestoneEntries();
   };
 
   ws.onerror = () => {

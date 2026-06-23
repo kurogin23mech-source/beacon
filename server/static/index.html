@@ -2836,6 +2836,13 @@ let state = {
   showCancelled: new Set(),
   // Collapsed nested entries
   collapsedEntries: new Set(),
+  // ms-84 / e-2326 — entries lazy-load cache. WS broadcasts a slim payload
+  // (no milestones[].entries[]) so the 1 MiB frame limit can't be tripped;
+  // entries are fetched per-MS via GET /api/projects/{id}/milestones/{ms_id}/entries
+  // when the user expands a card or on background refresh after a slim WS update.
+  // Key: ms.id. Value: array of entry objects (same shape core.entries_to_json returns).
+  milestoneEntries: {},
+  entriesLoading: new Set(),
   // Sort
   sortAsc: true,
   // Menu
@@ -3164,10 +3171,16 @@ function connectWebSocket(projectId) {
       const newJson = JSON.stringify(msg.data);
       if (newJson !== lastProjectJson) {
         lastProjectJson = newJson;
-        state.project = msg.data;
+        // ms-84 / e-2326 — WS now ships a slim payload (no entries[]).
+        // Hydrate cached entries back into the milestone array so existing
+        // render code keeps reading ms.entries unchanged, then schedule a
+        // background refetch for any currently-expanded MS (counts may have
+        // changed even when the cached entry tree is stale).
+        state.project = hydrateProjectEntries(msg.data);
         state.lastUpdate = new Date();
         state.connected = true;
         renderOnDataChange();
+        refreshExpandedMilestoneEntries();
       }
     } else if (msg.type === 'document_change') {
       // ms-43 e-809: Documents live in a Firestore subcollection that the
@@ -7883,12 +7896,18 @@ async function selectProject(projectId) {
   connectWebSocket(projectId);
 
   try {
-    const data = await api(`/api/projects/${projectId}`);
+    // ms-84 / e-2326 — slim variant on initial REST fetch so a large project
+    // doesn't ship 2+ MB on first paint either; entries are lazy-fetched per
+    // MS below when the in_progress milestones auto-expand.
+    const data = await api(`/api/projects/${projectId}?slim=true`);
     if (!state.project) {
-      state.project = data;
+      state.project = hydrateProjectEntries(data);
       state.lastUpdate = new Date();
       for (const ms of data.milestones || []) {
-        if (ms.status === 'in_progress') state.expanded.add(ms.id);
+        if (ms.status === 'in_progress') {
+          state.expanded.add(ms.id);
+          fetchMilestoneEntries(ms.id);
+        }
       }
       render();
     }
@@ -7898,9 +7917,64 @@ async function selectProject(projectId) {
 }
 
 function toggleMilestone(msId) {
-  if (state.expanded.has(msId)) state.expanded.delete(msId);
-  else state.expanded.add(msId);
-  render();
+  if (state.expanded.has(msId)) {
+    state.expanded.delete(msId);
+    render();
+  } else {
+    state.expanded.add(msId);
+    // ms-84 / e-2326 — fetch entries on first expand if not already cached.
+    // Render immediately so the card opens; fetch updates the body when done.
+    if (state.milestoneEntries[msId] === undefined) {
+      fetchMilestoneEntries(msId);
+    }
+    render();
+  }
+}
+
+// ms-84 / e-2326 — lazy fetch entries for a single milestone. Stores into
+// state.milestoneEntries[msId] and also mirrors onto state.project.milestones[X].entries
+// so the existing recursive render code (which reads ms.entries) keeps working.
+async function fetchMilestoneEntries(msId) {
+  if (!state.projectId) return;
+  if (state.entriesLoading.has(msId)) return;
+  state.entriesLoading.add(msId);
+  try {
+    const data = await api(`/api/projects/${state.projectId}/milestones/${msId}/entries`);
+    const entries = (data && data.entries) || [];
+    state.milestoneEntries[msId] = entries;
+    if (state.project && Array.isArray(state.project.milestones)) {
+      const ms = state.project.milestones.find(m => m.id === msId);
+      if (ms) ms.entries = entries;
+    }
+  } catch (e) {
+    // Silent on failure — the card still renders with whatever cached entries
+    // exist (possibly stale, possibly empty). User sees counts from the slim
+    // broadcast unchanged.
+  } finally {
+    state.entriesLoading.delete(msId);
+    render();
+  }
+}
+
+// Hydrate a slim project payload by reattaching cached entries onto each
+// milestone in-place. Returns the same project object (mutated).
+function hydrateProjectEntries(project) {
+  if (!project || !Array.isArray(project.milestones)) return project;
+  for (const ms of project.milestones) {
+    if (ms.entries === undefined) {
+      ms.entries = state.milestoneEntries[ms.id] || [];
+    }
+  }
+  return project;
+}
+
+// Re-fetch entries for any currently-expanded MS after a WS slim update.
+// Counts in the slim payload may indicate entry changes; cached entries
+// could be stale until refetched.
+function refreshExpandedMilestoneEntries() {
+  for (const msId of state.expanded) {
+    fetchMilestoneEntries(msId);
+  }
 }
 
 function toggleEntry(entryId, event) {
