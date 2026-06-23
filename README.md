@@ -86,13 +86,13 @@ beacon milestone add "First milestone"
 beacon milestone start ms-1
 ```
 
-For live progress visualization, use the [Tauri Desktop App](#desktop-app) or [Web UI](https://beacon-ai.dev) (after `beacon cloud push`).
+For live progress visualization, use the [Tauri Desktop App](#desktop-app) or [Web UI](https://beacon-ai.dev) (after `beacon cloud upload-initial`).
 The bare `beacon` command prints `beacon status` plus pointers to both front-ends.
 
 To push to cloud later for Web UI access and team collaboration:
 
 ```bash
-beacon cloud push
+beacon cloud upload-initial
 ```
 
 ### Path B: Join an existing cloud project (invited)
@@ -183,11 +183,11 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 | `beacon cloud status` | Show cloud config / クラウド設定表示 (read-only) |
 | `beacon cloud list` | List cloud projects / クラウドプロジェクト一覧 |
 | `beacon cloud join <id>` | Join an existing cloud project / 既存プロジェクトに参加 |
-| `beacon cloud upload-initial` | Initial bootstrap upload to new cloud project / 初回 upload (special; e-1862) |
-| `beacon cloud force-pull` | Emergency overwrite local from cloud / 緊急 force pull (special; e-1862) |
-| `beacon cloud push` | Legacy alias of upload-initial (deprecated) / 旧名 |
-| `beacon cloud pull` | Legacy alias of force-pull (deprecated) / 旧名 |
+| `beacon cloud upload-initial` | Initial bootstrap upload to new cloud project / 初回 upload (one-shot; ms-84) |
 | `beacon cloud off` | Switch back to local mode (sandbox / offline only) / sandbox 用途のみ |
+<!-- ms-84 Phase 4 (e-2038): `beacon cloud push` / `pull` / `force-pull` were removed.
+     The cloud → local round-trip was retired because cloud is now the sole truth source. -->
+
 
 ## CLI Commands
 
@@ -363,6 +363,8 @@ Treks (= 協奏作業領域) are cross-project, cross-session work areas. While 
 | `beacon trek resume <trek-id>` | Clear the halt signal / 再開 |
 | `beacon trek transfer-leader <trek-id> --to <session-id>` | Hand off `leader_session_id` to another session / leader 引き継ぎ |
 | `beacon trek take-over <trek-id>` | Re-bind `leader_session_id` to a fresh session of the same leader user (= dead-session recovery without the prior leader's authorization, ms-88 e-2089) |
+| `beacon trek kickoff <trek-id> [--session-id <sid>] [--kickoff-dm-event-id <eid>]` | Mark a session's Kickoff Ritual DM as sent (= `/beacon-trek-pulse` Step 0.4 が叩く、ms-88 e-2138)。kickoff_status を立てるまで pulse-ack は `kickoff_required` で reject される |
+| `beacon trek reconcile <trek-id> [--apply]` | Trek の `task_states` を task pool と整合させる (= 「pool で done だが Trek stamp が waiting-review / leader_review / working で残ってる」 stuck 状態を一括検知 + 修復、default dry-run、`--apply` で実適用、ms-88 e-2167) |
 
 In the Web UI / Tauri Desktop, the **Treks** tab on a project page lists every trek that includes the current project in its scope (= active と archived を別表示)。各 trek の詳細では members / scope / status / 関連 docs が並ぶ。逆に milestone / operation / task の詳細を開くと、その作業項目を scope に含む trek 一覧が **Related Treks** widget としてインラインで出る。
 
@@ -444,7 +446,7 @@ design.
 Beacon's visual UI is split across two front-ends:
 
 - **[Tauri Desktop App](#desktop-app)** — cross-platform native window for monitoring milestones, tasks, and entries.
-- **[Web UI](https://beacon-ai.dev)** — browser-based dashboard for cloud-linked projects (after `beacon cloud push`).
+- **[Web UI](https://beacon-ai.dev)** — browser-based dashboard for cloud-linked projects (after `beacon cloud upload-initial`).
 
 The legacy curses dashboard (`lib/dashboard.py`, tmux split-pane) was retired in e-764 and archived to `.trash/lib-dashboard-py-e764/`. The bare `beacon` command now prints status plus pointers to the two supported UIs.
 

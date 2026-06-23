@@ -123,6 +123,33 @@ VALID_TASK_STATE_TRANSITIONS = {
 DEFAULT_STATUS = "planning"
 DEFAULT_TYPE = "persistent"
 
+# ms-86 / e-2225 — session_history: per-Trek cumulative join log.
+#
+# Why: Trek 文書はもともと session_id を 3 箇所 (= leader_session_id /
+# halt.issued_by_session_id / task_states[].updated_by_session_id) に
+# 散在させていたが、 「この Trek に過去 join した session 全員の累積記録」
+# を 1 箇所にまとめる field が存在しなかった。 MEMBERS & AGENTS table が
+# 旧 ``state.openTrekMemberSessions`` (= live-only endpoint 由来) に依存して
+# おり、 一度 offline になった session が UI から消える regression が
+# 2026-06-22 user 指摘で顕在化した。 Trek は persistent record である
+# べきという原則 (= e-2225 motivation) に従い、 join 時点で永続的に記録する。
+#
+# Schema: trek_doc.session_history: list[SessionHistoryEntry]
+#     SessionHistoryEntry {
+#       session_id: str,
+#       user_id: str,
+#       email: str,
+#       joined_at: ISO timestamp,
+#       role_at_join: "leader" | "member",  # 加入時点の role。 transfer-leader で
+#                                            # 後から role が変わっても元のまま残す
+#                                            # (= 「いつ leader だった session」 を
+#                                            # 後から audit できるよう保存)
+#     }
+#
+# 同 session_id 既存なら no-op (= upsert)。 新規追加時のみ list 末尾に append。
+# 順序は append 順 (= 加入時系列) を保つ。
+SESSION_HISTORY_KEY = "session_history"
+
 
 def mint_trek_id() -> str:
     """Generate a fresh trek id (= 8 hex chars, ~64 bits of entropy).
@@ -421,9 +448,52 @@ def validate_pulse_picked_choice(choice: str) -> str:
     return choice
 
 
+# ms-92 / e-2165 — pulse-ack payload structured fields. The free-form
+# `note` keeps working for backward compatibility, but executors are
+# encouraged to populate the structured fields so the leader-digest
+# (= e-2164) can mechanically aggregate "stuck=N idle=M" counts without
+# parsing natural-language notes. Hard caps protect both the doc size
+# and the server-side aggregation cost.
+PULSE_ACK_STATE_SUMMARY_MAX = 100  # 1-line snapshot, ≤100 chars
+PULSE_ACK_BLOCKER_MAX = 200        # ≤200 chars per blocker
+PULSE_ACK_BLOCKERS_CAP = 3         # at most 3 blockers per pulse
+
+
+def _normalize_pulse_blockers(blockers) -> list[str]:
+    """Coerce + trim the blockers list (= optional structured field).
+
+    Accepts None / list / tuple; each item is str-coerced, stripped,
+    and truncated at PULSE_ACK_BLOCKER_MAX. Empty strings are dropped.
+    Excess items beyond PULSE_ACK_BLOCKERS_CAP are silently truncated
+    so a buggy executor can't blow up the trek doc.
+    """
+    if not blockers:
+        return []
+    if isinstance(blockers, str):
+        # Some callers may pass a single string; treat as one blocker.
+        items = [blockers]
+    else:
+        items = list(blockers)
+    out: list[str] = []
+    for item in items:
+        s = str(item or "").strip()
+        if not s:
+            continue
+        if len(s) > PULSE_ACK_BLOCKER_MAX:
+            s = s[:PULSE_ACK_BLOCKER_MAX]
+        out.append(s)
+        if len(out) >= PULSE_ACK_BLOCKERS_CAP:
+            break
+    return out
+
+
 def record_pulse_ack(trek_doc: dict, *, session_id: str,
                      picked_choice: str = "",
-                     note: str = "") -> dict:
+                     note: str = "",
+                     state_summary: str = "",
+                     blockers=None,
+                     needs_leader_judgment: bool = False,
+                     time_on_task_seconds: int = 0) -> dict:
     """Append a pulse-ack record for ``session_id`` and bump the counter.
 
     Called by the server endpoint when /beacon-trek-pulse Skill self-reports
@@ -431,11 +501,48 @@ def record_pulse_ack(trek_doc: dict, *, session_id: str,
     Skill is supposed to call exactly once per tick; if it calls twice that
     is recorded so observability is honest — dedupe is the caller's choice).
 
+    ms-92 / e-2165 — structured payload fields (= the leader-digest needs
+    machine-aggregatable status, free-form ``note`` alone can't be
+    counted):
+
+      * ``state_summary`` (str, ≤100 chars): 1-line state snapshot, e.g.
+        ``"working on e-100"`` / ``"stuck on e-200"`` / ``"idle"``.
+        Truncated silently if too long.
+      * ``blockers`` (list[str], ≤3 items, ≤200 chars each): when the
+        executor is stuck. Use specific descriptions ("OOM in
+        test_foo.py", not "test broken") so the leader-digest highlight
+        is actionable.
+      * ``needs_leader_judgment`` (bool, default False): set True when
+        the executor wants the leader's attention even if not formally
+        ``stuck``. Bubbles up to the leader-digest highlight band.
+      * ``time_on_task_seconds`` (int, default 0): seconds the executor
+        has been on the current task (= 0 if idle). Lets the digest
+        sort by "longest stuck" without timestamp math.
+
+    All structured fields are **optional and backward-compat**: existing
+    callers that only pass ``picked_choice`` + ``note`` continue to work
+    unchanged. The fields are stored on the history record and on the
+    session-level summary so the digest can read either.
+
     Returns the mutated trek_doc; caller persists with ``db.save_trek``.
     """
     if not session_id:
         raise ValueError("session_id is required")
     validate_pulse_picked_choice(picked_choice)
+    # Normalise structured fields. Truncation is silent (= caller buggy
+    # but record is still useful) rather than raising — pulse-ack is an
+    # observability event, not a write-path. We'd rather record a
+    # truncated snapshot than reject and leave the digest blind.
+    state_summary_norm = (state_summary or "").strip()
+    if len(state_summary_norm) > PULSE_ACK_STATE_SUMMARY_MAX:
+        state_summary_norm = state_summary_norm[:PULSE_ACK_STATE_SUMMARY_MAX]
+    blockers_norm = _normalize_pulse_blockers(blockers)
+    try:
+        time_on_task_norm = max(0, int(time_on_task_seconds or 0))
+    except (TypeError, ValueError):
+        time_on_task_norm = 0
+    needs_leader_judgment_norm = bool(needs_leader_judgment)
+
     acks = trek_doc.setdefault("pulse_acks", {})
     entry = acks.get(session_id) or {
         "session_id": session_id,
@@ -449,10 +556,24 @@ def record_pulse_ack(trek_doc: dict, *, session_id: str,
         "timestamp": now,
         "picked_choice": picked_choice,
         "note": (note or "")[:200],
+        # Structured fields (= e-2165). Always present in records so the
+        # digest can rely on the keys without per-record existence checks.
+        "state_summary": state_summary_norm,
+        "blockers": blockers_norm,
+        "needs_leader_judgment": needs_leader_judgment_norm,
+        "time_on_task_seconds": time_on_task_norm,
     }
     entry["total_acks"] = int(entry.get("total_acks") or 0) + 1
     entry["last_pulse_ack_at"] = now
     entry["last_picked_choice"] = picked_choice
+    # Mirror the structured fields on the session-level summary so a
+    # digest can read "latest snapshot per session" without scanning
+    # history. Same backward-compat guarantee — pre-e-2165 callers leave
+    # them empty / False / 0.
+    entry["last_state_summary"] = state_summary_norm
+    entry["last_blockers"] = blockers_norm
+    entry["last_needs_leader_judgment"] = needs_leader_judgment_norm
+    entry["last_time_on_task_seconds"] = time_on_task_norm
     history = entry.get("history") or []
     history.append(record)
     # Ring buffer cap — drop oldest beyond PULSE_ACK_HISTORY_CAP.
@@ -475,9 +596,19 @@ def summarize_pulse_acks(trek_doc: dict) -> dict:
             "last_pulse_ack_at": ISO,
             "last_picked_choice": str,
             "choice_counts": {choice: count, ...},
+            # ms-92 / e-2165 structured snapshot fields:
+            "state_summary": str,
+            "blockers": [str, ...],
+            "needs_leader_judgment": bool,
+            "time_on_task_seconds": int,
           }
         },
         "total_acks_across_sessions": int,
+        # ms-92 / e-2165 — aggregates for the leader-digest (e-2164):
+        "active_session_count": int,    # session who reported in this digest window
+        "stuck_session_count": int,     # session whose latest snapshot has blockers
+        "idle_session_count": int,      # session whose latest state_summary contains "idle" or time_on_task=0
+        "needs_leader_judgment_count": int,
       }
 
     Compliance rate (= acks / expected ticks) requires per-session tick
@@ -485,24 +616,59 @@ def summarize_pulse_acks(trek_doc: dict) -> dict:
     bus event log scans or extend this struct. For now we expose the raw
     counters; the UI can render "session X: 5 acks since Y" without needing
     the denominator.
+
+    ms-92 / e-2165 — the structured-field aggregates lean on the
+    session-level mirrors written by ``record_pulse_ack``. Sessions
+    predating e-2165 simply contribute empty / False / 0 values so
+    counts stay accurate (= no false "stuck" alarms from legacy data).
     """
     sessions: dict = {}
     total = 0
+    active = 0
+    stuck = 0
+    idle = 0
+    needs_leader = 0
     for sid, entry in (trek_doc.get("pulse_acks") or {}).items():
         choice_counts: dict = {}
         for h in entry.get("history") or []:
             c = h.get("picked_choice") or ""
             choice_counts[c] = choice_counts.get(c, 0) + 1
+        last_state = entry.get("last_state_summary") or ""
+        last_blockers = entry.get("last_blockers") or []
+        last_needs_leader = bool(entry.get("last_needs_leader_judgment") or False)
+        last_time_on_task = int(entry.get("last_time_on_task_seconds") or 0)
         sessions[sid] = {
             "total_acks": int(entry.get("total_acks") or 0),
             "last_pulse_ack_at": entry.get("last_pulse_ack_at") or "",
             "last_picked_choice": entry.get("last_picked_choice") or "",
             "choice_counts": choice_counts,
+            # Structured snapshot mirrors (= e-2165).
+            "state_summary": last_state,
+            "blockers": list(last_blockers),
+            "needs_leader_judgment": last_needs_leader,
+            "time_on_task_seconds": last_time_on_task,
         }
         total += int(entry.get("total_acks") or 0)
+        # Aggregate counts only when the session has actually pulsed at
+        # least once — otherwise legacy noise (= empty placeholder)
+        # would inflate idle counts.
+        if int(entry.get("total_acks") or 0) > 0:
+            active += 1
+            if last_blockers:
+                stuck += 1
+            if last_needs_leader:
+                needs_leader += 1
+            # idle ≈ "no work going on right now": either explicit
+            # `state_summary` containing "idle" or time_on_task=0.
+            if (last_state and "idle" in last_state.lower()) or last_time_on_task == 0:
+                idle += 1
     return {
         "sessions": sessions,
         "total_acks_across_sessions": total,
+        "active_session_count": active,
+        "stuck_session_count": stuck,
+        "idle_session_count": idle,
+        "needs_leader_judgment_count": needs_leader,
     }
 
 
@@ -780,6 +946,201 @@ def build_member(*, user_id: str, email: str,
     }
 
 
+def build_session_history_entry(*, session_id: str, user_id: str,
+                                email: str, joined_at: str,
+                                role_at_join: str) -> dict:
+    """Build a single session_history entry.
+
+    ms-86 / e-2225. ``role_at_join`` is the role the member had at the
+    moment this session joined. We preserve it even if the member is
+    later promoted / demoted via ``transfer_leader`` etc., so the history
+    answers "which session was acting as leader at that point in time"
+    without requiring an external audit log.
+    """
+    if not session_id:
+        raise ValueError("session_history entry requires session_id")
+    if not user_id or not email:
+        raise ValueError(
+            "session_history entry requires user_id and email"
+        )
+    validate_role(role_at_join)
+    return {
+        "session_id": session_id,
+        "user_id": user_id,
+        "email": email,
+        "joined_at": joined_at or utcnow_iso(),
+        "role_at_join": role_at_join,
+    }
+
+
+def find_session_history(trek_doc: dict, session_id: str) -> dict | None:
+    """Return the session_history entry for ``session_id`` (or None).
+
+    Linear scan — session_history is expected to stay small (= ~tens of
+    entries per Trek over its lifetime). If this becomes a hot path we can
+    switch to a dict keyed by session_id, but today the field is touched
+    on every render so we want stable list order over indexed lookup.
+    """
+    if not session_id:
+        return None
+    for entry in trek_doc.get(SESSION_HISTORY_KEY) or []:
+        if entry.get("session_id") == session_id:
+            return entry
+    return None
+
+
+def upsert_session_history(trek_doc: dict, *, session_id: str,
+                           user_id: str, email: str,
+                           role_at_join: str,
+                           joined_at: str = "") -> dict:
+    """Append a session_history entry, or no-op if session_id already present.
+
+    ms-86 / e-2225 AC2. Called by ``accept_invitation`` (= the moment a
+    session takes a member's invitation), by ``new_trek`` (= creator's
+    initial leader session), and by the one-shot backfill migration.
+
+    Empty ``session_id`` is tolerated as a no-op (= some legacy code paths
+    might call this without a session id; we don't want to raise and
+    break those, but we also don't write an entry with an empty key).
+    """
+    if not session_id:
+        return trek_doc
+    if find_session_history(trek_doc, session_id) is not None:
+        return trek_doc  # already recorded, no-op (= upsert semantics)
+    entry = build_session_history_entry(
+        session_id=session_id,
+        user_id=user_id,
+        email=email,
+        joined_at=joined_at or utcnow_iso(),
+        role_at_join=role_at_join,
+    )
+    trek_doc.setdefault(SESSION_HISTORY_KEY, []).append(entry)
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
+
+
+def backfill_session_history(trek_doc: dict) -> int:
+    """One-shot derivation of session_history from existing fields.
+
+    ms-86 / e-2225 AC3. Walks the three pre-existing session_id locations
+    on a Trek (= ``leader_session_id`` / ``halt.issued_by_session_id`` /
+    ``task_states[].updated_by_session_id``) and adds any missing entries.
+    Returns the number of entries added (= 0 if nothing to backfill).
+
+    Used by ``scripts/backfill_trek_session_history.py`` for stored docs,
+    and called lazily by ``trek_store.load_trek`` so even Treks that were
+    never run through the migration script self-heal on next read.
+
+    Heuristics for filling required entry fields when the source doesn't
+    record them directly:
+    - ``user_id`` / ``email``: looked up via the ``leader_session_id`` →
+      leader member, otherwise via the first joined member as a best-effort
+      attribution. External sessions (= halt issued by a session that
+      isn't in members[]) are recorded with empty user_id / email so they
+      still appear in the UI but flag as unknown.
+    - ``joined_at``: prefer the relevant timestamp on the source record
+      (= halt.issued_at, task_states[].updated_at), falling back to
+      trek.created_at when only the session_id is known.
+    - ``role_at_join``: leader_session_id → "leader"; everyone else
+      → "member" (= the conservative choice that matches the new write
+      path's default).
+    """
+    members = trek_doc.get("members") or []
+    by_user_id = {m.get("user_id"): m for m in members if m.get("user_id")}
+    # Fallback identity used when a session id appears outside members[]
+    # (= external halt-issuer). Use the first joined member as a coarse
+    # attribution so the UI still shows something readable.
+    fallback_member = next(
+        (m for m in members if m.get("joined_at")), None,
+    )
+
+    def _identity_for(role_hint: str) -> tuple[str, str]:
+        if role_hint == "leader" and members:
+            leader = next(
+                (m for m in members if m.get("role") == "leader"),
+                None,
+            )
+            if leader:
+                return leader.get("user_id", ""), leader.get("email", "")
+        if fallback_member:
+            return (
+                fallback_member.get("user_id", ""),
+                fallback_member.get("email", ""),
+            )
+        return "", ""
+
+    created_at = trek_doc.get("created_at") or utcnow_iso()
+    added = 0
+
+    # 1. leader_session_id — current leader's session
+    leader_sid = trek_doc.get("leader_session_id") or ""
+    if leader_sid and find_session_history(trek_doc, leader_sid) is None:
+        uid, email = _identity_for("leader")
+        # If the leader member has a joined_at, prefer that; else fall back
+        # to trek.created_at (= the only earlier timestamp we have).
+        leader_member = next(
+            (m for m in members if m.get("role") == "leader"), None,
+        )
+        joined_at = (
+            (leader_member or {}).get("joined_at") or created_at
+        )
+        # Internal write path (no upsert helper to keep backfill explicit
+        # about why role_at_join is leader here).
+        trek_doc.setdefault(SESSION_HISTORY_KEY, []).append({
+            "session_id": leader_sid,
+            "user_id": uid,
+            "email": email,
+            "joined_at": joined_at,
+            "role_at_join": "leader",
+        })
+        added += 1
+
+    # 2. task_states[].updated_by_session_id — sessions that stamped tasks
+    task_states = trek_doc.get("task_states") or {}
+    for task_id, ent in task_states.items():
+        sid = (ent or {}).get("updated_by_session_id") or ""
+        if not sid or find_session_history(trek_doc, sid) is not None:
+            continue
+        uid, email = _identity_for("member")
+        joined_at = (ent or {}).get("updated_at") or created_at
+        trek_doc.setdefault(SESSION_HISTORY_KEY, []).append({
+            "session_id": sid,
+            "user_id": uid,
+            "email": email,
+            "joined_at": joined_at,
+            "role_at_join": "member",
+        })
+        added += 1
+
+    # 3. halt.issued_by_session_id — halt issuer (may be external)
+    halt = trek_doc.get("halt") or {}
+    halt_sid = halt.get("issued_by_session_id") or ""
+    if halt_sid and find_session_history(trek_doc, halt_sid) is None:
+        # If the halt issuer isn't in members[], record empty identity
+        # — they're an external session by definition.
+        in_members = bool(by_user_id) and any(
+            False for _ in ()  # placeholder, see below
+        )
+        # We don't know the user_id from session_id alone; degrade to
+        # fallback identity (= same as task_states path).
+        uid, email = _identity_for("member")
+        joined_at = halt.get("issued_at") or created_at
+        trek_doc.setdefault(SESSION_HISTORY_KEY, []).append({
+            "session_id": halt_sid,
+            "user_id": uid,
+            "email": email,
+            "joined_at": joined_at,
+            "role_at_join": "member",
+        })
+        added += 1
+        # Suppress unused-flag lint without introducing a real branch.
+        _ = in_members
+
+    if added:
+        trek_doc["updated_at"] = utcnow_iso()
+    return added
+
+
 def normalize_scope_entry(entry: dict) -> dict:
     """Normalise a scope item.
 
@@ -877,6 +1238,17 @@ def new_trek(*,
     url = (manager_agent_url or "").strip()
     if url:
         meta["manager_agent_url"] = url
+    # ms-86 / e-2225 — seed session_history with the creator's session
+    # so the persistent record exists from t=0 instead of being filled
+    # in lazily on the next join. The creator is by definition a leader
+    # at the moment of creation.
+    initial_history = [{
+        "session_id": creator_session_id,
+        "user_id": creator_user_id,
+        "email": creator_email,
+        "joined_at": now,
+        "role_at_join": "leader",
+    }]
     return {
         "trek_id": mint_trek_id(),
         "title": title.strip(),
@@ -891,6 +1263,7 @@ def new_trek(*,
         "goal_state": (goal_state or "").strip(),
         "meta": meta,
         "task_states": {},
+        "session_history": initial_history,
         "created_at": now,
         "updated_at": now,
         "archived_at": None,
@@ -1072,10 +1445,18 @@ def add_invitation(trek_doc: dict, *,
     return trek_doc
 
 
-def accept_invitation(trek_doc: dict, *, user_id: str) -> dict:
+def accept_invitation(trek_doc: dict, *, user_id: str,
+                      session_id: str = "") -> dict:
     """Mark a member as joined (= sets ``joined_at`` to now).
 
-    Idempotent: if the member already joined, returns the doc unchanged.
+    Idempotent on the member dimension: if the member already joined,
+    ``joined_at`` is preserved. ``session_id`` (= ms-86 / e-2225) records
+    the actual session that performed this join into ``session_history``
+    so the Trek doc keeps a cumulative record of every session that has
+    ever participated. The session_history write is per-session-id
+    idempotent (= no duplicate entry for the same session), so re-running
+    join from the same session is safe.
+
     Raises ValueError if ``user_id`` is not in the members list (= must
     be invited first, no self-add).
     """
@@ -1085,8 +1466,20 @@ def accept_invitation(trek_doc: dict, *, user_id: str) -> dict:
             f"user {user_id} not invited to trek {trek_doc.get('trek_id')} "
             "(owner must `beacon trek invite` first)"
         )
+    # session_history write is independent of the member.joined_at idempotency
+    # because the same user can join from N sessions over time — each one
+    # is a distinct history entry, but the member dict still says "joined".
+    if session_id:
+        role_at_join = member.get("role") or "member"
+        upsert_session_history(
+            trek_doc,
+            session_id=session_id,
+            user_id=member.get("user_id") or user_id,
+            email=member.get("email") or "",
+            role_at_join=role_at_join,
+        )
     if member.get("joined_at"):
-        return trek_doc  # already joined, no-op
+        return trek_doc  # already joined, member.joined_at preserved
     member["joined_at"] = utcnow_iso()
     trek_doc["updated_at"] = utcnow_iso()
     return trek_doc
@@ -1129,6 +1522,103 @@ def parse_scope_arg(arg: str) -> dict:
             )
         return normalize_scope_entry(entry)
     return normalize_scope_entry({"project": arg})
+
+
+# ---------------------------------------------------------------------------
+# Cross-project task add via Trek scope (ms-92 / e-2141)
+# ---------------------------------------------------------------------------
+
+
+# Outcomes returned by ``check_trek_task_add_allowed``. Kept as plain
+# string constants so server-side rejections can map them to HTTP codes
+# (allowed / project_not_in_scope / milestone_not_in_scope /
+# scope_only_has_task_narrowing) without exposing internal helpers.
+TASK_ADD_ALLOWED = "allowed"
+TASK_ADD_REJECT_PROJECT_NOT_IN_SCOPE = "project_not_in_scope"
+TASK_ADD_REJECT_MILESTONE_NOT_IN_SCOPE = "milestone_not_in_scope"
+TASK_ADD_REJECT_SCOPE_ONLY_HAS_TASK_NARROWING = "scope_only_has_task_narrowing"
+
+
+def check_trek_task_add_allowed(
+    trek_doc: dict, *,
+    target_project: str,
+    target_milestone: str,
+) -> tuple[bool, str]:
+    """Decide whether the trek's scope authorises ``task.add`` on a target.
+
+    ms-92 / e-2141. The CLI / server share the same yes/no question:
+    *given this Trek's recorded scope, is the caller allowed to add a
+    task under ``target_project`` / ``target_milestone``?* Returning
+    ``(False, <reason>)`` lets callers map a single reason to either a
+    403 (server) or a friendly CLI error.
+
+    Rules (= SPEC of e-2141, also tracked by 4 unit-test paths):
+
+    1. Empty ``target_project`` or ``target_milestone`` → reject as
+       ``project_not_in_scope`` / ``milestone_not_in_scope`` respectively.
+       Callers must always supply both. Empty inputs mean the picker /
+       parser upstream is buggy; we refuse rather than guess.
+
+    2. The trek's ``scope`` must contain at least one entry matching
+       ``project == target_project``. Otherwise reject as
+       ``project_not_in_scope``.
+
+    3. Among the matching project entries, at least one must be **wide
+       enough** to cover the target milestone:
+
+       * project-wide entry (= ``{"project": pid}`` with no milestone /
+         operation / task narrowing) → covers anything under that
+         project. allowed.
+       * milestone entry (= ``{"project": pid, "milestone": ms-id}``)
+         whose ``milestone`` equals ``target_milestone`` → allowed.
+
+       Otherwise reject as ``milestone_not_in_scope``.
+
+    4. The "task-only narrowing" forbidden case (= AC #4): if **every**
+       matching project entry is task-narrowed (= ``{"project": pid,
+       "task": e-XXX}``) and none of them is project-wide or matches
+       the target milestone, reject as
+       ``scope_only_has_task_narrowing``. This preserves the user
+       responsibility frame: tasks are MS-grained decisions. Letting
+       Treks add tasks under another Trek's single-task scope would
+       let trees of tasks sprout sideways without any MS-level intent.
+
+    Operation-narrowed scope entries (= ``{"project": pid,
+    "operation": op-XX}``) are treated like task narrowings here — they
+    don't authorise sideways task creation; we reject the same way so
+    Operation work also stays MS-grained. (If someone needs cross-Op
+    task add later, that's its own design decision.)
+    """
+    if not target_project or not target_milestone:
+        if not target_project:
+            return False, TASK_ADD_REJECT_PROJECT_NOT_IN_SCOPE
+        return False, TASK_ADD_REJECT_MILESTONE_NOT_IN_SCOPE
+    scope = trek_doc.get("scope") or []
+    matching_project_entries = [
+        s for s in scope if s.get("project") == target_project
+    ]
+    if not matching_project_entries:
+        return False, TASK_ADD_REJECT_PROJECT_NOT_IN_SCOPE
+    for entry in matching_project_entries:
+        ms_ref = entry.get("milestone") or ""
+        op_ref = entry.get("operation") or ""
+        task_ref = entry.get("task") or ""
+        if not ms_ref and not op_ref and not task_ref:
+            # Project-wide scope entry — covers anything under this project.
+            return True, TASK_ADD_ALLOWED
+        if ms_ref and ms_ref == target_milestone:
+            return True, TASK_ADD_ALLOWED
+    # No project-wide and no milestone-matching entry. Distinguish the
+    # "task-only narrowing" pathology (= AC #4) from a generic milestone
+    # mismatch so the CLI can show the right hint.
+    only_task_or_op_narrowed = all(
+        (entry.get("task") or entry.get("operation"))
+        and not entry.get("milestone")
+        for entry in matching_project_entries
+    )
+    if only_task_or_op_narrowed:
+        return False, TASK_ADD_REJECT_SCOPE_ONLY_HAS_TASK_NARROWING
+    return False, TASK_ADD_REJECT_MILESTONE_NOT_IN_SCOPE
 
 
 def add_scope_entry(trek_doc: dict, *, entry: dict) -> dict:

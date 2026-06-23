@@ -340,10 +340,14 @@ def test_trek_join_auto_arms_session_by_default(trek_env):
     assert arm is not None
     assert arm["trek_id"] == tid
     assert arm["budget_turns"] == 20
-    # All 3 trek channels must be in the post-arm allowlist.
-    expected = {"trek-progress-check", "trek-trigger", "trek-task-review"}
+    # All 4 trek channels must be in the post-arm allowlist (= ms-92 / e-2164
+    # added trek-leader-digest as the 4th alongside the 3 from ms-75 / e-2047).
+    expected = {
+        "trek-progress-check", "trek-trigger", "trek-task-review",
+        "trek-leader-digest",
+    }
     assert expected.issubset(set(arm["channels"]))
-    # Three brand-new channels for the first-ever join.
+    # Four brand-new channels for the first-ever join.
     assert set(arm["channels_added"]) == expected
 
     # project.json reflects the channel allowlist write.
@@ -492,6 +496,101 @@ def test_trek_join_consent_gate_bypass_with_flag(trek_env):
     doc = json.loads(r.stdout)
     b_member = next(m for m in doc["members"] if m["email"] == "b@x.com")
     assert b_member["joined_at"]
+
+
+def test_trek_join_consent_explanation_has_four_sections(trek_env):
+    """ms-92 / e-2182 AC #1: consent gate explanation must carry 4 sections.
+
+    The 4 sections (= mirror the SPEC of e-2182 + CORE doc
+    trek-positioning `b1XOKXQeC0JXaKkO0CRt`):
+      (a) Trek とは何か
+      (b) 委譲する権限 (= concrete unlocks)
+      (c) user 確認境界 (= explicit no-go area)
+      (d) 撤回方法 (= beacon trek leave)
+
+    The non-TTY path writes the full explanation to stderr and exits 1
+    (= forcing function), so this test drives a subprocess pipe (=
+    non-TTY) without consent_ack and asserts the 4 section headers all
+    appear in stderr.
+    """
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "invite", tid, "--actor", "b@x.com")
+    env_b = dict(trek_env)
+    env_b.update({
+        "BEACON_USER_ID": "u-b",
+        "BEACON_USER_EMAIL": "b@x.com",
+        "BEACON_SESSION_ID": "sv-b-1",
+    })
+    env_b.pop("BEACON_TREK_CONSENT_ACK", None)
+    r = _run(env_b, "join", tid)
+    assert r.returncode != 0, "consent gate must block non-TTY without flag"
+    stderr = r.stderr
+    # AC #1 — 4 section headers all present
+    assert "(a) Trek とは何か" in stderr, (
+        "section (a) Trek とは何か must be in the explanation"
+    )
+    assert "(b) 参加で委譲する権限" in stderr, (
+        "section (b) 委譲する権限 must be in the explanation"
+    )
+    assert "(c) user 確認境界" in stderr, (
+        "section (c) user 確認境界 must be in the explanation"
+    )
+    assert "(d) 撤回方法" in stderr, (
+        "section (d) 撤回方法 must be in the explanation"
+    )
+    # AC #2 — each section carries concrete action examples (= 1-3 行)
+    # (b): concrete autonomous actions
+    assert "blanket" in stderr.lower() or "自動承認" in stderr
+    assert "executor" in stderr.lower() or "working" in stderr
+    # (c): concrete user-confirm boundaries
+    assert "deploy" in stderr.lower()
+    assert "release" in stderr.lower()
+    assert "merge" in stderr.lower()
+    # (d): concrete leave action
+    assert f"beacon trek leave {tid}" in stderr
+
+
+def test_trek_join_consent_explanation_references_core_doc(trek_env):
+    """ms-92 / e-2182 AC #4: vocabulary must align with CORE doc trek-positioning."""
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "invite", tid, "--actor", "b@x.com")
+    env_b = dict(trek_env)
+    env_b.update({
+        "BEACON_USER_ID": "u-b",
+        "BEACON_USER_EMAIL": "b@x.com",
+        "BEACON_SESSION_ID": "sv-b-1",
+    })
+    env_b.pop("BEACON_TREK_CONSENT_ACK", None)
+    r = _run(env_b, "join", tid)
+    # CORE doc id (b1XOKXQeC0JXaKkO0CRt) and the 缶詰 metaphor
+    assert "b1XOKXQeC0JXaKkO0CRt" in r.stderr, (
+        "CORE doc trek-positioning must be referenced for vocabulary alignment"
+    )
+    assert "缶詰" in r.stderr, "CORE doc 缶詰 metaphor must be carried forward"
+    # 3 段境界 (= e-2169) reference makes (c) section concrete
+    assert "e-2169" in r.stderr
+
+
+def test_trek_join_consent_flag_enforcement_unchanged(trek_env):
+    """ms-92 / e-2182 AC #3: --i-understand-the-implications flag enforcement
+    is preserved — only the explanation text changed, not the gate semantics.
+    """
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "invite", tid, "--actor", "b@x.com")
+    env_b = dict(trek_env)
+    env_b.update({
+        "BEACON_USER_ID": "u-b",
+        "BEACON_USER_EMAIL": "b@x.com",
+        "BEACON_SESSION_ID": "sv-b-1",
+    })
+    env_b.pop("BEACON_TREK_CONSENT_ACK", None)
+    # Without the flag → blocked
+    r_blocked = _run(env_b, "join", tid)
+    assert r_blocked.returncode != 0
+    # With the flag → passes
+    r_pass = _run(env_b, "join", tid, "--i-understand-the-implications",
+                  "--no-arm", "--json")
+    assert r_pass.returncode == 0, r_pass.stderr
 
 
 def test_trek_join_consent_gate_bypass_with_env_var(trek_env):

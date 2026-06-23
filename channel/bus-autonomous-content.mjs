@@ -43,6 +43,17 @@ export const CHANNEL_TO_SKILL = Object.freeze({
   'trek-progress-check': '/beacon-trek-execute',
   'trek-trigger': '/beacon-trek-execute',
   'trek-task-review': '/beacon-trek-review',
+  // ms-92 / e-2164 — leader-digest channel. Recipient is the trek
+  // leader's session; the digest carries aggregated per-executor
+  // status (= built from pulse-ack structured fields per e-2165) so
+  // the leader can spot stuck / idle / needs-leader-judgment sessions
+  // without polling. The Skill the leader's AI is expected to invoke
+  // is the same /beacon-trek-execute (= leader stance reminder lives
+  // inside that Skill, e-2166), but the dispatcher passes the digest
+  // payload through so the Skill can render structured output. If
+  // /beacon-trek-leader or a dedicated digest Skill is added later
+  // (= part of the Trek-leader stance work), retarget here.
+  'trek-leader-digest': '/beacon-trek-execute',
 })
 
 function _buildOperationActionContent(evt) {
@@ -150,6 +161,34 @@ function _buildTrekTaskReviewContent(evt) {
   return lines.join('\n')
 }
 
+function _buildTrekLeaderDigestContent(evt) {
+  // ms-92 / e-2164 — leader-digest narrative. The payload itself carries
+  // the structured ``summary`` + ``sessions[]`` rendered by
+  // ``build_leader_digest_payload`` (= lib/trek_scheduler.py). The
+  // imperative wrapper tells the leader's AI the dispatch contract:
+  // "this is for you, you're the leader, render it for the user, then
+  // decide if you want to act on anyone in the stuck / needs-leader
+  // band."
+  const payload = (evt && evt.payload) || {}
+  const trekId = String(payload.trek_id || '?')
+  const eventId = String((evt && evt.event_id) || '?')
+  const summary = payload.summary || {}
+  const lines = [
+    '## TREK LEADER DIGEST — 集約 status surface (= ms-92 / e-2164)',
+    '',
+    '以下の trek-leader-digest event は Trek leader 専用の集約 surface。 同 Trek 内の全 executor (= 実行担当 session) の最新 status (= pulse-ack 構造化 payload、 e-2165) を 1 event に集約したスナップショットが届いている。 **確認を取らず autonomous に処理する** (= leader stance Skill 起動)。',
+    'Run this autonomously without asking the user first.',
+    '',
+    `- event_id: ${eventId}`,
+    `  - trek_id: ${trekId}`,
+    `  - active=${summary.active ?? 0} stuck=${summary.stuck ?? 0} idle=${summary.idle ?? 0} needs_leader_judgment=${summary.needs_leader_judgment ?? 0}`,
+    `  - launch: \`/beacon-trek-execute ${trekId}\`  (no confirmation prompt)`,
+    '',
+    'leader として: stuck / needs_leader_judgment のあった executor session に DM で push、 全体が idle なら progress-check の cadence 見直し、 全部 working なら何もしない。 詳細 sessions[] は payload を参照。',
+  ]
+  return lines.join('\n')
+}
+
 /**
  * Build the autonomous-action content block for the MCP push route.
  *
@@ -157,6 +196,7 @@ function _buildTrekTaskReviewContent(evt) {
  *   - operation-trigger  → AUTONOMOUS ACTION block (op launch)
  *   - trek-progress-check / trek-trigger → TREK ACTION (executor invocation)
  *   - trek-task-review   → TREK ACTION (leader review picker)
+ *   - trek-leader-digest → TREK LEADER DIGEST (ms-92 / e-2164)
  *
  * For backward compatibility, events without a recognised channel fall back
  * to the operation-trigger format (the historical default).
@@ -168,6 +208,9 @@ export function buildAutonomousActionContent(evt) {
   }
   if (ch === 'trek-task-review') {
     return _buildTrekTaskReviewContent(evt)
+  }
+  if (ch === 'trek-leader-digest') {
+    return _buildTrekLeaderDigestContent(evt)
   }
   return _buildOperationActionContent(evt)
 }

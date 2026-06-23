@@ -1599,11 +1599,62 @@ def create_project(project_id: str, body: ProjectCreate,
 
 
 @app.get("/api/projects/{project_id}")
-def get_project(project_id: str, user: dict = Depends(require_auth)):
+def get_project(project_id: str, slim: bool = False,
+                user: dict = Depends(require_auth)):
     # ms-46 e-756: REST もWS pushと同じ enriched shape を返す
     # (total_tasks / done_tasks / entries_to_json)。client がどの経路で
     # データを取っても counts が落ちないように対称化する。
-    return _enrich_project(_load(project_id, user))
+    # ms-84 / e-2326: ?slim=true で entries[] を落とした軽量応答を返す
+    # (= Web UI 初期 fetch 用、 entries は MS expand 時に lazy fetch)。
+    # default は従来通り full 応答 (= CLI / Tauri IPC 等の既存 consumer 互換)。
+    raw = _load(project_id, user)
+    return _enrich_project_slim(raw) if slim else _enrich_project(raw)
+
+
+@app.get("/api/projects/{project_id}/milestones/{milestone_id}/entries")
+def get_milestone_entries(project_id: str, milestone_id: str,
+                          user: dict = Depends(require_auth)):
+    """Return entries[] for a single milestone (ms-84 / e-2326).
+
+    Pair endpoint for the slim WS broadcast: Web UI requests this per-MS
+    when the user expands a card. The recursive entry tree is serialized
+    via core.entries_to_json so the shape matches the legacy full payload.
+    Returns 404 if the milestone is not present in the project.
+    """
+    raw = _load(project_id, user)
+    for ms in raw.get("milestones", []):
+        if ms.get("id") == milestone_id:
+            entries = ms.get("entries", [])
+            return {
+                "milestone_id": milestone_id,
+                "entries": core.entries_to_json(entries),
+            }
+    raise HTTPException(status_code=404, detail="milestone not found")
+
+
+# ms-84 / e-2326 follow-up — tab-scoped REST endpoints. The slim WS broadcast
+# drops these arrays so the frame fits inside Cloud Run's WS tolerance; the
+# Web UI / Tauri fetch them lazily when the user switches to the matching
+# tab (= Releases / Worktree). Each returns the raw array under a top-level
+# key so the client can drop it straight into state.project.{name}.
+
+@app.get("/api/projects/{project_id}/pushes")
+def get_project_pushes(project_id: str, user: dict = Depends(require_auth)):
+    raw = _load(project_id, user)
+    return {"pushes": raw.get("pushes", [])}
+
+
+@app.get("/api/projects/{project_id}/deployments")
+def get_project_deployments(project_id: str, user: dict = Depends(require_auth)):
+    raw = _load(project_id, user)
+    return {"deployments": raw.get("deployments", [])}
+
+
+@app.get("/api/projects/{project_id}/worktree-sessions")
+def get_project_worktree_sessions(project_id: str,
+                                  user: dict = Depends(require_auth)):
+    raw = _load(project_id, user)
+    return {"worktree_sessions": raw.get("worktree_sessions", [])}
 
 
 @app.put("/api/projects/{project_id}")
@@ -1637,6 +1688,12 @@ def put_project(project_id: str, body: dict,
 @app.post("/api/projects/{project_id}/milestones")
 def create_milestone(project_id: str, body: MilestoneCreate,
                      user: dict = Depends(require_auth)):
+    # ms-43 / e-2246 — resolve the human author identity (= user_id / email /
+    # display_name) once, then thread it into core.milestone_add so meta.author
+    # is stamped at creation time. Mirrors the create_entry contract from
+    # ms-78 / e-1909 so MS lists / detail can surface a creator label.
+    author = _resolve_author(user)
+
     def op(data: dict):
         _require_write(data, user)
         try:
@@ -1646,6 +1703,7 @@ def create_milestone(project_id: str, body: MilestoneCreate,
                 priority=body.priority,
                 objective=body.objective,
                 acceptance_criteria=body.acceptance_criteria,
+                author=author,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
@@ -1832,6 +1890,61 @@ def update_entry(project_id: str, entry_id: str, body: EntryUpdate,
     )
 
 
+def _mirror_task_done_to_treks(entry_id: str) -> list[str]:
+    """ms-88 / e-2167 — task pool ↔ Trek stamp 同期 (= mirror sync).
+
+    task pool 側で task が ``done`` に成った瞬間に、 active な Trek の
+    ``task_states[<entry_id>]`` が non-terminal で stamp 済 なら自動で
+    ``done`` に mirror する。 「task pool で done だが Trek stamp は
+    waiting-review / leader_review / working で残ってる」 stuck 状態 (=
+    2026-06-19 dogfood の e-2045 14h 放置事例) を構造的に排除する。
+
+    state transition validation は bypass する (= 直接書き換え)。 これは
+    server-forced reconciliation であり、 「executor / leader / user が
+    意図的に state を進める」 normal transition とは性質が違う。
+
+    Returns trek_ids that were touched.
+    """
+    touched: list[str] = []
+    try:
+        all_treks = db.list_treks(actor_id=None)
+    except Exception:
+        return touched
+    for t in all_treks:
+        if t.get("status") != "active":
+            continue
+        states = t.get("task_states") or {}
+        existing = states.get(entry_id)
+        if not existing:
+            continue
+        try:
+            current_state = trek_mod.get_task_state(t, entry_id)
+        except Exception:
+            current_state = (existing or {}).get("state") or ""
+        if current_state in trek_mod.TERMINAL_TASK_STATES:
+            continue
+        # Direct mirror write (= bypass transition validation).
+        now_iso = trek_mod.utcnow_iso()
+        states[entry_id] = {
+            **existing,
+            "state": "done",
+            "updated_at": now_iso,
+            "last_activity_at": now_iso,
+            "updated_by_session_id": "task-pool-mirror",
+            "note": (
+                "task pool で done 化、 mirror 同期 (= ms-88 / e-2167)"
+            ),
+        }
+        t["task_states"] = states
+        t["updated_at"] = now_iso
+        try:
+            db.save_trek(t.get("trek_id", ""), t)
+            touched.append(t.get("trek_id", ""))
+        except Exception:
+            continue
+    return touched
+
+
 @app.post("/api/projects/{project_id}/entries/{entry_id}/done")
 def done_entry(project_id: str, entry_id: str,
                user: dict = Depends(require_auth)):
@@ -1847,9 +1960,16 @@ def done_entry(project_id: str, entry_id: str,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return data, {"entry_id": entry_id, "status": "done"}
-    return _apply_op_and_broadcast(
+    result = _apply_op_and_broadcast(
         project_id, op, op_name="entry.done", actor=user.get("sub", ""),
     )
+    # ms-88 / e-2167 — mirror task pool done into Trek task_states.
+    # Best-effort: failure does not block the task done response.
+    try:
+        _mirror_task_done_to_treks(entry_id)
+    except Exception:
+        pass
+    return result
 
 
 @app.delete("/api/projects/{project_id}/entries/{entry_id}")
@@ -3188,6 +3308,22 @@ class TrekHaltSet(BaseModel):
     reason: str = ""
 
 
+# ms-92 / e-2141 — cross-project task add via Trek scope.
+# Body for POST /api/treks/{trek_id}/task-add. The server walks
+# trek.check_trek_task_add_allowed and either writes the task to the
+# target project's milestone (stamping meta.trek_id for audit) or
+# returns 403 with the scope-guard reason code so the CLI can show
+# the right remediation hint.
+class TrekTaskAddRequest(BaseModel):
+    target_project: str
+    target_milestone: str
+    description: str
+    type: str = "task"
+    priority: str = ""
+    motivation: str = ""
+    acceptance_criteria: str = ""
+
+
 class TrekTransferLeader(BaseModel):
     from_session_id: str  # current leader session (caller's session)
     to_session_id: str    # new leader session
@@ -3198,11 +3334,21 @@ class TrekTakeOver(BaseModel):
     session_id: str  # 新 leader_session_id (= 呼び出し session の sid)
 
 
-# ms-88 / e-2106 — pulse-ack body (= /beacon-trek-pulse Skill self-report)
+# ms-88 / e-2106 — pulse-ack body (= /beacon-trek-pulse Skill self-report).
+# ms-92 / e-2165 — structured payload fields added so the leader-digest
+# (e-2164) can mechanically aggregate "stuck=N idle=M" counts without
+# parsing natural-language notes. All structured fields are optional and
+# backward-compat: pre-e-2165 callers (= bridge versions / scripts that
+# only set picked_choice + note) keep working.
 class TrekPulseAck(BaseModel):
     session_id: str
     picked_choice: str = ""  # 5-choice token, see lib/trek.VALID_PULSE_PICKED_CHOICES (ms-88 / e-2139)
     note: str = ""
+    # Structured fields — see lib/trek.record_pulse_ack docstring for shape.
+    state_summary: str = ""
+    blockers: list[str] = []
+    needs_leader_judgment: bool = False
+    time_on_task_seconds: int = 0
 
 
 # ms-88 / e-2138 — kickoff completion body (= /beacon-trek-pulse Step 0 が呼ぶ)
@@ -3424,7 +3570,8 @@ def invite_trek_member_endpoint(trek_id: str, body: TrekInvite,
 
 
 @app.post("/api/treks/{trek_id}/members/join")
-def join_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
+def join_trek_endpoint(trek_id: str, request: Request,
+                       user: dict = Depends(require_auth)):
     """Accept the caller's own invitation (= sets ``joined_at`` to now).
 
     Caller must already appear in members[] (= owner-issued invitation).
@@ -3434,10 +3581,20 @@ def join_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
     visibility model is "creator OR member" and an invited-but-not-yet-joined
     user IS a member entry; the visibility check passes. Self-add (= caller
     not yet in members[] at all) gets caught by trek_mod.accept_invitation.
+
+    ms-86 / e-2225 — also writes a session_history entry on the trek doc
+    so the Trek keeps a cumulative record of every session that has ever
+    joined. The session id is taken from the ``X-Beacon-Session`` header
+    (= the same channel the task-state endpoint uses). When the header is
+    missing the join still succeeds; the session_history entry is just
+    skipped for that call.
     """
     t = _load_trek_for_read(trek_id, user)
+    caller_sid = request.headers.get("X-Beacon-Session", "") or ""
     try:
-        trek_mod.accept_invitation(t, user_id=user.get("sub", ""))
+        trek_mod.accept_invitation(
+            t, user_id=user.get("sub", ""), session_id=caller_sid,
+        )
     except ValueError as e:
         # Not invited (no row at all) → 403, not 404. The trek exists; the
         # caller just cannot self-add.
@@ -3729,6 +3886,15 @@ def trek_pulse_ack_endpoint(trek_id: str, body: TrekPulseAck,
             session_id=body.session_id,
             picked_choice=body.picked_choice or "",
             note=body.note or "",
+            # ms-92 / e-2165 — structured payload. Server passes them
+            # through as-is; record_pulse_ack handles normalisation +
+            # truncation. Pre-e-2165 bridges omit these (Pydantic
+            # default-fills empty values), so behaviour is unchanged
+            # for legacy callers.
+            state_summary=body.state_summary or "",
+            blockers=body.blockers or [],
+            needs_leader_judgment=bool(body.needs_leader_judgment),
+            time_on_task_seconds=int(body.time_on_task_seconds or 0),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -3817,7 +3983,32 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
         leader_sid = t.get("leader_session_id") or ""
         scope = t.get("scope") or []
         target_pid = scope[0].get("project") if scope else ""
-        if leader_sid and target_pid:
+        # ms-88 / e-2168 — self-loop suppress: leader が自分で stamp した
+        # transition では、 leader 宛 review event を mint しない。 「自分が判断
+        # したものを自分にもう一度 review 依頼する」 ループによる envelope mint +
+        # DM 配送 + 通知 noise を構造的に排除。 state 遷移自体は normal に
+        # 保存されており、 suppress した事実だけ meta.review_suppressions に
+        # 残して後から audit 可能化する。
+        self_judgment = bool(
+            caller_sid and leader_sid and caller_sid == leader_sid
+        )
+        if self_judgment:
+            meta = t.setdefault("meta", {})
+            suppressions = meta.setdefault("review_suppressions", [])
+            suppressions.append({
+                "task_id": body.task_id,
+                "state": body.state,
+                "suppression_reason": "self_judgment",
+                "suppressed_at": trek_mod.utcnow_iso(),
+                "caller_session_id": caller_sid,
+            })
+            try:
+                db.save_trek(trek_id, t)
+            except Exception:
+                # Best-effort audit trail; suppression decision still
+                # holds even if save fails.
+                pass
+        elif leader_sid and target_pid:
             try:
                 envelope = envelope_mod.issue_t1_system_envelope(
                     project_id=target_pid,
@@ -3862,6 +4053,203 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
     return t
 
 
+@app.post("/api/treks/{trek_id}/task-add")
+def add_trek_task_endpoint(
+    trek_id: str,
+    body: TrekTaskAddRequest,
+    user: dict = Depends(require_auth),
+):
+    """Cross-project task add through Trek scope (ms-92 / e-2141).
+
+    Walks ``trek.check_trek_task_add_allowed(t, target_project,
+    target_milestone)`` first. On allowed: writes the task to the
+    target project's milestone via the existing ``core.task_add``
+    primitive, stamping ``meta.trek_id`` for audit traceability. On
+    rejected: 403 with the scope-guard reason code so callers can
+    show the right remediation hint.
+
+    Authorisation: caller must be a trek member (= same as
+    ``task-state``). The scope-guard does the cross-project
+    authorisation; the membership check is the "are you allowed to
+    drive this Trek at all" gate.
+
+    Reason codes returned in the 403 detail (= mirror the lib/trek.py
+    constants so the CLI / docs share a vocabulary):
+      * ``project_not_in_scope`` — target_project absent from scope
+      * ``milestone_not_in_scope`` — project present, MS not enumerated
+      * ``scope_only_has_task_narrowing`` — AC #4 of e-2141 (= MS-grain
+        enforcement; task-level scope entries don't sprout sideways)
+    """
+    t = _load_trek_for_read(trek_id, user)
+    user_id = user.get("sub") or ""
+    if _auth_enabled and not trek_mod.find_member(t, user_id):
+        raise HTTPException(
+            status_code=403,
+            detail="only trek members can add tasks through trek scope",
+        )
+    if not body.target_project:
+        raise HTTPException(status_code=400, detail="target_project required")
+    if not body.target_milestone:
+        raise HTTPException(status_code=400, detail="target_milestone required")
+    if not body.description:
+        raise HTTPException(status_code=400, detail="description required")
+    if not body.target_milestone.startswith("ms-"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"target_milestone {body.target_milestone!r} must start with "
+                "'ms-' (operations / single tasks are not valid task-add "
+                "targets — see SPEC ms-92 e-2141 AC #4 MS-grain enforcement)"
+            ),
+        )
+    allowed, reason = trek_mod.check_trek_task_add_allowed(
+        t,
+        target_project=body.target_project,
+        target_milestone=body.target_milestone,
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=f"trek scope rejects task add: {reason}",
+        )
+    # Scope check passed. Write to the target project via the existing
+    # task_add op. We stamp meta.trek_id on the entry (= audit trail).
+    author = _resolve_author(user)
+
+    def op(data: dict):
+        # ms-81 / e-1916 write-status gate is intentionally NOT applied
+        # here — the Trek scope authorisation is the relevant gate for
+        # cross-project writes, and Trek scope only enumerates active
+        # work. If the target MS is in a bad write status the entry-add
+        # CLI surfaces that locally; cross-project we trust the Trek
+        # scope owner's intent.
+        try:
+            eid = core.task_add(
+                data, body.target_milestone, body.description,
+                entry_type=body.type, priority=body.priority,
+                motivation=body.motivation,
+                acceptance_criteria=body.acceptance_criteria,
+                author=author,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        # Stamp meta.trek_id on the freshly-created entry so future
+        # /beacon-retrospect queries can answer "which tasks were
+        # sprouted via Trek X". core.task_add returns just the id, so
+        # we re-find the entry and patch its meta.
+        find_result = core.find_entry(data, eid)
+        if find_result:
+            _, _, entry, _ = find_result
+            meta = entry.setdefault("meta", {})
+            meta["trek_id"] = trek_id
+            meta["origin"] = "trek.task_add"
+        return data, {
+            "entry_id": eid,
+            "project_id": body.target_project,
+            "milestone_id": body.target_milestone,
+            "trek_id": trek_id,
+        }
+    return _apply_op_and_broadcast(
+        body.target_project,
+        op,
+        op_name="entry.create.trek_scope",
+        actor=user.get("sub", ""),
+    )
+
+
+class TrekReconcileRequest(BaseModel):
+    apply: bool = False
+
+
+@app.post("/api/treks/{trek_id}/reconcile")
+def reconcile_trek_endpoint(trek_id: str, body: TrekReconcileRequest,
+                            user: dict = Depends(require_auth)):
+    """ms-88 / e-2167 — Trek task_states を task pool と整合させる reconcile.
+
+    Trek 内に既に stamp 済の各 task について scope project の task pool を
+    引いて、 「pool 上は done だが Trek stamp は non-terminal で残ってる」
+    stuck 状態を一覧化する。 ``apply=true`` なら mirror で done に書き換え。
+    ``apply=false`` (= default) は dry-run、 diff だけ返す。
+
+    Authorisation: caller must be a trek member.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    user_id = user.get("sub") or ""
+    if not trek_mod.find_member(t, user_id):
+        raise HTTPException(
+            status_code=403,
+            detail="only trek members can reconcile task state",
+        )
+    states = t.get("task_states") or {}
+    scope_project_ids = [
+        s.get("project") for s in t.get("scope") or [] if s.get("project")
+    ]
+    # Build a single dict of entry_id → pool_status across scope projects.
+    pool_status: dict[str, str] = {}
+    for pid in scope_project_ids:
+        try:
+            project_data = db.get_project(pid)
+        except Exception:
+            continue
+        if not project_data:
+            continue
+        for entry_id in states.keys():
+            if entry_id in pool_status:
+                continue
+            found = core.find_entry(project_data, entry_id)
+            if found:
+                _, _, entry, _ = found
+                pool_status[entry_id] = (entry or {}).get("status") or ""
+    # Compute diff: pool done but trek state non-terminal.
+    diff: list[dict] = []
+    for entry_id, entry in states.items():
+        try:
+            current_state = trek_mod.get_task_state(t, entry_id)
+        except Exception:
+            current_state = (entry or {}).get("state") or ""
+        pool = pool_status.get(entry_id, "")
+        if pool == "done" and current_state not in trek_mod.TERMINAL_TASK_STATES:
+            diff.append({
+                "entry_id": entry_id,
+                "trek_state": current_state,
+                "pool_status": pool,
+                "would_change_to": "done",
+            })
+    applied: list[str] = []
+    if body.apply and diff:
+        now_iso = trek_mod.utcnow_iso()
+        for item in diff:
+            entry_id = item["entry_id"]
+            existing = states.get(entry_id) or {}
+            states[entry_id] = {
+                **existing,
+                "state": "done",
+                "updated_at": now_iso,
+                "last_activity_at": now_iso,
+                "updated_by_session_id": "task-pool-mirror",
+                "note": (
+                    "task pool で done 化、 mirror 同期 (= ms-88 / e-2167 "
+                    "reconcile)"
+                ),
+            }
+            applied.append(entry_id)
+        t["task_states"] = states
+        t["updated_at"] = now_iso
+        try:
+            db.save_trek(trek_id, t)
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"trek save failed: {type(e).__name__}: {e}",
+            )
+    return {
+        "trek_id": trek_id,
+        "applied": body.apply,
+        "diff": diff,
+        "applied_entry_ids": applied,
+    }
+
+
 @app.get("/api/treks/{trek_id}/documents")
 def list_trek_documents_endpoint(trek_id: str,
                                  user: dict = Depends(require_auth)):
@@ -3897,6 +4285,235 @@ def list_trek_documents_endpoint(trek_id: str,
             d_out = dict(d)
             d_out["project_id"] = pid
             out.append(d_out)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# ms-86 / e-2248 — Trek scope aggregate endpoints for milestones / operations /
+# tasks. The Trek detail UI needs to render MS / Op / Task entries from every
+# project the Trek's scope reaches, without the client knowing which project
+# each entry belongs to in advance. Mirrors the
+# ``/api/treks/{trek_id}/documents`` pattern (= same /documents shape: iterate
+# scope, walk each project's data, dedupe, attach source ``project_id``).
+#
+# Scope semantics (= identical to ``_list_related_treks`` match rule, mirror):
+#   * ``{"project": pid}`` (= project-wide) → every MS / Op / Task in that
+#     project belongs to the Trek
+#   * ``{"project": pid, "milestone": ms_id}`` → just that MS (and all its
+#     child tasks for the /tasks endpoint)
+#   * ``{"project": pid, "operation": op_id}`` → just that Op (and all its
+#     child tasks for the /tasks endpoint)
+#   * ``{"project": pid, "task": entry_id}`` → just that task (contributes
+#     to /tasks only, not /milestones or /operations)
+#
+# Why the duplicate walk vs. asking the client to iterate scope[] itself:
+# (1) one round-trip per concept beats N round-trips per project, (2) the
+# server already has the disclosure-policy check (= ms-63) wired into
+# ``_load(pid, user)`` so cross-project visibility is enforced server-side,
+# (3) ``state.project`` decoupling on the client (= e-2240 SPEC 設計方針 5)
+# requires the lookup to come from a Trek-keyed endpoint, not a project-keyed
+# one. See SPEC ``IgCFK8I34cBfPco3UE06`` for the full design rationale.
+# ---------------------------------------------------------------------------
+
+
+def _trek_scope_by_project(t: dict) -> dict[str, list[dict]]:
+    """Group ``t['scope']`` entries by their ``project`` field.
+
+    Returns ``{project_id: [scope_entry, ...]}``. Entries missing the
+    ``project`` field are silently dropped — they violate
+    ``normalize_scope_entry`` and shouldn't exist on disk, but old data
+    could; we skip rather than 500.
+    """
+    by_project: dict[str, list[dict]] = {}
+    for entry in t.get("scope") or []:
+        pid = entry.get("project") or ""
+        if not pid:
+            continue
+        by_project.setdefault(pid, []).append(entry)
+    return by_project
+
+
+def _scope_contributes(entries: list[dict], *, kind: str) -> tuple[bool, set[str]]:
+    """Decide what a project's scope entries contribute for one entity kind.
+
+    ``kind`` is ``"milestone"`` / ``"operation"`` / ``"task"``. Returns
+    ``(include_all, narrow_ids)``:
+
+    * ``include_all=True`` when any scope entry is project-wide (= no
+      narrowing key) — the whole project's entities of this kind belong.
+    * ``include_all=False, narrow_ids={...}`` when every matching entry
+      narrows; ``narrow_ids`` is the union of the matching IDs.
+
+    For ``kind="task"`` the contribution also widens via milestone /
+    operation narrowing (= "all tasks under that MS / Op"). That widening
+    is handled by the caller; this helper only reports direct task IDs.
+    """
+    if not entries:
+        return False, set()
+    narrow_ids: set[str] = set()
+    for entry in entries:
+        ms = entry.get("milestone") or ""
+        op = entry.get("operation") or ""
+        task = entry.get("task") or ""
+        if not (ms or op or task):
+            # Project-wide entry — whole project is in.
+            return True, set()
+        if kind == "milestone" and ms:
+            narrow_ids.add(ms)
+        elif kind == "operation" and op:
+            narrow_ids.add(op)
+        elif kind == "task" and task:
+            narrow_ids.add(task)
+    return False, narrow_ids
+
+
+@app.get("/api/treks/{trek_id}/milestones")
+def list_trek_milestones_endpoint(trek_id: str,
+                                  user: dict = Depends(require_auth)):
+    """Return milestones in this Trek's scope, walking each scope project.
+
+    Mirrors the /documents pattern: iterate scope → project_ids, load each
+    project, pick milestones in-scope (= project-wide entries include all,
+    narrowed entries pick by milestone ID), dedupe across projects, attach
+    source ``project_id`` on each entry for UI deep-linking.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    by_project = _trek_scope_by_project(t)
+    out: list = []
+    seen: set[tuple[str, str]] = set()
+    for pid, entries in by_project.items():
+        try:
+            project = _load(pid, user)
+        except Exception:
+            # Stale scope entry pointing at a project the caller cannot
+            # read; skip silently so a single bad ref doesn't break the
+            # whole listing (= same regime as /documents).
+            continue
+        include_all, narrow_ids = _scope_contributes(entries, kind="milestone")
+        if not include_all and not narrow_ids:
+            # Project is in scope only through operation / task narrowing,
+            # so the /milestones aggregate has nothing to contribute here.
+            continue
+        for ms in project.get("milestones", []) or []:
+            ms_id = ms.get("id") or ""
+            if not include_all and ms_id not in narrow_ids:
+                continue
+            key = (pid, ms_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            ms_out = dict(ms)
+            ms_out["project_id"] = pid
+            out.append(ms_out)
+    return out
+
+
+@app.get("/api/treks/{trek_id}/operations")
+def list_trek_operations_endpoint(trek_id: str,
+                                  user: dict = Depends(require_auth)):
+    """Return Operations in this Trek's scope. Mirrors /milestones."""
+    t = _load_trek_for_read(trek_id, user)
+    by_project = _trek_scope_by_project(t)
+    out: list = []
+    seen: set[tuple[str, str]] = set()
+    for pid, entries in by_project.items():
+        try:
+            project = _load(pid, user)
+        except Exception:
+            continue
+        include_all, narrow_ids = _scope_contributes(entries, kind="operation")
+        if not include_all and not narrow_ids:
+            continue
+        for op in project.get("operations", []) or []:
+            op_id = op.get("id") or ""
+            if not include_all and op_id not in narrow_ids:
+                continue
+            key = (pid, op_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            op_out = dict(op)
+            op_out["project_id"] = pid
+            out.append(op_out)
+    return out
+
+
+@app.get("/api/treks/{trek_id}/tasks")
+def list_trek_tasks_endpoint(trek_id: str,
+                             user: dict = Depends(require_auth)):
+    """Return tasks in this Trek's scope, walking MS / Op containers.
+
+    Task scope sources (= union across all scope entries):
+      * project-wide entry → every task in the project
+      * milestone entry → every task under that MS
+      * operation entry → every task under that Op
+      * task entry → that single task
+
+    Each output task carries source ``project_id`` and the immediate
+    container reference (``milestone_id`` or ``operation_id``) so the UI
+    can render the parent path without re-resolving.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    by_project = _trek_scope_by_project(t)
+    out: list = []
+    seen: set[tuple[str, str]] = set()
+    for pid, entries in by_project.items():
+        try:
+            project = _load(pid, user)
+        except Exception:
+            continue
+        # Compute per-project inclusion sets for task collection.
+        include_all_tasks, _ = _scope_contributes(entries, kind="task")
+        # Project-wide scope (no narrowing) also implies all tasks.
+        if not include_all_tasks:
+            for entry in entries:
+                if not (entry.get("milestone") or entry.get("operation")
+                        or entry.get("task")):
+                    include_all_tasks = True
+                    break
+        _, ms_narrow = _scope_contributes(entries, kind="milestone")
+        _, op_narrow = _scope_contributes(entries, kind="operation")
+        _, task_narrow = _scope_contributes(entries, kind="task")
+
+        def _emit(task: dict, *, milestone_id: str = "",
+                  operation_id: str = "") -> None:
+            tid = task.get("id") or ""
+            if not tid:
+                return
+            key = (pid, tid)
+            if key in seen:
+                return
+            seen.add(key)
+            row = dict(task)
+            row["project_id"] = pid
+            if milestone_id:
+                row["milestone_id"] = milestone_id
+            if operation_id:
+                row["operation_id"] = operation_id
+            out.append(row)
+
+        for ms in project.get("milestones", []) or []:
+            ms_id = ms.get("id") or ""
+            ms_wanted = (
+                include_all_tasks or (ms_id and ms_id in ms_narrow)
+            )
+            for entry in ms.get("entries", []) or []:
+                if entry.get("type") != "task":
+                    continue
+                tid = entry.get("id") or ""
+                if ms_wanted or (tid and tid in task_narrow):
+                    _emit(entry, milestone_id=ms_id)
+        for op in project.get("operations", []) or []:
+            op_id = op.get("id") or ""
+            op_wanted = (
+                include_all_tasks or (op_id and op_id in op_narrow)
+            )
+            for entry in op.get("entries", []) or []:
+                if entry.get("type") != "task":
+                    continue
+                tid = entry.get("id") or ""
+                if op_wanted or (tid and tid in task_narrow):
+                    _emit(entry, operation_id=op_id)
     return out
 
 
@@ -4745,7 +5362,17 @@ def trek_scheduler_tick_endpoint(
                 and s.get("session_id")
             ]
             # ms-88 / e-2109 — per-session filter.
+            # 2026-06-20 補完 (e-2109 second pass): leader 除外を追加。 leader は
+            # executor の進捗を促す立場ではない (= 役割が違う、 CORE doc
+            # trek-leader-stance / e-2166 と整合)、 progress-check の宛先から外す。
+            # 残された claim 0 件の executor は「fresh、 これから todo を引き受ける」
+            # と扱われ tick が届く。 leader 専用の集約 surface (= trek-leader-digest
+            # channel、 e-2164) は別 channel で配信する設計。
+            leader_sid_for_filter = trek_doc.get("leader_session_id") or ""
             for sid in live_sids:
+                if leader_sid_for_filter and sid == leader_sid_for_filter:
+                    # leader は progress-check の宛先ではない。
+                    continue
                 if trek_mod.session_has_active_claim(trek_doc, session_id=sid):
                     target_sids.append(sid)
                 elif not trek_mod.session_has_any_claim(trek_doc, session_id=sid):
@@ -4785,12 +5412,67 @@ def trek_scheduler_tick_endpoint(
             # Every send for this trek failed; skip the stamp so the next
             # tick retries instead of silently swallowing the failure.
             continue
+        # ms-92 / e-2164 — leader-digest fan-out (= one event to the
+        # leader's session carrying aggregated per-executor status).
+        # Same cadence as trek-progress-check (= they fire together so
+        # the leader sees "what is everyone doing right now" without
+        # polling). Leader session id may be missing on planning-era
+        # treks; skip in that case (= can't deliver without a target).
+        leader_sid = trek_doc.get("leader_session_id") or ""
+        leader_digest_event_id = ""
+        if leader_sid:
+            try:
+                digest_envelope = envelope_mod.issue_t1_system_envelope(
+                    project_id=target_project_id,
+                    trek_id=trek_id,
+                    actions_authorized=["trek.leader_digest"],
+                    data_class="free",
+                    ttl_seconds=3600,
+                )
+            except ValueError as exc:
+                errors.append({
+                    "trek_id": trek_id,
+                    "error": f"leader_digest_envelope_mint_failed: {exc}",
+                })
+                digest_envelope = None
+            if digest_envelope is not None:
+                digest_payload = trek_scheduler_mod.build_leader_digest_payload(
+                    trek_doc, now=now,
+                )
+                digest_payload["recipient_session_id"] = leader_sid
+                digest_bus_data = {
+                    "channel": "trek-leader-digest",
+                    "sender_session_id": "",
+                    "payload": digest_payload,
+                    "envelope": digest_envelope,
+                    "delivery": "auto-execute",
+                    "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                }
+                try:
+                    leader_digest_event_id = db.append_bus_event(
+                        target_project_id, digest_bus_data,
+                    )
+                except Exception as exc:
+                    errors.append({
+                        "trek_id": trek_id,
+                        "error": (
+                            f"leader_digest_send_failed: "
+                            f"{type(exc).__name__}: {exc}"
+                        ),
+                    })
         # Stamp last_progress_check_at so the next tick skips this trek
         # until its cadence elapses again.
         meta = trek_doc.setdefault("meta", {})
         meta["last_progress_check_at"] = now.strftime(
             "%Y-%m-%dT%H:%M:%S.%fZ"
         )
+        # ms-92 / e-2164 — record the latest leader-digest fire so the
+        # dashboard can show "last leader digest at X". Sits next to
+        # last_progress_check_at since they are co-scheduled.
+        if leader_digest_event_id:
+            meta["last_leader_digest_at"] = now.strftime(
+                "%Y-%m-%dT%H:%M:%S.%fZ"
+            )
         trek_doc["updated_at"] = trek_mod.utcnow_iso()
         try:
             db.save_trek(trek_id, trek_doc)
@@ -4805,6 +5487,8 @@ def trek_scheduler_tick_endpoint(
             "project_id": target_project_id,
             "event_ids": event_ids,
             "recipients": target_sids,
+            "leader_digest_event_id": leader_digest_event_id,
+            "leader_session_id": leader_sid,
         })
 
     # ms-83 / e-2001: idle escalation pass. Use the pre-snapshot
@@ -5589,9 +6273,18 @@ def list_bus_events(
     user: dict = Depends(require_auth),
 ):
     """List bus events ordered by created_at. Use ``since=<last_seen_iso>``
-    for polling-style catch-up; ``channel`` for server-side routing filter."""
+    for polling-style catch-up; ``channel`` for server-side routing filter.
+
+    ms-93 / e-2275: DM-channel events have their ``payload`` redacted before
+    return when the caller is neither sender nor recipient. Sidecar metadata
+    (event_id, channel, sender_session_id, created_at, receipt timestamps,
+    envelope view) stays visible so audit/diagnostics tooling keeps working.
+    """
     _load(project_id, user)
-    return db.list_bus_events(project_id, since=since, channel=channel, limit=limit)
+    events = db.list_bus_events(
+        project_id, since=since, channel=channel, limit=limit,
+    )
+    return _apply_dm_payload_visibility(project_id, events, _caller_uid(user))
 
 
 # e-1209: DM channels are 1:1 unicast by default. Without server-side
@@ -5649,6 +6342,153 @@ def _bus_event_addressed_to(event: dict, recipient_id: str) -> bool:
     return channel not in _DM_CHANNELS
 
 
+# ---------------------------------------------------------------------------
+# DM payload visibility boundary (ms-93 / e-2275)
+#
+# Routing (above) decides "who gets a push" — visibility (below) decides
+# "what the response shows" for direct-read endpoints (GET /bus, GET
+# /bus/unread, GET /bus/{event_id}). The two are orthogonal: a non-recipient
+# project member can still legitimately call GET /bus to inspect bus activity
+# (= sidecar status / cursor diagnostics), but the DM body itself is private
+# to (sender, recipient).
+#
+# Without this gate, every project member who can list bus events sees the
+# full ``payload`` field of every DM, including conversations they were not
+# party to. The Web UI / `beacon bus audit` rely on sidecar metadata
+# (event_id, channel, sender_session_id, created_at, delivered_at, opened_at,
+# envelope verify result) which are NOT secrets — only the free-text DM
+# body is.
+#
+# The redaction strategy:
+#   * Non-DM channels: untouched. Broadcast events have no privacy contract.
+#   * DM channels: resolve sender/recipient user_ids via the project session
+#     registry (same lookup the post-side gate uses, ``_resolve_bus_event_user_ids``).
+#     If the caller's user_id matches either party, return the event verbatim.
+#     Otherwise replace ``payload`` with the redaction marker and keep every
+#     other field (sidecar metadata stays visible).
+#
+# A 403 was considered and rejected: a caller who can read ``GET /bus`` MUST
+# still get the list back for non-DM bus traffic and for sidecar bookkeeping
+# on DM events they don't own. Dropping the request entirely would force
+# the Web UI to special-case DM-only filtering before issuing the read,
+# which is an unnecessary client-side coupling. Stripping the payload field
+# is the minimum-surface change that satisfies AC1+AC2 simultaneously.
+# ---------------------------------------------------------------------------
+
+_PAYLOAD_REDACTED = {"redacted": True, "reason": "dm_payload_visibility"}
+
+
+def _redact_dm_payload(event: dict) -> dict:
+    """Return a shallow copy of ``event`` with ``payload`` stripped to the
+    redaction marker. Sidecar fields (event_id, channel, sender_session_id,
+    created_at, delivery, *_at receipts, envelope view) are preserved.
+    """
+    if not isinstance(event, dict):
+        return event
+    redacted = dict(event)
+    redacted["payload"] = dict(_PAYLOAD_REDACTED)
+    return redacted
+
+
+def _caller_can_see_dm_payload(
+    event: dict,
+    caller_uid: str,
+    sender_uid: str,
+    receiver_uid: str,
+) -> bool:
+    """Decide whether ``caller_uid`` is sender or recipient of ``event``.
+
+    Empty-string caller_uid (= dev mode / unauthenticated path) collapses to
+    "can see everything" since the auth layer is what enforces identity in
+    the first place. Empty-string sender/receiver (= unknown — e.g. the
+    sender session was never registered) are treated conservatively: caller
+    cannot match an empty party, so the payload stays redacted unless the
+    caller is the other (known) party.
+    """
+    if not caller_uid:
+        # Dev mode (no auth) or anonymous read — same trust model as
+        # _require_project_role's auth_disabled bypass.
+        return True
+    if sender_uid and caller_uid == sender_uid:
+        return True
+    if receiver_uid and caller_uid == receiver_uid:
+        return True
+    return False
+
+
+def _apply_dm_payload_visibility(
+    project_id: str,
+    events: list[dict],
+    caller_uid: str,
+) -> list[dict]:
+    """Walk ``events`` and redact the ``payload`` of any DM-channel event
+    the caller is neither sender nor recipient of.
+
+    Performs the session→user_id resolution in a single ``list_sessions``
+    pass to keep this on the same cost shape as the existing
+    ``_resolve_bus_event_user_ids`` (one DB roundtrip regardless of event
+    count).
+    """
+    if not events:
+        return events
+    if not _auth_enabled:
+        # Dev mode: auth is disabled, so identity-based visibility gating is
+        # meaningless. Skip the resolve+redact pass entirely so local dev
+        # against ``BEACON_AUTH_ENABLED=0`` keeps seeing full DM bodies (the
+        # same trust model _require_project_role uses to bypass the role
+        # check in dev).
+        return events
+    has_dm = any((e.get("channel") or "") in _DM_CHANNELS for e in events)
+    if not has_dm:
+        return events
+    # Build sid → uid lookup once.
+    try:
+        sessions = db.list_sessions(project_id)
+    except Exception:
+        # Backend unavailable: fail closed for DM payloads (drop the body
+        # rather than risk leaking) but keep sidecar visible.
+        return [
+            _redact_dm_payload(e)
+            if (e.get("channel") or "") in _DM_CHANNELS
+            else e
+            for e in events
+        ]
+    sid_to_uid = {
+        str(s.get("session_id") or ""): str(s.get("user_id") or "")
+        for s in sessions
+        if s.get("session_id")
+    }
+    out: list[dict] = []
+    for ev in events:
+        channel = ev.get("channel") or ""
+        if channel not in _DM_CHANNELS:
+            out.append(ev)
+            continue
+        sender_sid = str(ev.get("sender_session_id") or "")
+        payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+        recipient_sid = str(payload.get("recipient_session_id") or "")
+        sender_uid = sid_to_uid.get(sender_sid, "")
+        receiver_uid = sid_to_uid.get(recipient_sid, "")
+        if _caller_can_see_dm_payload(ev, caller_uid, sender_uid, receiver_uid):
+            out.append(ev)
+        else:
+            out.append(_redact_dm_payload(ev))
+    return out
+
+
+def _caller_uid(user: dict | None) -> str:
+    """Extract the caller's stable user_id from a require_auth claims dict.
+
+    Empty string when ``user`` is None (internal callers) or carries no
+    ``sub`` claim (= auth disabled in dev). Callers that pass this to
+    ``_caller_can_see_dm_payload`` will then get the "see everything" branch,
+    matching the existing dev-mode bypass semantics.
+    """
+    if not user:
+        return ""
+    return str(user.get("sub") or "")
+
+
 @app.get("/api/projects/{project_id}/bus/unread")
 def list_unread_bus_events(
     project_id: str,
@@ -5695,7 +6535,13 @@ def list_unread_bus_events(
     filtered = [e for e in raw if _bus_event_addressed_to(e, recipient_id)]
     if limit:
         filtered = filtered[:limit]
-    return filtered
+    # ms-93 / e-2275: redact DM payloads the caller isn't a party to. The
+    # recipient_id query param is the session asking for its inbox, but the
+    # *caller* is the authenticated user behind that request. In dogfood,
+    # callers typically pass their own recipient_id (= bridge polling for
+    # itself), so this is a no-op for the common path; the guard catches
+    # the cross-user case where a member queries another session's unread.
+    return _apply_dm_payload_visibility(project_id, filtered, _caller_uid(user))
 
 
 @app.post("/api/projects/{project_id}/bus/cursors/{recipient_id}")
@@ -5844,6 +6690,11 @@ def get_bus_event(
     Powers the 3-stage display (sent / delivered / opened). The event dict
     already carries the per-stage timestamp fields when set, so the client
     only needs to render what's present.
+
+    ms-93 / e-2275: when the event is on a DM channel and the caller is
+    neither sender nor recipient, the ``payload`` field is replaced with a
+    redaction marker — sidecar fields (delivery, *_at, channel, etc.) stay
+    visible so the 3-stage display still renders.
     """
     _load(project_id, user)
     event = db.find_bus_event(project_id, event_id)
@@ -5852,7 +6703,8 @@ def get_bus_event(
             status_code=404,
             detail=f"bus event {event_id!r} not found",
         )
-    return event
+    redacted = _apply_dm_payload_visibility(project_id, [event], _caller_uid(user))
+    return redacted[0]
 
 
 @app.get("/api/projects/{project_id}/retros")
@@ -6047,13 +6899,60 @@ def _enrich_project(data: dict) -> dict:
     return enriched
 
 
+def _enrich_project_slim(data: dict) -> dict:
+    """Slim variant for WS broadcast — drops tab-scoped heavy arrays.
+
+    ms-84 / e-2326 (= initial fix) + follow-up: dropping entries[] alone left
+    the Beacon project at 413 KB which is still above whatever WS frame size
+    Cloud Run / GFE tolerates in practice (= 5 retries of wss:// confirmed
+    1006 close at 173 KB and 413 KB, while 32 KB went through). Profiling the
+    slim payload pointed at top-level arrays that the dashboard doesn't need:
+    pushes 311 KiB / deployments 80 KiB / worktree_sessions 5 KiB. These are
+    Releases / Worktree tab content. We drop them from the WS broadcast and
+    the Web UI / Tauri fetch them via tab-specific REST endpoints on demand:
+
+      GET /api/projects/{id}/pushes
+      GET /api/projects/{id}/deployments
+      GET /api/projects/{id}/worktree-sessions
+
+    Milestones keep total_tasks / done_tasks so card summaries stay accurate;
+    entries[] is still fetched per-MS on expand via
+    GET /api/projects/{id}/milestones/{ms_id}/entries. Operations stays in
+    slim because the dashboard renders operation cards inline.
+
+    REST GET /api/projects/{id} (= default, full) is unchanged so CLI / Tauri
+    IPC consumers continue to see the complete payload.
+    """
+    enriched = {**data}
+    for tab_scoped in ("pushes", "deployments", "worktree_sessions"):
+        enriched.pop(tab_scoped, None)
+    milestones = []
+    for ms in data.get("milestones", []):
+        entries = ms.get("entries", [])
+        total, done = core.count_task_status(entries)
+        slim_ms = {k: v for k, v in ms.items() if k != "entries"}
+        slim_ms["total_tasks"] = total
+        slim_ms["done_tasks"] = done
+        milestones.append(slim_ms)
+    enriched["milestones"] = milestones
+    return enriched
+
+
 async def _broadcast(project_id: str, data: dict):
-    """Send enriched project data to all WebSocket clients."""
+    """Notify subscribed WS clients that the project changed (ms-84 / e-2326).
+
+    Signal-only payload (~30 bytes). The previous attempts (full payload →
+    slim w/ entries dropped → slim w/ tab-scoped arrays dropped) all hit a
+    Cloud Run / GFE WS frame tolerance that's tighter than expected (=
+    measured: 17.6 KiB works, 84 KiB consistently 1006-closes). Instead of
+    chasing the threshold by stripping more fields, we make the WS a pure
+    signal channel: clients fetch the actual state via REST (which has no
+    frame limit). This is a permanent fix to the frame-size class of bugs.
+    """
     clients = _ws_connections.get(project_id, set()).copy()
     if not clients:
         return
-    enriched = _enrich_project(data)
-    msg = {"type": "project", "data": enriched}
+    msg = {"type": "project_changed"}
     for ws in clients:
         try:
             await ws.send_json(msg)
@@ -6321,10 +7220,19 @@ async def ws_project(websocket: WebSocket, project_id: str):
         _ws_connections[project_id] = set()
     _ws_connections[project_id].add(websocket)
 
-    # Send initial enriched data. The role check above already loaded the
-    # project via load_project_consistent (which hydrates v2 subcollection
-    # milestones), so we reuse ``raw`` instead of fetching twice.
-    await websocket.send_json({"type": "project", "data": _enrich_project(raw)})
+    # ms-84 / e-2326 — signal-only WS. Past attempts to push project state
+    # over WS (full / slim / aggressively-slim) all hit a Cloud Run / GFE WS
+    # frame tolerance somewhere in the 20-50 KB range, well under what
+    # Starlette's `max_size` default (1 MiB) would suggest. Rather than
+    # chasing that opaque limit, we send a tiny "ready" notification and
+    # let the client pull the actual state via REST (which has no frame
+    # limit and already returns the slim variant via ?slim=true). Subsequent
+    # change events on this socket follow the same shape — type=project_changed
+    # with no body — so the client's update path is "refetch on signal".
+    await websocket.send_json({
+        "type": "ws_ready",
+        "project_id": project_id,
+    })
 
     _start_watcher(project_id)
 
@@ -6435,6 +7343,27 @@ def dev_login(body: DevLoginRequest):
         db.update_user(sub, {"display_name": name})
     return {"status": "ok", "id_token": token, "email": email, "token_expiry": expiry}
 
+
+@app.post("/api/auth/exchange-cli-token")
+def exchange_cli_token(user: dict = Depends(require_auth)):
+    """ms-43 / e-2298 — Web UI session を 30 日有効化する exchange endpoint。
+
+    Web UI が初回ログイン直後 (= Firebase id_token を受け取った瞬間) に呼ぶ。
+    既存 require_auth で id_token を検証 → _make_cli_token(sub, email) で
+    bcli.* 形式の HMAC token (= 30 日 TTL、 CLI と同じ機構) を発行して返す。
+    Web UI は以降 bcli token を Authorization header / WS の ?token= で
+    使い、 Firebase id_token の固定 1 時間 TTL に縛られず session を持続する。
+
+    Firebase / Cognito どちらでも動く (= require_auth が provider 非依存で
+    成功すれば bcli token を発行する設計)。 dev-login の bcli token 発行
+    ロジックを公開 endpoint として小さく切り出した形 (= 同 lib 関数 reuse)。
+    """
+    sub = user.get("sub", "")
+    email = user.get("email", "")
+    if not sub:
+        raise HTTPException(status_code=400, detail="missing sub claim")
+    token, expiry = _make_cli_token(sub, email)
+    return {"status": "ok", "id_token": token, "email": email, "token_expiry": expiry}
 
 
 # ---- CLI Auth (Web UI-mediated flow) ----

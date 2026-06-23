@@ -82,6 +82,38 @@ let state = {
   selectedDeployEnv: 'all',
   auth: {},
   projects: [],
+  // ms-86 / e-2253 — Tauri parity for Trek state (mirrors Web SKIP-block init
+  // in server/static/index.html). SHARED openTrek() / closeTrek() / Trek
+  // detail render reach into these slots; missing them throws on .has() /
+  // .find() / array spread the moment the user clicks a Trek row. Same regime
+  // as showCancelled above (= "Web initializes in SKIP, Tauri must mirror").
+  //
+  // Field semantics are identical to Web (= shared across builds):
+  //   treks               — full set visible to the caller (creator or member)
+  //   openTrekId          — null in list view, trek_id while detail is open
+  //   openTrekDocs        — docs of the open Trek (loaded by loadTrekDocs)
+  //   openTrekScope       — cross-project MS/Op/Task aggregate (e-2248/e-2249)
+  //   openTrekExpanded    — Set of accordion-open scope row indices (e-2126)
+  //   openTrekShowDone    — Set of MS ids where "show done" is toggled on
+  //   relatedTreks        — reverse-lookup cache for the Related Treks widget
+  treks: [],
+  openTrekId: null,
+  openTrekDocs: [],
+  openTrekScope: { milestones: [], operations: [], tasks: [] },
+  openTrekExpanded: new Set(),
+  openTrekShowDone: new Set(),
+  relatedTreks: {},
+  // ms-84 / e-2326 — entries lazy-load cache. WS broadcasts a slim payload
+  // (no milestones[].entries[]); cached entries are re-attached on slim WS
+  // arrival so the SHARED render code keeps working unchanged. See
+  // server/static/index.html for the Web parity.
+  milestoneEntries: {},
+  entriesLoading: new Set(),
+  // ms-84 / e-2326 follow-up — tab-scoped extras cache. The slim WS broadcast
+  // also drops top-level arrays (pushes / deployments / worktree_sessions).
+  // Tauri's initial IPC load seeds these from the full payload so subsequent
+  // slim WS updates can hydrate without an extra round-trip.
+  projectExtras: { pushes: null, deployments: null, worktree_sessions: null },
 };
 
 // ---- Data loading (Tauri invoke) ----
@@ -99,6 +131,10 @@ async function loadProject() {
     const newJson = JSON.stringify(data);
     if (newJson !== lastProjectJson) {
       lastProjectJson = newJson;
+      // ms-84 / e-2326 — IPC still returns the full project (incl. entries[]).
+      // Seed the milestoneEntries cache so subsequent slim WS broadcasts can
+      // hydrate without an extra round-trip per MS.
+      seedMilestoneEntriesCache(data);
       state.project = data;
       state.lastUpdate = new Date();
       state.connected = true;
@@ -251,7 +287,145 @@ const dataSource = {
       throw new Error(`Unknown archive action: ${action}`);
     }
   },
+  // ms-86 / e-2253 — Trek dataSource parity with Web. Trek is a cross-project
+  // entity, so the Rust state.cloud_project_id (= scoped to a single project)
+  // doesn't apply. Rather than wire 4 new Rust commands (= cloud_list_treks,
+  // cloud_get_trek_docs, cloud_get_trek_scope, cloud_get_related_treks) we
+  // call the server REST endpoints directly from JS using the same auth path
+  // already used by connectCloudWebSocket() (= cloud_get_auth_token + bare
+  // fetch). Cloud-mode only; local Tauri mode has no trek backend reachable,
+  // so we degrade to empty arrays (matches the regress regime of loadTreks
+  // / loadTrekDocs in Web when offline).
+  loadTreks: async () => {
+    if (!cloudMode) { state.treks = []; return; }
+    state.treks = await _trekApi('/api/treks?include_archived=true', []);
+  },
+  loadTrekDocs: async (trekId) => {
+    if (!cloudMode) { state.openTrekDocs = []; return; }
+    state.openTrekDocs = await _trekApi(
+      `/api/treks/${encodeURIComponent(trekId)}/documents`, [],
+    );
+  },
+  // Mirrors server/static/index.html loadTrekScope (e-2249). The three
+  // aggregate endpoints (= e-2248) are hit in parallel; per-axis failure
+  // degrades to empty array on that axis so the Trek detail UI still renders.
+  loadTrekScope: async (trekId) => {
+    if (!cloudMode) {
+      state.openTrekScope = { milestones: [], operations: [], tasks: [] };
+      return;
+    }
+    const enc = encodeURIComponent(trekId);
+    const [ms, ops, tasks] = await Promise.all([
+      _trekApi(`/api/treks/${enc}/milestones`, []),
+      _trekApi(`/api/treks/${enc}/operations`, []),
+      _trekApi(`/api/treks/${enc}/tasks`, []),
+    ]);
+    state.openTrekScope = {
+      milestones: Array.isArray(ms) ? ms : [],
+      operations: Array.isArray(ops) ? ops : [],
+      tasks: Array.isArray(tasks) ? tasks : [],
+    };
+  },
+  loadRelatedTreks: async (kind, id) => {
+    const path = kind === 'milestone' ? 'milestones'
+      : kind === 'operation' ? 'operations'
+      : 'entries';
+    const key = (kind === 'milestone' ? 'ms' : kind === 'operation' ? 'op' : 'task') + ':' + id;
+    if (!cloudMode || !state.cloudProjectId) { state.relatedTreks[key] = []; return; }
+    state.relatedTreks[key] = await _trekApi(
+      `/api/projects/${state.cloudProjectId}/${path}/${encodeURIComponent(id)}/related-treks`,
+      [],
+    );
+  },
 };
+
+// ms-86 / e-2253 — small fetch helper for Trek endpoints. Mirrors Web's api()
+// helper minus the token-expiry / logout dance (= the Tauri auth lifecycle is
+// owned by Rust, not the JS layer). 401 / error → swallow into `fallback`
+// because every caller already treats failure as "empty list, render
+// gracefully" (= same posture as loadTrekDocs / loadRelatedTreks in Web).
+async function _trekApi(path, fallback) {
+  try {
+    const token = await invoke('cloud_get_auth_token');
+    const apiUrl = await getApiUrl();
+    const res = await fetch(`${apiUrl}${path}`, {
+      headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+    });
+    if (!res.ok) return fallback;
+    return await res.json();
+  } catch (_e) {
+    return fallback;
+  }
+}
+
+// ms-84 / e-2326 — entries lazy-load helpers (mirror server/static/index.html).
+// Tauri's initial loadProject() pulls the full project (entries included), so
+// the cache is seeded immediately. Slim WS broadcasts then preserve those
+// entries via hydrateProjectEntries, and per-MS REST refetch keeps the cache
+// fresh when an expanded MS's counts change.
+
+function seedMilestoneEntriesCache(project) {
+  if (!project) return;
+  if (Array.isArray(project.milestones)) {
+    for (const ms of project.milestones) {
+      if (Array.isArray(ms.entries)) {
+        state.milestoneEntries[ms.id] = ms.entries;
+      }
+    }
+  }
+  // ms-84 / e-2326 follow-up — also seed top-level tab-scoped arrays so
+  // subsequent slim WS broadcasts can hydrate them from cache.
+  for (const k of ['pushes', 'deployments', 'worktree_sessions']) {
+    if (Array.isArray(project[k])) {
+      state.projectExtras[k] = project[k];
+    }
+  }
+}
+
+function hydrateProjectEntries(project) {
+  if (!project || typeof project !== 'object') return project;
+  if (Array.isArray(project.milestones)) {
+    for (const ms of project.milestones) {
+      if (ms.entries === undefined) {
+        ms.entries = state.milestoneEntries[ms.id] || [];
+      }
+    }
+  }
+  for (const k of ['pushes', 'deployments', 'worktree_sessions']) {
+    if (project[k] === undefined && Array.isArray(state.projectExtras[k])) {
+      project[k] = state.projectExtras[k];
+    }
+  }
+  return project;
+}
+
+async function fetchMilestoneEntries(msId) {
+  if (!cloudMode || !state.cloudProjectId) return;
+  if (state.entriesLoading.has(msId)) return;
+  state.entriesLoading.add(msId);
+  try {
+    const data = await _trekApi(
+      `/api/projects/${encodeURIComponent(state.cloudProjectId)}/milestones/${encodeURIComponent(msId)}/entries`,
+      null,
+    );
+    const entries = (data && data.entries) || [];
+    state.milestoneEntries[msId] = entries;
+    if (state.project && Array.isArray(state.project.milestones)) {
+      const ms = state.project.milestones.find(m => m.id === msId);
+      if (ms) ms.entries = entries;
+    }
+  } finally {
+    state.entriesLoading.delete(msId);
+    render();
+  }
+}
+
+function refreshExpandedMilestoneEntries() {
+  if (!cloudMode) return;
+  for (const msId of state.expanded) {
+    fetchMilestoneEntries(msId);
+  }
+}
 
 function startPolling() { if (!pollTimer) pollTimer = setInterval(loadProject, 2000); }
 function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
@@ -318,16 +492,26 @@ async function connectCloudWebSocket(projectId) {
       if (typeof applyDocumentChange === 'function') applyDocumentChange(msg.data);
       return;
     }
+    // ms-84 / e-2326 — signal-only WS. ws_ready / project_changed mean
+    // "refetch via the existing Tauri IPC pull" (loadProject). Legacy
+    // type=project frames are still handled for rollover safety.
+    if (msg.type === 'ws_ready' || msg.type === 'project_changed') {
+      state.connected = true;
+      state.error = null;
+      loadProject();
+      return;
+    }
     if (msg.type !== 'project') return;
     const data = msg.data || {};
     const newJson = JSON.stringify(data);
     if (newJson === lastProjectJson) return;
     lastProjectJson = newJson;
-    state.project = data;
+    state.project = hydrateProjectEntries(data);
     state.lastUpdate = new Date();
     state.connected = true;
     state.error = null;
     renderOnDataChange();
+    refreshExpandedMilestoneEntries();
   };
 
   ws.onerror = () => {
@@ -552,7 +736,16 @@ const PLATFORM = {
     state.projectVersion = computeProjectVersion(state.project);
     return renderVersionBadge();
   },
-  getFooterLeftHTML: () => `<div>${cloudMode ? 'cloud' : 'local'}</div>`,
+  // ms-86 / e-2253 — when Trek detail is open, footer left text is replaced
+  // with brand-only "Beacon" to mirror Web (e-2250 AC #1). Trek is a
+  // cross-project entity; surfacing the cloud/local mode (= "which project
+  // backend") drags user cognition back to a project axis the detail view
+  // is explicitly trying to hide. Match the Web getFooterLeftHTML structure
+  // (= `state.openTrekId ? 'Beacon' : <project-id>`); on Tauri the non-Trek
+  // fallback is the cloud/local mode badge instead of a project id.
+  getFooterLeftHTML: () => state.openTrekId
+    ? `<div>Beacon</div>`
+    : `<div>${cloudMode ? 'cloud' : 'local'}</div>`,
   getArchiveButtonHTML: (p) => cloudMode
     ? `<button class="sort-toggle" data-action="archive-cloud-project" style="font-size:0.65rem;color:var(--text-dim);">Archive</button>`
     : '',

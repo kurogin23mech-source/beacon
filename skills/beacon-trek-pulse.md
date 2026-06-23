@@ -184,12 +184,55 @@ AI 自己判断で 1 つ以上を選ぶ。 user に picker を見せない (= �
 choice を決めたら、 **必ず最初に**以下を実行する。 これが Layer 2 の中心で、 「Skill が actually invoked された」 ground truth を server に渡す。
 
 ```bash
-cd "$PROJECT_DIR" && beacon trek pulse-ack "<trek-id>" --picked-choice "<choice>" --note "<note>"
+cd "$PROJECT_DIR" && beacon trek pulse-ack "<trek-id>" \
+  --picked-choice "<choice>" \
+  --note "<short note>" \
+  --state-summary "<1-line state snapshot>" \
+  --blocker "<blocker 1>" \
+  --blocker "<blocker 2>" \
+  --needs-leader-judgment \
+  --time-on-task <seconds>
 ```
 
-(= 内部的に POST /api/treks/<trek-id>/pulse-ack に投げる、 ms-88 / e-2106)
+(= 内部的に POST /api/treks/<trek-id>/pulse-ack に投げる、 ms-88 / e-2106 + ms-92 / e-2165 構造化 payload)
 
-成功時 stdout に `{"session_id": "...", "total_acks": N, "last_pulse_ack_at": "...", "last_picked_choice": "...", "history": [...]}` が返る。 これを Step 4 で user 通知に使う。
+### 構造化フィールドの埋め方 (= ms-92 / e-2165、 leader-digest 集約用)
+
+旧来の `--picked-choice` + `--note` (= 自然文) は backward-compat (= 後方互換) で残るが、 leader-digest (= e-2164、 leader 専用集約 surface) で「stuck=N idle=M」 を機械集計するには **構造化フィールドを populate** する必要がある。 normal な pulse では以下 4 つを推奨で埋める:
+
+| flag | 型 | 用途 | sample |
+|---|---|---|---|
+| `--state-summary` | 1 行 ≤100 字 | 今の状態を 1 文 | `"working on e-2165"` / `"stuck on e-2200 OOM"` / `"idle"` |
+| `--blocker` | 0-3 件 ≤200 字 / 件 | 困ってる場合に具体内容 | `--blocker "OOM in test_foo.py" --blocker "wait for cloud deploy"` |
+| `--needs-leader-judgment` | flag | leader の判断が要る時 true | (= pick `dm-leader` と組み合わせ可) |
+| `--time-on-task` | int 秒 | 今の task に何秒乗ってるか (= idle なら 0) | `--time-on-task 1800` |
+
+具体例 (= 4 つのよくある状態の埋め方):
+
+```bash
+# 1. 順調に working (= continue choice、 短い working snapshot で十分)
+beacon trek pulse-ack tk-xxx --picked-choice continue \
+  --state-summary "working on e-2165 schema fields" --time-on-task 1200
+
+# 2. stuck で leader 判断要請 (= dm-leader choice + blocker 具体記述)
+beacon trek pulse-ack tk-xxx --picked-choice dm-leader \
+  --state-summary "stuck on e-2200 OOM" \
+  --blocker "test_foo.py:42 hits OOM in CI but passes locally" \
+  --blocker "rolled back 3 attempts, root cause unclear" \
+  --needs-leader-judgment --time-on-task 5400
+
+# 3. idle (= no-op choice、 time_on_task=0)
+beacon trek pulse-ack tk-xxx --picked-choice no-op \
+  --state-summary "idle, waiting for kickoff-DM ack from peer-X" --time-on-task 0
+
+# 4. terminal (= done を宣言、 続けて task-state も叩く)
+beacon trek pulse-ack tk-xxx --picked-choice terminal \
+  --state-summary "done with e-2165" --time-on-task 3600
+```
+
+構造化フィールドが空のまま送られても server 側は拒否しない (= legacy バイナリ / 旧 Skill 経路の互換確保)。 但し leader-digest は空フィールドを「不明」 として扱うため、 leader の判断材料が薄くなる。 **「note を書くなら state_summary も埋める」 を default にする**。
+
+成功時 stdout に `{"session_id": "...", "total_acks": N, "last_pulse_ack_at": "...", "last_picked_choice": "...", "last_state_summary": "...", "last_blockers": [...], "last_needs_leader_judgment": bool, "last_time_on_task_seconds": int, "history": [...]}` が返る。 これを Step 4 で user 通知に使う。
 
 **重要**: pulse-ack を打たないまま Step 4 以降の action を実行する経路は禁止。 「先に observability を埋め、 行動はそのあと」 の順序が Layer 2 の意味。
 

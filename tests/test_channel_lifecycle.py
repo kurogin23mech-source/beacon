@@ -182,13 +182,14 @@ class TestOptOut:
                                                    tmp_path):
         """Opt-out --project outside a beacon project should error out cleanly."""
         monkeypatch.setenv("BEACON_CHANNEL_SCOPE", "project")
-        # CWD into a dir with no .beacon/project.json
+        # CWD into a dir with no .beacon/project.json or cloud.json
         other = tmp_path / "elsewhere"
         other.mkdir()
         monkeypatch.chdir(other)
         out, err, code = _capture(commands.cmd_channel_opt_out)
         assert code == 1
-        assert "no .beacon/project.json" in err
+        # ms-84 Phase 3 (e-2037): error message now accepts either marker.
+        assert "no Beacon project" in err or "no .beacon/project.json" in err
 
 
 class TestOptIn:
@@ -326,7 +327,8 @@ class TestInstallRefusedByOptOut:
         monkeypatch.chdir(other)
         out, err, code = _capture(commands.cmd_channel_install)
         assert code == 1
-        assert "no .beacon/project.json" in err
+        # ms-84 Phase 3 (e-2037): error message now accepts either marker.
+        assert "no Beacon project" in err or "no .beacon/project.json" in err
 
 
 # ---------------------------------------------------------------------------

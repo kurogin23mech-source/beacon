@@ -179,6 +179,79 @@ def test_get_project_not_found():
     assert r.status_code == 404
 
 
+def test_get_project_slim_drops_entries(client_for_slim=None):
+    # ms-84 / e-2326 — ?slim=true returns the project with entries[] omitted
+    # from each milestone, but keeps the computed total_tasks / done_tasks so
+    # the dashboard card summary stays accurate. Web UI uses this on initial
+    # mount so the WS frame limit (1 MiB) can't be tripped on first paint.
+    r = client.get(f"/api/projects/{PROJECT_ID}?slim=true")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["name"] == "Test"
+    for ms in body["milestones"]:
+        assert "entries" not in ms, f"milestone {ms['id']} leaked entries in slim mode"
+        assert "total_tasks" in ms
+        assert "done_tasks" in ms
+
+
+def test_get_project_slim_drops_tab_scoped_arrays():
+    # ms-84 / e-2326 follow-up — slim must also drop top-level pushes /
+    # deployments / worktree_sessions so the WS frame stays under Cloud Run's
+    # effective WS tolerance. These are fetched via tab-specific endpoints
+    # when the user switches to Releases / Worktree tab.
+    r = client.get(f"/api/projects/{PROJECT_ID}?slim=true")
+    assert r.status_code == 200
+    body = r.json()
+    for tab_scoped in ("pushes", "deployments", "worktree_sessions"):
+        assert tab_scoped not in body, (
+            f"slim leaked tab-scoped array '{tab_scoped}' "
+            f"(WS frame will be inflated for projects that have any history)"
+        )
+
+
+def test_get_project_pushes_endpoint():
+    r = client.get(f"/api/projects/{PROJECT_ID}/pushes")
+    assert r.status_code == 200
+    body = r.json()
+    assert "pushes" in body
+    assert isinstance(body["pushes"], list)
+
+
+def test_get_project_deployments_endpoint():
+    r = client.get(f"/api/projects/{PROJECT_ID}/deployments")
+    assert r.status_code == 200
+    body = r.json()
+    assert "deployments" in body
+    assert isinstance(body["deployments"], list)
+
+
+def test_get_project_worktree_sessions_endpoint():
+    r = client.get(f"/api/projects/{PROJECT_ID}/worktree-sessions")
+    assert r.status_code == 200
+    body = r.json()
+    assert "worktree_sessions" in body
+    assert isinstance(body["worktree_sessions"], list)
+
+
+def test_get_milestone_entries_returns_full_tree():
+    # ms-84 / e-2326 — pair endpoint to the slim broadcast. Web UI calls this
+    # per-MS when the user expands a card; payload shape matches the legacy
+    # nested entries[] tree from _enrich_project so the SHARED render code
+    # keeps working unchanged.
+    r = client.get(f"/api/projects/{PROJECT_ID}/milestones/ms-1/entries")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["milestone_id"] == "ms-1"
+    assert isinstance(body["entries"], list)
+    # ms-1 fixture has 1 todo task → exactly one entry in the tree.
+    assert len(body["entries"]) >= 1
+
+
+def test_get_milestone_entries_missing_milestone():
+    r = client.get(f"/api/projects/{PROJECT_ID}/milestones/ms-nonexistent/entries")
+    assert r.status_code == 404
+
+
 def test_put_project():
     new_data = {"name": "Updated", "milestones": []}
     r = client.put(f"/api/projects/{PROJECT_ID}", json=new_data)

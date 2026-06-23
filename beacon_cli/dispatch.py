@@ -828,6 +828,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_trek_pulse.add_argument("--note", default="")
     p_trek_pulse.add_argument("--json", action="store_true")
 
+    # ms-88 / e-2167 — reconcile task pool ↔ Trek stamp 同期
+    p_trek_reconcile = trek_sub.add_parser("reconcile", add_help=False)
+    p_trek_reconcile.add_argument("trek_id", nargs="?", default="")
+    p_trek_reconcile.add_argument("--apply", action="store_true")
+    p_trek_reconcile.add_argument("--json", action="store_true")
+
     # ms-75 / e-2048 — Trek task state machine declaration
     p_trek_state = trek_sub.add_parser("task-state", add_help=False)
     p_trek_state.add_argument("trek_id", nargs="?", default="")
@@ -2449,6 +2455,15 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
                 "BEACON_TREK_TASK_ID": args.task_id or "",
                 "BEACON_TREK_STATE": args.state or "",
                 "BEACON_TREK_NOTE": args.note or "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd == "reconcile":
+        return _run_commands_py(
+            root, "trek_reconcile",
+            {
+                "BEACON_TREK_ID": args.trek_id or "",
+                "BEACON_TREK_APPLY": "1" if getattr(args, "apply", False) else "",
                 "BEACON_JSON": json_env,
             },
         )

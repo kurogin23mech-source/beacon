@@ -1,0 +1,793 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Trek Detail — top-level routing mockup (ms-86 / e-2252 visual reference)</title>
+<!--
+  e-2252 visual reference for ms-86 cross-project Trek independence.
+
+  この mockup は SPEC `IgCFK8I34cBfPco3UE06` (= e-2240) の設計方針:
+    - 方針 2: ヘッダから「現在の project 名」 を Trek detail 時に完全排除
+    - 方針 3: URL から project hash を分離 (`?trek=<trek_id>` 単独)
+    - 方針 6: ハンバーガーメニュー上 Trek を top-level に分離
+    - 方針 7: Trek list view は user member の全 Trek を表示 (project filter 無し)
+    - 方針 8: mockup を新動線用に拡張 (= cross-project chip 列 / project 選択無関係 routing)
+
+  を新動線として visual reference 化するためのもの。
+
+  既存 `mockups/trek-detail.html` (= e-2126) は単一 project 由来 scope の
+  歴史的 dogfood シーンを凍結する reference として併存させる (= 双方向参照)。
+  本 mockup は **複数 project が 1 Trek の scope を共有している** ケースを
+  描き、 source project chip 列が UI 上どう見えるかを示す。
+
+  実装対応:
+    - e-2249 (state.project 非依存 lookup helper) ✓ landed
+    - e-2250 (Trek detail axis = state.openTrekId / URL = ?trek=<id> / header brand-only) ✓ landed
+    - e-2251 (ハンバーガー top-level Trek menu) → 本 mockup が先に visual reference
+-->
+<style>
+:root {
+  --bg: #0e0f12;
+  --bg-secondary: #16181d;
+  --bg-tertiary: #1a1c22;
+  --border: #2a2d35;
+  --border-subtle: #1f2128;
+  --text-primary: #e8eaed;
+  --text-secondary: #a0a4ac;
+  --text-dim: #5e6470;
+  --accent: #60a5fa;
+  --accent-bright: #93c5fd;
+  --warning: #fbbf24;
+  --danger: #ef4444;
+  --success: #4ade80;
+  --leader-purple: #a78bfa;
+  --chip-bg: rgba(96,165,250,0.08);
+  --chip-border: rgba(96,165,250,0.32);
+  --font-mono: 'SF Mono', Monaco, 'Cascadia Code', Consolas, 'Roboto Mono', monospace;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  margin: 0;
+  padding: 0;
+  line-height: 1.5;
+}
+
+/* ============================================================
+   Top bar: brand-only (= 方針 2)
+   project switcher / project name は **完全に消える**
+   Trek detail 時にヘッダから project 文脈が一切露出しない
+   ============================================================ */
+.top-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--border);
+}
+.hamburger {
+  width: 32px; height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 1.2rem;
+  position: relative;
+}
+.hamburger:hover { color: var(--text-primary); }
+.brand { font-size: 1.15rem; font-weight: 600; letter-spacing: -0.01em; }
+/* 注意: 旧 mockup にあった .project-name / .project-switcher は意図的に削除 */
+.url-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+.url-pill code {
+  color: var(--accent);
+  font-family: var(--font-mono);
+}
+.url-pill .url-note {
+  color: var(--text-dim);
+  font-size: 0.65rem;
+  font-style: italic;
+}
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+  font-size: 0.78rem;
+}
+.status-pill::before {
+  content: '';
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+}
+.spacer { flex: 1; }
+.settings-btn {
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  border-radius: 3px;
+}
+.avatar {
+  width: 32px; height: 32px;
+  border-radius: 50%;
+  background: #d97706;
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  font-size: 0.95rem;
+}
+
+/* ============================================================
+   Hamburger menu drawer (= 方針 6: Trek を top-level に分離)
+   project 階層配下ではなく、 menu トップに常駐
+   ============================================================ */
+.menu-drawer {
+  position: absolute;
+  top: 48px;
+  left: 16px;
+  width: 320px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px 0;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.4);
+  z-index: 10;
+}
+.menu-section-label {
+  font-size: 0.62rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 8px 16px 4px;
+}
+.menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 16px;
+  font-size: 0.82rem;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.menu-item:hover { background: var(--bg-tertiary); }
+.menu-item.active { background: rgba(96,165,250,0.08); color: var(--accent-bright); }
+.menu-item-icon {
+  width: 18px;
+  text-align: center;
+  margin-right: 10px;
+  color: var(--text-dim);
+}
+.menu-item-label { flex: 1; }
+.menu-item-count {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+.menu-divider {
+  height: 1px;
+  background: var(--border-subtle);
+  margin: 6px 12px;
+}
+.menu-project-list {
+  padding: 4px 0;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.menu-project-item {
+  display: flex;
+  align-items: center;
+  padding: 5px 16px 5px 38px;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.menu-project-item:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.menu-project-item.current { color: var(--accent); }
+.menu-project-item.current::before {
+  content: '●';
+  margin-right: 6px;
+  font-size: 0.5rem;
+}
+.menu-project-item:not(.current)::before {
+  content: '○';
+  margin-right: 6px;
+  font-size: 0.5rem;
+  color: var(--text-dim);
+}
+
+/* Trek main */
+.trek-container {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 24px 28px;
+}
+.progress-bar {
+  height: 2px;
+  background: var(--success);
+  width: 35%;
+  margin-bottom: 28px;
+  border-radius: 1px;
+}
+.trek-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  margin: 0 0 8px;
+  flex-wrap: wrap;
+}
+.trek-title {
+  font-size: 1.7rem;
+  margin: 0;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+/* ============================================================
+   Project chip 列 (= 方針 1 + 4: source project_id を必ず添える)
+   Trek title の直下に「この Trek が紐付く project 群」 を可視化。
+   1 Trek が複数 project に紐付きうる M:N 構造を視覚的に表現。
+   ============================================================ */
+.trek-projects {
+  display: flex;
+  gap: 6px;
+  margin: 4px 0 28px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.trek-projects-label {
+  font-size: 0.65rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-right: 4px;
+}
+.project-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  background: var(--chip-bg);
+  border: 1px solid var(--chip-border);
+  border-radius: 3px;
+  font-size: 0.72rem;
+  color: var(--accent-bright);
+  font-family: var(--font-mono);
+  cursor: pointer;
+}
+.project-chip:hover {
+  background: rgba(96,165,250,0.16);
+  border-color: rgba(96,165,250,0.5);
+}
+.project-chip .chip-count {
+  color: var(--text-dim);
+  font-size: 0.65rem;
+}
+
+.section-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-dim);
+  margin: 28px 0 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+/* WHY */
+.why-block {
+  border-left: 3px solid var(--accent);
+  background: rgba(96,165,250,0.04);
+  padding: 14px 18px;
+  font-size: 0.88rem;
+  color: var(--text-secondary);
+  line-height: 1.7;
+  border-radius: 0 4px 4px 0;
+}
+
+/* ============================================================
+   TREK TASKS — task row に source project chip を埋め込む
+   各 task が「どの project の MS / Op 配下」 か視覚的に判別可能
+   ============================================================ */
+.task-row {
+  border: 1px solid rgba(74,222,128,0.22);
+  border-radius: 4px;
+  padding: 12px 16px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  transition: border-color 0.1s, background 0.1s;
+}
+.task-row:hover { border-color: rgba(74,222,128,0.45); background: rgba(74,222,128,0.02); }
+.task-row.expanded {
+  border-color: rgba(74,222,128,0.45);
+  background: rgba(74,222,128,0.02);
+}
+.task-row.state-leader_review { border-color: rgba(167,139,250,0.35); }
+.task-row.state-leader_review:hover { border-color: rgba(167,139,250,0.6); }
+.task-row.state-user_review { border-color: rgba(251,191,36,0.5); background: rgba(251,191,36,0.03); }
+
+.task-row-head {
+  display: grid;
+  grid-template-columns: 18px 50px 1fr 180px 130px;
+  gap: 14px;
+  align-items: center;
+}
+.task-chevron {
+  color: var(--text-dim);
+  font-size: 0.75rem;
+  text-align: center;
+  user-select: none;
+}
+.task-chevron-spacer { width: 18px; }
+.task-tk-id {
+  font-family: var(--font-mono);
+  color: var(--success);
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+.task-row.leaf {
+  border-color: rgba(96,165,250,0.22);
+}
+.task-row.leaf:hover {
+  border-color: rgba(96,165,250,0.5);
+  background: rgba(96,165,250,0.03);
+}
+.task-row.leaf .task-tk-id { color: var(--accent); }
+.task-desc {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  font-size: 0.85rem;
+}
+/* ============================================================
+   per-task source project chip (= 方針 4 server endpoint payload)
+   Trek scope の各 entry に project_id が必ず添えられる前提で、
+   行の左端に小さく project 出自を表示。 複数 project 並存環境で
+   「この MS はどの project の MS か」 を 1 row で判別可能にする。
+   ============================================================ */
+.task-source-chip {
+  font-size: 0.6rem;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+  padding: 2px 7px;
+  border: 1px solid rgba(96,165,250,0.32);
+  background: rgba(96,165,250,0.05);
+  border-radius: 2px;
+  text-transform: uppercase;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+}
+.task-source-chip.alt {
+  color: var(--warning);
+  border-color: rgba(251,191,36,0.32);
+  background: rgba(251,191,36,0.05);
+}
+.task-ms-id {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  flex-shrink: 0;
+}
+.task-name {
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-assignee {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  font-family: var(--font-mono);
+}
+.task-state {
+  text-align: right;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+.task-state.working { color: var(--success); }
+.task-state.todo { color: var(--text-dim); }
+.task-state.leader_review { color: var(--accent-bright); }
+.task-state.user_review { color: var(--warning); }
+.task-state.done { color: var(--text-dim); text-decoration: line-through; }
+
+.task-children {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--border-subtle);
+}
+.child-task {
+  display: grid;
+  grid-template-columns: 48px 90px 1fr 80px;
+  gap: 10px;
+  padding: 6px 0;
+  font-size: 0.74rem;
+  color: var(--text-secondary);
+  align-items: baseline;
+}
+.child-task-tag {
+  color: var(--accent);
+  font-size: 0.65rem;
+  padding: 2px 7px;
+  border: 1px solid rgba(96,165,250,0.4);
+  border-radius: 2px;
+  text-align: center;
+  background: rgba(96,165,250,0.05);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.child-task-id {
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+}
+.child-task-desc {
+  color: var(--text-secondary);
+}
+
+/* MEMBERS & AGENTS */
+.members-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 6px;
+}
+.members-table th {
+  text-align: left;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: lowercase;
+  color: var(--text-dim);
+  font-weight: normal;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.members-table td {
+  padding: 12px 14px;
+  font-size: 0.82rem;
+  border-bottom: 1px solid var(--border-subtle);
+  vertical-align: middle;
+}
+.member-email { color: var(--text-primary); }
+.session-local {
+  font-family: var(--font-mono);
+  color: var(--accent);
+  font-weight: 600;
+}
+.role-leader {
+  color: var(--leader-purple);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  font-size: 0.75rem;
+}
+.task-link {
+  font-family: var(--font-mono);
+  color: var(--success);
+  font-weight: 600;
+}
+
+/* RECENT ACTIVITY */
+.activity-row {
+  display: grid;
+  grid-template-columns: 130px 22px 80px 1fr;
+  gap: 14px;
+  padding: 7px 14px;
+  font-size: 0.76rem;
+  border-bottom: 1px dashed var(--border-subtle);
+}
+.activity-row:last-child { border-bottom: none; }
+.activity-ts {
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+}
+.activity-icon { text-align: center; }
+.activity-source-chip {
+  font-size: 0.6rem;
+  color: var(--accent);
+  padding: 1px 6px;
+  border: 1px solid rgba(96,165,250,0.32);
+  background: rgba(96,165,250,0.05);
+  border-radius: 2px;
+  text-align: center;
+  font-family: var(--font-mono);
+  letter-spacing: 0.05em;
+  height: fit-content;
+}
+.activity-source-chip.alt {
+  color: var(--warning);
+  border-color: rgba(251,191,36,0.32);
+  background: rgba(251,191,36,0.05);
+}
+.activity-text {
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Annotation callout (= 「ここが新動線で変わった点」 を visual reference として明示) */
+.callout {
+  margin: 22px 0;
+  padding: 10px 14px;
+  background: rgba(251,191,36,0.04);
+  border-left: 2px solid var(--warning);
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  border-radius: 0 3px 3px 0;
+}
+.callout strong { color: var(--warning); letter-spacing: 0.05em; }
+
+/* Footer */
+.footer {
+  max-width: 1400px;
+  margin: 40px auto 0;
+  padding: 24px 28px;
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  display: flex;
+  justify-content: space-between;
+  border-top: 1px solid var(--border-subtle);
+}
+.footer-text em { font-style: italic; }
+</style>
+</head>
+<body>
+
+<!-- ============================================================
+     Top bar (= 方針 2: project 名 / switcher 完全排除)
+     ハンバーガー / Beacon / URL pill (= ?trek=<id> 単独) / Settings / avatar
+     ============================================================ -->
+<div class="top-bar">
+  <div class="hamburger">
+    ☰
+    <!-- ハンバーガー展開時の menu drawer (= 方針 6 視覚化) -->
+    <div class="menu-drawer">
+      <div class="menu-section-label">top-level (project 非依存)</div>
+      <div class="menu-item active">
+        <span class="menu-item-icon">⛺</span>
+        <span class="menu-item-label">Treks</span>
+        <span class="menu-item-count">2 joined</span>
+      </div>
+      <div class="menu-item">
+        <span class="menu-item-icon">📥</span>
+        <span class="menu-item-label">Inbox</span>
+        <span class="menu-item-count">3</span>
+      </div>
+
+      <div class="menu-divider"></div>
+
+      <div class="menu-section-label">projects (現在の選択は無関係)</div>
+      <div class="menu-project-list">
+        <div class="menu-project-item current">beacon-b95643</div>
+        <div class="menu-project-item">trailnode-7f3a12</div>
+        <div class="menu-project-item">creatron-invoice-a8c421</div>
+      </div>
+
+      <div class="menu-divider"></div>
+
+      <div class="menu-item">
+        <span class="menu-item-icon">⚙</span>
+        <span class="menu-item-label">Settings</span>
+      </div>
+    </div>
+  </div>
+  <div class="brand">Beacon</div>
+  <!-- ヘッダから project 名 / project switcher は完全に消えた (= 方針 2) -->
+  <!-- 代わりに URL pill で「いま ?trek=<id> 単独 routing になっている」 ことを visual hint -->
+  <div class="url-pill">
+    <code>?trek=tk-91</code>
+    <span class="url-note">project hash なし</span>
+  </div>
+  <div class="status-pill">online</div>
+  <div class="spacer"></div>
+  <button class="settings-btn">Settings</button>
+  <div class="avatar">K</div>
+</div>
+
+<div class="trek-container">
+  <div class="progress-bar"></div>
+
+  <!-- Trek title only — 旧 mockup と同じく project 名は出さない (= 方針 2) -->
+  <div class="trek-title-row">
+    <h1 class="trek-title">cross-project Trek 連携 dogfood</h1>
+  </div>
+
+  <!-- Project chip 列 (= 新動線で追加: 方針 1 の M:N を視覚化) -->
+  <!-- 旧 mockup には無かったセクション。 1 Trek が複数 project に scope を持つ -->
+  <!-- ことを user 側に明示し、 「Trek は project に従属しない」 設計と整合させる -->
+  <div class="trek-projects">
+    <span class="trek-projects-label">scope spans</span>
+    <span class="project-chip">
+      beacon-b95643
+      <span class="chip-count">(4)</span>
+    </span>
+    <span class="project-chip">
+      trailnode-7f3a12
+      <span class="chip-count">(2)</span>
+    </span>
+  </div>
+
+  <!-- WHY -->
+  <div class="section-label">WHY</div>
+  <div class="why-block">
+    ms-86 で確立した Trek の cross-project 独立性 (= SPEC IgCFK8I34cBfPco3UE06) が、
+    実装後の実走で本当に成立しているかを別 project の MS / task を同 Trek scope に
+    入れて確認する。 Beacon 側 task と TrailNode 側 task を 1 つの Trek に紐付け、
+    project 選択を切替えずにどちらの task も触れることを dogfood する。
+  </div>
+
+  <!-- 新動線で何が変わったかを mockup 内に注釈として残す (= visual reference の役割) -->
+  <div class="callout">
+    <strong>NEW ROUTING:</strong> ハンバーガー上で 「Treks」 が top-level menu item に
+    昇格し、 project 階層から独立した (= 方針 6)。 URL は <code>?trek=tk-91</code> 単独で、
+    project hash は付かない (= 方針 3)。 ヘッダから project 名 / switcher は完全に
+    消える (= 方針 2)。 Trek title 直下の chip 列で 「この Trek が紐付く全 project」 が
+    一覧でき、 1 Trek = 複数 project (= M:N) を視覚的に判別可能 (= 方針 1)。
+  </div>
+
+  <!-- TREK TASKS — source project chip 列を各 row に埋め込む -->
+  <div class="section-label">
+    <span>TREK TASKS</span>
+  </div>
+
+  <!-- t-1: beacon project 由来 MS -->
+  <div class="task-row">
+    <div class="task-row-head">
+      <div class="task-chevron">▸</div>
+      <div class="task-tk-id">t-1</div>
+      <div class="task-desc">
+        <span class="task-source-chip">BEACON</span>
+        <span class="task-ms-id">ms-86</span>
+        <span class="task-name">Trek UI 再構築 (= cross-project 独立性の visual 整合)</span>
+      </div>
+      <div class="task-assignee">s-2</div>
+      <div class="task-state working">working</div>
+    </div>
+  </div>
+
+  <!-- t-2: trailnode project 由来 MS (= 別 project chip) -->
+  <!-- 新動線の核心: 同じ Trek 画面に 別 project の MS が並ぶ -->
+  <div class="task-row expanded">
+    <div class="task-row-head">
+      <div class="task-chevron">▾</div>
+      <div class="task-tk-id">t-2</div>
+      <div class="task-desc">
+        <span class="task-source-chip alt">TRAILNODE</span>
+        <span class="task-ms-id">ms-14</span>
+        <span class="task-name">org-closed skill 共有の auth gate 設計</span>
+      </div>
+      <div class="task-assignee">s-3</div>
+      <div class="task-state todo">todo</div>
+    </div>
+    <div class="task-children">
+      <div class="child-task">
+        <span class="child-task-tag">task</span>
+        <span class="child-task-id">e-201</span>
+        <span class="child-task-desc">skill discovery API の org_id filter — owner_user_id 経由で org 解決</span>
+        <span class="task-state working">working</span>
+      </div>
+      <div class="child-task">
+        <span class="child-task-tag">task</span>
+        <span class="child-task-id">e-203</span>
+        <span class="child-task-desc">cross-org skill ロード時の audit log 追加 — invocation ログに source_org_id 付与</span>
+        <span class="task-state todo">todo</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- t-3: beacon 由来 leaf task -->
+  <div class="task-row leaf state-leader_review">
+    <div class="task-row-head">
+      <div class="task-chevron-spacer"></div>
+      <div class="task-tk-id">t-3</div>
+      <div class="task-desc">
+        <span class="task-source-chip">BEACON</span>
+        <span class="task-ms-id">e-2251</span>
+        <span class="task-name">ハンバーガーメニュー上 Trek を top-level menu item に分離</span>
+      </div>
+      <div class="task-assignee">s-2</div>
+      <div class="task-state leader_review">leader_review</div>
+    </div>
+  </div>
+
+  <!-- t-4: trailnode 由来 leaf task (= cross-project が同 row 内で並ぶ) -->
+  <div class="task-row leaf">
+    <div class="task-row-head">
+      <div class="task-chevron-spacer"></div>
+      <div class="task-tk-id">t-4</div>
+      <div class="task-desc">
+        <span class="task-source-chip alt">TRAILNODE</span>
+        <span class="task-ms-id">e-189</span>
+        <span class="task-name">skill registry の published_at filter — 公開済みのみ list</span>
+      </div>
+      <div class="task-assignee">s-3</div>
+      <div class="task-state working">working</div>
+    </div>
+  </div>
+
+  <!-- MEMBERS & AGENTS — project 関係なく Trek member だけが並ぶ -->
+  <div class="section-label">MEMBERS &amp; AGENTS</div>
+  <table class="members-table">
+    <thead>
+      <tr>
+        <th>user</th>
+        <th>session</th>
+        <th>role</th>
+        <th>task</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="member-email">kurogin23mech@gmail.com</td>
+        <td><span class="session-local">s-1</span></td>
+        <td><span class="role-leader">LEADER</span></td>
+        <td><span class="task-link">t-1</span></td>
+      </tr>
+      <tr>
+        <td class="member-email">kurogin23mech@gmail.com</td>
+        <td><span class="session-local">s-2</span></td>
+        <td></td>
+        <td><span class="task-link">t-2, t-3</span></td>
+      </tr>
+      <tr>
+        <td class="member-email">******@gmail.com</td>
+        <td><span class="session-local">s-3</span></td>
+        <td></td>
+        <td><span class="task-link">t-4</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <!-- RECENT ACTIVITY — 行ごとに source project chip 付き -->
+  <div class="section-label">
+    <span>RECENT ACTIVITY</span>
+  </div>
+  <div class="activity-row">
+    <div class="activity-ts">2026-06-23 10:24</div>
+    <div class="activity-icon">✓</div>
+    <div class="activity-source-chip">BEACON</div>
+    <div class="activity-text">state done — e-2250: Trek detail axis = state.openTrekId, URL = ?trek=&lt;id&gt; (= 方針 3 適用)</div>
+  </div>
+  <div class="activity-row">
+    <div class="activity-ts">2026-06-23 09:18</div>
+    <div class="activity-icon">📝</div>
+    <div class="activity-source-chip alt">TRAILNODE</div>
+    <div class="activity-text">commit — e-201: skill discovery org_id filter の prototype (= cross-project Trek 内で進行)</div>
+  </div>
+  <div class="activity-row">
+    <div class="activity-ts">2026-06-22 22:51</div>
+    <div class="activity-icon">✓</div>
+    <div class="activity-source-chip">BEACON</div>
+    <div class="activity-text">state done — e-2249: Trek lookup helpers を state.project 非依存にリファクタ (= 方針 5 適用)</div>
+  </div>
+
+</div>
+
+<div class="footer">
+  <div>
+    Beacon — Trek detail (top-level routing reference, ms-86 / e-2252)
+    <br><em>Where humans and AI are bound together — across projects.</em>
+  </div>
+  <div>mockup / visual reference (not a live build)</div>
+</div>
+
+</body>
+</html>

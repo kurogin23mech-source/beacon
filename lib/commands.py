@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Beacon CLI commands - thin adapter over core.py logic."""
 
-__version__ = "0.47.0"
+__version__ = "0.48.0"
 
 import json
 import os
@@ -773,14 +773,21 @@ def cmd_cloud_join():
     # write created a silent-drift attack surface (= sub-agent overwriting
     # config.json could flip cloud → local without touching cloud.json).
 
-    # Write project.json directly (LocalStore.save_project requires the file to exist)
+    # ms-84 Phase 3 (e-2037): no longer write a local project.json on
+    # cloud join. The CLI reads through Store → StoreApi in cloud mode,
+    # so a local cache file just decays into a silent-drift source the
+    # moment another writer (web UI / server-side scheduler / another
+    # session) touches the cloud document. If a stale project.json
+    # already exists at this path (= migrating an old install or a
+    # leftover from a prior local-mode invocation), rename it to keep a
+    # one-shot recovery copy and unblock the cut-over.
     pf = get_project_file()
-    with open(pf, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    renamed = _rename_local_project_json_for_cloud_cutover(pf)
 
     print(f"Joined cloud project: {project_id}")
     print(f"Project: {data.get('name', 'unnamed')}")
+    if renamed:
+        print(f"  local cache: {pf} → {renamed} (ms-84 Phase 3 cut-over)")
 
 
 # ---------------------------------------------------------------------------
@@ -797,10 +804,17 @@ def cmd_milestone_add():
     owner = os.environ.get("BEACON_OWNER", "")
     assignee = os.environ.get("BEACON_ASSIGNEE", "")
     data = load_project()
+    # ms-43 / e-2281 — stamp the human author on the milestone so the Web
+    # UI surfaces the creator label (= 起票者) instead of the legacy
+    # ``"claude"`` literal in ``created_by``. Resolution falls back to
+    # env > credentials.json > project members[]; unauthenticated local
+    # mode returns ``{}`` and the create proceeds without ``meta.author``.
+    author = _resolve_current_author(data)
     ms_id = core.milestone_add(data, title, target_date, description=description,
                                priority=priority, objective=objective,
                                acceptance_criteria=acceptance_criteria,
-                               owner=owner, assignee=assignee)
+                               owner=owner, assignee=assignee,
+                               author=author or None)
     save_project(data)
     print(f"Added milestone {ms_id}: {title}")
     if owner or assignee:
@@ -2457,10 +2471,16 @@ def cmd_task_add():
                 file=sys.stderr,
             )
 
+    # ms-43 / e-2281 — stamp the human author on the task so the Web UI
+    # surfaces the creator label (= 起票者) instead of the legacy
+    # ``"claude"`` literal in ``meta.created_by``. Same resolution path
+    # as cmd_milestone_add / cmd_operation_open.
+    author = _resolve_current_author(data)
     eid = core.task_add(data, ms_id, description, entry_type=entry_type,
                         date=date, detail=detail, requested_by=requested_by,
                         priority=priority, motivation=motivation,
-                        acceptance_criteria=acceptance_criteria)
+                        acceptance_criteria=acceptance_criteria,
+                        author=author or None)
     save_project(data)
     from_str = f" (from {requested_by})" if requested_by else ""
     print(f"Added {entry_type} [{eid}] to {target['title']}: {description}{from_str}")
@@ -3751,46 +3771,46 @@ def _write_user_beacon_config(d: dict) -> None:
 
 
 def _read_project_bus_disabled() -> bool:
-    """True if the active project sets `bus.disabled` in project.json.
+    """True if the active project sets `bus.disabled`.
 
     Project-scoped opt-out lives under a top-level `bus` object:
         { "bus": {"disabled": true}, ... }
     This shape mirrors the global config schema so a user inspecting
-    either file sees the same idiom. Missing project file → not opted out
-    (consistent with how install requires .beacon/project.json anyway).
+    either source (cloud doc or local project.json) sees the same idiom.
+
+    ms-84 Phase 3 (e-2037): cloud mode reads the project document via
+    Store → StoreApi instead of the local project.json, so the bus flag
+    survives cloud truth-model cut-over. Local mode keeps reading the
+    file. Missing or unreadable project → not opted out (consistent with
+    how install requires a Beacon root anyway).
     """
     try:
-        pf = get_project_file()
+        store = get_store()
+        data = store.load_project()
     except Exception:
         return False
-    if not os.path.exists(pf):
-        return False
-    try:
-        with open(pf, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return False
-    bus = data.get("bus") or {}
+    bus = (data or {}).get("bus") or {}
     return bool(bus.get("disabled"))
 
 
 def _write_project_bus_flag(disabled: bool) -> bool:
     """Set or clear the project-local `bus.disabled` flag.
 
-    Returns True on write. False if no project file exists (caller decides
-    whether to fail or treat as no-op). When `disabled=False`, the bus
-    object is removed entirely if empty so project.json stays minimal.
+    Returns True on write. False if no project document is available
+    (caller decides whether to fail or treat as no-op). When
+    ``disabled=False``, the bus object is removed entirely if empty so
+    the document stays minimal.
+
+    ms-84 Phase 3 (e-2037): routes through Store so cloud mode writes
+    the flag to the cloud document (= survives across sessions / web UI),
+    matching where ``_read_project_bus_disabled`` now reads from.
     """
     try:
-        pf = get_project_file()
+        store = get_store()
+        data = store.load_project()
     except Exception:
         return False
-    if not os.path.exists(pf):
-        return False
-    try:
-        with open(pf, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    if not isinstance(data, dict):
         return False
     bus = data.get("bus") or {}
     if disabled:
@@ -3802,9 +3822,10 @@ def _write_project_bus_flag(disabled: bool) -> bool:
             data.pop("bus", None)
         else:
             data["bus"] = bus
-    with open(pf, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    try:
+        store.save_project(data)
+    except Exception:
+        return False
     return True
 
 
@@ -3860,8 +3881,15 @@ def cmd_channel_install():
     """
     from pathlib import Path  # local import — pathlib not yet at module level
     cwd = Path.cwd()
-    if not (cwd / ".beacon" / "project.json").exists():
-        print("Error: no .beacon/project.json in this directory. Run `beacon init` first.",
+    # ms-84 Phase 3 (e-2037): accept either marker — cloud mode has no
+    # local project.json after cut-over.
+    if not (
+        (cwd / ".beacon" / "project.json").exists()
+        or (cwd / ".beacon" / "cloud.json").exists()
+    ):
+        print("Error: no Beacon project in this directory "
+              "(looked for .beacon/project.json or .beacon/cloud.json). "
+              "Run `beacon init` (local) or `beacon cloud join <project-id>` (cloud) first.",
               file=sys.stderr)
         sys.exit(1)
 
@@ -3974,9 +4002,15 @@ def cmd_channel_uninstall():
     """
     from pathlib import Path
     cwd = Path.cwd()
-    if not (cwd / ".beacon" / "project.json").exists():
-        print("Error: no .beacon/project.json in this directory. Run from a "
-              "project root.", file=sys.stderr)
+    # ms-84 Phase 3 (e-2037): cloud mode has no local project.json after
+    # cut-over; cloud.json is an equivalent root marker.
+    if not (
+        (cwd / ".beacon" / "project.json").exists()
+        or (cwd / ".beacon" / "cloud.json").exists()
+    ):
+        print("Error: no Beacon project in this directory "
+              "(looked for .beacon/project.json or .beacon/cloud.json). "
+              "Run from a project root.", file=sys.stderr)
         sys.exit(1)
 
     purge = os.environ.get("BEACON_CHANNEL_PURGE_FILES", "") == "1"
@@ -4078,23 +4112,30 @@ def cmd_channel_opt_out():
             print(f"Global opt-out written to {p}")
             print("  → DM auto-install will be skipped in every project.")
     else:
-        # project scope (default)
-        try:
-            pf = get_project_file()
-        except Exception:
-            pf = ""
-        if not pf or not os.path.exists(pf):
-            print("Error: no .beacon/project.json in this directory. Run from "
-                  "a project root, or use --global.", file=sys.stderr)
+        # project scope (default). ms-84 Phase 3 (e-2037): accept either
+        # marker — cloud mode keeps the bus flag in the cloud document
+        # via Store, so a local project.json may not exist.
+        from pathlib import Path as _Path
+        cwd = _Path.cwd()
+        has_marker = (
+            (cwd / ".beacon" / "project.json").exists()
+            or (cwd / ".beacon" / "cloud.json").exists()
+        )
+        if not has_marker:
+            print("Error: no Beacon project in this directory "
+                  "(looked for .beacon/project.json or .beacon/cloud.json). "
+                  "Run from a project root, or use --global.",
+                  file=sys.stderr)
             sys.exit(1)
         already = _read_project_bus_disabled()
         if not _write_project_bus_flag(True):
-            print("Error: failed to write project.json", file=sys.stderr)
+            print("Error: failed to persist project bus flag", file=sys.stderr)
             sys.exit(1)
+        location = "cloud project document" if (cwd / ".beacon" / "cloud.json").exists() else get_project_file()
         if already:
-            print(f"Project opt-out already set in {pf}")
+            print(f"Project opt-out already set in {location}")
         else:
-            print(f"Project opt-out written to {pf}")
+            print(f"Project opt-out written to {location}")
             print("  → DM auto-install will be skipped in this project only.")
 
     print()
@@ -4121,18 +4162,25 @@ def cmd_channel_opt_in():
         else:
             print(f"Global opt-out was not set (nothing to clear).")
     else:
-        try:
-            pf = get_project_file()
-        except Exception:
-            pf = ""
-        if not pf or not os.path.exists(pf):
-            print("Error: no .beacon/project.json in this directory. Run from "
-                  "a project root, or use --global.", file=sys.stderr)
+        # ms-84 Phase 3 (e-2037): accept either marker — cloud mode
+        # stores the flag in the cloud document via Store.
+        from pathlib import Path as _Path
+        cwd = _Path.cwd()
+        has_marker = (
+            (cwd / ".beacon" / "project.json").exists()
+            or (cwd / ".beacon" / "cloud.json").exists()
+        )
+        if not has_marker:
+            print("Error: no Beacon project in this directory "
+                  "(looked for .beacon/project.json or .beacon/cloud.json). "
+                  "Run from a project root, or use --global.",
+                  file=sys.stderr)
             sys.exit(1)
         had = _read_project_bus_disabled()
+        location = "cloud project document" if (cwd / ".beacon" / "cloud.json").exists() else get_project_file()
         if had:
             _write_project_bus_flag(False)
-            print(f"Project opt-out cleared from {pf}")
+            print(f"Project opt-out cleared from {location}")
         else:
             print(f"Project opt-out was not set (nothing to clear).")
 
@@ -4378,6 +4426,82 @@ def _read_credentials_for_identity() -> tuple[str, str]:
         if email or user_id:
             return user_id, email
     return "", ""
+
+
+def _resolve_current_author(data: Optional[dict] = None) -> dict:
+    """Return ``{"user_id", "email", "display_name"}`` for the current operator.
+
+    ms-43 / e-2281 — mirror of the server-side ``_resolve_author`` contract
+    (server/app.py L538) on the CLI side so MS / task / Operation creates
+    initiated from the local CLI also stamp ``meta.author`` with the
+    *human* identity rather than leaving the field absent and falling
+    back to the ``"claude"`` literal in ``created_by``.
+
+    Resolution order (= env > credentials.json > project members[]):
+
+      1. ``BEACON_USER_ID`` / ``BEACON_USER_EMAIL`` / ``BEACON_DISPLAY_NAME``
+         env vars take precedence — tests / CI / multi-account flows
+         override freely without touching credentials.json.
+      2. ``credentials.json`` of the active profile (= login 済セッションは
+         自動継承) supplies user_id (= JWT sub claim) and email when env
+         is empty. Reuses ``_read_credentials_for_identity`` so the JWT
+         parsing path stays in one place.
+      3. ``display_name`` is not in credentials.json. As a best-effort
+         fallback, scan ``data["members"][]`` for a member whose id /
+         user_id / email matches the caller and lift the member's
+         ``display_name`` (or ``name``) field. Empty when no match.
+
+    Empty fields are dropped via ``core._clean_author`` so the on-disk
+    shape stays exactly ``{user_id, email, display_name}`` minus the
+    empties. Unauthenticated / no-credentials local mode returns ``{}``
+    — the caller passes ``author=None`` (or this empty dict, same effect)
+    and the create proceeds without a ``meta.author`` field, which the
+    Web UI then renders via the legacy ``created_by`` fallback.
+
+    Best-effort: any exception in member lookup is swallowed so the
+    create path never fails due to display_name resolution.
+    """
+    user_id = (os.environ.get("BEACON_USER_ID") or "").strip()
+    email = (os.environ.get("BEACON_USER_EMAIL") or "").strip()
+    display_name = (os.environ.get("BEACON_DISPLAY_NAME") or "").strip()
+
+    # credentials.json fallback for env-missing case (ms-61 / e-2132 parity).
+    if not email or not user_id:
+        try:
+            cred_user_id, cred_email = _read_credentials_for_identity()
+            if not email:
+                email = cred_email
+            if not user_id:
+                user_id = cred_user_id
+        except Exception:
+            pass
+
+    # display_name fallback via project members[] (ms-78 e-1807 shape).
+    if not display_name and isinstance(data, dict):
+        try:
+            members = data.get("members")
+            if isinstance(members, list):
+                for m in members:
+                    if not isinstance(m, dict):
+                        continue
+                    m_uid = (m.get("user_id") or m.get("id") or "").strip()
+                    m_email = (m.get("email") or "").strip()
+                    if user_id and m_uid == user_id:
+                        display_name = (m.get("display_name") or m.get("name")
+                                        or "").strip()
+                        break
+                    if email and m_email and m_email == email:
+                        display_name = (m.get("display_name") or m.get("name")
+                                        or "").strip()
+                        break
+        except Exception:
+            pass
+
+    return core._clean_author({
+        "user_id": user_id,
+        "email": email,
+        "display_name": display_name,
+    })
 
 
 def _resolve_creator_identity() -> tuple[str, str, str]:
@@ -5282,6 +5406,12 @@ TREK_AUTO_ARM_CHANNELS = (
     "trek-progress-check",
     "trek-trigger",
     "trek-task-review",
+    # ms-92 / e-2164 — leader-digest channel. Leaders receive an
+    # aggregated per-session status snapshot on the same cadence as
+    # trek-progress-check. The channel is auto-execute so the leader's
+    # AI session can render the digest immediately without waiting for
+    # human Skill invocation.
+    "trek-leader-digest",
 )
 TREK_AUTO_ARM_DEFAULT_BUDGET = 20
 
@@ -5346,6 +5476,60 @@ def _arm_for_trek(trek_id: str) -> dict:
 TREK_JOIN_CONSENT_PHRASE = "I UNDERSTAND"
 
 
+def _build_trek_join_consent_explanation(trek_id: str, email: str) -> str:
+    """Build the 4-section consent explanation text (ms-92 / e-2182).
+
+    Sections (= AC #1 of e-2182, mirroring CORE doc trek-positioning
+    `b1XOKXQeC0JXaKkO0CRt`「缶詰の徹夜作業部屋」 vocabulary):
+
+      (a) **Trek とは何か** — what the user is opting into in 1 line
+      (b) **委譲する権限** — concrete actions AI gains permission for,
+          each with a one-line example so the user can recognise the
+          shape of the autonomy being granted
+      (c) **user 確認境界** — concrete things AI still must not do
+          (= deploy / release / scope-out / 不可逆 actions / PR merge),
+          so the user knows where their judgment is still required
+      (d) **撤回方法** — how to leave the Trek, what happens after
+
+    Split into a builder so cloud / local paths share the same text
+    (= AC #6) and tests can assert the 4 sections via plain string
+    search without mocking stdin / stderr.
+    """
+    return (
+        f"\n─── Trek 参加同意 (ms-92 e-2182) ─────────────────────\n"
+        f"trek_id:    {trek_id}\n"
+        f"joining as: {email}\n"
+        f"\n"
+        f"(a) Trek とは何か\n"
+        f"   Trek (= 缶詰の徹夜作業部屋) は 「事前承認スコープを持つ自律実行の作業空間」 です。\n"
+        f"   一度参加すると、 scope 内の DM や action は AI 判断で進みます (= turn 制限なし)。\n"
+        f"   詳細: CORE doc trek-positioning (b1XOKXQeC0JXaKkO0CRt)。\n"
+        f"\n"
+        f"(b) 参加で委譲する権限 (= 個別承認なしで AI が実行できるようになる行為)\n"
+        f"   - scope 内 DM が blanket 自動承認 (= 一括許可) で配信される\n"
+        f"     例: 別 session からの「次やって」 DM が user 確認なく届く (= ms-70 / e-1854 blanket bypass)\n"
+        f"   - executor (= 実行担当 session) が working / done / waiting-review を自分で宣言できる\n"
+        f"     例: subagent が task 完了を自己判断で stamp、 leader が後でまとめて review\n"
+        f"   - leader が PR (= プルリクエスト) の approve / reject を AI 自律で進められる\n"
+        f"     例: PR 内容が intent (= 目的) と整合していれば AI 単独で approve、 merge は別境界 (= (c) 参照)\n"
+        f"   - server-side scheduler が定期的に「次やって」 progress-check を push してくる\n"
+        f"     例: trek-progress-check / trek-trigger / trek-task-review channel が autonomous loop に乗る\n"
+        f"\n"
+        f"(c) user 確認境界 (= AI が touched せず、 必ず user に escalate される領域)\n"
+        f"   - deploy (= 本番への配置) / release (= リリース ceremony) は必ず user 承認\n"
+        f"   - Trek scope 外の action (= 別 project / 別 MS への直接 write) は user 確認必須\n"
+        f"   - 不可逆 action (= git force-push / hard delete / 外部 email 送信 等) は user_review に forward、 AI 単独 NG\n"
+        f"   - 個別 PR の merge は AI 自律 NG。 Trek 終結時に user 1 confirm で集約承認\n"
+        f"     (= e-2169 で確立した 「approve = AI / merge = Trek 単位 user / release = user」 の 3 段境界)\n"
+        f"\n"
+        f"(d) 撤回方法\n"
+        f"   いつでも `beacon trek leave {trek_id}` で抜けられます。\n"
+        f"   leave 後は blanket 自動承認が解除され、 以後の DM は通常の user 確認経路に戻ります。\n"
+        f"   leader role を持っている場合は先に `beacon trek transfer-leader {trek_id} --to <session_id>` で\n"
+        f"   後任を立ててから leave してください (= last-leader 抜けは server が 400 で reject)。\n"
+    )
+
+
 def _trek_join_consent_gate(trek_id: str, email: str, *, json_mode: bool) -> None:
     """Gate ``beacon trek join`` on per-session 明示同意 (ms-88 / e-2090).
 
@@ -5360,38 +5544,33 @@ def _trek_join_consent_gate(trek_id: str, email: str, *, json_mode: bool) -> Non
     - ``json_mode`` is irrelevant to the gate itself but affects the abort
       payload (= keep stderr human-readable either way; the gate is a UX
       checkpoint, not a JSON API).
+
+    The explanation text is built by ``_build_trek_join_consent_explanation``
+    (ms-92 / e-2182) so cloud / local paths share the same 4-section
+    structure and tests can assert section presence without driving
+    stdin / stderr.
     """
-    explanation = (
-        f"\n⚠ Trek 参加 = AI を turn 制限なく走らせる権限委譲です\n"
-        f"  trek_id: {trek_id}\n"
-        f"  joining as: {email}\n"
-        f"\n"
-        f"  参加すると次の挙動が unlock されます:\n"
-        f"  - scope 内 DM が blanket 自動承認 (= ms-70 / e-1854) で配信される\n"
-        f"  - trek-progress-check 等の channel が autonomous execution に乗る\n"
-        f"  - server-side scheduler が定期的に「次やって」 と push してくる\n"
-        f"  - 不可逆 action (= deploy / release / external write) は user_review に\n"
-        f"    forward されますが、 それ以外は AI 判断で実行されます\n"
-        f"\n"
-        f"  撤回したい場合: `beacon trek leave {trek_id}` で同等の手順で抜けられます。\n"
-    )
+    explanation = _build_trek_join_consent_explanation(trek_id, email)
 
     if not sys.stdin.isatty():
         # Non-TTY (= bot / CI / Skill pipe) は typed prompt を取れない。
         # silent auto-accept は本 gate の趣旨に反するので明示 flag を要求。
         sys.stderr.write(explanation)
         sys.stderr.write(
-            "\n  非 TTY 経由のため typed-ack を取れません。 自動化 / bot 経路で\n"
-            "  参加する場合は `--i-understand-the-implications` を明示的に渡してください。\n"
+            "\n─── 自動化 / bot 経路 ────────────────────────────────\n"
+            "非 TTY 経由のため typed-ack を取れません。 自動化 / bot 経路で\n"
+            "参加する場合は `--i-understand-the-implications` を明示的に渡してください\n"
+            "(= flag enforcement、 e-2090 で land した forcing function)。\n"
         )
         sys.exit(1)
 
     sys.stderr.write(explanation)
     sys.stderr.write(
-        f"\n  意味を理解したうえで参加する場合は次のフレーズを正確に入力してください\n"
-        f"  (case-sensitive、 余分な空白なし):\n"
-        f"    {TREK_JOIN_CONSENT_PHRASE}\n"
-        f"\n  > "
+        f"\n─── 同意確認 ───────────────────────────────────────\n"
+        f"上記 (a)-(d) を理解したうえで参加する場合は次のフレーズを正確に入力してください\n"
+        f"(case-sensitive、 余分な空白なし):\n"
+        f"   {TREK_JOIN_CONSENT_PHRASE}\n"
+        f"\n> "
     )
     sys.stderr.flush()
     try:
@@ -5484,8 +5663,14 @@ def cmd_trek_join():
                 file=sys.stderr,
             )
             sys.exit(1)
+        # ms-86 / e-2225 — pass BEACON_SESSION_ID so the join writes a
+        # session_history entry. Empty session_id is tolerated by
+        # accept_invitation (= no-op on the history dimension).
+        session_id = os.environ.get("BEACON_SESSION_ID", "").strip()
         try:
-            trek.accept_invitation(t, user_id=member["user_id"])
+            trek.accept_invitation(
+                t, user_id=member["user_id"], session_id=session_id,
+            )
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
@@ -5678,6 +5863,10 @@ def cmd_trek_pulse_ack():
                                 'continue' / 'dm-leader' / 'dm-peer' (ms-88
                                 / e-2140) / 'no-op' / '' (= 空文字 legacy)
       BEACON_TREK_NOTE          optional short context (= 200 char cap)
+      BEACON_TREK_STATE_SUMMARY    optional 1-line state snapshot (= ms-92 / e-2165, ≤100 chars)
+      BEACON_TREK_BLOCKERS         optional newline-separated blocker list (= ms-92 / e-2165, ≤3 items × ≤200 chars)
+      BEACON_TREK_NEEDS_LEADER     "1" → flag the pulse as needs_leader_judgment (= ms-92 / e-2165)
+      BEACON_TREK_TIME_ON_TASK     optional integer seconds on current task (= ms-92 / e-2165, default 0)
       BEACON_JSON               "1" → json output
     """
     import trek
@@ -5687,6 +5876,19 @@ def cmd_trek_pulse_ack():
     session_id = os.environ.get("BEACON_SESSION_ID", "").strip()
     picked_choice = os.environ.get("BEACON_TREK_PICKED_CHOICE", "").strip()
     note = os.environ.get("BEACON_TREK_NOTE", "")
+    # ms-92 / e-2165 — structured fields. Newline-separated blockers
+    # match the CLI shape "--blocker A --blocker B" expanding into a
+    # bash array joined with \n at the dispatcher boundary.
+    state_summary = os.environ.get("BEACON_TREK_STATE_SUMMARY", "")
+    blockers_raw = os.environ.get("BEACON_TREK_BLOCKERS", "")
+    blockers = [
+        b for b in (blockers_raw or "").split("\n") if b.strip()
+    ]
+    needs_leader = os.environ.get("BEACON_TREK_NEEDS_LEADER", "") == "1"
+    try:
+        time_on_task = int(os.environ.get("BEACON_TREK_TIME_ON_TASK", "0") or 0)
+    except ValueError:
+        time_on_task = 0
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not trek_id:
@@ -5706,6 +5908,10 @@ def cmd_trek_pulse_ack():
             entry = client.pulse_ack_trek(
                 trek_id, session_id=session_id,
                 picked_choice=picked_choice, note=note,
+                state_summary=state_summary,
+                blockers=blockers,
+                needs_leader_judgment=needs_leader,
+                time_on_task_seconds=time_on_task,
             )
         except RuntimeError as e:
             print(f"Error: {e}", file=sys.stderr)
@@ -5732,6 +5938,10 @@ def cmd_trek_pulse_ack():
         trek.record_pulse_ack(
             t, session_id=session_id,
             picked_choice=picked_choice, note=note,
+            state_summary=state_summary,
+            blockers=blockers,
+            needs_leader_judgment=needs_leader,
+            time_on_task_seconds=time_on_task,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -5998,6 +6208,141 @@ def cmd_trek_take_over():
         print(
             f"Took over leader of trek {trek_id}: "
             f"new leader_session_id = {session_id}"
+        )
+
+
+def cmd_trek_reconcile():
+    """Reconcile Trek task_states with task pool (ms-88 / e-2167).
+
+    2026-06-19 dogfood で観測した「task pool で done になっているのに Trek の
+    task_states stamp は waiting-review / leader_review / working で残ってる」
+    stuck 状態を一括修復する。
+
+    Default は dry-run (= 変更前 diff のみ表示)。 ``--apply`` を渡すと server
+    が mirror で done に書き換える (= updated_by_session_id="task-pool-mirror")。
+
+    Env:
+      BEACON_TREK_ID         (required)
+      BEACON_TREK_APPLY      "1" → apply (= 実適用)、 default は dry-run
+      BEACON_JSON            "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    apply_flag = os.environ.get("BEACON_TREK_APPLY", "") == "1"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            result = client.reconcile_trek(trek_id, apply=apply_flag)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        # Local-mode reconcile: read the trek doc and the project task pool
+        # from the local filesystem, compute diff, optionally apply.
+        t = trek_store.load_trek(trek_id)
+        if t is None:
+            print(f"Error: trek {trek_id} not found", file=sys.stderr)
+            sys.exit(1)
+        states = t.get("task_states") or {}
+        scope_pids = [
+            (s or {}).get("project") for s in (t.get("scope") or [])
+            if (s or {}).get("project")
+        ]
+        # Local mode: scope project は cwd の project.json と一致する想定。
+        # cross-project scope の局所 reconcile は cloud mode のみで完全対応。
+        try:
+            data = read_project()
+        except Exception:
+            data = None
+        pool_status: dict[str, str] = {}
+        if data:
+            import core
+            for entry_id in states.keys():
+                found = core.find_entry(data, entry_id)
+                if found:
+                    _, _, entry, _ = found
+                    pool_status[entry_id] = (entry or {}).get("status") or ""
+        diff: list[dict] = []
+        for entry_id, entry in states.items():
+            try:
+                current_state = trek.get_task_state(t, entry_id)
+            except Exception:
+                current_state = (entry or {}).get("state") or ""
+            pool = pool_status.get(entry_id, "")
+            if pool == "done" and current_state not in trek.TERMINAL_TASK_STATES:
+                diff.append({
+                    "entry_id": entry_id,
+                    "trek_state": current_state,
+                    "pool_status": pool,
+                    "would_change_to": "done",
+                })
+        applied: list[str] = []
+        if apply_flag and diff:
+            import datetime
+            now_iso = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            for item in diff:
+                entry_id = item["entry_id"]
+                existing = states.get(entry_id) or {}
+                states[entry_id] = {
+                    **existing,
+                    "state": "done",
+                    "updated_at": now_iso,
+                    "last_activity_at": now_iso,
+                    "updated_by_session_id": "task-pool-mirror",
+                    "note": (
+                        "task pool で done 化、 mirror 同期 "
+                        "(= ms-88 / e-2167 reconcile)"
+                    ),
+                }
+                applied.append(entry_id)
+            t["task_states"] = states
+            t["updated_at"] = now_iso
+            trek_store.save_trek(t)
+        result = {
+            "trek_id": trek_id,
+            "applied": apply_flag,
+            "diff": diff,
+            "applied_entry_ids": applied,
+        }
+
+    if json_mode:
+        print(json.dumps(result, ensure_ascii=False))
+        return
+
+    diff = result.get("diff") or []
+    applied_flag = result.get("applied")
+    applied_ids = result.get("applied_entry_ids") or []
+    if not diff:
+        print(
+            f"Trek {trek_id}: 整合済 (= task pool と Trek stamp が乖離している "
+            f"task は見つかりません)"
+        )
+        return
+    print(f"Trek {trek_id}: 乖離 {len(diff)} 件")
+    for item in diff:
+        print(
+            f"  {item.get('entry_id')}: trek_state="
+            f"{item.get('trek_state')!r} → would_change_to="
+            f"{item.get('would_change_to')!r} (pool_status="
+            f"{item.get('pool_status')!r})"
+        )
+    if applied_flag:
+        print(
+            f"\nApplied (= mirror で done 化): {len(applied_ids)} 件 "
+            f"{applied_ids}"
+        )
+    else:
+        print(
+            "\n(dry-run、 適用するには --apply を渡してください: "
+            f"`beacon trek reconcile {trek_id} --apply`)"
         )
 
 
@@ -6286,6 +6631,164 @@ def cmd_trek_plan():
                 print(f"goal_state set on trek {trek_id}: \"{new_val}\"")
             else:
                 print(f"goal_state cleared on trek {trek_id}")
+
+
+def cmd_trek_task_add():
+    """Cross-project task add through Trek scope (ms-92 / e-2141).
+
+    The caller specifies a target ``<pid>:<ms-id>`` plus task description.
+    The CLI (here) and the server share one scope-guard helper
+    (``trek.check_trek_task_add_allowed``) so a single decision drives
+    both a 403 reject server-side and a friendly CLI error here.
+
+    Local mode does not (yet) support cross-project task add because the
+    local data store doesn't carry a project_id → path registry — the
+    feature is genuinely cloud-shaped and the local refuse keeps the
+    failure mode explicit instead of pretending to work. Cloud mode
+    posts to ``POST /api/treks/{trek_id}/task-add`` which performs the
+    same scope walk + writes the task to the target project's MS,
+    stamping ``meta.trek_id`` on the entry for audit-trail traceability.
+
+    Env:
+      BEACON_TREK_ID                (required, e.g. tk-abcd1234)
+      BEACON_TREK_TASK_TARGET       (required, "<project-id>:<ms-id>")
+      BEACON_DESCRIPTION            (required, the task description)
+      BEACON_PRIORITY               (optional, lowest/low/middle/high/highest)
+      BEACON_MOTIVATION             (optional)
+      BEACON_ACCEPTANCE_CRITERIA    (optional)
+      BEACON_TYPE                   (optional, default "task")
+      BEACON_JSON                   "1" → json output
+    """
+    import trek
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    target = os.environ.get("BEACON_TREK_TASK_TARGET", "").strip()
+    description = os.environ.get("BEACON_DESCRIPTION", "").strip()
+    priority = os.environ.get("BEACON_PRIORITY", "").strip()
+    motivation = os.environ.get("BEACON_MOTIVATION", "")
+    acceptance_criteria = os.environ.get("BEACON_ACCEPTANCE_CRITERIA", "")
+    entry_type = os.environ.get("BEACON_TYPE", "task").strip() or "task"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required (e.g. tk-abcd1234)", file=sys.stderr)
+        sys.exit(1)
+    if not target:
+        print(
+            "Error: --target <project-id>:<ms-id> is required",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not description:
+        print("Error: task description is required", file=sys.stderr)
+        sys.exit(1)
+    if ":" not in target:
+        print(
+            f"Error: --target {target!r} must be <project-id>:<ms-id> "
+            "(omit the colon → project-wide scope which is not allowed "
+            "for task add; pick an MS explicitly)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    target_project, target_ms = target.split(":", 1)
+    target_project = target_project.strip()
+    target_ms = target_ms.strip()
+    if not target_project:
+        print(
+            f"Error: --target {target!r} missing project_id before ':'",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not target_ms or not target_ms.startswith("ms-"):
+        print(
+            f"Error: --target {target!r} must end with ms-XX "
+            "(operations / single tasks are not valid task-add targets; "
+            "see SPEC ms-92 e-2141 AC #4 — MS-grain enforcement)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # ----------- Cloud mode (= the actual cross-project use case) -----------
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            if not hasattr(client, "add_trek_task"):
+                print(
+                    "Error: this CLI is paired with an older cloud server "
+                    "that doesn't expose POST /api/treks/{trek_id}/task-add. "
+                    "Upgrade the server (= ms-92 e-2141 endpoint) or fall "
+                    "back to single-project `beacon task add -m <ms-id>` "
+                    "for now.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            result = client.add_trek_task(
+                trek_id,
+                target_project=target_project,
+                target_milestone=target_ms,
+                description=description,
+                entry_type=entry_type,
+                priority=priority,
+                motivation=motivation,
+                acceptance_criteria=acceptance_criteria,
+            )
+        except RuntimeError as e:
+            # Server-side 403 / 400 / 404 surfaces here. The server's
+            # rejection ``reason`` is included in the error message so
+            # the CLI tail line tells the user *why* (project not in
+            # scope vs. task-only narrowing vs. milestone mismatch).
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        if json_mode:
+            print(json.dumps(result, ensure_ascii=False))
+        else:
+            eid = result.get("entry_id", "<unknown>")
+            print(
+                f"Added cross-project task [{eid}] under "
+                f"{target_project}:{target_ms} via trek {trek_id}: "
+                f"{description}"
+            )
+        return
+
+    # ----------- Local mode (= rejected with an honest message) -----------
+    # We could in principle traverse a registry of local projects, but the
+    # local data model doesn't carry one (= local mode is single-project by
+    # design). Pretending to succeed by writing into the current cwd's
+    # project.json would silently strip the cross-project semantics.
+    # The local-mode scope guard *can* still surface the decision so users
+    # see the same error vocabulary they'd see from the server.
+    import trek_store
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(
+            f"Error: trek {trek_id} not found in local store. Cross-project "
+            "task add through Trek requires cloud mode (= server endpoint "
+            "POST /api/treks/{trek_id}/task-add walks the scope and writes "
+            "into the target project). Switch to cloud mode (`beacon cloud "
+            "setup`) or add the task directly with `beacon task add -m "
+            f"{target_ms}` from inside the target project's cwd.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    allowed, reason = trek.check_trek_task_add_allowed(
+        t, target_project=target_project, target_milestone=target_ms,
+    )
+    if not allowed:
+        print(
+            f"Error: trek scope rejects this task add ({reason}). "
+            f"trek {trek_id} scope: {t.get('scope') or []}",
+            file=sys.stderr,
+        )
+        sys.exit(2)  # 2 → "scope reject" so callers can distinguish
+    print(
+        "Error: scope check passed but local mode cannot write across "
+        "projects — the local data store is single-project by design. "
+        "Switch to cloud mode for cross-project task add, or use "
+        f"`beacon task add -m {target_ms}` from inside the target "
+        "project's cwd.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 def cmd_trek_leave():
@@ -6670,8 +7173,10 @@ def cmd_member_join():
     if not pid:
         print(f"Server returned no project_id: {resp}", file=sys.stderr)
         sys.exit(1)
-    # Bind this cwd to the joined project by writing cloud.json + project.json,
-    # mirroring `beacon cloud join`.
+    # Bind this cwd to the joined project by writing cloud.json. ms-84
+    # Phase 3 (e-2037): the matching local project.json write was retired
+    # — cloud mode reads through Store → StoreApi, so a local cache file
+    # just decays into a silent-drift source.
     try:
         data = client.get_project(pid)
     except RuntimeError as e:
@@ -6686,10 +7191,9 @@ def cmd_member_join():
         json.dump({"project_id": pid, "api_url": api_url}, f,
                   indent=2, ensure_ascii=False)
         f.write("\n")
-    pf = get_project_file()
-    with open(pf, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    # Rename any leftover project.json (= migration from a previous local
+    # install) so the cut-over is final.
+    _rename_local_project_json_for_cloud_cutover(get_project_file())
     if json_mode:
         print(json.dumps({
             "status": "joined",
@@ -9217,7 +9721,7 @@ def _get_api_client():
 
     config_path = _get_cloud_config_path()
     if not os.path.exists(config_path):
-        print("No cloud.json found. Run 'beacon cloud push' first.")
+        print("No cloud.json found. Run 'beacon cloud upload-initial' first.")
         sys.exit(1)
 
     with open(config_path, "r", encoding="utf-8") as f:
@@ -9263,7 +9767,8 @@ def cmd_doc_image_upload():
     # 10 の direct-call 削減)。 image upload は cloud-only operation のため、
     # ここでは mode guard として is_cloud() を確認するだけ。
     if not get_store().is_cloud():
-        print("Error: image upload requires cloud mode (run 'beacon cloud push' first)")
+        print("Error: image upload requires cloud mode "
+              "(run 'beacon cloud upload-initial' first)")
         sys.exit(1)
 
     client, config = _get_api_client()
@@ -9319,12 +9824,65 @@ def cmd_cloud_list():
     else:
         if not projects:
             print("No cloud projects found.")
-            print("Run 'beacon cloud push' to upload a project.")
+            print("Run 'beacon cloud upload-initial' to upload a project.")
             return
         for i, p in enumerate(projects, 1):
             print(f"  {i}. {p['project_id']}: {p['name']}")
             if p.get('objective'):
                 print(f"     {p['objective'][:60]}")
+
+
+def _rename_local_project_json_for_cloud_cutover(project_file: str) -> Optional[str]:
+    """Rename ``.beacon/project.json`` to ``.before-cloud-YYYYMMDD`` (ms-84 Phase 3).
+
+    Idempotent insurance for the local→cloud migration: after upload-initial
+    succeeds the local file becomes the silent-drift source from the moment
+    of cloud cut-over (any later cloud write will not propagate to disk).
+    Renaming it to a dated suffix:
+
+      - hides it from ``beacon-find-root`` style markers (cloud.json now
+        carries that role; see ``bin/beacon-find-root``);
+      - keeps a one-shot recovery copy on disk (= we never ``rm``);
+      - encodes the cut-over date so multiple runs (re-uploads, sandbox
+        tests) do not collide.
+
+    No-op when the source file is missing (= already cut over or never
+    existed for a from-scratch cloud project). Returns the destination
+    path on rename, ``None`` otherwise. Failures are logged to stderr
+    but do not raise — the cut-over should not be blocked by a stat /
+    rename hiccup, the user can rename manually post-hoc.
+    """
+    if not os.path.exists(project_file):
+        return None
+    import datetime as _dt
+    stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d")
+    base_dir = os.path.dirname(project_file) or ".beacon"
+    base_name = os.path.basename(project_file)
+    dest = os.path.join(base_dir, f"{base_name}.before-cloud-{stamp}")
+    # If the destination already exists (= re-run on the same day), append
+    # a short suffix to keep the rename idempotent without overwriting the
+    # earlier recovery copy. Never delete an existing backup.
+    if os.path.exists(dest):
+        suffix = 1
+        while os.path.exists(f"{dest}.{suffix}"):
+            suffix += 1
+        dest = f"{dest}.{suffix}"
+    try:
+        os.rename(project_file, dest)
+    except OSError as exc:
+        print(
+            f"Warning: failed to rename {project_file} → {dest}: {exc}\n"
+            f"  The cloud cut-over succeeded but the local cache is still on disk.\n"
+            f"  Rename it manually to prevent drift confusion.",
+            file=sys.stderr,
+        )
+        return None
+    _append_changelog({
+        "op": "cloud_cutover_rename",
+        "from": project_file,
+        "to": dest,
+    })
+    return dest
 
 
 def cmd_cloud_push():
@@ -9347,11 +9905,12 @@ def cmd_cloud_push():
             print("Error: already in cloud mode.")
             print("")
             print("  In cloud mode, all CLI changes go directly to the cloud.")
-            print("  Pushing the local project.json (which may be stale) would")
-            print("  overwrite cloud state and cause data loss.")
+            print("  The local project.json (if any) is a stale recovery copy.")
             print("")
-            print("  To sync cloud state to local:  beacon cloud pull")
-            print("  To force-push local state:     beacon cloud push --force")
+            print("  upload-initial is a one-shot local→cloud migration only;")
+            print("  re-running it after cut-over would overwrite cloud state.")
+            print("  Use --force to override (cloud → local round-trip was")
+            print("  retired in ms-84 Phase 4).")
             sys.exit(1)
         print("Warning: --force specified. Overwriting cloud project data with local file.")
         print("  documents and retros will NOT be pushed (they are managed in cloud).")
@@ -9420,36 +9979,33 @@ def cmd_cloud_push():
     # e-1861 (ms-61): cloud.json existence already marks us as cloud-mode
     # (written above during the push setup), so the legacy config.json
     # ``{"mode": "cloud"}`` write was retired. Single source of truth = cloud.json.
+
+    # ms-84 Phase 3 (e-2037): after the upload succeeds, rename the local
+    # project.json to ``.before-cloud-YYYYMMDD`` so the cut-over to a
+    # cloud-only truth model is final. The local file becomes the silent
+    # drift source from this point onward (any later cloud write does not
+    # propagate to it), so leaving it in place would re-introduce the
+    # exact failure mode ms-84 is closing. Helper is idempotent + never
+    # deletes — it keeps a one-shot recovery copy on disk.
+    pf = get_project_file()
+    renamed = _rename_local_project_json_for_cloud_cutover(pf)
+    if renamed:
+        print(f"  local cache: {pf} → {renamed}")
     print("Switched to cloud mode.")
 
 
-def cmd_cloud_pull():
-    client, config = _get_api_client()
-    project_id = config["project_id"]
-
-    try:
-        data = client.get_project(project_id)
-    except RuntimeError as e:
-        if "404" in str(e):
-            print(f"Project '{project_id}' not found in cloud.")
-            print("Run 'beacon cloud push' to upload first.")
-        else:
-            print(f"Error: {e}")
-        sys.exit(1)
-
-    core.validate_project(data)
-
-    from store_local import LocalStore
-    local = LocalStore(get_project_file())
-    local.save_project(data)
-    print(f"Pulled from cloud: projects/{project_id}")
+# ms-84 Phase 4 (e-2038): cmd_cloud_pull was removed structurally. The
+# cloud → local round-trip is now impossible (= no local cache to refresh
+# into), so the function and its dispatcher entry are gone. Any operator
+# script that called it should be deleted — `beacon status` reads cloud
+# directly and replaces every legitimate use of pull.
 
 
 def cmd_cloud_status():
     config_path = _get_cloud_config_path()
     if not os.path.exists(config_path):
         print("Cloud: not configured")
-        print("Run 'beacon cloud push' to set up.")
+        print("Run 'beacon cloud upload-initial' to bootstrap a new cloud project.")
         return
 
     with open(config_path, "r", encoding="utf-8") as f:
@@ -9864,12 +10420,82 @@ def cmd_pr_request_changes():
 
 
 
+def _trek_finalize_consent_active() -> bool:
+    """ms-92 / e-2169 — Trek 終結 1 confirm path opt-in detection.
+
+    The structural ban on AI-session pr-merge (see below) has one explicit
+    escape hatch: the ``/beacon-trek-finalize`` 1-confirm collective
+    merge path. That Skill exports ``BEACON_TREK_FINALIZE_CONSENT=1``
+    before delegating to ``beacon pr merge`` so the ban knows the merge
+    is happening with user collective approval, not as an AI-side
+    individual-PR self-merge.
+
+    The env var is **per-process** (not persisted), so a forgotten leak
+    cannot turn a future AI session into an unrestricted merger.
+    """
+    return os.environ.get("BEACON_TREK_FINALIZE_CONSENT", "") == "1"
+
+
+def _ai_session_merge_ban_active() -> bool:
+    """ms-92 / e-2169 — refuse AI-session individual PR merge.
+
+    See CORE doc ``pr-review-autonomy-boundary`` for the rationale: AI
+    sessions are authorised to approve / reject / request-changes on
+    PRs, but **merge** belongs to the Trek-unit user collective
+    confirmation (= ``/beacon-trek-finalize``) so the AI can't
+    self-loop "I wrote it, I approved it, I merged it" without the
+    user ever exercising codebase ownership.
+
+    The ban is on by default for AI sessions and bypassed only when
+    one of three explicit signals is present:
+
+      * ``BEACON_TREK_FINALIZE_CONSENT=1`` — Trek-finalize Skill is
+        the merger (= the 1-confirm collective approval path).
+      * ``BEACON_PR_MERGE_USER_OVERRIDE=1`` — user explicit opt-in
+        escape hatch (= user prompt phrased the merge directly).
+      * ``BEACON_SESSION_KIND=human`` — non-AI session (= straight
+        terminal usage). Default ``BEACON_SESSION_KIND`` (unset) is
+        treated as AI for safety; humans wanting straight-line merge
+        can either set the env var globally or use the override.
+
+    Returns True if the ban should fire (= refuse the merge).
+    """
+    if _trek_finalize_consent_active():
+        return False
+    if os.environ.get("BEACON_PR_MERGE_USER_OVERRIDE", "") == "1":
+        return False
+    kind = (os.environ.get("BEACON_SESSION_KIND", "") or "").strip().lower()
+    if kind == "human":
+        return False
+    return True
+
+
 def cmd_pr_merge():
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     if not entry_id:
         print("Error: entry ID required", file=sys.stderr)
         sys.exit(1)
+    # ms-92 / e-2169 — AI-session merge ban. Refuses the call when the
+    # 3 escape hatches (Trek-finalize consent / user override / human
+    # session kind) are all absent. The error message names every escape
+    # so a stuck user can pick the right one for their context.
+    if _ai_session_merge_ban_active():
+        print(
+            "Error: individual PR merge from an AI session is refused "
+            "(ms-92 / e-2169 structural ban).\n"
+            "  See CORE doc `pr-review-autonomy-boundary` for the role "
+            "split (= AI approves, Trek-unit user merges, user releases).\n"
+            "  Bypass paths (= one of these makes the merge proceed):\n"
+            "    1. /beacon-trek-finalize <trek-id> — 1-confirm "
+            "collective merge with the rest of the Trek's PRs.\n"
+            "    2. BEACON_PR_MERGE_USER_OVERRIDE=1 — explicit user "
+            "opt-in for one-off merges.\n"
+            "    3. BEACON_SESSION_KIND=human — declare the calling "
+            "session is human-driven (= straight terminal use).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     import datetime
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     data = load_project()
@@ -12582,99 +13208,20 @@ def _doctor_check_skill_cli_drift(home):
 
 
 def _doctor_check_project_staleness():
-    """Detect when local .beacon/project.json is out of sync with cloud.
+    """No-op since ms-84 Phase 5 (e-2039): the project-stale check is gone.
 
-    Compares local milestone / operation counts against the cloud copy.
-    Catches the ms-61 P3 case observed in fork worktrees on 2026-06-12:
-    a session sees ms-1..ms-22 locally while cloud already holds ms-43
-    onwards because ``beacon cloud pull`` was never run from this cwd.
-    The CLI surface ``beacon status`` happily returned the stale local
-    snapshot, hiding the cloud's authoritative state.
+    Background: this check existed because cloud mode kept a local
+    ``.beacon/project.json`` cache that could drift from the cloud truth
+    source. ms-84 Phase 3 cut that cache over (= cloud mode no longer has
+    a local project.json; cloud.json is the only on-disk marker), so the
+    "stale" concept stops applying — there is no local cache to compare
+    against the cloud document anymore.
 
-    Cloud project has no top-level ``updated_at`` field on the response,
-    so we compare counts (= a proxy that captures the common drift case:
-    another session / Web UI added milestones or operations). Same counts
-    but altered state (= same N items, but renames / status changes)
-    are not detected by this check; the milestone count drift is the
-    high-value attack surface.
-
-    Returns a list of warning strings. Empty list = in sync, or skipped.
-
-    Skip cases:
-    - .beacon/project.json absent (= no project in cwd)
-    - .beacon/cloud.json absent (= local mode)
-    - Local mtime < 5 min (= obviously fresh, no network call needed)
-    - BEACON_DOCTOR_SKIP_CLOUD_SYNC=1
-    - Network / auth error fetching cloud (best-effort; doctor must
-      stay usable offline).
+    Keeping the function as a no-op (rather than deleting it outright)
+    avoids breaking any in-flight Skill / doctor caller that imports the
+    name. The doctor entry that ran it (= ``warnings.extend(...)``) was
+    removed from cmd_doctor; this stub stays as a tombstone.
     """
-    if os.environ.get("BEACON_DOCTOR_SKIP_CLOUD_SYNC") == "1":
-        return []
-
-    proj_path = os.path.join(".beacon", "project.json")
-    cloud_cfg = os.path.join(".beacon", "cloud.json")
-    if not os.path.exists(proj_path) or not os.path.exists(cloud_cfg):
-        return []  # not a cloud-mode beacon project from this cwd
-
-    import time as _time
-    try:
-        mtime = os.stat(proj_path).st_mtime
-    except OSError:
-        return []
-    age_sec = _time.time() - mtime
-
-    # AC#3 honor: threshold for "very old" warn even when counts match.
-    threshold_sec = int(os.environ.get("BEACON_DOCTOR_STALENESS_SEC", "1800"))
-
-    # Avoid network call when local activity is recent (= obviously fresh).
-    # 300s = 5 min, far below threshold_sec default 30 min.
-    if age_sec < 300:
-        return []
-
-    try:
-        client, config = _get_api_client()
-        cloud_data = client.get_project(config["project_id"])
-    except Exception:
-        return []  # offline / auth issue — doctor stays usable
-
-    try:
-        with open(proj_path, "r", encoding="utf-8") as f:
-            local_data = json.load(f)
-    except Exception:
-        return []
-
-    cloud_ms = len(cloud_data.get("milestones", []))
-    local_ms = len(local_data.get("milestones", []))
-    cloud_op = len(cloud_data.get("operations", []))
-    local_op = len(local_data.get("operations", []))
-
-    diffs = []
-    if cloud_ms != local_ms:
-        diffs.append(f"milestones: local={local_ms}, cloud={cloud_ms}")
-    if cloud_op != local_op:
-        diffs.append(f"operations: local={local_op}, cloud={cloud_op}")
-
-    if diffs:
-        return [
-            "WARN [project-stale] .beacon/project.json differs from cloud:\n"
-            + "\n".join(f"       {d}" for d in diffs)
-            + f"\n       (local mtime: {int(age_sec / 60)} min ago)\n"
-            "       Run: beacon cloud pull   (to refresh local cache)\n"
-            "       Opt-out: BEACON_DOCTOR_SKIP_CLOUD_SYNC=1"
-        ]
-
-    # Counts match but file is very old — soft warn so external writes
-    # (another session, Web UI) are noticed even when counts coincide.
-    if age_sec > threshold_sec:
-        return [
-            f"WARN [project-stale] .beacon/project.json was last touched "
-            f"{int(age_sec / 60)} minutes ago (threshold {int(threshold_sec / 60)} min).\n"
-            "       Counts match cloud, but external state changes\n"
-            "       (renames / status shifts) may have happened. Run\n"
-            "       `beacon cloud pull` if uncertain.\n"
-            "       Threshold override: BEACON_DOCTOR_STALENESS_SEC=<seconds>"
-        ]
-
     return []
 
 
@@ -13004,12 +13551,12 @@ def cmd_doctor():
             if not _cloud.get("api_url"):
                 warnings.append(
                     "WARN [cloud.json] api_url is not set in .beacon/cloud.json.\n"
-                    "       Run: beacon cloud push"
+                    "       Run: beacon cloud upload-initial"
                 )
         except Exception:
             warnings.append(
                 "WARN [cloud.json] .beacon/cloud.json is unreadable.\n"
-                "       Run: beacon cloud push"
+                "       Run: beacon cloud upload-initial"
             )
     if os.path.exists(config_json_path):
         try:
@@ -13100,14 +13647,13 @@ def cmd_doctor():
         warnings.extend(_doctor_check_skill_cli_drift(home))
 
     # ------------------------------------------------------------------ #
-    # 9. .beacon/project.json staleness vs cloud (ms-61 / e-1571)
+    # 9. project-stale check retired in ms-84 Phase 5 (e-2039)
     # ------------------------------------------------------------------ #
-    # Detect when local project cache is out of sync with cloud — the
-    # exact P3 case observed on 2026-06-12 in this fork worktree, where
-    # `beacon status` returned 22 milestones while cloud held 67 because
-    # `beacon cloud pull` had never run from this cwd. Best-effort: skips
-    # on local mode, recent local writes (<5 min), and network errors.
-    warnings.extend(_doctor_check_project_staleness())
+    # Cloud mode no longer keeps a local .beacon/project.json cache after
+    # Phase 3, so the concept of "stale local relative to cloud" no longer
+    # applies. The helper above is now a no-op tombstone; the doctor call
+    # is left commented for audit-trail clarity.
+    # warnings.extend(_doctor_check_project_staleness())  # ms-84 Phase 5
 
     # ------------------------------------------------------------------ #
     # 10. CLAUDE.md entry-writing-principle marker (ms-68 / e-1640)
@@ -13184,10 +13730,11 @@ def cmd_help_json():
         {"command": "beacon retro", "flags": [], "description": "Start weekly retrospective (interactive)"},
         {"command": "beacon trigger check", "flags": [], "description": "Check pending triggers (JSON array)"},
         {"command": "beacon cloud list", "flags": [], "description": "List cloud projects"},
-        {"command": "beacon cloud upload-initial", "flags": ["--force"], "description": "Initial bootstrap upload to a new cloud project (e-1862); alias of legacy 'push'"},
-        {"command": "beacon cloud force-pull", "flags": [], "description": "Emergency overwrite local from cloud (e-1862); alias of legacy 'pull'"},
-        {"command": "beacon cloud push", "flags": ["--force"], "description": "Legacy alias for upload-initial (deprecated, kept for backward compat)"},
-        {"command": "beacon cloud pull", "flags": [], "description": "Legacy alias for force-pull (deprecated, kept for backward compat)"},
+        {"command": "beacon cloud upload-initial", "flags": ["--force"], "description": "Initial bootstrap upload to a new cloud project (one-shot local→cloud migration; ms-84 Phase 4)"},
+        # ms-84 Phase 4 (e-2038): push / pull / force-pull entries removed.
+        # The cloud → local round-trip is structurally impossible (= cloud
+        # is the sole truth source). bin/beacon now routes these names to
+        # the wildcard 'unknown subcommand' branch.
         {"command": "beacon cloud join <id>", "flags": [], "description": "Join an existing cloud project"},
         {"command": "beacon auth login", "flags": [], "description": "Sign in with Google"},
         {"command": "beacon auth logout", "flags": [], "description": "Remove cached credentials"},
@@ -13210,6 +13757,7 @@ def cmd_help_json():
         {"command": "beacon trek transfer-leader <trek-id> --to <session-id>", "flags": ["--json"], "description": "Hand off leader_session_id to another session"},
         {"command": "beacon trek take-over <trek-id>", "flags": ["--json"], "description": "Fresh session (= same user, leader role) を新 leader_session_id に bind し直す (= dead session 引き継ぎ、ms-88 e-2089)"},
         {"command": "beacon trek kickoff <trek-id>", "flags": ["--session-id <sid>", "--kickoff-dm-event-id <eid>", "--json"], "description": "Kickoff Ritual の完了 stamp (= /beacon-trek-pulse Step 0.4 が叩く、 ms-88 e-2138)。 server endpoint だけ先に land した PR #177 の CLI wrapper 補完 (e-2139 残作業 #1)"},
+        {"command": "beacon trek reconcile <trek-id>", "flags": ["--apply", "--json"], "description": "task pool ↔ Trek stamp 同期の reconcile (= 「pool で done だが Trek stamp が waiting-review / leader_review / working で残ってる」 stuck 状態を一括修復、 default dry-run、 ms-88 e-2167)"},
         # ms-54 e-1266: DM channel lifecycle commands (install / uninstall / opt-out / opt-in / status)
         {"command": "beacon channel install", "flags": [], "description": "Install beacon-bus MCP entry into .mcp.json (DM channel for multi-session messaging)"},
         {"command": "beacon channel uninstall", "flags": ["--purge-files", "--keep-files"], "description": "Remove beacon-bus MCP entry; --purge-files also wipes channel/node_modules (moved to .trash/)"},
@@ -13256,12 +13804,18 @@ def cmd_operation_open():
         print("Error: operation title required")
         sys.exit(1)
     data = load_project()
+    # ms-43 / e-2281 — stamp the human author on the Operation so the Web
+    # UI surfaces the creator label (= 起票者) instead of the legacy
+    # ``"claude"`` literal in ``created_by``. Same resolution path as
+    # cmd_milestone_add / cmd_task_add.
+    author = _resolve_current_author(data)
     try:
         data, op = core.operation_open(
             data, title, schedule=schedule, log_source=log_source,
             status=status, activation_hint=activation_hint,
             objective=objective, acceptance_criteria=acceptance_criteria,
             priority=priority,
+            author=author or None,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -13495,7 +14049,7 @@ def cmd_operation_approve():
     if not _is_cloud_mode():
         print("Error: operation approve requires cloud mode "
               "(envelope signing needs a server key). Run "
-              "'beacon cloud push' first.", file=sys.stderr)
+              "'beacon cloud upload-initial' first.", file=sys.stderr)
         sys.exit(1)
 
     ttl_seconds = None
@@ -16798,7 +17352,9 @@ if __name__ == "__main__":
         "doc_image_upload": cmd_doc_image_upload,
         "cloud_list": cmd_cloud_list,
         "cloud_push": cmd_cloud_push,
-        "cloud_pull": cmd_cloud_pull,
+        # ms-84 Phase 4 (e-2038): cloud_pull dispatch entry removed.
+        # cmd_cloud_pull was deleted; the bin/beacon `pull` / `force-pull`
+        # subcommands now hit the wildcard 'unknown subcommand' branch.
         "cloud_status": cmd_cloud_status,
         "cloud_check_project": cmd_cloud_check_project,
         "cloud_join": cmd_cloud_join,
@@ -16937,11 +17493,14 @@ if __name__ == "__main__":
         "trek_leave": cmd_trek_leave,
         "trek_plan": cmd_trek_plan,
         "trek_task_state": cmd_trek_task_state,
+        # ms-92 / e-2141 — cross-project task add via Trek scope
+        "trek_task_add": cmd_trek_task_add,
         "trek_stop": cmd_trek_stop,
         "trek_resume": cmd_trek_resume,
         "trek_pulse_ack": cmd_trek_pulse_ack,
         "trek_take_over": cmd_trek_take_over,
         "trek_kickoff": cmd_trek_kickoff,
+        "trek_reconcile": cmd_trek_reconcile,
         "trek_transfer_leader": cmd_trek_transfer_leader,
         "trek_timeline": cmd_trek_timeline,
         "version": lambda: print(f"beacon {__version__}"),

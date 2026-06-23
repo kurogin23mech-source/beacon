@@ -1,30 +1,29 @@
 ---
 name: beacon-cloud
-description: Cloud sync (= ローカル Beacon データの cloud 同期) を AI が対話で操作する Skill。日常運用は `open` / `status` (= web UI を開く / read-only 確認) のみで、push / pull / off は特殊用途 (= 初回 upload / 緊急 force pull / sandbox 検証専用) として明示位置付け。`/beacon-cloud` 単独起動では `open` / `status` を default surface し、特殊用途は subaction 名明示指定でのみ届く誤発火防止構造 (e-1861 / e-1862)。
-version: 0.2.0
+description: Cloud sync (= ローカル Beacon データの cloud 同期) を AI が対話で操作する Skill。日常運用は `open` / `status` (= web UI を開く / read-only 確認) のみ、`upload-initial` は新規プロジェクトの 1 回きり migration、`off` は sandbox 用途。ms-84 Phase 4 (e-2038) で `push` / `pull` / `force-pull` は CLI から削除された (= cloud が唯一の真値、戻り経路は構造的に不可能)。
+version: 0.3.0
 triggers:
   - /beacon-cloud
   - cloud open
   - cloud status
   - cloud upload-initial
-  - cloud force-pull
   - cloud off
-  - cloud push
-  - cloud pull
 ---
 
 # Beacon Cloud
 
 > Cloud sync (= ローカルの `.beacon/` を cloud Firestore と同期) の運用は、**ms-36 Cloud-first 設計が機能している今、日常 op は `open` (= web UI を開く) と `status` (= read-only 確認) のみ**。CLI / Skill / Web UI のすべてが直接 cloud を読み書きするため、push / pull は本来不要な操作になっている (UC16-F2 / e-1862 で確認)。
 >
-> したがって push / pull / off は **特殊用途のみ** に位置付ける:
-> - `push` (= 初回 upload / `upload-initial`): 新規 cloud project への 1 回きりの bootstrap
-> - `pull` (= 緊急 force pull / `force-pull`): cloud と local が大幅乖離した時の emergency recovery
-> - `off`: sandbox / 一時オフライン作業 (= UC16-F1 / e-1861 で「local mode 撤去」議論中、現状は sandbox 用途のみ)
+> **ms-84 Phase 4 (e-2038) で `push` / `pull` / `force-pull` は CLI から削除済**: cloud が唯一の真値になり (= ローカル cache を持たない)、 cloud → local の戻り経路は構造的に不可能になった。 SPEC 受入条件 3 / 8。
 >
-> 過去病理 (= 過去経験から): `beacon cloud push` を別マシン作業中に走らせて、もう片方の machine で書いた task / commit log を上書きしてしまった事例が複数件。本 Skill では特殊用途 subaction を **picker の default に出さない** + push 前に必ず「相手側の最終更新時刻」と「自分のローカル最終変更時刻」を提示し conflict 可能性を user に判断させる二重ガード。
+> 残る subaction:
+> - `open` / `status`: 日常運用
+> - `upload-initial`: 新規 cloud project への 1 回きり bootstrap (旧 `push` の本来用途のみが残った)
+> - `off`: sandbox / 一時オフライン作業
 >
-> 整理後の subaction 運用区分は CORE doc `YqsGgUhqEe0fHGDfXr3Q` (= 「Cloud sync subaction の運用区分」) を参照。3 階層 (= 日常運用 / 特殊用途 / sandbox) で位置付け済。
+> 過去病理: `beacon cloud push` を別マシン作業中に走らせて上書きする事例が複数件あった。 Phase 4 削除によりこの病理は構造的に発生不可能になった (= そもそも push CLI が存在しない)。
+>
+> 整理後の subaction 運用区分は CORE doc `YqsGgUhqEe0fHGDfXr3Q` (= 「Cloud sync subaction の運用区分」) を参照。 ms-84 land 後に書き換え予定。
 
 ## 文章の書き方 (Beacon 全体の哲学)
 
@@ -99,45 +98,43 @@ subaction 別の前提:
 選択 (番号 or subaction 名, cancel で中止):
 
 特殊用途 (= 通常は呼ばない、明示入力時のみ受理):
-  - upload-initial / push   初回 upload 専用、別マシン作業を上書きするリスク
-  - force-pull / pull       緊急 force pull 専用、cloud-first 設計と矛盾するため通常不要
+  - upload-initial          新規 cloud project への 1 回きり bootstrap
   - off                     cloud mode 解除、sandbox / 一時オフライン作業のみ
 ```
 
 ### 受理ルール
 
 - **default 動線**: ユーザーが picker から `open` / `status` を選んだ場合は通常フロー
-- **特殊用途**: `push` / `upload-initial` / `pull` / `force-pull` / `off` は user が **subaction 名を明示入力** (= `/beacon-cloud upload-initial` 等、または picker の数字 1/2 ではなく subaction 名タイプ) した場合のみ受理する。picker の番号には出さない (= 誤発火防止)
-- **`off` 特例 (e-1861 / ms-61)**: Beacon は Claude Code から呼ばれる前提で cloud-only 運用が標準。`off` を出すと「local mode に戻す」誤選択を誘発し、2026-06-15 incident (= sub-agent silent drift) の再現経路になる。default picker から外し、明示的に `/beacon-cloud off` と subaction 名指定された時のみ Step 3 に進む
+- **特殊用途**: `upload-initial` / `off` は user が **subaction 名を明示入力** した場合のみ受理する (= picker の番号には出さない、 誤発火防止)
+- **退役 subaction**: `push` / `pull` / `force-pull` は ms-84 Phase 4 (e-2038) で CLI から削除済。これらの名前で呼ばれた場合は「ms-84 Phase 4 で削除されました。 `upload-initial` が新規 bootstrap の代替です」 と説明して終了
+- **`off` 特例 (e-1861 / ms-61)**: Beacon は Claude Code から呼ばれる前提で cloud-only 運用が標準。`off` を出すと「local mode に戻す」誤選択を誘発し、2026-06-15 incident (= sub-agent silent drift) の再現経路になる。default picker から外し、明示的に `/beacon-cloud off` と subaction 名指定された時のみ進む
 - **未認識文字列**: 上記いずれにもマッチしないなら「未認識 subaction、`/beacon-cloud` 単独で起動すると default picker が出ます」と返して終了
 
-判定された subaction に対応する Step (1〜5) へ分岐する。
+判定された subaction に対応する Step へ分岐する。
 
 ---
 
-## Step 1: push / upload-initial (= ローカル → cloud、特殊用途、強警告 + 二段確認)
+## Step 1: upload-initial (= ローカル → cloud、新規 bootstrap 専用、強警告 + 二段確認)
 
-> **位置付け** (e-1862): この操作は **新規 cloud project への 1 回きりの bootstrap (= 初回 upload)** が本来の用途。`/beacon-cloud upload-initial` 名で呼ばれた場合は意図が明確、`push` 名で呼ばれた場合は「日常運用と勘違いされている可能性あり」と仮定して追加警告を出す。
+> **位置付け** (ms-84 Phase 4 / e-2038): この操作は **新規 cloud project への 1 回きりの bootstrap (= 初回 upload)** 専用。`upload-initial` 名でのみ起動できる (= 旧名の `push` は CLI / Skill から削除済)。
 >
-> 日常運用では push は不要 — CLI / Skill / Web UI のすべてが直接 cloud を読み書きするため (ms-36 Cloud-first 設計)。「push したい」と思った時点で何か別の問題 (= cloud との乖離、stale local cache) を疑うべき。
+> 日常運用では upload-initial は不要 — CLI / Skill / Web UI のすべてが直接 cloud を読み書きするため (ms-36 Cloud-first 設計)。「アップロードしたい」と思った時点で「新規プロジェクトを cloud に持ち上げる場面か?」と一度立ち止まる。
 
-### 1-0: 意図確認 (= `push` 名で呼ばれた場合のみ)
+### 1-0: 退役名で呼ばれた場合の応答
 
-ユーザーが `push` (alias `upload-initial` ではなく素の `push`) で起動した場合、以下を最初に提示:
+ユーザーが `push` で起動した場合 (= ms-84 Phase 4 削除済の旧名)、以下を提示して終了:
 
 ```
-注意: cloud push は日常運用では使いません (e-1862)。
+注意: `beacon cloud push` は ms-84 Phase 4 (e-2038) で CLI から削除されました。
   - cloud-first 設計のため、CLI / Skill / Web UI は直接 cloud を読み書きしています
-  - 「push すべきローカル変更」が見えること自体、何か乖離が起きている可能性が高い
-  - 本来 push が必要なのは: (a) 新規 cloud project への初回 upload (b) 緊急の force overwrite
+  - 「push すべきローカル変更」が見えること自体、何か乖離が起きている可能性が高い (= 構造的には起こらないはず)
 
-何をしようとしていますか?
-  1. 初回 upload (新規 cloud project に bootstrap) — そのまま続行
-  2. 緊急の force overwrite (cloud 側が壊れている等) — そのまま続行 (= 強警告あり)
-  3. 単に最新を同期したい — それは pull の用途なので /beacon-cloud pull に切り替え推奨
-  4. 何かおかしい気がする — cancel して状況を確認
+代わりに以下を検討してください:
+  - 新規 cloud project への初回 upload を実行したい → /beacon-cloud upload-initial
+  - cloud 側の状態を確認したい               → /beacon-cloud status
+  - cloud 側が壊れている疑いがある           → user の手動介入が必要 (= サポート起票)
 
-選択 (cancel で中止):
+このまま終了します。
 ```
 
 `upload-initial` 名で起動された場合はこのステップをスキップ (= 意図が明確)。
@@ -182,148 +179,74 @@ beacon cloud diff --json
 
 ### 1-c: 警告と二段確認
 
-衝突可能性ありの場合:
+cloud に既にプロジェクトが存在するときは原則中止する (= upload-initial は新規 bootstrap 専用):
 
 ```
-警告: cloud push は cloud 側の状態を **ローカル状態で上書き** します。
-  - 別マシン (= mac-mini.local) が直近 3 時間 42 分前に push しています
-  - そのマシンが書いた task done / log / doc は **失われる可能性** があります
-  - 推奨: 先に /beacon-cloud pull で cloud 側を取り込み、conflict を merge してから push
+警告: cloud project_id が既に存在します (= 別マシンで先に upload 済み)。
+  - upload-initial は新規 cloud project への 1 回きり bootstrap です
+  - 既存 cloud project に対する re-upload は **ローカル状態で上書き** するため、 他マシンの変更を破壊します
+  - ms-84 Phase 4 (e-2038) で pull / force-pull は削除されたので戻し経路はありません
 
 進める場合の確認:
-  - pull-first (推奨): 先に pull に切り替える
-  - push-anyway: 警告を承知の上で上書き push (= 失われる変更があれば手動復旧が必要)
-  - cancel: 中止
+  - cancel (推奨): 中止して状況を確認 (= 既存 project にすでに join 済の可能性)
+  - force-overwrite: 警告を承知の上で上書き (= 失われる変更があれば手動復旧が必要)
 ```
 
-`push-anyway` を選んだ場合、追加で `project_id` の完全一致入力を要求 (= 誤発火防止):
+`force-overwrite` を選んだ場合、追加で `project_id` の完全一致入力を要求 (= 誤発火防止):
 
 ```
-最終確認: cloud project_id を完全一致で入力してください (= 上書き push の意思表示):
+最終確認: cloud project_id を完全一致で入力してください (= 上書き upload の意思表示):
   期待値: <project_id>
   入力:
 ```
 
 完全一致しない場合は中止。
 
-衝突可能性なしの場合は単段確認:
+新規 project (= cloud に未登録) の場合は単段確認:
 
 ```
-ローカル変更 12 件を cloud に push します。
-  - 上書きされる cloud 変更: なし (= 自分が最終 push 者)
+ローカル変更 12 件を cloud に upload します (= 新規 project bootstrap)。
 
-push しますか? (yes / cancel)
+upload-initial を実行しますか? (yes / cancel)
 ```
 
 ### 1-d: 実行
 
 ```bash
-beacon cloud push --json
+beacon cloud upload-initial
 ```
 
-長文 message が必要なオプション (= 将来追加された場合) は **single quote または quoted heredoc** で渡す (= zsh の double-quote backtick 展開を避ける、過去経験から)。
+`--force` フラグは force-overwrite を選んだ場合のみ付与する。
 
 ### 1-e: 結果報告
 
 ```
-✓ cloud に push しました
-  push 数:        12 件
+✓ cloud に upload しました (= 新規 bootstrap)
+  upload 数:      12 件
   cloud 最終更新: <new timestamp>
   cloud URL:      <project URL>
+  local cache:    .beacon/project.json → .beacon/project.json.before-cloud-YYYYMMDD (= ms-84 Phase 3 cut-over)
 
 他マシン / 他メンバー側で同期するには:
-  - そのマシンで beacon cloud pull を実行
-  - または自動 sync (= hook 経由) が動いていれば数分以内に反映
+  - そのマシンで `beacon cloud join <project-id>` を実行 (= cloud.json を書き込んで cloud-first に切り替え)
 ```
 
 ---
 
-## Step 2: pull / force-pull (= cloud → ローカル、特殊用途、ローカル変更との衝突確認)
+## Step 2: pull / force-pull (= ms-84 Phase 4 で削除済、tombstone)
 
-> **位置付け** (e-1862): この操作は **cloud と local が大幅乖離した時の emergency recovery (= 緊急 force pull)** が本来の用途。`/beacon-cloud force-pull` 名で呼ばれた場合は意図が明確、`pull` 名で呼ばれた場合は「日常運用と勘違いされている可能性あり」と仮定して追加質問を出す。
->
-> 日常運用では pull は不要 — cloud-first 設計で常に cloud を直接読んでいるため、「pull すべき変更」という概念自体が薄い。ローカル `.beacon/project.json` は cloud キャッシュとしては stale でも、CLI は cloud から都度取得して動作する。
+ms-84 Phase 4 (e-2038) で `beacon cloud pull` / `force-pull` は CLI から削除された。 cloud → local の戻り経路は構造的に不可能 (= ローカル cache を持たない設計に cut over 済)。
 
-### 2-0: 意図確認 (= `pull` 名で呼ばれた場合のみ)
-
-ユーザーが `pull` (alias `force-pull` ではなく素の `pull`) で起動した場合、以下を最初に提示:
+ユーザーが `pull` / `force-pull` で起動した場合は以下を返して即終了:
 
 ```
-注意: cloud pull は日常運用では使いません (e-1862)。
-  - cloud-first 設計のため、CLI は常に cloud から直接読んでいます
-  - ローカル `.beacon/project.json` が古くても CLI 動作には影響しません (web UI も cloud 直読)
-  - 本来 pull が必要なのは: (a) cloud と local が大幅乖離した emergency recovery (b) オフライン作業を想定して local cache を最新化したい
+注意: `beacon cloud pull` / `force-pull` は ms-84 Phase 4 (e-2038) で CLI から削除されました。
+  - cloud が唯一の真値になり、ローカル cache そのものを持たなくなったため、 戻り経路は構造的に不可能になりました
+  - cloud 側の状態を確認したい → /beacon-cloud status または web UI (= /beacon-cloud open)
+  - cloud 側が壊れている疑いがある → user の手動介入が必要 (= サポート起票)
+  - 移行前のローカル cache (= `.beacon/project.json.before-cloud-YYYYMMDD`) はオフラインで参照できます
 
-何をしようとしていますか?
-  1. emergency recovery (cloud 側を真値源として local を上書き) — そのまま続行 (= 強警告あり)
-  2. オフライン作業前の cache 最新化 — そのまま続行
-  3. 何かおかしい気がする (= push の代わりに pull と入れた等) — cancel して状況を確認
-
-選択 (cancel で中止):
-```
-
-`force-pull` 名で起動された場合はこのステップをスキップ (= 意図が明確)。
-
-### 2-a: ローカル未 push 変更の確認
-
-```bash
-beacon cloud diff --json
-```
-
-`local_pending_changes` を控える。
-
-### 2-b: 衝突可能性の表示
-
-```
-─────────────────────────────────────────────
-  cloud 側の最新:
-    最終更新:    2026-06-15 13:42 by mac-mini.local
-    新規変更:    cloud 側で起きた、ローカルに無い変更
-      - task done: 4 件
-      - log: 7 件
-
-  ローカル側:
-    未 push 変更: <件数> 件
-      - <内容>
-
-  衝突可能性: <あり / なし>
-─────────────────────────────────────────────
-```
-
-### 2-c: 警告と確認
-
-ローカル未 push 変更がある場合:
-
-```
-警告: ローカルに未 push 変更が <N> 件あります。
-  pull は cloud 状態を取り込みますが、同じ entry (= 同 task / 同 log) を両側で変更している場合、conflict resolution が走ります。
-
-選択:
-  - push-first (推奨): 先にローカル変更を push する (= /beacon-cloud push に切り替え)
-  - pull-anyway: そのまま pull (= サーバ側の conflict resolution に委ねる)
-  - cancel: 中止
-```
-
-ローカル変更なしの場合は単段確認:
-
-```
-cloud から <N> 件の変更を取り込みます (= ローカル変更なし、安全)。
-pull しますか? (yes / cancel)
-```
-
-### 2-d: 実行
-
-```bash
-beacon cloud pull --json
-```
-
-### 2-e: 結果報告
-
-```
-✓ cloud から pull しました
-  取り込み数:   <N> 件
-  conflict 解決: <件数> 件 (= 自動 merge 済)
-  詳細:        beacon cloud log show
+このまま終了します。
 ```
 
 ---
@@ -481,20 +404,19 @@ read-only なので確認不要、即時実行して終了。
 
 | エラー | 対処 |
 |---|---|
-| cloud 未認証 (= push / pull / off 共通) | 「`beacon auth login` が必要です」と返して終了 |
+| cloud 未認証 (= upload-initial / off 共通) | 「`beacon auth login` が必要です」と返して終了 |
 | network エラー | 「cloud に到達できません: <error>。ネットワーク接続を確認してください」 |
-| push 中の merge conflict (= サーバ拒否) | 「cloud 側が更新されています。先に pull してください: /beacon-cloud pull」と提示 |
-| pull 中の auto-merge 失敗 | サーバが返した conflict 詳細を表示し、手動 resolve の手順を CORE doc 参照で提示 |
+| upload-initial 中の "already in cloud mode" | 「既に cloud mode です。 既存 project に対する re-upload は警告付きの `--force` のみ許可されます」 |
 | `--confirm` 不一致 | 「project_id が一致しません。誤発火防止のため中止しました」と返して中止 |
 
 ---
 
 ## 制約
 
-- **default picker には `open` と `status` (= 日常運用 read-only ops) のみを並べる** (e-1862)。push / pull / off は特殊用途として明示入力時のみ受理 (= 番号選択動線には出さない)。
-- **push / off は二段確認 (= project_id 完全一致入力 + 最終 yes) を必須** とする。誤発火防止の構造的ガード。
-- **`push` / `pull` 名で起動された場合は意図確認ステップ (Step 1-0 / 2-0) を先頭に挟む**。日常運用と勘違いされている可能性を排除し、本来の特殊用途 (= 初回 upload / 緊急 force pull) に正しく誘導する。
-- 衝突可能性がある場合、AI は **pull-first を必ず推奨** する。push-anyway を選ばせるのは user の明示的判断としてのみ。
+- **default picker には `open` と `status` (= 日常運用 read-only ops) のみを並べる** (e-1862)。upload-initial / off は特殊用途として明示入力時のみ受理 (= 番号選択動線には出さない)。 退役名 (`push` / `pull` / `force-pull`) は tombstone 応答のみ。
+- **upload-initial / off は二段確認 (= project_id 完全一致入力 + 最終 yes) を必須** とする。誤発火防止の構造的ガード。
+- **退役名 (`push` / `pull` / `force-pull`) で起動された場合は tombstone メッセージで終了**。ms-84 Phase 4 (e-2038) で CLI から削除済 — 何かを実行する経路は存在しない。
+- 衝突可能性がある場合、AI は **cancel を必ず推奨** する。force-overwrite を選ばせるのは user の明示的判断としてのみ。
 - `--confirm` / 長文オプションは **single quote または quoted heredoc** で渡す (= zsh の double-quote backtick 展開を避ける、過去経験から)。
 - open / status は read-only なので確認不要だが、open は URL を勝手にブラウザに流さず GUI / HEADLESS 環境を判定してから動く。
 - 本 Skill は **既に cloud setup 済の運用** を扱う。初回 setup は `/beacon-init` または直 CLI (= `beacon auth login` + `beacon cloud setup`) に委ねる (= scope 分離)。

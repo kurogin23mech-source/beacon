@@ -176,6 +176,11 @@ class TestWebUI_TrekDetailMockParity:
         self.src = _read(WEB_INDEX)
 
     def test_palette_classes_present(self):
+        # ms-86 v2 (= mockups/trek-detail.html / e-2126): SCOPE + MEMBERS row
+        # + CLAIMS placeholder + SUMMARIES were collapsed into the new
+        # TREK TASKS / MEMBERS table / RECENT ACTIVITY (real) trio. Older
+        # row classes intentionally dropped — assertions reflect the v2
+        # invariants instead.
         for cls in (
             ".trek-crumb",
             ".trek-head",
@@ -186,35 +191,54 @@ class TestWebUI_TrekDetailMockParity:
             ".trek-stop-card",
             ".trek-archive-card",
             ".trek-section",
-            ".trek-scope-row",
-            ".trek-member-row",
-            ".trek-claim-row",
-            ".trek-activity-row",
-            ".trek-summary-row",
+            ".trek-why-block",
+            ".trek-task-row",
+            ".trek-task-state",
+            ".trek-task-children",
+            ".trek-child-task",
+            ".trek-members-table",
+            ".trek-activity-row-v2",
             ".trek-cli-hint",
             ".trek-coming-soon",
         ):
             assert cls in self.src, f"CSS class {cls!r} missing"
 
     def test_detail_view_mock_sections(self):
+        # ms-86 v2 section order (= mockups/trek-detail.html):
+        # WHY → TREK TASKS → MEMBERS & AGENTS → RECENT ACTIVITY (5 sections only).
+        # PULSE-ACK COMPLIANCE は ms-88 / e-2108 由来で mockup には無く、 user dogfood (2026-06-22)
+        # で spec creep として撤去された (= AI / leader が server data を直接読めば足り、 human surface 不要)。
         for header in (
-            "SCOPE",
-            "MEMBERS &amp; SESSIONS",
-            "ACTIVE CLAIMS",
-            "RECENT ACTIVITY",
-            "SUMMARIES",
+            "<span>WHY</span>",
+            "<span>TREK TASKS</span>",
+            "MEMBERS &amp; AGENTS",
+            "<span>RECENT ACTIVITY</span>",
         ):
-            assert header in self.src
+            assert header in self.src, f"section header {header!r} missing"
+        # PULSE-ACK COMPLIANCE は撤去済 — もし再追加されたら mockup 整合を再評価
+        assert "PULSE-ACK COMPLIANCE" not in self.src, (
+            "PULSE-ACK COMPLIANCE は mockup スコープ外として 2026-06-22 に撤去済。 "
+            "再追加するなら mockup 更新 + user 承認が必要"
+        )
 
     def test_stop_card_invokes_cli(self):
         assert "STOP THIS TREK" in self.src
         assert "case 'trek-cli-hint':" in self.src
 
-    def test_unimplemented_sections_placeholders(self):
-        assert "ms-55" in self.src
-        assert "e-1696" in self.src
-        assert ("e-1697" in self.src) or ("beacon morning" in self.src)
-        assert ("e-1698" in self.src) or ("beacon trek summary" in self.src)
+    def test_v2_task_state_machine_classes(self):
+        # 5-state machine (= ms-88 / e-2107) must render with one CSS class
+        # per state so the leader can scan badges at a glance.
+        for state in ("working", "todo", "leader_review", "user_review", "done"):
+            assert f".trek-task-state.{state}" in self.src, f"task-state.{state} missing"
+
+    def test_v2_drops_placeholder_sections(self):
+        # ACTIVE CLAIMS / SUMMARIES / SCOPE placeholders were intentionally
+        # removed in v2. Match the rendered section header (= <span>X</span>)
+        # so the assertion ignores narrative comments that still mention the
+        # old names for historical context.
+        assert "<span>ACTIVE CLAIMS</span>" not in self.src, "ACTIVE CLAIMS placeholder re-added"
+        assert "<span>SUMMARIES</span>" not in self.src, "SUMMARIES placeholder re-added"
+        assert "<span>SCOPE</span>" not in self.src, "SCOPE section re-added (use TREK TASKS)"
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +277,277 @@ class TestDesktopUI_v3Parity:
         assert "function renderSettings(" in self.src
 
     def test_trek_detail_palette_carried(self):
+        # ms-86 v2 carry-over: same trek-* palette must survive the desktop
+        # build so layer.js can render the new layout when it adopts the
+        # 4-section treatment.
         for cls in (".trek-crumb", ".trek-head", ".trek-stop-card",
-                    ".trek-scope-row", ".trek-member-row"):
+                    ".trek-task-row", ".trek-members-table",
+                    ".trek-why-block", ".trek-activity-row-v2"):
             assert cls in self.src, f"CSS class {cls!r} missing"
+
+
+# ---------------------------------------------------------------------------
+# ms-86 v2 bug fixes (= 2026-06-22 dogfood) — pin behaviours so simplify
+# passes don't silently regress them again.
+# ---------------------------------------------------------------------------
+
+
+class TestWebUI_TrekHeaderHidesProjectChrome:
+    """e-2219: Trek detail page ヘッダから project 名 / project tag / version
+    badge を隠す。 Trek は cross-project entity であり project に従属しない。
+    """
+
+    def setup_method(self, _method):
+        self.src = _read(WEB_INDEX)
+
+    def test_header_branches_on_open_trek(self):
+        # renderShell must branch on openTrekId so the project chrome is
+        # suppressed when a trek detail page is on screen.
+        assert "const trekOpen = !!state.openTrekId;" in self.src
+        # Brand fallback used when trekOpen — mockup top-bar shows just "Beacon".
+        assert '<span class="project-name brand">Beacon</span>' in self.src
+
+    def test_project_chrome_still_rendered_when_no_trek(self):
+        # The original project-name + header-tag + version-badge cluster
+        # must still be reachable for the non-trek path.
+        assert 'esc(PLATFORM.headerTag)' in self.src
+        assert 'PLATFORM.versionBadgeHTML()' in self.src
+
+
+class TestWebUI_TrekProjectSwitchClearsOpenTrek:
+    """e-2220 (ms-43): Trek detail を開いた状態から hamburger menu 経由で project
+    を選び直したり、 同じ project を再選択した時に main content が project
+    page に戻ること (= state.openTrekId が解除される routing 経路)。
+    """
+
+    def setup_method(self, _method):
+        self.src = _read(WEB_INDEX)
+
+    def test_menu_select_project_clears_open_trek(self):
+        # menuSelectProject 内で state.openTrekId を明示クリアしている必要がある
+        # (= 別 project 選択時 / 同 project 再選択時の両方を構造的にカバー)。
+        assert "function menuSelectProject(" in self.src
+        # state.openTrekId = null が menuSelectProject 配下に必ず存在する。
+        idx = self.src.index("async function menuSelectProject(")
+        end = self.src.index("\n}\n", idx)
+        body = self.src[idx:end]
+        assert "state.openTrekId = null" in body, (
+            "menuSelectProject must reset state.openTrekId so trek detail "
+            "doesn't bleed across project switches (e-2220 / ms-43)"
+        )
+
+    def test_select_project_clears_open_trek(self):
+        # selectProject 自体も openTrekId を解除する (= URL / refresh / initial
+        # bootstrap 経由の project 選択でも trek 状態が漏れないため)。
+        idx = self.src.index("async function selectProject(projectId)")
+        end = self.src.index("\nfunction toggleMilestone", idx)
+        body = self.src[idx:end]
+        assert "state.openTrekId = null" in body, (
+            "selectProject must reset state.openTrekId so any project-load "
+            "path drops the open trek (e-2220)"
+        )
+
+
+class TestWebUI_TrekStopCardMaxWidth:
+    """e-2221: STOP card は画面幅の半分程度 (= mockup L137-141 halt-block の
+    max-width 700px) で center 揃え。 leaf width で読みやすい形にする。
+    """
+
+    def setup_method(self, _method):
+        self.src = _read(WEB_INDEX)
+
+    def test_stop_card_has_max_width(self):
+        # CSS 矩形 .trek-stop-card { ... } 内に max-width が含まれる。
+        idx = self.src.index(".trek-stop-card {")
+        end = self.src.index("}", idx)
+        block = self.src[idx:end]
+        assert "max-width" in block, (
+            ".trek-stop-card must have max-width so it doesn't span full leaf "
+            "width (e-2221 / mockup halt-block max-width: 700px)"
+        )
+
+
+class TestWebUI_TrekChevronAccordionWired:
+    """e-2222: TREK TASKS の MS / Op 行 chevron クリックで配下 task が accordion
+    展開される。 既存 _trekLookupMilestoneInProject helper を流用し、 user の
+    expand 状態は state.openTrekExpanded で保持する。
+    """
+
+    def setup_method(self, _method):
+        self.src = _read(WEB_INDEX)
+
+    def test_scope_toggle_action_handler_present(self):
+        # data-action="trek-scope-toggle" が chevron に紐づき、 dispatcher
+        # 側の handleCommonAction で case 処理されている。
+        assert 'data-action="trek-scope-toggle"' in self.src
+        assert "case 'trek-scope-toggle':" in self.src
+
+    def test_open_trek_expanded_state_field(self):
+        # 既存 state.openTrekExpanded (= Set<string>) が dispatcher で
+        # ms-id を toggle する経路を持つ。
+        assert "openTrekExpanded: new Set()" in self.src
+
+
+class TestWebUI_TrekTaskLeafOpensEntryModal:
+    """e-2223: task leaf 行クリックで既存 entry-detail-modal が overlay 表示
+    される。 既存 openEntryDetail / entry-detail-modal 機構をそのまま流用し、
+    leaf 行に data-action="open-entry-detail" + data-entry-id を渡す。
+    """
+
+    def setup_method(self, _method):
+        self.src = _read(WEB_INDEX)
+
+    def test_leaf_row_wires_open_entry_detail(self):
+        # leaf task row 描画関数 (_renderTrekTaskRow の s.task 分岐) で
+        # open-entry-detail action と data-entry-id が出力されていること。
+        idx = self.src.index("// Leaf task row.")
+        end = self.src.index("// Operation row", idx)
+        leaf_block = self.src[idx:end]
+        assert 'data-action="open-entry-detail"' in leaf_block, (
+            "leaf task row must wire open-entry-detail action so clicking "
+            "opens the existing entry-detail-modal overlay (e-2223)"
+        )
+        assert 'data-entry-id=' in leaf_block
+
+    def test_open_entry_detail_handler_still_dispatched(self):
+        # handleCommonAction の既存 case を流用する想定。 リネームされていない
+        # ことを確認することで wiring が空振りしない構造を pin する。
+        assert "case 'open-entry-detail':" in self.src
+
+
+class TestWebUI_TrekShowDoneToggle:
+    """e-2224: show done ボタンが accordion 展開中に表示され、 click で done
+    状態 task が inline 追加表示される (toggle)。 toggle 状態は MS id 単位で
+    state.openTrekShowDone (Set) に保持し、 別 Trek / 別 MS で混じらない。
+    """
+
+    def setup_method(self, _method):
+        self.src = _read(WEB_INDEX)
+
+    def test_show_done_button_rendered(self):
+        # show-done ボタンは class="trek-task-show-done-btn..." で render される
+        # (= hide-mode class が showDone=true 時に suffix される、 base class 名で grep)。
+        assert 'class="trek-task-show-done-btn' in self.src
+        assert 'data-action="trek-toggle-done"' in self.src
+
+    def test_show_done_dispatcher_case_present(self):
+        # dispatcher 側で case 'trek-toggle-done' が登録されていない限り
+        # クリックは無視されるので、 配線済みであることを構造的に pin。
+        assert "case 'trek-toggle-done':" in self.src
+
+    def test_show_done_state_is_set_keyed_by_ms(self):
+        # ms-id 単位の toggle 保持。 boolean 1 つだと別 MS の done 表示が
+        # 同時に切り替わってしまうので、 Set 化されていることを pin。
+        assert "openTrekShowDone: new Set()" in self.src
+
+    def test_show_done_button_has_hide_mode_class_when_expanded(self):
+        # done タスク表示中 (= showDone=true) はボタンに hide-mode class が付与され
+        # gray にスタイル切替される。 done タスクと視覚揃え (= 2026-06-23 user 指摘)。
+        assert "hide-mode" in self.src
+        assert ".trek-task-show-done-btn.hide-mode" in self.src
+
+    def test_done_child_task_tag_grayed_out(self):
+        # done タスクの TASK タグは grayout 専用 CSS が当たる (= done と todo を
+        # 視覚分離、 2026-06-23 user 指摘)。
+        assert '.trek-child-task[data-task-state="done"] .trek-child-task-tag' in self.src
+
+
+class TestWebUI_TrekFooterHidesProjectId:
+    """2026-06-23 dogfood: e-2219 で header の project name 系は隠したが、 footer
+    の `state.projectId` (= beacon-b95643 等) が残っており 「いまだに project
+    名が見える」 と user 報告。 Trek 詳細を開いている時は footer も brand
+    「Beacon」 に置換し、 state.project / state.projectId 関連表示を全 surface
+    で抑制する。 mockup の footer 文言とは差分が出るが、 mockup より
+    cross-project entity としての一貫性を優先 (= user 指示)。
+    """
+
+    def setup_method(self, _method):
+        self.src = _read(WEB_INDEX)
+
+    def test_footer_left_branches_on_open_trek(self):
+        # PLATFORM.getFooterLeftHTML が state.openTrekId で brand fallback する。
+        idx = self.src.index("getFooterLeftHTML:")
+        end = self.src.index(",", idx)
+        block = self.src[idx:end]
+        assert "state.openTrekId" in block, (
+            "PLATFORM.getFooterLeftHTML must branch on state.openTrekId so the "
+            "footer doesn't leak project id while a trek detail page is open "
+            "(2026-06-23 dogfood)"
+        )
+        assert "Beacon" in block, (
+            "PLATFORM.getFooterLeftHTML must show brand 'Beacon' fallback for "
+            "open trek (mirrors header brand swap)"
+        )
+
+    def test_non_trek_footer_still_shows_project_id(self):
+        # 通常 (non-trek) 経路では state.projectId が表示される (= retro / dashboard
+        # 視点で 「今どの project に居るか」 を判別するため、 mockup footer と同じ)。
+        idx = self.src.index("getFooterLeftHTML:")
+        end = self.src.index(",", idx)
+        block = self.src[idx:end]
+        assert "state.projectId" in block, (
+            "non-trek path must still surface state.projectId so users keep "
+            "the project context when they aren't inside a trek"
+        )
+
+
+class TestWebUI_TrekMembersTableSessionFullColumn:
+    """2026-06-23 dogfood: MEMBERS & AGENTS table の session 列を 2 列に分割。
+    既存 s-N badge (= session-local) と並んで raw session id 短縮形
+    (= sv-77...a648e110) を別列で表示し、 leader / member が自分の raw sid を
+    1 列で読めるようにする。 click で clipboard コピーは両セル共通。
+    """
+
+    def setup_method(self, _method):
+        self.src = _read(WEB_INDEX)
+
+    def test_thead_has_five_columns(self):
+        # thead の <th> ラベル順序 (user / session / session id / role / task)
+        # を render 文字列内で構造的に pin する。
+        thead_marker = "<table class=\"trek-members-table\">"
+        idx = self.src.index(thead_marker)
+        end = self.src.index("</thead>", idx)
+        block = self.src[idx:end]
+        for label in ("<th>user</th>", "<th>session</th>", "<th>session id</th>",
+                      "<th>role</th>", "<th>task</th>"):
+            assert label in block, f"thead missing column header {label!r}"
+
+    def test_separate_session_local_and_full_cells(self):
+        # td 単位で session-local-cell と session-full-cell が render される
+        # (= 1 td に span 2 つ並べる従来案ではなく、 5 列 table に再構築)。
+        assert 'class="session-local-cell"' in self.src
+        assert 'class="session-full-cell"' in self.src
+
+    def test_session_full_cell_is_clickable_for_copy(self):
+        # session-full cell にも copy-trek-sid action が紐づき、 既存の
+        # handleCommonAction 'copy-trek-sid' case で clipboard コピーが走る。
+        assert "session-full-clickable" in self.src
+        assert 'data-action="copy-trek-sid"' in self.src
+        assert "case 'copy-trek-sid':" in self.src
+
+    def test_session_full_cell_uses_short_session_id_helper(self):
+        # session-full セルは _trekShortSessionId helper で短縮済 raw sid を
+        # 表示する (= 既存 helper を再利用し、 短縮ルール一元化)。
+        # ms-86 / e-2225 — comment marker rewrite に追従、 構造的 anchor
+        # (= _renderTrekMembersTable の body 全体) で block を取り直す。
+        fn_marker = "function _renderTrekMembersTable("
+        idx = self.src.index(fn_marker)
+        # End at the closing of the same function — find the next top-level
+        # ``function `` declaration after ``fn_marker``.
+        end = self.src.index("\nfunction ", idx + len(fn_marker))
+        block = self.src[idx:end]
+        assert "_trekShortSessionId(fullSid)" in block, (
+            "session-full cell must reuse _trekShortSessionId helper so the "
+            "shortening rule (sv-77e815…a648e110) stays consistent"
+        )
+
+    def test_mockup_synced_to_five_columns(self):
+        # mockup 自体も 5 列構造に同期されている (= visual reference と実装の
+        # drift を構造的に防ぐ)。
+        mockup = _read(REPO_ROOT / "mockups" / "trek-detail.html")
+        idx = mockup.index('<table class="members-table">')
+        end = mockup.index("</thead>", idx)
+        block = mockup[idx:end]
+        for label in ("<th>user</th>", "<th>session</th>", "<th>session id</th>",
+                      "<th>role</th>", "<th>task</th>"):
+            assert label in block, f"mockup thead missing {label!r}"

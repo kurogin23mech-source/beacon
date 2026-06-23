@@ -19,6 +19,13 @@ _BACKEND = os.environ.get("BEACON_STORE_BACKEND", "firestore").lower()
 
 if _BACKEND == "dynamodb":
     from dynamodb_client import (  # noqa: F401
+        # Frontmatter helper (ms-60 / e-2306):
+        # operation_approve calls `db._extract_frontmatter_field(...)`. Without
+        # this re-export the call raises AttributeError, swallowed by the
+        # catch-all exception handler as a generic 500. Both backends ship the
+        # same pure-string helper, so the router exposes it under the same
+        # private name to keep call sites symmetrical.
+        _extract_frontmatter_field,
         # Projects
         get_project,
         save_project,
@@ -96,6 +103,13 @@ if _BACKEND == "dynamodb":
     )
 elif _BACKEND == "firestore":
     from firestore_client import (  # noqa: F401
+        # Frontmatter helper (ms-60 / e-2306):
+        # operation_approve calls `db._extract_frontmatter_field(...)`. Without
+        # this re-export the call raises AttributeError, swallowed by the
+        # catch-all exception handler as a generic 500. Both backends ship the
+        # same pure-string helper, so the router exposes it under the same
+        # private name to keep call sites symmetrical.
+        _extract_frontmatter_field,
         # Projects
         get_project,
         save_project,
