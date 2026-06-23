@@ -2843,6 +2843,13 @@ let state = {
   // Key: ms.id. Value: array of entry objects (same shape core.entries_to_json returns).
   milestoneEntries: {},
   entriesLoading: new Set(),
+  // ms-84 / e-2326 follow-up — tab-scoped extras cache. The slim WS broadcast
+  // also drops top-level arrays that the dashboard doesn't need (pushes /
+  // deployments / worktree_sessions) so the frame fits. They are fetched
+  // lazily on switchTab('releases') and reattached to state.project so the
+  // existing Releases tab render code keeps working unchanged.
+  projectExtras: { pushes: null, deployments: null, worktree_sessions: null },
+  projectExtrasLoading: new Set(),
   // Sort
   sortAsc: true,
   // Menu
@@ -4395,6 +4402,14 @@ async function switchTab(tab) {
         .then(() => render())
         .catch(() => {});
     }
+  }
+  if (tab === 'releases') {
+    // ms-84 / e-2326 follow-up — slim WS broadcast drops the heavy
+    // pushes / deployments arrays. Fetch them lazily when the user
+    // actually opens the Releases tab; the listing repaints once each
+    // arrives (fetchProjectExtra calls render() internally).
+    if (state.projectExtras.pushes === null) fetchProjectExtra('pushes');
+    if (state.projectExtras.deployments === null) fetchProjectExtra('deployments');
   }
   if (tab === 'notes') {
     // ms-57 e-1041: Session tab carries two sub-views (notes/logs). Kick
@@ -7957,12 +7972,23 @@ async function fetchMilestoneEntries(msId) {
 }
 
 // Hydrate a slim project payload by reattaching cached entries onto each
-// milestone in-place. Returns the same project object (mutated).
+// milestone in-place, plus the top-level tab-scoped arrays from cache so
+// the Releases / Worktree tabs don't go blank when a slim WS update lands.
 function hydrateProjectEntries(project) {
-  if (!project || !Array.isArray(project.milestones)) return project;
-  for (const ms of project.milestones) {
-    if (ms.entries === undefined) {
-      ms.entries = state.milestoneEntries[ms.id] || [];
+  if (!project || typeof project !== 'object') return project;
+  if (Array.isArray(project.milestones)) {
+    for (const ms of project.milestones) {
+      if (ms.entries === undefined) {
+        ms.entries = state.milestoneEntries[ms.id] || [];
+      }
+    }
+  }
+  // ms-84 / e-2326 follow-up — restore top-level tab-scoped arrays from the
+  // extras cache so the Releases / Worktree views keep their data across
+  // slim WS broadcasts (the broadcast drops these fields).
+  for (const k of ['pushes', 'deployments', 'worktree_sessions']) {
+    if (project[k] === undefined && Array.isArray(state.projectExtras[k])) {
+      project[k] = state.projectExtras[k];
     }
   }
   return project;
@@ -7974,6 +8000,28 @@ function hydrateProjectEntries(project) {
 function refreshExpandedMilestoneEntries() {
   for (const msId of state.expanded) {
     fetchMilestoneEntries(msId);
+  }
+}
+
+// ms-84 / e-2326 follow-up — lazy fetch a top-level tab-scoped array
+// (pushes / deployments / worktree_sessions) and reattach it to
+// state.project under the same key. Idempotent + dedup'd per key.
+async function fetchProjectExtra(key) {
+  if (!state.projectId) return;
+  const endpointKey = key === 'worktree_sessions' ? 'worktree-sessions' : key;
+  if (state.projectExtrasLoading.has(key)) return;
+  state.projectExtrasLoading.add(key);
+  try {
+    const data = await api(`/api/projects/${state.projectId}/${endpointKey}`);
+    const arr = (data && (data[key] || data)) || [];
+    const normalized = Array.isArray(arr) ? arr : [];
+    state.projectExtras[key] = normalized;
+    if (state.project) state.project[key] = normalized;
+  } catch (e) {
+    // Silent — Releases tab simply shows whatever's cached (possibly empty).
+  } finally {
+    state.projectExtrasLoading.delete(key);
+    render();
   }
 }
 
