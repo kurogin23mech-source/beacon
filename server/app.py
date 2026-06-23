@@ -6939,12 +6939,20 @@ def _enrich_project_slim(data: dict) -> dict:
 
 
 async def _broadcast(project_id: str, data: dict):
-    """Send slim project data to all WebSocket clients (ms-84 / e-2326)."""
+    """Notify subscribed WS clients that the project changed (ms-84 / e-2326).
+
+    Signal-only payload (~30 bytes). The previous attempts (full payload →
+    slim w/ entries dropped → slim w/ tab-scoped arrays dropped) all hit a
+    Cloud Run / GFE WS frame tolerance that's tighter than expected (=
+    measured: 17.6 KiB works, 84 KiB consistently 1006-closes). Instead of
+    chasing the threshold by stripping more fields, we make the WS a pure
+    signal channel: clients fetch the actual state via REST (which has no
+    frame limit). This is a permanent fix to the frame-size class of bugs.
+    """
     clients = _ws_connections.get(project_id, set()).copy()
     if not clients:
         return
-    enriched = _enrich_project_slim(data)
-    msg = {"type": "project", "data": enriched}
+    msg = {"type": "project_changed"}
     for ws in clients:
         try:
             await ws.send_json(msg)
@@ -7212,13 +7220,19 @@ async def ws_project(websocket: WebSocket, project_id: str):
         _ws_connections[project_id] = set()
     _ws_connections[project_id].add(websocket)
 
-    # Send initial slim data (ms-84 / e-2326). The role check above already
-    # loaded the project via load_project_consistent (which hydrates v2
-    # subcollection milestones), so we reuse ``raw`` instead of fetching twice.
-    # We send the slim variant (entries[] dropped) so the WS frame stays under
-    # Starlette's default 1 MiB limit; the client fetches entries lazily per-MS
-    # via GET /api/projects/{id}/milestones/{ms_id}/entries.
-    await websocket.send_json({"type": "project", "data": _enrich_project_slim(raw)})
+    # ms-84 / e-2326 — signal-only WS. Past attempts to push project state
+    # over WS (full / slim / aggressively-slim) all hit a Cloud Run / GFE WS
+    # frame tolerance somewhere in the 20-50 KB range, well under what
+    # Starlette's `max_size` default (1 MiB) would suggest. Rather than
+    # chasing that opaque limit, we send a tiny "ready" notification and
+    # let the client pull the actual state via REST (which has no frame
+    # limit and already returns the slim variant via ?slim=true). Subsequent
+    # change events on this socket follow the same shape — type=project_changed
+    # with no body — so the client's update path is "refetch on signal".
+    await websocket.send_json({
+        "type": "ws_ready",
+        "project_id": project_id,
+    })
 
     _start_watcher(project_id)
 

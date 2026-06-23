@@ -3174,15 +3174,21 @@ function connectWebSocket(projectId) {
   ws.onopen = () => { state.connected = true; state.error = null; updateConnectionStatus(); };
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
-    if (msg.type === 'project') {
+    if (msg.type === 'project_changed' || msg.type === 'ws_ready') {
+      // ms-84 / e-2326 — signal-only WS. Refetch slim project via REST
+      // (no frame size limit) whenever the server signals a change. Same
+      // path works for the initial ws_ready notification and for ongoing
+      // change broadcasts. Debounced via fetchSlimProjectIfChanged so
+      // back-to-back signals collapse into a single refetch.
+      state.connected = true;
+      fetchSlimProjectIfChanged();
+    } else if (msg.type === 'project') {
+      // Legacy fall-through — older server revisions during rollover may
+      // still push the full slim payload. Keep the hydrate path so the
+      // UI doesn't break during the deploy window.
       const newJson = JSON.stringify(msg.data);
       if (newJson !== lastProjectJson) {
         lastProjectJson = newJson;
-        // ms-84 / e-2326 — WS now ships a slim payload (no entries[]).
-        // Hydrate cached entries back into the milestone array so existing
-        // render code keeps reading ms.entries unchanged, then schedule a
-        // background refetch for any currently-expanded MS (counts may have
-        // changed even when the cached entry tree is stale).
         state.project = hydrateProjectEntries(msg.data);
         state.lastUpdate = new Date();
         state.connected = true;
@@ -8000,6 +8006,39 @@ function hydrateProjectEntries(project) {
 function refreshExpandedMilestoneEntries() {
   for (const msId of state.expanded) {
     fetchMilestoneEntries(msId);
+  }
+}
+
+// ms-84 / e-2326 signal-only — debounced slim REST refetch driven by WS
+// signals. Collapses bursts of project_changed signals (e.g. a script
+// landing 5 task updates back-to-back) into a single REST round-trip.
+let _slimRefetchTimer = null;
+let _slimRefetchInFlight = false;
+async function fetchSlimProjectIfChanged() {
+  if (!state.projectId) return;
+  if (_slimRefetchInFlight) {
+    // Coalesce: schedule one more refetch after the current one returns
+    // so the very last signal in a burst still triggers an update.
+    if (_slimRefetchTimer) clearTimeout(_slimRefetchTimer);
+    _slimRefetchTimer = setTimeout(fetchSlimProjectIfChanged, 250);
+    return;
+  }
+  _slimRefetchInFlight = true;
+  try {
+    const data = await api(`/api/projects/${state.projectId}?slim=true`);
+    const newJson = JSON.stringify(data);
+    if (newJson !== lastProjectJson) {
+      lastProjectJson = newJson;
+      state.project = hydrateProjectEntries(data);
+      state.lastUpdate = new Date();
+      renderOnDataChange();
+      refreshExpandedMilestoneEntries();
+    }
+  } catch (e) {
+    // Silent — UI keeps showing the last good state until the next signal
+    // or a manual reload.
+  } finally {
+    _slimRefetchInFlight = false;
   }
 }
 
