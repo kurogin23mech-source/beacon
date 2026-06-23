@@ -262,8 +262,39 @@ def test_approve_rejects_missing_approved_actions():
         f"/api/projects/{PROJECT_ID}/operations/{OP_ID}/envelopes",
         json={"spec_doc_id": "no-actions"},
     )
+    # ms-60 / e-2306 regression: this scenario previously surfaced as a 500
+    # because store_router omitted `_extract_frontmatter_field` from its
+    # re-export list, so `_spec_doc_for_op` raised AttributeError before any
+    # 4xx handler could fire. The test now pins the 400 path open.
     assert resp.status_code == 400
     assert "no `approved_actions`" in resp.json()["detail"]
+
+
+def test_store_router_reexports_extract_frontmatter_field():
+    """e-2306 regression guard.
+
+    `_spec_doc_for_op` in `server/app.py` calls
+    `db._extract_frontmatter_field(...)` where `db` is `store_router`. If the
+    router stops re-exporting that helper, every `operation approve` call
+    raises AttributeError → catch-all 500. Pin the contract at the module
+    level so the symptom shows up here instead of in production.
+    """
+    import store_router as router_under_test
+    assert hasattr(router_under_test, "_extract_frontmatter_field"), (
+        "store_router must re-export `_extract_frontmatter_field` for both "
+        "firestore and dynamodb backends (consumed by operation_approve)"
+    )
+    # Smoke-call the helper to confirm it's the real function, not a stub.
+    sample = (
+        "---\n"
+        "scope: spec\n"
+        f"operation: {OP_ID}\n"
+        "---\n"
+        "body\n"
+    )
+    assert router_under_test._extract_frontmatter_field(sample, "scope") == "spec"
+    assert router_under_test._extract_frontmatter_field(sample, "operation") == OP_ID
+    assert router_under_test._extract_frontmatter_field(sample, "missing") == ""
 
 
 def test_approve_rejects_empty_approved_actions():
