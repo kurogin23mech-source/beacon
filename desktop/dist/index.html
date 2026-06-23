@@ -5524,7 +5524,7 @@ function _renderTrekTaskRow(t, s, slotIndex, scope) {
 // _renderTrekMembersTable — v2 mockup table: user / session / role / task
 // columns with rowspan grouping for users that hold multiple sessions
 // inside the same trek (= same email × N session_ids).
-function _renderTrekMembersTable(t, scope) {
+function _renderTrekMembersTable(t, scopeAggregate) {
   const members = t.members || [];
   if (!members.length) {
     return `<div class="trek-coming-soon">No members yet.</div>`;
@@ -5547,11 +5547,14 @@ function _renderTrekMembersTable(t, scope) {
         if (taskSlot.has(taskId)) slots.add(taskSlot.get(taskId));
         else {
           // Walk back from task → milestone to find a parent slot.
-          // ms-86 / e-2249: ``scope`` is the cross-project aggregate
+          // ms-86 / e-2249: ``scopeAggregate`` is the cross-project aggregate
           // passed in by _renderTrekDetail; the lookup no longer reads
           // state.project, so member→slot wiring works for cross-project
           // Treks regardless of which project the caller currently has open.
-          const lookup = _trekLookupTask(scope, taskId);
+          // (renamed from ``scope`` in hotfix to avoid shadowing the local
+          // ``const scope = t.scope || []`` below — that one is the Trek's
+          // scope-entries array, not the cross-project aggregate dict.)
+          const lookup = _trekLookupTask(scopeAggregate, taskId);
           if (lookup && lookup.ms_id && msSlot.has(lookup.ms_id)) {
             slots.add(msSlot.get(lookup.ms_id));
           }
