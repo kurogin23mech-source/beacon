@@ -3799,6 +3799,11 @@ function renderMainContent() {
       <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
       <button class="tab-btn ${state.activeTab === 'releases' ? 'active' : ''}" data-action="switch-tab" data-tab="releases">Releases</button>
       <button class="tab-btn ${state.activeTab === 'operations' ? 'active' : ''}" data-action="switch-tab" data-tab="operations">Operations</button>
+      <!-- ms-86 / e-2251 — Treks promoted to top-level tab (= SPEC IgCFK8I34cBfPco3UE06
+           方針 6: Trek は project と独立な scope なので project 階層配下から外す)。
+           ハンバーガーメニューの Treks セクションは削除済 (= 重複排除)、 ここが唯一の
+           入口。 list view は user member の全 Trek を出す (= renderTreksSection)。 -->
+      <button class="tab-btn ${state.activeTab === 'treks' ? 'active' : ''}" data-action="switch-tab" data-tab="treks">Treks</button>
       <button class="tab-btn ${state.activeTab === 'notes' ? 'active' : ''}" data-action="switch-tab" data-tab="notes">Session</button>
     </div>
     ${state.activeTab === 'dashboard' ? `
@@ -3823,6 +3828,7 @@ function renderMainContent() {
     ${state.activeTab === 'documents' ? `<div id="documents-container">${renderDocumentsSection()}</div>` : ''}
     ${state.activeTab === 'releases' ? renderReleasesSection() : ''}
     ${state.activeTab === 'operations' ? renderOperationsSection() : ''}
+    ${state.activeTab === 'treks' ? renderTreksSection() : ''}
     ${state.activeTab === 'notes' ? renderSessionSection() : ''}
   `;
 }
@@ -4424,6 +4430,14 @@ async function switchTab(tab) {
       dataSource.loadSessionNotes(),
       dataSource.loadSessionLogs(),
     ]).then(() => render()).catch(() => {});
+  }
+  if (tab === 'treks') {
+    // ms-86 / e-2251 — Treks tab landed as a top-level item, so the trek
+    // list now loads on tab activation (= it used to load lazily when the
+    // hamburger panel opened). Skip if already cached.
+    if (!state.treks || state.treks.length === 0) {
+      dataSource.loadTreks().then(() => render()).catch(() => {});
+    }
   }
   render();
 }
@@ -6019,12 +6033,16 @@ function renderTreksSection() {
     }
     return _renderTrekDetail(t);
   }
-  // List view: filter to treks that include the current project in scope.
-  const pid = state.projectId;
-  const inProject = (state.treks || []).filter(t =>
-    (t.scope || []).some(s => s.project === pid)
-  );
-  if (inProject.length === 0) {
+  // List view (ms-86 / e-2251): show ALL treks the caller belongs to
+  // (= creator or member), not just treks scoped to the current project.
+  // Trek は cross-project な独立 scope (= SPEC IgCFK8I34cBfPco3UE06 中心原則 1
+  // 「Project ⟷ Trek は M:N 独立オブジェクト」)。 project filter を外して
+  // user 全 Trek を 1 画面で一覧できるようにする。 紐付く project は各行で
+  // chip 表示 (= 何の project に絡む Trek かは 1 行で読み取れる)。
+  // /api/treks endpoint 側で caller=member の絞り込みは既に走っているので、
+  // ここで追加 filter する必要は無い。
+  const allTreks = state.treks || [];
+  if (allTreks.length === 0) {
     return `
       <section class="retro-section fade-in">
         <div class="milestones-header" style="margin-bottom:4px;">
@@ -6032,7 +6050,7 @@ function renderTreksSection() {
           <span class="milestones-count">0</span>
         </div>
         <div class="retro-empty" style="margin-top:10px;">
-          No treks include this project in their scope yet (a trek is a cross-project, cross-session coordination workspace).
+          You don't belong to any treks yet (= a trek is a cross-project, cross-session coordination workspace).
         </div>
         <div style="margin-top:14px;padding:10px 12px;font-size:0.72rem;color:var(--text-dim);background:var(--bg-surface);border:1px solid var(--border);border-radius:4px;line-height:1.5;">
           ℹ Treks are created from the terminal:
@@ -6041,17 +6059,28 @@ function renderTreksSection() {
       </section>`;
   }
   // Split active vs archived for visual grouping (mock convention).
-  const active = inProject.filter(t => t.status !== 'archived');
-  const archived = inProject.filter(t => t.status === 'archived');
+  const active = allTreks.filter(t => t.status !== 'archived');
+  const archived = allTreks.filter(t => t.status === 'archived');
+  // ms-86 / e-2251 — derive distinct project count per trek (= "this trek
+  // spans N projects" chip). scope[] entries carry a `project` field per
+  // normalize_scope_entry (lib/trek.py L922-936). De-duplicate by project id
+  // so a 5-task / 1-project trek shows "1 project" rather than "5 projects".
   const trekRow = (t) => {
     const halt = !!t.halt;
     const memberCount = (t.members || []).length;
-    const scopeCount = (t.scope || []).length;
+    const scopeEntries = t.scope || [];
+    const scopeCount = scopeEntries.length;
+    const projectIds = new Set();
+    for (const s of scopeEntries) {
+      if (s && s.project) projectIds.add(s.project);
+    }
+    const projectCount = projectIds.size;
     return `
       <div class="trek-list-row" data-action="open-trek" data-trek-id="${esc(t.trek_id)}">
         <span class="status-dot ${_trekBadgeClass(t.status)}"></span>
         <span class="name">${esc(t.title || '')}${halt ? '<span class="halt-mark">⚠</span>' : ''}<span class="id">${esc(t.trek_id)}</span></span>
         <span class="counts">${memberCount}m / ${scopeCount}s</span>
+        <span class="counts">${projectCount} project${projectCount === 1 ? '' : 's'}</span>
         <span class="counts">${esc(t.type || '')}</span>
       </div>`;
   };
@@ -7573,19 +7602,17 @@ async function renderMenu() {
   if (state.projects.length === 0) {
     try { await loadProjects(); } catch (_e) {}
   }
-  const trekLoad = (state.treks && state.treks.length)
-    ? Promise.resolve()
-    : dataSource.loadTreks().catch(() => {});
+  // ms-86 / e-2251 \u2014 Treks \u30bb\u30af\u30b7\u30e7\u30f3\u306f\u30cf\u30f3\u30d0\u30fc\u30ac\u30fc\u304b\u3089\u524a\u9664\u6e08 (= top-level tab
+  // \u300cTreks\u300d \u306b\u5206\u96e2\u3001 SPEC IgCFK8I34cBfPco3UE06 \u65b9\u91dd 6)\u3002 menu loader \u304b\u3089\u3082 Trek
+  // load \u3092\u5916\u3057\u3001 \u30cf\u30f3\u30d0\u30fc\u30ac\u30fc = project + online sessions \u306e\u307f\u306b\u5f79\u5272\u3092\u7d5e\u308b\u3002
   const sessionLoad = (state.onlineSessions && state.onlineSessions.length)
     ? Promise.resolve()
     : dataSource.loadOnlineSessions().catch(() => {});
-  await Promise.all([trekLoad, sessionLoad]);
+  await Promise.all([sessionLoad]);
 
   const paint = () => {
     const root = document.getElementById('menu-root');
     if (!root) return;
-    const treks = state.treks || [];
-    const visibleTreks = treks.filter(t => t.status !== 'archived');
     const sessions = state.onlineSessions || [];
 
     root.innerHTML = `
@@ -7607,19 +7634,6 @@ async function renderMenu() {
               <div class="menu-item-sub">${esc(p.project_id)}</div>
             </button>
           `).join('') || '<div class="menu-user" style="color:var(--text-dim);">No projects.</div>'}
-        </div>
-
-        <div class="menu-section">
-          <div class="menu-section-title">Treks</div>
-          ${visibleTreks.length
-            ? visibleTreks.map(t => `
-                <button class="menu-item ${state.openTrekId === t.trek_id ? 'current' : ''}"
-                        data-action="menu-open-trek" data-trek-id="${esc(t.trek_id)}">
-                  ${esc(t.title || '')}${t.halt ? ' \u26a0' : ''}
-                  <div class="menu-item-sub">${esc(t.trek_id)}</div>
-                </button>
-              `).join('')
-            : '<div class="menu-user" style="color:var(--text-dim);">No treks visible to you.</div>'}
         </div>
 
         <div class="menu-section">
