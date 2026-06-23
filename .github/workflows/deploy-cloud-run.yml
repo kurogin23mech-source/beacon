@@ -84,6 +84,17 @@ jobs:
         #   1 人運用 / 低トラフィックなら問題なし。 本格運用時には案 B
         #   (Pub/Sub or Redis cross-instance fanout) に置換する。 SPEC は
         #   beacon doc add `ms-84 / e-2303 SPEC: WS push 構造修復` 参照。
+        #
+        # ms-84 / e-2322 — Cloud Run request timeout 延長 (e-2303 続き):
+        #   Cloud Run の request timeout default は 5 分 (300 秒)。 WebSocket は
+        #   1 connection = 1 request 扱いで 5 分で server 側自動切断 → client
+        #   onclose → 3 秒後 reconnect の周期 loop が起き、 write タイミングが
+        #   reconnect の dead window にハマると broadcast が live client に届かず
+        #   live 反映が体感できなくなる (= 2026-06-23 dogfood で e-2303 + 30 日
+        #   session 反映後も WS push が出ない症状の真因)。 --timeout=3600 で
+        #   60 分 (Cloud Run の最大値) に延長し、 通常使用での reconnect 頻度を
+        #   12 倍緩和する。 60 分超 idle / heartbeat 欠落 の根本修復は別 task
+        #   (= ms-46 e-766 reconnect 戦略 SHARED 化) で扱う。
         run: |
           gcloud run deploy beacon-api-prod \
             --source . \
@@ -92,6 +103,7 @@ jobs:
             --set-build-env-vars=CACHE_BUST=${{ github.sha }} \
             --min-instances=1 \
             --max-instances=1 \
+            --timeout=3600 \
             --quiet
 
       - name: Health check
