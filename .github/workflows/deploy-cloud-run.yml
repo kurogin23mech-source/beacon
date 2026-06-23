@@ -70,12 +70,28 @@ jobs:
         # Canonical command from the release CORE doc. --build-arg is NOT valid
         # for gcloud (Docker-CLI flag); --set-build-env-vars is the correct one.
         # CACHE_BUST is mandatory — see the workflow header.
+        #
+        # ms-84 / e-2303 — WS push 構造修復 (応急処置 A):
+        #   --min-instances=1 --max-instances=1 を付けて service を物理的に
+        #   single-instance に固定する。 server/app.py の `_ws_connections`
+        #   は process-local dict (L6942) で、 multi-instance Cloud Run では
+        #   HTTP POST (= write 着地 instance) と WS connection (= 別 instance)
+        #   が分離する経路がある。 着地 instance の `_ws_connections[project_id]`
+        #   が空で `_broadcast_project_after_write` (L6741) が early return
+        #   し、 Web UI が永遠に dark になる病理 (= e-2303 task description)。
+        #   single-instance 固定で fanout が不要になり live 反映が成立する。
+        #   trade-off: 月額 $5〜$20 (always-on 1 instance) + 水平 scale 不能。
+        #   1 人運用 / 低トラフィックなら問題なし。 本格運用時には案 B
+        #   (Pub/Sub or Redis cross-instance fanout) に置換する。 SPEC は
+        #   beacon doc add `ms-84 / e-2303 SPEC: WS push 構造修復` 参照。
         run: |
           gcloud run deploy beacon-api-prod \
             --source . \
             --project "${{ vars.GCP_PROJECT }}" \
             --region asia-northeast1 \
             --set-build-env-vars=CACHE_BUST=${{ github.sha }} \
+            --min-instances=1 \
+            --max-instances=1 \
             --quiet
 
       - name: Health check
