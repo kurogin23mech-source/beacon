@@ -1637,6 +1637,12 @@ def put_project(project_id: str, body: dict,
 @app.post("/api/projects/{project_id}/milestones")
 def create_milestone(project_id: str, body: MilestoneCreate,
                      user: dict = Depends(require_auth)):
+    # ms-43 / e-2246 — resolve the human author identity (= user_id / email /
+    # display_name) once, then thread it into core.milestone_add so meta.author
+    # is stamped at creation time. Mirrors the create_entry contract from
+    # ms-78 / e-1909 so MS lists / detail can surface a creator label.
+    author = _resolve_author(user)
+
     def op(data: dict):
         _require_write(data, user)
         try:
@@ -1646,6 +1652,7 @@ def create_milestone(project_id: str, body: MilestoneCreate,
                 priority=body.priority,
                 objective=body.objective,
                 acceptance_criteria=body.acceptance_criteria,
+                author=author,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
