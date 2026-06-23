@@ -1,0 +1,57 @@
+name: Test (pytest)
+
+# Runs the Python test suite on every PR + push to main so a "tests fail" PR
+# can no longer be merged silently. Created under ms-61 / e-1904 because the
+# ms-84 e-2326 WS-push repair work (2026-06-23) required 3 sequential deploys
+# and each one needed `pytest tests/test_api.py` hand-driven from local; a
+# missed regression in one of those passes could have shipped to prod.
+#
+# DESIGN NOTES
+#   - pyproject.toml declares pytest under [project.optional-dependencies] dev,
+#     so `pip install -e .[dev]` is the canonical install path (mirrors what a
+#     developer does locally).
+#   - tests/ has ~210 files and no conftest.py — pytest auto-discovers the test_*
+#     pattern from the repo root.
+#   - Python 3.11 matches the lint-docs.yml setup so a single Python version is
+#     used across all CI workflows (avoids 3.9-only regression noise).
+#   - This workflow runs independently of GitHub branch protection — even
+#     without protection rules, a red check is visible on the PR page.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Cancel in-progress runs on the same ref when a newer commit lands. Saves
+  # CI minutes on rapid push cycles (typical during fix iteration).
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install package with dev extras
+        # `-e .[dev]` pulls pytest + ruff from pyproject.toml's dev extra.
+        # Cloud extras (google-auth*) are pulled in from requirements.txt so
+        # tests that import lib/auth.py etc. don't ImportError on CI.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,cloud]"
+          python -m pip install -r requirements.txt
+
+      - name: Run pytest
+        run: pytest tests/ -q
