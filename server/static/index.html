@@ -3310,7 +3310,12 @@ function renderEntry(entry) {
   // ms-78 / e-1909 — author column. Empty for older entries without
   // meta.author and no legacy actor either, in which case we omit the
   // span entirely so the row layout stays clean.
-  const authorLabel = renderEntryAuthor(entry);
+  // ms-43 / e-2246 — also suppress in single-actor projects to align
+  // with MS / Operation card behavior (AC #4: 1 名 dev の場合は冗長性
+  // 回避で省略してよい). The entry detail modal always shows author
+  // regardless of this heuristic.
+  const _entryMultiActor = projectHasMultipleAuthors(state.project);
+  const authorLabel = _entryMultiActor ? renderEntryAuthor(entry) : '';
   const authorSpan = authorLabel
     ? `<span class="entry-author" style="color:var(--text-dim);font-size:0.65rem;margin-right:6px;">${authorLabel}</span>`
     : '';
