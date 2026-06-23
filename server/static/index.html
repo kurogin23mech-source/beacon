@@ -2747,6 +2747,16 @@ let state = {
   treks: [],
   openTrekId: null,
   openTrekDocs: [],
+  // ms-86 / e-2249 — cross-project scope aggregate for the currently
+  // open Trek. Populated from /api/treks/{id}/{milestones,operations,tasks}
+  // (= the e-2248 endpoints) when openTrek() runs. Shape:
+  //   { milestones: [{id, project_id, ...}],
+  //     operations: [{id, project_id, ...}],
+  //     tasks:      [{id, project_id, milestone_id?, operation_id?, ...}] }
+  // The Trek detail render reads this instead of `state.project`, so the
+  // detail view stays correct regardless of which project (if any) the
+  // caller currently has open (= e-2240 SPEC 設計方針 5).
+  openTrekScope: { milestones: [], operations: [], tasks: [] },
   // ms-86 / e-2126 — Trek detail v2 (mockup-faithful) UI state.
   // openTrekExpanded: scope row indices ("0", "1", ...) whose accordion
   //   (= child task list under a MS / Op) is currently open.
@@ -3889,6 +3899,27 @@ const dataSource = {
       state.openTrekDocs = [];
     }
   },
+  // ms-86 / e-2249 — cross-project Trek scope aggregate (= MS / Op /
+  // Task across every project the Trek's scope reaches). Calls the
+  // e-2248 endpoints in parallel and stuffs the result into
+  // ``state.openTrekScope`` so the Trek detail render can look entries
+  // up by id without depending on ``state.project``. Any individual
+  // endpoint failure degrades to an empty array on that axis so the
+  // Trek detail UI still renders something (= the same regress regime
+  // as loadTrekDocs).
+  loadTrekScope: async (trekId) => {
+    const enc = encodeURIComponent(trekId);
+    const [ms, ops, tasks] = await Promise.all([
+      api(`/api/treks/${enc}/milestones`).catch(() => []),
+      api(`/api/treks/${enc}/operations`).catch(() => []),
+      api(`/api/treks/${enc}/tasks`).catch(() => []),
+    ]);
+    state.openTrekScope = {
+      milestones: Array.isArray(ms) ? ms : [],
+      operations: Array.isArray(ops) ? ops : [],
+      tasks: Array.isArray(tasks) ? tasks : [],
+    };
+  },
   // ms-69 / e-1664 — reverse lookup for the Related Treks widget on
   // milestone / operation / task detail. ``kind`` ∈ {'milestone','operation','task'}.
   loadRelatedTreks: async (kind, id) => {
@@ -4294,20 +4325,31 @@ async function switchTab(tab) {
 async function openTrek(trekId) {
   state.openTrekId = trekId;
   state.openTrekDocs = [];
+  state.openTrekScope = { milestones: [], operations: [], tasks: [] };
   state.openTrekExpanded = new Set();
   state.openTrekShowDone = new Set();
   render();
-  // Fetch docs in the background; if it fails, the detail view shows
-  // "No docs tagged with this trek yet." which is a fine degrade.
-  try {
-    await dataSource.loadTrekDocs(trekId);
-    render();
-  } catch (_e) { /* no-op */ }
+  // ms-86 / e-2249 — fetch the cross-project scope aggregate (= MS /
+  // Op / Task across every project the Trek reaches) in parallel with
+  // the docs. Both are independent and any partial failure degrades
+  // gracefully (= the detail view falls back to bare scope ids).
+  await Promise.all([
+    (async () => {
+      try { await dataSource.loadTrekDocs(trekId); }
+      catch (_e) { /* docs failure → empty state */ }
+    })(),
+    (async () => {
+      try { await dataSource.loadTrekScope(trekId); }
+      catch (_e) { /* scope failure → empty state, detail uses bare ids */ }
+    })(),
+  ]);
+  render();
 }
 
 function closeTrek() {
   state.openTrekId = null;
   state.openTrekDocs = [];
+  state.openTrekScope = { milestones: [], operations: [], tasks: [] };
   state.openTrekExpanded = new Set();
   state.openTrekShowDone = new Set();
   render();
@@ -5207,48 +5249,65 @@ function _trekTaskAssignee(t, taskId) {
   return entry.updated_by_session_id || '';
 }
 
-// _trekLookupTaskInProject — best-effort lookup of a task entry inside the
-// currently loaded project tree. Returns null for cross-project scope (we
-// can't reach into another project's milestones from the WS payload). The
-// caller falls back to rendering the bare scope id.
-function _trekLookupTaskInProject(taskId) {
-  const proj = state.project || {};
-  const milestones = proj.milestones || [];
-  function walk(entries) {
-    for (const e of entries || []) {
-      if (e && e.id === taskId) return e;
-      const hit = walk(e && e.entries);
-      if (hit) return hit;
+// _trekLookupTask — find a task entry inside the Trek's cross-project
+// scope aggregate. ms-86 / e-2249: this used to read ``state.project``
+// (= the project that happened to be currently open), which broke for
+// cross-project Treks where the user might be on a different project
+// or no project at all. The aggregate is now fetched up-front by
+// ``dataSource.loadTrekScope`` and lives at ``state.openTrekScope``;
+// pass it in explicitly so the dependency is visible in the signature.
+//
+// @param {{milestones:Array, operations:Array, tasks:Array}|null} scope
+//   Cross-project Trek scope aggregate (= state.openTrekScope shape).
+//   ``null`` / empty arrays are tolerated — the function returns null
+//   and callers fall back to rendering the bare scope id.
+// @param {string} taskId  Target task entry id (= ``e-XXXX``).
+// @returns {{entry:Object, ms_id:string, ms_title?:string,
+//            op_id?:string, op_title?:string, project_id?:string}|null}
+function _trekLookupTask(scope, taskId) {
+  if (!scope || !taskId) return null;
+  for (const tk of (scope.tasks || [])) {
+    if (tk && tk.id === taskId) {
+      const ms_id = tk.milestone_id || '';
+      const op_id = tk.operation_id || '';
+      // Resolve the parent's title for richer UI labels, but tolerate
+      // missing parents (= MS / Op might not be in the aggregate if
+      // the scope entry was task-narrowed).
+      let ms_title = '';
+      if (ms_id) {
+        const ms = (scope.milestones || []).find(x => x.id === ms_id);
+        ms_title = (ms && ms.title) || '';
+      }
+      let op_title = '';
+      if (op_id) {
+        const op = (scope.operations || []).find(x => x.id === op_id);
+        op_title = (op && op.title) || '';
+      }
+      return {
+        entry: tk,
+        ms_id, ms_title,
+        op_id, op_title,
+        project_id: tk.project_id || '',
+      };
     }
-    return null;
-  }
-  for (const ms of milestones) {
-    const hit = walk(ms.entries || []);
-    if (hit) return { entry: hit, ms_id: ms.id, ms_title: ms.title || '' };
-  }
-  for (const op of (proj.operations || [])) {
-    const hit = walk(op.entries || []);
-    if (hit) return { entry: hit, op_id: op.id, op_title: op.title || '' };
   }
   return null;
 }
 
-// _trekLookupMilestoneInProject — same idea but for a milestone scope row.
-// Returns { ms, tasks } where tasks is the list of leaf entries under that
-// milestone (= task type only, skipping commit/save/etc.) so the accordion
-// can render them.
-function _trekLookupMilestoneInProject(msId) {
-  const proj = state.project || {};
-  const ms = (proj.milestones || []).find(x => x.id === msId);
+// _trekLookupMilestone — find a milestone in the Trek scope aggregate
+// and return its descendant tasks (filtered by ``milestone_id`` on the
+// flat tasks list). ms-86 / e-2249: state.project no longer touched.
+//
+// @param {{milestones:Array, tasks:Array}|null} scope
+// @param {string} msId
+// @returns {{ms:Object, tasks:Array}|null}
+function _trekLookupMilestone(scope, msId) {
+  if (!scope || !msId) return null;
+  const ms = (scope.milestones || []).find(x => x.id === msId);
   if (!ms) return null;
-  const tasks = [];
-  function walk(entries) {
-    for (const e of entries || []) {
-      if (e && e.type === 'task') tasks.push(e);
-      walk(e && e.entries);
-    }
-  }
-  walk(ms.entries || []);
+  // The aggregate ``tasks`` list is flat across projects; filter by
+  // ``milestone_id`` (= the container ref stamped by the /tasks endpoint).
+  const tasks = (scope.tasks || []).filter(tk => tk && tk.milestone_id === msId);
   return { ms, tasks };
 }
 
@@ -5284,7 +5343,7 @@ function _renderTrekChildTask(t, taskEntry) {
 //   - { project, operation }  → leaf-like row pointing at the operation
 // The slotIndex argument feeds the t-N label so rows have a stable visual
 // id even before claim primitives (ms-55) ship.
-function _renderTrekTaskRow(t, s, slotIndex) {
+function _renderTrekTaskRow(t, s, slotIndex, scope) {
   const slotLabel = 't-' + (slotIndex + 1);
   const pid = s.project || '';
   const projTag = pid ? `<span class="trek-task-project-tag">${esc(pid.split('-')[0].toUpperCase())}</span>` : '';
@@ -5296,8 +5355,11 @@ function _renderTrekTaskRow(t, s, slotIndex) {
   // で扱うので modal は開かない。 lookup 失敗 (= cross-project scope の task)
   // は entry id だけでも modal 側 findEntryInProject が null を返して silent
   // skip するため、 wiring は付けっぱなしで安全。
+  // ms-86 / e-2249: ``scope`` is the cross-project aggregate fetched once
+  // by openTrek(); helpers no longer read state.project so the row stays
+  // correct even when state.project is unrelated to this Trek.
   if (s.task) {
-    const lookup = _trekLookupTaskInProject(s.task);
+    const lookup = _trekLookupTask(scope, s.task);
     const desc = (lookup && lookup.entry && lookup.entry.description) || s.task;
     const stState = _trekTaskStateLabel(t, s.task);
     const effective = ((t.task_states || {})[s.task])
@@ -5340,7 +5402,7 @@ function _renderTrekTaskRow(t, s, slotIndex) {
   }
   // Milestone (= expandable parent).
   if (s.milestone) {
-    const lookup = _trekLookupMilestoneInProject(s.milestone);
+    const lookup = _trekLookupMilestone(scope, s.milestone);
     const msTitle = (lookup && lookup.ms && lookup.ms.title) || '';
     const tasks = lookup ? lookup.tasks : [];
     // Pick a representative state for the parent: the "most-advanced active"
@@ -5426,7 +5488,7 @@ function _renderTrekTaskRow(t, s, slotIndex) {
 // _renderTrekMembersTable — v2 mockup table: user / session / role / task
 // columns with rowspan grouping for users that hold multiple sessions
 // inside the same trek (= same email × N session_ids).
-function _renderTrekMembersTable(t) {
+function _renderTrekMembersTable(t, scope) {
   const members = t.members || [];
   if (!members.length) {
     return `<div class="trek-coming-soon">No members yet.</div>`;
@@ -5449,7 +5511,11 @@ function _renderTrekMembersTable(t) {
         if (taskSlot.has(taskId)) slots.add(taskSlot.get(taskId));
         else {
           // Walk back from task → milestone to find a parent slot.
-          const lookup = _trekLookupTaskInProject(taskId);
+          // ms-86 / e-2249: ``scope`` is the cross-project aggregate
+          // passed in by _renderTrekDetail; the lookup no longer reads
+          // state.project, so member→slot wiring works for cross-project
+          // Treks regardless of which project the caller currently has open.
+          const lookup = _trekLookupTask(scope, taskId);
           if (lookup && lookup.ms_id && msSlot.has(lookup.ms_id)) {
             slots.add(msSlot.get(lookup.ms_id));
           }
@@ -5604,6 +5670,12 @@ function _renderTrekDetail(t) {
   const halted = !!t.halt;
   const projectsInScope = new Set(scope.map(s => s.project).filter(Boolean));
   const workItemsInScope = scope.filter(s => s.milestone || s.operation || s.task).length;
+  // ms-86 / e-2249 — cross-project aggregate (= MS / Op / Task across
+  // every project the Trek's scope reaches), fetched by openTrek().
+  // Passed down to renderers so helpers don't have to fish into
+  // state.project (= which may be unrelated to this Trek, or null).
+  const scopeAggregate = state.openTrekScope
+    || { milestones: [], operations: [], tasks: [] };
 
   const creatorEmail = (t.creator_actor || {}).email || '';
   const leaderSid = t.leader_session_id || '';
@@ -5679,7 +5751,7 @@ function _renderTrekDetail(t) {
           <span class="right">${scope.length} scope entr${scope.length === 1 ? 'y' : 'ies'}</span>
         </div>
         ${scope.length
-          ? scope.map((s, i) => _renderTrekTaskRow(t, s, i)).join('')
+          ? scope.map((s, i) => _renderTrekTaskRow(t, s, i, scopeAggregate)).join('')
           : `<div class="trek-tasks-empty">No scope entries yet.</div>`}
       </div>
 
@@ -5689,7 +5761,7 @@ function _renderTrekDetail(t) {
           <span>MEMBERS &amp; AGENTS</span>
           <span class="right">${members.length} member${members.length === 1 ? '' : 's'} · LEADER = leader session</span>
         </div>
-        ${_renderTrekMembersTable(t)}
+        ${_renderTrekMembersTable(t, scopeAggregate)}
       </div>
 
       <!-- RECENT ACTIVITY — task-state transitions + halt events -->
