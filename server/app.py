@@ -4226,6 +4226,235 @@ def list_trek_documents_endpoint(trek_id: str,
     return out
 
 
+# ---------------------------------------------------------------------------
+# ms-86 / e-2248 — Trek scope aggregate endpoints for milestones / operations /
+# tasks. The Trek detail UI needs to render MS / Op / Task entries from every
+# project the Trek's scope reaches, without the client knowing which project
+# each entry belongs to in advance. Mirrors the
+# ``/api/treks/{trek_id}/documents`` pattern (= same /documents shape: iterate
+# scope, walk each project's data, dedupe, attach source ``project_id``).
+#
+# Scope semantics (= identical to ``_list_related_treks`` match rule, mirror):
+#   * ``{"project": pid}`` (= project-wide) → every MS / Op / Task in that
+#     project belongs to the Trek
+#   * ``{"project": pid, "milestone": ms_id}`` → just that MS (and all its
+#     child tasks for the /tasks endpoint)
+#   * ``{"project": pid, "operation": op_id}`` → just that Op (and all its
+#     child tasks for the /tasks endpoint)
+#   * ``{"project": pid, "task": entry_id}`` → just that task (contributes
+#     to /tasks only, not /milestones or /operations)
+#
+# Why the duplicate walk vs. asking the client to iterate scope[] itself:
+# (1) one round-trip per concept beats N round-trips per project, (2) the
+# server already has the disclosure-policy check (= ms-63) wired into
+# ``_load(pid, user)`` so cross-project visibility is enforced server-side,
+# (3) ``state.project`` decoupling on the client (= e-2240 SPEC 設計方針 5)
+# requires the lookup to come from a Trek-keyed endpoint, not a project-keyed
+# one. See SPEC ``IgCFK8I34cBfPco3UE06`` for the full design rationale.
+# ---------------------------------------------------------------------------
+
+
+def _trek_scope_by_project(t: dict) -> dict[str, list[dict]]:
+    """Group ``t['scope']`` entries by their ``project`` field.
+
+    Returns ``{project_id: [scope_entry, ...]}``. Entries missing the
+    ``project`` field are silently dropped — they violate
+    ``normalize_scope_entry`` and shouldn't exist on disk, but old data
+    could; we skip rather than 500.
+    """
+    by_project: dict[str, list[dict]] = {}
+    for entry in t.get("scope") or []:
+        pid = entry.get("project") or ""
+        if not pid:
+            continue
+        by_project.setdefault(pid, []).append(entry)
+    return by_project
+
+
+def _scope_contributes(entries: list[dict], *, kind: str) -> tuple[bool, set[str]]:
+    """Decide what a project's scope entries contribute for one entity kind.
+
+    ``kind`` is ``"milestone"`` / ``"operation"`` / ``"task"``. Returns
+    ``(include_all, narrow_ids)``:
+
+    * ``include_all=True`` when any scope entry is project-wide (= no
+      narrowing key) — the whole project's entities of this kind belong.
+    * ``include_all=False, narrow_ids={...}`` when every matching entry
+      narrows; ``narrow_ids`` is the union of the matching IDs.
+
+    For ``kind="task"`` the contribution also widens via milestone /
+    operation narrowing (= "all tasks under that MS / Op"). That widening
+    is handled by the caller; this helper only reports direct task IDs.
+    """
+    if not entries:
+        return False, set()
+    narrow_ids: set[str] = set()
+    for entry in entries:
+        ms = entry.get("milestone") or ""
+        op = entry.get("operation") or ""
+        task = entry.get("task") or ""
+        if not (ms or op or task):
+            # Project-wide entry — whole project is in.
+            return True, set()
+        if kind == "milestone" and ms:
+            narrow_ids.add(ms)
+        elif kind == "operation" and op:
+            narrow_ids.add(op)
+        elif kind == "task" and task:
+            narrow_ids.add(task)
+    return False, narrow_ids
+
+
+@app.get("/api/treks/{trek_id}/milestones")
+def list_trek_milestones_endpoint(trek_id: str,
+                                  user: dict = Depends(require_auth)):
+    """Return milestones in this Trek's scope, walking each scope project.
+
+    Mirrors the /documents pattern: iterate scope → project_ids, load each
+    project, pick milestones in-scope (= project-wide entries include all,
+    narrowed entries pick by milestone ID), dedupe across projects, attach
+    source ``project_id`` on each entry for UI deep-linking.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    by_project = _trek_scope_by_project(t)
+    out: list = []
+    seen: set[tuple[str, str]] = set()
+    for pid, entries in by_project.items():
+        try:
+            project = _load(pid, user)
+        except Exception:
+            # Stale scope entry pointing at a project the caller cannot
+            # read; skip silently so a single bad ref doesn't break the
+            # whole listing (= same regime as /documents).
+            continue
+        include_all, narrow_ids = _scope_contributes(entries, kind="milestone")
+        if not include_all and not narrow_ids:
+            # Project is in scope only through operation / task narrowing,
+            # so the /milestones aggregate has nothing to contribute here.
+            continue
+        for ms in project.get("milestones", []) or []:
+            ms_id = ms.get("id") or ""
+            if not include_all and ms_id not in narrow_ids:
+                continue
+            key = (pid, ms_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            ms_out = dict(ms)
+            ms_out["project_id"] = pid
+            out.append(ms_out)
+    return out
+
+
+@app.get("/api/treks/{trek_id}/operations")
+def list_trek_operations_endpoint(trek_id: str,
+                                  user: dict = Depends(require_auth)):
+    """Return Operations in this Trek's scope. Mirrors /milestones."""
+    t = _load_trek_for_read(trek_id, user)
+    by_project = _trek_scope_by_project(t)
+    out: list = []
+    seen: set[tuple[str, str]] = set()
+    for pid, entries in by_project.items():
+        try:
+            project = _load(pid, user)
+        except Exception:
+            continue
+        include_all, narrow_ids = _scope_contributes(entries, kind="operation")
+        if not include_all and not narrow_ids:
+            continue
+        for op in project.get("operations", []) or []:
+            op_id = op.get("id") or ""
+            if not include_all and op_id not in narrow_ids:
+                continue
+            key = (pid, op_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            op_out = dict(op)
+            op_out["project_id"] = pid
+            out.append(op_out)
+    return out
+
+
+@app.get("/api/treks/{trek_id}/tasks")
+def list_trek_tasks_endpoint(trek_id: str,
+                             user: dict = Depends(require_auth)):
+    """Return tasks in this Trek's scope, walking MS / Op containers.
+
+    Task scope sources (= union across all scope entries):
+      * project-wide entry → every task in the project
+      * milestone entry → every task under that MS
+      * operation entry → every task under that Op
+      * task entry → that single task
+
+    Each output task carries source ``project_id`` and the immediate
+    container reference (``milestone_id`` or ``operation_id``) so the UI
+    can render the parent path without re-resolving.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    by_project = _trek_scope_by_project(t)
+    out: list = []
+    seen: set[tuple[str, str]] = set()
+    for pid, entries in by_project.items():
+        try:
+            project = _load(pid, user)
+        except Exception:
+            continue
+        # Compute per-project inclusion sets for task collection.
+        include_all_tasks, _ = _scope_contributes(entries, kind="task")
+        # Project-wide scope (no narrowing) also implies all tasks.
+        if not include_all_tasks:
+            for entry in entries:
+                if not (entry.get("milestone") or entry.get("operation")
+                        or entry.get("task")):
+                    include_all_tasks = True
+                    break
+        _, ms_narrow = _scope_contributes(entries, kind="milestone")
+        _, op_narrow = _scope_contributes(entries, kind="operation")
+        _, task_narrow = _scope_contributes(entries, kind="task")
+
+        def _emit(task: dict, *, milestone_id: str = "",
+                  operation_id: str = "") -> None:
+            tid = task.get("id") or ""
+            if not tid:
+                return
+            key = (pid, tid)
+            if key in seen:
+                return
+            seen.add(key)
+            row = dict(task)
+            row["project_id"] = pid
+            if milestone_id:
+                row["milestone_id"] = milestone_id
+            if operation_id:
+                row["operation_id"] = operation_id
+            out.append(row)
+
+        for ms in project.get("milestones", []) or []:
+            ms_id = ms.get("id") or ""
+            ms_wanted = (
+                include_all_tasks or (ms_id and ms_id in ms_narrow)
+            )
+            for entry in ms.get("entries", []) or []:
+                if entry.get("type") != "task":
+                    continue
+                tid = entry.get("id") or ""
+                if ms_wanted or (tid and tid in task_narrow):
+                    _emit(entry, milestone_id=ms_id)
+        for op in project.get("operations", []) or []:
+            op_id = op.get("id") or ""
+            op_wanted = (
+                include_all_tasks or (op_id and op_id in op_narrow)
+            )
+            for entry in op.get("entries", []) or []:
+                if entry.get("type") != "task":
+                    continue
+                tid = entry.get("id") or ""
+                if op_wanted or (tid and tid in task_narrow):
+                    _emit(entry, operation_id=op_id)
+    return out
+
+
 @app.get("/api/treks/{trek_id}/summary")
 def trek_summary_endpoint(trek_id: str, user: dict = Depends(require_auth)):
     """Compact status snapshot for dashboards / Web UI Treks tab.
