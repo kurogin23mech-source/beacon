@@ -5574,8 +5574,14 @@ def cmd_trek_join():
                 file=sys.stderr,
             )
             sys.exit(1)
+        # ms-86 / e-2225 — pass BEACON_SESSION_ID so the join writes a
+        # session_history entry. Empty session_id is tolerated by
+        # accept_invitation (= no-op on the history dimension).
+        session_id = os.environ.get("BEACON_SESSION_ID", "").strip()
         try:
-            trek.accept_invitation(t, user_id=member["user_id"])
+            trek.accept_invitation(
+                t, user_id=member["user_id"], session_id=session_id,
+            )
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)

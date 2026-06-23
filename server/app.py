@@ -3519,7 +3519,8 @@ def invite_trek_member_endpoint(trek_id: str, body: TrekInvite,
 
 
 @app.post("/api/treks/{trek_id}/members/join")
-def join_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
+def join_trek_endpoint(trek_id: str, request: Request,
+                       user: dict = Depends(require_auth)):
     """Accept the caller's own invitation (= sets ``joined_at`` to now).
 
     Caller must already appear in members[] (= owner-issued invitation).
@@ -3529,10 +3530,20 @@ def join_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
     visibility model is "creator OR member" and an invited-but-not-yet-joined
     user IS a member entry; the visibility check passes. Self-add (= caller
     not yet in members[] at all) gets caught by trek_mod.accept_invitation.
+
+    ms-86 / e-2225 — also writes a session_history entry on the trek doc
+    so the Trek keeps a cumulative record of every session that has ever
+    joined. The session id is taken from the ``X-Beacon-Session`` header
+    (= the same channel the task-state endpoint uses). When the header is
+    missing the join still succeeds; the session_history entry is just
+    skipped for that call.
     """
     t = _load_trek_for_read(trek_id, user)
+    caller_sid = request.headers.get("X-Beacon-Session", "") or ""
     try:
-        trek_mod.accept_invitation(t, user_id=user.get("sub", ""))
+        trek_mod.accept_invitation(
+            t, user_id=user.get("sub", ""), session_id=caller_sid,
+        )
     except ValueError as e:
         # Not invited (no row at all) → 403, not 404. The trek exists; the
         # caller just cannot self-add.

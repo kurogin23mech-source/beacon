@@ -528,8 +528,13 @@ class TestWebUI_TrekMembersTableSessionFullColumn:
     def test_session_full_cell_uses_short_session_id_helper(self):
         # session-full セルは _trekShortSessionId helper で短縮済 raw sid を
         # 表示する (= 既存 helper を再利用し、 短縮ルール一元化)。
-        idx = self.src.index("// ms-86 / 2026-06-23 dogfood: session-full")
-        end = self.src.index("rows.push(", idx)
+        # ms-86 / e-2225 — comment marker rewrite に追従、 構造的 anchor
+        # (= _renderTrekMembersTable の body 全体) で block を取り直す。
+        fn_marker = "function _renderTrekMembersTable("
+        idx = self.src.index(fn_marker)
+        # End at the closing of the same function — find the next top-level
+        # ``function `` declaration after ``fn_marker``.
+        end = self.src.index("\nfunction ", idx + len(fn_marker))
         block = self.src[idx:end]
         assert "_trekShortSessionId(fullSid)" in block, (
             "session-full cell must reuse _trekShortSessionId helper so the "

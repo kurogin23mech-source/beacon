@@ -2483,6 +2483,20 @@ body::after {
   font-size: 0.74rem;
 }
 .trek-members-table .task-link.none { color: var(--text-dim); font-weight: normal; font-style: italic; }
+/* ms-86 / e-2225 — live-status overlay for the persistent session_history row.
+   The marker rides immediately before the local s-N badge so a single
+   eye-scan tells the operator who is around right now. */
+.trek-members-table .session-live-marker {
+  display: inline-block;
+  width: 0.7em;
+  text-align: center;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.8rem;
+  line-height: 1;
+}
+.trek-members-table .session-live-marker.online { color: var(--success, #4ade80); }
+.trek-members-table .session-live-marker.offline { color: var(--text-dim); }
+.trek-members-table .session-live-marker.none { color: var(--text-dim); opacity: 0.5; }
 
 /* RECENT ACTIVITY (real) — task-state transitions. */
 .trek-activity-row-v2 {
@@ -5216,13 +5230,16 @@ function _trekShortSessionId(sid) {
 // ms-86 / e-2133 — Trek-local 番号化: raw session_id (= sv-77...2b4d312b) 表示を
 // Trek 単位の s-N (1-origin) に置換し、 読み手に短くて識別しやすい id を提示する。
 //
-// 番号付与ルール (= AC4 不変・一意・client/server 一致):
-//   1. trek.members を joined_at 昇順 (同値時 email lex 昇順)
-//   2. 各 member について leader_session_id (= leader 行) を最優先で 1 つ、
-//      続いて state.openTrekMemberSessions[email] の live session を
-//      created_at + session_id 昇順で
-//   3. halt.issued_by_session_id が含まれていなければ末尾に追加
-//   4. 並んだ順に s-1, s-2, ... を 1-origin で割り当てる
+// ms-86 / e-2225 — Trek 文書に persistent な ``session_history`` field が
+// 入ったので live-only endpoint (= 旧 state.openTrekMemberSessions) ではなく
+// 累積記録から番号を引く。 これにより 「過去 join したが今 offline な session」
+// も UI に残り、 Trek の persistent record 原則 (= e-2225 motivation) に整合する。
+//
+// 番号付与ルール (= 不変・一意・client/server 一致):
+//   1. trek.session_history を joined_at 昇順 (同値時 session_id 昇順)
+//   2. 並んだ順に s-1, s-2, ... を 1-origin で割り当てる
+//   3. session_history に居ない session_id (= halt の外部発火元等) は
+//      末尾に追加 (= leader_session_id / halt.issued_by_session_id を順に拾う)
 //
 // returns: Map<session_id, "s-N">
 function _trekLocalSessionMap(t) {
@@ -5237,34 +5254,24 @@ function _trekLocalSessionMap(t) {
     seen.add(s);
     ordered.push(s);
   };
-  const members = Array.isArray(t.members) ? t.members.slice() : [];
-  members.sort((a, b) => {
+  // Primary source: persistent session_history (= e-2225).
+  const history = Array.isArray(t.session_history) ? t.session_history.slice() : [];
+  history.sort((a, b) => {
     const aj = (a && a.joined_at) ? String(a.joined_at) : '';
     const bj = (b && b.joined_at) ? String(b.joined_at) : '';
     if (aj !== bj) return aj < bj ? -1 : 1;
-    const ae = (a && a.email) ? String(a.email) : '';
-    const be = (b && b.email) ? String(b.email) : '';
-    return ae < be ? -1 : 1;
+    const asid = (a && a.session_id) ? String(a.session_id) : '';
+    const bsid = (b && b.session_id) ? String(b.session_id) : '';
+    return asid < bsid ? -1 : 1;
   });
-  const liveByEmail = (typeof state !== 'undefined' && state && state.openTrekMemberSessions) || {};
-  for (const mem of members) {
-    if (!mem || !mem.email) continue;
-    if (mem.role === 'leader' && t.leader_session_id) {
-      push(t.leader_session_id);
-    }
-    const live = Array.isArray(liveByEmail[mem.email]) ? liveByEmail[mem.email].slice() : [];
-    live.sort((a, b) => {
-      const ac = (a && a.created_at) ? String(a.created_at) : '';
-      const bc = (b && b.created_at) ? String(b.created_at) : '';
-      if (ac !== bc) return ac < bc ? -1 : 1;
-      const asid = (a && a.session_id) ? String(a.session_id) : '';
-      const bsid = (b && b.session_id) ? String(b.session_id) : '';
-      return asid < bsid ? -1 : 1;
-    });
-    for (const s of live) {
-      if (s && s.session_id) push(s.session_id);
-    }
+  for (const h of history) {
+    if (h && h.session_id) push(h.session_id);
   }
+  // Backstop: pick up session ids that didn't make it into session_history
+  // yet (= a stale doc loaded before lazy hydration ran, or a halt fired
+  // by an external session not yet recorded). Order preserves the legacy
+  // numbering on already-numbered ids.
+  if (t.leader_session_id) push(t.leader_session_id);
   if (t.halt && t.halt.issued_by_session_id) {
     push(t.halt.issued_by_session_id);
   }
@@ -5579,6 +5586,13 @@ function _renderTrekTaskRow(t, s, slotIndex, scope) {
 // _renderTrekMembersTable — v2 mockup table: user / session / role / task
 // columns with rowspan grouping for users that hold multiple sessions
 // inside the same trek (= same email × N session_ids).
+//
+// ms-86 / e-2225 — data source changed from the live-only
+// ``state.openTrekMemberSessions`` endpoint to ``trek.session_history``
+// so past-joined sessions persist in the UI even after they go offline.
+// "now online" is rendered as a row marker (= ● green / ○ dim) by
+// cross-referencing ``state.onlineSessions``, which keeps the live signal
+// without dropping the persistent record.
 function _renderTrekMembersTable(t, scopeAggregate) {
   const members = t.members || [];
   if (!members.length) {
@@ -5606,9 +5620,6 @@ function _renderTrekMembersTable(t, scopeAggregate) {
           // passed in by _renderTrekDetail; the lookup no longer reads
           // state.project, so member→slot wiring works for cross-project
           // Treks regardless of which project the caller currently has open.
-          // (renamed from ``scope`` in hotfix to avoid shadowing the local
-          // ``const scope = t.scope || []`` below — that one is the Trek's
-          // scope-entries array, not the cross-project aggregate dict.)
           const lookup = _trekLookupTask(scopeAggregate, taskId);
           if (lookup && lookup.ms_id && msSlot.has(lookup.ms_id)) {
             slots.add(msSlot.get(lookup.ms_id));
@@ -5618,62 +5629,130 @@ function _renderTrekMembersTable(t, scopeAggregate) {
     }
     return Array.from(slots).sort();
   }
+
+  // ms-86 / e-2225 — live overlay: which session_ids are currently online?
+  // We treat anything in state.onlineSessions as live. This keeps the table
+  // populated from the persistent session_history record while letting the
+  // user see at a glance who is around right now.
+  const liveSidSet = new Set();
+  for (const s of (state.onlineSessions || [])) {
+    if (s && s.session_id) liveSidSet.add(String(s.session_id));
+  }
+  function liveMarker(sid) {
+    if (!sid) return '<span class="session-live-marker none" title="no session">○</span>';
+    return liveSidSet.has(String(sid))
+      ? '<span class="session-live-marker online" title="online">●</span>'
+      : '<span class="session-live-marker offline" title="offline">○</span>';
+  }
+
+  // ms-86 / e-2225 — build per-member session list from session_history.
+  // sessionsByEmail[email] = [{session_id, role_at_join, joined_at}, ...]
+  // sorted by joined_at ascending so leader-at-join appears first.
+  const history = Array.isArray(t.session_history) ? t.session_history : [];
+  const sessionsByEmail = new Map();
+  for (const h of history) {
+    if (!h || !h.email) continue;
+    if (!sessionsByEmail.has(h.email)) sessionsByEmail.set(h.email, []);
+    sessionsByEmail.get(h.email).push(h);
+  }
+  for (const list of sessionsByEmail.values()) {
+    list.sort((a, b) => {
+      const aj = (a && a.joined_at) ? String(a.joined_at) : '';
+      const bj = (b && b.joined_at) ? String(b.joined_at) : '';
+      if (aj !== bj) return aj < bj ? -1 : 1;
+      const as = (a && a.session_id) ? String(a.session_id) : '';
+      const bs = (b && b.session_id) ? String(b.session_id) : '';
+      return as < bs ? -1 : 1;
+    });
+  }
+
   // Group members by email so each user gets one "user" cell with rowspan.
+  // Within each email group, emit one row per recorded session
+  // (= e-2225, persistent record) instead of one row per member doc
+  // (= legacy, one row per invitation).
   const ordered = [
     ...members.filter(m => m.role === 'leader'),
     ...members.filter(m => m.role !== 'leader' && m.joined_at),
     ...members.filter(m => !m.joined_at),
   ];
-  const byEmail = new Map();
+  const seenEmails = new Set();
+  const orderedEmails = [];
   for (const m of ordered) {
     const key = m.email || m.user_id || '(unknown)';
-    if (!byEmail.has(key)) byEmail.set(key, []);
-    byEmail.get(key).push(m);
+    if (seenEmails.has(key)) continue;
+    seenEmails.add(key);
+    orderedEmails.push(key);
   }
+
   const leaderSid = t.leader_session_id || '';
   const rows = [];
-  for (const [email, group] of byEmail.entries()) {
-    group.forEach((m, idx) => {
-      // ms-86 / 2026-06-23: server 側 members[] は user-grain で session_id 持たない、
-      // leader 行は trek.leader_session_id を fallback として取る。
-      // 非 leader 行は session_history (= e-2225) 未実装の現状 「(no session yet)」
-      // 表示で OK、 e-2225 land 後に member.session_id / session_history から拾い直す。
-      let sid = m.session_id || '';
-      if (!sid && m.role === 'leader') sid = leaderSid;
+
+  for (const email of orderedEmails) {
+    // Pick the matching member doc (= for role / invitation status fall-back).
+    const memberDoc = members.find(m => (m.email || m.user_id || '(unknown)') === email);
+    const memberRole = memberDoc ? (memberDoc.role || 'member') : 'member';
+    const isInvitedOnly = memberDoc ? !memberDoc.joined_at : false;
+    // Sessions recorded for this email.
+    const sessionEntries = sessionsByEmail.get(email) || [];
+
+    // Build the per-row payload list. If session_history has zero entries
+    // for this email (= invited but never joined any session), emit one
+    // synthetic row showing the invitation state.
+    const rowPayloads = sessionEntries.length
+      ? sessionEntries.map(h => ({
+          sid: h.session_id || '',
+          role_at_join: h.role_at_join || 'member',
+          joined_at: h.joined_at || '',
+          synthetic: false,
+        }))
+      : [{ sid: '', role_at_join: memberRole, joined_at: '', synthetic: true }];
+
+    rowPayloads.forEach((p, idx) => {
       const isFirstRow = idx === 0;
-      const isLeader = m.role === 'leader' || (sid && sid === leaderSid);
-      const isInvited = !m.joined_at;
-      const roleHtml = isInvited
-        ? `<span class="role-invited">invited</span>`
-        : isLeader
+      const sid = p.sid;
+      // ms-86 / e-2225 — role label now reflects role_at_join (= session's
+      // role at the moment it joined) instead of the member's current role.
+      // This keeps "who was leader when" auditable even after transfer-leader.
+      const isCurrentLeader = sid && sid === leaderSid;
+      const isLeaderAtJoin = p.role_at_join === 'leader';
+      let roleHtml;
+      if (p.synthetic && isInvitedOnly) {
+        roleHtml = `<span class="role-invited">invited</span>`;
+      } else if (isCurrentLeader || isLeaderAtJoin) {
+        // Current leader gets the strong badge; past leaders that were
+        // since demoted keep a softer "leader (past)" hint so the audit
+        // record is visible without misleading the operator about who is
+        // actually leading right now.
+        roleHtml = isCurrentLeader
           ? `<span class="role-leader">LEADER</span>`
-          : `<span class="role-member">member</span>`;
+          : `<span class="role-leader" title="was leader at join">leader (past)</span>`;
+      } else {
+        roleHtml = `<span class="role-member">member</span>`;
+      }
       const slots = sid ? taskLinksForSession(sid) : [];
       const taskCell = slots.length
         ? `<span class="task-link">${slots.map(esc).join(', ')}</span>`
         : `<span class="task-link none">—</span>`;
-      // ms-86 / e-2133: session-local 列 = Trek-local 番号 (= s-N) badge。
-      // ms-86 / 2026-06-23 dogfood: session-full 列 = raw session id 短縮形
-      // (= sv-77...a648e110) を別列で表示。 leader / member 両方が「自分の raw
-      // session id がどれか」 を 1 列で読めるようにする (= dogfood 観察、 s-N
-      // だけだと local 番号化された結果が見えても raw id が紐付かない問題)。
-      // 両セルとも hover で full sid tooltip、 click で clipboard コピー + toast。
       let sessionLocalCell;
       let sessionFullCell;
       if (sid) {
         const fullSid = String(sid);
-        sessionLocalCell = _trekRenderSessionRef(t, fullSid);
+        const localRef = _trekRenderSessionRef(t, fullSid);
         const shortLabel = _trekShortSessionId(fullSid);
         const tooltip = `${fullSid} (click to copy)`;
+        // Live marker rides immediately before the local label so the row
+        // reads "● s-1" / "○ s-2" — a single eye-scan tells the operator
+        // who is around right now.
+        sessionLocalCell = liveMarker(fullSid) + ' ' + localRef;
         sessionFullCell = `<span class="session-full session-full-clickable" data-action="copy-trek-sid" data-sid="${esc(fullSid)}" title="${esc(tooltip)}">${esc(shortLabel)}</span>`;
       } else {
-        sessionLocalCell = `<span class="session-local none">—</span>`;
+        sessionLocalCell = liveMarker('') + ` <span class="session-local none">—</span>`;
         sessionFullCell = `<span class="session-full none">(no session yet)</span>`;
       }
       rows.push(`
         <tr class="${isFirstRow ? '' : 'continued'}">
           ${isFirstRow
-            ? `<td class="member-email member-email-cell" rowspan="${group.length}">${esc(email)}</td>`
+            ? `<td class="member-email member-email-cell" rowspan="${rowPayloads.length}">${esc(email)}</td>`
             : ''}
           <td class="session-local-cell">${sessionLocalCell}</td>
           <td class="session-full-cell">${sessionFullCell}</td>
