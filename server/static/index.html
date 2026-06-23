@@ -3377,6 +3377,76 @@ function renderEntryAuthor(entry) {
   return '';
 }
 
+/* ms-43 / e-2246 — creator (起票者) label for milestones & operations.
+ *
+ * Same data shape as renderEntryAuthor (= meta.author), but the helper is
+ * named separately because MS / Operation are project-level entities, not
+ * sub-entries. Returns escaped HTML or '' when no creator info is present.
+ *
+ * "Creator" is rendered as 起票者 in the entry-writing-principle 3-tier
+ * loanword policy (= 日本語化が望ましい a一般概念). Callers wrap this
+ * label with an explanatory prefix like "起票者:".
+ */
+function renderCreatorLabel(item) {
+  const author = item?.meta?.author;
+  if (author && (author.display_name || author.email)) {
+    return renderName(author.display_name, author.email);
+  }
+  // Legacy fallback (= pre-e-2246 MS / Operations stamped a string-only
+  // ``created_by`` agent ID via core._get_actor). Show it dim so the row
+  // doesn't look "blank" for older entries.
+  const createdBy = (item && typeof item.created_by === 'string') ? item.created_by.trim() : '';
+  if (createdBy) return esc(createdBy);
+  return '';
+}
+
+/* ms-43 / e-2246 — project-level multi-author detection.
+ *
+ * AC #4: when the project has only one distinct creator (= 1 名 dev) the
+ * creator label is redundant and may be omitted. We walk MS, Operations,
+ * and entries (one level deep) collecting distinct ``meta.author`` keys
+ * (user_id preferred, falling back to email or display_name). If we see
+ * 2+ distinct authors anywhere, the creator label is worth showing on
+ * every surface for context.
+ *
+ * Returns true when 2+ distinct authors are present. Cheap walk: the
+ * result is recomputed per render but the project tree is small enough
+ * that this stays well under a frame even for large projects.
+ */
+function projectHasMultipleAuthors(project) {
+  if (!project) return false;
+  const seen = new Set();
+  const collect = (item) => {
+    const a = item?.meta?.author;
+    if (!a) return;
+    const key = (a.user_id || a.email || a.display_name || '').trim();
+    if (key) seen.add(key);
+  };
+  for (const ms of (project.milestones || [])) {
+    collect(ms);
+    for (const e of (ms.entries || [])) {
+      collect(e);
+      if (seen.size >= 2) return true;
+      // One more level (= child tasks / nested entries) is enough; deeper
+      // walk is not needed for the heuristic and costs renders.
+      for (const c of (e.entries || [])) {
+        collect(c);
+        if (seen.size >= 2) return true;
+      }
+    }
+    if (seen.size >= 2) return true;
+  }
+  for (const op of (project.operations || [])) {
+    collect(op);
+    for (const e of (op.entries || [])) {
+      collect(e);
+      if (seen.size >= 2) return true;
+    }
+    if (seen.size >= 2) return true;
+  }
+  return seen.size >= 2;
+}
+
 /* e-976: auto-link `PR #N` and `e-XXX` patterns inside reason strings
  * (done_reason / cancel_reason / restore_reason).
  *
@@ -4076,6 +4146,14 @@ function renderMilestoneCard(ms, index) {
     const msAc = ms.acceptance_criteria
       ? `<div class="ms-ac"><div class="ms-ac-label">done when</div>${esc(ms.acceptance_criteria)}</div>`
       : '';
+    // ms-43 / e-2246 — creator (= 起票者) row in the expanded detail body.
+    // Shown unconditionally inside the expanded MS view, regardless of
+    // multi-actor heuristic, because the detail surface is where users
+    // explicitly ask "who set this up?" (AC #1).
+    const _msExpandedCreatorLabel = renderCreatorLabel(ms);
+    const msExpandedCreator = _msExpandedCreatorLabel
+      ? `<div class="ms-creator-detail" style="font-size:0.7rem;color:var(--text-dim);margin:6px 0;">起票者: ${_msExpandedCreatorLabel}</div>`
+      : '';
     const showToolbar = hasDoneEntries || hasCancelledEntries;
     bodyHtml = `
       <div class="ms-entries">
@@ -4093,6 +4171,7 @@ function renderMilestoneCard(ms, index) {
           ` : ''}
         </div>
         ` : ''}
+        ${msExpandedCreator}
         ${msObjective}${msAc}
         ${ms.description ? `<div class="ms-description">${esc(ms.description)}</div>` : ''}
         ${renderedEntries}
@@ -4103,6 +4182,16 @@ function renderMilestoneCard(ms, index) {
 
   const msPriorityBadge = ms.priority ? `<span class="priority-badge priority-${ms.priority}">${ms.priority}</span>` : '';
   const msMemberBadges = renderMemberBadges(ms);
+
+  // ms-43 / e-2246 \u2014 show the MS creator (= \u8D77\u7968\u8005) as a sub-text under
+  // the title row when the project has 2+ distinct authors. Suppressed
+  // for single-dev projects to avoid redundancy (AC #4).
+  const msMultiActor = projectHasMultipleAuthors(state.project);
+  const msCreatorLabel = msMultiActor ? renderCreatorLabel(ms) : '';
+  const msCreatorRow = msCreatorLabel
+    ? `<div class="ms-creator" style="font-size:0.65rem;color:var(--text-dim);margin-top:2px;">\u8D77\u7968\u8005: ${msCreatorLabel}</div>`
+    : '';
+
   return `
     <div class="ms-card${activeClass}${expandedClass}">
       <div class="ms-card-header" data-action="toggle-ms" data-ms-id="${ms.id}">
@@ -4110,6 +4199,7 @@ function renderMilestoneCard(ms, index) {
         <div class="ms-title-row">
           <span class="ms-id">${ms.id}</span>
           <span class="ms-title">${esc(ms.title)}${msPriorityBadge}${msMemberBadges}</span>
+          ${msCreatorRow}
         </div>
         <div class="ms-meta">
           ${tasksLabel ? `<span class="ms-tasks-text">${tasksLabel}</span>` : ''}
@@ -6266,6 +6356,19 @@ function renderOperationsSection() {
     const statusBadge = `<span class="op-status-badge ${status}">${status}</span>`;
     const priorityBadge = op.priority ? `<span class="priority-badge priority-${op.priority}">${op.priority}</span>` : '';
 
+    // ms-43 / e-2246 — surface the Operation creator (= 起票者) when the
+    // project has 2+ distinct authors. Detail surface (creatorBlock) is
+    // shown unconditionally so the "who set this up?" question always
+    // has an answer inside the expanded card.
+    const _opMultiActor = projectHasMultipleAuthors(state.project);
+    const _opCreatorLabel = renderCreatorLabel(op);
+    const opCreatorRow = (_opMultiActor && _opCreatorLabel)
+      ? `<span class="op-creator" style="font-size:0.65rem;color:var(--text-dim);margin-left:8px;">起票者: ${_opCreatorLabel}</span>`
+      : '';
+    const creatorBlock = _opCreatorLabel
+      ? `<div class="op-meta-block op-meta-creator"><div class="op-meta-label">起票者</div>${_opCreatorLabel}</div>`
+      : '';
+
     const objectiveBlock = op.objective
       ? `<div class="op-meta-block op-meta-objective"><div class="op-meta-label">objective</div>${esc(op.objective)}</div>` : '';
     const hintBlock = op.activation_hint
@@ -6324,8 +6427,9 @@ function renderOperationsSection() {
         <span class="op-badge">${esc((op.schedule||{}).frequency||'')}</span>
         <span class="op-source">${esc(op.log_source||'')}</span>
         ${incidents.length ? `<span class="op-incident-count">⚠ ${incidents.length}</span>` : ''}
+        ${opCreatorRow}
       </div>
-      ${objectiveBlock}${hintBlock}
+      ${creatorBlock}${objectiveBlock}${hintBlock}
       ${opTasksHtml}
       ${runsHtml}
       ${incidents.length || resolvedIncidents.length ? `

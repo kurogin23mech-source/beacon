@@ -425,7 +425,8 @@ def next_milestone_id(data: dict) -> str:
 def milestone_add(data: dict, title: str, target_date: str = "",
                    description: str = "", priority: str = "",
                    objective: str = "", acceptance_criteria: str = "",
-                   owner: str = "", assignee: str = "") -> str:
+                   owner: str = "", assignee: str = "",
+                   author: dict | None = None) -> str:
     """Add a milestone. Returns the new ms_id.
 
     Issue #14: the ID is computed via `next_milestone_id` (max + 1) and we
@@ -433,6 +434,13 @@ def milestone_add(data: dict, title: str, target_date: str = "",
     belt-and-suspenders: if validate_project ran during load and the data
     already has duplicate IDs, raising here prevents us from compounding
     the corruption.
+
+    ``author`` (ms-43 / e-2246): optional ``{"user_id", "email",
+    "display_name"}`` dict attached to ``meta.author`` — the *human*
+    identity that created the milestone on the server side. Mirrors the
+    ms-78 / e-1909 contract on tasks so the UI can surface a creator
+    label in MS lists / detail. Empty fields are dropped via
+    ``_clean_author``.
     """
     ms_id = next_milestone_id(data)
     # Collision guard — should be unreachable when next_milestone_id is
@@ -470,6 +478,13 @@ def milestone_add(data: dict, title: str, target_date: str = "",
         ms["owner"] = owner
     if assignee:
         ms["assignee"] = assignee
+    # ms-43 / e-2246 — stamp the human author on the milestone so the UI
+    # can surface a creator label (= 起票者) in MS lists / detail. Same
+    # contract as task creation (ms-78 / e-1909). Stored under ``meta``
+    # to keep top-level fields stable and mirror the entry-side shape.
+    author_clean = _clean_author(author)
+    if author_clean:
+        ms.setdefault("meta", {})["author"] = author_clean
     data["milestones"].append(ms)
     return ms_id
 
@@ -2244,12 +2259,18 @@ def operation_open(data: dict, title: str, *,
                    schedule: str = "weekdays", log_source: str = "",
                    status: str = "open", activation_hint: str = "",
                    objective: str = "", acceptance_criteria: str = "",
-                   priority: str = "") -> tuple[dict, dict]:
+                   priority: str = "",
+                   author: dict | None = None) -> tuple[dict, dict]:
     """Create a new Operation. Returns (data, operation).
 
     Defaults to status='open' for backward compat. Pass status='todo' to
     create an outline-only Operation that will be activated later via
     operation_set_status (todo → in_progress → open).
+
+    ``author`` (ms-43 / e-2246): optional ``{"user_id", "email",
+    "display_name"}`` dict attached to ``meta.author`` — same contract
+    as milestone_add / task_add (ms-78 / e-1909). The UI surfaces this
+    as the Operation's 起票者 (= creator) in lists / detail.
     """
     if schedule not in SCHEDULE_DAYS:
         raise ValueError(f"Invalid schedule: {schedule}. Valid: {', '.join(sorted(SCHEDULE_DAYS))}")
@@ -2279,6 +2300,11 @@ def operation_open(data: dict, title: str, *,
         op["acceptance_criteria"] = acceptance_criteria
     if priority:
         op["priority"] = priority
+    # ms-43 / e-2246 — stamp the human author on the Operation so the UI
+    # can surface a creator label (= 起票者) in Operation lists / detail.
+    author_clean = _clean_author(author)
+    if author_clean:
+        op.setdefault("meta", {})["author"] = author_clean
     data.setdefault("operations", []).append(op)
     return data, op
 
