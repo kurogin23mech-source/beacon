@@ -1599,11 +1599,37 @@ def create_project(project_id: str, body: ProjectCreate,
 
 
 @app.get("/api/projects/{project_id}")
-def get_project(project_id: str, user: dict = Depends(require_auth)):
+def get_project(project_id: str, slim: bool = False,
+                user: dict = Depends(require_auth)):
     # ms-46 e-756: REST もWS pushと同じ enriched shape を返す
     # (total_tasks / done_tasks / entries_to_json)。client がどの経路で
     # データを取っても counts が落ちないように対称化する。
-    return _enrich_project(_load(project_id, user))
+    # ms-84 / e-2326: ?slim=true で entries[] を落とした軽量応答を返す
+    # (= Web UI 初期 fetch 用、 entries は MS expand 時に lazy fetch)。
+    # default は従来通り full 応答 (= CLI / Tauri IPC 等の既存 consumer 互換)。
+    raw = _load(project_id, user)
+    return _enrich_project_slim(raw) if slim else _enrich_project(raw)
+
+
+@app.get("/api/projects/{project_id}/milestones/{milestone_id}/entries")
+def get_milestone_entries(project_id: str, milestone_id: str,
+                          user: dict = Depends(require_auth)):
+    """Return entries[] for a single milestone (ms-84 / e-2326).
+
+    Pair endpoint for the slim WS broadcast: Web UI requests this per-MS
+    when the user expands a card. The recursive entry tree is serialized
+    via core.entries_to_json so the shape matches the legacy full payload.
+    Returns 404 if the milestone is not present in the project.
+    """
+    raw = _load(project_id, user)
+    for ms in raw.get("milestones", []):
+        if ms.get("id") == milestone_id:
+            entries = ms.get("entries", [])
+            return {
+                "milestone_id": milestone_id,
+                "entries": core.entries_to_json(entries),
+            }
+    raise HTTPException(status_code=404, detail="milestone not found")
 
 
 @app.put("/api/projects/{project_id}")
@@ -6848,12 +6874,37 @@ def _enrich_project(data: dict) -> dict:
     return enriched
 
 
+def _enrich_project_slim(data: dict) -> dict:
+    """Slim variant for WS broadcast — drops entries[] per milestone.
+
+    ms-84 / e-2326: full _enrich_project payload reaches 2.67 MB for the Beacon
+    project, exceeding Starlette's default WS frame size limit (1 MiB) and
+    getting silently dropped. WS clients need only milestone meta + counts to
+    render the dashboard; entries are fetched lazily per-MS via
+    GET /api/projects/{id}/milestones/{ms_id}/entries when the user expands a
+    card. Keeps total_tasks/done_tasks so the card summary stays accurate
+    without entries[]. REST GET /api/projects/{id} keeps the full default so
+    CLI / Tauri IPC consumers don't regress.
+    """
+    enriched = {**data}
+    milestones = []
+    for ms in data.get("milestones", []):
+        entries = ms.get("entries", [])
+        total, done = core.count_task_status(entries)
+        slim_ms = {k: v for k, v in ms.items() if k != "entries"}
+        slim_ms["total_tasks"] = total
+        slim_ms["done_tasks"] = done
+        milestones.append(slim_ms)
+    enriched["milestones"] = milestones
+    return enriched
+
+
 async def _broadcast(project_id: str, data: dict):
-    """Send enriched project data to all WebSocket clients."""
+    """Send slim project data to all WebSocket clients (ms-84 / e-2326)."""
     clients = _ws_connections.get(project_id, set()).copy()
     if not clients:
         return
-    enriched = _enrich_project(data)
+    enriched = _enrich_project_slim(data)
     msg = {"type": "project", "data": enriched}
     for ws in clients:
         try:
@@ -7122,10 +7173,13 @@ async def ws_project(websocket: WebSocket, project_id: str):
         _ws_connections[project_id] = set()
     _ws_connections[project_id].add(websocket)
 
-    # Send initial enriched data. The role check above already loaded the
-    # project via load_project_consistent (which hydrates v2 subcollection
-    # milestones), so we reuse ``raw`` instead of fetching twice.
-    await websocket.send_json({"type": "project", "data": _enrich_project(raw)})
+    # Send initial slim data (ms-84 / e-2326). The role check above already
+    # loaded the project via load_project_consistent (which hydrates v2
+    # subcollection milestones), so we reuse ``raw`` instead of fetching twice.
+    # We send the slim variant (entries[] dropped) so the WS frame stays under
+    # Starlette's default 1 MiB limit; the client fetches entries lazily per-MS
+    # via GET /api/projects/{id}/milestones/{ms_id}/entries.
+    await websocket.send_json({"type": "project", "data": _enrich_project_slim(raw)})
 
     _start_watcher(project_id)
 
