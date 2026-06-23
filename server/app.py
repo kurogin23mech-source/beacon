@@ -1632,6 +1632,31 @@ def get_milestone_entries(project_id: str, milestone_id: str,
     raise HTTPException(status_code=404, detail="milestone not found")
 
 
+# ms-84 / e-2326 follow-up — tab-scoped REST endpoints. The slim WS broadcast
+# drops these arrays so the frame fits inside Cloud Run's WS tolerance; the
+# Web UI / Tauri fetch them lazily when the user switches to the matching
+# tab (= Releases / Worktree). Each returns the raw array under a top-level
+# key so the client can drop it straight into state.project.{name}.
+
+@app.get("/api/projects/{project_id}/pushes")
+def get_project_pushes(project_id: str, user: dict = Depends(require_auth)):
+    raw = _load(project_id, user)
+    return {"pushes": raw.get("pushes", [])}
+
+
+@app.get("/api/projects/{project_id}/deployments")
+def get_project_deployments(project_id: str, user: dict = Depends(require_auth)):
+    raw = _load(project_id, user)
+    return {"deployments": raw.get("deployments", [])}
+
+
+@app.get("/api/projects/{project_id}/worktree-sessions")
+def get_project_worktree_sessions(project_id: str,
+                                  user: dict = Depends(require_auth)):
+    raw = _load(project_id, user)
+    return {"worktree_sessions": raw.get("worktree_sessions", [])}
+
+
 @app.put("/api/projects/{project_id}")
 def put_project(project_id: str, body: dict,
                 user: dict = Depends(require_auth)):
@@ -6875,18 +6900,32 @@ def _enrich_project(data: dict) -> dict:
 
 
 def _enrich_project_slim(data: dict) -> dict:
-    """Slim variant for WS broadcast — drops entries[] per milestone.
+    """Slim variant for WS broadcast — drops tab-scoped heavy arrays.
 
-    ms-84 / e-2326: full _enrich_project payload reaches 2.67 MB for the Beacon
-    project, exceeding Starlette's default WS frame size limit (1 MiB) and
-    getting silently dropped. WS clients need only milestone meta + counts to
-    render the dashboard; entries are fetched lazily per-MS via
-    GET /api/projects/{id}/milestones/{ms_id}/entries when the user expands a
-    card. Keeps total_tasks/done_tasks so the card summary stays accurate
-    without entries[]. REST GET /api/projects/{id} keeps the full default so
-    CLI / Tauri IPC consumers don't regress.
+    ms-84 / e-2326 (= initial fix) + follow-up: dropping entries[] alone left
+    the Beacon project at 413 KB which is still above whatever WS frame size
+    Cloud Run / GFE tolerates in practice (= 5 retries of wss:// confirmed
+    1006 close at 173 KB and 413 KB, while 32 KB went through). Profiling the
+    slim payload pointed at top-level arrays that the dashboard doesn't need:
+    pushes 311 KiB / deployments 80 KiB / worktree_sessions 5 KiB. These are
+    Releases / Worktree tab content. We drop them from the WS broadcast and
+    the Web UI / Tauri fetch them via tab-specific REST endpoints on demand:
+
+      GET /api/projects/{id}/pushes
+      GET /api/projects/{id}/deployments
+      GET /api/projects/{id}/worktree-sessions
+
+    Milestones keep total_tasks / done_tasks so card summaries stay accurate;
+    entries[] is still fetched per-MS on expand via
+    GET /api/projects/{id}/milestones/{ms_id}/entries. Operations stays in
+    slim because the dashboard renders operation cards inline.
+
+    REST GET /api/projects/{id} (= default, full) is unchanged so CLI / Tauri
+    IPC consumers continue to see the complete payload.
     """
     enriched = {**data}
+    for tab_scoped in ("pushes", "deployments", "worktree_sessions"):
+        enriched.pop(tab_scoped, None)
     milestones = []
     for ms in data.get("milestones", []):
         entries = ms.get("entries", [])

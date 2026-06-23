@@ -109,6 +109,11 @@ let state = {
   // server/static/index.html for the Web parity.
   milestoneEntries: {},
   entriesLoading: new Set(),
+  // ms-84 / e-2326 follow-up — tab-scoped extras cache. The slim WS broadcast
+  // also drops top-level arrays (pushes / deployments / worktree_sessions).
+  // Tauri's initial IPC load seeds these from the full payload so subsequent
+  // slim WS updates can hydrate without an extra round-trip.
+  projectExtras: { pushes: null, deployments: null, worktree_sessions: null },
 };
 
 // ---- Data loading (Tauri invoke) ----
@@ -360,19 +365,35 @@ async function _trekApi(path, fallback) {
 // fresh when an expanded MS's counts change.
 
 function seedMilestoneEntriesCache(project) {
-  if (!project || !Array.isArray(project.milestones)) return;
-  for (const ms of project.milestones) {
-    if (Array.isArray(ms.entries)) {
-      state.milestoneEntries[ms.id] = ms.entries;
+  if (!project) return;
+  if (Array.isArray(project.milestones)) {
+    for (const ms of project.milestones) {
+      if (Array.isArray(ms.entries)) {
+        state.milestoneEntries[ms.id] = ms.entries;
+      }
+    }
+  }
+  // ms-84 / e-2326 follow-up — also seed top-level tab-scoped arrays so
+  // subsequent slim WS broadcasts can hydrate them from cache.
+  for (const k of ['pushes', 'deployments', 'worktree_sessions']) {
+    if (Array.isArray(project[k])) {
+      state.projectExtras[k] = project[k];
     }
   }
 }
 
 function hydrateProjectEntries(project) {
-  if (!project || !Array.isArray(project.milestones)) return project;
-  for (const ms of project.milestones) {
-    if (ms.entries === undefined) {
-      ms.entries = state.milestoneEntries[ms.id] || [];
+  if (!project || typeof project !== 'object') return project;
+  if (Array.isArray(project.milestones)) {
+    for (const ms of project.milestones) {
+      if (ms.entries === undefined) {
+        ms.entries = state.milestoneEntries[ms.id] || [];
+      }
+    }
+  }
+  for (const k of ['pushes', 'deployments', 'worktree_sessions']) {
+    if (project[k] === undefined && Array.isArray(state.projectExtras[k])) {
+      project[k] = state.projectExtras[k];
     }
   }
   return project;
