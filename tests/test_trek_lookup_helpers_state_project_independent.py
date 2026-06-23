@@ -205,7 +205,7 @@ class TestRendererSignatures:
 
     def test_render_trek_members_table_takes_scope(self):
         src = _read(WEB_INDEX)
-        assert "function _renderTrekMembersTable(t, scope)" in src
+        assert "function _renderTrekMembersTable(t, scopeAggregate)" in src
 
     def test_render_trek_detail_passes_scope_aggregate_down(self):
         src = _read(WEB_INDEX)
@@ -222,4 +222,4 @@ class TestRendererSignatures:
     def test_desktop_parity_for_renderer_signatures(self):
         src = _read(DESKTOP_INDEX)
         assert "function _renderTrekTaskRow(t, s, slotIndex, scope)" in src
-        assert "function _renderTrekMembersTable(t, scope)" in src
+        assert "function _renderTrekMembersTable(t, scopeAggregate)" in src
