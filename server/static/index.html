@@ -2919,12 +2919,53 @@ async function handleCognitoCallback() {
     state.auth.email = payload.email || '';
     localStorage.setItem('beacon_token', idToken);
     localStorage.setItem('beacon_email', state.auth.email);
+    // ms-43 e-2298: short-lived id_token を bcli token (30 day TTL) に即交換。
+    // 成功時は state / localStorage を上書き、 失敗時は短命 token を据え置く。
+    const cli = await exchangeForCliToken(idToken);
+    if (cli) {
+      state.auth.token = cli;
+      localStorage.setItem('beacon_token', cli);
+    }
     // URL から ?code= を消す (= リロードで重複交換を避ける + 履歴汚染防止)
     window.history.replaceState({}, '', redirectUri);
     return true;
   } catch (e) {
     console.error('[beacon] cognito callback error', e);
     return false;
+  }
+}
+
+// ms-43 e-2298: Web UI session を 30 日有効化するための exchange helper。
+// Firebase / Cognito id_token は固定 1 時間 TTL で、 console / terraform から
+// 延長できない。 server に exchange endpoint があり、 短命 id_token を
+// HMAC bcli token (= 30 日 TTL、 CLI と同じ機構) に交換できる。 ログイン直後 /
+// localStorage load 直後にこの関数を一度呼ぶと、 以降のセッションは bcli token
+// で持続する。 失敗時は元の id_token を据え置く (= backward compatible)。
+async function exchangeForCliToken(idToken) {
+  if (!idToken) return null;
+  if (idToken.startsWith('bcli.')) return idToken; // 既に bcli token、 そのまま
+  try {
+    const res = await fetch('/api/auth/exchange-cli-token', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${idToken}`,
+        'Content-Type': 'application/json',
+      },
+    });
+    if (!res.ok) {
+      console.warn('[beacon] exchange-cli-token failed', res.status, '(staying on short-lived id_token)');
+      return null;
+    }
+    const data = await res.json();
+    const cliToken = data.id_token || '';
+    if (!cliToken.startsWith('bcli.')) {
+      console.warn('[beacon] exchange-cli-token returned non-bcli token, ignoring');
+      return null;
+    }
+    return cliToken;
+  } catch (e) {
+    console.warn('[beacon] exchange-cli-token error, staying on short-lived id_token', e);
+    return null;
   }
 }
 
@@ -2967,7 +3008,15 @@ function handleCredentialResponse(response) {
   state.auth.email = payload.email || '';
   localStorage.setItem('beacon_token', token);
   localStorage.setItem('beacon_email', state.auth.email);
-  init();
+  // ms-43 e-2298: short-lived id_token を bcli token (30 day TTL) に即交換。
+  // 成功時は state / localStorage を上書き、 失敗時は短命 token を据え置く。
+  exchangeForCliToken(token).then((cli) => {
+    if (cli) {
+      state.auth.token = cli;
+      localStorage.setItem('beacon_token', cli);
+    }
+    init();
+  });
 }
 
 function renderLogin() {
@@ -8005,6 +8054,17 @@ async function init() {
   // 成功すれば state.auth.token がセットされて以降の isAuthenticated() が true。
   if (state.auth.provider === 'cognito') {
     await handleCognitoCallback();
+  }
+  // ms-43 e-2298: localStorage から復元した token が bcli token でなければ
+  // exchange を 1 回試す (= 旧 Firebase id_token のまま session を持っていた
+  // ユーザーが reload した瞬間に 30 日 token へ移行する経路)。 失敗時は
+  // 短命 id_token を据え置く (= backward compatible、 reload 後の動きは旧来通り)。
+  if (state.auth.token && !state.auth.token.startsWith('bcli.')) {
+    const cli = await exchangeForCliToken(state.auth.token);
+    if (cli) {
+      state.auth.token = cli;
+      localStorage.setItem('beacon_token', cli);
+    }
   }
   if (!isAuthenticated()) {
     // Cognito 経路では GIS を待つ必要なし、直接 renderLogin する

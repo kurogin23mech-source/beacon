@@ -7058,6 +7058,27 @@ def dev_login(body: DevLoginRequest):
     return {"status": "ok", "id_token": token, "email": email, "token_expiry": expiry}
 
 
+@app.post("/api/auth/exchange-cli-token")
+def exchange_cli_token(user: dict = Depends(require_auth)):
+    """ms-43 / e-2298 — Web UI session を 30 日有効化する exchange endpoint。
+
+    Web UI が初回ログイン直後 (= Firebase id_token を受け取った瞬間) に呼ぶ。
+    既存 require_auth で id_token を検証 → _make_cli_token(sub, email) で
+    bcli.* 形式の HMAC token (= 30 日 TTL、 CLI と同じ機構) を発行して返す。
+    Web UI は以降 bcli token を Authorization header / WS の ?token= で
+    使い、 Firebase id_token の固定 1 時間 TTL に縛られず session を持続する。
+
+    Firebase / Cognito どちらでも動く (= require_auth が provider 非依存で
+    成功すれば bcli token を発行する設計)。 dev-login の bcli token 発行
+    ロジックを公開 endpoint として小さく切り出した形 (= 同 lib 関数 reuse)。
+    """
+    sub = user.get("sub", "")
+    email = user.get("email", "")
+    if not sub:
+        raise HTTPException(status_code=400, detail="missing sub claim")
+    token, expiry = _make_cli_token(sub, email)
+    return {"status": "ok", "id_token": token, "email": email, "token_expiry": expiry}
+
 
 # ---- CLI Auth (Web UI-mediated flow) ----
 
