@@ -6222,9 +6222,18 @@ def list_bus_events(
     user: dict = Depends(require_auth),
 ):
     """List bus events ordered by created_at. Use ``since=<last_seen_iso>``
-    for polling-style catch-up; ``channel`` for server-side routing filter."""
+    for polling-style catch-up; ``channel`` for server-side routing filter.
+
+    ms-93 / e-2275: DM-channel events have their ``payload`` redacted before
+    return when the caller is neither sender nor recipient. Sidecar metadata
+    (event_id, channel, sender_session_id, created_at, receipt timestamps,
+    envelope view) stays visible so audit/diagnostics tooling keeps working.
+    """
     _load(project_id, user)
-    return db.list_bus_events(project_id, since=since, channel=channel, limit=limit)
+    events = db.list_bus_events(
+        project_id, since=since, channel=channel, limit=limit,
+    )
+    return _apply_dm_payload_visibility(project_id, events, _caller_uid(user))
 
 
 # e-1209: DM channels are 1:1 unicast by default. Without server-side
@@ -6282,6 +6291,153 @@ def _bus_event_addressed_to(event: dict, recipient_id: str) -> bool:
     return channel not in _DM_CHANNELS
 
 
+# ---------------------------------------------------------------------------
+# DM payload visibility boundary (ms-93 / e-2275)
+#
+# Routing (above) decides "who gets a push" — visibility (below) decides
+# "what the response shows" for direct-read endpoints (GET /bus, GET
+# /bus/unread, GET /bus/{event_id}). The two are orthogonal: a non-recipient
+# project member can still legitimately call GET /bus to inspect bus activity
+# (= sidecar status / cursor diagnostics), but the DM body itself is private
+# to (sender, recipient).
+#
+# Without this gate, every project member who can list bus events sees the
+# full ``payload`` field of every DM, including conversations they were not
+# party to. The Web UI / `beacon bus audit` rely on sidecar metadata
+# (event_id, channel, sender_session_id, created_at, delivered_at, opened_at,
+# envelope verify result) which are NOT secrets — only the free-text DM
+# body is.
+#
+# The redaction strategy:
+#   * Non-DM channels: untouched. Broadcast events have no privacy contract.
+#   * DM channels: resolve sender/recipient user_ids via the project session
+#     registry (same lookup the post-side gate uses, ``_resolve_bus_event_user_ids``).
+#     If the caller's user_id matches either party, return the event verbatim.
+#     Otherwise replace ``payload`` with the redaction marker and keep every
+#     other field (sidecar metadata stays visible).
+#
+# A 403 was considered and rejected: a caller who can read ``GET /bus`` MUST
+# still get the list back for non-DM bus traffic and for sidecar bookkeeping
+# on DM events they don't own. Dropping the request entirely would force
+# the Web UI to special-case DM-only filtering before issuing the read,
+# which is an unnecessary client-side coupling. Stripping the payload field
+# is the minimum-surface change that satisfies AC1+AC2 simultaneously.
+# ---------------------------------------------------------------------------
+
+_PAYLOAD_REDACTED = {"redacted": True, "reason": "dm_payload_visibility"}
+
+
+def _redact_dm_payload(event: dict) -> dict:
+    """Return a shallow copy of ``event`` with ``payload`` stripped to the
+    redaction marker. Sidecar fields (event_id, channel, sender_session_id,
+    created_at, delivery, *_at receipts, envelope view) are preserved.
+    """
+    if not isinstance(event, dict):
+        return event
+    redacted = dict(event)
+    redacted["payload"] = dict(_PAYLOAD_REDACTED)
+    return redacted
+
+
+def _caller_can_see_dm_payload(
+    event: dict,
+    caller_uid: str,
+    sender_uid: str,
+    receiver_uid: str,
+) -> bool:
+    """Decide whether ``caller_uid`` is sender or recipient of ``event``.
+
+    Empty-string caller_uid (= dev mode / unauthenticated path) collapses to
+    "can see everything" since the auth layer is what enforces identity in
+    the first place. Empty-string sender/receiver (= unknown — e.g. the
+    sender session was never registered) are treated conservatively: caller
+    cannot match an empty party, so the payload stays redacted unless the
+    caller is the other (known) party.
+    """
+    if not caller_uid:
+        # Dev mode (no auth) or anonymous read — same trust model as
+        # _require_project_role's auth_disabled bypass.
+        return True
+    if sender_uid and caller_uid == sender_uid:
+        return True
+    if receiver_uid and caller_uid == receiver_uid:
+        return True
+    return False
+
+
+def _apply_dm_payload_visibility(
+    project_id: str,
+    events: list[dict],
+    caller_uid: str,
+) -> list[dict]:
+    """Walk ``events`` and redact the ``payload`` of any DM-channel event
+    the caller is neither sender nor recipient of.
+
+    Performs the session→user_id resolution in a single ``list_sessions``
+    pass to keep this on the same cost shape as the existing
+    ``_resolve_bus_event_user_ids`` (one DB roundtrip regardless of event
+    count).
+    """
+    if not events:
+        return events
+    if not _auth_enabled:
+        # Dev mode: auth is disabled, so identity-based visibility gating is
+        # meaningless. Skip the resolve+redact pass entirely so local dev
+        # against ``BEACON_AUTH_ENABLED=0`` keeps seeing full DM bodies (the
+        # same trust model _require_project_role uses to bypass the role
+        # check in dev).
+        return events
+    has_dm = any((e.get("channel") or "") in _DM_CHANNELS for e in events)
+    if not has_dm:
+        return events
+    # Build sid → uid lookup once.
+    try:
+        sessions = db.list_sessions(project_id)
+    except Exception:
+        # Backend unavailable: fail closed for DM payloads (drop the body
+        # rather than risk leaking) but keep sidecar visible.
+        return [
+            _redact_dm_payload(e)
+            if (e.get("channel") or "") in _DM_CHANNELS
+            else e
+            for e in events
+        ]
+    sid_to_uid = {
+        str(s.get("session_id") or ""): str(s.get("user_id") or "")
+        for s in sessions
+        if s.get("session_id")
+    }
+    out: list[dict] = []
+    for ev in events:
+        channel = ev.get("channel") or ""
+        if channel not in _DM_CHANNELS:
+            out.append(ev)
+            continue
+        sender_sid = str(ev.get("sender_session_id") or "")
+        payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+        recipient_sid = str(payload.get("recipient_session_id") or "")
+        sender_uid = sid_to_uid.get(sender_sid, "")
+        receiver_uid = sid_to_uid.get(recipient_sid, "")
+        if _caller_can_see_dm_payload(ev, caller_uid, sender_uid, receiver_uid):
+            out.append(ev)
+        else:
+            out.append(_redact_dm_payload(ev))
+    return out
+
+
+def _caller_uid(user: dict | None) -> str:
+    """Extract the caller's stable user_id from a require_auth claims dict.
+
+    Empty string when ``user`` is None (internal callers) or carries no
+    ``sub`` claim (= auth disabled in dev). Callers that pass this to
+    ``_caller_can_see_dm_payload`` will then get the "see everything" branch,
+    matching the existing dev-mode bypass semantics.
+    """
+    if not user:
+        return ""
+    return str(user.get("sub") or "")
+
+
 @app.get("/api/projects/{project_id}/bus/unread")
 def list_unread_bus_events(
     project_id: str,
@@ -6328,7 +6484,13 @@ def list_unread_bus_events(
     filtered = [e for e in raw if _bus_event_addressed_to(e, recipient_id)]
     if limit:
         filtered = filtered[:limit]
-    return filtered
+    # ms-93 / e-2275: redact DM payloads the caller isn't a party to. The
+    # recipient_id query param is the session asking for its inbox, but the
+    # *caller* is the authenticated user behind that request. In dogfood,
+    # callers typically pass their own recipient_id (= bridge polling for
+    # itself), so this is a no-op for the common path; the guard catches
+    # the cross-user case where a member queries another session's unread.
+    return _apply_dm_payload_visibility(project_id, filtered, _caller_uid(user))
 
 
 @app.post("/api/projects/{project_id}/bus/cursors/{recipient_id}")
@@ -6477,6 +6639,11 @@ def get_bus_event(
     Powers the 3-stage display (sent / delivered / opened). The event dict
     already carries the per-stage timestamp fields when set, so the client
     only needs to render what's present.
+
+    ms-93 / e-2275: when the event is on a DM channel and the caller is
+    neither sender nor recipient, the ``payload`` field is replaced with a
+    redaction marker — sidecar fields (delivery, *_at, channel, etc.) stay
+    visible so the 3-stage display still renders.
     """
     _load(project_id, user)
     event = db.find_bus_event(project_id, event_id)
@@ -6485,7 +6652,8 @@ def get_bus_event(
             status_code=404,
             detail=f"bus event {event_id!r} not found",
         )
-    return event
+    redacted = _apply_dm_payload_visibility(project_id, [event], _caller_uid(user))
+    return redacted[0]
 
 
 @app.get("/api/projects/{project_id}/retros")
