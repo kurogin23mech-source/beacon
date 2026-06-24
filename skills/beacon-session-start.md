@@ -867,44 +867,70 @@ beacon note list --json
   ...
 ```
 
-## Step 3.7: pending Operation の活性化議論
+## Step 3.7: pending Operation の活性化議論 (ms-61 / e-1843 で再設計)
 
-Step 1a の結果から `status == "todo"` または `status == "in_progress"` の Operation を取得する。空ならこの Step はスキップ。
+Step 1a の結果の **`pending_operations[]` フィールド** (= `beacon status --json` が出す todo / in_progress の Operation 一覧) を取得する。空配列 (= 通常プロジェクトの定常状態) ならこの Step はスキップ。
 
-各pendingOperationについて、AIが **総合的に判断する** （機械的なルールではなく文脈推論）:
+> **e-1843 修正経緯**: 旧版はこの Step 1a から「status==todo / in_progress を抽出する」と書いていたが、`beacon status --json` は実装上 `status="open"` のみを出していたため、Step 3.7 は **構造的に空を見せ続けて dead code 化** していた。e-1843 で CLI 側に `pending_operations[]` フィールドを追加 + helper (= `lib/operation_activation.py`) で verdict 分類を構造化、Skill 側はその verdict に従って discussion を組み立てる責務分担に再編した。
 
-### 判断材料
-1. **activation_hint**: 設計時に書かれたヒント（例: 「本番デプロイ後」「ユーザー10人超えたら」）
-2. **OperationTasks の消化状況**: `beacon operation task list -o <op-id> --json` で取得した未完了 / 完了状況
-3. **プロジェクト全体の状態**: Step 1a の MS状態、進捗、ビジョン
-4. **CORE ドキュメント (project-vision など)**: 「現時点でこの運用が必要か？」を判断する文脈
+### 構造的分類は helper が行う (Python 側)
 
-### 判断ロジック（AI が文脈で）
+`lib/operation_activation.format_pending_activation_section(pending_operations)` が、各 pending Operation を以下 4 verdict (= 判定) のどれかに分類して bullet 文字列を返す:
 
-各 pending Operation に対して、AI は以下のいずれかを選ぶ:
+- `unparseable`: `activation_hint` 未設定 → 「ヒントを書け」と促す
+- `prep-first`: OperationTasks が未完了 → 「先に準備項目を消化せよ」と促す
+- `needs-ai-judgement`: 構造的前提 (hint あり + tasks 完了) は満たされている → **AI に文脈評価を委ねる** (Skill 側で判断)
+- `activate-now`: 予約 (helper が default で返さない、test / 将来 CLI flag 用)
 
-- **「動かす時が来た」と推論**: hint の条件が満たされている、または状態的に活性化が筋。  
+helper 出力が `""` (= 空文字列) なら、このセクションは丸ごと出力しない (= `dm_pending.format_pending_dm_summary` と同じ「空なら省略」契約)。
+
+### AI の判断材料 (verdict ごとに上乗せ)
+
+helper の verdict を **そのまま出すだけでは AI 価値が無い**。`needs-ai-judgement` verdict の Operation について、AI は以下を **総合的に評価** して、最終的な discussion 文を組み立てる:
+
+1. **activation_hint の自然言語条件**: 例「本番デプロイ後」「ユーザー 10 人超えたら」 — これがプロジェクトの現状で満たされているか
+2. **プロジェクト全体の状態**: Step 1a の MS 状態、進捗、ビジョン (= project-vision CORE doc)
+3. **直近 commit / session log**: 「最近何をやっていたか」 から hint 条件の充足を推定
+
+### 判断パターン (verdict → 出力)
+
+各 pending Operation について、AI は以下のいずれかを選ぶ:
+
+- **verdict=needs-ai-judgement + 「動かす時が来た」と AI 推論**: hint 条件が満たされている。
   → 議論をユーザーに振る:
   ```
   op-X "Service health monitoring" の準備が整っているように見えます。
     根拠: ms-22 が完了して本番稼働中 / OperationTasks 3/3 done
     activation_hint: "Cloud Run 本番稼働後に有効化"
-
   動かしますか？それともまだ早い？
   ```
 
-- **「まだ早い」と判定**: 触れない（出力にも含めない、ノイズを避ける）
+- **verdict=needs-ai-judgement + 「まだ早い」と AI 判定**: 触れない (= 出力にも含めない、ノイズ防止)。 helper bullet も省略するか、 verdict のみ表示で済ませる。
 
-- **「OperationTasks の消化が先」と判定**:
+- **verdict=prep-first**: helper bullet をそのまま転記 + `/beacon-operation-setup` を促す:
   ```
-  op-Y "Cost watch" は活性化前にOperationTasks 2件の消化が必要。
+  op-Y "Cost watch" は活性化前に OperationTasks 2/3 件の消化が必要。
   /beacon-operation-setup で進めますか？
+  ```
+
+- **verdict=unparseable**: helper bullet をそのまま転記 + ヒント記述を促す:
+  ```
+  op-Z "Daily snapshot" は activation_hint が未設定で活性化条件を判定できません。
+  /beacon-operation-setup で hint を書き起こしてください。
   ```
 
 ### 出力位置
 
-Step 3 の出力の末尾、Step 4 トリガーチェックの直前に挿入。  
-論点が無いなら出力に含めない。
+Step 3 の出力の末尾、Step 4 トリガーチェックの直前に挿入。
+論点が無い (= 全 verdict が「まだ早い」AI 判定で省略) なら、 セクションごと出さなくてよい。
+
+### 責任分界 (= e-1843 AC #5)
+
+- **CLI (`lib/commands.py:cmd_status`)**: `pending_operations[]` フィールドの shape (= id / title / status / activation_hint / operation_tasks_total / operation_tasks_done / entries) を保証する。 shape を変える時は本 Skill markdown と helper の両方に追従が必要。
+- **helper (`lib/operation_activation.py`)**: verdict 分類ロジックの structural 部分を所管。 verdict を増やす / 名前を変える時は tests (= `tests/test_session_start_operation_activation.py`) が fail するので Skill markdown 追従も自動的に強制される (forcing function)。
+- **Skill markdown (この section)**: verdict → discussion 文の対応表 + AI 判断 (= `needs-ai-judgement` verdict の qualitative call) を所管。 helper の verdict literal が変わったら本 markdown の対応表も更新する。
+
+shape / verdict literal の drift は tests で捕まる構造 (= `test_verdict_vocabulary_is_closed`、 `test_cli_status_json_has_pending_operations_field_when_zero` 等) のため、 Skill 側の指示文と Python 側の実装が同時に壊れない限り、 silent drift は起きない。
 
 ## Step 4: トリガーチェック
 
