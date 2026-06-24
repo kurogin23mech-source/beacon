@@ -2494,6 +2494,29 @@ body::after {
   font-size: 0.74rem;
 }
 .trek-members-table .task-link.none { color: var(--text-dim); font-weight: normal; font-style: italic; }
+
+/* ms-86 / e-2227 — last activity column: pulls from _trekActivityEvents
+   so MEMBERS table and ACTIVITY section share one data source. The
+   relative-time pill stays tight on the left; the operation summary
+   trails behind in a dimmer font so the row reads
+   "5m ago · e-2226 → done" without crowding the table. */
+.trek-members-table .last-activity-cell { white-space: nowrap; }
+.trek-members-table .last-activity {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+}
+.trek-members-table .last-activity.none {
+  color: var(--text-dim);
+  font-style: italic;
+}
+.trek-members-table .last-activity-rel {
+  font-family: var(--font-mono, monospace);
+  color: var(--text-primary, var(--text-secondary));
+}
+.trek-members-table .last-activity-summary {
+  color: var(--text-dim);
+  font-family: var(--font-mono, monospace);
+}
 /* ms-86 / e-2225 — live-status overlay for the persistent session_history row.
    The marker rides immediately before the local s-N badge so a single
    eye-scan tells the operator who is around right now. */
@@ -5846,9 +5869,48 @@ function _renderTrekTaskRow(t, s, slotIndex, scope) {
     </div>`;
 }
 
-// _renderTrekMembersTable — v2 mockup table: user / session / role / task
-// columns with rowspan grouping for users that hold multiple sessions
-// inside the same trek (= same email × N session_ids).
+// ms-86 / e-2227 — relative-time helper for "last activity" column.
+// "just now" / "Nm ago" / "Nh ago" / "Nd ago" / ISO date. Reads the
+// browser clock; intentionally fuzzy so the cell stays scannable.
+function _trekRelTime(iso) {
+  if (!iso) return '';
+  const ts = Date.parse(iso);
+  if (Number.isNaN(ts)) return '';
+  const diff = Math.max(0, Date.now() - ts);
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return 'just now';
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  if (day < 7) return `${day}d ago`;
+  return iso.slice(0, 10);
+}
+
+// ms-86 / e-2227 — build session_id → last activity map from the same
+// _trekActivityEvents() feed the ACTIVITY section renders. Each entry
+// carries the most-recent event timestamp + a short label of what the
+// session last did, so MEMBERS and ACTIVITY share one source of truth
+// (= c-1 session_history rows × c-2 activity events).
+function _trekLastActivityBySession(t) {
+  const m = new Map();
+  const events = _trekActivityEvents(t);
+  for (const ev of events) {
+    if (!ev || !ev.sid) continue;
+    const cur = m.get(ev.sid);
+    if (cur && cur.ts >= (ev.ts || '')) continue;
+    let summary;
+    if (ev.kind === 'halt') summary = 'halt';
+    else summary = `${ev.task_id} → ${ev.state}`;
+    m.set(ev.sid, { ts: ev.ts || '', summary });
+  }
+  return m;
+}
+
+// _renderTrekMembersTable — v2 mockup table: user / session / role / task /
+// last activity columns with rowspan grouping for users that hold multiple
+// sessions inside the same trek (= same email × N session_ids).
 //
 // ms-86 / e-2225 — data source changed from the live-only
 // ``state.openTrekMemberSessions`` endpoint to ``trek.session_history``
@@ -5856,7 +5918,15 @@ function _renderTrekTaskRow(t, s, slotIndex, scope) {
 // "now online" is rendered as a row marker (= ● green / ○ dim) by
 // cross-referencing ``state.onlineSessions``, which keeps the live signal
 // without dropping the persistent record.
+//
+// ms-86 / e-2227 — added "last activity" column sourced from the same
+// _trekActivityEvents() feed that drives the ACTIVITY section. This
+// integrates the two new data sources (= c-1 session_history rows ×
+// c-2 enriched activity events) so the operator can see "this session
+// is online but hasn't moved a task in 3 hours" at a glance instead of
+// cross-referencing two sections by eye.
 function _renderTrekMembersTable(t, scopeAggregate) {
+  const lastActivity = _trekLastActivityBySession(t);
   const members = t.members || [];
   if (!members.length) {
     return `<div class="trek-coming-soon">No members yet.</div>`;
@@ -5996,6 +6066,16 @@ function _renderTrekMembersTable(t, scopeAggregate) {
       const taskCell = slots.length
         ? `<span class="task-link">${slots.map(esc).join(', ')}</span>`
         : `<span class="task-link none">—</span>`;
+      // ms-86 / e-2227 — last activity cell joins this session's row to the
+      // ACTIVITY feed. Empty for sessions that never moved a task (= invited
+      // but idle, or only halt-issuer rows whose sid lives elsewhere).
+      const last = sid ? lastActivity.get(sid) : null;
+      const lastActivityCell = last
+        ? `<span class="last-activity" title="${esc(last.summary + ' @ ' + last.ts)}">`
+          + `<span class="last-activity-rel">${esc(_trekRelTime(last.ts))}</span> `
+          + `<span class="last-activity-summary">${esc(last.summary)}</span>`
+          + `</span>`
+        : `<span class="last-activity none">—</span>`;
       let sessionLocalCell;
       let sessionFullCell;
       if (sid) {
@@ -6021,6 +6101,7 @@ function _renderTrekMembersTable(t, scopeAggregate) {
           <td class="session-full-cell">${sessionFullCell}</td>
           <td>${roleHtml}</td>
           <td>${taskCell}</td>
+          <td class="last-activity-cell">${lastActivityCell}</td>
         </tr>`);
     });
   }
@@ -6033,6 +6114,7 @@ function _renderTrekMembersTable(t, scopeAggregate) {
           <th>session id</th>
           <th>role</th>
           <th>task</th>
+          <th>last activity</th>
         </tr>
       </thead>
       <tbody>${rows.join('')}</tbody>
