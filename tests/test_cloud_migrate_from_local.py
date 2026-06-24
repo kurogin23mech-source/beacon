@@ -114,6 +114,52 @@ def test_pre_flight_tolerates_missing_fields():
     ) == []
 
 
+def test_pre_flight_pass_when_entries_were_moved_across_milestones():
+    """ms-95 / e-2405 (= MS 移動 entries の false-positive 解消):
+
+    dogfood で発見した実害ケース。 local snapshot 取得後に user が
+    triage で entry を別 MS に動かすと、 以前のロジックは
+    「local の ms-A に居る entry が cloud の ms-A には無い」 を
+    missing と判定していた。 cloud 全体には entry が存在するので
+    data loss リスクはゼロ。 新ロジックは「entry id が cloud project
+    全体のどこかに存在すれば OK」 に緩めるので pass する。
+    """
+    local = {
+        "milestones": [
+            {"id": "ms-A", "entries": [{"id": "e-100"}, {"id": "e-101"}]},
+            {"id": "ms-B", "entries": [{"id": "e-200"}]},
+        ],
+    }
+    cloud = {
+        "milestones": [
+            # e-100 moved from ms-A to ms-B in cloud
+            {"id": "ms-A", "entries": [{"id": "e-101"}]},
+            {"id": "ms-B", "entries": [{"id": "e-100"}, {"id": "e-200"}]},
+        ],
+    }
+    issues = commands._local_vs_cloud_pre_flight(local, cloud)
+    assert issues == [], f"expected pass for MS-moved entries, got: {issues}"
+
+
+def test_pre_flight_pass_when_operation_entry_moved_across_operations():
+    """Same false-positive class for operations: an entry that migrated
+    between operations should not be flagged as missing."""
+    local = {
+        "operations": [
+            {"id": "op-1", "entries": [{"id": "e-300"}]},
+            {"id": "op-2", "entries": []},
+        ],
+    }
+    cloud = {
+        "operations": [
+            {"id": "op-1", "entries": []},
+            {"id": "op-2", "entries": [{"id": "e-300"}]},
+        ],
+    }
+    issues = commands._local_vs_cloud_pre_flight(local, cloud)
+    assert issues == [], f"expected pass for op-moved entry, got: {issues}"
+
+
 # ---------------------------------------------------------------------------
 # cmd_cloud_migrate_from_local — end-to-end CLI flow
 # ---------------------------------------------------------------------------

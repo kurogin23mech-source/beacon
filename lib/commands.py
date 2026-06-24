@@ -10241,15 +10241,26 @@ def _local_vs_cloud_pre_flight(local: dict, remote: dict) -> list[str]:
     entry が残っていると、 retire (= rename to .trash/-ish) でその痕跡が
     cold storage に押しやられる。 pre-flight でそれを 1 回 catch する。
 
-    Compared dimensions (= 全 milestone / operation の id 集合と各配下
-    entries の id 集合):
+    Compared dimensions:
 
       * project name / objective text mismatch (= 別 project を間違って
         join した可能性)
-      * milestones[].id: local ⊆ cloud
-      * milestones[].entries[].id (per shared milestone): local ⊆ cloud
+      * milestones[].id: local ⊆ cloud (完全な MS 欠落のみ fail)
+      * milestones[].entries[].id: local の各 entry id が cloud の
+        **project 全体 (= 任意 MS) の entry id 集合** に含まれること
       * operations[].id: local ⊆ cloud
-      * operations[].entries[].id (per shared operation): local ⊆ cloud
+      * operations[].entries[].id: local の各 entry id が cloud の
+        **project 全体 (= 任意 operation) の entry id 集合** に含まれること
+
+    ms-95 / e-2405 (= MS 移動 entries の false-positive 解消):
+    以前は entry の MS 所属まで一致を要求していたので、 dogfood で wave 1/2
+    に整理した MS 間移動 (= e-1454 / e-1668 / e-2007 等 10 件) が
+    「local の ms-A に居る entry が cloud の ms-A に無い」 = missing と
+    false-positive 判定され、 user に余計な force-after-review 確認を
+    強要していた。 cloud には entry 自体は別 MS に存在しており data loss
+    リスクはゼロ。 そこで entry の所在判定は project 全体の id 集合に
+    平坦化し、 「entry id がどこかに存在すれば OK」 に緩めた。 完全な MS
+    自体の欠落は依然 fail として残す (= MS 構造そのものが消えるのは別問題)。
     """
     issues: list[str] = []
 
@@ -10268,6 +10279,16 @@ def _local_vs_cloud_pre_flight(local: dict, remote: dict) -> list[str]:
                 out.add(v)
         return out
 
+    def _flat_entry_ids(containers):
+        """Flatten entry ids across every milestone or operation."""
+        flat: set[str] = set()
+        for c in containers or []:
+            for e in (c.get("entries") or []):
+                v = e.get("id") if isinstance(e, dict) else None
+                if isinstance(v, str) and v:
+                    flat.add(v)
+        return flat
+
     local_ms = _id_set(local.get("milestones", []))
     cloud_ms = _id_set(remote.get("milestones", []))
     missing_ms = sorted(local_ms - cloud_ms)
@@ -10276,20 +10297,17 @@ def _local_vs_cloud_pre_flight(local: dict, remote: dict) -> list[str]:
             f"milestones present locally but missing in cloud: {missing_ms}"
         )
 
-    cloud_ms_by_id = {
-        m.get("id"): m for m in remote.get("milestones", []) or []
-        if isinstance(m.get("id"), str)
-    }
+    # ms-95 / e-2405: entries lookup is project-wide so that MS-moved entries
+    # are not false-positively reported as missing (= they still exist in
+    # cloud, just under a different milestone).
+    cloud_ms_entry_ids = _flat_entry_ids(remote.get("milestones", []))
     for m in local.get("milestones", []) or []:
         mid = m.get("id")
-        if mid not in cloud_ms_by_id:
-            continue
         local_entries = _id_set(m.get("entries", []))
-        cloud_entries = _id_set(cloud_ms_by_id[mid].get("entries", []))
-        missing = sorted(local_entries - cloud_entries)
+        missing = sorted(local_entries - cloud_ms_entry_ids)
         if missing:
             issues.append(
-                f"milestone {mid}: entries present locally but missing in cloud: {missing}"
+                f"milestone {mid}: entries present locally but missing in cloud (anywhere): {missing}"
             )
 
     local_ops = _id_set(local.get("operations", []))
@@ -10300,20 +10318,14 @@ def _local_vs_cloud_pre_flight(local: dict, remote: dict) -> list[str]:
             f"operations present locally but missing in cloud: {missing_ops}"
         )
 
-    cloud_ops_by_id = {
-        o.get("id"): o for o in remote.get("operations", []) or []
-        if isinstance(o.get("id"), str)
-    }
+    cloud_op_entry_ids = _flat_entry_ids(remote.get("operations", []))
     for o in local.get("operations", []) or []:
         oid = o.get("id")
-        if oid not in cloud_ops_by_id:
-            continue
         local_entries = _id_set(o.get("entries", []))
-        cloud_entries = _id_set(cloud_ops_by_id[oid].get("entries", []))
-        missing = sorted(local_entries - cloud_entries)
+        missing = sorted(local_entries - cloud_op_entry_ids)
         if missing:
             issues.append(
-                f"operation {oid}: entries present locally but missing in cloud: {missing}"
+                f"operation {oid}: entries present locally but missing in cloud (anywhere): {missing}"
             )
 
     return issues
