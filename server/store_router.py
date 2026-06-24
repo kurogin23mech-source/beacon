@@ -103,6 +103,20 @@ if _BACKEND == "dynamodb":
     )
 elif _BACKEND == "firestore":
     from firestore_client import (  # noqa: F401
+        # Firestore-specific escape hatches (ms-95 / e-2407):
+        # Several test files do `import firestore_client as db` then patch
+        # `db._db` / `db.get_db`. Other test files alias
+        # `sys.modules["firestore_client"] = store_router` at module scope to
+        # share rebinds across pytest collection — so subsequent
+        # `import firestore_client as db` resolves to store_router. Without
+        # re-exporting `_db` / `get_db`, `monkeypatch.setattr(db, "_db", …)`
+        # raises AttributeError. Asymmetric vs dynamodb branch is fine: these
+        # are firestore-coupled by definition (firestore.Client singleton).
+        _db,
+        get_db,
+        COLLECTION,
+        USERS_COLLECTION,
+        PROJECT_ID,
         # Frontmatter helper (ms-60 / e-2306):
         # operation_approve calls `db._extract_frontmatter_field(...)`. Without
         # this re-export the call raises AttributeError, swallowed by the
