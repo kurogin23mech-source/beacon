@@ -24,7 +24,7 @@
 //                              only when profile == "default" and the new
 //                              path is not yet created by silent migration)
 //   BEACON_CHANNEL_ALLOWLIST (csv, default "dm")
-//   BEACON_BUS_POLL_MS      (default 2000)
+//   BEACON_BUS_POLL_MS      (default 5000、ms-84 e-2366)
 //   BEACON_BUS_LOG          (default /tmp/beacon-bus-channel.log)
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
@@ -226,7 +226,17 @@ const ALLOWED_CHANNELS = Array.from(new Set([
   ..._envAllow,
   ...autoExecuteChannelsFromProject(),
 ]))
-const POLL_INTERVAL = parseInt(process.env.BEACON_BUS_POLL_MS || '2000', 10)
+// ms-84 / e-2366 — bridge poll interval default 2s → 5s.
+// 2s は Cloud Armor の IP 単位レート枠 100 req/60s (= infra/security/setup_cloud_armor.sh)
+// と相まって、1 session 60 req/分 (= 2 API × 30 周/分) が同 IP に 2 session 載るだけで
+// 即 429 Rate exceeded を踏む構造になっていた (= dolphin.orca の解析 / 2026-06-24)。
+// 5s に上げて 1 session 24 req/分まで落とし、合わせ技で予定されている dolphin の
+// heartbeat 緩和 PR (= heartbeat だけ 15s に separate、429 時 exponential backoff)
+// と組み合わせれば 1 session ~16 req/分 → 同 IP に 6 session 載るマージンになる。
+// 副作用は DM 着信遅延が最大 5s に伸びる (= 体感分かるがギリ許容)。
+// healthy 判定窓 max(30s, 2× poll) は 30s 不変、bus directory の live 判定に regression なし。
+// 即時性が必要な経路は BEACON_BUS_POLL_MS=2000 で従来挙動に opt-back 可能。
+const POLL_INTERVAL = parseInt(process.env.BEACON_BUS_POLL_MS || '5000', 10)
 const SCHEDULER_INTERVAL_MS = parseInt(
   process.env.BEACON_BRIDGE_SCHEDULE_INTERVAL_MS || '60000', 10)
 const SCHEDULER_DISABLED = process.env.BEACON_BRIDGE_SCHEDULE_DISABLE === '1'
