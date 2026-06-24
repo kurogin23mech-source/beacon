@@ -8537,6 +8537,16 @@ def _auto_fire_operation_triggers():
         with open(trigger_path, "w", encoding="utf-8") as f:
             json.dump(trigger_data, f, ensure_ascii=False)
             f.write("\n")
+        # ms-95 / e-1668 + e-2350: cloud-side atomic claim before the bus
+        # push. The local trigger file above is per-cwd UI state and
+        # harmless when duplicated across cwds (= each cwd has its own
+        # `.beacon/triggers/`); the bus push fanout is what would
+        # N-multiply across parallel bclaude sessions without this gate.
+        # The claim runs in a Firestore transaction server-side so only
+        # one of N concurrent bclaude sessions per (project, op, date)
+        # wins — losers skip the bus push.
+        if not _claim_operation_fire_for_bus_push(op_id):
+            continue
         # ms-60 / e-1340: also mirror onto the bus so AI sessions subscribed
         # via the inbox hook can autonomously run `/beacon-operation-execute`.
         # Channel "operation-trigger" + delivery="auto-execute" is the autonomous
@@ -8686,6 +8696,69 @@ def _resolve_operation_trigger_recipient(op_id: str) -> str:
             return owner
         break
     return ""
+
+
+def _claim_operation_fire_for_bus_push(op_id: str) -> bool:
+    """Return True iff this CLI should post the operation-trigger bus event.
+
+    Cloud mode: call ``POST /api/projects/<pid>/operation-fires/<op>/claim``
+    which uses a Firestore transaction to dedup across parallel bclaude
+    sessions in the same project. Server returns ``{claimed: True}`` for
+    the first caller per ``(project, op, today)`` and ``{claimed: False}``
+    for the rest. The losers skip ``_push_operation_trigger_to_bus`` so
+    only one operation-trigger event lands on the bus per day.
+
+    Local mode (no ``cloud.json``): always returns True. Without the
+    cloud, there is no cross-cwd race surface — each project root has its
+    own ``.beacon/triggers/`` and the per-cwd file gate above prevents
+    intra-cwd duplicates.
+
+    Failure-open policy (= ms-95 SPEC §設計方針 1 fail-open):
+    on network / auth / missing config errors, return True. The cost of
+    fail-open is a duplicate operation-trigger event (= cheap, the inbox
+    hook is idempotent on op_id + date). The cost of fail-close is a
+    silently missed daily Operation fire (= user-facing ritual broken
+    until they notice). Daily Operations are part of the SPEC contract
+    that "approved ops fire reliably"; a transient cloud hiccup must
+    not turn into silently lost fires.
+
+    ms-95 / e-1668 (= N-multiplied fires across parallel bclaude) and
+    e-2350 (= 4-6 min retrigger storms when local CLI run_record landed
+    but cloud sync lag hides it from the next scheduler tick) collapse
+    into a single root cause: scheduler decision based on a
+    locally-fetched view of cloud state. Pushing the decision to the
+    server transaction layer makes the dedup atomic.
+    """
+    try:
+        config_path = _get_cloud_config_path()
+        if not os.path.exists(config_path):
+            return True
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        project_id = config.get("project_id")
+        if not project_id:
+            return True
+        from auth import load_credentials
+        creds = load_credentials()
+        if creds is None:
+            return True
+        from api_client import ApiClient
+        api_url = _resolve_active_api_url()
+        client = ApiClient(api_url, _extract_token(creds))
+        session_id = ""
+        try:
+            import session as _session
+            session_id = _session.get_session_id() or ""
+        except Exception:
+            pass
+        result = client.claim_operation_fire(project_id, op_id, session_id)
+        return bool(result.get("claimed", True))
+    except Exception as exc:
+        sys.stderr.write(
+            f"[beacon] operation fire claim failed (fail-open, "
+            f"may duplicate-fire): {type(exc).__name__}: {exc}\n"
+        )
+        return True
 
 
 def _push_operation_trigger_to_bus(op_id: str, log_source: str,

@@ -1865,6 +1865,90 @@ def get_operation_envelope(
 
 
 # ---------------------------------------------------------------------------
+# Operation fire gate (ms-95 / e-1668 + e-2350)
+#
+# ``operation_fires``: per-project per-op per-day "I already fired today"
+# ledger. Subcollection keyed by ``<op_id>_<YYYY-MM-DD>``. First-write-wins
+# inside a Firestore transaction.
+#
+# Why this exists: the CLI scheduler (``_auto_fire_operation_triggers`` in
+# lib/commands.py) is invoked by every bclaude session's bridge poll loop
+# (channel/bus.mjs runSchedulerTick). With N parallel sessions in the same
+# project, the local "today already ran?" check (= scan ``op.entries`` for a
+# run_record dated today) races against the cloud-synced view: each session
+# can independently see "no run_record yet" before the first run_record
+# round-trips through Firestore, producing N-multiplied fires (e-1668) and
+# 4-6 minute retrigger storms (e-2350).
+#
+# This subcollection serializes the decision via transaction so only one
+# session per (project, op, date) wins the claim — the rest skip and the
+# local file gate keeps same-cwd sessions consistent as a second line.
+# ---------------------------------------------------------------------------
+
+OPERATION_FIRES_SUBCOLLECTION = "operation_fires"
+
+
+def claim_operation_fire_if_new(project_id: str, op_id: str, date: str,
+                                session_id: str) -> dict:
+    """Atomically claim "first to fire ``op_id`` on ``date`` for project".
+
+    First caller's transaction creates the document → returns
+    ``{"claimed": True, "claimed_by": session_id, "claimed_at": <now>}``.
+    Subsequent callers see the existing document and return
+    ``{"claimed": False, "claimed_by": <first session>, "claimed_at": <first ts>}``.
+
+    ``date`` is an ISO date string (``YYYY-MM-DD``). The doc id is
+    ``<op_id>_<date>`` so the same op can fire again on a later day
+    without prior gating.
+
+    ``session_id`` is recorded for tracing (= who won the race today).
+    Empty string is acceptable for callers without bridge mint
+    (e.g. non-bridged CLI on a fresh machine).
+
+    Used by the operation fire claim endpoint
+    (``POST /api/projects/<pid>/operation-fires/<op>/claim``); the CLI
+    scheduler hits the endpoint before posting the operation-trigger bus
+    event so cross-cwd / cross-machine duplicate fires are suppressed.
+    """
+    import datetime
+    db = get_db()
+    doc_id = f"{op_id}_{date}"
+    ref = (
+        db.collection(COLLECTION)
+        .document(project_id)
+        .collection(OPERATION_FIRES_SUBCOLLECTION)
+        .document(doc_id)
+    )
+
+    @firestore.transactional
+    def _txn(tx):
+        snap = ref.get(transaction=tx)
+        if snap.exists:
+            data = snap.to_dict() or {}
+            return {
+                "claimed": False,
+                "claimed_by": data.get("session_id", ""),
+                "claimed_at": data.get("claimed_at", ""),
+            }
+        now = datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
+        tx.set(ref, {
+            "op_id": op_id,
+            "date": date,
+            "session_id": session_id,
+            "claimed_at": now,
+        })
+        return {
+            "claimed": True,
+            "claimed_by": session_id,
+            "claimed_at": now,
+        }
+
+    return _txn(db.transaction())
+
+
+# ---------------------------------------------------------------------------
 # Treks (ms-69 / e-1652)
 #
 # Top-level collection ``treks/{trek_id}`` — independent of any single

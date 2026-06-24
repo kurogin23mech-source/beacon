@@ -477,6 +477,26 @@ class ApiClient:
             body["in_reply_to"] = in_reply_to
         return self.post(f"/api/projects/{project_id}/bus/envelope/issue", body)
 
+    # Operation fire claim (ms-95 / e-1668 + e-2350)
+
+    def claim_operation_fire(self, project_id: str, op_id: str,
+                             session_id: str = "") -> dict:
+        """Claim the right to fire ``op_id`` today for ``project_id``.
+
+        Returns ``{claimed, claimed_by, claimed_at}``. If ``claimed`` is
+        False, another bclaude session in the same project already fired
+        today — the caller (= ``_auto_fire_operation_triggers``) should
+        skip its local trigger write + bus push.
+
+        Server-side Firestore transaction serializes concurrent claims so
+        only one of N parallel sessions wins per (project, op, date).
+        See SPEC ``7JO6uTMTGs0ehGhGk3KX`` (ms-95) § 設計方針 1.
+        """
+        return self.post(
+            f"/api/projects/{project_id}/operation-fires/{op_id}/claim",
+            {"session_id": session_id},
+        )
+
     def list_bus_audit(self, project_id: str, *, since: str = "",
                        limit: int = 100) -> list:
         qs = []

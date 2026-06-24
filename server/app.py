@@ -831,6 +831,18 @@ class OperationRevokeRequest(BaseModel):
     reason: str = "manual revoke"
 
 
+class OperationFireClaimRequest(BaseModel):
+    """Body for POST /api/projects/{id}/operation-fires/{op_id}/claim (ms-95).
+
+    Atomic per-day claim used by the CLI scheduler to dedup operation
+    triggers across parallel bclaude sessions in the same project. See
+    ``claim_operation_fire_if_new`` in firestore_client for the gate
+    semantics. ``session_id`` is informational (= which session won the
+    race today) and may be empty when the caller has no bridge mint.
+    """
+    session_id: str = ""
+
+
 class BusCursorAdvance(BaseModel):
     """Body for POST /api/projects/{project_id}/bus/cursors/{recipient_id}.
 
@@ -2237,6 +2249,40 @@ def operation_envelopes_list(
             status_code=400, detail="status must be 'active' or 'revoked'"
         )
     return db.list_operation_envelopes(project_id, op_id=op_id, status=status)
+
+
+@app.post("/api/projects/{project_id}/operation-fires/{op_id}/claim")
+def operation_fire_claim(
+    project_id: str,
+    op_id: str,
+    body: OperationFireClaimRequest,
+    user: dict = Depends(require_auth),
+):
+    """Atomically claim "I'm firing op-<id> today" for this project (ms-95).
+
+    First-write-wins per ``(project, op, today)``. Subsequent callers see the
+    prior claim and skip their bus push. The CLI scheduler
+    (``_auto_fire_operation_triggers`` in lib/commands.py) hits this endpoint
+    before posting the operation-trigger bus event so cross-cwd /
+    cross-machine parallel bclaude sessions in the same project no longer
+    each fire independently (= e-1668 N-multiplied fires / e-2350 4-6 min
+    retrigger storms when ``run_record`` lands locally but cloud sync lag
+    makes the next scheduler tick still see "no run_record yet").
+
+    Response: ``{claimed: bool, claimed_by: str, claimed_at: str}``. Date is
+    server clock (UTC) so all sessions agree on the calendar day boundary
+    even across timezone-mixed machines.
+
+    Any project member (= owner / editor / viewer) may claim. The claim
+    itself is not a privileged action; the gate exists to dedup honest
+    parallel writers, not to enforce access.
+    """
+    _load(project_id, user)  # membership check (any role)
+    import datetime
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    return db.claim_operation_fire_if_new(
+        project_id, op_id, today, body.session_id or ""
+    )
 
 
 # ---------------------------------------------------------------------------
