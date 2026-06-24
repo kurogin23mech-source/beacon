@@ -37,6 +37,33 @@ beacon-find-root >/dev/null && echo "OK" || echo "NO_BEACON"
 ```
 - `NO_BEACON` の場合、このSkillは何もせず終了する。
 
+## Step 0.4: 並列上限の原則 (= 推奨 2 / 最大 3、 ms-61 e-1825)
+
+> **背景 (= memory feedback 「Parallel Agent dispatch を 8+ で投げない」 を構造昇格)**: 2026-06 の Mac dogfood で 8 並列でサブエージェントを起動した結果、 Claude Code harness が permission prompt (= 各サブエージェントが Edit/Write/Bash を叩く度に親に出る承認ダイアログ) を捌ききれず、 親セッション自体が応答不能に陥る事象を観測。 本 Skill は **dispatch の主要動線** であり、 ここで上限を破ると並列実装基盤そのものが停止する。
+
+### 並列上限ポリシー (MS-level / Task-level 共通)
+
+| 同時起動数 | 扱い |
+|---|---|
+| 1〜2 件 | **推奨** — 親 prompt も捌け、 確認のオーバーヘッドも低い |
+| 3 件 | **最大** — ここまでは並列許可。 これを超える時は分割 |
+| 4 件以上 | **拒否 (= 構造的に refuse)** — Step 4.4 / Task Mode T4 でユーザー確認の上、 必ず分割 (= queue 化、 順次起動) する |
+
+> この上限は本 Skill 内 (= MS-level の Step 4.4 と Task-level の T4) と Step 5 / Task Mode T6 起動部の両方で **二重に強制**する。 Skill の冒頭で原則だけ宣言しても起動経路で守られないと意味がないため。
+
+### Dispatch / Fork 振り分け原則 (= ms-61 e-1825 + memory feedback「Subagent dispatch の対話帯域ゼロ」)
+
+並列実行のニーズには 2 種類あり、 それぞれ別 Skill を使う:
+
+| ニーズ | 使う Skill | 理由 |
+|---|---|---|
+| **独立タスクを並列消化** (= 各 task が互いに独立、 AI 単独で進められる) | `/beacon-dispatch` | サブエージェントは対話帯域ゼロ、 自走前提。 本 Skill の本来用途 |
+| **人間 + AI 対話的に難しい MS を並列実装** (= 設計判断 / コンテキスト揺らぎが多く、 都度 user 議論が要る) | `/beacon-session-fork` | 別 bclaude (= Claude Code instance) を別 worktree で立ち上げ、 user と直接対話する経路を確保する Skill |
+
+dispatch は「親が黙って待ち、 子が自走完遂して返ってくる」 モデル。 「途中で user に質問したい」「設計判断を相談したい」 タイプの MS は dispatch には向かない (= サブエージェントから親への問い返し帯域が無い)。 そういう MS は **fork で別 bclaude セッションを物理的に立ち上げる方が原理的に正しい**。
+
+dispatch 起動前に、 渡された MS 群が「自走完遂可能」 か「対話必須」 かを **AI が一度判定** し、 後者が混ざっている場合は Step 4.4 のユーザー確認時に `/beacon-session-fork` への切り替えを推奨する。
+
 ## Step 0.5: サブエージェント permission preflight (e-1221 fix)
 
 > **背景**: サブエージェント harness はプロジェクトの `.claude/settings.local.json` の `permissions.allow` をそのまま継承する。親セッションで会話的に grant された permission は **継承されない**。`.worktrees/` 配下への Edit/Write が allowlist に無いと、サブエージェントは全 Edit/Write で permission-denied を食らい、**設計だけ綺麗に書いてコミット 0 で silently exit する**。2026-06-09 の TrailNode dogfood で 3/3 のサブエージェントがこのモードで失敗し、約 8 分の dispatch が無駄になった事象がある。
@@ -338,6 +365,48 @@ SPEC を先に作る場合: 一旦キャンセルして `/beacon-spec <ms-id>` �
 - **選択**: ユーザーが指定したMS-IDのみ起動
 - **キャンセル**: 何もせず終了 (SPEC 作成は別途 `/beacon-spec` で)
 
+## Step 4.4: 並列上限の構造的強制 (ms-61 e-1825)
+
+Step 4 でユーザーが承認した MS 群 (= 「全て」 or 「選択」 で選ばれた MS) を `$SELECTED_MSS` とする。 件数 `$N = len(SELECTED_MSS)` を Step 0.4 の原則と照合する:
+
+| `$N` | 動作 |
+|---|---|
+| 1〜2 | そのまま Step 4.5 へ |
+| 3 | 「3 件は最大上限です。 このまま進めて良いですか? [yes / 2 件に絞る / cancel]」 と一度確認した上で続行 |
+| 4 以上 | **強制分割**: 「並列上限 3 を超えています (= `$N` 件)。 構造的に refuse します。 以下の選択肢から選んでください」 と提示し、 次の degraded mode を案内 |
+
+### Degraded mode: 上限超過時の queue 化 (= 順次起動)
+
+`$N >= 4` の場合、 ユーザーに以下を提示:
+
+```
+⚠ 並列上限超過: $N 件のサブエージェント起動を要求されましたが、 上限は 3 件です。
+   過去 (= memory: Mac dogfood で 8 並列 → permission prompt 大量で Claude Code 破綻、 約 8 分の dispatch 無駄) の事象を構造的に防ぐためです。
+
+選択肢:
+  a) Wave 化して順次起動 (推奨): 先頭 3 件を Wave 1 として起動、 残りはここで queue 化して
+     Wave 1 完了後に新規 /beacon-dispatch を案内 (= 親セッションが一度に抱える子は最大 3)
+  b) ユーザー指定で 3 件に絞る: どの MS を Wave 1 に入れるかをユーザーが選ぶ
+  c) `/beacon-session-fork` を併用: 対話必須 MS は fork で別 bclaude に分離 (= 別 user 端末が
+     直接相手する経路)、 残りを dispatch に流す
+  d) cancel: 何もせず終了
+
+どれにしますか?
+```
+
+各選択肢の遷移:
+
+- **a) Wave 化**: 先頭 3 件 (= 渡された順、 もしくは priority=highest を優先) を `$SELECTED_MSS` として上書き、 残りは `$QUEUED_MSS` として記録。 Wave 1 完了後 Step 6d に到達した時点で「次の Wave: `<queued ms-id list>` 残り — `/beacon-dispatch` で起動可能」 と提示する。
+- **b) ユーザー指定**: ユーザーから 3 件以下の MS ID を受け取って `$SELECTED_MSS` を上書き。 残りは破棄 (= 次回 dispatch でまた検討)。
+- **c) fork 併用**: dispatch / fork の振り分けを user と相談 (Step 0.4 の振り分け原則を提示)。 dispatch 側に残った件数が 3 以下なら Step 4.5 へ、 まだ 4 以上なら a)/b) に戻る。
+- **d) cancel**: Step 5 に進まず Skill 終了。 `beacon milestone start` も実行しない (= MS の活性化はしない)。
+
+ユーザーの応答を待つ。 a)〜c) で `$N <= 3` になったら Step 4.5 へ進む。
+
+### Task-level dispatch も同じゲートを適用
+
+`$DISPATCH_MODE == "Task-level"` (Step 0.0 で判定) の場合、 本 Step は **Task Mode T4 内で同じ上限ロジックを実行**する (= 後述 T4 で wave 単位の同時起動件数を上限チェック)。 MS-level / Task-level どちらも 3 件を超えた時に同じ degraded mode が走る。
+
 ## Step 4.5: MS 活性化フェーズ (ms-81 e-1920 で workspace → start に統一)
 
 ユーザーが承認後（「全て」または「選択」）、エージェント起動の前に各MSを活性化し worktree (= MSごとの作業領域、git project の場合のみ作成) を準備する。
@@ -377,6 +446,7 @@ Step 4.5 で準備したworktree情報を使い、各MSに対して **Agent tool
 - 互いに依存関係のないMS同士は **並列** で起動してよい
 - 依存関係のあるMS同士は **直列** で起動する（先行MSの完了を待つ）
 - 実際には Step 2 の条件を通過した時点で互いに独立なので、全て並列で起動してよい
+- **同時並列起動数は 3 を超えてはならない** (= Step 0.4 / Step 4.4 で構造的に強制済の上限、 ms-61 e-1825)。 `$SELECTED_MSS` の件数が 4 以上のまま Step 5 に到達した場合は **Step 5 で起動せず Step 4.4 に戻る** (= 防御線が二重)。 ここを破ると memory に記録された 8 並列破綻事象が再発する
 
 ### 各エージェントへのPrompt
 
@@ -613,7 +683,18 @@ beacon milestone show $PARENT_MS_ID --json
 
 判定根拠を bullet で書き出し、「並列 N waves」「直列」「mixed (= 一部並列、一部直列)」のいずれかを推奨として人間に提示。
 
-### T4: 人間承認
+### T4: 人間承認 + 並列上限の構造的強制 (ms-61 e-1825)
+
+提示された計画について、 **Step 0.4 の並列上限 (= 推奨 2、 最大 3) を Wave 単位で適用**する。 各 Wave のサブエージェント数 `$W` が 3 を超えていれば、 提示前に Wave を自動分割する (= e.g. Wave 1 に 5 task 並列なら Wave 1a / Wave 1b に分割)。
+
+分割ロジック:
+- 各 Wave について `$W = len(wave.tasks)` をチェック
+- `$W <= 3` なら現状維持
+- `$W == 4 or 5` なら 2 個ずつ等分 (= 2+2 / 2+3)
+- `$W >= 6` なら 3 個区切りで分割 (= 3+3+... / 最後の塊だけ小さくなる)
+- 分割した Wave は元 Wave の直後に挿入 (= 元の直列依存は保持)
+
+分割後の計画をユーザーに提示:
 
 ```
 タスクレベル dispatch 計画:
@@ -625,14 +706,21 @@ beacon milestone show $PARENT_MS_ID --json
     - <task-1 と task-2 はファイル重複なし → 並列可能>
     - <task-3 は task-1 の lib/foo.py 新設を前提 → task-1 後>
   
-  実行計画:
-    Wave 1 (並列): <task-1>, <task-2>
-    Wave 2 (直列): <task-3>
+  実行計画 (= 並列上限 3 / Wave 適用済):
+    Wave 1 (並列, 2 件): <task-1>, <task-2>
+    Wave 2 (並列, 3 件): <task-3>, <task-4>, <task-5>
+    Wave 3 (直列, 1 件): <task-6>
+  
+  ※ 元の希望は Wave 2 に 5 件並列でしたが、 並列上限 3 を超えるため
+    Wave 2 (3 件) + Wave 3 (= 残り 2 件) に自動分割しました
+    (= Mac dogfood で 8 並列 → permission prompt 大量で破綻した経験を構造的に防止、 ms-61 e-1825)
   
   この計画で進めますか？ [yes / 修正 (= 計画を口頭で指示) / cancel]
 ```
 
-`yes` で続行。`修正` ならユーザーの口頭指示で計画を上書き再提示 (= T4 をループ)。`cancel` で中断。
+`yes` で続行。`修正` ならユーザーの口頭指示で計画を上書き再提示 (= T4 をループ、 上限ロジックも再適用)。`cancel` で中断。
+
+> **note**: 元計画が Wave 1 に 4+ 件並列だった場合、 Step 4.4 と同じ degraded mode の選択肢 (= Wave 化 / 件数絞り / fork 併用 / cancel) を提示してもよい。 Task-level は元々 1 MS 配下の task 群で fork 併用は稀だが、 計画ループの中で user が「これ dispatch でやるより fork で対話実装したい」 と判断した場合は cancel して `/beacon-session-fork` への切り替えを案内する。
 
 ### T5: nested worktree 作成
 
@@ -704,4 +792,4 @@ $TASK_WORKTREE_<task-id>
 - 親 MS の worktree が無い場合は本 Skill は worktree を切らず、`beacon milestone start` への誘導で停止 (= worktree 確保は MS 活性化の責務 / e-1477)
 - nested worktree 削除前に親 MS branch への merge を必ず通す (= 子の commit が孤立しないように)
 - 親 MS worktree 自体は Task Mode 完了後も残る (= 親 worktree の状態は dispatch 後も継続作業可能)
-- 並列 Wave のサブエージェント数は通常 2〜3 まで (= harness の permission prompt 大量化を避ける、memory feedback「Parallel Agent dispatch を 8+ で投げない」に従う)
+- **並列 Wave のサブエージェント数は推奨 2 / 最大 3** (Step 0.4 の並列上限原則 + T4 の Wave 自動分割で構造的に強制、 ms-61 e-1825)。 4 件以上を 1 Wave に詰めて起動してはならない (= Mac dogfood で 8 並列 → Claude Code harness の permission prompt 大量化で破綻、約 8 分の dispatch 無駄になった事象に基づく構造防御)
