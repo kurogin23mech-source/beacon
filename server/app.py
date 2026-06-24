@@ -1674,9 +1674,11 @@ def put_project(project_id: str, body: dict,
         actor=user.get("sub", ""),
         reason="PUT /api/projects (whole-document replace)",
     )
-    # ms-43 / e-2128 — explicit WS broadcast after every write. The Firestore
-    # on_snapshot listener is unreliable (silent disconnect, multi-instance
-    # watcher偏り, identical-content dedup), so we don't rely on it alone.
+    # ms-43 / e-2128 — explicit WS broadcast after every write. ms-84 / e-2325:
+    # the Firestore on_snapshot listener was disabled (see _start_watcher
+    # docstring) because it produced duplicate broadcasts for every write
+    # (over-broadcast bug). Single-instance Cloud Run posture makes the
+    # explicit broadcast self-sufficient.
     _broadcast_project_after_write(project_id)
     return {"status": "ok", "project_id": project_id}
 
@@ -7002,9 +7004,13 @@ def _broadcast_project_after_write(project_id: str) -> None:
 
     構造解 (= ms-43 / e-2128 path): broadcast を listener に依存させない。
     write 経路の HTTP endpoint で必ず本 helper を呼んで explicit broadcast を
-    打つ。 listener (= ``_on_snapshot``) は cross-instance fallback として残す
-    (= 削除しない、 listener が動く環境では冗長 broadcast、 client 側 JSON
-    dedup で吸収)。
+    打つ。
+
+    ms-84 / e-2325 更新: listener (= ``_on_snapshot``) は disable (=
+    ``_start_watcher`` が no-op に変更) 。 1 write が explicit + listener の
+    2 経路で fire していたのが over-broadcast 病理の構造源で、 単一 instance
+    posture (min=max=1) では fallback 不要、 explicit 1 本に集約する。 詳細
+    は ``_start_watcher`` の docstring 参照。
 
     Behavior:
       * No-op when no WS clients are subscribed to ``project_id`` (= 速攻 return)
@@ -7118,7 +7124,14 @@ async def _broadcast_document_change(project_id: str, payload: dict):
 
 
 def _on_snapshot(project_id: str, doc_snapshot, changes, read_time):
-    """Firestore on_snapshot callback (runs in background thread)."""
+    """Firestore on_snapshot callback (runs in background thread).
+
+    Retained but no longer wired up after ms-84 / e-2325. Kept so the v2
+    milestone-hydration contract test (tests/test_ws_v2_snapshot_hydrates_milestones.py)
+    can still exercise the function directly. If the listener is ever
+    re-attached, the body still hydrates v2 milestones correctly before
+    broadcasting.
+    """
     for doc in doc_snapshot:
         data = doc.to_dict()
         if _event_loop and _ws_connections.get(project_id):
@@ -7129,19 +7142,42 @@ def _on_snapshot(project_id: str, doc_snapshot, changes, read_time):
 
 
 def _start_watcher(project_id: str):
-    if project_id in _watchers:
-        return
-    doc_ref = db.get_db().collection(db.COLLECTION).document(project_id)
-    unsub = doc_ref.on_snapshot(
-        lambda ds, ch, rt: _on_snapshot(project_id, ds, ch, rt)
-    )
-    _watchers[project_id] = unsub
+    """No-op stub (ms-84 / e-2325).
+
+    Previously attached a Firestore ``on_snapshot`` listener as a cross-
+    instance broadcast fallback. The listener fires once per project doc
+    write *in addition to* the explicit broadcast from
+    ``_broadcast_project_after_write`` — so every write produced two
+    broadcasts. After e-2326 made WS payloads signal-only
+    (``{"type":"project_changed"}``), the two broadcasts are byte-identical
+    and the comment at ``_broadcast_project_after_write`` claiming
+    "client-side JSON dedup absorbs the duplicate" is structurally false
+    (identical payloads have no dedup signal). User-observed symptom:
+    Web UI WS Messages tab shows a row every 2-3 seconds with no
+    user-visible writes (e-2325 motivation).
+
+    Cloud Run is currently pinned to single-instance
+    (``--min-instances=1 --max-instances=1`` in
+    ``.github/workflows/deploy-cloud-run.yml``), so the cross-instance
+    fanout fallback this listener provided is structurally unneeded —
+    every write hits the same instance that owns the WS connections.
+    The explicit broadcast in ``_broadcast_project_after_write`` covers
+    100% of real-time updates in this posture.
+
+    If multi-instance is restored later, the right design is a proper
+    pub/sub layer (Cloud Pub/Sub) — not ``on_snapshot``, which is fragile
+    (silent disconnect, identical-content dedup, multi-watcher偏り —
+    see line 5121 comment, same trade-off).
+
+    The function name + signature is kept as a no-op so existing test
+    fixtures that patch it as ``lambda pid: None`` still resolve.
+    """
+    return
 
 
 def _stop_watcher(project_id: str):
-    if project_id in _watchers and not _ws_connections.get(project_id):
-        _watchers[project_id]()
-        del _watchers[project_id]
+    """No-op stub (ms-84 / e-2325). See ``_start_watcher`` for rationale."""
+    return
 
 
 @app.websocket("/ws/projects/{project_id}")
