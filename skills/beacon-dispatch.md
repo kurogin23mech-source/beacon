@@ -650,6 +650,30 @@ cd $MS_WORKTREE && git worktree add .worktrees/<task-id> <task-id>/work   # -b �
 
 `$TASK_WORKTREE_<task-id>` として絶対パスを記録。
 
+### T5.5: Trek-scoped task の TTL 延長 (ms-95 / e-2308)
+
+**前提判定**: 親 MS が Trek の scope (= 缶詰の作業部屋 / 自律的計画的タスク実行の作業空間) に含まれている場合、 dispatch する各 task は Trek task でもある。 この場合 Trek 側の **TTL safety net** (= 12 分間 reaffirm が無いと auto-stall して `leader_review` に強制遷移) が subagent 動作中に false-positive で発火する構造問題がある (= 2026-06-23 dogfood で実体験、 e-2308 起票)。
+
+**理由**: Agent tool subagent は別 `session_id` で起動され、 Trek の joined member ではない (= `beacon trek task-state working` が 403 で reject される)。 main session (= leader) も Agent tool 完了待ちで pulse 経路に入れない。 結果 12 分経過時点で TTL が走り、 動作中の task が `leader_review` に降格される。
+
+**対処**: T6 で各 subagent を起動する **直前** に、 leader 代行で TTL 延長を打つ:
+
+```bash
+beacon trek extend-ttl <trek-id> <task-id> --minutes 30 \
+  --reason "dispatched to Agent subagent (= e-2308 leader-side TTL extension)"
+```
+
+`--minutes 30` は subagent 1 件の典型的所要時間 (= 5-15 分) + 安全マージンの 2× を確保する基準値。 task が大きい想定なら `--minutes 60` 等に増やしてよい。 値は task 単位で個別に設定する。
+
+T7 で各 subagent が完了し PR まで land したら、 後片付けで `--minutes 0` で extension を clear する:
+
+```bash
+beacon trek extend-ttl <trek-id> <task-id> --minutes 0 \
+  --reason "subagent finished, restore normal TTL"
+```
+
+**省略可能条件**: 親 MS が Trek scope に含まれていない (= 単独 MS dispatch) 場合、 本 step は無音で skip する。 Trek 判定は `beacon trek list --joined --json` の scope 配列に親 MS が含まれるかで決まる。
+
 ### T6: サブエージェント prompt (各 task に 1 通)
 
 各 task について Agent tool で起動する。Wave 1 (並列) は **同時並列**、Wave 2 以降は **前 Wave 完了後** に起動。

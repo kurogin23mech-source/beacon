@@ -842,6 +842,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_trek_state.add_argument("--note", default="")
     p_trek_state.add_argument("--json", action="store_true")
 
+    # ms-95 / e-2308 — extend TTL on a single Trek task (= leader 代替 reaffirm
+    # for Agent-tool subagent dispatch path)
+    p_trek_extend = trek_sub.add_parser("extend-ttl", add_help=False)
+    p_trek_extend.add_argument("trek_id", nargs="?", default="")
+    p_trek_extend.add_argument("task_id", nargs="?", default="")
+    p_trek_extend.add_argument("--minutes", default="")
+    p_trek_extend.add_argument("--reason", default="")
+    p_trek_extend.add_argument("--json", action="store_true")
+
     # ---- doctor / project / help ----
     sub.add_parser("doctor", add_help=False)
     p_project = sub.add_parser("project", add_help=False)
@@ -2454,6 +2463,19 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
                 "BEACON_TREK_TASK_ID": args.task_id or "",
                 "BEACON_TREK_STATE": args.state or "",
                 "BEACON_TREK_NOTE": args.note or "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    if cmd == "extend-ttl":
+        # ms-95 / e-2308 — leader-side primitive for Agent-tool subagent
+        # dispatch path. See lib/commands.cmd_trek_extend_ttl docstring.
+        return _run_commands_py(
+            root, "trek_extend_ttl",
+            {
+                "BEACON_TREK_ID": args.trek_id or "",
+                "BEACON_TREK_TASK_ID": args.task_id or "",
+                "BEACON_TREK_TTL_MINUTES": getattr(args, "minutes", "") or "",
+                "BEACON_TREK_TTL_REASON": getattr(args, "reason", "") or "",
                 "BEACON_JSON": json_env,
             },
         )

@@ -6504,6 +6504,112 @@ def cmd_trek_task_state():
         )
 
 
+def cmd_trek_extend_ttl():
+    """Postpone TTL safety net deadline on a Trek task (ms-95 / e-2308).
+
+    Leader-side primitive for the Agent-tool subagent dispatch path:
+    main session calls this before launching a subagent that cannot
+    stamp ``last_activity_at`` itself, so the auto-stall deadline does
+    not fire mid-delegation. ``--minutes 0`` clears the extension.
+
+    Env:
+      BEACON_TREK_ID            (required)
+      BEACON_TREK_TASK_ID       (required)
+      BEACON_TREK_TTL_MINUTES   (required, int; ≤0 clears)
+      BEACON_TREK_TTL_REASON    (optional, short audit string)
+      BEACON_JSON               "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    task_id = os.environ.get("BEACON_TREK_TASK_ID", "").strip()
+    minutes_raw = os.environ.get("BEACON_TREK_TTL_MINUTES", "").strip()
+    reason = os.environ.get("BEACON_TREK_TTL_REASON", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+    if not task_id:
+        print("Error: task_id is required (e.g. e-2034)", file=sys.stderr)
+        sys.exit(1)
+    if not minutes_raw:
+        print(
+            "Error: --minutes is required (use 0 to clear an existing "
+            "extension)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    try:
+        minutes = int(minutes_raw)
+    except ValueError:
+        print(
+            f"Error: --minutes must be an integer (got {minutes_raw!r})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            entry = client.extend_trek_task_ttl(
+                trek_id,
+                task_id=task_id,
+                minutes=minutes,
+                reason=reason,
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        if json_mode:
+            print(json.dumps(entry, ensure_ascii=False))
+        else:
+            ext = (entry or {}).get("ttl_extended_until") or ""
+            if ext:
+                print(
+                    f"Extended trek {trek_id} task {task_id} TTL until {ext} "
+                    f"(+{minutes} min)"
+                )
+            else:
+                print(
+                    f"Cleared TTL extension on trek {trek_id} task {task_id} "
+                    f"(normal TTL resumes on next scheduler tick)"
+                )
+        return
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    try:
+        trek.extend_task_ttl(
+            t,
+            task_id=task_id,
+            minutes=minutes,
+            reason=reason,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    trek_store.save_trek(t)
+    entry = (t.get("task_states") or {}).get(task_id) or {}
+    if json_mode:
+        print(json.dumps(entry, ensure_ascii=False))
+    else:
+        ext = entry.get("ttl_extended_until") or ""
+        if ext:
+            print(
+                f"Extended trek {trek_id} task {task_id} TTL until {ext} "
+                f"(+{minutes} min, local mode)"
+            )
+        else:
+            print(
+                f"Cleared TTL extension on trek {trek_id} task {task_id} "
+                "(local mode)"
+            )
+
+
 def cmd_trek_plan():
     """Edit a trek's scope (= what work items the trek is concerned with).
 
@@ -18039,6 +18145,7 @@ if __name__ == "__main__":
         "trek_leave": cmd_trek_leave,
         "trek_plan": cmd_trek_plan,
         "trek_task_state": cmd_trek_task_state,
+        "trek_extend_ttl": cmd_trek_extend_ttl,
         # ms-92 / e-2141 — cross-project task add via Trek scope
         "trek_task_add": cmd_trek_task_add,
         "trek_stop": cmd_trek_stop,
