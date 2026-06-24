@@ -114,6 +114,61 @@ ms-N+1 (Cluster B): Y 件移動完了
 ...
 ```
 
+## Step 4.5: 新規 MS の active 化確認 (ms-61 e-1892)
+
+新 MS 群を起票し配下タスクを移し終えた直後、 **どの新 MS から手を着けるかが誰の active 視野にも入らないと、 land 直後に棚卸し残務が宙に浮く構造バグになる**。 これは 2026-06-17 に ms-71 (= 棚卸しレビュー MS) で新規 6 MS (ms-75〜80) を land した後、 どの新 MS も `todo` のまま放置されて誰の active にも入らなかった事故から学んだ:
+
+- `beacon status` / session-start の active MS には新 MS が 1 件も載らない (全部 todo のまま)
+- 「次の一手」 推奨にも上がらない
+- 棚卸し残務 6 件 (= I クラスタ: dead-paper / superseded / 命名 / Skill 整理) が誰にも assign されないまま忘却された
+
+この活性化忘れを構造的に塞ぐため、 Step 4 完了直後に **必ず以下の確認 step を踏む** (= ユーザー直接介入で「次に動かす MS」 を明示する forcing function)。
+
+### 4.5a: 着手候補の提示
+
+Step 3 で起票した新 MS のうち priority が `highest` のもの (なければ priority `high` の先頭) を「最有力着手候補」 として 1 つピックアップする。
+
+```
+新 MS を起票し配下タスクを移し終えました。 次に着手する MS を選んでください:
+
+  最有力候補: ms-N "<タイトル>" (priority: highest, X tasks)
+
+このまま ms-N を active 化しますか? (= `beacon milestone start ms-N` を実行、
+status を `in_progress` に flip、 自分を assignee に登録、 worktree を作成)
+(y/n、 default y、 別 MS を指定する場合は ms-id を入力)
+```
+
+回答待ち。
+
+### 4.5b: ユーザー回答の分岐
+
+- y / Enter / 「はい」 / 「OK」 → 4.5c で最有力候補を active 化
+- ms-id (= 別 MS 指定) → 4.5c でその MS を active 化
+- n / 「いいえ」 / 「後で」 → skip して Step 5 へ。 **明示的に「全 MS が todo のまま残る」 旨を 1 行 warn 表示** (= 「⚠ 新 MS 群はすべて todo です。 着手前に `beacon milestone start <ms-id>` を打ち忘れないでください」)。 これがユーザー自身による「あとで自分で start する」 宣言の記録になる。
+
+### 4.5c: `beacon milestone start` を実行
+
+```bash
+beacon milestone start <選んだms-id>
+```
+
+これは ms-81 e-1920 の正規経路で、 以下を atomic に実施する:
+
+- MS status を `in_progress` に flip
+- 現在の actor を assignee に追加 (= self-add)
+- worktree を `.worktrees/<ms-branch>/` に作成 (= 並走 session の HEAD 衝突を防ぐ)
+- ms-81 occupation claim を立てる (= 他 session に「この MS は私が占有中」 のシグナルを残す)
+
+これにより「Skill が新 MS を起票した直後に手動で `beacon milestone start` を打ち忘れる」 という人的ミスが構造的に発生しない経路に固定される (= 手動 start 忘れ事故ゼロ、 AC #1)。
+
+### 後方互換
+
+既存 fork session 等で「もうどれかが active になっていて、 さらに別の MS を start すべきか」 が曖昧なケースは、 ユーザーが 4.5b で n を選べば silent に skip するので no-op。 強制 start ではなく明示確認 + 1 click default 経路として組む。
+
+### 補助経路 (= session-start 側 trigger)
+
+session-start の trigger check で「新 MS 起票後 N 日経過しても親 MS が todo のまま放置されている」 ケースを検知する補助 trigger (= `meta-review-parent-stale`) も理想形だが、 本 PR では Skill 改修を優先する。 trigger 側は別 task で扱う (= e-1892 split candidate、 完了報告で明示)。
+
 ## Step 5: レビューMS を observe 化
 
 ```bash
