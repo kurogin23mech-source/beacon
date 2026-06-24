@@ -258,12 +258,29 @@ const HTTP_TIMEOUT_MS = parseInt(
 // (multiple awaits) doesn't false-positive.
 const ITERATION_WATCHDOG_MS = parseInt(
   process.env.BEACON_BUS_ITERATION_WATCHDOG_MS || '60000', 10)
+// ms-95 / e-1490 — periodic refresh of .beacon/bridges/<sid>.json so the claim
+// file's pid / parent_pid / cwd never goes stale relative to the live bus.mjs.
+// Before this, writeBridgeClaim() ran only at cold-start (stampColdStartMetadata).
+// If bus.mjs died and was respawned by a new bclaude in a different cwd /
+// with a different parent pid, the existing bridges/<sid>.json kept pointing
+// at the original startup-time values. `bus directory --live --healthy`
+// then dropped the session because the recorded pid was dead while the
+// real bridge was alive elsewhere (= e-1482 dogfood observation:
+// 3rd bclaude in a separate worktree disappeared from the directory).
+// 60s is the smallest disk-friendly interval — every 5s POLL_INTERVAL tick
+// would thrash the disk for a 4-field JSON that rarely changes; 60s lets
+// us recover within a single retro/ops-loop without measurable IO load.
+// Rewrite is also gated on actual drift (pid / parent_pid / cwd change)
+// so a steady-state bridge skips the disk write entirely.
+const BRIDGE_CLAIM_REFRESH_MS = parseInt(
+  process.env.BEACON_BUS_BRIDGE_CLAIM_REFRESH_MS || '60000', 10)
 
 log(`=== beacon-bus channel starting ===`)
 log(`  api=${API_URL} project=${PROJECT_ID} session=${SESSION_ID}`)
 log(`  allow=[${ALLOWED_CHANNELS.join(',')}] poll=${POLL_INTERVAL}ms cwd=${CWD}`)
 log(`  scheduler=${SCHEDULER_DISABLED ? 'OFF' : SCHEDULER_INTERVAL_MS + 'ms'}`)
 log(`  http_timeout=${HTTP_TIMEOUT_MS}ms iter_watchdog=${ITERATION_WATCHDOG_MS}ms`)
+log(`  bridge_claim_refresh=${BRIDGE_CLAIM_REFRESH_MS}ms`)
 log(`  session.json source=[${session.source || ''}] last_active=[${session.last_active || ''}]`)
 
 // --- Layer 0-3 transparency metadata (ms-54 / e-1369) -----------------------
@@ -1035,6 +1052,17 @@ if (!PROJECT_ID || !SESSION_ID) {
   // still treat it as a fallback for back-compat. If this cold-start
   // inherited the legacy file's session_id (single-bclaude case, no
   // force-mint), clean it up so we don't leave duplicate claims behind.
+  // ms-95 / e-1490 — track the last (pid, parent_pid, cwd) we actually
+  // wrote so refreshBridgeClaim() can short-circuit when nothing changed.
+  // process.pid and process.ppid are immutable within a Node process so
+  // in practice drift is rare, but the gate keeps refresh logic honest
+  // (= "only rewrite when stale") and makes the disk-cost story trivially
+  // bounded (1 write at cold-start + 1 write per actual drift event).
+  let lastClaimPid = null
+  let lastClaimPpid = null
+  let lastClaimCwd = null
+  let lastBridgeClaimWriteAt = 0
+
   function writeBridgeClaim() {
     try {
       fs.mkdirSync(BRIDGES_DIR, { recursive: true })
@@ -1047,6 +1075,10 @@ if (!PROJECT_ID || !SESSION_ID) {
       }
       const claimPath = path.join(BRIDGES_DIR, `${SESSION_ID}.json`)
       fs.writeFileSync(claimPath, JSON.stringify(claim, null, 2))
+      lastClaimPid = process.pid
+      lastClaimPpid = process.ppid
+      lastClaimCwd = CWD
+      lastBridgeClaimWriteAt = Date.now()
       log(`bridge claim written: pid=${process.pid} ppid=${process.ppid} session=${SESSION_ID} → ${claimPath}`)
       // Best-effort legacy cleanup: if .beacon/bridge.json carries our
       // sid or a dead pid, remove it so future readers don't see two
@@ -1066,6 +1098,41 @@ if (!PROJECT_ID || !SESSION_ID) {
     } catch (e) {
       // Best-effort. CLI degrades to mint path if claim isn't writable.
       log(`bridge claim write failed (non-fatal): ${e.message}`)
+    }
+  }
+
+  // ms-95 / e-1490 — called from loop() once per iteration. Two triggers:
+  //   1. drift detected — pid/parent_pid/cwd differs from what we last wrote
+  //      (rare in practice, but defends against a future code path that
+  //      changes CWD or any other invariant assumption).
+  //   2. periodic timer — at least once every BRIDGE_CLAIM_REFRESH_MS,
+  //      independent of drift. This is the load-bearing case: even if the
+  //      claim file is bit-identical, rewriting it bumps mtime so any
+  //      external garbage collector ("delete bridges/*.json untouched for
+  //      >N min") leaves us alone. More importantly, if a *different*
+  //      bus.mjs in a separate worktree ever overwrites our path (= sid
+  //      collision shouldn't happen post-e-1460 but the file is shared
+  //      state), our next refresh restores our authoritative view.
+  //
+  // Disk cost: 1 write per minute per bridge, ~250 bytes JSON. Negligible
+  // even on a 10-bridge dogfood machine (= 10 writes/min, <3 KB/min).
+  // No network call → no HTTP_TIMEOUT_MS / withWatchdog needed; the
+  // try/catch keeps a transient fs error from killing the loop.
+  function refreshBridgeClaim() {
+    try {
+      const now = Date.now()
+      const drifted =
+        process.pid !== lastClaimPid ||
+        process.ppid !== lastClaimPpid ||
+        CWD !== lastClaimCwd
+      const timerDue = (now - lastBridgeClaimWriteAt) >= BRIDGE_CLAIM_REFRESH_MS
+      if (!drifted && !timerDue) return
+      writeBridgeClaim()
+    } catch (e) {
+      // Defensive: writeBridgeClaim already swallows fs errors, but if the
+      // drift check itself throws (e.g. CWD reassigned to undefined by
+      // future code) we still cannot kill the loop.
+      log(`bridge claim refresh failed (non-fatal): ${e.message}`)
     }
   }
 
@@ -1169,6 +1236,13 @@ if (!PROJECT_ID || !SESSION_ID) {
       } catch (e) {
         log(`heartbeat watchdog non-fatal: ${e.message}`)
       }
+      // ms-95 / e-1490: refresh bridges/<sid>.json so pid / parent_pid /
+      // cwd don't go stale between cold-start and the (potentially much
+      // later) next bus.mjs restart. Self-gated to BRIDGE_CLAIM_REFRESH_MS
+      // and to actual drift, so steady-state cost is 1 fs write/minute.
+      // No await / no network — refreshBridgeClaim is sync fs.writeFileSync
+      // (= local disk only) wrapped in try/catch.
+      refreshBridgeClaim()
       await new Promise((r) => setTimeout(r, POLL_INTERVAL))
     }
     log('poll loop exiting')
