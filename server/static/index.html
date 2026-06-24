@@ -7779,76 +7779,127 @@ async function renderMenu() {
   // Per mock, Members + Project actions move to the Settings overlay
   // (Projects & Members tab); Account info moves to the avatar dropdown.
 
-  // Load any missing data upfront. The panel only paints **once** after
-  // all loaders resolve so the slide-in CSS animation runs exactly once
-  // (= user-reported "menu animates twice" bug fix).
-  if (state.projects.length === 0) {
-    try { await loadProjects(); } catch (_e) {}
-  }
-  // ms-86 / e-2251 \u2014 Treks \u30bb\u30af\u30b7\u30e7\u30f3\u306f\u30cf\u30f3\u30d0\u30fc\u30ac\u30fc\u304b\u3089\u524a\u9664\u6e08 (= top-level tab
-  // \u300cTreks\u300d \u306b\u5206\u96e2\u3001 SPEC IgCFK8I34cBfPco3UE06 \u65b9\u91dd 6)\u3002 menu loader \u304b\u3089\u3082 Trek
-  // load \u3092\u5916\u3057\u3001 \u30cf\u30f3\u30d0\u30fc\u30ac\u30fc = project + online sessions \u306e\u307f\u306b\u5f79\u5272\u3092\u7d5e\u308b\u3002
-  const sessionLoad = (state.onlineSessions && state.onlineSessions.length)
-    ? Promise.resolve()
-    : dataSource.loadOnlineSessions().catch(() => {});
-  await Promise.all([sessionLoad]);
+  // ms-95 / e-2215 \u2014 lazy fill pattern. Previously `renderMenu()` did
+  // `await loadProjects()` + `await loadOnlineSessions()` BEFORE the first
+  // paint, which kept `#menu-root` empty (= visually invisible) until both
+  // network round-trips resolved. On a fresh page load (= cache cold)
+  // the first hamburger click felt like a 300ms\u20131s freeze.
+  //
+  // Fix: paint the panel **immediately** with whatever data is already in
+  // `state.*` (possibly empty, in which case a loading skeleton placeholder
+  // is shown for that section). Then fire the missing fetches in the
+  // background and re-paint each section in-place as data arrives. The
+  // menu open animation now starts within the same frame as the click.
+  //
+  // The CSS slide-in keyframe runs on `.menu-panel` whose DOM identity is
+  // preserved across re-paints (= only the per-section innerHTML is
+  // replaced via paintProjects / paintSessions), so the animation still
+  // plays exactly once (= preserves the e-1659 v3 "animates twice" fix).
 
-  const paint = () => {
-    const root = document.getElementById('menu-root');
-    if (!root) return;
-    const sessions = state.onlineSessions || [];
+  const root = document.getElementById('menu-root');
+  if (!root) return;
 
-    root.innerHTML = `
-      <div class="menu-overlay" data-action="close-menu"></div>
-      <div class="menu-panel">
-        <div class="menu-section">
-          <div class="menu-header" style="margin-bottom:14px;">
-            <span class="menu-title">Menu</span>
-            <button class="menu-close" data-action="close-menu">\u00d7</button>
+  const renderProjectsSection = () => {
+    if (!state.projects || state.projects.length === 0) {
+      return '<div class="menu-user" style="color:var(--text-dim);">Loading\u2026</div>';
+    }
+    return state.projects.map(p => `
+      <button class="menu-item ${p.project_id === state.projectId ? 'current' : ''}"
+              data-action="menu-select-project" data-project-id="${esc(p.project_id)}">
+        ${esc(p.name)}
+        <div class="menu-item-sub">${esc(p.project_id)}</div>
+      </button>
+    `).join('');
+  };
+
+  const renderSessionsSection = () => {
+    const sessions = state.onlineSessions;
+    if (sessions === undefined || sessions === null) {
+      return '<div class="menu-user" style="color:var(--text-dim);">Loading\u2026</div>';
+    }
+    if (sessions.length === 0) {
+      return '<div class="menu-user" style="color:var(--text-dim);">No online sessions.</div>';
+    }
+    return sessions.slice(0, 12).map(s => {
+      const muted = !!s.shutdown;
+      const sid = (s.session_id || s.actor && s.actor.session_id || '');
+      const email = (s.actor && s.actor.email) || '';
+      // ms-82 / e-1971 \u2014 apply renderName so display_name (if set)
+      // appears here too, closing the ms-78 / e-1909 propagation gap.
+      const displayName = (s.actor && s.actor.display_name) || '';
+      const proj = s.project_name || s.project_id || '';
+      return `
+        <div class="sidebar-agent-row ${muted ? 'muted' : ''}">
+          <span class="agent-dot"></span>
+          <div class="agent-meta">
+            <span class="agent-id">${esc((sid || '').slice(0, 12))}\u2026</span>
+            <span class="agent-where">${renderName(displayName, email)}<br>${esc(proj)}</span>
           </div>
-        </div>
+        </div>`;
+    }).join('');
+  };
 
-        <div class="menu-section">
-          <div class="menu-section-title">Projects</div>
-          ${state.projects.map(p => `
-            <button class="menu-item ${p.project_id === state.projectId ? 'current' : ''}"
-                    data-action="menu-select-project" data-project-id="${esc(p.project_id)}">
-              ${esc(p.name)}
-              <div class="menu-item-sub">${esc(p.project_id)}</div>
-            </button>
-          `).join('') || '<div class="menu-user" style="color:var(--text-dim);">No projects.</div>'}
-        </div>
-
-        <div class="menu-section">
-          <div class="menu-section-title">Online Agents</div>
-          ${sessions.length
-            ? sessions.slice(0, 12).map(s => {
-                const muted = !!s.shutdown;
-                const sid = (s.session_id || s.actor && s.actor.session_id || '');
-                const email = (s.actor && s.actor.email) || '';
-                // ms-82 / e-1971 \u2014 apply renderName so display_name (if set)
-                // appears here too, closing the ms-78 / e-1909 propagation gap.
-                const displayName = (s.actor && s.actor.display_name) || '';
-                const proj = s.project_name || s.project_id || '';
-                return `
-                  <div class="sidebar-agent-row ${muted ? 'muted' : ''}">
-                    <span class="agent-dot"></span>
-                    <div class="agent-meta">
-                      <span class="agent-id">${esc((sid || '').slice(0, 12))}\u2026</span>
-                      <span class="agent-where">${renderName(displayName, email)}<br>${esc(proj)}</span>
-                    </div>
-                  </div>`;
-              }).join('')
-            : '<div class="menu-user" style="color:var(--text-dim);">No online sessions.</div>'}
+  // First paint: build the full shell with placeholder sections. Runs
+  // synchronously so the slide-in animation starts immediately.
+  root.innerHTML = `
+    <div class="menu-overlay" data-action="close-menu"></div>
+    <div class="menu-panel">
+      <div class="menu-section">
+        <div class="menu-header" style="margin-bottom:14px;">
+          <span class="menu-title">Menu</span>
+          <button class="menu-close" data-action="close-menu">\u00d7</button>
         </div>
       </div>
-    `;
-    document.getElementById('menu-root').querySelectorAll('[data-action]').forEach(el => {
-      el.addEventListener('click', handleAction);
+
+      <div class="menu-section">
+        <div class="menu-section-title">Projects</div>
+        <div id="menu-projects-list">${renderProjectsSection()}</div>
+      </div>
+
+      <div class="menu-section">
+        <div class="menu-section-title">Online Agents</div>
+        <div id="menu-sessions-list">${renderSessionsSection()}</div>
+      </div>
+    </div>
+  `;
+  root.querySelectorAll('[data-action]').forEach(el => {
+    el.addEventListener('click', handleAction);
+  });
+
+  // Background fetches \u2014 fire-and-forget. Each refills its section in
+  // place once data arrives. Errors silently degrade (placeholder stays).
+  const refillSection = (id, html) => {
+    const el = document.getElementById(id);
+    if (!el) return; // menu was closed before fetch returned
+    el.innerHTML = html;
+    el.querySelectorAll('[data-action]').forEach(node => {
+      node.addEventListener('click', handleAction);
     });
   };
 
-  paint();
+  if (!state.projects || state.projects.length === 0) {
+    loadProjects().then(() => {
+      refillSection('menu-projects-list',
+        (state.projects && state.projects.length > 0)
+          ? renderProjectsSection()
+          : '<div class="menu-user" style="color:var(--text-dim);">No projects.</div>');
+    }).catch(() => {
+      refillSection('menu-projects-list',
+        '<div class="menu-user" style="color:var(--text-dim);">No projects.</div>');
+    });
+  }
+
+  // ms-86 / e-2251 \u2014 Treks \u30bb\u30af\u30b7\u30e7\u30f3\u306f\u30cf\u30f3\u30d0\u30fc\u30ac\u30fc\u304b\u3089\u524a\u9664\u6e08 (= top-level tab
+  // \u300cTreks\u300d \u306b\u5206\u96e2\u3001 SPEC IgCFK8I34cBfPco3UE06 \u65b9\u91dd 6)\u3002 menu loader \u304b\u3089\u3082 Trek
+  // load \u3092\u5916\u3057\u3001 \u30cf\u30f3\u30d0\u30fc\u30ac\u30fc = project + online sessions \u306e\u307f\u306b\u5f79\u5272\u3092\u7d5e\u308b\u3002
+  if (!state.onlineSessions || state.onlineSessions.length === 0) {
+    dataSource.loadOnlineSessions().then(() => {
+      refillSection('menu-sessions-list', renderSessionsSection());
+    }).catch(() => {
+      refillSection('menu-sessions-list',
+        '<div class="menu-user" style="color:var(--text-dim);">No online sessions.</div>');
+    });
+  }
 }
 
 async function loadProjectActions() {
