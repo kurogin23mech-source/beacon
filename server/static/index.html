@@ -2258,7 +2258,7 @@ body::after {
 
 /* ms-86 v2 layout (mockups/trek-detail.html / e-2126) — wireframe reflow:
    WHY (goal_state) / TREK TASKS (MS accordion + 5-state badges) /
-   MEMBERS & AGENTS (table) / RECENT ACTIVITY (real task-state stream). */
+   MEMBERS & AGENTS (table) / ACTIVITY (real task-state stream). */
 
 /* WHY block — narrow blue left rule, soft accent tint background. */
 .trek-why-block {
@@ -2511,23 +2511,69 @@ body::after {
 .trek-members-table .session-live-marker.offline { color: var(--text-dim); }
 .trek-members-table .session-live-marker.none { color: var(--text-dim); opacity: 0.5; }
 
-/* RECENT ACTIVITY (real) — task-state transitions. */
+/* ACTIVITY (real) — task-state transitions + halt events.
+   ms-86 / e-2226: added session-ref column so each row carries the
+   Trek-local session id (= s-N) of the actor in addition to task id
+   and operation text. */
 .trek-activity-row-v2 {
   display: grid;
-  grid-template-columns: 130px 22px 1fr;
-  gap: 14px;
+  grid-template-columns: 130px 22px minmax(48px, max-content) 1fr;
+  gap: 12px;
   padding: 7px 14px;
   font-size: 0.74rem;
   border-bottom: 1px dashed var(--border-subtle, var(--border));
+  align-items: center;
 }
 .trek-activity-row-v2:last-child { border-bottom: none; }
 .trek-activity-row-v2 .activity-ts { font-family: var(--font-mono, monospace); color: var(--text-dim); }
 .trek-activity-row-v2 .activity-icon { text-align: center; }
+.trek-activity-row-v2 .activity-sid {
+  text-align: left;
+  color: var(--text-dim);
+  font-size: 0.7rem;
+}
+.trek-activity-row-v2 .activity-sid:empty::before {
+  content: "—";
+  color: var(--text-dim);
+  opacity: 0.4;
+}
 .trek-activity-row-v2 .activity-text {
   color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.trek-activity-row-v2 .activity-text .activity-task {
+  font-family: var(--font-mono, monospace);
+  color: var(--text-primary, var(--text-secondary));
+}
+.trek-activity-row-v2 .activity-text .activity-state {
+  color: var(--text-dim);
+}
+.trek-activity-row-v2 .activity-text .activity-note {
+  color: var(--text-secondary);
+}
+
+/* ms-86 / e-2226: pagination/expand footer for ACTIVITY section. */
+.trek-activity-toggle {
+  padding: 8px 14px;
+  text-align: center;
+  border-top: 1px dashed var(--border-subtle, var(--border));
+}
+.trek-activity-toggle button {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  padding: 4px 12px;
+  font-size: 0.72rem;
+  cursor: pointer;
+  border-radius: 4px;
+  font-family: inherit;
+}
+.trek-activity-toggle button:hover {
+  background: var(--bg-hover);
+  color: var(--accent);
+  border-color: var(--accent);
 }
 
 /* ms-86 / e-2133: Trek-local 番号 (= s-N) badge. raw session id (= sv-77...) を
@@ -2791,6 +2837,10 @@ let state = {
   //   doesn't reveal done tasks for unrelated MS rows.
   openTrekExpanded: new Set(),
   openTrekShowDone: new Set(),
+  // ms-86 / e-2226 — ACTIVITY section "show all" toggle. false → 10-row
+  // cap (default), true → all events. Reset whenever the open Trek
+  // changes so the expansion doesn't bleed across treks.
+  openTrekActivityExpanded: false,
   // ms-69 / e-1664 — Related Treks widget cache (= per work item).
   // Key shape: 'ms:ms-69' / 'op:op-1' / 'task:e-1656'. Values are the
   // list of treks whose scope covers the item. Populated lazily by
@@ -4384,6 +4434,7 @@ async function switchTab(tab) {
   state.openTrekDocs = [];
   state.openTrekExpanded = new Set();
   state.openTrekShowDone = new Set();
+  state.openTrekActivityExpanded = false;
   if (tab === 'documents') {
     const loads = [];
     if (state.documents.length === 0) loads.push(dataSource.loadDocuments().catch(() => {}));
@@ -4485,6 +4536,7 @@ async function openTrek(trekId) {
   state.openTrekScope = { milestones: [], operations: [], tasks: [] };
   state.openTrekExpanded = new Set();
   state.openTrekShowDone = new Set();
+  state.openTrekActivityExpanded = false;
   // ms-86 / e-2250 — drop "?project=" and switch to "?trek=<id>" so
   // shared links don't carry the opener's current project context.
   _setUrlForTrekDetail(trekId);
@@ -4512,6 +4564,7 @@ function closeTrek() {
   state.openTrekScope = { milestones: [], operations: [], tasks: [] };
   state.openTrekExpanded = new Set();
   state.openTrekShowDone = new Set();
+  state.openTrekActivityExpanded = false;
   // ms-86 / e-2250 — restore "?project=<pid>" so the post-Trek URL
   // reflects the project the user returns to (or, if none is loaded,
   // clear the trek param honestly without inventing a fallback project).
@@ -5384,7 +5437,7 @@ function _trekBadgeClass(s) {
   return '';
 }
 
-// ms-86 v2 (= e-2126 mockup) — TREK TASKS / MEMBERS table / RECENT ACTIVITY helpers.
+// ms-86 v2 (= e-2126 mockup) — TREK TASKS / MEMBERS table / ACTIVITY helpers.
 //
 // _trekTaskStateLabel — return the 5-state token for a scope entry, looking
 // it up in trek_doc.task_states. Defaults to "todo" when the executor has
@@ -5835,12 +5888,14 @@ function _renderTrekMembersTable(t, scopeAggregate) {
     </table>`;
 }
 
-// _renderTrekRecentActivity — populate RECENT ACTIVITY from the real
-// task_states transition timestamps (= best available signal until e-1696
-// lands a dedicated activity stream). Sorts most-recent first and caps at
-// 10 rows so the section stays scannable.
-function _renderTrekRecentActivity(t) {
+// ms-86 / e-2226 — ACTIVITY event collector.
+// Builds the time-sorted event list from task_states + halt. Split out
+// from _renderTrekActivity so the caller can read events.length for the
+// section header (= "N events / showing M") and for the show-all toggle
+// gating.
+function _trekActivityEvents(t) {
   const events = [];
+  if (!t) return events;
   for (const [taskId, ent] of Object.entries(t.task_states || {})) {
     if (!ent || !ent.updated_at) continue;
     events.push({
@@ -5860,22 +5915,38 @@ function _renderTrekRecentActivity(t) {
     });
   }
   events.sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
+  return events;
+}
+
+// _renderTrekActivity — render the ACTIVITY rows from the real
+// task_states transition timestamps (= best available signal until e-2227
+// lands the c-1 session_history + c-2 Activity expansion data source
+// integration). Each row carries: timestamp + state icon + Trek-local
+// session ref (= s-N) + task id + state label + transition note.
+//
+// ms-86 / e-2226: renamed from _renderTrekRecentActivity. Adds session
+// column and pagination footer (= "Show all (N)" / "Show fewer").
+function _renderTrekActivity(t, events, expanded) {
   if (!events.length) {
     return `<div class="trek-coming-soon">
       No activity recorded yet. State transitions and halt events surface
       here automatically — a richer feed (commits / DMs / scope changes)
-      lands with e-1696.
+      lands with e-2227.
     </div>`;
   }
-  const shown = events.slice(0, 10);
-  return shown.map(ev => {
+  const cap = expanded ? events.length : 10;
+  const shown = events.slice(0, cap);
+  const rows = shown.map(ev => {
     const ts = (ev.ts || '').slice(0, 16).replace('T', ' ');
+    const sidHtml = ev.sid ? _trekRenderSessionRef(t, ev.sid) : '';
     if (ev.kind === 'halt') {
+      const text = `halt — ${ev.reason || '(no reason)'}`;
       return `
         <div class="trek-activity-row-v2">
           <div class="activity-ts">${esc(ts)}</div>
           <div class="activity-icon">⛔</div>
-          <div class="activity-text" title="${esc(ev.reason)}">halt — ${esc(ev.reason || '(no reason)')}</div>
+          <div class="activity-sid">${sidHtml}</div>
+          <div class="activity-text" title="${esc(text)}">${esc(text)}</div>
         </div>`;
     }
     const icon = ev.state === 'done' ? '✓'
@@ -5883,17 +5954,34 @@ function _renderTrekRecentActivity(t) {
       : ev.state === 'leader_review' ? '👀'
       : ev.state === 'user_review' ? '⏸'
       : '○';
-    const noteSuffix = ev.note ? ' — ' + ev.note : '';
-    const text = `state ${ev.state} — ${ev.task_id}${noteSuffix}`;
+    // Operation text: "<task-id> → <state>[ — <note>]". The note (= done
+    // reason or transition comment, from task_states[task_id].note) is the
+    // "操作内容テキスト" surface — it's what the actor wrote about the
+    // transition. Title attribute carries the full plain-text version for
+    // hover (= row truncates via ellipsis when narrow).
+    const noteSuffix = ev.note ? ` — ${ev.note}` : '';
+    const titleText = `${ev.task_id} → ${ev.state}${noteSuffix}`;
+    const textHtml = `<span class="activity-task">${esc(ev.task_id)}</span>`
+      + ` <span class="activity-state">→ ${esc(ev.state)}</span>`
+      + (ev.note ? ` <span class="activity-note">— ${esc(ev.note)}</span>` : '');
     return `
       <div class="trek-activity-row-v2">
         <div class="activity-ts">${esc(ts)}</div>
         <div class="activity-icon">${icon}</div>
-        <div class="activity-text" title="${esc(text)}">${esc(text)}</div>
+        <div class="activity-sid">${sidHtml}</div>
+        <div class="activity-text" title="${esc(titleText)}">${textHtml}</div>
       </div>`;
-  }).join('') + (events.length > shown.length
-    ? `<div style="margin-top:6px;font-size:0.7rem;color:var(--text-dim);">${events.length - shown.length} older event(s) hidden.</div>`
-    : '');
+  }).join('');
+  let footer = '';
+  if (events.length > 10) {
+    const label = expanded
+      ? `Show fewer (last 10 of ${events.length})`
+      : `Show all (${events.length})`;
+    footer = `<div class="trek-activity-toggle">
+      <button data-action="trek-activity-toggle-expand">${esc(label)}</button>
+    </div>`;
+  }
+  return rows + footer;
 }
 
 function _renderTrekDetail(t) {
@@ -5916,7 +6004,7 @@ function _renderTrekDetail(t) {
   // - drop project subpage decorations (breadcrumb / trek-meta / archive card)
   // - WebUI 哲学への return: 全 CLI hints を削除、 read-only 監査 view に統一
   // - keep: HEADER (= trek title + halted pill) / WHY / HALT / TREK TASKS /
-  //   MEMBERS table / PULSE-ACK / RECENT ACTIVITY
+  //   MEMBERS table / PULSE-ACK / ACTIVITY
   // STOP / HALT card: no CLI hint text — operation は CLI + Skill (= Claude
   // Code) 経由、 ボタンは将来 fetch で叩く placeholder。
   let stopCardHtml = '';
@@ -5996,13 +6084,25 @@ function _renderTrekDetail(t) {
         ${_renderTrekMembersTable(t, scopeAggregate)}
       </div>
 
-      <!-- RECENT ACTIVITY — task-state transitions + halt events -->
+      <!-- ACTIVITY — task-state transitions + halt events.
+           ms-86 / e-2226: renamed from RECENT ACTIVITY, each row carries
+           Trek-local session ref + task id + state transition note; show-all
+           toggle lets user page back through full history. -->
       <div class="trek-section">
         <div class="trek-section-title">
-          <span>RECENT ACTIVITY</span>
-          <span class="right">last 10 events</span>
+          <span>ACTIVITY</span>
+          <span class="right">${(() => {
+            const evs = _trekActivityEvents(t);
+            const exp = !!state.openTrekActivityExpanded;
+            const visible = evs.length > 10 && !exp ? 10 : evs.length;
+            const total = evs.length;
+            const eventLabel = total === 1 ? 'event' : 'events';
+            return total > 10 && !exp
+              ? `${total} ${eventLabel} · showing ${visible}`
+              : `${total} ${eventLabel}`;
+          })()}</span>
         </div>
-        ${_renderTrekRecentActivity(t)}
+        ${_renderTrekActivity(t, _trekActivityEvents(t), !!state.openTrekActivityExpanded)}
       </div>
     </section>`;
 }
@@ -7349,6 +7449,14 @@ function handleCommonAction(action, el) {
       if (!state.openTrekShowDone) state.openTrekShowDone = new Set();
       if (state.openTrekShowDone.has(msId)) state.openTrekShowDone.delete(msId);
       else state.openTrekShowDone.add(msId);
+      render();
+      return true;
+    }
+    // ms-86 / e-2226 — ACTIVITY section "show all" / "show fewer" toggle.
+    // Single boolean (= one open Trek at a time), reset by openTrek /
+    // closeTrek / tab switch so expansion doesn't bleed across treks.
+    case 'trek-activity-toggle-expand': {
+      state.openTrekActivityExpanded = !state.openTrekActivityExpanded;
       render();
       return true;
     }
