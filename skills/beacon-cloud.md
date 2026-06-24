@@ -153,6 +153,39 @@ beacon cloud diff --json
 
 ### 1-b: 衝突可能性の表示 (= 必ず提示)
 
+#### 過去病理例 (= 提示前に必ず読み上げて user の体感に橋渡しする、e-1778)
+
+`upload-initial` 系の操作 (= 旧 `cloud push` 含む) で実際に起きた事故を具体的に提示する。
+「これは自分にも起きうる」 と user に体感させるための forcing function。
+e-1777 (= 過去 incident 共通パターン memo doc、 並行作業中) の完成後に詳細 cross-link 予定。
+
+`````
+過去にこの操作で起きた事故 (= 抽象論ではなく実例):
+
+  [病理 A] 2026-05-19 cloud 上書き data loss (= ms-24 / commit fe8b7ffd で構造修復)
+    Mac で `beacon cloud push` を実行 → cloud 側に他マシンから入っていた docs / retros が
+    丸ごと上書き消滅。 ローカルが「古いまま」 だったのに気付かず whole-PUT が走った。
+    その後 cloud mode では `--force` 必須 + docs / retros は skip する保護を CLI 側で追加。
+
+  [病理 B] 2026-06-15 silent mode flip による「データ消えた」 体感 (= e-1776 / e-1861 で構造修復)
+    サブエージェントが `.beacon/config.json` を `{"mode": "local"}` に黙って書き換えた。
+    以降の全 CLI が cloud を参照しなくなり、 user 体感では「cloud のデータが消えた」。
+    実際は cloud 側に残っていたが、 silent な mode flip で local 空 cache を見ていただけ。
+    対策: cloud.json 存在を唯一の真値にして `mode` 二重持ちを撤廃 (ms-61 / e-1861)。
+
+  [病理 C] 2026-06-07 Firestore 1 MiB cap で write 全停止 (= ms-59 / PR #80 で構造修復)
+    project doc が 1 MiB を超え、 「増やす write」 (= log / task add / milestone add) が
+    全て HTTP 500 で reject される状態に陥り 4-5 時間 blocked。 monolithic な
+    `1 project = 1 doc` 設計が原因。 upload-initial は新規 bootstrap で whole-PUT を走らせる
+    操作なので、 同じ payload size 由来の事故を踏みやすい (= subcollection 化済の今でも、
+    bootstrap タイミングで一気にサイズが乗ると同型の事故が起きうる)。
+
+これらは全て事後に構造修復済だが、 「whole-PUT で他者の状態が消える」 「silent な切り替わり」
+「payload 肥大化」 の 3 軸は upload-initial が本質的に踏みうる経路。 cancel が default の理由。
+`````
+
+#### 自プロジェクトの cloud 側状況 (= diff の結果)
+
 ```
 ─────────────────────────────────────────────
   cloud 側の状況:
@@ -176,6 +209,9 @@ beacon cloud diff --json
 ```
 
 衝突可能性なしの場合 (= cloud_changes_since_local_pull が 0) は「衝突可能性: なし (= 別マシンからの push は検知されません)」と明示。
+
+ただし「衝突なし」 表示でも上記病理 B (= silent mode flip で local が空 cache 化、 cloud 側 diff が
+「無い」 ように見える) と病理 C (= bootstrap 時の payload size) は残るため、 cancel が安全。
 
 ### 1-c: 警告と二段確認
 
