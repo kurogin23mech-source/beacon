@@ -1864,20 +1864,23 @@ cmd_pr() {
             local entry_id=""
             local rationale=""
             local json_flag=""
+            local no_auto_done_flag=""
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
-                    --rationale) rationale="${2:-}"; shift 2 ;;
-                    --json)      json_flag="1"; shift ;;
-                    *)           entry_id="$1"; shift ;;
+                    --rationale)    rationale="${2:-}"; shift 2 ;;
+                    --json)         json_flag="1"; shift ;;
+                    --no-auto-done) no_auto_done_flag="1"; shift ;;
+                    *)              entry_id="$1"; shift ;;
                 esac
             done
 
             if [ -z "$entry_id" ]; then
-                echo "Usage: beacon pr approve <entry-id> [--rationale \"text\"] [--json]"
+                echo "Usage: beacon pr approve <entry-id> [--rationale \"text\"] [--no-auto-done] [--json]"
                 exit 1
             fi
-            BEACON_ENTRY_ID="$entry_id" BEACON_RATIONALE="$rationale" BEACON_JSON="$json_flag" \
+            BEACON_ENTRY_ID="$entry_id" BEACON_RATIONALE="$rationale" \
+                BEACON_JSON="$json_flag" BEACON_NO_AUTO_DONE="$no_auto_done_flag" \
                 python3 "$COMMANDS_PY" pr_approve
             ;;
         reject)

@@ -10577,10 +10577,178 @@ def cmd_pr_close():
         print(f"Closed PR [{entry_id}]: {entry.get('description', '')}")
 
 
+def _collect_pr_bound_task_ids(pr_entry: dict, data: dict) -> list:
+    """ms-95 / e-2369 — collect the task IDs bound to this PR's commits.
+
+    Two signal sources are unioned, in order:
+
+    1. **Hash-join with beacon-logged commits' ``meta.resolves``** —
+       ``pr_add`` stores child commits with only ``meta.hash``, but the
+       beacon-logged side (= the entry created by ``beacon log``) carries
+       ``meta.resolves = "e-XXX"`` whenever the developer passed
+       ``--resolves <task-id>``. Joining by 7-char hash lifts that binding
+       up to the PR.
+    2. **``e-\\d+`` regex on commit messages** — for projects that don't
+       pass ``--resolves`` but mention the task id in the commit message
+       (``feat(ms-X): e-YYY ...``), this fallback still catches the
+       binding. Common in this very repo's commit log.
+
+    Returns a de-duplicated list of task IDs (strings). Order: stable on
+    first encounter so the auto-done report is deterministic.
+    """
+    bound: list = []
+    seen: set = set()
+
+    def _record(tid: str):
+        if tid and tid not in seen:
+            seen.add(tid)
+            bound.append(tid)
+
+    # Build hash → resolves map from beacon-logged commit entries.
+    hash_to_resolves: dict = {}
+    for ms in data.get("milestones", []):
+        if not isinstance(ms, dict):
+            continue
+        for ent in ms.get("entries", []) or []:
+            if not isinstance(ent, dict) or ent.get("type") != "commit":
+                continue
+            meta = ent.get("meta") or {}
+            h = (meta.get("hash") or "")[:7]
+            r = (meta.get("resolves") or "").strip()
+            if h and r:
+                hash_to_resolves[h] = r
+
+    # Walk PR's commit children.
+    for child in pr_entry.get("entries", []) or []:
+        if not isinstance(child, dict) or child.get("type") != "commit":
+            continue
+        meta = child.get("meta") or {}
+        h = (meta.get("hash") or "")[:7]
+        # Signal 1: hash-joined resolves
+        if h and h in hash_to_resolves:
+            _record(hash_to_resolves[h])
+        # Signal 1b: a resolves field may have been set on the PR child
+        # directly (forward-compat — currently pr_add doesn't, but future
+        # callers might).
+        r_direct = (meta.get("resolves") or "").strip()
+        if r_direct:
+            _record(r_direct)
+        # Signal 2: regex on the commit message text.
+        msg = child.get("description", "") or ""
+        for m in re.findall(r"e-\d+", msg):
+            _record(m)
+
+    return bound
+
+
+def _judge_pr_approve_auto_done(pr_entry: dict, data: dict) -> list:
+    """ms-95 / e-2369 — produce per-task judgement for PR approve auto-done.
+
+    Mirrors `/beacon-log` Skill Step 1.9's HIGH / MID / LOW × DONE / SKIP
+    judgement, but lives Python-side because `beacon pr approve` is a CLI
+    call (not an AI Skill prompt). The matching corpus is the PR
+    title/body/intent + every child commit message. The candidate task
+    set comes from `_collect_pr_bound_task_ids`.
+
+    Confidence rules (mirrors Step 1.9):
+      * **HIGH** — task ID is explicitly mentioned in the PR title /
+        intent / one of the commit messages, AND at least one
+        description / AC keyword overlaps with the same corpus.
+      * **MID**  — keyword overlap only (≥ 1 description / AC keyword
+        matches), but no explicit task-id mention in the corpus. Surface
+        as a candidate but do not auto-done.
+      * **LOW**  — only the task-id was found via a weak signal (e.g.
+        resolves was set in beacon log but the description doesn't even
+        share a token). Silently dropped.
+
+    Returns a list of dicts:
+        {"task_id": str, "confidence": "HIGH"|"MID"|"LOW",
+         "description": str, "ac_matched": [str, ...],
+         "reason": str}
+
+    Skips tasks that are already done / cancelled (idempotent).
+    """
+    # Compose the matching corpus.
+    pr_meta = pr_entry.get("meta") or {}
+    pr_title = pr_entry.get("description", "") or ""
+    pr_intent = pr_meta.get("intent", "") or ""
+    commit_msgs = [
+        (c.get("description") or "")
+        for c in (pr_entry.get("entries") or [])
+        if isinstance(c, dict) and c.get("type") == "commit"
+    ]
+    corpus_text = " \n".join([pr_title, pr_intent, *commit_msgs])
+    corpus_lower = corpus_text.lower()
+    corpus_tokens = core._tokenize(corpus_text)
+
+    bound = _collect_pr_bound_task_ids(pr_entry, data)
+    judgements: list = []
+
+    for tid in bound:
+        result = core.find_entry(data, tid)
+        if not result:
+            # Bound id points to a nonexistent / removed entry — skip
+            # silently (matches PR-not-found fail-soft style).
+            continue
+        _ms, _parent, task_entry, _idx = result
+        if task_entry.get("type") != "task":
+            # The bind pointed at a commit / note / PR — not actionable.
+            continue
+        if task_entry.get("status") in ("done", "cancelled"):
+            # Idempotent: a re-approve doesn't re-done.
+            continue
+
+        # Build task-side text for keyword matching.
+        task_desc = task_entry.get("description", "") or ""
+        ac_text = task_entry.get("acceptance_criteria", "") or ""
+        motivation = task_entry.get("motivation", "") or ""
+        task_side_text = " ".join([task_desc, ac_text, motivation])
+        task_tokens = core._tokenize(task_side_text)
+        overlap = task_tokens & corpus_tokens
+        ac_matched = sorted(overlap)[:5]
+
+        # HIGH: task-id explicit in corpus AND ≥1 keyword overlap.
+        # MID:  keyword overlap only, no explicit mention.
+        # LOW:  no overlap (drops silently).
+        explicit_mention = tid in re.findall(r"e-\d+", corpus_text)
+        if explicit_mention and overlap:
+            confidence = "HIGH"
+        elif overlap:
+            confidence = "MID"
+        elif explicit_mention:
+            # Explicit binding but zero keyword overlap → conservative
+            # MID (= surface for user review, don't auto-done).
+            confidence = "MID"
+        else:
+            confidence = "LOW"
+
+        if confidence == "LOW":
+            continue
+
+        pr_num = pr_meta.get("pr_number")
+        pr_label = f"#{pr_num}" if pr_num else pr_entry.get("id", "")
+        kw_list = ", ".join(ac_matched) if ac_matched else "(no AC keywords)"
+        reason = (
+            f"Auto-done from PR approve [{pr_label}]: "
+            f"{(pr_title or '').strip()[:120]}. "
+            f"AC keywords matched: {kw_list}"
+        )
+        judgements.append({
+            "task_id": tid,
+            "confidence": confidence,
+            "description": task_desc,
+            "ac_matched": ac_matched,
+            "reason": reason,
+        })
+
+    return judgements
+
+
 def cmd_pr_approve():
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
     rationale = os.environ.get("BEACON_RATIONALE", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    no_auto_done = os.environ.get("BEACON_NO_AUTO_DONE", "") == "1"
 
     if not entry_id:
         print("Error: entry ID required", file=sys.stderr)
@@ -10602,15 +10770,66 @@ def cmd_pr_approve():
     except ValueError as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
+
+    # ms-95 / e-2369 — auto-done tasks bound to this PR's commits via
+    # `meta.resolves` (or `e-XXX` mention in the commit messages). HIGH
+    # confidence → done with explicit `done_reason`; MID → surface as a
+    # warning for the user to follow up; LOW → silent. Skipped entirely
+    # when --no-auto-done is set (= BEACON_NO_AUTO_DONE=1).
+    auto_done_results: list = []
+    mid_warnings: list = []
+    if not no_auto_done:
+        try:
+            judgements = _judge_pr_approve_auto_done(entry, data)
+        except Exception:
+            # Fail-soft: never break the approve flow because of the
+            # auto-done helper. The save below still records the approve.
+            judgements = []
+        for j in judgements:
+            if j["confidence"] == "HIGH":
+                try:
+                    core.task_done(
+                        data, j["task_id"], reason=j["reason"]
+                    )
+                    auto_done_results.append(j)
+                except ValueError:
+                    # Task disappeared between collect and done — skip.
+                    pass
+            elif j["confidence"] == "MID":
+                mid_warnings.append(j)
+
     save_project(data)
 
     if json_mode:
-        print(json.dumps({"entry_id": entry_id, "review_status": "approved",
-                          "review_rationale": rationale}, ensure_ascii=False))
+        out = {
+            "entry_id": entry_id,
+            "review_status": "approved",
+            "review_rationale": rationale,
+            "auto_done": [
+                {"task_id": j["task_id"], "reason": j["reason"]}
+                for j in auto_done_results
+            ],
+            "mid_candidates": [
+                {"task_id": j["task_id"], "description": j["description"]}
+                for j in mid_warnings
+            ],
+        }
+        print(json.dumps(out, ensure_ascii=False))
     else:
         print(f"Approved PR [{entry_id}]: {entry.get('description', '')}")
         if rationale:
             print(f"  Rationale: {rationale}")
+        for j in auto_done_results:
+            print(
+                f"  ✓ Auto-done: {j['task_id']} ({j['description'][:60]}) "
+                f"— HIGH confidence"
+            )
+        for j in mid_warnings:
+            print(
+                f"  ⚠ Candidate: {j['task_id']} ({j['description'][:60]}) "
+                f"— MID confidence, run "
+                f"'beacon task done {j['task_id']} --reason ...' if AC is met"
+            )
 
 
 def cmd_pr_reject():
@@ -14009,7 +14228,7 @@ def cmd_help_json():
         {"command": "beacon doc update <doc-id>", "flags": ["--content <text>", "--stdin"], "description": "Update document content"},
         {"command": "beacon doc image-upload <local-file>", "flags": ["--json"], "description": "Upload image, get markdown img tag"},
         {"command": "beacon pr add", "flags": ["-m <ms-id>", "--url <url>", "--intent <text>"], "description": "Record a PR entry"},
-        {"command": "beacon pr approve <entry-id>", "flags": [], "description": "Approve a PR"},
+        {"command": "beacon pr approve <entry-id>", "flags": ["--rationale <text>", "--no-auto-done", "--json"], "description": "Approve a PR (auto-dones bound tasks at HIGH confidence; --no-auto-done to opt out)"},
         {"command": "beacon pr reject <entry-id>", "flags": [], "description": "Reject a PR"},
         {"command": "beacon pr merge <entry-id>", "flags": [], "description": "Mark PR as merged"},
         {"command": "beacon retro", "flags": [], "description": "Start weekly retrospective (interactive)"},
