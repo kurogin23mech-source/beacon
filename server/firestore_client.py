@@ -43,9 +43,34 @@ def save_project(project_id: str, data: dict) -> None:
 
 
 def list_projects(user_id: str | None = None, include_archived: bool = False) -> list[dict]:
-    """List projects. If user_id is given, only return projects owned by or shared with that user."""
+    """List projects. If user_id is given, only return projects owned by or shared with that user.
+
+    ms-95 / e-2411 — also returns ``owner_email`` per row so ``beacon cloud
+    list`` can render "who owns this project" without N+1 round-trips. The
+    email is resolved via ``get_user(owner_user_id)`` and silently omitted
+    when lookup fails (= migration-era projects without an ``owner`` field,
+    or stale user_id pointing at a deleted user). Existing consumers see
+    new field as additive — same shape plus the new key.
+    """
     query = get_db().collection(COLLECTION)
     docs = query.stream()
+    # Per-call cache so we resolve each owner_user_id at most once even if
+    # they own multiple projects in the response.
+    _email_cache: dict[str, str] = {}
+
+    def _resolve_owner_email(owner_uid: str) -> str:
+        if not owner_uid:
+            return ""
+        if owner_uid in _email_cache:
+            return _email_cache[owner_uid]
+        try:
+            owner_doc = get_user(owner_uid) or {}
+            email = owner_doc.get("email") or ""
+        except Exception:
+            email = ""
+        _email_cache[owner_uid] = email
+        return email
+
     result = []
     for doc in docs:
         data = doc.to_dict()
@@ -58,12 +83,16 @@ def list_projects(user_id: str | None = None, include_archived: bool = False) ->
                 members = [m.get("user_id") for m in data.get("members", [])]
                 if owner != user_id and user_id not in members:
                     continue
-        result.append({
+        owner_uid = data.get("owner") or ""
+        row = {
             "project_id": doc.id,
             "name": data.get("name", ""),
             "objective": data.get("objective", ""),
             "archived": data.get("archived", False),
-        })
+            "owner": owner_uid,
+            "owner_email": _resolve_owner_email(owner_uid),
+        }
+        result.append(row)
     return result
 
 
