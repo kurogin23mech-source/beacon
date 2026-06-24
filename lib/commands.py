@@ -13943,6 +13943,7 @@ def cmd_help_json():
         {"command": "beacon trigger check", "flags": [], "description": "Check pending triggers (JSON array)"},
         {"command": "beacon cloud list", "flags": [], "description": "List cloud projects"},
         {"command": "beacon cloud upload-initial", "flags": ["--force"], "description": "Initial bootstrap upload to a new cloud project (one-shot local→cloud migration; ms-84 Phase 4)"},
+        {"command": "beacon cloud migrate-from-local", "flags": ["--confirm", "--force-after-review"], "description": "Retire a stale .beacon/project.json that survived a prior cloud cut-over (pre-flight verifies cloud has every local entry; ms-95 / e-2339)"},
         # ms-84 Phase 4 (e-2038): push / pull / force-pull entries removed.
         # The cloud → local round-trip is structurally impossible (= cloud
         # is the sole truth source). bin/beacon now routes these names to
