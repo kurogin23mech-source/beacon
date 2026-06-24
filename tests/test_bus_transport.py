@@ -23,7 +23,22 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
 
 os.environ.setdefault("BEACON_OPERATIONS_BACKEND", "mock")
 
-import firestore_client  # noqa: E402
+# ms-95 e-2407: Module-load defense (mirrors tests/test_trek_api.py / test_api.py).
+# app.py does `import store_router as db`. If pytest collects another test file
+# (e.g. test_api.py) before this one, app — and thus store_router — get imported
+# first. store_router captures `from firestore_client import append_bus_event` etc.
+# at that moment, so any later `firestore_client.append_bus_event = mock` in this
+# file rebinds the ORIGINAL firestore_client module but leaves store_router's
+# cached reference untouched. Production code calls `db.X` (= store_router.X) and
+# hits the real Firestore client → DefaultCredentialsError in CI (no ADC).
+#
+# By aliasing `sys.modules["firestore_client"] = app_module.db` (= store_router)
+# BEFORE this file's `import firestore_client`, the subsequent rebinds land ON
+# store_router, which is what app.py actually reads.
+import app as app_module  # noqa: E402
+sys.modules["firestore_client"] = app_module.db
+
+import firestore_client  # noqa: E402  (= store_router after the alias above)
 
 # In-memory store mirroring the Firestore subcollection (per project).
 # Mapping: project_id -> list of event dicts (each dict contains event_id +
