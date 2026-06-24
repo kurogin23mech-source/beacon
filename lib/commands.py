@@ -10093,6 +10093,218 @@ def cmd_cloud_status():
     print(f"Auth: {'logged in' if logged_in else 'not logged in'}")
 
 
+def _local_vs_cloud_pre_flight(local: dict, remote: dict) -> list[str]:
+    """Compare local project.json against the cloud-side project snapshot.
+
+    Returns a list of human-readable issues. Empty list = pre-flight pass
+    (= cloud has at least everything local has, safe to retire local).
+
+    ms-95 / e-2339 (= 旧 local モード由来 orphan project.json の migration):
+    cloud モード以降の writes は cloud のみに行くので、 local は通常 stale
+    snapshot にしかならない。 risk は逆向き — local に cloud が知らない
+    entry が残っていると、 retire (= rename to .trash/-ish) でその痕跡が
+    cold storage に押しやられる。 pre-flight でそれを 1 回 catch する。
+
+    Compared dimensions (= 全 milestone / operation の id 集合と各配下
+    entries の id 集合):
+
+      * project name / objective text mismatch (= 別 project を間違って
+        join した可能性)
+      * milestones[].id: local ⊆ cloud
+      * milestones[].entries[].id (per shared milestone): local ⊆ cloud
+      * operations[].id: local ⊆ cloud
+      * operations[].entries[].id (per shared operation): local ⊆ cloud
+    """
+    issues: list[str] = []
+
+    local_name = (local.get("name") or "").strip()
+    remote_name = (remote.get("name") or "").strip()
+    if local_name and remote_name and local_name != remote_name:
+        issues.append(
+            f"project name differs: local={local_name!r} vs cloud={remote_name!r}"
+        )
+
+    def _id_set(items, key="id"):
+        out = set()
+        for it in items or []:
+            v = it.get(key)
+            if isinstance(v, str) and v:
+                out.add(v)
+        return out
+
+    local_ms = _id_set(local.get("milestones", []))
+    cloud_ms = _id_set(remote.get("milestones", []))
+    missing_ms = sorted(local_ms - cloud_ms)
+    if missing_ms:
+        issues.append(
+            f"milestones present locally but missing in cloud: {missing_ms}"
+        )
+
+    cloud_ms_by_id = {
+        m.get("id"): m for m in remote.get("milestones", []) or []
+        if isinstance(m.get("id"), str)
+    }
+    for m in local.get("milestones", []) or []:
+        mid = m.get("id")
+        if mid not in cloud_ms_by_id:
+            continue
+        local_entries = _id_set(m.get("entries", []))
+        cloud_entries = _id_set(cloud_ms_by_id[mid].get("entries", []))
+        missing = sorted(local_entries - cloud_entries)
+        if missing:
+            issues.append(
+                f"milestone {mid}: entries present locally but missing in cloud: {missing}"
+            )
+
+    local_ops = _id_set(local.get("operations", []))
+    cloud_ops = _id_set(remote.get("operations", []))
+    missing_ops = sorted(local_ops - cloud_ops)
+    if missing_ops:
+        issues.append(
+            f"operations present locally but missing in cloud: {missing_ops}"
+        )
+
+    cloud_ops_by_id = {
+        o.get("id"): o for o in remote.get("operations", []) or []
+        if isinstance(o.get("id"), str)
+    }
+    for o in local.get("operations", []) or []:
+        oid = o.get("id")
+        if oid not in cloud_ops_by_id:
+            continue
+        local_entries = _id_set(o.get("entries", []))
+        cloud_entries = _id_set(cloud_ops_by_id[oid].get("entries", []))
+        missing = sorted(local_entries - cloud_entries)
+        if missing:
+            issues.append(
+                f"operation {oid}: entries present locally but missing in cloud: {missing}"
+            )
+
+    return issues
+
+
+def cmd_cloud_migrate_from_local():
+    """Retire an orphan local project.json that survived the cloud cut-over.
+
+    ms-95 / e-2339 (= cloud モード移行済プロジェクトに残った旧 local project.json
+    を .beacon/.trash/-ish に退避する): ms-84 Phase 3 (e-2037) で
+    ``cloud upload-initial`` 経路に追加された ``_rename_local_project_json_
+    for_cloud_cutover`` は新規 cut-over 経路にしか効かず、 それ以前に cloud
+    モードに移行した historical project は ``.beacon/project.json`` (=
+    cloud 側と divergent な stale snapshot) を持ち続けていた。 本 CLI は
+    その orphan を pre-flight check 経由で安全に退避する。
+
+    Flow:
+
+      1. ``.beacon/cloud.json`` の存在 (= cloud モード判定) を確認
+      2. ``.beacon/project.json`` の存在 (= orphan condition) を確認
+      3. ``BEACON_CONFIRM`` (= ``--confirm <project_id>`` 経路) と cloud.json
+         の project_id を照合 (= silent invocation 防御、 ``cloud off`` と
+         同じ二段確認パターン、 e-1776 incident 由来)
+      4. local project.json + cloud project を比較する pre-flight check
+         (``_local_vs_cloud_pre_flight``)。 何かが local-only なら abort
+         (= ``--force-after-review`` で override 可)
+      5. ``_rename_local_project_json_for_cloud_cutover`` を呼んで rename
+         (= 既存ヘルパー再利用、 ``.before-cloud-YYYYMMDD`` suffix 付き、
+         再実行 idempotent + 既存 backup を上書きしない)
+
+    Override (``BEACON_FORCE`` = ``--force-after-review``): pre-flight で
+    local-only entry を catch したあと、 user がそれを確認したうえで本 fix
+    が必要な場合の脱出口。 例えば「local-only entry は意図的な未 sync 残骸
+    (= 削除予定)」 のケース。 fail-close 設計だが、 user 監査後の override
+    は許す。
+    """
+    expected_pid = os.environ.get("BEACON_CONFIRM", "").strip()
+    force_after_review = os.environ.get("BEACON_FORCE", "") == "1"
+
+    config_path = _get_cloud_config_path()
+    if not os.path.exists(config_path):
+        print("Not in cloud mode (no .beacon/cloud.json found).")
+        print("This command retires a local project.json that survived a")
+        print("prior cloud cut-over — without cloud.json there is no cut-over")
+        print("to retire.")
+        sys.exit(1)
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+    project_id = config.get("project_id", "")
+    if not project_id:
+        print("Error: .beacon/cloud.json is malformed (no project_id).")
+        sys.exit(1)
+
+    pf = get_project_file()
+    if not os.path.exists(pf):
+        print(f"No local project.json at {pf} — nothing to migrate.")
+        print("(= already retired, or this project was created cloud-first.)")
+        return
+
+    if not expected_pid or expected_pid != project_id:
+        print("Refusing to retire local project.json without two-factor confirmation.")
+        print("")
+        print(f"  Run: beacon cloud migrate-from-local --confirm {project_id!r}")
+        print("")
+        print("  This guard mirrors `cloud off` (e-1776): a sub-agent or stray")
+        print("  command should not be able to silently move historical state")
+        print("  out of the working tree.")
+        sys.exit(1)
+
+    from auth import load_credentials
+    creds = load_credentials()
+    if creds is None:
+        print("Not logged in. Run: beacon auth login")
+        sys.exit(1)
+
+    print("Pre-flight check: comparing local project.json against cloud state...")
+    from store_local import LocalStore
+    local = LocalStore(pf).load_project()
+
+    from api_client import ApiClient
+    api_url = _resolve_active_api_url()
+    client = ApiClient(api_url, _extract_token(creds))
+    try:
+        remote = client.get_project(project_id)
+    except RuntimeError as exc:
+        print(f"Error: could not fetch cloud project: {exc}")
+        sys.exit(1)
+
+    issues = _local_vs_cloud_pre_flight(local, remote)
+    if issues:
+        print("")
+        print(f"Pre-flight failed — local has {len(issues)} issue(s) that cloud is missing:")
+        for line in issues:
+            print(f"  - {line}")
+        if not force_after_review:
+            print("")
+            print("Refusing to retire local project.json: cloud is missing data that")
+            print("only exists locally. Either:")
+            print("")
+            print("  (a) Investigate the missing entries (a stale milestone? a")
+            print("      partial sync from before cloud cut-over?). Recover the")
+            print("      value you want into cloud via the CLI / Web UI, then re-run.")
+            print("  (b) If the local-only entries are intentional residue (= dead")
+            print("      cleanup pending), confirm by re-running with both flags:")
+            print("        BEACON_CONFIRM=<pid> BEACON_FORCE=1 beacon cloud migrate-from-local --confirm <pid> --force-after-review")
+            print("      (or via the CLI wrapper). The renamed copy stays under")
+            print("      .beacon/project.json.before-cloud-YYYYMMDD so recovery")
+            print("      remains possible.")
+            sys.exit(1)
+        print("")
+        print("Override accepted (--force-after-review). Proceeding to rename.")
+
+    renamed = _rename_local_project_json_for_cloud_cutover(pf)
+    if not renamed:
+        print(f"Rename failed (see warning above). The orphan file is still at {pf}.")
+        sys.exit(1)
+
+    print("")
+    print(f"Retired: {pf} → {renamed}")
+    print(f"  cloud project: {project_id}")
+    print(f"  pre-flight issues: {len(issues)}{' (override)' if issues else ''}")
+    print("")
+    print("From here on, cloud is the sole truth source for this working tree.")
+    print(f"To recover the old snapshot: mv {renamed} {pf}")
+
+
 # ---------------------------------------------------------------------------
 # PR commands (ms-15)
 # ---------------------------------------------------------------------------
@@ -13804,6 +14016,7 @@ def cmd_help_json():
         {"command": "beacon trigger check", "flags": [], "description": "Check pending triggers (JSON array)"},
         {"command": "beacon cloud list", "flags": [], "description": "List cloud projects"},
         {"command": "beacon cloud upload-initial", "flags": ["--force"], "description": "Initial bootstrap upload to a new cloud project (one-shot local→cloud migration; ms-84 Phase 4)"},
+        {"command": "beacon cloud migrate-from-local", "flags": ["--confirm", "--force-after-review"], "description": "Retire a stale .beacon/project.json that survived a prior cloud cut-over (pre-flight verifies cloud has every local entry; ms-95 / e-2339)"},
         # ms-84 Phase 4 (e-2038): push / pull / force-pull entries removed.
         # The cloud → local round-trip is structurally impossible (= cloud
         # is the sole truth source). bin/beacon now routes these names to
@@ -17431,6 +17644,7 @@ if __name__ == "__main__":
         "cloud_status": cmd_cloud_status,
         "cloud_check_project": cmd_cloud_check_project,
         "cloud_join": cmd_cloud_join,
+        "cloud_migrate_from_local": cmd_cloud_migrate_from_local,
         "common_setup": cmd_common_setup,
         "auth_check": cmd_auth_check,
         "auth_login": lambda: __import__("auth").login(),

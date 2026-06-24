@@ -184,6 +184,7 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 | `beacon cloud list` | List cloud projects / クラウドプロジェクト一覧 |
 | `beacon cloud join <id>` | Join an existing cloud project / 既存プロジェクトに参加 |
 | `beacon cloud upload-initial` | Initial bootstrap upload to new cloud project / 初回 upload (one-shot; ms-84) |
+| `beacon cloud migrate-from-local --confirm <id>` | Retire an orphan `.beacon/project.json` left from a prior cloud cut-over (pre-flight checks cloud has every local entry, then renames to `.before-cloud-YYYYMMDD`) / 旧 local 残骸の退避 (ms-95 / e-2339) |
 | `beacon cloud off` | Switch back to local mode (sandbox / offline only) / sandbox 用途のみ |
 <!-- ms-84 Phase 4 (e-2038): `beacon cloud push` / `pull` / `force-pull` were removed.
      The cloud → local round-trip was retired because cloud is now the sole truth source. -->

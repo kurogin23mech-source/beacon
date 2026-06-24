@@ -182,6 +182,10 @@ Cloud:
   beacon cloud list                  List accessible cloud projects (read-only)
   beacon cloud join <id>             Join an existing cloud project
   beacon cloud upload-initial        Initial bootstrap upload to a new cloud project (one-shot migration)
+  beacon cloud migrate-from-local --confirm <id>
+                                     Retire a stale .beacon/project.json that survived a prior cloud
+                                     cut-over (ms-95 / e-2339). Pre-flight verifies cloud has every
+                                     local entry before renaming to project.json.before-cloud-YYYYMMDD
   beacon cloud off --confirm <id>    Switch back to local mode (sandbox / verification only;
                                      e-1861/ms-61: archives cloud.json to .beacon/.trash/, no data loss)
   # ms-84 Phase 4 (e-2038): `push` / `pull` / `force-pull` were removed.
@@ -4182,6 +4186,35 @@ EOF
                 ;;
             status) python3 "$COMMANDS_PY" cloud_status ;;
             list)   python3 "$COMMANDS_PY" cloud_list ;;
+            migrate-from-local)
+                # ms-95 / e-2339: retire an orphan local project.json that
+                # survived the cloud cut-over. Two-factor confirm + pre-flight
+                # check mirror the `cloud off` pattern (e-1776 silent-flip
+                # incident shape applies here too — moving historical state
+                # out of the working tree must not be silently invocable).
+                shift 2  # drop 'cloud' and 'migrate-from-local'
+                confirm_pid=""
+                force=""
+                while [ -n "${1:-}" ]; do
+                    case "$1" in
+                        --confirm)
+                            confirm_pid="${2:-}"
+                            shift 2
+                            ;;
+                        --force-after-review|--force)
+                            force="1"
+                            shift
+                            ;;
+                        *)
+                            echo "Error: unknown flag '$1' for migrate-from-local."
+                            echo "Usage: beacon cloud migrate-from-local --confirm <project_id> [--force-after-review]"
+                            exit 1
+                            ;;
+                    esac
+                done
+                BEACON_CONFIRM="$confirm_pid" BEACON_FORCE="$force" \
+                    python3 "$COMMANDS_PY" cloud_migrate_from_local
+                ;;
             off)
                 # e-1861 (ms-61): "cloud off" is sandbox / verification-only now.
                 # Beacon = cloud-only in normal operation (Claude Code requires
@@ -4237,8 +4270,9 @@ EOF
                 # removed structurally. They now hit this wildcard branch
                 # ("error: unknown subcommand") per SPEC AC3.
                 echo "Error: unknown subcommand '${2}'."
-                echo "Usage: beacon cloud [open|status|list|join|upload-initial|off]"
+                echo "Usage: beacon cloud [open|status|list|join|upload-initial|migrate-from-local|off]"
                 echo "       (sandbox: cloud off --confirm <project_id>)"
+                echo "       (orphan retire: cloud migrate-from-local --confirm <project_id>)"
                 exit 1
                 ;;
         esac

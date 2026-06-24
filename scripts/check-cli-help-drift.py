@@ -233,6 +233,9 @@ ALLOW_MISSING_FROM_README: set[str] = {
     # main `## CLI Commands` table.
     "cloud upload-initial",
     "cloud force-pull",
+    # ms-95 / e-2339: orphan-retire helper, documented alongside its
+    # sibling `cloud upload-initial` in the Cloud Mode section.
+    "cloud migrate-from-local",
     "help",             # `beacon help` mirrors --help, not a "command"
     "update",           # documented in self-update section, not CLI table
     # ms-55 coordination signal CLIs — README rows are a follow-up; until
