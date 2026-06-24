@@ -13767,6 +13767,126 @@ def _doctor_check_claude_md_principle_marker():
     ]
 
 
+def _doctor_check_cloud_state_consistency():
+    """ms-61 / e-1776: surface cloud.json ↔ config.json mode-field divergence.
+
+    Background: cloud mode has two on-disk state files in ``.beacon/``:
+
+      - ``cloud.json`` — present iff this project is bound to a cloud
+        Firestore document. e-1861 (ms-61) made *cloud.json existence the
+        sole source of truth* for ``get_store()`` routing, so any CLI call
+        looks at this file and only this file when deciding cloud vs local.
+      - ``config.json["mode"]`` — legacy hint that historically toggled
+        cloud / local mode. Retired in e-1861 because a sub-agent could
+        silently rewrite it to ``{"mode": "local"}`` and flip every
+        subsequent CLI call back to LocalStore without touching cloud.json,
+        manifesting as apparent user data loss (2026-06-15 incident).
+
+    Even though the runtime ignores ``config.json["mode"]``, a divergence
+    between the two surfaces is still a structural signal that something
+    is being narrated wrong. Two failure modes specifically:
+
+      (1) cloud.json exists + config.json mode != "cloud"
+          → CLI is reading cloud (correct), but config.json claims local.
+            Humans and AI reading the on-disk state by hand will be misled,
+            and the symptom mirrors the original e-1861 silent failure
+            class. Surface a louder warning than the simple
+            ``legacy-mode-field`` heads-up so the Web UI ↔ CLI parity
+            confusion is named explicitly.
+
+      (2) cloud.json absent + config.json mode == "cloud"
+          → config.json narrates cloud but ``get_store()`` will route to
+            LocalStore (cloud.json is missing). The next ``beacon auth``
+            / cloud API call will silently degrade or fail in non-obvious
+            ways. Surface as a separate broken-cloud-binding warning.
+
+    Both warnings include:
+      - the ``config.json`` mtime (= last time the mode field was rewritten,
+        the only proxy we have for "when did the divergence appear"), and
+      - a one-line repair command suggestion.
+
+    Returns a list of warning strings; empty list = consistent or n/a.
+
+    AC mapping (e-1776):
+      AC #1: case (1) above.
+      AC #2: case (2) above.
+      AC #3: config.json mtime is appended to each warning body.
+      AC #4: each warning ends with a one-line repair command.
+    """
+    cloud_json_path = os.path.join(".beacon", "cloud.json")
+    config_json_path = os.path.join(".beacon", "config.json")
+
+    cloud_exists = os.path.exists(cloud_json_path)
+    config_exists = os.path.exists(config_json_path)
+
+    # Both absent (typical fresh checkout) or only cloud.json present
+    # without any config.json mode hint: nothing to reconcile.
+    if not config_exists:
+        return []
+
+    try:
+        with open(config_json_path, "r", encoding="utf-8") as f:
+            config_data = json.load(f)
+    except Exception:
+        # Unreadable config.json is reported elsewhere; we can't read mode.
+        return []
+
+    if not isinstance(config_data, dict):
+        return []
+
+    mode = config_data.get("mode")
+    # No mode field present at all = nothing to diverge on.
+    if mode is None:
+        return []
+
+    # AC #3: mtime breadcrumb — when did the mode field last get rewritten?
+    # Best-effort; if stat fails, we just omit the timestamp line.
+    try:
+        import datetime as _dt
+        _mtime = os.path.getmtime(config_json_path)
+        mtime_str = _dt.datetime.fromtimestamp(_mtime).isoformat(timespec="seconds")
+        mtime_line = f"       config.json last modified: {mtime_str} (= proxy for last mode switch)\n"
+    except Exception:
+        mtime_line = ""
+
+    warnings: list[str] = []
+
+    if cloud_exists and mode != "cloud":
+        # AC #1: cloud.json present, but config.json says non-cloud mode.
+        # CLI reads cloud correctly (e-1861), but humans / AI eyeballing the
+        # on-disk state are misled — same shape as the original 2026-06-15
+        # silent failure class.
+        warnings.append(
+            "WARN [cloud-state-divergence] cloud.json exists but config.json has `mode`=" + repr(mode) + ".\n"
+            "       The runtime reads cloud (cloud.json existence is the sole source\n"
+            "       of truth since e-1861), but the on-disk narration is split.\n"
+            "       Humans / AI reading state by hand may believe this project is\n"
+            "       local-only and report Web UI ↔ CLI output as a data-loss bug.\n"
+            + mtime_line +
+            "       Repair (drop the stale mode hint):\n"
+            "         python3 -c 'import json,pathlib;p=pathlib.Path(\".beacon/config.json\");"
+            "d=json.loads(p.read_text());d.pop(\"mode\",None);p.write_text(json.dumps(d,indent=2))'"
+        )
+    elif (not cloud_exists) and mode == "cloud":
+        # AC #2: config.json claims cloud but cloud.json is gone — get_store()
+        # will route to LocalStore and any cloud API path will silently
+        # degrade.
+        warnings.append(
+            "WARN [cloud-state-divergence] config.json `mode`='cloud' but .beacon/cloud.json is missing.\n"
+            "       The runtime routes to LocalStore (cloud.json absence wins since\n"
+            "       e-1861), so cloud auth / cloud API paths will silently degrade\n"
+            "       or fail with confusing errors.\n"
+            + mtime_line +
+            "       Repair options (pick one):\n"
+            "         beacon cloud upload-initial         # if this should be cloud\n"
+            "         python3 -c 'import json,pathlib;p=pathlib.Path(\".beacon/config.json\");"
+            "d=json.loads(p.read_text());d.pop(\"mode\",None);p.write_text(json.dumps(d,indent=2))'"
+            "   # if this should be local"
+        )
+
+    return warnings
+
+
 def _doctor_check_ms81_state_machine():
     """ms-81 e-1921: surface the four state-machine warnings named in SPEC AC #9.
 
@@ -13900,6 +14020,9 @@ def cmd_doctor():
       7. Duplicate IDs (Issue #14).
       8. Skill markdown references known beacon subcommands (ms-61 / e-1570).
       9. .beacon/project.json staleness vs cloud (ms-61 / e-1571).
+     10. CLAUDE.md entry-writing-principle marker (ms-68 / e-1640).
+     11. ms-81 state-machine warnings (e-1921).
+     12. cloud.json ↔ config.json state-file divergence (ms-61 / e-1776).
 
     Only prints warnings for problems found. Exits 0 if all checks pass,
     exits 1 if at least one warning was emitted.
@@ -14177,6 +14300,20 @@ def cmd_doctor():
     # whole MS is designed as a forcing function, not a wall.
     if os.environ.get("BEACON_DOCTOR_SKIP_MS81") != "1":
         warnings.extend(_doctor_check_ms81_state_machine())
+
+    # ------------------------------------------------------------------ #
+    # 12. cloud.json ↔ config.json state-file divergence (ms-61 / e-1776)
+    # ------------------------------------------------------------------ #
+    # Two on-disk state files (`.beacon/cloud.json` and
+    # `.beacon/config.json["mode"]`) can narrate cloud vs local
+    # independently. e-1861 made cloud.json existence the sole runtime
+    # truth, but a stale config.json mode field still produces silent
+    # "Web UI shows the doc / CLI says Document not found" confusion when
+    # humans inspect state by hand. Surface the divergence loudly, name
+    # the symptom class, and suggest a one-line repair (AC #1–#4 of
+    # e-1776). Warning-level only; never block.
+    if os.environ.get("BEACON_DOCTOR_SKIP_CLOUD_STATE") != "1":
+        warnings.extend(_doctor_check_cloud_state_consistency())
 
     # ------------------------------------------------------------------ #
     # Summary
