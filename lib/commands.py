@@ -7035,6 +7035,97 @@ def cmd_member_add():
         print("  collaborator access is separate — set via `gh repo edit --add-collaborator <user>`.")
 
 
+def _build_owner_row(data: dict) -> Optional[dict]:
+    """Build a project-owner row in the same shape as members[] (ms-95 e-2288).
+
+    Background: `project.json` stores the project owner in a top-level
+    ``owner`` field (= user_id string) that is structurally separate from
+    ``members[]``. Historically `beacon member list` only iterated
+    ``members[]`` and silently omitted the owner — leading AI / human readers
+    to mis-identify the highest-privilege actor (= 2026-06-23 incident:
+    profile-extractor AI sent a DM to the wrong recipient because the
+    `member list` output hid the actual project owner).
+
+    Returns a dict mirroring the members[] row shape so JSON consumers can
+    iterate one combined list:
+      {
+        "user_id":      <str>,
+        "email":        <str (best-effort, "" in pure local mode)>,
+        "display_name": <str (best-effort, "" in pure local mode)>,
+        "role":         "owner",
+        "source":       "project.owner",  # provenance marker (= AC #2 audit)
+      }
+
+    Resolution strategy for email / display_name:
+      1. **Cloud mode** (``.beacon/cloud.json`` present): call
+         ``GET /api/projects/{pid}/members`` — the server already enriches
+         ``owner_email`` + ``owner_display_name`` from the users collection.
+         Best-effort; auth / network failures fall through to (3).
+      2. **Members[] cross-reference**: if a member row carries the same
+         user_id as the project owner, reuse its email / display_name.
+      3. **Pure local fallback**: leave email / display_name empty. The
+         user_id itself is still surfaced so the row is never silently
+         omitted (the original bug).
+
+    Returns ``None`` only when ``data["owner"]`` is empty / missing
+    (= legacy local-only project that never bound an owner). Callers should
+    skip prepending in that case to preserve "no members" output.
+    """
+    owner_id = (data.get("owner") or "").strip()
+    if not owner_id:
+        return None
+
+    email = ""
+    display_name = ""
+
+    # Strategy 2: scan members[] for matching user_id (works in any mode and
+    # avoids an HTTP roundtrip when the data is already on hand).
+    for m in core.members_list(data):
+        if not isinstance(m, dict):
+            continue
+        if (m.get("user_id") or "") == owner_id:
+            email = m.get("email", "") or email
+            display_name = m.get("display_name", "") or m.get("name", "") or display_name
+            break
+
+    # Strategy 1: cloud-mode enrichment via /members endpoint. Best-effort —
+    # silent on any failure (auth missing, offline, server 5xx) so local /
+    # disconnected workflows still emit the row.
+    if not email or not display_name:
+        try:
+            project_file = get_project_file()
+            beacon_dir = os.path.dirname(project_file) or ".beacon"
+            cloud_json = os.path.join(beacon_dir, "cloud.json")
+            if os.path.exists(cloud_json):
+                with open(cloud_json, "r", encoding="utf-8") as f:
+                    pid = (json.load(f) or {}).get("project_id", "")
+                if pid:
+                    from auth import load_credentials
+                    creds = load_credentials()
+                    if creds is not None:
+                        api_url = _resolve_active_api_url()
+                        from api_client import ApiClient
+                        client = ApiClient(api_url, _extract_token(creds))
+                        resp = client.get(f"/api/projects/{pid}/members")
+                        if isinstance(resp, dict):
+                            email = email or (resp.get("owner_email") or "")
+                            display_name = display_name or (
+                                resp.get("owner_display_name") or ""
+                            )
+        except Exception:
+            # Best-effort enrichment — never block the owner row on cloud
+            # round-trip failures. The user_id still surfaces.
+            pass
+
+    return {
+        "user_id": owner_id,
+        "email": email,
+        "display_name": display_name,
+        "role": "owner",
+        "source": "project.owner",
+    }
+
+
 def cmd_member_list():
     """List members of the project.
 
@@ -7042,14 +7133,42 @@ def cmd_member_list():
     invite accept) over the raw id / email when present. Local-mode members
     use the id-based schema; cloud members use the user_id-based schema —
     the display logic accepts both.
+
+    ms-95 e-2288: project owner (= ``data["owner"]`` top-level field) is
+    prepended as the first row with ``role="owner"``. Previously the owner
+    was silently omitted because the members[] iteration never inspected
+    the owner field, which led AI readers to mis-identify the highest
+    privileged actor on the project. The prepended row carries
+    ``source="project.owner"`` so external tooling can distinguish it from
+    rows that live inside members[].
     """
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     data = load_project()
-    members = core.members_list(data)
+    members = list(core.members_list(data))
+
+    # Build the synthetic owner row and decide whether it needs prepending.
+    # Skip if the owner is already present in members[] with role="owner"
+    # (= some projects model owner inside members[] as well; we de-dupe to
+    # avoid two owner rows when both schemas hold the same identity).
+    owner_row = _build_owner_row(data)
+    if owner_row is not None:
+        owner_id = owner_row["user_id"]
+        already_in_members = any(
+            isinstance(m, dict)
+            and (m.get("user_id") or "") == owner_id
+            and (m.get("role") or "") == "owner"
+            for m in members
+        )
+        if not already_in_members:
+            members = [owner_row, *members]
+
     if json_mode:
         print(json.dumps(members, ensure_ascii=False, indent=2))
         return
     if not members:
+        # AC #4: preserve the "no members" output path even after the owner
+        # prepend logic — owner-less local projects are logically rare but
+        # defensively allowed.
         print("(no members — `beacon member add <id>` to add the first one)")
         return
     print(f"Members ({len(members)}):")
