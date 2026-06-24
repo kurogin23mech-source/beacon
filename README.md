@@ -254,6 +254,7 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 | `beacon pr reject <entry-id> [--rationale "text"]` | Reject a PR / 却下 |
 | `beacon pr merge <entry-id>` | Mark as merged / マージ済みに設定 |
 | `beacon pr close <entry-id>` | Close without merging / クローズ |
+| `beacon pr sync [--dry-run]` | Sync beacon PR entries with GitHub state (merged/closed) / GitHub状態と整合 (ms-61 / e-2005) |
 
 Use `/review` Claude Code Skill instead of `beacon pr review` for AI-assisted code review.
 
