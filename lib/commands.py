@@ -905,6 +905,12 @@ def cmd_milestone_list():
             "summary": data.get("summary", ""),
             "milestones": [],
             "operations": [],
+            # ms-61 / e-1843 — pending Operations (= todo / in_progress)
+            # are surfaced separately so /beacon-session-start Step 3.7
+            # ("pending Operation の活性化議論") has data to read.
+            # The legacy ``operations[]`` field stays open-only so all
+            # existing readers / Skills keep working unchanged.
+            "pending_operations": [],
         }
         for ms in milestones:
             entries = ms.get("entries", [])
@@ -925,23 +931,47 @@ def cmd_milestone_list():
         import datetime as _dt
         today_str = _dt.date.today().isoformat()
         for op in data.get("operations", []):
-            if op.get("status") != "open":
-                continue
-            entries = op.get("entries", [])
-            runs = [e for e in entries if e.get("type") == "run_record"]
-            open_incidents = [e for e in entries if e.get("type") == "incident" and e.get("status") == "open"]
-            recent_runs = []
-            for r in runs[-3:]:
-                recent_runs.append({"date": _local_date(r.get("date", "")), "status": r.get("status", "")})
-            output["operations"].append({
-                "id": op["id"],
-                "title": op.get("title", ""),
-                "status": op.get("status", "open"),
-                "log_source": op.get("log_source", ""),
-                "schedule": op.get("schedule", {}),
-                "recent_runs": recent_runs,
-                "open_incidents": open_incidents,
-            })
+            if op.get("status") == "open":
+                entries = op.get("entries", [])
+                runs = [e for e in entries if e.get("type") == "run_record"]
+                open_incidents = [e for e in entries if e.get("type") == "incident" and e.get("status") == "open"]
+                recent_runs = []
+                for r in runs[-3:]:
+                    recent_runs.append({"date": _local_date(r.get("date", "")), "status": r.get("status", "")})
+                output["operations"].append({
+                    "id": op["id"],
+                    "title": op.get("title", ""),
+                    "status": op.get("status", "open"),
+                    "log_source": op.get("log_source", ""),
+                    "schedule": op.get("schedule", {}),
+                    "recent_runs": recent_runs,
+                    "open_incidents": open_incidents,
+                })
+            elif op.get("status") in ("todo", "in_progress"):
+                # ms-61 / e-1843 — surface pending Operations for the
+                # Skill's Step 3.7 activation discussion. We carry the
+                # full ``entries`` list so the Skill / helper can count
+                # operation_tasks without a second CLI call (mirrors the
+                # "embed enough context to avoid round-trips" pattern
+                # used for milestones above).
+                entries = op.get("entries", [])
+                op_tasks = [e for e in entries if e.get("type") == "operation_task"]
+                op_tasks_done = sum(1 for t in op_tasks if t.get("status") == "done")
+                output["pending_operations"].append({
+                    "id": op["id"],
+                    "title": op.get("title", ""),
+                    "status": op.get("status", ""),
+                    "log_source": op.get("log_source", ""),
+                    "schedule": op.get("schedule", {}),
+                    "activation_hint": op.get("activation_hint", ""),
+                    "objective": op.get("objective", ""),
+                    "operation_tasks_total": len(op_tasks),
+                    "operation_tasks_done": op_tasks_done,
+                    # The Skill's classifier helper reads ``entries`` to
+                    # decide verdict; embed verbatim so caller has one
+                    # source of truth.
+                    "entries": entries,
+                })
         print(json.dumps(output, ensure_ascii=False))
         return
 
