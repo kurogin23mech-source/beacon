@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import sys
 import urllib.parse
-from typing import Optional
+from typing import Optional, Tuple
 
 from store import get_store
 import core
@@ -15996,9 +15996,20 @@ def cmd_bus_send():
     # polls a different project than `project_id`, auto-route to that
     # project. Loud stderr notice keeps the override auditable.
     project_id = _validate_recipient_project(recipient, project_id, channel)
-    # e-1402: liveness gate on the sid itself (independent of project
-    # routing). Catches stale session_id reuse when the Skill is bypassed.
-    _check_recipient_live_health(recipient, channel)
+    # e-1402 + e-2280: liveness gate on the sid itself, with conservative
+    # auto-swap when the stale sid maps to a single live healthy sibling
+    # owned by the same user. ms-95 / e-2280 lifts AI's per-send duty to
+    # manually re-resolve via `bus directory --live` after observed
+    # 2026-06-22 kyozai dolphin Trek dogfood (= 2 stale sends in 30 min).
+    swapped_recipient, swap_notice = _resolve_recipient_live(recipient, channel)
+    if swap_notice is not None and swapped_recipient != recipient:
+        # Update payload + re-validate project routing for the new sid.
+        # The new session may live in a different project (= different
+        # bclaude worktree); _validate_recipient_project handles the
+        # cross-project hop with its own stderr notice.
+        recipient = swapped_recipient
+        payload = {**payload, "recipient_session_id": recipient}
+        project_id = _validate_recipient_project(recipient, project_id, channel)
 
     # e-1290: envelope-by-default for CLI sends.
     #
@@ -16825,37 +16836,141 @@ def _validate_recipient_project(
     return target_project_id
 
 
-def _check_recipient_live_health(recipient: str, channel: str) -> None:
-    """Defense-in-depth gate (e-1402) against stale session_id reuse.
+def _row_owner_identity(row: dict) -> Tuple[str, str]:
+    """Extract (user_id, email) from a directory row, normalised to strings.
 
-    2026-06-10 LPS dogfood incident: an AI in another project bypassed the
-    /beacon-dm-send Skill (which forces a fresh `dm_discover` lookup per
-    send) and reused a session_id from conversation memory. The target had
-    shutdown 1 hour earlier; the DM landed in a dead session. The Skill's
-    safety net was structural but only effective when the Skill was used.
+    Both fields are best-effort: the server stamps ``user_id`` at the top
+    level of each session document (= ms-70 / e-1713 path); ``actor.email``
+    arrives via ``stamp_session_actor_email`` (ms-54 / e-1349) on bridge
+    boot. Either one alone is enough to recognise "same user" for the
+    auto-swap decision; we accept both so e-2280 swap works across the
+    full deployment surface even if one field is unset on legacy bridges.
+    """
+    uid = str(row.get("user_id") or "").strip()
+    actor = row.get("actor") if isinstance(row.get("actor"), dict) else {}
+    email = str(actor.get("email") or "").strip()
+    return (uid, email)
 
-    This helper closes that hole at the CLI surface: any `--to <sid>` send
-    on the dm channel triggers a live+healthy directory check. If the sid
-    isn't currently held by a polling bridge, emit a loud stderr warning
-    naming the Skill as the recommended remediation. Soft-warn only — the
-    send proceeds, since CLI immediacy is the legitimate use case (CI
-    scripts, automated tooling, debugging). Hard-refuse is an opt-in for
-    future strictness.
 
-    Distinct from ``_validate_recipient_project`` (e-1362) which asks
-    *which project does this sid poll?* — that's about cross-project
-    routing. This one asks *is this sid alive right now?* — that's about
-    session lifecycle. Same directory backend, different semantics, kept
-    as separate helpers per the "thin single-purpose" convention.
+def _identity_matches(a: Tuple[str, str], b: Tuple[str, str]) -> bool:
+    """Same-user check: any non-empty field matches on both sides.
 
-    Opt-out:
-      * ``BEACON_BUS_NO_LIVE_CHECK=1`` — bypass entirely (CI / automated
-        scripts that handle their own liveness verification).
+    Conservative: an empty pair on either side is never a match (so we
+    never auto-swap into a row whose owner we cannot identify). Either
+    user_id OR email matching is sufficient — this tolerates legacy
+    bridges that only stamp one of the two.
+    """
+    a_uid, a_email = a
+    b_uid, b_email = b
+    if a_uid and b_uid and a_uid == b_uid:
+        return True
+    if a_email and b_email and a_email == b_email:
+        return True
+    return False
+
+
+def _find_stale_recipient_identity(
+    recipient: str, helpers
+) -> Optional[Tuple[str, str]]:
+    """Look up the (user_id, email) the stale recipient sid belonged to.
+
+    Live+healthy directory excludes the stale sid (by definition — that's
+    why we're here). We query the broader directory (no healthy filter,
+    wider since_min) to recover the dead session's owner identity, so
+    the swap candidate search has something to match against.
+
+    Returns ``None`` if the sid can't be found in the broader directory
+    either — that means we don't know who owned it (= stamp was lost
+    or the sid was synthetic / never registered). In that case we fall
+    through to the existing soft-warn path; auto-swap is unsafe without
+    a confirmed owner identity.
+    """
+    try:
+        rows = helpers.discover_and_aggregate(healthy=False, since_min=1440)
+    except Exception:
+        return None
+    for row in rows:
+        if row.get("session_id") == recipient:
+            ident = _row_owner_identity(row)
+            if ident[0] or ident[1]:
+                return ident
+            return None
+    return None
+
+
+def _find_swap_candidate(
+    stale_recipient: str,
+    healthy_rows: list,
+    helpers,
+) -> Optional[dict]:
+    """Pick a same-user live+healthy session to swap the stale sid to.
+
+    Rules (intentionally narrow to keep auto-swap conservative):
+      * Stale recipient's owner identity must be recoverable (= we need
+        a user_id or email to match on).
+      * Among healthy rows, count rows that match that identity AND are
+        not the stale sid itself.
+      * Exactly 1 match → return it (= unambiguous swap).
+      * 0 or 2+ matches → return None (fall through to soft warn; we
+        will not guess between multiple live sessions of the same user).
+
+    The 2+ case matters: the same user can hold multiple concurrent
+    bclaude sessions on different worktrees / machines. Without further
+    context (cwd, machine, agent) we can't tell which one the sender
+    "meant", so we refuse to guess and let the sender re-pick.
+    """
+    stale_ident = _find_stale_recipient_identity(stale_recipient, helpers)
+    if stale_ident is None:
+        return None
+    matches = []
+    for row in healthy_rows:
+        if row.get("session_id") == stale_recipient:
+            continue
+        if _identity_matches(_row_owner_identity(row), stale_ident):
+            matches.append(row)
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _resolve_recipient_live(
+    recipient: str, channel: str
+) -> Tuple[str, Optional[str]]:
+    """Liveness gate + soft auto-swap for stale session_id reuse.
+
+    e-1402 established the soft-warn floor: any ``--to <sid>`` DM send
+    triggers a live+healthy directory check; if the sid isn't present,
+    emit a loud stderr warning naming the Skill as recommended fix and
+    let the send proceed.
+
+    e-2280 extends that with a structural recovery path: when the stale
+    sid resolves to a known user, and that user has *exactly one* live
+    healthy session in the directory, auto-swap to that sid (= the AI's
+    new bclaude restart). The swap is loud (stderr notice) so it stays
+    auditable, and conservative (only single-candidate swaps) so we
+    never silently redirect cross-machine or cross-worktree.
+
+    Returns ``(new_recipient, swap_notice)`` where ``swap_notice`` is
+    ``None`` if no swap happened (= unchanged sid), or a short string
+    describing the swap (= caller can log / display).
+
+    Distinct from ``_validate_recipient_project`` (e-1362) which routes
+    cross-project. This one is identity-grain (same user, new sid).
+
+    Opt-outs:
+      * ``BEACON_BUS_NO_LIVE_CHECK=1`` — bypass entirely (= retains
+        e-1402 contract; CI / automation that handles its own liveness).
+      * ``BEACON_BUS_NO_AUTO_SWAP=1`` — keep the live-check warning but
+        never swap. Useful for scripts that want to detect stale sends
+        explicitly without surprise redirection.
+      * ``BEACON_BUS_REFUSE_STALE=1`` — hard-refuse (exit 1) when stale
+        AND no swap candidate. Opt-in strictness for CI pipelines that
+        treat dead-sid sends as a bug rather than a soft hint.
     """
     if channel != "dm" or not recipient:
-        return
+        return (recipient, None)
     if os.environ.get("BEACON_BUS_NO_LIVE_CHECK", "") == "1":
-        return
+        return (recipient, None)
 
     try:
         import importlib
@@ -16866,29 +16981,76 @@ def _check_recipient_live_health(recipient: str, channel: str) -> None:
         # No discovery module available — bypass silently. Mirrors the
         # defensive posture of _validate_recipient_project; a missing
         # helper shouldn't break the send.
-        return
+        return (recipient, None)
 
     try:
         rows = helpers.discover_and_aggregate(healthy=True, since_min=10)
     except Exception:
         # Discovery raised (network / psutil / auth) — bypass rather than
         # turning a transient failure into a CLI footgun.
-        return
+        return (recipient, None)
 
     for row in rows:
         if row.get("session_id") == recipient:
-            return  # live + healthy, all good
+            return (recipient, None)  # live + healthy, all good
 
-    # Not in the live+healthy set. The session might be down (= dead) or
-    # simply not visible to this machine's bridge directory. Either way,
-    # the sender should know that the send is best-effort.
+    # Not in the live+healthy set. Try auto-swap before falling back to
+    # the soft warning.
+    swap_disabled = os.environ.get("BEACON_BUS_NO_AUTO_SWAP", "") == "1"
+    candidate = None
+    if not swap_disabled:
+        candidate = _find_swap_candidate(recipient, rows, helpers)
+
+    if candidate is not None:
+        new_sid = str(candidate.get("session_id") or "")
+        actor = candidate.get("actor") or {}
+        ident_hint = (
+            actor.get("email")
+            or actor.get("machine")
+            or actor.get("agent")
+            or "(unknown owner)"
+        )
+        notice = (
+            f"recipient {recipient[:24]}… is stale; auto-swapped to "
+            f"{new_sid[:24]}… (owner={ident_hint}, single live match)"
+        )
+        print(f"⇄ {notice}", file=sys.stderr)
+        return (new_sid, notice)
+
+    # Stale + no swap candidate (= zero or multiple matches, or owner
+    # identity not recoverable). Either soft-warn (default) or hard-
+    # refuse if the strict opt-in is set.
+    if os.environ.get("BEACON_BUS_REFUSE_STALE", "") == "1":
+        print(
+            f"Error: recipient session {recipient[:24]}… is not in the "
+            f"live+healthy directory and BEACON_BUS_REFUSE_STALE=1 is set."
+            f" Refusing to send into a dead or unreachable session. Use "
+            f"`/beacon-dm-send` Skill to re-discover a live recipient, or"
+            f" unset the env to fall back to soft-warn.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     print(
         f"⚠ recipient session {recipient[:24]}… is not in the live+healthy "
         f"directory. The send will proceed, but the target may be dead or "
         f"unreachable. Consider `/beacon-dm-send` Skill which re-discovers "
-        f"on every send. (Set BEACON_BUS_NO_LIVE_CHECK=1 to suppress.)",
+        f"on every send. (Set BEACON_BUS_NO_LIVE_CHECK=1 to suppress, "
+        f"BEACON_BUS_REFUSE_STALE=1 to hard-refuse instead.)",
         file=sys.stderr,
     )
+    return (recipient, None)
+
+
+def _check_recipient_live_health(recipient: str, channel: str) -> None:
+    """Back-compat shim around ``_resolve_recipient_live`` (e-1402 contract).
+
+    Pre-e-2280 callers / external tests invoked this for its stderr
+    side-effect only. Forward to the resolver but drop the return value
+    so the old void contract holds; the new ``cmd_bus_send`` path uses
+    the resolver directly and consumes the swapped sid.
+    """
+    _resolve_recipient_live(recipient, channel)
 
 
 def cmd_bus_directory():
