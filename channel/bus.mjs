@@ -241,10 +241,29 @@ const SCHEDULER_INTERVAL_MS = parseInt(
   process.env.BEACON_BRIDGE_SCHEDULE_INTERVAL_MS || '60000', 10)
 const SCHEDULER_DISABLED = process.env.BEACON_BRIDGE_SCHEDULE_DISABLE === '1'
 
+// ms-95 / e-1667 — per-request HTTP timeout for apiGet/apiPost/apiPut.
+// Before this, bare fetch() with no timeout meant any stalled response from
+// the cloud server (Cloud Run cold-start, 429 with slow Retry-After, a
+// wedged TCP socket) would block the poll loop's await forever. last_poll_at
+// stopped advancing and the bridge was marked healthy=false for 43+ minutes
+// before manual recovery (= incident 2026-06-12, report doc 5Hg9QWvmhfn5MXa1q2uj).
+// 30s is generous for legitimate cold starts but bounded enough that one
+// stall costs at most one POLL_INTERVAL of latency before the loop recovers.
+const HTTP_TIMEOUT_MS = parseInt(
+  process.env.BEACON_BUS_HTTP_TIMEOUT_MS || '30000', 10)
+// e-1667 defense-in-depth — per-iteration watchdog around pollOnce /
+// runSchedulerTick / writePollHeartbeat. Even if a future await path is
+// added without HTTP timeout, this cap forces the loop to continue. Picked
+// at 2× HTTP_TIMEOUT_MS so a single legitimate stall during pollOnce
+// (multiple awaits) doesn't false-positive.
+const ITERATION_WATCHDOG_MS = parseInt(
+  process.env.BEACON_BUS_ITERATION_WATCHDOG_MS || '60000', 10)
+
 log(`=== beacon-bus channel starting ===`)
 log(`  api=${API_URL} project=${PROJECT_ID} session=${SESSION_ID}`)
 log(`  allow=[${ALLOWED_CHANNELS.join(',')}] poll=${POLL_INTERVAL}ms cwd=${CWD}`)
 log(`  scheduler=${SCHEDULER_DISABLED ? 'OFF' : SCHEDULER_INTERVAL_MS + 'ms'}`)
+log(`  http_timeout=${HTTP_TIMEOUT_MS}ms iter_watchdog=${ITERATION_WATCHDOG_MS}ms`)
 log(`  session.json source=[${session.source || ''}] last_active=[${session.last_active || ''}]`)
 
 // --- Layer 0-3 transparency metadata (ms-54 / e-1369) -----------------------
@@ -406,8 +425,34 @@ function collectSessionMetadata() {
 
 // --- HTTPS helpers -----------------------------------------------------------
 
+// e-1667: wrap fetch with AbortController + HTTP_TIMEOUT_MS so a stalled
+// server can never hang the poll loop. AbortError is translated to a plain
+// Error with the timeout label so existing log paths (`heartbeat write failed
+// (non-fatal): ...`, `poll error: ...`) surface a readable cause instead of
+// `signal is aborted without reason`. Exported for unit-test ergonomics via
+// `export` at module bottom is unnecessary — tests reach into the module via
+// dynamic import; the structural pin tests in tests/test_bus_mjs_timeout_resilience.py
+// grep the source for the call shape instead of behavioral mocking.
+async function apiFetch(url, init = {}) {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), HTTP_TIMEOUT_MS)
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal })
+  } catch (e) {
+    if (e && e.name === 'AbortError') {
+      const method = (init.method || 'GET').toUpperCase()
+      throw new Error(
+        `${method} ${url.replace(API_URL, '')} timeout after ${HTTP_TIMEOUT_MS}ms (e-1667)`,
+      )
+    }
+    throw e
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 async function apiGet(p) {
-  const r = await fetch(`${API_URL}${p}`, {
+  const r = await apiFetch(`${API_URL}${p}`, {
     headers: { Authorization: `Bearer ${loadToken()}` },
   })
   if (!r.ok) throw new Error(`GET ${p} → ${r.status}: ${(await r.text()).slice(0, 200)}`)
@@ -415,7 +460,7 @@ async function apiGet(p) {
 }
 
 async function apiPost(p, body) {
-  const r = await fetch(`${API_URL}${p}`, {
+  const r = await apiFetch(`${API_URL}${p}`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${loadToken()}`,
@@ -436,7 +481,7 @@ async function apiPost(p, body) {
 }
 
 async function apiPut(p, body) {
-  const r = await fetch(`${API_URL}${p}`, {
+  const r = await apiFetch(`${API_URL}${p}`, {
     method: 'PUT',
     headers: {
       Authorization: `Bearer ${loadToken()}`,
@@ -451,6 +496,22 @@ async function apiPut(p, body) {
     throw err
   }
   return r.json()
+}
+
+// e-1667: per-iteration watchdog wrapper. Caps any awaited promise at
+// ITERATION_WATCHDOG_MS so a hung pollOnce / scheduler / heartbeat cannot
+// wedge the loop. Returns the promise's result on time, or rejects with a
+// labelled Error after the cap. Stacks with HTTP_TIMEOUT_MS (= apiFetch
+// catches first, watchdog is the structural fallback for non-fetch awaits).
+function withWatchdog(promise, label, timeoutMs) {
+  let timer
+  const guard = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} exceeded watchdog ${timeoutMs}ms (e-1667)`)),
+      timeoutMs,
+    )
+  })
+  return Promise.race([promise, guard]).finally(() => clearTimeout(timer))
 }
 
 /**
@@ -1079,8 +1140,12 @@ if (!PROJECT_ID || !SESSION_ID) {
     await ensureCursorPrimed()
     await stampColdStartMetadata()
     while (!stopping) {
+      // e-1667: each step is wrapped in withWatchdog so a hung await never
+      // wedges the iteration. HTTP_TIMEOUT_MS on apiFetch catches network
+      // stalls first; the watchdog is structural defense-in-depth for any
+      // non-fetch await (mcp.notification, fs writes, future code paths).
       try {
-        await pollOnce()
+        await withWatchdog(pollOnce(), 'pollOnce', ITERATION_WATCHDOG_MS)
       } catch (e) {
         log(`poll error: ${e.message}`)
       }
@@ -1088,7 +1153,7 @@ if (!PROJECT_ID || !SESSION_ID) {
       // Sits between pollOnce and heartbeat so a failure here can't
       // prevent the heartbeat from advancing.
       try {
-        await runSchedulerTick()
+        await withWatchdog(runSchedulerTick(), 'runSchedulerTick', ITERATION_WATCHDOG_MS)
       } catch (e) {
         log(`scheduler error (non-fatal): ${e.message}`)
       }
@@ -1097,7 +1162,13 @@ if (!PROJECT_ID || !SESSION_ID) {
       // here, so the loop is alive. Writing here means: if the loop
       // hangs or crashes, last_poll_at structurally stops advancing
       // and consumers can detect a dead bridge from cloud state alone.
-      await writePollHeartbeat()
+      // e-1667: also watchdog-guarded — a hung apiPut here was the
+      // 2026-06-12 incident root cause path.
+      try {
+        await withWatchdog(writePollHeartbeat(), 'writePollHeartbeat', ITERATION_WATCHDOG_MS)
+      } catch (e) {
+        log(`heartbeat watchdog non-fatal: ${e.message}`)
+      }
       await new Promise((r) => setTimeout(r, POLL_INTERVAL))
     }
     log('poll loop exiting')
