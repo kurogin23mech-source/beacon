@@ -10251,7 +10251,12 @@ def cmd_cloud_list():
             print("Run 'beacon cloud upload-initial' to upload a project.")
             return
         for i, p in enumerate(projects, 1):
-            print(f"  {i}. {p['project_id']}: {p['name']}")
+            # ms-95 / e-2411 — render owner email so cross-project work can
+            # see "who do I ask about this?" at a glance. Silently skipped
+            # when server didn't resolve one (= migration-era projects).
+            owner_email = (p.get("owner_email") or "").strip()
+            owner_suffix = f"  (owner: {owner_email})" if owner_email else ""
+            print(f"  {i}. {p['project_id']}: {p['name']}{owner_suffix}")
             if p.get('objective'):
                 print(f"     {p['objective'][:60]}")
 
