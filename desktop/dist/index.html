@@ -7410,11 +7410,17 @@ function handleCommonAction(action, el) {
       const wasExpanded = state.expanded.has(msId);
       wasExpanded ? state.expanded.delete(msId) : state.expanded.add(msId);
       render();
-      // ms-69 / e-1664: lazy-load related treks the first time this ms is
-      // expanded. Re-renders the card in-place once the data lands; the
-      // widget hides itself when the result is empty.
-      if (!wasExpanded && state.relatedTreks['ms:' + msId] === undefined) {
-        dataSource.loadRelatedTreks('milestone', msId).then(() => render());
+      if (!wasExpanded) {
+        // ms-95 / e-2406: initial load only pre-fetches entries for in_progress
+        // MSes (selectProject). Without lazy fetch, expanding a
+        // done/observing/waiting/todo MS shows an empty body.
+        if (state.milestoneEntries[msId] === undefined) {
+          fetchMilestoneEntries(msId);
+        }
+        // ms-69 / e-1664: lazy-load related treks on first expand.
+        if (state.relatedTreks['ms:' + msId] === undefined) {
+          dataSource.loadRelatedTreks('milestone', msId).then(() => render());
+        }
       }
       return true;
     }
