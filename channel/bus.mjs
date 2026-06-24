@@ -24,7 +24,7 @@
 //                              only when profile == "default" and the new
 //                              path is not yet created by silent migration)
 //   BEACON_CHANNEL_ALLOWLIST (csv, default "dm")
-//   BEACON_BUS_POLL_MS      (default 2000)
+//   BEACON_BUS_POLL_MS      (default 10000、ms-84 e-2366)
 //   BEACON_BUS_LOG          (default /tmp/beacon-bus-channel.log)
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
@@ -226,7 +226,15 @@ const ALLOWED_CHANNELS = Array.from(new Set([
   ..._envAllow,
   ...autoExecuteChannelsFromProject(),
 ]))
-const POLL_INTERVAL = parseInt(process.env.BEACON_BUS_POLL_MS || '2000', 10)
+// ms-84 / e-2366 — bridge poll interval default 2s → 10s.
+// 2s は Cloud Run の single-instance 構成 (--max-instances=1 / e-2303) で WS が
+// 占有する concurrency=80 slot と相まって idle session の read 負荷が線形に効き、
+// 単発 CLI 書き込みでも 429 Rate exceeded を踏むようになっていた (= 2026-06-24 観察)。
+// 10s に上げて idle session の read 数を 5x 削減する。 副作用は DM 着信遅延が
+// 最大 10s に伸びるだけ (= 2s での体感差は誤差、 healthy 判定窓 max(30s, 2×poll)
+// も 30s で不変なので bus directory の live 判定は regression なし)。
+// 即時性が必要な経路は BEACON_BUS_POLL_MS=2000 で従来挙動に opt-back 可能。
+const POLL_INTERVAL = parseInt(process.env.BEACON_BUS_POLL_MS || '10000', 10)
 const SCHEDULER_INTERVAL_MS = parseInt(
   process.env.BEACON_BRIDGE_SCHEDULE_INTERVAL_MS || '60000', 10)
 const SCHEDULER_DISABLED = process.env.BEACON_BRIDGE_SCHEDULE_DISABLE === '1'
