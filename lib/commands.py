@@ -11151,6 +11151,105 @@ def cmd_pr_merge():
         print(f"Merged PR [{entry_id}]: {entry.get('description', '')}")
 
 
+def _fetch_gh_pr_list_all() -> list:
+    """ms-61 / e-2005 — query `gh pr list --state all` and return a list
+    of dicts with at least `number`, `state`, `url`, `mergedAt`.
+
+    Returns [] if `gh` is unavailable, the repo isn't recognised, or the
+    output isn't parsable. Soft-fails so the caller can degrade gracefully.
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "list", "--state", "all", "--limit", "100",
+             "--json", "number,state,url,mergedAt,title"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return []
+    if result.returncode != 0:
+        return []
+    try:
+        rows = json.loads(result.stdout or "[]")
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(rows, list):
+        return []
+    return rows
+
+
+def cmd_pr_sync():
+    """ms-61 / e-2005 — sync beacon PR entries with GitHub state.
+
+    Walks every PR entry in the project, queries `gh pr list --state all`,
+    and for each entry whose GitHub state has advanced past beacon's
+    record:
+      - GitHub MERGED + beacon not-yet-done → `beacon pr merge`
+      - GitHub CLOSED + beacon not-yet-cancelled → `beacon pr close`
+
+    Read-only when `BEACON_DRY_RUN=1` (= prints plan only).
+    """
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    dry_run = os.environ.get("BEACON_DRY_RUN", "") == "1"
+
+    gh_prs = _fetch_gh_pr_list_all()
+    if not gh_prs:
+        msg = ("Warning: could not fetch GitHub PR list "
+               "(gh not configured / outside repo / no PRs).")
+        if json_mode:
+            print(json.dumps({"actions": [], "summary": {
+                "merged": 0, "closed": 0, "skipped": 0, "errors": []
+            }, "warning": msg}, ensure_ascii=False))
+        else:
+            print(msg, file=sys.stderr)
+        return
+
+    data = load_project()
+    actions = core.plan_pr_sync(data, gh_prs)
+
+    # Sort actions so non-skip transitions surface first.
+    actions_sorted = sorted(
+        actions, key=lambda a: (0 if a.get("action") != "skip" else 1, a.get("pr_number", 0))
+    )
+
+    if dry_run:
+        if json_mode:
+            print(json.dumps({"dry_run": True, "actions": actions_sorted},
+                             ensure_ascii=False))
+        else:
+            actionable = [a for a in actions_sorted if a.get("action") != "skip"]
+            if not actionable:
+                print("All beacon PR entries are already aligned with GitHub.")
+            else:
+                print(f"PR sync plan (dry-run, {len(actionable)} actionable):")
+                for a in actionable:
+                    print(f"  [{a['entry_id']}] PR#{a['pr_number']}: "
+                          f"{a['from_status']} → {a['to_status']} "
+                          f"({a['action']}; {a['reason']})")
+        return
+
+    summary = core.apply_pr_sync(data, actions_sorted)
+    save_project(data)
+
+    if json_mode:
+        print(json.dumps({"actions": actions_sorted, "summary": summary},
+                         ensure_ascii=False))
+    else:
+        if summary["merged"] == 0 and summary["closed"] == 0:
+            print("All beacon PR entries are already aligned with GitHub.")
+        else:
+            print(f"PR sync: {summary['merged']} merged, "
+                  f"{summary['closed']} closed, "
+                  f"{summary['skipped']} skipped.")
+            for a in actions_sorted:
+                if a.get("action") in ("merge", "close"):
+                    print(f"  [{a['entry_id']}] PR#{a['pr_number']}: "
+                          f"{a['from_status']} → {a['to_status']}")
+        if summary["errors"]:
+            print(f"  ⚠ {len(summary['errors'])} errors:", file=sys.stderr)
+            for err in summary["errors"]:
+                print(f"    [{err['entry_id']}] {err['error']}", file=sys.stderr)
+
+
 def _infer_pr_ms_id(data: dict) -> tuple[str, str]:
     """Infer the most likely target milestone ID for a PR being created.
 
@@ -14504,6 +14603,7 @@ def cmd_help_json():
         {"command": "beacon pr approve <entry-id>", "flags": ["--rationale <text>", "--no-auto-done", "--json"], "description": "Approve a PR (auto-dones bound tasks at HIGH confidence; --no-auto-done to opt out)"},
         {"command": "beacon pr reject <entry-id>", "flags": [], "description": "Reject a PR"},
         {"command": "beacon pr merge <entry-id>", "flags": [], "description": "Mark PR as merged"},
+        {"command": "beacon pr sync", "flags": ["--dry-run", "--json"], "description": "Align beacon PR entries with GitHub state (merged/closed) — ms-61 / e-2005"},
         {"command": "beacon retro", "flags": [], "description": "Start weekly retrospective (interactive)"},
         {"command": "beacon trigger check", "flags": [], "description": "Check pending triggers (JSON array)"},
         {"command": "beacon cloud list", "flags": [], "description": "List cloud projects"},
@@ -18206,6 +18306,7 @@ if __name__ == "__main__":
         "pr_request_review": cmd_pr_request_review,
         "pr_request_changes": cmd_pr_request_changes,
         "pr_merge": cmd_pr_merge,
+        "pr_sync": cmd_pr_sync,
         "issue_import": cmd_issue_import,
         "issue_list": cmd_issue_list,
         "issue_sync": cmd_issue_sync,

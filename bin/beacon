@@ -61,6 +61,7 @@ Pull Requests:
   beacon pr reject <entry-id>                  Reject a PR
   beacon pr merge <entry-id>                   Mark PR as merged
   beacon pr close <entry-id>                   Close PR without merging
+  beacon pr sync [--dry-run]                   Sync beacon PR entries with GitHub state (merged/closed)
 
 Documents:
   beacon doc add "title" [--scope core|spec|memo|retro|report]  Create a document
@@ -1989,8 +1990,26 @@ cmd_pr() {
             fi
             BEACON_ENTRY_ID="$entry_id" BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" pr_merge
             ;;
+        sync)
+            # ms-61 / e-2005: align beacon PR entries with GitHub state.
+            # GitHub MERGED → beacon pr merge; GitHub CLOSED → beacon pr close.
+            shift
+            local json_flag=""
+            local dry_run_flag=""
+
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --json)    json_flag="1"; shift ;;
+                    --dry-run) dry_run_flag="1"; shift ;;
+                    *)         shift ;;
+                esac
+            done
+
+            BEACON_JSON="$json_flag" BEACON_DRY_RUN="$dry_run_flag" \
+                python3 "$COMMANDS_PY" pr_sync
+            ;;
         *)
-            echo "Usage: beacon pr [create|add|show|review|approve|request-changes|reject|merge|close]"
+            echo "Usage: beacon pr [create|add|show|review|approve|request-changes|reject|merge|close|sync]"
             echo "  create          [-m <ms-id>] [--intent \"text\"] [gh pr create flags...]"
             echo "                  Run gh pr create and auto-record the PR in beacon"
             echo "  add             <github-url> [-m <ms-id>] [--intent \"text\"]  Register a PR"
@@ -2001,6 +2020,7 @@ cmd_pr() {
             echo "  reject          <entry-id> [--rationale \"text\"]  Reject a PR"
             echo "  merge           <entry-id>   Mark as merged"
             echo "  close           <entry-id>   Close without merging"
+            echo "  sync            [--dry-run]  Align beacon PR entries with GitHub state (merged/closed)"
             ;;
     esac
 }
