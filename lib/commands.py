@@ -31,18 +31,10 @@ def _resolve_session_id() -> str:
     test sandboxes that don't run the heartbeat). The empty string is
     the documented "no session" sentinel in core.log_commit / core.pr_add —
     those entries simply won't appear in session-log aggregation queries.
-
-    ms-95 e-2419: bridge claim を優先する resolve_active_session_id を使う
-    (= e-1331 / e-1460 で確立された "MCP bridge が listen 中の cwd では bridge
-    の session_id を CLI sender にも採用する" 原則)。 これで beacon bus send で
-    送った DM への reply (= recipient = parent sender) が bridge listen sid に
-    一致し、 PE → LPS → PE の双方向 push が成立する。 旧実装は get_session_id を
-    直叩きしていたため bridge claim を skip し、 CLI mint sid と bridge listen
-    sid が乖離して reply silent failure を引き起こしていた。
     """
     try:
         import session as _session
-        return _session.resolve_active_session_id()
+        return _session.get_session_id()
     except Exception:
         return ""
 
