@@ -15477,8 +15477,20 @@ def cmd_bus_listen():
     Sidecar lookup failures (= older server / no auth / network) silently
     fall back to the legacy "just JSON" output — the banner is added on
     top of the existing contract, not in place of it.
+
+    ms-95 / e-1454: wrap the per-iteration ``list_unread_bus_events``
+    call in a transient-network retry shield. The Monitor armed-mode
+    flow (= ``/beacon-bus-armed``) depends on this process staying
+    alive across SSL handshake timeouts / fetch failures / connection
+    resets. On a network exception we log to stderr, sleep with
+    exponential backoff (1 → 2 → 4 → 8 → 16 → 30s cap), and continue
+    the loop; on a successful round-trip the backoff resets to 1s.
+    Logic errors (= TypeError, KeyError, etc.) still propagate.
     """
+    import socket
+    import ssl
     import time
+    import urllib.error
     recipient = _bus_resolve_recipient()
     channel = os.environ.get("BEACON_BUS_CHANNEL", "").strip()
     auto_ack = os.environ.get("BEACON_BUS_AUTO_ACK", "") == "1"
@@ -15490,11 +15502,39 @@ def cmd_bus_listen():
     client, config = _get_api_client()
     project_id = _resolve_bus_project_id(config)  # e-1151: --project override
 
+    # ms-95 / e-1454: backoff state for transient network errors. Doubles
+    # on each consecutive failure up to ``backoff_cap``, resets to 1 on
+    # the next successful network round-trip. Function-local int keeps
+    # the contract simple — no module state, no test fixture juggling.
+    backoff_seconds = 1
+    backoff_cap = 30
     try:
         while True:
-            events = client.list_unread_bus_events(
-                project_id, recipient, channel=channel,
-            )
+            try:
+                events = client.list_unread_bus_events(
+                    project_id, recipient, channel=channel,
+                )
+            except (urllib.error.URLError, ssl.SSLError,
+                    TimeoutError, socket.timeout) as net_err:
+                # Transient network error: log to stderr (so an attached
+                # human / debug tail can see the cause), sleep with
+                # exponential backoff, then continue. Do NOT raise — the
+                # Monitor armed-mode loop depends on the process staying
+                # alive across SSL handshake timeouts / fetch failures /
+                # connection resets (2026-06-11 02:00Z incident).
+                print(
+                    f"[bus listen] transient network error: "
+                    f"{type(net_err).__name__}: {net_err} "
+                    f"(retry in {backoff_seconds}s)",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(backoff_seconds)
+                backoff_seconds = min(backoff_seconds * 2, backoff_cap)
+                continue
+            # Successful round-trip: reset backoff so the next failure
+            # starts at 1s again (= short hiccups don't compound).
+            backoff_seconds = 1
             if events:
                 # e-1715: refresh sidecar lookup once per batch so a
                 # newly-approved row in the middle of a poll loop stops
