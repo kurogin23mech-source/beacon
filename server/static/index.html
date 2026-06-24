@@ -7917,6 +7917,15 @@ async function selectProject(projectId) {
 
   connectWebSocket(projectId);
 
+  // ms-84 / e-2338 — gate WS-driven refetch while the initial REST is in flight.
+  // Without this, a ws_ready arriving during the await below would race against
+  // the initial REST (both fire ?slim=true in parallel) and trigger a duplicate
+  // wave of renders/refetches once both resolve. Reusing _slimRefetchInFlight
+  // routes the racing ws_ready through the existing 250ms coalesce path; by
+  // the time it fires, lastProjectJson is seeded (below) so the JSON compare
+  // short-circuits.
+  _slimRefetchInFlight = true;
+
   try {
     // ms-84 / e-2326 — slim variant on initial REST fetch so a large project
     // doesn't ship 2+ MB on first paint either; entries are lazy-fetched per
@@ -7925,16 +7934,37 @@ async function selectProject(projectId) {
     if (!state.project) {
       state.project = hydrateProjectEntries(data);
       state.lastUpdate = new Date();
+      // ms-84 / e-2338 — seed lastProjectJson with the same payload that
+      // fetchSlimProjectIfChanged would compare against. The first ws_ready
+      // after WS open arrives ~50ms in and would otherwise refetch + rerender
+      // the identical project (newJson !== null = lastProjectJson). With this
+      // seed the JSON comparison short-circuits and the WS-driven wave of
+      // re-renders (renderOnDataChange + refreshExpandedMilestoneEntries) is
+      // skipped on first paint.
+      lastProjectJson = JSON.stringify(data);
+      // ms-84 / e-2338 — batch the in_progress milestone entries fetches and
+      // collapse their post-fetch renders into a single trailing render(). The
+      // previous code called render() inside each fetchMilestoneEntries() in
+      // ``finally``, producing N independent paints for N active MS (visible
+      // flicker on reload). Promise.allSettled keeps the existing fire-and-
+      // forget semantics (no error propagation) while letting us know when
+      // every fetch has settled.
+      const pendingEntries = [];
       for (const ms of data.milestones || []) {
         if (ms.status === 'in_progress') {
           state.expanded.add(ms.id);
-          fetchMilestoneEntries(ms.id);
+          pendingEntries.push(fetchMilestoneEntries(ms.id, { suppressRender: true }));
         }
       }
       render();
+      if (pendingEntries.length > 0) {
+        Promise.allSettled(pendingEntries).then(() => render());
+      }
     }
   } catch (e) {
     if (!state.project) { state.error = e.message; render(); }
+  } finally {
+    _slimRefetchInFlight = false;
   }
 }
 
@@ -7956,7 +7986,13 @@ function toggleMilestone(msId) {
 // ms-84 / e-2326 — lazy fetch entries for a single milestone. Stores into
 // state.milestoneEntries[msId] and also mirrors onto state.project.milestones[X].entries
 // so the existing recursive render code (which reads ms.entries) keeps working.
-async function fetchMilestoneEntries(msId) {
+//
+// opts.suppressRender — skip the trailing render() in finally. selectProject
+// uses this during initial paint to batch N parallel fetches into a single
+// consolidated render once Promise.allSettled resolves (= e-2338 ちらつき修復)。
+// Default false preserves the per-fetch render for user-driven expansions
+// (= toggleMilestone) and WS-driven refreshExpandedMilestoneEntries.
+async function fetchMilestoneEntries(msId, opts = {}) {
   if (!state.projectId) return;
   if (state.entriesLoading.has(msId)) return;
   state.entriesLoading.add(msId);
@@ -7974,7 +8010,7 @@ async function fetchMilestoneEntries(msId) {
     // broadcast unchanged.
   } finally {
     state.entriesLoading.delete(msId);
-    render();
+    if (!opts.suppressRender) render();
   }
 }
 
