@@ -3040,6 +3040,84 @@ def _push_session_log_to_cloud(payload: dict) -> bool:
         return False
 
 
+def _stamp_cloud_session_shutdown(session_id: str) -> bool:
+    """Mark a cloud session document as shut down (ms-95 / e-2305).
+
+    Writes ``shutdown=true`` + ``last_poll_at=now`` to the cloud
+    sessions/{session_id} doc so the server-side directory query
+    (``/api/projects/{pid}/sessions?healthy_only=true``) classifies this
+    session as not-healthy *immediately* — without waiting for the
+    bridge's natural ``last_poll_at`` aging window (= max(30s, 2×
+    poll_interval_ms)).
+
+    Why this exists (e-2305 background): the shutdown stamp was
+    previously written only by ``channel/bus.mjs`` from its SIGINT /
+    SIGTERM graceful-exit path. That single path has three silent-failure
+    modes that leave the session advertised as ``healthy=true`` long
+    after the user-facing terminal has closed:
+
+      1. The bridge process outlives its Claude Code parent (= MCP
+         stdio shutdown unreliable on some hosts). bridge keeps polling,
+         so ``last_poll_at`` never goes stale → directory keeps the
+         row healthy indefinitely.
+      2. The shutdown PUT fails (cloud transient blip). The bridge's
+         try/catch swallows the error; the bridge then exits. The
+         server-side row carries no ``shutdown`` flag, but
+         ``last_poll_at`` will age out within 30s — so this case
+         self-heals at the heartbeat-staleness threshold.
+      3. Hard kill (SIGKILL / OS shutdown). No shutdown stamp; the
+         session ages out at the same 30s window as case 2.
+
+    Case 1 is the e-2305 reproduction: 3 sessions stacking up,
+    ``healthy=true`` persistently displayed. Adding a CLI-driven shutdown
+    stamp closes this gap structurally: when the user explicitly says
+    "this session is ending" via ``beacon session end``, we converge on
+    the same server-side merge field bus.mjs uses (= idempotent), but
+    via a path that does NOT depend on the bridge process's liveness or
+    its signal-delivery ordering. The two paths are integrity-safe by
+    Firestore merge=True semantics.
+
+    Best-effort: cloud unreachable, local-mode project, or not-logged-in
+    all return False without raising. Caller (cmd_session_end /
+    cmd_session_rescue) MUST NOT abort on a False return — the local
+    session log persistence is the primary truth source; the cloud
+    stamp is an immediacy optimization on the directory side.
+    """
+    if not session_id:
+        return False
+    store = get_store()
+    if not store.is_cloud():
+        return False  # Local mode: no cloud session doc to stamp.
+    import datetime
+    # ms precision matches what bus-heartbeat.mjs writes (= JavaScript
+    # Date.toISOString output). Server parses both ms and µs precision
+    # via fromisoformat with the Z→+00:00 replace dance, so the choice
+    # is stylistic — we go ms-precision to match the bridge so the two
+    # paths produce indistinguishable rows on the server.
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    body = {
+        "last_active": now_iso,
+        "last_poll_at": now_iso,
+        "shutdown": True,
+    }
+    try:
+        from auth import load_credentials
+        if load_credentials() is None:
+            return False
+        client, cfg = _get_api_client()
+        pid = cfg.get("project_id", "")
+        if not pid:
+            return False
+        client.upsert_session(pid, session_id, body)
+        return True
+    except BaseException:
+        if os.environ.get("BEACON_DEBUG") == "1":
+            import traceback as _tb
+            _tb.print_exc()
+        return False
+
+
 def _list_other_session_ids() -> list:
     """Return session_ids (other than the current one) that have entries
     associated with them in the project data or local notes.
@@ -3206,6 +3284,18 @@ def cmd_session_end():
             file=sys.stderr,
         )
 
+    # ms-95 / e-2305: stamp shutdown=true on the cloud session doc so the
+    # directory's healthy_only filter drops this session immediately —
+    # without waiting for the bridge's natural last_poll_at aging window.
+    # See _stamp_cloud_session_shutdown docstring for the failure modes
+    # this closes (bridge outliving Claude Code parent, network blips on
+    # the bridge's own graceful-exit stamp). Best-effort: local-mode or
+    # cloud-unreachable returns False silently so the session log
+    # persistence remains the primary truth source.
+    _stamped = _stamp_cloud_session_shutdown(sid)
+    if _stamped and os.environ.get("BEACON_DEBUG") == "1":
+        print(f"  cloud session {sid} marked shutdown=true", file=sys.stderr)
+
     payload = _aggregate_and_persist(sid, recovered=False,
                                       summary_override=summary_override)
     if json_mode:
@@ -3232,6 +3322,12 @@ def cmd_session_rescue():
     for sid in sids:
         try:
             payload = _aggregate_and_persist(sid, recovered=True)
+            # ms-95 / e-2305: rescued sessions are by definition orphan
+            # (= the original bclaude tab is no longer driving them).
+            # Stamp shutdown=true so the directory's healthy_only filter
+            # doesn't keep advertising them as receive-capable. Best-effort;
+            # see _stamp_cloud_session_shutdown for failure semantics.
+            _stamp_cloud_session_shutdown(sid)
             results.append({"session_id": sid, "status": "ok",
                             "notes": len(payload.get("note_ids", [])),
                             "commits": len(payload.get("commit_ids", [])),
