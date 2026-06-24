@@ -266,6 +266,19 @@ def detect_auto_stalled_tasks(
         # なるので自然に対象外。
         if not entry or (entry or {}).get("state") != WORKING_TASK_STATE:
             continue
+        # ms-95 / e-2308 — per-task TTL extension. Set by the leader via
+        # ``trek.extend_task_ttl`` (CLI ``beacon trek extend-ttl``) when
+        # delegating to an Agent-tool subagent that cannot stamp
+        # ``last_activity_at`` itself. While the extension is in the
+        # future, skip auto-stall regardless of how stale
+        # ``last_activity_at`` is. Once the extension expires, normal
+        # TTL semantics resume (= the leader is expected to renew or
+        # let the safety net fire).
+        ext_str = entry.get("ttl_extended_until") or ""
+        if ext_str:
+            ext = _parse_iso(ext_str)
+            if ext is not None and _ensure_utc(ext) > now:
+                continue
         last_str = entry.get("last_activity_at") or entry.get("updated_at") or ""
         last = _parse_iso(last_str)
         if last is None:

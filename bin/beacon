@@ -2776,6 +2776,29 @@ except ValueError as e:
                 BEACON_TREK_STATE="$state" BEACON_TREK_NOTE="$note" \
                     python3 "$COMMANDS_PY" trek_task_state
                 ;;
+            # ms-95 / e-2308 — TTL safety net deadline 延長 (= leader が Agent
+            # subagent dispatch する際の reaffirm 代替)。 --minutes 0 で clear。
+            extend-ttl)
+                shift 2
+                trek_id="" task_id="" minutes="" reason=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --minutes) minutes="${2:-}"; shift 2 ;;
+                        --reason) reason="${2:-}"; shift 2 ;;
+                        --json) export BEACON_JSON=1; shift ;;
+                        *)
+                            if [[ -z "$trek_id" ]]; then trek_id="$1"
+                            elif [[ -z "$task_id" ]]; then task_id="$1"
+                            fi
+                            shift
+                            ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" BEACON_TREK_TASK_ID="$task_id" \
+                BEACON_TREK_TTL_MINUTES="$minutes" \
+                BEACON_TREK_TTL_REASON="$reason" \
+                    python3 "$COMMANDS_PY" trek_extend_ttl
+                ;;
             # ms-92 / e-2141 — cross-project task add via Trek scope。
             # Trek scope に含まれる project の MS 配下にのみ task を起票できる
             # (= scope-guard で structural enforce、 envelope は T1-system 経由)。

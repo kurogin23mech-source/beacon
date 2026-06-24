@@ -873,6 +873,24 @@ class ApiClient:
             {"task_id": task_id, "state": state, "note": note},
         )
 
+    def extend_trek_task_ttl(self, trek_id: str, *, task_id: str,
+                             minutes: int, reason: str = "") -> dict:
+        """ms-95 / e-2308 — Postpone TTL safety net deadline on a task.
+
+        Leader-side primitive for the Agent-tool subagent dispatch path
+        where the subagent cannot stamp ``last_activity_at`` itself.
+        ``minutes <= 0`` clears the extension and lets normal TTL
+        semantics resume on the next scheduler tick.
+        """
+        return self.post(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/extend-ttl",
+            {
+                "task_id": task_id,
+                "minutes": int(minutes),
+                "reason": reason or "",
+            },
+        )
+
     def add_trek_task(self, trek_id: str, *,
                       target_project: str,
                       target_milestone: str,

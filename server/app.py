@@ -3405,6 +3405,15 @@ class TrekKickoff(BaseModel):
     kickoff_dm_event_id: str = ""  # bus.send 結果の event_id (= audit trace)
 
 
+# ms-95 / e-2308 — extend TTL on a single task (= leader hints "I delegated
+# this to a subagent that can't stamp activity itself"). See
+# lib/trek.extend_task_ttl docstring for semantics.
+class TrekExtendTtl(BaseModel):
+    task_id: str
+    minutes: int  # 0 or negative clears the extension
+    reason: str = ""  # short audit string (e.g. "dispatched to subagent X")
+
+
 def _load_trek_for_read(trek_id: str, user: dict) -> dict:
     """Load a trek doc. 404 if missing, 403 if caller is neither creator
     nor a member (per SPEC visibility = creator OR members)."""
@@ -3948,6 +3957,51 @@ def trek_pulse_ack_endpoint(trek_id: str, body: TrekPulseAck,
         raise HTTPException(status_code=400, detail=str(e))
     db.save_trek(trek_id, t)
     return (t.get("pulse_acks") or {}).get(body.session_id) or {}
+
+
+@app.post("/api/treks/{trek_id}/extend-ttl")
+def extend_trek_task_ttl_endpoint(trek_id: str, body: TrekExtendTtl,
+                                  user: dict = Depends(require_auth)):
+    """Postpone the TTL safety net deadline on a single task (ms-95 / e-2308).
+
+    Leader-side primitive for the Agent-tool subagent dispatch path.
+    When ``/beacon-dispatch`` launches a subagent that cannot stamp
+    ``last_activity_at`` itself (= different ``session_id``, not joined
+    to the trek), the leader calls this endpoint to push the auto-stall
+    deadline forward by ``minutes`` so the TTL check skips the task
+    while delegation is in progress. ``minutes=0`` (or negative) clears
+    the extension and lets normal TTL semantics resume.
+
+    Auth: caller must be a trek member. Leader-only is **not** enforced
+    so that any joined member can call this on their own behalf (= a
+    fork session dispatching a sub-agent for its task without leader
+    handoff still has access). Server-side write goes through
+    ``trek_mod.extend_task_ttl`` which validates the integer cast.
+
+    Returns the updated ``task_states[task_id]`` entry so the caller
+    can echo the new ``ttl_extended_until`` back to the user.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    if _auth_enabled:
+        uid = user.get("sub") or ""
+        if not trek_mod.find_member(t, uid):
+            raise HTTPException(
+                status_code=403,
+                detail="only trek members can extend task TTL",
+            )
+    if not body.task_id:
+        raise HTTPException(status_code=400, detail="task_id required")
+    try:
+        trek_mod.extend_task_ttl(
+            t,
+            task_id=body.task_id,
+            minutes=body.minutes,
+            reason=body.reason or "",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.save_trek(trek_id, t)
+    return (t.get("task_states") or {}).get(body.task_id) or {}
 
 
 @app.get("/api/treks/{trek_id}/pulse-acks")

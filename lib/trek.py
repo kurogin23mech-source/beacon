@@ -770,6 +770,77 @@ def summarize_kickoff_status(trek_doc: dict) -> dict:
     }
 
 
+def extend_task_ttl(trek_doc: dict, *, task_id: str,
+                    minutes: int, reason: str = "") -> dict:
+    """Postpone the TTL safety net deadline on a single task (ms-95 / e-2308).
+
+    Used by the leader (= main session) when it delegates the executor
+    work to an out-of-band runner that cannot stamp ``last_activity_at``
+    itself — concretely an Agent-tool subagent launched via
+    ``/beacon-dispatch`` Task Mode. The subagent runs in a fresh
+    ``session_id`` that is not joined to the trek, so it cannot call
+    ``beacon trek task-state working``. Without this primitive the
+    leader would have to babysit the subagent and re-stamp every 12
+    minutes, defeating the point of delegation.
+
+    Effect: stamps ``task_states[task_id].ttl_extended_until = now +
+    minutes`` (UTC ISO8601). ``detect_auto_stalled_tasks`` (=
+    ``lib.trek_scheduler``) honours this field: any task whose
+    extension is in the future is skipped, regardless of how stale
+    ``last_activity_at`` is.
+
+    Idempotent: a follow-up call with a longer extension replaces the
+    earlier one (= "extend further"); a shorter extension also
+    replaces it (= caller can pull the deadline in early if a
+    subagent returned). Use ``minutes=0`` (or a negative value) to
+    clear the extension and let TTL fire normally on the next tick.
+
+    If the task has no ``task_states`` entry yet (= executor never
+    stamped), initialise a default-state record first so the extension
+    has somewhere to live. The scheduler will then treat the task as
+    "extension active, not yet active" — TTL is moot until the
+    extension expires.
+
+    Returns the mutated trek_doc; caller persists with
+    ``db.save_trek``.
+    """
+    if not task_id:
+        raise ValueError("task_id is required")
+    try:
+        minutes_int = int(minutes)
+    except (TypeError, ValueError):
+        raise ValueError(f"minutes must be an integer, got {minutes!r}")
+    states = trek_doc.setdefault("task_states", {})
+    now_dt = datetime.datetime.now(datetime.timezone.utc)
+    now_iso = utcnow_iso()
+    entry = states.get(task_id)
+    if not entry:
+        entry = {
+            "state": DEFAULT_TASK_STATE,
+            "updated_at": now_iso,
+            "updated_by_session_id": "",
+            "note": "",
+        }
+    if minutes_int <= 0:
+        # Clear the extension. Use ``None`` rather than a stale
+        # timestamp so downstream readers do a simple None check.
+        entry.pop("ttl_extended_until", None)
+        entry.pop("ttl_extension_reason", None)
+    else:
+        deadline = now_dt + datetime.timedelta(minutes=minutes_int)
+        # Match utcnow_iso format (.%fZ) so downstream _parse_iso reads cleanly.
+        entry["ttl_extended_until"] = deadline.strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ",
+        )
+        if reason:
+            entry["ttl_extension_reason"] = reason[:120]
+        else:
+            entry.pop("ttl_extension_reason", None)
+    states[task_id] = entry
+    trek_doc["updated_at"] = now_iso
+    return trek_doc
+
+
 def bump_task_activity(trek_doc: dict, *, task_id: str,
                        reason: str = "") -> dict:
     """Refresh ``last_activity_at`` on a task without changing its state.
