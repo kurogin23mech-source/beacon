@@ -3677,10 +3677,67 @@ def leave_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
     return t
 
 
+# ms-95 / e-2320 — structured audit log for Trek scope mutations.
+# Background: 2026-06-23 (memo doc kINfY5a9LLnxHWWhtbZJ Finding 4) a Trek
+# scope went from 3 narrow MS entries back to including a project-wide
+# entry 1-2 hours after the leader had explicitly removed it. The leader
+# could not identify who or what re-added the project-wide entry. A grep
+# of the entire codebase (lib/ / server/ / scripts/ / channel/ / skills/)
+# found ZERO automated callers of ``add_scope_entry`` other than:
+#   (1) cmd_trek_plan in lib/commands.py (= user-typed `beacon trek plan
+#       --add-scope` only)
+#   (2) this server endpoint (= the only HTTP path for scope writes)
+# Both require explicit caller action. So the re-add was either: a stale
+# CLI from another window, a manual mistake the leader forgot, or a race
+# we couldn't see without log evidence. The "封鎖" (= structural block)
+# for e-2320 is therefore observability: every scope mutation gets a
+# structured log line carrying caller user_id / session / entry so the
+# next occurrence can be traced from Cloud Logging instead of guessed at.
+# (e-2315 is the orthogonal "reject project-wide entries at the parser
+# layer" task — together they close the foot-gun.)
+
+def _log_trek_scope_audit(*, action: str, trek_id: str, user: dict,
+                          request: Request, entry: dict) -> None:
+    """Emit a structured audit line for trek scope add/remove.
+
+    Format mirrors the JSON-line shape Cloud Logging already parses from
+    other server modules. Failure to log is silently swallowed — audit is
+    observational, not load-bearing.
+    """
+    try:
+        import json as _json
+        sid = ""
+        try:
+            sid = request.headers.get("X-Beacon-Session", "") or ""
+        except Exception:
+            sid = ""
+        uid = ""
+        if isinstance(user, dict):
+            uid = user.get("sub") or user.get("email") or ""
+        record = {
+            "evt": "trek.scope.audit",
+            "action": action,  # "add" or "remove"
+            "trek_id": trek_id,
+            "user_id": uid,
+            "session_id": sid,
+            "entry": entry,
+        }
+        print(_json.dumps(record, ensure_ascii=False), flush=True)
+    except Exception:
+        pass
+
+
 @app.put("/api/treks/{trek_id}/scope")
 def add_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
+                            request: Request,
                             user: dict = Depends(require_auth)):
-    """Append a scope entry (cross-project ref). Any joined member."""
+    """Append a scope entry (cross-project ref). Any joined member.
+
+    ms-95 / e-2320 — emits a ``trek.scope.audit`` log line per mutation
+    so Cloud Logging can answer "who added this scope entry and when?"
+    The original incident (memo doc kINfY5a9LLnxHWWhtbZJ Finding 4) had
+    no such record, leaving the leader unable to trace the silent re-add.
+    """
     t = _load_trek_for_read(trek_id, user)
     _require_trek_joined_member(t, user)
     entry: dict = {"project": body.project}
@@ -3695,13 +3752,23 @@ def add_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
     db.save_trek(trek_id, t)
+    _log_trek_scope_audit(
+        action="add", trek_id=trek_id, user=user,
+        request=request, entry=entry,
+    )
     return t
 
 
 @app.delete("/api/treks/{trek_id}/scope")
 def remove_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
+                               request: Request,
                                user: dict = Depends(require_auth)):
-    """Remove a scope entry. Any joined member."""
+    """Remove a scope entry. Any joined member.
+
+    ms-95 / e-2320 — same audit log as add path, so a remove → re-add
+    sequence (= the 2026-06-23 pathology) leaves two lines in Cloud
+    Logging that pinpoint who/when on each leg.
+    """
     t = _load_trek_for_read(trek_id, user)
     _require_trek_joined_member(t, user)
     entry: dict = {"project": body.project}
@@ -3716,6 +3783,10 @@ def remove_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     db.save_trek(trek_id, t)
+    _log_trek_scope_audit(
+        action="remove", trek_id=trek_id, user=user,
+        request=request, entry=entry,
+    )
     return t
 
 
