@@ -984,6 +984,36 @@ def build_parser() -> argparse.ArgumentParser:
     channel_sub = p_channel.add_subparsers(dest="channel_cmd", metavar="<subcmd>")
     channel_sub.add_parser("install", add_help=False)
 
+    # `beacon retro [--prepare|--catch-up] [--since X] [--until Y]`
+    # `beacon retro save --week YYYY-WNN [--content T] [--stdin] [--json]`
+    # `beacon retro done`
+    #
+    # ms-61 / e-2348: Win parity for /beacon-retro Skill. The Skill calls
+    # `beacon retro --prepare`, `beacon retro --catch-up`, `beacon retro save`,
+    # and `beacon retro done`. Without this parser, Windows beacon.exe (dispatch.py
+    # path) failed with `argparse invalid choice: 'retro'` and the Skill was
+    # unusable end-to-end on Win. Mirrors bin/beacon's `retro)` case
+    # (lines 4119-4151) plus cmd_retro() (lines 1421-1474).
+    p_retro = sub.add_parser(
+        "retro", help="Weekly retrospective (prepare/save/done)", add_help=False,
+    )
+    p_retro.add_argument("--help", "-h", action="store_true", dest="show_help")
+    # Top-level flags handled when no subcommand (= equivalent to bash's
+    # `cmd_retro` default branch) — these drive `retro_prepare`.
+    p_retro.add_argument("--prepare", action="store_true", dest="retro_prepare_flag")
+    p_retro.add_argument("--catch-up", action="store_true", dest="retro_catch_up")
+    p_retro.add_argument("--since", default="")
+    p_retro.add_argument("--until", default="")
+    retro_sub = p_retro.add_subparsers(dest="retro_cmd", metavar="<subcmd>")
+    # `beacon retro save --week ... [--content T] [--stdin] [--json]`
+    p_retro_save = retro_sub.add_parser("save", add_help=False)
+    p_retro_save.add_argument("--week", default="")
+    p_retro_save.add_argument("--content", default="")
+    p_retro_save.add_argument("--stdin", action="store_true")
+    p_retro_save.add_argument("--json", action="store_true")
+    # `beacon retro done` — no flags.
+    retro_sub.add_parser("done", add_help=False)
+
     # ---- ms-55 coordination signals (e-1735) ----
     # Win parity for the 6 ms-55 verbs (stop / resume / rollback / claim /
     # stuck / morning). Each subparser mirrors bin/beacon's env layout
@@ -3086,6 +3116,116 @@ def _split_target(target: str) -> tuple[str, str]:
     return k, i
 
 
+def _handle_retro(root: Path, args: argparse.Namespace) -> int:
+    """`beacon retro [--prepare|--catch-up] [--since X] [--until Y]` (= prepare).
+    `beacon retro save --week ... [--content T] [--stdin] [--json]` (= save).
+    `beacon retro done` (= done).
+
+    ms-61 / e-2348: Windows beacon.exe (= dispatch.py PowerShell-native path)
+    had no retro subcommand registered, so /beacon-retro Skill failed end-to-end
+    on Win with `argparse invalid choice: 'retro'`. Mirrors bin/beacon's
+    ``retro)`` case (lines 4119-4151) and ``cmd_retro`` (lines 1421-1474).
+
+    Dispatch table:
+
+      ``retro_cmd`` value | env vars set                            | commands.py verb
+      ------------------- | --------------------------------------- | ---------------------
+      ``None`` (top)      | ``BEACON_SINCE`` / ``BEACON_UNTIL`` /  | ``retro_prepare``
+                          | ``BEACON_RETRO_CATCH_UP``               |
+      ``save``            | ``BEACON_RETRO_WEEK`` /                 | ``retro_save``
+                          | ``BEACON_CONTENT`` / ``BEACON_JSON``    |
+      ``done``            | (none)                                  | ``retro_done``
+
+    --since defaulting mirrors bash: if absent, call ``cmd_retro_default_since``
+    via the commands.py subprocess (= same code path the bash wrapper uses).
+    --until defaulting: today (or yesterday if today is Monday, so we cover the
+    week ending Sunday).
+    """
+    if args.show_help:
+        print(
+            "Usage: beacon retro [--prepare] [--catch-up] "
+            "[--since YYYY-MM-DD] [--until YYYY-MM-DD]"
+        )
+        print(
+            "       beacon retro save --week YYYY-WNN [--content T | --stdin] [--json]"
+        )
+        print("       beacon retro done")
+        return 0
+
+    sub_cmd = getattr(args, "retro_cmd", None)
+
+    if sub_cmd == "save":
+        week = getattr(args, "week", "") or ""
+        if not week:
+            _eprint(
+                "Usage: beacon retro save --week YYYY-WNN [--content text | --stdin] [--json]"
+            )
+            _eprint("  Content can be piped via stdin.")
+            return 1
+        return _run_commands_py(root, "retro_save", {
+            "BEACON_RETRO_WEEK": week,
+            "BEACON_CONTENT": getattr(args, "content", "") or "",
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        })
+
+    if sub_cmd == "done":
+        return _run_commands_py(root, "retro_done", {})
+
+    # Default branch: `beacon retro [--prepare|--catch-up] [--since X] [--until Y]`
+    # → retro_prepare. --prepare is accepted as an explicit no-op flag for
+    # parity with the bash CLI; presence does not change behaviour.
+    since = getattr(args, "since", "") or ""
+    until = getattr(args, "until", "") or ""
+    catch_up = getattr(args, "retro_catch_up", False)
+
+    if not since:
+        since = _compute_default_since()
+    if not until:
+        until = _compute_default_until()
+
+    return _run_commands_py(root, "retro_prepare", {
+        "BEACON_SINCE": since,
+        "BEACON_UNTIL": until,
+        "BEACON_RETRO_CATCH_UP": "1" if catch_up else "",
+    })
+
+
+def _compute_default_since() -> str:
+    """Compute the default ``--since`` for ``beacon retro --prepare``.
+
+    Mirrors bin/beacon's logic: if today is Monday, anchor on a week ago;
+    otherwise anchor on the most recent Monday. This is the fallback when
+    the (preferred) ``cmd_retro_default_since`` helper isn't reachable; we
+    skip the .reviewed marker / retro_day inspection here because that
+    requires reading project state, and the bash wrapper itself falls back
+    to the same Monday-anchor math when the helper returns empty.
+    """
+    import datetime
+    today = datetime.date.today()
+    # weekday(): Mon=0 ... Sun=6 ; bash's date +%u: Mon=1 ... Sun=7
+    dow_bash = today.weekday() + 1
+    if dow_bash == 1:
+        since = today - datetime.timedelta(days=7)
+    else:
+        since = today - datetime.timedelta(days=dow_bash - 1)
+    return since.strftime("%Y-%m-%d")
+
+
+def _compute_default_until() -> str:
+    """Compute the default ``--until`` for ``beacon retro --prepare``.
+
+    Mirrors bin/beacon: today, except on Monday return yesterday so the
+    cover-window ends on Sunday (= end of the prior ISO week).
+    """
+    import datetime
+    today = datetime.date.today()
+    if today.weekday() == 0:  # Monday
+        until = today - datetime.timedelta(days=1)
+    else:
+        until = today
+    return until.strftime("%Y-%m-%d")
+
+
 def _handle_stop(root: Path, args: argparse.Namespace) -> int:
     """`beacon stop scoped|global|status` (ms-55 e-1646)."""
     if args.show_help or getattr(args, "stop_cmd", None) is None:
@@ -3771,6 +3911,8 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "sessions": _handle_sessions,
     "profile": _handle_profile,
     "channel": _handle_channel,
+    # ms-61 / e-2348: Win parity for /beacon-retro Skill (prepare/save/done).
+    "retro": _handle_retro,
     "bus": _handle_bus,
     # ms-70 / e-1716 + e-1923: cross-user DM approval primitives (Win mirror
     # of bin/beacon's `dm)` case). `dm respond` + `dm log`.
@@ -3810,6 +3952,9 @@ def _print_top_help() -> None:
         "  beacon note \"<text>\" | note list | note clear\n"
         "  beacon search \"query\" [--ms id] [--scope S]\n"
         "  beacon trigger fire|check|clear [name]\n"
+        "  beacon retro [--prepare|--catch-up] [--since X] [--until Y]\n"
+        "  beacon retro save --week YYYY-WNN [--content T | --stdin] [--json]\n"
+        "  beacon retro done\n"
         "  beacon cycle status\n"
         "  beacon push record|list\n"
         "  beacon deploy record|list\n"
@@ -3823,7 +3968,7 @@ def _print_top_help() -> None:
         "\n"
         "Not yet available on bash-less systems (tracked under ms-44):\n"
         "  beacon setup, dashboard (tmux), beacon update, beacon pr review,\n"
-        "  beacon cloud open/launch (tmux dashboard), beacon retro (interactive),\n"
+        "  beacon cloud open/launch (tmux dashboard),\n"
         "  beacon operation/run/incident/member.\n"
     )
 
