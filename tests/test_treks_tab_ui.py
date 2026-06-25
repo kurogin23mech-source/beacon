@@ -29,25 +29,35 @@ def _read(path):
 
 
 # ---------------------------------------------------------------------------
-# v1/v2 tab pollution must be gone (= the original Treks tab on project page)
+# Top-level Treks tab (= ms-86 / e-2251 reinstated the tab as the canonical
+# entry point — Trek is a project-independent scope and should not be hidden
+# inside the project's collapsible sidebar dropdown). The v3-era sidebar
+# remains alongside it for cross-project navigation, but the tab is the
+# documented surface for "open the Treks list view from anywhere in the app".
 # ---------------------------------------------------------------------------
 
-class TestWebUI_TreksTabRemoved:
+class TestWebUI_TreksTabPresent:
+    """ms-95 e-2441: was TreksTabRemoved (= v3 design assumed sidebar-only,
+    pre-e-2251). After e-2251 the tab was reinstated as the canonical
+    project-page entry; assertions flipped from absence to presence."""
+
     def setup_method(self, _method):
         self.src = _read(WEB_INDEX)
 
-    def test_no_treks_tab_button(self):
-        assert 'data-tab="treks"' not in self.src, (
-            "Treks tab button should have been removed from tab-bar (v3 refactor)"
+    def test_treks_tab_button_present(self):
+        assert 'data-tab="treks"' in self.src, (
+            "Treks tab button must live in the tab-bar (ms-86 / e-2251)"
         )
 
-    def test_no_treks_tab_render_branch(self):
-        assert "state.activeTab === 'treks'" not in self.src, (
-            "activeTab === 'treks' branch should have been removed"
+    def test_treks_tab_render_branch_present(self):
+        assert "state.activeTab === 'treks'" in self.src, (
+            "activeTab === 'treks' render branch must be wired"
         )
 
-    def test_no_treks_switch_tab_branch(self):
-        assert "if (tab === 'treks')" not in self.src
+    def test_treks_switch_tab_branch_present(self):
+        assert "if (tab === 'treks')" in self.src, (
+            "switch-tab dispatcher must handle the treks tab"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -205,14 +215,18 @@ class TestWebUI_TrekDetailMockParity:
 
     def test_detail_view_mock_sections(self):
         # ms-86 v2 section order (= mockups/trek-detail.html):
-        # WHY → TREK TASKS → MEMBERS & AGENTS → RECENT ACTIVITY (5 sections only).
+        # WHY → TREK TASKS → MEMBERS & AGENTS → ACTIVITY (5 sections only).
+        # ms-86 / e-2226: section header was renamed from RECENT ACTIVITY to
+        # ACTIVITY (= each row carries trek-local session ref + task id +
+        # state-transition note, "recent" became misleading once show-all
+        # toggle was added). Test follows the rename (ms-95 e-2441).
         # PULSE-ACK COMPLIANCE は ms-88 / e-2108 由来で mockup には無く、 user dogfood (2026-06-22)
         # で spec creep として撤去された (= AI / leader が server data を直接読めば足り、 human surface 不要)。
         for header in (
             "<span>WHY</span>",
             "<span>TREK TASKS</span>",
             "MEMBERS &amp; AGENTS",
-            "<span>RECENT ACTIVITY</span>",
+            "<span>ACTIVITY</span>",
         ):
             assert header in self.src, f"section header {header!r} missing"
         # PULSE-ACK COMPLIANCE は撤去済 — もし再追加されたら mockup 整合を再評価
@@ -249,8 +263,12 @@ class TestDesktopUI_v3Parity:
     def setup_method(self, _method):
         self.src = _read(DESKTOP_INDEX)
 
-    def test_no_treks_tab(self):
-        assert 'data-tab="treks"' not in self.src
+    def test_treks_tab_present(self):
+        # ms-95 e-2441: was test_no_treks_tab — flipped after ms-86 / e-2251
+        # reinstated the top-level Treks tab.
+        assert 'data-tab="treks"' in self.src, (
+            "desktop bundle must carry the Treks tab (ms-86 / e-2251)"
+        )
 
     def test_header_chrome_present(self):
         for s in (
