@@ -28,7 +28,15 @@ os.environ.setdefault("BEACON_OPERATIONS_BACKEND", "mock")
 # Pin the secret so signatures are deterministic across test re-imports.
 os.environ.setdefault("BEACON_ENVELOPE_SECRET", "integration-test-secret")
 
-import firestore_client  # noqa: E402
+# ms-95 e-2407: Same alias trick as test_bus_transport — make `firestore_client.X
+# = mock` rebinds below land on store_router (= what app.py actually reads via
+# `import store_router as db`). Without this, `db.X` hits the real Firestore
+# client in CI → DefaultCredentialsError on all 10 envelope-integration tests.
+# See tests/test_bus_transport.py for the longer rationale.
+import app as app_module  # noqa: E402
+sys.modules["firestore_client"] = app_module.db
+
+import firestore_client  # noqa: E402  (= store_router after the alias above)
 
 # Reuse the in-memory store pattern from test_bus_transport.
 _bus_store: dict[str, list[dict]] = {}
