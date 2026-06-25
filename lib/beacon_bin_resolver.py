@@ -216,8 +216,35 @@ def _categorise_signals(probe: ProbeResult) -> tuple:
     return hard, soft
 
 
+# Per-code one-line descriptions used to compose ``advice`` when the
+# verdict is ``soft_warn``. Each entry stays short enough for a Skill
+# UX 1-liner. Adding a new soft code = add an entry here.
+_SOFT_CODE_DESCRIPTIONS = {
+    "multiple-binaries": (
+        "other beacon binaries exist on PATH (cosmetic; primary is fine)"
+    ),
+    "doctor-json-unavailable": (
+        "selected beacon does not understand `doctor --json`"
+        " (usable, but PATH-health observability is degraded)"
+    ),
+}
+
+
+def _describe_soft_code(code: str) -> str:
+    """Return a 1-line description for a soft_warn code (or the code itself)."""
+    return _SOFT_CODE_DESCRIPTIONS.get(code, code)
+
+
 def _format_advice(verdict: str, selected_bin: str, hard_codes: list, soft_codes: list) -> str:
-    """Compose a 1-line user-facing recommendation."""
+    """Compose a 1-line user-facing recommendation.
+
+    Codex 2026-06-25 polish: soft_warn advice must stay accurate for any
+    combination of soft codes (the previous wording was hard-coded to the
+    ``multiple-binaries`` case and went stale when other codes joined).
+    We render per-code descriptions, joined by ``; `` so the advice
+    always reads like "Selected is usable. Note: <code1>: <desc1>;
+    <code2>: <desc2>".
+    """
     if verdict == "no-candidate":
         return ("No usable `beacon` binary found. Set BEACON_BIN to an absolute"
                 " path of a recent install (v0.30.0+), or add bin/ to PATH.")
@@ -227,9 +254,10 @@ def _format_advice(verdict: str, selected_bin: str, hard_codes: list, soft_codes
                 f" Set BEACON_BIN to an absolute path of a recent install"
                 f" (v0.30.0+) and re-run.")
     if verdict == "soft_warn":
-        joined = ", ".join(soft_codes)
-        return (f"Selected beacon at {selected_bin} is usable. Note: {joined}"
-                f" (cosmetic; primary is fine, but other beacons exist on PATH).")
+        if soft_codes:
+            notes = "; ".join(f"{c}: {_describe_soft_code(c)}" for c in soft_codes)
+            return (f"Selected beacon at {selected_bin} is usable. Note: {notes}.")
+        return f"Selected beacon at {selected_bin} is usable."
     return f"Selected beacon at {selected_bin} is healthy."
 
 

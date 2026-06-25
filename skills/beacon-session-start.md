@@ -36,7 +36,62 @@ beacon-find-root >/dev/null && echo "OK" || echo "NO_BEACON"
 ```
 - `NO_BEACON` の場合、このSkillは何もせず終了する。
 
-## Step 0: 環境チェック（beacon doctor 軽量版）
+## Step 0: 環境チェック（beacon doctor 軽量版 + BEACON_BIN gate）
+
+### Step 0a-pre: BEACON_BIN gate (= ms-93 / e-2276)
+
+PATH 上の古い `beacon` が新しい install を黙って隠しているケースを構造的に
+検出する。 2026-06-25 PE / Codex dogfood で「`beacon doctor --json` を叩いたら
+古い CLI が `OK: all checks passed.` を返して silent success する」 経路が
+確認されたため、 doctor 任せにせず resolver で hard fail / soft warn を
+明示的に判定する。
+
+repo root を見つけて (= `beacon-find-root` の出力)、 resolver script を直接叩く:
+
+```bash
+__ROOT=$(beacon-find-root) && python3 "$__ROOT/scripts/beacon-bin-resolver.py" 2>&1
+```
+
+stdout は 1 行 JSON。 以下の field を読む:
+- `verdict`: `ok` / `soft_warn` / `hard_fail` / `no-candidate`
+- `selected_bin`: 選ばれた絶対パス
+- `selected_source`: `env` / `install_root` / `path`
+- `advice`: 1 行の user 向け推奨メッセージ
+
+#### `verdict == "hard_fail"` または `"no-candidate"` の場合
+
+セッション開始を **中断せず** 進めるが、 最上位に必ず表示する:
+
+```
+⚠ BEACON_BIN gate: <advice>
+  selected: <selected_bin> (source=<selected_source>)
+```
+
+これは Step 3 出力ヘッダの先頭 (Web UI / Incident セクションよりさらに上) に置く。
+ユーザーが `BEACON_BIN=<absolute path>` を export し直すまで他 session-start
+操作がノイズ混じりで動く可能性があるため、 視認性最優先。
+
+#### `verdict == "soft_warn"` の場合
+
+Step 3 出力ヘッダに 1 行だけ添える:
+
+```
+ℹ BEACON_BIN gate: <advice>
+```
+
+詳細な signal は出力しない (= `candidates_probed` は debug 用、 default では非表示)。
+
+#### `verdict == "ok"` の場合
+
+何も表示しない。
+
+#### script 自体が叩けない場合 (= beacon repo が古くて resolver 未配置 等)
+
+`scripts/beacon-bin-resolver.py` が存在しない、 もしくは Python が無い場合は
+**silent skip** して次の Step 0a に進む。 この gate は best-effort、 旧 beacon
+で session-start を呼んだ user を block しない。
+
+### Step 0a: 旧 doctor 軽量チェック (= 既存の挙動を継承)
 
 Bash ツールで実行:
 ```bash
@@ -46,6 +101,10 @@ beacon doctor 2>&1
 - 出力が `OK:` で始まる場合 → 何もせず次へ進む
 - 警告が含まれる場合 → その警告をそのまま提示し、次へ進む（中断しない）
 - `beacon` コマンドが存在しない場合 → スキップして次へ進む
+
+BEACON_BIN gate (Step 0a-pre) が PATH 関連の構造化判定を行うので、 doctor の
+PATH 警告は冗長になることがあるが、 そのほかの警告 (= hooks / skills-drift /
+legacy-mode-field / ms81 系) は doctor 経由でしか出ないため両方走らせる。
 
 ## Step 0a: 引数チェック
 

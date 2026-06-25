@@ -10,7 +10,11 @@ confirmed three load-bearing behaviours these tests must keep true:
    when the candidate still has bus/sessions; it just degrades
    observability.
 3. ``env BEACON_BIN`` → install_root/bin → PATH fallback is the
-   resolution order; we must never silently demote the env's choice.
+   resolution order. When env's BEACON_BIN hard-fails (= can't run
+   bus/sessions or version too old), we DO fall through to the next
+   candidate so the install Skill can still succeed — but the env
+   failure is preserved in ``candidates_probed`` and reflected in
+   ``selected_source`` so the user can see what happened.
 """
 
 import json
@@ -277,6 +281,45 @@ class TestResolveBeaconBin:
         )
         assert result.verdict == "soft_warn"
         assert "doctor-json-unavailable" in result.soft_warn_codes
+        # Codex 2026-06-25 polish (= advice must stay accurate when
+        # doctor-json-unavailable is the soft code, not multiple-binaries).
+        # The old hard-coded "primary is fine, but other beacons exist
+        # on PATH" wording is wrong for this case — it must reference
+        # what doctor-json-unavailable actually means.
+        assert "doctor-json-unavailable" in result.advice
+        assert "PATH-health observability is degraded" in result.advice
+        # And the stale "primary is fine" multi-binary phrasing must NOT
+        # leak into a doctor-json-unavailable-only advice.
+        assert "other beacons exist" not in result.advice
+
+
+class TestAdviceCodeSpecificFormatting:
+    """Codex 2026-06-25 polish: advice text adapts per soft code combo."""
+
+    def test_multiple_binaries_advice_mentions_path(self):
+        text = resolver._format_advice(
+            "soft_warn", "/fake/beacon", [], ["multiple-binaries"],
+        )
+        assert "multiple-binaries" in text
+        assert "other beacon binaries exist on PATH" in text
+
+    def test_doctor_json_advice_mentions_observability(self):
+        text = resolver._format_advice(
+            "soft_warn", "/fake/beacon", [], ["doctor-json-unavailable"],
+        )
+        assert "doctor-json-unavailable" in text
+        assert "observability is degraded" in text
+
+    def test_multiple_soft_codes_both_described(self):
+        text = resolver._format_advice(
+            "soft_warn", "/fake/beacon", [],
+            ["multiple-binaries", "doctor-json-unavailable"],
+        )
+        # Both codes referenced with their per-code descriptions.
+        assert "multiple-binaries" in text
+        assert "doctor-json-unavailable" in text
+        assert "other beacon binaries exist" in text
+        assert "observability is degraded" in text
 
 
 # ------------------------------------------------------------------ #
