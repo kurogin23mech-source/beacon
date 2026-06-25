@@ -3695,6 +3695,11 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
             "BEACON_BUS_SENDER": args.sender or "",
             "BEACON_BUS_DELIVERY": args.delivery or "",
             "BEACON_BUS_IN_REPLY_TO": args.in_reply_to or "",
+            # ms-95 e-2441: pre-populate BEACON_BUS_RECIPIENT_SESSION as empty
+            # so the no-recipient branch (= broadcast channels) still passes
+            # the env var through, matching the bash dispatcher contract that
+            # always exports it. Overridden per-recipient inside the loop.
+            "BEACON_BUS_RECIPIENT_SESSION": "",
             "BEACON_BUS_ACTION": bus_action_csv,
             "BEACON_BUS_NO_ENVELOPE": "1" if getattr(args, "no_envelope", False) else "",
             "BEACON_JSON": "1" if args.json else "",
