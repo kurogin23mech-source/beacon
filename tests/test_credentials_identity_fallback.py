@@ -98,9 +98,17 @@ def test_credentials_fallback_reads_email_and_user_id_from_bcli_token(isolated_h
         email="fork@example.com",
     )
     import importlib
-    # profile module caches the resolved active-profile; reload it before
-    # commands so HOME changes pick up cleanly across tests.
-    for modname in ("profile", "commands"):
+    # ms-95 e-2441: only reload `commands` here. The original code also
+    # reloaded `profile`, but profile.py has no mutable module-level state to
+    # reset — and the reload creates a NEW `ProfileError` class object inside
+    # the same module, breaking adjacent tests (test_profile.py) that captured
+    # the OLD class via `from profile import ProfileError`. After the reload,
+    # validate_profile_name raises NEW ProfileError, but the test's
+    # pytest.raises(OLD ProfileError) fails to match (isinstance check on
+    # distinct class objects). commands module is preserved here because its
+    # functions cache via closures and need a fresh module to honor HOME
+    # changes; commands does not export classes used by adjacent tests.
+    for modname in ("commands",):
         if modname in sys.modules:
             importlib.reload(sys.modules[modname])
     import commands
@@ -117,9 +125,17 @@ def test_credentials_fallback_reads_standard_jwt(isolated_home):
         email="google@example.com",
     )
     import importlib
-    # profile module caches the resolved active-profile; reload it before
-    # commands so HOME changes pick up cleanly across tests.
-    for modname in ("profile", "commands"):
+    # ms-95 e-2441: only reload `commands` here. The original code also
+    # reloaded `profile`, but profile.py has no mutable module-level state to
+    # reset — and the reload creates a NEW `ProfileError` class object inside
+    # the same module, breaking adjacent tests (test_profile.py) that captured
+    # the OLD class via `from profile import ProfileError`. After the reload,
+    # validate_profile_name raises NEW ProfileError, but the test's
+    # pytest.raises(OLD ProfileError) fails to match (isinstance check on
+    # distinct class objects). commands module is preserved here because its
+    # functions cache via closures and need a fresh module to honor HOME
+    # changes; commands does not export classes used by adjacent tests.
+    for modname in ("commands",):
         if modname in sys.modules:
             importlib.reload(sys.modules[modname])
     import commands
@@ -136,9 +152,17 @@ def test_credentials_fallback_falls_back_to_legacy_path(isolated_home):
         email="legacy@example.com",
     )
     import importlib
-    # profile module caches the resolved active-profile; reload it before
-    # commands so HOME changes pick up cleanly across tests.
-    for modname in ("profile", "commands"):
+    # ms-95 e-2441: only reload `commands` here. The original code also
+    # reloaded `profile`, but profile.py has no mutable module-level state to
+    # reset — and the reload creates a NEW `ProfileError` class object inside
+    # the same module, breaking adjacent tests (test_profile.py) that captured
+    # the OLD class via `from profile import ProfileError`. After the reload,
+    # validate_profile_name raises NEW ProfileError, but the test's
+    # pytest.raises(OLD ProfileError) fails to match (isinstance check on
+    # distinct class objects). commands module is preserved here because its
+    # functions cache via closures and need a fresh module to honor HOME
+    # changes; commands does not export classes used by adjacent tests.
+    for modname in ("commands",):
         if modname in sys.modules:
             importlib.reload(sys.modules[modname])
     import commands
@@ -150,9 +174,17 @@ def test_credentials_fallback_falls_back_to_legacy_path(isolated_home):
 def test_credentials_fallback_returns_empty_when_nothing_exists(isolated_home):
     """credentials.json 不在 → ("", "")、 crash しない。"""
     import importlib
-    # profile module caches the resolved active-profile; reload it before
-    # commands so HOME changes pick up cleanly across tests.
-    for modname in ("profile", "commands"):
+    # ms-95 e-2441: only reload `commands` here. The original code also
+    # reloaded `profile`, but profile.py has no mutable module-level state to
+    # reset — and the reload creates a NEW `ProfileError` class object inside
+    # the same module, breaking adjacent tests (test_profile.py) that captured
+    # the OLD class via `from profile import ProfileError`. After the reload,
+    # validate_profile_name raises NEW ProfileError, but the test's
+    # pytest.raises(OLD ProfileError) fails to match (isinstance check on
+    # distinct class objects). commands module is preserved here because its
+    # functions cache via closures and need a fresh module to honor HOME
+    # changes; commands does not export classes used by adjacent tests.
+    for modname in ("commands",):
         if modname in sys.modules:
             importlib.reload(sys.modules[modname])
     import commands
@@ -167,9 +199,17 @@ def test_credentials_fallback_handles_malformed_json(isolated_home):
     profile_dir.mkdir(parents=True, exist_ok=True)
     (profile_dir / "credentials.json").write_text("not valid json")
     import importlib
-    # profile module caches the resolved active-profile; reload it before
-    # commands so HOME changes pick up cleanly across tests.
-    for modname in ("profile", "commands"):
+    # ms-95 e-2441: only reload `commands` here. The original code also
+    # reloaded `profile`, but profile.py has no mutable module-level state to
+    # reset — and the reload creates a NEW `ProfileError` class object inside
+    # the same module, breaking adjacent tests (test_profile.py) that captured
+    # the OLD class via `from profile import ProfileError`. After the reload,
+    # validate_profile_name raises NEW ProfileError, but the test's
+    # pytest.raises(OLD ProfileError) fails to match (isinstance check on
+    # distinct class objects). commands module is preserved here because its
+    # functions cache via closures and need a fresh module to honor HOME
+    # changes; commands does not export classes used by adjacent tests.
+    for modname in ("commands",):
         if modname in sys.modules:
             importlib.reload(sys.modules[modname])
     import commands
@@ -188,9 +228,17 @@ def test_credentials_fallback_handles_empty_token(isolated_home):
         "token": "",
     }))
     import importlib
-    # profile module caches the resolved active-profile; reload it before
-    # commands so HOME changes pick up cleanly across tests.
-    for modname in ("profile", "commands"):
+    # ms-95 e-2441: only reload `commands` here. The original code also
+    # reloaded `profile`, but profile.py has no mutable module-level state to
+    # reset — and the reload creates a NEW `ProfileError` class object inside
+    # the same module, breaking adjacent tests (test_profile.py) that captured
+    # the OLD class via `from profile import ProfileError`. After the reload,
+    # validate_profile_name raises NEW ProfileError, but the test's
+    # pytest.raises(OLD ProfileError) fails to match (isinstance check on
+    # distinct class objects). commands module is preserved here because its
+    # functions cache via closures and need a fresh module to honor HOME
+    # changes; commands does not export classes used by adjacent tests.
+    for modname in ("commands",):
         if modname in sys.modules:
             importlib.reload(sys.modules[modname])
     import commands
@@ -214,9 +262,17 @@ def test_resolve_uses_env_when_both_set(isolated_home, monkeypatch):
     monkeypatch.setenv("BEACON_USER_EMAIL", "env@example.com")
     monkeypatch.setenv("BEACON_SESSION_ID", "sv-env-1")
     import importlib
-    # profile module caches the resolved active-profile; reload it before
-    # commands so HOME changes pick up cleanly across tests.
-    for modname in ("profile", "commands"):
+    # ms-95 e-2441: only reload `commands` here. The original code also
+    # reloaded `profile`, but profile.py has no mutable module-level state to
+    # reset — and the reload creates a NEW `ProfileError` class object inside
+    # the same module, breaking adjacent tests (test_profile.py) that captured
+    # the OLD class via `from profile import ProfileError`. After the reload,
+    # validate_profile_name raises NEW ProfileError, but the test's
+    # pytest.raises(OLD ProfileError) fails to match (isinstance check on
+    # distinct class objects). commands module is preserved here because its
+    # functions cache via closures and need a fresh module to honor HOME
+    # changes; commands does not export classes used by adjacent tests.
+    for modname in ("commands",):
         if modname in sys.modules:
             importlib.reload(sys.modules[modname])
     import commands
@@ -235,9 +291,17 @@ def test_resolve_partial_env_combines_with_credentials(isolated_home, monkeypatc
     )
     monkeypatch.setenv("BEACON_USER_EMAIL", "override@example.com")
     import importlib
-    # profile module caches the resolved active-profile; reload it before
-    # commands so HOME changes pick up cleanly across tests.
-    for modname in ("profile", "commands"):
+    # ms-95 e-2441: only reload `commands` here. The original code also
+    # reloaded `profile`, but profile.py has no mutable module-level state to
+    # reset — and the reload creates a NEW `ProfileError` class object inside
+    # the same module, breaking adjacent tests (test_profile.py) that captured
+    # the OLD class via `from profile import ProfileError`. After the reload,
+    # validate_profile_name raises NEW ProfileError, but the test's
+    # pytest.raises(OLD ProfileError) fails to match (isinstance check on
+    # distinct class objects). commands module is preserved here because its
+    # functions cache via closures and need a fresh module to honor HOME
+    # changes; commands does not export classes used by adjacent tests.
+    for modname in ("commands",):
         if modname in sys.modules:
             importlib.reload(sys.modules[modname])
     import commands
@@ -249,9 +313,17 @@ def test_resolve_partial_env_combines_with_credentials(isolated_home, monkeypatc
 def test_resolve_falls_back_to_whoami_when_no_env_and_no_credentials(isolated_home):
     """env もなく credentials もない → user_id は whoami fallback。email は空。"""
     import importlib
-    # profile module caches the resolved active-profile; reload it before
-    # commands so HOME changes pick up cleanly across tests.
-    for modname in ("profile", "commands"):
+    # ms-95 e-2441: only reload `commands` here. The original code also
+    # reloaded `profile`, but profile.py has no mutable module-level state to
+    # reset — and the reload creates a NEW `ProfileError` class object inside
+    # the same module, breaking adjacent tests (test_profile.py) that captured
+    # the OLD class via `from profile import ProfileError`. After the reload,
+    # validate_profile_name raises NEW ProfileError, but the test's
+    # pytest.raises(OLD ProfileError) fails to match (isinstance check on
+    # distinct class objects). commands module is preserved here because its
+    # functions cache via closures and need a fresh module to honor HOME
+    # changes; commands does not export classes used by adjacent tests.
+    for modname in ("commands",):
         if modname in sys.modules:
             importlib.reload(sys.modules[modname])
     import commands
