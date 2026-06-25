@@ -47,13 +47,37 @@ def _import_modules(install_root: Path):
 
 
 def _resolve_codex_session(cs_module, cwd: str):
-    """Best-effort: find this Codex run's session record so the hook
-    can fire ``opened`` ack against the right recipient sid.
+    """Find the active receive-loop session so the hook can fire opened
+    ack against the right recipient sid.
 
-    Returns ``(session_id, project_id)`` or ``("", "")`` when the
-    discovery fails — the hook degrades gracefully (event still
-    archives, but no opened ack network call).
+    Resolution order (= e-2502 Codex 2026-06-26 dogfood fix):
+
+    1. ``<cwd>/.beacon/codex/receive-loop.session.json`` — the daemon
+       publishes its sid here on startup, removes on shutdown. Works
+       regardless of the hook's parent_pid (= manual hook runs and
+       Codex hook runs see the same file).
+    2. ``parent_pid`` derivation — legacy path; only matches when the
+       hook runs as a direct child of the Codex process that launched
+       the daemon. Kept as a fallback.
+
+    Returns ``(session_id, project_id)`` or ``("", "")`` on failure —
+    the hook degrades gracefully (event still archives, just no opened
+    ack call).
     """
+    # Path 1: cwd-level pointer file (= daemon-published).
+    try:
+        pointer = Path(cwd) / ".beacon" / "codex" / "receive-loop.session.json"
+        if pointer.is_file():
+            with pointer.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            sid = (data.get("session_id") or "").strip()
+            pid = (data.get("project_id") or "").strip()
+            if sid and pid:
+                return (sid, pid)
+    except Exception:
+        pass
+
+    # Path 2: parent_pid fallback (= the original scheme).
     if cs_module is None:
         return ("", "")
     try:
@@ -64,7 +88,6 @@ def _resolve_codex_session(cs_module, cwd: str):
             project_id = json.load(f).get("project_id", "")
         if not project_id:
             return ("", "")
-        # parent_pid: the hook runs as a child of the Codex process.
         parent_pid = os.getppid()
         key = cs_module.derive_stable_instance_key(cwd, parent_pid)
         sess_path = cs_module.codex_session_path(project_id, key)

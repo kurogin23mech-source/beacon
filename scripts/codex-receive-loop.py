@@ -121,10 +121,42 @@ def _pid_file(cwd: Path) -> Path:
     return cwd / ".beacon" / "codex" / "receive-loop.pid"
 
 
+def _session_pointer_file(cwd: Path) -> Path:
+    """Cwd-level pointer to "the active receive-loop session".
+
+    Codex 2026-06-26 dogfood (= MbZWuaiLRms2U7XF9Pum) found the hook
+    cannot reach the session record via parent_pid because the hook
+    runs in a different shell than the daemon (= different parent_pid).
+    Publishing the sid + project + beacon_bin to a known cwd path lets
+    the hook discover them without any pid math.
+    """
+    return cwd / ".beacon" / "codex" / "receive-loop.session.json"
+
+
 def _write_pid_file(cwd: Path) -> None:
     path = _pid_file(cwd)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(str(os.getpid()))
+
+
+def _write_session_pointer(cwd: Path, *, session_id: str, project_id: str,
+                            beacon_bin: str) -> None:
+    """Publish the active session pointer for the hook to read."""
+    path = _session_pointer_file(cwd)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "session_id": session_id,
+        "project_id": project_id,
+        "beacon_bin": beacon_bin,
+        "written_at": _now_iso_for_pointer(),
+    }
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def _now_iso_for_pointer() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _check_existing_daemon(cwd: Path) -> int:
@@ -201,6 +233,12 @@ def main() -> int:
     os.environ["BEACON_BUS_SENDER"] = session.session_id
 
     _write_pid_file(cwd)
+    _write_session_pointer(
+        cwd,
+        session_id=session.session_id,
+        project_id=project_id,
+        beacon_bin=os.environ.get("BEACON_BIN", ""),
+    )
 
     print(
         f"codex-receive-loop: started "
@@ -283,6 +321,10 @@ def main() -> int:
         cs.close_codex_session(session_file, reason="signal")
         try:
             _pid_file(cwd).unlink()
+        except OSError:
+            pass
+        try:
+            _session_pointer_file(cwd).unlink()
         except OSError:
             pass
         print(
