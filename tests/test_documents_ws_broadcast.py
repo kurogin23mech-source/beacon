@@ -131,19 +131,36 @@ def patched_firestore_and_store(monkeypatch):
         _sys.modules["firestore_client"] = firestore_client
     monkeypatch.setenv("BEACON_OPERATIONS_BACKEND", "mock")
 
+    # ms-95 e-2407: app.py reads everything via `store_router as db`, so we
+    # must mirror mocks on store_router too. Without this the document
+    # endpoints hit real Firestore (= PERMISSION_DENIED in local with ADC,
+    # DefaultCredentialsError in CI).
+    import store_router as _sr
     saved_fs = {name: getattr(firestore_client, name, None)
                 for name in _PATCH_TARGETS}
+    saved_sr = {name: getattr(_sr, name, None) for name in _PATCH_TARGETS}
     saved_auth = app_module._auth_enabled
     saved_start = app_module._start_watcher
     saved_stop = app_module._stop_watcher
+
+    noop_get_project = lambda pid: {"name": "test", "milestones": []}
+    noop_save_project = lambda pid, data: None
+    noop_list_projects = lambda: []
 
     firestore_client.list_documents = _mock_list_documents
     firestore_client.get_document = _mock_get_document
     firestore_client.save_document = _mock_save_document
     firestore_client.delete_document = _mock_delete_document
-    firestore_client.get_project = lambda pid: {"name": "test", "milestones": []}
-    firestore_client.save_project = lambda pid, data: None
-    firestore_client.list_projects = lambda: []
+    firestore_client.get_project = noop_get_project
+    firestore_client.save_project = noop_save_project
+    firestore_client.list_projects = noop_list_projects
+    _sr.list_documents = _mock_list_documents
+    _sr.get_document = _mock_get_document
+    _sr.save_document = _mock_save_document
+    _sr.delete_document = _mock_delete_document
+    _sr.get_project = noop_get_project
+    _sr.save_project = noop_save_project
+    _sr.list_projects = noop_list_projects
 
     app_module._auth_enabled = False
     # The WS endpoint starts a Firestore on_snapshot watcher on accept and
@@ -160,6 +177,9 @@ def patched_firestore_and_store(monkeypatch):
         for name, fn in saved_fs.items():
             if fn is not None:
                 setattr(firestore_client, name, fn)
+        for name, fn in saved_sr.items():
+            if fn is not None:
+                setattr(_sr, name, fn)
         app_module._auth_enabled = saved_auth
         app_module._start_watcher = saved_start
         app_module._stop_watcher = saved_stop
@@ -170,11 +190,11 @@ def patched_firestore_and_store(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def _drain_initial_project_frame(ws):
-    """The WS endpoint sends a {type: project} snapshot on connect. Tests
-    care about the *next* frame triggered by the HTTP write, so we eat the
-    initial one before exercising the endpoint."""
+    """The WS endpoint sends a {type: ws_ready, project_id} signal on connect
+    (e-2326: signal-only protocol). Tests care about the *next* frame triggered
+    by the HTTP write, so we eat the initial one before exercising the endpoint."""
     first = ws.receive_json()
-    assert first["type"] == "project"
+    assert first["type"] == "ws_ready"
 
 
 def test_post_document_pushes_document_change_add_frame():

@@ -58,14 +58,28 @@ client = TestClient(app_module.app)
 
 @pytest.fixture(autouse=True)
 def _patch_firestore_mocks():
-    """Swap firestore_client mocks for this file only; restore after each test."""
+    """Swap firestore_client mocks for this file only; restore after each test.
+
+    ms-95 e-2407: app.py does `import store_router as db`, so the WS endpoint
+    actually reads `store_router.get_project` (not the raw firestore_client one).
+    Mirror the mocks on store_router as well — without this the WS handler
+    hits real Firestore when validating role/auth, yielding PERMISSION_DENIED
+    (locally with ADC) or DefaultCredentialsError (in CI).
+    """
+    import store_router
     prev_get = firestore_client.get_project
     prev_save = firestore_client.save_project
+    prev_sr_get = store_router.get_project
+    prev_sr_save = store_router.save_project
     firestore_client.get_project = _mock_get_project
     firestore_client.save_project = _mock_save_project
+    store_router.get_project = _mock_get_project
+    store_router.save_project = _mock_save_project
     yield
     firestore_client.get_project = prev_get
     firestore_client.save_project = prev_save
+    store_router.get_project = prev_sr_get
+    store_router.save_project = prev_sr_save
 
 
 @pytest.fixture(autouse=True)
@@ -131,8 +145,11 @@ def test_token_valid_accepts(monkeypatch):
 
     with client.websocket_connect("/ws/projects/p1?token=valid") as ws:
         msg = ws.receive_json()
-        assert msg["type"] == "project"
-        assert msg["data"]["name"] == "WS Test"
+        # signal-only protocol (e-2326): initial frame is ws_ready (no body).
+        # Auth acceptance is verified by the WS opening + signal arriving;
+        # project data is fetched separately via REST.
+        assert msg["type"] == "ws_ready"
+        assert msg["project_id"] == "p1"
 
 
 def test_unknown_project_closes_with_4404(monkeypatch):
@@ -201,5 +218,6 @@ def test_member_role_accepts(monkeypatch):
 
     with client.websocket_connect("/ws/projects/p3?token=valid") as ws:
         msg = ws.receive_json()
-        assert msg["type"] == "project"
-        assert msg["data"]["name"] == "Member project"
+        # signal-only protocol (e-2326): initial frame is ws_ready (no body).
+        assert msg["type"] == "ws_ready"
+        assert msg["project_id"] == "p3"

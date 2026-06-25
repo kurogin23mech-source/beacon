@@ -155,9 +155,9 @@ def test_put_project_broadcasts_to_subscribed_ws_client():
     pid = "p-put-1"
     _seed_project(pid, milestones=[])
     with client.websocket_connect(_ws_url(pid)) as ws:
-        # 接続直後の initial frame を消費 (= type=project の最初の snapshot)
+        # 接続直後の initial frame は ws_ready のシグナル (e-2326 で signal-only 化)
         initial = ws.receive_json()
-        assert initial["type"] == "project"
+        assert initial["type"] == "ws_ready"
         # PUT で milestones を 1 件入れた状態に置換
         new_body = {
             "name": "test project",
@@ -171,12 +171,15 @@ def test_put_project_broadcasts_to_subscribed_ws_client():
         }
         resp = client.put(f"/api/projects/{pid}", json=new_body)
         assert resp.status_code == 200, resp.text
-        # 直後の WS frame に新しい milestone が乗っていることを assert
+        # 直後の WS frame は project_changed のシグナルのみ (body なし、e-2326)
         update = ws.receive_json()
-        assert update["type"] == "project"
-        ms_titles = [m["title"] for m in update["data"].get("milestones") or []]
+        assert update["type"] == "project_changed"
+        # 実データは signal を受けてから REST で再 fetch する設計
+        got = client.get(f"/api/projects/{pid}")
+        assert got.status_code == 200
+        ms_titles = [m["title"] for m in (got.json().get("milestones") or [])]
         assert "First MS" in ms_titles, (
-            f"expected explicit broadcast after PUT to carry new milestone; "
+            f"expected REST GET after project_changed signal to carry new milestone; "
             f"got titles={ms_titles!r}"
         )
 
@@ -193,15 +196,18 @@ def test_post_milestones_broadcasts_to_subscribed_ws_client():
     pid = "p-post-1"
     _seed_project(pid, milestones=[])
     with client.websocket_connect(_ws_url(pid)) as ws:
-        ws.receive_json()  # initial
+        ws.receive_json()  # initial (= ws_ready)
         resp = client.post(
             f"/api/projects/{pid}/milestones",
             json={"title": "Granular MS", "target_date": ""},
         )
         assert resp.status_code == 200, resp.text
         update = ws.receive_json()
-        assert update["type"] == "project"
-        ms_titles = [m["title"] for m in update["data"].get("milestones") or []]
+        assert update["type"] == "project_changed"
+        # signal-only protocol (e-2326): refetch via REST
+        got = client.get(f"/api/projects/{pid}")
+        assert got.status_code == 200
+        ms_titles = [m["title"] for m in (got.json().get("milestones") or [])]
         assert "Granular MS" in ms_titles
 
 
@@ -217,15 +223,18 @@ def test_patch_milestone_broadcasts_progress_change():
          "progress": 30, "target_date": "", "entries": []},
     ])
     with client.websocket_connect(_ws_url(pid)) as ws:
-        ws.receive_json()  # initial
+        ws.receive_json()  # initial (= ws_ready)
         resp = client.patch(
             f"/api/projects/{pid}/milestones/ms-1",
             json={"progress": "80"},  # MilestoneUpdate expects str
         )
         assert resp.status_code == 200, resp.text
         update = ws.receive_json()
-        assert update["type"] == "project"
-        ms = next((m for m in update["data"]["milestones"] if m["id"] == "ms-1"), None)
+        assert update["type"] == "project_changed"
+        # signal-only protocol (e-2326): refetch via REST
+        got = client.get(f"/api/projects/{pid}")
+        assert got.status_code == 200
+        ms = next((m for m in got.json()["milestones"] if m["id"] == "ms-1"), None)
         assert ms is not None
         # progress is normalized to int in core.milestone_update
         assert int(ms.get("progress", 0)) == 80
@@ -241,8 +250,8 @@ def test_broadcast_reaches_all_subscribers():
     _seed_project(pid, milestones=[])
     with client.websocket_connect(_ws_url(pid)) as ws1:
         with client.websocket_connect(_ws_url(pid)) as ws2:
-            ws1.receive_json()
-            ws2.receive_json()
+            ws1.receive_json()  # ws_ready
+            ws2.receive_json()  # ws_ready
             resp = client.post(
                 f"/api/projects/{pid}/milestones",
                 json={"title": "Multi-Sub MS", "target_date": ""},
@@ -250,10 +259,14 @@ def test_broadcast_reaches_all_subscribers():
             assert resp.status_code == 200, resp.text
             u1 = ws1.receive_json()
             u2 = ws2.receive_json()
+            # signal-only protocol (e-2326): both subscribers get project_changed
             for u in (u1, u2):
-                assert u["type"] == "project"
-                titles = [m["title"] for m in u["data"].get("milestones") or []]
-                assert "Multi-Sub MS" in titles
+                assert u["type"] == "project_changed"
+            # refetch once via REST and confirm data landed
+            got = client.get(f"/api/projects/{pid}")
+            assert got.status_code == 200
+            titles = [m["title"] for m in (got.json().get("milestones") or [])]
+            assert "Multi-Sub MS" in titles
 
 
 # ---------------------------------------------------------------------------
