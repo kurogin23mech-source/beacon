@@ -106,7 +106,18 @@ def persist_inbox_event(event: dict, cwd: str = "") -> Path | None:
 
 def ack_event(api, *, project_id: str, event_id: str, stage: str,
               recipient_session_id: str) -> bool:
-    """POST /api/projects/<pid>/bus/<event_id>/ack. Fire-and-forget."""
+    """POST /api/projects/<pid>/bus/<event_id>/ack. Fire-and-forget.
+
+    On transport failure, prints a single line to stderr so the
+    surrounding context (= daemon stdout/stderr stream, or the hook
+    runner's stderr buffer) preserves the audit trail. Codex 2026-06-26
+    dogfood (= DM Gx0VhYhthfqneAdp4XVS) found the silent ``except``
+    here caused a false negative: a network-sandboxed hook invocation
+    archived the event and emitted additionalContext but the user had
+    no signal that opened ack failed. The print converts the swallowed
+    failure into an observable one without changing the fire-and-forget
+    contract — callers can still ignore the return value.
+    """
     if not event_id:
         return False
     try:
@@ -116,7 +127,13 @@ def ack_event(api, *, project_id: str, event_id: str, stage: str,
     try:
         api.post(bp.ack_path(project_id, event_id), body)
         return True
-    except Exception:
+    except Exception as exc:
+        import sys as _sys
+        _sys.stderr.write(
+            f"beacon-bus: ack {stage} for {event_id} failed "
+            f"({type(exc).__name__}): {exc}\n"
+        )
+        _sys.stderr.flush()
         return False
 
 

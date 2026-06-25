@@ -158,6 +158,21 @@ class TestAckEvent:
         ) is False
         assert api.post_calls == []
 
+    def test_transport_failure_prints_stderr_warning(self, capsys):
+        # Codex 2026-06-26 dogfood (= Gx0VhYhthfqneAdp4XVS) found the
+        # silent ``except`` here was the false-negative source. Ensure
+        # the failure is observable on stderr without changing the
+        # fire-and-forget contract.
+        api = _FakeApi()
+        api.post_should_raise = True
+        ok = crl.ack_event(
+            api, project_id="proj-1", event_id="evt-99",
+            stage="opened", recipient_session_id="codex-1-abc",
+        )
+        assert ok is False
+        captured = capsys.readouterr()
+        assert "ack opened for evt-99 failed" in captured.err
+
 
 # ------------------------------------------------------------------ #
 # poll_inbox_once
