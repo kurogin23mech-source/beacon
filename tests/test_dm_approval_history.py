@@ -213,12 +213,16 @@ def firestore_client(monkeypatch):
     monkeypatch.setitem(sys.modules, "google.cloud", fake_google_cloud)
     monkeypatch.setitem(sys.modules, "google.cloud.firestore", fake_firestore_module)
 
-    sys.modules.pop("firestore_client", None)
+    # ms-95 e-2438: monkeypatch.delitem auto-restores the prior firestore_client
+    # entry after teardown; raw pop leaks the deletion, wiping downstream tests'
+    # mocks → DefaultCredentialsError on CI.
+    if "firestore_client" in sys.modules:
+        monkeypatch.delitem(sys.modules, "firestore_client")
     import firestore_client as fc
 
     monkeypatch.setattr(fc, "get_db", lambda: fake_db)
     yield fc
-    sys.modules.pop("firestore_client", None)
+    # No manual pop on teardown — monkeypatch handles it.
 
 
 # ---------------------------------------------------------------------------

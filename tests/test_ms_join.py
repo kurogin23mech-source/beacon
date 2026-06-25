@@ -70,7 +70,10 @@ def project(monkeypatch):
         monkeypatch.chdir(tmp)
         monkeypatch.delenv("BEACON_AGENT_PARENT", raising=False)
         monkeypatch.delenv("BEACON_AGENT_CHILD_ID", raising=False)
-        sys.modules.pop("firestore_client", None)
+        # ms-95 e-2438: monkeypatch.delitem auto-restores. Raw sys.modules.pop
+        # leaks → adjacent tests' firestore_client mocks vanish → CI no-creds.
+        if "firestore_client" in sys.modules:
+            monkeypatch.delitem(sys.modules, "firestore_client")
         yield Path(tmp)
 
 

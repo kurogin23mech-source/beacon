@@ -43,7 +43,9 @@ def local_project_dir(monkeypatch):
         monkeypatch.delenv("BEACON_CLOUD", raising=False)
         # Prevent the operations-layer mock backend from leaking from other test files.
         monkeypatch.setenv("BEACON_OPERATIONS_BACKEND", "local")
-        sys.modules.pop("firestore_client", None)
+        # ms-95 e-2438: monkeypatch.delitem auto-restores so downstream tests'
+        # firestore_client mocks survive.
+        monkeypatch.delitem(sys.modules, "firestore_client", raising=False)
         yield Path(tmp)
 
 
