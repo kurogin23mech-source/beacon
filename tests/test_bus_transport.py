@@ -418,10 +418,10 @@ def test_ws_push_delivers_bus_event_to_subscribers():
     Without this, consumers have to poll GET /bus, which defeats the point of
     UC1/UC2 (real-time DM / push-driven Operation alerts)."""
     with client.websocket_connect(f"/ws/projects/{PROJECT_ID}") as ws:
-        # The initial frame is the project snapshot (type=project). Drain it
-        # so the next receive sees the bus event we trigger below.
+        # The initial frame is a ws_ready signal (e-2326: signal-only protocol).
+        # Drain it so the next receive sees the bus event we trigger below.
         first = ws.receive_json()
-        assert first["type"] == "project"
+        assert first["type"] == "ws_ready"
 
         resp = client.post(f"/api/projects/{PROJECT_ID}/bus", json={
             "channel": "session-dm",
