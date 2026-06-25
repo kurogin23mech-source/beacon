@@ -60,6 +60,7 @@ itself.
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import sys
@@ -244,6 +245,51 @@ def _ack_cursor(api_url: str, project_id: str, recipient_id: str,
         {"last_seen_at": last_seen_at},
         token,
     )
+
+
+def _ensure_cursor_primed(api_url: str, project_id: str, recipient_id: str,
+                          token: str) -> bool:
+    """First-run cursor catchup for brand-new sessions.
+
+    ms-95 e-2446 / 2026-06-25: /beacon-session-fork で作られた新規 session_id
+    にはサーバー側 bus cursor が未設定のため、 ``/bus/unread`` を叩くと過去
+    全イベント (= 古い operation-trigger / trek-trigger / test 系イベント等)
+    が返り、 inbox-hook がそれを順次 AI context に inject して **完全暴走**
+    する経路があった。 ``channel/bus.mjs`` には既に ``ensureCursorPrimed``
+    があり同じ問題を bridge 側で防いでいたが、 inbox-hook 側にはなかった。
+
+    cursor が未設定 (= 空 / epoch / 404) なら NOW に prime して True を返す
+    (= caller は今回の poll を skip)。 cursor が既存値なら False (= 通常 poll
+    を続行)。
+    """
+    cursor_path = (f"/api/projects/{project_id}/bus/cursors/"
+                   f"{urllib.parse.quote(recipient_id, safe='')}")
+    try:
+        cur = _api_get(api_url, cursor_path, token)
+        last = ""
+        if isinstance(cur, dict):
+            last = cur.get("last_seen_at") or ""
+        is_unset = (not last) or last.startswith("1970-") or last == "0"
+        if is_unset:
+            now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            _ack_cursor(api_url, project_id, recipient_id, now, token)
+            _log(f"first-run: cursor primed to {now} (no historical dispatch)")
+            return True
+        return False
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            try:
+                _ack_cursor(api_url, project_id, recipient_id, now, token)
+                _log(f"first-run (404): cursor primed to {now}")
+            except Exception as ack_exc:
+                _log(f"first-run prime ack failed: {ack_exc}")
+            return True
+        _log(f"cursor prime check HTTP {exc.code}: {exc}")
+        return False
+    except Exception as exc:
+        _log(f"cursor prime check failed: {exc.__class__.__name__}: {exc}")
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -608,6 +654,18 @@ def main() -> None:
         return
 
     started = time.monotonic()
+
+    # ms-95 e-2446: Prime cursor for brand-new sessions (= /beacon-session-fork)
+    # so we don't inject historical events. Mirrors channel/bus.mjs
+    # ensureCursorPrimed. On first run, advance cursor to NOW and skip this
+    # poll entirely — subsequent polls see only events created after this point.
+    try:
+        if _ensure_cursor_primed(api_url, project_id, session_id, token):
+            return
+    except Exception as exc:
+        _log(f"cursor prime wrapper failed: {exc.__class__.__name__}: {exc}")
+        # Non-fatal: fall through to the normal poll path.
+
     try:
         unread = _list_unread(api_url, project_id, session_id, token)
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
