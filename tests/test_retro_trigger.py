@@ -42,7 +42,10 @@ def project_with_retro(monkeypatch):
         monkeypatch.setenv("BEACON_PROJECT_FILE", str(project_file))
         monkeypatch.delenv("BEACON_CLOUD", raising=False)
         monkeypatch.setenv("BEACON_OPERATIONS_BACKEND", "local")
-        sys.modules.pop("firestore_client", None)
+        # ms-95 e-2438: monkeypatch.delitem auto-restores. Raw pop leaks across
+        # the test boundary → adjacent firestore_client mocks vanish.
+        if "firestore_client" in sys.modules:
+            monkeypatch.delitem(sys.modules, "firestore_client")
         yield Path(tmp)
 
 

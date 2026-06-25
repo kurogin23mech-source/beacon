@@ -46,7 +46,7 @@ def local_project(monkeypatch):
     monkeypatch.setenv("BEACON_OPERATIONS_BACKEND", "local")
     # Ensure cloud-detection stays in "local" — make sure firestore_client
     # is not on sys.modules (it shouldn't be in tests, but be defensive).
-    sys.modules.pop("firestore_client", None)
+    monkeypatch.delitem(sys.modules, "firestore_client", raising=False)
     yield tmp.name
     Path(tmp.name).unlink(missing_ok=True)
 
@@ -195,7 +195,7 @@ def test_backend_local_when_firestore_client_not_loaded(monkeypatch):
     # Sanity: with the explicit override removed and the server module unloaded,
     # detection falls through to "local".
     monkeypatch.delenv("BEACON_OPERATIONS_BACKEND", raising=False)
-    sys.modules.pop("firestore_client", None)
+    monkeypatch.delitem(sys.modules, "firestore_client", raising=False)
     assert operations._detect_backend() == "local"
 
 
@@ -337,8 +337,8 @@ def test_backend_cloud_when_store_router_loaded(monkeypatch):
     """ms-64 e-1631: store_router presence is a valid cloud signal even when
     firestore_client never gets imported (= pure-AWS Lambda build)."""
     monkeypatch.delenv("BEACON_OPERATIONS_BACKEND", raising=False)
-    sys.modules.pop("firestore_client", None)
-    sys.modules.pop("store_router", None)
+    monkeypatch.delitem(sys.modules, "firestore_client", raising=False)
+    monkeypatch.delitem(sys.modules, "store_router", raising=False)
 
     monkeypatch.setitem(sys.modules, "store_router", type("FakeRouter", (), {})())
     assert operations._detect_backend() == "cloud"
@@ -462,7 +462,7 @@ def test_append_changelog_uses_store_router_when_available(monkeypatch):
     fake_router = type("FakeRouter", (), {})()
     fake_router.append_changelog = lambda pid, entry: appended.append((pid, entry))
     monkeypatch.setitem(sys.modules, "store_router", fake_router)
-    sys.modules.pop("firestore_client", None)  # ensure store_router wins
+    monkeypatch.delitem(sys.modules, "firestore_client", raising=False)  # ensure store_router wins
 
     operations._append_changelog("p-test", "task.done", "tester", reason="why")
     assert len(appended) == 1
@@ -473,8 +473,8 @@ def test_append_changelog_uses_store_router_when_available(monkeypatch):
 
 def test_append_changelog_silent_when_neither_module_loaded(monkeypatch):
     """No cloud sink when running pure-local (no API server modules loaded)."""
-    sys.modules.pop("store_router", None)
-    sys.modules.pop("firestore_client", None)
+    monkeypatch.delitem(sys.modules, "store_router", raising=False)
+    monkeypatch.delitem(sys.modules, "firestore_client", raising=False)
     # Should simply return without raising.
     operations._append_changelog("p-test", "task.done", "tester")
 

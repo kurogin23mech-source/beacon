@@ -240,11 +240,19 @@ def firestore_client(monkeypatch):
     monkeypatch.setitem(sys.modules, "google.cloud", fake_google_cloud)
     monkeypatch.setitem(sys.modules, "google.cloud.firestore", fake_firestore_module)
 
-    sys.modules.pop("firestore_client", None)
+    # ms-95 e-2438: use monkeypatch.delitem so the prior sys.modules
+    # ["firestore_client"] entry (with adjacent test modules' mocks) is restored
+    # after this fixture tears down. A raw pop here would leak the deletion
+    # across the test boundary; the next `import firestore_client` would re-load
+    # the real module, wiping the mocks → DefaultCredentialsError on CI for
+    # downstream tests (e.g. test_invitation_api, test_trash_sweep).
+    if "firestore_client" in sys.modules:
+        monkeypatch.delitem(sys.modules, "firestore_client")
     import firestore_client as fc
     monkeypatch.setattr(fc, "get_db", lambda: fake_db)
     yield fc
-    sys.modules.pop("firestore_client", None)
+    # No manual pop on teardown — monkeypatch.delitem auto-restores the prior
+    # firestore_client module reference and undoes the get_db setattr.
 
 
 @pytest.fixture
