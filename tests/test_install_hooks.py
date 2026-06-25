@@ -28,10 +28,33 @@ def fake_hooks(tmp_path, monkeypatch):
     postcompact.write_text("#!/bin/bash\nexit 0\n")
     settings = tmp_path / "settings.json"
 
-    # Patch the module's PostCompact path so it points at our stub.
-    sys.modules.pop("commands", None)
+    # ms-95 e-2438: use monkeypatch.delitem so sys.modules entry is auto-restored.
+    monkeypatch.delitem(sys.modules, "commands", raising=False)
     import commands  # type: ignore
     monkeypatch.setattr(commands, "CLAUDE_POSTCOMPACT_HOOK_SCRIPT", str(postcompact))
+
+    # ms-95 e-2440: hide the beacon-* console-script entry-points from
+    # `_resolve_hook_command`'s `shutil.which()` probe. On CI (and any dev box
+    # where `pip install -e .[dev]` placed the entry-points on PATH) the
+    # resolver would pick the bare entry-point name (e.g. `beacon-hook-
+    # postcompact`) BEFORE consulting the module-level constant we just
+    # monkeypatched, so the test's stub path never lands in settings.json.
+    # Forcing `which()` to return None for the beacon entry-points makes the
+    # resolver fall through to the constant (which IS our stub).
+    import shutil
+    _real_which = shutil.which
+    _entry_block = {
+        "beacon-hook-post-commit",
+        "beacon-hook-postcompact",
+        "beacon-hook-save",
+        "beacon-hook-context-monitor",
+    }
+    def _which_hiding_beacon_entrypoints(cmd, *args, **kwargs):
+        if cmd in _entry_block:
+            return None
+        return _real_which(cmd, *args, **kwargs)
+    monkeypatch.setattr(shutil, "which", _which_hiding_beacon_entrypoints)
+
     return {
         "posttool": str(posttool),
         "postcompact": str(postcompact),
