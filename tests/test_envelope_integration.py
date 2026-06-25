@@ -100,37 +100,84 @@ def _mock_find_bus_event(project_id: str, event_id: str) -> dict | None:
     return None
 
 
-firestore_client.append_bus_event = _mock_append_bus_event
-firestore_client.list_bus_events = _mock_list_bus_events
-firestore_client.get_bus_cursor = lambda pid, rid: {}
-firestore_client.advance_bus_cursor = lambda pid, rid, ts: {}
-firestore_client.check_and_record_bus_nonce = _mock_check_and_record_bus_nonce
-firestore_client.append_bus_audit = _mock_append_bus_audit
-firestore_client.list_bus_audit = _mock_list_bus_audit
-firestore_client.find_bus_event = _mock_find_bus_event
-firestore_client.get_project = lambda pid: {"name": "test", "milestones": []}
-firestore_client.save_project = lambda pid, data: None
-firestore_client.list_projects = lambda: []
-
-
 from fastapi.testclient import TestClient  # noqa: E402
 import app as app_module  # noqa: E402
 import envelope as envelope_mod  # noqa: E402
 
-# Auth off (dev mode) so we can call endpoints without minting tokens.
-app_module._auth_enabled = False
-app_module._start_watcher = lambda project_id: None
-app_module._stop_watcher = lambda project_id: None
-
-# The _require_project_role helper depends on operations.load_project_consistent,
-# which isn't stubbed at module import. Bypass by patching the helper to a
-# no-op pair (membership is auth-enabled-only anyway).
-app_module._require_project_role = lambda project_id, user, **kw: (
-    {"name": "test", "milestones": []}, "owner"
-)
+# ms-95 e-2441: mutations DELAYED to setup_module (runs at THIS module's test
+# start, not at pytest collection time) so they don't leak into adjacent test
+# files. teardown_module restores. Previously these mutations ran at module
+# import time and leaked for the entire pytest session, polluting
+# test_trek_scope_aggregate (15), test_api (8), test_ws_auth_close (2), etc.
+#
+# PR #263's earlier attempt (= teardown_module restore but keep mutations at
+# module level) had cross-collection ordering bugs where the restore
+# overwrote adjacent files' OWN module-level mocks. Delaying the mutations
+# entirely to setup_module avoids the ordering trap because env_integration
+# only touches global state during its own tests' execution window.
 
 client = TestClient(app_module.app)
 PROJECT_ID = "envelope-itest"
+
+_FC_ATTRS = (
+    "append_bus_event", "list_bus_events", "get_bus_cursor",
+    "advance_bus_cursor", "check_and_record_bus_nonce",
+    "append_bus_audit", "list_bus_audit", "find_bus_event",
+    "get_project", "save_project", "list_projects",
+)
+# ms-95 e-2441: do NOT restore `_auth_enabled` — test_api.py and other
+# adjacent files set it at module load and rely on the value persisting
+# through their tests. Restoring forces it back to the app.py default (True)
+# and breaks adjacent test_api requests with 401.
+_APP_ATTRS = (
+    "_start_watcher", "_stop_watcher", "_require_project_role",
+)
+_fc_originals: dict = {}
+_app_originals: dict = {}
+
+
+def setup_module(_module):
+    """ms-95 e-2441: apply env_integration's firestore_client + app_module
+    overrides only when THIS module's tests are about to run. Adjacent files'
+    tests have already executed by then (or run after teardown_module restores
+    everything)."""
+    global _fc_originals, _app_originals
+    _fc_originals = {name: getattr(firestore_client, name, None) for name in _FC_ATTRS}
+    _app_originals = {name: getattr(app_module, name, None) for name in _APP_ATTRS}
+
+    firestore_client.append_bus_event = _mock_append_bus_event
+    firestore_client.list_bus_events = _mock_list_bus_events
+    firestore_client.get_bus_cursor = lambda pid, rid: {}
+    firestore_client.advance_bus_cursor = lambda pid, rid, ts: {}
+    firestore_client.check_and_record_bus_nonce = _mock_check_and_record_bus_nonce
+    firestore_client.append_bus_audit = _mock_append_bus_audit
+    firestore_client.list_bus_audit = _mock_list_bus_audit
+    firestore_client.find_bus_event = _mock_find_bus_event
+    firestore_client.get_project = lambda pid: {"name": "test", "milestones": []}
+    firestore_client.save_project = lambda pid, data: None
+    firestore_client.list_projects = lambda: []
+
+    # Auth off (dev mode) so we can call endpoints without minting tokens.
+    app_module._auth_enabled = False
+    app_module._start_watcher = lambda project_id: None
+    app_module._stop_watcher = lambda project_id: None
+    # The _require_project_role helper depends on
+    # operations.load_project_consistent, which isn't stubbed at module
+    # import. Bypass by patching the helper to a no-op pair (membership is
+    # auth-enabled-only anyway).
+    app_module._require_project_role = lambda project_id, user, **kw: (
+        {"name": "test", "milestones": []}, "owner"
+    )
+
+
+def teardown_module(_module):
+    """Restore the snapshots so downstream tests see the original module."""
+    for name, value in _fc_originals.items():
+        if value is not None:
+            setattr(firestore_client, name, value)
+    for name, value in _app_originals.items():
+        if value is not None:
+            setattr(app_module, name, value)
 
 
 @pytest.fixture(autouse=True)
