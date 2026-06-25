@@ -230,6 +230,23 @@ def fake_app(monkeypatch):
     fake_gcs = _FakeGCSClient()
 
     # Swap Firestore + GCS for the duration of this test.
+    #
+    # ms-95 e-2441: patch `trailnode.db` (= the firestore_client module
+    # reference that the trailnode.py production code actually uses for
+    # `db.get_db()` calls). Why not patch our top-level `db` import?
+    # Because adjacent test files (e.g. test_bus_transport.py) do
+    # `sys.modules["firestore_client"] = app_module.db` at MODULE LOAD time.
+    # When those files are collected first, `import firestore_client as db`
+    # at the top of THIS file resolves to store_router (= the alias target),
+    # NOT the real firestore_client module. trailnode.py was already loaded
+    # by app.py BEFORE the alias swap, so `trailnode.db` still points at the
+    # real firestore_client module. Patching the wrong reference leaves
+    # production calls hitting the real Firestore client → CI no-creds.
+    real_fc_in_trailnode = trailnode.db
+    monkeypatch.setattr(real_fc_in_trailnode, "_db", fake_db)
+    monkeypatch.setattr(real_fc_in_trailnode, "get_db", lambda: fake_db)
+    # Also patch the test-local alias so any direct `db.X` references in
+    # this file (= rare, but defense-in-depth) see the same fake.
     monkeypatch.setattr(db, "_db", fake_db)
     monkeypatch.setattr(db, "get_db", lambda: fake_db)
     monkeypatch.setattr(trailnode, "_gcs_client", fake_gcs)
