@@ -45,6 +45,8 @@ def _now_iso() -> str:
 # ------------------------------------------------------------------ #
 
 
+# @e-2502-core-candidate — heartbeat body shape + endpoint are bus protocol,
+#   not Codex-specific. Move to lib/bus_protocol.py once that lands.
 def heartbeat_to_server(
     api,
     *,
@@ -95,11 +97,16 @@ def heartbeat_to_server(
 # ------------------------------------------------------------------ #
 
 
+# @e-2502-adapter-specific — file-based persistence is the Codex delivery
+#   mechanism (= UserPromptSubmit hook reads files). Claude Code's adapter
+#   uses mcp.notification instead. Adapter interface should be "deliver(evt)
+#   → opened_ok: bool".
 def inbox_dir(cwd: str = "") -> Path:
     """Resolve ``<cwd>/.beacon/codex/inbox``, defaulting to ``Path.cwd()``."""
     return (Path(cwd) if cwd else Path.cwd()) / INBOX_DIR_REL
 
 
+# @e-2502-adapter-specific — see inbox_dir comment.
 def persist_inbox_event(event: dict, cwd: str = "") -> Path | None:
     """Write ``event`` to the inbox directory as a per-event JSON file.
 
@@ -118,6 +125,10 @@ def persist_inbox_event(event: dict, cwd: str = "") -> Path | None:
     return target
 
 
+# @e-2502-core-candidate — ack endpoint + body shape are bus protocol.
+#   Move to lib/bus_protocol.py. Codex must also start firing the ``opened``
+#   stage (= currently only ``delivered`` is wired; bus.mjs fires both =
+#   silent drift #3 per the e-2502 SPEC).
 def ack_event(api, *, project_id: str, event_id: str, stage: str,
               recipient_session_id: str) -> bool:
     """POST /api/projects/<pid>/bus/<event_id>/ack. Fire-and-forget."""
@@ -133,6 +144,10 @@ def ack_event(api, *, project_id: str, event_id: str, stage: str,
         return False
 
 
+# @e-2502-core-candidate — addressing rule must lockstep with server's
+#   /bus/unread filter and bus.mjs's filter chain (e-1209). Move to core.
+#   TODO: also implement DM-without-recipient drop (= bus.mjs filter 2b,
+#   currently missing here = silent drift #1 per the e-2502 SPEC).
 def _addressed_to_us(event: dict, our_sid: str) -> bool:
     """Drop events that are explicitly addressed to a different sid."""
     intended = ((event or {}).get("payload") or {}).get("recipient_session_id", "")
@@ -142,6 +157,13 @@ def _addressed_to_us(event: dict, our_sid: str) -> bool:
     return intended == our_sid
 
 
+# @e-2502-core-candidate (filter chain + watermark dedupe) +
+# @e-2502-adapter-specific (persist_inbox_event call). The split: the
+# filter / dedupe / ack-delivered logic IS bus protocol and must lockstep
+# with bus.mjs::pollOnce; the persistence step is adapter. After core
+# extraction, this function becomes ~5 lines: call core.poll(), receive a
+# filtered event list, hand to adapter.deliver(evt). Also missing:
+# channel allowlist filter (= bus.mjs filter 3 = silent drift #2 per SPEC).
 def poll_inbox_once(
     api,
     *,
@@ -210,6 +232,9 @@ def poll_inbox_once(
 # ------------------------------------------------------------------ #
 
 
+# @e-2502-adapter-specific — the inbox file convention is Codex's hook
+#   contract. Claude Code adapter has no equivalent (= MCP push is
+#   synchronous). Stays here.
 def list_inbox_events(cwd: str = "") -> list:
     """Read every JSON file in the inbox directory (= for the hook)."""
     d = inbox_dir(cwd)
@@ -225,6 +250,9 @@ def list_inbox_events(cwd: str = "") -> list:
     return out
 
 
+# @e-2502-adapter-specific — archive is the "opened" stage equivalent for
+#   Codex. Per e-2502 SPEC §2-B, this is also where the missing ``opened``
+#   ack should fire once core extraction is done (= silent drift #3 fix).
 def archive_inbox_event(path: str, cwd: str = "") -> Path | None:
     """Move an inbox file into ``<inbox>/.read/`` so the hook never
     re-injects the same event twice. Returns the archive path, or

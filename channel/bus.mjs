@@ -840,6 +840,9 @@ if (!PROJECT_ID || !SESSION_ID) {
   // the poll loop. The cursor advance below remains the source-of-truth
   // for "won't re-deliver" semantics — receipts are an observational
   // signal that sits on top, not a delivery guarantee.
+  // @e-2502-core-candidate — ack endpoint + body shape duplicated in
+  //   lib/codex_receive_loop.py::ack_event. Move to lib/bus_protocol.py;
+  //   this function becomes a thin wrapper.
   async function ackReceipt(eventId, stage) {
     if (!eventId) return
     try {
@@ -855,6 +858,14 @@ if (!PROJECT_ID || !SESSION_ID) {
     }
   }
 
+  // @e-2502-core-candidate (poll URL + watermark dedupe + filter chain
+  //   = self-loop / recipient match / DM-without-recipient drop / channel
+  //   allowlist) +
+  // @e-2502-adapter-specific (mcp.notification call + content building
+  //   block at the bottom). The filter chain is bus protocol and must
+  //   lockstep with lib/codex_receive_loop.py::poll_inbox_once after
+  //   core extraction. The mcp.notification path is the Claude Code
+  //   adapter and stays here.
   async function pollOnce() {
     // Pass in-memory bridgeLastSeen as ?since so the bridge does not depend on
     // (and does not perturb) the server cursor. Empty string ⇒ server falls

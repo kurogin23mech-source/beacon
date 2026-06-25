@@ -39,6 +39,10 @@
  * @param {boolean} [opts.shutdown]
  * @returns {object}
  */
+// @e-2502-core-candidate — heartbeat body is bus protocol, currently
+//   duplicated in lib/codex_receive_loop.py::heartbeat_to_server. Move
+//   the shape to lib/bus_protocol.py once that lands; this function
+//   becomes a thin Node wrapper.
 export function buildHeartbeatBody({ nowIso, pollIntervalMs, shutdown = false }) {
   return {
     last_active: nowIso,
