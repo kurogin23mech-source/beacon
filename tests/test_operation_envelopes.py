@@ -162,8 +162,11 @@ firestore_client.list_projects = lambda: []
 from fastapi.testclient import TestClient  # noqa: E402
 import app as app_module  # noqa: E402
 
+# ms-95 e-2441: do NOT restore `_auth_enabled` — test_api.py and other
+# adjacent files set it at module load and rely on the value persisting
+# through their tests. Restoring forces it back to the app.py default (True)
+# and breaks adjacent test_api requests with 401.
 _APP_ATTRS_TO_RESTORE = (
-    "_auth_enabled",
     "_start_watcher",
     "_stop_watcher",
     "_require_project_role",
