@@ -100,20 +100,6 @@ def _mock_find_bus_event(project_id: str, event_id: str) -> dict | None:
     return None
 
 
-# ms-95 e-2441: snapshot originals BEFORE mutations so teardown_module can
-# restore them. Without teardown, `firestore_client.get_project` stays bound
-# to the canned `lambda pid: {"name":"test","milestones":[]}` for the whole
-# pytest session, leaking the envelope-itest project shape into every later
-# test that asks firestore_client for a project (= test_trek_scope_aggregate
-# is the worst-hit, all 14 of its tests rely on real per-project state).
-_FC_ATTRS_TO_RESTORE = (
-    "append_bus_event", "list_bus_events", "get_bus_cursor",
-    "advance_bus_cursor", "check_and_record_bus_nonce",
-    "append_bus_audit", "list_bus_audit", "find_bus_event",
-    "get_project", "save_project", "list_projects",
-)
-_fc_originals = {name: getattr(firestore_client, name, None) for name in _FC_ATTRS_TO_RESTORE}
-
 firestore_client.append_bus_event = _mock_append_bus_event
 firestore_client.list_bus_events = _mock_list_bus_events
 firestore_client.get_bus_cursor = lambda pid, rid: {}
@@ -131,12 +117,6 @@ from fastapi.testclient import TestClient  # noqa: E402
 import app as app_module  # noqa: E402
 import envelope as envelope_mod  # noqa: E402
 
-_APP_ATTRS_TO_RESTORE = (
-    "_auth_enabled", "_start_watcher", "_stop_watcher",
-    "_require_project_role",
-)
-_app_originals = {name: getattr(app_module, name, None) for name in _APP_ATTRS_TO_RESTORE}
-
 # Auth off (dev mode) so we can call endpoints without minting tokens.
 app_module._auth_enabled = False
 app_module._start_watcher = lambda project_id: None
@@ -151,20 +131,6 @@ app_module._require_project_role = lambda project_id, user, **kw: (
 
 client = TestClient(app_module.app)
 PROJECT_ID = "envelope-itest"
-
-
-def teardown_module(_module):
-    """ms-95 e-2441: restore module-level mutations after this file's tests.
-    Without this, firestore_client.get_project + app_module helpers leak the
-    envelope-itest canned project into every later test (= test_trek_scope_
-    aggregate_endpoints lost 14 of its tests because adjacent code paths
-    received {"name":"test","milestones":[]} instead of proj-a / proj-b)."""
-    for name, value in _fc_originals.items():
-        if value is not None:
-            setattr(firestore_client, name, value)
-    for name, value in _app_originals.items():
-        if value is not None:
-            setattr(app_module, name, value)
 
 
 @pytest.fixture(autouse=True)
