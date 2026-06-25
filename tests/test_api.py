@@ -51,6 +51,21 @@ firestore_client.list_documents = mock_list_documents
 from fastapi.testclient import TestClient
 import app as app_module
 
+# ms-95 e-2407: Also mirror project mocks onto store_router (= app.py's db).
+# app.py does `import store_router as db`, and store_router does
+# `from firestore_client import get_project` at its import time. If a sibling
+# test file (e.g. test_bus_transport.py) sets `sys.modules["firestore_client"]
+# = store_router` and then rebinds `firestore_client.get_project = noop_lambda`
+# at module-scope, that noop OVERWRITES store_router.get_project — wiping out
+# the mocks this file installed at lines 37-49. The fixture below re-applies
+# our mocks per test, but only on the ORIGINAL firestore_client; store_router
+# stays polluted unless we mirror here too.
+_store_router_module = app_module.db
+_store_router_module.get_project = mock_get_project
+_store_router_module.save_project = mock_save_project
+_store_router_module.list_projects = mock_list_projects
+_store_router_module.list_documents = mock_list_documents
+
 # Disable auth for functional tests (auth tested separately below)
 app_module._auth_enabled = False
 
@@ -95,6 +110,12 @@ def reset_store():
     firestore_client.save_project = mock_save_project
     firestore_client.list_projects = mock_list_projects
     firestore_client.list_documents = mock_list_documents
+    # ms-95 e-2407: mirror on store_router (= app.py's db); see module-scope
+    # comment above the `_store_router_module.X = mock_X` block for why.
+    _store_router_module.get_project = mock_get_project
+    _store_router_module.save_project = mock_save_project
+    _store_router_module.list_projects = mock_list_projects
+    _store_router_module.list_documents = mock_list_documents
     _store.clear()
     _store[PROJECT_ID] = copy.deepcopy(SEED_PROJECT)
     _docs_store.clear()
