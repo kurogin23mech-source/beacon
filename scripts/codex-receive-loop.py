@@ -36,14 +36,16 @@ from pathlib import Path
 
 
 def _import_modules(install_root: Path):
-    """Make ``lib`` importable, return (codex_session, codex_receive_loop, api_client)."""
+    """Make ``lib`` importable, return (codex_session, codex_receive_loop,
+    api_client, bus_protocol)."""
     lib_dir = str(install_root / "lib")
     if lib_dir not in sys.path:
         sys.path.insert(0, lib_dir)
     import codex_session as cs  # noqa: E402
     import codex_receive_loop as crl  # noqa: E402
     import api_client as ac  # noqa: E402
-    return cs, crl, ac
+    import bus_protocol as bp  # noqa: E402
+    return cs, crl, ac, bp
 
 
 def _load_cloud_config(cwd: Path) -> dict:
@@ -165,7 +167,7 @@ def main() -> int:
 
     install_root = Path(args.install_root or Path(__file__).resolve().parent.parent)
     cwd = Path(args.cwd or os.getcwd())
-    cs, crl, ac = _import_modules(install_root)
+    cs, crl, ac, bp = _import_modules(install_root)
 
     config = _load_cloud_config(cwd)
     project_id = config["project_id"]
@@ -206,7 +208,17 @@ def main() -> int:
         flush=True,
     )
 
-    state = {"stop": False, "last_heartbeat_at": 0.0, "since": ""}
+    # Codex 2026-06-26 blocker #2: cold-start ``since=""`` flooded the
+    # inbox with weeks of broadcast traffic on the first poll. Pin the
+    # in-memory watermark to "now" so the first poll only catches new
+    # events; bus.mjs avoids this because it polls the per-recipient
+    # queue (server-filtered to DMs), but our endpoint returns broader
+    # history and the filter chain runs on our side.
+    state = {
+        "stop": False,
+        "last_heartbeat_at": 0.0,
+        "since": bp.initial_watermark_now(),
+    }
 
     def _on_signal(_signum, _frame):
         state["stop"] = True

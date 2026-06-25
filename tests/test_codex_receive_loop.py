@@ -284,3 +284,104 @@ class TestInboxFileLifecycle:
             str(tmp_path / "no-such-file.json"), cwd=str(tmp_path),
         )
         assert result is None
+
+    def test_archive_collision_is_idempotent(self, tmp_path):
+        # Codex 2026-06-26 blocker #4: daemon restart re-persisted the
+        # same event into the top-level inbox; the next hook archive
+        # collided with a stale ``.read/<event_id>.json`` and the file
+        # was lost. The new contract suffixes the conflicting dest so
+        # neither version is silently overwritten.
+        crl.persist_inbox_event(
+            {"event_id": "evt-1", "payload": {"text": "v1"}},
+            cwd=str(tmp_path),
+        )
+        first_entry = crl.list_inbox_events(cwd=str(tmp_path))[0]
+        crl.archive_inbox_event(first_entry["path"], cwd=str(tmp_path))
+
+        # Simulate daemon restart: same event_id reappears.
+        crl.persist_inbox_event(
+            {"event_id": "evt-1", "payload": {"text": "v2"}},
+            cwd=str(tmp_path),
+        )
+        second_entry = crl.list_inbox_events(cwd=str(tmp_path))[0]
+        archived = crl.archive_inbox_event(second_entry["path"], cwd=str(tmp_path))
+        assert archived is not None
+        # No surviving top-level file (= no double inject next hook).
+        assert crl.list_inbox_events(cwd=str(tmp_path)) == []
+        # Both versions preserved in .read/.
+        read_dir = tmp_path / ".beacon" / "codex" / "inbox" / ".read"
+        assert sum(1 for _ in read_dir.iterdir()) == 2
+
+
+class TestArchiveFiresOpenedAck:
+    """Codex 2026-06-26 silent drift #3 fix — opened ack on hook archive."""
+
+    def test_archive_with_api_posts_opened(self, tmp_path):
+        api = _FakeApi()
+        crl.persist_inbox_event(
+            {"event_id": "evt-99", "payload": {"text": "hello"}},
+            cwd=str(tmp_path),
+        )
+        entry = crl.list_inbox_events(cwd=str(tmp_path))[0]
+        crl.archive_inbox_event(
+            entry["path"], cwd=str(tmp_path),
+            api=api, project_id="proj-1",
+            recipient_session_id="codex-1-abc",
+        )
+        opened_posts = [
+            (p, b) for (p, b) in api.post_calls
+            if b.get("stage") == "opened"
+        ]
+        assert len(opened_posts) == 1
+        path, body = opened_posts[0]
+        assert path == "/api/projects/proj-1/bus/evt-99/ack"
+        assert body["recipient_session_id"] == "codex-1-abc"
+
+    def test_archive_without_api_skips_ack(self, tmp_path):
+        crl.persist_inbox_event(
+            {"event_id": "evt-99", "payload": {"text": "hello"}},
+            cwd=str(tmp_path),
+        )
+        entry = crl.list_inbox_events(cwd=str(tmp_path))[0]
+        # No api kwarg → no network call; archive still succeeds.
+        path = crl.archive_inbox_event(entry["path"], cwd=str(tmp_path))
+        assert path is not None
+
+
+class TestPollInboxOnceDriftFixes:
+    """The three silent drifts from Codex 2026-06-26 dogfood."""
+
+    def test_does_not_persist_dm_without_recipient(self, tmp_path):
+        # Codex blocker #1 root cause: dm channel + no recipient slipped
+        # through as a "broadcast" in the pre-protocol implementation.
+        api = _FakeApi()
+        api.get_returns = [[{
+            "event_id": "evt-bc",
+            "created_at": "2026-06-26T01:00:00Z",
+            "channel": "dm",
+            "sender_session_id": "other",
+            "payload": {"text": "broadcast"},  # no recipient_session_id
+        }]]
+        _latest, n = crl.poll_inbox_once(
+            api, project_id="proj-1", session_id="codex-1-abc",
+            since="", cwd=str(tmp_path),
+        )
+        assert n == 0
+        # delivered ack still fires (e-1348 rule), but not opened.
+        assert any(p[0].endswith("/ack") for p in api.post_calls)
+
+    def test_does_not_persist_channel_outside_allowlist(self, tmp_path):
+        api = _FakeApi()
+        api.get_returns = [[{
+            "event_id": "evt-test",
+            "created_at": "2026-06-26T01:00:00Z",
+            "channel": "test-random",
+            "sender_session_id": "other",
+            "payload": {},
+        }]]
+        _latest, n = crl.poll_inbox_once(
+            api, project_id="proj-1", session_id="codex-1-abc",
+            since="", cwd=str(tmp_path),
+            allowed_channels=("dm",),
+        )
+        assert n == 0

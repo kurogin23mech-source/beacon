@@ -1,36 +1,40 @@
 """Codex receive-loop primitives (= ms-93 / e-2497, layer 2).
 
-This module factors the receive-loop work into small, testable
-functions so we can pin behaviour with mock API clients before
-``scripts/codex-receive-loop.py`` runs anything for real. The actual
-daemon is a thin shell around these primitives.
-
-Responsibilities (mirroring Claude Code's channel/bus.mjs):
-
-- ``heartbeat_to_server`` — PUT /api/projects/<pid>/sessions/<sid>
-  keeps the server-side ``last_active`` fresh so the freshness
-  threshold (3600s in lib/session.py) never expires our sid.
-- ``poll_inbox_once`` — GET /api/projects/<pid>/bus/unread, filter to
-  events addressed to us, persist them to the local inbox directory
-  for the hook to pick up, ack delivered.
-- ``ack_event`` — POST /api/projects/<pid>/bus/<event_id>/ack with
-  stage ``delivered`` or ``opened`` (= mirrors bus.mjs's two-stage
-  receipt logic).
-- ``persist_inbox_event`` — write an event JSON to
-  ``<cwd>/.beacon/codex/inbox/<event_id>.json`` (= where the Codex
-  hook reads).
+The receive-loop work split (= ms-93 / e-2502): bus protocol responsibilities
+(= filter chain, heartbeat body, ack shape, URL builders) live in
+``lib/bus_protocol.py`` so Claude Code's bus.mjs and Codex share the same
+contract. This module wraps those primitives with the Codex-specific
+adapter pieces (= file-based inbox persistence + archive on hook read).
 
 The daemon (= scripts/codex-receive-loop.py) wires these into a
 ``while True`` plus signal handlers; the loop body lives here so tests
 can drive one iteration deterministically.
+
+2026-06-26 Codex dogfood (= DM ``D7sAqeIqn6gIMFRIs9PD``) fixes folded
+into this rewrite:
+
+- broadcast pollution: events that don't match the protocol's filter
+  chain (= DM-without-recipient drop / channel allowlist / recipient
+  mismatch) are no longer persisted to the Codex inbox
+- initial watermark: cold start now pins ``since`` to "now" so the
+  first poll does not flood the inbox with weeks of history
+- archive idempotency: archiving a file when a conflicting name
+  already exists in ``.read/`` no longer raises; the duplicate is
+  retired with a unique suffix
+- ``opened`` ack: archive (= equivalent of the AI "seeing" the event)
+  now fires the opened stage
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Shared protocol primitives (= e-2502 phase 2 core extraction).
+import bus_protocol as bp
 
 
 INBOX_DIR_REL = Path(".beacon") / "codex" / "inbox"
@@ -45,8 +49,6 @@ def _now_iso() -> str:
 # ------------------------------------------------------------------ #
 
 
-# @e-2502-core-candidate — heartbeat body shape + endpoint are bus protocol,
-#   not Codex-specific. Move to lib/bus_protocol.py once that lands.
 def heartbeat_to_server(
     api,
     *,
@@ -56,65 +58,42 @@ def heartbeat_to_server(
     poll_interval_ms: int = 2000,
     shutdown: bool = False,
 ) -> bool:
-    """PUT /api/projects/<pid>/sessions/<sid> with current timestamp.
+    """PUT /api/projects/<pid>/sessions/<sid> with the canonical body.
 
-    Body shape mirrors channel/bus-heartbeat.mjs ``buildHeartbeatBody``
-    (= ``last_active`` / ``last_poll_at`` / ``poll_interval_ms`` /
-    ``shutdown``) so the server's poll-health computation (e-1318)
-    treats the Codex receive loop the same way it treats the Claude
-    Code bridge — the directory ``--healthy`` filter and the freshness
-    threshold both kick in correctly.
-
-    The ``actor`` payload is sent only on the first heartbeat (= mint
-    path) or whenever the caller wants to refresh it; the field-path
-    merge in server/firestore_client.py preserves the original
-    actor.machine/agent so subsequent heartbeats can omit it safely.
+    Body shape comes from ``bus_protocol.heartbeat_body`` so Codex and
+    Claude Code stay aligned. ``actor`` is sent only on the first
+    heartbeat (= mint path) or when the caller wants to refresh it;
+    the server's field-path merge preserves actor.machine/agent.
 
     Returns ``True`` on success, ``False`` on transport failure
     (= we never raise; the loop must survive transient network blips).
     """
-    now = _now_iso()
-    body = {
-        "last_active": now,
-        "last_poll_at": now,
-        "poll_interval_ms": poll_interval_ms,
-        "shutdown": bool(shutdown),
-    }
+    body = bp.heartbeat_body(
+        _now_iso(),
+        poll_interval_ms=poll_interval_ms,
+        shutdown=shutdown,
+    )
     if actor:
         body["actor"] = actor
     try:
-        api.put(
-            f"/api/projects/{project_id}/sessions/{session_id}",
-            body,
-        )
+        api.put(bp.heartbeat_path(project_id, session_id), body)
         return True
     except Exception:
         return False
 
 
 # ------------------------------------------------------------------ #
-# Inbox poll + persist + ack
+# Inbox persistence (= Codex adapter)
 # ------------------------------------------------------------------ #
 
 
-# @e-2502-adapter-specific — file-based persistence is the Codex delivery
-#   mechanism (= UserPromptSubmit hook reads files). Claude Code's adapter
-#   uses mcp.notification instead. Adapter interface should be "deliver(evt)
-#   → opened_ok: bool".
 def inbox_dir(cwd: str = "") -> Path:
     """Resolve ``<cwd>/.beacon/codex/inbox``, defaulting to ``Path.cwd()``."""
     return (Path(cwd) if cwd else Path.cwd()) / INBOX_DIR_REL
 
 
-# @e-2502-adapter-specific — see inbox_dir comment.
 def persist_inbox_event(event: dict, cwd: str = "") -> Path | None:
-    """Write ``event`` to the inbox directory as a per-event JSON file.
-
-    Returns the path written, or ``None`` when the event has no
-    ``event_id`` (= cannot be filed). The hook later reads any file
-    found here and renders it into Codex's context (= UserPromptSubmit
-    additionalContext).
-    """
+    """Write ``event`` to the inbox directory as a per-event JSON file."""
     event_id = (event or {}).get("event_id", "")
     if not event_id:
         return None
@@ -125,45 +104,27 @@ def persist_inbox_event(event: dict, cwd: str = "") -> Path | None:
     return target
 
 
-# @e-2502-core-candidate — ack endpoint + body shape are bus protocol.
-#   Move to lib/bus_protocol.py. Codex must also start firing the ``opened``
-#   stage (= currently only ``delivered`` is wired; bus.mjs fires both =
-#   silent drift #3 per the e-2502 SPEC).
 def ack_event(api, *, project_id: str, event_id: str, stage: str,
               recipient_session_id: str) -> bool:
     """POST /api/projects/<pid>/bus/<event_id>/ack. Fire-and-forget."""
-    if not event_id or stage not in ("delivered", "opened"):
+    if not event_id:
         return False
     try:
-        api.post(
-            f"/api/projects/{project_id}/bus/{event_id}/ack",
-            {"stage": stage, "recipient_session_id": recipient_session_id},
-        )
+        body = bp.ack_body(stage, recipient_session_id)
+    except ValueError:
+        return False
+    try:
+        api.post(bp.ack_path(project_id, event_id), body)
         return True
     except Exception:
         return False
 
 
-# @e-2502-core-candidate — addressing rule must lockstep with server's
-#   /bus/unread filter and bus.mjs's filter chain (e-1209). Move to core.
-#   TODO: also implement DM-without-recipient drop (= bus.mjs filter 2b,
-#   currently missing here = silent drift #1 per the e-2502 SPEC).
-def _addressed_to_us(event: dict, our_sid: str) -> bool:
-    """Drop events that are explicitly addressed to a different sid."""
-    intended = ((event or {}).get("payload") or {}).get("recipient_session_id", "")
-    intended = (intended or "").strip()
-    if not intended:
-        return True  # broadcast / channel-wide event — keep
-    return intended == our_sid
+# ------------------------------------------------------------------ #
+# poll_inbox_once — core filter + adapter persist
+# ------------------------------------------------------------------ #
 
 
-# @e-2502-core-candidate (filter chain + watermark dedupe) +
-# @e-2502-adapter-specific (persist_inbox_event call). The split: the
-# filter / dedupe / ack-delivered logic IS bus protocol and must lockstep
-# with bus.mjs::pollOnce; the persistence step is adapter. After core
-# extraction, this function becomes ~5 lines: call core.poll(), receive a
-# filtered event list, hand to adapter.deliver(evt). Also missing:
-# channel allowlist filter (= bus.mjs filter 3 = silent drift #2 per SPEC).
 def poll_inbox_once(
     api,
     *,
@@ -171,20 +132,21 @@ def poll_inbox_once(
     session_id: str,
     since: str,
     cwd: str = "",
+    allowed_channels: tuple = bp.DEFAULT_ALLOWED_CHANNELS,
 ) -> tuple:
-    """One poll iteration: fetch /bus/unread, persist + ack each event
-    addressed to us, return ``(latest_seen, persisted_count)``.
+    """One poll iteration: fetch + run the protocol filter chain +
+    persist surviving events + ack delivered.
 
-    ``since`` is the in-memory watermark (= bus.mjs's ``bridgeLastSeen``)
-    so multiple polls don't re-process the same event. The server-side
-    cursor is owned by the inbox hook, not the receive loop, mirroring
-    the Claude Code split (see ms-60 follow-up).
+    Returns ``(latest_seen, persisted_count)`` so the caller can roll
+    the in-memory watermark forward.
+
+    The filter chain lives in ``bus_protocol.filter_event``; this
+    function only handles the Codex-side persistence after the protocol
+    decides "keep". That split is what e-2502 SPEC §2 calls "core +
+    adapter": filtering belongs to bus protocol, persistence belongs to
+    the Codex adapter.
     """
-    url = (
-        f"/api/projects/{project_id}/bus/unread"
-        f"?recipient_id={session_id}"
-        f"&since={since}"
-    )
+    url = bp.poll_unread_path(project_id, session_id, since)
     try:
         events = api.get(url)
     except Exception:
@@ -192,31 +154,34 @@ def poll_inbox_once(
     if not isinstance(events, list):
         return (since, 0)
 
+    config = bp.FilterConfig(
+        our_session_id=session_id,
+        allowed_channels=allowed_channels,
+        watermark=since,
+    )
+
     latest_seen = since
     persisted = 0
     for evt in events:
         if not isinstance(evt, dict):
             continue
         created_at = str(evt.get("created_at") or "")
-        # ms-60 follow-up: in-memory dedupe — never re-process a poll
-        # batch we have already seen (some old servers ignore ``since``).
-        if since and created_at <= since:
+        verdict = bp.filter_event(evt, config)
+        if verdict == bp.FILTER_DROP_WATERMARK:
+            # Already-seen events: skip without an ack (server should
+            # have honoured ``since`` server-side already).
             continue
-        # Stamp delivered before the filter chain (= mirrors bus.mjs
-        # e-1348). Sender deserves to know we received it even if we
-        # drop it locally.
+        # Stamp delivered before the rest of the decision tree (e-1348
+        # rule): the sender deserves to know we received the event even
+        # when we drop it locally.
         ack_event(
             api,
             project_id=project_id,
             event_id=str(evt.get("event_id") or ""),
-            stage="delivered",
+            stage=bp.ACK_STAGE_DELIVERED,
             recipient_session_id=session_id,
         )
-        # Self-loop guard.
-        if str(evt.get("sender_session_id") or "") == session_id:
-            continue
-        # Filter: not addressed to us → drop.
-        if not _addressed_to_us(evt, session_id):
+        if verdict != bp.FILTER_KEEP:
             continue
         # Persist for the hook to read on the next user prompt.
         path = persist_inbox_event(evt, cwd=cwd)
@@ -232,9 +197,6 @@ def poll_inbox_once(
 # ------------------------------------------------------------------ #
 
 
-# @e-2502-adapter-specific — the inbox file convention is Codex's hook
-#   contract. Claude Code adapter has no equivalent (= MCP push is
-#   synchronous). Stays here.
 def list_inbox_events(cwd: str = "") -> list:
     """Read every JSON file in the inbox directory (= for the hook)."""
     d = inbox_dir(cwd)
@@ -250,24 +212,58 @@ def list_inbox_events(cwd: str = "") -> list:
     return out
 
 
-# @e-2502-adapter-specific — archive is the "opened" stage equivalent for
-#   Codex. Per e-2502 SPEC §2-B, this is also where the missing ``opened``
-#   ack should fire once core extraction is done (= silent drift #3 fix).
-def archive_inbox_event(path: str, cwd: str = "") -> Path | None:
-    """Move an inbox file into ``<inbox>/.read/`` so the hook never
-    re-injects the same event twice. Returns the archive path, or
-    ``None`` on failure (file vanished, etc.)."""
+def archive_inbox_event(
+    path: str,
+    cwd: str = "",
+    *,
+    api=None,
+    project_id: str = "",
+    recipient_session_id: str = "",
+) -> Path | None:
+    """Move an inbox file into ``<inbox>/.read/`` (= opened semantic).
+
+    Idempotent name resolution: if the destination already exists
+    (= same event_id was re-persisted after a daemon restart, see
+    Codex 2026-06-26 blocker #4), append a millisecond suffix so the
+    rename always succeeds and no event is silently overwritten.
+
+    When ``api`` + ``project_id`` + ``recipient_session_id`` are
+    supplied, the move also fires the ``opened`` ack stage. The hook
+    invokes this — that's the moment "the AI has seen this event" in
+    the Codex adapter (= equivalent of bus.mjs's mcp.notification
+    success).
+    """
     src = Path(path)
     if not src.is_file():
         return None
     dest_dir = inbox_dir(cwd) / ".read"
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / src.name
+    if dest.exists():
+        # Codex 2026-06-26 blocker #4: avoid losing the new version to
+        # a stale archive from a prior run. Suffix with the current
+        # millisecond so each rename is unique.
+        suffix = f".{int(time.time() * 1000)}"
+        dest = dest.with_suffix(dest.suffix + suffix)
     try:
         src.rename(dest)
-        return dest
     except OSError:
         return None
+
+    # Fire opened ack if the caller wired up the bus client. Best-effort —
+    # archive succeeded even if the ack network call fails.
+    if api is not None and project_id and recipient_session_id:
+        # Recover event_id from the source filename (= ``<event_id>.json``).
+        event_id = Path(path).stem
+        if event_id:
+            ack_event(
+                api,
+                project_id=project_id,
+                event_id=event_id,
+                stage=bp.ACK_STAGE_OPENED,
+                recipient_session_id=recipient_session_id,
+            )
+    return dest
 
 
 __all__ = [

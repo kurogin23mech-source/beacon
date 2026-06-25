@@ -35,7 +35,82 @@ def _import_modules(install_root: Path):
     if lib_dir not in sys.path:
         sys.path.insert(0, lib_dir)
     import codex_receive_loop as crl  # noqa: E402
-    return crl
+    try:
+        import api_client as ac  # noqa: E402
+    except Exception:
+        ac = None
+    try:
+        import codex_session as cs  # noqa: E402
+    except Exception:
+        cs = None
+    return crl, ac, cs
+
+
+def _resolve_codex_session(cs_module, cwd: str):
+    """Best-effort: find this Codex run's session record so the hook
+    can fire ``opened`` ack against the right recipient sid.
+
+    Returns ``(session_id, project_id)`` or ``("", "")`` when the
+    discovery fails — the hook degrades gracefully (event still
+    archives, but no opened ack network call).
+    """
+    if cs_module is None:
+        return ("", "")
+    try:
+        cloud_path = Path(cwd) / ".beacon" / "cloud.json"
+        if not cloud_path.is_file():
+            return ("", "")
+        with cloud_path.open("r", encoding="utf-8") as f:
+            project_id = json.load(f).get("project_id", "")
+        if not project_id:
+            return ("", "")
+        # parent_pid: the hook runs as a child of the Codex process.
+        parent_pid = os.getppid()
+        key = cs_module.derive_stable_instance_key(cwd, parent_pid)
+        sess_path = cs_module.codex_session_path(project_id, key)
+        record = cs_module.read_codex_session(sess_path)
+        if record is None:
+            return ("", "")
+        return (record.session_id, project_id)
+    except Exception:
+        return ("", "")
+
+
+def _build_api_client(ac_module, cwd: str):
+    """Build an ApiClient with the standard auth token resolution.
+
+    Mirrors ``scripts/codex-receive-loop.py::_load_cloud_config`` so the
+    hook can fire opened ack the same way the daemon fires delivered.
+    Returns ``None`` when nothing usable is found.
+    """
+    if ac_module is None:
+        return None
+    cloud_path = Path(cwd) / ".beacon" / "cloud.json"
+    if not cloud_path.is_file():
+        return None
+    try:
+        with cloud_path.open("r", encoding="utf-8") as f:
+            cloud = json.load(f)
+    except Exception:
+        return None
+    api_url = cloud.get("api_url")
+    if not api_url:
+        return None
+    token = cloud.get("id_token", "") or os.environ.get("BEACON_AUTH_TOKEN", "")
+    if not token:
+        creds_path = Path(os.path.expanduser("~/.beacon/credentials.json"))
+        if creds_path.is_file():
+            try:
+                with creds_path.open("r", encoding="utf-8") as f:
+                    token = json.load(f).get("token", "")
+            except Exception:
+                token = ""
+    if not token:
+        return None
+    try:
+        return ac_module.ApiClient(api_url, token=token)
+    except Exception:
+        return None
 
 
 def _format_entry(entry: dict) -> str:
@@ -71,7 +146,7 @@ def main() -> int:
 
     install_root = Path(args.install_root or Path(__file__).resolve().parent.parent)
     cwd = args.cwd or os.getcwd()
-    crl = _import_modules(install_root)
+    crl, ac, cs = _import_modules(install_root)
 
     entries = crl.list_inbox_events(cwd=cwd)
     if not entries:
@@ -88,8 +163,20 @@ def main() -> int:
     additional = header + body
 
     if not args.no_archive:
+        # The archive call is also where the ``opened`` ack fires
+        # (= e-2502 SPEC §2-B closing drift #3). Best-effort: if we
+        # can't find the session record or build an API client, the
+        # event still archives but the ack is skipped.
+        session_id, project_id = _resolve_codex_session(cs, cwd)
+        api = _build_api_client(ac, cwd)
         for e in entries:
-            crl.archive_inbox_event(e["path"], cwd=cwd)
+            crl.archive_inbox_event(
+                e["path"],
+                cwd=cwd,
+                api=api,
+                project_id=project_id,
+                recipient_session_id=session_id,
+            )
 
     print(json.dumps({"additionalContext": additional}, ensure_ascii=False))
     return 0
