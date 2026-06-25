@@ -14481,6 +14481,69 @@ def _doctor_check_ms81_state_machine():
     return warnings
 
 
+def _doctor_probe_beacon_version(binary_path: str) -> str:
+    """Return the raw `--version` stdout for a beacon binary, or '?' on failure.
+
+    Used by the e-1170 multi-binary surface and the e-2276
+    selected-version-too-old gate. Subprocess timeout is intentionally
+    short (3s) — doctor must remain responsive even when a stale binary
+    hangs on stdin.
+    """
+    import subprocess as _subprocess
+    try:
+        return _subprocess.run(
+            [binary_path, "--version"],
+            capture_output=True, text=True, timeout=3,
+        ).stdout.strip() or "?"
+    except Exception:
+        return "?"
+
+
+def _doctor_parse_version(raw: str):
+    """Return ``(major, minor, patch)`` parsed from a `beacon <ver>` string.
+
+    Accepts both `beacon 0.48.0` and `0.48.0` shapes. Returns ``None``
+    when the string does not contain a parseable semver triple — the
+    caller treats that as "version unknown" and skips the
+    selected-version-too-old gate, never blocking on a probe failure.
+    """
+    import re
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", raw or "")
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+
+def _doctor_probe_missing_subcommands(binary_path: str, subs: tuple) -> tuple:
+    """Return tuple of `subs` that the binary rejects as 'Unknown command'.
+
+    Probes ``<binary> <sub> --help`` for each subcommand. The probe
+    returns no missing subs (= empty tuple) when the subprocess fails for
+    transport reasons (timeout, ENOENT) — we don't want a flaky subprocess
+    to fire a false bus-sessions-unavailable signal. Only an authoritative
+    'Unknown command' line (printed by cmd dispatcher) is treated as
+    missing.
+    """
+    import subprocess as _subprocess
+    missing = []
+    for sub in subs:
+        try:
+            r = _subprocess.run(
+                [binary_path, sub, "--help"],
+                capture_output=True, text=True, timeout=3,
+            )
+            combined = (r.stdout or "") + (r.stderr or "")
+            # The CLI prints `Unknown command: <name>` (lib/commands.py
+            # main dispatch) — pin on that exact phrase to avoid false
+            # positives from unrelated stderr like deprecation notices.
+            if "Unknown command" in combined:
+                missing.append(sub)
+        except Exception:
+            # Subprocess failure (timeout / ENOENT) → can't say, skip.
+            continue
+    return tuple(missing)
+
+
 def cmd_doctor():
     """Lightweight environment health check for Beacon.
 
@@ -14505,11 +14568,26 @@ def cmd_doctor():
     import shutil as _shutil
     import time as _time
 
+    # ms-93 / e-2276: --json flag emits structured signals (Codex wrapper /
+    # Skill gate parses these to drive 'use BEACON_BIN=<abs path>' UX).
+    json_mode = "--json" in sys.argv[2:] if len(sys.argv) > 2 else False
+
     home = _user_home()
     warnings: list[str] = []
+    # path_signals carries rich metadata that the Codex wrapper / Skill
+    # need to act on PATH problems decisively (= which binaries, which
+    # version, which subcommands are missing). The 3 codes are pinned by
+    # tests/test_doctor_path_signals.py.
+    path_signals: list[dict] = []
+    # ``warning_to_signal_idx`` maps a warning's index in ``warnings`` to
+    # the index in ``path_signals`` that already encodes it with rich
+    # metadata. Used by --json mode to emit each warning exactly once
+    # (rich signal wins when a mapping exists).
+    warning_to_signal_idx: dict = {}
 
     # ------------------------------------------------------------------ #
-    # 1. beacon on PATH (+ e-1170 version shadowing detect)
+    # 1. beacon on PATH (+ e-1170 version shadowing detect +
+    #    e-2276 selected-version-too-old + bus-sessions-unavailable)
     # ------------------------------------------------------------------ #
     beacon_paths = _find_all_on_path("beacon")
     if not beacon_paths:
@@ -14518,32 +14596,117 @@ def cmd_doctor():
             "       Add the beacon bin/ directory to your PATH, or use\n"
             "       the full path to the beacon script."
         )
-    elif len(beacon_paths) > 1:
-        # e-1170: multiple beacon binaries on PATH = potential version
-        # shadowing. Today's Win user case: stale ~/.local/bin 0.11.1
-        # shadowing AppData/.../Scripts 0.19.0, so `beacon --version`
-        # returned the old value silently and post-install confusion was
-        # massive. Surface the shadow chain with versions for each.
+        warning_to_signal_idx[len(warnings) - 1] = len(path_signals)
+        path_signals.append({
+            "code": "beacon-not-on-path",
+            "category": "PATH",
+            "severity": "WARN",
+            "message": "beacon binary not found on PATH",
+            "metadata": {},
+        })
+    else:
+        # Always probe primary version (used by both the multiple-binaries
+        # warning and the version-too-old gate).
         import subprocess as _subprocess
-        version_lines = []
-        for bp in beacon_paths:
-            try:
-                v = _subprocess.run(
-                    [bp, "--version"], capture_output=True, text=True, timeout=3
-                ).stdout.strip() or "?"
-            except Exception:
-                v = "?"
-            version_lines.append(f"         {bp}  →  {v}")
         primary = beacon_paths[0]
-        warnings.append(
-            f"WARN [PATH] Multiple `beacon` binaries on PATH ({len(beacon_paths)} found):\n"
-            + "\n".join(version_lines)
-            + f"\n       Primary (will be used): {primary}\n"
-            "       This is usually fine, but if `beacon --version` looks stale\n"
-            "       relative to your last upgrade, the entry earlier on PATH is\n"
-            "       shadowing a newer install. Remove or reorder PATH to put the\n"
-            "       intended install first."
-        )
+        primary_version_raw = _doctor_probe_beacon_version(primary)
+        primary_version_parsed = _doctor_parse_version(primary_version_raw)
+
+        if len(beacon_paths) > 1:
+            # e-1170: multiple beacon binaries on PATH = potential version
+            # shadowing. Today's Win user case: stale ~/.local/bin 0.11.1
+            # shadowing AppData/.../Scripts 0.19.0, so `beacon --version`
+            # returned the old value silently and post-install confusion was
+            # massive. Surface the shadow chain with versions for each.
+            version_lines = []
+            binaries_meta = []
+            for bp in beacon_paths:
+                v_raw = _doctor_probe_beacon_version(bp)
+                version_lines.append(f"         {bp}  →  {v_raw}")
+                binaries_meta.append({"path": bp, "version": v_raw})
+            warnings.append(
+                f"WARN [PATH] Multiple `beacon` binaries on PATH ({len(beacon_paths)} found):\n"
+                + "\n".join(version_lines)
+                + f"\n       Primary (will be used): {primary}\n"
+                "       This is usually fine, but if `beacon --version` looks stale\n"
+                "       relative to your last upgrade, the entry earlier on PATH is\n"
+                "       shadowing a newer install. Remove or reorder PATH to put the\n"
+                "       intended install first."
+            )
+            warning_to_signal_idx[len(warnings) - 1] = len(path_signals)
+            path_signals.append({
+                "code": "multiple-binaries",
+                "category": "PATH",
+                "severity": "WARN",
+                "message": f"Multiple `beacon` binaries on PATH ({len(beacon_paths)} found); primary={primary}",
+                "metadata": {
+                    "binaries": binaries_meta,
+                    "primary": primary,
+                },
+            })
+
+        # e-2276 (a): selected-version-too-old. The Codex DM dogfood
+        # (2026-06-25) confirmed that homebrew's stale 0.2.1 shadowing a
+        # current /Users/.../beacon/bin (v0.48.0) leaves the user with a
+        # primary that lacks `bus` / `sessions` entirely. We fire even when
+        # there is only a single binary on PATH — an old solo install is
+        # equally broken.
+        min_required = os.environ.get("BEACON_DOCTOR_MIN_VERSION", "0.30.0")
+        min_required_parsed = _doctor_parse_version(f"beacon {min_required}")
+        if (
+            primary_version_parsed is not None
+            and min_required_parsed is not None
+            and primary_version_parsed < min_required_parsed
+        ):
+            warnings.append(
+                f"WARN [PATH] Selected `beacon` (primary on PATH) is older than required:\n"
+                f"         path:     {primary}\n"
+                f"         version:  {primary_version_raw}\n"
+                f"         required: >= {min_required}\n"
+                "       This often means a stale install (homebrew, ~/.local/bin) is\n"
+                "       shadowing a newer beacon further down PATH. Set BEACON_BIN to\n"
+                "       the absolute path of the newer install, or reorder PATH."
+            )
+            warning_to_signal_idx[len(warnings) - 1] = len(path_signals)
+            path_signals.append({
+                "code": "selected-version-too-old",
+                "category": "PATH",
+                "severity": "WARN",
+                "message": f"Primary beacon on PATH ({primary_version_raw}) is older than required >= {min_required}",
+                "metadata": {
+                    "primary": primary,
+                    "primary_version": primary_version_raw,
+                    "required_min": min_required,
+                },
+            })
+
+        # e-2276 (c): bus-sessions-unavailable. Probe the primary binary
+        # directly. If `beacon bus --help` or `beacon sessions --help`
+        # returns "Unknown command", the primary cannot fulfil DM /
+        # session discovery — even if its version string looks acceptable.
+        # This is the authoritative subcommand-presence check; the
+        # version-too-old gate above is a fast proxy.
+        missing_subs = _doctor_probe_missing_subcommands(primary, ("bus", "sessions"))
+        if missing_subs:
+            warnings.append(
+                "WARN [PATH] Selected `beacon` is missing required subcommands:\n"
+                f"         path:           {primary}\n"
+                f"         missing:        {', '.join(missing_subs)}\n"
+                "       Codex / Claude Code Beacon integration relies on `bus` and\n"
+                "       `sessions`. Set BEACON_BIN to an absolute path of a recent\n"
+                "       beacon (v0.30.0+), or reorder PATH."
+            )
+            warning_to_signal_idx[len(warnings) - 1] = len(path_signals)
+            path_signals.append({
+                "code": "bus-sessions-unavailable",
+                "category": "PATH",
+                "severity": "WARN",
+                "message": f"Primary beacon on PATH lacks subcommands: {', '.join(missing_subs)}",
+                "metadata": {
+                    "primary": primary,
+                    "missing_subcommands": list(missing_subs),
+                },
+            })
 
     # ------------------------------------------------------------------ #
     # 2. PostToolUse hook in ~/.claude/settings.json
@@ -14793,6 +14956,22 @@ def cmd_doctor():
     # ------------------------------------------------------------------ #
     # Summary
     # ------------------------------------------------------------------ #
+    if json_mode:
+        # ms-93 / e-2276: Codex wrapper / Skill gate parses this. Each
+        # warning string is converted to a minimal structured entry so
+        # callers can branch on `code`. Warnings that have a paired rich
+        # path_signal (= tracked in warning_to_signal_idx) use that
+        # signal instead of the generic parse — rich metadata wins.
+        structured: list[dict] = []
+        for i, w in enumerate(warnings):
+            rich_idx = warning_to_signal_idx.get(i)
+            if rich_idx is not None:
+                structured.append(path_signals[rich_idx])
+            else:
+                structured.append(_doctor_warning_to_signal(w))
+        print(json.dumps({"ok": not warnings, "signals": structured}, ensure_ascii=False))
+        sys.exit(1 if warnings else 0)
+
     if warnings:
         for w in warnings:
             print(w)
@@ -14800,6 +14979,35 @@ def cmd_doctor():
     else:
         print("OK: all checks passed.")
         sys.exit(0)
+
+
+def _doctor_warning_to_signal(warn_text: str) -> dict:
+    """Parse a `WARN [tag] ...` string into a minimal structured signal.
+
+    Used by `beacon doctor --json` to convert legacy `warnings: list[str]`
+    entries into ``{code, category, severity, message}`` dicts for
+    machine consumption (= ms-93 / e-2276 Codex wrapper). PATH signals
+    have a richer parallel list (``path_signals``) that overrides this
+    minimal form when the code matches.
+    """
+    import re
+    m = re.match(r"WARN \[([^\]]+)\]\s*(.*)", warn_text, re.DOTALL)
+    if not m:
+        return {
+            "code": "unknown",
+            "category": "other",
+            "severity": "WARN",
+            "message": warn_text.strip(),
+        }
+    tag, body = m.group(1), m.group(2).strip()
+    # First line is the title; subsequent lines are detail.
+    first_line = body.split("\n", 1)[0].strip()
+    return {
+        "code": tag,
+        "category": tag,
+        "severity": "WARN",
+        "message": first_line,
+    }
 
 
 def cmd_help_json():
