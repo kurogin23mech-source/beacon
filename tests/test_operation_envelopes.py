@@ -127,6 +127,27 @@ def _mock_get_operation_envelope(project_id: str, envelope_id: str) -> dict | No
     return copy.deepcopy(_envelope_store.get(project_id, {}).get(envelope_id))
 
 
+# ms-95 e-2441: snapshot originals BEFORE the module-level mutations below so
+# teardown_module can restore them. These mutations are not wrapped in a
+# fixture (= the test author chose module-level for ergonomic reasons), so
+# without an explicit teardown they leak across the rest of the pytest
+# session. test_trek_scope_aggregate_endpoints.py was hit hardest — its 14
+# tests all blew up because `firestore_client.get_project` was permanently
+# rebound to return the op-env-itest canned data, and adjacent app_module
+# attributes (`_require_project_role`, `_load`) were similarly clamped.
+_FC_ATTRS_TO_RESTORE = (
+    "get_document",
+    "get_active_operation_envelope",
+    "issue_operation_envelope",
+    "revoke_operation_envelope",
+    "list_operation_envelopes",
+    "get_operation_envelope",
+    "get_project",
+    "save_project",
+    "list_projects",
+)
+_fc_originals = {name: getattr(firestore_client, name, None) for name in _FC_ATTRS_TO_RESTORE}
+
 firestore_client.get_document = _mock_get_document
 firestore_client.get_active_operation_envelope = _mock_get_active_operation_envelope
 firestore_client.issue_operation_envelope = _mock_issue_operation_envelope
@@ -141,6 +162,15 @@ firestore_client.list_projects = lambda: []
 from fastapi.testclient import TestClient  # noqa: E402
 import app as app_module  # noqa: E402
 
+_APP_ATTRS_TO_RESTORE = (
+    "_auth_enabled",
+    "_start_watcher",
+    "_stop_watcher",
+    "_require_project_role",
+    "_load",
+)
+_app_originals = {name: getattr(app_module, name, None) for name in _APP_ATTRS_TO_RESTORE}
+
 app_module._auth_enabled = False
 app_module._start_watcher = lambda project_id: None
 app_module._stop_watcher = lambda project_id: None
@@ -153,6 +183,20 @@ app_module._require_project_role = lambda project_id, user, **kw: (
 app_module._load = lambda project_id, user=None: copy.deepcopy(PROJECT_DATA)
 
 client = TestClient(app_module.app)
+
+
+def teardown_module(_module):
+    """ms-95 e-2441: restore the module-level mutations so adjacent test files
+    (test_trek_scope_aggregate_endpoints.py, etc.) see the real
+    firestore_client / app_module behavior again. Without this, the canned
+    op-env-itest project leaks into every subsequent test that touches
+    firestore_client.get_project or app_module._require_project_role."""
+    for name, value in _fc_originals.items():
+        if value is not None:
+            setattr(firestore_client, name, value)
+    for name, value in _app_originals.items():
+        if value is not None:
+            setattr(app_module, name, value)
 
 
 @pytest.fixture(autouse=True)
