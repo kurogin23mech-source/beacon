@@ -61,7 +61,9 @@ def project(monkeypatch):
         # Clean inherited sub-agent env so the actor name is deterministic.
         monkeypatch.delenv("BEACON_AGENT_PARENT", raising=False)
         monkeypatch.delenv("BEACON_AGENT_CHILD_ID", raising=False)
-        sys.modules.pop("firestore_client", None)
+        # ms-95 e-2441: monkeypatch.delitem auto-restores. Raw pop leaks the
+        # deletion → adjacent test_api mocks vanish (8 fails on CI).
+        monkeypatch.delitem(sys.modules, "firestore_client", raising=False)
         yield Path(tmp)
 
 
