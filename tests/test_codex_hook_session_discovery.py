@@ -82,3 +82,14 @@ class TestResolveCodexSession:
             def read_codex_session(_p): return _FakeCS._Rec
         sid, pid = hook_mod._resolve_codex_session(_FakeCS(), str(tmp_path))
         assert sid == "codex-from-pointer"
+
+
+class TestHookOutputShape:
+    def test_hook_output_wraps_additional_context(self):
+        payload = hook_mod._hook_output("hello")
+        assert payload == {
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": "hello",
+            }
+        }

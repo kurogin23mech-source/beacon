@@ -13,7 +13,8 @@ Usage from a Codex hook entry:
 
 Output: a single JSON object on stdout, e.g.::
 
-    {"additionalContext": "BEACON BUS INBOX — 1 new event ...\\n..."}
+    {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+                            "additionalContext": "BEACON BUS INBOX — 1 new event ...\\n..."}}
 
 When the inbox is empty, the output is ``{}`` (= no context added).
 Each successfully-rendered event is archived into
@@ -152,6 +153,16 @@ def _format_entry(entry: dict) -> str:
     )
 
 
+def _hook_output(context: str, hook_event_name: str = "UserPromptSubmit") -> dict:
+    """Return Codex/Claude-compatible hook output for context injection."""
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": hook_event_name,
+            "additionalContext": context,
+        }
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Codex inbox hook (= ms-93 / e-2497).",
@@ -201,7 +212,7 @@ def main() -> int:
                 recipient_session_id=session_id,
             )
 
-    print(json.dumps({"additionalContext": additional}, ensure_ascii=False))
+    print(json.dumps(_hook_output(additional), ensure_ascii=False))
     return 0
 
 
