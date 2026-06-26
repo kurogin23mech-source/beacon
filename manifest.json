@@ -19,6 +19,11 @@
         "linux": null,
         "windows": "~/.local/bin/bclaude.cmd"
       },
+      "bin/bcodex": {
+        "darwin": "~/.local/bin/bcodex",
+        "linux": "~/.local/bin/bcodex",
+        "windows": null
+      },
       "bin/beacon": {
         "darwin": "~/.local/bin/beacon",
         "linux": "~/.local/bin/beacon",
@@ -62,6 +67,7 @@
     },
     "modes": {
       "bin/bclaude": "exec",
+      "bin/bcodex": "exec",
       "bin/beacon": "exec",
       "bin/beacon-bus-inbox-hook.py": "exec",
       "bin/beacon-post-commit-hook.sh": "exec",
