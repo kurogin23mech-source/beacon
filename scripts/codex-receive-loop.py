@@ -246,6 +246,16 @@ def main() -> int:
         flush=True,
     )
 
+    # TODO (= ms-93 / e-2519 SPEC §8-G option D): once the app-server
+    # spike (`plugins/beacon/scripts/beacon_codex_app_server_client.py`)
+    # has been validated against a live `codex app-server` daemon and
+    # ``BridgeAppServerClient.dispatch_dm`` knows the proper TurnInput
+    # shape, wire it in here behind an opt-in flag (e.g. ``--app-server``)
+    # so that DMs reaching ``persist_inbox_event`` can also trigger an
+    # autonomous Codex worker turn (= push semantics, not just pull-on-
+    # next-prompt). The armed-mode gate is the caller's responsibility
+    # (Codex-side ``/beacon-bus-armed`` equivalent Skill, e-2519 AC 6).
+    #
     # Codex 2026-06-26 blocker #2: cold-start ``since=""`` flooded the
     # inbox with weeks of broadcast traffic on the first poll. Pin the
     # in-memory watermark to "now" so the first poll only catches new
