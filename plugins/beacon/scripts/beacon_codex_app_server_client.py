@@ -2,8 +2,8 @@
 
 Goal of this skeleton (= not a production driver):
 
-- Confirm the wire shape (= JSON-RPC 2.0 over stdio with `Thread/start` +
-  `Turn/start` + streamed notifications) so the next phase can extend it.
+- Confirm the wire shape (= JSON-RPC 2.0-ish over stdio with `thread/start` +
+  `turn/start` + streamed notifications) so the next phase can extend it.
 - Land enough scaffolding that a fresh Codex / Claude Code session can
   pick up from here without re-doing the schema dig.
 - **NOT** wired into ``scripts/codex-receive-loop.py`` yet — the
@@ -20,12 +20,11 @@ Background (= Codex 設計相談 2026-06-26):
   primary thread-and-turn lifecycle (= v2 schema).
 
 What this skeleton does NOT do (= follow-up):
-- No live handshake against a running daemon — running ``codex app-server
-  daemon start`` and authenticating is out of scope for the skeleton.
-- No mapping from DM payload → ``Turn/start.input`` content shape (the
-  ``input`` schema is non-trivial; a TODO marks the gap).
-- No streamed notification consumer that converts agent messages back
-  into a Beacon DM reply (= the autonomous response path).
+- No durable managed-daemon path. Codex 0.142.2 on this dogfood machine
+  rejected ``codex app-server daemon start`` because the standalone install
+  managed by the Codex installer was absent; direct ``codex app-server
+  --stdio`` worked.
+- No Beacon DM reply sender yet (= the autonomous response path).
 - No armed-mode gate (= e-2519 AC 6 lives in a separate Skill).
 """
 
@@ -138,7 +137,6 @@ def request(
     req_id = handle.next_request_id
     handle.next_request_id += 1
     msg = {
-        "jsonrpc": "2.0",
         "id": req_id,
         "method": method,
         "params": params or {},
@@ -198,31 +196,65 @@ def thread_start(
         params["baseInstructions"] = base_instructions
     if approval_policy is not None:
         params["approvalPolicy"] = approval_policy
-    return request(handle, "Thread/start", params=params)
+    return request(handle, "thread/start", params=params)
+
+
+def extract_thread_id(response: dict) -> str:
+    """Return the thread id from a ``thread/start`` response."""
+    result = response.get("result") or {}
+    thread = result.get("thread") or {}
+    thread_id = thread.get("id") or result.get("threadId") or ""
+    if not thread_id:
+        raise RuntimeError(f"thread/start returned no thread id: {response}")
+    return str(thread_id)
 
 
 def turn_start(
     handle: AppServerHandle,
     *,
     thread_id: str,
-    input_payload: list[dict] | str,
+    input_payload: list[dict],
 ) -> dict:
     """Start a turn within the thread.
 
-    ``input_payload`` is whatever the ``TurnStartParams.input`` schema
-    accepts. The schema marks ``input`` as required but didn't expand
-    the inner shape in our dump — the spike should observe the rejection
-    error if the shape is wrong and adjust. TODO: convert DM ``payload.text``
-    into the expected ``TurnInput`` content shape.
+    Dogfood against Codex CLI 0.142.2 confirmed ``input`` must be a sequence.
+    A raw string is rejected with "expected a sequence"; the minimal accepted
+    text shape is ``[{"type": "text", "text": "..."}]``.
     """
     return request(
         handle,
-        "Turn/start",
+        "turn/start",
         params={
             "threadId": thread_id,
             "input": input_payload,
         },
     )
+
+
+def text_input(text: str) -> list[dict]:
+    """Return the minimal accepted app-server turn input shape."""
+    return [{"type": "text", "text": text}]
+
+
+def agent_message_text_from_notifications(notifications: Iterable[dict]) -> str:
+    """Reconstruct final agent text from app-server notifications.
+
+    The app-server stream emits ``item/agentMessage/delta`` chunks and later an
+    ``item/completed`` with ``item.type == "agentMessage"`` and full ``text``.
+    Prefer the completed item when present; otherwise concatenate deltas.
+    """
+    chunks: list[str] = []
+    completed_text = ""
+    for msg in notifications:
+        method = msg.get("method")
+        params = msg.get("params") or {}
+        if method == "item/agentMessage/delta":
+            chunks.append(str(params.get("delta") or ""))
+        elif method == "item/completed":
+            item = params.get("item") or {}
+            if item.get("type") == "agentMessage":
+                completed_text = str(item.get("text") or "")
+    return completed_text or "".join(chunks)
 
 
 # ------------------------------------------------------------------ #
@@ -258,12 +290,7 @@ class BridgeAppServerClient:
         initialize(self.handle)
         # One thread per bridge instance for now (= simplest model).
         rsp = thread_start(self.handle, cwd=cwd)
-        result = rsp.get("result", {})
-        self.thread_id = result.get("threadId")
-        if not self.thread_id:
-            raise RuntimeError(
-                f"Thread/start returned no threadId: {rsp}"
-            )
+        self.thread_id = extract_thread_id(rsp)
 
     def dispatch_dm(self, event: dict) -> dict:
         """Convert a Beacon DM event into a Turn/start invocation.
@@ -284,11 +311,10 @@ class BridgeAppServerClient:
             )
         payload = (event or {}).get("payload") or {}
         text = payload.get("text") or ""
-        # TODO: replace this naive shape — observe what the server accepts.
         return turn_start(
             self.handle,
             thread_id=self.thread_id,
-            input_payload=text,
+            input_payload=text_input(text),
         )
 
     def stop(self) -> None:
@@ -301,9 +327,12 @@ class BridgeAppServerClient:
 __all__ = [
     "AppServerHandle",
     "BridgeAppServerClient",
+    "agent_message_text_from_notifications",
     "initialize",
+    "extract_thread_id",
     "request",
     "start_app_server",
+    "text_input",
     "thread_start",
     "turn_start",
 ]

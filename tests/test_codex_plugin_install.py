@@ -32,6 +32,9 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_ROOT = REPO_ROOT / "plugins" / "beacon"
 BRIDGE_PATH = PLUGIN_ROOT / "scripts" / "beacon-codex-bridge"
+APP_SERVER_CLIENT_PATH = (
+    PLUGIN_ROOT / "scripts" / "beacon_codex_app_server_client.py"
+)
 
 CODEX_VALIDATOR = Path(
     os.path.expanduser(
@@ -46,6 +49,16 @@ def _load_bridge_module():
     spec = importlib.util.spec_from_loader("bridge", loader)
     m = importlib.util.module_from_spec(spec)
     loader.exec_module(m)
+    return m
+
+
+def _load_app_server_client_module():
+    spec = importlib.util.spec_from_file_location(
+        "beacon_codex_app_server_client", APP_SERVER_CLIENT_PATH
+    )
+    m = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = m
+    spec.loader.exec_module(m)
     return m
 
 
@@ -360,3 +373,58 @@ def test_stop_wait_window_is_at_least_5_seconds(tmp_path):
         "cmd_stop polling window must be >= 100 iterations (= 10s); "
         f"FINDING #4 needs the wider window. Source:\n{src}"
     )
+
+
+# ------------------------------------------------------------------ #
+# 6. app-server spike helpers (= ms-93 / e-2519 SPEC §8-G option D)
+# ------------------------------------------------------------------ #
+
+
+def test_app_server_text_input_shape_is_sequence():
+    client = _load_app_server_client_module()
+    assert client.text_input("hello") == [{"type": "text", "text": "hello"}]
+
+
+def test_app_server_extract_thread_id_from_thread_start_response():
+    client = _load_app_server_client_module()
+    rsp = {"result": {"thread": {"id": "thr-1"}}}
+    assert client.extract_thread_id(rsp) == "thr-1"
+
+
+def test_app_server_agent_message_prefers_completed_text():
+    client = _load_app_server_client_module()
+    notifications = [
+        {
+            "method": "item/agentMessage/delta",
+            "params": {"delta": "hel"},
+        },
+        {
+            "method": "item/agentMessage/delta",
+            "params": {"delta": "lo"},
+        },
+        {
+            "method": "item/completed",
+            "params": {
+                "item": {
+                    "type": "agentMessage",
+                    "text": "hello",
+                },
+            },
+        },
+    ]
+    assert client.agent_message_text_from_notifications(notifications) == "hello"
+
+
+def test_app_server_agent_message_falls_back_to_deltas():
+    client = _load_app_server_client_module()
+    notifications = [
+        {
+            "method": "item/agentMessage/delta",
+            "params": {"delta": "he"},
+        },
+        {
+            "method": "item/agentMessage/delta",
+            "params": {"delta": "llo"},
+        },
+    ]
+    assert client.agent_message_text_from_notifications(notifications) == "hello"
