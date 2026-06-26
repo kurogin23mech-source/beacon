@@ -4918,7 +4918,7 @@ EOF
             python3 "$COMMANDS_PY" search
         ;;
     doctor)
-        python3 "$COMMANDS_PY" doctor
+        python3 "$COMMANDS_PY" doctor "${@:2}"
         ;;
     cycle)
         ensure_project
