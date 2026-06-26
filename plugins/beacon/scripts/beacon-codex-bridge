@@ -1,0 +1,537 @@
+#!/usr/bin/env python3
+"""Beacon Codex bridge lifecycle CLI (= ms-93 / e-2508).
+
+`start` / `stop` / `restart` / `status` / `install-hook` / `uninstall-hook` /
+`uninstall` を 1 つの CLI に統合する。 Codex plugin の skill
+``beacon-codex-bridge`` から呼ばれる product path であり、 user が手で
+``nohup python3 scripts/codex-receive-loop.py &`` を打つ必要を消す。
+
+cwd-scoped lifecycle:
+
+- pidfile: ``<cwd>/.beacon/codex/receive-loop.pid``
+- log:     ``<cwd>/.beacon/codex/receive-loop.log``
+- session: ``<cwd>/.beacon/codex/receive-loop.session.json``
+
+すべて cwd 配下なので、 別 cwd で並走しても collision しない。 stale pidfile
+(= pid が dead) は ``start`` 時に自動 cleanup される。
+
+Hook install / uninstall は ``~/.codex/hooks.json`` を冪等に編集する。
+既に同 command の entry があれば no-op、 無ければ append。 uninstall は
+beacon の entry のみ pop し、 他 entry は触らない。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+# Codex hooks.json — user-global location.
+CODEX_HOOKS_PATH = Path(os.path.expanduser("~/.codex/hooks.json"))
+HOOK_EVENT = "UserPromptSubmit"
+# Stable marker so we can detect "our" hook entry across upgrades.
+HOOK_SCRIPT_BASENAME = "codex-inbox-hook.py"
+
+
+def _install_root() -> Path:
+    """Resolve the Beacon source checkout.
+
+    Resolution order:
+    1. ``BEACON_INSTALL_ROOT`` env var (= explicit override)
+    2. Script-relative: this file lives at
+       ``<beacon-root>/plugins/beacon/scripts/beacon-codex-bridge``,
+       so two levels up is the install root.
+    """
+    env = os.environ.get("BEACON_INSTALL_ROOT", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    return Path(__file__).resolve().parent.parent.parent.parent
+
+
+def _codex_dir(cwd: Path) -> Path:
+    return cwd / ".beacon" / "codex"
+
+
+def _pid_file(cwd: Path) -> Path:
+    return _codex_dir(cwd) / "receive-loop.pid"
+
+
+def _log_file(cwd: Path) -> Path:
+    return _codex_dir(cwd) / "receive-loop.log"
+
+
+def _session_file(cwd: Path) -> Path:
+    return _codex_dir(cwd) / "receive-loop.session.json"
+
+
+def _read_pid(cwd: Path) -> int:
+    """Return the live pid recorded in the pidfile, or 0 if none/stale."""
+    p = _pid_file(cwd)
+    if not p.is_file():
+        return 0
+    try:
+        pid = int(p.read_text().strip())
+    except (OSError, ValueError):
+        return 0
+    if pid <= 0:
+        return 0
+    try:
+        os.kill(pid, 0)
+        return pid
+    except ProcessLookupError:
+        return 0
+    except PermissionError:
+        return pid
+    except Exception:
+        return 0
+
+
+def _clean_stale_pidfile(cwd: Path) -> bool:
+    """If the pidfile points to a dead pid, remove it. Returns True if cleaned."""
+    p = _pid_file(cwd)
+    if not p.is_file():
+        return False
+    if _read_pid(cwd) != 0:
+        return False
+    try:
+        p.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def _hook_command(install_root: Path) -> str:
+    """Absolute command string Codex stores in ``hooks.json``."""
+    script = install_root / "scripts" / HOOK_SCRIPT_BASENAME
+    return f"/usr/bin/python3 {script}"
+
+
+def _hook_entry(install_root: Path, cwd: Path) -> dict:
+    """The Codex hook entry shape we write into ``hooks.json``."""
+    return {
+        "hooks": [
+            {
+                "type": "command",
+                "command": f"{_hook_command(install_root)} --cwd {cwd}",
+                "timeout": 10,
+            }
+        ]
+    }
+
+
+def _is_our_hook(entry: dict) -> bool:
+    """Detect a beacon-owned hook entry across upgrades.
+
+    Match on the basename of the script file so absolute-path changes
+    (= different ``BEACON_INSTALL_ROOT`` between sessions) still resolve
+    to "ours" for uninstall / idempotency purposes.
+    """
+    for h in (entry or {}).get("hooks", []) or []:
+        cmd = str(h.get("command", ""))
+        if HOOK_SCRIPT_BASENAME in cmd:
+            return True
+    return False
+
+
+def _load_hooks_json() -> dict:
+    if not CODEX_HOOKS_PATH.is_file():
+        return {"hooks": {}}
+    try:
+        with CODEX_HOOKS_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"~/.codex/hooks.json is malformed: {exc}. "
+            "Fix it manually and rerun."
+        ) from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("~/.codex/hooks.json is not a JSON object.")
+    data.setdefault("hooks", {})
+    if not isinstance(data["hooks"], dict):
+        raise RuntimeError("~/.codex/hooks.json `hooks` is not an object.")
+    return data
+
+
+def _save_hooks_json(data: dict) -> None:
+    CODEX_HOOKS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = CODEX_HOOKS_PATH.with_suffix(".json.tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    tmp.replace(CODEX_HOOKS_PATH)
+
+
+def cmd_install_hook(install_root: Path, cwd: Path) -> int:
+    """Idempotently merge our UserPromptSubmit entry into hooks.json."""
+    try:
+        data = _load_hooks_json()
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    bucket = data["hooks"].setdefault(HOOK_EVENT, [])
+    if not isinstance(bucket, list):
+        print(
+            f"~/.codex/hooks.json `hooks.{HOOK_EVENT}` is not an array.",
+            file=sys.stderr,
+        )
+        return 1
+    # If we already have a beacon-owned entry for this cwd, update its
+    # command to the current absolute path (= absorbs install_root drift).
+    desired = _hook_entry(install_root, cwd)
+    desired_cmd = desired["hooks"][0]["command"]
+    for i, entry in enumerate(bucket):
+        if not _is_our_hook(entry):
+            continue
+        # Only update if this entry is bound to the same cwd; otherwise
+        # leave it (= another cwd has its own entry, multi-project ok).
+        existing_cmd = (entry.get("hooks") or [{}])[0].get("command", "")
+        if str(cwd) in existing_cmd:
+            if existing_cmd == desired_cmd:
+                print(
+                    f"hook: already installed for cwd={cwd} (no-op)",
+                )
+                return 0
+            bucket[i] = desired
+            _save_hooks_json(data)
+            print(f"hook: updated command for cwd={cwd}")
+            return 0
+    bucket.append(desired)
+    _save_hooks_json(data)
+    print(f"hook: installed for cwd={cwd}")
+    return 0
+
+
+def cmd_uninstall_hook(cwd: Path) -> int:
+    """Remove our hook entry for this cwd. Leaves other entries alone."""
+    if not CODEX_HOOKS_PATH.is_file():
+        print("hook: ~/.codex/hooks.json not found (already absent)")
+        return 0
+    try:
+        data = _load_hooks_json()
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    bucket = data.get("hooks", {}).get(HOOK_EVENT)
+    if not isinstance(bucket, list):
+        print("hook: not installed (nothing to remove)")
+        return 0
+    keep = []
+    removed = 0
+    for entry in bucket:
+        if not _is_our_hook(entry):
+            keep.append(entry)
+            continue
+        cmd = (entry.get("hooks") or [{}])[0].get("command", "")
+        if str(cwd) in cmd:
+            removed += 1
+            continue
+        keep.append(entry)
+    if removed == 0:
+        print(f"hook: not installed for cwd={cwd}")
+        return 0
+    data["hooks"][HOOK_EVENT] = keep
+    _save_hooks_json(data)
+    print(f"hook: removed {removed} entry for cwd={cwd}")
+    return 0
+
+
+def cmd_start(
+    install_root: Path,
+    cwd: Path,
+    *,
+    app_server: bool = False,
+    armed: bool = False,
+) -> int:
+    pid = _read_pid(cwd)
+    if pid:
+        print(f"daemon: already running (pid={pid})")
+        # Still ensure the hook is installed (= idempotent contract).
+        cmd_install_hook(install_root, cwd)
+        return 0
+    _clean_stale_pidfile(cwd)
+    install_rc = cmd_install_hook(install_root, cwd)
+    if install_rc != 0:
+        return install_rc
+
+    cloud = cwd / ".beacon" / "cloud.json"
+    if not cloud.is_file():
+        print(
+            f"daemon: {cloud} not found. "
+            "Run `beacon cloud setup` in this cwd first.",
+            file=sys.stderr,
+        )
+        return 1
+
+    log_path = _log_file(cwd)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_f = log_path.open("a", encoding="utf-8")
+    log_f.write(f"\n--- bridge start {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} ---\n")
+    log_f.flush()
+
+    daemon_script = install_root / "scripts" / "codex-receive-loop.py"
+    if not daemon_script.is_file():
+        print(
+            f"daemon: {daemon_script} not found. "
+            "Check BEACON_INSTALL_ROOT.",
+            file=sys.stderr,
+        )
+        log_f.close()
+        return 1
+
+    daemon_argv = ["/usr/bin/env", "python3", str(daemon_script), "--cwd", str(cwd)]
+    if app_server:
+        daemon_argv.append("--app-server")
+    if armed:
+        daemon_argv.append("--armed")
+
+    daemon_env = {**os.environ, "BEACON_INSTALL_ROOT": str(install_root)}
+    if app_server:
+        # Env-var duplicate of the flag so a stale daemon argv (= old
+        # supervisor) can't silently flip the opt-in off on restart.
+        daemon_env["BEACON_CODEX_APP_SERVER"] = "1"
+    if armed:
+        # Same env-var safety for the autonomous reply opt-in.
+        daemon_env["BEACON_CODEX_ARMED"] = "1"
+
+    # Detach so the daemon survives the bridge's exit.
+    proc = subprocess.Popen(
+        daemon_argv,
+        stdin=subprocess.DEVNULL,
+        stdout=log_f,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        env=daemon_env,
+    )
+    # Give the daemon a beat to write its pidfile + session pointer.
+    for _ in range(20):
+        time.sleep(0.1)
+        new_pid = _read_pid(cwd)
+        if new_pid:
+            print(f"daemon: started (pid={new_pid}, log={log_path})")
+            return 0
+        if proc.poll() is not None:
+            print(
+                f"daemon: failed to start (exit={proc.returncode}). "
+                f"Inspect {log_path} for details.",
+                file=sys.stderr,
+            )
+            return 1
+    print(
+        f"daemon: started but pidfile not yet visible (subprocess pid={proc.pid}). "
+        f"Check {log_path} if status remains empty.",
+    )
+    return 0
+
+
+def cmd_stop(cwd: Path) -> int:
+    pid = _read_pid(cwd)
+    if not pid:
+        _clean_stale_pidfile(cwd)
+        print("daemon: not running")
+        return 0
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        _clean_stale_pidfile(cwd)
+        print(f"daemon: pid={pid} not found (cleaned stale pidfile)")
+        return 0
+    except PermissionError:
+        print(f"daemon: cannot signal pid={pid} (permission denied)", file=sys.stderr)
+        return 1
+    # Wait for the daemon's graceful close (heartbeat shutdown + pidfile unlink).
+    # 10s window: the shutdown path sends a final heartbeat to the server with
+    # shutdown=True (= network call) before unlinking the pidfile. 3s was
+    # sometimes too tight on slower networks, which made `restart` bail
+    # before `start` (ms-93 / e-2508 Codex re-dogfood FINDING #4, 2026-06-26).
+    for _ in range(100):
+        time.sleep(0.1)
+        if _read_pid(cwd) == 0:
+            print(f"daemon: stopped (pid={pid})")
+            return 0
+    # Daemon didn't exit in 10s; report but don't escalate to SIGKILL automatically.
+    print(
+        f"daemon: SIGTERM sent to pid={pid} but pidfile still present after 10s. "
+        "Re-run `stop` or inspect the daemon manually.",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def cmd_restart(
+    install_root: Path,
+    cwd: Path,
+    *,
+    app_server: bool = False,
+    armed: bool = False,
+) -> int:
+    """Stop the daemon, clean any leftover state, then start fresh.
+
+    Does NOT gate `start` on `cmd_stop`'s exit code. Even when stop's polling
+    window times out (= pidfile cleanup didn't catch up), the daemon may
+    have actually died — in that case `_clean_stale_pidfile` below removes
+    the stale entry and `cmd_start` can proceed. This was found via
+    ms-93 / e-2508 Codex re-dogfood FINDING #4 (2026-06-26): the previous
+    `if rc != 0: return rc` gate made `restart` silently bail when the
+    daemon had stopped but the pidfile lingered.
+
+    If the daemon is genuinely still alive after `cmd_stop` returns,
+    `cmd_start` will detect the live pidfile and no-op (= matching the
+    semantics of `start` on a running daemon).
+    """
+    cmd_stop(cwd)
+    _clean_stale_pidfile(cwd)
+    return cmd_start(install_root, cwd, app_server=app_server, armed=armed)
+
+
+def cmd_status(install_root: Path, cwd: Path) -> int:
+    # Hook status.
+    hook_marker = "absent"
+    try:
+        data = _load_hooks_json()
+        for entry in data.get("hooks", {}).get(HOOK_EVENT, []) or []:
+            if _is_our_hook(entry) and str(cwd) in (
+                (entry.get("hooks") or [{}])[0].get("command", "")
+            ):
+                hook_marker = "installed ✓"
+                break
+    except RuntimeError as exc:
+        hook_marker = f"error ({exc})"
+    print(f"hook:    {hook_marker}")
+
+    # Daemon status.
+    pid = _read_pid(cwd)
+    if pid:
+        print(f"daemon:  running ✓ (pid={pid})")
+    else:
+        print("daemon:  not running")
+
+    # Session pointer.
+    sf = _session_file(cwd)
+    if sf.is_file():
+        try:
+            with sf.open("r", encoding="utf-8") as f:
+                ptr = json.load(f)
+            sid = ptr.get("session_id", "?")
+            pid_in_ptr = ptr.get("project_id", "?")
+            written = ptr.get("written_at", "?")
+            print(f"session: {sid} project={pid_in_ptr} written_at={written}")
+        except Exception as exc:
+            print(f"session: <unreadable: {exc}>")
+    else:
+        print("session: (no pointer file)")
+
+    # Inbox counts.
+    inbox = cwd / ".beacon" / "codex" / "inbox"
+    if inbox.is_dir():
+        unread = len(list(inbox.glob("*.json")))
+        read_dir = inbox / ".read"
+        archived = len(list(read_dir.glob("*.json"))) if read_dir.is_dir() else 0
+        print(f"inbox:   {unread} unread / {archived} archived")
+    else:
+        print("inbox:   (no inbox directory yet)")
+    return 0
+
+
+def cmd_uninstall(install_root: Path, cwd: Path) -> int:
+    """Full local teardown: stop daemon + remove hook entry for this cwd."""
+    rc_stop = cmd_stop(cwd)
+    rc_hook = cmd_uninstall_hook(cwd)
+    return rc_stop or rc_hook
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Beacon Codex bridge lifecycle CLI (ms-93 / e-2508).",
+    )
+    parser.add_argument(
+        "subaction",
+        nargs="?",
+        default="status",
+        choices=[
+            "start",
+            "stop",
+            "restart",
+            "status",
+            "install-hook",
+            "uninstall-hook",
+            "uninstall",
+        ],
+    )
+    parser.add_argument("--cwd", default="", help="Project cwd (default: $PWD).")
+    parser.add_argument(
+        "--install-root",
+        default="",
+        help="Beacon checkout (default: BEACON_INSTALL_ROOT or script-relative).",
+    )
+    parser.add_argument(
+        "--app-server",
+        action="store_true",
+        help=(
+            "Opt-in (ms-93 / e-2519): start the daemon with autonomous push "
+            "receive via a long-lived `codex app-server --stdio` child. "
+            "Default off keeps the pull-on-prompt path identical to before. "
+            "Only honoured by `start` / `restart`."
+        ),
+    )
+    parser.add_argument(
+        "--armed",
+        action="store_true",
+        help=(
+            "Opt-in (ms-93 / e-2519 AC 2/6): in addition to --app-server, "
+            "send the Codex agent reply back to the original DM sender. "
+            "User must `beacon bus budget grant N` first — armed mode does "
+            "NOT auto-grant from inside the daemon. Has no effect without "
+            "--app-server."
+        ),
+    )
+    args = parser.parse_args()
+
+    install_root = (
+        Path(args.install_root).expanduser().resolve()
+        if args.install_root
+        else _install_root()
+    )
+    cwd = Path(args.cwd or os.getcwd()).resolve()
+
+    if not (install_root / "scripts" / "codex-receive-loop.py").is_file():
+        print(
+            f"bridge: cannot find scripts/codex-receive-loop.py under {install_root}. "
+            "Set BEACON_INSTALL_ROOT to your beacon checkout.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.subaction == "start":
+        return cmd_start(
+            install_root, cwd,
+            app_server=args.app_server,
+            armed=args.armed,
+        )
+    if args.subaction == "stop":
+        return cmd_stop(cwd)
+    if args.subaction == "restart":
+        return cmd_restart(
+            install_root, cwd,
+            app_server=args.app_server,
+            armed=args.armed,
+        )
+    if args.subaction == "status":
+        return cmd_status(install_root, cwd)
+    if args.subaction == "install-hook":
+        return cmd_install_hook(install_root, cwd)
+    if args.subaction == "uninstall-hook":
+        return cmd_uninstall_hook(cwd)
+    if args.subaction == "uninstall":
+        return cmd_uninstall(install_root, cwd)
+    parser.error(f"unknown subaction: {args.subaction}")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

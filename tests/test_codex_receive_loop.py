@@ -252,6 +252,52 @@ class TestPollInboxOnce:
         )
         assert n == 0
 
+    def test_on_kept_event_fires_for_persisted_events_only(self, tmp_path):
+        """ms-93 / e-2519 app-server wiring: callback only fires for kept
+        events (= post-filter, post-persist). Self-sent / wrong-recipient
+        / watermark-suppressed events must NOT trigger the autonomous
+        push path because they would have been silently injected into
+        the long-lived Codex turn worker."""
+        api = _FakeApi()
+        kept_event = self._event(event_id="evt-keep")
+        self_sent = self._event(
+            event_id="evt-self", sender_session_id="codex-1-abc",
+        )
+        wrong_rcpt = self._event(event_id="evt-other")
+        wrong_rcpt["payload"]["recipient_session_id"] = "someone-else"
+        api.get_returns = [[kept_event, self_sent, wrong_rcpt]]
+        seen = []
+        _latest, n = crl.poll_inbox_once(
+            api, project_id="proj-1", session_id="codex-1-abc",
+            since="", cwd=str(tmp_path),
+            on_kept_event=lambda evt: seen.append(evt.get("event_id")),
+        )
+        assert n == 1
+        assert seen == ["evt-keep"]
+
+    def test_on_kept_event_exception_does_not_break_persistence(self, tmp_path):
+        """Pull-on-prompt path is authoritative; an autonomous-path
+        callback exception must not roll back the inbox file or skip
+        the rest of the events."""
+        api = _FakeApi()
+        evt_a = self._event(event_id="evt-a", created_at="2026-06-25T10:00:00Z")
+        evt_b = self._event(event_id="evt-b", created_at="2026-06-25T10:01:00Z")
+        api.get_returns = [[evt_a, evt_b]]
+
+        def _raise_on_a(evt):
+            if evt.get("event_id") == "evt-a":
+                raise RuntimeError("simulated app-server hiccup")
+
+        _latest, n = crl.poll_inbox_once(
+            api, project_id="proj-1", session_id="codex-1-abc",
+            since="", cwd=str(tmp_path),
+            on_kept_event=_raise_on_a,
+        )
+        # Both events still persisted (= callback failures swallowed).
+        assert n == 2
+        assert (tmp_path / ".beacon" / "codex" / "inbox" / "evt-a.json").is_file()
+        assert (tmp_path / ".beacon" / "codex" / "inbox" / "evt-b.json").is_file()
+
     def test_get_transport_error_does_not_raise(self, tmp_path):
         api = _FakeApi()
         api.get_should_raise = True

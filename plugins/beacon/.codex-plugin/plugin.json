@@ -1,0 +1,27 @@
+{
+  "name": "beacon",
+  "version": "0.1.0",
+  "description": "Beacon for Codex CLI — DM inbox bridge + Beacon Skills bundled as one Codex plugin.",
+  "author": {
+    "name": "Beacon Team",
+    "url": "https://github.com/r-kida2/beacon"
+  },
+  "homepage": "https://beacon-ai.dev/",
+  "repository": "https://github.com/r-kida2/beacon",
+  "license": "MIT",
+  "keywords": ["beacon", "dm", "bridge", "bus"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Beacon",
+    "shortDescription": "Codex CLI 連携 — Beacon DM inbox + Skills",
+    "longDescription": "Beacon の Codex 対応 plugin。 UserPromptSubmit hook で DM (= 別 Codex / Claude Code session からの直接メッセージ) を受信、 receive-loop daemon の lifecycle (= start / stop / status) を 1 step で扱える Skill を同梱する。 daemon を別 terminal で nohup する手動運用を不要にする。",
+    "developerName": "Beacon Team",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Write"],
+    "defaultPrompt": [
+      "$beacon-codex-bridge start で DM 受信を有効化",
+      "$beacon-codex-bridge status で daemon の状態確認",
+      "DM が来たら次の prompt の冒頭に表示されます"
+    ]
+  }
+}

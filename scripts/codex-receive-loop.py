@@ -15,7 +15,7 @@ Usage:
     BEACON_BIN=/abs/path/to/beacon python3 scripts/codex-receive-loop.py [--cwd /repo]
 
 Environment knobs:
-    BEACON_HEARTBEAT_SECS — heartbeat tick (default 30)
+    BEACON_HEARTBEAT_SECS — heartbeat tick (default 5)
     BEACON_POLL_SECS       — inbox poll tick (default 2)
     BEACON_BUS_SENDER      — exported by this script for child CLI calls
 
@@ -30,6 +30,7 @@ import argparse
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -46,6 +47,19 @@ def _import_modules(install_root: Path):
     import api_client as ac  # noqa: E402
     import bus_protocol as bp  # noqa: E402
     return cs, crl, ac, bp
+
+
+def _import_app_server_client(install_root: Path):
+    """Late import of the app-server client (= ms-93 / e-2519, opt-in).
+
+    Kept behind a function so the default daemon doesn't take an
+    unconditional import dependency on the spike module.
+    """
+    plugin_scripts = str(install_root / "plugins" / "beacon" / "scripts")
+    if plugin_scripts not in sys.path:
+        sys.path.insert(0, plugin_scripts)
+    import beacon_codex_app_server_client as ac_mod  # noqa: E402
+    return ac_mod
 
 
 def _load_cloud_config(cwd: Path) -> dict:
@@ -195,7 +209,43 @@ def main() -> int:
     )
     parser.add_argument("--once", action="store_true",
                         help="Run a single iteration and exit (= for tests).")
+    parser.add_argument(
+        "--app-server", action="store_true",
+        help=(
+            "Opt-in: also dispatch each kept DM to a long-lived "
+            "`codex app-server --stdio` child (= ms-93 / e-2519 push receive). "
+            "Default off keeps the pull-on-prompt path identical to before."
+        ),
+    )
+    parser.add_argument(
+        "--armed", action="store_true",
+        help=(
+            "Opt-in: when `--app-server` is also on, send the Codex agent "
+            "reply back to the original DM sender via `beacon bus send "
+            "--in-reply-to` (= ms-93 / e-2519 AC 2 + AC 6 autonomous "
+            "response loop). Requires the user to have granted bus budget "
+            "first (= `beacon bus budget grant N`) — armed mode does not "
+            "auto-grant from inside the daemon (= preserves user intent). "
+            "Has no effect without --app-server."
+        ),
+    )
     args = parser.parse_args()
+    if not args.app_server:
+        # Env-var equivalent so the bridge CLI can flip the flag without
+        # threading argv through the lifecycle subprocess invocation.
+        args.app_server = os.environ.get("BEACON_CODEX_APP_SERVER", "").strip() in (
+            "1", "true", "yes", "on",
+        )
+    if not args.armed:
+        args.armed = os.environ.get("BEACON_CODEX_ARMED", "").strip() in (
+            "1", "true", "yes", "on",
+        )
+    if args.armed and not args.app_server:
+        sys.stderr.write(
+            "codex-receive-loop: --armed has no effect without --app-server "
+            "(= autonomous reply needs the app-server dispatch path); ignoring.\n"
+        )
+        args.armed = False
 
     install_root = Path(args.install_root or Path(__file__).resolve().parent.parent)
     cwd = Path(args.cwd or os.getcwd())
@@ -246,12 +296,128 @@ def main() -> int:
         flush=True,
     )
 
+    # App-server opt-in (= ms-93 / e-2519 SPEC §8-G option D MVP wiring).
+    # When ``--app-server`` is on we keep one ``codex app-server --stdio``
+    # child alive for the daemon's lifetime and forward each kept DM to
+    # it via ``BridgeAppServerClient.dispatch_dm``. The default pull-on-
+    # prompt path is untouched (= callback stays ``None``); only the
+    # autonomous push path is added. The armed-mode budget gate lives in
+    # a separate Skill (= e-2519 AC 6), so this wiring is intentionally
+    # naive about who is allowed to wake the bridge — production must
+    # combine it with the gate.
+    #
     # Codex 2026-06-26 blocker #2: cold-start ``since=""`` flooded the
     # inbox with weeks of broadcast traffic on the first poll. Pin the
     # in-memory watermark to "now" so the first poll only catches new
     # events; bus.mjs avoids this because it polls the per-recipient
     # queue (server-filtered to DMs), but our endpoint returns broader
     # history and the filter chain runs on our side.
+    app_server_client = None
+    if args.app_server:
+        try:
+            ac_mod = _import_app_server_client(install_root)
+            app_server_client = ac_mod.BridgeAppServerClient()
+            app_server_client.ensure_started(cwd=str(cwd))
+            print(
+                "codex-receive-loop: app-server child started "
+                f"(thread={app_server_client.thread_id})",
+                flush=True,
+            )
+        except Exception as exc:
+            # Don't tear down the daemon — log and fall back to pull-only.
+            print(
+                f"codex-receive-loop: app-server start failed ({exc}); "
+                "continuing with pull-on-prompt only.",
+                file=sys.stderr,
+                flush=True,
+            )
+            app_server_client = None
+
+    def _on_kept_event(evt):
+        """Dispatch a kept DM to the app-server child and log the result.
+
+        Best-effort: any failure is logged and swallowed so the
+        pull-on-prompt persistence (= already done by ``poll_inbox_once``
+        before this callback fires) remains the authoritative path.
+
+        When ``--armed`` is also on (= e-2519 AC 2 + AC 6), the agent
+        reply is sent back to the original sender via ``beacon bus send
+        --in-reply-to``. The user must have granted bus budget first;
+        budget-exhausted sends fail loudly in the daemon log so the user
+        can re-grant.
+        """
+        if app_server_client is None:
+            return
+        try:
+            rsp = app_server_client.dispatch_dm_and_wait(evt)
+            agent_text = ac_mod.agent_message_text_from_notifications(
+                rsp.get("_notifications") or []
+            )
+            event_id = str((evt or {}).get("event_id") or "")
+            preview = (agent_text or "").strip().replace("\n", " ")[:160]
+            print(
+                f"codex-receive-loop: app-server dispatched event={event_id} "
+                f"agent_text_preview={preview!r}",
+                flush=True,
+            )
+
+            if not args.armed:
+                return
+            reply_argv = crl.build_dm_reply_args(
+                event=evt,
+                agent_text=agent_text,
+                beacon_bin=os.environ.get("BEACON_BIN") or "beacon",
+            )
+            if reply_argv is None:
+                print(
+                    f"codex-receive-loop: armed reply skipped event={event_id} "
+                    "(= empty agent_text or missing event_id / sender_session_id)",
+                    flush=True,
+                )
+                return
+            reply_env = {
+                **os.environ,
+                # Pin the sender to this daemon's session so the reply is
+                # attributed to the Codex bridge, not whatever beacon CLI
+                # would mint on its own.
+                "BEACON_BUS_SENDER": session.session_id,
+            }
+            try:
+                result = subprocess.run(
+                    reply_argv,
+                    env=reply_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+            except Exception as exc:
+                print(
+                    f"codex-receive-loop: armed reply exception event={event_id}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return
+            if result.returncode == 0:
+                print(
+                    f"codex-receive-loop: armed reply sent event={event_id} "
+                    f"to={evt.get('sender_session_id')} (= in_reply_to)",
+                    flush=True,
+                )
+            else:
+                stderr_preview = (result.stderr or "").strip().replace("\n", " ")[:240]
+                print(
+                    f"codex-receive-loop: armed reply failed event={event_id} "
+                    f"rc={result.returncode} stderr={stderr_preview!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        except Exception as exc:
+            print(
+                f"codex-receive-loop: app-server dispatch failed: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+
     state = {
         "stop": False,
         "last_heartbeat_at": 0.0,
@@ -264,7 +430,12 @@ def main() -> int:
     signal.signal(signal.SIGINT, _on_signal)
     signal.signal(signal.SIGTERM, _on_signal)
 
-    heartbeat_secs = int(os.environ.get("BEACON_HEARTBEAT_SECS", "30") or "30")
+    # Default 5s matches Claude Code's bus.mjs BEACON_BUS_POLL_MS=5000 so the
+    # `--live --healthy` directory filter sees the Codex sid as alive on the
+    # same cadence (= ms-93 / e-2508 Codex dogfood FINDING #1: 30s heartbeat
+    # was below the healthy threshold and the daemon dropped from healthy
+    # while still running).
+    heartbeat_secs = int(os.environ.get("BEACON_HEARTBEAT_SECS", "5") or "5")
     poll_secs = int(os.environ.get("BEACON_POLL_SECS", "2") or "2")
 
     actor = {
@@ -299,6 +470,7 @@ def main() -> int:
                 api, project_id=project_id,
                 session_id=session.session_id,
                 since=state["since"], cwd=str(cwd),
+                on_kept_event=_on_kept_event if app_server_client else None,
             )
             state["since"] = latest
             if persisted:
@@ -318,6 +490,11 @@ def main() -> int:
             session_id=session.session_id, actor=actor,
             poll_interval_ms=poll_secs * 1000, shutdown=True,
         )
+        if app_server_client is not None:
+            try:
+                app_server_client.stop()
+            except Exception:
+                pass
         cs.close_codex_session(session_file, reason="signal")
         try:
             _pid_file(cwd).unlink()

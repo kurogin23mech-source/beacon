@@ -150,6 +150,7 @@ def poll_inbox_once(
     since: str,
     cwd: str = "",
     allowed_channels: tuple = bp.DEFAULT_ALLOWED_CHANNELS,
+    on_kept_event=None,
 ) -> tuple:
     """One poll iteration: fetch + run the protocol filter chain +
     persist surviving events + ack delivered.
@@ -162,6 +163,15 @@ def poll_inbox_once(
     decides "keep". That split is what e-2502 SPEC §2 calls "core +
     adapter": filtering belongs to bus protocol, persistence belongs to
     the Codex adapter.
+
+    ``on_kept_event`` (= ms-93 / e-2519 app-server wiring) is an
+    optional callable invoked once per event that passes the filter
+    chain AND was successfully persisted. Daemons running in
+    autonomous mode (= ``--app-server``) use this to also dispatch the
+    DM to a long-lived ``codex app-server --stdio`` child; the default
+    pull-on-prompt path leaves the callback as ``None`` and behaves
+    exactly as before. Callback exceptions are caught so a flaky
+    autonomous path cannot stall the pull path.
     """
     url = bp.poll_unread_path(project_id, session_id, since)
     try:
@@ -204,6 +214,13 @@ def poll_inbox_once(
         path = persist_inbox_event(evt, cwd=cwd)
         if path is not None:
             persisted += 1
+            if on_kept_event is not None:
+                try:
+                    on_kept_event(evt)
+                except Exception:
+                    # Autonomous-path failures must not stall pull-path
+                    # persistence. The caller's logger surfaces details.
+                    pass
         if created_at > latest_seen:
             latest_seen = created_at
     return (latest_seen, persisted)
@@ -283,9 +300,53 @@ def archive_inbox_event(
     return dest
 
 
+def build_dm_reply_args(
+    *,
+    event: dict,
+    agent_text: str,
+    beacon_bin: str = "beacon",
+) -> list[str] | None:
+    """Build ``beacon bus send`` argv for replying with ``agent_text``.
+
+    Returns the argv list ready for ``subprocess.run``, or ``None`` when
+    the reply must be skipped because there is nothing meaningful to send
+    or no one to address. The caller (= daemon) shells this out only
+    when the autonomous push path (= ms-93 / e-2519 AC 2) is armed.
+
+    Skip conditions (= silent no-op):
+    - ``agent_text`` is empty / whitespace-only (= Codex returned nothing
+      useful, sending an empty reply would be noise)
+    - the original event lacks ``event_id`` (= cannot thread the reply)
+    - the original event lacks ``sender_session_id`` (= no addressee)
+    """
+    text = (agent_text or "").strip()
+    if not text:
+        return None
+    event_id = str((event or {}).get("event_id") or "").strip()
+    sender_sid = str((event or {}).get("sender_session_id") or "").strip()
+    if not event_id or not sender_sid:
+        return None
+    payload = json.dumps({"text": text}, ensure_ascii=False)
+    return [
+        beacon_bin,
+        "bus",
+        "send",
+        "--channel",
+        "dm",
+        "--to",
+        sender_sid,
+        "--in-reply-to",
+        event_id,
+        "--payload",
+        payload,
+        "--json",
+    ]
+
+
 __all__ = [
     "ack_event",
     "archive_inbox_event",
+    "build_dm_reply_args",
     "heartbeat_to_server",
     "inbox_dir",
     "list_inbox_events",

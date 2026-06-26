@@ -16,12 +16,36 @@ Codex が beacon repo で何かを始めるときは、 まず `.agents/skills/b
 2. `verdict == hard_fail / no-candidate` なら user に修正方法を 1 行で出して停止
 3. `verdict == ok / soft_warn` なら以降の Beacon CLI 呼び出しで `env BEACON_BIN=<selected_bin> <selected_bin> ...` 形式を使う
 
-## 永続化 (= hook env への BEACON_BIN 注入) について
+## DM 受信を有効化する (= Beacon Codex plugin / e-2508 minimum viable)
 
-毎回 BEACON_BIN を手で設定するのが煩わしくなったら、 **Beacon Codex plugin** の land (= ms-93 phase 1、 別 task) を待ってください。 plugin は hook bundled で BEACON_BIN を自動注入する予定です。 phase 0 では `~/.codex/config.toml` / `~/.codex/hooks.json` を Skill が勝手に書き換えないようにしてあります (= 別 install / 別 repo に副作用を出さないため)。
+DM (= 別 session からの直接メッセージ) を Codex の prompt 冒頭に inject させるには、 `plugins/beacon/` 配下の Codex plugin を install します。 1 step (= 1 Skill 呼び出し) で hook 登録 + daemon 起動が完了します。
+
+```
+# Codex 起動後:
+$beacon-codex-bridge start
+
+# 確認:
+$beacon-codex-bridge status
+
+# 停止:
+$beacon-codex-bridge stop
+```
+
+裏で行われていること:
+
+1. `~/.codex/hooks.json` の `UserPromptSubmit` に Beacon の hook entry を冪等 merge (= 既に同 cwd の entry があれば no-op)
+2. `<cwd>/.beacon/codex/receive-loop.pid` を読んで daemon の running 状態を確認
+3. 未起動なら `scripts/codex-receive-loop.py` を nohup 起動 (= log は `<cwd>/.beacon/codex/receive-loop.log`)
+4. 既に running なら no-op (= collision 防止、 cwd-scoped lock)
+5. stale pidfile (= pid が dead) は自動 cleanup
+
+**`nohup python3 scripts/codex-receive-loop.py &` を別 terminal で打つ必要はありません**。 tmux ad-hoc launcher は dev / dogfood 専用扱いで、 product path は plugin Skill 経由です。
+
+plugin 自体の install (= `codex plugin add beacon@personal`) と marketplace entry の整備は別途 (= MVP では skill 直叩きが優先、 marketplace 整備は follow-up task)。
 
 ## 関連 task / SPEC
 
 - `ms-93` Codex 対応 — 全体 MS (= `beacon doc show <ms-93 SPEC doc>` 参照)
 - `e-2276` Codex 側 phase 0 wrapper (= BEACON_BIN 固定 + doctor PATH gate)
 - `e-2497` Codex 側 receive loop adapter (= 固定 session_id + heartbeat、 phase 1 本命)
+- `e-2508` Codex plugin lifecycle (= 本セクションの実装、 `plugins/beacon/`)
