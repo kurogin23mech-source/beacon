@@ -241,7 +241,13 @@ def cmd_uninstall_hook(cwd: Path) -> int:
     return 0
 
 
-def cmd_start(install_root: Path, cwd: Path, *, app_server: bool = False) -> int:
+def cmd_start(
+    install_root: Path,
+    cwd: Path,
+    *,
+    app_server: bool = False,
+    armed: bool = False,
+) -> int:
     pid = _read_pid(cwd)
     if pid:
         print(f"daemon: already running (pid={pid})")
@@ -281,12 +287,17 @@ def cmd_start(install_root: Path, cwd: Path, *, app_server: bool = False) -> int
     daemon_argv = ["/usr/bin/env", "python3", str(daemon_script), "--cwd", str(cwd)]
     if app_server:
         daemon_argv.append("--app-server")
+    if armed:
+        daemon_argv.append("--armed")
 
     daemon_env = {**os.environ, "BEACON_INSTALL_ROOT": str(install_root)}
     if app_server:
         # Env-var duplicate of the flag so a stale daemon argv (= old
         # supervisor) can't silently flip the opt-in off on restart.
         daemon_env["BEACON_CODEX_APP_SERVER"] = "1"
+    if armed:
+        # Same env-var safety for the autonomous reply opt-in.
+        daemon_env["BEACON_CODEX_ARMED"] = "1"
 
     # Detach so the daemon survives the bridge's exit.
     proc = subprocess.Popen(
@@ -352,7 +363,13 @@ def cmd_stop(cwd: Path) -> int:
     return 1
 
 
-def cmd_restart(install_root: Path, cwd: Path, *, app_server: bool = False) -> int:
+def cmd_restart(
+    install_root: Path,
+    cwd: Path,
+    *,
+    app_server: bool = False,
+    armed: bool = False,
+) -> int:
     """Stop the daemon, clean any leftover state, then start fresh.
 
     Does NOT gate `start` on `cmd_stop`'s exit code. Even when stop's polling
@@ -369,7 +386,7 @@ def cmd_restart(install_root: Path, cwd: Path, *, app_server: bool = False) -> i
     """
     cmd_stop(cwd)
     _clean_stale_pidfile(cwd)
-    return cmd_start(install_root, cwd, app_server=app_server)
+    return cmd_start(install_root, cwd, app_server=app_server, armed=armed)
 
 
 def cmd_status(install_root: Path, cwd: Path) -> int:
@@ -462,6 +479,17 @@ def main() -> int:
             "Only honoured by `start` / `restart`."
         ),
     )
+    parser.add_argument(
+        "--armed",
+        action="store_true",
+        help=(
+            "Opt-in (ms-93 / e-2519 AC 2/6): in addition to --app-server, "
+            "send the Codex agent reply back to the original DM sender. "
+            "User must `beacon bus budget grant N` first — armed mode does "
+            "NOT auto-grant from inside the daemon. Has no effect without "
+            "--app-server."
+        ),
+    )
     args = parser.parse_args()
 
     install_root = (
@@ -480,11 +508,19 @@ def main() -> int:
         return 1
 
     if args.subaction == "start":
-        return cmd_start(install_root, cwd, app_server=args.app_server)
+        return cmd_start(
+            install_root, cwd,
+            app_server=args.app_server,
+            armed=args.armed,
+        )
     if args.subaction == "stop":
         return cmd_stop(cwd)
     if args.subaction == "restart":
-        return cmd_restart(install_root, cwd, app_server=args.app_server)
+        return cmd_restart(
+            install_root, cwd,
+            app_server=args.app_server,
+            armed=args.armed,
+        )
     if args.subaction == "status":
         return cmd_status(install_root, cwd)
     if args.subaction == "install-hook":

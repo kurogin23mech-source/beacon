@@ -30,6 +30,7 @@ import argparse
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -216,6 +217,18 @@ def main() -> int:
             "Default off keeps the pull-on-prompt path identical to before."
         ),
     )
+    parser.add_argument(
+        "--armed", action="store_true",
+        help=(
+            "Opt-in: when `--app-server` is also on, send the Codex agent "
+            "reply back to the original DM sender via `beacon bus send "
+            "--in-reply-to` (= ms-93 / e-2519 AC 2 + AC 6 autonomous "
+            "response loop). Requires the user to have granted bus budget "
+            "first (= `beacon bus budget grant N`) — armed mode does not "
+            "auto-grant from inside the daemon (= preserves user intent). "
+            "Has no effect without --app-server."
+        ),
+    )
     args = parser.parse_args()
     if not args.app_server:
         # Env-var equivalent so the bridge CLI can flip the flag without
@@ -223,6 +236,16 @@ def main() -> int:
         args.app_server = os.environ.get("BEACON_CODEX_APP_SERVER", "").strip() in (
             "1", "true", "yes", "on",
         )
+    if not args.armed:
+        args.armed = os.environ.get("BEACON_CODEX_ARMED", "").strip() in (
+            "1", "true", "yes", "on",
+        )
+    if args.armed and not args.app_server:
+        sys.stderr.write(
+            "codex-receive-loop: --armed has no effect without --app-server "
+            "(= autonomous reply needs the app-server dispatch path); ignoring.\n"
+        )
+        args.armed = False
 
     install_root = Path(args.install_root or Path(__file__).resolve().parent.parent)
     cwd = Path(args.cwd or os.getcwd())
@@ -316,6 +339,12 @@ def main() -> int:
         Best-effort: any failure is logged and swallowed so the
         pull-on-prompt persistence (= already done by ``poll_inbox_once``
         before this callback fires) remains the authoritative path.
+
+        When ``--armed`` is also on (= e-2519 AC 2 + AC 6), the agent
+        reply is sent back to the original sender via ``beacon bus send
+        --in-reply-to``. The user must have granted bus budget first;
+        budget-exhausted sends fail loudly in the daemon log so the user
+        can re-grant.
         """
         if app_server_client is None:
             return
@@ -331,6 +360,57 @@ def main() -> int:
                 f"agent_text_preview={preview!r}",
                 flush=True,
             )
+
+            if not args.armed:
+                return
+            reply_argv = crl.build_dm_reply_args(
+                event=evt,
+                agent_text=agent_text,
+                beacon_bin=os.environ.get("BEACON_BIN") or "beacon",
+            )
+            if reply_argv is None:
+                print(
+                    f"codex-receive-loop: armed reply skipped event={event_id} "
+                    "(= empty agent_text or missing event_id / sender_session_id)",
+                    flush=True,
+                )
+                return
+            reply_env = {
+                **os.environ,
+                # Pin the sender to this daemon's session so the reply is
+                # attributed to the Codex bridge, not whatever beacon CLI
+                # would mint on its own.
+                "BEACON_BUS_SENDER": session.session_id,
+            }
+            try:
+                result = subprocess.run(
+                    reply_argv,
+                    env=reply_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+            except Exception as exc:
+                print(
+                    f"codex-receive-loop: armed reply exception event={event_id}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return
+            if result.returncode == 0:
+                print(
+                    f"codex-receive-loop: armed reply sent event={event_id} "
+                    f"to={evt.get('sender_session_id')} (= in_reply_to)",
+                    flush=True,
+                )
+            else:
+                stderr_preview = (result.stderr or "").strip().replace("\n", " ")[:240]
+                print(
+                    f"codex-receive-loop: armed reply failed event={event_id} "
+                    f"rc={result.returncode} stderr={stderr_preview!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
         except Exception as exc:
             print(
                 f"codex-receive-loop: app-server dispatch failed: {exc}",

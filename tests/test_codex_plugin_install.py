@@ -343,7 +343,7 @@ def test_restart_does_not_gate_on_stop_exit_code(tmp_path, monkeypatch):
         calls["clean"] += 1
         return False
 
-    def fake_start(install_root, cwd, *, app_server=False):
+    def fake_start(install_root, cwd, *, app_server=False, armed=False):
         calls["start"] += 1
         return 0
 
@@ -561,8 +561,9 @@ def test_cmd_restart_propagates_app_server_flag(monkeypatch, tmp_path):
     def fake_clean(cwd):
         return False
 
-    def fake_start(install_root, cwd, *, app_server=False):
+    def fake_start(install_root, cwd, *, app_server=False, armed=False):
         seen["app_server"] = app_server
+        seen["armed"] = armed
         return 0
 
     monkeypatch.setattr(bridge, "cmd_stop", fake_stop)
@@ -594,3 +595,148 @@ def test_argparse_app_server_flag_is_off_by_default(monkeypatch):
     assert ns.app_server is False
     ns2 = p.parse_args(["start", "--app-server"])
     assert ns2.app_server is True
+
+
+# ------------------------------------------------------------------ #
+# 8. bridge --armed forwarding (= ms-93 / e-2519 AC 2 + AC 6
+#    autonomous reply opt-in)
+# ------------------------------------------------------------------ #
+
+
+def test_cmd_start_without_armed_flag_omits_argv_and_env(monkeypatch, tmp_path):
+    bridge = _load_bridge_module()
+    _prep_fake_start(bridge, monkeypatch, tmp_path)
+    pid_returns = iter([0, 99999])
+    monkeypatch.setattr(bridge, "_read_pid", lambda cwd: next(pid_returns))
+    monkeypatch.setattr(bridge.subprocess, "Popen", _FakeProc)
+
+    rc = bridge.cmd_start(REPO_ROOT, tmp_path, app_server=True, armed=False)
+    assert rc == 0
+    assert "--armed" not in _FakeProc.last.argv, (
+        "default armed=False must not forward --armed to daemon argv"
+    )
+    assert "BEACON_CODEX_ARMED" not in _FakeProc.last.kwargs["env"], (
+        "default armed=False must not set BEACON_CODEX_ARMED in env"
+    )
+
+
+def test_cmd_start_with_armed_flag_adds_argv_and_env(monkeypatch, tmp_path):
+    bridge = _load_bridge_module()
+    _prep_fake_start(bridge, monkeypatch, tmp_path)
+    pid_returns = iter([0, 99999])
+    monkeypatch.setattr(bridge, "_read_pid", lambda cwd: next(pid_returns))
+    monkeypatch.setattr(bridge.subprocess, "Popen", _FakeProc)
+
+    rc = bridge.cmd_start(REPO_ROOT, tmp_path, app_server=True, armed=True)
+    assert rc == 0
+    assert "--armed" in _FakeProc.last.argv, (
+        "--armed must be forwarded to daemon argv when opt-in"
+    )
+    assert _FakeProc.last.kwargs["env"].get("BEACON_CODEX_ARMED") == "1", (
+        "BEACON_CODEX_ARMED must be set so a stale daemon argv cannot "
+        "silently disable autonomous reply on restart"
+    )
+
+
+def test_cmd_restart_propagates_armed_flag(monkeypatch, tmp_path):
+    bridge = _load_bridge_module()
+    seen = {}
+
+    def fake_start(install_root, cwd, *, app_server=False, armed=False):
+        seen["app_server"] = app_server
+        seen["armed"] = armed
+        return 0
+
+    monkeypatch.setattr(bridge, "cmd_stop", lambda cwd: 0)
+    monkeypatch.setattr(bridge, "_clean_stale_pidfile", lambda cwd: False)
+    monkeypatch.setattr(bridge, "cmd_start", fake_start)
+
+    rc = bridge.cmd_restart(REPO_ROOT, tmp_path, app_server=True, armed=True)
+    assert rc == 0
+    assert seen.get("armed") is True, (
+        "restart must propagate --armed through to start"
+    )
+
+
+# ------------------------------------------------------------------ #
+# 9. build_dm_reply_args helper (= ms-93 / e-2519 AC 2 reply builder)
+# ------------------------------------------------------------------ #
+
+
+def _load_receive_loop_module():
+    """Load lib/codex_receive_loop.py for testing build_dm_reply_args."""
+    import importlib.util as _u
+    path = REPO_ROOT / "lib" / "codex_receive_loop.py"
+    spec = _u.spec_from_file_location("codex_receive_loop_for_test", path)
+    m = _u.module_from_spec(spec)
+    # bus_protocol is a sibling module; make it importable from lib/.
+    if str(REPO_ROOT / "lib") not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT / "lib"))
+    sys.modules[spec.name] = m
+    spec.loader.exec_module(m)
+    return m
+
+
+def test_build_dm_reply_args_returns_argv_for_valid_input():
+    crl = _load_receive_loop_module()
+    argv = crl.build_dm_reply_args(
+        event={"event_id": "evt-1", "sender_session_id": "sv-other-abc"},
+        agent_text="hello back",
+        beacon_bin="/abs/beacon",
+    )
+    assert argv is not None
+    assert argv[:3] == ["/abs/beacon", "bus", "send"]
+    assert "--channel" in argv and "dm" in argv
+    assert "--to" in argv and "sv-other-abc" in argv
+    assert "--in-reply-to" in argv and "evt-1" in argv
+    # payload index follows "--payload"
+    payload_idx = argv.index("--payload") + 1
+    assert "hello back" in argv[payload_idx]
+    assert argv[-1] == "--json"
+
+
+def test_build_dm_reply_args_skips_when_agent_text_empty():
+    crl = _load_receive_loop_module()
+    for empty in ("", "   ", "\n\n", None):
+        argv = crl.build_dm_reply_args(
+            event={"event_id": "evt-1", "sender_session_id": "sv-other"},
+            agent_text=empty or "",
+            beacon_bin="beacon",
+        )
+        assert argv is None, (
+            f"empty agent_text {empty!r} must skip the reply (= no spam)"
+        )
+
+
+def test_build_dm_reply_args_skips_when_event_id_or_sender_missing():
+    """Missing event_id breaks the conversation thread; missing
+    sender_session_id leaves no addressee. Either makes the reply
+    impossible to thread back."""
+    crl = _load_receive_loop_module()
+    for evt in (
+        {"sender_session_id": "sv-other"},  # no event_id
+        {"event_id": "evt-1"},  # no sender_session_id
+        {"event_id": "", "sender_session_id": "sv-other"},  # empty event_id
+        {"event_id": "evt-1", "sender_session_id": ""},  # empty sender
+        {},  # both missing
+    ):
+        argv = crl.build_dm_reply_args(
+            event=evt, agent_text="non-empty", beacon_bin="beacon",
+        )
+        assert argv is None, (
+            f"missing event_id or sender_session_id must skip the reply ({evt!r})"
+        )
+
+
+def test_build_dm_reply_args_payload_is_valid_json():
+    """The --payload value must be valid JSON the bus accepts."""
+    crl = _load_receive_loop_module()
+    argv = crl.build_dm_reply_args(
+        event={"event_id": "evt-1", "sender_session_id": "sv-other"},
+        agent_text='hello with "quotes" and \nnewline',
+        beacon_bin="beacon",
+    )
+    assert argv is not None
+    payload_idx = argv.index("--payload") + 1
+    parsed = json.loads(argv[payload_idx])
+    assert parsed["text"] == 'hello with "quotes" and \nnewline'
