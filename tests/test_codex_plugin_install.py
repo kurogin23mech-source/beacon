@@ -343,7 +343,7 @@ def test_restart_does_not_gate_on_stop_exit_code(tmp_path, monkeypatch):
         calls["clean"] += 1
         return False
 
-    def fake_start(install_root, cwd, *, app_server=False, armed=False):
+    def fake_start(install_root, cwd, **kwargs):
         calls["start"] += 1
         return 0
 
@@ -464,6 +464,157 @@ def test_app_server_drain_until_idle_reads_agent_notifications(monkeypatch):
     assert client.agent_message_text_from_notifications(notifications) == "hello"
 
 
+def test_app_server_process_env_blocks_budget_self_grant(monkeypatch):
+    client = _load_app_server_client_module()
+    captured = {}
+
+    class FakeProc:
+        stdin = None
+        stdout = None
+        stderr = None
+
+        def __init__(self, argv, **kwargs):
+            captured["argv"] = argv
+            captured["env"] = kwargs.get("env") or {}
+
+    monkeypatch.setattr(client.subprocess, "Popen", FakeProc)
+    client.start_app_server(codex_bin="/tmp/codex")
+    assert captured["argv"] == ["/tmp/codex", "app-server", "--stdio"]
+    assert captured["env"]["BEACON_OPERATION_AUTO_EXECUTE"] == "1"
+    assert captured["env"]["BEACON_CODEX_APP_SERVER_BRIDGE"] == "1"
+
+
+def test_app_server_proxy_uses_daemon_proxy_command(monkeypatch):
+    client = _load_app_server_client_module()
+    captured = {}
+
+    class FakeProc:
+        stdin = None
+        stdout = None
+        stderr = None
+
+        def __init__(self, argv, **kwargs):
+            captured["argv"] = argv
+
+    monkeypatch.setattr(client.subprocess, "Popen", FakeProc)
+    client.start_app_server(
+        codex_bin="/tmp/codex",
+        proxy=True,
+        sock="/tmp/codex.sock",
+    )
+    assert captured["argv"] == [
+        "/tmp/codex", "app-server", "proxy", "--sock", "/tmp/codex.sock"
+    ]
+
+
+def test_app_server_remote_url_uses_websocket(monkeypatch):
+    client = _load_app_server_client_module()
+    captured = {}
+
+    class FakeWs:
+        def send(self, _msg):
+            pass
+
+        def recv(self, timeout=None):
+            return "{}"
+
+        def close(self):
+            captured["closed"] = True
+
+    def fake_connect(url):
+        captured["url"] = url
+        return FakeWs()
+
+    import types
+    fake_client_mod = types.SimpleNamespace(connect=fake_connect)
+    fake_sync_mod = types.SimpleNamespace(client=fake_client_mod)
+    fake_websockets_mod = types.SimpleNamespace(sync=fake_sync_mod)
+    monkeypatch.setitem(sys.modules, "websockets", fake_websockets_mod)
+    monkeypatch.setitem(sys.modules, "websockets.sync", fake_sync_mod)
+    monkeypatch.setitem(sys.modules, "websockets.sync.client", fake_client_mod)
+
+    handle = client.start_app_server(remote_url="ws://127.0.0.1:39988")
+    assert captured["url"] == "ws://127.0.0.1:39988"
+    assert handle.ws is not None
+    handle.stop()
+    assert captured["closed"] is True
+
+
+def test_app_server_thread_resume_request(monkeypatch):
+    client = _load_app_server_client_module()
+    captured = {}
+
+    def fake_request(_handle, method, params=None):
+        captured["method"] = method
+        captured["params"] = params
+        return {"result": {"thread": {"id": params["threadId"]}}}
+
+    monkeypatch.setattr(client, "request", fake_request)
+    rsp = client.thread_resume(object(), thread_id="thr-existing", cwd="/tmp/p")
+    assert captured == {
+        "method": "thread/resume",
+        "params": {"threadId": "thr-existing", "cwd": "/tmp/p"},
+    }
+    assert client.extract_thread_id(rsp) == "thr-existing"
+
+
+def test_bridge_app_server_thread_uses_response_only_instructions(monkeypatch):
+    client = _load_app_server_client_module()
+    captured = {}
+
+    monkeypatch.setattr(client, "start_app_server", lambda **_kwargs: object())
+    monkeypatch.setattr(client, "initialize", lambda _handle: {"result": {}})
+
+    def fake_thread_start(_handle, **kwargs):
+        captured.update(kwargs)
+        return {"result": {"thread": {"id": "thr-1"}}}
+
+    monkeypatch.setattr(client, "thread_start", fake_thread_start)
+    bridge = client.BridgeAppServerClient()
+    bridge.ensure_started(cwd="/tmp/project")
+    assert bridge.thread_id == "thr-1"
+    assert captured["cwd"] == "/tmp/project"
+    assert "Do not run shell commands" in captured["base_instructions"]
+    assert "parent bridge daemon is responsible for sending" in captured[
+        "base_instructions"
+    ]
+
+
+def test_bridge_app_server_can_resume_existing_remote_thread(monkeypatch):
+    client = _load_app_server_client_module()
+    captured = {}
+
+    def fake_start_app_server(**kwargs):
+        captured["start_kwargs"] = kwargs
+        return object()
+
+    def fake_thread_resume(_handle, **kwargs):
+        captured["resume_kwargs"] = kwargs
+        return {"result": {"thread": {"id": kwargs["thread_id"]}}}
+
+    monkeypatch.setattr(client, "start_app_server", fake_start_app_server)
+    monkeypatch.setattr(client, "initialize", lambda _handle: {"result": {}})
+    monkeypatch.setattr(client, "thread_resume", fake_thread_resume)
+
+    bridge = client.BridgeAppServerClient(
+        target_thread_id="thr-existing",
+        use_proxy=True,
+        proxy_sock="/tmp/codex.sock",
+        remote_url="ws://127.0.0.1:39988",
+    )
+    bridge.ensure_started(cwd="/tmp/project")
+    assert bridge.thread_id == "thr-existing"
+    assert captured["start_kwargs"] == {
+        "proxy": True,
+        "sock": "/tmp/codex.sock",
+        "remote_url": "ws://127.0.0.1:39988",
+    }
+    assert captured["resume_kwargs"] == {
+        "thread_id": "thr-existing",
+        "cwd": "/tmp/project",
+    }
+
+
 # ------------------------------------------------------------------ #
 # 7. bridge --app-server forwarding (= ms-93 / e-2519 MVP wiring)
 # ------------------------------------------------------------------ #
@@ -551,6 +702,37 @@ def test_cmd_start_with_app_server_flag_adds_argv_and_env(monkeypatch, tmp_path)
     )
 
 
+def test_cmd_start_with_remote_thread_adds_proxy_args_and_env(monkeypatch, tmp_path):
+    bridge = _load_bridge_module()
+    _prep_fake_start(bridge, monkeypatch, tmp_path)
+    pid_returns = iter([0, 99999])
+    monkeypatch.setattr(bridge, "_read_pid", lambda cwd: next(pid_returns))
+    monkeypatch.setattr(bridge.subprocess, "Popen", _FakeProc)
+
+    rc = bridge.cmd_start(
+        REPO_ROOT,
+        tmp_path,
+        app_server=True,
+        codex_thread_id="thr-existing",
+        app_server_proxy=True,
+        app_server_sock="/tmp/codex.sock",
+        app_server_url="ws://127.0.0.1:39988",
+    )
+    assert rc == 0
+    assert "--codex-thread-id" in _FakeProc.last.argv
+    assert "thr-existing" in _FakeProc.last.argv
+    assert "--app-server-proxy" in _FakeProc.last.argv
+    assert "--app-server-sock" in _FakeProc.last.argv
+    assert "/tmp/codex.sock" in _FakeProc.last.argv
+    assert "--app-server-url" in _FakeProc.last.argv
+    assert "ws://127.0.0.1:39988" in _FakeProc.last.argv
+    env = _FakeProc.last.kwargs["env"]
+    assert env["BEACON_CODEX_THREAD_ID"] == "thr-existing"
+    assert env["BEACON_CODEX_APP_SERVER_PROXY"] == "1"
+    assert env["BEACON_CODEX_APP_SERVER_SOCK"] == "/tmp/codex.sock"
+    assert env["BEACON_CODEX_APP_SERVER_URL"] == "ws://127.0.0.1:39988"
+
+
 def test_cmd_restart_propagates_app_server_flag(monkeypatch, tmp_path):
     bridge = _load_bridge_module()
     seen = {}
@@ -561,9 +743,8 @@ def test_cmd_restart_propagates_app_server_flag(monkeypatch, tmp_path):
     def fake_clean(cwd):
         return False
 
-    def fake_start(install_root, cwd, *, app_server=False, armed=False):
-        seen["app_server"] = app_server
-        seen["armed"] = armed
+    def fake_start(install_root, cwd, **kwargs):
+        seen.update(kwargs)
         return 0
 
     monkeypatch.setattr(bridge, "cmd_stop", fake_stop)
@@ -642,9 +823,8 @@ def test_cmd_restart_propagates_armed_flag(monkeypatch, tmp_path):
     bridge = _load_bridge_module()
     seen = {}
 
-    def fake_start(install_root, cwd, *, app_server=False, armed=False):
-        seen["app_server"] = app_server
-        seen["armed"] = armed
+    def fake_start(install_root, cwd, **kwargs):
+        seen.update(kwargs)
         return 0
 
     monkeypatch.setattr(bridge, "cmd_stop", lambda cwd: 0)

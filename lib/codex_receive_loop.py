@@ -151,6 +151,7 @@ def poll_inbox_once(
     cwd: str = "",
     allowed_channels: tuple = bp.DEFAULT_ALLOWED_CHANNELS,
     on_kept_event=None,
+    persist_kept: bool = True,
 ) -> tuple:
     """One poll iteration: fetch + run the protocol filter chain +
     persist surviving events + ack delivered.
@@ -166,12 +167,12 @@ def poll_inbox_once(
 
     ``on_kept_event`` (= ms-93 / e-2519 app-server wiring) is an
     optional callable invoked once per event that passes the filter
-    chain AND was successfully persisted. Daemons running in
-    autonomous mode (= ``--app-server``) use this to also dispatch the
-    DM to a long-lived ``codex app-server --stdio`` child; the default
-    pull-on-prompt path leaves the callback as ``None`` and behaves
-    exactly as before. Callback exceptions are caught so a flaky
-    autonomous path cannot stall the pull path.
+    chain. By default, the event is first persisted for the
+    pull-on-prompt hook. App-server daemons can pass
+    ``persist_kept=False`` so the hook cannot race the autonomous
+    path and archive/read the same DM before the daemon replies.
+    Callback exceptions are caught so a flaky autonomous path cannot
+    stall the poll loop.
     """
     url = bp.poll_unread_path(project_id, session_id, since)
     try:
@@ -210,17 +211,23 @@ def poll_inbox_once(
         )
         if verdict != bp.FILTER_KEEP:
             continue
-        # Persist for the hook to read on the next user prompt.
-        path = persist_inbox_event(evt, cwd=cwd)
-        if path is not None:
-            persisted += 1
-            if on_kept_event is not None:
-                try:
-                    on_kept_event(evt)
-                except Exception:
-                    # Autonomous-path failures must not stall pull-path
-                    # persistence. The caller's logger surfaces details.
-                    pass
+        if persist_kept:
+            # Persist for the hook to read on the next user prompt.
+            path = persist_inbox_event(evt, cwd=cwd)
+            if path is not None:
+                persisted += 1
+                if on_kept_event is not None:
+                    try:
+                        on_kept_event(evt)
+                    except Exception:
+                        # Autonomous-path failures must not stall pull-path
+                        # persistence. The caller's logger surfaces details.
+                        pass
+        elif on_kept_event is not None:
+            try:
+                on_kept_event(evt)
+            except Exception:
+                pass
         if created_at > latest_seen:
             latest_seen = created_at
     return (latest_seen, persisted)

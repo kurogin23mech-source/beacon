@@ -247,6 +247,10 @@ def cmd_start(
     *,
     app_server: bool = False,
     armed: bool = False,
+    codex_thread_id: str = "",
+    app_server_proxy: bool = False,
+    app_server_sock: str = "",
+    app_server_url: str = "",
 ) -> int:
     pid = _read_pid(cwd)
     if pid:
@@ -289,6 +293,14 @@ def cmd_start(
         daemon_argv.append("--app-server")
     if armed:
         daemon_argv.append("--armed")
+    if codex_thread_id:
+        daemon_argv.extend(["--codex-thread-id", codex_thread_id])
+    if app_server_proxy:
+        daemon_argv.append("--app-server-proxy")
+    if app_server_sock:
+        daemon_argv.extend(["--app-server-sock", app_server_sock])
+    if app_server_url:
+        daemon_argv.extend(["--app-server-url", app_server_url])
 
     daemon_env = {**os.environ, "BEACON_INSTALL_ROOT": str(install_root)}
     if app_server:
@@ -298,6 +310,14 @@ def cmd_start(
     if armed:
         # Same env-var safety for the autonomous reply opt-in.
         daemon_env["BEACON_CODEX_ARMED"] = "1"
+    if codex_thread_id:
+        daemon_env["BEACON_CODEX_THREAD_ID"] = codex_thread_id
+    if app_server_proxy:
+        daemon_env["BEACON_CODEX_APP_SERVER_PROXY"] = "1"
+    if app_server_sock:
+        daemon_env["BEACON_CODEX_APP_SERVER_SOCK"] = app_server_sock
+    if app_server_url:
+        daemon_env["BEACON_CODEX_APP_SERVER_URL"] = app_server_url
 
     # Detach so the daemon survives the bridge's exit.
     proc = subprocess.Popen(
@@ -369,6 +389,10 @@ def cmd_restart(
     *,
     app_server: bool = False,
     armed: bool = False,
+    codex_thread_id: str = "",
+    app_server_proxy: bool = False,
+    app_server_sock: str = "",
+    app_server_url: str = "",
 ) -> int:
     """Stop the daemon, clean any leftover state, then start fresh.
 
@@ -386,7 +410,15 @@ def cmd_restart(
     """
     cmd_stop(cwd)
     _clean_stale_pidfile(cwd)
-    return cmd_start(install_root, cwd, app_server=app_server, armed=armed)
+    return cmd_start(
+        install_root, cwd,
+        app_server=app_server,
+        armed=armed,
+        codex_thread_id=codex_thread_id,
+        app_server_proxy=app_server_proxy,
+        app_server_sock=app_server_sock,
+        app_server_url=app_server_url,
+    )
 
 
 def cmd_status(install_root: Path, cwd: Path) -> int:
@@ -420,7 +452,14 @@ def cmd_status(install_root: Path, cwd: Path) -> int:
             sid = ptr.get("session_id", "?")
             pid_in_ptr = ptr.get("project_id", "?")
             written = ptr.get("written_at", "?")
-            print(f"session: {sid} project={pid_in_ptr} written_at={written}")
+            codex_thread = ptr.get("codex_thread_id") or "-"
+            proxy = ptr.get("app_server_proxy")
+            url = ptr.get("app_server_url") or "-"
+            print(
+                f"session: {sid} project={pid_in_ptr} written_at={written} "
+                f"codex_thread={codex_thread} app_server_proxy={proxy} "
+                f"app_server_url={url}"
+            )
         except Exception as exc:
             print(f"session: <unreadable: {exc}>")
     else:
@@ -490,6 +529,37 @@ def main() -> int:
             "--app-server."
         ),
     )
+    parser.add_argument(
+        "--codex-thread-id",
+        default="",
+        help=(
+            "Remote Codex UX opt-in: with --app-server, deliver DMs as turns "
+            "on this existing app-server thread instead of a response-worker "
+            "thread. Use with --app-server-proxy."
+        ),
+    )
+    parser.add_argument(
+        "--app-server-proxy",
+        action="store_true",
+        help=(
+            "Use `codex app-server proxy` so the bridge connects to the "
+            "running app-server daemon shared by a remote Codex TUI."
+        ),
+    )
+    parser.add_argument(
+        "--app-server-sock",
+        default="",
+        help="Optional app-server daemon Unix socket for --app-server-proxy.",
+    )
+    parser.add_argument(
+        "--app-server-url",
+        default="",
+        help=(
+            "Already-running Codex app-server endpoint, e.g. "
+            "ws://127.0.0.1:39988. Use this with a remote Codex TUI launched "
+            "against the same endpoint."
+        ),
+    )
     args = parser.parse_args()
 
     install_root = (
@@ -512,6 +582,10 @@ def main() -> int:
             install_root, cwd,
             app_server=args.app_server,
             armed=args.armed,
+            codex_thread_id=args.codex_thread_id,
+            app_server_proxy=args.app_server_proxy,
+            app_server_sock=args.app_server_sock,
+            app_server_url=args.app_server_url,
         )
     if args.subaction == "stop":
         return cmd_stop(cwd)
@@ -520,6 +594,10 @@ def main() -> int:
             install_root, cwd,
             app_server=args.app_server,
             armed=args.armed,
+            codex_thread_id=args.codex_thread_id,
+            app_server_proxy=args.app_server_proxy,
+            app_server_sock=args.app_server_sock,
+            app_server_url=args.app_server_url,
         )
     if args.subaction == "status":
         return cmd_status(install_root, cwd)

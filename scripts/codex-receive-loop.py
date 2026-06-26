@@ -154,7 +154,9 @@ def _write_pid_file(cwd: Path) -> None:
 
 
 def _write_session_pointer(cwd: Path, *, session_id: str, project_id: str,
-                            beacon_bin: str) -> None:
+                            beacon_bin: str, codex_thread_id: str = "",
+                            app_server_proxy: bool = False,
+                            app_server_url: str = "") -> None:
     """Publish the active session pointer for the hook to read."""
     path = _session_pointer_file(cwd)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -162,6 +164,9 @@ def _write_session_pointer(cwd: Path, *, session_id: str, project_id: str,
         "session_id": session_id,
         "project_id": project_id,
         "beacon_bin": beacon_bin,
+        "codex_thread_id": codex_thread_id,
+        "app_server_proxy": app_server_proxy,
+        "app_server_url": app_server_url,
         "written_at": _now_iso_for_pointer(),
     }
     with path.open("w", encoding="utf-8") as f:
@@ -229,6 +234,42 @@ def main() -> int:
             "Has no effect without --app-server."
         ),
     )
+    parser.add_argument(
+        "--codex-thread-id",
+        default="",
+        help=(
+            "Opt-in remote UX: with --app-server, resume this existing Codex "
+            "app-server thread and deliver DMs as new turns on it instead of "
+            "creating a response-worker thread. Env equivalent: "
+            "BEACON_CODEX_THREAD_ID."
+        ),
+    )
+    parser.add_argument(
+        "--app-server-proxy",
+        action="store_true",
+        help=(
+            "Use `codex app-server proxy` to connect to a running app-server "
+            "daemon instead of spawning an ephemeral `--stdio` server. This "
+            "is required when targeting a remote Codex TUI thread."
+        ),
+    )
+    parser.add_argument(
+        "--app-server-sock",
+        default="",
+        help=(
+            "Optional Unix socket path for `codex app-server proxy --sock`. "
+            "Env equivalent: BEACON_CODEX_APP_SERVER_SOCK."
+        ),
+    )
+    parser.add_argument(
+        "--app-server-url",
+        default="",
+        help=(
+            "Connect to an already-running Codex app-server endpoint, for "
+            "example ws://127.0.0.1:39988. Env equivalent: "
+            "BEACON_CODEX_APP_SERVER_URL."
+        ),
+    )
     args = parser.parse_args()
     if not args.app_server:
         # Env-var equivalent so the bridge CLI can flip the flag without
@@ -246,6 +287,33 @@ def main() -> int:
             "(= autonomous reply needs the app-server dispatch path); ignoring.\n"
         )
         args.armed = False
+    if not args.codex_thread_id:
+        args.codex_thread_id = os.environ.get("BEACON_CODEX_THREAD_ID", "").strip()
+    if not args.app_server_proxy:
+        args.app_server_proxy = os.environ.get(
+            "BEACON_CODEX_APP_SERVER_PROXY", ""
+        ).strip() in ("1", "true", "yes", "on")
+    if not args.app_server_sock:
+        args.app_server_sock = os.environ.get(
+            "BEACON_CODEX_APP_SERVER_SOCK", ""
+        ).strip()
+    if not args.app_server_url:
+        args.app_server_url = os.environ.get(
+            "BEACON_CODEX_APP_SERVER_URL", ""
+        ).strip()
+    if args.codex_thread_id and not args.app_server:
+        sys.stderr.write(
+            "codex-receive-loop: --codex-thread-id has no effect without "
+            "--app-server; ignoring.\n"
+        )
+        args.codex_thread_id = ""
+    if args.codex_thread_id and not (args.app_server_proxy or args.app_server_url):
+        sys.stderr.write(
+            "codex-receive-loop: --codex-thread-id should be used with "
+            "--app-server-url or --app-server-proxy so the bridge reaches "
+            "the same app-server as the remote TUI; falling back to a local "
+            "app-server process will not wake the visible TUI.\n"
+        )
 
     install_root = Path(args.install_root or Path(__file__).resolve().parent.parent)
     cwd = Path(args.cwd or os.getcwd())
@@ -288,6 +356,9 @@ def main() -> int:
         session_id=session.session_id,
         project_id=project_id,
         beacon_bin=os.environ.get("BEACON_BIN", ""),
+        codex_thread_id=args.codex_thread_id,
+        app_server_proxy=args.app_server_proxy,
+        app_server_url=args.app_server_url,
     )
 
     print(
@@ -316,11 +387,23 @@ def main() -> int:
     if args.app_server:
         try:
             ac_mod = _import_app_server_client(install_root)
-            app_server_client = ac_mod.BridgeAppServerClient()
+            app_server_client = ac_mod.BridgeAppServerClient(
+                target_thread_id=args.codex_thread_id,
+                use_proxy=args.app_server_proxy,
+                proxy_sock=args.app_server_sock,
+                remote_url=args.app_server_url,
+            )
             app_server_client.ensure_started(cwd=str(cwd))
+            mode = "remote-thread" if args.codex_thread_id else "worker-thread"
+            transport = (
+                "url" if args.app_server_url
+                else "proxy" if args.app_server_proxy
+                else "stdio"
+            )
             print(
                 "codex-receive-loop: app-server child started "
-                f"(thread={app_server_client.thread_id})",
+                f"(thread={app_server_client.thread_id} mode={mode} "
+                f"transport={transport})",
                 flush=True,
             )
         except Exception as exc:
@@ -359,6 +442,13 @@ def main() -> int:
                 f"codex-receive-loop: app-server dispatched event={event_id} "
                 f"agent_text_preview={preview!r}",
                 flush=True,
+            )
+            crl.ack_event(
+                api,
+                project_id=project_id,
+                event_id=event_id,
+                stage="opened",
+                recipient_session_id=session.session_id,
             )
 
             if not args.armed:
@@ -471,6 +561,7 @@ def main() -> int:
                 session_id=session.session_id,
                 since=state["since"], cwd=str(cwd),
                 on_kept_event=_on_kept_event if app_server_client else None,
+                persist_kept=app_server_client is None,
             )
             state["since"] = latest
             if persisted:
