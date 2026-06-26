@@ -304,3 +304,59 @@ def test_install_root_resolution_script_relative(monkeypatch):
     # Script lives at plugins/beacon/scripts/beacon-codex-bridge; two more
     # parents up should be the repo root.
     assert bridge._install_root() == REPO_ROOT
+
+
+# ------------------------------------------------------------------ #
+# 5. restart resilience (= ms-93 / e-2508 Codex re-dogfood FINDING #4)
+# ------------------------------------------------------------------ #
+
+
+def test_restart_does_not_gate_on_stop_exit_code(tmp_path, monkeypatch):
+    """`restart` must call `start` even when `stop` reports non-zero.
+
+    The previous implementation bailed early on `cmd_stop` exit 1 (= when
+    the daemon was slower than the polling window). Codex re-dogfood found
+    `restart` silently failing while `start` worked. The fix decouples the
+    two: `restart = stop + clean stale + start` regardless of stop's rc.
+    """
+    bridge = _load_bridge_module()
+    calls = {"stop": 0, "start": 0, "clean": 0}
+
+    def fake_stop(cwd):
+        calls["stop"] += 1
+        return 1  # simulate the "pidfile still present" timeout
+
+    def fake_clean(cwd):
+        calls["clean"] += 1
+        return False
+
+    def fake_start(install_root, cwd):
+        calls["start"] += 1
+        return 0
+
+    monkeypatch.setattr(bridge, "cmd_stop", fake_stop)
+    monkeypatch.setattr(bridge, "_clean_stale_pidfile", fake_clean)
+    monkeypatch.setattr(bridge, "cmd_start", fake_start)
+
+    rc = bridge.cmd_restart(REPO_ROOT, tmp_path)
+    assert rc == 0
+    assert calls["stop"] == 1
+    assert calls["clean"] == 1
+    assert calls["start"] == 1, "restart must reach start even when stop returned non-zero"
+
+
+def test_stop_wait_window_is_at_least_5_seconds(tmp_path):
+    """Sanity check that the wait window allows for slow network shutdown.
+
+    The bug Codex hit: graceful shutdown sends a final heartbeat to the
+    server (= network call) before the daemon unlinks its pidfile. Window
+    < 5s could time out on slow networks.
+    """
+    bridge = _load_bridge_module()
+    import inspect
+    src = inspect.getsource(bridge.cmd_stop)
+    # Look for "range(100)" or higher — 100*0.1s = 10s
+    assert "range(100)" in src, (
+        "cmd_stop polling window must be >= 100 iterations (= 10s); "
+        f"FINDING #4 needs the wider window. Source:\n{src}"
+    )

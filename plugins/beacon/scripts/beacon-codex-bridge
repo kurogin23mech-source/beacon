@@ -324,14 +324,18 @@ def cmd_stop(cwd: Path) -> int:
         print(f"daemon: cannot signal pid={pid} (permission denied)", file=sys.stderr)
         return 1
     # Wait for the daemon's graceful close (heartbeat shutdown + pidfile unlink).
-    for _ in range(30):
+    # 10s window: the shutdown path sends a final heartbeat to the server with
+    # shutdown=True (= network call) before unlinking the pidfile. 3s was
+    # sometimes too tight on slower networks, which made `restart` bail
+    # before `start` (ms-93 / e-2508 Codex re-dogfood FINDING #4, 2026-06-26).
+    for _ in range(100):
         time.sleep(0.1)
         if _read_pid(cwd) == 0:
             print(f"daemon: stopped (pid={pid})")
             return 0
-    # Daemon didn't exit in 3s; report but don't escalate to SIGKILL automatically.
+    # Daemon didn't exit in 10s; report but don't escalate to SIGKILL automatically.
     print(
-        f"daemon: SIGTERM sent to pid={pid} but pidfile still present. "
+        f"daemon: SIGTERM sent to pid={pid} but pidfile still present after 10s. "
         "Re-run `stop` or inspect the daemon manually.",
         file=sys.stderr,
     )
@@ -339,9 +343,22 @@ def cmd_stop(cwd: Path) -> int:
 
 
 def cmd_restart(install_root: Path, cwd: Path) -> int:
-    rc = cmd_stop(cwd)
-    if rc != 0:
-        return rc
+    """Stop the daemon, clean any leftover state, then start fresh.
+
+    Does NOT gate `start` on `cmd_stop`'s exit code. Even when stop's polling
+    window times out (= pidfile cleanup didn't catch up), the daemon may
+    have actually died — in that case `_clean_stale_pidfile` below removes
+    the stale entry and `cmd_start` can proceed. This was found via
+    ms-93 / e-2508 Codex re-dogfood FINDING #4 (2026-06-26): the previous
+    `if rc != 0: return rc` gate made `restart` silently bail when the
+    daemon had stopped but the pidfile lingered.
+
+    If the daemon is genuinely still alive after `cmd_stop` returns,
+    `cmd_start` will detect the live pidfile and no-op (= matching the
+    semantics of `start` on a running daemon).
+    """
+    cmd_stop(cwd)
+    _clean_stale_pidfile(cwd)
     return cmd_start(install_root, cwd)
 
 
