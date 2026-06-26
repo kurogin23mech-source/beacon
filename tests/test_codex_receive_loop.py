@@ -298,6 +298,26 @@ class TestPollInboxOnce:
         assert (tmp_path / ".beacon" / "codex" / "inbox" / "evt-a.json").is_file()
         assert (tmp_path / ".beacon" / "codex" / "inbox" / "evt-b.json").is_file()
 
+    def test_app_server_mode_can_skip_hook_inbox_persistence(self, tmp_path):
+        """App-server push mode must not race UserPromptSubmit hook archiving.
+
+        When ``persist_kept=False`` the kept event still reaches the callback,
+        but no top-level inbox file is created for the hook to read/archive.
+        """
+        api = _FakeApi()
+        api.get_returns = [[self._event(event_id="evt-push")]]
+        seen = []
+        latest, n = crl.poll_inbox_once(
+            api, project_id="proj-1", session_id="codex-1-abc",
+            since="", cwd=str(tmp_path),
+            on_kept_event=lambda evt: seen.append(evt.get("event_id")),
+            persist_kept=False,
+        )
+        assert latest == "2026-06-25T10:00:00Z"
+        assert n == 0
+        assert seen == ["evt-push"]
+        assert crl.list_inbox_events(cwd=str(tmp_path)) == []
+
     def test_get_transport_error_does_not_raise(self, tmp_path):
         api = _FakeApi()
         api.get_should_raise = True

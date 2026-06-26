@@ -41,6 +41,14 @@ from typing import Any, Callable, Iterable
 
 
 CODEX_BIN_DEFAULT = "/opt/homebrew/bin/codex"
+BRIDGE_BASE_INSTRUCTIONS = (
+    "You are the Beacon Codex DM bridge response worker. "
+    "Respond to the DM text only. Do not run shell commands, edit files, "
+    "inspect the repository, grant bus budget, send Beacon messages, or take "
+    "any external action. The parent bridge daemon is responsible for sending "
+    "your final text as a Beacon reply. Keep responses concise and include any "
+    "exact phrase the sender requested."
+)
 
 
 @dataclass
@@ -53,11 +61,21 @@ class AppServerHandle:
     presence (= response if ``id`` present, notification otherwise).
     """
 
-    proc: subprocess.Popen
+    proc: subprocess.Popen | None = None
+    ws: Any | None = None
     next_request_id: int = 1
     pending: dict[int, Any] = field(default_factory=dict)
 
     def stop(self) -> None:
+        if self.ws is not None:
+            try:
+                self.ws.close()
+            except Exception:
+                pass
+            self.ws = None
+            return
+        if self.proc is None:
+            return
         try:
             if self.proc.stdin and not self.proc.stdin.closed:
                 self.proc.stdin.close()
@@ -77,17 +95,53 @@ def start_app_server(
     codex_bin: str = CODEX_BIN_DEFAULT,
     *,
     extra_env: dict[str, str] | None = None,
+    proxy: bool = False,
+    sock: str = "",
+    remote_url: str = "",
 ) -> AppServerHandle:
-    """Spawn ``codex app-server --stdio`` and return the handle.
+    """Spawn a Codex app-server JSON-RPC pipe and return the handle.
+
+    ``remote_url`` connects directly to an already-running app-server endpoint
+    such as ``ws://127.0.0.1:39988``. That is the most practical shared-UX
+    route on Codex 0.142.2 because the TUI can also be launched with
+    ``codex --remote <same-url>``.
+
+    ``proxy=False`` starts an ephemeral ``codex app-server --stdio`` child.
+    ``proxy=True`` connects stdio to the already-running app-server daemon via
+    ``codex app-server proxy``. The proxy path is the one that can reproduce
+    ClaudeCode-style UX for a remote Codex TUI: the bridge and the TUI talk to
+    the same app-server daemon, and the bridge can ``thread/resume`` +
+    ``turn/start`` the TUI's existing thread.
 
     The caller is responsible for invoking ``handle.stop()`` (or using
     a context manager wrapper — left as a follow-up).
 
     Raises FileNotFoundError if the codex binary isn't installed.
     """
-    env = {**os.environ, **(extra_env or {})}
+    if remote_url:
+        if not remote_url.startswith(("ws://", "wss://")):
+            raise ValueError(
+                "remote_url currently supports ws:// or wss:// app-server endpoints"
+            )
+        from websockets.sync.client import connect
+
+        return AppServerHandle(ws=connect(remote_url))
+
+    env = {
+        **os.environ,
+        # The app-server worker must not be able to self-grant autonomous
+        # send budget if it chooses to run a Beacon CLI command anyway.
+        "BEACON_OPERATION_AUTO_EXECUTE": "1",
+        "BEACON_CODEX_APP_SERVER_BRIDGE": "1",
+        **(extra_env or {}),
+    }
+    argv = [codex_bin, "app-server", "proxy"] if proxy else [
+        codex_bin, "app-server", "--stdio"
+    ]
+    if proxy and sock:
+        argv.extend(["--sock", sock])
     proc = subprocess.Popen(
-        [codex_bin, "app-server", "--stdio"],
+        argv,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -100,6 +154,11 @@ def start_app_server(
 
 def _send(handle: AppServerHandle, message: dict) -> None:
     """Write a JSON-RPC message to the server stdin."""
+    if handle.ws is not None:
+        handle.ws.send(json.dumps(message, ensure_ascii=False))
+        return
+    if handle.proc is None:
+        raise RuntimeError("app-server handle is not connected")
     if handle.proc.stdin is None:
         raise RuntimeError("app-server stdin closed")
     line = json.dumps(message, ensure_ascii=False) + "\n"
@@ -113,6 +172,17 @@ def _recv_one(handle: AppServerHandle, timeout_s: float = 30.0) -> dict | None:
     Returns ``None`` on EOF / timeout. Real production would use a
     selector or asyncio reader; this is a blocking helper for the spike.
     """
+    if handle.ws is not None:
+        try:
+            raw = handle.ws.recv(timeout=timeout_s)
+        except TimeoutError:
+            return None
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {"_unparsed": str(raw)}
+    if handle.proc is None:
+        return None
     if handle.proc.stdout is None:
         return None
     ready, _, _ = select.select([handle.proc.stdout], [], [], timeout_s)
@@ -202,6 +272,25 @@ def thread_start(
     if approval_policy is not None:
         params["approvalPolicy"] = approval_policy
     return request(handle, "thread/start", params=params)
+
+
+def thread_resume(
+    handle: AppServerHandle,
+    *,
+    thread_id: str,
+    cwd: str | None = None,
+) -> dict:
+    """Resume or rejoin an existing app-server thread.
+
+    Per the generated Codex app-server schema, if ``threadId`` identifies a
+    running thread the server rejoins that thread. This is the key primitive
+    for Beacon DM push UX: the receive loop does not create a fresh worker
+    persona, it sends the DM as the next turn on the existing Codex thread.
+    """
+    params: dict = {"threadId": thread_id}
+    if cwd is not None:
+        params["cwd"] = cwd
+    return request(handle, "thread/resume", params=params)
 
 
 def extract_thread_id(response: dict) -> str:
@@ -334,15 +423,36 @@ class BridgeAppServerClient:
     handle: AppServerHandle | None = None
     thread_id: str | None = None
     on_agent_message: Callable[[dict], None] | None = None
+    target_thread_id: str = ""
+    use_proxy: bool = False
+    proxy_sock: str = ""
+    remote_url: str = ""
 
     def ensure_started(self, cwd: str) -> None:
         if self.handle is not None:
             return
-        self.handle = start_app_server()
+        self.handle = start_app_server(
+            proxy=self.use_proxy,
+            sock=self.proxy_sock,
+            remote_url=self.remote_url,
+        )
         # Standard JSON-RPC initialize.
         initialize(self.handle)
-        # One thread per bridge instance for now (= simplest model).
-        rsp = thread_start(self.handle, cwd=cwd)
+        if self.target_thread_id:
+            rsp = thread_resume(
+                self.handle,
+                thread_id=self.target_thread_id,
+                cwd=cwd,
+            )
+        else:
+            # One response-worker thread per bridge instance for the fallback
+            # autonomous path. This is intentionally separate from the
+            # remote-thread UX path above.
+            rsp = thread_start(
+                self.handle,
+                cwd=cwd,
+                base_instructions=BRIDGE_BASE_INSTRUCTIONS,
+            )
         self.thread_id = extract_thread_id(rsp)
 
     def dispatch_dm(self, event: dict) -> dict:
@@ -407,6 +517,7 @@ __all__ = [
     "request",
     "start_app_server",
     "text_input",
+    "thread_resume",
     "thread_start",
     "turn_start",
 ]
