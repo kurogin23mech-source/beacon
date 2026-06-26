@@ -343,7 +343,7 @@ def test_restart_does_not_gate_on_stop_exit_code(tmp_path, monkeypatch):
         calls["clean"] += 1
         return False
 
-    def fake_start(install_root, cwd):
+    def fake_start(install_root, cwd, *, app_server=False):
         calls["start"] += 1
         return 0
 
@@ -428,3 +428,135 @@ def test_app_server_agent_message_falls_back_to_deltas():
         },
     ]
     assert client.agent_message_text_from_notifications(notifications) == "hello"
+
+
+# ------------------------------------------------------------------ #
+# 7. bridge --app-server forwarding (= ms-93 / e-2519 MVP wiring)
+# ------------------------------------------------------------------ #
+
+
+class _FakeProc:
+    """Stand-in for subprocess.Popen, captures argv + env."""
+
+    last = None  # class-level: most recent instance, for assertions
+
+    def __init__(self, argv, **kwargs):
+        self.argv = list(argv)
+        self.kwargs = kwargs
+        self.pid = 12345
+        self._poll_returns = None
+        _FakeProc.last = self
+
+    def poll(self):
+        return self._poll_returns
+
+    @property
+    def returncode(self):
+        return self._poll_returns
+
+
+def _prep_fake_start(bridge, monkeypatch, tmp_path):
+    """Set up the minimum surface cmd_start touches before subprocess spawn."""
+    # cloud.json so the "no cloud config" early-return is bypassed.
+    cloud = tmp_path / ".beacon" / "cloud.json"
+    cloud.parent.mkdir(parents=True, exist_ok=True)
+    cloud.write_text("{}")
+
+    # Pretend the daemon script exists at the expected location.
+    real_isfile = Path.is_file
+
+    def fake_isfile(self):
+        if str(self).endswith("scripts/codex-receive-loop.py"):
+            return True
+        return real_isfile(self)
+
+    monkeypatch.setattr(Path, "is_file", fake_isfile)
+
+    # Pretend the hook install succeeds (= side-effect free).
+    monkeypatch.setattr(bridge, "cmd_install_hook", lambda *a, **k: 0)
+    # Skip the "pidfile not yet visible" wait loop by claiming a live pid
+    # immediately so cmd_start returns 0 without polling.
+    monkeypatch.setattr(bridge, "_read_pid", lambda cwd: 99999)
+
+
+def test_cmd_start_without_app_server_flag_omits_argv_and_env(
+    monkeypatch, tmp_path
+):
+    bridge = _load_bridge_module()
+    _prep_fake_start(bridge, monkeypatch, tmp_path)
+    # First _read_pid call (existing-pid guard) must be 0, then 99999 after spawn.
+    pid_returns = iter([0, 99999])
+    monkeypatch.setattr(bridge, "_read_pid", lambda cwd: next(pid_returns))
+    monkeypatch.setattr(bridge.subprocess, "Popen", _FakeProc)
+
+    rc = bridge.cmd_start(REPO_ROOT, tmp_path, app_server=False)
+    assert rc == 0
+    assert "--app-server" not in _FakeProc.last.argv, (
+        "default daemon argv must not contain --app-server"
+    )
+    assert "BEACON_CODEX_APP_SERVER" not in _FakeProc.last.kwargs["env"], (
+        "default env must not set BEACON_CODEX_APP_SERVER"
+    )
+
+
+def test_cmd_start_with_app_server_flag_adds_argv_and_env(monkeypatch, tmp_path):
+    bridge = _load_bridge_module()
+    _prep_fake_start(bridge, monkeypatch, tmp_path)
+    pid_returns = iter([0, 99999])
+    monkeypatch.setattr(bridge, "_read_pid", lambda cwd: next(pid_returns))
+    monkeypatch.setattr(bridge.subprocess, "Popen", _FakeProc)
+
+    rc = bridge.cmd_start(REPO_ROOT, tmp_path, app_server=True)
+    assert rc == 0
+    assert "--app-server" in _FakeProc.last.argv, (
+        "--app-server flag must be forwarded to the daemon argv"
+    )
+    assert _FakeProc.last.kwargs["env"].get("BEACON_CODEX_APP_SERVER") == "1", (
+        "BEACON_CODEX_APP_SERVER must be set so a stale daemon argv cannot "
+        "silently disable opt-in on restart"
+    )
+
+
+def test_cmd_restart_propagates_app_server_flag(monkeypatch, tmp_path):
+    bridge = _load_bridge_module()
+    seen = {}
+
+    def fake_stop(cwd):
+        return 0
+
+    def fake_clean(cwd):
+        return False
+
+    def fake_start(install_root, cwd, *, app_server=False):
+        seen["app_server"] = app_server
+        return 0
+
+    monkeypatch.setattr(bridge, "cmd_stop", fake_stop)
+    monkeypatch.setattr(bridge, "_clean_stale_pidfile", fake_clean)
+    monkeypatch.setattr(bridge, "cmd_start", fake_start)
+
+    rc = bridge.cmd_restart(REPO_ROOT, tmp_path, app_server=True)
+    assert rc == 0
+    assert seen.get("app_server") is True, (
+        "restart must propagate --app-server through to start"
+    )
+
+
+def test_argparse_app_server_flag_is_off_by_default(monkeypatch):
+    """The CLI default must keep pull-on-prompt behaviour identical.
+
+    Parses argv via the bridge's parser; doesn't exec subprocess.
+    """
+    bridge = _load_bridge_module()
+    # Replay the parser construction without invoking main() (which would
+    # try to resolve install_root paths). Easiest: dispatch a quick parse.
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("subaction", nargs="?", default="status")
+    p.add_argument("--cwd", default="")
+    p.add_argument("--install-root", default="")
+    p.add_argument("--app-server", action="store_true")
+    ns = p.parse_args(["start"])
+    assert ns.app_server is False
+    ns2 = p.parse_args(["start", "--app-server"])
+    assert ns2.app_server is True

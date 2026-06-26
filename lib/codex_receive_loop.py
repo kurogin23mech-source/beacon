@@ -150,6 +150,7 @@ def poll_inbox_once(
     since: str,
     cwd: str = "",
     allowed_channels: tuple = bp.DEFAULT_ALLOWED_CHANNELS,
+    on_kept_event=None,
 ) -> tuple:
     """One poll iteration: fetch + run the protocol filter chain +
     persist surviving events + ack delivered.
@@ -162,6 +163,15 @@ def poll_inbox_once(
     decides "keep". That split is what e-2502 SPEC §2 calls "core +
     adapter": filtering belongs to bus protocol, persistence belongs to
     the Codex adapter.
+
+    ``on_kept_event`` (= ms-93 / e-2519 app-server wiring) is an
+    optional callable invoked once per event that passes the filter
+    chain AND was successfully persisted. Daemons running in
+    autonomous mode (= ``--app-server``) use this to also dispatch the
+    DM to a long-lived ``codex app-server --stdio`` child; the default
+    pull-on-prompt path leaves the callback as ``None`` and behaves
+    exactly as before. Callback exceptions are caught so a flaky
+    autonomous path cannot stall the pull path.
     """
     url = bp.poll_unread_path(project_id, session_id, since)
     try:
@@ -204,6 +214,13 @@ def poll_inbox_once(
         path = persist_inbox_event(evt, cwd=cwd)
         if path is not None:
             persisted += 1
+            if on_kept_event is not None:
+                try:
+                    on_kept_event(evt)
+                except Exception:
+                    # Autonomous-path failures must not stall pull-path
+                    # persistence. The caller's logger surfaces details.
+                    pass
         if created_at > latest_seen:
             latest_seen = created_at
     return (latest_seen, persisted)
