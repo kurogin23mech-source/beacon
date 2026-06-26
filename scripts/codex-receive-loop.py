@@ -15,7 +15,7 @@ Usage:
     BEACON_BIN=/abs/path/to/beacon python3 scripts/codex-receive-loop.py [--cwd /repo]
 
 Environment knobs:
-    BEACON_HEARTBEAT_SECS — heartbeat tick (default 30)
+    BEACON_HEARTBEAT_SECS — heartbeat tick (default 5)
     BEACON_POLL_SECS       — inbox poll tick (default 2)
     BEACON_BUS_SENDER      — exported by this script for child CLI calls
 
@@ -264,7 +264,12 @@ def main() -> int:
     signal.signal(signal.SIGINT, _on_signal)
     signal.signal(signal.SIGTERM, _on_signal)
 
-    heartbeat_secs = int(os.environ.get("BEACON_HEARTBEAT_SECS", "30") or "30")
+    # Default 5s matches Claude Code's bus.mjs BEACON_BUS_POLL_MS=5000 so the
+    # `--live --healthy` directory filter sees the Codex sid as alive on the
+    # same cadence (= ms-93 / e-2508 Codex dogfood FINDING #1: 30s heartbeat
+    # was below the healthy threshold and the daemon dropped from healthy
+    # while still running).
+    heartbeat_secs = int(os.environ.get("BEACON_HEARTBEAT_SECS", "5") or "5")
     poll_secs = int(os.environ.get("BEACON_POLL_SECS", "2") or "2")
 
     actor = {
