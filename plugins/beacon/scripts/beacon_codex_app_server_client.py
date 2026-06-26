@@ -32,8 +32,10 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
@@ -112,6 +114,9 @@ def _recv_one(handle: AppServerHandle, timeout_s: float = 30.0) -> dict | None:
     selector or asyncio reader; this is a blocking helper for the spike.
     """
     if handle.proc.stdout is None:
+        return None
+    ready, _, _ = select.select([handle.proc.stdout], [], [], timeout_s)
+    if not ready:
         return None
     line = handle.proc.stdout.readline()
     if not line:
@@ -231,6 +236,54 @@ def turn_start(
     )
 
 
+def extract_turn_id(response: dict) -> str:
+    """Return the turn id from a ``turn/start`` response."""
+    result = response.get("result") or {}
+    turn = result.get("turn") or {}
+    turn_id = turn.get("id") or result.get("turnId") or ""
+    if not turn_id:
+        raise RuntimeError(f"turn/start returned no turn id: {response}")
+    return str(turn_id)
+
+
+def drain_until_idle(
+    handle: AppServerHandle,
+    *,
+    thread_id: str,
+    turn_id: str | None = None,
+    timeout_s: float = 60.0,
+) -> list[dict]:
+    """Read app-server notifications until the target thread is idle.
+
+    ``turn/start`` returns as soon as the turn is accepted; the useful agent
+    text arrives later as notifications. The receive-loop needs a bounded
+    drain so ``agent_text_preview`` reflects the actual response instead of
+    the pre-response notification prefix.
+    """
+    end = time.monotonic() + timeout_s
+    notifications: list[dict] = []
+    while True:
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            break
+        msg = _recv_one(handle, timeout_s=remaining)
+        if msg is None:
+            break
+        notifications.append(msg)
+        method = msg.get("method")
+        params = msg.get("params") or {}
+        if method == "thread/status/changed":
+            if params.get("threadId") != thread_id:
+                continue
+            status = params.get("status") or {}
+            if status.get("type") == "idle":
+                break
+        elif method == "turn/completed":
+            if turn_id and params.get("turnId") == turn_id:
+                break
+    return notifications
+
+
 def text_input(text: str) -> list[dict]:
     """Return the minimal accepted app-server turn input shape."""
     return [{"type": "text", "text": text}]
@@ -317,6 +370,25 @@ class BridgeAppServerClient:
             input_payload=text_input(text),
         )
 
+    def dispatch_dm_and_wait(self, event: dict, *, timeout_s: float = 60.0) -> dict:
+        """Dispatch a DM and drain notifications until the turn is idle."""
+        if self.handle is None or self.thread_id is None:
+            raise RuntimeError(
+                "BridgeAppServerClient: call ensure_started() before dispatch_dm_and_wait()"
+            )
+        rsp = self.dispatch_dm(event)
+        turn_id = extract_turn_id(rsp)
+        rsp.setdefault("_notifications", [])
+        rsp["_notifications"].extend(
+            drain_until_idle(
+                self.handle,
+                thread_id=self.thread_id,
+                turn_id=turn_id,
+                timeout_s=timeout_s,
+            )
+        )
+        return rsp
+
     def stop(self) -> None:
         if self.handle is not None:
             self.handle.stop()
@@ -328,8 +400,10 @@ __all__ = [
     "AppServerHandle",
     "BridgeAppServerClient",
     "agent_message_text_from_notifications",
+    "drain_until_idle",
     "initialize",
     "extract_thread_id",
+    "extract_turn_id",
     "request",
     "start_app_server",
     "text_input",

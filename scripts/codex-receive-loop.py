@@ -320,7 +320,7 @@ def main() -> int:
         if app_server_client is None:
             return
         try:
-            rsp = app_server_client.dispatch_dm(evt)
+            rsp = app_server_client.dispatch_dm_and_wait(evt)
             agent_text = ac_mod.agent_message_text_from_notifications(
                 rsp.get("_notifications") or []
             )

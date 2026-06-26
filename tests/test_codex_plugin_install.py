@@ -391,6 +391,12 @@ def test_app_server_extract_thread_id_from_thread_start_response():
     assert client.extract_thread_id(rsp) == "thr-1"
 
 
+def test_app_server_extract_turn_id_from_turn_start_response():
+    client = _load_app_server_client_module()
+    rsp = {"result": {"turn": {"id": "turn-1"}}}
+    assert client.extract_turn_id(rsp) == "turn-1"
+
+
 def test_app_server_agent_message_prefers_completed_text():
     client = _load_app_server_client_module()
     notifications = [
@@ -427,6 +433,34 @@ def test_app_server_agent_message_falls_back_to_deltas():
             "params": {"delta": "llo"},
         },
     ]
+    assert client.agent_message_text_from_notifications(notifications) == "hello"
+
+
+def test_app_server_drain_until_idle_reads_agent_notifications(monkeypatch):
+    client = _load_app_server_client_module()
+    messages = iter([
+        {
+            "method": "item/agentMessage/delta",
+            "params": {"threadId": "thr-1", "turnId": "turn-1", "delta": "he"},
+        },
+        {
+            "method": "item/completed",
+            "params": {
+                "threadId": "thr-1",
+                "turnId": "turn-1",
+                "item": {"type": "agentMessage", "text": "hello"},
+            },
+        },
+        {
+            "method": "thread/status/changed",
+            "params": {"threadId": "thr-1", "status": {"type": "idle"}},
+        },
+    ])
+
+    monkeypatch.setattr(client, "_recv_one", lambda _h, timeout_s=30.0: next(messages))
+    notifications = client.drain_until_idle(
+        object(), thread_id="thr-1", turn_id="turn-1", timeout_s=1
+    )
     assert client.agent_message_text_from_notifications(notifications) == "hello"
 
 
