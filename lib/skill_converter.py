@@ -13,7 +13,8 @@ from pathlib import Path
 
 CONVERTER_VERSION = 1
 TARGETS = ("claude", "codex")
-CLAUDE_FIELDS = {"args"}
+CLAUDE_FIELDS = {"args", "triggers"}
+COMMON_FIELDS = {"name", "description", "version"}
 OPENAI_FIELDS = {"tags", "sandbox_hint", "policy"}
 
 
@@ -25,9 +26,10 @@ class SkillConversionError(ValueError):
 class CanonicalSkill:
     name: str
     description: str
+    version: str
     body: str
     root: Path
-    claude: dict[str, str]
+    claude: dict[str, object]
 
 
 def _parse_scalar(value: str) -> str:
@@ -37,9 +39,14 @@ def _parse_scalar(value: str) -> str:
     return value
 
 
-def _parse_flat_yaml(text: str, *, allowed: set[str], label: str) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for lineno, raw in enumerate(text.splitlines(), 1):
+def _parse_flat_yaml(text: str, *, allowed: set[str], label: str) -> dict[str, object]:
+    result: dict[str, object] = {}
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        raw = lines[index]
+        lineno = index + 1
+        index += 1
         stripped = raw.strip()
         if not stripped or stripped.startswith("#"):
             continue
@@ -51,7 +58,25 @@ def _parse_flat_yaml(text: str, *, allowed: set[str], label: str) -> dict[str, s
             raise SkillConversionError(f"{label}:{lineno}: unsupported field {key!r}")
         if key in result:
             raise SkillConversionError(f"{label}:{lineno}: duplicate field {key!r}")
-        result[key] = _parse_scalar(value)
+        if value.strip():
+            result[key] = _parse_scalar(value)
+            continue
+        items: list[str] = []
+        while index < len(lines):
+            candidate = lines[index]
+            candidate_stripped = candidate.strip()
+            if not candidate_stripped or candidate_stripped.startswith("#"):
+                index += 1
+                continue
+            if not candidate[:1].isspace():
+                break
+            if not candidate_stripped.startswith("- "):
+                raise SkillConversionError(
+                    f"{label}:{index + 1}: expected a list item"
+                )
+            items.append(_parse_scalar(candidate_stripped[2:]))
+            index += 1
+        result[key] = items
     return result
 
 
@@ -80,9 +105,9 @@ def _split_skill_markdown(text: str, path: Path) -> tuple[dict[str, str], str]:
     if end < 0:
         raise SkillConversionError(f"{path}: unterminated YAML frontmatter")
     metadata = _parse_flat_yaml(
-        text[4:end], allowed={"name", "description"}, label=str(path)
+        text[4:end], allowed=COMMON_FIELDS, label=str(path)
     )
-    if set(metadata) != {"name", "description"}:
+    if not {"name", "description"}.issubset(metadata):
         missing = sorted({"name", "description"} - set(metadata))
         raise SkillConversionError(f"{path}: missing required field(s): {', '.join(missing)}")
     return metadata, text[end + 5 :]
@@ -117,13 +142,32 @@ def read_canonical_skill(root: Path) -> CanonicalSkill:
         else {}
     )
     _validate_openai_yaml(root / "agents" / "openai.yaml")
-    return CanonicalSkill(name, metadata["description"], body, root, claude)
+    return CanonicalSkill(
+        name,
+        str(metadata["description"]),
+        str(metadata.get("version", "")),
+        body,
+        root,
+        claude,
+    )
 
 
 def render_claude(skill: CanonicalSkill) -> bytes:
     lines = ["---", f"name: {skill.name}", f"description: {skill.description}"]
+    if skill.version:
+        lines.append(f"version: {skill.version}")
     for key in sorted(skill.claude):
-        lines.append(f"{key}: {json.dumps(skill.claude[key], ensure_ascii=False)}")
+        value = skill.claude[key]
+        if isinstance(value, list):
+            if value:
+                lines.append(f"{key}:")
+                lines.extend(
+                    f"  - {json.dumps(item, ensure_ascii=False)}" for item in value
+                )
+            else:
+                lines.append(f"{key}: []")
+        else:
+            lines.append(f"{key}: {json.dumps(value, ensure_ascii=False)}")
     lines.append("---")
     body = skill.body if skill.body.endswith("\n") else skill.body + "\n"
     return ("\n".join(lines) + "\n" + body).encode("utf-8")
