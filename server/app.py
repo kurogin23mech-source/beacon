@@ -535,6 +535,72 @@ def _save(project_id: str, data: dict) -> None:
 # Author resolution (ms-78 / e-1909) — UC11-F5 follow-up
 # ---------------------------------------------------------------------------
 
+def _resolve_canonical_project_id(
+    maybe: str, *, user_id: str
+) -> Optional[str]:
+    """Resolve a slug or full project_id to its canonical full project_id.
+
+    ms-95 / Trek task-add cross-project bug: scope entries can be stored
+    using the user-friendly **slug** (= just ``"profile-extractor"``)
+    because that's what users type at the CLI (``beacon trek plan
+    --add-scope profile-extractor:ms-5``). But ``operations.apply_operation``
+    requires the **full project_id** (= ``"profile-extractor-276d28"`` with
+    the 6-char md5 path-hash suffix the CLI mints in ``cmd_cloud_setup``).
+    Without this resolver, the task-add endpoint passes the slug down to
+    ``db.get_project`` → returns None → ``LookupError`` → uncaught → HTTP
+    500. This helper canonicalizes both the request side and (caller's
+    copy of) the scope side so the scope match works on equal footing and
+    the downstream apply_operation call always sees the full id.
+
+    Returns:
+      * the full project_id on **unique** match
+      * ``None`` if not found OR ambiguous (= multiple slug expansions)
+
+    Resolution strategy:
+      1. Fast path — assume ``maybe`` is already the full id. If
+         ``db.get_project(maybe)`` returns a doc, return ``maybe`` as-is.
+      2. Slug path — scan projects accessible to ``user_id`` and pick
+         those whose project_id starts with ``f"{maybe}-"`` (= slug prefix
+         used by ``cmd_cloud_setup`` when minting ids as ``<slug>-<hex6>``).
+         Return the id when exactly one matches, else ``None``.
+
+    Failure modes (intentional, returned as ``None`` so the caller picks
+    the right HTTP code):
+      * Project does not exist → 404 candidate
+      * Multiple projects share the slug prefix → 409 candidate (the
+        caller should surface "ambiguous slug" so the user can supply
+        the full id explicitly)
+
+    Performance: slug path is O(N) over the user's projects per call.
+    No cache — keep the code simple; if this shows up in latency traces
+    later, memoize per-request.
+    """
+    if not maybe:
+        return None
+    # Fast path: maybe is already a full project_id.
+    try:
+        if db.get_project(maybe) is not None:
+            return maybe
+    except Exception:  # noqa: BLE001 - db hiccup falls through to slug path
+        pass
+    if not user_id:
+        # Cannot scope the slug scan without a user — refuse rather than
+        # leak cross-tenant ids.
+        return None
+    try:
+        rows = db.list_projects(user_id=user_id)
+    except Exception:  # noqa: BLE001 - on db failure, refuse to guess
+        return None
+    prefix = f"{maybe}-"
+    matches = [
+        r.get("project_id") for r in (rows or [])
+        if (r.get("project_id") or "").startswith(prefix)
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
 def _resolve_author(user: dict) -> dict:
     """Build the ``meta.author`` dict for a write triggered by ``user``.
 
@@ -4275,9 +4341,49 @@ def add_trek_task_endpoint(
                 "targets — see SPEC ms-92 e-2141 AC #4 MS-grain enforcement)"
             ),
         )
+    # ms-95 / Trek task-add slug ↔ full project_id resolution.
+    # Two storage forms can appear in trek scope: full id (= canonical,
+    # what apply_operation needs) or slug (= what users type at
+    # ``beacon trek plan --add-scope <slug>:<ms>``). Canonicalise both
+    # the request side and an in-memory copy of the scope so the scope
+    # match runs on equal footing and the downstream apply_op call
+    # always receives a real project_id. Without this the bug from PE
+    # + LPS dogfood reports manifests as:
+    #   * slug stored + slug request → scope match ok, then 500
+    #     (LookupError from apply_operation seeing an unknown id)
+    #   * slug stored + full id request → 403 project_not_in_scope
+    #     (literal string equality miss)
+    requesting_user_id = user.get("sub") or ""
+    resolved_target_project = _resolve_canonical_project_id(
+        body.target_project, user_id=requesting_user_id,
+    )
+    if resolved_target_project is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"target_project {body.target_project!r} not found or "
+                "ambiguous (no exact full project_id match and no unique "
+                "slug expansion). Pass the full project_id (e.g. "
+                "'<slug>-<hex6>') if multiple projects share the slug."
+            ),
+        )
+    # Build a scope-copy where each entry's ``project`` field is
+    # canonicalised. Unresolvable entries (= stale slug for a deleted
+    # project, or a slug shared by multiple of the caller's projects)
+    # are kept as-is so they cleanly fail the scope match instead of
+    # crashing the endpoint.
+    canonical_scope: list[dict] = []
+    for s in t.get("scope") or []:
+        original = s.get("project") or ""
+        resolved = (
+            _resolve_canonical_project_id(original, user_id=requesting_user_id)
+            or original
+        )
+        canonical_scope.append({**s, "project": resolved})
+    canonical_t = {**t, "scope": canonical_scope}
     allowed, reason = trek_mod.check_trek_task_add_allowed(
-        t,
-        target_project=body.target_project,
+        canonical_t,
+        target_project=resolved_target_project,
         target_milestone=body.target_milestone,
     )
     if not allowed:
@@ -4318,12 +4424,12 @@ def add_trek_task_endpoint(
             meta["origin"] = "trek.task_add"
         return data, {
             "entry_id": eid,
-            "project_id": body.target_project,
+            "project_id": resolved_target_project,
             "milestone_id": body.target_milestone,
             "trek_id": trek_id,
         }
     return _apply_op_and_broadcast(
-        body.target_project,
+        resolved_target_project,
         op,
         op_name="entry.create.trek_scope",
         actor=user.get("sub", ""),
