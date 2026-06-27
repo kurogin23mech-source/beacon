@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import datetime
 import secrets
+from enum import Enum
 from typing import Iterable
 
 # Trek lifecycle: planning → active → archived  (3 states only)
@@ -83,7 +84,33 @@ KICKOFF_HISTORY_KEY = "kickoff_status"
 # 走り続ける (= leader_review は中途中継、 user_review は terminal 扱い)。
 VALID_TASK_STATES = ("todo", "working", "leader_review", "user_review", "done")
 DEFAULT_TASK_STATE = "todo"
-TERMINAL_TASK_STATES = ("done", "user_review")
+# ms-97 / e-2566 — convert to frozenset for fast `in` checks while keeping
+# tuple-compatible iteration order. All known readers use `x in TERMINAL_TASK_STATES`
+# (lib/commands.py, server/app.py, lib/trek_scheduler.py) which is unaffected.
+TERMINAL_TASK_STATES = frozenset({"done", "user_review"})
+
+
+class TrekTaskState(str, Enum):
+    """Canonical 5-state enum for Trek task state (ms-97 / e-2566 AC9).
+
+    Inherits from ``str`` so existing string-based call sites keep working
+    (= comparison, dict key, JSON serialisation) while new code can use the
+    enum for type safety. Values match VALID_TASK_STATES exactly.
+    """
+
+    TODO = "todo"
+    WORKING = "working"
+    LEADER_REVIEW = "leader_review"
+    USER_REVIEW = "user_review"
+    DONE = "done"
+
+    @classmethod
+    def terminal(cls) -> frozenset[str]:
+        """Return the terminal states (= done, user_review) as a frozenset."""
+        return TERMINAL_TASK_STATES
+
+    def is_terminal(self) -> bool:
+        return self.value in TERMINAL_TASK_STATES
 
 # Backward compat (= ms-88 / e-2107 migration). 旧 `waiting-review` で書かれた
 # 既存データは server-forced auto-stall 経路 (= old e-2067) からのものが多く、
@@ -964,6 +991,81 @@ def aggregate_task_state(trek_doc: dict, *, task_ids: list[str]) -> dict:
     }
 
 
+def aggregate_ms_slot_state(trek_doc: dict, *, task_ids: list[str]) -> str:
+    """Derive an MS slot's state from its child tasks (ms-97 / e-2566 AC10).
+
+    Precedence rule (= SPEC § 中心原則 4, MS slot 状態 = 配下 task 状態の集約):
+
+    | child task 構成                                          | slot 状態         |
+    |---------------------------------------------------------|------------------|
+    | 1 件でも `leader_review` あり                            | ``leader_review`` |
+    | 全件 terminal AND 全件 `done`                            | ``done``         |
+    | 全件 terminal AND 一部 `user_review`                     | ``user_review``  |
+    | 1 件でも `working` あり (上記非該当)                     | ``working``      |
+    | 全件 `todo`                                              | ``todo``         |
+
+    ``leader_review`` takes the highest priority because it represents an
+    outstanding leader-judgment request — surfacing the queue is more
+    valuable than the average state of the rest. Terminal classification
+    (done vs user_review) only matters after the leader queue is empty.
+
+    Empty ``task_ids`` returns ``"todo"`` (= an empty MS slot is a freshly
+    scoped milestone with no child tasks yet; default is todo to keep the
+    UI consistent with newly added scope entries).
+    """
+    if not task_ids:
+        return TrekTaskState.TODO.value
+    states = [get_task_state(trek_doc, tid) for tid in task_ids if tid]
+    if not states:
+        return TrekTaskState.TODO.value
+    if any(s == TrekTaskState.LEADER_REVIEW.value for s in states):
+        return TrekTaskState.LEADER_REVIEW.value
+    if all(s in TERMINAL_TASK_STATES for s in states):
+        if all(s == TrekTaskState.DONE.value for s in states):
+            return TrekTaskState.DONE.value
+        return TrekTaskState.USER_REVIEW.value
+    if any(s == TrekTaskState.WORKING.value for s in states):
+        return TrekTaskState.WORKING.value
+    return TrekTaskState.TODO.value
+
+
+def resolve_session_home_project(
+    sessions: list[dict],
+    session_id: str,
+) -> str | None:
+    """Resolve a session_id to its home project_id (ms-97 / e-2566 AC14).
+
+    The SPEC fixes the operation-project as ``session_id`` 's home project
+    (= the project this session belongs to). cwd is explicitly disallowed
+    as a source of truth because cwd changes silently extend an agent's
+    autonomous authority across projects.
+
+    This helper is intentionally pure: it takes a list of session records
+    (each with at least ``session_id`` and ``project_id``) and returns the
+    home project_id for the supplied session_id. Returns ``None`` when the
+    session is not found or its record lacks a project_id.
+
+    Server-side callers wrap this with cross-project aggregation:
+
+        sessions: list[dict] = []
+        for pid in db.list_projects():
+            for s in db.list_sessions(pid):
+                sessions.append({**s, "project_id": pid})
+        home = resolve_session_home_project(sessions, sid)
+
+    Each ``s`` from ``db.list_sessions`` is already stamped with
+    ``session_id`` (= doc.id); the caller is responsible for adding
+    ``project_id`` because the per-project query has it implicit.
+    """
+    if not session_id:
+        return None
+    for s in sessions:
+        if s.get("session_id") == session_id:
+            pid = s.get("project_id") or ""
+            return pid or None
+    return None
+
+
 def build_actor_ref(*, user_id: str, email: str) -> dict:
     """Canonical actor reference (= user_id + email pair).
 
@@ -1212,13 +1314,22 @@ def backfill_session_history(trek_doc: dict) -> int:
     return added
 
 
-def normalize_scope_entry(entry: dict) -> dict:
+def normalize_scope_entry(entry: dict, *, strict: bool = False) -> dict:
     """Normalise a scope item.
 
     A scope entry MUST include ``project`` (= project_id) and MAY include
     one of milestone / operation / task to narrow it. Unknown keys are
     dropped to keep the on-disk schema tight (= server side can validate
     against this normalisation, CLI side can also use it before posting).
+
+    ms-97 / e-2566 AC7: when ``strict=True`` a narrowing key (= one of
+    ``milestone`` / ``operation`` / ``task``) is required, and project-wide
+    entries (= ``{"project": pid}`` with no narrowing key) are rejected
+    with ValueError. The default ``strict=False`` preserves legacy
+    behaviour for backward compatibility (= existing fixtures and the
+    ``remove_scope_entry`` path that must still recognise grandfathered
+    project-wide entries). CLI / server new-write paths opt in by passing
+    ``strict=True``.
     """
     if not entry.get("project"):
         raise ValueError("scope entry missing required 'project' field")
@@ -1226,7 +1337,26 @@ def normalize_scope_entry(entry: dict) -> dict:
     for k in ("milestone", "operation", "task"):
         if entry.get(k):
             out[k] = entry[k]
+    if strict and not any(k in out for k in ("milestone", "operation", "task")):
+        raise ValueError(
+            f"scope entry {entry!r} is project-wide; ms-97 SPEC AC7 requires "
+            "a narrowing key (milestone/operation/task). Pass strict=False "
+            "only when reading or removing grandfathered legacy data."
+        )
     return out
+
+
+def has_project_wide_scope(trek_doc: dict) -> bool:
+    """Return True if any scope[] entry lacks a narrowing key (= legacy form).
+
+    ms-97 / e-2566 AC8: existing project-wide entries are grandfathered but
+    surfaced as warnings. CLI / server / Web UI use this to decide whether
+    to render the warning on an existing trek.
+    """
+    for entry in trek_doc.get("scope") or []:
+        if not any(entry.get(k) for k in ("milestone", "operation", "task")):
+            return True
+    return False
 
 
 DEFAULT_CADENCE_MINUTES = 10
@@ -1556,7 +1686,7 @@ def accept_invitation(trek_doc: dict, *, user_id: str,
     return trek_doc
 
 
-def parse_scope_arg(arg: str) -> dict:
+def parse_scope_arg(arg: str, *, strict: bool = False) -> dict:
     """Parse a CLI ``<project>[:<ref>]`` scope argument into a normalized entry.
 
     ``ref`` is dispatched by prefix:
@@ -1567,6 +1697,12 @@ def parse_scope_arg(arg: str) -> dict:
 
     Returns the normalized scope dict ready to append to ``trek_doc.scope``.
     Raises ValueError on empty input or unknown ref prefix.
+
+    ms-97 / e-2566 AC7: ``strict=True`` rejects project-wide entries
+    (= the SPEC-mandated CLI surface for new scope-add invocations). The
+    default ``strict=False`` keeps backward compatibility with legacy
+    callers that still accept project-wide; the CLI ``scope-add`` path
+    will opt in (see e-2568).
     """
     if not arg or not arg.strip():
         raise ValueError("scope argument cannot be empty")
@@ -1579,7 +1715,7 @@ def parse_scope_arg(arg: str) -> dict:
             raise ValueError(f"scope arg {arg!r} missing project")
         entry: dict = {"project": project}
         if not ref:
-            return normalize_scope_entry(entry)
+            return normalize_scope_entry(entry, strict=strict)
         if ref.startswith("ms-"):
             entry["milestone"] = ref
         elif ref.startswith("op-"):
@@ -1591,8 +1727,8 @@ def parse_scope_arg(arg: str) -> dict:
                 f"unknown ref prefix in {arg!r} — expected ms-/op-/e- "
                 "(or omit ref for project-wide scope)"
             )
-        return normalize_scope_entry(entry)
-    return normalize_scope_entry({"project": arg})
+        return normalize_scope_entry(entry, strict=strict)
+    return normalize_scope_entry({"project": arg}, strict=strict)
 
 
 # ---------------------------------------------------------------------------
@@ -1692,9 +1828,74 @@ def check_trek_task_add_allowed(
     return False, TASK_ADD_REJECT_MILESTONE_NOT_IN_SCOPE
 
 
-def add_scope_entry(trek_doc: dict, *, entry: dict) -> dict:
-    """Append a scope entry; raises ValueError if it already exists."""
-    norm = normalize_scope_entry(entry)
+def is_task_slot(scope_entry: dict) -> bool:
+    """Return True iff this scope entry is task-grained (= bans new task adds).
+
+    ms-97 / e-2566 AC12: a Trek slot narrowed to a single task
+    (= ``{"project": pid, "task": e-XXX}`` without ``milestone`` /
+    ``operation``) MUST NOT spawn additional tasks under it. The user
+    delegated the task as the unit of work; auto-growing it sideways would
+    breach scope creep boundaries.
+
+    Returns True iff ``task`` is set and neither ``milestone`` nor
+    ``operation`` is present. Project-wide (= no narrowing key) is **not**
+    a task slot — it's a separate (legacy / grandfathered) case handled
+    by ``has_project_wide_scope`` and AC8 warnings.
+    """
+    return (
+        bool(scope_entry.get("task"))
+        and not scope_entry.get("milestone")
+        and not scope_entry.get("operation")
+    )
+
+
+def is_task_add_banned_under_task_slot(
+    trek_doc: dict,
+    *,
+    target_project: str,
+    target_milestone: str,
+) -> bool:
+    """Return True iff adding a task under target violates the task-slot ban.
+
+    ms-97 / e-2566 AC12. The ban fires when **every** matching project
+    scope entry is task-narrowed and none of them widens to the target
+    milestone. This is the same pathology that
+    ``check_trek_task_add_allowed`` already reports as
+    ``scope_only_has_task_narrowing``; this helper exposes it as a
+    boolean so server endpoints can express the hard-check directly
+    without unpacking the multi-return contract.
+    """
+    if not target_project or not target_milestone:
+        return False
+    matching = [
+        s for s in (trek_doc.get("scope") or [])
+        if s.get("project") == target_project
+    ]
+    if not matching:
+        return False
+    # If any matching entry widens to project-wide or to the target
+    # milestone, the add is authorised — not banned by the task slot rule.
+    for entry in matching:
+        if not entry.get("milestone") and not entry.get("operation") \
+                and not entry.get("task"):
+            return False  # project-wide widens enough
+        if entry.get("milestone") == target_milestone:
+            return False
+    # All matching entries are task / operation narrowed — banned.
+    return all(
+        is_task_slot(e) or e.get("operation") for e in matching
+    )
+
+
+def add_scope_entry(trek_doc: dict, *, entry: dict, strict: bool = False) -> dict:
+    """Append a scope entry; raises ValueError if it already exists.
+
+    ms-97 / e-2566 AC7: pass ``strict=True`` to reject project-wide
+    entries (= the SPEC-mandated path for new CLI / server writes). The
+    default ``strict=False`` preserves legacy behaviour so existing tests
+    and grandfathered call sites keep working unchanged.
+    """
+    norm = normalize_scope_entry(entry, strict=strict)
     for existing in trek_doc.get("scope") or []:
         if existing == norm:
             raise ValueError(f"scope entry already exists: {norm}")
@@ -1771,6 +1972,144 @@ def transfer_leader(trek_doc: dict, *, target_session_id: str) -> dict:
     trek_doc["leader_session_id"] = target_session_id
     trek_doc["updated_at"] = utcnow_iso()
     return trek_doc
+
+
+# ---------------------------------------------------------------------------
+# members[] session_id keyed migration (ms-97 / e-2566 AC6 + AC34)
+#
+# Legacy schema (= pre ms-97): members[] keyed by user_id, with one entry
+# per user regardless of how many sessions that user runs concurrently.
+# This conflates "user as auth chain" with "session as autonomous agent"
+# and contradicts the SPEC's design philosophy (= 中心原則 1: session =
+# 独立 AI agent 人格、 user は便宜上の auth chain).
+#
+# New schema: members[] keyed by session_id, with one entry per (user,
+# session) pair that joined. The original list is preserved under
+# ``members_legacy_backup`` so rollback is mechanical. Migration is
+# idempotent — re-running on a migrated doc is a no-op.
+#
+# Cutover plan (= SPEC Migration リスク + Rollback 戦略):
+#   Phase A: backup + rewrite, switch new code to session_id keyed reads
+#   Phase B: 1 month soak with backup retained for hot rollback
+#   Phase C: drop backup field, full cutover
+# ---------------------------------------------------------------------------
+
+MEMBERS_LEGACY_BACKUP_KEY = "members_legacy_backup"
+
+
+def members_are_session_id_keyed(trek_doc: dict) -> bool:
+    """Return True iff members[] entries carry a ``session_id`` field.
+
+    Used by migration scripts to skip docs that are already migrated, and
+    by server endpoints to branch on the storage schema until cutover
+    (Phase C) is complete.
+    """
+    members = trek_doc.get("members") or []
+    if not members:
+        # Empty list is "trivially compatible with both schemas"; we treat
+        # it as already migrated so the migration script doesn't churn
+        # updated_at for empty docs.
+        return True
+    return all("session_id" in m for m in members)
+
+
+def migrate_members_to_session_id_keyed(trek_doc: dict) -> dict:
+    """Rewrite members[] from user_id keyed to session_id keyed (ms-97 / e-2566 AC6, AC34).
+
+    The session for each member is sourced from ``session_history`` (= the
+    per-Trek cumulative join log added in ms-86 / e-2225). For each
+    user_id-keyed member entry, the **earliest session_history entry with
+    matching user_id** is selected — this preserves "the session that
+    first joined this Trek as that member" as the canonical session for
+    rollback Phase B.
+
+    Behaviour:
+    - Idempotent: if the doc is already migrated (= every member has
+      ``session_id``), return without changes.
+    - Backup: the original ``members[]`` list is copied verbatim into
+      ``members_legacy_backup`` so ``rollback_members_migration`` can
+      restore it. Backup is only written on the **first** migration
+      (= we never overwrite an existing backup, even if some operator
+      partially mutates the doc between phases).
+    - Missing session mapping: if a user_id has no matching entry in
+      ``session_history``, the member entry is preserved unchanged
+      **without** a ``session_id`` and the migration is marked partial.
+      Operators are expected to inspect partial migrations and fix them
+      manually (= the script surfaces a CLI warning, see scripts/).
+
+    Returns the mutated trek_doc. Sets ``updated_at`` only if at least one
+    member entry gained a ``session_id`` — pure-no-op cases keep the
+    document timestamp pristine so dogfood diff churn stays low.
+    """
+    members = trek_doc.get("members") or []
+    if not members:
+        return trek_doc
+    if all("session_id" in m for m in members):
+        return trek_doc
+    history = trek_doc.get("session_history") or []
+    # Index session_history by user_id; preserve insertion order so the
+    # earliest join survives as the canonical session_id.
+    user_to_session: dict[str, str] = {}
+    for entry in history:
+        uid = entry.get("user_id") or ""
+        sid = entry.get("session_id") or ""
+        if uid and sid and uid not in user_to_session:
+            user_to_session[uid] = sid
+    # Stamp backup before mutating members. Never overwrite an existing
+    # backup — rollback safety depends on the **first** legacy snapshot.
+    if MEMBERS_LEGACY_BACKUP_KEY not in trek_doc:
+        trek_doc[MEMBERS_LEGACY_BACKUP_KEY] = [dict(m) for m in members]
+    new_members: list[dict] = []
+    mutated = False
+    for m in members:
+        new_entry = dict(m)
+        if "session_id" not in new_entry:
+            mapped = user_to_session.get(new_entry.get("user_id") or "")
+            if mapped:
+                new_entry["session_id"] = mapped
+                mutated = True
+        new_members.append(new_entry)
+    trek_doc["members"] = new_members
+    if mutated:
+        trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
+
+
+def rollback_members_migration(trek_doc: dict) -> dict:
+    """Restore ``members[]`` from ``members_legacy_backup`` (ms-97 / e-2566 AC34).
+
+    Idempotent: if no backup exists (= never migrated or already rolled
+    back), the doc is returned unchanged. Otherwise the backup is copied
+    back into ``members[]`` and removed; ``updated_at`` is bumped to mark
+    the rollback. After rollback, the doc is once again in the legacy
+    user_id keyed form and new-code readers must fall through to the old
+    code path.
+    """
+    backup = trek_doc.get(MEMBERS_LEGACY_BACKUP_KEY)
+    if not backup:
+        return trek_doc
+    trek_doc["members"] = [dict(m) for m in backup]
+    trek_doc.pop(MEMBERS_LEGACY_BACKUP_KEY, None)
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
+
+
+def find_member_by_session_id(
+    trek_doc: dict, session_id: str,
+) -> dict | None:
+    """Return the (session_id keyed) member dict for ``session_id``, or None.
+
+    ms-97 / e-2566 AC6 — new code path that queries members by session_id.
+    Returns None on empty input or when the doc is still user_id keyed and
+    the session doesn't appear in any member entry. Server-side DM bypass
+    + leader hard-check pivot on this lookup.
+    """
+    if not session_id:
+        return None
+    for m in trek_doc.get("members") or []:
+        if m.get("session_id") == session_id:
+            return m
+    return None
 
 
 def remove_member(trek_doc: dict, *, user_id: str) -> dict:
