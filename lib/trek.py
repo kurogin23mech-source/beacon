@@ -1917,6 +1917,151 @@ def remove_scope_entry(trek_doc: dict, *, entry: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Pending scope additions (ms-97 / e-2567 AC23)
+#
+# AI-initiated scope-add does **not** commit immediately. It enqueues a
+# pending record that a joined member must explicitly approve before it
+# lands on ``scope[]``. The pending record carries who asked + when, so
+# the approval audit log has both halves of the round-trip.
+#
+# Direct PUT /api/treks/{trek_id}/scope stays unchanged (= leader's
+# shortcut path); the approval flow lives behind new endpoints
+# POST /scope-add / GET /scope-pending / POST /scope-approve.
+# Blanket approval (AC24) lands in Phase 2.
+# ---------------------------------------------------------------------------
+
+PENDING_SCOPE_ADDITIONS_KEY = "pending_scope_additions"
+
+
+def mint_pending_scope_id() -> str:
+    """Generate a fresh pending-scope id (= ``sa-<8 hex>``).
+
+    Short enough for CLI legibility, large enough that two concurrent
+    scope-add requests in the same trek don't collide. Format mirrors
+    ``mint_trek_id`` so operators recognise the shape.
+    """
+    return f"sa-{secrets.token_hex(4)}"
+
+
+def add_pending_scope(
+    trek_doc: dict,
+    *,
+    entry: dict,
+    requested_by_session_id: str,
+    requested_by_user_id: str,
+) -> str:
+    """Enqueue a scope addition for user approval; return the pending_id.
+
+    The entry is normalised in **strict** mode so project-wide entries are
+    rejected at request time, not approval time (= operators get the
+    feedback while they still have context). Duplicate detection runs
+    against both the committed ``scope[]`` and the pending queue so we
+    don't accumulate redundant approvals for the same target.
+    """
+    if not requested_by_session_id:
+        raise ValueError("requested_by_session_id required")
+    if not requested_by_user_id:
+        raise ValueError("requested_by_user_id required")
+    norm = normalize_scope_entry(entry, strict=True)
+    for existing in trek_doc.get("scope") or []:
+        if existing == norm:
+            raise ValueError(f"scope entry already committed: {norm}")
+    for pending in trek_doc.get(PENDING_SCOPE_ADDITIONS_KEY) or []:
+        if pending.get("entry") == norm:
+            raise ValueError(
+                f"scope entry already pending approval: {norm} "
+                f"(pending_id={pending.get('pending_id')})"
+            )
+    pending_id = mint_pending_scope_id()
+    record = {
+        "pending_id": pending_id,
+        "entry": norm,
+        "requested_by_session_id": requested_by_session_id,
+        "requested_by_user_id": requested_by_user_id,
+        "requested_at": utcnow_iso(),
+    }
+    trek_doc.setdefault(PENDING_SCOPE_ADDITIONS_KEY, []).append(record)
+    trek_doc["updated_at"] = utcnow_iso()
+    return pending_id
+
+
+def list_pending_scope(trek_doc: dict) -> list[dict]:
+    """Return a shallow copy of pending scope additions (= safe to mutate)."""
+    return [dict(p) for p in trek_doc.get(PENDING_SCOPE_ADDITIONS_KEY) or []]
+
+
+def find_pending_scope(
+    trek_doc: dict, pending_id: str,
+) -> dict | None:
+    """Return the pending record for ``pending_id``, or None."""
+    if not pending_id:
+        return None
+    for p in trek_doc.get(PENDING_SCOPE_ADDITIONS_KEY) or []:
+        if p.get("pending_id") == pending_id:
+            return p
+    return None
+
+
+def approve_pending_scope(
+    trek_doc: dict,
+    *,
+    pending_id: str,
+    approved_by_session_id: str,
+    approved_by_user_id: str,
+) -> dict:
+    """Commit a pending scope addition to ``scope[]`` and dequeue it.
+
+    Returns the committed entry (= the normalised dict that landed on
+    ``scope[]``) so callers can echo it in the response. Raises
+    ``ValueError`` for unknown pending_id or already-committed entry
+    (= the entry was added through PUT /scope between request and
+    approve, a race we surface rather than silently no-op).
+    """
+    if not approved_by_session_id:
+        raise ValueError("approved_by_session_id required")
+    if not approved_by_user_id:
+        raise ValueError("approved_by_user_id required")
+    pending = find_pending_scope(trek_doc, pending_id)
+    if pending is None:
+        raise ValueError(f"pending scope id {pending_id!r} not found")
+    entry = pending.get("entry") or {}
+    for existing in trek_doc.get("scope") or []:
+        if existing == entry:
+            raise ValueError(
+                f"scope entry already committed (race with direct add): "
+                f"{entry}"
+            )
+    trek_doc.setdefault("scope", []).append(entry)
+    trek_doc[PENDING_SCOPE_ADDITIONS_KEY] = [
+        p for p in trek_doc.get(PENDING_SCOPE_ADDITIONS_KEY) or []
+        if p.get("pending_id") != pending_id
+    ]
+    pending["approved_at"] = utcnow_iso()
+    pending["approved_by_session_id"] = approved_by_session_id
+    pending["approved_by_user_id"] = approved_by_user_id
+    trek_doc["updated_at"] = utcnow_iso()
+    return entry
+
+
+def cancel_pending_scope(trek_doc: dict, *, pending_id: str) -> bool:
+    """Discard a pending scope addition without committing it.
+
+    Returns True if a record was removed, False if no record matched.
+    Idempotent (= safe to call when the pending entry was already
+    approved or cancelled by a concurrent request).
+    """
+    pending = trek_doc.get(PENDING_SCOPE_ADDITIONS_KEY) or []
+    new_pending = [
+        p for p in pending if p.get("pending_id") != pending_id
+    ]
+    if len(new_pending) == len(pending):
+        return False
+    trek_doc[PENDING_SCOPE_ADDITIONS_KEY] = new_pending
+    trek_doc["updated_at"] = utcnow_iso()
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Halt + leader transfer (ms-69 / e-1662)
 #
 # Halt = Andon cord. The STOP signal sets the ``halt`` field; participating

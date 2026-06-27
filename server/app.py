@@ -3337,6 +3337,23 @@ class TrekScopeOp(BaseModel):
     task: Optional[str] = None
 
 
+# ms-97 / e-2567 AC23 — AI-initiated scope-add that goes through user approval
+# before committing to ``scope[]``. Same body shape as TrekScopeOp (= the
+# caller still names project + narrowing key), but the server enqueues a
+# pending record instead of writing scope[] directly. The approving user
+# later calls POST /api/treks/{trek_id}/scope-approve { pending_id }.
+class TrekScopeAddPendingRequest(BaseModel):
+    project: str
+    milestone: Optional[str] = None
+    operation: Optional[str] = None
+    task: Optional[str] = None
+    requested_by_session_id: str  # caller's session_id (= audit only; server cross-checks against X-Beacon-Session)
+
+
+class TrekScopeApproveRequest(BaseModel):
+    pending_id: str
+
+
 class TrekTaskStateSet(BaseModel):
     """ms-75 / e-2048 — Trek-internal task state declaration.
 
@@ -3790,6 +3807,164 @@ def remove_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
     return t
 
 
+# ms-97 / e-2567 AC23 — scope-add approval flow.
+#
+# PUT /scope (above) is the leader's direct-commit shortcut; it remains
+# unchanged for backward compat. The 3 endpoints below implement the
+# approval-required path the SPEC calls out:
+#   POST /scope-add        — AI/CLI enqueues a pending scope addition
+#   GET /scope-pending     — list pending entries waiting for approval
+#   POST /scope-approve    — joined member approves a pending_id, commit
+#
+# Blanket approval (AC24, ``beacon trek blanket-approve --category``) is
+# explicitly out-of-scope for this PR; lands in Phase 2.
+@app.post("/api/treks/{trek_id}/scope-add")
+def add_trek_scope_pending_endpoint(
+    trek_id: str,
+    body: TrekScopeAddPendingRequest,
+    request: Request,
+    user: dict = Depends(require_auth),
+):
+    """Enqueue a scope addition pending user approval.
+
+    The entry is normalised in **strict** mode (= project-wide rejected);
+    duplicates against committed ``scope[]`` or the existing pending queue
+    are surfaced as 409 so the caller can show the right hint instead of
+    accumulating noise. Returns the trek doc plus the newly minted
+    pending_id so the CLI can hand it to the approver.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    entry: dict = {"project": body.project}
+    if body.milestone:
+        entry["milestone"] = body.milestone
+    if body.operation:
+        entry["operation"] = body.operation
+    if body.task:
+        entry["task"] = body.task
+    caller_uid = user.get("sub") or ""
+    # The caller's session_id is in X-Beacon-Session (= trusted, set by
+    # the bridge). The body field is informational and only used when the
+    # header is absent (= raw CLI / curl). We do not let the body field
+    # override the header — that would let a session attribute requests
+    # to other sessions, defeating audit.
+    header_sid = request.headers.get("X-Beacon-Session", "") or ""
+    caller_sid = header_sid or (body.requested_by_session_id or "")
+    if not caller_sid:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "scope-add requires a caller session_id "
+                "(set X-Beacon-Session header or body.requested_by_session_id)"
+            ),
+        )
+    try:
+        pending_id = trek_mod.add_pending_scope(
+            t,
+            entry=entry,
+            requested_by_session_id=caller_sid,
+            requested_by_user_id=caller_uid,
+        )
+    except ValueError as e:
+        msg = str(e)
+        if "already committed" in msg or "already pending" in msg:
+            raise HTTPException(status_code=409, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
+    db.save_trek(trek_id, t)
+    _log_trek_scope_audit(
+        action="add-pending", trek_id=trek_id, user=user,
+        request=request, entry=entry,
+    )
+    return {"pending_id": pending_id, "trek": t}
+
+
+@app.get("/api/treks/{trek_id}/scope-pending")
+def list_trek_scope_pending_endpoint(
+    trek_id: str,
+    user: dict = Depends(require_auth),
+):
+    """List pending scope additions awaiting approval.
+
+    Returns the pending records as an unwrapped array so CLI clients can
+    iterate without conditional wrapper unwrap. Blanket approvals (AC24)
+    land on a separate endpoint in Phase 2 to keep the response shape
+    stable.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    return trek_mod.list_pending_scope(t)
+
+
+@app.post("/api/treks/{trek_id}/scope-approve")
+def approve_trek_scope_pending_endpoint(
+    trek_id: str,
+    body: TrekScopeApproveRequest,
+    request: Request,
+    user: dict = Depends(require_auth),
+):
+    """Approve a pending scope addition; the entry lands on ``scope[]``.
+
+    Any joined member may approve (= leader role is not required). The
+    server records the approving session + user on the pending record
+    (= retained as an approval audit trail) and commits the normalised
+    entry to ``scope[]``. 404 when pending_id is unknown, 409 when the
+    entry was committed via PUT /scope between request and approve.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    if not body.pending_id:
+        raise HTTPException(status_code=400, detail="pending_id required")
+    caller_uid = user.get("sub") or ""
+    caller_sid = request.headers.get("X-Beacon-Session", "") or ""
+    try:
+        entry = trek_mod.approve_pending_scope(
+            t,
+            pending_id=body.pending_id,
+            approved_by_session_id=caller_sid or "cli",
+            approved_by_user_id=caller_uid,
+        )
+    except ValueError as e:
+        msg = str(e)
+        if "not found" in msg:
+            raise HTTPException(status_code=404, detail=msg)
+        if "already committed" in msg:
+            raise HTTPException(status_code=409, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
+    db.save_trek(trek_id, t)
+    _log_trek_scope_audit(
+        action="approve-pending", trek_id=trek_id, user=user,
+        request=request, entry=entry,
+    )
+    return t
+
+
+@app.delete("/api/treks/{trek_id}/scope-pending/{pending_id}")
+def cancel_trek_scope_pending_endpoint(
+    trek_id: str,
+    pending_id: str,
+    request: Request,
+    user: dict = Depends(require_auth),
+):
+    """Discard a pending scope addition without committing it.
+
+    Used when the leader decides a proposed scope-add is wrong or the
+    requesting executor has moved on. Idempotent — silent no-op if the
+    pending_id was already cleared (= approved or cancelled concurrently).
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    pending = trek_mod.find_pending_scope(t, pending_id)
+    removed = trek_mod.cancel_pending_scope(t, pending_id=pending_id)
+    if removed:
+        db.save_trek(trek_id, t)
+        _log_trek_scope_audit(
+            action="cancel-pending", trek_id=trek_id, user=user,
+            request=request,
+            entry=(pending or {}).get("entry") or {"pending_id": pending_id},
+        )
+    return t
+
+
 @app.put("/api/treks/{trek_id}/halt")
 def set_trek_halt_endpoint(trek_id: str, body: TrekHaltSet,
                            user: dict = Depends(require_auth)):
@@ -4135,6 +4310,40 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
     # Determine the calling session_id (best-effort — bridges include
     # X-Beacon-Session header; CLI/curl callers may omit it).
     caller_sid = request.headers.get("X-Beacon-Session", "") or ""
+    # ms-97 / e-2567 AC13 — leader-only transition hard-check.
+    # Transitions FROM leader_review (= leader 専用 3 択 approve/re-work/forward)
+    # require the caller's session to match trek.leader_session_id. Bypassing
+    # this check would let a non-leader session approve their own work; the
+    # SPEC's "leader hard-check on state machine API" forbids that explicitly.
+    # Transitions FROM user_review require the caller's user_id to match the
+    # trek creator's user_id (= user grain because user_review is the human
+    # decision point and a session restart should not lose the right).
+    # Pre-check uses the canonical lib.trek getter so legacy waiting-review
+    # docs are migrated to leader_review before the comparison.
+    prior_state = trek_mod.get_task_state(t, body.task_id)
+    if prior_state == trek_mod.TrekTaskState.LEADER_REVIEW.value:
+        leader_sid = t.get("leader_session_id") or ""
+        if leader_sid and caller_sid and caller_sid != leader_sid:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"trek transition from leader_review requires "
+                    f"actor_session_id == trek.leader_session_id "
+                    f"(= {leader_sid!r}); caller session was {caller_sid!r}"
+                ),
+            )
+    if prior_state == trek_mod.TrekTaskState.USER_REVIEW.value:
+        creator_uid = (t.get("creator_actor") or {}).get("user_id", "")
+        caller_uid = user.get("sub") or ""
+        if creator_uid and caller_uid and caller_uid != creator_uid:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"trek transition from user_review requires the trek "
+                    f"owner (creator_actor.user_id={creator_uid!r}); caller "
+                    f"user was {caller_uid!r}"
+                ),
+            )
     try:
         trek_mod.set_task_state(
             t,
@@ -5408,6 +5617,13 @@ def trek_scheduler_tick_endpoint(
                            if t.get("trek_id") in wanted]
     candidate_treks = [t for t in candidate_treks
                        if t.get("status") == "active"]
+    # ms-97 / e-2567 AC32 — halt 中の trek は tick fire を全停止
+    # (= cadence-fire / idle-escalation / auto-stall すべて skip)。
+    # SPEC 中心原則 6: 「halt 設定中は executor / leader 両方の tick fire 全停止、
+    # DM bypass も失効、自律 succession も走らない、user 明示 unhalt で再開」。
+    # 既存 lib/trek_scheduler.detect_auto_stalled_tasks も halt 中は no-op
+    # を返すが、 candidate_treks レベルで切るほうが意図が明示的になる。
+    candidate_treks = [t for t in candidate_treks if not t.get("halt")]
     due_treks = trek_scheduler_mod.select_due_treks(
         candidate_treks, now=now,
     )
@@ -5419,6 +5635,116 @@ def trek_scheduler_tick_endpoint(
         for t in candidate_treks
         if trek_scheduler_mod.should_fire_idle_escalation(t, now=now)
     }
+
+    # ms-97 / e-2567 AC16 — cross-project session index. The pre-AC16 fanout
+    # path resolved member sessions via ``db.list_sessions(scope[0].project)``
+    # which silently dropped members whose home project lived in scope[1..N].
+    # The new path queries every project's session registry once per tick
+    # and indexes by session_id, so members[] iteration can resolve any
+    # session's home project regardless of where it lives. The N+1 enumeration
+    # cost is bounded (= scheduler tick is internal, runs once per cadence
+    # window) so we choose freshness over a session-id-indexed cache.
+    #
+    # Project enumeration combines two sources for robustness:
+    #   1. db.list_projects() — production path (= every active project)
+    #   2. scope[].project across candidate_treks — ensures test fixtures
+    #      that stub sessions for trek scope projects without seeding a
+    #      global project list still resolve cleanly. Also catches treks
+    #      whose scope references a project that the directory doesn't
+    #      enumerate (= corner-case data divergence) by reaching the
+    #      stubbed session registry directly.
+    project_id_set: set[str] = set()
+    try:
+        for _pid in db.list_projects():
+            if _pid:
+                project_id_set.add(_pid)
+    except Exception:
+        pass
+    for _t in candidate_treks:
+        for _e in _t.get("scope") or []:
+            _pid = _e.get("project") or ""
+            if _pid:
+                project_id_set.add(_pid)
+    all_sessions_index: dict[str, dict] = {}
+    for _pid in project_id_set:
+        try:
+            for _s in db.list_sessions(_pid):
+                _sid = (_s or {}).get("session_id") or ""
+                if not _sid or _sid in all_sessions_index:
+                    continue
+                all_sessions_index[_sid] = {**_s, "project_id": _pid}
+        except Exception:
+            continue
+    live_cutoff_iso = (now - datetime.timedelta(minutes=10)).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+
+    # Maintain a reverse index user_id → [session_id, ...] for the legacy
+    # fan-out path (= members[] still user_id keyed, no session_history).
+    # Production data lives at member.session_id post-migration so this
+    # path is only hit by un-migrated treks and tests.
+    sessions_by_user_id: dict[str, list[str]] = {}
+    for _sid, _sess in all_sessions_index.items():
+        _uid = (_sess or {}).get("user_id") or ""
+        if _uid and _sid:
+            sessions_by_user_id.setdefault(_uid, []).append(_sid)
+
+    def _resolve_member_sids(member: dict, trek_doc: dict) -> list[str]:
+        """Resolve a member entry to its candidate session_ids.
+
+        Three tiers (= first hit wins, no fall-through to weaker tiers
+        once a stronger one matches):
+        1. Post-migration (ms-97 / e-2566 AC6): ``member.session_id`` is
+           the canonical session — return [session_id].
+        2. ``session_history`` carries per-Trek join records keyed by both
+           user_id and session_id (= ms-86 / e-2225). When members[] is
+           still user_id keyed we walk this list and return every session
+           that ever joined under this user_id; live-filter and per-claim
+           filter run downstream.
+        3. Legacy fallback (= no session_history): enumerate the
+           cross-project session index for matching user_id. Preserves
+           the pre-AC6 behaviour ``db.list_sessions(target) ∧ user_id
+           filter`` so un-migrated production treks and tests with
+           directly-stubbed session registries keep working.
+        """
+        sid = member.get("session_id") or ""
+        if sid:
+            return [sid]
+        uid = member.get("user_id") or ""
+        if not uid:
+            return []
+        history_sids = [
+            entry.get("session_id") or ""
+            for entry in (trek_doc.get("session_history") or [])
+            if entry.get("user_id") == uid and entry.get("session_id")
+        ]
+        if history_sids:
+            # Dedup while preserving order (= earliest joined first).
+            seen: set[str] = set()
+            ordered: list[str] = []
+            for s in history_sids:
+                if s not in seen:
+                    seen.add(s)
+                    ordered.append(s)
+            return ordered
+        return list(sessions_by_user_id.get(uid, []))
+
+    def _leader_home_pid(trek_doc: dict) -> str:
+        """Return the leader session's home project, or "" when unresolved.
+
+        Used by idle-escalation + auto-stall passes for the bus target
+        project. Falls back to scope[0].project when the leader session
+        is unknown / offline so cross-project treks with a temporarily
+        absent leader still surface the events somewhere observable.
+        """
+        leader_sid = trek_doc.get("leader_session_id") or ""
+        if leader_sid:
+            sess = all_sessions_index.get(leader_sid) or {}
+            pid = sess.get("project_id") or ""
+            if pid:
+                return pid
+        scope = trek_doc.get("scope") or []
+        return scope[0].get("project", "") if scope else ""
 
     fired: list[dict] = []
     errors: list[dict] = []
@@ -5451,117 +5777,132 @@ def trek_scheduler_tick_endpoint(
             except Exception:
                 pass
             continue
-        # Determine the target project for the bus event. The trek's first
-        # scope entry's project is the canonical "home project" for the
-        # progress-check; treks with no scope are skipped by the payload
-        # builder (= empty-scope fallback DM still fires, into the leader
-        # session's home project resolved from its actor).
-        scope = trek_doc.get("scope") or []
-        if not scope:
-            errors.append({
-                "trek_id": trek_id,
-                "error": "empty_scope_no_target_project",
-            })
-            continue
-        target_project_id = scope[0].get("project", "")
-        if not target_project_id:
-            errors.append({
-                "trek_id": trek_id,
-                "error": "scope_entry_missing_project",
-            })
-            continue
-        try:
-            envelope = envelope_mod.issue_t1_system_envelope(
-                project_id=target_project_id,
-                trek_id=trek_id,
-                actions_authorized=["trek.progress_check"],
-                data_class="free",
-                ttl_seconds=3600,
-            )
-        except ValueError as exc:
-            errors.append({
-                "trek_id": trek_id,
-                "error": f"envelope_mint_failed: {exc}",
-            })
-            continue
-        # Build the DM body from a project-data snapshot. We don't have
-        # live local project.json here on the server side, so the body
-        # is the minimal "scope-aware" fallback (= scope refs only). The
-        # AI side enriches it from the receiving session's local repo.
-        payload = trek_scheduler_mod.build_progress_check_payload(
-            trek_doc,
-            project_data=None,
-            now=now,
-        )
-        # ms-83 / e-2036 — fan out to every live session of every Trek
-        # member, not just one project-wide broadcast. Per the dogfood
-        # observation (2026-06-19): trek.members[] is keyed by user_id,
-        # so self-dogfood (= multiple sessions of one user) collapsed to
-        # 1 member, leaving executor sessions unreached. The fix queries
-        # the project's session registry, filters by member user_ids and
-        # a 10-minute live cutoff, then writes one bus event per session
-        # with a session-addressed payload (= payload.recipient_session_id).
-        # If no live sessions resolve (= empty members or all stale), the
-        # broadcast fallback fires (sid="") so behaviour stays compatible.
+        # ms-97 / e-2567 AC16 + AC17 — members-iterate fanout.
         #
-        # ms-88 / e-2109 — per-session task_state filter. The dogfood also
-        # showed that fanning out to every live session even when their
-        # claimed tasks were all terminal (= leader_review / user_review /
-        # done) burned executor inboxes with ticks they couldn't act on.
-        # Filter target_sids down to sessions that either (a) hold at least
-        # one todo / working claim, or (b) have no claims yet (= fresh
-        # executor about to pick up). Sessions whose claims are all in
-        # terminal-ish states get NO tick — they explicitly finished and
-        # should stay quiet until the leader re-stamps them working.
-        member_user_ids = {
-            (m.get("user_id") or "")
-            for m in (trek_doc.get("members") or [])
-            if m.get("user_id")
-        }
-        target_sids: list[str] = []
-        if member_user_ids:
-            try:
-                project_sessions = db.list_sessions(target_project_id)
-            except Exception:
-                project_sessions = []
-            live_cutoff = (now - datetime.timedelta(minutes=10)).strftime(
-                "%Y-%m-%dT%H:%M:%S.%fZ"
-            )
-            live_sids = [
-                (s.get("session_id") or "")
-                for s in project_sessions
-                if (s.get("user_id") or "") in member_user_ids
-                and (s.get("last_active") or "") >= live_cutoff
-                and s.get("session_id")
-            ]
-            # ms-88 / e-2109 — per-session filter.
-            # 2026-06-20 補完 (e-2109 second pass): leader 除外を追加。 leader は
-            # executor の進捗を促す立場ではない (= 役割が違う、 CORE doc
-            # trek-leader-stance / e-2166 と整合)、 progress-check の宛先から外す。
-            # 残された claim 0 件の executor は「fresh、 これから todo を引き受ける」
-            # と扱われ tick が届く。 leader 専用の集約 surface (= trek-leader-digest
-            # channel、 e-2164) は別 channel で配信する設計。
-            leader_sid_for_filter = trek_doc.get("leader_session_id") or ""
-            for sid in live_sids:
-                if leader_sid_for_filter and sid == leader_sid_for_filter:
-                    # leader は progress-check の宛先ではない。
+        # Old path (= pre-AC16): mint one envelope per trek bound to
+        # ``scope[0].project``, then list that single project's session
+        # registry, filter by member user_ids. This dropped every member
+        # whose home project was scope[1..N] (= the e-2564 incident root
+        # cause, observed in tk-7a3b88b9 dogfood on 2026-06-27).
+        #
+        # New path: iterate ``trek.members[]`` directly. For each member,
+        # resolve the session_id (= post-migration field, fall back to
+        # session_history for legacy user_id keyed docs), look up the
+        # session's home project from the cross-project session index,
+        # and post one bus event per (live, attention-required) session
+        # into THAT session's home project bus. The leader's session
+        # receives the leader-digest event in its own home project; non-
+        # leader sessions receive progress-check events in theirs.
+        #
+        # Per-session task_state filter (= ms-88 / e-2109) is preserved:
+        # sessions whose claims are all terminal-ish stay quiet until
+        # the leader re-stamps them working.
+        members = trek_doc.get("members") or []
+        leader_sid = trek_doc.get("leader_session_id") or ""
+
+        # Build the canonical payloads ONCE per trek; recipient_session_id
+        # is stamped per-fanout below.
+        payload_base = trek_scheduler_mod.build_progress_check_payload(
+            trek_doc, project_data=None, now=now,
+        )
+        digest_payload_base: Optional[dict] = None  # lazily built when a live leader is found
+
+        executor_targets: list[dict] = []  # {sid, home_pid}
+        leader_target: Optional[dict] = None  # {sid, home_pid}
+
+        # scope[0].project is the legacy "trek home" — used as a fallback
+        # for executor broadcasts AND for the digest target when the
+        # leader session isn't yet registered with a project (= planning-
+        # era treks, dogfood data with stubbed sessions, etc.).
+        scope_fallback_pid = ""
+        scope_for_fallback = trek_doc.get("scope") or []
+        if scope_for_fallback:
+            scope_fallback_pid = scope_for_fallback[0].get("project", "")
+
+        seen_sids: set[str] = set()
+        for m in members:
+            sids_for_member = _resolve_member_sids(m, trek_doc)
+            if not sids_for_member:
+                # Legacy member missing every resolution tier; report
+                # but don't fail the tick.
+                errors.append({
+                    "trek_id": trek_id,
+                    "error": "member_session_id_unresolved",
+                    "member_user_id": m.get("user_id") or "",
+                })
+                continue
+            for sid in sids_for_member:
+                if sid in seen_sids:
                     continue
-                if trek_mod.session_has_active_claim(trek_doc, session_id=sid):
-                    target_sids.append(sid)
-                elif not trek_mod.session_has_any_claim(trek_doc, session_id=sid):
-                    # Fresh session, no claims yet — still tick so it picks
-                    # up a todo task.
-                    target_sids.append(sid)
+                seen_sids.add(sid)
+                sess = all_sessions_index.get(sid) or {}
+                home_pid = sess.get("project_id") or ""
+                if not home_pid:
+                    errors.append({
+                        "trek_id": trek_id,
+                        "error": "member_session_no_home_project",
+                        "session_id": sid,
+                    })
+                    continue
+                last_active = sess.get("last_active") or ""
+                if last_active < live_cutoff_iso:
+                    # Stale session — skip silently, matches legacy
+                    # 10-minute live cutoff.
+                    continue
+                if sid == leader_sid:
+                    leader_target = {"sid": sid, "home_pid": home_pid}
+                    continue
+                # Executor — apply the per-session task_state filter.
+                if trek_mod.session_has_active_claim(
+                    trek_doc, session_id=sid,
+                ):
+                    executor_targets.append(
+                        {"sid": sid, "home_pid": home_pid},
+                    )
+                elif not trek_mod.session_has_any_claim(
+                    trek_doc, session_id=sid,
+                ):
+                    # Fresh session, no claims yet — still tick so it
+                    # picks up a todo task.
+                    executor_targets.append(
+                        {"sid": sid, "home_pid": home_pid},
+                    )
                 # else: every claim is terminal-ish → skip this session.
-        if not target_sids:
-            # Fallback: broadcast (= sid empty). Preserves behaviour when
-            # member resolution fails (= no live sessions / empty members /
-            # backend hiccup) so the trek still surfaces in some inbox.
-            target_sids = [""]
+
+        # Fallback (= back-compat): when member resolution returns no live
+        # executor targets, broadcast into scope[0].project so the trek
+        # still surfaces in some inbox. Preserves behaviour for legacy
+        # treks that pre-date the session_id-keyed members migration.
+        fanout_targets: list[dict] = list(executor_targets)
+        if not fanout_targets and scope_fallback_pid:
+            fanout_targets.append({
+                "sid": "",  # broadcast
+                "home_pid": scope_fallback_pid,
+            })
+
+        # Emit progress-check per executor (or 1 fallback broadcast).
         event_ids: list[str] = []
         any_send_succeeded = False
-        for sid in target_sids:
-            send_payload = dict(payload)
+        for tgt in fanout_targets:
+            sid = tgt["sid"]
+            home_pid = tgt["home_pid"]
+            try:
+                envelope = envelope_mod.issue_t1_system_envelope(
+                    project_id=home_pid,
+                    trek_id=trek_id,
+                    actions_authorized=["trek.progress_check"],
+                    data_class="free",
+                    ttl_seconds=3600,
+                )
+            except ValueError as exc:
+                errors.append({
+                    "trek_id": trek_id,
+                    "recipient_session_id": sid,
+                    "project_id": home_pid,
+                    "error": f"envelope_mint_failed: {exc}",
+                })
+                continue
+            send_payload = dict(payload_base)
             if sid:
                 send_payload["recipient_session_id"] = sid
             bus_data = {
@@ -5573,30 +5914,46 @@ def trek_scheduler_tick_endpoint(
                 "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
             }
             try:
-                event_ids.append(db.append_bus_event(target_project_id, bus_data))
+                event_ids.append(db.append_bus_event(home_pid, bus_data))
                 any_send_succeeded = True
             except Exception as exc:
                 errors.append({
                     "trek_id": trek_id,
                     "recipient_session_id": sid,
+                    "project_id": home_pid,
                     "error": f"bus_append_failed: {type(exc).__name__}: {exc}",
                 })
         if not any_send_succeeded:
             # Every send for this trek failed; skip the stamp so the next
             # tick retries instead of silently swallowing the failure.
             continue
+
         # ms-92 / e-2164 — leader-digest fan-out (= one event to the
         # leader's session carrying aggregated per-executor status).
-        # Same cadence as trek-progress-check (= they fire together so
-        # the leader sees "what is everyone doing right now" without
-        # polling). Leader session id may be missing on planning-era
-        # treks; skip in that case (= can't deliver without a target).
-        leader_sid = trek_doc.get("leader_session_id") or ""
+        # Under cross-project fanout (ms-97 / e-2567 AC16) the digest
+        # goes into the leader's home project when resolvable; otherwise
+        # falls back to scope[0].project so legacy single-project treks
+        # (= tests, planning-era data with stubbed sessions) keep firing.
+        # When the trek has no leader_session_id at all (= planning-era,
+        # genuinely no leader yet) the digest is skipped — there's no one
+        # to deliver to.
         leader_digest_event_id = ""
-        if leader_sid:
+        digest_recipient_sid = ""
+        digest_home_pid = ""
+        if leader_target is not None:
+            digest_recipient_sid = leader_target["sid"]
+            digest_home_pid = leader_target["home_pid"]
+        elif leader_sid and scope_fallback_pid:
+            # Leader declared but session lookup failed (= legacy / test
+            # path with no registered session). Fall back to scope[0] for
+            # the bus target so the digest still reaches the leader's
+            # inbox via the project-scoped channel listener.
+            digest_recipient_sid = leader_sid
+            digest_home_pid = scope_fallback_pid
+        if digest_home_pid:
             try:
                 digest_envelope = envelope_mod.issue_t1_system_envelope(
-                    project_id=target_project_id,
+                    project_id=digest_home_pid,
                     trek_id=trek_id,
                     actions_authorized=["trek.leader_digest"],
                     data_class="free",
@@ -5609,21 +5966,23 @@ def trek_scheduler_tick_endpoint(
                 })
                 digest_envelope = None
             if digest_envelope is not None:
-                digest_payload = trek_scheduler_mod.build_leader_digest_payload(
-                    trek_doc, now=now,
+                digest_payload_base = (
+                    trek_scheduler_mod.build_leader_digest_payload(
+                        trek_doc, now=now,
+                    )
                 )
-                digest_payload["recipient_session_id"] = leader_sid
+                digest_payload_base["recipient_session_id"] = digest_recipient_sid
                 digest_bus_data = {
                     "channel": "trek-leader-digest",
                     "sender_session_id": "",
-                    "payload": digest_payload,
+                    "payload": digest_payload_base,
                     "envelope": digest_envelope,
                     "delivery": "auto-execute",
                     "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
                 }
                 try:
                     leader_digest_event_id = db.append_bus_event(
-                        target_project_id, digest_bus_data,
+                        digest_home_pid, digest_bus_data,
                     )
                 except Exception as exc:
                     errors.append({
@@ -5633,15 +5992,13 @@ def trek_scheduler_tick_endpoint(
                             f"{type(exc).__name__}: {exc}"
                         ),
                     })
+
         # Stamp last_progress_check_at so the next tick skips this trek
         # until its cadence elapses again.
         meta = trek_doc.setdefault("meta", {})
         meta["last_progress_check_at"] = now.strftime(
             "%Y-%m-%dT%H:%M:%S.%fZ"
         )
-        # ms-92 / e-2164 — record the latest leader-digest fire so the
-        # dashboard can show "last leader digest at X". Sits next to
-        # last_progress_check_at since they are co-scheduled.
         if leader_digest_event_id:
             meta["last_leader_digest_at"] = now.strftime(
                 "%Y-%m-%dT%H:%M:%S.%fZ"
@@ -5657,9 +6014,17 @@ def trek_scheduler_tick_endpoint(
             continue
         fired.append({
             "trek_id": trek_id,
-            "project_id": target_project_id,
+            # Legacy field — under cross-project fanout there is no single
+            # project per trek. Populate with the leader's home project
+            # when resolvable, falling back to scope[0].project so the
+            # field stays non-empty for back-compat observability.
+            "project_id": (
+                (leader_target["home_pid"] if leader_target else "")
+                or scope_fallback_pid
+            ),
             "event_ids": event_ids,
-            "recipients": target_sids,
+            "recipients": [t["sid"] for t in fanout_targets],
+            "recipient_projects": [t["home_pid"] for t in fanout_targets],
             "leader_digest_event_id": leader_digest_event_id,
             "leader_session_id": leader_sid,
         })
@@ -5678,12 +6043,11 @@ def trek_scheduler_tick_endpoint(
         fresh = db.get_trek(trek_id)
         if fresh is not None:
             trek_doc = fresh
-        scope = trek_doc.get("scope") or []
-        if not scope:
-            # Same fallback path as the progress-check loop; without a
-            # target project we have nowhere to post.
-            continue
-        target_project_id = scope[0].get("project", "")
+        # ms-97 / e-2567 AC16 — idle escalation goes to the leader's home
+        # project (= where the user is looking) for cross-project treks.
+        # Falls back to scope[0].project when the leader isn't resolvable,
+        # preserving legacy behaviour for treks with offline leaders.
+        target_project_id = _leader_home_pid(trek_doc)
         if not target_project_id:
             continue
         payload = trek_scheduler_mod.build_idle_escalation_payload(
@@ -5751,10 +6115,11 @@ def trek_scheduler_tick_endpoint(
         )
         if not stalled:
             continue
-        scope = trek_doc.get("scope") or []
-        if not scope:
-            continue
-        target_pid = scope[0].get("project", "")
+        # ms-97 / e-2567 AC16 — auto-stall review event goes to the leader's
+        # home project so cross-project treks reach the leader regardless
+        # of which project the trek's scope[0] points at. Falls back to
+        # scope[0].project when the leader session is offline.
+        target_pid = _leader_home_pid(trek_doc)
         if not target_pid:
             continue
         leader_sid = trek_doc.get("leader_session_id") or ""
