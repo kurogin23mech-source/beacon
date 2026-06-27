@@ -12920,6 +12920,53 @@ def _resolve_hook_command(hook_basename: str) -> str:
 def cmd_skill_install():
     """Install beacon Claude Code Skills into ~/.claude/skills/, update CLAUDE.md, and configure hooks."""
     import shutil
+    from pathlib import Path
+    converter_target = os.environ.get("BEACON_SKILL_TARGET", "").strip()
+    converter_name = os.environ.get("BEACON_SKILL_NAME", "").strip()
+    if converter_target or converter_name:
+        from skill_converter import (
+            SkillConversionError,
+            install_skill,
+            prune_skill,
+            resolve_canonical_root,
+        )
+
+        if not converter_target or not converter_name:
+            print("Error: converter install requires both --target and --name", file=sys.stderr)
+            sys.exit(2)
+        targets = ("claude", "codex") if converter_target == "both" else (converter_target,)
+        try:
+            common = {
+                "targets": targets,
+                "home": Path(_user_home()),
+                "dry_run": os.environ.get("BEACON_DRY_RUN") == "1",
+                "force": os.environ.get("BEACON_FORCE") == "1",
+            }
+            if os.environ.get("BEACON_PRUNE") == "1":
+                if os.environ.get("BEACON_ADOPT") == "1":
+                    raise SkillConversionError("--prune and --adopt are mutually exclusive")
+                results = prune_skill(converter_name, **common)
+            else:
+                results = install_skill(
+                    resolve_canonical_root() / converter_name,
+                    adopt=os.environ.get("BEACON_ADOPT") == "1",
+                    **common,
+                )
+        except SkillConversionError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if os.environ.get("BEACON_JSON") == "1":
+            print(json.dumps(results, ensure_ascii=False))
+        else:
+            for result in results:
+                print(
+                    f"{result['target']}: {result['action']} "
+                    f"{result['destination']}"
+                )
+                for warning in result.get("warnings", []):
+                    print(f"  warning: {warning}")
+        return
+
     _append_claude_md()
 
     skills_src = _resolve_skills_src()

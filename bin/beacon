@@ -241,7 +241,9 @@ Other:
   beacon auth login                 Sign in with Google (use this, not 'cloud login')
   beacon auth logout                Remove cached credentials
   beacon auth status                Show login status
-  beacon skill install              Install Claude Code Skills
+  beacon skill install              Install legacy Claude Code Skills
+  beacon skill install --target claude|codex|both --name <name>
+                                    Install a canonical shared Skill
   beacon monitor context [--dry-run]
                                     Stop hook: context-usage threshold monitor (e-854)
   beacon update [--check] [--skill-only] [--yes]
@@ -4600,7 +4602,28 @@ EOF
         ;;
     skill)
         case "${2:-}" in
-            install) python3 "$COMMANDS_PY" skill_install ;;
+            install)
+                shift 2
+                _skill_target=""; _skill_name=""; _skill_force=""
+                _skill_adopt=""; _skill_dry_run=""; _skill_prune=""; _skill_json=""
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        --target)  _skill_target="${2:-}"; shift 2 ;;
+                        --name)    _skill_name="${2:-}"; shift 2 ;;
+                        --force)   _skill_force="1"; shift ;;
+                        --adopt)   _skill_adopt="1"; shift ;;
+                        --dry-run) _skill_dry_run="1"; shift ;;
+                        --prune)   _skill_prune="1"; shift ;;
+                        --json)    _skill_json="1"; shift ;;
+                        *) echo "Usage: beacon skill install [--target claude|codex|both --name <name>] [--dry-run] [--prune] [--force|--adopt] [--json]"; exit 2 ;;
+                    esac
+                done
+                BEACON_SKILL_TARGET="$_skill_target" BEACON_SKILL_NAME="$_skill_name" \
+                BEACON_FORCE="$_skill_force" BEACON_ADOPT="$_skill_adopt" \
+                BEACON_DRY_RUN="$_skill_dry_run" BEACON_PRUNE="$_skill_prune" \
+                BEACON_JSON="$_skill_json" \
+                    python3 "$COMMANDS_PY" skill_install
+                ;;
             *)       echo "Usage: beacon skill install" ;;
         esac
         ;;
