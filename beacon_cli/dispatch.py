@@ -728,6 +728,16 @@ def build_parser() -> argparse.ArgumentParser:
     # have not accepted yet — they show up via plain list / status.
     p_trek_list.add_argument("--joined", dest="joined_only", action="store_true",
                              help="Show only treks the current user has joined")
+    # ms-97 / e-2571 AC8 + AC31 — surface grandfathered project-wide scope
+    # treks so operators can decide whether to narrow them. Default off
+    # (= shows all visible treks); on filters to just the legacy ones.
+    p_trek_list.add_argument(
+        "--legacy-scope", dest="legacy_scope_only", action="store_true",
+        help=(
+            "Show only treks with grandfathered project-wide scope "
+            "(= meta.legacy_project_wide_scope marker, ms-97 AC31)"
+        ),
+    )
     p_trek_list.add_argument("--json", action="store_true")
 
     p_trek_show = trek_sub.add_parser("show", aliases=["get"], add_help=False)
@@ -2359,6 +2369,9 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
                 "BEACON_TREK_ALL_ACTORS": "1" if args.all_actors else "",
                 "BEACON_TREK_JOINED_ONLY": (
                     "1" if getattr(args, "joined_only", False) else ""
+                ),
+                "BEACON_TREK_LEGACY_SCOPE_ONLY": (
+                    "1" if getattr(args, "legacy_scope_only", False) else ""
                 ),
                 "BEACON_JSON": json_env,
             },
