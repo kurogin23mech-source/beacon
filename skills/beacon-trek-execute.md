@@ -437,9 +437,11 @@ cd "$PROJECT_DIR" && beacon bus ack --event <event_id> 2>&1 || \
 
 user 引数経由 (= event_id 無し) の起動では skip。
 
-## Step 8.5: completion_ready signal の受領時動作 (= ms-97 / AC20、 leader 専用)
+## Step 8.5: completion_ready signal の受領時動作 (= ms-97 / AC20、 leader 専用、 Phase 2 実装待ち)
 
-leader として `trek-leader-digest` event を受けた時、 payload に **`completion_ready=true` marker** (= 仮 field 名、 e-2567 で確定予定) が立っている場合、 そのイベントは「全 MS / task slot が terminal `{done, user_review}` に到達した」 ことを通知している (= server が idempotent stamp `meta.completion_notified_at` で 1 回限り fire、 Op slot を含む trek では発火しない)。
+leader として `trek-leader-digest` event を受けた時、 payload に **`completion_ready=true` marker** が立っている場合、 そのイベントは「全 MS / task slot が terminal `{done, user_review}` に到達した」 ことを通知している (= server が idempotent stamp `trek.meta.completion_notified_at` で 1 回限り fire、 Op slot を含む trek では発火しない)。
+
+> **Phase 2 land 待ち (= ms-97 AC20/21)**: 本 Step の schema (= `payload.completion_ready` / `trek.meta.completion_notified_at` / `trek.meta.summary_sent_at`) は Fork B1 (= e-2567 server endpoint 改修) との合意で **canonical 確定** していますが、 stamp 発火実装は **Phase 2 で land 予定**。 当面 Skill 内 schema をこの canonical 名で固定保持し、 Phase 2 land 後に実 fire 経路と接続。
 
 leader が取るべき行動:
 
@@ -458,17 +460,46 @@ cd "$PROJECT_DIR" && beacon bus send --channel notify --payload '{
 }' --delivery notify-user-only
 ```
 
-2. **`meta.summary_sent_at` stamp を打つ** (= 仮 CLI、 e-2568 で確定予定):
+2. **`trek.meta.summary_sent_at` stamp を打つ** — Phase 2 で land 予定の専用 CLI 経由 (= Fork B1 と合意):
 
 ```bash
-cd "$PROJECT_DIR" && beacon trek meta-set <trek-id> --key summary_sent_at --value "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# (= Phase 2 で実装予定、 ms-97 AC21、 leader 限定 hard-check + 専用 endpoint POST /api/treks/{trek_id}/complete を server 側に生やす想定)
+cd "$PROJECT_DIR" && beacon trek complete --trek <trek-id>
 ```
 
-3. **leader tick を以降停止** (= server 側で `meta.summary_sent_at` を見て tick 対象から外す)
+Generic な `beacon trek meta-set` は **採用しない** (= blast-radius 過大、 任意 key 上書きが audit / validation を崩す)。 専用 subcommand `trek complete` で leader 限定 + 単一 stamp 操作に閉じる設計。
+
+3. **leader tick を以降停止** (= server 側で `meta.summary_sent_at` non-null を見て tick 対象から外す)
 
 leader が長期間不応 (= 上記 1-3 を取らない) の場合、 server が auto-succession 経路で別 session を leader に任命する (= ms-97 / AC22)。 つまり「completion_ready を受領したら速やかに動く」 が leader の責務。
 
-**仮 schema 整合の追従**: e-2567 (= server endpoint 改修) で確定する payload field 名と CLI subcommand 名 (= 上記 `completion_ready` / `meta.summary_sent_at` / `trek meta-set`) は仮値で書いてある。 e-2567 land 後に確定 field 名で本 section を 1 commit update する (= ms-97 Phase 1a 統合 dogfood 前の必須 follow-up)。
+## Step 8.6: Server-side hard enforcement (= ms-97 / e-2567 land 済、 Phase 1a Wave 2)
+
+e-2567 で **server endpoint 側の構造強制** が land 済。 本 Skill 利用者 (= executor / leader 両方) が知っておくべき新しい挙動 3 点:
+
+### (A) `payload.recipient_session_id` 全 fanout で stamp 必須化 (= AC16/17)
+
+`trek-progress-check` / `trek-leader-digest` 両方の payload で、 server が **members 直接 iterate + 各 session の home project bus に POST + `recipient_session_id` を per-fanout で stamp** するようになった。 旧 schema (= scope[0] 固定 fanout、 leader-digest のみ stamp) は廃止。
+
+→ Skill 内で payload を受け取った時、 `payload.recipient_session_id` は **identity 情報として依存して OK** (= 自セッションが正しい受信者か確認に使う、 cross-project でも保証される)。
+
+### (B) Scope-add は canonical leader endpoint 経由 (= AC23、 e-2567 land 済 server / e-2568 land 待ち CLI)
+
+leader が AI 自律で scope を追加する経路は **server endpoint 3 本** で確定 (= `POST /api/treks/{trek_id}/scope-add` / `GET /api/treks/{trek_id}/scope-pending` / `POST /api/treks/{trek_id}/scope-approve`)。
+
+default flow: scope-add → `pending_user_approval` state に入る → user 明示 approve (= `scope-approve`) で初めて `scope[]` に commit。 blanket pre-approval (= `beacon trek blanket-approve --category <cat>`、 Phase 2) が設定されていれば自動 commit。
+
+→ Skill 内で leader が scope を増やしたい時、 旧 Step 3 経由の DM 依頼ではなく **canonical endpoint を使う** (= CLI `beacon trek scope-add` は e-2568 land 待ち、 land まで raw API `curl -X POST /api/treks/{trek_id}/scope-add` で fallback 可)。
+
+### (C) State machine API の leader hard-check 403 (= AC13)
+
+`PATCH /api/treks/{trek_id}/task-state` で server が `actor_session_id (= X-Beacon-Session header) == trek.leader_session_id` を hard-check、 不一致は **403 Forbidden** で reject。
+
+対象遷移:
+- `leader_review → {done, working, user_review}` (= leader 3 択、 ms-75 e-2048)
+- `user_review → {done, working}` (= user 3 択は auth.sub == creator_actor.user_id で check)
+
+→ Skill 内 Step 4 で leader 3 択を実行する経路は **leader session でなければ 403 が返る** ことを前提に。 元 leader / 復活 stuck session が leader 行為を試しても server が物理的に拒否、 並存問題は構造的に消滅 (= 自己防御で動作する)。
 
 ## Step 9: 結果報告
 
