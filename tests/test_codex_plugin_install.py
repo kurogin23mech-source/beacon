@@ -521,8 +521,9 @@ def test_app_server_remote_url_uses_websocket(monkeypatch):
         def close(self):
             captured["closed"] = True
 
-    def fake_connect(url):
+    def fake_connect(url, **kwargs):
         captured["url"] = url
+        captured["kwargs"] = kwargs
         return FakeWs()
 
     import types
@@ -535,6 +536,7 @@ def test_app_server_remote_url_uses_websocket(monkeypatch):
 
     handle = client.start_app_server(remote_url="ws://127.0.0.1:39988")
     assert captured["url"] == "ws://127.0.0.1:39988"
+    assert captured["kwargs"] == {"ping_interval": None}
     assert handle.ws is not None
     handle.stop()
     assert captured["closed"] is True

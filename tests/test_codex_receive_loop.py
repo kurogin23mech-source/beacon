@@ -318,6 +318,26 @@ class TestPollInboxOnce:
         assert seen == ["evt-push"]
         assert crl.list_inbox_events(cwd=str(tmp_path)) == []
 
+    def test_app_server_failure_persists_hook_fallback(self, tmp_path):
+        """A failed autonomous dispatch must not consume the only DM copy."""
+        api = _FakeApi()
+        api.get_returns = [[self._event(event_id="evt-fallback")]]
+
+        def _fail(_evt):
+            raise ConnectionError("stale app-server websocket")
+
+        latest, n = crl.poll_inbox_once(
+            api, project_id="proj-1", session_id="codex-1-abc",
+            since="", cwd=str(tmp_path),
+            on_kept_event=_fail,
+            persist_kept=False,
+        )
+
+        assert latest == "2026-06-25T10:00:00Z"
+        assert n == 1
+        inbox = crl.list_inbox_events(cwd=str(tmp_path))
+        assert [row["event"]["event_id"] for row in inbox] == ["evt-fallback"]
+
     def test_get_transport_error_does_not_raise(self, tmp_path):
         api = _FakeApi()
         api.get_should_raise = True

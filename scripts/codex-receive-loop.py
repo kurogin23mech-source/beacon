@@ -507,6 +507,27 @@ def main() -> int:
                 file=sys.stderr,
                 flush=True,
             )
+            # A dead long-lived websocket otherwise poisons every later DM.
+            # Reconnect for the next event, but do not retry this event here:
+            # turn/start may have reached the server before the transport
+            # failed, so retrying could execute the same DM twice. Re-raise so
+            # poll_inbox_once persists this event for the hook fallback.
+            try:
+                app_server_client.stop()
+                app_server_client.ensure_started(cwd=str(cwd))
+                print(
+                    "codex-receive-loop: app-server reconnected after "
+                    "dispatch failure",
+                    flush=True,
+                )
+            except Exception as reconnect_exc:
+                print(
+                    "codex-receive-loop: app-server reconnect failed: "
+                    f"{reconnect_exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            raise
 
     state = {
         "stop": False,
