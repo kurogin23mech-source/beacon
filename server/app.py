@@ -5691,15 +5691,61 @@ def trek_scheduler_tick_endpoint(
             # Every send for this trek failed; skip the stamp so the next
             # tick retries instead of silently swallowing the failure.
             continue
-        # ms-92 / e-2164 — leader-digest fan-out (= one event to the
-        # leader's session carrying aggregated per-executor status).
-        # Same cadence as trek-progress-check (= they fire together so
-        # the leader sees "what is everyone doing right now" without
-        # polling). Leader session id may be missing on planning-era
-        # treks; skip in that case (= can't deliver without a target).
-        leader_sid = trek_doc.get("leader_session_id") or ""
+        # ms-92 / e-2164 — leader-digest fan-out (= one event per leader
+        # live session carrying aggregated per-executor status). Same
+        # cadence as trek-progress-check (= they fire together so the
+        # leader sees "what is everyone doing right now" without
+        # polling).
+        #
+        # ms-95 / e-2539 (= 2026-06-27 cross-project Trek dogfood、
+        # tk-7a3b88b9 LPS 観察) — leader が再接続 / 新 fork で session を
+        # 切り替えた時、 trek_doc.leader_session_id は **元の (dead)
+        # session_id を指したまま** で更新されないため、 digest 配信が
+        # その dead sid 宛に append され、 leader の現 live bridge には
+        # 届かない構造を持っていた (= meta.last_leader_digest_at は
+        # stamp されるので 「fire した観察事実」 と 「届かなかった機能
+        # 事実」 が乖離)。 progress-check 側は既に live_sids 経路で多
+        # session 対応済 (= 上記 e-2036 / e-2109 path)、 leader-digest
+        # 側だけが leader_session_id 1 個に固執していた非対称を解消
+        # する。
+        #
+        # 改修: leader_session_id 単一 sid 固執 → leader user の **全
+        # live session** に fan-out。 live が 0 件のときは従来の単一
+        # leader_session_id を fallback として残す (= 後方互換、 観察
+        # 経路の連続性)。 planning-era trek (= leader_session_id 空)
+        # は依然 skip (= deliver できない)。
+        leader_user_id = ""
+        for m in trek_doc.get("members") or []:
+            if (m.get("role") or "") == "leader" and m.get("user_id"):
+                leader_user_id = m.get("user_id") or ""
+                break
+        # Resolve from the same project_sessions / live_cutoff we already
+        # computed for progress-check. Filter by user_id (= leader) and
+        # the live cutoff. We deliberately do NOT subtract leader_sid_for_filter
+        # here — progress-check excludes the leader on purpose, but the
+        # leader-digest channel is precisely *for* the leader.
+        leader_live_sids: list[str] = []
+        if leader_user_id and member_user_ids:
+            for s in project_sessions:
+                if (s.get("user_id") or "") != leader_user_id:
+                    continue
+                if (s.get("last_active") or "") < live_cutoff:
+                    continue
+                sid_candidate = s.get("session_id") or ""
+                if sid_candidate and sid_candidate not in leader_live_sids:
+                    leader_live_sids.append(sid_candidate)
+        # Fallback: no live leader session resolves (= leader user has no
+        # session active in the last 10 minutes), fall back to the stamped
+        # leader_session_id so behaviour stays compatible with the
+        # single-sid pre-2026-06-27 path. planning-era treks (=
+        # leader_session_id is empty and no live leader either) get
+        # skipped — there is genuinely no recipient.
+        if not leader_live_sids:
+            stamped = trek_doc.get("leader_session_id") or ""
+            if stamped:
+                leader_live_sids = [stamped]
         leader_digest_event_id = ""
-        if leader_sid:
+        if leader_live_sids:
             try:
                 digest_envelope = envelope_mod.issue_t1_system_envelope(
                     project_id=target_project_id,
@@ -5715,30 +5761,39 @@ def trek_scheduler_tick_endpoint(
                 })
                 digest_envelope = None
             if digest_envelope is not None:
-                digest_payload = trek_scheduler_mod.build_leader_digest_payload(
+                base_digest_payload = trek_scheduler_mod.build_leader_digest_payload(
                     trek_doc, now=now,
                 )
-                digest_payload["recipient_session_id"] = leader_sid
-                digest_bus_data = {
-                    "channel": "trek-leader-digest",
-                    "sender_session_id": "",
-                    "payload": digest_payload,
-                    "envelope": digest_envelope,
-                    "delivery": "auto-execute",
-                    "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-                }
-                try:
-                    leader_digest_event_id = db.append_bus_event(
-                        target_project_id, digest_bus_data,
-                    )
-                except Exception as exc:
-                    errors.append({
-                        "trek_id": trek_id,
-                        "error": (
-                            f"leader_digest_send_failed: "
-                            f"{type(exc).__name__}: {exc}"
-                        ),
-                    })
+                for lsid in leader_live_sids:
+                    digest_payload = dict(base_digest_payload)
+                    digest_payload["recipient_session_id"] = lsid
+                    digest_bus_data = {
+                        "channel": "trek-leader-digest",
+                        "sender_session_id": "",
+                        "payload": digest_payload,
+                        "envelope": digest_envelope,
+                        "delivery": "auto-execute",
+                        "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                    }
+                    try:
+                        # Record the latest event_id so the stamp below
+                        # fires on at least one successful append. We do
+                        # not collect all event_ids here (= existing
+                        # observability surface = stamp + count is
+                        # sufficient; per-event audit is upstream of bus
+                        # storage).
+                        leader_digest_event_id = db.append_bus_event(
+                            target_project_id, digest_bus_data,
+                        )
+                    except Exception as exc:
+                        errors.append({
+                            "trek_id": trek_id,
+                            "recipient_session_id": lsid,
+                            "error": (
+                                f"leader_digest_send_failed: "
+                                f"{type(exc).__name__}: {exc}"
+                            ),
+                        })
         # Stamp last_progress_check_at so the next tick skips this trek
         # until its cadence elapses again.
         meta = trek_doc.setdefault("meta", {})
@@ -5767,7 +5822,15 @@ def trek_scheduler_tick_endpoint(
             "event_ids": event_ids,
             "recipients": target_sids,
             "leader_digest_event_id": leader_digest_event_id,
-            "leader_session_id": leader_sid,
+            # ms-95 / e-2539: keep ``leader_session_id`` in the audit
+            # surface as the **stamped** sid (= the trek_doc field value)
+            # for backward compat with the existing dashboard /
+            # observability consumers. The live fan-out targets are
+            # captured in the new ``leader_digest_recipients`` field
+            # below so callers can tell "where the digest actually went"
+            # apart from "who the doc thinks the leader is".
+            "leader_session_id": trek_doc.get("leader_session_id") or "",
+            "leader_digest_recipients": list(leader_live_sids),
         })
 
     # ms-83 / e-2001: idle escalation pass. Use the pre-snapshot
