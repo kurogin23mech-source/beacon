@@ -2,6 +2,8 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.49.1] - 2026-06-27
+
 ## [v0.49.0] - 2026-06-25
 
 - Merge pull request #267 from kurogin23mech-source/fix/ms-95-e2441-project-export-import-sys-modules-leak
