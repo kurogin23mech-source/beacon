@@ -1,0 +1,761 @@
+{
+  "version": 1,
+  "generated_at": "2026-06-27T05:14:00Z",
+  "generator": "manual + beacon-cli (ms-93 / e-2558)",
+  "source_dir": "skills/",
+  "total_skills": 39,
+  "spec_reference": "doc_id 6aK8fr1OjsO3hJNHb7hA (= ms-93 §3-B canonical Skill schema)",
+  "cohort_summary": {
+    "bus-dm": 5,
+    "core-workflow": 9,
+    "infrastructure": 2,
+    "methodology": 3,
+    "onboarding": 4,
+    "operation": 3,
+    "review-spec": 5,
+    "session": 4,
+    "trek": 4
+  },
+  "skills": [
+    {
+      "skill_name": "_beacon-retrospect-methodology",
+      "current_location": "skills/_beacon-retrospect-methodology.md",
+      "frontmatter": {},
+      "claude_only_fields": [],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 4769,
+      "content_hash": "182b294fb3dc",
+      "migration_cohort": "methodology",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "_beacon-review-methodology",
+      "current_location": "skills/_beacon-review-methodology.md",
+      "frontmatter": {},
+      "claude_only_fields": [],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 5134,
+      "content_hash": "89fbe9df124e",
+      "migration_cohort": "methodology",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "_beacon-spec-methodology",
+      "current_location": "skills/_beacon-spec-methodology.md",
+      "frontmatter": {},
+      "claude_only_fields": [],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 4796,
+      "content_hash": "5e1a31808d74",
+      "migration_cohort": "methodology",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-bus-armed",
+      "current_location": "skills/beacon-bus-armed.md",
+      "frontmatter": {
+        "name": "beacon-bus-armed",
+        "description": "現在のセッションを「自律 DM 応答モード」に切り替える。Monitor で bus listen を armed しっぱなしにし、prompt 無しでも別セッションからの DM に AI が起動して返答できる状態を作る。budget gate で必ず N 回で止まる安全形。",
+        "version": "1.0.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 6455,
+      "content_hash": "6732da8c6ce2",
+      "migration_cohort": "bus-dm",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-cloud",
+      "current_location": "skills/beacon-cloud.md",
+      "frontmatter": {
+        "name": "beacon-cloud",
+        "description": "Cloud sync (= ローカル Beacon データの cloud 同期) を AI が対話で操作する Skill。日常運用は `open` / `status` (= web UI を開く / read-only 確認) のみ、`upload-initial` は新規プロジェクトの 1 回きり migration、`off` は sandbox 用途。ms-84 Phase 4 (e-2038) で `push` / `pull` / `force-pull` は CLI から削除された (= cloud が唯一の真値、戻り経路は構造的に不可能)。",
+        "version": "0.3.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 14522,
+      "content_hash": "267b59a4f260",
+      "migration_cohort": "bus-dm",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-deploy",
+      "current_location": "skills/beacon-deploy.md",
+      "frontmatter": {},
+      "claude_only_fields": [],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 6019,
+      "content_hash": "a0a55f6c56ff",
+      "migration_cohort": "core-workflow",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-dispatch",
+      "current_location": "skills/beacon-dispatch.md",
+      "frontmatter": {
+        "name": "beacon-dispatch",
+        "description": "依存グラフから実行可能なマイルストーンまたはタスク群を特定し、サブエージェントを並列起動する。マルチエージェント協奏のオーケストレーター。",
+        "version": "0.4.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 26796,
+      "content_hash": "976651049ab2",
+      "migration_cohort": "infrastructure",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-dm-respond",
+      "current_location": "skills/beacon-dm-respond.md",
+      "frontmatter": {
+        "name": "beacon-dm-respond",
+        "description": "別セッションから届いた DM action 付き envelope を user に提示し、y/n 確認を取った上で beacon dm respond approve|deny <envelope-id> を叩く対話 Skill。ms-70 (= cross-user DM 承認) における「terminal Claude Code 内での user 直接判断」の動線を構造化する。",
+        "version": "0.1.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 10572,
+      "content_hash": "e1aa83d246d4",
+      "migration_cohort": "bus-dm",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-dm-send",
+      "current_location": "skills/beacon-dm-send.md",
+      "frontmatter": {
+        "name": "beacon-dm-send",
+        "description": "別セッションに対話的に DM を送る Skill (新規送信・返信両対応)。受信トレイから返信、または live + healthy filter で受信者選択 → live 検証 → ペイロード入力 → envelope auto-issue → 送信を 1 フローで完結。手書きで起きがちな受信者ミスや --to / --in-reply-to 忘れ・project跨ぎ忘れ・budget gate 不意打ち・stale session_id 再利用を構造的に排除する。",
+        "version": "0.2.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 20883,
+      "content_hash": "53582b8d71df",
+      "migration_cohort": "bus-dm",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-drift-check",
+      "current_location": "skills/beacon-drift-check.md",
+      "frontmatter": {
+        "name": "beacon-drift-check",
+        "description": "beacon doctor の drift 系 warn を整形して、どの Skill のどの行を直すべきかと推奨修正を一覧で返す。修正は提案のみ、自動実行はしない。",
+        "version": "1.0.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 5756,
+      "content_hash": "634c917a7234",
+      "migration_cohort": "infrastructure",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-incident-report",
+      "current_location": "skills/beacon-incident-report.md",
+      "frontmatter": {
+        "name": "beacon-incident-report",
+        "description": "Incident を close した上で、原因/対応/再発防止を含むインシデントレポートを report スコープ Doc として保存する。close → report 作成のフローを一体で進める。",
+        "version": "1.0.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 5141,
+      "content_hash": "06eac4a54fb2",
+      "migration_cohort": "core-workflow",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-init",
+      "current_location": "skills/beacon-init.md",
+      "frontmatter": {
+        "name": "beacon-init",
+        "description": "Beaconプロジェクトを会話形式で初期化。プロジェクト名と大目的を明示的に聞いてから場所を決める。既存リポはProject Archaeologyへ自動チェイン。",
+        "version": "2.3.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 16673,
+      "content_hash": "6ce0a273b754",
+      "migration_cohort": "onboarding",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-log",
+      "current_location": "skills/beacon-log.md",
+      "frontmatter": {
+        "name": "beacon-log",
+        "description": "コミット後にbeaconへ記録し、進捗率をAI評価で自動更新する。prepare/finalizeの2段階ワークフロー。",
+        "version": "0.5.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 16244,
+      "content_hash": "c7fa3f573cc4",
+      "migration_cohort": "core-workflow",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-member",
+      "current_location": "skills/beacon-member.md",
+      "frontmatter": {
+        "name": "beacon-member",
+        "description": "プロジェクトメンバーの操作 (= 招待 / 役割変更 / 削除) を AI が対話で行う Skill。3 subaction (invite / role-change / remove) を 1 Skill に統合し、owner 変更や remove は二段確認で誤発火を構造的に防ぐ。",
+        "version": "0.1.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 8717,
+      "content_hash": "a24e2789f06f",
+      "migration_cohort": "bus-dm",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-note",
+      "current_location": "skills/beacon-note.md",
+      "frontmatter": {
+        "name": "beacon-note",
+        "description": "セッション内の一時メモを記録する。コンパクション対策に使い、セッション終了時に重要なものをDocに昇格して削除する。",
+        "version": "1.0.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 3735,
+      "content_hash": "285a18ae97fd",
+      "migration_cohort": "core-workflow",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-onboard",
+      "current_location": "skills/beacon-onboard.md",
+      "frontmatter": {
+        "name": "beacon-onboard",
+        "description": "新メンバーが招待されてプロジェクトに合流する初日のオンボーディング体験。プロジェクトの目的・直近の流れ・自分の担当範囲を 1 ターンで把握できるようにする。/beacon-init は新規プロジェクト作成、これは既存プロジェクトへの合流。",
+        "version": "0.1.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 7020,
+      "content_hash": "c32d9c28e186",
+      "migration_cohort": "onboarding",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-operation-execute",
+      "current_location": "skills/beacon-operation-execute.md",
+      "frontmatter": {
+        "name": "beacon-operation-execute",
+        "description": "事前承認された Operation を自律実行する。bus inbox に届いた operation-trigger event (delivery=auto-execute) を受けて発動。SPEC に書かれた手順でログ取得、結果を run_record で記録、異常時は incident を起票する。各 action は envelope の approved_actions と照合してから実行する。",
+        "version": "1.0.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 10660,
+      "content_hash": "0506a93404a7",
+      "migration_cohort": "operation",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-operation-review",
+      "current_location": "skills/beacon-operation-review.md",
+      "frontmatter": {
+        "name": "beacon-operation-review",
+        "description": "定期チェックトリガー発火時に実行。Operation に紐づく SPEC ドキュメントの手順でログを取得・解釈し、run record を記録する。問題があれば Incident を起票する。",
+        "version": "1.1.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 5819,
+      "content_hash": "d9f4d7e2ec82",
+      "migration_cohort": "operation",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-operation-setup",
+      "current_location": "skills/beacon-operation-setup.md",
+      "frontmatter": {
+        "name": "beacon-operation-setup",
+        "description": "Operationを輪郭(todo)から実稼働(open)まで会話で組み立てる。新規Operationの作成と、既存todoOperationの活性化の両方に対応。OperationTasks（準備項目）とSPECドキュメント（ログ取得手順）をセットで整備する。",
+        "version": "2.1.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 10150,
+      "content_hash": "9bd28b32fe77",
+      "migration_cohort": "operation",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-pr-create",
+      "current_location": "skills/beacon-pr-create.md",
+      "frontmatter": {
+        "name": "beacon-pr-create",
+        "description": "PRを切る側のための対話Skill。対象MSの確認、intent（このPRで何を達成したいか・なぜ）の引き出し、ブランチ/コミットの整合性チェックを経て、gh pr create + beacon pr add まで一気通貫で実行する。1人開発でも2-5人チームでも同じフローで回せる軽量PR体験。",
+        "version": "0.1.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 9560,
+      "content_hash": "364e6002d57a",
+      "migration_cohort": "core-workflow",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-push",
+      "current_location": "skills/beacon-push.md",
+      "frontmatter": {},
+      "claude_only_fields": [],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 9029,
+      "content_hash": "da92567f7da7",
+      "migration_cohort": "core-workflow",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-retro",
+      "current_location": "skills/beacon-retro.md",
+      "frontmatter": {
+        "name": "beacon-retro",
+        "description": "週次振り返りドキュメントを生成し、ユーザーとディスカッションする。課題→判断→結果の文脈で再構成。",
+        "version": "0.2.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 8406,
+      "content_hash": "e69ab7bcec0a",
+      "migration_cohort": "core-workflow",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-retrospect",
+      "current_location": "skills/beacon-retrospect.md",
+      "frontmatter": {
+        "name": "beacon-retrospect",
+        "description": "プロジェクト史を自然言語で問い合わせて、関連する記録（task / commit / document / push / deploy / incident / retro 等）を統一検索 API で集めて要約する。「○○の機能って実装したっけ？どう実装したっけ？」「ms-15 の判断軌跡を教えて」「先月の auth エラーの件」等の問い合わせに答える。",
+        "version": "0.1.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 7357,
+      "content_hash": "74876afdd972",
+      "migration_cohort": "core-workflow",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-review-apply",
+      "current_location": "skills/beacon-review-apply.md",
+      "frontmatter": {
+        "name": "beacon-review-apply",
+        "description": "メタレビューで合意したMS再分割案を実行する。新MSを起票し、タスクを各MSへ移動、レビューMSをobserve化する。",
+        "version": "0.1.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 5373,
+      "content_hash": "35e9d0c16b56",
+      "migration_cohort": "review-spec",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-review-meta",
+      "current_location": "skills/beacon-review-meta.md",
+      "frontmatter": {
+        "name": "beacon-review-meta",
+        "description": "全UCレビュー完了後、発見した全タスクを俯瞰してクラスタリング・優先度再評価・MS再分割案を作成する。ユーザーとの議論で案を確定し、SPECドキュメントとして保存する。",
+        "version": "0.1.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 3660,
+      "content_hash": "8319ddf95ac1",
+      "migration_cohort": "review-spec",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-review-uc",
+      "current_location": "skills/beacon-review-uc.md",
+      "frontmatter": {
+        "name": "beacon-review-uc",
+        "description": "プロダクト全体UXレビューにおいて、1つのユースケースを対話駆動で精査する。ペルソナ・フロー・ギャップを順に詰め、findings を子タスクとして起票する。/beacon-review から呼ばれる。",
+        "version": "0.1.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 3470,
+      "content_hash": "4b34f44b6682",
+      "migration_cohort": "review-spec",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-review",
+      "current_location": "skills/beacon-review.md",
+      "frontmatter": {
+        "name": "beacon-review",
+        "description": "プロダクト全体のUXレビューを駆動するエントリ Skill。ユースケース駆動でレビューを進め、最終的にMS再分割まで実行する。状態を見て次に呼ぶべきSkill（beacon-review-uc/meta/apply）を判定する。",
+        "version": "0.1.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 4343,
+      "content_hash": "7249897050c4",
+      "migration_cohort": "review-spec",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-roadmap",
+      "current_location": "skills/beacon-roadmap.md",
+      "frontmatter": {
+        "name": "beacon-roadmap",
+        "description": "project-vision COREドキュメントを読み、大目的に到達するまでのマイルストーン群（3〜7個）を一括設計・登録する。順序・依存関係も提案する。",
+        "version": "0.1.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 9264,
+      "content_hash": "28eaa2f268bf",
+      "migration_cohort": "onboarding",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-session-end",
+      "current_location": "skills/beacon-session-end.md",
+      "frontmatter": {
+        "name": "beacon-session-end",
+        "description": "Beaconプロジェクトのセッション終了時にサマリーを更新し、未完了タスクを整理する。",
+        "version": "0.1.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 6823,
+      "content_hash": "053f3820af25",
+      "migration_cohort": "session",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-session-fork",
+      "current_location": "skills/beacon-session-fork.md",
+      "frontmatter": {
+        "name": "beacon-session-fork",
+        "description": "別 bclaude セッションを別 worktree で 1 コマンドで立ち上げる Skill。git worktree add + .beacon/cloud.json コピー + beacon channel install + .beacon/fork.json 書き込みを裏で代行し、Mac (Terminal.app / iTerm2) では新ターミナルで bclaude を自動起動する。難しい MS を人間 + AI で対話的に並列実装するときの足場。",
+        "version": "0.1.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 4571,
+      "content_hash": "c03f3524b3e7",
+      "migration_cohort": "session",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-session-merge-back",
+      "current_location": "skills/beacon-session-merge-back.md",
+      "frontmatter": {
+        "name": "beacon-session-merge-back",
+        "description": "/beacon-session-fork で立てた子 worktree を片付ける Skill。active な fork を picker で選び、対応 branch が main に取り込まれているかを git で確認、merge 済なら git worktree remove + git branch -d で物理削除する。未 merge は警告して中止。fork → 並列実装 → cleanup の往復を 2 Skill で完結させるペア Skill。",
+        "version": "0.1.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 4553,
+      "content_hash": "c84f85186bd8",
+      "migration_cohort": "session",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-session-start",
+      "current_location": "skills/beacon-session-start.md",
+      "frontmatter": {
+        "name": "beacon-session-start",
+        "description": "Beaconプロジェクトのセッション開始時にコンテキストを復元。アクティブMS・未消化タスク・summaryを提示する。",
+        "version": "0.7.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 32062,
+      "content_hash": "99f6854f32f3",
+      "migration_cohort": "session",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-spec",
+      "current_location": "skills/beacon-spec.md",
+      "frontmatter": {
+        "name": "beacon-spec",
+        "description": "マイルストーンの SPEC (要求書 / 判断軌跡) を対話駆動で作成し、続けてタスク 3〜10 個に分割して一括起票する。フォーム入力ではなく Socratic 対話で 6 セクション (背景・問題・設計方針・スコープ・受入条件・実装順序) を埋める。",
+        "version": "0.1.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 12589,
+      "content_hash": "9f4566d7c6e4",
+      "migration_cohort": "review-spec",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-task",
+      "current_location": "skills/beacon-task.md",
+      "frontmatter": {
+        "name": "beacon-task",
+        "description": "beaconのタスク操作（追加・完了・更新・削除・一覧）をCLI経由で実行する。",
+        "version": "0.2.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 6241,
+      "content_hash": "bf97652b51ac",
+      "migration_cohort": "core-workflow",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-trek-execute",
+      "current_location": "skills/beacon-trek-execute.md",
+      "frontmatter": {
+        "name": "beacon-trek-execute",
+        "description": "Trek (= 缶詰の徹夜作業部屋 / 事前承認スコープ) を AI が自律実行する Skill。Trek scope 内の MS / task / Operation について user 確認なしで計画・議論・実装・中間 commit を進める。デプロイ / リリースのみ user 介入境界として escalate する。trek-trigger event (delivery=auto-execute) 由来でも user 引数 `/beacon-trek-execute <trek-id>` 由来でも起動する。",
+        "version": "0.1.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 20593,
+      "content_hash": "d63654c3cdfc",
+      "migration_cohort": "trek",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-trek-finalize",
+      "current_location": "skills/beacon-trek-finalize.md",
+      "frontmatter": {
+        "name": "beacon-trek-finalize",
+        "description": "Trek (= 缶詰の徹夜作業部屋、 事前承認スコープを持つ自律実行の作業空間) を終結する Skill。 含まれる全 PR の構造化 summary を user に提示し、 1 confirm で 全 PR 一括 merge + Trek archive まで完遂する。 「approve = AI / merge = Trek 単位 user / release = user」 の 3 段境界 (= ms-92 / e-2169 + CORE doc pr-review-autonomy-boundary) を 1 動線で具現化する。",
+        "version": "0.1.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 7421,
+      "content_hash": "0bd1692fcc07",
+      "migration_cohort": "trek",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-trek-pulse",
+      "current_location": "skills/beacon-trek-pulse.md",
+      "frontmatter": {
+        "name": "beacon-trek-pulse",
+        "description": "Trek autonomous loop の 1 tick に対する executor の自己申告 + 5 択 picker (terminal / continue / dm-leader / dm-peer / no-op)。/beacon-trek-execute と並列に存在する短時間 Skill で、 server に「Skill が実際 invoke された」 ground truth を渡す (= Layer 2 observability)。 trek-progress-check event 由来 でも user 引数 `/beacon-trek-pulse <trek-id>` 由来でも起動する。 1 tick = 1 pulse の運用。",
+        "version": "0.1.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 16479,
+      "content_hash": "c12642f20862",
+      "migration_cohort": "trek",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-trek",
+      "current_location": "skills/beacon-trek.md",
+      "frontmatter": {
+        "name": "beacon-trek",
+        "description": "Trek (= 分散協奏のための作業領域) を AI が対話で操作する Skill。create / join / leave / scope-add / scope-remove / member-invite / status / archive の 8 subaction を 1 Skill に統合し、subaction ごとに draft 表示 + ユーザー確認を挟んで beacon trek <verb> を実行する。",
+        "version": "0.1.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 14525,
+      "content_hash": "f5c1b656e4e9",
+      "migration_cohort": "trek",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-vision",
+      "current_location": "skills/beacon-vision.md",
+      "frontmatter": {
+        "name": "beacon-vision",
+        "description": "ふわっとしたアイデアを対話で精緻化し、構造化されたプロジェクトビジョンとして`project-vision` COREドキュメントに記録する。フォーム入力ではなく、Socratic対話で6セクション（大目的・ターゲット・問題・成功基準・制約・やらないこと）を自然に埋める。",
+        "version": "0.1.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 9005,
+      "content_hash": "d748724a269b",
+      "migration_cohort": "onboarding",
+      "migration_status": "todo"
+    }
+  ]
+}
