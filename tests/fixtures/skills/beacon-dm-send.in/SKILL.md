@@ -1,0 +1,8 @@
+---
+name: beacon-dm-send
+description: Send a Beacon DM to a live session and verify delivery.
+---
+
+# Beacon DM Send
+
+Read `references/safety.md`, then run `scripts/build-payload.py`.
