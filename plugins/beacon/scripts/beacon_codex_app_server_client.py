@@ -125,7 +125,12 @@ def start_app_server(
             )
         from websockets.sync.client import connect
 
-        return AppServerHandle(ws=connect(remote_url))
+        # A Codex turn can keep the shared app-server busy longer than the
+        # websockets client's default 20-second keepalive window. In that
+        # state the client closes an otherwise usable connection before the
+        # next Beacon DM arrives. JSON-RPC requests already have bounded
+        # response timeouts, so use those as the liveness check instead.
+        return AppServerHandle(ws=connect(remote_url, ping_interval=None))
 
     env = {
         **os.environ,

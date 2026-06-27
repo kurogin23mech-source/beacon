@@ -171,8 +171,8 @@ def poll_inbox_once(
     pull-on-prompt hook. App-server daemons can pass
     ``persist_kept=False`` so the hook cannot race the autonomous
     path and archive/read the same DM before the daemon replies.
-    Callback exceptions are caught so a flaky autonomous path cannot
-    stall the poll loop.
+    If that callback fails, persist the event as a pull-on-prompt fallback;
+    advancing the watermark without either delivery path would lose the DM.
     """
     url = bp.poll_unread_path(project_id, session_id, since)
     try:
@@ -227,7 +227,9 @@ def poll_inbox_once(
             try:
                 on_kept_event(evt)
             except Exception:
-                pass
+                path = persist_inbox_event(evt, cwd=cwd)
+                if path is not None:
+                    persisted += 1
         if created_at > latest_seen:
             latest_seen = created_at
     return (latest_seen, persisted)
