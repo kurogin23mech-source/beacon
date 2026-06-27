@@ -4856,6 +4856,13 @@ def cmd_trek_list():
             print("(no treks yet — `beacon trek create \"title\"` で最初の trek を起票)")
         return
 
+    # ms-97 / e-2568 + e-2571 — list でも legacy 残骸を一目で見える形に。
+    #   legacy_members = session_id を持たない member が 1 件でもあれば marker (e-2568)
+    #   legacy_scope   = project-wide scope を 1 件でも含めば marker (e-2568 + e-2571)
+    # scope 判定は e-2571 で land した `is_legacy_project_wide_scope` (= meta
+    # マーカー由来) と `has_project_wide_scope` (= scope[] inspection) を
+    # 両方走らせて、 migration 後 / 前 どちらでも検出できるようにする。
+    # 詳細は `beacon trek show` 側で full surface する。
     import trek as trek_mod
     print(f"Treks ({len(treks)}):")
     for t in treks:
@@ -4865,19 +4872,26 @@ def cmd_trek_list():
             "archived": "□",
         }.get(t.get("status", ""), "?")
         halt_marker = " [halted]" if t.get("halt") else ""
-        # ms-97 / e-2571 — visual cue so operators see grandfathered
-        # project-wide scope at a glance, without needing --legacy-scope.
-        legacy_marker = (
-            " ⚠legacy-scope"
-            if (trek_mod.is_legacy_project_wide_scope(t)
-                or trek_mod.has_project_wide_scope(t))
-            else ""
-        )
-        member_count = len(t.get("members") or [])
+        members = t.get("members") or []
+        member_count = len(members)
         scope_count = len(t.get("scope") or [])
+        legacy_members = any(not m.get("session_id") for m in members)
+        legacy_scope = (
+            trek_mod.is_legacy_project_wide_scope(t)
+            or trek_mod.has_project_wide_scope(t)
+        )
+        legacy_marker = ""
+        if legacy_members or legacy_scope:
+            bits = []
+            if legacy_members:
+                bits.append("members")
+            if legacy_scope:
+                bits.append("scope")
+            legacy_marker = f" ⚠legacy:{'+'.join(bits)}"
         print(f"  {status_icon} {t['trek_id']:14s} {t['title'][:55]}"
               f" — {t.get('type', '?')}/{t.get('status', '?')}"
-              f"{halt_marker}{legacy_marker}, {member_count}m/{scope_count}s")
+              f"{halt_marker}, {member_count}m/{scope_count}s"
+              f"{legacy_marker}")
 
 
 def _current_project_id() -> str:
@@ -5121,7 +5135,15 @@ def cmd_trek_show():
     scope rows are surfaced as hints (= the user must cd into the other
     project) — the CLI intentionally does not fan out into other
     project.json files to keep aggregation cheap and unambiguous.
+
+    ms-97 / e-2568: human output also surfaces (a) leader_session_id as a
+    labelled line callers can copy into a request-invite DM (AC5),
+    (b) a one-line warning when the trek still carries a legacy
+    project-wide scope entry (AC8/AC31), and (c) members[] in the new
+    session_id keyed shape (AC6) with a "(legacy user-keyed)" marker for
+    rows the migration hasn't reached yet.
     """
+    import trek
     import trek_store
 
     trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
@@ -5168,7 +5190,14 @@ def cmd_trek_show():
         print(f"  archived:    {t.get('archived_at', '')[:19]}")
     creator = t.get("creator_actor") or {}
     print(f"  creator:     {creator.get('email')} (user_id={creator.get('user_id')})")
-    print(f"  leader sess: {t.get('leader_session_id')}")
+    # ms-97 / e-2568 AC5 — leader_session_id を 1 行で表示 + 用途を 1 行で
+    # 添える (= 別 session から "招待をリクエストする" 時にこの sid を相手に
+    # 伝えてもらう、 という導線の説明)。 leader が居ない (= archived 等の
+    # edge case) は素直に "(none)" を出す。
+    leader_sid = t.get("leader_session_id") or "(none)"
+    print(f"  leader sess: {leader_sid}")
+    print(f"               (request-invite hint: 別 session から `beacon "
+          f"trek invite --actor <email>` を依頼する時、 この sid 宛に DM)")
     if t.get("description"):
         print(f"  description: {t['description']}")
     goal_line = _goal_state_status(t, agg)
@@ -5177,27 +5206,32 @@ def cmd_trek_show():
         # so it visually aligns with the other show fields.
         for line in goal_line.split("\n"):
             print(f"  {line}" if not line.startswith("  ") else line)
+    # ms-97 / e-2568 AC6 — members[] は session_id keyed (= 同 user の各
+    # session が個別 member として明示登録)。 session_id が空の row は
+    # "(legacy user-keyed)" マーカーで表示し、 migration script (e-2571)
+    # の対象であることを surface する。
+    # e-2568 + e-2571 統合: migrated row は session_id を 1 行表示で見せ、
+    # 未 migrated row は B3 の `⚠no-session_id` marker を添える。 1 ファイル
+    # に閉じた member 全体像 + 別ブロックで unhealthy 集約、 という二段構え。
     members = t.get("members") or []
     print(f"  members ({len(members)}):")
     for m in members:
         joined = "joined" if m.get("joined_at") else "invited"
-        # ms-97 / e-2571 — surface members that lack session_id (= partial
-        # migration outcome) right next to the member line so the operator
-        # cannot miss them. Stale-session detection (= sid set but session
-        # no longer live) lives in the dedicated alarming block below where
-        # we have access to the live-session snapshot.
-        partial = "" if m.get("session_id") else " ⚠no-session_id"
-        print(
-            f"    - {m.get('email')} [{m.get('role')}] ({joined}){partial}"
-        )
+        sid = m.get("session_id") or ""
+        if sid:
+            print(f"    - sess {sid} [{m.get('role')}] {m.get('email')} "
+                  f"({joined})")
+        else:
+            print(f"    - {m.get('email')} [{m.get('role')}] ({joined}) "
+                  f"⚠no-session_id (legacy user-keyed, migration 対象 "
+                  f"ms-97/e-2571)")
 
     # ms-97 / e-2571 — Migration リスク + Rollback 戦略 §5 alarming surface.
     # Group both "partial migration" (= member without session_id) and
     # "stale session" (= sid set but the session has not been seen in the
     # live snapshot) into a single warning block so the operator gets one
     # actionable list.
-    import trek as trek_mod
-    unhealthy = trek_mod.find_unhealthy_members(t)
+    unhealthy = trek.find_unhealthy_members(t)
     if unhealthy:
         print()
         print(f"  ⚠ unhealthy members ({len(unhealthy)}, ms-97 AC34):")
@@ -5216,6 +5250,10 @@ def cmd_trek_show():
             "backfilling session_history, or remove the member manually."
         )
 
+    # ms-97 / e-2568 + e-2571 統合 — scope 一覧 + legacy footer warning。
+    # 1 件でも project-wide があれば B3 の foot 警告 1 行を出す (= B3 流の
+    # 集約表示)、 行頭は narrow / project-wide を区別表示する (= B2 流の
+    # 行レベル可視化を保持しつつ duplicate な suffix は削る)。
     scope = t.get("scope") or []
     print(f"  scope ({len(scope)}):")
     legacy_scope_seen = False
@@ -5230,12 +5268,12 @@ def cmd_trek_show():
         else:
             print(f"    - {s.get('project')} (project-wide)")
             legacy_scope_seen = True
-    if legacy_scope_seen or trek_mod.is_legacy_project_wide_scope(t):
-        # ms-97 / e-2571 AC8 + AC31 — warn that grandfathered project-wide
-        # scope is preserved as-is (= existing executors keep their reach)
-        # but new scope-add will reject project-wide entries. Surface the
-        # tightening migration path so operators can decide whether to
-        # narrow.
+    if legacy_scope_seen or trek.is_legacy_project_wide_scope(t):
+        # ms-97 / e-2568 + e-2571 AC8 + AC31 — warn that grandfathered
+        # project-wide scope is preserved as-is (= existing executors keep
+        # their reach) but new scope-add will reject project-wide entries.
+        # Surface the tightening migration path so operators can decide
+        # whether to narrow.
         print(
             "    ⚠ legacy project-wide scope — grandfathered (ms-97 AC8). "
             "New scope-add rejects project-wide entries; narrow via "
@@ -6867,10 +6905,20 @@ def cmd_trek_plan():
     # Parse the scope arg with the shared helper so cloud and local agree on
     # the entry shape. We do this BEFORE branching so syntax errors surface
     # the same way regardless of mode. goal_state-only calls skip parsing.
+    #
+    # ms-97 / e-2568 AC7 — CLI-layer reject of project-wide (= narrowing-key
+    # missing) scope-add. Defense-in-depth: parse_scope_arg with strict
+    # mode and the local-mode add helper below (also strict) both refuse;
+    # the server endpoint (e-2567) double-checks; and the Web UI surfaces
+    # the error from either layer. Remove keeps strict=False so legacy
+    # grandfathered entries can be cleared without first round-tripping
+    # through a narrower form.
     entry: dict | None = None
     if add_arg or remove_arg:
         try:
-            entry = trek.parse_scope_arg(add_arg or remove_arg)
+            entry = trek.parse_scope_arg(
+                add_arg or remove_arg, strict=bool(add_arg),
+            )
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
@@ -6923,7 +6971,10 @@ def cmd_trek_plan():
         try:
             if entry is not None:
                 if add_arg:
-                    trek.add_scope_entry(t, entry=entry)
+                    # ms-97 / e-2568 AC7 — local-mode strict write as well,
+                    # so the rejection contract holds whether or not the
+                    # caller is online.
+                    trek.add_scope_entry(t, entry=entry, strict=True)
                 else:
                     trek.remove_scope_entry(t, entry=entry)
             if goal_state_explicit:
@@ -7105,6 +7156,198 @@ def cmd_trek_task_add():
         file=sys.stderr,
     )
     sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# ms-97 / e-2568 — scope-add approval flow CLI (AC23)
+#
+# Three new subcommands that pair with Fork B1's server endpoints
+# (POST /scope-add, GET /scope-pending, POST /scope-approve) shipped in
+# the e-2567 PR. The legacy direct-commit shortcut keeps living at
+# `beacon trek plan --add-scope` (= PUT /scope) — these new verbs are
+# the AI-initiated path that requires an explicit user approve before
+# the entry lands in trek.scope[].
+#
+# Local mode is intentionally not supported here: pending state lives in
+# the cloud trek doc, so calling the new verbs without `.beacon/cloud.json`
+# prints a clear "cloud-only" error and exits non-zero rather than
+# silently falling through to the legacy direct write.
+# ---------------------------------------------------------------------------
+
+def _trek_scope_cloud_only_or_die(verb: str) -> None:
+    """Refuse with a clear message if invoked outside cloud mode."""
+    if _is_cloud_mode():
+        return
+    print(
+        f"Error: `beacon trek {verb}` requires cloud mode "
+        "(pending scope state lives in the cloud trek doc, not in "
+        "the local trek_store). Use `beacon trek plan --add-scope` "
+        "for legacy direct commits, or sign in to a cloud project.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def cmd_trek_scope_add():
+    """Propose a scope-add that requires explicit user approval (AC23).
+
+    Env:
+      BEACON_TREK_ID        (required)
+      BEACON_TREK_SCOPE_ADD "<project>[:<ref>]" — the entry to propose
+      BEACON_JSON           "1" → json output (= raw {pending_id, entry, ...})
+
+    Unlike `beacon trek plan --add-scope` (= direct commit), this verb
+    posts to the server's `/scope-add` endpoint which mints an
+    `sa-<8hex>` pending id and stages the entry without touching
+    `trek.scope[]`. A joined member must then run `beacon trek
+    scope-approve <pending_id>` to commit.
+    """
+    import trek
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    add_arg = os.environ.get("BEACON_TREK_SCOPE_ADD", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+    if not add_arg:
+        print(
+            "Error: pass <project>[:<ref>] as the scope entry to propose",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # ms-97 / e-2568 AC7 — same strict reject as plan --add-scope. The
+    # propose path also refuses project-wide entries; the server does a
+    # double check (e-2567) but failing in the CLI gives a faster +
+    # cheaper error.
+    try:
+        entry = trek.parse_scope_arg(add_arg, strict=True)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    _trek_scope_cloud_only_or_die("scope-add")
+    try:
+        client, _config = _get_api_client()
+        result = client.propose_trek_scope_add(
+            trek_id,
+            project=entry["project"],
+            milestone=entry.get("milestone", ""),
+            operation=entry.get("operation", ""),
+            task=entry.get("task", ""),
+        )
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(result, ensure_ascii=False))
+        return
+    pending_id = result.get("pending_id", "<unknown>")
+    entry_disp = result.get("entry") or entry
+    narrow = ", ".join(
+        f"{k}={v}" for k, v in entry_disp.items() if k != "project"
+    )
+    ref_str = f"{entry_disp.get('project')}" + (f":{narrow}" if narrow else "")
+    print(
+        f"Proposed scope-add [{pending_id}] on trek {trek_id}: {ref_str}\n"
+        f"  next: `beacon trek scope-approve {trek_id} {pending_id}` "
+        f"でユーザーが承認すると `scope[]` に commit されます。"
+    )
+
+
+def cmd_trek_scope_list_pending():
+    """List pending scope-add proposals on a trek (AC23 user surface).
+
+    Env:
+      BEACON_TREK_ID  (required)
+      BEACON_JSON     "1" → json output (= raw array from server)
+    """
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+
+    _trek_scope_cloud_only_or_die("scope-list-pending")
+    try:
+        client, _config = _get_api_client()
+        rows = client.list_trek_scope_pending(trek_id)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(rows, ensure_ascii=False))
+        return
+    if not rows:
+        print(f"(no pending scope-add proposals on trek {trek_id})")
+        return
+    print(f"Pending scope-add on trek {trek_id} ({len(rows)}):")
+    for row in rows:
+        pending_id = row.get("pending_id", "<?>")
+        entry = row.get("entry") or {}
+        narrow = ", ".join(
+            f"{k}={v}" for k, v in entry.items() if k != "project"
+        )
+        ref_str = f"{entry.get('project')}" + (
+            f":{narrow}" if narrow else ""
+        )
+        requested_by = (row.get("requested_by_user_id")
+                        or row.get("requested_by_session_id")
+                        or "<unknown>")
+        requested_at = (row.get("requested_at") or "")[:19]
+        print(f"  - [{pending_id}] {ref_str}  "
+              f"(by {requested_by} at {requested_at})")
+    print(
+        f"  → 承認: `beacon trek scope-approve {trek_id} <pending_id>`"
+    )
+
+
+def cmd_trek_scope_approve():
+    """Commit a pending scope-add into trek.scope[] (AC23).
+
+    Env:
+      BEACON_TREK_ID            (required)
+      BEACON_TREK_PENDING_ID    (required) — `sa-<8hex>` minted by scope-add
+      BEACON_JSON               "1" → json output (= updated trek doc)
+    """
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    pending_id = os.environ.get("BEACON_TREK_PENDING_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+    if not pending_id:
+        print(
+            "Error: pending_id is required "
+            "(run `beacon trek scope-list-pending <trek_id>` to see them)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    _trek_scope_cloud_only_or_die("scope-approve")
+    try:
+        client, _config = _get_api_client()
+        result = client.approve_trek_scope_pending(
+            trek_id, pending_id=pending_id,
+        )
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(result, ensure_ascii=False))
+        return
+    scope_len = len(result.get("scope") or [])
+    print(
+        f"Approved scope-add [{pending_id}] on trek {trek_id} "
+        f"(scope: {scope_len} items)"
+    )
 
 
 def cmd_trek_leave():
@@ -19145,6 +19388,11 @@ if __name__ == "__main__":
         "trek_join": cmd_trek_join,
         "trek_leave": cmd_trek_leave,
         "trek_plan": cmd_trek_plan,
+        # ms-97 / e-2568 — AC23 scope-add approval flow (= new subcommands
+        # parallel to plan --add-scope; latter stays as legacy direct write).
+        "trek_scope_add": cmd_trek_scope_add,
+        "trek_scope_list_pending": cmd_trek_scope_list_pending,
+        "trek_scope_approve": cmd_trek_scope_approve,
         "trek_task_state": cmd_trek_task_state,
         "trek_extend_ttl": cmd_trek_extend_ttl,
         # ms-92 / e-2141 — cross-project task add via Trek scope

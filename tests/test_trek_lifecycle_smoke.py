@@ -124,7 +124,11 @@ def test_cross_project_trek_full_lifecycle(smoke_env):
         "plan beacon")
     _ok(_run(alice, "plan", trek_id, "--add-scope", "pe-xxx:op-12"), "plan pe")
     _ok(_run(alice, "plan", trek_id, "--add-scope", "lps-xxx:e-1234"), "plan lps")
-    _ok(_run(alice, "plan", trek_id, "--add-scope", "trailnode-xxx"), "plan tn")
+    # ms-97 / e-2568 AC7 — narrowing key 必須 (= project-wide scope は CLI で
+    # reject)。 旧テストは project-wide だったが SPEC AC7 に揃えて narrowed
+    # 形に書き換える (= ms slot 配下の cross-project member 招集として有効)。
+    _ok(_run(alice, "plan", trek_id, "--add-scope", "trailnode-xxx:ms-1"),
+        "plan tn")
 
     r = _ok(_run(alice, "show", trek_id, "--json"))
     doc = json.loads(r.stdout)

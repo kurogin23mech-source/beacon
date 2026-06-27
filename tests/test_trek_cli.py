@@ -670,22 +670,29 @@ def test_trek_plan_add_scope_task(trek_env):
     assert {"project": "lps-1", "task": "e-1234"} in doc["scope"]
 
 
-def test_trek_plan_add_scope_project_wide(trek_env):
+def test_trek_plan_add_scope_project_wide_rejected(trek_env):
+    """ms-97 / e-2568 AC7 — project-wide adds are rejected at the CLI
+    layer (the parse_scope_arg(strict=True) opt-in). Removing legacy
+    project-wide entries still works (see ``_remove_scope`` test below)
+    because remove keeps strict=False to clear grandfathered data.
+    """
     tid = _make_trek_and_return_id(trek_env)
     r = _run(trek_env, "plan", tid, "--add-scope", "lps-1", "--json")
-    assert r.returncode == 0
-    doc = json.loads(r.stdout)
-    assert {"project": "lps-1"} in doc["scope"]
+    assert r.returncode != 0
+    assert "project-wide" in r.stderr
+    assert "narrowing key" in r.stderr
 
 
 def test_trek_plan_remove_scope(trek_env):
     tid = _make_trek_and_return_id(trek_env)
     _run(trek_env, "plan", tid, "--add-scope", "beacon-1:ms-64")
-    _run(trek_env, "plan", tid, "--add-scope", "pe-1")
+    # ms-97 / e-2568 AC7 — narrowing-key 必須なので 2 つ目の add も
+    # narrowed 形にする (= 旧テストは project-wide だったが SPEC で reject)。
+    _run(trek_env, "plan", tid, "--add-scope", "pe-1:ms-99")
     r = _run(trek_env, "plan", tid, "--remove-scope", "beacon-1:ms-64", "--json")
     assert r.returncode == 0
     doc = json.loads(r.stdout)
-    assert doc["scope"] == [{"project": "pe-1"}]
+    assert doc["scope"] == [{"project": "pe-1", "milestone": "ms-99"}]
 
 
 def test_trek_plan_requires_add_or_remove(trek_env):

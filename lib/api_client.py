@@ -745,6 +745,69 @@ class ApiClient:
             f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/scope", body,
         )
 
+    # -----------------------------------------------------------------
+    # ms-97 / e-2568 — scope-add approval flow (= AC23 Phase 1a)
+    #
+    # Three endpoints, agreed shape with Fork B1 (e-2567 server PR):
+    #   POST /api/treks/{trek_id}/scope-add      → mints sa-<8hex> pending
+    #   GET  /api/treks/{trek_id}/scope-pending  → list of pending entries
+    #   POST /api/treks/{trek_id}/scope-approve  → commits pending to scope[]
+    #
+    # The legacy PUT /api/treks/{trek_id}/scope (= add_trek_scope above)
+    # stays as a direct-commit shortcut for leader / joined-member manual
+    # operations. The new POST path is the AI-initiated path that requires
+    # explicit user approval before the entry appears in trek.scope[].
+    # -----------------------------------------------------------------
+
+    def propose_trek_scope_add(self, trek_id: str, *, project: str,
+                               milestone: str = "", operation: str = "",
+                               task: str = "") -> dict:
+        """Propose a scope addition (= AC23 pending flow). Returns
+        ``{"pending_id": "sa-...", "entry": {...}, ...}``.
+
+        Caller's session_id / user_id are derived server-side from the
+        auth header — the request body never carries them (spoofing
+        prevention, per Fork B1 schema confirmation).
+        """
+        body: dict = {"project": project}
+        if milestone:
+            body["milestone"] = milestone
+        if operation:
+            body["operation"] = operation
+        if task:
+            body["task"] = task
+        return self.post(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/scope-add",
+            body,
+        )
+
+    def list_trek_scope_pending(self, trek_id: str) -> list:
+        """List pending scope-add proposals on a trek. Any joined member.
+
+        Returns a flat array of
+        ``[{"pending_id", "entry", "requested_by_session_id",
+            "requested_by_user_id", "requested_at"}, ...]``.
+        Blanket approvals are NOT included here — they will live at
+        ``GET /api/treks/{trek_id}/blanket-approvals`` (AC24 / Phase 2).
+        """
+        return self.get(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/scope-pending",
+        )
+
+    def approve_trek_scope_pending(self, trek_id: str, *,
+                                   pending_id: str) -> dict:
+        """Commit a pending scope-add into ``trek.scope[]``. Any joined
+        member can approve (= AC23, not leader-restricted).
+
+        Returns the updated trek doc. Raises RuntimeError on 404 (pending
+        not found), 409 (already committed), 400 (validation), or 403
+        (caller not a joined member).
+        """
+        return self.post(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/scope-approve",
+            {"pending_id": pending_id},
+        )
+
     def set_trek_halt(self, trek_id: str, *, issued_by_session_id: str,
                       reason: str = "") -> dict:
         """Pull the Andon cord. Any joined member may halt an active trek."""
