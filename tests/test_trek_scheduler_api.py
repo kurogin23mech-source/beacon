@@ -333,6 +333,199 @@ def test_due_trek_stamps_last_leader_digest_at_when_fired():
     assert saved["meta"]["last_leader_digest_at"]
 
 
+# ---------------------------------------------------------------------------
+# ms-95 / e-2539 — leader-digest fan-out to all leader live sessions
+#
+# Background: cross-project Trek tk-7a3b88b9 dogfood (PE + LPS, 2026-06-27)
+# observed that when the leader reconnects (= new bclaude session, fork,
+# or machine switch), trek_doc.leader_session_id still points at the
+# original (now dead) session_id. The pre-fix dispatch path was rigid
+# single-sid append → bus event landed at the dead sid → leader's live
+# bridge never picked it up → meta.last_leader_digest_at stamped without
+# functional delivery.
+#
+# Fix: dispatch is now session-grain (= mirror what progress-check has
+# done since e-2036). Every live session belonging to the leader user
+# receives the digest. Backward compat: if no live leader session
+# resolves, fall back to the stamped leader_session_id so dead-leader
+# treks still get observable fires.
+# ---------------------------------------------------------------------------
+
+
+def test_leader_digest_fans_out_to_all_live_leader_sessions():
+    """Multi-session leader (= same user logged in from N bclaude) gets
+    the digest delivered to each live session, not just the originally
+    stamped one. This is the core fix for the LPS dogfood observation."""
+    _seed_trek(
+        trek_id="tk-digestfan1",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-95"}],
+    )
+    # Leader user has 3 live sessions: the original stamped one + 2
+    # extras (= reconnect / fork scenarios). All three are within the
+    # 10-minute live cutoff so they all qualify.
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-leader",
+        session_ids=["sv-leader", "sv-leader-fork", "sv-leader-mac"],
+    )
+
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-digestfan1"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    fired = body["fired"][0]
+    # All three live sessions are recorded as digest recipients.
+    assert sorted(fired["leader_digest_recipients"]) == [
+        "sv-leader", "sv-leader-fork", "sv-leader-mac",
+    ]
+    # The stamped leader_session_id audit field is preserved untouched
+    # (= "did not silently re-stamp the doc just because we fanned out").
+    assert fired["leader_session_id"] == "sv-leader"
+
+    # Three digest events landed, one per session, all addressed.
+    events = _bus_events_by_project["beacon-test"]
+    digest_events = [e for e in events if e["channel"] == "trek-leader-digest"]
+    assert len(digest_events) == 3
+    recipients = sorted(
+        e["payload"].get("recipient_session_id", "") for e in digest_events
+    )
+    assert recipients == ["sv-leader", "sv-leader-fork", "sv-leader-mac"]
+
+
+def test_leader_digest_delivers_to_live_session_when_stamped_is_stale():
+    """The regression reproducer: stamped leader_session_id points at a
+    DEAD session (= leader reconnected, original session gone), but the
+    leader user has a different live session. The digest must reach the
+    live one — not silently appended to the dead sid."""
+    _seed_trek(
+        trek_id="tk-stamp-stale",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-95"}],
+    )
+    # stamped leader is "sv-leader" but only "sv-leader-reconnect" is
+    # live in the session directory.
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-leader",
+        session_ids=["sv-leader-reconnect"],
+    )
+
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-stamp-stale"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    fired = resp.json()["fired"][0]
+    # Digest went to the live sid, not the stale stamped one.
+    assert fired["leader_digest_recipients"] == ["sv-leader-reconnect"]
+    # Stamped audit field still reads the original (= we did not
+    # silently mutate the trek doc; transfer is a separate command).
+    assert fired["leader_session_id"] == "sv-leader"
+
+    events = _bus_events_by_project["beacon-test"]
+    digest_events = [e for e in events if e["channel"] == "trek-leader-digest"]
+    assert len(digest_events) == 1
+    assert digest_events[0]["payload"]["recipient_session_id"] == \
+        "sv-leader-reconnect"
+
+
+def test_leader_digest_falls_back_to_stamped_when_no_live_leader_session():
+    """Backward compat: leader has no live session at all (= away from
+    desk). The digest falls back to the stamped leader_session_id so
+    behaviour stays compatible with the pre-fix single-sid path. The
+    fired event lets observability surface (= dashboard) keep showing
+    'last leader digest at X' without going dark."""
+    _seed_trek(
+        trek_id="tk-leader-away",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-95"}],
+    )
+    # No sessions for the leader user in the directory. The pre-fix
+    # path relied on the stamped sid alone, so the fallback must
+    # reproduce that.
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-leader",
+        session_ids=[],
+    )
+
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-leader-away"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    fired = resp.json()["fired"][0]
+    # Fallback recipient is the stamped leader_session_id.
+    assert fired["leader_digest_recipients"] == ["sv-leader"]
+    assert fired["leader_session_id"] == "sv-leader"
+
+
+def test_leader_digest_ignores_non_leader_live_sessions():
+    """Live sessions belonging to non-leader members must NOT receive
+    the leader digest — they are progress-check material, not leader
+    surface. Guards against accidentally cross-wiring the two
+    channels."""
+    # Add a second non-leader member to the trek so we can register a
+    # live session for them.
+    _seed_trek(
+        trek_id="tk-nonleader",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-95"}],
+    )
+    _treks["tk-nonleader"]["members"].append({
+        "user_id": "uid-executor", "email": "ex@b.com",
+        "role": "member", "invited_at": "2026-06-27T00:00:00.000000Z",
+        "joined_at": "2026-06-27T00:00:00.000000Z",
+        "invited_by": "uid-leader",
+    })
+    # Leader has 1 live session; executor (non-leader) has another.
+    import datetime
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    _sessions_by_project["beacon-test"] = [
+        {"session_id": "sv-leader-live", "user_id": "uid-leader",
+         "last_active": now_iso},
+        {"session_id": "sv-executor-live", "user_id": "uid-executor",
+         "last_active": now_iso},
+    ]
+
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-nonleader"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    fired = resp.json()["fired"][0]
+    # Only the leader's live session received the digest.
+    assert fired["leader_digest_recipients"] == ["sv-leader-live"]
+
+    events = _bus_events_by_project["beacon-test"]
+    digest_events = [e for e in events if e["channel"] == "trek-leader-digest"]
+    assert len(digest_events) == 1
+    assert digest_events[0]["payload"]["recipient_session_id"] == \
+        "sv-leader-live"
+    # The executor live session DID receive a progress-check event
+    # (= that channel is for them); just not the digest.
+    progress_events = [
+        e for e in events if e["channel"] == "trek-progress-check"
+    ]
+    progress_recipients = {
+        e["payload"].get("recipient_session_id", "") for e in progress_events
+    }
+    assert "sv-executor-live" in progress_recipients
+
+
 def test_empty_scope_trek_lands_in_errors_not_fired():
     _seed_trek(
         trek_id="tk-bbbb2222",
