@@ -32,6 +32,20 @@ triggers:
 
 詳細は CORE doc `b1XOKXQeC0JXaKkO0CRt` (= 「Trek の位置づけ: 缶詰の徹夜作業部屋」)。
 
+### Trek manual の必読 (= ms-97 / AC28、 1 回 onboarding)
+
+本 Skill が **Trek create / join 直後の初回起動** で動くとき (= 自セッションが当該 Trek に初めて参加する起動)、 以下を 1 度実行して manual を読み込む。 約 1500 tokens で哲学 / 役割 / 5 状態 / 行動選択肢 / pulse-ack schema / antipatterns 5 件を圧縮済の単一 CORE doc:
+
+```bash
+cd "$PROJECT_DIR" && beacon doc show yfOufm7d2zkAhcm5QWES
+```
+
+(= `trek-operating-manual`、 ms-97 / AC28 で land)
+
+判定経路: `beacon trek show <trek-id> --json` の `members[].joined_at` で自セッションの join_at が直近 1 hour 以内かつ本 Skill 起動が初回 (= note / commit に当該 trek_id の言及がまだない) なら 「初回起動」 とみなす。 既参加で繰り返し起動するケースでは manual 再読込は不要 (= 1 セッション内で複数回起動されても 1 回だけで足りる)。
+
+manual に書かれている 5 antipattern は本 Skill 全体の guard rail として一致しているので、 並行参照 (= manual を読みながら Skill body を進める) が前提。 哲学・命名・人格モデルの背景は併せて `nmeML0M8HKpZlwRaYGXh` (= beacon-philosophy-purpose-vs-trekking) / `l1FweFG4EjuSOHx0ovFq` (= agent-personhood) を 1 度読むと、 自律権限境界と「session = 独立人格」 の前提が腑に落ちる (= 初回のみ任意、 以降 skip 可)。
+
 ## leader / executor 役割分担 (= ms-88 / e-2140 coordinator norm)
 
 Trek の autonomous 実行では、 leader (= Trek の `leader_session_id`) と executor (= leader 以外の joined session) で **default の役割が違う**。 用語と動き:
@@ -423,6 +437,39 @@ cd "$PROJECT_DIR" && beacon bus ack --event <event_id> 2>&1 || \
 
 user 引数経由 (= event_id 無し) の起動では skip。
 
+## Step 8.5: completion_ready signal の受領時動作 (= ms-97 / AC20、 leader 専用)
+
+leader として `trek-leader-digest` event を受けた時、 payload に **`completion_ready=true` marker** (= 仮 field 名、 e-2567 で確定予定) が立っている場合、 そのイベントは「全 MS / task slot が terminal `{done, user_review}` に到達した」 ことを通知している (= server が idempotent stamp `meta.completion_notified_at` で 1 回限り fire、 Op slot を含む trek では発火しない)。
+
+leader が取るべき行動:
+
+1. **completion summary を user に DM** (= PR review-style、 「全 slot terminal、 終了宣言してください」 + 各 slot の達成内容 + outstanding な user 判断項目を列挙)
+
+```bash
+cd "$PROJECT_DIR" && beacon bus send --channel notify --payload '{
+  "trek_id": "<trek-id>",
+  "completion_summary": {
+    "ms_slots_done": <N>,
+    "task_slots_done": <M>,
+    "user_review_pending": [...],
+    "outstanding_decisions": [...]
+  },
+  "text": "Trek <trek-id> 全 slot terminal 到達。 終了宣言してください: beacon trek archive <trek-id>"
+}' --delivery notify-user-only
+```
+
+2. **`meta.summary_sent_at` stamp を打つ** (= 仮 CLI、 e-2568 で確定予定):
+
+```bash
+cd "$PROJECT_DIR" && beacon trek meta-set <trek-id> --key summary_sent_at --value "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+```
+
+3. **leader tick を以降停止** (= server 側で `meta.summary_sent_at` を見て tick 対象から外す)
+
+leader が長期間不応 (= 上記 1-3 を取らない) の場合、 server が auto-succession 経路で別 session を leader に任命する (= ms-97 / AC22)。 つまり「completion_ready を受領したら速やかに動く」 が leader の責務。
+
+**仮 schema 整合の追従**: e-2567 (= server endpoint 改修) で確定する payload field 名と CLI subcommand 名 (= 上記 `completion_ready` / `meta.summary_sent_at` / `trek meta-set`) は仮値で書いてある。 e-2567 land 後に確定 field 名で本 section を 1 commit update する (= ms-97 Phase 1a 統合 dogfood 前の必須 follow-up)。
+
 ## Step 9: 結果報告
 
 通常モードでは run_record / commit / task done / incident で結果が記録されている (= 「完了」 を user に通知する必要はない)。
@@ -466,3 +513,10 @@ opt-in しない場合: event は `delivery=propose-to-ai` に降格され、AI 
 | `/beacon-dm-respond` | DM 受信判断 (= cross-user は必ず y/n、ただし Trek scope 内は server 側 dm_gate で blanket bypass) |
 | `/beacon-bus-armed` | 自律 listen 状態維持 (= prompt 無しで bus event を AI コンテキストに inject) |
 | `/beacon-trek` | Trek の create / join / scope-add / archive 等の管理 (= autonomous 実行 ではなく管理) |
+
+## 末尾 reminder (= ms-97 / AC29、 軽量 ~50 tokens)
+
+> ✓ pulse-ack 書いたか? (= state_summary 必須、 空文字は不応扱い)
+> ✓ trek_id 確認した? (= 他 Trek の payload と混同していないか)
+> ✓ scope 内 action か? (= 触る file / task が `members[]` から見える scope か)
+> 詳細は manual `yfOufm7d2zkAhcm5QWES` の antipattern 5 件を参照。
