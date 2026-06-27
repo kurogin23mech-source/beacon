@@ -40,10 +40,39 @@ _bus_events_by_project: dict[str, list[dict]] = {}
 # ms-88 / e-2109 — per-project live session registry stub for the fan-out
 # filter integration test. Tests can populate this directly.
 _sessions_by_project: dict[str, list[dict]] = {}
+# ms-95 / v0.49.2 — project registry stub so the scheduler tick's
+# _resolve_trek_target_project_id helper can expand a slug like
+# "life-plan-simulator" to the canonical full id
+# "life-plan-simulator-68c5df" before db.list_sessions / append_bus_event
+# are called. Without this the slug-stored scope case (= LPS dogfood
+# observation) cannot be exercised in tests.
+_projects: dict[str, dict] = {}
 
 
 def _mock_list_sessions(project_id: str):
     return copy.deepcopy(_sessions_by_project.get(project_id, []))
+
+
+def _mock_get_project(project_id: str):
+    return copy.deepcopy(_projects.get(project_id))
+
+
+def _mock_list_projects(user_id: str = "", include_archived: bool = False):
+    rows: list[dict] = []
+    for pid, data in _projects.items():
+        if user_id and data.get("owner") and data.get("owner") != user_id:
+            continue
+        rows.append({"project_id": pid, "name": data.get("name", "")})
+    return rows
+
+
+def _register_project(project_id: str, *, owner: str = "") -> None:
+    """Register a fake project so _resolve_trek_target_project_id can
+    canonicalise scope slugs to ``<slug>-<hex6>``."""
+    _projects[project_id] = {
+        "name": project_id.rsplit("-", 1)[0] if "-" in project_id else project_id,
+        "owner": owner,
+    }
 
 
 def _mock_get_trek(trek_id: str):
@@ -85,6 +114,11 @@ def _rebind_db():
         ("list_treks", _mock_list_treks),
         ("append_bus_event", _mock_append_bus_event),
         ("list_sessions", _mock_list_sessions),
+        # ms-95 / v0.49.2 — slug-resolving scheduler tick needs both
+        # get_project (= fast path full-id check) and list_projects
+        # (= slug expansion scan) to be deterministic in tests.
+        ("get_project", _mock_get_project),
+        ("list_projects", _mock_list_projects),
     ]
     for name, mock in binds:
         prior[name] = getattr(db_module, name, None)
@@ -92,6 +126,7 @@ def _rebind_db():
     _treks.clear()
     _bus_events_by_project.clear()
     _sessions_by_project.clear()
+    _projects.clear()
     yield
     for name, val in prior.items():
         if val is None:
@@ -524,6 +559,116 @@ def test_leader_digest_ignores_non_leader_live_sessions():
         e["payload"].get("recipient_session_id", "") for e in progress_events
     }
     assert "sv-executor-live" in progress_recipients
+
+
+# ---------------------------------------------------------------------------
+# ms-95 / v0.49.2 — slug ↔ canonical project_id resolution in scheduler tick
+#
+# Background: PR #271 fixed the task-add endpoint to canonicalise
+# ``scope[].project`` from slug to full id, but the scheduler tick path
+# was not touched. v0.49.1 deploy still left LPS without leader-digest
+# delivery because ``scope[0]['project']`` is "life-plan-simulator" (=
+# the slug users type at ``beacon trek plan --add-scope <slug>:<ms>``)
+# but ``db.list_sessions`` / ``db.append_bus_event`` need the full id
+# "life-plan-simulator-68c5df" to find the leader session and write to
+# the right bus. The new helper ``_resolve_trek_target_project_id``
+# closes this gap for both the progress-check and idle-escalation
+# loops.
+# ---------------------------------------------------------------------------
+
+
+def test_slug_stored_scope_resolves_to_canonical_full_project_id():
+    """LPS dogfood reproducer (2026-06-27): scope is stored as slug,
+    leader's live session is registered under the full id project.
+
+    Pre-fix: ``db.list_sessions("life-plan-simulator")`` returns nothing
+    because that slug isn't a real project id → ``leader_live_sids`` is
+    empty → fallback to stamped sid → digest event is appended to the
+    "life-plan-simulator" *slug* bus, which no real bridge listens to.
+
+    Post-fix: helper canonicalises to "life-plan-simulator-68c5df", so
+    list_sessions finds the leader's live sid AND the bus event lands
+    in the real project's bus where the leader actually subscribes.
+    """
+    slug = "life-plan-simulator"
+    full_id = "life-plan-simulator-68c5df"
+    _register_project(full_id, owner="uid-leader")
+    _seed_trek(
+        trek_id="tk-slug-resolve",
+        status="active",
+        cadence=10,
+        scope=[{"project": slug, "milestone": "ms-22"}],
+    )
+    import datetime
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    # Leader's live session lives in the **full id** project (= mirrors
+    # what a real bclaude bridge does: it registers under the cwd
+    # project's full id, never under a bare slug).
+    _sessions_by_project[full_id] = [
+        {"session_id": "sv-leader-live", "user_id": "uid-leader",
+         "last_active": now_iso},
+    ]
+
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-slug-resolve"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    fired = resp.json()["fired"][0]
+    # Audit field reports the canonical full id (= proves the helper
+    # ran and downstream code saw the right project).
+    assert fired["project_id"] == full_id
+    # Leader's actual live session was reached, not the fallback
+    # stamped sid (= the LPS dogfood failure mode would have produced
+    # ["sv-leader"] from the trek_doc.leader_session_id fallback).
+    assert fired["leader_digest_recipients"] == ["sv-leader-live"]
+
+    # Bus events landed in the full-id project's bus, not the slug
+    # bus. The slug bucket must remain empty.
+    assert slug not in _bus_events_by_project
+    full_events = _bus_events_by_project[full_id]
+    digest_events = [
+        e for e in full_events if e["channel"] == "trek-leader-digest"
+    ]
+    assert len(digest_events) == 1
+    assert digest_events[0]["payload"]["recipient_session_id"] == \
+        "sv-leader-live"
+
+
+def test_full_id_stored_scope_passes_through_unchanged():
+    """When scope is already stored as the canonical full id, the
+    helper's fast path returns it as-is — no slug expansion, no
+    spurious project lookup. Guards the helper against accidentally
+    re-resolving an already-canonical id."""
+    full_id = "life-plan-simulator-68c5df"
+    _register_project(full_id, owner="uid-leader")
+    _seed_trek(
+        trek_id="tk-already-full",
+        status="active",
+        cadence=10,
+        scope=[{"project": full_id, "milestone": "ms-22"}],
+    )
+    import datetime
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    _sessions_by_project[full_id] = [
+        {"session_id": "sv-leader-live", "user_id": "uid-leader",
+         "last_active": now_iso},
+    ]
+
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-already-full"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    fired = resp.json()["fired"][0]
+    assert fired["project_id"] == full_id
+    assert fired["leader_digest_recipients"] == ["sv-leader-live"]
 
 
 def test_empty_scope_trek_lands_in_errors_not_fired():
