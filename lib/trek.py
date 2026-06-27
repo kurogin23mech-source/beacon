@@ -2094,6 +2094,112 @@ def rollback_members_migration(trek_doc: dict) -> dict:
     return trek_doc
 
 
+LEGACY_PROJECT_WIDE_SCOPE_META_KEY = "legacy_project_wide_scope"
+"""ms-97 / e-2571 AC8 + AC31 — meta marker stamped on grandfathered treks
+whose scope[] contains at least one project-wide entry (= no narrowing key).
+Set by ``stamp_legacy_project_wide_scope`` at migration time. CLI / Web UI
+read it to render the legacy-scope warning without re-walking scope[]."""
+
+
+def stamp_legacy_project_wide_scope(trek_doc: dict) -> bool:
+    """Mark a grandfathered project-wide scope trek under ``meta``.
+
+    ms-97 / e-2571 AC8 + AC31 (grandfather + warning surface). When the
+    trek's scope[] contains a project-wide entry (= ``has_project_wide_scope``
+    returns True), set ``meta.legacy_project_wide_scope = True`` so the
+    CLI / Web UI can flag it without re-walking scope on every read.
+
+    Returns True iff the marker transitioned False/missing → True (= caller
+    can decide whether to persist). Idempotent: stamping a doc that already
+    carries the marker is a no-op and returns False. Treks with no
+    project-wide entries are never stamped (= returns False even if the
+    operator runs the script over them).
+
+    Does NOT touch ``scope[]`` — the grandfather contract preserves the
+    original entries as-is so existing executors keep their reach.
+    """
+    if not has_project_wide_scope(trek_doc):
+        return False
+    meta = trek_doc.setdefault("meta", {})
+    if meta.get(LEGACY_PROJECT_WIDE_SCOPE_META_KEY) is True:
+        return False
+    meta[LEGACY_PROJECT_WIDE_SCOPE_META_KEY] = True
+    trek_doc["updated_at"] = utcnow_iso()
+    return True
+
+
+def unstamp_legacy_project_wide_scope(trek_doc: dict) -> bool:
+    """Remove the legacy-project-wide-scope marker (= rollback of stamping).
+
+    ms-97 / e-2571 — companion to ``stamp_legacy_project_wide_scope`` so the
+    migration script's ``--rollback`` path can revert the marker. Also used
+    when an operator narrows a grandfathered scope entry and the marker is
+    no longer accurate.
+
+    Returns True iff the marker was present and got removed. Idempotent.
+    """
+    meta = trek_doc.get("meta") or {}
+    if LEGACY_PROJECT_WIDE_SCOPE_META_KEY not in meta:
+        return False
+    meta.pop(LEGACY_PROJECT_WIDE_SCOPE_META_KEY, None)
+    if not meta:
+        trek_doc.pop("meta", None)
+    trek_doc["updated_at"] = utcnow_iso()
+    return True
+
+
+def is_legacy_project_wide_scope(trek_doc: dict) -> bool:
+    """Return True iff the trek carries the legacy-project-wide-scope marker.
+
+    ms-97 / e-2571 — cheap read-only check for CLI / Web UI rendering.
+    Prefer this over ``has_project_wide_scope`` when the migration has
+    already run (= stamping is the source of truth), because it does not
+    re-walk scope[] on every list iteration.
+    """
+    meta = trek_doc.get("meta") or {}
+    return bool(meta.get(LEGACY_PROJECT_WIDE_SCOPE_META_KEY))
+
+
+def find_unhealthy_members(
+    trek_doc: dict,
+    *,
+    live_session_ids: Iterable[str] | None = None,
+) -> list[dict]:
+    """Return member entries that need operator attention (= partial migration
+    or stale session).
+
+    ms-97 / e-2571 — Migration リスク + Rollback 戦略 §5 alarming surface.
+    A member is "unhealthy" when either:
+      - it lacks ``session_id`` (= migration script could not map it from
+        ``session_history``, partial-migration case); or
+      - it carries a ``session_id`` not present in ``live_session_ids``
+        (= the session that joined as this member is no longer live).
+
+    ``live_session_ids`` is optional — when omitted, only the
+    missing-session_id case is reported (= the migration script default).
+    Callers that hold a live-session snapshot pass it in to also surface
+    stale sessions.
+
+    Returns a list (possibly empty) of member dicts in original order. Does
+    not mutate the trek doc.
+    """
+    members = trek_doc.get("members") or []
+    if not members:
+        return []
+    live_set: set[str] | None = (
+        set(live_session_ids) if live_session_ids is not None else None
+    )
+    out: list[dict] = []
+    for m in members:
+        sid = m.get("session_id") or ""
+        if not sid:
+            out.append(m)
+            continue
+        if live_set is not None and sid not in live_set:
+            out.append(m)
+    return out
+
+
 def find_member_by_session_id(
     trek_doc: dict, session_id: str,
 ) -> dict | None:

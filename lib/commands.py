@@ -4786,6 +4786,12 @@ def cmd_trek_list():
     # out of the joined list so /beacon-session-start can display "current
     # treks" without mixing in invitations the user hasn't yet accepted.
     joined_only = os.environ.get("BEACON_TREK_JOINED_ONLY", "") == "1"
+    # ms-97 / e-2571 AC8 + AC31: surface grandfathered project-wide scope
+    # treks. Falls back to ``has_project_wide_scope`` for docs that pre-date
+    # the stamp script so operators are not surprised by missing markers.
+    legacy_scope_only = (
+        os.environ.get("BEACON_TREK_LEGACY_SCOPE_ONLY", "") == "1"
+    )
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if all_actors:
@@ -4824,12 +4830,25 @@ def cmd_trek_list():
             return False
         treks = [t for t in treks if _is_joined(t)]
 
+    if legacy_scope_only:
+        # AC8 + AC31 — accept either the explicit marker or a project-wide
+        # scope entry (= grandfathered docs that have not yet run the
+        # stamp script).
+        import trek as trek_mod
+        treks = [
+            t for t in treks
+            if trek_mod.is_legacy_project_wide_scope(t)
+            or trek_mod.has_project_wide_scope(t)
+        ]
+
     if json_mode:
         print(json.dumps(treks, ensure_ascii=False, indent=2))
         return
 
     if not treks:
-        if joined_only:
+        if legacy_scope_only:
+            print("(no treks with legacy project-wide scope)")
+        elif joined_only:
             print("(no joined treks — `beacon trek join <id>` で招待を承諾)")
         elif actor_id:
             print(f"(no treks visible to {actor_id} — try --all で全件)")
@@ -4837,6 +4856,7 @@ def cmd_trek_list():
             print("(no treks yet — `beacon trek create \"title\"` で最初の trek を起票)")
         return
 
+    import trek as trek_mod
     print(f"Treks ({len(treks)}):")
     for t in treks:
         status_icon = {
@@ -4845,11 +4865,19 @@ def cmd_trek_list():
             "archived": "□",
         }.get(t.get("status", ""), "?")
         halt_marker = " [halted]" if t.get("halt") else ""
+        # ms-97 / e-2571 — visual cue so operators see grandfathered
+        # project-wide scope at a glance, without needing --legacy-scope.
+        legacy_marker = (
+            " ⚠legacy-scope"
+            if (trek_mod.is_legacy_project_wide_scope(t)
+                or trek_mod.has_project_wide_scope(t))
+            else ""
+        )
         member_count = len(t.get("members") or [])
         scope_count = len(t.get("scope") or [])
         print(f"  {status_icon} {t['trek_id']:14s} {t['title'][:55]}"
               f" — {t.get('type', '?')}/{t.get('status', '?')}"
-              f"{halt_marker}, {member_count}m/{scope_count}s")
+              f"{halt_marker}{legacy_marker}, {member_count}m/{scope_count}s")
 
 
 def _current_project_id() -> str:
@@ -5153,9 +5181,44 @@ def cmd_trek_show():
     print(f"  members ({len(members)}):")
     for m in members:
         joined = "joined" if m.get("joined_at") else "invited"
-        print(f"    - {m.get('email')} [{m.get('role')}] ({joined})")
+        # ms-97 / e-2571 — surface members that lack session_id (= partial
+        # migration outcome) right next to the member line so the operator
+        # cannot miss them. Stale-session detection (= sid set but session
+        # no longer live) lives in the dedicated alarming block below where
+        # we have access to the live-session snapshot.
+        partial = "" if m.get("session_id") else " ⚠no-session_id"
+        print(
+            f"    - {m.get('email')} [{m.get('role')}] ({joined}){partial}"
+        )
+
+    # ms-97 / e-2571 — Migration リスク + Rollback 戦略 §5 alarming surface.
+    # Group both "partial migration" (= member without session_id) and
+    # "stale session" (= sid set but the session has not been seen in the
+    # live snapshot) into a single warning block so the operator gets one
+    # actionable list.
+    import trek as trek_mod
+    unhealthy = trek_mod.find_unhealthy_members(t)
+    if unhealthy:
+        print()
+        print(f"  ⚠ unhealthy members ({len(unhealthy)}, ms-97 AC34):")
+        for m in unhealthy:
+            sid_state = (
+                f"session_id={m.get('session_id', '')}"
+                if m.get("session_id")
+                else "no session_id (partial migration)"
+            )
+            print(
+                f"    - {m.get('email')} (user_id={m.get('user_id', '')}) "
+                f"— {sid_state}"
+            )
+        print(
+            "    → re-run scripts/migrate_trek_members_session_id.py after "
+            "backfilling session_history, or remove the member manually."
+        )
+
     scope = t.get("scope") or []
     print(f"  scope ({len(scope)}):")
+    legacy_scope_seen = False
     for s in scope:
         # ms-75 / e-1864 AC 6: surface bind grain (project / project:task=eXXX /
         # project:ms=msXX / project:op=opXX) explicitly so members understand
@@ -5166,6 +5229,19 @@ def cmd_trek_show():
             print(f"    - {s.get('project')}:{ref_str}")
         else:
             print(f"    - {s.get('project')} (project-wide)")
+            legacy_scope_seen = True
+    if legacy_scope_seen or trek_mod.is_legacy_project_wide_scope(t):
+        # ms-97 / e-2571 AC8 + AC31 — warn that grandfathered project-wide
+        # scope is preserved as-is (= existing executors keep their reach)
+        # but new scope-add will reject project-wide entries. Surface the
+        # tightening migration path so operators can decide whether to
+        # narrow.
+        print(
+            "    ⚠ legacy project-wide scope — grandfathered (ms-97 AC8). "
+            "New scope-add rejects project-wide entries; narrow via "
+            "`beacon trek plan ... --add-scope <project>:<ms-id>` and "
+            "remove the project-wide row to clear the warning."
+        )
     if t.get("halt"):
         h = t["halt"]
         print(f"  halt: at={h.get('issued_at')} by={h.get('issued_by_session_id')}"
