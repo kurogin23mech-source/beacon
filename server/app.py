@@ -601,6 +601,56 @@ def _resolve_canonical_project_id(
     return None
 
 
+def _resolve_trek_target_project_id(trek_doc: dict) -> str:
+    """Resolve trek scope[0]['project'] to a canonical full project_id.
+
+    ms-95 / v0.49.2 — the Trek scheduler tick uses ``scope[0]['project']``
+    as ``target_project_id`` for both ``db.list_sessions`` (= populating
+    ``leader_live_sids`` for the digest fan-out) and
+    ``db.append_bus_event`` (= where the dispatched event lands). If the
+    scope entry is stored as a slug (= what users type at
+    ``beacon trek plan --add-scope life-plan-simulator:ms-22``), both
+    calls silently miss: ``list_sessions`` returns nothing so
+    ``leader_live_sids`` collapses to the stamped fallback sid, and
+    ``append_bus_event`` writes to a non-existent project bus that the
+    real leader's bridge never listens to. The leader sees zero
+    digest events even though ``meta.last_leader_digest_at`` keeps
+    stamping (= LPS dogfood observation, 2026-06-27).
+
+    Fix: mirror the task-add endpoint's resolver (PR #271 / e-2538) here
+    so the scheduler's first-pass project lookup runs on the canonical
+    full ``<slug>-<hex6>`` form. We scope the slug expansion through the
+    trek leader's user_id — the leader necessarily has access to every
+    project in the trek's scope, so this is the safe identity to use
+    in a scheduler-side (= no end-user request context) resolution.
+
+    Behaviour:
+      * Returns the canonical full project_id when resolution succeeds.
+      * Returns the raw scope value when resolution fails (= leader
+        missing, slug ambiguous, db hiccup) so the existing error path
+        (= "scope_entry_missing_project") and downstream fallback keep
+        their pre-v0.49.2 behaviour. We never raise here; the scheduler
+        loop is a fan-out that must continue across treks.
+    """
+    scope = trek_doc.get("scope") or []
+    if not scope:
+        return ""
+    raw = scope[0].get("project", "") or ""
+    if not raw:
+        return ""
+    leader_user_id = ""
+    for m in trek_doc.get("members") or []:
+        if (m.get("role") or "") == "leader" and m.get("user_id"):
+            leader_user_id = m.get("user_id") or ""
+            break
+    if not leader_user_id:
+        # Without a leader user we cannot scope the slug scan. Return raw
+        # — the scheduler's existing error / fallback path handles it.
+        return raw
+    canonical = _resolve_canonical_project_id(raw, user_id=leader_user_id)
+    return canonical or raw
+
+
 def _resolve_author(user: dict) -> dict:
     """Build the ``meta.author`` dict for a write triggered by ``user``.
 
@@ -5569,7 +5619,14 @@ def trek_scheduler_tick_endpoint(
                 "error": "empty_scope_no_target_project",
             })
             continue
-        target_project_id = scope[0].get("project", "")
+        # ms-95 / v0.49.2 — canonicalise slug-stored scope[0] before any
+        # downstream use. Both db.list_sessions (= populating
+        # leader_live_sids) and db.append_bus_event (= where digest
+        # events land) need the full <slug>-<hex6> form; the slug-only
+        # form is what users type at the CLI but is not a valid
+        # project_id. See _resolve_trek_target_project_id docstring for
+        # the LPS dogfood that surfaced this gap.
+        target_project_id = _resolve_trek_target_project_id(trek_doc)
         if not target_project_id:
             errors.append({
                 "trek_id": trek_id,
@@ -5852,7 +5909,10 @@ def trek_scheduler_tick_endpoint(
             # Same fallback path as the progress-check loop; without a
             # target project we have nowhere to post.
             continue
-        target_project_id = scope[0].get("project", "")
+        # ms-95 / v0.49.2 — same slug ↔ canonical resolution as the
+        # progress-check loop above, so idle-escalation events also
+        # land in the real project bus rather than a slug-keyed ghost.
+        target_project_id = _resolve_trek_target_project_id(trek_doc)
         if not target_project_id:
             continue
         payload = trek_scheduler_mod.build_idle_escalation_payload(
