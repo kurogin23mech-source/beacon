@@ -49,7 +49,7 @@ def test_reader_rejects_extra_frontmatter_and_name_mismatch(tmp_path):
     root = tmp_path / "wrong-folder"
     root.mkdir()
     (root / "SKILL.md").write_text(
-        "---\nname: other\ndescription: x\nversion: 1\n---\nbody\n",
+        "---\nname: other\ndescription: x\npriority: high\n---\nbody\n",
         encoding="utf-8",
     )
     with pytest.raises(sc.SkillConversionError, match="unsupported field"):
