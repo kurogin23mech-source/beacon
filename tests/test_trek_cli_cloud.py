@@ -102,6 +102,44 @@ class FakeApiClient:
     def remove_trek_scope(self, trek_id, **kwargs):
         return self._record("remove_trek_scope", trek_id=trek_id, **kwargs)
 
+    # ms-97 / e-2568 — scope-add approval flow (= AC23 Phase 1a CLI).
+    def propose_trek_scope_add(self, trek_id, **kwargs):
+        self.calls.append(
+            ("propose_trek_scope_add", {"trek_id": trek_id, **kwargs}),
+        )
+        return {
+            "pending_id": "sa-deadbeef",
+            "entry": {
+                "project": kwargs.get("project"),
+                **{k: kwargs.get(k) for k
+                   in ("milestone", "operation", "task") if kwargs.get(k)},
+            },
+            "requested_by_session_id": "sv-caller",
+            "requested_by_user_id": "uid-a",
+            "requested_at": "2026-06-27T00:00:00Z",
+        }
+
+    def list_trek_scope_pending(self, trek_id):
+        self.calls.append(
+            ("list_trek_scope_pending", {"trek_id": trek_id}),
+        )
+        return [
+            {
+                "pending_id": "sa-deadbeef",
+                "entry": {"project": "beacon", "milestone": "ms-97"},
+                "requested_by_session_id": "sv-caller",
+                "requested_by_user_id": "uid-a",
+                "requested_at": "2026-06-27T00:00:00Z",
+            },
+        ]
+
+    def approve_trek_scope_pending(self, trek_id, **kwargs):
+        self.calls.append(
+            ("approve_trek_scope_pending",
+             {"trek_id": trek_id, **kwargs}),
+        )
+        return self._next_trek
+
     def set_trek_halt(self, trek_id, **kwargs):
         return self._record("set_trek_halt", trek_id=trek_id, **kwargs)
 
@@ -271,14 +309,21 @@ class TestScopeCloudDispatch:
             "milestone": "ms-69", "operation": "", "task": "",
         }
 
-    def test_add_scope_project_only(self, fake_client, monkeypatch):
+    def test_add_scope_project_only_rejected(self, fake_client, monkeypatch,
+                                              capsys):
+        """ms-97 / e-2568 AC7 — project-wide adds are rejected at the CLI
+        layer in cloud mode too (= parse error fires before the client is
+        touched, so ``fake_client.calls`` stays empty)."""
         monkeypatch.setenv("BEACON_TREK_ID", "tk-fake01")
         monkeypatch.setenv("BEACON_TREK_SCOPE_ADD", "beacon")
         _capture_stdout(monkeypatch)
-        commands.cmd_trek_plan()
-        name, kwargs = fake_client.calls[0]
-        assert name == "add_trek_scope"
-        assert kwargs["milestone"] == ""
+        with pytest.raises(SystemExit) as excinfo:
+            commands.cmd_trek_plan()
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert "project-wide" in err
+        assert "narrowing key" in err
+        assert fake_client.calls == []
 
     def test_add_scope_task_ref(self, fake_client, monkeypatch):
         monkeypatch.setenv("BEACON_TREK_ID", "tk-fake01")
@@ -297,6 +342,65 @@ class TestScopeCloudDispatch:
         name, kwargs = fake_client.calls[0]
         assert name == "remove_trek_scope"
         assert kwargs["operation"] == "op-2"
+
+
+# ---------------------------------------------------------------------------
+# ms-97 / e-2568 — scope-add approval flow CLI (AC23).
+# ---------------------------------------------------------------------------
+
+class TestScopeApprovalFlowDispatch:
+    def test_scope_add_routes_to_propose_endpoint(self, fake_client,
+                                                  monkeypatch):
+        monkeypatch.setenv("BEACON_TREK_ID", "tk-fake01")
+        monkeypatch.setenv("BEACON_TREK_SCOPE_ADD", "beacon:ms-97")
+        _capture_stdout(monkeypatch)
+        commands.cmd_trek_scope_add()
+        name, kwargs = fake_client.calls[0]
+        assert name == "propose_trek_scope_add"
+        assert kwargs == {
+            "trek_id": "tk-fake01", "project": "beacon",
+            "milestone": "ms-97", "operation": "", "task": "",
+        }
+
+    def test_scope_add_rejects_project_wide(self, fake_client, monkeypatch,
+                                            capsys):
+        monkeypatch.setenv("BEACON_TREK_ID", "tk-fake01")
+        monkeypatch.setenv("BEACON_TREK_SCOPE_ADD", "beacon")
+        _capture_stdout(monkeypatch)
+        with pytest.raises(SystemExit) as excinfo:
+            commands.cmd_trek_scope_add()
+        assert excinfo.value.code == 1
+        assert fake_client.calls == []
+
+    def test_scope_list_pending_routes_to_list_endpoint(self, fake_client,
+                                                       monkeypatch):
+        monkeypatch.setenv("BEACON_TREK_ID", "tk-fake01")
+        _capture_stdout(monkeypatch)
+        commands.cmd_trek_scope_list_pending()
+        assert fake_client.calls[0] == (
+            "list_trek_scope_pending", {"trek_id": "tk-fake01"},
+        )
+
+    def test_scope_approve_routes_to_approve_endpoint(self, fake_client,
+                                                     monkeypatch):
+        monkeypatch.setenv("BEACON_TREK_ID", "tk-fake01")
+        monkeypatch.setenv("BEACON_TREK_PENDING_ID", "sa-deadbeef")
+        _capture_stdout(monkeypatch)
+        commands.cmd_trek_scope_approve()
+        assert fake_client.calls[0] == (
+            "approve_trek_scope_pending",
+            {"trek_id": "tk-fake01", "pending_id": "sa-deadbeef"},
+        )
+
+    def test_scope_approve_requires_pending_id(self, fake_client, monkeypatch,
+                                              capsys):
+        monkeypatch.setenv("BEACON_TREK_ID", "tk-fake01")
+        _capture_stdout(monkeypatch)
+        with pytest.raises(SystemExit) as excinfo:
+            commands.cmd_trek_scope_approve()
+        assert excinfo.value.code == 1
+        assert "pending_id" in capsys.readouterr().err
+        assert fake_client.calls == []
 
 
 class TestHaltCloudDispatch:

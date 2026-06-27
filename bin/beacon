@@ -2636,6 +2636,62 @@ except ValueError as e:
                     BEACON_TREK_GOAL_STATE_SET="$goal_state_set" \
                     python3 "$COMMANDS_PY" trek_plan
                 ;;
+            # ms-97 / e-2568 — AC23 scope-add approval flow.
+            # 3 new subcommands paired with Fork B1's e-2567 server endpoints.
+            # The legacy direct-commit path stays at `plan --add-scope`.
+            scope-add)
+                shift 2
+                trek_id="" scope_arg=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        *)
+                            if [[ -z "$trek_id" ]]; then
+                                trek_id="$1"
+                            elif [[ -z "$scope_arg" ]]; then
+                                scope_arg="$1"
+                            fi
+                            shift
+                            ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" \
+                    BEACON_TREK_SCOPE_ADD="$scope_arg" \
+                    python3 "$COMMANDS_PY" trek_scope_add
+                ;;
+            scope-list-pending|scope-pending)
+                shift 2
+                trek_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" \
+                    python3 "$COMMANDS_PY" trek_scope_list_pending
+                ;;
+            scope-approve)
+                shift 2
+                trek_id="" pending_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        --pending-id) pending_id="${2:-}"; shift 2 ;;
+                        *)
+                            if [[ -z "$trek_id" ]]; then
+                                trek_id="$1"
+                            elif [[ -z "$pending_id" ]]; then
+                                pending_id="$1"
+                            fi
+                            shift
+                            ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" \
+                    BEACON_TREK_PENDING_ID="$pending_id" \
+                    python3 "$COMMANDS_PY" trek_scope_approve
+                ;;
             timeline)
                 shift 2
                 trek_id="" limit="50"
@@ -2879,8 +2935,11 @@ except ValueError as e:
                 echo "  invite <trek-id> --actor <email> [--notify]"
                 echo "  join <trek-id>"
                 echo "  leave <trek-id>"
-                echo "  plan <trek-id> --add-scope <project[:ref]>"
+                echo "  plan <trek-id> --add-scope <project:ref>      (= legacy direct commit、 ms-97 AC7 で narrowing key 必須)"
                 echo "  plan <trek-id> --remove-scope <project[:ref]>"
+                echo "  scope-add <trek-id> <project:ref>             (= AC23 approval flow、 pending を立てる、 ms-97 e-2568)"
+                echo "  scope-list-pending <trek-id>                  (= pending scope-add の一覧)"
+                echo "  scope-approve <trek-id> <pending-id>          (= pending を scope[] に commit、 ms-97 AC23)"
                 echo "  stop <trek-id> [--reason \"...\"]    (= Andon cord、halt 信号を立てる)"
                 echo "  resume <trek-id>                     (= halt 信号を clear)"
                 echo "  transfer-leader <trek-id> --to <session-id>"
