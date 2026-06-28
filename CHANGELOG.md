@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.51.4] - 2026-06-28
+
+- Merge pull request #302 from kurogin23mech-source/fix/ms-97-trek-scheduler-import-flat-layout
+- fix(ms-97): lib/trek_scheduler.py lazy import for Cloud Run flat layout (= dogfood 全 tick で executor skip 真因)
+- docs(release): update README/CHANGELOG for v0.51.3
+- chore(release): bump formula to 0.51.3
+
 ## [v0.51.3] - 2026-06-28
 
 - Merge pull request #301 from kurogin23mech-source/fix/ms-97-fanout-empty-targets-and-broadcast-delivery
