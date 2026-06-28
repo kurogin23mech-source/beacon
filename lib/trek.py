@@ -1347,6 +1347,13 @@ def new_trek(*,
         # treks (= pre-e-2611 docs) read this as ``[]`` via the helpers'
         # ``or []`` fallback, so no migration is required.
         PENDING_SCOPE_OPS_KEY: [],
+        # ms-97 / e-2658 (Phase 0) — AC6 cutover safety scaffolding.
+        # members[] が session_id keyed に書き換わる cutover の前に、
+        # 元の user_id keyed entries をここに退避する。 Phase 0 段階
+        # では空 list で seed のみ (= 実 migration は Phase 1)。 既存
+        # trek (= pre-e-2658 docs) は helper の ``or []`` fallback で
+        # 同等に扱われ、 schema 互換性が保たれる。
+        MEMBERS_LEGACY_BACKUP_KEY: [],
         "created_at": now,
         "updated_at": now,
         "archived_at": None,
@@ -1761,6 +1768,98 @@ VALID_PENDING_SCOPE_ACTIONS = (
     PENDING_SCOPE_ACTION_ADD,
     PENDING_SCOPE_ACTION_REMOVE,
 )
+
+
+# ---------------------------------------------------------------------------
+# AC6 / AC34 migration scaffolding (= ms-97 Phase 0, e-2658)
+# ---------------------------------------------------------------------------
+# `members[]` を user_id keyed (= 旧 SPEC) から session_id keyed (= ms-97
+# AC6) に書き換える cutover を、 既存 trek の不可逆破壊から守る 5 機構の
+# 最小単位 (= backup field + migration_phase tracker)。 詳細な migration
+# script / 復元 script / 不整合 alarming は別 commit で順次 land する。
+
+MEMBERS_LEGACY_BACKUP_KEY = "members_legacy_backup"
+
+# Phase A = backup を取って members[] を session_id keyed に書き換えた直後
+# Phase B = backup 維持 + 新経路で 1 ヶ月運用 (= 観察期間)
+# Phase C = backup 削除 (= 完全 cutover、 rollback 不可)
+# pre-A = migration 未着手 (= 既存 trek の default、 旧 user_id keyed のまま)
+DEFAULT_MIGRATION_PHASE = "pre-A"
+VALID_MIGRATION_PHASES = ("pre-A", "A", "B", "C")
+MIGRATION_PHASE_META_KEY = "migration_phase"
+
+
+def get_migration_phase(trek_doc: dict) -> str:
+    """Return the trek's members migration phase (= "pre-A" if absent).
+
+    `trek.meta.migration_phase` が無い trek は migration 未着手として
+    扱う (= 旧 user_id keyed のまま)。 既存 trek が読み出された時に
+    silent に "pre-A" を返すので、 読み手の分岐が読みやすい。
+    """
+    meta = trek_doc.get("meta") or {}
+    phase = meta.get(MIGRATION_PHASE_META_KEY) or DEFAULT_MIGRATION_PHASE
+    if phase not in VALID_MIGRATION_PHASES:
+        return DEFAULT_MIGRATION_PHASE
+    return phase
+
+
+def set_migration_phase(trek_doc: dict, phase: str) -> dict:
+    """Stamp `meta.migration_phase` after validating the phase token.
+
+    Returns the mutated trek_doc (= chain-friendly). Caller persists via
+    db.save_trek. ValueError for unknown phase tokens.
+    """
+    if phase not in VALID_MIGRATION_PHASES:
+        raise ValueError(
+            f"migration_phase {phase!r} not in {VALID_MIGRATION_PHASES}"
+        )
+    meta = trek_doc.setdefault("meta", {})
+    meta[MIGRATION_PHASE_META_KEY] = phase
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
+
+
+def backup_legacy_members(trek_doc: dict) -> dict:
+    """Snapshot current `members[]` into `members_legacy_backup[]`.
+
+    既存 trek を AC6 cutover (= session_id keyed) に進める時、 元の
+    user_id keyed entries を別 field に退避してから本体を書き換える
+    ことで、 不整合発覚時に reverse migration で復元可能にする。
+
+    `members_legacy_backup` が既に non-empty なら ValueError (= 二重
+    backup を防ぐ、 巻き戻し失敗で snapshot を上書きしないため)。
+    Returns the mutated trek_doc.
+    """
+    existing_backup = trek_doc.get(MEMBERS_LEGACY_BACKUP_KEY) or []
+    if existing_backup:
+        raise ValueError(
+            f"{MEMBERS_LEGACY_BACKUP_KEY} is non-empty — refusing to "
+            f"overwrite snapshot (= guard against double backup)"
+        )
+    current_members = list(trek_doc.get("members") or [])
+    trek_doc[MEMBERS_LEGACY_BACKUP_KEY] = [dict(m) for m in current_members]
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
+
+
+def restore_legacy_members(trek_doc: dict) -> dict:
+    """Reverse `backup_legacy_members` — restore `members[]` from backup.
+
+    Phase A → pre-A への hot rollback 経路。 backup が空なら ValueError
+    (= 復元元が無い)。 復元後は backup field を空 list に戻し、
+    migration_phase を pre-A に巻き戻す。
+    """
+    backup = trek_doc.get(MEMBERS_LEGACY_BACKUP_KEY) or []
+    if not backup:
+        raise ValueError(
+            f"{MEMBERS_LEGACY_BACKUP_KEY} is empty — nothing to restore"
+        )
+    trek_doc["members"] = [dict(m) for m in backup]
+    trek_doc[MEMBERS_LEGACY_BACKUP_KEY] = []
+    meta = trek_doc.setdefault("meta", {})
+    meta[MIGRATION_PHASE_META_KEY] = "pre-A"
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
 
 
 def mint_pending_scope_op_id() -> str:

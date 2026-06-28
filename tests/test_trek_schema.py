@@ -1334,3 +1334,131 @@ def test_summarize_pulse_acks_ignores_legacy_empty_sessions():
     assert summary["active_session_count"] == 0
     assert summary["stuck_session_count"] == 0
     assert summary["idle_session_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Migration scaffolding (= ms-97 / e-2658)
+# ---------------------------------------------------------------------------
+# AC6 (= members[] を user_id keyed から session_id keyed に書き換える)
+# cutover を、 既存 trek の不可逆破壊から守る最小単位 (= backup field +
+# migration_phase tracker) の schema 契約を pin する。 Phase 0-A 段階では
+# 挙動変更ゼロ (= seed のみ / helper は AC34 migration で使う)。
+
+def _new_trek_for_migration() -> dict:
+    return trek.new_trek(
+        title="Migration scaffolding fixture",
+        creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-aaaa-12345",
+    )
+
+
+def test_new_trek_seeds_members_legacy_backup_empty():
+    t = _new_trek_for_migration()
+    assert "members_legacy_backup" in t
+    assert t["members_legacy_backup"] == []
+
+
+def test_get_migration_phase_defaults_to_pre_A():
+    t = _new_trek_for_migration()
+    # meta.migration_phase が無い trek は "pre-A" を silent に返す。
+    assert "migration_phase" not in (t.get("meta") or {})
+    assert trek.get_migration_phase(t) == "pre-A"
+
+
+def test_get_migration_phase_reads_valid_stamp():
+    t = _new_trek_for_migration()
+    t.setdefault("meta", {})["migration_phase"] = "A"
+    assert trek.get_migration_phase(t) == "A"
+
+
+def test_get_migration_phase_falls_back_on_invalid_token():
+    t = _new_trek_for_migration()
+    t.setdefault("meta", {})["migration_phase"] = "bogus"
+    # 不正トークンは silent に "pre-A" に丸める (= 読み手の分岐を守る)。
+    assert trek.get_migration_phase(t) == "pre-A"
+
+
+def test_set_migration_phase_validates_token():
+    t = _new_trek_for_migration()
+    with pytest.raises(ValueError):
+        trek.set_migration_phase(t, "Z")
+    # 有効トークンは stamp される。
+    trek.set_migration_phase(t, "A")
+    assert t["meta"]["migration_phase"] == "A"
+
+
+def test_set_migration_phase_bumps_updated_at():
+    t = _new_trek_for_migration()
+    # updated_at を「過去」値に置き換えてから stamp、 mutation を観測する。
+    t["updated_at"] = "1970-01-01T00:00:00Z"
+    trek.set_migration_phase(t, "A")
+    assert t["updated_at"] != "1970-01-01T00:00:00Z"
+
+
+def test_backup_legacy_members_copies_members_to_backup():
+    t = _new_trek_for_migration()
+    # 既存 leader (1 名) に follower 1 名を足して 2 名分の members[] を作る。
+    t["members"].append({
+        "user_id": "u-2",
+        "email": "c@d.com",
+        "role": "follower",
+        "joined_at": "2026-06-28T00:00:00Z",
+    })
+    assert len(t["members"]) == 2
+    trek.backup_legacy_members(t)
+    assert len(t["members_legacy_backup"]) == 2
+    assert t["members_legacy_backup"][0]["user_id"] == "u-1"
+    assert t["members_legacy_backup"][1]["user_id"] == "u-2"
+
+
+def test_backup_legacy_members_refuses_double_backup():
+    t = _new_trek_for_migration()
+    trek.backup_legacy_members(t)
+    # 既に backup が non-empty (= leader 1 名がコピーされている) なら
+    # 二重 backup を ValueError で拒否する。
+    assert t["members_legacy_backup"] != []
+    with pytest.raises(ValueError):
+        trek.backup_legacy_members(t)
+
+
+def test_backup_legacy_members_is_independent_copy():
+    t = _new_trek_for_migration()
+    trek.backup_legacy_members(t)
+    # 返却された backup entry を変更しても、 元の members[] には影響しない
+    # (= dict(m) の shallow copy で snapshot を独立化している)。
+    t["members_legacy_backup"][0]["role"] = "tampered"
+    assert t["members"][0]["role"] == "leader"
+
+
+def test_restore_legacy_members_restores_from_backup():
+    t = _new_trek_for_migration()
+    trek.backup_legacy_members(t)
+    original_leader = dict(t["members"][0])
+    # cutover を模擬: members[] を AC6 形 (session_id keyed) に書き換える。
+    t["members"] = [{
+        "session_id": "sv-aaaa-12345",
+        "role": "leader",
+        "joined_at": "2026-06-28T00:00:00Z",
+    }]
+    trek.restore_legacy_members(t)
+    assert len(t["members"]) == 1
+    assert t["members"][0]["user_id"] == original_leader["user_id"]
+    # 復元後、 backup field は空に戻る (= 次回 backup を許す状態)。
+    assert t["members_legacy_backup"] == []
+
+
+def test_restore_legacy_members_fails_on_empty_backup():
+    t = _new_trek_for_migration()
+    # backup が空 (= 初期 seed のまま) なら復元元が無い → ValueError。
+    assert t["members_legacy_backup"] == []
+    with pytest.raises(ValueError):
+        trek.restore_legacy_members(t)
+
+
+def test_restore_legacy_members_resets_phase_to_pre_A():
+    t = _new_trek_for_migration()
+    trek.backup_legacy_members(t)
+    trek.set_migration_phase(t, "A")
+    assert t["meta"]["migration_phase"] == "A"
+    trek.restore_legacy_members(t)
+    assert t["meta"]["migration_phase"] == "pre-A"
