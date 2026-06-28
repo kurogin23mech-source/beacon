@@ -4421,6 +4421,43 @@ def trek_summary_sent_endpoint(
     return t
 
 
+@app.post("/api/treks/{trek_id}/migrate-members-session-keyed")
+def migrate_trek_members_session_keyed_endpoint(
+    trek_id: str,
+    request: Request,
+    dry_run: bool = False,
+    user: dict = Depends(require_auth),
+):
+    """Migrate trek.members[] from user_id keyed to session_id keyed (ms-97 / e-2658 AC6).
+
+    Leader-only via ``_require_trek_leader_session``. Applies the pure
+    mutator ``trek_mod.migrate_members_to_session_keyed`` and persists
+    via ``db.save_trek``. Live Firestore trek (= tk-XXXXXXXX) を CLI から
+    cloud-mode で書き換えるための endpoint。 local-mode は CLI 側で別経路
+    (= scripts/migrate_members_session_keyed.py local fallback)。
+
+    Idempotency:
+        Returns 409 if the trek is already past pre-A phase (= refuse
+        double migration to keep the inverse rollback unambiguous).
+
+    Args:
+        dry_run: ``?dry_run=true`` で migrate 後の trek_doc を返すが
+            ``db.save_trek`` は呼ばない (= 事前確認用)。
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_leader_session(t, user, request)
+    try:
+        trek_mod.migrate_members_to_session_keyed(t)
+    except ValueError as exc:
+        # Double-migration refusal (= already at phase A/B/C) returns 409
+        # Conflict so the CLI / operator can distinguish "already done"
+        # from a 4xx validation error.
+        raise HTTPException(status_code=409, detail=str(exc))
+    if not dry_run:
+        db.save_trek(trek_id, t)
+    return t
+
+
 @app.post("/api/treks/{trek_id}/transfer-leader")
 def transfer_trek_leader_endpoint(trek_id: str, body: TrekTransferLeader,
                                   user: dict = Depends(require_auth)):

@@ -50,93 +50,32 @@ from lib import trek as trek_mod  # noqa: E402
 
 
 def migrate_trek(trek_doc: dict) -> dict:
-    """Mutate ``trek_doc`` in place: members[] → session_id keyed.
-
-    Pure mutator (= no I/O). Callers persist via ``db.save_trek`` or
-    equivalent backend hook.
+    """Backward-compat wrapper. Delegates to the shared pure mutator
+    ``trek_mod.migrate_members_to_session_keyed`` (= same logic now lives
+    in ``lib/trek.py`` so the server endpoint can reuse it).
 
     Returns the same ``trek_doc`` (= chain-friendly).
 
     Raises:
-        ValueError: if the trek is already past pre-A phase (= refuse
-            double migration to keep the inverse rollback unambiguous).
+        ValueError: if the trek is already past pre-A phase.
     """
-    phase = trek_mod.get_migration_phase(trek_doc)
-    if phase != "pre-A":
-        raise ValueError(
-            f"migrate_trek: trek already at phase {phase!r}; "
-            f"refusing double migration (= run revert script first)"
+    before_phase = trek_mod.get_migration_phase(trek_doc)
+    trek_mod.migrate_members_to_session_keyed(trek_doc)
+    # Surface orphan warnings to stderr to preserve the legacy CLI UX
+    # (= the previous inline implementation printed per-orphan lines).
+    orphans = (trek_doc.get("meta") or {}).get("migration_orphans") or []
+    for uid in orphans:
+        print(
+            f"  warn: user_id={uid!r} has no session_history entry; "
+            f"skipping (= orphan member)",
+            file=sys.stderr,
         )
-
-    # 1) Snapshot original members[] before mutation (= the rollback
-    #    contract). ``backup_legacy_members`` raises if the backup field
-    #    is already populated, which gives us a second-line guard against
-    #    silent re-runs.
-    trek_mod.backup_legacy_members(trek_doc)
-
-    legacy_members = trek_doc.get("members_legacy_backup") or []
-    session_history = trek_doc.get("session_history") or []
-    leader_sid = trek_doc.get("leader_session_id") or ""
-
-    # Build a per-user_id list of session_history entries so we can
-    # expand each legacy member to N session-grain entries deterministically.
-    sessions_by_user: dict[str, list[dict]] = {}
-    for h in session_history:
-        uid = h.get("user_id") or ""
-        if not uid:
-            continue
-        sessions_by_user.setdefault(uid, []).append(h)
-
-    new_members: list[dict] = []
-    for legacy in legacy_members:
-        user_id = legacy.get("user_id") or ""
-        role = legacy.get("role") or "member"
-        email = legacy.get("email") or ""
-        invited_at = legacy.get("invited_at") or ""
-        invited_by = legacy.get("invited_by") or ""
-        sessions = sessions_by_user.get(user_id) or []
-        if not sessions:
-            # No session_history entry for this user_id → orphan. Skip
-            # but emit a structured note so callers can audit.
-            print(
-                f"  warn: user_id={user_id!r} has no session_history entry; "
-                f"skipping (= orphan member)",
-                file=sys.stderr,
-            )
-            continue
-        for h in sessions:
-            sid = h.get("session_id") or ""
-            if not sid:
-                continue
-            # Leader role collapses to a single session: only the one
-            # stamped as ``leader_session_id`` keeps the leader role.
-            # Every other session of the same user_id falls back to
-            # "member" so the 1-leader invariant survives the expansion.
-            entry_role = role
-            if role == "leader" and sid != leader_sid:
-                entry_role = "member"
-            new_members.append({
-                "session_id": sid,
-                "user_id": user_id,
-                "email": email or h.get("email") or "",
-                "role": entry_role,
-                "joined_at": h.get("joined_at") or "",
-                "invited_at": invited_at,
-                "invited_by": invited_by,
-            })
-
-    trek_doc["members"] = new_members
-    trek_mod.set_migration_phase(trek_doc, "A")
+    del before_phase  # consumed only for clarity above
     return trek_doc
 
 
 def _load_trek_local(trek_id: str, project_id: Optional[str]) -> dict:
-    """Best-effort load via lib.trek_store (= local-mode file backend).
-
-    Cloud-mode trek_doc は server API 経由でしか拾えないため、 そのケースは
-    呼び出し側で別経路を用意する (= --project は forward-compat な hook で、
-    現状は local-mode trek_store のみ対応)。
-    """
+    """Best-effort load via lib.trek_store (= local-mode file backend)."""
     from lib import trek_store  # noqa: E402
 
     doc = trek_store.load_trek(trek_id)
@@ -149,6 +88,44 @@ def _save_trek_local(trek_id: str, trek_doc: dict) -> None:
     from lib import trek_store  # noqa: E402
 
     trek_store.save_trek(trek_id, trek_doc)
+
+
+def _cloud_mode_available(project_id: Optional[str]) -> bool:
+    """True iff ``--project`` was given AND ``.beacon/cloud.json`` exists.
+
+    両条件揃った時のみ cloud endpoint 経由に振る (= cwd で local 開発中の
+    operator が誤って prod API を叩かないようにする二重ガード)。
+    """
+    if not project_id:
+        return False
+    cloud_json = Path.cwd() / ".beacon" / "cloud.json"
+    return cloud_json.exists()
+
+
+def _migrate_via_cloud(
+    trek_id: str, project_id: str, dry_run: bool,
+) -> dict:
+    """POST to the server migrate endpoint and return the response trek_doc.
+
+    Uses ``lib.api_client.ApiClient`` (= same auth path as ``beacon cloud
+    *`` CLI subcommands). Bearer token + ``X-Beacon-Session`` header are
+    injected by ``ApiClient._request`` via the auth / session helpers.
+    """
+    sys.path.insert(0, str(ROOT / "lib"))
+    from auth import load_credentials  # noqa: E402
+    from api_client import ApiClient  # noqa: E402
+    from commands import _resolve_active_api_url, _extract_token  # noqa: E402
+
+    creds = load_credentials()
+    if creds is None:
+        raise SystemExit("Not logged in. Run: beacon auth login")
+    api_url = _resolve_active_api_url()
+    client = ApiClient(api_url, _extract_token(creds))
+    path = (
+        f"/api/treks/{trek_id}/migrate-members-session-keyed"
+        f"?dry_run={'true' if dry_run else 'false'}"
+    )
+    return client.post(path)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -166,12 +143,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--project", default=None,
         help=(
-            "Optional project id hint (= forward-compat for cloud-mode "
-            "trek storage; currently unused, local-mode trek_store path "
-            "is used)."
+            "Project id hint. When set AND .beacon/cloud.json exists, the "
+            "migration is performed via the server endpoint "
+            "(POST /api/treks/{trek_id}/migrate-members-session-keyed). "
+            "Otherwise the local-mode trek_store path is used."
         ),
     )
     args = parser.parse_args(argv)
+
+    if _cloud_mode_available(args.project):
+        try:
+            trek_doc = _migrate_via_cloud(
+                args.trek_id, args.project, args.dry_run,
+            )
+        except RuntimeError as exc:
+            # ApiClient raises RuntimeError("API error <code>: <detail>")
+            # on 4xx/5xx; 409 = double-migration refusal.
+            print(f"migration refused: {exc}", file=sys.stderr)
+            return 2
+        after_members = trek_doc.get("members") or []
+        print(f"trek_id: {args.trek_id} (cloud-mode)")
+        print(f"  after: {len(after_members)} member entries (session_id keyed)")
+        print(f"  meta.migration_phase: {trek_doc.get('meta', {}).get('migration_phase')}")
+        print(json.dumps(after_members, indent=2, sort_keys=True))
+        print("--dry-run: server did not persist" if args.dry_run else "applied")
+        return 0
 
     trek_doc = _load_trek_local(args.trek_id, args.project)
     before_members = list(trek_doc.get("members") or [])

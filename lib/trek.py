@@ -2295,6 +2295,90 @@ def restore_legacy_members(trek_doc: dict) -> dict:
     return trek_doc
 
 
+def migrate_members_to_session_keyed(trek_doc: dict) -> dict:
+    """Mutate ``trek_doc`` in place: members[] → session_id keyed (= AC6 cutover).
+
+    Shared pure mutator used by both the CLI script
+    (``scripts/migrate_members_session_keyed.py``) and the server endpoint
+    (``POST /api/treks/{trek_id}/migrate-members-session-keyed``). I/O free —
+    callers persist via ``db.save_trek`` / ``trek_store.save_trek``.
+
+    展開ルール:
+    - 各 user_id keyed member entry について、 ``session_history[]`` の中で
+      ``user_id`` が一致する entry を全て探し、 1 session = 1 member entry に
+      expand する。
+    - ``role`` 解決: 旧 entry の role が "leader" の時は、
+      ``leader_session_id`` に一致する session のみ "leader" を維持し、
+      他 session は "member" に落とす (= 1 trek に 1 leader session の
+      不変条件を維持)。
+    - session_history に entry が無い user_id は orphan 扱いで skip
+      (= 完全破壊を避ける)。
+
+    Raises:
+        ValueError: phase が pre-A 以外 (= 二重 migrate refusal)。
+    """
+    phase = get_migration_phase(trek_doc)
+    if phase != "pre-A":
+        raise ValueError(
+            f"migrate: trek already at phase {phase!r}; "
+            f"refusing double migration (= run revert script first)"
+        )
+
+    # Snapshot before mutation (= rollback contract). Raises if backup
+    # field is non-empty — second-line guard against silent re-runs.
+    backup_legacy_members(trek_doc)
+
+    legacy_members = trek_doc.get("members_legacy_backup") or []
+    session_history = trek_doc.get("session_history") or []
+    leader_sid = trek_doc.get("leader_session_id") or ""
+
+    sessions_by_user: dict[str, list[dict]] = {}
+    for h in session_history:
+        uid = h.get("user_id") or ""
+        if not uid:
+            continue
+        sessions_by_user.setdefault(uid, []).append(h)
+
+    new_members: list[dict] = []
+    orphans: list[str] = []
+    for legacy in legacy_members:
+        user_id = legacy.get("user_id") or ""
+        role = legacy.get("role") or "member"
+        email = legacy.get("email") or ""
+        invited_at = legacy.get("invited_at") or ""
+        invited_by = legacy.get("invited_by") or ""
+        sessions = sessions_by_user.get(user_id) or []
+        if not sessions:
+            orphans.append(user_id)
+            continue
+        for h in sessions:
+            sid = h.get("session_id") or ""
+            if not sid:
+                continue
+            entry_role = role
+            if role == "leader" and sid != leader_sid:
+                entry_role = "member"
+            new_members.append({
+                "session_id": sid,
+                "user_id": user_id,
+                "email": email or h.get("email") or "",
+                "role": entry_role,
+                "joined_at": h.get("joined_at") or "",
+                "invited_at": invited_at,
+                "invited_by": invited_by,
+            })
+
+    trek_doc["members"] = new_members
+    if orphans:
+        # Stash orphan user_ids on meta so callers can audit (= the CLI
+        # script prints to stderr; the server returns this via the JSON
+        # body so the operator can see them from a remote curl).
+        meta = trek_doc.setdefault("meta", {})
+        meta["migration_orphans"] = orphans
+    set_migration_phase(trek_doc, "A")
+    return trek_doc
+
+
 def mint_pending_scope_op_id() -> str:
     """Generate a fresh pending scope op id (= ``sp-<8 hex>``)."""
     return f"sp-{secrets.token_hex(4)}"
