@@ -29,34 +29,39 @@ def _read(path):
 
 
 # ---------------------------------------------------------------------------
-# Top-level Treks tab (= ms-86 / e-2251 reinstated the tab as the canonical
-# entry point — Trek is a project-independent scope and should not be hidden
-# inside the project's collapsible sidebar dropdown). The v3-era sidebar
-# remains alongside it for cross-project navigation, but the tab is the
-# documented surface for "open the Treks list view from anywhere in the app".
+# Project-tab Treks button — REMOVED in ms-97 / e-2606 (Phase 1b UI 復元)。
+# SPEC tnJnByg8Ymw8T3DgPdJD AC1/AC3/AC4 で 「Trek は project と独立な
+# first-class object なので project 階層配下に置かない」 が確定し、 e-2251
+# の真逆実装は revert された。 hamburger menu top-level の Treks セクション
+# (= TestWebUI_Sidebar 配下) が唯一の入口。 ms-95 e-2441 で
+# TreksTabRemoved → TreksTabPresent に flip した assertions を、 今回 ms-97
+# e-2606 で再度 TreksTabRemoved に戻す。
 # ---------------------------------------------------------------------------
 
-class TestWebUI_TreksTabPresent:
-    """ms-95 e-2441: was TreksTabRemoved (= v3 design assumed sidebar-only,
-    pre-e-2251). After e-2251 the tab was reinstated as the canonical
-    project-page entry; assertions flipped from absence to presence."""
+class TestWebUI_TreksTabRemoved:
+    """ms-97 / e-2606: SPEC tnJnByg8Ymw8T3DgPdJD AC1/AC3/AC4 で project tab bar
+    から Treks タブを削除し、 hamburger menu top-level に Treks セクションを
+    復活させる方向に確定。 e-2251 の真逆実装を revert した。 hamburger Treks
+    セクションが唯一の入口なので、 「タブが無い」 ことを構造的に pin する。
+    """
 
     def setup_method(self, _method):
         self.src = _read(WEB_INDEX)
 
-    def test_treks_tab_button_present(self):
-        assert 'data-tab="treks"' in self.src, (
-            "Treks tab button must live in the tab-bar (ms-86 / e-2251)"
+    def test_treks_tab_button_removed(self):
+        assert 'data-tab="treks"' not in self.src, (
+            "Treks tab button must not be in the project tab-bar (ms-97 / e-2606)"
         )
 
-    def test_treks_tab_render_branch_present(self):
-        assert "state.activeTab === 'treks'" in self.src, (
-            "activeTab === 'treks' render branch must be wired"
+    def test_treks_tab_render_branch_removed(self):
+        assert "state.activeTab === 'treks'" not in self.src, (
+            "activeTab === 'treks' render branch must be removed (ms-97 / e-2606)"
         )
 
-    def test_treks_switch_tab_branch_present(self):
-        assert "if (tab === 'treks')" in self.src, (
-            "switch-tab dispatcher must handle the treks tab"
+    def test_treks_switch_tab_branch_removed(self):
+        assert "if (tab === 'treks')" not in self.src, (
+            "switch-tab dispatcher must not handle the treks tab anymore "
+            "(ms-97 / e-2606 — list view moved to hamburger menu)"
         )
 
 
@@ -263,11 +268,13 @@ class TestDesktopUI_v3Parity:
     def setup_method(self, _method):
         self.src = _read(DESKTOP_INDEX)
 
-    def test_treks_tab_present(self):
-        # ms-95 e-2441: was test_no_treks_tab — flipped after ms-86 / e-2251
-        # reinstated the top-level Treks tab.
-        assert 'data-tab="treks"' in self.src, (
-            "desktop bundle must carry the Treks tab (ms-86 / e-2251)"
+    def test_treks_tab_removed(self):
+        # ms-97 / e-2606: SPEC tnJnByg8Ymw8T3DgPdJD AC1/AC3/AC4 で project tab
+        # bar から Treks タブを削除し、 hamburger menu top-level に移した。
+        # desktop bundle (= build.py が server/static/index.html から自動生成)
+        # も同期して tab が無いこと、 を構造的に pin する。
+        assert 'data-tab="treks"' not in self.src, (
+            "desktop bundle must not carry the Treks tab (ms-97 / e-2606)"
         )
 
     def test_header_chrome_present(self):
@@ -569,3 +576,189 @@ class TestWebUI_TrekMembersTableSessionFullColumn:
         for label in ("<th>user</th>", "<th>session</th>", "<th>session id</th>",
                       "<th>role</th>", "<th>task</th>"):
             assert label in block, f"mockup thead missing {label!r}"
+
+
+# ---------------------------------------------------------------------------
+# ms-97 / e-2606..e-2609 (Phase 1b UI 復元) — SPEC tnJnByg8Ymw8T3DgPdJD の
+# UI/動線系 AC を構造的に pin する。 e-2251 で merge された真逆実装の
+# revert + leader_session_id / project-wide warning / scope approval surface
+# の 3 件を追加。
+# ---------------------------------------------------------------------------
+
+
+class TestWebUI_TreksHamburgerSectionWired:
+    """ms-97 / e-2606 (AC3 / AC4): hamburger menu top-level に Treks セクション
+    が復活し、 各行 click で trek detail に直接遷移する経路が wire 済み。
+    """
+
+    def setup_method(self, _method):
+        self.src = _read(WEB_INDEX)
+
+    def test_hamburger_has_treks_section_title(self):
+        assert '<div class="menu-section-title">Treks</div>' in self.src, (
+            "hamburger menu must have a top-level Treks section "
+            "(ms-97 / e-2606 AC3)"
+        )
+
+    def test_hamburger_treks_list_container_present(self):
+        assert 'id="menu-treks-list"' in self.src, (
+            "hamburger Treks section must render into #menu-treks-list "
+            "for lazy fill (ms-97 / e-2606)"
+        )
+
+    def test_menu_open_trek_action_registered(self):
+        assert 'data-action="menu-open-trek"' in self.src, (
+            "hamburger Trek rows must wire data-action='menu-open-trek' "
+            "so click opens trek detail (ms-97 / e-2606)"
+        )
+        assert "case 'menu-open-trek':" in self.src
+
+    def test_open_trek_lazy_loads_treks_when_empty(self):
+        # openTrek() が直接呼ばれた経路 (= shared link / trek-jump-from-widget)
+        # で state.treks 未 load のままだと _renderTrekDetail が「Trek not found」
+        # を出してしまうため、 openTrek 自身が lazy load する。
+        idx = self.src.index("async function openTrek(")
+        end = self.src.index("\nfunction closeTrek(", idx)
+        block = self.src[idx:end]
+        assert "dataSource.loadTreks()" in block, (
+            "openTrek must lazy-load state.treks when empty so direct entries "
+            "(shared link / widget) don't show 'Trek not found' (ms-97 / e-2606)"
+        )
+
+
+class TestWebUI_TrekListCrossProject:
+    """ms-97 / e-2607 (AC2): hamburger Treks list が 「user が creator or
+    member の全 Trek」 を出す。 project context 切替で list 内容不変、
+    created_at 降順 sort を client 側でも defensive に固定。
+    """
+
+    def setup_method(self, _method):
+        self.src = _read(WEB_INDEX)
+
+    def test_no_project_filter_on_trek_list(self):
+        # hamburger Treks section の render 関数 (= renderMenu 内の closure)
+        # は state.projectId を参照しない。
+        idx = self.src.index("const renderTreksSection = () => {")
+        end = self.src.index("};", idx)
+        block = self.src[idx:end]
+        assert "state.projectId" not in block, (
+            "hamburger renderTreksSection must not filter by state.projectId "
+            "— Trek is project-independent (ms-97 / e-2607 AC2)"
+        )
+
+    def test_default_sort_is_created_at_desc(self):
+        # closure 内で sort 比較関数が created_at で並び替えていること。
+        idx = self.src.index("const renderTreksSection = () => {")
+        end = self.src.index("};", idx)
+        block = self.src[idx:end]
+        assert "created_at" in block and ".sort(" in block, (
+            "hamburger renderTreksSection must explicitly sort by created_at "
+            "for defensive client-side ordering (ms-97 / e-2607 AC2)"
+        )
+
+
+class TestWebUI_TrekDetailLeaderRow:
+    """ms-97 / e-2608 (AC5): Trek detail に leader_session_id を 1 行表示する。
+    request-invite の宛先 / leader_review 権限の所在を user / 他 session が
+    視認できる経路。
+    """
+
+    def setup_method(self, _method):
+        self.src = _read(WEB_INDEX)
+
+    def test_leader_row_html_present(self):
+        assert "trek-leader-row" in self.src
+        assert "trek-leader-sid" in self.src
+        assert "trek-leader-label" in self.src
+
+    def test_leader_row_uses_leader_session_id_field(self):
+        # 直前で leaderSid を t.leader_session_id から引いている。
+        idx = self.src.index("const leaderSid = t.leader_session_id")
+        # leader 不在 (= 空文字列) の場合は行ごと省略する三項分岐がある。
+        idx2 = self.src.index("leaderRowHtml", idx)
+        block = self.src[idx2 : idx2 + 400]
+        assert "leaderSid" in block, "leaderRowHtml must branch on leaderSid"
+
+
+class TestWebUI_TrekProjectWideWarning:
+    """ms-97 / e-2608 (AC8 / AC31): project-wide scope (= narrowing key なし) を
+    持つ既存 trek に warning bar を出す。 SPEC AC7 で新規追加は reject される
+    が、 既存 trek は grandfathered なので cleanup 誘導を UI 側で促す。
+    """
+
+    def setup_method(self, _method):
+        self.src = _read(WEB_INDEX)
+
+    def test_warning_bar_css_present(self):
+        for cls in (".trek-warning-bar", ".trek-warning-chip"):
+            assert cls in self.src, f"CSS class {cls!r} missing"
+
+    def test_warning_bar_filters_project_wide_entries(self):
+        idx = self.src.index("const projectWideEntries = scope.filter(")
+        end = self.src.index(");", idx)
+        block = self.src[idx:end]
+        # narrowing key 3 種をすべて欠くものを project-wide と判定する。
+        for key in ("milestone", "operation", "task", "project"):
+            assert key in block, (
+                f"project-wide filter must consider {key} key "
+                "(ms-97 / e-2608 AC8)"
+            )
+
+
+class TestWebUI_TrekScopeApprovalSurface:
+    """ms-97 / e-2609 (AC23 / AC25): trek doc の pending_scope_changes を
+    1 click で approve / reject する surface を Trek detail に追加する。
+    backend (= e-2611) 未着地時は空 array で section が完全省略される
+    progressive disclosure 設計。
+    """
+
+    def setup_method(self, _method):
+        self.src = _read(WEB_INDEX)
+
+    def test_pending_section_helper_present(self):
+        assert "function _renderTrekScopeApprovals(" in self.src
+
+    def test_pending_section_header_present(self):
+        assert "PENDING SCOPE CHANGES" in self.src
+
+    def test_approve_and_reject_actions_registered(self):
+        for action in ("trek-scope-approve", "trek-scope-reject"):
+            assert f'data-action="{action}"' in self.src, (
+                f"data-action='{action}' must be wired in pending row "
+                "(ms-97 / e-2609 AC23/AC25)"
+            )
+            assert f"case '{action}':" in self.src, (
+                f"handleAction must dispatch '{action}' case"
+            )
+
+    def test_pending_section_omitted_when_field_empty(self):
+        # helper の早期 return: pending.length === 0 → 空文字列。
+        idx = self.src.index("function _renderTrekScopeApprovals(")
+        end = self.src.index("\nfunction _renderTrekDetail(", idx)
+        block = self.src[idx:end]
+        assert "if (pending.length === 0) return ''" in block, (
+            "_renderTrekScopeApprovals must return '' when pending list is "
+            "empty so the section disappears (progressive disclosure, "
+            "ms-97 / e-2609)"
+        )
+
+    def test_pending_row_carries_pending_id(self):
+        # approve / reject button の data-pending-id を経由して server に
+        # 1 click で id が渡る経路を pin する。
+        assert 'data-pending-id="' in self.src
+
+    def test_approve_endpoint_posts_to_scope_approve(self):
+        # handleAction の trek-scope-approve case で /scope-approve エンドポイント
+        # を POST 経由で叩いていることを構造的に pin (= endpoint 名が drift しない
+        # ように tied)。
+        idx = self.src.index("case 'trek-scope-approve':")
+        end = self.src.index("case 'trek-scope-reject':", idx)
+        block = self.src[idx:end]
+        assert "/scope-approve" in block and "POST" in block
+
+    def test_reject_endpoint_posts_to_scope_reject(self):
+        idx = self.src.index("case 'trek-scope-reject':")
+        # 大きめにブロック取って、 次の case まで。
+        end = self.src.index("    case 'trek-cli-hint':", idx)
+        block = self.src[idx:end]
+        assert "/scope-reject" in block and "POST" in block
