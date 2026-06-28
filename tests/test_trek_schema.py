@@ -344,16 +344,24 @@ def test_set_goal_state_clear_via_empty_string():
 # ---------------------------------------------------------------------------
 
 def test_new_trek_defaults_meta_empty():
-    """No cadence + no manager URL → meta is present but empty.
+    """No cadence + no manager URL → meta carries only the G6 (e-2660)
+    completion-flow seed fields, all set to ``None``.
 
-    Always-present empty dict keeps consumers from branching on KeyError
-    vs. empty-dict (= the same pattern goal_state uses with empty string).
+    ms-97 / Phase 7-A — ``new_trek`` seeds three tracking fields
+    (``completion_notified_at`` / ``summary_sent_at`` /
+    ``stall_threshold_minutes``) so AC20 / AC21 / AC11 readers find a
+    stable invariant from t=0 instead of branching on
+    KeyError-vs-None. Cadence + manager URL stay opt-in.
     """
     t = trek.new_trek(
         title="x", creator_user_id="u-1", creator_email="a@b.com",
         creator_session_id="sv-x",
     )
-    assert t["meta"] == {}
+    assert t["meta"] == {
+        "completion_notified_at": None,
+        "summary_sent_at": None,
+        "stall_threshold_minutes": None,
+    }
 
 
 def test_new_trek_with_cadence_minutes():

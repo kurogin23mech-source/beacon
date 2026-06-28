@@ -759,6 +759,19 @@ class ApiClient:
             f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/halt"
         )
 
+    def trek_summary_sent(self, trek_id: str) -> dict:
+        """Stamp ``meta.summary_sent_at`` after the leader sent the user
+        summary DM (ms-97 / Phase 7-A / AC21).
+
+        Leader-only on the server side; the CLI dispatches via the
+        scheduler's ``X-Beacon-Session`` header so the AC13 hard-check
+        resolves correctly. Returns the updated trek doc.
+        """
+        return self.post(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/summary-sent",
+            {},
+        )
+
     def transfer_trek_leader(self, trek_id: str, *, from_session_id: str,
                              to_session_id: str) -> dict:
         """Hand off leadership. Caller's session must equal the trek's current

@@ -2905,6 +2905,21 @@ except ValueError as e:
                 BEACON_TREK_TTL_REASON="$reason" \
                     python3 "$COMMANDS_PY" trek_extend_ttl
                 ;;
+            # ms-97 / Phase 7-A / AC21 — leader が user summary DM 送信後に
+            # meta.summary_sent_at を stamp し、 completion_notified_at と
+            # 組合せて leader-digest tick を停止する。
+            summary-sent)
+                shift 2
+                trek_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" \
+                    python3 "$COMMANDS_PY" trek_summary_sent
+                ;;
             # ms-92 / e-2141 — cross-project task add via Trek scope。
             # Trek scope に含まれる project の MS 配下にのみ task を起票できる
             # (= scope-guard で structural enforce、 envelope は T1-system 経由)。
