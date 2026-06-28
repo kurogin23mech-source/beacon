@@ -2211,6 +2211,113 @@ body::after {
   border-radius: 3px;
 }
 
+/* ms-97 / e-2609 — Pending scope-add / scope-remove approval surface。
+   Trek detail の WHY ブロックの上に出る action panel。 1 click で approve
+   or reject を server に投げる経路で、 backend が pending_user_approval
+   state を取り扱う e-2611 land 後に自動で出現する。 */
+.trek-pending-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.trek-pending-row {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-surface, var(--bg-raised));
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.trek-pending-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.trek-pending-action {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  padding: 2px 8px;
+  border-radius: 2px;
+  text-transform: uppercase;
+}
+.trek-pending-action.add {
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  background: rgba(96,165,250,0.08);
+}
+.trek-pending-action.remove {
+  color: var(--danger, #ef4444);
+  border: 1px solid var(--danger, #ef4444);
+  background: rgba(239,68,68,0.06);
+}
+.trek-pending-entry {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.78rem;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+.trek-pending-blanket-tag {
+  font-size: 0.65rem;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-dim);
+  padding: 1px 6px;
+  border: 1px dashed var(--border);
+  border-radius: 2px;
+}
+.trek-pending-sub {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+.trek-pending-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.trek-pending-approve, .trek-pending-reject {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  padding: 6px 16px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.trek-pending-approve {
+  background: var(--accent);
+  color: #0a0a0c;
+  border: 1px solid var(--accent);
+}
+.trek-pending-approve:hover:not(:disabled) {
+  background: var(--accent-bright, var(--accent));
+}
+.trek-pending-reject {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+.trek-pending-reject:hover:not(:disabled) {
+  border-color: var(--danger, #ef4444);
+  color: var(--danger, #ef4444);
+}
+.trek-pending-approve:disabled, .trek-pending-reject:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.trek-pending-reason {
+  flex: 1;
+  min-width: 180px;
+  background: var(--bg-base, var(--bg-surface));
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  padding: 6px 8px;
+  font-size: 0.72rem;
+  font-family: var(--font-body);
+}
+
 .trek-meta {
   display: grid;
   grid-template-columns: 100px 1fr;
@@ -6143,6 +6250,101 @@ function _renderTrekActivity(t, events, expanded) {
   return rows + footer;
 }
 
+// ms-97 / e-2609 (AC23 / AC25) — Pending scope mutation approvals。 trek doc
+// が backend (= e-2611 land) で `pending_scope_changes` field を持つように
+// なった時点で、 この surface が自動で出現する。 既存 backend (= add/remove
+// が即座に commit される現行 API) では field 不在 → render は空文字列を返し、
+// section ごと省略される。
+//
+// pending_scope_changes entry shape (= 想定、 e-2611 SPEC で確定する):
+//   { id, action: "add"|"remove", entry: {project, milestone, operation, task},
+//     requested_by_session_id, requested_at, blanket_eligible_category }
+//
+// blanket auto-commit (= e-2603 / AC24) が land した後は、 blanket 対象の add
+// は server-side で自動 commit されてここに出ない。 UI 側は何もしなくてよい。
+function _renderTrekScopeApprovals(t) {
+  const pending = Array.isArray(t.pending_scope_changes)
+    ? t.pending_scope_changes
+    : [];
+  if (pending.length === 0) return '';
+
+  // ms-97 / e-2609 — backend が e-2611 land 前の場合に remove ボタンを薄く
+  // (= disabled) 表示する保険。 backend が remove approval endpoint を返す
+  // ようになった時点で、 trek doc に capabilities.scope_remove_approval=true
+  // のような flag を置くか、 単純に endpoint が存在する前提で送って 404
+  // を catch して silent degrade することも可能。 ここでは disabled-flag を
+  // pending entry に optional に持たせる契約とし、 不在なら全機能有効。
+  const removeDisabled = !!t.meta && t.meta.scope_remove_approval_disabled === true;
+
+  const fmtEntry = (entry) => {
+    if (!entry || typeof entry !== 'object') return '';
+    const parts = [];
+    if (entry.project) parts.push(`project=${esc(entry.project)}`);
+    if (entry.milestone) parts.push(`milestone=${esc(entry.milestone)}`);
+    if (entry.operation) parts.push(`operation=${esc(entry.operation)}`);
+    if (entry.task) parts.push(`task=${esc(entry.task)}`);
+    return parts.join(' · ');
+  };
+
+  const rows = pending.map(p => {
+    const id = String(p.id || '');
+    const action = (p.action || 'add') === 'remove' ? 'remove' : 'add';
+    const requestedByHtml = _trekRenderSessionRef(t, p.requested_by_session_id || '');
+    const requestedAt = (p.requested_at || '').slice(0, 16).replace('T', ' ');
+    const blanketTag = p.blanket_eligible_category
+      ? `<span class="trek-pending-blanket-tag" title="next time this category is requested, it can be auto-committed via blanket-approve">category=${esc(p.blanket_eligible_category)}</span>`
+      : '';
+    const removeBtnDisabled = action === 'remove' && removeDisabled;
+    const rejectReasonInputId = `trek-pending-reject-reason-${esc(id)}`;
+    return `
+      <div class="trek-pending-row">
+        <div class="trek-pending-meta">
+          <span class="trek-pending-action ${action}">${action === 'add' ? '+ add' : '− remove'}</span>
+          <span class="trek-pending-entry">${fmtEntry(p.entry)}</span>
+          ${blanketTag}
+        </div>
+        <div class="trek-pending-sub">
+          requested by ${requestedByHtml} at ${esc(requestedAt)}
+        </div>
+        <div class="trek-pending-actions">
+          <button class="trek-pending-approve"
+                  data-action="trek-scope-approve"
+                  data-trek-id="${esc(t.trek_id)}"
+                  data-pending-id="${esc(id)}"
+                  ${removeBtnDisabled ? 'disabled title="scope-remove approval endpoint not yet shipped (= e-2611 pending)"' : ''}>
+            Approve
+          </button>
+          <button class="trek-pending-reject"
+                  data-action="trek-scope-reject"
+                  data-trek-id="${esc(t.trek_id)}"
+                  data-pending-id="${esc(id)}"
+                  data-reason-input="${rejectReasonInputId}"
+                  ${removeBtnDisabled ? 'disabled' : ''}>
+            Reject
+          </button>
+          <input type="text"
+                 class="trek-pending-reason"
+                 id="${rejectReasonInputId}"
+                 placeholder="reason (optional)"
+                 ${removeBtnDisabled ? 'disabled' : ''}>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <div class="trek-section">
+      <div class="trek-section-title">
+        <span>PENDING SCOPE CHANGES</span>
+        <span class="right">${pending.length} awaiting approval</span>
+      </div>
+      <div class="trek-pending-list">
+        ${rows}
+      </div>
+    </div>
+  `;
+}
+
 function _renderTrekDetail(t) {
   const members = t.members || [];
   const scope = t.scope || [];
@@ -6252,6 +6454,15 @@ function _renderTrekDetail(t) {
       </div>
 
       ${projectWideWarningHtml}
+
+      <!-- ms-97 / e-2609 (AC23 / AC25) — Pending scope-add / scope-remove
+           approval surface。 SPEC で default となる pending_user_approval
+           state を user が 1 click で approve / reject する経路。
+           backend (= e-2611 / e-2603) が land する前は trek doc に
+           pending_scope_changes フィールドが付かないので、 空状態は section
+           ごと省略する (= 初期段階では UI が surfacing しない、 backend
+           land 後に自動で出現する progressive disclosure)。 -->
+      ${_renderTrekScopeApprovals(t)}
 
       <!-- WHY (= goal_state) -->
       <div class="trek-section">
@@ -7622,6 +7833,65 @@ function handleCommonAction(action, el) {
       const tid = el.dataset.trekId;
       if (state.openEntryId) closeEntryModal();
       openTrek(tid);
+      return true;
+    }
+    // ms-97 / e-2609 — Trek detail の pending scope-add / scope-remove
+    // approval button。 trek doc の pending_scope_changes entry を 1 click
+    // で server に commit / reject させる経路。 backend (= e-2611 / e-2603)
+    // が pending state を扱うようになった時点で機能する。 endpoint 不在の
+    // 旧 backend では 404 / 405 が返り、 alert で「endpoint 未着地」 を user
+    // に説明して silent fail させる (= 既存 trek を壊さない)。
+    case 'trek-scope-approve': {
+      const trekId = el.dataset.trekId || '';
+      const pendingId = el.dataset.pendingId || '';
+      if (!trekId || !pendingId) return true;
+      el.disabled = true;
+      api(`/api/treks/${encodeURIComponent(trekId)}/scope-approve`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({pending_id: pendingId}),
+      }).then(updated => {
+        // server returns the refreshed trek doc; merge into state.treks so the
+        // detail re-render drops the pending row immediately.
+        if (updated && updated.trek_id) {
+          state.treks = (state.treks || []).map(t =>
+            t.trek_id === updated.trek_id ? updated : t);
+          render();
+        } else {
+          dataSource.loadTreks().then(render);
+        }
+      }).catch(e => {
+        el.disabled = false;
+        window.alert('Approve failed: ' + (e && e.message || 'unknown error')
+          + '\n\n(endpoint may not be shipped yet — see SPEC e-2611)');
+      });
+      return true;
+    }
+    case 'trek-scope-reject': {
+      const trekId = el.dataset.trekId || '';
+      const pendingId = el.dataset.pendingId || '';
+      const reasonInputId = el.dataset.reasonInput || '';
+      if (!trekId || !pendingId) return true;
+      const reasonInput = reasonInputId ? document.getElementById(reasonInputId) : null;
+      const reason = reasonInput ? reasonInput.value : '';
+      el.disabled = true;
+      api(`/api/treks/${encodeURIComponent(trekId)}/scope-reject`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({pending_id: pendingId, reason: reason || ''}),
+      }).then(updated => {
+        if (updated && updated.trek_id) {
+          state.treks = (state.treks || []).map(t =>
+            t.trek_id === updated.trek_id ? updated : t);
+          render();
+        } else {
+          dataSource.loadTreks().then(render);
+        }
+      }).catch(e => {
+        el.disabled = false;
+        window.alert('Reject failed: ' + (e && e.message || 'unknown error')
+          + '\n\n(endpoint may not be shipped yet — see SPEC e-2611)');
+      });
       return true;
     }
     // ms-69 / e-1659 v2 — trek detail STOP / Resume buttons surface the CLI
