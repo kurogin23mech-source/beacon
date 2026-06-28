@@ -842,6 +842,34 @@ def build_parser() -> argparse.ArgumentParser:
     p_trek_state.add_argument("--note", default="")
     p_trek_state.add_argument("--json", action="store_true")
 
+    # ms-97 / e-2626 (AC23) — canonical scope-add verb (= flag-style alias of
+    # plan --add-scope <project>:<ref>). The action delegates to cmd_trek_plan
+    # so the staging machinery (= pending_scope_ops + scope-approve flow) is
+    # shared with the existing --add-scope path.
+    p_trek_scope_add = trek_sub.add_parser("scope-add", add_help=False)
+    p_trek_scope_add.add_argument("trek_id", nargs="?", default="")
+    p_trek_scope_add.add_argument("--project", dest="scope_add_project",
+                                  default="")
+    p_trek_scope_add.add_argument("--milestone", "--ms",
+                                  dest="scope_add_milestone", default="")
+    p_trek_scope_add.add_argument("--operation", "--op",
+                                  dest="scope_add_operation", default="")
+    p_trek_scope_add.add_argument("--task", "--e",
+                                  dest="scope_add_task", default="")
+    p_trek_scope_add.add_argument("--json", action="store_true")
+
+    # ms-97 / e-2611 (AC25) — commit a staged scope op.
+    p_trek_scope_approve = trek_sub.add_parser("scope-approve", add_help=False)
+    p_trek_scope_approve.add_argument("trek_id", nargs="?", default="")
+    p_trek_scope_approve.add_argument("pending_id", nargs="?", default="")
+    p_trek_scope_approve.add_argument("--json", action="store_true")
+
+    # ms-97 / e-2611 (AC25) — drop a staged scope op without applying.
+    p_trek_scope_reject = trek_sub.add_parser("scope-reject", add_help=False)
+    p_trek_scope_reject.add_argument("trek_id", nargs="?", default="")
+    p_trek_scope_reject.add_argument("pending_id", nargs="?", default="")
+    p_trek_scope_reject.add_argument("--json", action="store_true")
+
     # ms-95 / e-2308 — extend TTL on a single Trek task (= leader 代替 reaffirm
     # for Agent-tool subagent dispatch path)
     p_trek_extend = trek_sub.add_parser("extend-ttl", add_help=False)
@@ -2318,6 +2346,13 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
             "  plan <trek-id> --remove-scope <project[:ref]>\n"
             "  plan <trek-id> --goal-state \"<criterion>\"   "
             "(= ms-75 / e-1865, '' clears)\n"
+            "  scope-add <trek-id> --project <pid> "
+            "[--milestone <ms-id> | --operation <op-id> | --task <e-id>]   "
+            "(= canonical, ms-97 / AC23)\n"
+            "  scope-approve <trek-id> <pending-id>   "
+            "(= commit staged op, ms-97 / AC25)\n"
+            "  scope-reject  <trek-id> <pending-id>   "
+            "(= drop staged op, ms-97 / AC25)\n"
             "  timeline <trek-id> [--limit N] [--json]   "
             "(= chronological view)\n"
             "  stop <trek-id> [--reason \"...\"]    (= Andon cord、halt 信号)\n"
@@ -2515,6 +2550,54 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
             {
                 "BEACON_TREK_ID": args.trek_id or "",
                 "BEACON_TREK_APPLY": "1" if getattr(args, "apply", False) else "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    # ms-97 / e-2626 (AC23) — canonical scope-add verb. Delegates to
+    # cmd_trek_plan with BEACON_TREK_SCOPE_ADD assembled from the flag-style
+    # args. Requires at least one narrowing key (= --milestone / --operation /
+    # --task) since cmd_trek_plan / parse_scope_arg rejects bare project-wide
+    # adds under AC7 strict mode.
+    if cmd == "scope-add":
+        project = getattr(args, "scope_add_project", "") or ""
+        milestone = getattr(args, "scope_add_milestone", "") or ""
+        operation = getattr(args, "scope_add_operation", "") or ""
+        task = getattr(args, "scope_add_task", "") or ""
+        if not project:
+            print("Error: --project <pid> is required", file=sys.stderr)
+            return 1
+        ref = milestone or operation or task
+        if not ref:
+            print(
+                "Error: one of --milestone | --operation | --task is required",
+                file=sys.stderr,
+            )
+            return 1
+        return _run_commands_py(
+            root, "trek_plan",
+            {
+                "BEACON_TREK_ID": args.trek_id or "",
+                "BEACON_TREK_SCOPE_ADD": f"{project}:{ref}",
+                "BEACON_JSON": json_env,
+            },
+        )
+    # ms-97 / e-2611 (AC25) — commit a staged scope op.
+    if cmd == "scope-approve":
+        return _run_commands_py(
+            root, "trek_scope_approve",
+            {
+                "BEACON_TREK_ID": args.trek_id or "",
+                "BEACON_PENDING_ID": getattr(args, "pending_id", "") or "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    # ms-97 / e-2611 (AC25) — drop a staged scope op.
+    if cmd == "scope-reject":
+        return _run_commands_py(
+            root, "trek_scope_reject",
+            {
+                "BEACON_TREK_ID": args.trek_id or "",
+                "BEACON_PENDING_ID": getattr(args, "pending_id", "") or "",
                 "BEACON_JSON": json_env,
             },
         )
