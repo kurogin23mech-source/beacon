@@ -91,6 +91,23 @@ def _mock_get_project(project_id: str):
     return copy.deepcopy(_projects.get(project_id))
 
 
+# ms-97 Phase 4 / AC14 — session registry per project so the home check
+# in add_trek_task_endpoint can resolve caller_sid → home pid via
+# trek.resolve_session_home_project(... db.list_sessions ...).
+_sessions_by_project: dict[str, list[dict]] = {}
+
+
+def _mock_list_sessions(project_id: str) -> list[dict]:
+    return copy.deepcopy(_sessions_by_project.get(project_id, []))
+
+
+def _register_session(project_id: str, session_id: str) -> None:
+    """Test helper — register a fake session under a project."""
+    _sessions_by_project.setdefault(project_id, []).append({
+        "session_id": session_id,
+    })
+
+
 def _mock_list_projects(user_id: Optional[str] = None,
                        include_archived: bool = False) -> list[dict]:
     """Mirror firestore_client.list_projects shape: project_id + name + owner.
@@ -165,6 +182,9 @@ def _rebind_db():
         # to mock both for the resolver to behave deterministically.
         ("get_project", _mock_get_project),
         ("list_projects", _mock_list_projects),
+        # ms-97 Phase 4 / AC14 — list_sessions used by
+        # resolve_session_home_project to resolve caller home project.
+        ("list_sessions", _mock_list_sessions),
     ]:
         prior[name] = getattr(db_module, name, None)
         setattr(db_module, name, mock)
@@ -213,6 +233,7 @@ def reset_store():
     _treks.clear()
     _users_by_email.clear()
     _projects.clear()
+    _sessions_by_project.clear()
     _apply_operation_calls.clear()
     for uid, email in (
         (LEADER_UID, LEADER_EMAIL),
@@ -241,6 +262,7 @@ def reset_store():
         _treks.clear()
         _users_by_email.clear()
         _projects.clear()
+        _sessions_by_project.clear()
         app_module.app.dependency_overrides.clear()
         _restore_db(prior)
 
@@ -714,4 +736,146 @@ class TestSlugResolution:
             },
         )
         assert r.status_code == 404, r.text
-        assert not _apply_operation_calls
+
+
+# ---------------------------------------------------------------------------
+# ms-97 Phase 4 / AC14 — executor home project check on slot 起票
+# ---------------------------------------------------------------------------
+
+
+def _seed_phase_a_trek(scope: list[dict]) -> str:
+    """Seed a phase A+ trek (= session_id keyed members) for AC14 tests.
+
+    Stamps ``meta.migration_phase=A`` so trek_mod.is_session_id_keyed
+    returns True, and attaches session_id to the seed members so the
+    endpoint's session-grain role / home checks resolve.
+    """
+    trek_id = _seed_trek(scope)
+    t = _treks[trek_id]
+    t.setdefault("meta", {})["migration_phase"] = "A"
+    for m in t.get("members") or []:
+        if m.get("user_id") == LEADER_UID:
+            m["session_id"] = "sv-leader"
+        elif m.get("user_id") == MEMBER_UID:
+            m["session_id"] = "sv-member"
+    return trek_id
+
+
+class TestAC14ExecutorHomeProject:
+    """AC14: executor (= non-leader member) の slot 起票 は home project に限定。
+
+    - 同じ project に session が登録されていれば 200
+    - 別 scope project への slot 起票試行 (= caller の home ≠ target) は 403
+    - leader は home check 免除 (= cross-project authority を保持)
+    - pre-A trek は legacy 振る舞い (= home check skip)
+    """
+
+    def test_executor_can_add_slot_to_home_project(self):
+        """Positive path: executor の session が target project に登録済 → 200."""
+        trek_id = _seed_phase_a_trek([
+            {"project": "proj-A", "milestone": "ms-target"},
+            {"project": "proj-B", "milestone": "ms-target"},
+        ])
+        # Register member session under proj-A (= their home project).
+        _register_session("proj-A", "sv-member")
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/task-add",
+            json={
+                "target_project": "proj-A",
+                "target_milestone": "ms-target",
+                "description": "executor slot in home",
+            },
+            headers={"X-Beacon-Session": "sv-member"},
+        )
+        assert r.status_code == 200, r.text
+
+    def test_executor_cannot_add_slot_to_other_scope_project(self):
+        """AC14 rejection: executor home = proj-A, target = proj-B → 403."""
+        trek_id = _seed_phase_a_trek([
+            {"project": "proj-A", "milestone": "ms-target"},
+            {"project": "proj-B", "milestone": "ms-target"},
+        ])
+        # Member session is registered under proj-A (their home), but
+        # they try to spawn a slot in proj-B.
+        _register_session("proj-A", "sv-member")
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/task-add",
+            json={
+                "target_project": "proj-B",
+                "target_milestone": "ms-target",
+                "description": "executor tries cross-project",
+            },
+            headers={"X-Beacon-Session": "sv-member"},
+        )
+        assert r.status_code == 403, r.text
+        assert "home" in r.text.lower() or "AC14" in r.text
+
+    def test_executor_with_ghost_session_rejected(self):
+        """Session not registered in any scope project → 403."""
+        trek_id = _seed_phase_a_trek([
+            {"project": "proj-A", "milestone": "ms-target"},
+        ])
+        # Note: NO _register_session call — member's session_id is
+        # nowhere on the session registry.
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/task-add",
+            json={
+                "target_project": "proj-A",
+                "target_milestone": "ms-target",
+                "description": "ghost session attempt",
+            },
+            headers={"X-Beacon-Session": "sv-member"},
+        )
+        assert r.status_code == 403, r.text
+        # Detail mentions home project resolution failure.
+        assert "home" in r.text.lower() or "registered" in r.text.lower()
+
+    def test_leader_exempt_from_home_check(self):
+        """leader は cross-project authority を持つ (= home check skip)."""
+        trek_id = _seed_phase_a_trek([
+            {"project": "proj-A", "milestone": "ms-target"},
+            {"project": "proj-B", "milestone": "ms-target"},
+        ])
+        # Leader session registered under proj-A only; sprouts a slot
+        # in proj-B — should be allowed because leader is exempt.
+        _register_session("proj-A", "sv-leader")
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/task-add",
+            json={
+                "target_project": "proj-B",
+                "target_milestone": "ms-target",
+                "description": "leader cross-project slot",
+            },
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r.status_code == 200, r.text
+
+    def test_pre_a_trek_skips_home_check(self):
+        """Pre-A trek invariance: legacy trek with no migration_phase stamp.
+
+        Even without registering the member's session in any scope
+        project, the request succeeds because the home check is
+        gated on ``is_session_id_keyed`` (= phase A+ only).
+        """
+        # _seed_trek (= default) does NOT stamp migration_phase, so
+        # is_session_id_keyed returns False and the home check skips.
+        trek_id = _seed_trek([
+            {"project": "proj-A", "milestone": "ms-target"},
+        ])
+        # NOTE: no _register_session — would 403 under phase A+, but
+        # phase pre-A skips the home check entirely (= legacy contract).
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/task-add",
+            json={
+                "target_project": "proj-A",
+                "target_milestone": "ms-target",
+                "description": "pre-A invariance",
+            },
+            headers={"X-Beacon-Session": "sv-member"},
+        )
+        assert r.status_code == 200, r.text

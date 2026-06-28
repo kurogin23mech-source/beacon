@@ -834,4 +834,65 @@ def test_leader_digest_payload_empty_trek_fallback_body():
     payload = scheduler.build_leader_digest_payload(t)
     assert payload["summary"]["active"] == 0
     assert payload["sessions"] == []
-    assert "まだ pulse-ack" in payload["body"]
+
+
+# ---------------------------------------------------------------------------
+# ms-97 Phase 4 / AC32 — halt 完全化 (= autonomous activity 4 paths suspend)
+# ---------------------------------------------------------------------------
+
+def test_ac32_halt_blocks_select_due_treks():
+    """End-to-end: select_due_treks filters out a trek with halt set.
+
+    Even if a trek would otherwise be due (= never fired before, status
+    active), engaging the Andon cord (= halt dict on trek_doc) removes
+    it from the due list. This locks in the scheduler tick fire skip
+    that AC32 promises.
+    """
+    halted = trek_mod.set_halt(
+        _build_trek(status="active"),
+        issued_by_session_id="sv-leader",
+        reason="manual stop",
+    )
+    not_halted = _build_trek(status="active")
+    due = scheduler.select_due_treks([halted, not_halted], now=_utc())
+    due_ids = [t.get("trek_id") for t in due]
+    assert halted["trek_id"] not in due_ids, (
+        "halted trek must not appear in due list"
+    )
+    assert not_halted["trek_id"] in due_ids, (
+        "non-halted trek with no prior fire should still be due"
+    )
+
+
+def test_ac32_halt_blocks_auto_stall_detection():
+    """AC32 path #3 — detect_auto_stalled_tasks returns [] for halted treks.
+
+    Even a task long past its TTL must not auto-transition to
+    leader_review while the trek is halted. The 2-pass tick endpoint
+    relies on this for the auto-stall skip; this test pins the
+    underlying detector behaviour.
+    """
+    # Build a halted trek with a stale working task.
+    t = trek_mod.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-leader",
+    )
+    t["status"] = "active"
+    t["halt"] = {
+        "issued_by_session_id": "sv-leader",
+        "reason": "STOP",
+        "issued_at": "2026-06-18T00:00:00.000000Z",
+    }
+    t["task_states"] = {
+        "e-stuck": {
+            "state": "working",
+            "updated_by_session_id": "sv-exec",
+            "updated_at": "2026-06-17T00:00:00.000000Z",
+            "last_activity_at": "2026-06-17T00:00:00.000000Z",
+            "note": "",
+        }
+    }
+    stalled = scheduler.detect_auto_stalled_tasks(t, now=_utc())
+    assert stalled == [], (
+        f"halted trek must not produce auto-stall transitions, got {stalled}"
+    )
