@@ -36,20 +36,63 @@ from typing import Iterable, Optional
 # constant.
 DEFAULT_CADENCE_MINUTES = 10
 
+
+# ---------------------------------------------------------------------------
+# ms-97 / e-2667 — Dual-form lazy import helper for Cloud Run flat layout.
+#
+# Cloud Run uses WORKDIR=/app/server + PYTHONPATH=/app/lib:/app/server, so
+# ``lib`` is NOT a package on the path — modules under lib/ are reachable
+# only via their bare names (= ``import trek``, matching server/app.py:33
+# ``import trek as trek_mod``). Local pytest / dev runs typically have the
+# repo root on sys.path instead, where ``from lib.trek import ...`` works.
+#
+# Pre-fix, every lazy import site tried only ``from lib.trek import ...``,
+# which silently fell back to ``None`` on Cloud Run. That broke
+# ``should_fire_executor_tick`` so every executor with no unclaim todo
+# (= the common steady-state) got skipped from executor_targets, which is
+# the real root cause behind the dogfood "全 tick で executor skip" symptom.
+#
+# This helper centralises the dual-form fallback so the four call sites
+# below stay short and the fallback order is identical everywhere.
+# ---------------------------------------------------------------------------
+
+def _import_trek():
+    """Import the lib.trek module under both flat (Cloud Run) and package layouts.
+
+    Returns the trek module on success, or ``None`` if neither import
+    path works (= a genuinely broken deploy; callers should fall back
+    to their conservative "no info" branch).
+    """
+    try:
+        import trek as _t  # type: ignore[import-not-found]
+        return _t
+    except ImportError:
+        pass
+    try:
+        from lib import trek as _t  # type: ignore[no-redef]
+        return _t
+    except ImportError:
+        return None
+
+
 # ms-75 / e-2048 + ms-88 / e-2107 — Trek task state machine constants.
 # Re-export so we can recognise terminal vs working states without dragging
 # the whole lib.trek import (= keeps module pure for tests that mock that
 # side). Note: ms-88 / e-2107 changed DEFAULT_TASK_STATE from `working` to
 # `todo`, so we now use a dedicated `WORKING_TASK_STATE` constant to anchor
 # the auto-stall TTL check (= "tasks that are actively progressing").
-try:
-    from lib.trek import (
-        DEFAULT_TASK_STATE,  # noqa: F401  (= "todo")
-        TERMINAL_TASK_STATES,  # noqa: F401  (= ("done", "user_review"))
-    )
-except Exception:
+_trek_for_constants = _import_trek()
+if _trek_for_constants is not None:
+    try:
+        DEFAULT_TASK_STATE = _trek_for_constants.DEFAULT_TASK_STATE  # (= "todo")
+        TERMINAL_TASK_STATES = _trek_for_constants.TERMINAL_TASK_STATES  # (= ("done", "user_review"))
+    except AttributeError:
+        DEFAULT_TASK_STATE = "todo"
+        TERMINAL_TASK_STATES = ("done", "user_review")
+else:
     DEFAULT_TASK_STATE = "todo"
     TERMINAL_TASK_STATES = ("done", "user_review")
+del _trek_for_constants
 
 WORKING_TASK_STATE = "working"
 
@@ -186,12 +229,11 @@ def is_trek_task_aggregate_terminal(trek_doc: dict) -> bool:
     states = trek_doc.get("task_states") or {}
     if not states:
         return False
-    try:
-        # Lazy import inside the call so the module stays light when
-        # imported by tests that mock lib.trek.
-        from lib.trek import get_task_state as _get_state
-    except Exception:
-        _get_state = None
+    # Lazy import inside the call so the module stays light when imported
+    # by tests that mock lib.trek. ms-97 / e-2667 — dual-form fallback so
+    # Cloud Run's flat layout (PYTHONPATH=/app/lib:/app/server) also resolves.
+    _trek = _import_trek()
+    _get_state = getattr(_trek, "get_task_state", None) if _trek else None
     for tid, entry in states.items():
         if _get_state is not None:
             # Use the canonical getter so legacy tokens migrate.
@@ -239,10 +281,10 @@ def _task_state_of(trek_doc: dict, task_id: str, entry: dict) -> str:
     to retry on each task. ``entry`` is the raw map; fallback to its
     ``state`` field when the canonical getter is unavailable.
     """
-    try:
-        from lib.trek import get_task_state as _get_state
-    except Exception:
-        _get_state = None
+    # ms-97 / e-2667 — dual-form lazy import so Cloud Run's flat layout
+    # (PYTHONPATH=/app/lib:/app/server) also resolves the canonical getter.
+    _trek = _import_trek()
+    _get_state = getattr(_trek, "get_task_state", None) if _trek else None
     if _get_state is not None:
         return _get_state(trek_doc, task_id)
     return (entry or {}).get("state") or DEFAULT_TASK_STATE
@@ -350,14 +392,16 @@ def should_fire_executor_tick(
     up an HTTP layer. Wraps ``session_has_active_claim`` from lib.trek
     + the ``has_unclaim_todo`` helper above.
     """
-    try:
-        from lib.trek import (
-            session_has_active_claim as _has_active,
-            session_has_any_claim as _has_any,
-        )
-    except Exception:
-        _has_active = None
-        _has_any = None
+    # ms-97 / e-2667 — dual-form lazy import. The pre-fix code only tried
+    # ``from lib.trek import ...`` which silent-failed on Cloud Run (flat
+    # layout: PYTHONPATH=/app/lib:/app/server, ``lib`` is not a package),
+    # so both helpers fell back to None. That made the function always
+    # short-circuit to has_unclaim_todo(trek_doc) only, which returns False
+    # for any trek with no fresh todo entries — and that skipped LPS / PE
+    # from executor_targets every tick (= dogfood 不着 root cause).
+    _trek = _import_trek()
+    _has_active = getattr(_trek, "session_has_active_claim", None) if _trek else None
+    _has_any = getattr(_trek, "session_has_any_claim", None) if _trek else None
     if _has_active is not None and _has_active(trek_doc, session_id=session_id):
         return True
     # A fresh executor with NO claims at all may still pick up an unclaim
@@ -992,8 +1036,28 @@ def build_leader_digest_payload(
     """
     # Local import to keep module-level imports light (= the scheduler
     # module is imported in lots of hot test paths and trek is a
-    # comparatively heavy module).
-    import trek as trek_mod
+    # comparatively heavy module). ms-97 / e-2667 — dual-form so both
+    # Cloud Run flat layout and local package layout resolve.
+    trek_mod = _import_trek()
+    if trek_mod is None or not hasattr(trek_mod, "summarize_pulse_acks"):
+        # Defensive: with no trek module we can't render a real digest.
+        # Return an empty-but-well-shaped payload so callers do not crash.
+        now = _ensure_utc(now or datetime.datetime.now(datetime.timezone.utc))
+        return {
+            "kind": _LEADER_DIGEST_KIND,
+            "trek_id": trek_doc.get("trek_id", ""),
+            "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "summary": {
+                "active": 0, "stuck": 0, "idle": 0,
+                "needs_leader_judgment": 0,
+                "total_acks_across_sessions": 0,
+            },
+            "sessions": [],
+            "body": (
+                f"[{_LEADER_DIGEST_HEADER}] trek_id={trek_doc.get('trek_id', '')}\n"
+                "  (trek module unavailable — digest skipped this tick)"
+            ),
+        }
 
     now = _ensure_utc(now or datetime.datetime.now(datetime.timezone.utc))
     trek_id = trek_doc.get("trek_id", "")
