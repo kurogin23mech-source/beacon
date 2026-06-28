@@ -5787,9 +5787,21 @@ def cmd_trek_join():
         # for the invitee who is told "look for an invitation to email X"); fall
         # back to user_id lookup. Use the looked-up member's user_id for the
         # actual accept call.
-        member = trek.find_member_by_email(t, email)
+        # ms-86 / e-2225 — pass BEACON_SESSION_ID so the join writes a
+        # session_history entry. Empty session_id is tolerated by
+        # accept_invitation (= no-op on the history dimension).
+        session_id = os.environ.get("BEACON_SESSION_ID", "").strip()
+        # ms-97 / e-2658 Phase 1 (AC6) — phase A+ trek の時は、 まず
+        # session_id grain で既存 member entry を探す (= 同 session の
+        # 再 join idempotent path)。 見つからなければ email / user_id
+        # grain で placeholder (= 未 accept invitation) 経路に落ちる。
+        member = None
+        if session_id and trek.is_session_id_keyed(t):
+            member = trek.find_member(t, session_id=session_id)
         if member is None:
-            member = trek.find_member(t, user_id)
+            member = trek.find_member_by_email(t, email)
+        if member is None:
+            member = trek.find_member(t, user_id=user_id)
         if member is None:
             print(
                 f"Error: no invitation found for {email} (user_id={user_id}) "
@@ -5797,10 +5809,6 @@ def cmd_trek_join():
                 file=sys.stderr,
             )
             sys.exit(1)
-        # ms-86 / e-2225 — pass BEACON_SESSION_ID so the join writes a
-        # session_history entry. Empty session_id is tolerated by
-        # accept_invitation (= no-op on the history dimension).
-        session_id = os.environ.get("BEACON_SESSION_ID", "").strip()
         try:
             trek.accept_invitation(
                 t, user_id=member["user_id"], session_id=session_id,
@@ -6177,7 +6185,7 @@ def cmd_trek_kickoff():
         sys.exit(1)
     member = trek.find_member_by_email(t, email) if email else None
     if member is None:
-        member = trek.find_member(t, user_id)
+        member = trek.find_member(t, user_id=user_id)
     if member is None:
         print(
             f"Error: you are not a member of trek {trek_id} "
@@ -6280,7 +6288,7 @@ def cmd_trek_take_over():
         # pointer to a fresh session_id under that user.
         member = trek.find_member_by_email(t, email) if email else None
         if member is None:
-            member = trek.find_member(t, user_id)
+            member = trek.find_member(t, user_id=user_id)
         if member is None:
             print(
                 f"Error: you are not a member of trek {trek_id} "
@@ -7255,7 +7263,19 @@ def cmd_trek_leave():
         print(f"Error: trek {trek_id} not found", file=sys.stderr)
         sys.exit(1)
 
-    member = trek.find_member_by_email(t, email) or trek.find_member(t, user_id)
+    # ms-97 / e-2658 Phase 1 (AC6) — phase A+ trek の時は session_id grain
+    # で自セッションのみ leave (= 同 user の他 session は残す)。 pre-A
+    # trek または session_id 不在時は user-grain leave (= 同 user の全
+    # entries 削除、 従来挙動)。
+    session_id = os.environ.get("BEACON_SESSION_ID", "").strip()
+    session_grain = bool(session_id) and trek.is_session_id_keyed(t)
+    member = None
+    if session_grain:
+        member = trek.find_member(t, session_id=session_id)
+    if member is None:
+        member = trek.find_member_by_email(t, email)
+    if member is None:
+        member = trek.find_member(t, user_id=user_id)
     if member is None:
         print(
             f"Error: {email} (user_id={user_id}) is not a member of trek "
@@ -7265,7 +7285,10 @@ def cmd_trek_leave():
         sys.exit(1)
 
     try:
-        trek.remove_member(t, user_id=member["user_id"])
+        if session_grain and member.get("session_id"):
+            trek.remove_member(t, session_id=member["session_id"])
+        else:
+            trek.remove_member(t, user_id=member["user_id"])
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
