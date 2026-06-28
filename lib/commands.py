@@ -6972,7 +6972,9 @@ def cmd_trek_scope_approve():
                 # Fallback: hit the endpoint directly via the client's
                 # raw HTTP helper. The api_client method lands in a
                 # follow-up; CLI users get parity through the raw POST.
-                t = client._post(
+                # ms-97 / e-2626 follow-up: ApiClient has ``post``, not
+                # ``_post`` (= dogfood で発見、 PR #284 typo の修正)。
+                t = client.post(
                     f"/api/treks/{trek_id}/scope/approve/{pending_id}",
                     body={},
                 )
@@ -7023,7 +7025,9 @@ def cmd_trek_scope_reject():
             if hasattr(client, "reject_trek_scope_op"):
                 t = client.reject_trek_scope_op(trek_id, pending_id)
             else:
-                t = client._post(
+                # ms-97 / e-2626 follow-up: ApiClient.post (= dogfood で発見、
+                # PR #284 typo の修正、 approve 側と同じ問題)。
+                t = client.post(
                     f"/api/treks/{trek_id}/scope/reject/{pending_id}",
                     body={},
                 )
