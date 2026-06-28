@@ -608,6 +608,67 @@ def test_trek_join_consent_gate_bypass_with_env_var(trek_env):
     assert r.returncode == 0, r.stderr
 
 
+# ---------------------------------------------------------------------------
+# session_id auto-derive (ms-97 / e-2694) — when BEACON_SESSION_ID env is
+# unset, cmd_trek_join must fall back to reading .beacon/session.json so
+# server-side phase A+ logic doesn't silently no-op on a missing header.
+# ---------------------------------------------------------------------------
+
+def test_trek_join_auto_derives_session_id_from_session_json(trek_env, tmp_path):
+    """BEACON_SESSION_ID env unset + .beacon/session.json present →
+    session_id auto-derived and stamped on the trek's session_history.
+
+    Pre-fix behavior (= ms-97 dogfood e-2694): env unset → join writes
+    session_history with empty session_id (= upsert_session_history
+    no-ops) → server / readers see no per-session record for the
+    joining bclaude. With the auto-derive fallback, the local
+    session.json supplies the sid so session_history correctly
+    attributes the join.
+
+    The test seeds ``.beacon/session.json`` with a fresh ``last_active``
+    so the freshness gate in ``get_or_mint_session`` accepts the file's
+    sid rather than minting a new one. It also pops the host's
+    ``CLAUDE_CODE_SESSION_ID`` (= leaks from the developer's bclaude
+    parent process) which would otherwise override the file path.
+    """
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "invite", tid, "--actor", "b@x.com")
+
+    # Seed .beacon/session.json with a known sid and a fresh last_active
+    # so it passes the freshness gate in get_or_mint_session.
+    import json as _json
+    import datetime as _dt
+    fresh_ts = _dt.datetime.now(_dt.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ",
+    )
+    session_json = Path(trek_env["BEACON_CWD"]) / ".beacon" / "session.json"
+    session_json.parent.mkdir(parents=True, exist_ok=True)
+    session_json.write_text(_json.dumps({
+        "session_id": "sv-b-from-file",
+        "last_active": fresh_ts,
+    }))
+
+    env_b = dict(trek_env)
+    env_b.update({
+        "BEACON_USER_ID": "u-b",
+        "BEACON_USER_EMAIL": "b@x.com",
+    })
+    # CRITICAL: pop env vars so the resolver MUST fall back to session.json.
+    env_b.pop("BEACON_SESSION_ID", None)
+    env_b["CLAUDE_CODE_SESSION_ID"] = ""  # subprocess inherits — explicitly clear
+
+    r = _run(env_b, "join", tid, "--no-arm", "--json")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(r.stdout)
+    # session_history must carry the file-derived sid (= auto-derive landed).
+    history = doc.get("session_history") or []
+    sids = {h.get("session_id") for h in history}
+    assert "sv-b-from-file" in sids, (
+        f"auto-derive should have stamped sv-b-from-file on session_history, "
+        f"got sids={sids}"
+    )
+
+
 def test_trek_leave_removes_member(trek_env):
     tid = _make_trek_and_return_id(trek_env)
     _run(trek_env, "invite", tid, "--actor", "b@x.com")

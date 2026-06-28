@@ -5796,6 +5796,20 @@ def cmd_trek_join():
         print("Error: trek_id is required", file=sys.stderr)
         sys.exit(1)
 
+    # ms-97 / e-2694 dogfood fix: BEACON_SESSION_ID env unset is the
+    # default for many user shells (= the env var is only set by the
+    # bclaude wrapper / dispatch shim). Without auto-derive, the server
+    # sees ``X-Beacon-Session: <empty>`` on the join HTTP call, falls
+    # into the pre-A path, and silently no-ops on a phase A+ trek (=
+    # leader stamp only, no member expansion). Resolve eagerly here so
+    # the env var is set for both the local-mode local writer AND the
+    # downstream api_client._request, restoring a single source of truth
+    # for the joining session id.
+    if not os.environ.get("BEACON_SESSION_ID", "").strip():
+        derived_sid = _resolve_session_id()
+        if derived_sid:
+            os.environ["BEACON_SESSION_ID"] = derived_sid
+
     user_id, email, _ = _resolve_creator_identity()
     if not email:
         print(
@@ -7097,7 +7111,7 @@ def cmd_trek_scope_approve():
                 # Fallback: hit the endpoint directly via the client's
                 # raw HTTP helper. The api_client method lands in a
                 # follow-up; CLI users get parity through the raw POST.
-                t = client._post(
+                t = client.post(
                     f"/api/treks/{trek_id}/scope/approve/{pending_id}",
                     body={},
                 )
@@ -7148,7 +7162,7 @@ def cmd_trek_scope_reject():
             if hasattr(client, "reject_trek_scope_op"):
                 t = client.reject_trek_scope_op(trek_id, pending_id)
             else:
-                t = client._post(
+                t = client.post(
                     f"/api/treks/{trek_id}/scope/reject/{pending_id}",
                     body={},
                 )
@@ -7202,7 +7216,7 @@ def _cmd_trek_blanket(direction: str):
     if _is_cloud_mode():
         try:
             client, _config = _get_api_client()
-            payload = client._post(
+            payload = client.post(
                 f"/api/treks/{trek_id}/{path}",
                 body={"category": category},
             )
@@ -17435,11 +17449,60 @@ def _resolve_bus_project_id(config: dict) -> str:
          session DMs a TrailNode session) without flipping cwd.
       2. ``config["project_id"]`` — the default, derived from
          ``.beacon/cloud.json`` of the current project.
+
+    ms-97 / e-2694 dogfood fix: when an override is supplied via
+    ``--project`` (= env var), pass it through
+    :func:`lib.project_ref.resolve_project_ref` against the cloud
+    project list so short names (= ``life-plan-simulator``) expand to
+    full suffix'd ids (= ``life-plan-simulator-68c5df``). The session
+    registry, DM fanout, and recipient lookups all key off the full
+    id — short-name input silently misses every record. Best-effort:
+    if the api client / list call is unavailable (= local-mode tests,
+    offline), passthrough preserves the legacy behaviour.
     """
     override = os.environ.get("BEACON_BUS_PROJECT_ID", "").strip()
     if override:
-        return override
+        return _canonicalize_project_ref(override) or override
     return config.get("project_id", "")
+
+
+def _canonicalize_project_ref(ref: str) -> str:
+    """Best-effort short-name → full project_id expansion.
+
+    Wraps :func:`lib.project_ref.resolve_project_ref` with a cloud-only
+    lister (= ``api_client.list_projects``) and swallows transport
+    errors so a network blip in the resolver never blocks the underlying
+    send / fanout. Returns the resolved id, or the input unchanged when
+    resolution can't run.
+    """
+    if not ref:
+        return ref
+    try:
+        from project_ref import resolve_project_ref as _resolve
+    except ImportError:
+        from lib.project_ref import resolve_project_ref as _resolve
+    lister = None
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+
+            def _list() -> list:
+                try:
+                    return client.list_projects() or []
+                except Exception:  # noqa: BLE001 — degrade to passthrough
+                    return []
+
+            lister = _list
+        except Exception:  # noqa: BLE001
+            lister = None
+    try:
+        return _resolve(ref, db_or_lister=lister)
+    except ValueError:
+        # Ambiguous — surface the input unchanged. The downstream call
+        # (= /bus send, /trek scope add) will hit a clearer error path
+        # (= "project not found" or rejection at the server) instead of
+        # the resolver hijacking error reporting.
+        return ref
 
 
 def _validate_recipient_project(

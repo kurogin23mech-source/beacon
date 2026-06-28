@@ -4158,7 +4158,22 @@ def add_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
     """
     t = _load_trek_for_read(trek_id, user)
     _require_trek_joined_member(t, user)
-    entry: dict = {"project": body.project}
+    # ms-97 / e-2694 dogfood fix: expand short project names (=
+    # ``life-plan-simulator``) to canonical full ids (=
+    # ``life-plan-simulator-68c5df``) BEFORE we persist the scope entry.
+    # Without this, scope rows storing the short name silently mismatch
+    # against the registry-keyed session lookups (= ``list_sessions`` and
+    # DM fanout key off the full id), so members in those projects
+    # disappear from the fanout target list.
+    requesting_user_id = (user.get("sub") or "").strip()
+    canonical_pid = body.project
+    if requesting_user_id:
+        resolved = _resolve_canonical_project_id(
+            body.project, user_id=requesting_user_id,
+        )
+        if resolved:
+            canonical_pid = resolved
+    entry: dict = {"project": canonical_pid}
     if body.milestone:
         entry["milestone"] = body.milestone
     if body.operation:

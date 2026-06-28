@@ -38,8 +38,30 @@ class ApiClient:
         # task-state stamps, etc.) can attribute the call to a session
         # without inventing a new auth path. Empty / unset is fine — the
         # server treats missing header as anonymous-session.
+        #
+        # ms-97 / e-2694 dogfood fix: when ``BEACON_SESSION_ID`` is empty
+        # (= unset in the user's interactive shell, the common case for
+        # CLI direct invocation), fall back to the active session resolver
+        # which reads ``.beacon/session.json`` / bridge claim. This makes
+        # ALL cloud-mode API calls (= not just trek join) carry an
+        # ``X-Beacon-Session`` header so server-side endpoints that key
+        # off phase A+ session_id (= trek join, task-state stamps,
+        # session-grained audit) work from a bare shell without requiring
+        # the user to set the env var manually. Best-effort: any failure
+        # in the resolver (= no .beacon/ dir, corrupt JSON) leaves the
+        # header empty — the existing "anonymous-session" fallback path
+        # continues to apply.
         import os as _os
         sid = _os.environ.get("BEACON_SESSION_ID", "").strip()
+        if not sid:
+            try:
+                # Resolve from .beacon/session.json / bridge claim. Same
+                # source used by ``commands._resolve_session_id`` so the
+                # CLI and the api_client agree on session identity.
+                import session as _session
+                sid = (_session.resolve_active_session_id() or "").strip()
+            except Exception:
+                sid = ""
         if sid:
             req.add_header("X-Beacon-Session", sid)
 
