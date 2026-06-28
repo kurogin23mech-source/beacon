@@ -1241,9 +1241,14 @@ def test_fanout_skips_all_sessions_when_all_have_only_terminal_claims():
     progress_events = [
         e for e in events if _is_trek_progress_check_event(e)
     ]
-    # broadcast fallback (= recipient_session_id 未設定 or "") 1 件のみ
+    # ms-97 / e-2660 — broadcast fallback は stamped leader_session_id
+    # を recipient に stamp する (= DM routing filter を通すため、
+    # 旧 "" recipient は _bus_event_addressed_to が drop していた)。
     assert len(progress_events) == 1
-    assert progress_events[0]["payload"].get("recipient_session_id", "") == ""
+    assert (
+        progress_events[0]["payload"].get("recipient_session_id", "")
+        == "sv-leader"
+    )
 
 
 def test_fanout_fresh_session_with_no_claims_still_receives_tick():
@@ -1356,9 +1361,16 @@ def test_fanout_leader_excluded_even_with_no_claims():
     progress_events = [
         e for e in events if _is_trek_progress_check_event(e)
     ]
-    # 全 live session が leader (= 除外) → broadcast fallback (空 recipient) のみ
+    # ms-97 / e-2660 — 全 live session が leader (= 除外) → broadcast
+    # fallback (recipient=stamped leader_session_id) のみ。 旧実装は
+    # recipient_session_id="" だったが、 DM routing filter が drop する
+    # ので leader sid を stamp する経路へ変更 (= 配送可能化 + leader が
+    # 「fanout が executor 不在で fallback した」 audit signal を受信)。
     assert len(progress_events) == 1
-    assert progress_events[0]["payload"].get("recipient_session_id", "") == ""
+    assert (
+        progress_events[0]["payload"].get("recipient_session_id", "")
+        == "sv-leader"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1498,9 +1510,15 @@ def test_lazy_start_no_signal_yields_broadcast_fallback_only():
     digest_events = [
         e for e in events if _is_trek_leader_digest_event(e)
     ]
-    # Minimal tick: broadcast fallback (= recipient "") の 1 件のみ。
+    # ms-97 / e-2660 — Minimal tick: broadcast fallback (= recipient =
+    # stamped leader_session_id) の 1 件のみ。 旧実装は recipient_session_id=""
+    # で post していたが _bus_event_addressed_to が drop する穴があり、
+    # 配送可能な leader sid stamp に変更。
     assert len(progress_events) == 1
-    assert progress_events[0]["payload"].get("recipient_session_id", "") == ""
+    assert (
+        progress_events[0]["payload"].get("recipient_session_id", "")
+        == "sv-leader"
+    )
     # Leader-digest は AC33 で silent。
     assert digest_events == []
 

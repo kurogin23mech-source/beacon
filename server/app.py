@@ -6448,19 +6448,48 @@ def _build_executor_targets_session_grain(
          the executor has no signal worth waking on this tick.
     """
     members = trek_doc.get("members") or []
+    trek_id_for_log = trek_doc.get("trek_id", "")
+    # ms-97 / e-2660 — diagnostic header. Surfaces input shape so an
+    # empty-targets outcome can be triaged from logs without needing
+    # to recompute the inputs. Emitted at the start of every call.
+    print(
+        f"diag[ms-97 e-2660 AC16] trek={trek_id_for_log} "
+        f"_build_executor_targets_session_grain entry: "
+        f"len(members)={len(members)} "
+        f"live_cutoff={live_cutoff} "
+        f"scope_project_ids={scope_project_ids} "
+        f"leader_sid={leader_sid}",
+        file=sys.stderr,
+    )
     targets: list[dict] = []
     for m in members:
         msid = m.get("session_id") or ""
+        mrole = m.get("role") or ""
         if not msid:
             # Invitation-stage placeholder (= invited, not joined). No
             # session yet to wake.
+            print(
+                f"diag[ms-97 e-2660 AC16] trek={trek_id_for_log} "
+                f"skipped: empty session_id (role={mrole})",
+                file=sys.stderr,
+            )
             continue
         if leader_sid and msid == leader_sid:
+            print(
+                f"diag[ms-97 e-2660 AC16] trek={trek_id_for_log} "
+                f"sid={msid} skipped: leader_sid match",
+                file=sys.stderr,
+            )
             continue
         # Role-based leader skip (= belt + suspenders with the sid
         # match above; covers cases where the doc has role=leader but
         # leader_session_id is unstamped).
-        if (m.get("role") or "") == "leader":
+        if mrole == "leader":
+            print(
+                f"diag[ms-97 e-2660 AC16] trek={trek_id_for_log} "
+                f"sid={msid} skipped: role=leader",
+                file=sys.stderr,
+            )
             continue
         # Resolve home project. First scope project whose session
         # registry contains msid wins.
@@ -6484,9 +6513,15 @@ def _build_executor_targets_session_grain(
             # surfaces this via leader-digest payload.
             print(
                 f"warn[ms-97 e-2659 AC16]: trek "
-                f"{trek_doc.get('trek_id', '')} member session "
+                f"{trek_id_for_log} member session "
                 f"{msid} has no resolvable home project in scope "
                 f"{scope_project_ids}",
+                file=sys.stderr,
+            )
+            print(
+                f"diag[ms-97 e-2660 AC16] trek={trek_id_for_log} "
+                f"sid={msid} skipped: no home project resolved "
+                f"(= ghost)",
                 file=sys.stderr,
             )
             continue
@@ -6494,12 +6529,29 @@ def _build_executor_targets_session_grain(
         # offline session that has not registered a recent heartbeat
         # would not receive the dm anyway.
         if last_active and last_active < live_cutoff:
+            print(
+                f"diag[ms-97 e-2660 AC16] trek={trek_id_for_log} "
+                f"sid={msid} skipped: last_active={last_active} "
+                f"< live_cutoff={live_cutoff}",
+                file=sys.stderr,
+            )
             continue
         # Lazy-start gate (= AC33).
         if not trek_scheduler_mod.should_fire_executor_tick(
             fanout_trek_doc, session_id=msid,
         ):
+            print(
+                f"diag[ms-97 e-2660 AC16] trek={trek_id_for_log} "
+                f"sid={msid} skipped: "
+                f"should_fire_executor_tick=False",
+                file=sys.stderr,
+            )
             continue
+        print(
+            f"diag[ms-97 e-2660 AC16] trek={trek_id_for_log} "
+            f"sid={msid} kept: home_pid={resolved_pid}",
+            file=sys.stderr,
+        )
         targets.append({
             "session_id": msid,
             "home_project_id": resolved_pid,
@@ -6972,12 +7024,32 @@ def trek_scheduler_tick_endpoint(
             # OR every live session was filtered out by the lazy-start
             # gate). Mirrors the pre-e-2639 broadcast minimal-tick
             # contract: one event posted to the audit-surface project
-            # bus with no recipient_session_id, so the trek still
-            # surfaces in *some* inbox and downstream observers see the
-            # "fired at minimum once" guarantee.
+            # bus so the trek still surfaces in *some* inbox and
+            # downstream observers see the "fired at minimum once"
+            # guarantee.
+            #
+            # ms-97 / e-2660 — recipient_session_id MUST be set to the
+            # stamped leader_session_id so _bus_event_addressed_to can
+            # deliver it. Prior to this fix the broadcast fallback
+            # posted with channel="dm" and no recipient stamp; the DM
+            # routing filter (server/app.py _bus_event_addressed_to)
+            # structurally drops "DM + no recipient" events, so the
+            # broadcast event was written to storage but never reached
+            # any bridge. Pinning the recipient to the stamped leader
+            # session preserves SPEC 中心原則 6 (= Wake 経路 DM 統一)
+            # AND surfaces the broadcast-fallback as a leader audit
+            # signal (= leader sees "fanout had no executor targets
+            # this tick").
+            stamped_leader_sid_for_broadcast = (
+                trek_doc.get("leader_session_id") or ""
+            )
             send_payload = dict(progress_payload)
             send_payload["sender_type"] = "trek-scheduler"
             send_payload["origin_channel"] = "trek-progress-check"
+            if stamped_leader_sid_for_broadcast:
+                send_payload["recipient_session_id"] = (
+                    stamped_leader_sid_for_broadcast
+                )
             try:
                 target_envelope = envelope_mod.issue_t1_system_envelope(
                     project_id=target_project_id,
@@ -7008,7 +7080,9 @@ def trek_scheduler_tick_endpoint(
             except Exception as exc:
                 errors.append({
                     "trek_id": trek_id,
-                    "recipient_session_id": "",
+                    "recipient_session_id": (
+                        stamped_leader_sid_for_broadcast
+                    ),
                     "error": (
                         f"bus_append_failed: {type(exc).__name__}: {exc}"
                     ),
