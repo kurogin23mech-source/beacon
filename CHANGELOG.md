@@ -2,6 +2,25 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.50.0] - 2026-06-28
+
+- Merge pull request #286 from kurogin23mech-source/feat/ms-95-e2639-tick-via-dm
+- feat(ms-95): e-2639 migrate Trek tick to dm channel transport (per-member fanout)
+- Merge pull request #284 from kurogin23mech-source/feat/ms-97-e2626-scope-add-pending
+- feat(ms-97): e-2626 scope-add pending_user_approval flow (AC23)
+- Merge pull request #282 from kurogin23mech-source/feat/ms-97-phase1b-ui
+- Merge pull request #283 from kurogin23mech-source/feat/ms-97-phase1b-backend
+- feat(ms-97): e-2613 tick fire lazy start (AC33)
+- test(ms-97): Phase 1b UI invariants (AC1〜AC8/AC23 を tests で pin)
+- feat(ms-97): e-2609 scope-add/remove approval surface (AC23/25)
+- feat(ms-97): e-2608 leader_session_id 表示 + project-wide warning (AC5/8/31)
+- feat(ms-97): e-2612 halt 中 tick fire 全停止 (AC32)
+- feat(ms-97): e-2607 Trek list を user member 全 Trek に切替 (AC2)
+- feat(ms-97): e-2606 ハンバーガー復活 + tab bar 削除 (AC1/3/4)
+- feat(ms-97): e-2611 scope-remove approval flow (AC25)
+- docs(release): update README/CHANGELOG for v0.49.2
+- chore(release): bump formula to 0.49.2
+
 ## [v0.49.2] - 2026-06-27
 
 ## [v0.49.1] - 2026-06-27
