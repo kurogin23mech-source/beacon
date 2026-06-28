@@ -7176,6 +7176,80 @@ def cmd_trek_scope_reject():
         )
 
 
+def _cmd_trek_blanket(direction: str):
+    """Shared implementation for blanket-approve / blanket-revoke.
+
+    ms-97 / Phase 7-C / AC24 — Cloud / local mode both supported. Cloud
+    mode hits the new ``/api/treks/{id}/blanket-approve`` (or revoke)
+    endpoint; local mode mutates the trek doc in place via the trek
+    helpers and saves through ``trek_store``.
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    category = os.environ.get("BEACON_TREK_BLANKET_CATEGORY", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id or not category:
+        print(
+            "Error: trek_id and --category are required",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    path = "blanket-approve" if direction == "approve" else "blanket-revoke"
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            payload = client._post(
+                f"/api/treks/{trek_id}/{path}",
+                body={"category": category},
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        result = payload
+    else:
+        t = trek_store.load_trek(trek_id)
+        if t is None:
+            print(f"Error: trek {trek_id} not found", file=sys.stderr)
+            sys.exit(1)
+        try:
+            if direction == "approve":
+                trek.add_blanket_approval(t, category)
+            else:
+                trek.remove_blanket_approval(t, category)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        trek_store.save_trek(t)
+        result = {
+            "trek_id": trek_id,
+            "blanket_scope_approvals": trek.list_blanket_approvals(t),
+        }
+
+    if json_mode:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        verb = "Added" if direction == "approve" else "Removed"
+        approvals = result.get("blanket_scope_approvals") or []
+        print(
+            f"{verb} blanket category '{category}' on trek {trek_id} "
+            f"(active categories: {approvals})"
+        )
+
+
+def cmd_trek_blanket_approve():
+    """Register a blanket scope-add pre-approval (ms-97 / AC24, e-2603)."""
+    _cmd_trek_blanket("approve")
+
+
+def cmd_trek_blanket_revoke():
+    """Remove a blanket scope-add pre-approval (ms-97 / AC24, e-2603)."""
+    _cmd_trek_blanket("revoke")
+
+
 def cmd_trek_task_add():
     """Cross-project task add through Trek scope (ms-92 / e-2141).
 
@@ -19343,6 +19417,9 @@ if __name__ == "__main__":
         # ms-97 / e-2611 AC25 — scope mutation approval flow.
         "trek_scope_approve": cmd_trek_scope_approve,
         "trek_scope_reject": cmd_trek_scope_reject,
+        # ms-97 / Phase 7-C / AC24 — blanket pre-approval (e-2603).
+        "trek_blanket_approve": cmd_trek_blanket_approve,
+        "trek_blanket_revoke": cmd_trek_blanket_revoke,
         "trek_task_state": cmd_trek_task_state,
         "trek_extend_ttl": cmd_trek_extend_ttl,
         # ms-97 / Phase 7-A / AC21 — leader が user summary DM 送信後

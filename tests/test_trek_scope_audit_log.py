@@ -169,23 +169,23 @@ class TestNoUndocumentedScopeMutators:
     def test_add_scope_entry_callers_only_documented_paths(self):
         callers = self._list_callers("add_scope_entry")
         caller_files = sorted({c[0] for c in callers})
-        # ms-97 / e-2626 — scope-add is now routed exclusively through the
-        # pending approval flow (= AC23, mirror of the e-2611 scope-remove
-        # narrowing). ``cmd_trek_plan`` no longer calls ``add_scope_entry``
-        # directly (= it stages via ``add_pending_scope_op``), and the
-        # server's PUT endpoint likewise stages instead of applying. The
-        # only remaining caller is ``approve_pending_scope_op`` inside
-        # lib/trek.py itself — the apply path runs through the approve
-        # endpoint, which in turn invokes the helper. This narrowing is
-        # intentional and structural (= a new direct caller would
-        # re-introduce the silent unsupervised-add pathology AC23
-        # explicitly forbids).
-        assert caller_files == ["lib/trek.py"], (
-            f"e-2320 contract (post ms-97 / e-2626): trek.add_scope_entry "
-            f"must only be called from lib/trek.py "
-            f"(approve_pending_scope_op). Found: {caller_files!r}. "
-            f"If a new direct mutation path appears, route it through the "
-            f"pending approval flow instead so AC23 can't regress."
+        # ms-97 / e-2626 — scope-add is routed through the pending approval
+        # flow (= AC23). ms-97 / Phase 7-C / e-2603 (AC24) — blanket
+        # pre-approval adds ONE additional documented caller in
+        # ``server/app.py`` (the ``add_trek_scope_endpoint`` auto-commit
+        # branch, only reachable when ``is_blanket_approved`` matches).
+        # Both callers route through trek.add_scope_entry which still
+        # runs strict normalisation, so AC7 / AC23 invariants hold.
+        # If a NEW direct caller appears outside these two files, AC23
+        # has regressed.
+        assert caller_files == ["lib/trek.py", "server/app.py"], (
+            f"e-2320 contract (post ms-97 / e-2626 + e-2603 AC24): "
+            f"trek.add_scope_entry callers must be exactly "
+            f"['lib/trek.py', 'server/app.py'] (lib = "
+            f"approve_pending_scope_op; server = blanket auto-commit "
+            f"in add_trek_scope_endpoint). Found: {caller_files!r}. "
+            f"Route any new caller through the pending approval flow "
+            f"or the blanket approval gate."
         )
 
     def test_remove_scope_entry_callers_only_documented_paths(self):

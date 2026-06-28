@@ -3543,6 +3543,11 @@ class TrekExtendTtl(BaseModel):
     reason: str = ""  # short audit string (e.g. "dispatched to subagent X")
 
 
+# ms-97 / Phase 7-C / AC24, e-2603 — blanket scope approval body.
+class TrekBlanketCategory(BaseModel):
+    category: str  # See lib/trek._normalised_blanket_category for shape
+
+
 def _trek_find_member_dual(
     t: dict, *, user_id: str, session_id: str = "",
 ) -> dict | None:
@@ -4178,6 +4183,25 @@ def add_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
         sid = request.headers.get("X-Beacon-Session", "") or ""
     except Exception:
         sid = ""
+    # ms-97 / Phase 7-C / AC24 — blanket pre-approval auto-commit. When the
+    # leader has registered a matching category (= e.g. "operation" or
+    # "milestone:ms-97"), bypass ``add_pending_scope_op`` and apply the
+    # add directly via ``add_scope_entry``. This is the "no DM hop" path.
+    if trek_mod.is_blanket_approved(t, entry):
+        try:
+            trek_mod.add_scope_entry(t, entry=entry)
+        except ValueError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        db.save_trek(trek_id, t)
+        _log_trek_scope_audit(
+            action="add_blanket_auto_commit", trek_id=trek_id, user=user,
+            request=request, entry=entry,
+        )
+        out = dict(t)
+        out["pending_op"] = None
+        out["auto_committed"] = True
+        out["committed_via"] = "blanket_approval"
+        return out
     try:
         rec = trek_mod.add_pending_scope_op(
             t,
@@ -4199,6 +4223,7 @@ def add_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
     # reject. Existing clients that ignored the body keep working.
     out = dict(t)
     out["pending_op"] = rec
+    out["auto_committed"] = False
     return out
 
 
@@ -4633,6 +4658,105 @@ def trek_kickoff_status_endpoint(trek_id: str,
     return trek_mod.summarize_kickoff_status(t)
 
 
+# ---------------------------------------------------------------------------
+# ms-97 / Phase 7-C / AC24, e-2603 — blanket scope approval endpoints.
+# Leader-only. The category string is validated by trek_mod helpers.
+# ---------------------------------------------------------------------------
+
+@app.post("/api/treks/{trek_id}/blanket-approve")
+def trek_blanket_approve_endpoint(trek_id: str, body: TrekBlanketCategory,
+                                  request: Request,
+                                  user: dict = Depends(require_auth)):
+    """Register ``category`` as a blanket pre-approval (AC24).
+
+    Subsequent scope-add requests whose entry matches the category will
+    auto-commit (= bypass pending stage). Leader-only.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_leader_session(t, user, request)
+    try:
+        trek_mod.add_blanket_approval(t, body.category)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.save_trek(trek_id, t)
+    return {
+        "trek_id": trek_id,
+        "blanket_scope_approvals": trek_mod.list_blanket_approvals(t),
+    }
+
+
+@app.post("/api/treks/{trek_id}/blanket-revoke")
+def trek_blanket_revoke_endpoint(trek_id: str, body: TrekBlanketCategory,
+                                 request: Request,
+                                 user: dict = Depends(require_auth)):
+    """Remove ``category`` from blanket pre-approvals (AC24). Leader-only."""
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_leader_session(t, user, request)
+    try:
+        trek_mod.remove_blanket_approval(t, body.category)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.save_trek(trek_id, t)
+    return {
+        "trek_id": trek_id,
+        "blanket_scope_approvals": trek_mod.list_blanket_approvals(t),
+    }
+
+
+# ---------------------------------------------------------------------------
+# ms-97 / Phase 7-C / AC26 + AC27, e-2603 — structured logs read API.
+# Write paths live next to the relevant endpoints (= tick, pulse-ack,
+# task-state) and call ``db.append_trek_log`` directly.
+# ---------------------------------------------------------------------------
+
+def _append_trek_log_safe(trek_id: str, entry: dict) -> None:
+    """Append a trek log entry, swallowing any backend error.
+
+    Logs are observability, not a transactional concern — a failure to
+    persist the log row must never break the original write (= tick /
+    pulse-ack / task-state). Errors are printed to stderr for visibility.
+    """
+    try:
+        db.append_trek_log(trek_id, entry)
+    except Exception as exc:
+        print(
+            f"warn[ms-97 e-2603]: append_trek_log failed for trek "
+            f"{trek_id}: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+
+
+@app.get("/api/treks/{trek_id}/logs.jsonl")
+def trek_logs_jsonl_endpoint(trek_id: str, request: Request,
+                             since: str = "",
+                             user: dict = Depends(require_auth)):
+    """Stream the trek's structured logs as NDJSON (AC27).
+
+    One JSON object per line, ascending by ``created_at``. RBAC: any
+    joined member (= same surface as ``_load_trek_for_read``). Optional
+    ``?since=<ISO8601>`` filters older rows so callers can resume.
+    """
+    t = _load_trek_for_read(trek_id, user, request)
+    # Cap at a generous limit to keep streaming bounded; clients that
+    # need everything can page via ``since``.
+    rows = db.list_trek_logs(trek_id, limit=10000, since=since or "")
+    # FastAPI StreamingResponse with NDJSON content type.
+    from fastapi.responses import StreamingResponse
+    import json as _json
+
+    def _generator():
+        for row in rows:
+            try:
+                yield _json.dumps(row, ensure_ascii=False) + "\n"
+            except Exception:
+                # Skip un-serialisable rows defensively (= one bad row
+                # must not break the stream).
+                continue
+    # Make sure auth side-effects on ``t`` aren't accidentally serialised.
+    del t  # noqa: F841
+    return StreamingResponse(_generator(), media_type="application/x-ndjson")
+
+
 @app.post("/api/treks/{trek_id}/pulse-ack")
 def trek_pulse_ack_endpoint(trek_id: str, body: TrekPulseAck,
                             user: dict = Depends(require_auth)):
@@ -4696,6 +4820,22 @@ def trek_pulse_ack_endpoint(trek_id: str, body: TrekPulseAck,
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     db.save_trek(trek_id, t)
+    # ms-97 / Phase 7-C / AC26 — pulse-ack log row. The Skill marker
+    # (= record_pulse_ack already mutated the trek doc); the log row
+    # is the durable observability artefact.
+    _append_trek_log_safe(trek_id, {
+        "kind": "pulse-ack",
+        "session_id": body.session_id,
+        "payload": {
+            "picked_choice": body.picked_choice or "",
+            "note": (body.note or "")[:500],
+            "state_summary": (body.state_summary or "")[:500],
+            "blockers": list(body.blockers or [])[:20],
+            "needs_leader_judgment": bool(body.needs_leader_judgment),
+            "time_on_task_seconds": int(body.time_on_task_seconds or 0),
+        },
+        "created_at": trek_mod.utcnow_iso(),
+    })
     return (t.get("pulse_acks") or {}).get(body.session_id) or {}
 
 
@@ -4823,6 +4963,19 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
     # and address it to the current leader_session_id so only the
     # responsible session sees it (= no project-wide broadcast).
     if body.state in trek_mod.TERMINAL_TASK_STATES:
+        # ms-97 / Phase 7-C / AC26 — outcome log row at terminal state.
+        # Recorded BEFORE the DM fanout so the log row exists even if
+        # leader notification fails (= durable audit trail).
+        _append_trek_log_safe(trek_id, {
+            "kind": "outcome",
+            "session_id": caller_sid,
+            "payload": {
+                "task_id": body.task_id,
+                "state": body.state,
+                "note": (body.note or "")[:500],
+            },
+            "created_at": trek_mod.utcnow_iso(),
+        })
         leader_sid = t.get("leader_session_id") or ""
         scope = t.get("scope") or []
         target_pid = scope[0].get("project") if scope else ""
@@ -7032,6 +7185,22 @@ def trek_scheduler_tick_endpoint(
                 "error": f"trek_save_failed: {type(exc).__name__}: {exc}",
             })
             continue
+        # ms-97 / Phase 7-C / AC26 — aggregate tick log row (= one per
+        # tick, not per recipient). Captures fanout breadth for later
+        # analysis without flooding the logs subcollection.
+        _append_trek_log_safe(trek_id, {
+            "kind": "tick",
+            "session_id": "",
+            "payload": {
+                "project_id": target_project_id,
+                "event_ids": list(event_ids),
+                "recipients": list(target_sids),
+                "leader_digest_event_id": leader_digest_event_id,
+                "leader_digest_recipients": list(leader_live_sids),
+                "completion_ready": bool(completion_ready_fanned_out),
+            },
+            "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        })
         fired.append({
             "trek_id": trek_id,
             "project_id": target_project_id,

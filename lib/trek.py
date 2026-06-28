@@ -2434,6 +2434,150 @@ def list_pending_scope_ops(trek_doc: dict) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# AC24 blanket scope approval (ms-97 Phase 7-C, e-2603)
+#
+# Leader が「この category の scope-add は事前承認」 と宣言する仕組み。
+# 該当 category にマッチする scope-add は ``add_pending_scope_op`` 経路を
+# bypass して直接 ``add_scope_entry`` で commit する (= no DM hop)。 user が
+# 明示 revoke するまで有効。
+#
+# Schema: ``trek.meta.blanket_scope_approvals: list[str]``
+#
+# Category 形式 (= scope entry に対する filter 表現):
+#   * ``"operation"``        — operation narrowing を持つ全 add (= 任意 project)
+#   * ``"milestone"``        — milestone narrowing を持つ全 add
+#   * ``"task"``             — task narrowing を持つ全 add
+#   * ``"project:<pid>"``    — 指定 project へ narrowing を伴う全 add
+#   * ``"milestone:ms-XX"``  — 指定 milestone id を narrowing に持つ全 add
+#                              (= 任意 project でこの ms-id に narrowing する add 全部)
+#
+# 不一致なら blanket は False を返し、 既存 pending 経路にフォールバックする。
+# Project-wide scope (= no narrowing) は ``normalize_scope_entry`` strict mode で
+# はじかれるので、 そもそも blanket の引数として届かない (= AC7 と直交)。
+# ---------------------------------------------------------------------------
+
+BLANKET_SCOPE_APPROVALS_META_KEY = "blanket_scope_approvals"
+
+_BLANKET_NARROWING_CATEGORIES = ("operation", "milestone", "task")
+
+
+def _normalised_blanket_category(category: str) -> str:
+    """Validate + canonicalise a blanket category string.
+
+    Raises ``ValueError`` if the token does not match any of the 5
+    supported shapes. Returns the trimmed string on success.
+    """
+    if not isinstance(category, str):
+        raise ValueError(
+            f"blanket category must be str, got {type(category).__name__}"
+        )
+    cat = category.strip()
+    if not cat:
+        raise ValueError("blanket category required (= non-empty string)")
+    if cat in _BLANKET_NARROWING_CATEGORIES:
+        return cat
+    if ":" in cat:
+        prefix, _, suffix = cat.partition(":")
+        suffix = suffix.strip()
+        if not suffix:
+            raise ValueError(
+                f"blanket category {category!r} requires a value after ':'"
+            )
+        if prefix == "project":
+            return f"project:{suffix}"
+        if prefix == "milestone":
+            return f"milestone:{suffix}"
+    raise ValueError(
+        f"blanket category {category!r} not in supported forms: "
+        f"'operation' | 'milestone' | 'task' | 'project:<pid>' | "
+        f"'milestone:<ms-id>'"
+    )
+
+
+def list_blanket_approvals(trek_doc: dict) -> list[str]:
+    """Return the trek's current blanket approval list (= safe read copy)."""
+    meta = trek_doc.get("meta") or {}
+    vals = meta.get(BLANKET_SCOPE_APPROVALS_META_KEY) or []
+    if not isinstance(vals, list):
+        return []
+    return [v for v in vals if isinstance(v, str) and v]
+
+
+def is_blanket_approved(trek_doc: dict, entry: dict) -> bool:
+    """Return True if ``entry`` matches any blanket category on the trek.
+
+    ``entry`` should already be a normalised scope entry (= strict mode,
+    so at least one narrowing key is present). The check walks the trek's
+    blanket list and returns True on first match.
+
+    The match is **inclusive** — a single entry can satisfy multiple
+    categories. Example: ``{"project": "p1", "milestone": "ms-5"}``
+    matches both ``"milestone"`` and ``"project:p1"`` and
+    ``"milestone:ms-5"`` if any are present.
+    """
+    approvals = list_blanket_approvals(trek_doc)
+    if not approvals:
+        return False
+    proj = entry.get("project") or ""
+    ms = entry.get("milestone") or ""
+    op = entry.get("operation") or ""
+    task = entry.get("task") or ""
+    for cat in approvals:
+        if cat == "operation" and op:
+            return True
+        if cat == "milestone" and ms:
+            return True
+        if cat == "task" and task:
+            return True
+        if cat.startswith("project:"):
+            if proj and cat[len("project:"):] == proj:
+                return True
+        elif cat.startswith("milestone:"):
+            if ms and cat[len("milestone:"):] == ms:
+                return True
+    return False
+
+
+def add_blanket_approval(trek_doc: dict, category: str) -> dict:
+    """Append ``category`` to ``meta.blanket_scope_approvals`` (idempotent).
+
+    Returns the mutated trek_doc (= chain-friendly). Raises ``ValueError``
+    if ``category`` is not in the supported shape. Already-present
+    categories are a no-op (= idempotent, leader can repeat the call
+    without piling up dupes).
+    """
+    norm = _normalised_blanket_category(category)
+    meta = trek_doc.setdefault("meta", {})
+    current = meta.get(BLANKET_SCOPE_APPROVALS_META_KEY)
+    if not isinstance(current, list):
+        current = []
+    if norm in current:
+        return trek_doc
+    current.append(norm)
+    meta[BLANKET_SCOPE_APPROVALS_META_KEY] = current
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
+
+
+def remove_blanket_approval(trek_doc: dict, category: str) -> dict:
+    """Drop ``category`` from ``meta.blanket_scope_approvals``.
+
+    Returns the mutated trek_doc. Raises ``ValueError`` if the category
+    string is malformed (= same validator as add). Returns the doc
+    unchanged if the category is not currently present (= idempotent on
+    the "make this gone" direction).
+    """
+    norm = _normalised_blanket_category(category)
+    meta = trek_doc.setdefault("meta", {})
+    current = meta.get(BLANKET_SCOPE_APPROVALS_META_KEY) or []
+    if not isinstance(current, list) or norm not in current:
+        return trek_doc
+    meta[BLANKET_SCOPE_APPROVALS_META_KEY] = [c for c in current if c != norm]
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
+
+
+# ---------------------------------------------------------------------------
 # AC22 auto-succession (ms-97 Phase 7-B, e-2684)
 #
 # Leader session が「不応」 (= crash / stuck / 通信途絶) になった時、 priority

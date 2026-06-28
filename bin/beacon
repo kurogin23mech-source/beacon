@@ -117,6 +117,11 @@ Treks (cross-project / cross-session 協奏作業領域 — ms-69):
                                     Commit a staged scope op (= apply add or remove, ms-97/AC25)
   beacon trek scope-reject <trek-id> <pending-id>
                                     Drop a staged scope op (ms-97/AC25)
+  beacon trek blanket-approve <trek-id> --category <cat>
+                                    Pre-approve scope-add for a category (ms-97/AC24).
+                                    Category: operation | milestone | task | project:<pid> | milestone:<ms-id>
+  beacon trek blanket-revoke <trek-id> --category <cat>
+                                    Drop a blanket pre-approval (ms-97/AC24)
   beacon trek plan <trek-id> --goal-state "<criterion>"
                                     Set / clear (空文字で clear) trek の完了マーカー.
   beacon trek timeline <trek-id> [--limit N] [--json]
@@ -2732,6 +2737,26 @@ except ValueError as e:
                 done
                 BEACON_TREK_ID="$trek_id" BEACON_PENDING_ID="$pending_id" \
                     python3 "$COMMANDS_PY" trek_scope_reject
+                ;;
+            # ms-97 / Phase 7-C / AC24 — blanket pre-approval (e-2603).
+            blanket-approve|blanket-revoke)
+                _bk_sub="$2"
+                shift 2
+                trek_id="" category=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --category) category="${2:-}"; shift 2 ;;
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                if [[ "$_bk_sub" == "blanket-approve" ]]; then
+                    BEACON_TREK_ID="$trek_id" BEACON_TREK_BLANKET_CATEGORY="$category" \
+                        python3 "$COMMANDS_PY" trek_blanket_approve
+                else
+                    BEACON_TREK_ID="$trek_id" BEACON_TREK_BLANKET_CATEGORY="$category" \
+                        python3 "$COMMANDS_PY" trek_blanket_revoke
+                fi
                 ;;
             stop)
                 shift 2
