@@ -6799,6 +6799,12 @@ def cmd_trek_plan():
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
 
+    # ``pending_rec`` is the local-mode handle to the freshly-staged pending
+    # op record (ms-97 / e-2626 + e-2611). Initialise to None so the print
+    # block downstream can safely query ``(pending_rec or {}).get(...)``
+    # even on goal_state-only invocations that never enter the staging path.
+    pending_rec: dict | None = None
+
     if _is_cloud_mode():
         try:
             client, _config = _get_api_client()
@@ -6847,13 +6853,19 @@ def cmd_trek_plan():
         try:
             if entry is not None:
                 if add_arg:
-                    # AC23 (= Phase 1a scope-add approval) lands in a separate
-                    # task; until then add stays immediate. Phase 1b only
-                    # routes scope-remove through the pending flow (ms-97 /
-                    # e-2611 AC25).
-                    trek.add_scope_entry(t, entry=entry)
+                    # ms-97 / e-2626 (AC23) — scope-add now stages a pending op
+                    # (= ``pending_user_approval`` state). User commits with
+                    # ``beacon trek scope-approve <pending_id>``. Mirrors the
+                    # scope-remove flip in e-2611. AC24 blanket pre-approval
+                    # lands as a layer on top in a follow-up task (= e-2603).
+                    pending_rec = trek.add_pending_scope_op(
+                        t,
+                        action=trek.PENDING_SCOPE_ACTION_ADD,
+                        entry=entry,
+                        requested_by_session_id=_resolve_local_session_id(),
+                    )
                 else:
-                    # ms-97 / e-2611 — scope-remove now stages a pending op.
+                    # ms-97 / e-2611 — scope-remove also stages a pending op.
                     # User commits with ``beacon trek scope-approve <id>``.
                     pending_rec = trek.add_pending_scope_op(
                         t,
@@ -6873,8 +6885,23 @@ def cmd_trek_plan():
     else:
         if add_arg:
             ref_display = add_arg
-            print(f"Added scope {ref_display} on trek {trek_id} "
-                  f"(scope: {len(t.get('scope') or [])} items)")
+            # ms-97 / e-2626 (AC23) — scope-add now stages a pending op.
+            # Show the pending_id so the user knows the exact handle for
+            # the approve / reject CLI. Cloud-mode path returns a
+            # ``pending_op`` field on the response payload (= server add
+            # endpoint) so json-mode consumers get the same info.
+            pending_id = ""
+            if _is_cloud_mode():
+                po = (t or {}).get("pending_op") or {}
+                pending_id = po.get("pending_id") or ""
+            else:
+                pending_id = (pending_rec or {}).get("pending_id") or ""
+            print(
+                f"Staged scope-add of {ref_display} on trek {trek_id} "
+                f"(pending_id: {pending_id}). "
+                f"Approve: beacon trek scope-approve {pending_id} "
+                f"(reject: beacon trek scope-reject {pending_id})"
+            )
         elif remove_arg:
             ref_display = remove_arg
             # Show the pending_id so the user knows the exact handle

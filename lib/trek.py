@@ -1778,6 +1778,13 @@ def add_pending_scope_op(
     actually exists in ``scope[]`` — pending a removal of something that
     isn't there would always 404 at approve-time, surfacing the error
     earlier (= at request time) keeps the flow legible.
+
+    For ``scope_add`` (ms-97 / e-2626 AC23) the helper symmetrically
+    rejects entries that already exist in ``scope[]`` (= duplicate
+    request), so the user gets the 409 at stage-time instead of at
+    approve-time. Without this check, two duplicate-add requests could
+    pile up as separate pending records, only the first of which would
+    eventually apply.
     """
     if action not in VALID_PENDING_SCOPE_ACTIONS:
         raise ValueError(
@@ -1788,6 +1795,10 @@ def add_pending_scope_op(
         scope = trek_doc.get("scope") or []
         if not any(s == norm for s in scope):
             raise ValueError(f"scope entry not found: {norm}")
+    elif action == PENDING_SCOPE_ACTION_ADD:
+        scope = trek_doc.get("scope") or []
+        if any(s == norm for s in scope):
+            raise ValueError(f"scope entry already present: {norm}")
     record = {
         "pending_id": mint_pending_scope_op_id(),
         "action": action,

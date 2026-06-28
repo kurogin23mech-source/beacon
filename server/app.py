@@ -3847,12 +3847,24 @@ def _log_trek_scope_audit(*, action: str, trek_id: str, user: dict,
 def add_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
                             request: Request,
                             user: dict = Depends(require_auth)):
-    """Append a scope entry (cross-project ref). Any joined member.
+    """Stage a scope-entry add for user approval (ms-97 / e-2626, AC23).
 
-    ms-95 / e-2320 — emits a ``trek.scope.audit`` log line per mutation
-    so Cloud Logging can answer "who added this scope entry and when?"
-    The original incident (memo doc kINfY5a9LLnxHWWhtbZJ Finding 4) had
-    no such record, leaving the leader unable to trace the silent re-add.
+    Pre-e-2626 this was an immediate mutation (= ``scope[]`` grew before
+    any explicit user OK). With AC23 the scope-add must mirror the
+    scope-remove approval flow (= ``pending_user_approval`` state on
+    ``trek_doc.pending_scope_ops[]``). The actual ``scope[]`` mutation
+    lands only when the user runs ``beacon trek scope-approve
+    <pending_id>`` (= POST ``/api/treks/{trek_id}/scope/approve/
+    {pending_id}``).
+
+    The legacy audit log (ms-95 / e-2320) still emits, but now with
+    ``action="add_pending"`` so the Cloud Logging filter can tell the
+    request stage (``pending``) from the apply stage
+    (``scope_add_approved``).
+
+    AC24 (= blanket pre-approval, e-2603) is layered on top in a
+    follow-up task. This endpoint stages unconditionally; the
+    auto-commit on blanket-approved categories lands separately.
     """
     t = _load_trek_for_read(trek_id, user)
     _require_trek_joined_member(t, user)
@@ -3863,16 +3875,37 @@ def add_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
         entry["operation"] = body.operation
     if body.task:
         entry["task"] = body.task
+    # Resolve the requesting session id from the X-Beacon-Session header so
+    # the pending record carries the "who asked" attribution. Falls back to
+    # empty string when the header is absent (= same null behaviour as the
+    # audit helper, callers without a session header still get to stage).
+    sid = ""
     try:
-        trek_mod.add_scope_entry(t, entry=entry)
+        sid = request.headers.get("X-Beacon-Session", "") or ""
+    except Exception:
+        sid = ""
+    try:
+        rec = trek_mod.add_pending_scope_op(
+            t,
+            action=trek_mod.PENDING_SCOPE_ACTION_ADD,
+            entry=entry,
+            requested_by_session_id=sid,
+        )
     except ValueError as e:
+        # Normalisation failure (= bad entry shape). 409 to match the
+        # legacy contract on the immediate path.
         raise HTTPException(status_code=409, detail=str(e))
     db.save_trek(trek_id, t)
     _log_trek_scope_audit(
-        action="add", trek_id=trek_id, user=user,
+        action="add_pending", trek_id=trek_id, user=user,
         request=request, entry=entry,
     )
-    return t
+    # Return the trek doc unchanged in shape, plus the pending record so
+    # callers can immediately reference the ``pending_id`` for approve /
+    # reject. Existing clients that ignored the body keep working.
+    out = dict(t)
+    out["pending_op"] = rec
+    return out
 
 
 @app.delete("/api/treks/{trek_id}/scope")

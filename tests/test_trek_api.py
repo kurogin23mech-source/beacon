@@ -555,31 +555,66 @@ class TestLeave:
 
 class TestScope:
     def test_member_can_add_scope(self):
+        """ms-97 / e-2626 AC23 — scope-add now stages a pending op.
+
+        Pre-e-2626 the PUT was immediate; AC23 requires the user to
+        explicitly approve each addition. The PUT call stages, then
+        scope-approve flushes the pending entry into ``scope[]``.
+        """
         trek_id = _create_seed_trek()
         _impersonate(MEMBER_UID, MEMBER_EMAIL)
-        r = client.put(f"/api/treks/{trek_id}/scope", json={
-            "project": "beacon", "milestone": "ms-69",
-        })
+        body = {"project": "beacon", "milestone": "ms-69"}
+        # Stage: PUT returns 200 + ``pending_op`` but scope is unchanged.
+        r = client.put(f"/api/treks/{trek_id}/scope", json=body)
         assert r.status_code == 200
-        scope = r.json()["scope"]
-        assert {"project": "beacon", "milestone": "ms-69"} in scope
+        payload = r.json()
+        assert body not in payload["scope"], (
+            "AC23: scope-add stages a pending op; scope[] must NOT "
+            "mutate until approve."
+        )
+        pending_id = payload["pending_op"]["pending_id"]
+        # Approve: flush the pending op into scope[].
+        r2 = client.post(
+            f"/api/treks/{trek_id}/scope/approve/{pending_id}",
+        )
+        assert r2.status_code == 200
+        assert body in r2.json()["scope"]
 
     def test_add_scope_project_only(self):
+        """Project-wide scope add follows the same staging flow (AC23)."""
         trek_id = _create_seed_trek()
         _impersonate(LEADER_UID, LEADER_EMAIL)
-        r = client.put(f"/api/treks/{trek_id}/scope", json={
-            "project": "beacon",
-        })
+        body = {"project": "beacon"}
+        r = client.put(f"/api/treks/{trek_id}/scope", json=body)
         assert r.status_code == 200
-        assert {"project": "beacon"} in r.json()["scope"]
+        payload = r.json()
+        # Staging: not yet in scope.
+        assert body not in payload["scope"]
+        pending_id = payload["pending_op"]["pending_id"]
+        r2 = client.post(
+            f"/api/treks/{trek_id}/scope/approve/{pending_id}",
+        )
+        assert r2.status_code == 200
+        assert body in r2.json()["scope"]
 
     def test_add_duplicate_scope_returns_409(self):
+        """Duplicate-add still 409s, but now at stage-time (e-2626).
+
+        First add: stage + approve (= scope[] now contains the entry).
+        Second add: stage fails with 409 because the entry is already
+        present. Without the symmetric check in
+        ``add_pending_scope_op``, the duplicate would silently pile up
+        as a second pending record and 409 only at approve-time.
+        """
         trek_id = _create_seed_trek()
         _impersonate(LEADER_UID, LEADER_EMAIL)
         body = {"project": "beacon", "milestone": "ms-69"}
-        client.put(f"/api/treks/{trek_id}/scope", json=body)
-        r = client.put(f"/api/treks/{trek_id}/scope", json=body)
-        assert r.status_code == 409
+        r1 = client.put(f"/api/treks/{trek_id}/scope", json=body)
+        assert r1.status_code == 200
+        pid = r1.json()["pending_op"]["pending_id"]
+        client.post(f"/api/treks/{trek_id}/scope/approve/{pid}")
+        r2 = client.put(f"/api/treks/{trek_id}/scope", json=body)
+        assert r2.status_code == 409
 
     def test_remove_scope(self):
         """ms-97 / e-2611 AC25 — scope-remove now stages a pending op.
@@ -587,12 +622,20 @@ class TestScope:
         Pre-e-2611 the DELETE was immediate; AC25 requires the user to
         explicitly approve each removal. The DELETE call stages, then
         scope-approve flushes the pending entry into ``scope[]``.
+
+        ms-97 / e-2626 — scope-add also stages now; the setup steps
+        below chain through approve to actually grow ``scope[]`` before
+        the remove-side flow under test.
         """
         trek_id = _create_seed_trek()
         _impersonate(LEADER_UID, LEADER_EMAIL)
         body = {"project": "beacon", "milestone": "ms-69"}
-        client.put(f"/api/treks/{trek_id}/scope", json=body)
-        # Stage: DELETE returns 200 + ``pending_op`` but scope is unchanged.
+        # Setup: stage + approve add so scope[] has the entry to remove.
+        r0 = client.put(f"/api/treks/{trek_id}/scope", json=body)
+        pid0 = r0.json()["pending_op"]["pending_id"]
+        client.post(f"/api/treks/{trek_id}/scope/approve/{pid0}")
+        # Stage remove: DELETE returns 200 + ``pending_op`` but scope is
+        # unchanged.
         r = client.request("DELETE", f"/api/treks/{trek_id}/scope", json=body)
         assert r.status_code == 200
         payload = r.json()

@@ -647,11 +647,30 @@ def test_trek_leave_non_member(trek_env):
 # ---------------------------------------------------------------------------
 
 def test_trek_plan_add_scope_milestone(trek_env):
+    """ms-97 / e-2626 AC23 — scope-add now stages a pending op.
+
+    ``beacon trek plan --add-scope`` stages a pending record; the user
+    must run ``beacon trek scope-approve <pending_id>`` to actually
+    grow ``scope[]``. The json mode response shows the pending op so
+    callers can chain (= mirror of the e-2611 scope-remove flip).
+    """
     tid = _make_trek_and_return_id(trek_env)
     r = _run(trek_env, "plan", tid, "--add-scope", "beacon-1:ms-64", "--json")
     assert r.returncode == 0, r.stderr
     doc = json.loads(r.stdout)
-    assert {"project": "beacon-1", "milestone": "ms-64"} in doc["scope"]
+    # AC23 — scope unchanged; pending op staged.
+    assert {"project": "beacon-1", "milestone": "ms-64"} not in doc["scope"]
+    pending = doc.get("pending_scope_ops") or []
+    assert len(pending) == 1
+    assert pending[0]["action"] == "scope_add"
+    assert pending[0]["entry"] == {"project": "beacon-1", "milestone": "ms-64"}
+    pid = pending[0]["pending_id"]
+    # Approve flushes the pending into scope[].
+    r2 = _run(trek_env, "scope-approve", tid, pid, "--json")
+    assert r2.returncode == 0, r2.stderr
+    doc2 = json.loads(r2.stdout)
+    assert {"project": "beacon-1", "milestone": "ms-64"} in doc2["scope"]
+    assert doc2.get("pending_scope_ops") == []
 
 
 def test_trek_plan_add_scope_operation(trek_env):
@@ -659,7 +678,12 @@ def test_trek_plan_add_scope_operation(trek_env):
     r = _run(trek_env, "plan", tid, "--add-scope", "pe-1:op-12", "--json")
     assert r.returncode == 0
     doc = json.loads(r.stdout)
-    assert {"project": "pe-1", "operation": "op-12"} in doc["scope"]
+    # AC23 staging — not yet in scope.
+    assert {"project": "pe-1", "operation": "op-12"} not in doc["scope"]
+    pid = doc["pending_scope_ops"][0]["pending_id"]
+    r2 = _run(trek_env, "scope-approve", tid, pid, "--json")
+    doc2 = json.loads(r2.stdout)
+    assert {"project": "pe-1", "operation": "op-12"} in doc2["scope"]
 
 
 def test_trek_plan_add_scope_task(trek_env):
@@ -667,7 +691,11 @@ def test_trek_plan_add_scope_task(trek_env):
     r = _run(trek_env, "plan", tid, "--add-scope", "lps-1:e-1234", "--json")
     assert r.returncode == 0
     doc = json.loads(r.stdout)
-    assert {"project": "lps-1", "task": "e-1234"} in doc["scope"]
+    assert {"project": "lps-1", "task": "e-1234"} not in doc["scope"]
+    pid = doc["pending_scope_ops"][0]["pending_id"]
+    r2 = _run(trek_env, "scope-approve", tid, pid, "--json")
+    doc2 = json.loads(r2.stdout)
+    assert {"project": "lps-1", "task": "e-1234"} in doc2["scope"]
 
 
 def test_trek_plan_add_scope_project_wide(trek_env):
@@ -675,7 +703,27 @@ def test_trek_plan_add_scope_project_wide(trek_env):
     r = _run(trek_env, "plan", tid, "--add-scope", "lps-1", "--json")
     assert r.returncode == 0
     doc = json.loads(r.stdout)
-    assert {"project": "lps-1"} in doc["scope"]
+    assert {"project": "lps-1"} not in doc["scope"]
+    pid = doc["pending_scope_ops"][0]["pending_id"]
+    r2 = _run(trek_env, "scope-approve", tid, pid, "--json")
+    doc2 = json.loads(r2.stdout)
+    assert {"project": "lps-1"} in doc2["scope"]
+
+
+def _stage_and_approve_add(trek_env, tid, ref):
+    """Helper: run plan --add-scope <ref> + scope-approve to commit.
+
+    ms-97 / e-2626 — scope-add now stages a pending op (AC23). Tests
+    that historically did setup with a single ``--add-scope`` call must
+    chain through scope-approve to actually grow ``scope[]``. This
+    helper hides that two-step dance for setup-only call sites.
+    """
+    r = _run(trek_env, "plan", tid, "--add-scope", ref, "--json")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(r.stdout)
+    pid = doc["pending_scope_ops"][-1]["pending_id"]
+    r2 = _run(trek_env, "scope-approve", tid, pid, "--json")
+    assert r2.returncode == 0, r2.stderr
 
 
 def test_trek_plan_remove_scope(trek_env):
@@ -685,10 +733,14 @@ def test_trek_plan_remove_scope(trek_env):
     record; the user must run ``beacon trek scope-approve <pending_id>``
     to actually shrink ``scope[]``. The json mode response includes
     the pending op so callers can chain.
+
+    AC23 (e-2626) made scope-add also stage; setup steps below chain
+    through ``_stage_and_approve_add`` so the trek's ``scope[]`` is
+    actually populated before the remove-side flow under test.
     """
     tid = _make_trek_and_return_id(trek_env)
-    _run(trek_env, "plan", tid, "--add-scope", "beacon-1:ms-64")
-    _run(trek_env, "plan", tid, "--add-scope", "pe-1")
+    _stage_and_approve_add(trek_env, tid, "beacon-1:ms-64")
+    _stage_and_approve_add(trek_env, tid, "pe-1")
     r = _run(trek_env, "plan", tid, "--remove-scope", "beacon-1:ms-64",
              "--json")
     assert r.returncode == 0
@@ -726,8 +778,14 @@ def test_trek_plan_rejects_both_add_and_remove(trek_env):
 
 
 def test_trek_plan_add_scope_rejects_duplicate(trek_env):
+    """ms-97 / e-2626 — duplicate-add still rejected, now at stage-time.
+
+    Stage + approve the first add, then a second --add-scope of the
+    same ref must fail with an "already present" error (= 409 on the
+    HTTP side, exit code != 0 on the CLI side).
+    """
     tid = _make_trek_and_return_id(trek_env)
-    _run(trek_env, "plan", tid, "--add-scope", "beacon-1:ms-64")
+    _stage_and_approve_add(trek_env, tid, "beacon-1:ms-64")
     r = _run(trek_env, "plan", tid, "--add-scope", "beacon-1:ms-64")
     assert r.returncode != 0
     assert "already" in r.stderr.lower()
