@@ -2647,6 +2647,45 @@ except ValueError as e:
                 BEACON_TREK_ID="$trek_id" BEACON_LIMIT="$limit" \
                     python3 "$COMMANDS_PY" trek_timeline
                 ;;
+            # ms-97 / e-2611 AC25 — scope mutation approval flow.
+            scope-approve)
+                shift 2
+                trek_id="" pending_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        *)
+                            if [[ -z "$trek_id" ]]; then
+                                trek_id="$1"
+                            elif [[ -z "$pending_id" ]]; then
+                                pending_id="$1"
+                            fi
+                            shift
+                            ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" BEACON_PENDING_ID="$pending_id" \
+                    python3 "$COMMANDS_PY" trek_scope_approve
+                ;;
+            scope-reject)
+                shift 2
+                trek_id="" pending_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        *)
+                            if [[ -z "$trek_id" ]]; then
+                                trek_id="$1"
+                            elif [[ -z "$pending_id" ]]; then
+                                pending_id="$1"
+                            fi
+                            shift
+                            ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" BEACON_PENDING_ID="$pending_id" \
+                    python3 "$COMMANDS_PY" trek_scope_reject
+                ;;
             stop)
                 shift 2
                 trek_id="" reason=""

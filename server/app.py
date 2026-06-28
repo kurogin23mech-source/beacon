@@ -3879,11 +3879,18 @@ def add_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
 def remove_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
                                request: Request,
                                user: dict = Depends(require_auth)):
-    """Remove a scope entry. Any joined member.
+    """Stage a scope-entry removal for user approval (ms-97 / e-2611, AC25).
 
-    ms-95 / e-2320 — same audit log as add path, so a remove → re-add
-    sequence (= the 2026-06-23 pathology) leaves two lines in Cloud
-    Logging that pinpoint who/when on each leg.
+    Pre-e-2611 this was an immediate mutation. With AC25 the scope-remove
+    must mirror the scope-add approval flow (= ``pending_user_approval``
+    state on ``trek_doc.pending_scope_ops[]``). The actual ``scope[]``
+    mutation lands only when the user runs
+    ``beacon trek scope-approve <pending_id>`` (= POST
+    ``/api/treks/{trek_id}/scope/approve/{pending_id}``).
+
+    The legacy audit log (ms-95 / e-2320) still emits, but now with
+    ``action="remove_pending"`` so the Cloud Logging filter can tell the
+    request stage (``pending``) from the apply stage (``remove_approved``).
     """
     t = _load_trek_for_read(trek_id, user)
     _require_trek_joined_member(t, user)
@@ -3894,14 +3901,108 @@ def remove_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
         entry["operation"] = body.operation
     if body.task:
         entry["task"] = body.task
+    # Resolve the requesting session id from the X-Beacon-Session header so
+    # the pending record carries the "who asked" attribution. Falls back to
+    # empty string when the header is absent (= same null behaviour as the
+    # audit helper, callers without a session header still get to stage).
+    sid = ""
     try:
-        trek_mod.remove_scope_entry(t, entry=entry)
+        sid = request.headers.get("X-Beacon-Session", "") or ""
+    except Exception:
+        sid = ""
+    try:
+        rec = trek_mod.add_pending_scope_op(
+            t,
+            action=trek_mod.PENDING_SCOPE_ACTION_REMOVE,
+            entry=entry,
+            requested_by_session_id=sid,
+        )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     db.save_trek(trek_id, t)
     _log_trek_scope_audit(
-        action="remove", trek_id=trek_id, user=user,
+        action="remove_pending", trek_id=trek_id, user=user,
         request=request, entry=entry,
+    )
+    # Return the trek doc unchanged in shape, plus the pending record so
+    # callers can immediately reference the ``pending_id`` for approve /
+    # reject. Existing clients that ignored the body keep working.
+    out = dict(t)
+    out["pending_op"] = rec
+    return out
+
+
+@app.post("/api/treks/{trek_id}/scope/approve/{pending_id}")
+def approve_trek_scope_op_endpoint(trek_id: str, pending_id: str,
+                                   request: Request,
+                                   user: dict = Depends(require_auth)):
+    """Approve a pending scope op (= commit add or remove).
+
+    ms-97 / e-2611 — Mirror of the scope-remove staging endpoint. Any
+    joined member of the trek may approve; the philosophy is that
+    ``pending_user_approval`` is a structural pause for an explicit
+    "yes do that" rather than a per-actor authorisation check. The same
+    ``trek.scope.audit`` log line is emitted with
+    ``action="<scope_add|remove>_approved"`` so the apply step is
+    observable in Cloud Logging alongside the original request stage.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    rec = trek_mod.find_pending_scope_op(t, pending_id=pending_id)
+    if rec is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"pending scope op not found: {pending_id}",
+        )
+    try:
+        applied_entry = trek_mod.approve_pending_scope_op(
+            t, pending_id=pending_id,
+        )
+    except ValueError as e:
+        # The drop happened before raise (see lib helper), so save the
+        # now-cleaned doc and 409 the caller. This matches the
+        # add_scope_entry / remove_scope_entry 409 contract on add.
+        db.save_trek(trek_id, t)
+        raise HTTPException(status_code=409, detail=str(e))
+    db.save_trek(trek_id, t)
+    audit_action = f"{rec.get('action', 'scope_op')}_approved"
+    _log_trek_scope_audit(
+        action=audit_action, trek_id=trek_id, user=user,
+        request=request, entry=applied_entry,
+    )
+    return t
+
+
+@app.post("/api/treks/{trek_id}/scope/reject/{pending_id}")
+def reject_trek_scope_op_endpoint(trek_id: str, pending_id: str,
+                                  request: Request,
+                                  user: dict = Depends(require_auth)):
+    """Reject a pending scope op (= drop without applying).
+
+    ms-97 / e-2611 — Companion to ``approve``. Any joined member may
+    reject. Audit line carries
+    ``action="<scope_add|remove>_rejected"`` so the rejection is just as
+    traceable as approve / apply.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    rec = trek_mod.find_pending_scope_op(t, pending_id=pending_id)
+    if rec is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"pending scope op not found: {pending_id}",
+        )
+    try:
+        dropped = trek_mod.reject_pending_scope_op(
+            t, pending_id=pending_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    db.save_trek(trek_id, t)
+    audit_action = f"{dropped.get('action', 'scope_op')}_rejected"
+    _log_trek_scope_audit(
+        action=audit_action, trek_id=trek_id, user=user,
+        request=request, entry=dropped.get("entry") or {},
     )
     return t
 
