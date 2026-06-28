@@ -582,13 +582,31 @@ class TestScope:
         assert r.status_code == 409
 
     def test_remove_scope(self):
+        """ms-97 / e-2611 AC25 — scope-remove now stages a pending op.
+
+        Pre-e-2611 the DELETE was immediate; AC25 requires the user to
+        explicitly approve each removal. The DELETE call stages, then
+        scope-approve flushes the pending entry into ``scope[]``.
+        """
         trek_id = _create_seed_trek()
         _impersonate(LEADER_UID, LEADER_EMAIL)
         body = {"project": "beacon", "milestone": "ms-69"}
         client.put(f"/api/treks/{trek_id}/scope", json=body)
+        # Stage: DELETE returns 200 + ``pending_op`` but scope is unchanged.
         r = client.request("DELETE", f"/api/treks/{trek_id}/scope", json=body)
         assert r.status_code == 200
-        assert body not in r.json()["scope"]
+        payload = r.json()
+        assert body in payload["scope"], (
+            "AC25: scope-remove stages a pending op; scope[] must NOT "
+            "mutate until approve."
+        )
+        pending_id = payload["pending_op"]["pending_id"]
+        # Approve: flush the pending op into scope[].
+        r2 = client.post(
+            f"/api/treks/{trek_id}/scope/approve/{pending_id}",
+        )
+        assert r2.status_code == 200
+        assert body not in r2.json()["scope"]
 
     def test_remove_nonexistent_scope_returns_404(self):
         trek_id = _create_seed_trek()

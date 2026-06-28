@@ -6847,9 +6847,20 @@ def cmd_trek_plan():
         try:
             if entry is not None:
                 if add_arg:
+                    # AC23 (= Phase 1a scope-add approval) lands in a separate
+                    # task; until then add stays immediate. Phase 1b only
+                    # routes scope-remove through the pending flow (ms-97 /
+                    # e-2611 AC25).
                     trek.add_scope_entry(t, entry=entry)
                 else:
-                    trek.remove_scope_entry(t, entry=entry)
+                    # ms-97 / e-2611 — scope-remove now stages a pending op.
+                    # User commits with ``beacon trek scope-approve <id>``.
+                    pending_rec = trek.add_pending_scope_op(
+                        t,
+                        action=trek.PENDING_SCOPE_ACTION_REMOVE,
+                        entry=entry,
+                        requested_by_session_id=_resolve_local_session_id(),
+                    )
             if goal_state_explicit:
                 trek.set_goal_state(t, goal_state=goal_state_arg)
         except ValueError as e:
@@ -6860,17 +6871,157 @@ def cmd_trek_plan():
     if json_mode:
         print(json.dumps(t, ensure_ascii=False))
     else:
-        if add_arg or remove_arg:
-            verb = "Added" if add_arg else "Removed"
-            ref_display = (add_arg or remove_arg)
-            print(f"{verb} scope {ref_display} on trek {trek_id} "
+        if add_arg:
+            ref_display = add_arg
+            print(f"Added scope {ref_display} on trek {trek_id} "
                   f"(scope: {len(t.get('scope') or [])} items)")
+        elif remove_arg:
+            ref_display = remove_arg
+            # Show the pending_id so the user knows the exact handle
+            # for the approve / reject CLI. Cloud-mode path also returns
+            # a ``pending_op`` field on the response payload (see server
+            # remove endpoint) so json-mode consumers get the same info.
+            pending_id = ""
+            if _is_cloud_mode():
+                po = (t or {}).get("pending_op") or {}
+                pending_id = po.get("pending_id") or ""
+            else:
+                pending_id = (pending_rec or {}).get("pending_id") or ""
+            print(
+                f"Staged scope-remove of {ref_display} on trek {trek_id} "
+                f"(pending_id: {pending_id}). "
+                f"Approve: beacon trek scope-approve {pending_id} "
+                f"(reject: beacon trek scope-reject {pending_id})"
+            )
         if goal_state_explicit:
             new_val = (goal_state_arg or "").strip()
             if new_val:
                 print(f"goal_state set on trek {trek_id}: \"{new_val}\"")
             else:
                 print(f"goal_state cleared on trek {trek_id}")
+
+
+def _resolve_local_session_id() -> str:
+    """Best-effort resolution of the current bclaude session id.
+
+    Used for stamping ``requested_by_session_id`` on pending scope ops in
+    local mode (= the cloud-mode path resolves the session from the
+    ``X-Beacon-Session`` request header on the server side). Falls back
+    to an empty string when no session is bound — the pending record
+    still works; only the attribution is blank.
+    """
+    sid = os.environ.get("BEACON_SESSION_ID", "").strip()
+    if sid:
+        return sid
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+    return sid
+
+
+def cmd_trek_scope_approve():
+    """Commit a pending scope op (= apply add or remove).
+
+    ms-97 / e-2611 AC25 — Mirror of scope-add approval. Reads
+    BEACON_TREK_ID + BEACON_PENDING_ID and either calls the server
+    approve endpoint (cloud mode) or applies in-place via
+    ``trek.approve_pending_scope_op`` (local mode).
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    pending_id = os.environ.get("BEACON_PENDING_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id or not pending_id:
+        print("Error: trek_id and pending_id are required", file=sys.stderr)
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            if hasattr(client, "approve_trek_scope_op"):
+                t = client.approve_trek_scope_op(trek_id, pending_id)
+            else:
+                # Fallback: hit the endpoint directly via the client's
+                # raw HTTP helper. The api_client method lands in a
+                # follow-up; CLI users get parity through the raw POST.
+                t = client._post(
+                    f"/api/treks/{trek_id}/scope/approve/{pending_id}",
+                    body={},
+                )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        t = trek_store.load_trek(trek_id)
+        if t is None:
+            print(f"Error: trek {trek_id} not found", file=sys.stderr)
+            sys.exit(1)
+        try:
+            trek.approve_pending_scope_op(t, pending_id=pending_id)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        trek_store.save_trek(t)
+
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        print(
+            f"Approved pending scope op {pending_id} on trek {trek_id} "
+            f"(scope: {len(t.get('scope') or [])} items, "
+            f"pending: {len(t.get('pending_scope_ops') or [])} items)"
+        )
+
+
+def cmd_trek_scope_reject():
+    """Drop a pending scope op without applying it.
+
+    ms-97 / e-2611 AC25 — Companion to scope-approve. Same env contract.
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    pending_id = os.environ.get("BEACON_PENDING_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id or not pending_id:
+        print("Error: trek_id and pending_id are required", file=sys.stderr)
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            if hasattr(client, "reject_trek_scope_op"):
+                t = client.reject_trek_scope_op(trek_id, pending_id)
+            else:
+                t = client._post(
+                    f"/api/treks/{trek_id}/scope/reject/{pending_id}",
+                    body={},
+                )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        t = trek_store.load_trek(trek_id)
+        if t is None:
+            print(f"Error: trek {trek_id} not found", file=sys.stderr)
+            sys.exit(1)
+        try:
+            trek.reject_pending_scope_op(t, pending_id=pending_id)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        trek_store.save_trek(t)
+
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        print(
+            f"Rejected pending scope op {pending_id} on trek {trek_id} "
+            f"(pending: {len(t.get('pending_scope_ops') or [])} items)"
+        )
 
 
 def cmd_trek_task_add():
@@ -19022,6 +19173,9 @@ if __name__ == "__main__":
         "trek_join": cmd_trek_join,
         "trek_leave": cmd_trek_leave,
         "trek_plan": cmd_trek_plan,
+        # ms-97 / e-2611 AC25 — scope mutation approval flow.
+        "trek_scope_approve": cmd_trek_scope_approve,
+        "trek_scope_reject": cmd_trek_scope_reject,
         "trek_task_state": cmd_trek_task_state,
         "trek_extend_ttl": cmd_trek_extend_ttl,
         # ms-92 / e-2141 — cross-project task add via Trek scope

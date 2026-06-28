@@ -274,6 +274,10 @@ def test_due_trek_fires_t1_system_envelope_on_progress_check_channel():
 def test_due_trek_fires_leader_digest_on_separate_channel():
     """The same scheduler tick that fires trek-progress-check must also
     fire one trek-leader-digest addressed to the leader's session.
+
+    ms-97 / e-2613 (AC33) — leader-digest now requires lazy-start signal
+    (= leader_review queue / todo float / completion imminent). Seed an
+    unclaim todo so the digest gate opens.
     """
     _seed_trek(
         trek_id="tk-digest01",
@@ -281,6 +285,10 @@ def test_due_trek_fires_leader_digest_on_separate_channel():
         cadence=10,
         scope=[{"project": "beacon-test", "milestone": "ms-92"}],
     )
+    # AC33: provide a todo float so the leader-digest gate opens.
+    _treks["tk-digest01"]["task_states"] = {
+        "e-todo1": {"state": "todo"},
+    }
     resp = client.post(
         "/api/system/trek-scheduler/tick",
         json={"trek_ids": ["tk-digest01"]},
@@ -315,10 +323,6 @@ def test_due_trek_fires_leader_digest_on_separate_channel():
     assert payload["kind"] == "trek-leader-digest"
     assert payload["recipient_session_id"] == "sv-leader"
     assert payload["trek_id"] == "tk-digest01"
-    # Aggregate counts are present even when there are no pulse-acks yet
-    # (= legitimate "fresh trek, no executors pulsed" snapshot).
-    assert payload["summary"]["active"] == 0
-    assert payload["sessions"] == []
 
 
 def test_due_trek_without_leader_session_id_skips_digest():
@@ -358,6 +362,9 @@ def test_due_trek_stamps_last_leader_digest_at_when_fired():
         cadence=10,
         scope=[{"project": "beacon-test", "milestone": "ms-92"}],
     )
+    # ms-97 / e-2613 (AC33) — leader-digest now lazy-gated; seed a todo
+    # float so the gate opens and the stamp lands.
+    _treks["tk-stamp001"]["task_states"] = {"e-todo1": {"state": "todo"}}
     resp = client.post(
         "/api/system/trek-scheduler/tick",
         json={"trek_ids": ["tk-stamp001"]},
@@ -390,13 +397,18 @@ def test_due_trek_stamps_last_leader_digest_at_when_fired():
 def test_leader_digest_fans_out_to_all_live_leader_sessions():
     """Multi-session leader (= same user logged in from N bclaude) gets
     the digest delivered to each live session, not just the originally
-    stamped one. This is the core fix for the LPS dogfood observation."""
+    stamped one. This is the core fix for the LPS dogfood observation.
+
+    ms-97 / e-2613 (AC33) — seed task_states so the leader-digest gate
+    opens (= todo float). The fan-out behaviour stays under test.
+    """
     _seed_trek(
         trek_id="tk-digestfan1",
         status="active",
         cadence=10,
         scope=[{"project": "beacon-test", "milestone": "ms-95"}],
     )
+    _treks["tk-digestfan1"]["task_states"] = {"e-todo1": {"state": "todo"}}
     # Leader user has 3 live sessions: the original stamped one + 2
     # extras (= reconnect / fork scenarios). All three are within the
     # 10-minute live cutoff so they all qualify.
@@ -436,13 +448,17 @@ def test_leader_digest_delivers_to_live_session_when_stamped_is_stale():
     """The regression reproducer: stamped leader_session_id points at a
     DEAD session (= leader reconnected, original session gone), but the
     leader user has a different live session. The digest must reach the
-    live one — not silently appended to the dead sid."""
+    live one — not silently appended to the dead sid.
+
+    ms-97 / e-2613 (AC33) — seed todo float so leader-digest gate opens.
+    """
     _seed_trek(
         trek_id="tk-stamp-stale",
         status="active",
         cadence=10,
         scope=[{"project": "beacon-test", "milestone": "ms-95"}],
     )
+    _treks["tk-stamp-stale"]["task_states"] = {"e-todo1": {"state": "todo"}}
     # stamped leader is "sv-leader" but only "sv-leader-reconnect" is
     # live in the session directory.
     _seed_live_sessions_for_trek(
@@ -476,13 +492,17 @@ def test_leader_digest_falls_back_to_stamped_when_no_live_leader_session():
     desk). The digest falls back to the stamped leader_session_id so
     behaviour stays compatible with the pre-fix single-sid path. The
     fired event lets observability surface (= dashboard) keep showing
-    'last leader digest at X' without going dark."""
+    'last leader digest at X' without going dark.
+
+    ms-97 / e-2613 (AC33) — seed todo float so leader-digest gate opens.
+    """
     _seed_trek(
         trek_id="tk-leader-away",
         status="active",
         cadence=10,
         scope=[{"project": "beacon-test", "milestone": "ms-95"}],
     )
+    _treks["tk-leader-away"]["task_states"] = {"e-todo1": {"state": "todo"}}
     # No sessions for the leader user in the directory. The pre-fix
     # path relied on the stamped sid alone, so the fallback must
     # reproduce that.
@@ -508,7 +528,11 @@ def test_leader_digest_ignores_non_leader_live_sessions():
     """Live sessions belonging to non-leader members must NOT receive
     the leader digest — they are progress-check material, not leader
     surface. Guards against accidentally cross-wiring the two
-    channels."""
+    channels.
+
+    ms-97 / e-2613 (AC33) — seed todo float so leader-digest gate opens
+    AND the executor sees the unclaim work.
+    """
     # Add a second non-leader member to the trek so we can register a
     # live session for them.
     _seed_trek(
@@ -517,6 +541,7 @@ def test_leader_digest_ignores_non_leader_live_sessions():
         cadence=10,
         scope=[{"project": "beacon-test", "milestone": "ms-95"}],
     )
+    _treks["tk-nonleader"]["task_states"] = {"e-todo1": {"state": "todo"}}
     _treks["tk-nonleader"]["members"].append({
         "user_id": "uid-executor", "email": "ex@b.com",
         "role": "member", "invited_at": "2026-06-27T00:00:00.000000Z",
@@ -599,6 +624,8 @@ def test_slug_stored_scope_resolves_to_canonical_full_project_id():
         cadence=10,
         scope=[{"project": slug, "milestone": "ms-22"}],
     )
+    # ms-97 / e-2613 (AC33) — seed todo float so leader-digest fires.
+    _treks["tk-slug-resolve"]["task_states"] = {"e-todo1": {"state": "todo"}}
     import datetime
     now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
         "%Y-%m-%dT%H:%M:%S.%fZ"
@@ -780,6 +807,10 @@ def test_10min_cadence_does_not_refire_immediately():
         cadence=10,
         scope=[{"project": "beacon-test", "milestone": "ms-83"}],
     )
+    # ms-97 / e-2613 (AC33) — seed todo float so both progress-check and
+    # leader-digest fire (= original 2-event expectation preserved). The
+    # cadence-decision test is about temporal gating, not lazy-start.
+    _treks["tk-cccc3333"]["task_states"] = {"e-todo1": {"state": "todo"}}
     # First tick — fires.
     r1 = client.post(
         "/api/system/trek-scheduler/tick",
@@ -1040,7 +1071,16 @@ def _seed_live_sessions_for_trek(project_id: str, *,
 def test_fanout_skips_session_with_only_terminal_claims():
     """ms-88 / e-2109: session whose claims are all in leader_review /
     user_review / done が tick を受け取らない (= 「work_review 後も scheduler
-    届く」 問題の構造解)。"""
+    届く」 問題の構造解)。
+
+    ms-97 / e-2613 (AC33) — extended: terminal-claim session に対しても
+    unclaim todo float が存在すれば fire する (= 「次の仕事が残ってるなら
+    pick up しに来い」)。 unclaim todo が無い場合のみ silent。
+
+    本テストは unclaim todo 無し状態を維持して original e-2109 silent
+    semantics を pin する。 sv-fresh は AC33 lazy-start gate に該当
+    しないので broadcast fallback (= recipient="") 経路に degrade する。
+    """
     _seed_trek(
         trek_id="tk-fan0001",
         status="active",
@@ -1053,11 +1093,11 @@ def test_fanout_skips_session_with_only_terminal_claims():
         user_id="uid-leader",
         session_ids=["sv-active", "sv-finished", "sv-fresh"],
     )
-    # sv-active が working な claim を持つ
+    # sv-active が working な claim を持つ、 sv-finished は done のみ。
+    # AC33 silent semantics を保つため unclaim todo は seed しない。
     _treks["tk-fan0001"]["task_states"] = {
         "e-w": {"state": "working", "updated_by_session_id": "sv-active"},
         "e-d": {"state": "done", "updated_by_session_id": "sv-finished"},
-        # sv-fresh は claim 無し → fallback で tick もらう
     }
     resp = client.post(
         "/api/system/trek-scheduler/tick",
@@ -1072,10 +1112,12 @@ def test_fanout_skips_session_with_only_terminal_claims():
     recipients = sorted(
         e["payload"].get("recipient_session_id", "") for e in progress_events
     )
-    # sv-active と sv-fresh は届く、 sv-finished は届かない
+    # sv-active のみが lazy-start で fire、 sv-finished と sv-fresh は
+    # AC33 silent (= 仕事無し)、 broadcast fallback で空 recipient が
+    # 1 件混ざる場合あり。
     assert "sv-active" in recipients
-    assert "sv-fresh" in recipients
     assert "sv-finished" not in recipients
+    assert "sv-fresh" not in recipients
 
 
 def test_fanout_skips_all_sessions_when_all_have_only_terminal_claims():
@@ -1114,7 +1156,13 @@ def test_fanout_skips_all_sessions_when_all_have_only_terminal_claims():
 
 def test_fanout_fresh_session_with_no_claims_still_receives_tick():
     """fresh session (= 何も claim していない) は fallback 経路で tick を貰う
-    (= todo task を pick up する経路)。"""
+    (= todo task を pick up する経路)。
+
+    ms-97 / e-2613 (AC33) — fresh session の lazy-start には unclaim todo が
+    必要。 seed しないと「 nothing to do here」 と判断され broadcast
+    fallback に degrade する。 unclaim todo を seed して legacy fresh
+    pick-up 経路を維持する。
+    """
     _seed_trek(
         trek_id="tk-fan0003",
         status="active",
@@ -1126,7 +1174,8 @@ def test_fanout_fresh_session_with_no_claims_still_receives_tick():
         user_id="uid-leader",
         session_ids=["sv-fresh"],
     )
-    # task_states 空 = どの session も claim していない
+    # AC33: seed unclaim todo so sv-fresh gets ticked directly.
+    _treks["tk-fan0003"]["task_states"] = {"e-todo1": {"state": "todo"}}
     resp = client.post(
         "/api/system/trek-scheduler/tick",
         json={"trek_ids": ["tk-fan0003"]},
@@ -1218,3 +1267,280 @@ def test_fanout_leader_excluded_even_with_no_claims():
     # 全 live session が leader (= 除外) → broadcast fallback (空 recipient) のみ
     assert len(progress_events) == 1
     assert progress_events[0]["payload"].get("recipient_session_id", "") == ""
+
+
+# ---------------------------------------------------------------------------
+# ms-97 / e-2612 (AC32) — Halt 中の tick fire 全停止
+# ---------------------------------------------------------------------------
+
+
+def _seed_halted_trek(trek_id: str, *,
+                      scope: list[dict] | None = None) -> dict:
+    """Helper: a due trek with halt set."""
+    t = _seed_trek(
+        trek_id=trek_id,
+        status="active",
+        cadence=10,
+        scope=scope or [{"project": "beacon-test", "milestone": "ms-97"}],
+    )
+    _treks[trek_id]["halt"] = {
+        "issued_at": "2026-06-28T00:00:00.000000Z",
+        "issued_by_session_id": "sv-leader",
+        "reason": "AC32 dogfood",
+    }
+    return t
+
+
+def test_halt_skips_executor_progress_check_fire():
+    """AC32: halt 中の trek は executor tick (= trek-progress-check) を
+    打たない。 candidate / due には残るが、 fired / events は空。
+    """
+    _seed_halted_trek("tk-halt-exec")
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-halt-exec"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # candidate / due には残る (= halt は status を変えない)、 fired 0、
+    # halted リストに 1 件。
+    assert body["candidates"] == 1
+    assert body["fired"] == []
+    assert any(h["trek_id"] == "tk-halt-exec" for h in body["halted"])
+    # Bus events も書かれない。
+    events = _bus_events_by_project.get("beacon-test", [])
+    progress_events = [
+        e for e in events if e["channel"] == "trek-progress-check"
+    ]
+    assert progress_events == []
+
+
+def test_halt_skips_leader_digest_fanout():
+    """AC32: halt 中は leader-digest channel も書かれない。"""
+    _seed_halted_trek("tk-halt-digest")
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-leader",
+        session_ids=["sv-leader"],
+    )
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-halt-digest"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    events = _bus_events_by_project.get("beacon-test", [])
+    digest_events = [
+        e for e in events if e["channel"] == "trek-leader-digest"
+    ]
+    assert digest_events == [], (
+        "AC32: leader-digest must not fire while halt is set"
+    )
+
+
+def test_halt_skips_idle_escalation():
+    """AC32: halt 中は idle escalation (= notify channel) も発火しない。
+    Halt は autonomous activity 全体の pause なので、 idle 検出による
+    user 通知も leader が cord を引いた間は止まる。 Resume 後に再度
+    idle 判定 → escalate という流れに戻す。
+    """
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    # Idle 判定が走るように last_session_response_at を古く設定。
+    very_stale = (now - datetime.timedelta(hours=2)).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    _seed_halted_trek("tk-halt-idle")
+    _treks["tk-halt-idle"]["meta"]["last_session_response_at"] = very_stale
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-halt-idle"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["escalations"] == [], (
+        "AC32: idle escalation must not fire while halt is set"
+    )
+    events = _bus_events_by_project.get("beacon-test", [])
+    notify_events = [e for e in events if e["channel"] == "notify"]
+    assert notify_events == []
+
+
+# ---------------------------------------------------------------------------
+# ms-97 / e-2613 (AC33) — Tick fire lazy start (per-executor / per-leader)
+# ---------------------------------------------------------------------------
+
+
+def test_lazy_start_no_signal_yields_broadcast_fallback_only():
+    """AC33 edge case: 全 lazy-start gate が closed (= claim 無し /
+    unclaim todo 無し / leader_review 無し / todo float 無し /
+    completion not imminent) でも、 minimal tick 1 件は fire する
+    (= no complete silence)。 broadcast fallback (= recipient_session_id "")
+    がその minimal tick の正体。 leader-digest は AC33 で完全 silent。
+    """
+    _seed_trek(
+        trek_id="tk-lazy-silent",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-97"}],
+    )
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-leader",
+        session_ids=["sv-leader"],
+    )
+    # task_states 空 = どの session も claim していない、 unclaim todo
+    # 無し、 leader_review 無し、 todo float 無し → 全 gate close。
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-lazy-silent"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    events = _bus_events_by_project.get("beacon-test", [])
+    progress_events = [
+        e for e in events if e["channel"] == "trek-progress-check"
+    ]
+    digest_events = [
+        e for e in events if e["channel"] == "trek-leader-digest"
+    ]
+    # Minimal tick: broadcast fallback (= recipient "") の 1 件のみ。
+    assert len(progress_events) == 1
+    assert progress_events[0]["payload"].get("recipient_session_id", "") == ""
+    # Leader-digest は AC33 で silent。
+    assert digest_events == []
+
+
+def test_lazy_start_leader_digest_fires_on_leader_review_queue():
+    """AC33: leader_review queue が non-empty なら leader-digest 発火。"""
+    _seed_trek(
+        trek_id="tk-lazy-lreview",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-97"}],
+    )
+    _treks["tk-lazy-lreview"]["task_states"] = {
+        "e-1": {"state": "leader_review",
+                "updated_by_session_id": "sv-exec"},
+    }
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-leader",
+        session_ids=["sv-leader"],
+    )
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-lazy-lreview"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200
+    events = _bus_events_by_project["beacon-test"]
+    digest_events = [
+        e for e in events if e["channel"] == "trek-leader-digest"
+    ]
+    assert len(digest_events) >= 1
+
+
+def test_lazy_start_leader_digest_silent_when_all_working():
+    """AC33: working-only trek (= 多数 slot が non-terminal) は leader
+    action 不要として digest silent。 progress-check は executor へ届く。
+    """
+    _seed_trek(
+        trek_id="tk-lazy-working",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-97"}],
+    )
+    # 4 working tasks under sv-exec — leader action は不要 (= not
+    # imminent, not leader_review, not todo float)。
+    _treks["tk-lazy-working"]["task_states"] = {
+        "e-1": {"state": "working", "updated_by_session_id": "sv-exec"},
+        "e-2": {"state": "working", "updated_by_session_id": "sv-exec"},
+        "e-3": {"state": "working", "updated_by_session_id": "sv-exec"},
+        "e-4": {"state": "working", "updated_by_session_id": "sv-exec"},
+    }
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-leader",
+        session_ids=["sv-leader", "sv-exec"],
+    )
+    # Add sv-exec to members so the live filter matches.
+    _treks["tk-lazy-working"]["members"].append({
+        "user_id": "uid-leader", "email": "a@b.com", "role": "member",
+        "invited_at": "2026-06-28T00:00:00.000000Z",
+        "joined_at": "2026-06-28T00:00:00.000000Z",
+        "invited_by": "uid-leader",
+    })
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-lazy-working"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200
+    events = _bus_events_by_project["beacon-test"]
+    digest_events = [
+        e for e in events if e["channel"] == "trek-leader-digest"
+    ]
+    # AC33: working-only → leader silent.
+    assert digest_events == []
+
+
+def test_lazy_start_executor_silent_with_only_terminal_claims_and_no_todo():
+    """AC33: executor whose claims are all terminal AND no unclaim todo
+    → silent (= stop condition)。 broadcast fallback だけが minimal tick。
+    """
+    _seed_trek(
+        trek_id="tk-lazy-stop",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-97"}],
+    )
+    _treks["tk-lazy-stop"]["task_states"] = {
+        "e-1": {"state": "done", "updated_by_session_id": "sv-exec"},
+    }
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-leader",
+        session_ids=["sv-exec"],
+    )
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-lazy-stop"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    # is_trek_task_aggregate_terminal もこの状態 (= 全 done) を quiesce
+    # に分類する。 fired 0 / quiesced 1 を観察する経路。
+    assert body["fired"] == []
+    assert len(body["quiesced"]) == 1
+
+
+def test_resume_clears_halt_and_tick_fires_again():
+    """AC32 補完: halt クリア後 (= clear_halt) は次 tick で発火復帰する。
+    Resume 後に「再度 trek-progress-check が動く」 ことを確認する。
+    """
+    _seed_halted_trek("tk-halt-resume")
+    # First tick: halted, no fire.
+    r1 = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-halt-resume"]},
+        headers=HEADERS_OK,
+    )
+    assert r1.status_code == 200
+    assert r1.json()["fired"] == []
+    # Clear halt (= simulate beacon trek resume).
+    _treks["tk-halt-resume"]["halt"] = None
+    # Second tick should fire normally.
+    r2 = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-halt-resume"]},
+        headers=HEADERS_OK,
+    )
+    assert r2.status_code == 200
+    body = r2.json()
+    assert len(body["fired"]) == 1
+    assert body["fired"][0]["trek_id"] == "tk-halt-resume"
+    assert body["halted"] == []

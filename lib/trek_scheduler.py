@@ -192,6 +192,208 @@ def is_trek_task_aggregate_terminal(trek_doc: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Per-executor / per-leader lazy start (ms-97 / e-2613, AC33)
+#
+# Pre-e-2613 the scheduler fired ticks at every cadence window for every
+# live session of every member, leaving only the global aggregate-terminal
+# quiesce (= ms-88 / e-2107) and per-session terminal-claim filter
+# (= ms-88 / e-2109) as silence gates. AC33 narrows further:
+#
+#   * Per-executor tick fires iff the executor "has >=1 active claim
+#     slot" (= todo / working stamped to this session_id) OR "has unclaim
+#     todo in scope" (= there exist todo entries with no
+#     updated_by_session_id stamp, which the executor could pick up).
+#     Stop: all claim slots terminal AND no unclaim todo float.
+#
+#   * Per-leader (= leader-digest) tick fires iff "leader_review queue
+#     non-empty" OR "todo float exists" OR "completion imminent (=
+#     within COMPLETION_IMMINENT_SLOTS slots of all-terminal)" OR
+#     "abnormal executor (= leader_review queue counted above already)".
+#     Stop: all slots terminal.
+#
+#   * Even when all gates close, a single MINIMAL tick still fires per
+#     cadence window (= no complete silence). This is the broadcast
+#     fallback the existing fanout uses for sessions without claims;
+#     leader-digest gets the same minimal-tick treatment.
+# ---------------------------------------------------------------------------
+
+COMPLETION_IMMINENT_SLOTS = 2
+
+
+def _task_state_of(trek_doc: dict, task_id: str, entry: dict) -> str:
+    """Best-effort state getter for a task_states entry.
+
+    Wraps the lib.trek.get_task_state lazy import so callers do not need
+    to retry on each task. ``entry`` is the raw map; fallback to its
+    ``state`` field when the canonical getter is unavailable.
+    """
+    try:
+        from lib.trek import get_task_state as _get_state
+    except Exception:
+        _get_state = None
+    if _get_state is not None:
+        return _get_state(trek_doc, task_id)
+    return (entry or {}).get("state") or DEFAULT_TASK_STATE
+
+
+def has_unclaim_todo(trek_doc: dict) -> bool:
+    """Return True iff at least one ``task_states`` entry is in ``todo``
+    state without a stamped owner (= fresh todo waiting for an executor).
+
+    ms-97 / e-2613 (AC33) — used by the per-executor lazy-start decision.
+    An executor with no active claim still gets a tick if there's an
+    unclaim todo to pick up; otherwise they stay quiet.
+    """
+    states = trek_doc.get("task_states") or {}
+    for tid, entry in states.items():
+        state = _task_state_of(trek_doc, tid, entry or {})
+        if state != DEFAULT_TASK_STATE:
+            continue
+        owner = (entry or {}).get("updated_by_session_id") or ""
+        if not owner:
+            return True
+    return False
+
+
+def has_leader_review_queue(trek_doc: dict) -> bool:
+    """Return True iff at least one task is in ``leader_review`` state.
+
+    ms-97 / e-2613 (AC33) — leader-digest condition. ``leader_review`` is
+    the "leader judgment requested" slot; while any exist, the leader's
+    digest must keep firing so they can act.
+    """
+    states = trek_doc.get("task_states") or {}
+    for tid, entry in states.items():
+        state = _task_state_of(trek_doc, tid, entry or {})
+        if state == "leader_review":
+            return True
+    return False
+
+
+def has_todo_float(trek_doc: dict) -> bool:
+    """Return True iff at least one task is in ``todo`` state (claimed or not).
+
+    ms-97 / e-2613 (AC33) — leader-digest condition. While todo float
+    exists, leader visibility is useful (= "what's unclaimed / waiting").
+    """
+    states = trek_doc.get("task_states") or {}
+    for tid, entry in states.items():
+        state = _task_state_of(trek_doc, tid, entry or {})
+        if state == DEFAULT_TASK_STATE:
+            return True
+    return False
+
+
+def is_completion_imminent(
+    trek_doc: dict,
+    *,
+    threshold: int = COMPLETION_IMMINENT_SLOTS,
+) -> bool:
+    """Return True iff the trek is within ``threshold`` non-terminal slots
+    of full aggregate-terminal completion.
+
+    ms-97 / e-2613 (AC33) — leader-digest condition. When most slots are
+    done and only a couple remain, the leader benefits from seeing the
+    finish line approach (= "ship soon, decide last few"). For a trek
+    with N=0 non-terminal slots ``is_trek_task_aggregate_terminal``
+    already triggers, so this helper is only meaningful for 1..N case.
+
+    A trek with no stamped states returns False (= "no signal").
+    """
+    states = trek_doc.get("task_states") or {}
+    if not states:
+        return False
+    non_terminal = 0
+    for tid, entry in states.items():
+        state = _task_state_of(trek_doc, tid, entry or {})
+        if state not in TERMINAL_TASK_STATES:
+            non_terminal += 1
+            if non_terminal > threshold:
+                return False
+    # 1..threshold non-terminal slots means imminent. 0 means already
+    # terminal (= caller should use the dedicated terminal predicate).
+    return 0 < non_terminal <= threshold
+
+
+def should_fire_executor_tick(
+    trek_doc: dict,
+    *,
+    session_id: str,
+) -> bool:
+    """Lazy-start decision for one executor's progress-check tick.
+
+    ms-97 / e-2613 (AC33) — returns True iff the executor either:
+      * has at least one active claim slot in this trek (= a stamped
+        todo / working entry pointing to this session_id), or
+      * the trek has an unclaim todo waiting to be picked up (= fresh
+        executor with empty claim history, but real work to do).
+
+    Returns False when the executor has only terminal claims AND there
+    is no unclaim todo float (= "nothing to do here, stay quiet"). The
+    server-side orchestrator falls back to a single minimal broadcast
+    when EVERY executor returns False, preserving the SPEC's
+    "no complete silence" rule.
+
+    Pure / I/O-free so unit tests can pin the matrix without standing
+    up an HTTP layer. Wraps ``session_has_active_claim`` from lib.trek
+    + the ``has_unclaim_todo`` helper above.
+    """
+    try:
+        from lib.trek import (
+            session_has_active_claim as _has_active,
+            session_has_any_claim as _has_any,
+        )
+    except Exception:
+        _has_active = None
+        _has_any = None
+    if _has_active is not None and _has_active(trek_doc, session_id=session_id):
+        return True
+    # A fresh executor with NO claims at all may still pick up an unclaim
+    # todo. If neither condition holds the executor genuinely has nothing
+    # to do; skip.
+    if _has_any is not None and _has_any(trek_doc, session_id=session_id):
+        # Has claims, but none active → all terminal. Only fire if there
+        # is unclaim todo float to pick up next.
+        return has_unclaim_todo(trek_doc)
+    # No claims yet (= fresh executor). Fire only if there's something to
+    # claim — otherwise they're idle by design.
+    return has_unclaim_todo(trek_doc)
+
+
+def should_fire_leader_tick(trek_doc: dict) -> bool:
+    """Lazy-start decision for the leader-digest tick.
+
+    ms-97 / e-2613 (AC33) — fires when any of:
+      * leader_review queue non-empty (= leader has decisions to make)
+      * todo float exists (= unclaimed / queued work to visualise)
+      * completion imminent (= within COMPLETION_IMMINENT_SLOTS of all-
+        terminal, leader benefits from seeing the finish line)
+
+    Returns False otherwise. Stop condition (= all slots terminal) is
+    handled by the existing ``is_trek_task_aggregate_terminal`` quiesce
+    path; this helper assumes the caller already filtered out fully-
+    terminal treks.
+
+    A trek with empty task_states returns False — there is no state for
+    the leader to digest yet. The orchestrator's minimal-tick fallback
+    keeps one event per cadence window so the leader can still observe
+    "nothing has happened" through the digest channel.
+    """
+    if has_leader_review_queue(trek_doc):
+        return True
+    if has_todo_float(trek_doc):
+        return True
+    if is_completion_imminent(trek_doc):
+        return True
+    # Working-only treks (= all non-terminal slots in `working`) are
+    # currently considered "executor's job, no leader action needed".
+    # The auto-stall safety net (= ms-75 / e-2067, server-side) catches
+    # silent halts by transitioning stuck `working` to `leader_review`,
+    # which re-fires this gate via has_leader_review_queue.
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Auto-stall detection (ms-75 / e-2067)
 # ---------------------------------------------------------------------------
 

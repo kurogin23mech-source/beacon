@@ -679,13 +679,34 @@ def test_trek_plan_add_scope_project_wide(trek_env):
 
 
 def test_trek_plan_remove_scope(trek_env):
+    """ms-97 / e-2611 AC25 — scope-remove now stages a pending op.
+
+    The CLI ``beacon trek plan ... --remove-scope`` stages a pending
+    record; the user must run ``beacon trek scope-approve <pending_id>``
+    to actually shrink ``scope[]``. The json mode response includes
+    the pending op so callers can chain.
+    """
     tid = _make_trek_and_return_id(trek_env)
     _run(trek_env, "plan", tid, "--add-scope", "beacon-1:ms-64")
     _run(trek_env, "plan", tid, "--add-scope", "pe-1")
-    r = _run(trek_env, "plan", tid, "--remove-scope", "beacon-1:ms-64", "--json")
+    r = _run(trek_env, "plan", tid, "--remove-scope", "beacon-1:ms-64",
+             "--json")
     assert r.returncode == 0
     doc = json.loads(r.stdout)
-    assert doc["scope"] == [{"project": "pe-1"}]
+    # AC25 — scope still has both entries; the pending op was staged.
+    assert {"project": "beacon-1", "milestone": "ms-64"} in doc["scope"]
+    assert {"project": "pe-1"} in doc["scope"]
+    pending = doc.get("pending_scope_ops") or []
+    assert len(pending) == 1
+    assert pending[0]["action"] == "scope_remove"
+    assert pending[0]["entry"] == {"project": "beacon-1", "milestone": "ms-64"}
+    pid = pending[0]["pending_id"]
+    # Approve flushes the pending into scope[].
+    r2 = _run(trek_env, "scope-approve", tid, pid, "--json")
+    assert r2.returncode == 0, r2.stderr
+    doc2 = json.loads(r2.stdout)
+    assert doc2["scope"] == [{"project": "pe-1"}]
+    assert doc2.get("pending_scope_ops") == []
 
 
 def test_trek_plan_requires_add_or_remove(trek_env):

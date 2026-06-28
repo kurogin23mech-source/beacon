@@ -1335,6 +1335,11 @@ def new_trek(*,
         "meta": meta,
         "task_states": {},
         "session_history": initial_history,
+        # ms-97 / e-2611 — pending scope mutations awaiting user approval.
+        # Empty by default; populated by ``add_pending_scope_op``. Existing
+        # treks (= pre-e-2611 docs) read this as ``[]`` via the helpers'
+        # ``or []`` fallback, so no migration is required.
+        PENDING_SCOPE_OPS_KEY: [],
         "created_at": now,
         "updated_at": now,
         "archived_at": None,
@@ -1716,6 +1721,164 @@ def remove_scope_entry(trek_doc: dict, *, entry: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Scope mutation pending approval (ms-97 / e-2611, AC25)
+#
+# Scope-add and scope-remove are not immediate any more — both go through a
+# ``pending_user_approval`` state recorded in ``trek_doc.pending_scope_ops``.
+# The user runs ``beacon trek scope-approve <pending_id>`` (= commit) or
+# ``beacon trek scope-reject <pending_id>`` (= drop) to flush each pending
+# entry into ``scope[]`` (or discard it).
+#
+# Phase 1b lands the structural pieces ONLY for scope-remove (= the e-2611
+# AC25 cut). scope-add already short-circuits at the immediate path (= AC23
+# Phase 1a lives in a separate task), so the pending flow accepts both
+# actions but the call sites in lib/commands.py / server/app.py only route
+# scope-remove through it for this commit. Blanket pre-approval (= AC24 /
+# e-2603) layers on top of this without redesign — it checks the pending
+# entry's ``action`` field and auto-approves matching categories.
+#
+# Schema: trek_doc.pending_scope_ops: list of pending op records.
+#     {
+#       "pending_id": "sp-<hex8>",
+#       "action": "scope_remove" | "scope_add",
+#       "entry": <normalised scope entry>,
+#       "requested_by_session_id": str,
+#       "requested_at": ISO8601,
+#     }
+# ---------------------------------------------------------------------------
+
+PENDING_SCOPE_OPS_KEY = "pending_scope_ops"
+PENDING_SCOPE_ACTION_ADD = "scope_add"
+PENDING_SCOPE_ACTION_REMOVE = "scope_remove"
+VALID_PENDING_SCOPE_ACTIONS = (
+    PENDING_SCOPE_ACTION_ADD,
+    PENDING_SCOPE_ACTION_REMOVE,
+)
+
+
+def mint_pending_scope_op_id() -> str:
+    """Generate a fresh pending scope op id (= ``sp-<8 hex>``)."""
+    return f"sp-{secrets.token_hex(4)}"
+
+
+def add_pending_scope_op(
+    trek_doc: dict,
+    *,
+    action: str,
+    entry: dict,
+    requested_by_session_id: str = "",
+) -> dict:
+    """Record a pending scope op (= awaiting user approval).
+
+    Returns the new pending record (with its minted ``pending_id``).
+    Raises ``ValueError`` if ``action`` is unknown or ``entry`` cannot be
+    normalised (= passes through ``normalize_scope_entry``).
+
+    For ``scope_remove`` the helper also checks that the target entry
+    actually exists in ``scope[]`` — pending a removal of something that
+    isn't there would always 404 at approve-time, surfacing the error
+    earlier (= at request time) keeps the flow legible.
+    """
+    if action not in VALID_PENDING_SCOPE_ACTIONS:
+        raise ValueError(
+            f"pending scope action {action!r} not in {VALID_PENDING_SCOPE_ACTIONS}"
+        )
+    norm = normalize_scope_entry(entry)
+    if action == PENDING_SCOPE_ACTION_REMOVE:
+        scope = trek_doc.get("scope") or []
+        if not any(s == norm for s in scope):
+            raise ValueError(f"scope entry not found: {norm}")
+    record = {
+        "pending_id": mint_pending_scope_op_id(),
+        "action": action,
+        "entry": norm,
+        "requested_by_session_id": requested_by_session_id or "",
+        "requested_at": utcnow_iso(),
+    }
+    trek_doc.setdefault(PENDING_SCOPE_OPS_KEY, []).append(record)
+    trek_doc["updated_at"] = utcnow_iso()
+    return record
+
+
+def find_pending_scope_op(trek_doc: dict, *,
+                          pending_id: str) -> dict | None:
+    """Return the pending scope op with the given id, or None."""
+    if not pending_id:
+        return None
+    for rec in trek_doc.get(PENDING_SCOPE_OPS_KEY) or []:
+        if rec.get("pending_id") == pending_id:
+            return rec
+    return None
+
+
+def _drop_pending_scope_op(trek_doc: dict, *, pending_id: str) -> None:
+    """Remove the pending record from trek_doc in place."""
+    items = trek_doc.get(PENDING_SCOPE_OPS_KEY) or []
+    trek_doc[PENDING_SCOPE_OPS_KEY] = [
+        r for r in items if r.get("pending_id") != pending_id
+    ]
+
+
+def approve_pending_scope_op(
+    trek_doc: dict,
+    *,
+    pending_id: str,
+) -> dict:
+    """Commit a pending scope op (= apply add / remove to ``scope[]``).
+
+    Raises ``ValueError`` if the pending id is not found, or if the
+    underlying scope mutation fails (= e.g. add when the entry is
+    already in scope, or remove when it's already absent). The pending
+    record is removed in either case so the user does not get stuck
+    on a permanently-broken entry; this matches the user expectation
+    ``approve = "make this real or tell me why not, then forget it"``.
+
+    Returns the now-applied scope entry (= normalised dict).
+    """
+    rec = find_pending_scope_op(trek_doc, pending_id=pending_id)
+    if rec is None:
+        raise ValueError(f"pending scope op not found: {pending_id}")
+    action = rec.get("action")
+    entry = rec.get("entry") or {}
+    # Drop first so even a failure does not leave the queue dirty.
+    _drop_pending_scope_op(trek_doc, pending_id=pending_id)
+    if action == PENDING_SCOPE_ACTION_ADD:
+        add_scope_entry(trek_doc, entry=entry)
+    elif action == PENDING_SCOPE_ACTION_REMOVE:
+        remove_scope_entry(trek_doc, entry=entry)
+    else:
+        raise ValueError(
+            f"pending scope op {pending_id} has unknown action {action!r}"
+        )
+    trek_doc["updated_at"] = utcnow_iso()
+    return entry
+
+
+def reject_pending_scope_op(
+    trek_doc: dict,
+    *,
+    pending_id: str,
+) -> dict:
+    """Drop a pending scope op without applying it.
+
+    Returns the removed record. Raises ``ValueError`` if the id is not
+    found (= so the CLI can tell the user "this was already approved /
+    rejected by someone else" rather than silently swallow the call).
+    """
+    rec = find_pending_scope_op(trek_doc, pending_id=pending_id)
+    if rec is None:
+        raise ValueError(f"pending scope op not found: {pending_id}")
+    _drop_pending_scope_op(trek_doc, pending_id=pending_id)
+    trek_doc["updated_at"] = utcnow_iso()
+    return rec
+
+
+def list_pending_scope_ops(trek_doc: dict) -> list[dict]:
+    """Return a copy of the trek's pending scope ops (= safe for read)."""
+    return list(trek_doc.get(PENDING_SCOPE_OPS_KEY) or [])
+
+
+# ---------------------------------------------------------------------------
 # Halt + leader transfer (ms-69 / e-1662)
 #
 # Halt = Andon cord. The STOP signal sets the ``halt`` field; participating
@@ -1727,6 +1890,28 @@ def remove_scope_entry(trek_doc: dict, *, entry: dict) -> dict:
 # transferring session is the current leader; server-side enforcement
 # lands in e-1656 with proper auth.
 # ---------------------------------------------------------------------------
+
+def is_halted(trek_doc: dict) -> bool:
+    """Return True if the trek currently carries an active halt signal.
+
+    ms-97 / e-2612 (AC32) — Halt is the Andon cord: while set, server-side
+    tick fire (= executor progress-check, leader digest, auto-succession)
+    must stop entirely, and DM bypass (= shared_trek_member rule in
+    ``dm_gate.should_gate_dm_action``) is also suspended so cross-user
+    DMs fall back to the normal budget gate.
+
+    ``halt`` is set via ``set_halt`` (= dict) and cleared via
+    ``clear_halt`` (= None). Treat ``None`` / missing / empty-dict as
+    "not halted" so legacy trek docs (= pre-halt schema) read as
+    not-halted by default.
+    """
+    halt = trek_doc.get("halt")
+    if not halt:
+        return False
+    if isinstance(halt, dict) and not halt:
+        return False
+    return True
+
 
 def set_halt(trek_doc: dict, *,
              issued_by_session_id: str, reason: str = "") -> dict:

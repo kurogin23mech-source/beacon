@@ -3879,11 +3879,18 @@ def add_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
 def remove_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
                                request: Request,
                                user: dict = Depends(require_auth)):
-    """Remove a scope entry. Any joined member.
+    """Stage a scope-entry removal for user approval (ms-97 / e-2611, AC25).
 
-    ms-95 / e-2320 — same audit log as add path, so a remove → re-add
-    sequence (= the 2026-06-23 pathology) leaves two lines in Cloud
-    Logging that pinpoint who/when on each leg.
+    Pre-e-2611 this was an immediate mutation. With AC25 the scope-remove
+    must mirror the scope-add approval flow (= ``pending_user_approval``
+    state on ``trek_doc.pending_scope_ops[]``). The actual ``scope[]``
+    mutation lands only when the user runs
+    ``beacon trek scope-approve <pending_id>`` (= POST
+    ``/api/treks/{trek_id}/scope/approve/{pending_id}``).
+
+    The legacy audit log (ms-95 / e-2320) still emits, but now with
+    ``action="remove_pending"`` so the Cloud Logging filter can tell the
+    request stage (``pending``) from the apply stage (``remove_approved``).
     """
     t = _load_trek_for_read(trek_id, user)
     _require_trek_joined_member(t, user)
@@ -3894,14 +3901,108 @@ def remove_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
         entry["operation"] = body.operation
     if body.task:
         entry["task"] = body.task
+    # Resolve the requesting session id from the X-Beacon-Session header so
+    # the pending record carries the "who asked" attribution. Falls back to
+    # empty string when the header is absent (= same null behaviour as the
+    # audit helper, callers without a session header still get to stage).
+    sid = ""
     try:
-        trek_mod.remove_scope_entry(t, entry=entry)
+        sid = request.headers.get("X-Beacon-Session", "") or ""
+    except Exception:
+        sid = ""
+    try:
+        rec = trek_mod.add_pending_scope_op(
+            t,
+            action=trek_mod.PENDING_SCOPE_ACTION_REMOVE,
+            entry=entry,
+            requested_by_session_id=sid,
+        )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     db.save_trek(trek_id, t)
     _log_trek_scope_audit(
-        action="remove", trek_id=trek_id, user=user,
+        action="remove_pending", trek_id=trek_id, user=user,
         request=request, entry=entry,
+    )
+    # Return the trek doc unchanged in shape, plus the pending record so
+    # callers can immediately reference the ``pending_id`` for approve /
+    # reject. Existing clients that ignored the body keep working.
+    out = dict(t)
+    out["pending_op"] = rec
+    return out
+
+
+@app.post("/api/treks/{trek_id}/scope/approve/{pending_id}")
+def approve_trek_scope_op_endpoint(trek_id: str, pending_id: str,
+                                   request: Request,
+                                   user: dict = Depends(require_auth)):
+    """Approve a pending scope op (= commit add or remove).
+
+    ms-97 / e-2611 — Mirror of the scope-remove staging endpoint. Any
+    joined member of the trek may approve; the philosophy is that
+    ``pending_user_approval`` is a structural pause for an explicit
+    "yes do that" rather than a per-actor authorisation check. The same
+    ``trek.scope.audit`` log line is emitted with
+    ``action="<scope_add|remove>_approved"`` so the apply step is
+    observable in Cloud Logging alongside the original request stage.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    rec = trek_mod.find_pending_scope_op(t, pending_id=pending_id)
+    if rec is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"pending scope op not found: {pending_id}",
+        )
+    try:
+        applied_entry = trek_mod.approve_pending_scope_op(
+            t, pending_id=pending_id,
+        )
+    except ValueError as e:
+        # The drop happened before raise (see lib helper), so save the
+        # now-cleaned doc and 409 the caller. This matches the
+        # add_scope_entry / remove_scope_entry 409 contract on add.
+        db.save_trek(trek_id, t)
+        raise HTTPException(status_code=409, detail=str(e))
+    db.save_trek(trek_id, t)
+    audit_action = f"{rec.get('action', 'scope_op')}_approved"
+    _log_trek_scope_audit(
+        action=audit_action, trek_id=trek_id, user=user,
+        request=request, entry=applied_entry,
+    )
+    return t
+
+
+@app.post("/api/treks/{trek_id}/scope/reject/{pending_id}")
+def reject_trek_scope_op_endpoint(trek_id: str, pending_id: str,
+                                  request: Request,
+                                  user: dict = Depends(require_auth)):
+    """Reject a pending scope op (= drop without applying).
+
+    ms-97 / e-2611 — Companion to ``approve``. Any joined member may
+    reject. Audit line carries
+    ``action="<scope_add|remove>_rejected"`` so the rejection is just as
+    traceable as approve / apply.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    rec = trek_mod.find_pending_scope_op(t, pending_id=pending_id)
+    if rec is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"pending scope op not found: {pending_id}",
+        )
+    try:
+        dropped = trek_mod.reject_pending_scope_op(
+            t, pending_id=pending_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    db.save_trek(trek_id, t)
+    audit_action = f"{dropped.get('action', 'scope_op')}_rejected"
+    _log_trek_scope_audit(
+        action=audit_action, trek_id=trek_id, user=user,
+        request=request, entry=dropped.get("entry") or {},
     )
     return t
 
@@ -5564,6 +5665,20 @@ def trek_scheduler_tick_endpoint(
                            if t.get("trek_id") in wanted]
     candidate_treks = [t for t in candidate_treks
                        if t.get("status") == "active"]
+    # ms-97 / e-2612 (AC32) — explicit halt accounting. ``is_trek_due``
+    # already filters halted treks out of the due set (= the cadence
+    # decision returns False when halt is set, see lib.trek_scheduler),
+    # but the response payload needs to surface the skip so observers
+    # and tests can tell "skipped because halted" apart from "cadence
+    # not elapsed". Collect halted IDs from the candidate set before
+    # select_due_treks drops them silently.
+    halted: list[dict] = []
+    for t in candidate_treks:
+        if trek_mod.is_halted(t):
+            halted.append({
+                "trek_id": t.get("trek_id", ""),
+                "reason": "halted",
+            })
     due_treks = trek_scheduler_mod.select_due_treks(
         candidate_treks, now=now,
     )
@@ -5581,6 +5696,14 @@ def trek_scheduler_tick_endpoint(
     quiesced: list[dict] = []
     for trek_doc in due_treks:
         trek_id = trek_doc.get("trek_id", "")
+        # ms-97 / e-2612 (AC32) — Defense-in-depth halt skip. The cadence
+        # decision (``is_trek_due`` in lib.trek_scheduler) already filters
+        # halted treks out of ``due_treks``, so this branch should never
+        # actually execute. Keep it as a structural guarantee so a future
+        # cadence-decision change can't silently re-introduce tick fires
+        # on halted treks.
+        if trek_mod.is_halted(trek_doc):
+            continue
         # ms-75 / e-2048 — Trek task state machine integration. When every
         # task that an executor has stamped state for has reached terminal
         # (= done or waiting-review), the scheduler goes silent for this
@@ -5697,25 +5820,26 @@ def trek_scheduler_tick_endpoint(
                 and (s.get("last_active") or "") >= live_cutoff
                 and s.get("session_id")
             ]
-            # ms-88 / e-2109 — per-session filter.
+            # ms-88 / e-2109 — per-session filter (executor lazy start).
             # 2026-06-20 補完 (e-2109 second pass): leader 除外を追加。 leader は
             # executor の進捗を促す立場ではない (= 役割が違う、 CORE doc
             # trek-leader-stance / e-2166 と整合)、 progress-check の宛先から外す。
-            # 残された claim 0 件の executor は「fresh、 これから todo を引き受ける」
-            # と扱われ tick が届く。 leader 専用の集約 surface (= trek-leader-digest
-            # channel、 e-2164) は別 channel で配信する設計。
+            #
+            # ms-97 / e-2613 (AC33) — refined to "per-executor lazy start":
+            # fire only when the executor has >=1 active claim OR there's
+            # unclaim todo float to pick up. Implemented in
+            # ``trek_scheduler_mod.should_fire_executor_tick``; the leader
+            # exclusion stays here as a structural filter (= role bound,
+            # not state bound).
             leader_sid_for_filter = trek_doc.get("leader_session_id") or ""
             for sid in live_sids:
                 if leader_sid_for_filter and sid == leader_sid_for_filter:
                     # leader は progress-check の宛先ではない。
                     continue
-                if trek_mod.session_has_active_claim(trek_doc, session_id=sid):
+                if trek_scheduler_mod.should_fire_executor_tick(
+                    trek_doc, session_id=sid,
+                ):
                     target_sids.append(sid)
-                elif not trek_mod.session_has_any_claim(trek_doc, session_id=sid):
-                    # Fresh session, no claims yet — still tick so it picks
-                    # up a todo task.
-                    target_sids.append(sid)
-                # else: every claim is terminal-ish → skip this session.
         if not target_sids:
             # Fallback: broadcast (= sid empty). Preserves behaviour when
             # member resolution fails (= no live sessions / empty members /
@@ -5802,7 +5926,18 @@ def trek_scheduler_tick_endpoint(
             if stamped:
                 leader_live_sids = [stamped]
         leader_digest_event_id = ""
-        if leader_live_sids:
+        # ms-97 / e-2613 (AC33) — per-leader lazy start. Fire the digest
+        # only when the leader genuinely has signal to consume (=
+        # leader_review queue / todo float / completion imminent). When
+        # the gate closes AND no progress-check fired either (= every
+        # executor was also quiet), the orchestrator's broadcast
+        # fallback already injects one minimal trek-progress-check event
+        # this tick, so leader-digest can stay silent without violating
+        # the "no complete silence" rule.
+        leader_should_fire = (
+            trek_scheduler_mod.should_fire_leader_tick(trek_doc)
+        )
+        if leader_live_sids and leader_should_fire:
             try:
                 digest_envelope = envelope_mod.issue_t1_system_envelope(
                     project_id=target_project_id,
@@ -5898,6 +6033,12 @@ def trek_scheduler_tick_endpoint(
         trek_id = trek_doc.get("trek_id", "")
         if trek_id not in idle_trek_ids:
             continue
+        # ms-97 / e-2612 (AC32) — halt 中 は idle escalation も停止。
+        # 「leader が pause した状態で自律 escalation が走る」 のは
+        # halt の意図 (= 全 autonomous activity の一時停止) に反する。
+        # Resume 後の次 tick で再度 idle 判定 → 必要なら escalate。
+        if trek_mod.is_halted(trek_doc):
+            continue
         # Re-read the trek so the cadence-pass save lands in our
         # working copy (= last_idle_escalation_at sits next to the
         # freshly-stamped last_progress_check_at).
@@ -5975,6 +6116,13 @@ def trek_scheduler_tick_endpoint(
         fresh = db.get_trek(trek_id)
         if fresh is not None:
             trek_doc = fresh
+        # ms-97 / e-2612 (AC32) — halt 中 は auto-stall も停止。
+        # detect_auto_stalled_tasks 内部にも halt guard はあるが、
+        # 「server tick endpoint 側で halt なら全 autonomous activity を
+        # 止める」 という contract を一箇所で読み取れるよう、ここでも
+        # 明示的に skip する (= 多層 defence)。
+        if trek_mod.is_halted(trek_doc):
+            continue
         stalled = trek_scheduler_mod.detect_auto_stalled_tasks(
             trek_doc, now=now,
         )
@@ -6079,6 +6227,11 @@ def trek_scheduler_tick_endpoint(
         "auto_stalled": auto_stalled,
         "errors": errors,
         "quiesced": quiesced,
+        # ms-97 / e-2612 (AC32) — treks skipped because halt is set.
+        # Separate from ``quiesced`` (= terminal task-state aggregate)
+        # so observers can tell "leader pulled the cord" apart from
+        # "work is genuinely done".
+        "halted": halted,
     }
 
 

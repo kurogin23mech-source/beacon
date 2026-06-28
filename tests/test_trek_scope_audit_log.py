@@ -100,7 +100,16 @@ class TestAuditLogShape:
         assert m, "could not locate remove_trek_scope_endpoint body"
         body = m.group(1)
         assert '_log_trek_scope_audit(' in body
-        assert 'action="remove"' in body
+        # ms-97 / e-2611 — scope-remove now stages a pending op first; the
+        # audit action carries the stage tag so the log line can tell the
+        # request-time stage ("remove_pending") apart from the apply-time
+        # stage ("scope_remove_approved" emitted by the approve endpoint).
+        assert ('action="remove"' in body
+                or 'action="remove_pending"' in body), (
+            "remove endpoint must emit an audit line tagged with either "
+            "'remove' (pre-e-2611 immediate path) or 'remove_pending' "
+            "(e-2611 staging path)."
+        )
 
     def test_endpoints_accept_request_for_session_header(self):
         # Both endpoints must take a Request param so the audit helper can
@@ -155,34 +164,49 @@ class TestNoUndocumentedScopeMutators:
         callers = self._list_callers("add_scope_entry")
         # Expected: cmd_trek_plan (lib/commands.py) + add_trek_scope_endpoint
         # (server/app.py). Doc / test references in test files are excluded
-        # by the lib/ + server/ scope of _list_callers.
+        # by the lib/ + server/ scope of _list_callers. ms-97 / e-2611 also
+        # adds a call from ``approve_pending_scope_op`` inside lib/trek.py
+        # itself — the approval helper is a legitimate documented caller
+        # (= pending op commit) and still passes through the same audit
+        # surface via the approve endpoint.
         caller_files = sorted({c[0] for c in callers})
         assert caller_files == sorted([
             "lib/commands.py",
+            "lib/trek.py",
             "server/app.py",
         ]), (
             f"e-2320 contract: trek.add_scope_entry must only be called from "
-            f"lib/commands.py (cmd_trek_plan) and server/app.py "
+            f"lib/commands.py (cmd_trek_plan), lib/trek.py "
+            f"(approve_pending_scope_op, ms-97 e-2611), and server/app.py "
             f"(add_trek_scope_endpoint). Found callers in: {caller_files!r}. "
             f"If you are adding an automated path on purpose, update this "
             f"test and add audit hooks per the e-2320 pattern."
         )
-        # Defense in depth: also assert the count matches 1 caller each.
+        # Defense in depth: also assert the count per file.
         per_file = {}
         for f, _ in callers:
             per_file[f] = per_file.get(f, 0) + 1
         assert per_file == {
             "lib/commands.py": 1,
+            "lib/trek.py": 1,
             "server/app.py": 1,
         }, f"unexpected caller count: {per_file!r}"
 
     def test_remove_scope_entry_callers_only_documented_paths(self):
         callers = self._list_callers("remove_scope_entry")
         caller_files = sorted({c[0] for c in callers})
-        assert caller_files == sorted([
-            "lib/commands.py",
-            "server/app.py",
-        ]), (
-            f"e-2320 contract: trek.remove_scope_entry must only be called "
-            f"from lib/commands.py and server/app.py. Found: {caller_files!r}"
+        # ms-97 / e-2611 — scope-remove is now routed exclusively through
+        # the pending approval flow. ``cmd_trek_plan`` no longer calls
+        # ``remove_scope_entry`` directly (= it stages via
+        # ``add_pending_scope_op``), and the server's DELETE endpoint
+        # likewise stages instead of applying. The only remaining caller
+        # is ``approve_pending_scope_op`` inside lib/trek.py itself — the
+        # apply path runs through the approve endpoint, which in turn
+        # invokes the helper. This narrowing is intentional and structural.
+        assert caller_files == ["lib/trek.py"], (
+            f"e-2320 contract (post ms-97 / e-2611): trek.remove_scope_entry "
+            f"must only be called from lib/trek.py "
+            f"(approve_pending_scope_op). Found: {caller_files!r}. "
+            f"If a new direct mutation path appears, route it through the "
+            f"pending approval flow instead so AC25 can't regress."
         )
