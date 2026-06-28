@@ -1378,7 +1378,10 @@ def backfill_session_history(trek_doc: dict) -> int:
     return added
 
 
-def normalize_scope_entry(entry: dict, *, strict: bool = True) -> dict:
+def normalize_scope_entry(
+    entry: dict, *, strict: bool = True, resolve: bool = False,
+    db_or_lister=None,
+) -> dict:
     """Normalise a scope item.
 
     A scope entry MUST include ``project`` (= project_id) and MAY include
@@ -1404,10 +1407,28 @@ def normalize_scope_entry(entry: dict, *, strict: bool = True) -> dict:
     The split is the structural guarantee for AC7 + AC8: new project-wide
     additions are physically impossible to land via the strict path, while
     existing on-disk project-wide entries remain readable.
+
+    ms-97 / e-2694 dogfood fix: ``resolve=True`` (default False) runs the
+    project ref through :func:`lib.project_ref.resolve_project_ref` so
+    short names (= ``life-plan-simulator``) are expanded to canonical
+    suffix'd ids (= ``life-plan-simulator-68c5df``) at the boundary.
+    Existing tests default to ``resolve=False`` so the pure normalisation
+    shape is unchanged; CLI / server entry points opt in.
     """
     if not entry.get("project"):
         raise ValueError("scope entry missing required 'project' field")
-    out: dict = {"project": entry["project"]}
+    project_ref = entry["project"]
+    if resolve:
+        # Lazy import: project_ref isn't required for the strict-mode
+        # contract — only the resolve=True opt-in path needs it. Keeping
+        # the import here means base trek.py callers don't pay the
+        # import cost.
+        try:
+            from project_ref import resolve_project_ref as _resolve
+        except ImportError:
+            from lib.project_ref import resolve_project_ref as _resolve
+        project_ref = _resolve(project_ref, db_or_lister=db_or_lister)
+    out: dict = {"project": project_ref}
     for k in ("milestone", "operation", "task"):
         if entry.get(k):
             out[k] = entry[k]
