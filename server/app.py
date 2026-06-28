@@ -5886,6 +5886,52 @@ def trek_scheduler_tick_endpoint(
                     "user_id": uid,
                     "home_project_id": project_pid,
                 }
+        # ms-97 / e-2658 — Migration safety 機構 #5: 不整合 alarming.
+        # Phase A+ trek (= members[] が session_id keyed に書き換わった後)
+        # に限り、 各 member.session_id が scope projects の session
+        # registry に居るかを check し、 居なければ warning log を出して
+        # leader-digest payload に ``alarm`` field を載せる。 Phase pre-A
+        # trek (= 旧 user_id keyed legacy) は session_id field を持たない
+        # ので skip する (= alarming 対象外、 構造的 no-op)。
+        member_session_alarm: list[str] = []
+        try:
+            current_phase = trek_mod.get_migration_phase(trek_doc)
+        except Exception:
+            current_phase = "pre-A"
+        if current_phase in ("A", "B", "C"):
+            # Build the union of session_ids known across all scope
+            # projects (= NOT filtered by live cutoff or user_id; the
+            # alarm fires when a stamped member session has *vanished*
+            # entirely, not when it's merely offline).
+            all_known_sids: set[str] = set()
+            for project_pid in scope_project_ids:
+                try:
+                    for s in db.list_sessions(project_pid):
+                        sid = s.get("session_id") or ""
+                        if sid:
+                            all_known_sids.add(sid)
+                except Exception:
+                    # Best-effort: per-project listing failure must not
+                    # break the tick. Missing project just contributes
+                    # zero known sids, which over-reports alarms — that
+                    # is the safer direction (= surface, don't hide).
+                    continue
+            for m in trek_doc.get("members") or []:
+                msid = m.get("session_id") or ""
+                if not msid:
+                    continue
+                if msid not in all_known_sids:
+                    member_session_alarm.append(msid)
+            if member_session_alarm:
+                # Structured warning into stderr → captured by Cloud Run
+                # logs and by local-mode dev server output. Includes
+                # trek_id so the log line is greppable.
+                print(
+                    f"warn[ms-97 e-2658]: trek {trek_id} has member "
+                    f"sessions absent from session registry: "
+                    f"{member_session_alarm}",
+                    file=sys.stderr,
+                )
         # ms-88 / e-2109 + ms-97 / e-2613 (AC33) — per-executor lazy
         # start. The leader role is structurally excluded from progress-
         # check (= CORE doc trek-leader-stance / e-2166: leader's role
@@ -6157,6 +6203,17 @@ def trek_scheduler_tick_endpoint(
                 digest_payload["recipient_session_id"] = lsid
                 digest_payload["sender_type"] = "trek-scheduler"
                 digest_payload["origin_channel"] = "trek-leader-digest"
+                # ms-97 / e-2658 — surface missing member sessions to
+                # the leader so a vanished session can be triaged from
+                # the digest UI without crawling logs. Phase pre-A trek
+                # never sets this (= alarming gated by migration_phase
+                # above), so legacy treks read the field as empty.
+                if member_session_alarm:
+                    digest_payload["alarm"] = {
+                        "missing_member_sessions": list(
+                            member_session_alarm
+                        ),
+                    }
                 digest_bus_data = {
                     "channel": "dm",
                     "sender_session_id": "",
