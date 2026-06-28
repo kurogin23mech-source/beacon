@@ -230,6 +230,93 @@ def test_shared_trek_lookup_detects_receiver_as_creator():
     assert lookup("user-alice", "user-bob") is True
 
 
+def test_shared_trek_lookup_skips_halted_trek():
+    """ms-97 / e-2612 (AC32) — halted treks must not grant DM bypass.
+
+    Leader pulled the Andon cord → autonomous cross-user action exchange
+    must fall back to the normal cross-user gate. Even if sender +
+    receiver share the trek's members[], the halt flag suspends the
+    bypass for the duration of the halt.
+    """
+    treks_by_uid = {
+        "user-alice": [
+            {
+                "trek_id": "tk-halted",
+                "creator_actor": {"user_id": "user-alice"},
+                "members": [
+                    {"user_id": "user-alice", "role": "leader"},
+                    {"user_id": "user-bob", "role": "member"},
+                ],
+                "halt": {"issued_by_session_id": "sv-alice"},
+                "status": "active",
+            }
+        ],
+    }
+    lookup = dm_gate.build_shared_trek_lookup_from_lists(
+        lambda uid: treks_by_uid.get(uid, [])
+    )
+    # Halt set → no bypass even though both users are in members[].
+    assert lookup("user-alice", "user-bob") is False
+
+
+def test_shared_trek_lookup_skips_archived_trek():
+    """Archived treks no longer grant DM bypass (defence in depth alongside
+    AC32 halt skip). Caller-side filter already hides archived by default
+    but the lookup itself must not depend on the filter being applied."""
+    treks_by_uid = {
+        "user-alice": [
+            {
+                "trek_id": "tk-archived",
+                "creator_actor": {"user_id": "user-alice"},
+                "members": [
+                    {"user_id": "user-alice"},
+                    {"user_id": "user-bob"},
+                ],
+                "status": "archived",
+            }
+        ],
+    }
+    lookup = dm_gate.build_shared_trek_lookup_from_lists(
+        lambda uid: treks_by_uid.get(uid, [])
+    )
+    assert lookup("user-alice", "user-bob") is False
+
+
+def test_shared_trek_lookup_multi_trek_only_one_active_still_grants_bypass():
+    """ms-97 / e-2612 (AC32) — if the user shares multiple treks and at
+    least one is non-halted + non-archived, bypass still applies. Halt
+    only suspends bypass for the specific halted trek, not blanket.
+    """
+    treks_by_uid = {
+        "user-alice": [
+            {
+                "trek_id": "tk-halted",
+                "creator_actor": {"user_id": "user-alice"},
+                "members": [
+                    {"user_id": "user-alice"},
+                    {"user_id": "user-bob"},
+                ],
+                "halt": {"issued_by_session_id": "sv-alice"},
+                "status": "active",
+            },
+            {
+                "trek_id": "tk-active",
+                "creator_actor": {"user_id": "user-alice"},
+                "members": [
+                    {"user_id": "user-alice"},
+                    {"user_id": "user-bob"},
+                ],
+                "status": "active",
+            },
+        ],
+    }
+    lookup = dm_gate.build_shared_trek_lookup_from_lists(
+        lambda uid: treks_by_uid.get(uid, [])
+    )
+    # tk-active grants bypass despite tk-halted being halted.
+    assert lookup("user-alice", "user-bob") is True
+
+
 def test_shared_trek_lookup_empty_user_ids_return_false():
     """Blank sender or receiver → cannot be in any shared Trek.
 

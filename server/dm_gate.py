@@ -184,6 +184,19 @@ def build_shared_trek_lookup_from_lists(
             return False
         treks = list_treks_for_user(sender_uid) or []
         for t in treks:
+            # ms-97 / e-2612 (AC32) — halt 中の trek は DM bypass の根拠に
+            # ならない。 leader が Andon cord を引いた状態で「同じ Trek の
+            # 仲間だから」 と autonomous cross-user action DM を通すのは
+            # halt の意図と矛盾する。 該当 trek は跨ぐが他に halt 無しの
+            # 共有 trek があればそちらで bypass 成立、 共有 trek が halt
+            # しかなければ通常の cross-user budget gate に fallback する。
+            if t.get("halt"):
+                continue
+            # archived trek も bypass 根拠に使わない (= 終わった作業領域
+            # は AI action 同意の根拠にならない)。 ms-70 originally caller-
+            # side filter に任せていたが、 halt と同列に明示する。
+            if (t.get("status") or "") == "archived":
+                continue
             if (t.get("creator_actor") or {}).get("user_id") == receiver_uid:
                 return True
             for m in (t.get("members") or []):

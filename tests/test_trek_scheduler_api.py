@@ -1218,3 +1218,130 @@ def test_fanout_leader_excluded_even_with_no_claims():
     # 全 live session が leader (= 除外) → broadcast fallback (空 recipient) のみ
     assert len(progress_events) == 1
     assert progress_events[0]["payload"].get("recipient_session_id", "") == ""
+
+
+# ---------------------------------------------------------------------------
+# ms-97 / e-2612 (AC32) — Halt 中の tick fire 全停止
+# ---------------------------------------------------------------------------
+
+
+def _seed_halted_trek(trek_id: str, *,
+                      scope: list[dict] | None = None) -> dict:
+    """Helper: a due trek with halt set."""
+    t = _seed_trek(
+        trek_id=trek_id,
+        status="active",
+        cadence=10,
+        scope=scope or [{"project": "beacon-test", "milestone": "ms-97"}],
+    )
+    _treks[trek_id]["halt"] = {
+        "issued_at": "2026-06-28T00:00:00.000000Z",
+        "issued_by_session_id": "sv-leader",
+        "reason": "AC32 dogfood",
+    }
+    return t
+
+
+def test_halt_skips_executor_progress_check_fire():
+    """AC32: halt 中の trek は executor tick (= trek-progress-check) を
+    打たない。 candidate / due には残るが、 fired / events は空。
+    """
+    _seed_halted_trek("tk-halt-exec")
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-halt-exec"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # candidate / due には残る (= halt は status を変えない)、 fired 0、
+    # halted リストに 1 件。
+    assert body["candidates"] == 1
+    assert body["fired"] == []
+    assert any(h["trek_id"] == "tk-halt-exec" for h in body["halted"])
+    # Bus events も書かれない。
+    events = _bus_events_by_project.get("beacon-test", [])
+    progress_events = [
+        e for e in events if e["channel"] == "trek-progress-check"
+    ]
+    assert progress_events == []
+
+
+def test_halt_skips_leader_digest_fanout():
+    """AC32: halt 中は leader-digest channel も書かれない。"""
+    _seed_halted_trek("tk-halt-digest")
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-leader",
+        session_ids=["sv-leader"],
+    )
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-halt-digest"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    events = _bus_events_by_project.get("beacon-test", [])
+    digest_events = [
+        e for e in events if e["channel"] == "trek-leader-digest"
+    ]
+    assert digest_events == [], (
+        "AC32: leader-digest must not fire while halt is set"
+    )
+
+
+def test_halt_skips_idle_escalation():
+    """AC32: halt 中は idle escalation (= notify channel) も発火しない。
+    Halt は autonomous activity 全体の pause なので、 idle 検出による
+    user 通知も leader が cord を引いた間は止まる。 Resume 後に再度
+    idle 判定 → escalate という流れに戻す。
+    """
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    # Idle 判定が走るように last_session_response_at を古く設定。
+    very_stale = (now - datetime.timedelta(hours=2)).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    _seed_halted_trek("tk-halt-idle")
+    _treks["tk-halt-idle"]["meta"]["last_session_response_at"] = very_stale
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-halt-idle"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["escalations"] == [], (
+        "AC32: idle escalation must not fire while halt is set"
+    )
+    events = _bus_events_by_project.get("beacon-test", [])
+    notify_events = [e for e in events if e["channel"] == "notify"]
+    assert notify_events == []
+
+
+def test_resume_clears_halt_and_tick_fires_again():
+    """AC32 補完: halt クリア後 (= clear_halt) は次 tick で発火復帰する。
+    Resume 後に「再度 trek-progress-check が動く」 ことを確認する。
+    """
+    _seed_halted_trek("tk-halt-resume")
+    # First tick: halted, no fire.
+    r1 = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-halt-resume"]},
+        headers=HEADERS_OK,
+    )
+    assert r1.status_code == 200
+    assert r1.json()["fired"] == []
+    # Clear halt (= simulate beacon trek resume).
+    _treks["tk-halt-resume"]["halt"] = None
+    # Second tick should fire normally.
+    r2 = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-halt-resume"]},
+        headers=HEADERS_OK,
+    )
+    assert r2.status_code == 200
+    body = r2.json()
+    assert len(body["fired"]) == 1
+    assert body["fired"][0]["trek_id"] == "tk-halt-resume"
+    assert body["halted"] == []

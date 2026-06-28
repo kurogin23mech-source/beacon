@@ -1891,6 +1891,28 @@ def list_pending_scope_ops(trek_doc: dict) -> list[dict]:
 # lands in e-1656 with proper auth.
 # ---------------------------------------------------------------------------
 
+def is_halted(trek_doc: dict) -> bool:
+    """Return True if the trek currently carries an active halt signal.
+
+    ms-97 / e-2612 (AC32) — Halt is the Andon cord: while set, server-side
+    tick fire (= executor progress-check, leader digest, auto-succession)
+    must stop entirely, and DM bypass (= shared_trek_member rule in
+    ``dm_gate.should_gate_dm_action``) is also suspended so cross-user
+    DMs fall back to the normal budget gate.
+
+    ``halt`` is set via ``set_halt`` (= dict) and cleared via
+    ``clear_halt`` (= None). Treat ``None`` / missing / empty-dict as
+    "not halted" so legacy trek docs (= pre-halt schema) read as
+    not-halted by default.
+    """
+    halt = trek_doc.get("halt")
+    if not halt:
+        return False
+    if isinstance(halt, dict) and not halt:
+        return False
+    return True
+
+
 def set_halt(trek_doc: dict, *,
              issued_by_session_id: str, reason: str = "") -> dict:
     """Engage the Andon cord. Raises if trek is not currently ``active``.

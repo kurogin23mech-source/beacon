@@ -5665,6 +5665,20 @@ def trek_scheduler_tick_endpoint(
                            if t.get("trek_id") in wanted]
     candidate_treks = [t for t in candidate_treks
                        if t.get("status") == "active"]
+    # ms-97 / e-2612 (AC32) — explicit halt accounting. ``is_trek_due``
+    # already filters halted treks out of the due set (= the cadence
+    # decision returns False when halt is set, see lib.trek_scheduler),
+    # but the response payload needs to surface the skip so observers
+    # and tests can tell "skipped because halted" apart from "cadence
+    # not elapsed". Collect halted IDs from the candidate set before
+    # select_due_treks drops them silently.
+    halted: list[dict] = []
+    for t in candidate_treks:
+        if trek_mod.is_halted(t):
+            halted.append({
+                "trek_id": t.get("trek_id", ""),
+                "reason": "halted",
+            })
     due_treks = trek_scheduler_mod.select_due_treks(
         candidate_treks, now=now,
     )
@@ -5682,6 +5696,14 @@ def trek_scheduler_tick_endpoint(
     quiesced: list[dict] = []
     for trek_doc in due_treks:
         trek_id = trek_doc.get("trek_id", "")
+        # ms-97 / e-2612 (AC32) — Defense-in-depth halt skip. The cadence
+        # decision (``is_trek_due`` in lib.trek_scheduler) already filters
+        # halted treks out of ``due_treks``, so this branch should never
+        # actually execute. Keep it as a structural guarantee so a future
+        # cadence-decision change can't silently re-introduce tick fires
+        # on halted treks.
+        if trek_mod.is_halted(trek_doc):
+            continue
         # ms-75 / e-2048 — Trek task state machine integration. When every
         # task that an executor has stamped state for has reached terminal
         # (= done or waiting-review), the scheduler goes silent for this
@@ -5999,6 +6021,12 @@ def trek_scheduler_tick_endpoint(
         trek_id = trek_doc.get("trek_id", "")
         if trek_id not in idle_trek_ids:
             continue
+        # ms-97 / e-2612 (AC32) — halt 中 は idle escalation も停止。
+        # 「leader が pause した状態で自律 escalation が走る」 のは
+        # halt の意図 (= 全 autonomous activity の一時停止) に反する。
+        # Resume 後の次 tick で再度 idle 判定 → 必要なら escalate。
+        if trek_mod.is_halted(trek_doc):
+            continue
         # Re-read the trek so the cadence-pass save lands in our
         # working copy (= last_idle_escalation_at sits next to the
         # freshly-stamped last_progress_check_at).
@@ -6076,6 +6104,13 @@ def trek_scheduler_tick_endpoint(
         fresh = db.get_trek(trek_id)
         if fresh is not None:
             trek_doc = fresh
+        # ms-97 / e-2612 (AC32) — halt 中 は auto-stall も停止。
+        # detect_auto_stalled_tasks 内部にも halt guard はあるが、
+        # 「server tick endpoint 側で halt なら全 autonomous activity を
+        # 止める」 という contract を一箇所で読み取れるよう、ここでも
+        # 明示的に skip する (= 多層 defence)。
+        if trek_mod.is_halted(trek_doc):
+            continue
         stalled = trek_scheduler_mod.detect_auto_stalled_tasks(
             trek_doc, now=now,
         )
@@ -6180,6 +6215,11 @@ def trek_scheduler_tick_endpoint(
         "auto_stalled": auto_stalled,
         "errors": errors,
         "quiesced": quiesced,
+        # ms-97 / e-2612 (AC32) — treks skipped because halt is set.
+        # Separate from ``quiesced`` (= terminal task-state aggregate)
+        # so observers can tell "leader pulled the cord" apart from
+        # "work is genuinely done".
+        "halted": halted,
     }
 
 
