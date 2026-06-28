@@ -144,7 +144,13 @@ def reset_store():
 
 def _create_trek_with_member_and_scope() -> str:
     """Create a trek with LEADER + joined MEMBER + 3 scope entries (mixed
-    project / milestone / operation / task refs), then start it."""
+    project / milestone / operation / task refs), then start it.
+
+    ms-97 / e-2626 — scope-add now stages a pending op (AC23); each PUT
+    must be followed by an approve POST to actually commit the entry
+    into ``scope[]``. The contract under test (= ``scope[*]`` shape on
+    GET /api/treks/{id}) is unchanged; only the setup steps grew.
+    """
     _impersonate(LEADER_UID)
     r = client.post("/api/treks", json={
         "title": "Contract pin trek",
@@ -156,13 +162,16 @@ def _create_trek_with_member_and_scope() -> str:
     _impersonate(MEMBER_UID)
     client.post(f"/api/treks/{trek_id}/members/join")
     _impersonate(LEADER_UID)
-    # 3 cross-project scope entries
-    client.put(f"/api/treks/{trek_id}/scope",
-               json={"project": "beacon", "milestone": "ms-69"})
-    client.put(f"/api/treks/{trek_id}/scope",
-               json={"project": "pe", "operation": "op-12"})
-    client.put(f"/api/treks/{trek_id}/scope",
-               json={"project": "lps", "task": "e-1234"})
+    # 3 cross-project scope entries — each PUT stages a pending op, then
+    # we approve to commit (= e-2626 staging flow).
+    for entry in (
+        {"project": "beacon", "milestone": "ms-69"},
+        {"project": "pe", "operation": "op-12"},
+        {"project": "lps", "task": "e-1234"},
+    ):
+        r = client.put(f"/api/treks/{trek_id}/scope", json=entry)
+        pid = r.json()["pending_op"]["pending_id"]
+        client.post(f"/api/treks/{trek_id}/scope/approve/{pid}")
     # start
     client.post(f"/api/treks/{trek_id}/start")
     return trek_id
@@ -281,9 +290,12 @@ class TestContract_ScopeList:
     def test_project_only_scope_entry(self):
         trek_id = _create_trek_with_member_and_scope()
         _impersonate(LEADER_UID)
-        # Add a project-only scope entry (no narrowing).
-        client.put(f"/api/treks/{trek_id}/scope",
-                   json={"project": "trailnode"})
+        # Add a project-only scope entry (no narrowing). ms-97 / e-2626:
+        # stage + approve to actually commit (= AC23 staging flow).
+        r = client.put(f"/api/treks/{trek_id}/scope",
+                       json={"project": "trailnode"})
+        pid = r.json()["pending_op"]["pending_id"]
+        client.post(f"/api/treks/{trek_id}/scope/approve/{pid}")
         body = client.get(f"/api/treks/{trek_id}").json()
         project_only = [e for e in body["scope"]
                         if "milestone" not in e and "operation" not in e

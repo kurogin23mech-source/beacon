@@ -1,17 +1,20 @@
-"""ms-97 / e-2611 (AC25) — scope-remove approval flow.
+"""ms-97 / e-2611 + e-2626 — scope-add / scope-remove approval flow.
 
-Pre-e-2611 scope-remove mutated the trek's ``scope[]`` immediately. AC25
-now requires that both scope-add (= AC23, separate task) and scope-remove
-go through a ``pending_user_approval`` state, with explicit
+Pre-e-2611 / e-2626 scope-add and scope-remove mutated the trek's
+``scope[]`` immediately. AC23 (= scope-add, e-2626) and AC25
+(= scope-remove, e-2611) now both require that the mutation go through
+a ``pending_user_approval`` state, with explicit
 ``beacon trek scope-approve <pending_id>`` to commit.
 
 This file pins:
 
   (a) Lib-level pending op helpers (= ``add_pending_scope_op``,
       ``approve_pending_scope_op``, ``reject_pending_scope_op``,
-      ``find_pending_scope_op``, ``list_pending_scope_ops``).
-  (b) Server-side flow: DELETE /api/treks/{id}/scope returns a pending
-      record + does NOT mutate scope[] yet; approve endpoint flushes
+      ``find_pending_scope_op``, ``list_pending_scope_ops``) for both
+      ``scope_add`` and ``scope_remove`` actions.
+  (b) Server-side flow: PUT /api/treks/{id}/scope (add) and
+      DELETE /api/treks/{id}/scope (remove) both return a pending
+      record + do NOT mutate scope[] yet; approve endpoint flushes
       the pending into scope[]; reject endpoint drops it without
       mutating scope.
 
@@ -164,6 +167,119 @@ class TestPendingScopeOpHelpers:
         # list_ should return a shallow copy so callers can't mutate state.
         all_listed.clear()
         assert len(trek_mod.list_pending_scope_ops(t)) == 2
+
+    # -----------------------------------------------------------------
+    # ms-97 / e-2626 (AC23) — scope_add helper cases (mirror of remove).
+    # -----------------------------------------------------------------
+
+    def test_add_pending_scope_op_add_records_entry(self):
+        t = self._make_trek()
+        rec = trek_mod.add_pending_scope_op(
+            t,
+            action=trek_mod.PENDING_SCOPE_ACTION_ADD,
+            entry={"project": "p3", "milestone": "ms-9"},
+            requested_by_session_id="sv-xyz",
+        )
+        assert rec["pending_id"].startswith("sp-")
+        assert rec["action"] == "scope_add"
+        assert rec["entry"] == {"project": "p3", "milestone": "ms-9"}
+        assert rec["requested_by_session_id"] == "sv-xyz"
+        # Scope itself is NOT mutated yet (= AC23 staging).
+        assert len(t["scope"]) == 2
+        # Pending list now carries one record.
+        assert len(t["pending_scope_ops"]) == 1
+        assert t["pending_scope_ops"][0] == rec
+
+    def test_add_pending_scope_op_add_duplicate_rejects(self):
+        """ms-97 / e-2626 — duplicate-add 409 surfaces at stage-time.
+
+        Without the symmetric check, two pending-add records for the
+        same entry could pile up and the second approve would fail
+        opaquely at apply-time. Catching it at request-time keeps the
+        UX legible (= same 409 the immediate path used to return).
+        """
+        t = self._make_trek()
+        with pytest.raises(ValueError, match="already present"):
+            trek_mod.add_pending_scope_op(
+                t,
+                action=trek_mod.PENDING_SCOPE_ACTION_ADD,
+                entry={"project": "p1", "milestone": "ms-1"},
+            )
+        # No partial state on rejection.
+        assert t.get("pending_scope_ops") in (None, [])
+
+    def test_add_pending_scope_op_add_normalises_entry(self):
+        """Entry normalisation runs at stage-time (= same path as remove)."""
+        t = self._make_trek()
+        # ``parse_scope_arg`` is the documented input shape but tests
+        # exercise ``normalize_scope_entry`` via raw dict; verify the
+        # pending record carries the normalised entry, not the raw one.
+        rec = trek_mod.add_pending_scope_op(
+            t,
+            action=trek_mod.PENDING_SCOPE_ACTION_ADD,
+            entry={"project": "p4", "task": "e-77"},
+        )
+        # Normaliser keeps narrowing keys it understands.
+        assert rec["entry"] == {"project": "p4", "task": "e-77"}
+
+    def test_approve_pending_scope_op_add_commits(self):
+        t = self._make_trek()
+        rec = trek_mod.add_pending_scope_op(
+            t,
+            action=trek_mod.PENDING_SCOPE_ACTION_ADD,
+            entry={"project": "p3", "milestone": "ms-9"},
+        )
+        applied = trek_mod.approve_pending_scope_op(
+            t, pending_id=rec["pending_id"],
+        )
+        assert applied == {"project": "p3", "milestone": "ms-9"}
+        # Scope grew by 1 (= add is now committed).
+        assert {"project": "p3", "milestone": "ms-9"} in t["scope"]
+        assert len(t["scope"]) == 3
+        # Pending list empty.
+        assert t["pending_scope_ops"] == []
+
+    def test_reject_pending_scope_op_add_drops_without_apply(self):
+        t = self._make_trek()
+        rec = trek_mod.add_pending_scope_op(
+            t,
+            action=trek_mod.PENDING_SCOPE_ACTION_ADD,
+            entry={"project": "p3", "milestone": "ms-9"},
+        )
+        dropped = trek_mod.reject_pending_scope_op(
+            t, pending_id=rec["pending_id"],
+        )
+        # Scope unchanged (= reject = "no, drop this").
+        assert len(t["scope"]) == 2
+        # Pending dropped.
+        assert t["pending_scope_ops"] == []
+        assert dropped["pending_id"] == rec["pending_id"]
+        assert dropped["action"] == "scope_add"
+
+    def test_pending_add_and_remove_can_coexist(self):
+        """ms-97 / e-2626 — a pending add for entry X and a pending
+        remove for entry Y must coexist cleanly (= no interference).
+        """
+        t = self._make_trek()
+        add_rec = trek_mod.add_pending_scope_op(
+            t,
+            action=trek_mod.PENDING_SCOPE_ACTION_ADD,
+            entry={"project": "p3", "milestone": "ms-9"},
+        )
+        rem_rec = trek_mod.add_pending_scope_op(
+            t,
+            action=trek_mod.PENDING_SCOPE_ACTION_REMOVE,
+            entry={"project": "p1", "milestone": "ms-1"},
+        )
+        assert len(t["pending_scope_ops"]) == 2
+        # Approve add, then approve remove — final scope = p2 + p3.
+        trek_mod.approve_pending_scope_op(t, pending_id=add_rec["pending_id"])
+        trek_mod.approve_pending_scope_op(t, pending_id=rem_rec["pending_id"])
+        assert t["scope"] == [
+            {"project": "p2", "operation": "op-2"},
+            {"project": "p3", "milestone": "ms-9"},
+        ]
+        assert t["pending_scope_ops"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -343,4 +459,100 @@ class TestScopeRemovePendingEndpoint:
             {"project": "p2", "operation": "op-2"},
         ]
         # Pending dropped.
+        assert body.get("pending_scope_ops") == []
+
+
+# ---------------------------------------------------------------------------
+# ms-97 / e-2626 (AC23) — scope-add pending endpoint integration
+# ---------------------------------------------------------------------------
+
+class TestScopeAddPendingEndpoint:
+    """Mirror of ``TestScopeRemovePendingEndpoint`` for the PUT path.
+
+    AC23 requires that the scope-add HTTP call (= PUT
+    ``/api/treks/{id}/scope``) stage a pending op instead of mutating
+    ``scope[]`` immediately. The same approve / reject endpoints already
+    handle both ``scope_add`` and ``scope_remove`` actions (= dispatched
+    by ``rec.action``), so this class only checks the request-time
+    staging behaviour and verifies approve / reject reach the add path.
+    """
+
+    def test_put_scope_stages_pending_does_not_mutate_scope(self):
+        _seed_trek_with_scope()
+        resp = client.put(
+            "/api/treks/tk-pend0001/scope",
+            json={"project": "p3", "milestone": "ms-9"},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        # The endpoint returns the trek doc plus the new pending record.
+        assert "pending_op" in body
+        po = body["pending_op"]
+        assert po["action"] == "scope_add"
+        assert po["entry"] == {"project": "p3", "milestone": "ms-9"}
+        assert po["pending_id"].startswith("sp-")
+        # Scope unchanged on stage (= AC23 contract: no commit without
+        # explicit user approve).
+        saved = _treks["tk-pend0001"]
+        assert saved["scope"] == [
+            {"project": "p1", "milestone": "ms-1"},
+            {"project": "p2", "operation": "op-2"},
+        ]
+        # Pending list now has 1 entry on the saved doc.
+        assert len(saved.get("pending_scope_ops") or []) == 1
+
+    def test_put_duplicate_scope_entry_returns_409_no_pending_left(self):
+        """Duplicate-add surfaces a 409 at stage-time (= e-2626).
+
+        Pre-e-2626 the immediate add also returned 409 on duplicates;
+        the staging path preserves the same contract so callers do not
+        have to learn a new failure mode.
+        """
+        _seed_trek_with_scope()
+        resp = client.put(
+            "/api/treks/tk-pend0001/scope",
+            json={"project": "p1", "milestone": "ms-1"},
+        )
+        assert resp.status_code == 409
+        saved = _treks["tk-pend0001"]
+        assert not saved.get("pending_scope_ops")
+
+    def test_approve_endpoint_flushes_pending_add_into_scope(self):
+        _seed_trek_with_scope()
+        # Stage first.
+        r1 = client.put(
+            "/api/treks/tk-pend0001/scope",
+            json={"project": "p3", "milestone": "ms-9"},
+        )
+        assert r1.status_code == 200, r1.text
+        pid = r1.json()["pending_op"]["pending_id"]
+        # Approve.
+        r2 = client.post(
+            f"/api/treks/tk-pend0001/scope/approve/{pid}",
+        )
+        assert r2.status_code == 200, r2.text
+        body = r2.json()
+        assert {"project": "p3", "milestone": "ms-9"} in body["scope"]
+        assert len(body["scope"]) == 3
+        assert body.get("pending_scope_ops") == []
+
+    def test_reject_endpoint_drops_pending_add_without_mutating_scope(self):
+        _seed_trek_with_scope()
+        r1 = client.put(
+            "/api/treks/tk-pend0001/scope",
+            json={"project": "p3", "milestone": "ms-9"},
+        )
+        assert r1.status_code == 200, r1.text
+        pid = r1.json()["pending_op"]["pending_id"]
+        # Reject.
+        r2 = client.post(
+            f"/api/treks/tk-pend0001/scope/reject/{pid}",
+        )
+        assert r2.status_code == 200, r2.text
+        body = r2.json()
+        # Scope unchanged (= add was never applied).
+        assert body["scope"] == [
+            {"project": "p1", "milestone": "ms-1"},
+            {"project": "p2", "operation": "op-2"},
+        ]
         assert body.get("pending_scope_ops") == []

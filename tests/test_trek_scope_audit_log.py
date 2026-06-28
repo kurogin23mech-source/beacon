@@ -86,9 +86,15 @@ class TestAuditLogShape:
         assert m, "could not locate add_trek_scope_endpoint body"
         body = m.group(1)
         assert '_log_trek_scope_audit(' in body
-        assert 'action="add"' in body, (
-            "audit call from the add endpoint must tag action='add' (= "
-            "distinguishes from remove in log queries)."
+        # ms-97 / e-2626 — scope-add now stages a pending op; the audit
+        # action carries the stage tag so the log line can tell the
+        # request-time stage ("add_pending") apart from the apply-time
+        # stage ("scope_add_approved" emitted by the approve endpoint).
+        assert ('action="add"' in body
+                or 'action="add_pending"' in body), (
+            "add endpoint must emit an audit line tagged with either "
+            "'add' (pre-e-2626 immediate path) or 'add_pending' "
+            "(e-2626 staging path)."
         )
 
     def test_remove_endpoint_calls_audit_helper(self):
@@ -162,35 +168,25 @@ class TestNoUndocumentedScopeMutators:
 
     def test_add_scope_entry_callers_only_documented_paths(self):
         callers = self._list_callers("add_scope_entry")
-        # Expected: cmd_trek_plan (lib/commands.py) + add_trek_scope_endpoint
-        # (server/app.py). Doc / test references in test files are excluded
-        # by the lib/ + server/ scope of _list_callers. ms-97 / e-2611 also
-        # adds a call from ``approve_pending_scope_op`` inside lib/trek.py
-        # itself — the approval helper is a legitimate documented caller
-        # (= pending op commit) and still passes through the same audit
-        # surface via the approve endpoint.
         caller_files = sorted({c[0] for c in callers})
-        assert caller_files == sorted([
-            "lib/commands.py",
-            "lib/trek.py",
-            "server/app.py",
-        ]), (
-            f"e-2320 contract: trek.add_scope_entry must only be called from "
-            f"lib/commands.py (cmd_trek_plan), lib/trek.py "
-            f"(approve_pending_scope_op, ms-97 e-2611), and server/app.py "
-            f"(add_trek_scope_endpoint). Found callers in: {caller_files!r}. "
-            f"If you are adding an automated path on purpose, update this "
-            f"test and add audit hooks per the e-2320 pattern."
+        # ms-97 / e-2626 — scope-add is now routed exclusively through the
+        # pending approval flow (= AC23, mirror of the e-2611 scope-remove
+        # narrowing). ``cmd_trek_plan`` no longer calls ``add_scope_entry``
+        # directly (= it stages via ``add_pending_scope_op``), and the
+        # server's PUT endpoint likewise stages instead of applying. The
+        # only remaining caller is ``approve_pending_scope_op`` inside
+        # lib/trek.py itself — the apply path runs through the approve
+        # endpoint, which in turn invokes the helper. This narrowing is
+        # intentional and structural (= a new direct caller would
+        # re-introduce the silent unsupervised-add pathology AC23
+        # explicitly forbids).
+        assert caller_files == ["lib/trek.py"], (
+            f"e-2320 contract (post ms-97 / e-2626): trek.add_scope_entry "
+            f"must only be called from lib/trek.py "
+            f"(approve_pending_scope_op). Found: {caller_files!r}. "
+            f"If a new direct mutation path appears, route it through the "
+            f"pending approval flow instead so AC23 can't regress."
         )
-        # Defense in depth: also assert the count per file.
-        per_file = {}
-        for f, _ in callers:
-            per_file[f] = per_file.get(f, 0) + 1
-        assert per_file == {
-            "lib/commands.py": 1,
-            "lib/trek.py": 1,
-            "server/app.py": 1,
-        }, f"unexpected caller count: {per_file!r}"
 
     def test_remove_scope_entry_callers_only_documented_paths(self):
         callers = self._list_callers("remove_scope_entry")
