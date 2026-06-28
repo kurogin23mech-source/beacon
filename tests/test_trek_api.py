@@ -1026,3 +1026,80 @@ class TestTrekReconcileEndpoint:
             json={"apply": False},
         )
         assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# ms-97 Phase 4 / AC13 — leader hard-check (session_id grain)
+# ---------------------------------------------------------------------------
+
+class TestLeaderSessionHardCheck:
+    """AC13: leader-only endpoints require BOTH role and session_id grain.
+
+    pre-Phase-4 the role check passed for any session of the leader
+    user; that left "second terminal of the leader user" able to
+    mutate trek-level state without being the live leader session.
+    Phase 4 closes the gap by hard-checking
+    ``X-Beacon-Session == trek.leader_session_id`` on phase A+ trek.
+
+    Pre-A invariance: the check degrades to role-only.
+    """
+
+    def _seed_phase_a_trek(self) -> str:
+        """Trek with migration_phase=A, leader_session_id=sv-leader, member sv-member."""
+        trek_id = _create_seed_trek()
+        t = _treks[trek_id]
+        # Stamp phase A so is_session_id_keyed returns True.
+        meta = t.setdefault("meta", {})
+        meta["migration_phase"] = "A"
+        # Attach session_id to existing members[] entries so the
+        # session-grain role check resolves correctly.
+        for m in t.get("members") or []:
+            if m.get("user_id") == LEADER_UID:
+                m["session_id"] = "sv-leader"
+            elif m.get("user_id") == MEMBER_UID:
+                m["session_id"] = "sv-member"
+        return trek_id
+
+    def test_leader_session_can_update(self):
+        """AC13 positive path — leader's stamped session can patch."""
+        trek_id = self._seed_phase_a_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.patch(
+            f"/api/treks/{trek_id}", json={"title": "Renamed"},
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r.status_code == 200, r.text
+
+    def test_other_session_of_leader_user_blocked_on_update(self):
+        """AC13 hard-check: leader user but wrong session_id → 403."""
+        trek_id = self._seed_phase_a_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.patch(
+            f"/api/treks/{trek_id}", json={"title": "x"},
+            headers={"X-Beacon-Session": "sv-leader-second-terminal"},
+        )
+        # Role check passes (= leader user), session check rejects.
+        # NOTE: the session-grain role check also resolves to "" for
+        # an unknown session_id under phase A+, so this can come back
+        # as "Trek leader role required" rather than the AC13 detail.
+        # Either way it's a 403.
+        assert r.status_code == 403
+
+    def test_leader_session_can_archive(self):
+        """Archive endpoint also gated by AC13 hard-check."""
+        trek_id = self._seed_phase_a_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.delete(
+            f"/api/treks/{trek_id}",
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r.status_code == 200, r.text
+
+    def test_pre_a_trek_invariance_no_session_header(self):
+        """Pre-A trek + no session header → degrades to role-only check (legacy)."""
+        # Default seed is pre-A (no migration_phase stamp).
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        # No X-Beacon-Session header → role-only check applies.
+        r = client.patch(f"/api/treks/{trek_id}", json={"title": "Renamed"})
+        assert r.status_code == 200, r.text

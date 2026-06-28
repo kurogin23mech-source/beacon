@@ -3610,11 +3610,11 @@ def _require_trek_leader(
 ) -> None:
     """Raise 403 if caller does not hold the leader role on this trek.
 
-    ms-97 / e-2658 Phase 1 — AC13 (= leader hard-check で
-    ``actor_session_id == trek.leader_session_id`` を強制) は Phase 4 で
-    別途 land。 Phase 1 では従来通り user_id grain (+ phase A+ で session
-    grain 優先) の role check のみで、 leader_session_id hard-check は
-    まだ入れない。
+    ms-97 / e-2658 Phase 1 — original user_id grain (+ phase A+ で session
+    grain 優先) の role check entry-point。 Phase 4 (= AC13 hard-check) で
+    leader-only endpoints は ``_require_trek_leader_session`` 経由に切り
+    替わるが、 この helper 自身は role check 限定の従来 contract を維持
+    する (= 並列で残しておくと既存 caller の影響範囲を最小化できる)。
     """
     if not _auth_enabled:
         return
@@ -3623,6 +3623,67 @@ def _require_trek_leader(
         sid = request.headers.get("X-Beacon-Session", "") or ""
     if _trek_member_role(t, user.get("sub", ""), sid) != "leader":
         raise HTTPException(status_code=403, detail="Trek leader role required")
+
+
+def _require_trek_leader_session(
+    t: dict, user: dict, request: "Request | None" = None,
+) -> None:
+    """Raise 403 unless caller is BOTH the leader role AND the live leader session (ms-97 / AC13).
+
+    Two-layer check (= role at user grain + session at session grain):
+
+      1. ``_require_trek_leader`` — caller has ``role == "leader"`` in
+         the trek's members[]. Survives session restart of the same
+         user.
+      2. session_id hard-check    — caller's ``X-Beacon-Session`` header
+         equals ``trek.leader_session_id``. Blocks a second session of
+         the same user from impersonating leader actions (= the gap
+         that AC13 closes; pre-Phase-4 the role check alone allowed
+         any session of the leader user to mutate).
+
+    Layer 2 only fires on phase A+ trek (= ``is_session_id_keyed``
+    True). Pre-A trek invariance: the helper degrades to the
+    role-only check, matching the legacy contract. Without the
+    ``X-Beacon-Session`` header (= legacy CLI / smoke test) we also
+    fall through to role-only — the header is opt-in, not a hard
+    requirement, so we don't break callers that pre-date the
+    session-grain key.
+
+    The 403 detail surfaces a session prefix on both sides of the
+    mismatch so the operator can tell "wrong-session of leader user"
+    from "non-leader user" at a glance (= dogfood ergonomics).
+    """
+    _require_trek_leader(t, user, request)
+    if not _auth_enabled:
+        return
+    if request is None:
+        return
+    caller_sid = request.headers.get("X-Beacon-Session", "") or ""
+    if not caller_sid:
+        # No session header → can't apply session grain; the role check
+        # above is the available authoritative gate. Mirrors the
+        # legacy CLI behaviour (= header is opt-in).
+        return
+    if not trek_mod.is_session_id_keyed(t):
+        # Pre-A trek: members[] is keyed by user_id only, so the
+        # leader_session_id field may be stale or absent. Don't fail
+        # the call — pre-A invariance is contractually preserved.
+        return
+    leader_sid = t.get("leader_session_id") or ""
+    if not leader_sid:
+        # Phase A+ trek with no live leader session (= e.g. just
+        # archived or stamped null) — the role check above is the
+        # available gate; refusing here would prevent ``take-over``
+        # from binding a fresh session post-leader-death.
+        return
+    if caller_sid != leader_sid:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "leader action requires the stamped leader session "
+                f"(caller={caller_sid[:8]}.., leader={leader_sid[:8]}..)"
+            ),
+        )
 
 
 def _require_trek_joined_member(
@@ -3705,15 +3766,19 @@ def get_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
 
 
 @app.patch("/api/treks/{trek_id}")
-def update_trek_endpoint(trek_id: str, body: TrekUpdate,
+def update_trek_endpoint(trek_id: str, body: TrekUpdate, request: Request,
                          user: dict = Depends(require_auth)):
     """Update title / description / type. Leader-only.
 
     Status / members / scope / halt are mutated through dedicated endpoints
     so audit logs and authz rules stay sharp per intent.
+
+    ms-97 Phase 4 / AC13 — leader hard-check via
+    ``_require_trek_leader_session`` (= role + session_id grain on phase
+    A+ trek). Pre-A invariance preserved.
     """
     t = _load_trek_for_read(trek_id, user)
-    _require_trek_leader(t, user)
+    _require_trek_leader_session(t, user, request)
     if body.title is not None:
         title = body.title.strip()
         if not title:
@@ -3749,10 +3814,16 @@ def update_trek_endpoint(trek_id: str, body: TrekUpdate,
 
 
 @app.delete("/api/treks/{trek_id}")
-def archive_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
-    """Archive a trek (status → archived). Leader-only. Archive is terminal."""
+def archive_trek_endpoint(trek_id: str, request: Request,
+                          user: dict = Depends(require_auth)):
+    """Archive a trek (status → archived). Leader-only. Archive is terminal.
+
+    ms-97 Phase 4 / AC13 — leader hard-check via
+    ``_require_trek_leader_session`` (= role + session_id grain on phase
+    A+ trek). Pre-A invariance preserved.
+    """
     t = _load_trek_for_read(trek_id, user)
-    _require_trek_leader(t, user)
+    _require_trek_leader_session(t, user, request)
     cur = t.get("status", "")
     try:
         trek_mod.validate_transition(cur, "archived")
@@ -3767,10 +3838,16 @@ def archive_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
 
 
 @app.post("/api/treks/{trek_id}/start")
-def start_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
-    """Transition trek planning → active. Leader-only."""
+def start_trek_endpoint(trek_id: str, request: Request,
+                        user: dict = Depends(require_auth)):
+    """Transition trek planning → active. Leader-only.
+
+    ms-97 Phase 4 / AC13 — leader hard-check via
+    ``_require_trek_leader_session`` (= role + session_id grain on phase
+    A+ trek). Pre-A invariance preserved.
+    """
     t = _load_trek_for_read(trek_id, user)
-    _require_trek_leader(t, user)
+    _require_trek_leader_session(t, user, request)
     cur = t.get("status", "")
     try:
         trek_mod.validate_transition(cur, "active")
@@ -4580,6 +4657,7 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
 def add_trek_task_endpoint(
     trek_id: str,
     body: TrekTaskAddRequest,
+    request: Request,
     user: dict = Depends(require_auth),
 ):
     """Cross-project task add through Trek scope (ms-92 / e-2141).
@@ -4665,6 +4743,63 @@ def add_trek_task_endpoint(
         )
         canonical_scope.append({**s, "project": resolved})
     canonical_t = {**t, "scope": canonical_scope}
+    # ms-97 Phase 4 / AC14 — executor の home project check.
+    #
+    # Trek scope を介した slot 起票は、 caller (= executor) が「自分の
+    # home project に slot を生やす」 経路に限定する。 すなわち caller
+    # の live session_id が登録されている scope project = 起票先 project
+    # でなければならない。 違反例 (= executor A が executor B の project に
+    # slot を生やす) は executor 間で意図しない作業押し付けを生むので、
+    # server side で物理的に塞ぐ (= プロンプト notice ではなく code 制約)。
+    #
+    # 適用範囲: phase A+ trek のみ (= is_session_id_keyed True)。
+    # Pre-A trek は session_id を持たない時代の trek なので、 caller
+    # session_id を home に逆引きする手立てが無い → legacy 振る舞い継続
+    # (= scope guard だけが authorisation の砦)。
+    #
+    # X-Beacon-Session header が空の caller (= CLI smoke / 古い client)
+    # は home check を skip。 header は opt-in、 hard-require には
+    # しない (= AC13 の helper と同じ stance)。
+    #
+    # leader (= role == "leader") は home check 免除。 leader は全
+    # scope projects に対して slot 起票する authority を持つ (=
+    # cross-project authority は leader / scope policy 側で行使)。
+    if _auth_enabled and trek_mod.is_session_id_keyed(canonical_t):
+        caller_sid = request.headers.get("X-Beacon-Session", "") or ""
+        if caller_sid:
+            caller_role = _trek_member_role(
+                canonical_t, user_id=user_id, session_id=caller_sid,
+            )
+            if caller_role != "leader":
+                scope_project_ids: list[str] = []
+                for s in canonical_scope:
+                    pid = s.get("project") or ""
+                    if pid and pid not in scope_project_ids:
+                        scope_project_ids.append(pid)
+                home_pid = trek_mod.resolve_session_home_project(
+                    caller_sid,
+                    scope_project_ids,
+                    db.list_sessions,
+                )
+                if not home_pid:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=(
+                            "executor session is not registered in any "
+                            "scope project; cannot resolve home project "
+                            "for slot 起票 (AC14)"
+                        ),
+                    )
+                if home_pid != resolved_target_project:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=(
+                            f"executor can only add a slot in their home "
+                            f"project (home={home_pid}, "
+                            f"target={resolved_target_project}); leader "
+                            "must originate cross-project slots (AC14)"
+                        ),
+                    )
     allowed, reason = trek_mod.check_trek_task_add_allowed(
         canonical_t,
         target_project=resolved_target_project,

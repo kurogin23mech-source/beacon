@@ -697,6 +697,130 @@ def test_aggregate_task_state_active_when_any_working():
 
 
 # ---------------------------------------------------------------------------
+# ms-97 Phase 4 / AC10 — MS slot precedence
+# ---------------------------------------------------------------------------
+
+def test_compute_ms_slot_state_leader_review_wins():
+    """precedence #1: any leader_review child → slot is leader_review.
+
+    Even if other children are done / user_review / working / todo,
+    leader_review wins because the leader's queue is the most
+    actionable / blocking state.
+    """
+    children = [
+        {"state": "done"},
+        {"state": "leader_review"},
+        {"state": "working"},
+        {"state": "todo"},
+    ]
+    assert trek.compute_ms_slot_state(children) == "leader_review"
+
+
+def test_compute_ms_slot_state_all_done():
+    """precedence #2: all done → slot is done."""
+    children = [{"state": "done"}, {"state": "done"}]
+    assert trek.compute_ms_slot_state(children) == "done"
+
+
+def test_compute_ms_slot_state_mixed_terminal_user_review():
+    """precedence #3: terminal mix (done + user_review) → slot is user_review.
+
+    All children are terminal but not all done → user_review wins
+    because the slot needs user judgment to fully close out.
+    """
+    children = [{"state": "done"}, {"state": "user_review"}]
+    assert trek.compute_ms_slot_state(children) == "user_review"
+
+
+def test_compute_ms_slot_state_working_presence():
+    """precedence #4: any working child (no leader_review / no all-terminal) → working."""
+    children = [
+        {"state": "todo"},
+        {"state": "working"},
+        {"state": "done"},
+    ]
+    assert trek.compute_ms_slot_state(children) == "working"
+
+
+def test_compute_ms_slot_state_all_todo():
+    """precedence #5: all todo (or empty slot) → todo."""
+    children = [{"state": "todo"}, {"state": "todo"}]
+    assert trek.compute_ms_slot_state(children) == "todo"
+    # empty slot collapses to todo as well.
+    assert trek.compute_ms_slot_state([]) == "todo"
+
+
+def test_compute_ms_slot_state_unknown_state_collapses_to_todo():
+    """defensive: garbage / unknown state tokens collapse to todo for counting.
+
+    A future-version of trek doc with a state token this version
+    doesn't recognise must not crash the helper; it falls through
+    to the all-todo path.
+    """
+    children = [{"state": "future-state-xyz"}, {"state": "todo"}]
+    assert trek.compute_ms_slot_state(children) == "todo"
+
+
+# ---------------------------------------------------------------------------
+# ms-97 Phase 4 / AC14 — resolve_session_home_project
+# ---------------------------------------------------------------------------
+
+def test_resolve_session_home_project_found_on_first_pid():
+    """First scope project wins when session is registered there."""
+    def lister(pid):
+        if pid == "proj-A":
+            return [{"session_id": "sv-exec"}, {"session_id": "sv-other"}]
+        return []
+    home = trek.resolve_session_home_project(
+        "sv-exec", ["proj-A", "proj-B"], lister,
+    )
+    assert home == "proj-A"
+
+
+def test_resolve_session_home_project_found_on_second_pid():
+    """Walks the list in order — second pid hit returned correctly."""
+    def lister(pid):
+        if pid == "proj-B":
+            return [{"session_id": "sv-exec"}]
+        return []
+    home = trek.resolve_session_home_project(
+        "sv-exec", ["proj-A", "proj-B"], lister,
+    )
+    assert home == "proj-B"
+
+
+def test_resolve_session_home_project_no_match_returns_empty():
+    """Ghost session (registered nowhere in scope) returns ``""``."""
+    home = trek.resolve_session_home_project(
+        "sv-ghost", ["proj-A", "proj-B"],
+        lambda _pid: [{"session_id": "sv-other"}],
+    )
+    assert home == ""
+
+
+def test_resolve_session_home_project_empty_inputs():
+    """Empty session_id or empty scope returns ``""`` immediately."""
+    assert trek.resolve_session_home_project(
+        "", ["proj-A"], lambda _pid: [{"session_id": "sv-x"}],
+    ) == ""
+    assert trek.resolve_session_home_project(
+        "sv-exec", [], lambda _pid: [{"session_id": "sv-exec"}],
+    ) == ""
+
+
+def test_resolve_session_home_project_handles_lister_failure():
+    """Listing exceptions on one pid don't poison the walk."""
+    def flaky(pid):
+        if pid == "proj-A":
+            raise RuntimeError("listing failed")
+        return [{"session_id": "sv-exec"}]
+    home = trek.resolve_session_home_project(
+        "sv-exec", ["proj-A", "proj-B"], flaky,
+    )
+    assert home == "proj-B"
+
+
+# ---------------------------------------------------------------------------
 # ms-88 / e-2107 — 5-state state machine + legacy migration
 # ---------------------------------------------------------------------------
 

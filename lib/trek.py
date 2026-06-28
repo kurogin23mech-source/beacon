@@ -971,6 +971,112 @@ def aggregate_task_state(trek_doc: dict, *, task_ids: list[str]) -> dict:
     }
 
 
+def compute_ms_slot_state(task_states_for_slot: list[dict]) -> str:
+    """Aggregate MS slot 状態 from the task_state entries of its child tasks (ms-97 / AC10).
+
+    Pure function with no I/O: accepts the already-filtered list of
+    ``task_state`` entries (= dicts carrying at least a ``state`` key,
+    matching the shape stored on ``trek.task_states.*``) that belong to
+    a single MS slot, and returns the slot's aggregated state token.
+
+    Precedence rule (= "the most urgent / blocking child wins, then
+    terminal states cascade"):
+
+      1. any child in ``leader_review``        → ``"leader_review"``
+      2. else all children in {``done``}       → ``"done"``
+      3. else all children in {``done``,
+            ``user_review``}                   → ``"user_review"``
+      4. else any child in ``working``         → ``"working"``
+      5. else (all children todo or empty)     → ``"todo"``
+
+    Empty slot returns ``"todo"`` (= "no work yet, ready to start").
+    Untracked / malformed entries collapse to ``todo`` for counting so
+    a freshly-added child keeps the slot at todo rather than skipping
+    straight to terminal.
+
+    The output token is one of ``VALID_TASK_STATES`` so callers can
+    feed it into the same state-machine surface as raw task states
+    (= UI bucket, scheduler skip rules etc.).
+
+    See SPEC ms-97 AC10 for the rationale: MS slot acts as a *header*
+    for its child tasks, and the header should surface the most
+    actionable state (= leader_review blocks executor progress, while
+    terminal-only slots are "done from this slot's perspective"). The
+    rule is intentionally distinct from ``aggregate_task_state`` —
+    that one classifies the whole Trek (= scheduler fire decision),
+    this one classifies one MS slot (= header pill / progress badge).
+    """
+    if not task_states_for_slot:
+        return "todo"
+    states = []
+    for entry in task_states_for_slot:
+        if not isinstance(entry, dict):
+            states.append("todo")
+            continue
+        s = entry.get("state") or "todo"
+        if s not in VALID_TASK_STATES:
+            s = "todo"
+        states.append(s)
+    if "leader_review" in states:
+        return "leader_review"
+    if all(s == "done" for s in states):
+        return "done"
+    if all(s in ("done", "user_review") for s in states):
+        return "user_review"
+    if "working" in states:
+        return "working"
+    return "todo"
+
+
+def resolve_session_home_project(
+    session_id: str,
+    scope_project_ids: list[str],
+    list_sessions,
+) -> str:
+    """Find the home project of ``session_id`` within the Trek's scope (ms-97 / AC14).
+
+    Walks ``scope_project_ids`` in order and asks ``list_sessions(pid)``
+    for each project's session registry. The first project whose
+    session list contains a row with matching ``session_id`` wins —
+    that's the executor's "home" project for the Trek-scope purposes
+    (= the only project they may originate slot 起票 from).
+
+    ``list_sessions`` is a callable so the helper stays unit-testable
+    without dragging in the store / firestore client. In production
+    ``app.py`` passes ``db.list_sessions``; tests can pass a lambda
+    that returns a hand-rolled session list.
+
+    Returns the matching project_id, or ``""`` (empty string) if the
+    session is not registered in any scope project. The empty-string
+    sentinel lets callers distinguish "ghost session" from "found pid"
+    without an extra Optional[str] wrapper at the type signature.
+
+    AC14 use: server-side guard on executor slot 起票 (= POST
+    /api/treks/{id}/task-add). The caller's home project must equal
+    the target project of the slot; otherwise we'd let executor A
+    sprout slots in executor B's project, which violates the SPEC
+    设计方针 14 "executor は自分の home project にしか slot を生やせない"
+    rule (= cross-project authority lives with leader / scope policy).
+    """
+    if not session_id or not scope_project_ids:
+        return ""
+    for pid in scope_project_ids:
+        if not pid:
+            continue
+        try:
+            sessions = list_sessions(pid) or []
+        except Exception:
+            # Listing failure on one project shouldn't poison the walk
+            # — the session may yet be registered on a later scope pid.
+            continue
+        for s in sessions or []:
+            if not isinstance(s, dict):
+                continue
+            if (s.get("session_id") or "") == session_id:
+                return pid
+    return ""
+
+
 def build_actor_ref(*, user_id: str, email: str) -> dict:
     """Canonical actor reference (= user_id + email pair).
 
@@ -2239,6 +2345,25 @@ def is_halted(trek_doc: dict) -> bool:
     ``clear_halt`` (= None). Treat ``None`` / missing / empty-dict as
     "not halted" so legacy trek docs (= pre-halt schema) read as
     not-halted by default.
+
+    AC32 halt-suspension contract — final audit (ms-97 / Phase 4):
+
+      1. tick scheduler         — ``server/app.py`` tick endpoint skips
+         halted treks at the candidate filter (= 5972, defense-in-depth
+         at 6023) AND ``lib/trek_scheduler.is_trek_due`` returns False
+         on halt set (= the upstream cadence decision itself).
+      2. DM bypass              — ``server/dm_gate.should_gate_dm_action``
+         skips halted treks when evaluating ``shared_trek_member``
+         bypass, so cross-user DMs fall back to the normal budget gate
+         while the Andon cord is engaged.
+      3. auto-stall             — tick endpoint skip at 6648 +
+         ``lib/trek_scheduler.detect_auto_stalled_tasks`` returns ``[]``
+         (= 507) on halt set.
+      4. auto-succession        — **not yet implemented** (= AC22 lands
+         in a future Phase). The halt contract still holds as a
+         documented promise: when AC22 lands, its succession path MUST
+         consult ``is_halted`` before nominating a new leader. Tests
+         in ``tests/test_trek_scheduler.py`` lock the existing 3 paths.
     """
     halt = trek_doc.get("halt")
     if not halt:
