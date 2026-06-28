@@ -3527,6 +3527,13 @@ class TrekKickoff(BaseModel):
     kickoff_dm_event_id: str = ""  # bus.send 結果の event_id (= audit trace)
 
 
+# ms-97 / Phase 7-B / e-2684 — leader succession consent body (= candidate
+# accept / decline 1 hop response). caller_session_id は X-Beacon-Session
+# header から取るので body には載せない。
+class TrekSuccessionConsent(BaseModel):
+    decision: str  # "accept" | "decline"
+
+
 # ms-95 / e-2308 — extend TTL on a single task (= leader hints "I delegated
 # this to a subagent that can't stamp activity itself"). See
 # lib/trek.extend_task_ttl docstring for semantics.
@@ -4466,6 +4473,104 @@ def take_over_trek_endpoint(trek_id: str, body: TrekTakeOver,
     trek_mod.reset_kickoff_pending(
         t, session_id=body.session_id, user_id=uid_for_reset,
     )
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.post("/api/treks/{trek_id}/succession-consent")
+def trek_succession_consent_endpoint(
+    trek_id: str,
+    body: TrekSuccessionConsent,
+    request: Request,
+    user: dict = Depends(require_auth),
+):
+    """AC22 1 hop consent endpoint — candidate accepts / declines leadership.
+
+    ms-97 / Phase 7-B / e-2684. Called by the candidate session that
+    received a ``trek-leader-succession-consent`` DM. Strict caller gate:
+
+      * Caller session_id (= ``X-Beacon-Session`` header) MUST equal
+        ``meta.succession_pending_candidate`` (= the session the
+        orchestrator nominated this cycle). Any other session is 403.
+      * ``decision`` must be ``"accept"`` or ``"decline"``.
+
+    On accept:
+      * ``leader_session_id`` を caller_sid に transfer (= ``transfer_leader``)
+      * ``session_history`` に role_at_join="leader" を upsert
+      * ``meta.succession_pending_*`` / ``succession_declined`` /
+        ``succession_escalated_at`` を全てクリア (= clear_succession_state)
+      * caller の ``kickoff_status`` を pending=True に reset (= 新 leader
+        は peer に再度 plan を宣言する義務、 ms-88 / e-2138 互換)
+
+    On decline:
+      * ``meta.succession_declined`` に caller_sid を追加 (= 次 tick で
+        別 candidate を選ぶ)
+      * ``meta.succession_pending_*`` をクリア
+      * leader 役はそのまま (= 引き続き不応のままなら次 tick で再 nominate)
+    """
+    t = _load_trek_for_read(trek_id, user, request)
+    decision = (body.decision or "").strip().lower()
+    if decision not in ("accept", "decline"):
+        raise HTTPException(
+            status_code=400,
+            detail="decision must be 'accept' or 'decline'",
+        )
+    caller_sid = ""
+    if request is not None:
+        caller_sid = request.headers.get("X-Beacon-Session", "") or ""
+    if not caller_sid:
+        raise HTTPException(
+            status_code=400,
+            detail="X-Beacon-Session header required for succession consent",
+        )
+    meta = t.get("meta") or {}
+    pending_sid = (
+        meta.get(trek_mod.SUCCESSION_PENDING_CANDIDATE_META_KEY) or ""
+    )
+    if not pending_sid:
+        raise HTTPException(
+            status_code=400,
+            detail="no succession candidate pending for this trek",
+        )
+    if caller_sid != pending_sid:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "only the pending succession candidate can respond "
+                f"(caller={caller_sid[:8]}.., pending={pending_sid[:8]}..)"
+            ),
+        )
+    member = trek_mod.find_member(t, session_id=caller_sid)
+    if member is None:
+        raise HTTPException(
+            status_code=403,
+            detail="caller is not a member of this trek",
+        )
+    if decision == "accept":
+        try:
+            trek_mod.transfer_leader(t, target_session_id=caller_sid)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        # Promote member role + record session_history at role_at_join=leader.
+        member["role"] = "leader"
+        trek_mod.upsert_session_history(
+            t,
+            session_id=caller_sid,
+            user_id=member.get("user_id") or "",
+            email=member.get("email") or "",
+            role_at_join="leader",
+        )
+        # Fresh leader session must re-kickoff (= announce plan to peers).
+        trek_mod.reset_kickoff_pending(
+            t,
+            session_id=caller_sid,
+            user_id=member.get("user_id") or "",
+        )
+        trek_mod.clear_succession_state(t)
+        db.save_trek(trek_id, t)
+        return t
+    # Decline path
+    trek_mod.record_succession_decline(t, caller_sid)
     db.save_trek(trek_id, t)
     return t
 
@@ -6295,6 +6400,105 @@ def trek_scheduler_tick_endpoint(
         # on halted treks.
         if trek_mod.is_halted(trek_doc):
             continue
+        # ms-97 / Phase 7-B / AC22 — auto-succession orchestrator.
+        # halt をすり抜けてここまで来た上で、 phase A+ trek (= session_id
+        # keyed members) かつ leader session が不応 (= N=3 連続 pulse-ack
+        # miss AND last_active >= 30 min stale AND 条件) の時、 priority
+        # order = invited_at 昇順で次 candidate session を選び、 1 hop
+        # consent DM を emit する。 candidate 不在の時は user に escalation
+        # (= meta.succession_escalated_at を 1 度だけ stamp、 leader-digest
+        # 経由で観測可能)。 各 trek ごとに 1 tick 最大 1 candidate を
+        # nominate する idempotent 設計 (= pending stamp で二重発射防止)。
+        if trek_mod.is_session_id_keyed(trek_doc):
+            try:
+                leader_sid_for_succession = (
+                    trek_doc.get("leader_session_id") or ""
+                )
+                leader_last_active = ""
+                if leader_sid_for_succession:
+                    succession_scope_ids = _resolve_trek_scope_project_ids(
+                        trek_doc
+                    )
+                    for project_pid in succession_scope_ids:
+                        try:
+                            project_sessions = db.list_sessions(project_pid)
+                        except Exception:
+                            project_sessions = []
+                        found_la = ""
+                        for s in project_sessions:
+                            if s.get("session_id") == leader_sid_for_succession:
+                                found_la = s.get("last_active") or ""
+                                break
+                        if found_la:
+                            leader_last_active = found_la
+                            break
+                unresponsive = trek_mod.detect_unresponsive_leader(
+                    trek_doc, now,
+                    leader_last_active=leader_last_active,
+                )
+                if unresponsive:
+                    meta = trek_doc.setdefault("meta", {})
+                    pending_already = (
+                        meta.get(
+                            trek_mod.SUCCESSION_PENDING_CANDIDATE_META_KEY
+                        )
+                        or ""
+                    )
+                    if not pending_already:
+                        candidate = trek_mod.pick_succession_candidate(
+                            trek_doc
+                        )
+                        if candidate is None:
+                            if not meta.get(
+                                trek_mod.SUCCESSION_ESCALATED_AT_META_KEY
+                            ):
+                                meta[
+                                    trek_mod.SUCCESSION_ESCALATED_AT_META_KEY
+                                ] = trek_mod.utcnow_iso()
+                                print(
+                                    f"warn[ms-97 e-2684]: trek "
+                                    f"{trek_id} succession escalated — "
+                                    "no candidate available",
+                                    file=sys.stderr,
+                                )
+                                trek_doc["updated_at"] = (
+                                    trek_mod.utcnow_iso()
+                                )
+                                try:
+                                    db.save_trek(trek_id, trek_doc)
+                                except Exception:
+                                    pass
+                        else:
+                            candidate_sid = candidate.get("session_id") or ""
+                            if candidate_sid:
+                                emit_leader_succession_consent_dm(
+                                    trek_doc, candidate_sid,
+                                    former_leader_session_id=(
+                                        leader_sid_for_succession
+                                    ),
+                                )
+                                meta[
+                                    trek_mod.SUCCESSION_PENDING_CANDIDATE_META_KEY
+                                ] = candidate_sid
+                                meta[
+                                    trek_mod.SUCCESSION_PENDING_EMITTED_AT_META_KEY
+                                ] = trek_mod.utcnow_iso()
+                                trek_doc["updated_at"] = (
+                                    trek_mod.utcnow_iso()
+                                )
+                                try:
+                                    db.save_trek(trek_id, trek_doc)
+                                except Exception:
+                                    pass
+            except Exception as exc:
+                # Succession orchestrator must never break the tick loop.
+                # Log the error and continue with the regular fanout —
+                # next tick re-evaluates from a clean slate.
+                print(
+                    f"warn[ms-97 e-2684]: trek {trek_id} succession "
+                    f"orchestrator error: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
         # ms-75 / e-2048 — Trek task state machine integration. When every
         # task that an executor has stamped state for has reached terminal
         # (= done or waiting-review), the scheduler goes silent for this

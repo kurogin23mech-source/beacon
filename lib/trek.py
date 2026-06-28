@@ -2434,6 +2434,224 @@ def list_pending_scope_ops(trek_doc: dict) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# AC22 auto-succession (ms-97 Phase 7-B, e-2684)
+#
+# Leader session が「不応」 (= crash / stuck / 通信途絶) になった時、 priority
+# order = invited_at 昇順で次の candidate session を選び、 1 hop consent DM
+# を送って leader を引き継ぐ。 candidate が辞退したら次へ escalate、 全員
+# 辞退または candidate 不在の時は user に escalation。
+#
+# 不応判定: N=3 連続 pulse-ack miss AND last_active >= 30 min stale。
+# AND 条件で「crash / stuck」 を区別せず単一概念で処理する (= SPEC AC22)。
+# threshold は trek.meta で configurable (= dogfood-driven 調整)。
+# ---------------------------------------------------------------------------
+
+# Default thresholds (= overridable via trek.meta.succession_*).
+SUCCESSION_DEFAULT_MISS_COUNT = 3       # N 連続 pulse-ack miss
+SUCCESSION_DEFAULT_STALE_MINUTES = 30   # last_active 経過 (min)
+
+# Meta keys (= configurable threshold + state)
+SUCCESSION_MISS_COUNT_META_KEY = "succession_miss_count"
+SUCCESSION_STALE_MINUTES_META_KEY = "succession_stale_minutes"
+SUCCESSION_PENDING_CANDIDATE_META_KEY = "succession_pending_candidate"
+SUCCESSION_PENDING_EMITTED_AT_META_KEY = "succession_pending_emitted_at"
+SUCCESSION_DECLINED_META_KEY = "succession_declined"
+SUCCESSION_ESCALATED_AT_META_KEY = "succession_escalated_at"
+
+
+def _parse_iso_to_dt(value: str) -> datetime.datetime | None:
+    """Parse an ISO-8601 timestamp string to a UTC datetime.
+
+    Accepts the Z-suffixed format that the rest of the codebase uses
+    (= utcnow_iso) and the .%f microsecond variant from session
+    registry stamps. Returns None on any parsing failure so callers
+    can degrade gracefully (= a missing / malformed timestamp simply
+    fails the "stale" check, never throws into the tick loop).
+    """
+    if not value or not isinstance(value, str):
+        return None
+    raw = value.rstrip("Z")
+    try:
+        dt = datetime.datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+
+
+def detect_unresponsive_leader(
+    trek_doc: dict,
+    now: datetime.datetime,
+    *,
+    leader_last_active: str = "",
+) -> str | None:
+    """Return the leader session_id if the current leader is unresponsive.
+
+    AC22 不応判定 — N 連続 pulse-ack miss **AND** last_active >= N min stale。
+    AND 条件で「crash / stuck」 を単一概念に統合する (= SPEC AC22)。
+
+    入力:
+      * ``trek_doc`` — 評価対象 trek
+      * ``now`` — 評価時刻 (= UTC datetime、 server tick endpoint が渡す)
+      * ``leader_last_active`` — leader session の session registry
+        ``last_active`` (= 別 store なので caller 経由で渡す)
+
+    挙動:
+      * phase pre-A trek (= members[] が user_id keyed legacy) は常に
+        ``None``。 AC22 は session-grain identity が要るので phase A+
+        のみ対象 (= 後方互換 invariant 保持)。
+      * ``leader_session_id`` 空 → ``None`` (= 既に leader 不在 / planning-era)。
+      * threshold は ``trek.meta.succession_miss_count`` (default 3) /
+        ``succession_stale_minutes`` (default 30) で override 可能。
+      * pulse-ack history の最新 N 件が全て「miss」 (= 後述の条件) かつ
+        last_active が N 分以上 stale なら ``leader_session_id`` を返す。
+
+    Miss 判定 (= pulse-ack history の各 entry):
+      * ``pulse_acks[leader_sid]`` が空 / 不在 → N 件分 miss 扱い (= 一度も
+        ack していない leader は構造的に不応)。
+      * history の最新 N 件のうち、 picked_choice が ``no-op`` または ``""``
+        (= 未指定 / 観測しただけ) のものを miss とカウントする。
+      * "miss" の解釈 (= AC22 の「不応」) を 「ack はしたが action token を
+        出していない」 まで広げる (= 形だけの心拍応答だけで実体 progress
+        がない状態も不応として扱う)。 ``continue`` / ``terminal`` /
+        ``dm-leader`` / ``dm-peer`` は応答ありとカウントする。
+
+    Returns ``leader_session_id`` (= 不応と判定された session) or ``None``。
+    """
+    if not is_session_id_keyed(trek_doc):
+        return None
+    leader_sid = trek_doc.get("leader_session_id") or ""
+    if not leader_sid:
+        return None
+    meta = trek_doc.get("meta") or {}
+    try:
+        miss_threshold = int(
+            meta.get(SUCCESSION_MISS_COUNT_META_KEY)
+            or SUCCESSION_DEFAULT_MISS_COUNT
+        )
+    except (TypeError, ValueError):
+        miss_threshold = SUCCESSION_DEFAULT_MISS_COUNT
+    try:
+        stale_minutes = int(
+            meta.get(SUCCESSION_STALE_MINUTES_META_KEY)
+            or SUCCESSION_DEFAULT_STALE_MINUTES
+        )
+    except (TypeError, ValueError):
+        stale_minutes = SUCCESSION_DEFAULT_STALE_MINUTES
+    miss_threshold = max(1, miss_threshold)
+    stale_minutes = max(1, stale_minutes)
+
+    # Stale check (= last_active gap)
+    last_active_dt = _parse_iso_to_dt(leader_last_active)
+    if last_active_dt is None:
+        # No session registry signal → treat as fully stale (= cannot
+        # observe a live heartbeat, so the AND second leg passes).
+        is_stale = True
+    else:
+        gap = now - last_active_dt
+        is_stale = gap >= datetime.timedelta(minutes=stale_minutes)
+    if not is_stale:
+        return None
+
+    # Miss check (= consecutive pulse-ack misses on the leader session)
+    acks_map = trek_doc.get("pulse_acks") or {}
+    entry = acks_map.get(leader_sid) or {}
+    history = entry.get("history") or []
+    if not history:
+        # Empty history + stale → trivially unresponsive.
+        return leader_sid
+    recent = history[-miss_threshold:]
+    if len(recent) < miss_threshold:
+        # Not enough samples yet (= leader fired fewer than N pulses
+        # since join). Combined with stale this still counts as miss
+        # (= we have no positive signal of liveness).
+        return leader_sid
+
+    def _is_miss(record: dict) -> bool:
+        choice = (record.get("picked_choice") or "").strip()
+        return choice in ("", "no-op")
+
+    if all(_is_miss(h) for h in recent):
+        return leader_sid
+    return None
+
+
+def pick_succession_candidate(trek_doc: dict) -> dict | None:
+    """Return the next succession candidate (member dict), or None.
+
+    Priority order: ``invited_at`` 昇順 (= 早く join した順)。 Excludes:
+      * current leader (= 既に失敗した session)
+      * 既に decline した session (= ``meta.succession_declined[]``)
+      * placeholder invitation (= session_id 未設定、 まだ join していない)
+      * leader 候補に再選出できない role (= 現時点では role は filter せず、
+        joined であれば leader 引き継ぎ対象とする)
+
+    Returns ``None`` when no eligible candidate exists (= caller must
+    escalate to user).
+    """
+    if not is_session_id_keyed(trek_doc):
+        return None
+    leader_sid = trek_doc.get("leader_session_id") or ""
+    meta = trek_doc.get("meta") or {}
+    declined = set(meta.get(SUCCESSION_DECLINED_META_KEY) or [])
+    members = trek_doc.get("members") or []
+    eligible: list[dict] = []
+    for m in members:
+        msid = (m.get("session_id") or "").strip()
+        if not msid:
+            # placeholder invitation (= not yet joined at session grain)
+            continue
+        if msid == leader_sid:
+            continue
+        if msid in declined:
+            continue
+        if not (m.get("joined_at") or "").strip():
+            # invited but not joined
+            continue
+        eligible.append(m)
+    if not eligible:
+        return None
+    eligible.sort(key=lambda m: (m.get("invited_at") or "", m.get("session_id") or ""))
+    return eligible[0]
+
+
+def record_succession_decline(trek_doc: dict, session_id: str) -> dict:
+    """Append ``session_id`` to ``meta.succession_declined`` and clear pending.
+
+    Idempotent: re-declining is a no-op on the list (= unique entries).
+    Clears ``meta.succession_pending_candidate`` so the next tick can
+    pick a new candidate without overlapping consents.
+    """
+    if not session_id:
+        raise ValueError("session_id required to record succession decline")
+    meta = trek_doc.setdefault("meta", {})
+    declined = list(meta.get(SUCCESSION_DECLINED_META_KEY) or [])
+    if session_id not in declined:
+        declined.append(session_id)
+    meta[SUCCESSION_DECLINED_META_KEY] = declined
+    meta[SUCCESSION_PENDING_CANDIDATE_META_KEY] = ""
+    meta[SUCCESSION_PENDING_EMITTED_AT_META_KEY] = ""
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
+
+
+def clear_succession_state(trek_doc: dict) -> dict:
+    """Clear all succession pending state (= called after a successful accept).
+
+    Resets pending candidate fields and declined list so the next
+    unresponsive-leader cycle starts fresh.
+    """
+    meta = trek_doc.setdefault("meta", {})
+    meta[SUCCESSION_PENDING_CANDIDATE_META_KEY] = ""
+    meta[SUCCESSION_PENDING_EMITTED_AT_META_KEY] = ""
+    meta[SUCCESSION_DECLINED_META_KEY] = []
+    meta[SUCCESSION_ESCALATED_AT_META_KEY] = ""
+    trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
+
+
+# ---------------------------------------------------------------------------
 # Halt + leader transfer (ms-69 / e-1662)
 #
 # Halt = Andon cord. The STOP signal sets the ``halt`` field; participating
@@ -2473,11 +2691,12 @@ def is_halted(trek_doc: dict) -> bool:
       3. auto-stall             — tick endpoint skip at 6648 +
          ``lib/trek_scheduler.detect_auto_stalled_tasks`` returns ``[]``
          (= 507) on halt set.
-      4. auto-succession        — **not yet implemented** (= AC22 lands
-         in a future Phase). The halt contract still holds as a
-         documented promise: when AC22 lands, its succession path MUST
-         consult ``is_halted`` before nominating a new leader. Tests
-         in ``tests/test_trek_scheduler.py`` lock the existing 3 paths.
+      4. auto-succession        — tick endpoint AC22 path skips halted
+         treks before evaluating ``detect_unresponsive_leader`` (= ms-97
+         Phase 7-B / e-2684). Halt 中は succession nomination も consent
+         DM emit も escalation stamp も全停止する。 Resume 後の次 tick で
+         不応判定をやり直す。 Tests in ``tests/test_trek_succession.py``
+         lock the halt-suspension contract for AC22.
     """
     halt = trek_doc.get("halt")
     if not halt:
