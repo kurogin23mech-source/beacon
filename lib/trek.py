@@ -95,14 +95,17 @@ LEGACY_TASK_STATE_MIGRATIONS = {
     "waiting-review": "leader_review",
 }
 
-# ms-75 / e-2067 + ms-88 / e-2107 — server-side TTL safety net.
-# **TTL 短縮 30 → 12 min**: scheduler cadence (= 10 min) + 2 min バッファ。
-# 旧 30 min は 3 cadence 分 silent を許す緩さで dogfood (tk-40b0b27c) の
-# silent halt 病理を許容してしまっていた。 12 min は 1 cadence 内に必ず罰則が
-# fire する設計。 罰則 = 当該 session の全 working task を **一括 leader_review に
-# 強制遷移** (= 旧 「該当 1 task のみ stall」 から強化、 silent silent 経路を
-# 構造的に絶つ)。 Per-trek override は trek.meta.working_ttl_minutes。
-DEFAULT_WORKING_TTL_MINUTES = 12
+# ms-75 / e-2067 + ms-88 / e-2107 + ms-95 / e-2646 — server-side TTL safety net.
+# **TTL 12 min → 1440 min (24h) に再緩和**: 2026-06-28 dogfood で 12 min は
+# prep 待機中 (= staging URL 受領待ち / 別 session のレビュー待ち) の
+# executor を「stuck」と誤判定し、 working → leader_review に勝手に flip
+# して attribution を奪う構造問題が確定 (= e-2646 / dogfood findings
+# `e70cUf8IS5uEIS1HIEXt` § #14)。 24h baseline = 「待機」 と「stuck」 を
+# 実用上区別できる距離、 かつ翌日まで完全 silent な絶対 halt は依然 catch
+# する境界。 「すぐ stall 判定したい」 個別 Trek は trek.meta.working_ttl_minutes
+# で短い override 可能 (= 既存 field と互換)、 「prep 待機中」 marker は
+# task_states[*].meta.working_pause_until (ISO8601) で立てる (= e-2646)。
+DEFAULT_WORKING_TTL_MINUTES = 1440
 
 # Allowed transitions (5 状態、 計 10 経路 + idempotent no-op):
 # - claim 1 経路: todo → working
@@ -884,12 +887,16 @@ def get_working_ttl_minutes(trek_doc: dict,
     """Return the working-state TTL in minutes (= meta override or default).
 
     Per ms-75 / e-2067 AC 6: per-trek override at ``trek.meta.
-    working_ttl_minutes``. Non-numeric or missing values fall back to the
-    SPEC default (30 minutes), which gives an executor three full cadence
-    windows (= cadence 10 × 3) of silence before the safety net fires.
+    working_ttl_minutes``. ms-95 / e-2646: also accepts
+    ``trek.meta.stall_threshold_minutes`` (= new name) as a synonym, with
+    the new name winning on collision. Default is 24h (= 1440 min) so
+    prep-waiting executors are not stuck-judged in the small minutes.
     """
     meta = trek_doc.get("meta") or {}
-    val = meta.get("working_ttl_minutes")
+    # New field name (= ms-95 / e-2646) reads first.
+    val = meta.get("stall_threshold_minutes")
+    if val is None:
+        val = meta.get("working_ttl_minutes")
     if val is None:
         return default
     try:

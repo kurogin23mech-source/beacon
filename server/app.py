@@ -5700,6 +5700,7 @@ def trek_scheduler_tick_endpoint(
             detail="trek scheduler tick requires X-Beacon-Scheduler-Key",
         )
 
+    import copy
     import datetime
     now = datetime.datetime.now(datetime.timezone.utc)
     # Fan out across active treks. Without project scoping we list every
@@ -5744,6 +5745,29 @@ def trek_scheduler_tick_endpoint(
     quiesced: list[dict] = []
     for trek_doc in due_treks:
         trek_id = trek_doc.get("trek_id", "")
+        # ms-95 / e-2644 — **fanout snapshot strategy** (= dogfood findings
+        # `e70cUf8IS5uEIS1HIEXt` § #19)。 2026-06-28 dogfood で
+        # 「executor が active claim を保持していたのに progress-check fanout
+        # から漏れた」 病理を観察。 root cause: 同 tick 内で stall transition
+        # が走ると task_states[*].updated_by_session_id が "" にリセットされ、
+        # その後の fanout 評価 (= session_has_active_claim) で claim 主と
+        # session_id が一致せず False を返す → executor_targets から除外。
+        #
+        # 構造的対策: tick endpoint 冒頭で task_states を snapshot 化し
+        # (= deep copy)、 fanout 評価は **snapshot ベース** で実行する。
+        # stall mutation は同 transaction 内で fanout 評価の **後** に
+        # 走るのでこの tick の fanout には影響しない (= 次 tick 以降は
+        # 新しい task_states を snapshot 化した上で評価)。
+        #
+        # snapshot trek_doc は live trek_doc の shallow copy + task_states
+        # の deep copy を持つ shape。 fanout helpers が読むのは task_states
+        # 以外には scope / members / leader_session_id 等の概ね tick 内で
+        # 不変な field のみなので、 shallow copy で十分。
+        task_states_snapshot = copy.deepcopy(
+            trek_doc.get("task_states") or {}
+        )
+        fanout_trek_doc = dict(trek_doc)
+        fanout_trek_doc["task_states"] = task_states_snapshot
         # ms-97 / e-2612 (AC32) — Defense-in-depth halt skip. The cadence
         # decision (``is_trek_due`` in lib.trek_scheduler) already filters
         # halted treks out of ``due_treks``, so this branch should never
@@ -5816,8 +5840,10 @@ def trek_scheduler_tick_endpoint(
         # (= scope refs only); the receiver-side AI enriches from its
         # local repo. Done before iterating sessions because the body
         # is identical for every recipient on this tick.
+        # ms-95 / e-2644 — payload も snapshot から build (= scope refs
+        # と task_state aggregate を読む経路、 stall flip 影響を受けない)。
         progress_payload = trek_scheduler_mod.build_progress_check_payload(
-            trek_doc,
+            fanout_trek_doc,
             project_data=None,
             now=now,
         )
@@ -5885,8 +5911,11 @@ def trek_scheduler_tick_endpoint(
                 # `leader_review > working` state transition surface
                 # is leader-only, and that gate sits elsewhere.
                 continue
+            # ms-95 / e-2644 — fanout 評価は **snapshot** ベース
+            # (= 同 tick 内で stall transition が走っても claim を喪失
+            # しない、 dogfood findings § #19 構造的対策)。
             if not trek_scheduler_mod.should_fire_executor_tick(
-                trek_doc, session_id=sid,
+                fanout_trek_doc, session_id=sid,
             ):
                 continue
             executor_targets.append({
@@ -6020,27 +6049,65 @@ def trek_scheduler_tick_endpoint(
         # project wakes them reliably. ``leader_digest_recipients`` audit
         # field stays for back-compat with dashboard consumers (=
         # `fired[].leader_digest_recipients`).
+        # ms-95 / e-2645 — leader-digest **narrow fanout**。 旧実装は
+        # 「leader user の全 live session」 に digest を broadcast していたが、
+        # 2026-06-28 dogfood で「同 user の executor session が leader-digest
+        # を受信」 する病理を観察 (= same-user multi-session で user_id filter
+        # が collapse、 dogfood findings § #16)。
+        #
+        # 新方針:
+        #   * **primary path**: stamped ``leader_session_id`` が live なら
+        #     **その 1 session のみ** に digest を送る (= 役割境界明示)。
+        #   * **fallback path**: stamped が stale (= live でない) の時のみ、
+        #     leader user の全 live session に fan out (= ms-92 e-2164
+        #     multi-leader-session 互換、 reconnect / fork で sid が変わった
+        #     場合に digest が宙に消えない経路)。
+        #
+        # この narrow は same-user dogfood で executor の noise を断つだけ
+        # でなく、 cross-user Trek の正常動作 (= leader user の sessions
+        # のみ) も同じ logic で表現できる (= leader_session_id 一致 →
+        # 一つだけ、 stale → leader user の sessions に拡散)。
         leader_targets: list[dict] = []
         leader_target_pids: list[str] = []
-        for sid, info in live_sessions.items():
-            if not leader_user_id:
-                break
-            if info["user_id"] != leader_user_id:
-                continue
-            # Do NOT subtract leader_sid_for_filter here — progress-check
-            # excludes the leader on purpose, but the leader-digest
-            # channel is precisely *for* the leader. Every live leader
-            # session gets a digest in its own home project.
+        stamped_leader_sid = trek_doc.get("leader_session_id") or ""
+        if (
+            stamped_leader_sid
+            and stamped_leader_sid in live_sessions
+            and (
+                # Sanity: stamped session should actually belong to the
+                # leader user. If the doc is corrupted we fall through
+                # to the fallback path rather than misroute.
+                live_sessions[stamped_leader_sid].get("user_id")
+                == leader_user_id
+                or not leader_user_id
+            )
+        ):
+            # Primary path: stamped leader session is live → narrow to it.
+            info = live_sessions[stamped_leader_sid]
             leader_targets.append({
-                "session_id": sid,
+                "session_id": stamped_leader_sid,
                 "home_project_id": info["home_project_id"],
             })
+        else:
+            # Fallback path: stamped leader is stale (= not live). Fan
+            # out to all live sessions of the leader user — preserves
+            # ms-92 e-2164 multi-leader-session reconnect / fork
+            # compatibility.
+            for sid, info in live_sessions.items():
+                if not leader_user_id:
+                    break
+                if info["user_id"] != leader_user_id:
+                    continue
+                leader_targets.append({
+                    "session_id": sid,
+                    "home_project_id": info["home_project_id"],
+                })
         leader_live_sids: list[str] = [t["session_id"] for t in leader_targets]
-        # Fallback: no live leader session resolves (= leader user has no
-        # session active in the last 10 minutes). Fall back to the stamped
-        # leader_session_id targeting the first scope project so behaviour
-        # stays compatible with the pre-e-2639 single-sid path; the
-        # observability surface (= meta.last_leader_digest_at stamping)
+        # Fallback (= leader fully offline): no live leader session resolves
+        # AND the primary stamped sid was already considered above (=
+        # neither live nor present in live_sessions). Fall back to the
+        # stamped leader_session_id targeting the first scope project so
+        # the observability surface (= meta.last_leader_digest_at stamping)
         # keeps working even when the leader is fully offline. Planning-
         # era treks (= leader_session_id empty AND no live leader) get
         # skipped — there is genuinely no recipient.
@@ -6060,12 +6127,13 @@ def trek_scheduler_tick_endpoint(
         # executor was also quiet), the broadcast fallback above already
         # injects one minimal dm event this tick so leader-digest can
         # stay silent without violating the "no complete silence" rule.
+        # ms-95 / e-2644 — leader-digest gate も snapshot ベース。
         leader_should_fire = (
-            trek_scheduler_mod.should_fire_leader_tick(trek_doc)
+            trek_scheduler_mod.should_fire_leader_tick(fanout_trek_doc)
         )
         if leader_targets and leader_should_fire:
             base_digest_payload = trek_scheduler_mod.build_leader_digest_payload(
-                trek_doc, now=now,
+                fanout_trek_doc, now=now,
             )
             for target in leader_targets:
                 lsid = target["session_id"]
