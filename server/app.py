@@ -3536,9 +3536,40 @@ class TrekExtendTtl(BaseModel):
     reason: str = ""  # short audit string (e.g. "dispatched to subagent X")
 
 
-def _load_trek_for_read(trek_id: str, user: dict) -> dict:
+def _trek_find_member_dual(
+    t: dict, *, user_id: str, session_id: str = "",
+) -> dict | None:
+    """Phase-gated member lookup (= ms-97 / e-2658 Phase 1 AC6 dual-mode).
+
+    Phase A+ trek (= members[] が session_id keyed) で caller の session_id
+    が分かっている時は session-grain で lookup。 caller_sid が空 (= 旧
+    bridge / curl など header 未送) の時、 または pre-A trek の時は
+    legacy user_id grain で lookup。 dual-mode 経路として cutover 期間
+    の互換性を保つ。
+    """
+    if session_id and trek_mod.is_session_id_keyed(t):
+        m = trek_mod.find_member(t, session_id=session_id)
+        if m is not None:
+            return m
+        # Fallback to user_id grain in case the calling session predates
+        # the migration (= header set but session not yet registered).
+        # This avoids hard-locking honest callers out during the cutover
+        # window; AC13 (= strict session_id hard-check) lands separately.
+    if not user_id:
+        return None
+    return trek_mod.find_member(t, user_id=user_id)
+
+
+def _load_trek_for_read(
+    trek_id: str, user: dict, request: "Request | None" = None,
+) -> dict:
     """Load a trek doc. 404 if missing, 403 if caller is neither creator
-    nor a member (per SPEC visibility = creator OR members)."""
+    nor a member (per SPEC visibility = creator OR members).
+
+    ms-97 / e-2658 Phase 1 (AC6) — ``request`` から ``X-Beacon-Session``
+    を取り、 phase A+ trek の時は session_id grain で membership check
+    する dual-mode 経路。 ``request`` 省略時は user_id grain のみ。
+    """
     t = db.get_trek(trek_id)
     if t is None:
         raise HTTPException(status_code=404, detail=f"Trek '{trek_id}' not found")
@@ -3548,37 +3579,71 @@ def _load_trek_for_read(trek_id: str, user: dict) -> dict:
     creator_uid = (t.get("creator_actor") or {}).get("user_id", "")
     if creator_uid == uid:
         return t
-    for m in t.get("members") or []:
-        if m.get("user_id") == uid:
-            return t
+    caller_sid = ""
+    if request is not None:
+        caller_sid = request.headers.get("X-Beacon-Session", "") or ""
+    if _trek_find_member_dual(t, user_id=uid, session_id=caller_sid) is not None:
+        return t
     raise HTTPException(status_code=403, detail="Not a member of this trek")
 
 
-def _trek_member_role(t: dict, user_id: str) -> str:
-    """Return the caller's role ('leader' / 'member' / '' if not a member)."""
-    for m in t.get("members") or []:
-        if m.get("user_id") == user_id:
-            return m.get("role", "member")
-    return ""
+def _trek_member_role(
+    t: dict, user_id: str, session_id: str = "",
+) -> str:
+    """Return the caller's role ('leader' / 'member' / '' if not a member).
+
+    ms-97 / e-2658 Phase 1 — phase A+ trek の時は session_id grain 優先、
+    pre-A trek または session_id 不明時は user_id grain。 同 user_id で
+    複数 session が居る場合 (= phase A+ silent expand 状況) は session_id
+    grain hit が真値、 user_id grain は best-effort first-match。
+    """
+    member = _trek_find_member_dual(
+        t, user_id=user_id, session_id=session_id,
+    )
+    if member is None:
+        return ""
+    return member.get("role", "member")
 
 
-def _require_trek_leader(t: dict, user: dict) -> None:
-    """Raise 403 if caller does not hold the leader role on this trek."""
+def _require_trek_leader(
+    t: dict, user: dict, request: "Request | None" = None,
+) -> None:
+    """Raise 403 if caller does not hold the leader role on this trek.
+
+    ms-97 / e-2658 Phase 1 — AC13 (= leader hard-check で
+    ``actor_session_id == trek.leader_session_id`` を強制) は Phase 4 で
+    別途 land。 Phase 1 では従来通り user_id grain (+ phase A+ で session
+    grain 優先) の role check のみで、 leader_session_id hard-check は
+    まだ入れない。
+    """
     if not _auth_enabled:
         return
-    if _trek_member_role(t, user.get("sub", "")) != "leader":
+    sid = ""
+    if request is not None:
+        sid = request.headers.get("X-Beacon-Session", "") or ""
+    if _trek_member_role(t, user.get("sub", ""), sid) != "leader":
         raise HTTPException(status_code=403, detail="Trek leader role required")
 
 
-def _require_trek_joined_member(t: dict, user: dict) -> None:
+def _require_trek_joined_member(
+    t: dict, user: dict, request: "Request | None" = None,
+) -> None:
     """Raise 403 if caller is not a joined member (= invited but not joined
-    is insufficient for write ops; mirrors SPEC 設計方針 12 join-flow)."""
+    is insufficient for write ops; mirrors SPEC 設計方針 12 join-flow).
+
+    ms-97 / e-2658 Phase 1 — phase A+ trek の時は session_id grain 優先。
+    placeholder (= session_id 未設定 + joined_at 空) は invited-but-not-joined
+    として常に reject される。
+    """
     if not _auth_enabled:
         return
     uid = user.get("sub", "")
-    for m in t.get("members") or []:
-        if m.get("user_id") == uid and m.get("joined_at"):
-            return
+    sid = ""
+    if request is not None:
+        sid = request.headers.get("X-Beacon-Session", "") or ""
+    member = _trek_find_member_dual(t, user_id=uid, session_id=sid)
+    if member is not None and member.get("joined_at"):
+        return
     raise HTTPException(status_code=403, detail="Only joined members can perform this action")
 
 
@@ -3783,15 +3848,34 @@ def join_trek_endpoint(trek_id: str, request: Request,
 
 
 @app.delete("/api/treks/{trek_id}/members/me")
-def leave_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
+def leave_trek_endpoint(trek_id: str, request: Request,
+                        user: dict = Depends(require_auth)):
     """Caller removes themselves from the trek.
 
     The leader must transfer leadership first (`POST .../transfer-leader`),
     and the last member cannot leave (= archive the trek instead).
+
+    ms-97 / e-2658 Phase 1 (AC6) — phase A+ trek (= members[] が session_id
+    keyed) で ``X-Beacon-Session`` header があれば、 該当 1 session の
+    member entry だけを削除する (= 同 user の他 session entries は残る、
+    session-grain leave)。 header 不在 / pre-A trek は従来の user-grain
+    leave (= 同 user の全 entries を削除)。
     """
-    t = _load_trek_for_read(trek_id, user)
+    t = _load_trek_for_read(trek_id, user, request)
+    user_id = user.get("sub", "")
+    caller_sid = request.headers.get("X-Beacon-Session", "") or ""
     try:
-        trek_mod.remove_member(t, user_id=user.get("sub", ""))
+        if caller_sid and trek_mod.is_session_id_keyed(t):
+            # session-grain leave (= 自分の 1 session のみ抜ける)。
+            # session 不在なら user-grain にフォールバック (= placeholder
+            # session_id 未設定 entry の挙動を保つ)。
+            target = trek_mod.find_member(t, session_id=caller_sid)
+            if target is not None:
+                trek_mod.remove_member(t, session_id=caller_sid)
+            else:
+                trek_mod.remove_member(t, user_id=user_id)
+        else:
+            trek_mod.remove_member(t, user_id=user_id)
     except ValueError as e:
         # leader-still-leader / not-a-member / last-member → 400
         raise HTTPException(status_code=400, detail=str(e))
@@ -4141,7 +4225,7 @@ def take_over_trek_endpoint(trek_id: str, body: TrekTakeOver,
     # if a future refactor splits role from joined_at.
     if _auth_enabled:
         uid = user.get("sub") or ""
-        member = trek_mod.find_member(t, uid)
+        member = trek_mod.find_member(t, user_id=uid)
         if not member or not member.get("joined_at"):
             raise HTTPException(
                 status_code=403,
@@ -4184,7 +4268,7 @@ def trek_kickoff_endpoint(trek_id: str, body: TrekKickoff,
     t = _load_trek_for_read(trek_id, user)
     if _auth_enabled:
         uid = user.get("sub") or ""
-        if not trek_mod.find_member(t, uid):
+        if not trek_mod.find_member(t, user_id=uid):
             raise HTTPException(
                 status_code=403,
                 detail="only trek members can mark kickoff completed",
@@ -4212,7 +4296,7 @@ def trek_kickoff_status_endpoint(trek_id: str,
     t = _load_trek_for_read(trek_id, user)
     if _auth_enabled:
         uid = user.get("sub") or ""
-        if not trek_mod.find_member(t, uid):
+        if not trek_mod.find_member(t, user_id=uid):
             raise HTTPException(
                 status_code=403,
                 detail="only trek members can read kickoff status",
@@ -4242,7 +4326,7 @@ def trek_pulse_ack_endpoint(trek_id: str, body: TrekPulseAck,
     t = _load_trek_for_read(trek_id, user)
     if _auth_enabled:
         uid = user.get("sub") or ""
-        if not trek_mod.find_member(t, uid):
+        if not trek_mod.find_member(t, user_id=uid):
             raise HTTPException(
                 status_code=403,
                 detail="only trek members can pulse-ack",
@@ -4311,7 +4395,7 @@ def extend_trek_task_ttl_endpoint(trek_id: str, body: TrekExtendTtl,
     t = _load_trek_for_read(trek_id, user)
     if _auth_enabled:
         uid = user.get("sub") or ""
-        if not trek_mod.find_member(t, uid):
+        if not trek_mod.find_member(t, user_id=uid):
             raise HTTPException(
                 status_code=403,
                 detail="only trek members can extend task TTL",
@@ -4343,7 +4427,7 @@ def list_trek_pulse_acks_endpoint(trek_id: str,
     t = _load_trek_for_read(trek_id, user)
     if _auth_enabled:
         uid = user.get("sub") or ""
-        if not trek_mod.find_member(t, uid):
+        if not trek_mod.find_member(t, user_id=uid):
             raise HTTPException(
                 status_code=403,
                 detail="only trek members can read pulse-ack stats",
@@ -4374,10 +4458,14 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
     grain). Leader-only is not required — any member session can stamp
     on behalf of the work they performed.
     """
-    t = _load_trek_for_read(trek_id, user)
-    # Member check
+    t = _load_trek_for_read(trek_id, user, request)
+    # Member check. Determine the calling session_id (best-effort —
+    # bridges include X-Beacon-Session header; CLI/curl callers may
+    # omit it). ms-97 / e-2658 Phase 1 (AC6) — phase A+ trek の時は
+    # session_id grain で member check、 pre-A は user_id grain。
     user_id = user.get("sub") or ""
-    if not trek_mod.find_member(t, user_id):
+    caller_sid = request.headers.get("X-Beacon-Session", "") or ""
+    if not _trek_find_member_dual(t, user_id=user_id, session_id=caller_sid):
         raise HTTPException(
             status_code=403,
             detail="only trek members can stamp task state",
@@ -4388,9 +4476,6 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
         trek_mod.validate_task_state(body.state)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    # Determine the calling session_id (best-effort — bridges include
-    # X-Beacon-Session header; CLI/curl callers may omit it).
-    caller_sid = request.headers.get("X-Beacon-Session", "") or ""
     try:
         trek_mod.set_task_state(
             t,
@@ -4511,7 +4596,7 @@ def add_trek_task_endpoint(
     """
     t = _load_trek_for_read(trek_id, user)
     user_id = user.get("sub") or ""
-    if _auth_enabled and not trek_mod.find_member(t, user_id):
+    if _auth_enabled and not trek_mod.find_member(t, user_id=user_id):
         raise HTTPException(
             status_code=403,
             detail="only trek members can add tasks through trek scope",
@@ -4644,7 +4729,7 @@ def reconcile_trek_endpoint(trek_id: str, body: TrekReconcileRequest,
     """
     t = _load_trek_for_read(trek_id, user)
     user_id = user.get("sub") or ""
-    if not trek_mod.find_member(t, user_id):
+    if not trek_mod.find_member(t, user_id=user_id):
         raise HTTPException(
             status_code=403,
             detail="only trek members can reconcile task state",

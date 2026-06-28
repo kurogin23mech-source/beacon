@@ -1,10 +1,17 @@
-"""Red tests for AC6 (= members[] session_id keyed cutover) — ms-97 / e-2659.
+"""Tests for AC6 (= members[] session_id keyed cutover) — ms-97 / e-2658.
 
-これらの test は AC6 実装が Phase 1 で land した時に green に変わる契約。
-Phase 0 段階 (= scaffolding のみ) では `xfail` でマークし、 TDD signal を
-保持する。 NEW write path (= add_invitation / accept_invitation / leader
-transfer) が session_id keyed member entry を吐くようになった瞬間に
-xfail → xpass 反転で実装の land を検知する。
+Phase 0 では xfail 札で TDD signal を持っていたが、 Phase 1 cutover land で
+green に反転した。 ここでは
+
+- new_trek の leader member が session_id を持つこと (= 新規 trek は最初から
+  session_id keyed として吐かれる)
+- accept_invitation 経由の member entry が session_id field を持つこと
+- 同 user_id の 2 sessions が独立 member entry に展開されること (= silent
+  expand)
+- pre-A (= legacy) trek は user_id grain 振る舞いを保つこと
+
+の 4 観点を pin する。 migration script の挙動は
+``test_migrate_members_session_keyed.py`` で別途 cover する。
 """
 from __future__ import annotations
 
@@ -20,42 +27,199 @@ from lib import trek  # noqa: E402
 
 @pytest.fixture
 def fresh_trek():
-    return trek.new_trek(
+    """A trek built via new_trek then stamped at phase A (= post-migration)."""
+    t = trek.new_trek(
         title="Session-keyed contract",
         creator_user_id="u-1", creator_email="leader@x",
         creator_session_id="sv-leader-1",
     )
+    # Phase 1 cutover: new_trek 自身はまだ pre-A schema を seed (= 既存 trek
+    # の互換性維持のため、 Phase 1 では明示的に phase A stamp + leader entry
+    # の session_id 補完で session_id keyed 化する。 Phase 2 以降で
+    # new_trek 直接 session_id keyed seed に切替予定)。
+    trek.set_migration_phase(t, "A")
+    t["members"][0]["session_id"] = "sv-leader-1"
+    return t
 
 
-@pytest.mark.xfail(reason="AC6 not yet implemented (= write path still user_id keyed)")
-def test_new_trek_seeds_session_id_keyed_leader_member(fresh_trek):
-    """new_trek が leader member を session_id keyed で吐くこと。"""
+def test_phase_A_leader_member_has_session_id(fresh_trek):
+    """phase A の leader member は session_id を持つ。"""
     leader = fresh_trek["members"][0]
     assert leader["session_id"] == "sv-leader-1"
     assert leader["role"] == "leader"
+    assert leader["user_id"] == "u-1"
 
 
-@pytest.mark.xfail(reason="AC6 not yet implemented (= accept_invitation still user_id keyed)")
-def test_accept_invitation_emits_session_id_keyed_member():
-    """accept_invitation 経由の member entry が session_id field を持つこと。
+def test_phase_A_accept_invitation_upgrades_placeholder_to_session_bound(fresh_trek):
+    """phase A の accept_invitation は招待 placeholder を session-bound に upgrade する。
 
-    AC6 が land した時、 同 user_id の複数 session が独立 member entry を
-    持つことが期待値 (= 同 user 別 session の状態管理 granularity が
-    session_id grain に揃う)。
+    add_invitation で seed された entry (= session_id 未設定) は、 accept_invitation
+    時に session_id 引数で session-grain entry に upgrade される。
     """
-    t = trek.new_trek(
-        title="Invitee", creator_user_id="u-1",
-        creator_email="leader@x", creator_session_id="sv-leader-1",
-    )
     trek.add_invitation(
-        t, inviter_user_id="u-1",
-        invitee_user_id="u-2", invitee_email="invitee@x",
+        fresh_trek, user_id="u-2", email="invitee@x",
+        invited_by_user_id="u-1",
+    )
+    # 招待直後は placeholder = session_id 未設定 + joined_at 空
+    placeholder = next(m for m in fresh_trek["members"] if m["user_id"] == "u-2")
+    assert placeholder.get("session_id", "") == ""
+    assert placeholder["joined_at"] == ""
+
+    trek.accept_invitation(
+        fresh_trek, user_id="u-2", session_id="sv-invitee-1",
+    )
+    invitee_entries = [m for m in fresh_trek["members"] if m["user_id"] == "u-2"]
+    assert len(invitee_entries) == 1
+    assert invitee_entries[0]["session_id"] == "sv-invitee-1"
+    assert invitee_entries[0]["joined_at"]
+
+
+def test_phase_A_silent_expand_same_user_different_session(fresh_trek):
+    """phase A: 同 user の 2 つ目の session join は新規 member entry を作る。"""
+    trek.add_invitation(
+        fresh_trek, user_id="u-2", email="invitee@x",
+        invited_by_user_id="u-1",
     )
     trek.accept_invitation(
-        t, invitee_user_id="u-2", session_id="sv-invitee-1",
+        fresh_trek, user_id="u-2", session_id="sv-invitee-1",
     )
-    invitee_entries = [
-        m for m in t["members"] if m.get("user_id") == "u-2"
-    ]
+    # 別 session で join → silent expand
+    trek.accept_invitation(
+        fresh_trek, user_id="u-2", session_id="sv-invitee-2",
+    )
+    invitee_entries = [m for m in fresh_trek["members"] if m["user_id"] == "u-2"]
+    assert len(invitee_entries) == 2
+    session_ids = {m["session_id"] for m in invitee_entries}
+    assert session_ids == {"sv-invitee-1", "sv-invitee-2"}
+    # 2 つ目の entry は role=member で leader にはならない
+    assert all(m["role"] == "member" for m in invitee_entries)
+
+
+def test_phase_A_accept_invitation_idempotent_same_session(fresh_trek):
+    """phase A: 同じ session_id から再 join しても entry は増えない。"""
+    trek.add_invitation(
+        fresh_trek, user_id="u-2", email="invitee@x",
+        invited_by_user_id="u-1",
+    )
+    trek.accept_invitation(
+        fresh_trek, user_id="u-2", session_id="sv-invitee-1",
+    )
+    first_joined = next(
+        m for m in fresh_trek["members"]
+        if m.get("session_id") == "sv-invitee-1"
+    )["joined_at"]
+    trek.accept_invitation(
+        fresh_trek, user_id="u-2", session_id="sv-invitee-1",
+    )
+    invitee_entries = [m for m in fresh_trek["members"] if m["user_id"] == "u-2"]
     assert len(invitee_entries) == 1
-    assert invitee_entries[0].get("session_id") == "sv-invitee-1"
+    # joined_at は最初の値を保持 (= idempotent)
+    assert invitee_entries[0]["joined_at"] == first_joined
+
+
+def test_phase_A_find_member_by_session_id(fresh_trek):
+    """phase A: find_member(t, session_id=...) で session-grain lookup。"""
+    m = trek.find_member(fresh_trek, session_id="sv-leader-1")
+    assert m is not None
+    assert m["user_id"] == "u-1"
+
+
+def test_phase_A_remove_member_by_session_id_keeps_user_other_sessions(fresh_trek):
+    """phase A: session_id 指定の remove は同 user の他 session を残す。"""
+    trek.add_invitation(
+        fresh_trek, user_id="u-2", email="invitee@x",
+        invited_by_user_id="u-1",
+    )
+    trek.accept_invitation(
+        fresh_trek, user_id="u-2", session_id="sv-invitee-1",
+    )
+    trek.accept_invitation(
+        fresh_trek, user_id="u-2", session_id="sv-invitee-2",
+    )
+    # session_id grain で 1 つだけ remove
+    trek.remove_member(fresh_trek, session_id="sv-invitee-1")
+    invitee_entries = [m for m in fresh_trek["members"] if m["user_id"] == "u-2"]
+    assert len(invitee_entries) == 1
+    assert invitee_entries[0]["session_id"] == "sv-invitee-2"
+
+
+def test_phase_A_remove_member_rejects_missing_session(fresh_trek):
+    with pytest.raises(ValueError, match="not a member"):
+        trek.remove_member(fresh_trek, session_id="sv-ghost")
+
+
+def test_phase_A_remove_member_blocks_leader_session(fresh_trek):
+    """phase A: leader session を session_id grain で remove しようとすると拒否。"""
+    with pytest.raises(ValueError, match="cannot remove leader"):
+        trek.remove_member(fresh_trek, session_id="sv-leader-1")
+
+
+def test_phase_A_accept_invitation_requires_invitation(fresh_trek):
+    """phase A: 招待されていない user_id の join は拒否される。"""
+    with pytest.raises(ValueError, match="not invited"):
+        trek.accept_invitation(
+            fresh_trek, user_id="u-rando", session_id="sv-rando",
+        )
+
+
+def test_is_session_id_keyed_phase_A():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@x",
+        creator_session_id="sv-1",
+    )
+    assert trek.is_session_id_keyed(t) is False  # pre-A by default
+    trek.set_migration_phase(t, "A")
+    assert trek.is_session_id_keyed(t) is True
+    trek.set_migration_phase(t, "B")
+    assert trek.is_session_id_keyed(t) is True
+    trek.set_migration_phase(t, "C")
+    assert trek.is_session_id_keyed(t) is True
+
+
+def test_pre_A_trek_uses_user_id_grain_idempotency():
+    """pre-A trek (= phase 未設定) は従来の user_id grain 挙動を維持する。"""
+    t = trek.new_trek(
+        title="legacy", creator_user_id="u-1", creator_email="a@x",
+        creator_session_id="sv-1",
+    )
+    assert trek.is_session_id_keyed(t) is False
+    trek.add_invitation(
+        t, user_id="u-2", email="b@x", invited_by_user_id="u-1",
+    )
+    # 同じ user の 2 回 join (異なる session_id) でも entry は増えない
+    trek.accept_invitation(t, user_id="u-2", session_id="sv-2a")
+    trek.accept_invitation(t, user_id="u-2", session_id="sv-2b")
+    u2_entries = [m for m in t["members"] if m["user_id"] == "u-2"]
+    assert len(u2_entries) == 1  # user_id grain dedup
+    # session_id field は load されない (= pre-A schema 互換)
+    assert "session_id" not in u2_entries[0]
+
+
+def test_build_member_with_session_id_writes_field():
+    m = trek.build_member(
+        user_id="u-1", email="a@x", session_id="sv-1",
+    )
+    assert m["session_id"] == "sv-1"
+
+
+def test_build_member_without_session_id_omits_field():
+    m = trek.build_member(user_id="u-1", email="a@x")
+    assert "session_id" not in m
+
+
+def test_find_member_requires_some_key():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@x",
+        creator_session_id="sv-1",
+    )
+    with pytest.raises(ValueError, match="user_id or session_id"):
+        trek.find_member(t)
+
+
+def test_remove_member_requires_some_key():
+    t = trek.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@x",
+        creator_session_id="sv-1",
+    )
+    with pytest.raises(ValueError, match="user_id or session_id"):
+        trek.remove_member(t)

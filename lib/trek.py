@@ -1003,18 +1003,25 @@ def build_member(*, user_id: str, email: str,
                  role: str = "member",
                  invited_at: str | None = None,
                  joined_at: str = "",
-                 invited_by: str = "") -> dict:
+                 invited_by: str = "",
+                 session_id: str = "") -> dict:
     """Build a trek member dict.
 
     ``invited_at`` defaults to now if omitted. ``joined_at`` empty means
     "invited but not yet joined" (= visible to invitee but they have not
     accepted). ``invited_by`` is the user_id of the inviter; empty for
     self-created leader membership at creation time.
+
+    ms-97 / e-2658 Phase 1 (AC6) — ``session_id`` パラメータを optional
+    で受け取る。 空 (= default) なら pre-A の user_id keyed 振る舞いを
+    維持し、 非空なら session_id keyed entry (= session 1 件 1 member)
+    を吐く。 build_member は単なる dict builder なので、 phase 判定は
+    呼び出し側 (= add_invitation / new_trek 等) が行う。
     """
     validate_role(role)
     if not user_id or not email:
         raise ValueError("member requires both user_id and email")
-    return {
+    entry = {
         "user_id": user_id,
         "email": email,
         "role": role,
@@ -1022,6 +1029,11 @@ def build_member(*, user_id: str, email: str,
         "joined_at": joined_at,
         "invited_by": invited_by,
     }
+    # session_id field は AC6 phase A+ trek でのみ書き込まれる。 pre-A
+    # trek の dict には field 自体を載せず、 schema 互換を完全に維持。
+    if session_id:
+        entry["session_id"] = session_id
+    return entry
 
 
 def build_session_history_entry(*, session_id: str, user_id: str,
@@ -1488,12 +1500,55 @@ def validate_transition(from_status: str, to_status: str) -> None:
 # Storage callers (lib/trek_store, server/firestore_client) wrap them.
 # ---------------------------------------------------------------------------
 
-def find_member(trek_doc: dict, user_id: str) -> dict | None:
-    """Return the member dict for ``user_id``, or None if absent."""
-    for m in trek_doc.get("members") or []:
+def find_member(
+    trek_doc: dict,
+    user_id: str | None = None,
+    *,
+    session_id: str | None = None,
+) -> dict | None:
+    """Return the member dict matching the given grain, or None if absent.
+
+    ms-97 / e-2658 Phase 1 (AC6) — dual-grain lookup.
+
+    - ``find_member(t, "u-123")`` (= positional, legacy) → user_id 検索
+    - ``find_member(t, user_id="u-123")`` (= keyword) → user_id 検索
+    - ``find_member(t, session_id="sv-abc")`` → session_id 検索 (= NEW)
+
+    user_id と session_id を両方指定された場合は session_id を優先する
+    (= phase A+ では session_id が member identity の真値、 user_id は
+    1 user N session で曖昧)。 どちらも空 / None なら ValueError。
+
+    session_id keyed phase の trek (= migration_phase A/B/C) でも、
+    pre-A code path から positional user_id 渡しが来た時は legacy
+    grain で linear scan する (= 1 user N session の場合は最初に
+    マッチした member entry を返す best-effort)。 厳密な session
+    grain lookup が要るなら session_id 引数を使うこと。
+    """
+    if session_id is None and (user_id is None or user_id == ""):
+        raise ValueError(
+            "find_member: either user_id or session_id must be given"
+        )
+    members = trek_doc.get("members") or []
+    if session_id:
+        for m in members:
+            if m.get("session_id") == session_id:
+                return m
+        return None
+    for m in members:
         if m.get("user_id") == user_id:
             return m
     return None
+
+
+def is_session_id_keyed(trek_doc: dict) -> bool:
+    """Return True if this trek's ``members[]`` is session_id keyed.
+
+    ms-97 / e-2658 Phase 1 (AC6) helper — phase A/B/C は session_id keyed
+    な write path で読み書きされる cutover 済 trek。 pre-A trek (= 旧
+    user_id keyed dedup) は False を返す。 server / CLI / Skill は
+    membership check の前段でこれを呼んで read path を分岐させる。
+    """
+    return get_migration_phase(trek_doc) in ("A", "B", "C")
 
 
 def find_member_by_email(trek_doc: dict, email: str) -> dict | None:
@@ -1517,8 +1572,14 @@ def add_invitation(trek_doc: dict, *,
 
     Raises ValueError if the user is already a member. Mutates and returns
     the trek doc so callers can persist with a single save_trek.
+
+    ms-97 / e-2658 Phase 1 (AC6) — phase A+ trek (= session_id keyed) でも
+    招待段階では session_id が未確定 (= invitee がまだ join していない)
+    なので、 dedupe は user_id grain で行う (= 1 user に 1 招待まで)。
+    session-grain への展開は ``accept_invitation`` 時に発生する。
+    pre-A trek の振る舞いと完全に同じ。
     """
-    if find_member(trek_doc, user_id) is not None:
+    if find_member(trek_doc, user_id=user_id) is not None:
         raise ValueError(
             f"user {user_id} is already a member of trek "
             f"{trek_doc.get('trek_id')}"
@@ -1549,8 +1610,113 @@ def accept_invitation(trek_doc: dict, *, user_id: str,
 
     Raises ValueError if ``user_id`` is not in the members list (= must
     be invited first, no self-add).
+
+    ms-97 / e-2658 Phase 1 (AC6) — phase A+ trek (= session_id keyed)
+    での session-grain expand:
+
+    - 招待 entry (= ``session_id`` field 未設定 + ``joined_at`` 空) が
+      存在し、 join 時に session_id が渡された時は、 その entry を
+      session-bound に upgrade する (= 同じ dict に session_id と
+      joined_at を書き込む)。
+    - 既に joined な entry がある状態で**別 session_id** から join した
+      時は、 同 user_id の新規 member entry を追加して silent expand
+      する (= 1 user N session が独立 member として共存)。
+    - 同じ session_id から再 join (= idempotent retry) は、 該当
+      session-bound entry の joined_at を保ったまま no-op。
+
+    pre-A trek (= phase pre-A) では従来通り user_id grain idempotent
+    で動作 (= 同じ user_id の 2 回目 join は no-op)。
     """
-    member = find_member(trek_doc, user_id)
+    members = trek_doc.get("members") or []
+    phase_a_plus = is_session_id_keyed(trek_doc)
+
+    if phase_a_plus and session_id:
+        # session-grain expand path. Look first for a session-bound entry
+        # (= already joined from this session), then for the invitation
+        # placeholder (= same user_id, empty session_id) to upgrade.
+        existing_sb = next(
+            (m for m in members
+             if m.get("session_id") == session_id),
+            None,
+        )
+        if existing_sb is not None:
+            # Already joined from this session — fully idempotent, but
+            # still upsert session_history so retries refresh the
+            # invariant "every session that ever joined is on record".
+            role_at_join = existing_sb.get("role") or "member"
+            upsert_session_history(
+                trek_doc,
+                session_id=session_id,
+                user_id=existing_sb.get("user_id") or user_id,
+                email=existing_sb.get("email") or "",
+                role_at_join=role_at_join,
+            )
+            return trek_doc
+        # No session-bound entry yet → look for an unaccepted invitation
+        # at the user_id grain (= placeholder seeded by add_invitation).
+        placeholder = next(
+            (m for m in members
+             if m.get("user_id") == user_id
+             and not m.get("session_id")
+             and not m.get("joined_at")),
+            None,
+        )
+        if placeholder is not None:
+            # Upgrade placeholder to session-bound. Same dict — preserves
+            # invited_at / invited_by / role.
+            now = utcnow_iso()
+            placeholder["session_id"] = session_id
+            placeholder["joined_at"] = now
+            role_at_join = placeholder.get("role") or "member"
+            upsert_session_history(
+                trek_doc,
+                session_id=session_id,
+                user_id=placeholder.get("user_id") or user_id,
+                email=placeholder.get("email") or "",
+                role_at_join=role_at_join,
+            )
+            trek_doc["updated_at"] = now
+            return trek_doc
+        # No placeholder either. Check if this user_id has any joined
+        # session-bound entry already (= silent expand from a different
+        # session of the same user).
+        sibling = next(
+            (m for m in members
+             if m.get("user_id") == user_id and m.get("joined_at")),
+            None,
+        )
+        if sibling is None:
+            raise ValueError(
+                f"user {user_id} not invited to trek "
+                f"{trek_doc.get('trek_id')} "
+                "(owner must `beacon trek invite` first)"
+            )
+        # Silent expand: add a fresh session-grain member entry. Role
+        # falls back to "member" (= we do not multiply leadership;
+        # leader_session_id remains pinned to the original session).
+        now = utcnow_iso()
+        new_member = build_member(
+            user_id=sibling.get("user_id") or user_id,
+            email=sibling.get("email") or "",
+            role="member",
+            invited_at=sibling.get("invited_at") or now,
+            joined_at=now,
+            invited_by=sibling.get("invited_by") or "",
+            session_id=session_id,
+        )
+        trek_doc.setdefault("members", []).append(new_member)
+        upsert_session_history(
+            trek_doc,
+            session_id=session_id,
+            user_id=new_member["user_id"],
+            email=new_member["email"],
+            role_at_join="member",
+        )
+        trek_doc["updated_at"] = now
+        return trek_doc
+
+    # pre-A path (= legacy user_id keyed idempotency) — current behavior.
+    member = find_member(trek_doc, user_id=user_id)
     if member is None:
         raise ValueError(
             f"user {user_id} not invited to trek {trek_doc.get('trek_id')} "
@@ -2075,20 +2241,63 @@ def transfer_leader(trek_doc: dict, *, target_session_id: str) -> dict:
     return trek_doc
 
 
-def remove_member(trek_doc: dict, *, user_id: str) -> dict:
+def remove_member(trek_doc: dict, *,
+                  user_id: str | None = None,
+                  session_id: str | None = None) -> dict:
     """Remove a member from the trek.
 
     Guard rails:
     - Cannot remove the leader (= they must `transfer-leader` first).
     - Cannot remove the last member (= archive the trek instead).
+
+    ms-97 / e-2658 Phase 1 (AC6) — dual-grain removal:
+
+    - ``session_id`` 指定 → 該当 1 session の member entry のみ削除
+      (= 同 user の他 session entries は残る、 session-grain leave)
+    - ``user_id`` 指定 → 該当 user の全 entries を削除 (= 旧 user-grain
+      semantics、 pre-A trek の挙動と互換)
+    - 両方指定すると session_id を優先 (= 厳密粒度の方を採用)
+    - どちらも空 / None なら ValueError
     """
+    if not user_id and not session_id:
+        raise ValueError(
+            "remove_member: either user_id or session_id must be given"
+        )
     members = trek_doc.get("members") or []
-    target = find_member(trek_doc, user_id)
+    if session_id:
+        target = find_member(trek_doc, session_id=session_id)
+        if target is None:
+            raise ValueError(
+                f"session {session_id} not a member of trek "
+                f"{trek_doc.get('trek_id')}"
+            )
+        if target.get("role") == "leader":
+            raise ValueError(
+                f"cannot remove leader session ({session_id}); use "
+                "`beacon trek transfer-leader` to hand off first"
+            )
+        new_members = [m for m in members
+                       if m.get("session_id") != session_id]
+        if not new_members:
+            raise ValueError(
+                "cannot remove last member; archive the trek instead"
+            )
+        trek_doc["members"] = new_members
+        trek_doc["updated_at"] = utcnow_iso()
+        return trek_doc
+
+    target = find_member(trek_doc, user_id=user_id)
     if target is None:
         raise ValueError(
             f"user {user_id} not a member of trek {trek_doc.get('trek_id')}"
         )
-    if target.get("role") == "leader":
+    # Leader guard: any matching entry with role=leader blocks removal.
+    leader_match = next(
+        (m for m in members
+         if m.get("user_id") == user_id and m.get("role") == "leader"),
+        None,
+    )
+    if leader_match is not None:
         raise ValueError(
             f"cannot remove leader (user {user_id}); use "
             "`beacon trek transfer-leader` to hand off first"
