@@ -2132,6 +2132,192 @@ body::after {
   color: var(--text-dim);
 }
 
+/* ms-97 / e-2608 — Leader session id row (trek-head 内、 trek-stats の下)。
+   等幅で sid を見せるので request-invite の宛先 / leader_review 権限の所在が
+   1 行で読み取れる。 hover で tooltip に完全な sid を出す (= title 属性)。 */
+.trek-leader-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 0.72rem;
+  margin-top: 6px;
+}
+.trek-leader-label {
+  color: var(--text-dim);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-size: 0.6rem;
+}
+.trek-leader-sid {
+  font-family: var(--font-mono, monospace);
+  color: var(--accent);
+  word-break: break-all;
+}
+
+/* ms-97 / e-2608 — Project-wide scope warning bar。 narrowing key (milestone /
+   operation / task) を持たない scope entry がある trek に表示し、 自律権限が
+   project 全体に染み出すリスクを user に周知する。 STOP card より控えめな
+   amber 系で、 「危険ではないが要対応」 のトーンに収める。 */
+.trek-warning-bar {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 14px 18px;
+  margin: 16px 0 22px;
+  border: 1px solid var(--warning, #fbbf24);
+  background: rgba(251,191,36,0.08);
+  border-radius: 4px;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+.trek-warning-bar .icon {
+  font-size: 1.2rem;
+  color: var(--warning, #fbbf24);
+  flex-shrink: 0;
+  line-height: 1.2;
+}
+.trek-warning-bar .text { flex: 1; }
+.trek-warning-bar .text strong {
+  display: block;
+  color: var(--warning, #fbbf24);
+  font-size: 0.85rem;
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+.trek-warning-bar code {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.72rem;
+  color: var(--text-primary);
+  background: var(--bg-surface, var(--bg-raised));
+  padding: 1px 6px;
+  border-radius: 2px;
+  border: 1px solid var(--border-subtle);
+}
+.trek-warning-bar-entries {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.trek-warning-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: 0.7rem;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-secondary);
+  background: rgba(251,191,36,0.12);
+  border: 1px solid rgba(251,191,36,0.4);
+  border-radius: 3px;
+}
+
+/* ms-97 / e-2609 — Pending scope-add / scope-remove approval surface。
+   Trek detail の WHY ブロックの上に出る action panel。 1 click で approve
+   or reject を server に投げる経路で、 backend が pending_user_approval
+   state を取り扱う e-2611 land 後に自動で出現する。 */
+.trek-pending-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.trek-pending-row {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-surface, var(--bg-raised));
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.trek-pending-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.trek-pending-action {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  padding: 2px 8px;
+  border-radius: 2px;
+  text-transform: uppercase;
+}
+.trek-pending-action.add {
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  background: rgba(96,165,250,0.08);
+}
+.trek-pending-action.remove {
+  color: var(--danger, #ef4444);
+  border: 1px solid var(--danger, #ef4444);
+  background: rgba(239,68,68,0.06);
+}
+.trek-pending-entry {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.78rem;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+.trek-pending-blanket-tag {
+  font-size: 0.65rem;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-dim);
+  padding: 1px 6px;
+  border: 1px dashed var(--border);
+  border-radius: 2px;
+}
+.trek-pending-sub {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+.trek-pending-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.trek-pending-approve, .trek-pending-reject {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  padding: 6px 16px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.trek-pending-approve {
+  background: var(--accent);
+  color: #0a0a0c;
+  border: 1px solid var(--accent);
+}
+.trek-pending-approve:hover:not(:disabled) {
+  background: var(--accent-bright, var(--accent));
+}
+.trek-pending-reject {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+.trek-pending-reject:hover:not(:disabled) {
+  border-color: var(--danger, #ef4444);
+  color: var(--danger, #ef4444);
+}
+.trek-pending-approve:disabled, .trek-pending-reject:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.trek-pending-reason {
+  flex: 1;
+  min-width: 180px;
+  background: var(--bg-base, var(--bg-surface));
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  padding: 6px 8px;
+  font-size: 0.72rem;
+  font-family: var(--font-body);
+}
+
 .trek-meta {
   display: grid;
   grid-template-columns: 100px 1fr;
@@ -3859,11 +4045,10 @@ function renderMainContent() {
       <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
       <button class="tab-btn ${state.activeTab === 'releases' ? 'active' : ''}" data-action="switch-tab" data-tab="releases">Releases</button>
       <button class="tab-btn ${state.activeTab === 'operations' ? 'active' : ''}" data-action="switch-tab" data-tab="operations">Operations</button>
-      <!-- ms-86 / e-2251 — Treks promoted to top-level tab (= SPEC IgCFK8I34cBfPco3UE06
-           方針 6: Trek は project と独立な scope なので project 階層配下から外す)。
-           ハンバーガーメニューの Treks セクションは削除済 (= 重複排除)、 ここが唯一の
-           入口。 list view は user member の全 Trek を出す (= renderTreksSection)。 -->
-      <button class="tab-btn ${state.activeTab === 'treks' ? 'active' : ''}" data-action="switch-tab" data-tab="treks">Treks</button>
+      <!-- ms-97 / e-2606 — Project tab bar から Treks タブを削除 (= e-2251 で
+           merge された SPEC § 方針 6 と真逆の配置を revert)。 Trek は project と
+           独立な first-class object なので、 ハンバーガーメニュー top-level
+           Treks セクション (= renderTreksSection in renderMenu) から入る。 -->
       <button class="tab-btn ${state.activeTab === 'notes' ? 'active' : ''}" data-action="switch-tab" data-tab="notes">Session</button>
     </div>
     ${state.activeTab === 'dashboard' ? `
@@ -3888,7 +4073,6 @@ function renderMainContent() {
     ${state.activeTab === 'documents' ? `<div id="documents-container">${renderDocumentsSection()}</div>` : ''}
     ${state.activeTab === 'releases' ? renderReleasesSection() : ''}
     ${state.activeTab === 'operations' ? renderOperationsSection() : ''}
-    ${state.activeTab === 'treks' ? renderTreksSection() : ''}
     ${state.activeTab === 'notes' ? renderSessionSection() : ''}
   `;
 }
@@ -4492,14 +4676,6 @@ async function switchTab(tab) {
       dataSource.loadSessionLogs(),
     ]).then(() => render()).catch(() => {});
   }
-  if (tab === 'treks') {
-    // ms-86 / e-2251 — Treks tab landed as a top-level item, so the trek
-    // list now loads on tab activation (= it used to load lazily when the
-    // hamburger panel opened). Skip if already cached.
-    if (!state.treks || state.treks.length === 0) {
-      dataSource.loadTreks().then(() => render()).catch(() => {});
-    }
-  }
   render();
 }
 
@@ -4563,6 +4739,14 @@ async function openTrek(trekId) {
   // ms-86 / e-2250 — drop "?project=" and switch to "?trek=<id>" so
   // shared links don't carry the opener's current project context.
   _setUrlForTrekDetail(trekId);
+  // ms-97 / e-2606 — Trek detail render は state.treks の中から trek_id 一致
+  // entry を引いて display する設計 (renderMainContent L3838-3848)。 hamburger
+  // menu を一度も開いていない経路 (= shared link / trek-jump-from-widget) では
+  // state.treks が空のまま openTrek が来るため、 「Trek not found」 表示に
+  // なる。 ここで lazy load して取りこぼしを防ぐ。
+  if (!state.treks || state.treks.length === 0) {
+    try { await dataSource.loadTreks(); } catch (_e) { /* fall through to render */ }
+  }
   render();
   // ms-86 / e-2249 — fetch the cross-project scope aggregate (= MS /
   // Op / Task across every project the Trek reaches) in parallel with
@@ -6066,6 +6250,101 @@ function _renderTrekActivity(t, events, expanded) {
   return rows + footer;
 }
 
+// ms-97 / e-2609 (AC23 / AC25) — Pending scope mutation approvals。 trek doc
+// が backend (= e-2611 land) で `pending_scope_changes` field を持つように
+// なった時点で、 この surface が自動で出現する。 既存 backend (= add/remove
+// が即座に commit される現行 API) では field 不在 → render は空文字列を返し、
+// section ごと省略される。
+//
+// pending_scope_changes entry shape (= 想定、 e-2611 SPEC で確定する):
+//   { id, action: "add"|"remove", entry: {project, milestone, operation, task},
+//     requested_by_session_id, requested_at, blanket_eligible_category }
+//
+// blanket auto-commit (= e-2603 / AC24) が land した後は、 blanket 対象の add
+// は server-side で自動 commit されてここに出ない。 UI 側は何もしなくてよい。
+function _renderTrekScopeApprovals(t) {
+  const pending = Array.isArray(t.pending_scope_changes)
+    ? t.pending_scope_changes
+    : [];
+  if (pending.length === 0) return '';
+
+  // ms-97 / e-2609 — backend が e-2611 land 前の場合に remove ボタンを薄く
+  // (= disabled) 表示する保険。 backend が remove approval endpoint を返す
+  // ようになった時点で、 trek doc に capabilities.scope_remove_approval=true
+  // のような flag を置くか、 単純に endpoint が存在する前提で送って 404
+  // を catch して silent degrade することも可能。 ここでは disabled-flag を
+  // pending entry に optional に持たせる契約とし、 不在なら全機能有効。
+  const removeDisabled = !!t.meta && t.meta.scope_remove_approval_disabled === true;
+
+  const fmtEntry = (entry) => {
+    if (!entry || typeof entry !== 'object') return '';
+    const parts = [];
+    if (entry.project) parts.push(`project=${esc(entry.project)}`);
+    if (entry.milestone) parts.push(`milestone=${esc(entry.milestone)}`);
+    if (entry.operation) parts.push(`operation=${esc(entry.operation)}`);
+    if (entry.task) parts.push(`task=${esc(entry.task)}`);
+    return parts.join(' · ');
+  };
+
+  const rows = pending.map(p => {
+    const id = String(p.id || '');
+    const action = (p.action || 'add') === 'remove' ? 'remove' : 'add';
+    const requestedByHtml = _trekRenderSessionRef(t, p.requested_by_session_id || '');
+    const requestedAt = (p.requested_at || '').slice(0, 16).replace('T', ' ');
+    const blanketTag = p.blanket_eligible_category
+      ? `<span class="trek-pending-blanket-tag" title="next time this category is requested, it can be auto-committed via blanket-approve">category=${esc(p.blanket_eligible_category)}</span>`
+      : '';
+    const removeBtnDisabled = action === 'remove' && removeDisabled;
+    const rejectReasonInputId = `trek-pending-reject-reason-${esc(id)}`;
+    return `
+      <div class="trek-pending-row">
+        <div class="trek-pending-meta">
+          <span class="trek-pending-action ${action}">${action === 'add' ? '+ add' : '− remove'}</span>
+          <span class="trek-pending-entry">${fmtEntry(p.entry)}</span>
+          ${blanketTag}
+        </div>
+        <div class="trek-pending-sub">
+          requested by ${requestedByHtml} at ${esc(requestedAt)}
+        </div>
+        <div class="trek-pending-actions">
+          <button class="trek-pending-approve"
+                  data-action="trek-scope-approve"
+                  data-trek-id="${esc(t.trek_id)}"
+                  data-pending-id="${esc(id)}"
+                  ${removeBtnDisabled ? 'disabled title="scope-remove approval endpoint not yet shipped (= e-2611 pending)"' : ''}>
+            Approve
+          </button>
+          <button class="trek-pending-reject"
+                  data-action="trek-scope-reject"
+                  data-trek-id="${esc(t.trek_id)}"
+                  data-pending-id="${esc(id)}"
+                  data-reason-input="${rejectReasonInputId}"
+                  ${removeBtnDisabled ? 'disabled' : ''}>
+            Reject
+          </button>
+          <input type="text"
+                 class="trek-pending-reason"
+                 id="${rejectReasonInputId}"
+                 placeholder="reason (optional)"
+                 ${removeBtnDisabled ? 'disabled' : ''}>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <div class="trek-section">
+      <div class="trek-section-title">
+        <span>PENDING SCOPE CHANGES</span>
+        <span class="right">${pending.length} awaiting approval</span>
+      </div>
+      <div class="trek-pending-list">
+        ${rows}
+      </div>
+    </div>
+  `;
+}
+
 function _renderTrekDetail(t) {
   const members = t.members || [];
   const scope = t.scope || [];
@@ -6124,6 +6403,41 @@ function _renderTrekDetail(t) {
     ? `<div class="trek-why-block">${esc(goalState)}</div>`
     : `<div class="trek-why-block empty">No goal_state set yet.</div>`;
 
+  // ms-97 / e-2608 (AC5) — leader_session_id を 1 行で表示する。 user / 他
+  // session が leader session を確認して 「request-invite を誰宛に送るか」
+  // 「leader_review への遷移は誰の権限か」 を判断できるようにする。 trek-id badge
+  // と同じ monospace でラベル + sid を並べる (= "司令塔: sv-xxxx")。 不在の場合
+  // (= migration 前の trek、 または leader 未任命) は表示しない。
+  const leaderRowHtml = leaderSid
+    ? `<div class="trek-leader-row">
+         <span class="trek-leader-label">Leader</span>
+         <span class="trek-leader-sid" title="${esc(leaderSid)}">${esc(leaderSid)}</span>
+       </div>`
+    : '';
+
+  // ms-97 / e-2608 (AC8 / AC31) — project-wide scope (= narrowing key なし、
+  // 「project: X」 だけのエントリ) を 1 件でも持つ trek には warning bar を出す。
+  // SPEC AC7 で project-wide は新規追加が reject されるが、 既存 trek は
+  // grandfathered (= AC8)。 自律権限が project 全体に染み出すリスクを user に
+  // 周知し、 narrowing key (milestone / operation / task) の追加を促す。
+  const projectWideEntries = scope.filter(
+    s => s && s.project && !s.milestone && !s.operation && !s.task
+  );
+  const projectWideWarningHtml = projectWideEntries.length
+    ? `<div class="trek-warning-bar" role="alert">
+         <span class="icon">⚠</span>
+         <div class="text">
+           <strong>Project-wide scope detected</strong>
+           This trek has ${projectWideEntries.length} scope entr${projectWideEntries.length === 1 ? 'y' : 'ies'} without a narrowing key (milestone / operation / task).
+           Trek の自律権限が project 全体に染み出すリスクがあります。
+           各 entry に narrowing key を追加してください (= CLI: <code>beacon trek scope-add &lt;trek_id&gt; --project ${esc(projectWideEntries[0].project || '')} --milestone &lt;ms-id&gt;</code>)。
+           <div class="trek-warning-bar-entries">
+             ${projectWideEntries.map(s => `<span class="trek-warning-chip">project: ${esc(s.project || '')}</span>`).join('')}
+           </div>
+         </div>
+       </div>`
+    : '';
+
   return `
     <section class="fade-in trek-detail-v2">
 
@@ -6136,7 +6450,19 @@ function _renderTrekDetail(t) {
         <div class="trek-stats">
           ${projectsInScope.size} project${projectsInScope.size === 1 ? '' : 's'} · ${workItemsInScope} work item${workItemsInScope === 1 ? '' : 's'} · ${members.length} member${members.length === 1 ? '' : 's'}
         </div>
+        ${leaderRowHtml}
       </div>
+
+      ${projectWideWarningHtml}
+
+      <!-- ms-97 / e-2609 (AC23 / AC25) — Pending scope-add / scope-remove
+           approval surface。 SPEC で default となる pending_user_approval
+           state を user が 1 click で approve / reject する経路。
+           backend (= e-2611 / e-2603) が land する前は trek doc に
+           pending_scope_changes フィールドが付かないので、 空状態は section
+           ごと省略する (= 初期段階では UI が surfacing しない、 backend
+           land 後に自動で出現する progressive disclosure)。 -->
+      ${_renderTrekScopeApprovals(t)}
 
       <!-- WHY (= goal_state) -->
       <div class="trek-section">
@@ -7500,11 +7826,72 @@ function handleCommonAction(action, el) {
       if (typeof exportProject === 'function') exportProject(_settingsViewedProjectId());
       return true;
     // ms-69 / e-1664 — Related Treks widget on work item detail
+    // ms-97 / e-2606 — Trek tab は廃止されたので、 widget からは trek detail
+    // page に直接遷移する (= openTrek が main 領域を上書きするので tab 経由
+    // 不要)。 entry modal が開いていれば閉じる (= 遷移先で見えなくする)。
     case 'trek-jump-from-widget': {
       const tid = el.dataset.trekId;
-      // Close the entry modal (if open) so the Treks tab is unobstructed.
       if (state.openEntryId) closeEntryModal();
-      switchTab('treks').then(() => openTrek(tid));
+      openTrek(tid);
+      return true;
+    }
+    // ms-97 / e-2609 — Trek detail の pending scope-add / scope-remove
+    // approval button。 trek doc の pending_scope_changes entry を 1 click
+    // で server に commit / reject させる経路。 backend (= e-2611 / e-2603)
+    // が pending state を扱うようになった時点で機能する。 endpoint 不在の
+    // 旧 backend では 404 / 405 が返り、 alert で「endpoint 未着地」 を user
+    // に説明して silent fail させる (= 既存 trek を壊さない)。
+    case 'trek-scope-approve': {
+      const trekId = el.dataset.trekId || '';
+      const pendingId = el.dataset.pendingId || '';
+      if (!trekId || !pendingId) return true;
+      el.disabled = true;
+      api(`/api/treks/${encodeURIComponent(trekId)}/scope-approve`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({pending_id: pendingId}),
+      }).then(updated => {
+        // server returns the refreshed trek doc; merge into state.treks so the
+        // detail re-render drops the pending row immediately.
+        if (updated && updated.trek_id) {
+          state.treks = (state.treks || []).map(t =>
+            t.trek_id === updated.trek_id ? updated : t);
+          render();
+        } else {
+          dataSource.loadTreks().then(render);
+        }
+      }).catch(e => {
+        el.disabled = false;
+        window.alert('Approve failed: ' + (e && e.message || 'unknown error')
+          + '\n\n(endpoint may not be shipped yet — see SPEC e-2611)');
+      });
+      return true;
+    }
+    case 'trek-scope-reject': {
+      const trekId = el.dataset.trekId || '';
+      const pendingId = el.dataset.pendingId || '';
+      const reasonInputId = el.dataset.reasonInput || '';
+      if (!trekId || !pendingId) return true;
+      const reasonInput = reasonInputId ? document.getElementById(reasonInputId) : null;
+      const reason = reasonInput ? reasonInput.value : '';
+      el.disabled = true;
+      api(`/api/treks/${encodeURIComponent(trekId)}/scope-reject`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({pending_id: pendingId, reason: reason || ''}),
+      }).then(updated => {
+        if (updated && updated.trek_id) {
+          state.treks = (state.treks || []).map(t =>
+            t.trek_id === updated.trek_id ? updated : t);
+          render();
+        } else {
+          dataSource.loadTreks().then(render);
+        }
+      }).catch(e => {
+        el.disabled = false;
+        window.alert('Reject failed: ' + (e && e.message || 'unknown error')
+          + '\n\n(endpoint may not be shipped yet — see SPEC e-2611)');
+      });
       return true;
     }
     // ms-69 / e-1659 v2 — trek detail STOP / Resume buttons surface the CLI
@@ -7812,6 +8199,59 @@ async function renderMenu() {
     `).join('');
   };
 
+  // ms-97 / e-2606 + e-2607 \u2014 Treks \u30bb\u30af\u30b7\u30e7\u30f3\u3092\u30cf\u30f3\u30d0\u30fc\u30ac\u30fc top-level \u306b
+  // \u5fa9\u6d3b\u3055\u305b\u308b (= e-2251 \u3067 project tab bar \u306b\u62bc\u3057\u8fbc\u3081\u3089\u308c\u305f\u914d\u7f6e\u3092 SPEC \u901a\u308a
+  // \u623b\u3059)\u3002 Trek \u306f project \u3068\u72ec\u7acb\u306a first-class object \u306a\u306e\u3067\u3001 project
+  // switcher \u3068\u540c\u3058\u968e\u5c64\u306b \u300c\u81ea\u5206\u304c member \u306e Trek \u4e00\u89a7\u300d \u3068\u3057\u3066\u4e26\u3076\u3002
+  //
+  // ms-97 / e-2607 (AC2) \u2014 \u8868\u793a\u5bfe\u8c61\u306f \u300cuser \u304c creator or member \u306e\u5168 Trek\u300d\u3002
+  // \u73fe\u5728\u958b\u3044\u3066\u3044\u308b project \u306b\u7d61\u3080 Trek \u3060\u3051\u3092\u51fa\u3057\u3066\u3044\u305f legacy filter \u306f\u5ec3\u6b62
+  // \u3057\u3001 project context \u3092\u5207\u66ff\u3048\u3066\u3082 list \u5185\u5bb9\u306f\u4e0d\u5909\u3002 server side
+  // (= /api/treks?include_archived=true\u3001 actor_id filter \u306e\u307f) \u3082 project
+  // filter \u3092\u6301\u305f\u306a\u3044\u306e\u3067\u3001 client \u306f state.treks \u3092\u305d\u306e\u307e\u307e\u4f7f\u3046\u3002
+  //
+  // Sort: created_at \u964d\u9806 (= newest first)\u3002 server side \u304c\u65e2\u306b\u540c sort \u3092\u8fd4\u3059
+  // (lib/trek_store.list_treks L110-112) \u304c\u3001 cache \u9806\u5e8f\u305a\u308c\u3084\u5225 source \u304b\u3089\u306e
+  // upsert \u306b\u5099\u3048\u3066 client \u5074\u3067\u3082 defensive \u306b\u4e26\u3079\u76f4\u3059\u3002
+  const renderTreksSection = () => {
+    const treks = state.treks;
+    if (treks === undefined || treks === null) {
+      return '<div class="menu-user" style="color:var(--text-dim);">Loading\u2026</div>';
+    }
+    const active = treks
+      .filter(t => t.status !== 'archived')
+      .slice()
+      .sort((a, b) => {
+        const ax = (a.created_at || '') + (a.trek_id || '');
+        const bx = (b.created_at || '') + (b.trek_id || '');
+        return bx.localeCompare(ax);
+      });
+    if (active.length === 0) {
+      return '<div class="menu-user" style="color:var(--text-dim);">You are not a member of any active treks.</div>';
+    }
+    return active.map(t => {
+      const halt = !!t.halt;
+      const projectIds = new Set();
+      for (const s of (t.scope || [])) {
+        if (s && s.project) projectIds.add(s.project);
+      }
+      const projectCount = projectIds.size;
+      const memberCount = (t.members || []).length;
+      const subParts = [
+        `${projectCount} project${projectCount === 1 ? '' : 's'}`,
+        `${memberCount}m`,
+      ];
+      if (halt) subParts.unshift('\u26a0 halted');
+      return `
+        <button class="menu-item ${state.openTrekId === t.trek_id ? 'current' : ''}"
+                data-action="menu-open-trek" data-trek-id="${esc(t.trek_id)}">
+          ${esc(t.title || '')}
+          <div class="menu-item-sub">${subParts.join(' \u00b7 ')} \u00b7 ${esc(t.trek_id)}</div>
+        </button>
+      `;
+    }).join('');
+  };
+
   const renderSessionsSection = () => {
     const sessions = state.onlineSessions;
     if (sessions === undefined || sessions === null) {
@@ -7857,6 +8297,11 @@ async function renderMenu() {
       </div>
 
       <div class="menu-section">
+        <div class="menu-section-title">Treks</div>
+        <div id="menu-treks-list">${renderTreksSection()}</div>
+      </div>
+
+      <div class="menu-section">
         <div class="menu-section-title">Online Agents</div>
         <div id="menu-sessions-list">${renderSessionsSection()}</div>
       </div>
@@ -7889,9 +8334,21 @@ async function renderMenu() {
     });
   }
 
-  // ms-86 / e-2251 \u2014 Treks \u30bb\u30af\u30b7\u30e7\u30f3\u306f\u30cf\u30f3\u30d0\u30fc\u30ac\u30fc\u304b\u3089\u524a\u9664\u6e08 (= top-level tab
-  // \u300cTreks\u300d \u306b\u5206\u96e2\u3001 SPEC IgCFK8I34cBfPco3UE06 \u65b9\u91dd 6)\u3002 menu loader \u304b\u3089\u3082 Trek
-  // load \u3092\u5916\u3057\u3001 \u30cf\u30f3\u30d0\u30fc\u30ac\u30fc = project + online sessions \u306e\u307f\u306b\u5f79\u5272\u3092\u7d5e\u308b\u3002
+  // ms-97 / e-2606 \u2014 Treks list \u3092 hamburger top-level \u306b lazy fill \u3059\u308b\u3002
+  // e-2251 \u3067 project tab bar \u306b\u62bc\u3057\u8fbc\u3081\u3089\u308c\u305f\u914d\u7f6e\u3092 SPEC tnJnByg8Ymw8T3DgPdJD
+  // (= ms-97 SPEC, AC1/AC3/AC4) \u901a\u308a\u623b\u3059: Trek \u306f project \u3068\u72ec\u7acb\u306a first-class
+  // object \u306a\u306e\u3067\u3001 project switcher \u3068\u540c\u3058 menu \u968e\u5c64\u306b\u4e26\u3076\u306e\u304c\u81ea\u7136\u306a\u52d5\u7dda\u3002
+  // /api/treks \u306f include_archived=true \u3067\u5168\u53d6\u5f97\u3057\u3001 list \u5074\u306e filter \u3067 active
+  // \u306e\u307f\u8868\u793a (= active \u304c glance\u3001 archived \u306f detail \u7d4c\u7531\u3067\u306e\u307f\u5230\u9054)\u3002
+  if (!state.treks || state.treks.length === 0) {
+    dataSource.loadTreks().then(() => {
+      refillSection('menu-treks-list', renderTreksSection());
+    }).catch(() => {
+      refillSection('menu-treks-list',
+        '<div class="menu-user" style="color:var(--text-dim);">No treks.</div>');
+    });
+  }
+
   if (!state.onlineSessions || state.onlineSessions.length === 0) {
     dataSource.loadOnlineSessions().then(() => {
       refillSection('menu-sessions-list', renderSessionsSection());
