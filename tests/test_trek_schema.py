@@ -797,9 +797,13 @@ def test_legacy_waiting_review_migrates_on_read():
     assert trek.get_task_state(t, "e-old") == "leader_review"
 
 
-def test_default_ttl_changed_to_12_minutes():
-    """ms-88 / e-2107: DEFAULT_WORKING_TTL_MINUTES 30 → 12 短縮。"""
-    assert trek.DEFAULT_WORKING_TTL_MINUTES == 12
+def test_default_ttl_changed_to_24h():
+    """ms-88 / e-2107 → ms-95 / e-2646: DEFAULT_WORKING_TTL_MINUTES 履歴
+    30 → 12 → 1440 (24h)。 2026-06-28 dogfood で 12 min は prep 待機中の
+    executor を「stuck」 と誤判定する病理を生んだので、 24h baseline に
+    再緩和。 「すぐ stall 判定したい」 個別 Trek は meta.stall_threshold_minutes
+    で短い override 可能 (= 機能変更ではなく default だけ動かす)。"""
+    assert trek.DEFAULT_WORKING_TTL_MINUTES == 1440
 
 
 # ---------------------------------------------------------------------------
@@ -1079,8 +1083,9 @@ def test_get_working_ttl_minutes_default_when_unset():
         title="t", creator_user_id="u-1", creator_email="a@b.com",
         creator_session_id="sv-1",
     )
-    # ms-88 / e-2107: TTL default 30 → 12 min (= scheduler cadence + 2 min バッファ)。
-    assert trek.get_working_ttl_minutes(t) == 12
+    # ms-95 / e-2646: TTL default は 24h (= 1440 min) に再緩和。 prep 待機中
+    # の executor を「stuck」 と誤判定する dogfood 病理を構造的に絶つ。
+    assert trek.get_working_ttl_minutes(t) == 1440
 
 
 def test_get_working_ttl_minutes_honors_meta_override():
@@ -1099,8 +1104,8 @@ def test_get_working_ttl_minutes_falls_back_on_non_numeric_override():
     )
     t.setdefault("meta", {})["working_ttl_minutes"] = "garbage"
     # Bad config must not crash; fall back to default so safety net stays on.
-    # ms-88 / e-2107: default 30 → 12 min。
-    assert trek.get_working_ttl_minutes(t) == 12
+    # ms-95 / e-2646: default 12 → 1440 (24h)。
+    assert trek.get_working_ttl_minutes(t) == 1440
 
 
 # ---------------------------------------------------------------------------

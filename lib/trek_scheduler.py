@@ -53,11 +53,23 @@ except Exception:
 
 WORKING_TASK_STATE = "working"
 
-# ms-75 / e-2067 + ms-88 / e-2107 — server-side TTL safety net default.
-# Shortened 30 → 12 min so silent halts are caught within one scheduler
-# cadence (+ 2 min buffer). 罰則 = 全 working を leader_review に強制遷移
-# (= server/app.py の orchestrator 経路、 ここは検出のみ)。
-DEFAULT_WORKING_TTL_MINUTES = 12
+# ms-75 / e-2067 + ms-88 / e-2107 + ms-95 / e-2646 — server-side TTL safety
+# net default. **24h (= 1440 min)** baseline (was 12 min, was 30 min).
+#
+# 2026-06-28 dogfood で 12 min は **短すぎ** が確定: prep 待機中の executor
+# (= 例: staging URL を待っている LPS / 別 session のレビュー待ち) を
+# 「stuck」 と誤判定して working → leader_review に勝手に flip し、 executor
+# の attribution を奪う病理が観察された (= e-2646 / dogfood findings memo
+# `e70cUf8IS5uEIS1HIEXt` § #14 / #19 連鎖)。
+#
+# 24h default = 「待機」 を「stuck」 と誤判定する確率を実用上ゼロに、 かつ
+# 完全 silent halt (= 翌日になっても無反応) は依然 catch する境界。 個別
+# Trek は ``trek_doc.meta.stall_threshold_minutes`` で短い override 可能
+# (= per-Trek の急ぎ事情に合わせる経路、 既存の `working_ttl_minutes`
+# field と互換)。 「prep 待機中」 を明示的に表現したい時は
+# ``task_states[*].meta.working_pause_until`` (ISO8601) で「この時刻まで
+# stall 判定をスキップ」 と marker を立てる経路を別途用意 (= e-2646)。
+DEFAULT_WORKING_TTL_MINUTES = 1440
 
 
 # ---------------------------------------------------------------------------
@@ -406,15 +418,56 @@ def get_working_ttl_minutes(trek_doc: dict,
     we use for DEFAULT_TASK_STATE). Both functions must read the same
     field name; a divergence would cause the server to interpret the
     TTL one way and the CLI to render it another.
+
+    ms-95 / e-2646 — both ``working_ttl_minutes`` (= legacy field name)
+    and ``stall_threshold_minutes`` (= new name introduced with the
+    24h default) are accepted. The new name reads first so callers
+    that adopt the new field win, but old data + tests using the old
+    name keep working unchanged (= no migration required).
     """
     meta = trek_doc.get("meta") or {}
-    val = meta.get("working_ttl_minutes")
+    # New field name takes precedence (= explicit user override for the
+    # 24h-default era).
+    val = meta.get("stall_threshold_minutes")
+    if val is None:
+        val = meta.get("working_ttl_minutes")
     if val is None:
         return default
     try:
         return int(val)
     except (TypeError, ValueError):
         return default
+
+
+def _task_entry_is_paused(entry: dict, now: datetime.datetime) -> bool:
+    """ms-95 / e-2646 — return True iff a task_states entry is marked as
+    intentionally paused (= prep waiting, not stuck).
+
+    Two equivalent markers are accepted:
+
+      * ``entry.meta.working_pause_until`` (ISO8601) — pause expires at
+        that timestamp; before it, stall check is skipped.
+      * ``entry.meta.working_paused`` truthy — explicit boolean marker,
+        useful for "pause indefinitely until I un-pause" flows.
+
+    Both live under ``entry["meta"]`` to keep the entry's top-level
+    shape (state / updated_at / updated_by_session_id / note /
+    last_activity_at) stable. The detector treats either as "skip stall
+    for this task this tick"; the caller (server tick endpoint) treats
+    the task as still actively-claimed even though no recent activity.
+    """
+    if not entry:
+        return False
+    meta = entry.get("meta") or {}
+    if meta.get("working_paused"):
+        return True
+    pause_str = meta.get("working_pause_until") or ""
+    if not pause_str:
+        return False
+    pause_until = _parse_iso(pause_str)
+    if pause_until is None:
+        return False
+    return _ensure_utc(pause_until) > _ensure_utc(now)
 
 
 def detect_auto_stalled_tasks(
@@ -467,6 +520,13 @@ def detect_auto_stalled_tasks(
         # legacy `waiting-review` は migrate されて leader_review 扱いに
         # なるので自然に対象外。
         if not entry or (entry or {}).get("state") != WORKING_TASK_STATE:
+            continue
+        # ms-95 / e-2646 — prep 待機 marker。 executor が「意図的に保留中」
+        # と明示している間は stall 判定をスキップ (= 24h default の
+        # threshold より精細な per-task pause primitive)。 staging URL
+        # 受領待ち / 別 session のレビュー待ちなど、 dogfood で attribution
+        # を奪われる病理の構造的対策。
+        if _task_entry_is_paused(entry, now):
             continue
         # ms-95 / e-2308 — per-task TTL extension. Set by the leader via
         # ``trek.extend_task_ttl`` (CLI ``beacon trek extend-ttl``) when

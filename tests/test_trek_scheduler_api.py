@@ -436,13 +436,13 @@ def test_due_trek_stamps_last_leader_digest_at_when_fired():
 # ---------------------------------------------------------------------------
 
 
-def test_leader_digest_fans_out_to_all_live_leader_sessions():
-    """Multi-session leader (= same user logged in from N bclaude) gets
-    the digest delivered to each live session, not just the originally
-    stamped one. This is the core fix for the LPS dogfood observation.
-
-    ms-97 / e-2613 (AC33) — seed task_states so the leader-digest gate
-    opens (= todo float). The fan-out behaviour stays under test.
+def test_leader_digest_targets_stamped_leader_session_only_when_live():
+    """ms-95 / e-2645 — **narrow fanout**: stamped ``leader_session_id``
+    が live なら **その 1 session のみ** に digest を送る。 旧実装は
+    「leader user の全 live session に broadcast」 で、 same-user
+    multi-session dogfood (= leader / executor を同 user の別 session が
+    兼ねる) で executor session が leader-digest を受信する病理を生んだ
+    (= dogfood findings § #16)。
     """
     _seed_trek(
         trek_id="tk-digestfan1",
@@ -452,8 +452,8 @@ def test_leader_digest_fans_out_to_all_live_leader_sessions():
     )
     _treks["tk-digestfan1"]["task_states"] = {"e-todo1": {"state": "todo"}}
     # Leader user has 3 live sessions: the original stamped one + 2
-    # extras (= reconnect / fork scenarios). All three are within the
-    # 10-minute live cutoff so they all qualify.
+    # extras. With e-2645 narrow fanout, only the stamped sid gets the
+    # digest because it IS live (= primary path triggers).
     _seed_live_sessions_for_trek(
         "beacon-test",
         user_id="uid-leader",
@@ -468,22 +468,60 @@ def test_leader_digest_fans_out_to_all_live_leader_sessions():
     assert resp.status_code == 200, resp.text
     body = resp.json()
     fired = body["fired"][0]
-    # All three live sessions are recorded as digest recipients.
-    assert sorted(fired["leader_digest_recipients"]) == [
-        "sv-leader", "sv-leader-fork", "sv-leader-mac",
-    ]
-    # The stamped leader_session_id audit field is preserved untouched
-    # (= "did not silently re-stamp the doc just because we fanned out").
+    # ms-95 / e-2645 — Only the stamped leader session gets the digest.
+    assert fired["leader_digest_recipients"] == ["sv-leader"]
+    # The stamped leader_session_id audit field is preserved untouched.
     assert fired["leader_session_id"] == "sv-leader"
 
-    # Three digest events landed, one per session, all addressed.
+    # One digest event lands (= narrow path).
     events = _bus_events_by_project["beacon-test"]
     digest_events = [e for e in events if _is_trek_leader_digest_event(e)]
-    assert len(digest_events) == 3
+    assert len(digest_events) == 1
+    assert digest_events[0]["payload"]["recipient_session_id"] == "sv-leader"
+
+
+def test_leader_digest_falls_back_to_leader_user_sessions_when_stamped_stale():
+    """ms-95 / e-2645 — **fallback path**: stamped ``leader_session_id``
+    が stale (= live でない) の時のみ、 leader user の全 live session に
+    fan out する (= ms-92 e-2164 multi-leader-session 互換、 reconnect /
+    fork で sid が変わったときに digest が宙に消えない経路)。
+    """
+    _seed_trek(
+        trek_id="tk-digestfan2",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-95"}],
+    )
+    _treks["tk-digestfan2"]["task_states"] = {"e-todo1": {"state": "todo"}}
+    # Stamped is "sv-leader" but only "sv-leader-fork" + "sv-leader-mac"
+    # are live → fallback to leader user's live sessions.
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-leader",
+        session_ids=["sv-leader-fork", "sv-leader-mac"],
+    )
+
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-digestfan2"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    fired = resp.json()["fired"][0]
+    # Fallback fan out reaches both live leader-user sessions.
+    assert sorted(fired["leader_digest_recipients"]) == [
+        "sv-leader-fork", "sv-leader-mac",
+    ]
+    # Stamped audit field preserved (= we did not silently re-stamp).
+    assert fired["leader_session_id"] == "sv-leader"
+
+    events = _bus_events_by_project["beacon-test"]
+    digest_events = [e for e in events if _is_trek_leader_digest_event(e)]
+    assert len(digest_events) == 2
     recipients = sorted(
         e["payload"].get("recipient_session_id", "") for e in digest_events
     )
-    assert recipients == ["sv-leader", "sv-leader-fork", "sv-leader-mac"]
+    assert recipients == ["sv-leader-fork", "sv-leader-mac"]
 
 
 def test_leader_digest_delivers_to_live_session_when_stamped_is_stale():
@@ -889,9 +927,10 @@ def test_10min_cadence_does_not_refire_immediately():
 # ---------------------------------------------------------------------------
 
 def test_auto_stall_transitions_stalled_task_to_leader_review():
-    """ms-88 / e-2107: auto-stall 罰則先が `waiting-review` → `leader_review` に
-    変更され、 TTL default が 30 → 12 min 短縮された。 13 min 沈黙の working
-    task で safety net が発火、 leader_review に遷移 + trek-task-review DM 発火。"""
+    """ms-88 / e-2107 + ms-95 / e-2646: auto-stall 罰則先が `leader_review`。
+    Default TTL は 24h に再緩和されたので、 test は per-trek
+    ``stall_threshold_minutes=12`` を inject して 13 min silence で
+    mechanism が発火することを verify。"""
     import datetime
     now = datetime.datetime.now(datetime.timezone.utc)
     stale = (now - datetime.timedelta(minutes=13)).strftime(
@@ -904,6 +943,9 @@ def test_auto_stall_transitions_stalled_task_to_leader_review():
         scope=[{"project": "beacon-test", "milestone": "ms-75"}],
         last_at=stale,  # prevent cadence-fire from also running
     )
+    # ms-95 / e-2646 — inject 12-min threshold so mechanism stays testable
+    # without waiting 24h.
+    _treks["tk-stall0001"]["meta"]["stall_threshold_minutes"] = 12
     _treks["tk-stall0001"]["task_states"] = {
         "e-1": {
             "state": "working",
@@ -926,7 +968,7 @@ def test_auto_stall_transitions_stalled_task_to_leader_review():
     assert entry["trek_id"] == "tk-stall0001"
     assert entry["task_id"] == "e-1"
     assert entry["silence_minutes"] >= 13
-    assert entry["ttl_minutes"] == 12  # ms-88 / e-2107: 30 → 12 min 短縮
+    assert entry["ttl_minutes"] == 12  # ms-95 / e-2646 — injected, not default
 
     # Trek doc has the new leader_review state (= ms-88 / e-2107)。
     saved = _treks["tk-stall0001"]
@@ -1046,8 +1088,8 @@ def test_auto_stall_skips_halted_trek():
 
 def test_auto_stall_leader_can_recover_via_re_stamp_working():
     """AC 5: false-positive recovery path. ms-88 / e-2107: 罰則先が
-    leader_review に変更されたので leader は leader_review → working で復帰。
-    TTL も 12 min 短縮なので 13 min stale で発火する。"""
+    leader_review。 ms-95 / e-2646: TTL default 24h なので test は短い
+    threshold を inject して 13 min stale で発火させる。"""
     import datetime
     now = datetime.datetime.now(datetime.timezone.utc)
     stale = (now - datetime.timedelta(minutes=13)).strftime(
@@ -1060,6 +1102,8 @@ def test_auto_stall_leader_can_recover_via_re_stamp_working():
         scope=[{"project": "beacon-test", "milestone": "ms-75"}],
         last_at=stale,
     )
+    # ms-95 / e-2646 — inject 12-min threshold.
+    _treks["tk-stall0005"]["meta"]["stall_threshold_minutes"] = 12
     _treks["tk-stall0005"]["task_states"] = {
         "e-1": {
             "state": "working",
@@ -1857,3 +1901,98 @@ def test_progress_check_dm_carries_system_sender_marker():
     assert ev["payload"]["origin_channel"] == "trek-progress-check"
     # Delivery stays auto-execute (= AI autonomous progression).
     assert ev["delivery"] == "auto-execute"
+
+
+# ---------------------------------------------------------------------------
+# ms-95 / e-2644 — fanout snapshot strategy
+# ---------------------------------------------------------------------------
+
+def test_executor_with_active_claim_receives_progress_check_even_if_stall_flips_in_same_tick():
+    """ms-95 / e-2644 — **snapshot strategy** regression reproducer.
+
+    2026-06-28 dogfood で「executor が active claim を保持していたのに
+    progress-check fanout から漏れた」 病理を観察 (= dogfood findings § #19)。
+    root cause: 同 tick 内で stall transition が走ると task_states[*].
+    updated_by_session_id が "" にリセットされ、 fanout 評価 (=
+    session_has_active_claim) で claim 主と session_id が一致せず False。
+
+    本テストは:
+      * stall threshold を 12 min に inject (= 同 tick で stall が確実に
+        発火する条件を作る)
+      * executor session が working claim を 13 min 前に stamp 済み
+        (= stall 対象だが、 tick 開始時点では active claim 持ち)
+
+    Expected: snapshot strategy により、 fanout は tick 開始時の
+    task_states を参照する → executor は progress-check を受信する。
+    stall transition は同 transaction 内で fanout の後に走るので、 次 tick
+    以降は leader_review に降格された state が反映される。
+    """
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    stale = (now - datetime.timedelta(minutes=13)).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    _seed_trek(
+        trek_id="tk-snap0001",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-95"}],
+        # last_at が古いと cadence-fire も走る (= due treks に入る)
+        last_at=stale,
+    )
+    # ms-95 / e-2646 — inject short threshold so stall fires this tick.
+    _treks["tk-snap0001"]["meta"]["stall_threshold_minutes"] = 12
+    _treks["tk-snap0001"]["task_states"] = {
+        "e-373": {
+            "state": "working",
+            "updated_at": stale,
+            "last_activity_at": stale,
+            "updated_by_session_id": "sv-lps-exec",
+            "note": "",
+        },
+    }
+    # Add the executor user as member + live session.
+    _treks["tk-snap0001"]["members"].append({
+        "user_id": "uid-lps-exec", "email": "lps@b.com",
+        "role": "member", "invited_at": "2026-06-27T00:00:00.000000Z",
+        "joined_at": "2026-06-27T00:00:00.000000Z",
+        "invited_by": "uid-leader",
+    })
+    now_iso = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    _sessions_by_project["beacon-test"] = [
+        {"session_id": "sv-leader", "user_id": "uid-leader",
+         "last_active": now_iso},
+        {"session_id": "sv-lps-exec", "user_id": "uid-lps-exec",
+         "last_active": now_iso},
+    ]
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-snap0001"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    # The stall pass DID fire (= late-tick, after fanout).
+    assert len(body["auto_stalled"]) == 1
+    assert body["auto_stalled"][0]["task_id"] == "e-373"
+
+    # CRITICAL: the executor still got the progress-check this tick (=
+    # snapshot strategy preserved claim attribution during fanout).
+    events = _bus_events_by_project["beacon-test"]
+    progress_events = [
+        e for e in events if _is_trek_progress_check_event(e)
+    ]
+    recipients = [
+        e["payload"].get("recipient_session_id", "") for e in progress_events
+    ]
+    assert "sv-lps-exec" in recipients, (
+        "e-2644 regression: executor with active claim was excluded from "
+        "fanout because stall transition ran before/concurrent with the "
+        "fanout decision in the same tick."
+    )
+
+    # And the trek doc reflects the stall transition (= next-tick state
+    # is consistent with the auto_stalled report).
+    saved = _treks["tk-snap0001"]
+    assert saved["task_states"]["e-373"]["state"] == "leader_review"

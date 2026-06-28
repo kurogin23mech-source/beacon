@@ -495,9 +495,12 @@ def test_detect_auto_stalled_skips_task_under_ttl():
 
 
 def test_detect_auto_stalled_detects_task_past_default_ttl():
-    """ms-88 / e-2107: TTL default 30 → 12 min。 13 min silence で stall。"""
+    """ms-88 / e-2107 → ms-95 / e-2646: TTL default は 24h (1440 min) に再緩和。
+    旧 12 min ベースの test は per-trek override で 12 min を inject して
+    動作を保つ (= mechanism は変えていない、 default だけ変わった)。"""
     trek = {
         "status": "active",
+        "meta": {"stall_threshold_minutes": 12},  # ms-95 / e-2646 — inject
         "task_states": {
             "e-1": {"state": "working",
                     "last_activity_at": _iso(_now_minus(13))},
@@ -543,9 +546,11 @@ def test_detect_auto_stalled_honors_per_trek_ttl_override():
 def test_detect_auto_stalled_falls_back_to_updated_at_for_legacy_entries():
     """task_states entries written before e-2067 land have no
     last_activity_at field. The detector falls back to updated_at so
-    legacy stamps are still evaluated. ms-88 / e-2107: TTL 12 min。"""
+    legacy stamps are still evaluated. ms-95 / e-2646: default 24h なので
+    test は short threshold を inject して mechanism を verify。"""
     trek = {
         "status": "active",
+        "meta": {"stall_threshold_minutes": 12},  # ms-95 / e-2646 — inject
         "task_states": {
             "e-1": {"state": "working",
                     "updated_at": _iso(_now_minus(15))},
@@ -570,9 +575,10 @@ def test_detect_auto_stalled_skips_entry_with_no_activity_anchor():
 
 def test_detect_auto_stalled_returns_multiple_tasks():
     """All working + stalled tasks in a single trek are returned together.
-    ms-88 / e-2107: TTL 12 min。"""
+    ms-95 / e-2646: default 24h なので test は short threshold を inject。"""
     trek = {
         "status": "active",
+        "meta": {"stall_threshold_minutes": 12},  # ms-95 / e-2646 — inject
         "task_states": {
             "e-1": {"state": "working",
                     "last_activity_at": _iso(_now_minus(20))},
@@ -600,11 +606,111 @@ def test_build_auto_stall_note_includes_silence_minutes():
 def test_get_working_ttl_minutes_in_scheduler_module_matches_default():
     """Scheduler-side getter is the operational read path; it must agree
     with the schema-side getter so server + CLI render the same number.
-    ms-88 / e-2107: default 30 → 12 min。"""
-    assert scheduler.get_working_ttl_minutes({}) == 12
+    ms-95 / e-2646: default 12 → 1440 min (24h)。"""
+    assert scheduler.get_working_ttl_minutes({}) == 1440
+    # Legacy field name still wins.
     assert scheduler.get_working_ttl_minutes(
         {"meta": {"working_ttl_minutes": 7}}
     ) == 7
+    # ms-95 / e-2646: new field name (= stall_threshold_minutes) is the
+    # preferred override path.
+    assert scheduler.get_working_ttl_minutes(
+        {"meta": {"stall_threshold_minutes": 99}}
+    ) == 99
+    # Conflict: new name wins (= ms-95 / e-2646).
+    assert scheduler.get_working_ttl_minutes(
+        {"meta": {"stall_threshold_minutes": 99,
+                  "working_ttl_minutes": 7}}
+    ) == 99
+
+
+# ---------------------------------------------------------------------------
+# ms-95 / e-2646 — stall threshold 24h default + pause primitive
+# ---------------------------------------------------------------------------
+
+def test_detect_auto_stalled_does_not_fire_under_24h_default():
+    """ms-95 / e-2646: 12 min silence under the new 24h default should NOT
+    trigger stall. This is the dogfood regression reproducer (= prep
+    待機中の executor を「stuck」 と誤判定する病理を構造的に絶つ)。"""
+    trek = {
+        "status": "active",
+        # No meta override → default 1440 min applies.
+        "task_states": {
+            "e-1": {"state": "working",
+                    "last_activity_at": _iso(_now_minus(12))},
+        },
+    }
+    assert scheduler.detect_auto_stalled_tasks(trek, now=_BASE_NOW) == []
+
+
+def test_detect_auto_stalled_default_still_fires_after_24h():
+    """ms-95 / e-2646: 24h + 1 min silence DOES still fire (= the safety
+    net is still there for genuine silent halts, just slower to fire)."""
+    trek = {
+        "status": "active",
+        "task_states": {
+            "e-1": {"state": "working",
+                    "last_activity_at": _iso(_now_minus(60 * 24 + 1))},
+        },
+    }
+    out = scheduler.detect_auto_stalled_tasks(trek, now=_BASE_NOW)
+    assert len(out) == 1
+    assert out[0]["task_id"] == "e-1"
+
+
+def test_detect_auto_stalled_skips_when_working_pause_until_is_in_future():
+    """ms-95 / e-2646: per-task pause primitive. executor が「意図的に保留中」
+    と marker を立てている間は stall 判定をスキップ (= staging URL 受領
+    待ち / 別 session のレビュー待ちの正規表現)。"""
+    future = _iso(_BASE_NOW + datetime.timedelta(hours=2))
+    trek = {
+        "status": "active",
+        "meta": {"stall_threshold_minutes": 12},  # 短い threshold inject
+        "task_states": {
+            "e-1": {
+                "state": "working",
+                "last_activity_at": _iso(_now_minus(20)),  # 通常なら stall
+                "meta": {"working_pause_until": future},
+            },
+        },
+    }
+    # threshold は超えているが pause 中なので skip される。
+    assert scheduler.detect_auto_stalled_tasks(trek, now=_BASE_NOW) == []
+
+
+def test_detect_auto_stalled_fires_after_working_pause_until_expires():
+    """ms-95 / e-2646: pause 期限が過ぎたら通常 stall 判定に戻る。"""
+    past = _iso(_BASE_NOW - datetime.timedelta(minutes=1))
+    trek = {
+        "status": "active",
+        "meta": {"stall_threshold_minutes": 12},
+        "task_states": {
+            "e-1": {
+                "state": "working",
+                "last_activity_at": _iso(_now_minus(20)),
+                "meta": {"working_pause_until": past},
+            },
+        },
+    }
+    out = scheduler.detect_auto_stalled_tasks(trek, now=_BASE_NOW)
+    assert len(out) == 1
+
+
+def test_detect_auto_stalled_skips_when_working_paused_boolean_is_truthy():
+    """ms-95 / e-2646: 期限指定なしで「とにかく止めて」 と表現する
+    boolean marker も受理する経路。"""
+    trek = {
+        "status": "active",
+        "meta": {"stall_threshold_minutes": 12},
+        "task_states": {
+            "e-1": {
+                "state": "working",
+                "last_activity_at": _iso(_now_minus(60)),
+                "meta": {"working_paused": True},
+            },
+        },
+    }
+    assert scheduler.detect_auto_stalled_tasks(trek, now=_BASE_NOW) == []
 
 
 # ---------------------------------------------------------------------------
