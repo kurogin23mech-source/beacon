@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.50.1] - 2026-06-28
+
+- Merge pull request #287 from kurogin23mech-source/feat/ms-95-dogfood-tick-fixes
+- fix(ms-95): e-2644/e-2645/e-2646 dogfood tick fixes (snapshot + narrow + 24h)
+- docs(release): update README/CHANGELOG for v0.50.0
+- chore(release): bump formula to 0.50.0
+
 ## [v0.50.0] - 2026-06-28
 
 - Merge pull request #286 from kurogin23mech-source/feat/ms-95-e2639-tick-via-dm
