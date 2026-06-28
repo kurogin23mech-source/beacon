@@ -1231,13 +1231,32 @@ def backfill_session_history(trek_doc: dict) -> int:
     return added
 
 
-def normalize_scope_entry(entry: dict) -> dict:
+def normalize_scope_entry(entry: dict, *, strict: bool = True) -> dict:
     """Normalise a scope item.
 
     A scope entry MUST include ``project`` (= project_id) and MAY include
     one of milestone / operation / task to narrow it. Unknown keys are
     dropped to keep the on-disk schema tight (= server side can validate
     against this normalisation, CLI side can also use it before posting).
+
+    ms-97 / e-2659 (AC7 = scope strict mode):
+
+    - ``strict=True`` (default): the entry MUST include at least one
+      narrowing key (= ``milestone`` / ``operation`` / ``task``).
+      Project-wide entries (= no narrowing) raise ``ValueError`` so the
+      Trek's autonomous scope cannot accidentally cover an entire project.
+      This is the only mode NEW callers (= CLI ``--add-scope`` parser,
+      server endpoint validation, ``add_scope_entry`` / pending op staging)
+      should use.
+
+    - ``strict=False``: legacy permissive mode. Project-wide entries are
+      accepted silently so historical Trek docs (AC8 grandfather) and
+      identity look-ups on already-persisted scope rows (= remove /
+      pending look-up) keep working without forcing a data migration.
+
+    The split is the structural guarantee for AC7 + AC8: new project-wide
+    additions are physically impossible to land via the strict path, while
+    existing on-disk project-wide entries remain readable.
     """
     if not entry.get("project"):
         raise ValueError("scope entry missing required 'project' field")
@@ -1245,6 +1264,11 @@ def normalize_scope_entry(entry: dict) -> dict:
     for k in ("milestone", "operation", "task"):
         if entry.get(k):
             out[k] = entry[k]
+    if strict and not any(k in out for k in ("milestone", "operation", "task")):
+        raise ValueError(
+            "scope entry requires narrowing key: milestone | operation | "
+            "task (= project-wide scope is no longer accepted; ms-97 AC7)"
+        )
     return out
 
 
@@ -1321,7 +1345,11 @@ def new_trek(*,
         role="leader", invited_at=now, joined_at=now,
         invited_by=creator_user_id,
     )
-    scope = [normalize_scope_entry(s) for s in (initial_scope or [])]
+    # ms-97 / e-2659 (AC7): seeded scope on a fresh trek runs through the
+    # strict gate — there is no "legacy data" to grandfather at creation
+    # time. Callers that need to import historical project-wide rows can
+    # populate ``trek_doc['scope']`` directly after construction.
+    scope = [normalize_scope_entry(s, strict=True) for s in (initial_scope or [])]
     meta: dict = {}
     if cadence_minutes is not None:
         meta["cadence_minutes"] = int(cadence_minutes)
@@ -1741,7 +1769,7 @@ def accept_invitation(trek_doc: dict, *, user_id: str,
     return trek_doc
 
 
-def parse_scope_arg(arg: str) -> dict:
+def parse_scope_arg(arg: str, *, strict: bool = True) -> dict:
     """Parse a CLI ``<project>[:<ref>]`` scope argument into a normalized entry.
 
     ``ref`` is dispatched by prefix:
@@ -1752,6 +1780,13 @@ def parse_scope_arg(arg: str) -> dict:
 
     Returns the normalized scope dict ready to append to ``trek_doc.scope``.
     Raises ValueError on empty input or unknown ref prefix.
+
+    ms-97 / e-2659 (AC7): ``strict=True`` (default) rejects project-wide
+    scope (= no narrowing ref) via the ``normalize_scope_entry`` strict
+    guard. CLI ``--add-scope`` is wired to this default so user-facing
+    rejections happen at parse time with a clear hint. Legacy callers
+    that need to parse already-persisted strings (= rare) can opt out
+    with ``strict=False``.
     """
     if not arg or not arg.strip():
         raise ValueError("scope argument cannot be empty")
@@ -1764,7 +1799,7 @@ def parse_scope_arg(arg: str) -> dict:
             raise ValueError(f"scope arg {arg!r} missing project")
         entry: dict = {"project": project}
         if not ref:
-            return normalize_scope_entry(entry)
+            return normalize_scope_entry(entry, strict=strict)
         if ref.startswith("ms-"):
             entry["milestone"] = ref
         elif ref.startswith("op-"):
@@ -1776,8 +1811,8 @@ def parse_scope_arg(arg: str) -> dict:
                 f"unknown ref prefix in {arg!r} — expected ms-/op-/e- "
                 "(or omit ref for project-wide scope)"
             )
-        return normalize_scope_entry(entry)
-    return normalize_scope_entry({"project": arg})
+        return normalize_scope_entry(entry, strict=strict)
+    return normalize_scope_entry({"project": arg}, strict=strict)
 
 
 # ---------------------------------------------------------------------------
@@ -1878,8 +1913,14 @@ def check_trek_task_add_allowed(
 
 
 def add_scope_entry(trek_doc: dict, *, entry: dict) -> dict:
-    """Append a scope entry; raises ValueError if it already exists."""
-    norm = normalize_scope_entry(entry)
+    """Append a scope entry; raises ValueError if it already exists.
+
+    ms-97 / e-2659 (AC7): runs ``normalize_scope_entry`` in strict mode,
+    so project-wide additions raise ValueError before they can reach
+    ``scope[]``. This is the lib-layer enforcement that closes the
+    project-wide hole regardless of which caller invoked the helper.
+    """
+    norm = normalize_scope_entry(entry, strict=True)
     for existing in trek_doc.get("scope") or []:
         if existing == norm:
             raise ValueError(f"scope entry already exists: {norm}")
@@ -1889,8 +1930,14 @@ def add_scope_entry(trek_doc: dict, *, entry: dict) -> dict:
 
 
 def remove_scope_entry(trek_doc: dict, *, entry: dict) -> dict:
-    """Remove a scope entry; raises ValueError if not found."""
-    norm = normalize_scope_entry(entry)
+    """Remove a scope entry; raises ValueError if not found.
+
+    ms-97 / e-2659 (AC8): runs ``normalize_scope_entry`` in non-strict
+    mode so legacy project-wide entries (= grandfathered on-disk data)
+    can still be addressed for removal. Otherwise users could never
+    delete the very entries the new strict mode is meant to retire.
+    """
+    norm = normalize_scope_entry(entry, strict=False)
     scope = trek_doc.get("scope") or []
     new_scope = [s for s in scope if s != norm]
     if len(new_scope) == len(scope):
@@ -2062,7 +2109,12 @@ def add_pending_scope_op(
         raise ValueError(
             f"pending scope action {action!r} not in {VALID_PENDING_SCOPE_ACTIONS}"
         )
-    norm = normalize_scope_entry(entry)
+    # ms-97 / e-2659 (AC7 / AC8): the strict mode toggle mirrors the apply
+    # helpers — ``scope_add`` enforces the narrowing-key requirement (= no
+    # new project-wide pending), while ``scope_remove`` must keep working
+    # against grandfathered project-wide rows already on disk.
+    strict_norm = action == PENDING_SCOPE_ACTION_ADD
+    norm = normalize_scope_entry(entry, strict=strict_norm)
     if action == PENDING_SCOPE_ACTION_REMOVE:
         scope = trek_doc.get("scope") or []
         if not any(s == norm for s in scope):

@@ -104,9 +104,14 @@ def test_build_member_role_validated():
 # normalize_scope_entry
 # ---------------------------------------------------------------------------
 
-def test_normalize_scope_keeps_project_only():
-    out = trek.normalize_scope_entry({"project": "p-1"})
+def test_normalize_scope_keeps_project_only_legacy():
+    # ms-97 / e-2659 (AC8): strict mode now rejects project-wide entries
+    # (= no narrowing key), but the non-strict path is retained for
+    # reading grandfathered on-disk rows. Lock both halves of the contract.
+    out = trek.normalize_scope_entry({"project": "p-1"}, strict=False)
     assert out == {"project": "p-1"}
+    with pytest.raises(ValueError, match="narrowing key"):
+        trek.normalize_scope_entry({"project": "p-1"})
 
 
 def test_normalize_scope_keeps_project_plus_milestone():

@@ -3965,6 +3965,15 @@ def add_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
         entry["operation"] = body.operation
     if body.task:
         entry["task"] = body.task
+    # ms-97 / e-2659 (AC7 server layer): explicit strict-mode validation
+    # so the project-wide rejection surfaces as HTTPException 400 with the
+    # user-facing message, distinct from the 409 "already present" path
+    # below. add_pending_scope_op will also run strict mode internally,
+    # this front-load is for the clean status code split.
+    try:
+        entry = trek_mod.normalize_scope_entry(entry, strict=True)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     # Resolve the requesting session id from the X-Beacon-Session header so
     # the pending record carries the "who asked" attribution. Falls back to
     # empty string when the header is absent (= same null behaviour as the

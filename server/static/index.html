@@ -6430,7 +6430,7 @@ function _renderTrekDetail(t) {
            <strong>Project-wide scope detected</strong>
            This trek has ${projectWideEntries.length} scope entr${projectWideEntries.length === 1 ? 'y' : 'ies'} without a narrowing key (milestone / operation / task).
            Trek の自律権限が project 全体に染み出すリスクがあります。
-           各 entry に narrowing key を追加してください (= CLI: <code>beacon trek scope-add &lt;trek_id&gt; --project ${esc(projectWideEntries[0].project || '')} --milestone &lt;ms-id&gt;</code>)。
+           各 entry に narrowing key を追加してください (= CLI: <code>beacon trek plan ${esc(t.trek_id || '&lt;trek_id&gt;')} --add-scope ${esc(projectWideEntries[0].project || '')}:&lt;ms-id|op-id|e-id&gt;</code>)。
            <div class="trek-warning-bar-entries">
              ${projectWideEntries.map(s => `<span class="trek-warning-chip">project: ${esc(s.project || '')}</span>`).join('')}
            </div>
