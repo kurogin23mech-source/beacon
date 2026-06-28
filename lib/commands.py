@@ -6821,6 +6821,54 @@ def cmd_trek_extend_ttl():
             )
 
 
+def cmd_trek_summary_sent():
+    """Stamp ``meta.summary_sent_at`` after the leader sent the user
+    summary DM (ms-97 / Phase 7-A / AC21).
+
+    Leader-only on the server side (= ``_require_trek_leader_session``
+    hard-check on phase A+ trek)。 stamp 後は ``completion_notified_at``
+    と組み合わせて leader-digest tick が停止する。 Cloud-mode only
+    (= server endpoint 経由)。 ローカル mode では scheduler tick が
+    存在しないため stamp する意味がない。
+
+    Env:
+      BEACON_TREK_ID  (required)
+      BEACON_JSON     "1" → json output
+    """
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+
+    if not _is_cloud_mode():
+        print(
+            "Error: beacon trek summary-sent is cloud-mode only "
+            "(= server endpoint stamps meta.summary_sent_at; local treks "
+            "have no scheduler tick to stop)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        client, _config = _get_api_client()
+        t = client.trek_summary_sent(trek_id)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        stamped = (t.get("meta") or {}).get("summary_sent_at") or "(unknown)"
+        print(
+            f"Stamped meta.summary_sent_at={stamped} on trek {trek_id}. "
+            "Leader-digest tick will stop once completion_ready has also "
+            "fired."
+        )
+
+
 def cmd_trek_plan():
     """Edit a trek's scope (= what work items the trek is concerned with).
 
@@ -19297,6 +19345,9 @@ if __name__ == "__main__":
         "trek_scope_reject": cmd_trek_scope_reject,
         "trek_task_state": cmd_trek_task_state,
         "trek_extend_ttl": cmd_trek_extend_ttl,
+        # ms-97 / Phase 7-A / AC21 — leader が user summary DM 送信後
+        # に meta.summary_sent_at を stamp する CLI wrapper。
+        "trek_summary_sent": cmd_trek_summary_sent,
         # ms-92 / e-2141 — cross-project task add via Trek scope
         "trek_task_add": cmd_trek_task_add,
         "trek_stop": cmd_trek_stop,

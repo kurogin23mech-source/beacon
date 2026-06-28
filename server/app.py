@@ -4362,6 +4362,33 @@ def clear_trek_halt_endpoint(trek_id: str, user: dict = Depends(require_auth)):
     return t
 
 
+@app.post("/api/treks/{trek_id}/summary-sent")
+def trek_summary_sent_endpoint(
+    trek_id: str, request: Request,
+    user: dict = Depends(require_auth),
+):
+    """Stamp ``meta.summary_sent_at`` after the leader sent the user
+    summary DM (ms-97 / Phase 7-A / AC21).
+
+    Leader-only via ``_require_trek_leader_session`` (= role + session_id
+    grain on phase A+ trek、 pre-A invariance preserved)。 stamp 後は
+    leader-digest tick が停止条件に入る (= completion_notified_at と
+    summary_sent_at の両方 stamp で leader-digest fire を skip する、
+    AC21)。
+
+    Idempotent: re-calling stamps the latest timestamp but the leader-tick
+    stop condition only cares about "non-null". Returns the updated trek
+    doc so callers can echo ``meta.summary_sent_at`` back to the user.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_leader_session(t, user, request)
+    meta = t.setdefault("meta", {})
+    meta["summary_sent_at"] = trek_mod.utcnow_iso()
+    t["updated_at"] = trek_mod.utcnow_iso()
+    db.save_trek(trek_id, t)
+    return t
+
+
 @app.post("/api/treks/{trek_id}/transfer-leader")
 def transfer_trek_leader_endpoint(trek_id: str, body: TrekTransferLeader,
                                   user: dict = Depends(require_auth)):
@@ -6673,13 +6700,40 @@ def trek_scheduler_tick_endpoint(
         # injects one minimal dm event this tick so leader-digest can
         # stay silent without violating the "no complete silence" rule.
         # ms-95 / e-2644 — leader-digest gate も snapshot ベース。
-        leader_should_fire = (
-            trek_scheduler_mod.should_fire_leader_tick(fanout_trek_doc)
+        # ms-97 / Phase 7-A / AC21 — leader が user summary DM 送信後
+        # (= ``meta.summary_sent_at`` stamped) かつ completion_ready が
+        # 既に 1 回 fire 済 (= ``meta.completion_notified_at`` stamped)
+        # の状態では leader-digest tick を停止する。 「完遂宣言が
+        # 終わった trek に digest を打ち続けない」 ための停止条件。
+        # 片方だけ stamped の状態では従来通り fire し続ける。
+        leader_meta_snapshot = trek_doc.get("meta") or {}
+        leader_halted_by_summary = bool(
+            leader_meta_snapshot.get("summary_sent_at")
+        ) and bool(
+            leader_meta_snapshot.get("completion_notified_at")
         )
+        # ms-97 / Phase 7-A / AC20 — completion_ready シグナル。
+        # 全 task_states terminal + Op slot 不在 + 未通知 の時 1 回限り
+        # leader-digest payload に ``completion_ready=True`` を載せ、
+        # fanout 成功後に ``meta.completion_notified_at`` を stamp して
+        # 二度目の fire を構造的に防ぐ。
+        completion_ready_now = (
+            trek_scheduler_mod.is_completion_ready(fanout_trek_doc)
+        )
+        leader_should_fire = (
+            (not leader_halted_by_summary)
+            and (
+                trek_scheduler_mod.should_fire_leader_tick(fanout_trek_doc)
+                or completion_ready_now
+            )
+        )
+        completion_ready_fanned_out = False
         if leader_targets and leader_should_fire:
             base_digest_payload = trek_scheduler_mod.build_leader_digest_payload(
                 fanout_trek_doc, now=now,
             )
+            if completion_ready_now:
+                base_digest_payload["completion_ready"] = True
             for target in leader_targets:
                 lsid = target["session_id"]
                 lpid = target["home_project_id"]
@@ -6733,6 +6787,8 @@ def trek_scheduler_tick_endpoint(
                     )
                     if lpid not in leader_target_pids:
                         leader_target_pids.append(lpid)
+                    if completion_ready_now:
+                        completion_ready_fanned_out = True
                 except Exception as exc:
                     errors.append({
                         "trek_id": trek_id,
@@ -6755,6 +6811,14 @@ def trek_scheduler_tick_endpoint(
             meta["last_leader_digest_at"] = now.strftime(
                 "%Y-%m-%dT%H:%M:%S.%fZ"
             )
+        # ms-97 / Phase 7-A / AC20 — completion_ready idempotent stamp.
+        # Fanout が 1 つ以上の leader session に成功した時のみ stamp する
+        # (= 全 leader が宛先不在で失敗した場合は次 tick で retry)。 stamp
+        # 後は ``is_completion_ready`` が False を返すので、 同 trek
+        # ライフサイクル内で再 fire しない (= 二度目の通知病理を構造的に
+        # 防ぐ)。
+        if completion_ready_fanned_out:
+            meta["completion_notified_at"] = trek_mod.utcnow_iso()
         trek_doc["updated_at"] = trek_mod.utcnow_iso()
         try:
             db.save_trek(trek_id, trek_doc)

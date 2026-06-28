@@ -1497,7 +1497,22 @@ def new_trek(*,
     # time. Callers that need to import historical project-wide rows can
     # populate ``trek_doc['scope']`` directly after construction.
     scope = [normalize_scope_entry(s, strict=True) for s in (initial_scope or [])]
-    meta: dict = {}
+    # ms-97 Phase 7-A (= G6, e-2660): seed the completion-flow tracking
+    # fields on every new trek so AC20 (= completion_ready idempotent
+    # stamp) / AC21 (= summary_sent_at leader stop) / AC11+e-2646 (=
+    # stall_threshold_minutes trek-level override) have a stable
+    # invariant to read against. すべて None / 未設定 で seed する
+    # (= None は "まだ起きていない" を意味し、 readers は
+    # ``meta.get("...")`` で同じ None を読む)。
+    #
+    # 既存 trek (= pre-G6 docs) は migration 不要。 これらの field が
+    # 欠落していても readers は ``meta.get(...)`` で None を取り、
+    # 同じ "まだ起きていない" 状態として扱う。
+    meta: dict = {
+        "completion_notified_at": None,
+        "summary_sent_at": None,
+        "stall_threshold_minutes": None,
+    }
     if cadence_minutes is not None:
         meta["cadence_minutes"] = int(cadence_minutes)
     url = (manager_agent_url or "").strip()

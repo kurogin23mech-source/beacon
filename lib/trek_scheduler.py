@@ -406,6 +406,50 @@ def should_fire_leader_tick(trek_doc: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Completion-ready signal (ms-97 / Phase 7-A, AC20)
+# ---------------------------------------------------------------------------
+
+def _has_op_slot(trek_doc: dict) -> bool:
+    """Return True iff any scope entry narrows to an Operation (= ``operation`` key set).
+
+    ms-97 / AC20 — Op slot 入りの trek は completion_ready を発火しない。
+    Op (= 定期 / 自動運転 task) は trek 完遂条件の外側で動くため、
+    別 SPEC が決まるまで本シグナル経路を suppress する。
+    """
+    for entry in trek_doc.get("scope") or []:
+        if isinstance(entry, dict) and entry.get("operation"):
+            return True
+    return False
+
+
+def is_completion_ready(trek_doc: dict) -> bool:
+    """Return True iff this trek is ready to fire a one-shot completion_ready marker.
+
+    ms-97 / Phase 7-A / AC20 — fires ONCE per trek when:
+
+      * every stamped ``task_states`` entry is in a terminal state
+        (= ``done`` or ``user_review`` — same set as
+        ``is_trek_task_aggregate_terminal``), AND
+      * the scope contains NO Operation slot (= per AC20 footnote,
+        Op-bearing treks defer this signal pending separate SPEC), AND
+      * ``meta.completion_notified_at`` is still unstamped (= ``None``
+        / absent — i.e. the marker has not already been fanned out).
+
+    Empty ``task_states`` returns False, mirroring
+    ``is_trek_task_aggregate_terminal``.
+
+    Pure / I/O-free. The server endpoint pairs this with the idempotent
+    stamp; the test surface pins the matrix without a server.
+    """
+    if _has_op_slot(trek_doc):
+        return False
+    meta = trek_doc.get("meta") or {}
+    if meta.get("completion_notified_at"):
+        return False
+    return is_trek_task_aggregate_terminal(trek_doc)
+
+
+# ---------------------------------------------------------------------------
 # Auto-stall detection (ms-75 / e-2067)
 # ---------------------------------------------------------------------------
 
