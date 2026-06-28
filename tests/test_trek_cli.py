@@ -779,6 +779,101 @@ def _stage_and_approve_add(trek_env, tid, ref):
     assert r2.returncode == 0, r2.stderr
 
 
+# ---------------------------------------------------------------------------
+# ms-97 Phase 5 (AC23 / AC25) — canonical scope-add / scope-approve /
+# scope-reject verb subparser wirings. The verbs land alongside the existing
+# `plan --add-scope` flow; the staging machinery is shared (cmd_trek_plan).
+# ---------------------------------------------------------------------------
+
+def test_trek_scope_add_canonical_verb_milestone(trek_env):
+    """ms-97 / AC23 — `beacon trek scope-add --project P --milestone M`
+    is the canonical verb. It stages a pending op equivalent to
+    ``plan --add-scope P:M``.
+    """
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "scope-add", tid,
+             "--project", "beacon-1", "--milestone", "ms-64", "--json")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(r.stdout)
+    # Staged, not committed.
+    assert {"project": "beacon-1", "milestone": "ms-64"} not in doc["scope"]
+    pending = doc.get("pending_scope_ops") or []
+    assert len(pending) == 1
+    assert pending[0]["action"] == "scope_add"
+    assert pending[0]["entry"] == {"project": "beacon-1", "milestone": "ms-64"}
+
+
+def test_trek_scope_add_canonical_verb_task(trek_env):
+    """ms-97 / AC23 — --task / --e narrowing key variant works."""
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "scope-add", tid,
+             "--project", "lps-1", "--task", "e-1234", "--json")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(r.stdout)
+    pending = doc.get("pending_scope_ops") or []
+    assert len(pending) == 1
+    assert pending[0]["entry"] == {"project": "lps-1", "task": "e-1234"}
+
+
+def test_trek_scope_add_requires_narrowing_key(trek_env):
+    """ms-97 / AC7+AC23 — bare project-wide scope-add must be rejected
+    by the CLI flag-validation layer (= no narrowing key passed).
+    """
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "scope-add", tid, "--project", "lps-1", "--json")
+    assert r.returncode != 0, r.stdout
+    # Either the CLI flag-layer or the downstream parse_scope_arg surfaces
+    # the rejection — accept either wording for forward compatibility.
+    msg = r.stderr or r.stdout
+    assert "milestone" in msg or "narrowing key" in msg or "operation" in msg
+
+
+def test_trek_scope_add_requires_project(trek_env):
+    """ms-97 / AC23 — --project is required."""
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "scope-add", tid, "--milestone", "ms-64", "--json")
+    assert r.returncode != 0, r.stdout
+    assert "--project" in (r.stderr or r.stdout)
+
+
+def test_trek_scope_approve_canonical_verb_commits_pending(trek_env):
+    """ms-97 / AC25 — `beacon trek scope-approve <trek-id> <pending-id>`
+    flushes a staged scope op into ``scope[]``.
+    """
+    tid = _make_trek_and_return_id(trek_env)
+    # Stage via the canonical verb.
+    r = _run(trek_env, "scope-add", tid,
+             "--project", "beacon-1", "--milestone", "ms-64", "--json")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(r.stdout)
+    pid = doc["pending_scope_ops"][0]["pending_id"]
+    # Approve.
+    r2 = _run(trek_env, "scope-approve", tid, pid, "--json")
+    assert r2.returncode == 0, r2.stderr
+    doc2 = json.loads(r2.stdout)
+    assert {"project": "beacon-1", "milestone": "ms-64"} in doc2["scope"]
+    assert doc2.get("pending_scope_ops") == []
+
+
+def test_trek_scope_reject_canonical_verb_drops_pending(trek_env):
+    """ms-97 / AC25 — `beacon trek scope-reject <trek-id> <pending-id>`
+    drops a staged op without applying it.
+    """
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "scope-add", tid,
+             "--project", "beacon-1", "--milestone", "ms-64", "--json")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(r.stdout)
+    pid = doc["pending_scope_ops"][0]["pending_id"]
+    # Reject.
+    r2 = _run(trek_env, "scope-reject", tid, pid, "--json")
+    assert r2.returncode == 0, r2.stderr
+    doc2 = json.loads(r2.stdout)
+    # Scope unchanged, pending op gone.
+    assert {"project": "beacon-1", "milestone": "ms-64"} not in doc2["scope"]
+    assert doc2.get("pending_scope_ops") == []
+
+
 def test_trek_plan_remove_scope(trek_env):
     """ms-97 / e-2611 AC25 — scope-remove now stages a pending op.
 
