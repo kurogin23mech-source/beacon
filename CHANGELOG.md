@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.51.3] - 2026-06-28
+
+- Merge pull request #301 from kurogin23mech-source/fix/ms-97-fanout-empty-targets-and-broadcast-delivery
+- fix(ms-97): broadcast-fallback DM delivery + executor target diagnostic
+- docs(release): update README/CHANGELOG for v0.51.2
+- chore(release): bump formula to 0.51.2
+
 ## [v0.51.2] - 2026-06-28
 
 - Merge pull request #300 from kurogin23mech-source/fix/ms-97-project-ref-and-session-resolution
