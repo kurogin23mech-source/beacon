@@ -95,6 +95,9 @@ if _BACKEND == "dynamodb":
         save_trek,
         list_treks,
         delete_trek,
+        # Trek structured logs (ms-97 Phase 7-C, AC26 / AC27, e-2603)
+        append_trek_log,
+        list_trek_logs,
         # Active claims (ms-55 e-1730)
         list_active_claims,
         get_active_claim,
@@ -193,6 +196,9 @@ elif _BACKEND == "firestore":
         save_trek,
         list_treks,
         delete_trek,
+        # Trek structured logs (ms-97 Phase 7-C, AC26 / AC27, e-2603)
+        append_trek_log,
+        list_trek_logs,
         # Active claims (ms-55 e-1730)
         list_active_claims,
         get_active_claim,

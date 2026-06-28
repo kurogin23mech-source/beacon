@@ -2080,3 +2080,68 @@ def delete_trek(trek_id: str) -> bool:
         return False
     doc_ref.delete()
     return True
+
+
+# ---------------------------------------------------------------------------
+# Trek structured logs (ms-97 Phase 7-C, AC26 / AC27, e-2603)
+# Subcollection: treks/{trek_id}/logs/{log_id}
+# Retention: indefinite (MVP).
+# ---------------------------------------------------------------------------
+
+TREK_LOGS_SUBCOLLECTION = "logs"
+
+
+def _mint_trek_log_id() -> str:
+    import secrets as _secrets
+    return f"log-{_secrets.token_hex(8)}"
+
+
+def append_trek_log(trek_id: str, log_entry: dict) -> str:
+    """Append a trek log entry. Returns the assigned log_id.
+
+    ``log_entry`` is the caller-supplied record (= ``kind`` / ``session_id``
+    / ``payload`` / ``created_at`` / ...). This helper stamps ``log_id`` and
+    ``trek_id`` so callers don't have to (= safe defaults: ``log_id`` is
+    minted if absent, ``trek_id`` is forced to the path arg).
+    """
+    payload = dict(log_entry or {})
+    log_id = payload.get("log_id") or _mint_trek_log_id()
+    payload["log_id"] = log_id
+    payload["trek_id"] = trek_id
+    (
+        get_db()
+        .collection(TREKS_COLLECTION)
+        .document(trek_id)
+        .collection(TREK_LOGS_SUBCOLLECTION)
+        .document(log_id)
+        .set(payload)
+    )
+    return log_id
+
+
+def list_trek_logs(trek_id: str, *, limit: int = 100,
+                   since: str = "") -> list[dict]:
+    """Return ``treks/{trek_id}/logs`` ordered by ``created_at`` ascending.
+
+    ``since`` is an optional ISO8601 lower bound (= entries with
+    ``created_at > since`` only). ``limit`` caps the number of rows
+    returned to keep the read O(1) for dashboard use cases.
+    """
+    col = (
+        get_db()
+        .collection(TREKS_COLLECTION)
+        .document(trek_id)
+        .collection(TREK_LOGS_SUBCOLLECTION)
+    )
+    docs = col.stream()
+    out: list[dict] = []
+    for d in docs:
+        rec = d.to_dict() or {}
+        if since and (rec.get("created_at") or "") <= since:
+            continue
+        rec["log_id"] = d.id
+        out.append(rec)
+    out.sort(key=lambda r: (r.get("created_at", ""), r.get("log_id", "")))
+    if limit and limit > 0:
+        out = out[:limit]
+    return out
