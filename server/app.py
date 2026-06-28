@@ -5607,23 +5607,45 @@ async def post_bus_event(
     gate_lookup = dm_gate_mod.build_shared_trek_lookup_from_lists(
         # Sender-side trek visibility is sufficient — Trek membership
         # query is symmetric (creator OR members) on either backend.
+        # ms-97 / e-2659 Phase 3 (G4): the lookup is invoked fresh per
+        # bus event — no list reuse — so a member removed between
+        # events stops granting bypass on the next invocation.
         lambda uid: db.list_treks(actor_id=uid) if uid else [],
     )
+    # ms-97 / e-2659 Phase 3 (AC18): pass session ids so phase A+ treks
+    # are evaluated session-grain. Recipient sid is resolved from the
+    # payload (= same shape used by ``_resolve_bus_event_user_ids``).
+    recipient_sid_for_gate = ""
+    if isinstance(body.payload, dict):
+        recipient_sid_for_gate = str(
+            body.payload.get("recipient_session_id") or ""
+        )
     # ms-83 / e-1995: pass tier+issuer so the gate can recognise
     # T1-system server-mint envelopes as T1-equivalent (= bypass).
-    should_gate, gate_reason = dm_gate_mod.should_gate_dm_action(
+    should_gate, gate_reason, gate_trek_id = dm_gate_mod.should_gate_dm_action(
         sender_user_id=sender_uid,
         receiver_user_id=receiver_uid,
         actions_authorized=env_actions,
         shared_trek_lookup=gate_lookup,
         envelope_tier=env_tier,
         envelope_issuer=env_issuer,
+        sender_session_id=body.sender_session_id or "",
+        receiver_session_id=recipient_sid_for_gate,
     )
     audit_record["dm_gate"] = {
         "should_gate": should_gate,
         "reason": gate_reason,
         "sender_user_id": sender_uid,
         "receiver_user_id": receiver_uid,
+        # ms-97 / e-2659 Phase 3 (AC19): bypass flag + matched trek_id.
+        # bypass=True when the gate let an action-bearing cross-user
+        # envelope through *because* of a shared trek membership. The
+        # trek_id makes the audit log searchable by trek.
+        "bypass": (
+            (not should_gate)
+            and gate_reason == dm_gate_mod.GATE_REASON_SHARED_TREK
+        ),
+        "trek_id": gate_trek_id,
     }
     if should_gate:
         # Force a safe, non-auto-execute delivery so legacy receivers
@@ -5770,6 +5792,136 @@ class TrekSchedulerTickRequest(BaseModel):
     # Optional scoping for tests / staged rollout. None = iterate all.
     project_ids: Optional[list[str]] = None
     trek_ids: Optional[list[str]] = None
+
+
+def _build_executor_targets_user_grain(
+    *,
+    fanout_trek_doc: dict,
+    live_sessions: dict[str, dict],
+    leader_sid: str,
+) -> list[dict]:
+    """Legacy pre-A fanout target builder (= user_id grain).
+
+    ms-97 / e-2659 Phase 3 — kept verbatim for backward compatibility
+    with treks that have NOT been migrated to session_id keyed members[].
+    Walks the live_sessions map (which was already filtered by
+    ``member_user_ids`` upstream), excludes the leader session, and
+    applies the per-session ``should_fire_executor_tick`` lazy-start
+    gate. This is the byte-for-byte equivalent of the pre-Phase-3 inline
+    loop body — extracted into a function purely so the new Phase A+
+    path sits next to it for diff clarity.
+    """
+    targets: list[dict] = []
+    for sid, info in live_sessions.items():
+        if leader_sid and sid == leader_sid:
+            # The stamped leader session is structurally excluded
+            # from progress-check (= CORE doc trek-leader-stance /
+            # e-2166: leader's role is review, not pickup).
+            continue
+        # ms-95 / e-2644 — fanout 評価は **snapshot** ベース
+        # (= 同 tick 内で stall transition が走っても claim を喪失
+        # しない、 dogfood findings § #19 構造的対策)。
+        if not trek_scheduler_mod.should_fire_executor_tick(
+            fanout_trek_doc, session_id=sid,
+        ):
+            continue
+        targets.append({
+            "session_id": sid,
+            "home_project_id": info["home_project_id"],
+        })
+    return targets
+
+
+def _build_executor_targets_session_grain(
+    *,
+    fanout_trek_doc: dict,
+    trek_doc: dict,
+    scope_project_ids: list[str],
+    leader_sid: str,
+    live_cutoff: str,
+) -> list[dict]:
+    """ms-97 / e-2659 Phase 3 (AC16) — phase A+ fanout target builder.
+
+    Iterates ``trek_doc.members[]`` directly (= session_id keyed) and
+    resolves each session's home project by scanning every scope
+    project's session registry. First match wins (= a session_id is
+    unique to one project bridge in practice). Sessions without a
+    resolvable home project are skipped with a structured warning to
+    stderr — the leader-digest payload's ``alarm`` field already
+    surfaces this case upstream, so the warning is purely log-side.
+
+    Why iterate scope_project_ids for home resolution: the scheduler
+    has no session→project reverse index. With N scope projects the
+    cost is O(M·N) per tick where M = member count; both numbers are
+    small (single digits) in dogfood. If/when scale demands, swap to
+    a session_id → project_id directory point lookup.
+
+    Filters applied (in order):
+      1. Leader session_id → excluded (CORE doc trek-leader-stance).
+      2. No resolvable home project → skipped + stderr warning.
+      3. Session not live (= last_active before live_cutoff) → skipped
+         (= 10-min cutoff matches the user_grain path for parity).
+      4. ``should_fire_executor_tick`` lazy-start gate → skipped if
+         the executor has no signal worth waking on this tick.
+    """
+    members = trek_doc.get("members") or []
+    targets: list[dict] = []
+    for m in members:
+        msid = m.get("session_id") or ""
+        if not msid:
+            # Invitation-stage placeholder (= invited, not joined). No
+            # session yet to wake.
+            continue
+        if leader_sid and msid == leader_sid:
+            continue
+        # Role-based leader skip (= belt + suspenders with the sid
+        # match above; covers cases where the doc has role=leader but
+        # leader_session_id is unstamped).
+        if (m.get("role") or "") == "leader":
+            continue
+        # Resolve home project. First scope project whose session
+        # registry contains msid wins.
+        resolved_pid = ""
+        last_active = ""
+        for pid in scope_project_ids:
+            try:
+                project_sessions = db.list_sessions(pid)
+            except Exception:
+                project_sessions = []
+            for s in project_sessions:
+                if (s.get("session_id") or "") == msid:
+                    resolved_pid = pid
+                    last_active = s.get("last_active") or ""
+                    break
+            if resolved_pid:
+                break
+        if not resolved_pid:
+            # Ghost member: session vanished from every scope project's
+            # registry. Skip + log; the alarm hook upstream already
+            # surfaces this via leader-digest payload.
+            print(
+                f"warn[ms-97 e-2659 AC16]: trek "
+                f"{trek_doc.get('trek_id', '')} member session "
+                f"{msid} has no resolvable home project in scope "
+                f"{scope_project_ids}",
+                file=sys.stderr,
+            )
+            continue
+        # Live cutoff filter — keeps parity with user_grain path. An
+        # offline session that has not registered a recent heartbeat
+        # would not receive the dm anyway.
+        if last_active and last_active < live_cutoff:
+            continue
+        # Lazy-start gate (= AC33).
+        if not trek_scheduler_mod.should_fire_executor_tick(
+            fanout_trek_doc, session_id=msid,
+        ):
+            continue
+        targets.append({
+            "session_id": msid,
+            "home_project_id": resolved_pid,
+        })
+    return targets
 
 
 @app.post("/api/system/trek-scheduler/tick")
@@ -6039,29 +6191,36 @@ def trek_scheduler_tick_endpoint(
             if (m.get("role") or "") == "leader" and m.get("user_id"):
                 leader_user_id = m.get("user_id") or ""
                 break
-        executor_targets: list[dict] = []
-        for sid, info in live_sessions.items():
-            if leader_sid_for_filter and sid == leader_sid_for_filter:
-                # The stamped leader session is structurally excluded
-                # from progress-check (= CORE doc trek-leader-stance /
-                # e-2166: leader's role is review, not pickup). Other
-                # sessions of the same user (= fork / re-connect under
-                # a fresh sid) are NOT excluded here because they may
-                # legitimately be wearing an executor hat — only the
-                # `leader_review > working` state transition surface
-                # is leader-only, and that gate sits elsewhere.
-                continue
-            # ms-95 / e-2644 — fanout 評価は **snapshot** ベース
-            # (= 同 tick 内で stall transition が走っても claim を喪失
-            # しない、 dogfood findings § #19 構造的対策)。
-            if not trek_scheduler_mod.should_fire_executor_tick(
-                fanout_trek_doc, session_id=sid,
-            ):
-                continue
-            executor_targets.append({
-                "session_id": sid,
-                "home_project_id": info["home_project_id"],
-            })
+        # ms-97 / e-2659 Phase 3 (AC16) — fanout target build is now
+        # **phase-gated**. Phase A+ treks (= members[] is session_id
+        # keyed) iterate members[] directly and resolve each session's
+        # home project via the session registry. Pre-A treks keep the
+        # legacy "walk live_sessions, filter by user_id membership"
+        # path verbatim — backward compat for treks not yet migrated.
+        #
+        # Why this matters (= dogfood findings root cause): the old
+        # path required (a) the executor's home project to be in
+        # ``scope[]`` and (b) the session registry to surface a live
+        # row. For LPS / PE cross-project Treks where the executor's
+        # home project was *not* in scope (= scope listed only the
+        # primary project), step (a) failed silently and the executor
+        # never received a tick. Phase A+ iteration removes step (a)
+        # by relying solely on members[] as the canonical recipient
+        # list.
+        if trek_mod.is_session_id_keyed(trek_doc):
+            executor_targets = _build_executor_targets_session_grain(
+                fanout_trek_doc=fanout_trek_doc,
+                trek_doc=trek_doc,
+                scope_project_ids=scope_project_ids,
+                leader_sid=leader_sid_for_filter,
+                live_cutoff=live_cutoff,
+            )
+        else:
+            executor_targets = _build_executor_targets_user_grain(
+                fanout_trek_doc=fanout_trek_doc,
+                live_sessions=live_sessions,
+                leader_sid=leader_sid_for_filter,
+            )
         # Audit-surface ``recipients`` list (= back-compat for callers
         # that read ``fired[].recipients``). Empty string sentinel marks
         # the broadcast fallback.
