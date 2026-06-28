@@ -2132,6 +2132,85 @@ body::after {
   color: var(--text-dim);
 }
 
+/* ms-97 / e-2608 — Leader session id row (trek-head 内、 trek-stats の下)。
+   等幅で sid を見せるので request-invite の宛先 / leader_review 権限の所在が
+   1 行で読み取れる。 hover で tooltip に完全な sid を出す (= title 属性)。 */
+.trek-leader-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 0.72rem;
+  margin-top: 6px;
+}
+.trek-leader-label {
+  color: var(--text-dim);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-size: 0.6rem;
+}
+.trek-leader-sid {
+  font-family: var(--font-mono, monospace);
+  color: var(--accent);
+  word-break: break-all;
+}
+
+/* ms-97 / e-2608 — Project-wide scope warning bar。 narrowing key (milestone /
+   operation / task) を持たない scope entry がある trek に表示し、 自律権限が
+   project 全体に染み出すリスクを user に周知する。 STOP card より控えめな
+   amber 系で、 「危険ではないが要対応」 のトーンに収める。 */
+.trek-warning-bar {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 14px 18px;
+  margin: 16px 0 22px;
+  border: 1px solid var(--warning, #fbbf24);
+  background: rgba(251,191,36,0.08);
+  border-radius: 4px;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+.trek-warning-bar .icon {
+  font-size: 1.2rem;
+  color: var(--warning, #fbbf24);
+  flex-shrink: 0;
+  line-height: 1.2;
+}
+.trek-warning-bar .text { flex: 1; }
+.trek-warning-bar .text strong {
+  display: block;
+  color: var(--warning, #fbbf24);
+  font-size: 0.85rem;
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+.trek-warning-bar code {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.72rem;
+  color: var(--text-primary);
+  background: var(--bg-surface, var(--bg-raised));
+  padding: 1px 6px;
+  border-radius: 2px;
+  border: 1px solid var(--border-subtle);
+}
+.trek-warning-bar-entries {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.trek-warning-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: 0.7rem;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-secondary);
+  background: rgba(251,191,36,0.12);
+  border: 1px solid rgba(251,191,36,0.4);
+  border-radius: 3px;
+}
+
 .trek-meta {
   display: grid;
   grid-template-columns: 100px 1fr;
@@ -6122,6 +6201,41 @@ function _renderTrekDetail(t) {
     ? `<div class="trek-why-block">${esc(goalState)}</div>`
     : `<div class="trek-why-block empty">No goal_state set yet.</div>`;
 
+  // ms-97 / e-2608 (AC5) — leader_session_id を 1 行で表示する。 user / 他
+  // session が leader session を確認して 「request-invite を誰宛に送るか」
+  // 「leader_review への遷移は誰の権限か」 を判断できるようにする。 trek-id badge
+  // と同じ monospace でラベル + sid を並べる (= "司令塔: sv-xxxx")。 不在の場合
+  // (= migration 前の trek、 または leader 未任命) は表示しない。
+  const leaderRowHtml = leaderSid
+    ? `<div class="trek-leader-row">
+         <span class="trek-leader-label">Leader</span>
+         <span class="trek-leader-sid" title="${esc(leaderSid)}">${esc(leaderSid)}</span>
+       </div>`
+    : '';
+
+  // ms-97 / e-2608 (AC8 / AC31) — project-wide scope (= narrowing key なし、
+  // 「project: X」 だけのエントリ) を 1 件でも持つ trek には warning bar を出す。
+  // SPEC AC7 で project-wide は新規追加が reject されるが、 既存 trek は
+  // grandfathered (= AC8)。 自律権限が project 全体に染み出すリスクを user に
+  // 周知し、 narrowing key (milestone / operation / task) の追加を促す。
+  const projectWideEntries = scope.filter(
+    s => s && s.project && !s.milestone && !s.operation && !s.task
+  );
+  const projectWideWarningHtml = projectWideEntries.length
+    ? `<div class="trek-warning-bar" role="alert">
+         <span class="icon">⚠</span>
+         <div class="text">
+           <strong>Project-wide scope detected</strong>
+           This trek has ${projectWideEntries.length} scope entr${projectWideEntries.length === 1 ? 'y' : 'ies'} without a narrowing key (milestone / operation / task).
+           Trek の自律権限が project 全体に染み出すリスクがあります。
+           各 entry に narrowing key を追加してください (= CLI: <code>beacon trek scope-add &lt;trek_id&gt; --project ${esc(projectWideEntries[0].project || '')} --milestone &lt;ms-id&gt;</code>)。
+           <div class="trek-warning-bar-entries">
+             ${projectWideEntries.map(s => `<span class="trek-warning-chip">project: ${esc(s.project || '')}</span>`).join('')}
+           </div>
+         </div>
+       </div>`
+    : '';
+
   return `
     <section class="fade-in trek-detail-v2">
 
@@ -6134,7 +6248,10 @@ function _renderTrekDetail(t) {
         <div class="trek-stats">
           ${projectsInScope.size} project${projectsInScope.size === 1 ? '' : 's'} · ${workItemsInScope} work item${workItemsInScope === 1 ? '' : 's'} · ${members.length} member${members.length === 1 ? '' : 's'}
         </div>
+        ${leaderRowHtml}
       </div>
+
+      ${projectWideWarningHtml}
 
       <!-- WHY (= goal_state) -->
       <div class="trek-section">
