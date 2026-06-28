@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.51.2] - 2026-06-28
+
+- Merge pull request #300 from kurogin23mech-source/fix/ms-97-project-ref-and-session-resolution
+- fix(ms-97): project_ref + session_id resolution unification (= dogfood structural fixes)
+- docs(release): update README/CHANGELOG for v0.51.1
+- chore(release): bump formula to 0.51.1
+
 ## [v0.51.1] - 2026-06-28
 
 - Merge pull request #299 from kurogin23mech-source/fix/ms-97-cloud-migration-endpoint
