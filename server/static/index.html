@@ -7812,18 +7812,33 @@ async function renderMenu() {
     `).join('');
   };
 
-  // ms-97 / e-2606 \u2014 Treks \u30bb\u30af\u30b7\u30e7\u30f3\u3092\u30cf\u30f3\u30d0\u30fc\u30ac\u30fc top-level \u306b\u5fa9\u6d3b\u3055\u305b\u308b
-  // (= e-2251 \u3067 project tab bar \u306b\u62bc\u3057\u8fbc\u3081\u3089\u308c\u305f\u914d\u7f6e\u3092 SPEC \u901a\u308a\u623b\u3059)\u3002 Trek \u306f
-  // project \u3068\u72ec\u7acb\u306a first-class object \u306a\u306e\u3067\u3001 project switcher \u3068\u540c\u3058\u968e\u5c64\u306b
-  // \u300c\u81ea\u5206\u304c member \u306e Trek \u4e00\u89a7\u300d \u3068\u3057\u3066\u4e26\u3076\u3002 \u5404\u884c click \u3067 trek detail \u306b
-  // \u76f4\u63a5\u9077\u79fb\u3059\u308b (= openTrek\u3001 project tab \u3092\u7d4c\u7531\u3057\u306a\u3044)\u3002 list view \u81ea\u4f53\u304c
-  // \u3053\u3053\u306b\u7d71\u5408\u3055\u308c\u308b\u306e\u3067\u3001 project tab \u306e Treks \u30bf\u30d6\u306f\u524a\u9664\u3059\u308b (= AC4)\u3002
+  // ms-97 / e-2606 + e-2607 \u2014 Treks \u30bb\u30af\u30b7\u30e7\u30f3\u3092\u30cf\u30f3\u30d0\u30fc\u30ac\u30fc top-level \u306b
+  // \u5fa9\u6d3b\u3055\u305b\u308b (= e-2251 \u3067 project tab bar \u306b\u62bc\u3057\u8fbc\u3081\u3089\u308c\u305f\u914d\u7f6e\u3092 SPEC \u901a\u308a
+  // \u623b\u3059)\u3002 Trek \u306f project \u3068\u72ec\u7acb\u306a first-class object \u306a\u306e\u3067\u3001 project
+  // switcher \u3068\u540c\u3058\u968e\u5c64\u306b \u300c\u81ea\u5206\u304c member \u306e Trek \u4e00\u89a7\u300d \u3068\u3057\u3066\u4e26\u3076\u3002
+  //
+  // ms-97 / e-2607 (AC2) \u2014 \u8868\u793a\u5bfe\u8c61\u306f \u300cuser \u304c creator or member \u306e\u5168 Trek\u300d\u3002
+  // \u73fe\u5728\u958b\u3044\u3066\u3044\u308b project \u306b\u7d61\u3080 Trek \u3060\u3051\u3092\u51fa\u3057\u3066\u3044\u305f legacy filter \u306f\u5ec3\u6b62
+  // \u3057\u3001 project context \u3092\u5207\u66ff\u3048\u3066\u3082 list \u5185\u5bb9\u306f\u4e0d\u5909\u3002 server side
+  // (= /api/treks?include_archived=true\u3001 actor_id filter \u306e\u307f) \u3082 project
+  // filter \u3092\u6301\u305f\u306a\u3044\u306e\u3067\u3001 client \u306f state.treks \u3092\u305d\u306e\u307e\u307e\u4f7f\u3046\u3002
+  //
+  // Sort: created_at \u964d\u9806 (= newest first)\u3002 server side \u304c\u65e2\u306b\u540c sort \u3092\u8fd4\u3059
+  // (lib/trek_store.list_treks L110-112) \u304c\u3001 cache \u9806\u5e8f\u305a\u308c\u3084\u5225 source \u304b\u3089\u306e
+  // upsert \u306b\u5099\u3048\u3066 client \u5074\u3067\u3082 defensive \u306b\u4e26\u3079\u76f4\u3059\u3002
   const renderTreksSection = () => {
     const treks = state.treks;
     if (treks === undefined || treks === null) {
       return '<div class="menu-user" style="color:var(--text-dim);">Loading\u2026</div>';
     }
-    const active = treks.filter(t => t.status !== 'archived');
+    const active = treks
+      .filter(t => t.status !== 'archived')
+      .slice()
+      .sort((a, b) => {
+        const ax = (a.created_at || '') + (a.trek_id || '');
+        const bx = (b.created_at || '') + (b.trek_id || '');
+        return bx.localeCompare(ax);
+      });
     if (active.length === 0) {
       return '<div class="menu-user" style="color:var(--text-dim);">You are not a member of any active treks.</div>';
     }
