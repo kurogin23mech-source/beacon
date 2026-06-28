@@ -5820,25 +5820,26 @@ def trek_scheduler_tick_endpoint(
                 and (s.get("last_active") or "") >= live_cutoff
                 and s.get("session_id")
             ]
-            # ms-88 / e-2109 — per-session filter.
+            # ms-88 / e-2109 — per-session filter (executor lazy start).
             # 2026-06-20 補完 (e-2109 second pass): leader 除外を追加。 leader は
             # executor の進捗を促す立場ではない (= 役割が違う、 CORE doc
             # trek-leader-stance / e-2166 と整合)、 progress-check の宛先から外す。
-            # 残された claim 0 件の executor は「fresh、 これから todo を引き受ける」
-            # と扱われ tick が届く。 leader 専用の集約 surface (= trek-leader-digest
-            # channel、 e-2164) は別 channel で配信する設計。
+            #
+            # ms-97 / e-2613 (AC33) — refined to "per-executor lazy start":
+            # fire only when the executor has >=1 active claim OR there's
+            # unclaim todo float to pick up. Implemented in
+            # ``trek_scheduler_mod.should_fire_executor_tick``; the leader
+            # exclusion stays here as a structural filter (= role bound,
+            # not state bound).
             leader_sid_for_filter = trek_doc.get("leader_session_id") or ""
             for sid in live_sids:
                 if leader_sid_for_filter and sid == leader_sid_for_filter:
                     # leader は progress-check の宛先ではない。
                     continue
-                if trek_mod.session_has_active_claim(trek_doc, session_id=sid):
+                if trek_scheduler_mod.should_fire_executor_tick(
+                    trek_doc, session_id=sid,
+                ):
                     target_sids.append(sid)
-                elif not trek_mod.session_has_any_claim(trek_doc, session_id=sid):
-                    # Fresh session, no claims yet — still tick so it picks
-                    # up a todo task.
-                    target_sids.append(sid)
-                # else: every claim is terminal-ish → skip this session.
         if not target_sids:
             # Fallback: broadcast (= sid empty). Preserves behaviour when
             # member resolution fails (= no live sessions / empty members /
@@ -5925,7 +5926,18 @@ def trek_scheduler_tick_endpoint(
             if stamped:
                 leader_live_sids = [stamped]
         leader_digest_event_id = ""
-        if leader_live_sids:
+        # ms-97 / e-2613 (AC33) — per-leader lazy start. Fire the digest
+        # only when the leader genuinely has signal to consume (=
+        # leader_review queue / todo float / completion imminent). When
+        # the gate closes AND no progress-check fired either (= every
+        # executor was also quiet), the orchestrator's broadcast
+        # fallback already injects one minimal trek-progress-check event
+        # this tick, so leader-digest can stay silent without violating
+        # the "no complete silence" rule.
+        leader_should_fire = (
+            trek_scheduler_mod.should_fire_leader_tick(trek_doc)
+        )
+        if leader_live_sids and leader_should_fire:
             try:
                 digest_envelope = envelope_mod.issue_t1_system_envelope(
                     project_id=target_project_id,
