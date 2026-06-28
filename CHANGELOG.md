@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.51.1] - 2026-06-28
+
+- Merge pull request #299 from kurogin23mech-source/fix/ms-97-cloud-migration-endpoint
+- fix(ms-97): cloud-mode migration endpoint (= live trek migrate without local store)
+- docs(release): update README/CHANGELOG for v0.51.0
+- chore(release): bump formula to 0.51.0
+
 ## [v0.51.0] - 2026-06-28
 
 - Merge pull request #298 from kurogin23mech-source/feat/ms-97-phase7c-blanket-and-logs
