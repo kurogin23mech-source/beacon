@@ -4838,6 +4838,10 @@ def cmd_trek_list():
         return
 
     print(f"Treks ({len(treks)}):")
+    # ms-97 / e-2659 (AC8 + AC31): collect treks with grandfathered
+    # project-wide scope so the listing surfaces the warning once at the
+    # bottom (= avoid spamming every row).
+    project_wide_treks: list[tuple[str, list[str]]] = []
     for t in treks:
         status_icon = {
             "planning": "○",
@@ -4846,10 +4850,33 @@ def cmd_trek_list():
         }.get(t.get("status", ""), "?")
         halt_marker = " [halted]" if t.get("halt") else ""
         member_count = len(t.get("members") or [])
-        scope_count = len(t.get("scope") or [])
+        scope_entries = t.get("scope") or []
+        scope_count = len(scope_entries)
+        project_wide = [
+            s.get("project") or ""
+            for s in scope_entries
+            if not any(s.get(k) for k in ("milestone", "operation", "task"))
+        ]
+        pw_marker = (
+            f" [⚠ {len(project_wide)} project-wide]" if project_wide else ""
+        )
         print(f"  {status_icon} {t['trek_id']:14s} {t['title'][:55]}"
               f" — {t.get('type', '?')}/{t.get('status', '?')}"
-              f"{halt_marker}, {member_count}m/{scope_count}s")
+              f"{halt_marker}, {member_count}m/{scope_count}s{pw_marker}")
+        if project_wide:
+            project_wide_treks.append((t["trek_id"], project_wide))
+    if project_wide_treks:
+        print()
+        print("⚠ Project-wide scope entries detected "
+              "(= legacy, narrowing key 無し):")
+        for trek_id, projects in project_wide_treks:
+            for project in projects:
+                print(f"  - {trek_id}: {project}")
+        print("これらは旧 SPEC で許容されていた entry で、 "
+              "新規追加は server reject されます。")
+        print("対処: `beacon trek plan --remove-scope <project>` で削除し、 "
+              "`beacon trek plan --add-scope <project>:<ms-id|op-id|e-id>` "
+              "で narrowing 付き entry を staging してください。")
 
 
 def _current_project_id() -> str:
@@ -5156,6 +5183,7 @@ def cmd_trek_show():
         print(f"    - {m.get('email')} [{m.get('role')}] ({joined})")
     scope = t.get("scope") or []
     print(f"  scope ({len(scope)}):")
+    project_wide_entries: list[dict] = []
     for s in scope:
         # ms-75 / e-1864 AC 6: surface bind grain (project / project:task=eXXX /
         # project:ms=msXX / project:op=opXX) explicitly so members understand
@@ -5166,6 +5194,23 @@ def cmd_trek_show():
             print(f"    - {s.get('project')}:{ref_str}")
         else:
             print(f"    - {s.get('project')} (project-wide)")
+            project_wide_entries.append(s)
+    # ms-97 / e-2659 (AC8 + AC31): warn the operator when the trek still
+    # carries grandfathered project-wide scope entries (= rows with no
+    # narrowing key). New additions are server-rejected (AC7), but legacy
+    # data stays readable. Surface the gap so the operator knows the trek
+    # is broader than today's policy would allow.
+    if project_wide_entries:
+        print()
+        print("  ⚠ Project-wide scope entries detected "
+              "(= legacy, narrowing key 無し):")
+        for s in project_wide_entries:
+            print(f"    - {s.get('project')}")
+        print("  これらは旧 SPEC で許容されていた entry で、 "
+              "新規追加は server reject されます。")
+        print("  対処: `beacon trek plan --remove-scope <project>` で削除し、 "
+              "`beacon trek plan --add-scope <project>:<ms-id|op-id|e-id>` "
+              "で narrowing 付き entry を staging してください。")
     if t.get("halt"):
         h = t["halt"]
         print(f"  halt: at={h.get('issued_at')} by={h.get('issued_by_session_id')}"

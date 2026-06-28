@@ -698,16 +698,69 @@ def test_trek_plan_add_scope_task(trek_env):
     assert {"project": "lps-1", "task": "e-1234"} in doc2["scope"]
 
 
-def test_trek_plan_add_scope_project_wide(trek_env):
+def test_trek_plan_add_scope_project_wide_rejected(trek_env):
+    """ms-97 / e-2659 (AC7 CLI layer): project-wide add is now rejected.
+
+    Pre-AC7 the CLI accepted ``--add-scope lps-1`` (= no `:<ref>`) and
+    staged a pending op for a project-wide entry. With AC7 the CLI's
+    ``parse_scope_arg`` runs in strict mode by default, so this case
+    bails out before any cloud call with a clear ``narrowing key`` hint.
+    """
     tid = _make_trek_and_return_id(trek_env)
     r = _run(trek_env, "plan", tid, "--add-scope", "lps-1", "--json")
-    assert r.returncode == 0
-    doc = json.loads(r.stdout)
-    assert {"project": "lps-1"} not in doc["scope"]
-    pid = doc["pending_scope_ops"][0]["pending_id"]
-    r2 = _run(trek_env, "scope-approve", tid, pid, "--json")
-    doc2 = json.loads(r2.stdout)
-    assert {"project": "lps-1"} in doc2["scope"]
+    assert r.returncode != 0, r.stdout
+    assert "narrowing key" in r.stderr, r.stderr
+
+
+def _inject_legacy_project_wide_scope(trek_env, tid: str, project: str) -> None:
+    """Splice a legacy project-wide row into a trek doc on disk.
+
+    ms-97 / e-2659 (AC8): the strict write path forbids project-wide
+    scope adds, but grandfathered rows still exist on disk for older
+    treks. Tests for the CLI warning surface must seed such a row
+    without going through the strict CLI / server gates — we patch the
+    JSON file in ``BEACON_TREKS_DIR`` directly.
+    """
+    import json as _json
+    import os as _os
+    path = _os.path.join(trek_env["BEACON_TREKS_DIR"], f"{tid}.json")
+    with open(path, "r", encoding="utf-8") as f:
+        doc = _json.load(f)
+    doc.setdefault("scope", []).append({"project": project})
+    with open(path, "w", encoding="utf-8") as f:
+        _json.dump(doc, f, ensure_ascii=False, indent=2)
+
+
+def test_trek_show_warns_on_legacy_project_wide_scope(trek_env):
+    """ms-97 / e-2659 (AC8 + AC31): trek show flags grandfathered rows."""
+    tid = _make_trek_and_return_id(trek_env)
+    _inject_legacy_project_wide_scope(trek_env, tid, "lps-1")
+    r = _run(trek_env, "show", tid)
+    assert r.returncode == 0, r.stderr
+    assert "Project-wide scope entries detected" in r.stdout
+    assert "lps-1" in r.stdout
+    # The remediation hint must point at the actual CLI verb.
+    assert "--add-scope" in r.stdout
+
+
+def test_trek_show_no_warning_when_all_narrowed(trek_env):
+    """No warning bar when scope[] is fully narrowed."""
+    tid = _make_trek_and_return_id(trek_env)
+    _stage_and_approve_add(trek_env, tid, "beacon-1:ms-64")
+    r = _run(trek_env, "show", tid)
+    assert r.returncode == 0, r.stderr
+    assert "Project-wide scope entries detected" not in r.stdout
+
+
+def test_trek_list_warns_on_legacy_project_wide_scope(trek_env):
+    """ms-97 / e-2659 (AC8 + AC31): trek list summarises grandfathered rows."""
+    tid = _make_trek_and_return_id(trek_env)
+    _inject_legacy_project_wide_scope(trek_env, tid, "lps-1")
+    r = _run(trek_env, "list")
+    assert r.returncode == 0, r.stderr
+    assert "[⚠ 1 project-wide]" in r.stdout
+    assert "Project-wide scope entries detected" in r.stdout
+    assert f"{tid}: lps-1" in r.stdout
 
 
 def _stage_and_approve_add(trek_env, tid, ref):
@@ -738,16 +791,19 @@ def test_trek_plan_remove_scope(trek_env):
     through ``_stage_and_approve_add`` so the trek's ``scope[]`` is
     actually populated before the remove-side flow under test.
     """
+    # ms-97 / e-2659 (AC7): both setup adds must carry narrowing keys
+    # so they survive the strict-mode parse layer. The remove path is
+    # what's actually under test here.
     tid = _make_trek_and_return_id(trek_env)
     _stage_and_approve_add(trek_env, tid, "beacon-1:ms-64")
-    _stage_and_approve_add(trek_env, tid, "pe-1")
+    _stage_and_approve_add(trek_env, tid, "pe-1:ms-5")
     r = _run(trek_env, "plan", tid, "--remove-scope", "beacon-1:ms-64",
              "--json")
     assert r.returncode == 0
     doc = json.loads(r.stdout)
     # AC25 — scope still has both entries; the pending op was staged.
     assert {"project": "beacon-1", "milestone": "ms-64"} in doc["scope"]
-    assert {"project": "pe-1"} in doc["scope"]
+    assert {"project": "pe-1", "milestone": "ms-5"} in doc["scope"]
     pending = doc.get("pending_scope_ops") or []
     assert len(pending) == 1
     assert pending[0]["action"] == "scope_remove"
@@ -757,7 +813,7 @@ def test_trek_plan_remove_scope(trek_env):
     r2 = _run(trek_env, "scope-approve", tid, pid, "--json")
     assert r2.returncode == 0, r2.stderr
     doc2 = json.loads(r2.stdout)
-    assert doc2["scope"] == [{"project": "pe-1"}]
+    assert doc2["scope"] == [{"project": "pe-1", "milestone": "ms-5"}]
     assert doc2.get("pending_scope_ops") == []
 
 

@@ -580,22 +580,21 @@ class TestScope:
         assert r2.status_code == 200
         assert body in r2.json()["scope"]
 
-    def test_add_scope_project_only(self):
-        """Project-wide scope add follows the same staging flow (AC23)."""
+    def test_add_scope_project_only_rejected(self):
+        """ms-97 / e-2659 (AC7): project-wide adds are now 400.
+
+        Pre-AC7 the endpoint accepted ``{"project": "beacon"}`` and staged
+        a pending op for a project-wide row. AC7 closes that hole — the
+        narrowing key (= milestone / operation / task) is mandatory on
+        the server validation layer and the response carries a clear
+        ``narrowing key`` hint.
+        """
         trek_id = _create_seed_trek()
         _impersonate(LEADER_UID, LEADER_EMAIL)
         body = {"project": "beacon"}
         r = client.put(f"/api/treks/{trek_id}/scope", json=body)
-        assert r.status_code == 200
-        payload = r.json()
-        # Staging: not yet in scope.
-        assert body not in payload["scope"]
-        pending_id = payload["pending_op"]["pending_id"]
-        r2 = client.post(
-            f"/api/treks/{trek_id}/scope/approve/{pending_id}",
-        )
-        assert r2.status_code == 200
-        assert body in r2.json()["scope"]
+        assert r.status_code == 400, r.text
+        assert "narrowing key" in r.text
 
     def test_add_duplicate_scope_returns_409(self):
         """Duplicate-add still 409s, but now at stage-time (e-2626).
@@ -660,10 +659,13 @@ class TestScope:
         assert r.status_code == 404
 
     def test_invited_not_joined_cannot_edit_scope(self):
+        # ms-97 / e-2659 (AC7): use a narrowing-keyed body so the test
+        # actually exercises the auth gate instead of the AC7 strict
+        # validation (= which would 400 before auth ever fires).
         trek_id = _create_seed_trek()
         _impersonate(INVITED_UID, INVITED_EMAIL)
         r = client.put(f"/api/treks/{trek_id}/scope",
-                       json={"project": "beacon"})
+                       json={"project": "beacon", "milestone": "ms-1"})
         assert r.status_code == 403
 
 

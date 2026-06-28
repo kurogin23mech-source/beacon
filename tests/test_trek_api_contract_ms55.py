@@ -287,20 +287,19 @@ class TestContract_ScopeList:
             for k in extra & allowed_extra_keys:
                 assert e[k], f"scope entry has empty {k} field: {e}"
 
-    def test_project_only_scope_entry(self):
+    def test_project_only_scope_entry_rejected(self):
+        # ms-97 / e-2659 (AC7): project-only entries are no longer
+        # accepted on the write path. Previously this test verified the
+        # narrowing-key fields could be absent — the contract has flipped
+        # to "narrowing key required". The legacy non-strict normaliser
+        # still keeps grandfathered rows readable (see
+        # test_normalize_scope_reject.py::TestNormalizeNonStrict).
         trek_id = _create_trek_with_member_and_scope()
         _impersonate(LEADER_UID)
-        # Add a project-only scope entry (no narrowing). ms-97 / e-2626:
-        # stage + approve to actually commit (= AC23 staging flow).
         r = client.put(f"/api/treks/{trek_id}/scope",
                        json={"project": "trailnode"})
-        pid = r.json()["pending_op"]["pending_id"]
-        client.post(f"/api/treks/{trek_id}/scope/approve/{pid}")
-        body = client.get(f"/api/treks/{trek_id}").json()
-        project_only = [e for e in body["scope"]
-                        if "milestone" not in e and "operation" not in e
-                        and "task" not in e]
-        assert any(e["project"] == "trailnode" for e in project_only)
+        assert r.status_code == 400, r.text
+        assert "narrowing key" in r.text
 
 
 # ---------------------------------------------------------------------------

@@ -410,6 +410,55 @@ class TestRejectedScopeOnlyTask:
         assert "scope_only_has_task_narrowing" in r.text
 
 
+class TestAC12Closure:
+    """ms-97 / e-2659 (AC12): once AC7 retires project-wide scope on
+    the new write path, the only ways into the task-add endpoint are
+    (a) a milestone-narrowed scope row — allowed under that MS only,
+    (b) an operation-narrowed scope row — rejected as
+    ``scope_only_has_task_narrowing``, or (c) a task-narrowed scope
+    row — also rejected as ``scope_only_has_task_narrowing``.
+
+    There is no longer a "project-wide" path that authorises a task
+    slot to spawn sibling tasks. This test pair pins that closure
+    against the existing scope-guard implementation; both rejections
+    come from ``check_trek_task_add_allowed`` without any new code,
+    making it a *verification* test for AC7's downstream effect.
+    """
+
+    def test_task_slot_cannot_spawn_sibling_task(self):
+        trek_id = _seed_trek([
+            {"project": "proj-A", "task": "e-1234"},
+        ])
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/task-add",
+            json={
+                "target_project": "proj-A",
+                "target_milestone": "ms-10",
+                "description": "AC12: task slot tries to sprout a sibling",
+            },
+        )
+        assert r.status_code == 403, r.text
+        assert "scope_only_has_task_narrowing" in r.text
+        assert not _apply_operation_calls
+
+    def test_operation_slot_cannot_spawn_sibling_task(self):
+        trek_id = _seed_trek([
+            {"project": "proj-A", "operation": "op-7"},
+        ])
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/task-add",
+            json={
+                "target_project": "proj-A",
+                "target_milestone": "ms-10",
+                "description": "AC12: op slot tries to sprout a sibling",
+            },
+        )
+        assert r.status_code == 403, r.text
+        assert "scope_only_has_task_narrowing" in r.text
+
+
 # ---------------------------------------------------------------------------
 # Auth gating — non-member caller is rejected
 # ---------------------------------------------------------------------------
