@@ -5877,6 +5877,20 @@ def cmd_trek_join():
                 file=sys.stderr,
             )
 
+    # ms-97 / Phase 6 (AC15) — render accident-time leader-candidate notice.
+    # The cloud path may already surface this via the server response key
+    # ``leader_candidate_notice``; if present we honor that text verbatim
+    # (= avoids wording drift between client / server). For local mode we
+    # derive the notice locally from the live trek doc.
+    notice_text = ""
+    if isinstance(t, dict) and t.get("leader_candidate_notice"):
+        notice_text = str(t["leader_candidate_notice"])
+    else:
+        try:
+            notice_text = trek.build_leader_candidate_notice(t)
+        except Exception:
+            notice_text = ""
+
     if json_mode:
         # Keep the trek doc as the top-level shape so existing consumers
         # (= tests / Skill bodies parsing the trek doc directly) keep
@@ -5888,6 +5902,8 @@ def cmd_trek_join():
             out["_arm"] = arm_summary
         elif no_arm:
             out["_arm"] = {"skipped": True, "reason": "--no-arm"}
+        if notice_text:
+            out["leader_candidate_notice"] = notice_text
         print(json.dumps(out, ensure_ascii=False))
     else:
         print(f"Joined trek {trek_id} as {email}")
@@ -5923,6 +5939,14 @@ def cmd_trek_join():
                 "Run `beacon bus auto-execute add --channel trek-progress-check` "
                 "and `beacon bus budget grant --turns 20` manually to arm later."
             )
+
+        # ms-97 / Phase 6 (AC15) — accident-time leader-candidate pre-notice.
+        # Surface unconditionally at the tail of the human output so the
+        # invitee sees it on the same screen as the join confirmation
+        # (= no extra command, no hidden read).
+        if notice_text:
+            print()
+            print(notice_text)
 
 
 def cmd_trek_stop():

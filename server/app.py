@@ -3890,6 +3890,107 @@ def invite_trek_member_endpoint(trek_id: str, body: TrekInvite,
     return t
 
 
+def emit_leader_succession_consent_dm(
+    trek_doc: dict,
+    candidate_session_id: str,
+    *,
+    former_leader_session_id: str = "",
+    deadline_seconds: int = 1800,
+    candidate_home_project_id: str = "",
+) -> Optional[str]:
+    """Post a 1 hop leader succession consent DM to ``candidate_session_id``.
+
+    ms-97 / Phase 6 (AC15) — structural placeholder for the (Phase 7) AC22
+    auto-succession algorithm. AC22 itself is not written here; this helper
+    exists so AC22 can call into a stable, signed-envelope DM emit path
+    without re-deriving routing / envelope / payload concerns.
+
+    Contract:
+
+    * Payload kind is ``trek-leader-succession-consent``.
+    * Required payload fields: ``trek_id``, ``candidate_session_id``,
+      ``deadline_seconds``, ``former_leader_session_id``.
+    * Envelope is T1-system scoped to the trek, authorizing the single
+      action ``trek.leader_succession_consent``.
+    * Bus event is posted to ``candidate_home_project_id`` if provided,
+      otherwise the first ``trek_doc.scope[].project`` is used (= the
+      candidate's working project is what the bus inbox watches).
+    * Delivery mode is ``auto-execute`` so the candidate session wakes
+      via the bus-armed loop and the user's terminal Claude surfaces the
+      DM through the normal /beacon-dm-respond path (= 1 hop consent).
+    * Returns the bus event id, or ``None`` if no target bus is
+      resolvable (= empty scope and no explicit override) — the caller
+      can degrade gracefully without a thrown exception.
+
+    Raises ``ValueError`` only for callable-misuse cases (= empty
+    ``candidate_session_id``), so the AC22 algorithm gets a loud signal
+    if it forgets to plumb the candidate routing through.
+    """
+    if not candidate_session_id:
+        raise ValueError(
+            "candidate_session_id is required (= the session that the "
+            "consent DM is addressed to)"
+        )
+    trek_id = trek_doc.get("trek_id") or ""
+
+    target_project_id = candidate_home_project_id or ""
+    if not target_project_id:
+        scope = trek_doc.get("scope") or []
+        if scope:
+            first = scope[0] if isinstance(scope[0], dict) else {}
+            target_project_id = first.get("project") or ""
+    if not target_project_id:
+        # No bus to post to. Caller (= AC22) can fall back to a different
+        # candidate or escalate to user. Return None rather than throwing
+        # because routing failure is an expected runtime state, not a
+        # caller bug.
+        return None
+
+    try:
+        env = envelope_mod.issue_t1_system_envelope(
+            project_id=target_project_id,
+            trek_id=trek_id,
+            actions_authorized=["trek.leader_succession_consent"],
+            data_class="free",
+            ttl_seconds=max(int(deadline_seconds), 60),
+        )
+    except ValueError:
+        env = None
+
+    payload = {
+        "kind": "trek-leader-succession-consent",
+        "trek_id": trek_id,
+        "candidate_session_id": candidate_session_id,
+        "deadline_seconds": int(deadline_seconds),
+        "former_leader_session_id": former_leader_session_id or "",
+        "recipient_session_id": candidate_session_id,
+        "created_at": trek_mod.utcnow_iso(),
+        "body": (
+            f"[Trek leader succession consent] trek_id={trek_id}\n"
+            "現 leader session が不応状態に陥ったため、 あなたが次期 leader "
+            "候補として選ばれました。\n"
+            f"deadline: {int(deadline_seconds)} 秒以内に accept / decline を "
+            "明示してください。\n"
+            "辞退した場合、 次の candidate に escalate されます。"
+        ),
+    }
+    bus_data = {
+        "channel": "dm",
+        "sender_session_id": "",
+        "recipient_session_id": candidate_session_id,
+        "payload": payload,
+        "envelope": env,
+        "delivery": "auto-execute",
+        "created_at": trek_mod.utcnow_iso(),
+    }
+    try:
+        return db.append_bus_event(target_project_id, bus_data)
+    except Exception:
+        # Best-effort delivery; AC22 will observe a missing event via
+        # downstream check and re-escalate to the next candidate.
+        return None
+
+
 @app.post("/api/treks/{trek_id}/members/join")
 def join_trek_endpoint(trek_id: str, request: Request,
                        user: dict = Depends(require_auth)):
@@ -3912,16 +4013,26 @@ def join_trek_endpoint(trek_id: str, request: Request,
     """
     t = _load_trek_for_read(trek_id, user)
     caller_sid = request.headers.get("X-Beacon-Session", "") or ""
+    user_id = user.get("sub", "")
     try:
         trek_mod.accept_invitation(
-            t, user_id=user.get("sub", ""), session_id=caller_sid,
+            t, user_id=user_id, session_id=caller_sid,
         )
     except ValueError as e:
         # Not invited (no row at all) → 403, not 404. The trek exists; the
         # caller just cannot self-add.
         raise HTTPException(status_code=403, detail=str(e))
     db.save_trek(trek_id, t)
-    return t
+    # ms-97 / Phase 6 (AC15) — surface the accident-time leader candidate
+    # notice on the join response so clients (= CLI / Skill / future UI) can
+    # display the pre-notice to the invitee without re-deriving the text. The
+    # member entry now carries ``meta.leader_candidate_notice_shown_at`` as
+    # the audit stamp (= trek_mod.accept_invitation does that write).
+    response = dict(t)
+    response["leader_candidate_notice"] = (
+        trek_mod.build_leader_candidate_notice(t)
+    )
+    return response
 
 
 @app.delete("/api/treks/{trek_id}/members/me")

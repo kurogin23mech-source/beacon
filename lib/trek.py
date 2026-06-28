@@ -1105,6 +1105,47 @@ def build_halt(*, issued_by_session_id: str, reason: str = "") -> dict:
     }
 
 
+# ms-97 Phase 6 (AC15) — accident-time leader candidate notice.
+#
+# Trek invite acceptance に必須挿入する事前通知。 受諾した user に対し
+# 「現 leader session が不応 (= N=3 連続 pulse-ack miss + 30 min stale)
+# になった時、 自動 succession 経路 (= AC22、 Phase 7 で実装) で次期
+# leader 候補になり得る」 ことを明示し、 任命時に server から確認 DM
+# (= 1 hop consent) が届くこと、 辞退すると次の candidate に escalate
+# されることを通知する。
+#
+# 文面を const にして lib / server / CLI / tests から同じ文字列を参照
+# できるようにし、 wording drift を構造的に防ぐ。
+LEADER_CANDIDATE_NOTICE = (
+    "あなたは Trek \"{title}\" のメンバーになりました。\n"
+    "\n"
+    "⚠ アクシデント時の leader 候補可能性 について:\n"
+    "このメンバー枠は、 現 leader session が不応 (= N=3 連続 pulse-ack "
+    "miss + 30 min stale) になった時、\n"
+    "自動 succession 経路 (= AC22、 後 Phase で実装) で次期 leader "
+    "候補になり得ます。 候補に選ばれた\n"
+    "時は server から確認 DM (= 1 hop consent) が届くので、 受諾 / "
+    "辞退を明示してください。\n"
+    "辞退した場合、 次の candidate (= invited_at 順) に escalate "
+    "されます。"
+)
+
+
+def build_leader_candidate_notice(trek_doc: dict) -> str:
+    """Render the accident-time leader candidate notice for ``trek_doc``.
+
+    Returns the canonical pre-notice text with the trek title substituted in.
+    Surfaced at invite-acceptance time so the invitee is informed *before*
+    they may be auto-promoted to leader by the (Phase 7) AC22 succession
+    algorithm. The text is intentionally non-localized for now — Phase 6
+    only pins the contract; i18n is a later orthogonal concern.
+
+    ms-97 / Phase 6 (AC15).
+    """
+    title = trek_doc.get("title", "") or ""
+    return LEADER_CANDIDATE_NOTICE.format(title=title)
+
+
 def build_member(*, user_id: str, email: str,
                  role: str = "member",
                  invited_at: str | None = None,
@@ -1730,6 +1771,50 @@ def add_invitation(trek_doc: dict, *,
     return trek_doc
 
 
+def _stamp_leader_candidate_notice_shown(member: dict, *, now: str = "") -> dict:
+    """Stamp ``meta.leader_candidate_notice_shown_at`` on a member entry.
+
+    Idempotent: if a stamp already exists it is preserved (= the first
+    notice delivery is the canonical audit point; re-joins from the same
+    session must not re-stamp and silently bury the original). ``now``
+    defaults to current UTC.
+
+    Returns the member dict (= for chaining in accept_invitation paths).
+
+    ms-97 / Phase 6 (AC15) — provides audit so the leader / server can
+    later verify members were informed about the accident-time succession
+    candidate possibility.
+    """
+    meta = member.setdefault("meta", {})
+    if not meta.get("leader_candidate_notice_shown_at"):
+        meta["leader_candidate_notice_shown_at"] = now or utcnow_iso()
+    return member
+
+
+def find_last_accepted_member(trek_doc: dict, *, user_id: str,
+                              session_id: str = "") -> dict | None:
+    """Return the most relevant member dict for a freshly-accepted invitation.
+
+    Lookup precedence (= matches ``accept_invitation`` write order):
+
+    1. session_id grain if non-empty and the trek is phase A+
+    2. user_id grain (= pre-A path / fallback)
+
+    Returns None if no matching entry exists. Used by the server endpoint
+    to know which member.meta to stamp + which dict to surface back to
+    the caller alongside the trek doc.
+
+    ms-97 / Phase 6 (AC15).
+    """
+    if session_id and is_session_id_keyed(trek_doc):
+        m = find_member(trek_doc, session_id=session_id)
+        if m is not None:
+            return m
+    if user_id:
+        return find_member(trek_doc, user_id=user_id)
+    return None
+
+
 def accept_invitation(trek_doc: dict, *, user_id: str,
                       session_id: str = "") -> dict:
     """Mark a member as joined (= sets ``joined_at`` to now).
@@ -1760,6 +1845,11 @@ def accept_invitation(trek_doc: dict, *, user_id: str,
 
     pre-A trek (= phase pre-A) では従来通り user_id grain idempotent
     で動作 (= 同じ user_id の 2 回目 join は no-op)。
+
+    ms-97 / Phase 6 (AC15) — 受諾された member entry に対し
+    ``meta.leader_candidate_notice_shown_at`` を stamp する (= 既存
+    stamp は保持する idempotent 仕様)。 stamp は accident-time leader
+    candidate notice を server / CLI が表示した時の audit 痕跡。
     """
     members = trek_doc.get("members") or []
     phase_a_plus = is_session_id_keyed(trek_doc)
@@ -1785,6 +1875,7 @@ def accept_invitation(trek_doc: dict, *, user_id: str,
                 email=existing_sb.get("email") or "",
                 role_at_join=role_at_join,
             )
+            _stamp_leader_candidate_notice_shown(existing_sb)
             return trek_doc
         # No session-bound entry yet → look for an unaccepted invitation
         # at the user_id grain (= placeholder seeded by add_invitation).
@@ -1809,6 +1900,7 @@ def accept_invitation(trek_doc: dict, *, user_id: str,
                 email=placeholder.get("email") or "",
                 role_at_join=role_at_join,
             )
+            _stamp_leader_candidate_notice_shown(placeholder, now=now)
             trek_doc["updated_at"] = now
             return trek_doc
         # No placeholder either. Check if this user_id has any joined
@@ -1846,6 +1938,7 @@ def accept_invitation(trek_doc: dict, *, user_id: str,
             email=new_member["email"],
             role_at_join="member",
         )
+        _stamp_leader_candidate_notice_shown(new_member, now=now)
         trek_doc["updated_at"] = now
         return trek_doc
 
@@ -1869,8 +1962,14 @@ def accept_invitation(trek_doc: dict, *, user_id: str,
             role_at_join=role_at_join,
         )
     if member.get("joined_at"):
+        # Already-joined idempotent path: still stamp so the notice audit
+        # mark exists even for join retries from the same user (= the
+        # CLI / endpoint always surfaces the notice text, the stamp pins
+        # delivery happened).
+        _stamp_leader_candidate_notice_shown(member)
         return trek_doc  # already joined, member.joined_at preserved
     member["joined_at"] = utcnow_iso()
+    _stamp_leader_candidate_notice_shown(member)
     trek_doc["updated_at"] = utcnow_iso()
     return trek_doc
 
