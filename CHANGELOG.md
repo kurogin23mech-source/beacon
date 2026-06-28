@@ -2,6 +2,33 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.51.0] - 2026-06-28
+
+- Merge pull request #298 from kurogin23mech-source/feat/ms-97-phase7c-blanket-and-logs
+- feat(ms-97): Phase 7-C — AC24 blanket approval + AC26/27 structured logs (ms-97 FINAL)
+- Merge pull request #297 from kurogin23mech-source/feat/ms-97-phase7b-ac22-succession
+- feat(ms-97): Phase 7-B — AC22 auto-succession (priority + threshold + consent + escalation)
+- Merge pull request #296 from kurogin23mech-source/feat/ms-97-phase7a-ac20-ac21-completion-ready
+- feat(ms-97): Phase 7-A — AC20/AC21/G6 completion_ready + summary_sent + meta seed
+- Merge pull request #295 from kurogin23mech-source/feat/ms-97-phase6-ac15-invite-consent
+- feat(ms-97): Phase 6 — AC15 invite consent (accident-time leader candidate notice + 1 hop consent hook)
+- Merge pull request #294 from kurogin23mech-source/feat/ms-97-phase5-ui-cli-skill
+- Merge pull request #293 from kurogin23mech-source/feat/ms-97-phase4-ac10-ac13-ac14-ac32
+- feat(ms-97): Phase 5 — UI/CLI/Skill 動線整理 + Manual auto-show + Skill 重複解消
+- feat(ms-97): Phase 4 — AC10/AC13/AC14/AC32 (MS slot precedence + leader/executor auth boundaries + halt 完全化)
+- Merge pull request #292 from kurogin23mech-source/feat/ms-97-phase3-ac16-fanout-bypass
+- feat(ms-97): Phase 3 — AC16/AC18/AC19/G3/G4 — fanout members iterate + DM bypass session-grain
+- Merge pull request #291 from kurogin23mech-source/feat/ms-97-phase2-ac7-scope-strict
+- feat(ms-97): Phase 2 — AC7/AC8/AC31/AC12 scope narrowing strict (3-layer reject + grandfather warning)
+- Merge pull request #290 from kurogin23mech-source/feat/ms-97-phase1-ac6-members-session-keyed
+- feat(ms-97): e-2658 Phase 1 — AC6 members[] cutover to session_id keyed (phase-gated dual-mode)
+- Merge pull request #289 from kurogin23mech-source/feat/ms-97-e2658-phase0a-remainder
+- Merge pull request #288 from kurogin23mech-source/feat/ms-97-e2658-phase0a-scaffolding
+- feat(ms-97): e-2658 Phase 0-A remainder + e-2659 test scaffolding (migration script + alarming + red tests for AC6/7/16-19/34)
+- feat(ms-97): e-2658 Phase 0-A scaffolding — add members_legacy_backup field + migration_phase tracker
+- docs(release): update README/CHANGELOG for v0.50.1
+- chore(release): bump formula to 0.50.1
+
 ## [v0.50.1] - 2026-06-28
 
 - Merge pull request #287 from kurogin23mech-source/feat/ms-95-dogfood-tick-fixes
