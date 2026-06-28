@@ -40,9 +40,9 @@ _bus_events_by_project: dict[str, list[dict]] = {}
 # ms-88 / e-2109 — per-project live session registry stub for the fan-out
 # filter integration test. Tests can populate this directly.
 _sessions_by_project: dict[str, list[dict]] = {}
-# ms-95 / v0.49.2 — project registry stub so the scheduler tick's
-# _resolve_trek_target_project_id helper can expand a slug like
-# "life-plan-simulator" to the canonical full id
+# ms-95 / v0.49.2 (post e-2639) — project registry stub so the scheduler
+# tick's ``_resolve_trek_scope_project_ids`` helper can expand a slug
+# like "life-plan-simulator" to the canonical full id
 # "life-plan-simulator-68c5df" before db.list_sessions / append_bus_event
 # are called. Without this the slug-stored scope case (= LPS dogfood
 # observation) cannot be exercised in tests.
@@ -67,8 +67,8 @@ def _mock_list_projects(user_id: str = "", include_archived: bool = False):
 
 
 def _register_project(project_id: str, *, owner: str = "") -> None:
-    """Register a fake project so _resolve_trek_target_project_id can
-    canonicalise scope slugs to ``<slug>-<hex6>``."""
+    """Register a fake project so ``_resolve_trek_scope_project_ids``
+    can canonicalise scope slugs to ``<slug>-<hex6>``."""
     _projects[project_id] = {
         "name": project_id.rsplit("-", 1)[0] if "-" in project_id else project_id,
         "owner": owner,
@@ -140,6 +140,36 @@ app_module._auth_enabled = False
 client = TestClient(app_module.app)
 
 HEADERS_OK = {"X-Beacon-Scheduler-Key": "test-scheduler-key"}
+
+
+# ---------------------------------------------------------------------------
+# Channel recognition helpers (ms-95 / e-2639)
+#
+# Trek scheduler tick was migrated from dedicated ``trek-progress-check`` /
+# ``trek-leader-digest`` channels to the shared ``dm`` channel with a
+# ``payload.origin_channel`` discriminator (= ms-97 SPEC 中心原則 6
+# 「Wake 経路は DM と完全同一」). These helpers let tests assert behaviour
+# without re-encoding the dm-transport wiring everywhere.
+# ---------------------------------------------------------------------------
+
+_TREK_PROGRESS_ORIGIN = "trek-progress-check"
+_TREK_LEADER_DIGEST_ORIGIN = "trek-leader-digest"
+
+
+def _is_trek_progress_check_event(e: dict) -> bool:
+    """Return True iff ``e`` is a Trek progress-check dm event (e-2639)."""
+    if e.get("channel") != "dm":
+        return False
+    payload = e.get("payload") or {}
+    return payload.get("origin_channel") == _TREK_PROGRESS_ORIGIN
+
+
+def _is_trek_leader_digest_event(e: dict) -> bool:
+    """Return True iff ``e`` is a Trek leader-digest dm event (e-2639)."""
+    if e.get("channel") != "dm":
+        return False
+    payload = e.get("payload") or {}
+    return payload.get("origin_channel") == _TREK_LEADER_DIGEST_ORIGIN
 
 
 # ---------------------------------------------------------------------------
@@ -240,15 +270,16 @@ def test_due_trek_fires_t1_system_envelope_on_progress_check_channel():
     assert body["fired"][0]["trek_id"] == "tk-aaaa1111"
     assert body["fired"][0]["project_id"] == "beacon-test"
 
-    # Bus events landed: the cadence tick fires both trek-progress-check
-    # (= executor surface) and trek-leader-digest (= leader surface,
-    # added in ms-92 / e-2164). Pin the progress-check event shape here;
-    # the digest shape has its own dedicated test below.
+    # Bus events landed: the cadence tick fires both progress-check
+    # (= executor surface) and leader-digest (= leader surface, added in
+    # ms-92 / e-2164). Pre-e-2639 these were dedicated channels; post
+    # ms-95 / e-2639 they share the ``dm`` channel with an
+    # ``origin_channel`` discriminator (= ms-97 SPEC 中心原則 6).
     events = _bus_events_by_project["beacon-test"]
-    progress_events = [e for e in events
-                       if e["channel"] == "trek-progress-check"]
+    progress_events = [e for e in events if _is_trek_progress_check_event(e)]
     assert len(progress_events) == 1
     ev = progress_events[0]
+    assert ev["channel"] == "dm"
     assert ev["delivery"] == "auto-execute"
     assert ev["envelope"]["tier"] == "T1-system"
     assert ev["envelope"]["issuer"] == "beacon-system"
@@ -256,6 +287,10 @@ def test_due_trek_fires_t1_system_envelope_on_progress_check_channel():
     assert ev["envelope"]["actions_authorized"] == ["trek.progress_check"]
     assert ev["payload"]["trek_id"] == "tk-aaaa1111"
     assert ev["payload"]["kind"] == "trek-progress-check"
+    # Sender identity marker so receivers can filter Trek tick from
+    # human DMs without parsing the envelope tier.
+    assert ev["payload"]["sender_type"] == "trek-scheduler"
+    assert ev["payload"]["origin_channel"] == "trek-progress-check"
 
     # Trek's last_progress_check_at was stamped.
     saved = _treks["tk-aaaa1111"]
@@ -305,14 +340,17 @@ def test_due_trek_fires_leader_digest_on_separate_channel():
     )
 
     # Two bus events landed: one progress-check + one leader-digest.
+    # Both ride on the shared ``dm`` channel post e-2639 with
+    # ``origin_channel`` markers distinguishing the two surfaces.
     events = _bus_events_by_project["beacon-test"]
-    channels = [e["channel"] for e in events]
-    assert "trek-progress-check" in channels
-    assert "trek-leader-digest" in channels
+    progress_events = [e for e in events if _is_trek_progress_check_event(e)]
+    digest_events = [e for e in events if _is_trek_leader_digest_event(e)]
+    assert len(progress_events) >= 1
+    assert len(digest_events) >= 1
 
     # Inspect the digest event shape.
-    digest_event = next(e for e in events
-                        if e["channel"] == "trek-leader-digest")
+    digest_event = digest_events[0]
+    assert digest_event["channel"] == "dm"
     assert digest_event["delivery"] == "auto-execute"
     assert digest_event["envelope"]["tier"] == "T1-system"
     assert digest_event["envelope"]["scope"] == "trek:tk-digest01"
@@ -323,6 +361,8 @@ def test_due_trek_fires_leader_digest_on_separate_channel():
     assert payload["kind"] == "trek-leader-digest"
     assert payload["recipient_session_id"] == "sv-leader"
     assert payload["trek_id"] == "tk-digest01"
+    assert payload["sender_type"] == "trek-scheduler"
+    assert payload["origin_channel"] == "trek-leader-digest"
 
 
 def test_due_trek_without_leader_session_id_skips_digest():
@@ -348,11 +388,13 @@ def test_due_trek_without_leader_session_id_skips_digest():
     fired = body["fired"][0]
     assert fired["leader_digest_event_id"] == ""
 
-    # No leader-digest event in the bus.
+    # No leader-digest event in the bus (= progress-check minimal tick
+    # still fires as a broadcast fallback per AC33).
     events = _bus_events_by_project["beacon-test"]
-    channels = [e["channel"] for e in events]
-    assert "trek-progress-check" in channels
-    assert "trek-leader-digest" not in channels
+    progress_events = [e for e in events if _is_trek_progress_check_event(e)]
+    digest_events = [e for e in events if _is_trek_leader_digest_event(e)]
+    assert len(progress_events) >= 1
+    assert digest_events == []
 
 
 def test_due_trek_stamps_last_leader_digest_at_when_fired():
@@ -436,7 +478,7 @@ def test_leader_digest_fans_out_to_all_live_leader_sessions():
 
     # Three digest events landed, one per session, all addressed.
     events = _bus_events_by_project["beacon-test"]
-    digest_events = [e for e in events if e["channel"] == "trek-leader-digest"]
+    digest_events = [e for e in events if _is_trek_leader_digest_event(e)]
     assert len(digest_events) == 3
     recipients = sorted(
         e["payload"].get("recipient_session_id", "") for e in digest_events
@@ -481,7 +523,7 @@ def test_leader_digest_delivers_to_live_session_when_stamped_is_stale():
     assert fired["leader_session_id"] == "sv-leader"
 
     events = _bus_events_by_project["beacon-test"]
-    digest_events = [e for e in events if e["channel"] == "trek-leader-digest"]
+    digest_events = [e for e in events if _is_trek_leader_digest_event(e)]
     assert len(digest_events) == 1
     assert digest_events[0]["payload"]["recipient_session_id"] == \
         "sv-leader-reconnect"
@@ -571,14 +613,14 @@ def test_leader_digest_ignores_non_leader_live_sessions():
     assert fired["leader_digest_recipients"] == ["sv-leader-live"]
 
     events = _bus_events_by_project["beacon-test"]
-    digest_events = [e for e in events if e["channel"] == "trek-leader-digest"]
+    digest_events = [e for e in events if _is_trek_leader_digest_event(e)]
     assert len(digest_events) == 1
     assert digest_events[0]["payload"]["recipient_session_id"] == \
         "sv-leader-live"
     # The executor live session DID receive a progress-check event
     # (= that channel is for them); just not the digest.
     progress_events = [
-        e for e in events if e["channel"] == "trek-progress-check"
+        e for e in events if _is_trek_progress_check_event(e)
     ]
     progress_recipients = {
         e["payload"].get("recipient_session_id", "") for e in progress_events
@@ -596,9 +638,9 @@ def test_leader_digest_ignores_non_leader_live_sessions():
 # the slug users type at ``beacon trek plan --add-scope <slug>:<ms>``)
 # but ``db.list_sessions`` / ``db.append_bus_event`` need the full id
 # "life-plan-simulator-68c5df" to find the leader session and write to
-# the right bus. The new helper ``_resolve_trek_target_project_id``
-# closes this gap for both the progress-check and idle-escalation
-# loops.
+# the right bus. The scheduler-side helper (now
+# ``_resolve_trek_scope_project_ids`` post e-2639) closes this gap for
+# the progress-check and idle-escalation loops.
 # ---------------------------------------------------------------------------
 
 
@@ -658,7 +700,7 @@ def test_slug_stored_scope_resolves_to_canonical_full_project_id():
     assert slug not in _bus_events_by_project
     full_events = _bus_events_by_project[full_id]
     digest_events = [
-        e for e in full_events if e["channel"] == "trek-leader-digest"
+        e for e in full_events if _is_trek_leader_digest_event(e)
     ]
     assert len(digest_events) == 1
     assert digest_events[0]["payload"]["recipient_session_id"] == \
@@ -745,11 +787,14 @@ def test_idle_trek_fires_escalation_on_notify_channel():
     assert esc["trek_id"] == "tk-idle0000"
 
     events = _bus_events_by_project["beacon-test"]
-    # One trek-progress-check (cadence due) + one notify (idle).
-    channels = [e["channel"] for e in events]
-    assert "trek-progress-check" in channels
-    assert "notify" in channels
-    notify_event = [e for e in events if e["channel"] == "notify"][0]
+    # One progress-check dm (cadence due, e-2639 transport) + one
+    # notify (idle, still on the legacy notify channel because it's
+    # user-facing not AI-wake).
+    progress_events = [e for e in events if _is_trek_progress_check_event(e)]
+    notify_events = [e for e in events if e["channel"] == "notify"]
+    assert len(progress_events) >= 1
+    assert len(notify_events) >= 1
+    notify_event = notify_events[0]
     assert notify_event["payload"]["kind"] == "trek-idle-escalation"
     assert notify_event["delivery"] == "notify-user-only"
 
@@ -827,13 +872,16 @@ def test_10min_cadence_does_not_refire_immediately():
     )
     assert r2.status_code == 200
     assert r2.json()["due"] == 0
-    # Only one cadence-fire landed. Each fire emits both a
-    # trek-progress-check and a trek-leader-digest (= ms-92 / e-2164),
-    # so 2 events total for one fire.
+    # Only one cadence-fire landed. Each fire emits both a progress-
+    # check and a leader-digest (= ms-92 / e-2164). Post e-2639 both
+    # ride on the ``dm`` channel with ``origin_channel`` markers, so
+    # the two events live in the ``dm`` channel slice of the bus.
     events = _bus_events_by_project["beacon-test"]
     assert len(events) == 2
-    channels = sorted(e["channel"] for e in events)
-    assert channels == ["trek-leader-digest", "trek-progress-check"]
+    progress_events = [e for e in events if _is_trek_progress_check_event(e)]
+    digest_events = [e for e in events if _is_trek_leader_digest_event(e)]
+    assert len(progress_events) == 1
+    assert len(digest_events) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1107,7 +1155,7 @@ def test_fanout_skips_session_with_only_terminal_claims():
     assert resp.status_code == 200
     events = _bus_events_by_project["beacon-test"]
     progress_events = [
-        e for e in events if e["channel"] == "trek-progress-check"
+        e for e in events if _is_trek_progress_check_event(e)
     ]
     recipients = sorted(
         e["payload"].get("recipient_session_id", "") for e in progress_events
@@ -1147,7 +1195,7 @@ def test_fanout_skips_all_sessions_when_all_have_only_terminal_claims():
     assert resp.status_code == 200
     events = _bus_events_by_project.get("beacon-test", [])
     progress_events = [
-        e for e in events if e["channel"] == "trek-progress-check"
+        e for e in events if _is_trek_progress_check_event(e)
     ]
     # broadcast fallback (= recipient_session_id 未設定 or "") 1 件のみ
     assert len(progress_events) == 1
@@ -1184,7 +1232,7 @@ def test_fanout_fresh_session_with_no_claims_still_receives_tick():
     assert resp.status_code == 200
     events = _bus_events_by_project["beacon-test"]
     progress_events = [
-        e for e in events if e["channel"] == "trek-progress-check"
+        e for e in events if _is_trek_progress_check_event(e)
     ]
     recipients = [
         e["payload"].get("recipient_session_id", "") for e in progress_events
@@ -1225,7 +1273,7 @@ def test_fanout_excludes_leader_session_from_progress_check():
     assert resp.status_code == 200
     events = _bus_events_by_project["beacon-test"]
     progress_events = [
-        e for e in events if e["channel"] == "trek-progress-check"
+        e for e in events if _is_trek_progress_check_event(e)
     ]
     recipients = [
         e["payload"].get("recipient_session_id", "") for e in progress_events
@@ -1262,7 +1310,7 @@ def test_fanout_leader_excluded_even_with_no_claims():
     assert resp.status_code == 200
     events = _bus_events_by_project.get("beacon-test", [])
     progress_events = [
-        e for e in events if e["channel"] == "trek-progress-check"
+        e for e in events if _is_trek_progress_check_event(e)
     ]
     # 全 live session が leader (= 除外) → broadcast fallback (空 recipient) のみ
     assert len(progress_events) == 1
@@ -1311,7 +1359,7 @@ def test_halt_skips_executor_progress_check_fire():
     # Bus events も書かれない。
     events = _bus_events_by_project.get("beacon-test", [])
     progress_events = [
-        e for e in events if e["channel"] == "trek-progress-check"
+        e for e in events if _is_trek_progress_check_event(e)
     ]
     assert progress_events == []
 
@@ -1332,7 +1380,7 @@ def test_halt_skips_leader_digest_fanout():
     assert resp.status_code == 200, resp.text
     events = _bus_events_by_project.get("beacon-test", [])
     digest_events = [
-        e for e in events if e["channel"] == "trek-leader-digest"
+        e for e in events if _is_trek_leader_digest_event(e)
     ]
     assert digest_events == [], (
         "AC32: leader-digest must not fire while halt is set"
@@ -1401,10 +1449,10 @@ def test_lazy_start_no_signal_yields_broadcast_fallback_only():
     assert resp.status_code == 200, resp.text
     events = _bus_events_by_project.get("beacon-test", [])
     progress_events = [
-        e for e in events if e["channel"] == "trek-progress-check"
+        e for e in events if _is_trek_progress_check_event(e)
     ]
     digest_events = [
-        e for e in events if e["channel"] == "trek-leader-digest"
+        e for e in events if _is_trek_leader_digest_event(e)
     ]
     # Minimal tick: broadcast fallback (= recipient "") の 1 件のみ。
     assert len(progress_events) == 1
@@ -1438,7 +1486,7 @@ def test_lazy_start_leader_digest_fires_on_leader_review_queue():
     assert resp.status_code == 200
     events = _bus_events_by_project["beacon-test"]
     digest_events = [
-        e for e in events if e["channel"] == "trek-leader-digest"
+        e for e in events if _is_trek_leader_digest_event(e)
     ]
     assert len(digest_events) >= 1
 
@@ -1481,7 +1529,7 @@ def test_lazy_start_leader_digest_silent_when_all_working():
     assert resp.status_code == 200
     events = _bus_events_by_project["beacon-test"]
     digest_events = [
-        e for e in events if e["channel"] == "trek-leader-digest"
+        e for e in events if _is_trek_leader_digest_event(e)
     ]
     # AC33: working-only → leader silent.
     assert digest_events == []
@@ -1544,3 +1592,268 @@ def test_resume_clears_halt_and_tick_fires_again():
     assert len(body["fired"]) == 1
     assert body["fired"][0]["trek_id"] == "tk-halt-resume"
     assert body["halted"] == []
+
+
+# ---------------------------------------------------------------------------
+# ms-95 / e-2639 — dm transport per-member fanout cross-project verification
+#
+# Background: Pre-e-2639 the tick wrote to ``scope[0]['project']`` only.
+# A cross-project Trek (= scope[0] = project P1, scope[1] = project P2,
+# scope[2] = project P3) with members living in different home projects
+# left scope[1..N] members permanently deaf because the bridge only
+# subscribes to its own project's bus. The 2026-06-28 dogfood
+# (tk-LPS cross-project Trek) surfaced this as opened ✗ for every
+# member except scope[0] residents.
+#
+# Post-e-2639 fix: walk each scope project's session registry, stitch a
+# (user_id, session_id, home_project_id) tuple per live member session,
+# then post one dm event per session into that session's home project
+# bus. SPEC AC17: "Cross-project Trek で scope[1..N] の各 project に
+# 住む member session が tick (= progress-check / leader-digest) を
+# 受信できることを実機 dogfood で確認" — this test pins the structural
+# guarantee in unit-test form so the regression cannot silently come
+# back.
+# ---------------------------------------------------------------------------
+
+
+def test_cross_project_trek_fans_dm_to_each_member_home_project():
+    """3-member cross-project Trek (= the e-2639 reproducer in test form).
+
+    Setup:
+      * Trek scope spans 3 projects P1 / P2 / P3.
+      * Leader lives in P1 (= scope[0]).
+      * Executor A lives in P2 (= scope[1]).
+      * Executor B lives in P3 (= scope[2]).
+      * All three executors have unclaim todo so the lazy-start gate
+        opens and the dm fires.
+
+    Expected behaviour:
+      * 1 dm per executor session lands in *that executor's home
+        project bus* (= AC17 cross-project delivery guarantee).
+      * 1 dm for the leader-digest lands in the leader's home project
+        bus.
+      * No event lands in a project where the recipient does not live.
+    """
+    p1 = "proj-leader"
+    p2 = "proj-exec-a"
+    p3 = "proj-exec-b"
+
+    # Trek scope spans all three projects. Leader sits in scope[0].
+    _seed_trek(
+        trek_id="tk-cross3p",
+        status="active",
+        cadence=10,
+        scope=[
+            {"project": p1, "milestone": "ms-95"},
+            {"project": p2, "milestone": "ms-95"},
+            {"project": p3, "milestone": "ms-95"},
+        ],
+    )
+    # Add executor members so the dm fanout sees more than the leader.
+    _treks["tk-cross3p"]["members"].extend([
+        {
+            "user_id": "uid-exec-a", "email": "a@b.com", "role": "member",
+            "invited_at": "2026-06-28T00:00:00.000000Z",
+            "joined_at": "2026-06-28T00:00:00.000000Z",
+            "invited_by": "uid-leader",
+        },
+        {
+            "user_id": "uid-exec-b", "email": "b@b.com", "role": "member",
+            "invited_at": "2026-06-28T00:00:00.000000Z",
+            "joined_at": "2026-06-28T00:00:00.000000Z",
+            "invited_by": "uid-leader",
+        },
+    ])
+    # Seed unclaim todo so the executor lazy-start gate (AC33) opens.
+    _treks["tk-cross3p"]["task_states"] = {
+        "e-todo1": {"state": "todo"},
+        "e-todo2": {"state": "todo"},
+    }
+    # Each member lives in a different project's session registry —
+    # exactly the cross-project topology that broke pre-e-2639.
+    import datetime
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    _sessions_by_project[p1] = [
+        {"session_id": "sv-leader", "user_id": "uid-leader",
+         "last_active": now_iso},
+    ]
+    _sessions_by_project[p2] = [
+        {"session_id": "sv-exec-a", "user_id": "uid-exec-a",
+         "last_active": now_iso},
+    ]
+    _sessions_by_project[p3] = [
+        {"session_id": "sv-exec-b", "user_id": "uid-exec-b",
+         "last_active": now_iso},
+    ]
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-cross3p"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    fired = resp.json()["fired"]
+    assert len(fired) == 1
+    audit = fired[0]
+    # Audit surface: per-recipient home project_ids are recorded so
+    # observers can verify cross-project delivery happened.
+    assert sorted(audit["recipient_home_project_ids"]) == sorted([p2, p3])
+    # Leader-digest landed in the leader's home project (= p1, scope[0]).
+    assert audit["leader_digest_target_project_ids"] == [p1]
+
+    # Executor A's dm landed ONLY in P2's bus (= their home project),
+    # not in P1 or P3 (= we explicitly check the cross-project routing).
+    p2_events = _bus_events_by_project.get(p2, [])
+    p2_progress = [e for e in p2_events if _is_trek_progress_check_event(e)]
+    assert len(p2_progress) == 1
+    assert p2_progress[0]["payload"]["recipient_session_id"] == "sv-exec-a"
+
+    # Executor B's dm landed ONLY in P3's bus.
+    p3_events = _bus_events_by_project.get(p3, [])
+    p3_progress = [e for e in p3_events if _is_trek_progress_check_event(e)]
+    assert len(p3_progress) == 1
+    assert p3_progress[0]["payload"]["recipient_session_id"] == "sv-exec-b"
+
+    # Leader's digest landed in P1's bus. The leader is structurally
+    # excluded from progress-check (= role filter), so the only Trek
+    # tick event in P1 should be the leader-digest, addressed to the
+    # leader's session.
+    p1_events = _bus_events_by_project.get(p1, [])
+    p1_progress = [e for e in p1_events if _is_trek_progress_check_event(e)]
+    p1_digest = [e for e in p1_events if _is_trek_leader_digest_event(e)]
+    assert p1_progress == [], (
+        "leader's home project must not receive a progress-check dm — "
+        "the leader is structurally excluded from the executor surface"
+    )
+    assert len(p1_digest) == 1
+    assert p1_digest[0]["payload"]["recipient_session_id"] == "sv-leader"
+
+    # No project should have received an event addressed to a session
+    # that doesn't live in it (= the pre-e-2639 regression mode).
+    for pid, events in _bus_events_by_project.items():
+        for ev in events:
+            sid = ev.get("payload", {}).get("recipient_session_id") or ""
+            if not sid:
+                continue
+            # The session must live in this project (i.e., its home
+            # project for the bridge to subscribe).
+            session_homes = {
+                s["session_id"]: pid_inner
+                for pid_inner, sessions in _sessions_by_project.items()
+                for s in sessions
+            }
+            assert session_homes.get(sid) == pid, (
+                f"event addressed to {sid} landed in {pid} but its "
+                f"home project is {session_homes.get(sid)} — cross-"
+                f"project mis-routing regression"
+            )
+
+
+def test_cross_project_trek_executor_in_scope1_receives_dm_in_own_bus():
+    """Minimal AC17 reproducer: scope[1] executor receives the dm in
+    their OWN home project bus, not in scope[0].
+
+    Pre-e-2639 the dm would have gone to scope[0]['project'] only, so
+    this test would have asserted on an empty bus. Post-fix the
+    executor's home project bus carries the event.
+    """
+    scope0 = "proj-home-of-leader"
+    scope1 = "proj-home-of-exec"
+    _seed_trek(
+        trek_id="tk-ac17",
+        status="active",
+        cadence=10,
+        scope=[
+            {"project": scope0, "milestone": "ms-97"},
+            {"project": scope1, "milestone": "ms-97"},
+        ],
+    )
+    _treks["tk-ac17"]["members"].append({
+        "user_id": "uid-exec", "email": "ex@b.com", "role": "member",
+        "invited_at": "2026-06-28T00:00:00.000000Z",
+        "joined_at": "2026-06-28T00:00:00.000000Z",
+        "invited_by": "uid-leader",
+    })
+    _treks["tk-ac17"]["task_states"] = {"e-todo": {"state": "todo"}}
+    import datetime
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    _sessions_by_project[scope0] = [
+        {"session_id": "sv-leader", "user_id": "uid-leader",
+         "last_active": now_iso},
+    ]
+    _sessions_by_project[scope1] = [
+        {"session_id": "sv-exec", "user_id": "uid-exec",
+         "last_active": now_iso},
+    ]
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-ac17"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+
+    # The executor's dm landed in scope1 — their home project.
+    s1_progress = [
+        e for e in _bus_events_by_project.get(scope1, [])
+        if _is_trek_progress_check_event(e)
+    ]
+    assert len(s1_progress) == 1
+    assert s1_progress[0]["payload"]["recipient_session_id"] == "sv-exec"
+    # And specifically NOT in scope0 (= the pre-e-2639 regression mode
+    # would have written the executor's tick there).
+    s0_progress = [
+        e for e in _bus_events_by_project.get(scope0, [])
+        if _is_trek_progress_check_event(e)
+        and e["payload"].get("recipient_session_id") == "sv-exec"
+    ]
+    assert s0_progress == [], (
+        "pre-e-2639 regression: executor dm leaked into scope[0] bus"
+    )
+
+
+def test_progress_check_dm_carries_system_sender_marker():
+    """e-2639 AC3: sender identity is system-scheduler (= pseudo sid /
+    marker) so receivers can filter Trek tick from human DMs without
+    parsing the envelope tier.
+
+    The discriminator is ``payload.sender_type == "trek-scheduler"`` +
+    ``payload.origin_channel ∈ {trek-progress-check, trek-leader-digest}``;
+    ``sender_session_id`` stays empty (= server-issued, no human-typed
+    confusion). This pins the contract so downstream consumers can rely
+    on the marker without inspecting envelope internals.
+    """
+    _seed_trek(
+        trek_id="tk-marker001",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-95"}],
+    )
+    _treks["tk-marker001"]["task_states"] = {"e-todo": {"state": "todo"}}
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-leader",
+        session_ids=["sv-exec"],  # not the stamped leader sid → executor
+    )
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-marker001"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200
+    events = _bus_events_by_project["beacon-test"]
+    progress = [e for e in events if _is_trek_progress_check_event(e)]
+    assert len(progress) >= 1
+    ev = progress[0]
+    # Channel is dm — the unified wake rail.
+    assert ev["channel"] == "dm"
+    # sender_session_id stays empty (= server-issued); receivers must
+    # NOT mis-attribute the dm to a human sender.
+    assert ev["sender_session_id"] == ""
+    # System-scheduler marker pair.
+    assert ev["payload"]["sender_type"] == "trek-scheduler"
+    assert ev["payload"]["origin_channel"] == "trek-progress-check"
+    # Delivery stays auto-execute (= AI autonomous progression).
+    assert ev["delivery"] == "auto-execute"
