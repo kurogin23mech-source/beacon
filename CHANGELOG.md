@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.51.5] - 2026-06-29
+
+- Merge pull request #303 from kurogin23mech-source/fix/trigger-check-runaway
+- fix: stop runaway trigger check processes
+- docs(release): update README/CHANGELOG for v0.51.4
+- chore(release): bump formula to 0.51.4
+
 ## [v0.51.4] - 2026-06-28
 
 - Merge pull request #302 from kurogin23mech-source/fix/ms-97-trek-scheduler-import-flat-layout
