@@ -38,6 +38,7 @@ import { consumeBusBudgetOne, refuseMessage } from './bus-budget.mjs'
 import { selectTierForBridge } from './bus-envelope.mjs'
 import { buildHeartbeatBody } from './bus-heartbeat.mjs'
 import { createLocalSessionHeartbeat } from './bus-local-heartbeat.mjs'
+import { runCommandWithTimeout } from './managed-process.mjs'
 import {
   buildAutonomousActionContent,
   shouldEmitAutonomousImperative,
@@ -239,6 +240,8 @@ const ALLOWED_CHANNELS = Array.from(new Set([
 const POLL_INTERVAL = parseInt(process.env.BEACON_BUS_POLL_MS || '5000', 10)
 const SCHEDULER_INTERVAL_MS = parseInt(
   process.env.BEACON_BRIDGE_SCHEDULE_INTERVAL_MS || '60000', 10)
+const SCHEDULER_MAX_BACKOFF_MS = parseInt(
+  process.env.BEACON_BRIDGE_SCHEDULE_MAX_BACKOFF_MS || '900000', 10)
 const SCHEDULER_DISABLED = process.env.BEACON_BRIDGE_SCHEDULE_DISABLE === '1'
 
 // ms-95 / e-1667 — per-request HTTP timeout for apiGet/apiPost/apiPut.
@@ -278,7 +281,7 @@ const BRIDGE_CLAIM_REFRESH_MS = parseInt(
 log(`=== beacon-bus channel starting ===`)
 log(`  api=${API_URL} project=${PROJECT_ID} session=${SESSION_ID}`)
 log(`  allow=[${ALLOWED_CHANNELS.join(',')}] poll=${POLL_INTERVAL}ms cwd=${CWD}`)
-log(`  scheduler=${SCHEDULER_DISABLED ? 'OFF' : SCHEDULER_INTERVAL_MS + 'ms'}`)
+log(`  scheduler=${SCHEDULER_DISABLED ? 'OFF' : SCHEDULER_INTERVAL_MS + 'ms'} max_backoff=${SCHEDULER_MAX_BACKOFF_MS}ms`)
 log(`  http_timeout=${HTTP_TIMEOUT_MS}ms iter_watchdog=${ITERATION_WATCHDOG_MS}ms`)
 log(`  bridge_claim_refresh=${BRIDGE_CLAIM_REFRESH_MS}ms`)
 log(`  session.json source=[${session.source || ''}] last_active=[${session.last_active || ''}]`)
@@ -1194,23 +1197,31 @@ if (!PROJECT_ID || !SESSION_ID) {
   // pollOnce() iteration picks the event up via /bus/unread and forwards
   // to the AI via MCP notification.
   let lastSchedulerRunAt = 0
+  let schedulerFailureCount = 0
   async function runSchedulerTick() {
     if (SCHEDULER_DISABLED) return
     const now = Date.now()
     if (now - lastSchedulerRunAt < SCHEDULER_INTERVAL_MS) return
     lastSchedulerRunAt = now
     try {
-      execSync('beacon trigger check', {
+      const beaconBin = process.env.BEACON_BIN || 'beacon'
+      await runCommandWithTimeout(beaconBin, ['trigger', 'check'], {
         cwd: CWD,
-        stdio: ['ignore', 'ignore', 'pipe'],
-        encoding: 'utf8',
         timeout: 15000,
+        env: process.env,
       })
+      schedulerFailureCount = 0
       log('scheduler: trigger check completed')
     } catch (e) {
       // Non-zero exit / timeout / spawn fail — log but don't kill the loop.
       // The autofire path is idempotent so a missed tick recovers next round.
-      log(`scheduler: trigger check failed (non-fatal): ${e.message}`)
+      schedulerFailureCount += 1
+      const backoff = Math.min(
+        SCHEDULER_INTERVAL_MS * (2 ** schedulerFailureCount),
+        SCHEDULER_MAX_BACKOFF_MS,
+      )
+      lastSchedulerRunAt = Date.now() + backoff - SCHEDULER_INTERVAL_MS
+      log(`scheduler: trigger check failed (non-fatal; retry in ${backoff}ms): ${e.message}`)
     }
   }
 
