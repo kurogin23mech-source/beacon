@@ -985,6 +985,100 @@ _LEADER_DIGEST_HEADER = "Trek leader digest"
 _LEADER_DIGEST_KIND = "trek-leader-digest"
 
 
+def build_task_state_aggregate(trek_doc: dict) -> dict:
+    """Aggregate ``trek_doc.task_states`` for the leader-digest payload (ms-97 / e-2707).
+
+    Surfaces AC10 precedence (= ``leader_review`` / ``done`` / ``user_review``
+    / ``working`` / ``todo``) so the leader can see at a glance "どこに
+    判断要請があるか / どこが詰まっているか" without polling each session.
+    The legacy pulse-ack derived ``needs_leader_judgment`` flag is
+    executor-self-report (= updated only when an executor remembers to
+    pulse-ack with the flag), so it can sit at 0 while task_states[*].state
+    has flipped to ``leader_review``. This aggregate closes that blind spot.
+
+    Returned shape:
+        {
+          "counts": {
+            "leader_review": int, "done": int, "user_review": int,
+            "working": int, "todo": int,
+          },
+          "leader_review_queue": [
+            {
+              "task_id": str,
+              "updated_by_session_id": str,
+              "updated_at": ISO8601,
+              "note": str,
+            },
+            ...
+          ],
+          "overall_state": str,   # one of compute_ms_slot_state's outputs
+        }
+
+    Pure / I/O-free so unit tests can pin the matrix without standing up
+    Firestore. Uses ``compute_ms_slot_state`` from lib.trek (via
+    ``_import_trek``) for the overall_state derivation; if the trek module
+    cannot be resolved, the helper falls back to the same precedence rule
+    locally so the payload still ships a valid token.
+    """
+    states = trek_doc.get("task_states") or {}
+    counts = {
+        "leader_review": 0,
+        "done": 0,
+        "user_review": 0,
+        "working": 0,
+        "todo": 0,
+    }
+    leader_review_queue: list[dict] = []
+    # Build the children list for compute_ms_slot_state in one pass.
+    children: list[dict] = []
+    for tid, entry in states.items():
+        entry = entry or {}
+        state = _task_state_of(trek_doc, tid, entry)
+        if state not in counts:
+            # Unknown / malformed → collapse to todo for counting (mirrors
+            # compute_ms_slot_state's defensive cast).
+            state = "todo"
+        counts[state] += 1
+        children.append({"state": state})
+        if state == "leader_review":
+            leader_review_queue.append({
+                "task_id": tid,
+                "updated_by_session_id": entry.get("updated_by_session_id") or "",
+                "updated_at": entry.get("updated_at") or "",
+                "note": (entry.get("note") or "")[:500],
+            })
+    # Stable ordering: oldest leader_review first so the leader's eye lands
+    # on the one that has been waiting longest (= same intent as the
+    # sessions[] sort by time_on_task desc).
+    leader_review_queue.sort(key=lambda r: r.get("updated_at") or "")
+
+    _trek = _import_trek()
+    _compute = getattr(_trek, "compute_ms_slot_state", None) if _trek else None
+    if _compute is not None and children:
+        overall_state = _compute(children)
+    elif children:
+        # Local fallback mirrors lib.trek.compute_ms_slot_state precedence.
+        cs = [c["state"] for c in children]
+        if "leader_review" in cs:
+            overall_state = "leader_review"
+        elif all(s == "done" for s in cs):
+            overall_state = "done"
+        elif all(s in ("done", "user_review") for s in cs):
+            overall_state = "user_review"
+        elif "working" in cs:
+            overall_state = "working"
+        else:
+            overall_state = "todo"
+    else:
+        overall_state = "todo"
+
+    return {
+        "counts": counts,
+        "leader_review_queue": leader_review_queue,
+        "overall_state": overall_state,
+    }
+
+
 def build_leader_digest_payload(
     trek_doc: dict,
     *,
@@ -1043,6 +1137,11 @@ def build_leader_digest_payload(
         # Defensive: with no trek module we can't render a real digest.
         # Return an empty-but-well-shaped payload so callers do not crash.
         now = _ensure_utc(now or datetime.datetime.now(datetime.timezone.utc))
+        # ms-97 / e-2707 — even on the fallback path, surface the
+        # task_state aggregate so the leader-digest is never silent about
+        # the leader_review queue (= the legacy needs_leader_judgment is
+        # pulse-ack derived and can lag behind real state).
+        task_state_aggregate = build_task_state_aggregate(trek_doc)
         return {
             "kind": _LEADER_DIGEST_KIND,
             "trek_id": trek_doc.get("trek_id", ""),
@@ -1050,9 +1149,13 @@ def build_leader_digest_payload(
             "summary": {
                 "active": 0, "stuck": 0, "idle": 0,
                 "needs_leader_judgment": 0,
+                "leader_review_queue_count": len(
+                    task_state_aggregate["leader_review_queue"]
+                ),
                 "total_acks_across_sessions": 0,
             },
             "sessions": [],
+            "task_state_aggregate": task_state_aggregate,
             "body": (
                 f"[{_LEADER_DIGEST_HEADER}] trek_id={trek_doc.get('trek_id', '')}\n"
                 "  (trek module unavailable — digest skipped this tick)"
@@ -1088,12 +1191,26 @@ def build_leader_digest_payload(
         reverse=True,
     )
 
+    # ms-97 / e-2707 — task_state aggregate (= AC10 precedence + leader_review
+    # queue list). Surface BEFORE summary_block so the count field below
+    # can read it without recomputing.
+    task_state_aggregate = build_task_state_aggregate(trek_doc)
+
     summary_block = {
         "active": int(summary.get("active_session_count") or 0),
         "stuck": int(summary.get("stuck_session_count") or 0),
         "idle": int(summary.get("idle_session_count") or 0),
         "needs_leader_judgment": int(
             summary.get("needs_leader_judgment_count") or 0
+        ),
+        # ms-97 / e-2707 — task_state-derived parallel to needs_leader_judgment.
+        # needs_leader_judgment is pulse-ack self-report (= executor remembers
+        # to flag it); leader_review_queue_count is structural (= counted
+        # straight from task_states.*.state). The two answer different
+        # questions: "did executor wave a hand?" vs "did anyone flip the slot
+        # to leader_review?". Leaders read whichever is non-zero.
+        "leader_review_queue_count": len(
+            task_state_aggregate["leader_review_queue"]
         ),
         "total_acks_across_sessions": int(
             summary.get("total_acks_across_sessions") or 0
@@ -1122,12 +1239,28 @@ def build_leader_digest_payload(
     else:
         sessions_block_str = "  (まだ pulse-ack を打った session がありません)"
 
+    # ms-97 / e-2707 — leader_review_queue line is emitted only when the
+    # queue is non-empty so a clean digest stays terse. When non-empty it
+    # surfaces the count + first 3 task_ids so the leader sees them inline
+    # without having to re-read the structured payload.
+    lr_queue = task_state_aggregate["leader_review_queue"]
+    lr_line = ""
+    if lr_queue:
+        lr_ids = ", ".join(r["task_id"] for r in lr_queue[:3])
+        more = f" (+{len(lr_queue) - 3} more)" if len(lr_queue) > 3 else ""
+        lr_line = (
+            f"\nleader_review queue: {len(lr_queue)} 件 [{lr_ids}{more}] "
+            f"— invoke /beacon-trek-review NOW"
+        )
+
     body = (
         f"[{_LEADER_DIGEST_HEADER}] trek_id={trek_id}\n"
         f"active={summary_block['active']} "
         f"stuck={summary_block['stuck']} "
         f"idle={summary_block['idle']} "
-        f"needs_leader_judgment={summary_block['needs_leader_judgment']}\n"
+        f"needs_leader_judgment={summary_block['needs_leader_judgment']} "
+        f"leader_review_queue={summary_block['leader_review_queue_count']}"
+        f"{lr_line}\n"
         f"{sessions_block_str}"
     )
 
@@ -1137,6 +1270,7 @@ def build_leader_digest_payload(
         "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "summary": summary_block,
         "sessions": sessions_list,
+        "task_state_aggregate": task_state_aggregate,
         "body": body,
     }
 

@@ -896,3 +896,210 @@ def test_ac32_halt_blocks_auto_stall_detection():
     assert stalled == [], (
         f"halted trek must not produce auto-stall transitions, got {stalled}"
     )
+
+
+# ---------------------------------------------------------------------------
+# ms-97 / e-2707 — build_task_state_aggregate + leader-digest payload
+# task_state_aggregate field (AC10 precedence surfaced for leader digest)
+# ---------------------------------------------------------------------------
+
+
+def _trek_with_task_states(states: dict) -> dict:
+    """Build a trek with raw task_states entries pre-populated.
+
+    Bypasses the set_task_state state-machine validator so we can pin
+    arbitrary state combinations (= the aggregate is purely read-side
+    over whatever the executor / leader has stamped).
+    """
+    t = trek_mod.new_trek(
+        title="agg test", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-leader",
+    )
+    t["status"] = "active"
+    t["task_states"] = dict(states)
+    return t
+
+
+def test_task_state_aggregate_empty_returns_zero_counts_and_todo():
+    """Trek with no task_states (= fresh) aggregates to all-zero counts
+    + overall_state='todo' (= compute_ms_slot_state's empty-slot fallback).
+    """
+    t = _trek_with_task_states({})
+    agg = scheduler.build_task_state_aggregate(t)
+    assert agg["counts"] == {
+        "leader_review": 0, "done": 0, "user_review": 0,
+        "working": 0, "todo": 0,
+    }
+    assert agg["leader_review_queue"] == []
+    assert agg["overall_state"] == "todo"
+
+
+def test_task_state_aggregate_counts_each_state_bucket():
+    """Each state stamped lands in its own bucket; the count matrix is the
+    structural signal leaders read."""
+    t = _trek_with_task_states({
+        "e-a": {"state": "done", "updated_at": "2026-06-25T00:00:00Z"},
+        "e-b": {"state": "done", "updated_at": "2026-06-25T01:00:00Z"},
+        "e-c": {"state": "working", "updated_at": "2026-06-25T02:00:00Z"},
+        "e-d": {"state": "todo", "updated_at": "2026-06-25T03:00:00Z"},
+        "e-e": {"state": "user_review", "updated_at": "2026-06-25T04:00:00Z"},
+    })
+    agg = scheduler.build_task_state_aggregate(t)
+    assert agg["counts"] == {
+        "leader_review": 0, "done": 2, "user_review": 1,
+        "working": 1, "todo": 1,
+    }
+    # overall_state: 1 working → "working" wins per AC10 precedence
+    assert agg["overall_state"] == "working"
+
+
+def test_task_state_aggregate_leader_review_wins_overall_state():
+    """AC10 precedence top: any leader_review present → overall_state='leader_review'.
+    This is the case where the leader is structurally blocking executor
+    progress and the digest must surface it."""
+    t = _trek_with_task_states({
+        "e-a": {"state": "done"},
+        "e-b": {"state": "leader_review",
+                "updated_by_session_id": "sv-exec",
+                "updated_at": "2026-06-25T00:00:00Z",
+                "note": "needs leader judgment"},
+        "e-c": {"state": "working"},
+    })
+    agg = scheduler.build_task_state_aggregate(t)
+    assert agg["overall_state"] == "leader_review"
+    assert agg["counts"]["leader_review"] == 1
+
+
+def test_task_state_aggregate_leader_review_queue_carries_entry_metadata():
+    """Each leader_review entry surfaces task_id + updated_by + updated_at
+    + note so the leader can act without a second lookup."""
+    t = _trek_with_task_states({
+        "e-target": {
+            "state": "leader_review",
+            "updated_by_session_id": "sv-exec-1",
+            "updated_at": "2026-06-25T12:34:56Z",
+            "note": "needs approve / re-work / forward",
+        },
+    })
+    agg = scheduler.build_task_state_aggregate(t)
+    assert len(agg["leader_review_queue"]) == 1
+    row = agg["leader_review_queue"][0]
+    assert row["task_id"] == "e-target"
+    assert row["updated_by_session_id"] == "sv-exec-1"
+    assert row["updated_at"] == "2026-06-25T12:34:56Z"
+    assert "approve" in row["note"]
+
+
+def test_task_state_aggregate_leader_review_queue_sorted_oldest_first():
+    """Oldest leader_review surfaces first (= been waiting longest)."""
+    t = _trek_with_task_states({
+        "e-newest": {"state": "leader_review",
+                     "updated_at": "2026-06-25T03:00:00Z"},
+        "e-oldest": {"state": "leader_review",
+                     "updated_at": "2026-06-25T01:00:00Z"},
+        "e-middle": {"state": "leader_review",
+                     "updated_at": "2026-06-25T02:00:00Z"},
+    })
+    agg = scheduler.build_task_state_aggregate(t)
+    ids = [r["task_id"] for r in agg["leader_review_queue"]]
+    assert ids == ["e-oldest", "e-middle", "e-newest"]
+
+
+def test_task_state_aggregate_unknown_state_collapses_to_todo():
+    """Malformed / unknown state token → counted as todo, not crashed."""
+    t = _trek_with_task_states({
+        "e-weird": {"state": "garbage-state"},
+        "e-clean": {"state": "todo"},
+    })
+    agg = scheduler.build_task_state_aggregate(t)
+    assert agg["counts"]["todo"] == 2
+    assert agg["overall_state"] == "todo"
+
+
+def test_leader_digest_payload_summary_carries_leader_review_queue_count():
+    """summary.leader_review_queue_count surfaces in parallel to
+    needs_leader_judgment so the leader can read either signal.
+    Regression pin: the 2026-06-29 LPS dogfood post-mortem proved
+    needs_leader_judgment=0 while task_states had leader_review queue,
+    which let the leader read past the digest for 10 minutes."""
+    t = _trek_with_task_states({
+        "e-blocked": {"state": "leader_review",
+                      "updated_at": "2026-06-25T00:00:00Z"},
+    })
+    # Add a pulse-ack so the digest doesn't short-circuit to the
+    # empty-sessions path; the queue surface is independent of pulse-acks.
+    trek_mod.record_pulse_ack(
+        t, session_id="sv-exec", picked_choice="continue",
+        state_summary="working", time_on_task_seconds=10,
+    )
+    payload = scheduler.build_leader_digest_payload(t)
+    assert payload["summary"]["leader_review_queue_count"] == 1
+    # needs_leader_judgment is pulse-ack derived and may be 0 even when
+    # leader_review_queue_count is non-zero — the two are independent.
+
+
+def test_leader_digest_payload_includes_task_state_aggregate_field():
+    """The structured task_state_aggregate field is the Skill-facing
+    payload so the leader-side AI can chain /beacon-trek-review without
+    re-deriving state from the body string."""
+    t = _trek_with_task_states({
+        "e-r": {"state": "leader_review",
+                "updated_by_session_id": "sv-exec",
+                "updated_at": "2026-06-25T00:00:00Z",
+                "note": "ready for review"},
+        "e-w": {"state": "working"},
+    })
+    payload = scheduler.build_leader_digest_payload(t)
+    assert "task_state_aggregate" in payload
+    agg = payload["task_state_aggregate"]
+    assert agg["counts"]["leader_review"] == 1
+    assert agg["counts"]["working"] == 1
+    assert agg["overall_state"] == "leader_review"
+    assert agg["leader_review_queue"][0]["task_id"] == "e-r"
+
+
+def test_leader_digest_payload_body_surfaces_leader_review_queue_when_nonempty():
+    """Body text exposes the leader_review queue so legacy Skills /
+    un-upgraded bridges still surface the actionable count."""
+    t = _trek_with_task_states({
+        "e-r1": {"state": "leader_review",
+                 "updated_at": "2026-06-25T00:00:00Z"},
+        "e-r2": {"state": "leader_review",
+                 "updated_at": "2026-06-25T01:00:00Z"},
+    })
+    payload = scheduler.build_leader_digest_payload(t)
+    body = payload["body"]
+    assert "leader_review_queue=2" in body
+    assert "leader_review queue: 2 件" in body
+    assert "/beacon-trek-review" in body
+
+
+def test_leader_digest_payload_body_omits_queue_line_when_empty():
+    """Clean trek (= no leader_review entries) keeps the body terse —
+    the queue line only fires when there is action to take."""
+    t = _trek_with_task_states({
+        "e-a": {"state": "working"},
+    })
+    payload = scheduler.build_leader_digest_payload(t)
+    body = payload["body"]
+    assert "leader_review_queue=0" in body
+    assert "invoke /beacon-trek-review NOW" not in body
+
+
+def test_leader_digest_payload_fallback_path_still_carries_aggregate(monkeypatch):
+    """When the lazy trek import fails (= ``_import_trek`` returns None),
+    the fallback empty-shape payload must still expose
+    task_state_aggregate so callers do not crash on field access."""
+    # Force the trek module unavailable for the duration of the call.
+    monkeypatch.setattr(scheduler, "_import_trek", lambda: None)
+    t = {
+        "trek_id": "tk-fallback",
+        "task_states": {
+            "e-a": {"state": "leader_review",
+                    "updated_at": "2026-06-25T00:00:00Z"},
+        },
+    }
+    payload = scheduler.build_leader_digest_payload(t)
+    assert "task_state_aggregate" in payload
+    assert payload["summary"]["leader_review_queue_count"] == 1
+    assert payload["task_state_aggregate"]["overall_state"] == "leader_review"

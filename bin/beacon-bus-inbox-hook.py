@@ -429,6 +429,162 @@ def _format_autonomous_action_block(events: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _format_trek_progress_check_block(events: list[dict]) -> str:
+    """Render the Level 3 imperative inject for ``trek-progress-check`` events
+    (ms-97 / e-2711).
+
+    Twin of ``_format_trek_action_block`` but scoped to the periodic
+    server-cadence "next, please" DM (= ms-83 / e-1999). The block uses
+    Level 3 imperative phrasing (= "You MUST immediately invoke …") so
+    the AI's "framing 慣性" (= mechanical ack pathology) is structurally
+    short-circuited: there is no room left for the AI to decide
+    "should I invoke?" — the answer is built into the inject.
+
+    Each event's trek_id is lifted from the payload so the launched
+    Skill receives the full command form ready to paste.
+    """
+    if not events:
+        return ""
+    lines: list[str] = []
+    lines.append("## TREK PROGRESS CHECK — Level 3 imperative")
+    lines.append("")
+    lines.append(
+        "以下の trek-progress-check event (= server cadence の「次やって」 DM、 "
+        "ms-83 / e-1999) は **必ず即時 Skill を invoke する**。 "
+        "ack だけで終わらせない (= e-2711 の機械 ack 病理対策)。"
+    )
+    lines.append("")
+    for ev in events:
+        payload = ev.get("payload") or {}
+        trek_id = payload.get("trek_id", "?")
+        eid = ev.get("event_id", "?")
+        lines.append(f"- event_id: {eid}")
+        lines.append(f"  - trek_id: {trek_id}")
+        cmd = f"/beacon-trek-execute {trek_id}"
+        lines.append(
+            f"  - **You MUST immediately invoke `{cmd}` as your next "
+            f"action** (= 確認なし、 同ターン内)"
+        )
+    lines.append("")
+    lines.append(
+        "Skill 側 (= /beacon-trek-execute) が pulse-ack / scope check / "
+        "state 更新を全部やる。 この inject に対する応答は invoke 1 件、 "
+        "それ以外は protocol 違反 (= ms-75 / e-2068 forced 3-択)。"
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _format_trek_task_review_block(events: list[dict]) -> str:
+    """Render the Level 3 imperative inject for ``trek-task-review`` events
+    (ms-97 / e-2711).
+
+    Twin of the progress-check block but routes the leader to
+    ``/beacon-trek-review`` (= the forced 3-択 approve / re-work /
+    forward-to-user judgment Skill, ms-75 / e-2048). Each event carries
+    trek_id + task_id in the payload so the Skill is launchable as a
+    one-shot command without re-parsing the raw event.
+    """
+    if not events:
+        return ""
+    lines: list[str] = []
+    lines.append("## TREK TASK REVIEW — Level 3 imperative")
+    lines.append("")
+    lines.append(
+        "以下の trek-task-review event (= executor が task を done / "
+        "leader_review に flip した時の leader 通知、 ms-75 / e-2048) は "
+        "**必ず即時 Skill を invoke する**。 ack で flush しない "
+        "(= e-2711 の leader 機械 ack 病理対策)。"
+    )
+    lines.append("")
+    for ev in events:
+        payload = ev.get("payload") or {}
+        trek_id = payload.get("trek_id", "?")
+        task_id = payload.get("task_id", "?")
+        eid = ev.get("event_id", "?")
+        lines.append(f"- event_id: {eid}")
+        lines.append(f"  - trek_id: {trek_id}")
+        lines.append(f"  - task_id: {task_id}")
+        cmd = f"/beacon-trek-review {trek_id} {task_id}"
+        lines.append(
+            f"  - **You MUST immediately invoke `{cmd}` as your next "
+            f"action** (= 確認なし、 forced 3-択 に直行)"
+        )
+    lines.append("")
+    lines.append(
+        "judgment = approve / re-work / forward-to-user。 "
+        "Skill が 3-択を強制するので「読んだだけ」 で終わるパスは構造的に塞がる。"
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _format_trek_leader_digest_block(events: list[dict]) -> str:
+    """Render the Level 3 imperative inject for ``trek-leader-digest`` events
+    (ms-97 / e-2711, leverages e-2707 payload extension).
+
+    Reads ``payload.task_state_aggregate.leader_review_queue`` (= the
+    new field shipped in e-2707) and surfaces "N 件の leader_review queue
+    があります、 即時 invoke /beacon-trek-review" so the leader cannot
+    miss the queue. When the queue is empty the digest stays informational
+    (= no forced Skill invoke, just the standard event list).
+
+    The Level 3 phrasing is the structural defence against the
+    2026-06-29 LPS dogfood pathology where ``needs_leader_judgment=0``
+    let the leader read past the digest while task_states had a
+    leader_review queue (= e-2707 motivation).
+    """
+    if not events:
+        return ""
+    lines: list[str] = []
+    lines.append("## TREK LEADER DIGEST — Level 3 imperative")
+    lines.append("")
+    lines.append(
+        "以下の trek-leader-digest event (= leader 向け定期サマリ、 "
+        "ms-92 / e-2164) は **task_state_aggregate に leader_review 件数が "
+        "あれば必ず /beacon-trek-review を即時 invoke する**。 "
+        "「needs_leader_judgment=0 だから OK」 と digest を読み流さない "
+        "(= e-2707 motivation / 2026-06-29 LPS dogfood post-mortem)。"
+    )
+    lines.append("")
+    for ev in events:
+        payload = ev.get("payload") or {}
+        trek_id = payload.get("trek_id", "?")
+        eid = ev.get("event_id", "?")
+        agg = payload.get("task_state_aggregate") or {}
+        summary = payload.get("summary") or {}
+        # e-2707 field; fall back to summary.leader_review_queue_count when
+        # the payload originator hasn't yet rolled the aggregate (= old
+        # server build, defensive).
+        queue = agg.get("leader_review_queue") or []
+        queue_count = len(queue) or int(
+            summary.get("leader_review_queue_count") or 0
+        )
+        lines.append(f"- event_id: {eid}")
+        lines.append(f"  - trek_id: {trek_id}")
+        lines.append(f"  - leader_review queue: {queue_count} 件")
+        if queue_count > 0:
+            # Show first 3 task ids so the leader knows what to look for.
+            preview_ids = [r.get("task_id", "?") for r in queue[:3]]
+            if preview_ids:
+                lines.append(f"  - tasks: {', '.join(preview_ids)}"
+                             + (f" (+{queue_count - 3} more)"
+                                if queue_count > 3 else ""))
+            cmd = f"/beacon-trek-review {trek_id}"
+            lines.append(
+                f"  - **You MUST immediately invoke `{cmd} <task-id>` for "
+                f"each queued task as your next action** "
+                f"(= 確認なし、 全件 forced 3-択 を回す)"
+            )
+        else:
+            lines.append(
+                "  - queue 空 → invoke 不要 (= digest 観察のみ、 次の "
+                "tick 待ち)"
+            )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _format_trek_action_block(events: list[dict]) -> str:
     """Render the "TREK ACTION" inject for armed trek-trigger events
     (ms-75 / e-1870).
@@ -486,7 +642,10 @@ def _render_context(events: list[dict], notify_only_count: int,
                     budget: dict | None = None,
                     auto_execute_downgraded_count: int = 0,
                     autonomous_actions: list[dict] | None = None,
-                    trek_actions: list[dict] | None = None) -> str:
+                    trek_actions: list[dict] | None = None,
+                    trek_progress_check_actions: list[dict] | None = None,
+                    trek_task_review_actions: list[dict] | None = None,
+                    trek_leader_digest_actions: list[dict] | None = None) -> str:
     """Build the additionalContext markdown for AI inject.
 
     ``autonomous_actions`` is the subset of ``events`` that survived the
@@ -498,6 +657,14 @@ def _render_context(events: list[dict], notify_only_count: int,
     ``trek_actions`` is the analogous subset for the ``trek-trigger``
     channel (ms-75 / e-1870). When non-empty, a "TREK ACTION" block is
     emitted right after the operation block.
+
+    ``trek_progress_check_actions`` / ``trek_task_review_actions`` /
+    ``trek_leader_digest_actions`` are the ms-97 / e-2711 Level 3
+    imperative dispatches for the periodic trek DMs. Each gets its own
+    block ABOVE the generic event list, ensuring the AI sees "You MUST
+    immediately invoke …" before the noise. The blocks share the
+    visual pattern with TREK ACTION / AUTONOMOUS ACTION so the AI's
+    block-parser handles all four uniformly.
     """
     parts: list[str] = []
     parts.append("BEACON BUS INBOX — 新着 event があります")
@@ -508,6 +675,21 @@ def _render_context(events: list[dict], notify_only_count: int,
     trek_block = _format_trek_action_block(trek_actions or [])
     if trek_block:
         parts.append(trek_block)
+    # ms-97 / e-2711 — Level 3 imperative blocks for the periodic trek DMs.
+    # Order: progress-check → task-review → leader-digest. The order
+    # mirrors the "executor-first, then leader" reading flow.
+    progress_check_block = _format_trek_progress_check_block(
+        trek_progress_check_actions or [])
+    if progress_check_block:
+        parts.append(progress_check_block)
+    task_review_block = _format_trek_task_review_block(
+        trek_task_review_actions or [])
+    if task_review_block:
+        parts.append(task_review_block)
+    leader_digest_block = _format_trek_leader_digest_block(
+        trek_leader_digest_actions or [])
+    if leader_digest_block:
+        parts.append(leader_digest_block)
     budget_line = _format_budget_line(budget)
     if budget_line:
         parts.append(budget_line)
@@ -709,6 +891,13 @@ def main() -> None:
     notify_only: list[dict] = []
     autonomous_actions: list[dict] = []
     trek_actions: list[dict] = []
+    # ms-97 / e-2711 — Level 3 imperative dispatch buckets for the
+    # periodic trek DMs. Same opt-in posture as trek-trigger: only
+    # auto-execute + channel in allowlist lands here; otherwise the
+    # event is downgraded to propose-to-ai with the standard marker.
+    trek_progress_check_actions: list[dict] = []
+    trek_task_review_actions: list[dict] = []
+    trek_leader_digest_actions: list[dict] = []
     downgraded_count = 0
     downgraded_audit: list[dict] = []
     for ev in unread:
@@ -737,6 +926,25 @@ def main() -> None:
                 # /beacon-trek-execute <trek-id> without scanning the noise.
                 # Same pattern as operation-trigger, twin scope-level entry.
                 trek_actions.append(ev)
+            elif channel == "trek-progress-check":
+                # ms-97 / e-2711: opted-in trek-progress-check events get a
+                # Level 3 imperative "You MUST immediately invoke
+                # /beacon-trek-execute <trek-id>" block. Closes the
+                # "AI acks the DM but never invokes the Skill" pathology.
+                trek_progress_check_actions.append(ev)
+            elif channel == "trek-task-review":
+                # ms-97 / e-2711: opted-in trek-task-review events get a
+                # Level 3 imperative "You MUST immediately invoke
+                # /beacon-trek-review <trek-id> <task-id>" block. Closes
+                # the leader-side mechanical ack pathology.
+                trek_task_review_actions.append(ev)
+            elif channel == "trek-leader-digest":
+                # ms-97 / e-2711 (× e-2707): opted-in trek-leader-digest
+                # events read payload.task_state_aggregate.leader_review_queue
+                # and force /beacon-trek-review invoke when non-empty.
+                # When queue is empty, the block surfaces "digest only"
+                # without forcing invoke.
+                trek_leader_digest_actions.append(ev)
         if delivery == "notify-user-only":
             notify_only.append(ev)
         else:
@@ -797,11 +1005,16 @@ def main() -> None:
     # decrements; the hook is read-only.
     budget = _read_bus_budget(root)
 
-    _emit(hook_event_name, _render_context(inject, len(notify_only),
-                                            monitor_suggested, budget,
-                                            downgraded_count,
-                                            autonomous_actions,
-                                            trek_actions))
+    _emit(hook_event_name, _render_context(
+        inject, len(notify_only),
+        monitor_suggested, budget,
+        downgraded_count,
+        autonomous_actions,
+        trek_actions,
+        trek_progress_check_actions,
+        trek_task_review_actions,
+        trek_leader_digest_actions,
+    ))
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
     _log(f"surfaced {len(inject)} event(s) ({elapsed_ms} ms)")
