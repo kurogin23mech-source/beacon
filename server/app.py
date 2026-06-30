@@ -5014,8 +5014,17 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
     # project (= first scope entry's project) as the bus event target,
     # and address it to the current leader_session_id so only the
     # responsible session sees it (= no project-wide broadcast).
-    if body.state in trek_mod.TERMINAL_TASK_STATES:
-        # ms-97 / Phase 7-C / AC26 — outcome log row at terminal state.
+    # ms-97 / e-2706 (AC1) — review notify trigger 拡張。
+    # 旧コードは `TERMINAL_TASK_STATES` (= done / user_review) のみで判定し、
+    # `leader_review` 遷移時に trek-task-review event が永久に発火しない構造
+    # bug を持っていた (= ms-88 e-2107 で waiting-review → leader_review に
+    # 5-state 移行した際の check 条件 drift)。 REVIEW_TRIGGER_STATES (= done /
+    # user_review / leader_review) に置き換えて leader への review 通知を
+    # 正常化する。 outcome log row は元来 terminal 状態にのみ書く design なので
+    # 同じ trigger 集合に乗せる (= leader_review も「leader 判断要請」 という
+    # 意味で 1 つの outcome event として記録に値する)。
+    if body.state in trek_mod.REVIEW_TRIGGER_STATES:
+        # ms-97 / Phase 7-C / AC26 — outcome log row at review-trigger state.
         # Recorded BEFORE the DM fanout so the log row exists even if
         # leader notification fails (= durable audit trail).
         _append_trek_log_safe(trek_id, {
