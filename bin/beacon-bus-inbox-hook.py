@@ -749,6 +749,28 @@ def main() -> None:
         # there with its full payload so a human can review what was forced
         # into propose-to-ai even when the AI handled it inline.
         _append_to_inbox_log(root, downgraded_audit)
+        # ms-95 / e-2710 — also persist a diagnostic frame so the next
+        # post-mortem can read "what the hook saw at downgrade time" without
+        # re-deriving it. The 2026-06-29 LPS dogfood post-mortem stalled for
+        # hours on the question "did the local allowlist actually contain the
+        # trek channels at the moment the hook fired?" — this frame answers
+        # it inline so future cases close in minutes.
+        try:
+            pj_path = root / ".beacon" / "project.json"
+            mtime = pj_path.stat().st_mtime if pj_path.exists() else None
+            diag = {
+                "_diag": "auto_execute_downgrade",
+                "downgraded_count": downgraded_count,
+                "downgraded_channels": sorted({
+                    str(e.get("channel", "")) for e in downgraded_audit}),
+                "allowlist_at_downgrade": list(allowlist),
+                "project_json_path": str(pj_path),
+                "project_json_mtime": mtime,
+                "session_id": session_id,
+            }
+            _append_to_inbox_log(root, [diag])
+        except Exception as exc:
+            _log(f"diag frame write failed: {exc}")
 
     # Always advance the cursor to the last seen event so neither inject nor
     # notify-only events are replayed; the cursor is delivery-agnostic.
