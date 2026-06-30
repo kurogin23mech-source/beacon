@@ -762,3 +762,96 @@ class TestWebUI_TrekScopeApprovalSurface:
         end = self.src.index("    case 'trek-cli-hint':", idx)
         block = self.src[idx:end]
         assert "/scope-reject" in block and "POST" in block
+
+
+# ---------------------------------------------------------------------------
+# ms-95 / e-2640 — Trek detail cross-project scope-entries hydration
+#
+# Pins the structural pieces that make cross-project Trek detail MS render
+# the actual milestone title (= NOT "milestone not loaded"):
+#
+#   1. ``loadTrekScope`` fans out to /api/treks/{id}/scope-entries so
+#      ``state.milestoneEntries`` is seeded with the cross-project MS
+#      entries body BEFORE the user expands any card.
+#   2. ``fetchMilestoneEntries`` resolves the MS's project_id from
+#      ``state.openTrekScope.milestones`` when ``state.openTrekId`` is set,
+#      so the URL embeds the correct project (= not the cwd / currently
+#      selected one).
+#   3. The Trek detail render still drives off ``state.openTrekScope`` and
+#      surfaces the milestone title (= "(milestone not loaded)" fallback
+#      string is still present for the genuinely-missing case).
+# ---------------------------------------------------------------------------
+
+class TestWebUI_TrekScopeEntriesHydration:
+    def setup_method(self, _method):
+        self.src = _read(WEB_INDEX)
+
+    def test_load_trek_scope_calls_scope_entries_endpoint(self):
+        # loadTrekScope must fan out to /scope-entries so cross-project MS
+        # entries land in state.milestoneEntries BEFORE the user clicks.
+        # Pin the exact endpoint string so future refactors can't silently
+        # drop the call.
+        idx = self.src.index("loadTrekScope: async")
+        # End of the function — find the next dataSource entry.
+        end = self.src.index("loadRelatedTreks:", idx)
+        block = self.src[idx:end]
+        assert "/scope-entries" in block, (
+            "loadTrekScope must call /api/treks/{id}/scope-entries so "
+            "cross-project MS entries are pre-fetched (ms-95 / e-2640)"
+        )
+        # state.milestoneEntries seeding from the response.
+        assert "state.milestoneEntries[msId]" in block, (
+            "loadTrekScope must seed state.milestoneEntries[msId] from the "
+            "/scope-entries response so cross-project expand short-circuits "
+            "(ms-95 / e-2640)"
+        )
+
+    def test_fetch_milestone_entries_branches_on_open_trek_id(self):
+        # fetchMilestoneEntries must use the per-MS project_id from
+        # state.openTrekScope.milestones when state.openTrekId is set, NOT
+        # always state.projectId (= the bug e-2640 fixes).
+        idx = self.src.index("async function fetchMilestoneEntries(")
+        end = self.src.index("function hydrateProjectEntries", idx)
+        block = self.src[idx:end]
+        assert "state.openTrekId" in block, (
+            "fetchMilestoneEntries must branch on state.openTrekId for the "
+            "Trek detail context route (ms-95 / e-2640)"
+        )
+        assert "state.openTrekScope" in block, (
+            "fetchMilestoneEntries must resolve the MS project_id from "
+            "state.openTrekScope.milestones (ms-95 / e-2640)"
+        )
+        # The legacy fallback (= state.projectId) must still be present so
+        # the non-Trek path keeps working.
+        assert "state.projectId" in block, (
+            "fetchMilestoneEntries must keep state.projectId as the "
+            "non-Trek-detail fallback (ms-95 / e-2640 AC4: backward-compat)"
+        )
+
+    def test_milestone_not_loaded_fallback_still_present(self):
+        # The literal fallback string remains for the genuinely-missing
+        # case (= scope aggregate didn't ship the MS at all). This pin
+        # makes sure refactors don't silently drop the diagnostic string.
+        assert "(milestone not loaded)" in self.src, (
+            "(milestone not loaded) fallback string must remain for the "
+            "case where the MS truly isn't in scope (ms-95 / e-2640)"
+        )
+
+    def test_render_trek_detail_renders_ms_title_from_scope_aggregate(self):
+        # _trekLookupMilestone (= the lookup helper that decides whether
+        # "milestone not loaded" appears) must read from the cross-project
+        # scope aggregate, not from state.project. Pin the source-of-truth
+        # to scope.milestones so cross-project MS titles can render.
+        idx = self.src.index("function _trekLookupMilestone(")
+        end = self.src.index("function _renderTrekChildTask", idx)
+        block = self.src[idx:end]
+        assert "scope.milestones" in block, (
+            "_trekLookupMilestone must source MS titles from "
+            "scope.milestones (= the cross-project aggregate), not "
+            "state.project (ms-95 / e-2640 — structurally guarantees "
+            "cross-project MS titles render)"
+        )
+        assert "state.project" not in block, (
+            "_trekLookupMilestone must not fall back to state.project "
+            "(= reintroduces the cwd-project coupling e-2640 fixed)"
+        )

@@ -5672,6 +5672,106 @@ def list_trek_tasks_endpoint(trek_id: str,
     return out
 
 
+# ---------------------------------------------------------------------------
+# ms-95 / e-2640 — Trek scope-entries endpoint (= MS detail body hydration
+# for the Trek detail view). The Trek detail UI used to call
+# ``GET /api/projects/{state.projectId}/milestones/{ms_id}/entries`` from
+# ``fetchMilestoneEntries``, which embeds the *currently selected project*
+# in the URL. For cross-project Treks the MS lives in a different project
+# than the user's current cwd / selected project, so the call resolves to
+# the wrong project, returns 404, and the UI renders the MS card as
+# "milestone not loaded".
+#
+# This endpoint mirrors the ``/milestones`` / ``/tasks`` aggregate pattern
+# but ships the full ``entries[]`` body for every in-scope MS (= where the
+# scope entry has a ``milestone`` narrowing key OR the scope is
+# project-wide). Entries are serialized via ``core.entries_to_json`` so the
+# shape matches the legacy per-project endpoint exactly (= client side
+# patch minimal, ``state.milestoneEntries[msId] = entries`` works
+# unchanged).
+#
+# Authorization: ``_load_trek_for_read`` (= creator-or-member RBAC, mirrors
+# every other ``/api/treks/{id}/*`` endpoint).
+# ---------------------------------------------------------------------------
+
+@app.get("/api/treks/{trek_id}/scope-entries")
+def list_trek_scope_entries_endpoint(
+    trek_id: str,
+    user: dict = Depends(require_auth),
+):
+    """Return ``entries[]`` for every MS in this Trek's scope, cross-project.
+
+    Response shape (= one list keyed off the Trek, dedup'd across projects)::
+
+        {
+          "trek_id": "tk-xxx",
+          "milestones": [
+            {
+              "project_id": "lps-abcdef",
+              "milestone_id": "ms-22",
+              "milestone_title": "...",
+              "entries": [ ...entries_to_json shape... ]
+            },
+            ...
+          ]
+        }
+
+    The ``entries[]`` shape exactly mirrors
+    ``GET /api/projects/{pid}/milestones/{ms_id}/entries`` so the Web UI
+    can stuff the result straight into ``state.milestoneEntries[msId]``
+    without any per-entry rewriting (= ms-95 / e-2640 AC3).
+
+    Scope semantics (= same rule as ``/api/treks/{id}/milestones`` walker
+    above — see ``_scope_contributes``):
+
+      * project-wide entry (= no narrowing key) → every MS in the
+        project contributes its entries
+      * ``{"project": pid, "milestone": ms_id}`` → just that MS's entries
+
+    Operation- or task-only scope entries do not contribute MS entries
+    (= mirrors ``/milestones`` which returns ``[]`` in those cases).
+
+    Stale scope entries pointing at projects the caller cannot read are
+    silently skipped (= identical to ``/documents`` / ``/milestones``).
+    """
+    t = _load_trek_for_read(trek_id, user)
+    by_project = _trek_scope_by_project(t)
+    out_ms: list = []
+    seen: set[tuple[str, str]] = set()
+    for pid, entries in by_project.items():
+        try:
+            project = _load(pid, user)
+        except Exception:
+            # Stale scope entry pointing at a project the caller cannot
+            # read; skip silently so a single bad ref doesn't break the
+            # whole listing (= same regime as /documents / /milestones).
+            continue
+        include_all, narrow_ids = _scope_contributes(entries, kind="milestone")
+        if not include_all and not narrow_ids:
+            # Project only contributes via operation / task narrowing;
+            # the MS aggregate has nothing to ship here.
+            continue
+        for ms in project.get("milestones", []) or []:
+            ms_id = ms.get("id") or ""
+            if not include_all and ms_id not in narrow_ids:
+                continue
+            key = (pid, ms_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            raw_entries = ms.get("entries", []) or []
+            out_ms.append({
+                "project_id": pid,
+                "milestone_id": ms_id,
+                "milestone_title": ms.get("title", ""),
+                "entries": core.entries_to_json(raw_entries),
+            })
+    return {
+        "trek_id": t.get("trek_id") or trek_id,
+        "milestones": out_ms,
+    }
+
+
 @app.get("/api/treks/{trek_id}/summary")
 def trek_summary_endpoint(trek_id: str, user: dict = Depends(require_auth)):
     """Compact status snapshot for dashboards / Web UI Treks tab.

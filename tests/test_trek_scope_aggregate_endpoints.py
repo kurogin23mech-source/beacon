@@ -466,3 +466,189 @@ class TestTrekTasksEndpoint:
         _impersonate(LEADER_UID)
         r = client.get("/api/treks/tk-empty/tasks")
         assert r.json() == []
+
+
+# ---------------------------------------------------------------------------
+# /api/treks/{trek_id}/scope-entries — ms-95 / e-2640
+#
+# Pins the contract of the new endpoint that ships ``entries[]`` for every
+# in-scope MS so the Trek detail UI can hydrate cross-project MS bodies
+# without falling back to ``/api/projects/${state.projectId}/...`` (= the
+# bug where the URL embeds the *currently selected* project, breaking
+# cross-project Trek detail with "milestone not loaded").
+# ---------------------------------------------------------------------------
+
+class TestTrekScopeEntriesEndpoint:
+    def test_project_wide_scope_returns_entries_for_each_ms(self):
+        _make_project(PROJECT_A, milestones=[
+            _ms("ms-1", entries=[_task("e-1"), _task("e-2")]),
+            _ms("ms-2", entries=[_task("e-9")]),
+        ])
+        _make_trek("tk-wide", scope=[{"project": PROJECT_A}])
+        _impersonate(LEADER_UID)
+        r = client.get("/api/treks/tk-wide/scope-entries")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["trek_id"] == "tk-wide"
+        rows = sorted(body["milestones"], key=lambda x: x["milestone_id"])
+        assert [row["milestone_id"] for row in rows] == ["ms-1", "ms-2"]
+        # project_id stamped on each row so the UI can deep-link.
+        assert all(row["project_id"] == PROJECT_A for row in rows)
+        # entries body comes through, shaped like the legacy per-project
+        # endpoint (= entries_to_json output: id / type / status / ...).
+        ms1 = next(r for r in rows if r["milestone_id"] == "ms-1")
+        entry_ids = [e["id"] for e in ms1["entries"]]
+        assert entry_ids == ["e-1", "e-2"]
+        for e in ms1["entries"]:
+            assert "type" in e and "status" in e
+
+    def test_three_project_cross_project_trek_returns_entries_from_all(self):
+        """ms-95 / e-2640 AC6 — the dogfood scenario this endpoint was
+        introduced for: a 3-project Trek (= mirror of tk-7495e1be
+        LPS / PE / Beacon) returns MS entries from every scope project
+        in one shot, so the Web UI can render the full Trek detail body
+        without per-project round trips.
+        """
+        # 3 separate projects, each with one MS that carries one task.
+        PROJECT_C = "proj-c"
+        _make_project(PROJECT_A, milestones=[
+            _ms("ms-a", title="A goal", entries=[_task("e-1a", description="task in A")]),
+        ])
+        _make_project(PROJECT_B, milestones=[
+            _ms("ms-b", title="B goal", entries=[_task("e-1b", description="task in B")]),
+        ])
+        _make_project(PROJECT_C, milestones=[
+            _ms("ms-c", title="C goal", entries=[_task("e-1c", description="task in C")]),
+        ])
+        _make_trek("tk-3proj", scope=[
+            {"project": PROJECT_A, "milestone": "ms-a"},
+            {"project": PROJECT_B, "milestone": "ms-b"},
+            {"project": PROJECT_C, "milestone": "ms-c"},
+        ])
+        _impersonate(LEADER_UID)
+        r = client.get("/api/treks/tk-3proj/scope-entries")
+        assert r.status_code == 200
+        body = r.json()
+        rows = body["milestones"]
+        # All 3 projects' MS entries returned in one response.
+        triples = sorted(
+            (row["project_id"], row["milestone_id"], row["milestone_title"])
+            for row in rows
+        )
+        assert triples == [
+            (PROJECT_A, "ms-a", "A goal"),
+            (PROJECT_B, "ms-b", "B goal"),
+            (PROJECT_C, "ms-c", "C goal"),
+        ]
+        # Each MS's entries body is its own (= no cross-contamination).
+        by_ms = {row["milestone_id"]: row["entries"] for row in rows}
+        assert [e["id"] for e in by_ms["ms-a"]] == ["e-1a"]
+        assert [e["id"] for e in by_ms["ms-b"]] == ["e-1b"]
+        assert [e["id"] for e in by_ms["ms-c"]] == ["e-1c"]
+
+    def test_narrow_milestone_scope_returns_only_that_ms_entries(self):
+        _make_project(PROJECT_A, milestones=[
+            _ms("ms-1", entries=[_task("e-1")]),
+            _ms("ms-2", entries=[_task("e-9")]),
+        ])
+        _make_trek("tk-narrow", scope=[
+            {"project": PROJECT_A, "milestone": "ms-2"},
+        ])
+        _impersonate(LEADER_UID)
+        r = client.get("/api/treks/tk-narrow/scope-entries")
+        body = r.json()
+        assert [row["milestone_id"] for row in body["milestones"]] == ["ms-2"]
+        assert [e["id"] for e in body["milestones"][0]["entries"]] == ["e-9"]
+
+    def test_operation_only_scope_contributes_no_milestones(self):
+        _make_project(PROJECT_A,
+                      milestones=[_ms("ms-1", entries=[_task("e-1")])],
+                      operations=[_op("op-1", entries=[_task("e-2")])])
+        _make_trek("tk-op-only", scope=[
+            {"project": PROJECT_A, "operation": "op-1"},
+        ])
+        _impersonate(LEADER_UID)
+        r = client.get("/api/treks/tk-op-only/scope-entries")
+        # Operation-narrowed scope contributes Ops, not MS (= same regime as
+        # the /milestones endpoint).
+        assert r.json()["milestones"] == []
+
+    def test_task_only_scope_contributes_no_milestones(self):
+        _make_project(PROJECT_A, milestones=[
+            _ms("ms-1", entries=[_task("e-1"), _task("e-2")]),
+        ])
+        _make_trek("tk-task-only", scope=[
+            {"project": PROJECT_A, "task": "e-1"},
+        ])
+        _impersonate(LEADER_UID)
+        r = client.get("/api/treks/tk-task-only/scope-entries")
+        assert r.json()["milestones"] == []
+
+    def test_dedupes_when_multiple_scope_entries_target_same_ms(self):
+        _make_project(PROJECT_A, milestones=[_ms("ms-1", entries=[_task("e-1")])])
+        _make_trek("tk-dup", scope=[
+            {"project": PROJECT_A, "milestone": "ms-1"},
+            {"project": PROJECT_A, "milestone": "ms-1"},
+        ])
+        _impersonate(LEADER_UID)
+        r = client.get("/api/treks/tk-dup/scope-entries")
+        rows = r.json()["milestones"]
+        assert len(rows) == 1
+        assert rows[0]["milestone_id"] == "ms-1"
+
+    def test_empty_scope_returns_empty_milestones_list(self):
+        _make_trek("tk-empty", scope=[])
+        _impersonate(LEADER_UID)
+        r = client.get("/api/treks/tk-empty/scope-entries")
+        body = r.json()
+        assert body["trek_id"] == "tk-empty"
+        assert body["milestones"] == []
+
+    def test_stale_scope_entry_does_not_break_listing(self):
+        # PROJECT_A exists, "proj-stale" doesn't. Should silently skip the
+        # stale ref instead of 500-ing the whole listing.
+        _make_project(PROJECT_A, milestones=[_ms("ms-1", entries=[_task("e-1")])])
+        _make_trek("tk-stale", scope=[
+            {"project": "proj-stale"},
+            {"project": PROJECT_A},
+        ])
+        _impersonate(LEADER_UID)
+        r = client.get("/api/treks/tk-stale/scope-entries")
+        rows = r.json()["milestones"]
+        assert [row["milestone_id"] for row in rows] == ["ms-1"]
+
+    def test_non_member_returns_403(self):
+        _make_project(PROJECT_A, milestones=[_ms("ms-1")])
+        _make_trek("tk-private", scope=[{"project": PROJECT_A}])
+        _impersonate("uid-outsider")
+        r = client.get("/api/treks/tk-private/scope-entries")
+        assert r.status_code == 403
+
+    def test_missing_trek_returns_404(self):
+        _impersonate(LEADER_UID)
+        r = client.get("/api/treks/tk-nonexistent/scope-entries")
+        assert r.status_code == 404
+
+    def test_entries_shape_matches_legacy_per_project_endpoint(self):
+        """AC3 — response shape must match the legacy
+        ``/api/projects/{pid}/milestones/{ms_id}/entries`` so client-side
+        patches stay minimal (= ``state.milestoneEntries[msId] = entries``
+        works unchanged for both endpoints).
+        """
+        _make_project(PROJECT_A, milestones=[
+            _ms("ms-1", entries=[
+                _task("e-1", description="first"),
+                {"id": "c-1", "type": "commit", "description": "noise",
+                 "status": "done", "meta": {"hash": "abc1234"}},
+            ]),
+        ])
+        _make_trek("tk-shape", scope=[{"project": PROJECT_A}])
+        _impersonate(LEADER_UID)
+        legacy = client.get(
+            f"/api/projects/{PROJECT_A}/milestones/ms-1/entries"
+        ).json()
+        trek = client.get("/api/treks/tk-shape/scope-entries").json()
+        trek_ms_entries = trek["milestones"][0]["entries"]
+        # Both endpoints serialize via core.entries_to_json so the entry
+        # dicts have identical keys / shapes.
+        assert legacy["entries"] == trek_ms_entries

@@ -1251,3 +1251,37 @@ class TestLeaderSessionHardCheck:
         # No X-Beacon-Session header → role-only check applies.
         r = client.patch(f"/api/treks/{trek_id}", json={"title": "Renamed"})
         assert r.status_code == 200, r.text
+
+
+# ---------------------------------------------------------------------------
+# ms-95 / e-2640 — /api/treks/{trek_id}/scope-entries smoke pin
+#
+# The detailed cross-project / shape / RBAC cases live in
+# ``test_trek_scope_aggregate_endpoints.py`` (= it already has the
+# project-mocking scaffolding the new endpoint needs). This file's seed
+# treks have empty scope so the test below only pins the auth gates +
+# response envelope; cross-project body assertions live in the
+# scope-aggregate suite.
+# ---------------------------------------------------------------------------
+
+class TestScopeEntriesEndpoint:
+    def test_member_can_call_endpoint_returns_envelope(self):
+        trek_id = _create_seed_trek()
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.get(f"/api/treks/{trek_id}/scope-entries")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["trek_id"] == trek_id
+        # Seed trek has empty scope → no MS rows; envelope still present.
+        assert body["milestones"] == []
+
+    def test_stranger_returns_403(self):
+        trek_id = _create_seed_trek()
+        _impersonate(STRANGER_UID, STRANGER_EMAIL)
+        r = client.get(f"/api/treks/{trek_id}/scope-entries")
+        assert r.status_code == 403
+
+    def test_missing_trek_returns_404(self):
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.get("/api/treks/tk-nope/scope-entries")
+        assert r.status_code == 404
