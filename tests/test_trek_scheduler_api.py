@@ -667,6 +667,234 @@ def test_leader_digest_ignores_non_leader_live_sessions():
 
 
 # ---------------------------------------------------------------------------
+# ms-95 / e-2723 — same-user multi-session leader-digest collapse fix
+#
+# Background: 2026-06-28 dogfood (tk-7495e1be) observed that leader-digest
+# was being delivered to **every same-user session** when the primary
+# stamped sid was stale (= reconnect/fork scenario). The old fallback
+# path filtered solely on ``info["user_id"] == leader_user_id``, which
+# collapses when leader + executor share a user_id (= dogfood multi-role
+# self-test). Fix: phase A+ trek's fallback path narrows by
+# ``members[]`` ``role=leader`` session_id, structurally excluding
+# executor sessions regardless of user_id overlap. ms-92 e-2164 SPEC
+# Done when #1 explicitly says "recipient = leader_session_id のみ".
+# ---------------------------------------------------------------------------
+
+
+def _mark_trek_session_id_keyed(trek_id: str) -> None:
+    """Flip a seeded trek to phase A (= session_id keyed members[]) so
+    the e-2723 fallback narrow exercises the new branch."""
+    meta = _treks[trek_id].setdefault("meta", {})
+    meta["migration_phase"] = "A"
+
+
+def test_leader_digest_fallback_narrows_to_role_leader_session_same_user():
+    """ms-95 / e-2723 — same-user multi-session collapse fix.
+
+    Setup: leader + executor are the SAME user (= dogfood multi-role
+    self-test on one machine, or Mac+Win parallel sessions of the same
+    Beacon dev). Stamped leader_session_id is stale (= the original
+    leader session has gone away). Both leader's fresh session AND the
+    executor session are live under the same user_id.
+
+    Pre-e-2723 behaviour: fallback path matched on user_id alone →
+    both sessions received the leader digest (= cross-wired channels,
+    executor saw leader noise).
+
+    Post-e-2723 behaviour: phase A+ fallback walks members[] and picks
+    only role=leader sessions. The executor session is structurally
+    excluded.
+    """
+    _seed_trek(
+        trek_id="tk-e2723-sameuser",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-95"}],
+    )
+    _treks["tk-e2723-sameuser"]["task_states"] = {
+        "e-todo1": {"state": "todo"},
+    }
+    # Phase A+ trek: members[] is session_id keyed AND both roles live
+    # under the same user_id (= the dogfood collapse condition).
+    _mark_trek_session_id_keyed("tk-e2723-sameuser")
+    _treks["tk-e2723-sameuser"]["members"] = [
+        {
+            "user_id": "uid-leader", "email": "a@b.com",
+            "session_id": "sv-leader-fresh",
+            "role": "leader",
+            "invited_at": "2026-06-28T00:00:00.000000Z",
+            "joined_at": "2026-06-28T00:00:00.000000Z",
+            "invited_by": "uid-leader",
+        },
+        {
+            "user_id": "uid-leader", "email": "a@b.com",
+            "session_id": "sv-executor",
+            "role": "executor",
+            "invited_at": "2026-06-28T00:00:00.000000Z",
+            "joined_at": "2026-06-28T00:00:00.000000Z",
+            "invited_by": "uid-leader",
+        },
+    ]
+    # Stamped sid is the original (= now stale, not live).
+    _treks["tk-e2723-sameuser"]["leader_session_id"] = "sv-leader-stale"
+    # Live registry: only the fresh leader sid and the executor sid are
+    # present. The stamped stale sid is NOT live → primary path falls
+    # through to the fallback.
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-leader",
+        session_ids=["sv-leader-fresh", "sv-executor"],
+    )
+
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-e2723-sameuser"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    fired = resp.json()["fired"][0]
+    # Critical pin: digest reaches ONLY the leader's fresh session.
+    # Pre-fix this list would include both "sv-leader-fresh" and
+    # "sv-executor" because both share uid-leader.
+    assert fired["leader_digest_recipients"] == ["sv-leader-fresh"]
+
+    # Bus events: exactly one digest event, addressed to the leader.
+    events = _bus_events_by_project["beacon-test"]
+    digest_events = [e for e in events if _is_trek_leader_digest_event(e)]
+    assert len(digest_events) == 1
+    assert digest_events[0]["payload"]["recipient_session_id"] == \
+        "sv-leader-fresh"
+
+
+def test_leader_digest_fallback_excludes_executor_when_cross_user():
+    """ms-95 / e-2723 regression guard — cross-user trek (= different
+    user_ids for leader and executor) must continue to narrow correctly
+    on the fallback path. This pins the cross-user case so the
+    same-user narrow doesn't accidentally regress the original
+    behaviour.
+    """
+    _seed_trek(
+        trek_id="tk-e2723-crossuser",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-95"}],
+    )
+    _treks["tk-e2723-crossuser"]["task_states"] = {
+        "e-todo1": {"state": "todo"},
+    }
+    _mark_trek_session_id_keyed("tk-e2723-crossuser")
+    _treks["tk-e2723-crossuser"]["members"] = [
+        {
+            "user_id": "uid-leader", "email": "lead@b.com",
+            "session_id": "sv-leader-fresh",
+            "role": "leader",
+            "invited_at": "2026-06-28T00:00:00.000000Z",
+            "joined_at": "2026-06-28T00:00:00.000000Z",
+            "invited_by": "uid-leader",
+        },
+        {
+            "user_id": "uid-executor", "email": "ex@b.com",
+            "session_id": "sv-executor",
+            "role": "executor",
+            "invited_at": "2026-06-28T00:00:00.000000Z",
+            "joined_at": "2026-06-28T00:00:00.000000Z",
+            "invited_by": "uid-leader",
+        },
+    ]
+    # Stamped sid is stale → fallback path.
+    _treks["tk-e2723-crossuser"]["leader_session_id"] = "sv-leader-stale"
+    # Both live but under different user_ids.
+    import datetime
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    _sessions_by_project["beacon-test"] = [
+        {"session_id": "sv-leader-fresh", "user_id": "uid-leader",
+         "last_active": now_iso},
+        {"session_id": "sv-executor", "user_id": "uid-executor",
+         "last_active": now_iso},
+    ]
+
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-e2723-crossuser"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    fired = resp.json()["fired"][0]
+    # Cross-user: digest reaches the leader's fresh session only.
+    assert fired["leader_digest_recipients"] == ["sv-leader-fresh"]
+
+    events = _bus_events_by_project["beacon-test"]
+    digest_events = [e for e in events if _is_trek_leader_digest_event(e)]
+    assert len(digest_events) == 1
+    assert digest_events[0]["payload"]["recipient_session_id"] == \
+        "sv-leader-fresh"
+
+
+def test_leader_digest_fallback_skips_when_no_leader_member_session_live():
+    """ms-95 / e-2723 — phase A+ trek fallback. If no role=leader member
+    has a live session_id, the digest falls back to the stamped sid
+    (= same observability surface as 'leader fully offline').
+    """
+    _seed_trek(
+        trek_id="tk-e2723-leader-down",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-95"}],
+    )
+    _treks["tk-e2723-leader-down"]["task_states"] = {
+        "e-todo1": {"state": "todo"},
+    }
+    _mark_trek_session_id_keyed("tk-e2723-leader-down")
+    _treks["tk-e2723-leader-down"]["members"] = [
+        {
+            "user_id": "uid-leader", "email": "lead@b.com",
+            "session_id": "sv-leader-offline",  # not in live registry
+            "role": "leader",
+            "invited_at": "2026-06-28T00:00:00.000000Z",
+            "joined_at": "2026-06-28T00:00:00.000000Z",
+            "invited_by": "uid-leader",
+        },
+        {
+            "user_id": "uid-leader", "email": "lead@b.com",
+            "session_id": "sv-executor",
+            "role": "executor",
+            "invited_at": "2026-06-28T00:00:00.000000Z",
+            "joined_at": "2026-06-28T00:00:00.000000Z",
+            "invited_by": "uid-leader",
+        },
+    ]
+    _treks["tk-e2723-leader-down"]["leader_session_id"] = "sv-leader-stale"
+    # Only the executor session is live; no leader session is live at
+    # all.
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-leader",
+        session_ids=["sv-executor"],
+    )
+
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-e2723-leader-down"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    fired = resp.json()["fired"][0]
+    # Fallback observability surface: stamped sid is used so the
+    # dashboard's last_leader_digest_at keeps stamping.
+    assert fired["leader_digest_recipients"] == ["sv-leader-stale"]
+    # Critical pin: executor (= same user) must NOT receive the digest
+    # even though their session is live.
+    events = _bus_events_by_project["beacon-test"]
+    digest_events = [e for e in events if _is_trek_leader_digest_event(e)]
+    digest_recipients = {
+        e["payload"].get("recipient_session_id", "") for e in digest_events
+    }
+    assert "sv-executor" not in digest_recipients
+
+
+# ---------------------------------------------------------------------------
 # ms-95 / v0.49.2 — slug ↔ canonical project_id resolution in scheduler tick
 #
 # Background: PR #271 fixed the task-add endpoint to canonicalise

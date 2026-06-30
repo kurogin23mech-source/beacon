@@ -7231,6 +7231,31 @@ def trek_scheduler_tick_endpoint(
         # でなく、 cross-user Trek の正常動作 (= leader user の sessions
         # のみ) も同じ logic で表現できる (= leader_session_id 一致 →
         # 一つだけ、 stale → leader user の sessions に拡散)。
+        #
+        # ms-95 / e-2723 — fallback path の **second narrow**。 2026-06-28
+        # dogfood 続報 (= dogfood findings § #16 致命的連鎖 #2): e-2645
+        # primary path が落ちて fallback に到達した時、 旧 fallback は
+        # 「leader user の全 live session」 に fan out していた。 これだと
+        # **same-user multi-session** (= leader + executor が同 user の
+        # 別 session、 dogfood の Mac / Win 並走 や 1 user 多 role 検証)
+        # で executor session も leader-digest を受信してしまう。 ms-92
+        # e-2164 SPEC Done when #1 「recipient = leader_session_id のみ」
+        # の意図に反する。
+        #
+        # 新 fallback (= ms-97 AC6 land 後の session_id keyed members[]
+        # を活用):
+        #   * Phase A+ trek (= ``is_session_id_keyed`` True): members[]
+        #     を walk し、 ``role=leader`` な member.session_id が live
+        #     なものだけに narrow。 1 leader = 1 session が原則なので
+        #     normal flow では 1 target、 multi-leader role を許容する
+        #     trek (= 将来の co-leader) でも members[] に書かれた範囲
+        #     だけが対象 (= executor は構造的に除外)。
+        #   * Pre-A trek (= legacy user_id keyed): session_id field が
+        #     members[] に存在しないので fallback は従来通り leader user
+        #     の全 live session。 same-user collapse は pre-A trek でも
+        #     起きうるが、 phase A migration で構造解消する方が筋が良い
+        #     (= pre-A trek の数は migration 進行で減るのみ、 long-term
+        #     には phase A+ が default)。
         leader_targets: list[dict] = []
         leader_target_pids: list[str] = []
         stamped_leader_sid = trek_doc.get("leader_session_id") or ""
@@ -7252,11 +7277,44 @@ def trek_scheduler_tick_endpoint(
                 "session_id": stamped_leader_sid,
                 "home_project_id": info["home_project_id"],
             })
+        elif trek_mod.is_session_id_keyed(trek_doc):
+            # Fallback path (= phase A+): stamped leader is stale. Walk
+            # members[] and pick live sessions with role=leader only.
+            # This is the e-2723 narrow that closes the same-user
+            # collapse: executor session (= same user_id but
+            # role=executor) is structurally excluded because we never
+            # look at it.
+            for m in trek_doc.get("members") or []:
+                if (m.get("role") or "") != "leader":
+                    continue
+                msid = m.get("session_id") or ""
+                if not msid:
+                    # Invitation-stage leader placeholder (= invited but
+                    # not joined) — no session to wake.
+                    continue
+                if msid not in live_sessions:
+                    # Stamped or named leader sid is offline; skip and
+                    # let the "fully offline" tail fall through to the
+                    # stamped-only stub below.
+                    continue
+                # Sanity user_id match (= belt + suspenders); if the
+                # session registry disagrees with members[] we skip
+                # rather than misroute.
+                if (
+                    leader_user_id
+                    and live_sessions[msid].get("user_id") != leader_user_id
+                ):
+                    continue
+                leader_targets.append({
+                    "session_id": msid,
+                    "home_project_id": live_sessions[msid]["home_project_id"],
+                })
         else:
-            # Fallback path: stamped leader is stale (= not live). Fan
-            # out to all live sessions of the leader user — preserves
-            # ms-92 e-2164 multi-leader-session reconnect / fork
-            # compatibility.
+            # Fallback path (= pre-A legacy): members[] is user_id keyed
+            # only — no session_id field to narrow on. Preserve the
+            # legacy "all live sessions of the leader user" fan-out for
+            # backward compat. Phase A migration (= ms-97 AC6) eventually
+            # removes this branch by upgrading every trek's members[].
             for sid, info in live_sessions.items():
                 if not leader_user_id:
                     break
