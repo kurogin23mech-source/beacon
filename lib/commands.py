@@ -6696,7 +6696,10 @@ def cmd_trek_task_state():
             print(
                 f"Stamped trek {trek_id} task {task_id} state → {state}"
             )
-            if state in trek.TERMINAL_TASK_STATES:
+            # ms-97 / e-2706 — leader notify は REVIEW_TRIGGER_STATES
+            # (= done / user_review / leader_review) で発火する。 CLI 表示も
+            # server 側 emit 条件と一致させる。
+            if state in trek.REVIEW_TRIGGER_STATES:
                 print(
                     "  Leader has been notified via trek-task-review DM "
                     "(= /beacon-trek-review surface)."

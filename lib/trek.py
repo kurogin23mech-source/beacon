@@ -85,6 +85,18 @@ VALID_TASK_STATES = ("todo", "working", "leader_review", "user_review", "done")
 DEFAULT_TASK_STATE = "todo"
 TERMINAL_TASK_STATES = ("done", "user_review")
 
+# ms-97 / e-2706 — review-notify trigger set (= TERMINAL_TASK_STATES の意味的分離)。
+# `TERMINAL_TASK_STATES` (= done / user_review) は「Trek 完遂判定 = 走り続け停止」
+# semantic で使う (= trek.py § 完遂判定、 mirror/reconcile 経路)。
+# 一方、 leader への「review が要る」 notify は `leader_review` 含み 3 状態が真。
+# 旧 SPEC では `waiting-review` (= 現 `leader_review`) を含めた notify 意図だったが、
+# ms-88 e-2107 の 5-state 移行 (waiting-review → leader_review) で check 条件が
+# 連動せず、 LPS exec が e-373 を `working → leader_review` に stamp しても
+# leader に notify event が届かない構造 bug が dogfood (2026-06-28) で顕在化。
+# server/app.py set_trek_task_state_endpoint は本集合で trek-task-review event
+# 発火を判定する (= AC1)。
+REVIEW_TRIGGER_STATES = ("done", "user_review", "leader_review")
+
 # Backward compat (= ms-88 / e-2107 migration). 旧 `waiting-review` で書かれた
 # 既存データは server-forced auto-stall 経路 (= old e-2067) からのものが多く、
 # semantic 的には新 `leader_review` (= 「leader 判断要請、 server 強制」) に

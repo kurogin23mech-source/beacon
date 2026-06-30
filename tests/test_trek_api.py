@@ -883,6 +883,154 @@ class TestLeaderSelfLoopSuppress:
 
 
 # ---------------------------------------------------------------------------
+# ms-97 / e-2706 — leader_review 遷移時の trek-task-review event 発火 (AC1)
+# ---------------------------------------------------------------------------
+
+class TestReviewTriggerStatesEmit:
+    """ms-97 / e-2706 — REVIEW_TRIGGER_STATES (= done / user_review / leader_review)
+    の **どれに遷移しても** trek-task-review event を発火する regression pin。
+
+    旧コードは TERMINAL_TASK_STATES (= done / user_review) のみで判定しており、
+    `leader_review` (= ms-88 e-2107 の 5-state 移行で新設) への遷移時に
+    leader へ notify event が発火しない構造 bug を持っていた。 dogfood
+    (2026-06-28) で LPS exec が e-373 を `working → leader_review` に stamp
+    したが leader に届かず、 10 min+ の遷移見落としを生んだ。
+    """
+
+    def _seed_with_member_working(self, task_id: str) -> str:
+        trek_id = _create_seed_trek()
+        _treks[trek_id]["scope"] = [
+            {"project": "beacon-test", "milestone": "ms-97"}
+        ]
+        _treks[trek_id]["task_states"] = {
+            task_id: {
+                "state": "working",
+                "updated_by_session_id": "sv-member",
+                "updated_at": "2026-06-28T00:00:00.000000Z",
+                "last_activity_at": "2026-06-28T00:00:00.000000Z",
+                "note": "",
+            }
+        }
+        for k in list(_bus_events_by_project.keys()):
+            _bus_events_by_project[k].clear()
+        return trek_id
+
+    def test_member_stamp_leader_review_emits_review_event(self):
+        """e-2706 の核心: working → leader_review 遷移で event 発火。
+
+        旧コードでは event が発火せず、 bus は空のままだった。 本テストが
+        regression pin として残る限り、 leader_review notify drift は再発しない。
+        """
+        trek_id = self._seed_with_member_working("e-2706-target")
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.patch(
+            f"/api/treks/{trek_id}/task-state",
+            json={
+                "task_id": "e-2706-target",
+                "state": "leader_review",
+                "note": "leader 判断要請",
+            },
+            headers={"X-Beacon-Session": "sv-member"},
+        )
+        assert r.status_code == 200, r.text
+        bus = _bus_events_by_project.get("beacon-test", [])
+        review_events = [
+            e for e in bus if e.get("channel") == "trek-task-review"
+        ]
+        assert len(review_events) == 1, (
+            f"Expected leader_review transition to emit trek-task-review event, "
+            f"got {review_events}"
+        )
+        payload = review_events[0].get("payload") or {}
+        assert payload.get("state") == "leader_review"
+        assert payload.get("task_id") == "e-2706-target"
+        assert payload.get("recipient_session_id") == "sv-leader"
+        # delivery=auto-execute (= Level 3 invoke 経路) を維持
+        assert review_events[0].get("delivery") == "auto-execute"
+        # NOTE: outcome log row (= AC26 audit trail) は Firestore 側に書かれる
+        # 経路で、 本 in-memory mock store では検証しない (= 既存
+        # TestLeaderSelfLoopSuppress も同様に skip)。 critical assertion は
+        # bus event の発火と payload 整合性。
+
+    def test_member_stamp_done_still_emits_review_event(self):
+        """control 1: done への遷移は依然 event 発火 (= 既存挙動 regression なし)。"""
+        trek_id = self._seed_with_member_working("e-done-control")
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.patch(
+            f"/api/treks/{trek_id}/task-state",
+            json={"task_id": "e-done-control", "state": "done", "note": "done"},
+            headers={"X-Beacon-Session": "sv-member"},
+        )
+        assert r.status_code == 200, r.text
+        bus = _bus_events_by_project.get("beacon-test", [])
+        review_events = [
+            e for e in bus if e.get("channel") == "trek-task-review"
+        ]
+        assert len(review_events) == 1
+        assert (review_events[0].get("payload") or {}).get("state") == "done"
+
+    def test_member_stamp_user_review_still_emits_review_event(self):
+        """control 2: user_review への遷移も依然 event 発火 (= 既存挙動)。"""
+        trek_id = self._seed_with_member_working("e-user-rev-control")
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.patch(
+            f"/api/treks/{trek_id}/task-state",
+            json={
+                "task_id": "e-user-rev-control",
+                "state": "user_review",
+                "note": "forward to user",
+            },
+            headers={"X-Beacon-Session": "sv-member"},
+        )
+        assert r.status_code == 200, r.text
+        bus = _bus_events_by_project.get("beacon-test", [])
+        review_events = [
+            e for e in bus if e.get("channel") == "trek-task-review"
+        ]
+        assert len(review_events) == 1
+        assert (
+            (review_events[0].get("payload") or {}).get("state") == "user_review"
+        )
+
+    def test_leader_self_stamp_leader_review_still_suppresses(self):
+        """ms-88 e-2168 の self-loop suppress は leader_review にも効く (= 二重防御)。
+
+        e-2706 で trigger 集合を拡張しても、 leader 自身が leader_review を
+        stamp した時に「自分に review 依頼」 する循環は依然 mint しないこと。
+        """
+        trek_id = self._seed_with_member_working("e-leader-self")
+        # task_states の updater を leader に書き換え (= 既存 stamp も leader)
+        _treks[trek_id]["task_states"]["e-leader-self"]["updated_by_session_id"] = "sv-leader"
+        for k in list(_bus_events_by_project.keys()):
+            _bus_events_by_project[k].clear()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.patch(
+            f"/api/treks/{trek_id}/task-state",
+            json={
+                "task_id": "e-leader-self",
+                "state": "leader_review",
+                "note": "leader が自分で leader_review に置く稀ケース",
+            },
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r.status_code == 200, r.text
+        bus = _bus_events_by_project.get("beacon-test", [])
+        review_events = [
+            e for e in bus if e.get("channel") == "trek-task-review"
+        ]
+        assert review_events == [], (
+            f"leader self-stamp should suppress review event even at "
+            f"leader_review, got {review_events}"
+        )
+        # Suppression recorded
+        t = _treks[trek_id]
+        suppressions = (t.get("meta") or {}).get("review_suppressions") or []
+        assert len(suppressions) == 1
+        assert suppressions[0]["state"] == "leader_review"
+        assert suppressions[0]["suppression_reason"] == "self_judgment"
+
+
+# ---------------------------------------------------------------------------
 # ms-88 / e-2167 — Trek task_states ↔ task pool reconcile endpoint
 # ---------------------------------------------------------------------------
 
