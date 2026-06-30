@@ -43,6 +43,10 @@ sys.modules["firestore_client"] = app_module.db
 _treks: dict[str, dict] = {}
 _logs: dict[str, list[dict]] = {}
 _bus_events: dict[str, list[dict]] = {}
+# ms-97 / e-2650 — project pool mock so slot-done precondition can verify
+# that task pool truth backs Trek slot done transitions. Tests that exercise
+# done transitions seed this via ``_seed_pool_task``.
+_project_pool: dict[str, dict] = {}
 
 
 def _mock_get_trek(trek_id: str):
@@ -92,6 +96,38 @@ def _mock_list_sessions(project_id: str):
     return []
 
 
+def _mock_get_project(project_id: str):
+    data = _project_pool.get(project_id)
+    return copy.deepcopy(data) if data else None
+
+
+def _seed_pool_task(project_id: str, ms_id: str, entry_id: str,
+                    status: str = "done") -> None:
+    """ms-97 / e-2650 — seed _project_pool so the slot-done precondition allows.
+
+    Tests in this file flip Trek slots to done as part of verifying
+    structured-log writes; they need the project pool to mirror that
+    truth (= true to ms-97 / e-2650 ordering: pool is the source of
+    truth, Trek slot is the derived view).
+    """
+    proj = _project_pool.setdefault(
+        project_id, {"milestones": [], "operations": []}
+    )
+    ms = None
+    for existing in proj["milestones"]:
+        if existing.get("id") == ms_id:
+            ms = existing
+            break
+    if ms is None:
+        ms = {"id": ms_id, "entries": []}
+        proj["milestones"].append(ms)
+    for child in ms["entries"]:
+        if child.get("id") == entry_id:
+            child["status"] = status
+            return
+    ms["entries"].append({"id": entry_id, "type": "task", "status": status})
+
+
 @pytest.fixture(autouse=True)
 def _rebind_db():
     db_module = app_module.db
@@ -104,6 +140,7 @@ def _rebind_db():
         ("list_trek_logs", _mock_list_trek_logs),
         ("append_bus_event", _mock_append_bus_event),
         ("list_sessions", _mock_list_sessions),
+        ("get_project", _mock_get_project),
     ]
     for name, mock in binds:
         prior[name] = getattr(db_module, name, None)
@@ -111,6 +148,7 @@ def _rebind_db():
     _treks.clear()
     _logs.clear()
     _bus_events.clear()
+    _project_pool.clear()
     yield
     for name, val in prior.items():
         if val is None:
@@ -224,6 +262,8 @@ class TestPulseAckWritesLog:
 class TestTaskStateWritesOutcomeLog:
     def test_terminal_transition_writes_outcome_log(self):
         _seed_trek()
+        # ms-97 / e-2650 — pool 真値源 precondition 充足のため pool seed。
+        _seed_pool_task("p1", "ms-1", "e-1", status="done")
         # First move todo → working (= state machine requirement).
         r1 = client.patch(
             "/api/treks/tk-log000001/task-state",

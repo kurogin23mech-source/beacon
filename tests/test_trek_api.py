@@ -64,6 +64,13 @@ _users_by_email: dict[str, tuple[str, dict]] = {}
 # ms-88 / e-2168 — bus events recorded by mock append_bus_event so tests can
 # assert on review event mint / suppression.
 _bus_events_by_project: dict[str, list[dict]] = {}
+# ms-97 / e-2650 — in-memory project pool used by mock get_project so tests
+# can pre-populate task pool entries that the slot-done precondition
+# verifies. Shape: { project_id: project_data_dict }. Each project_data
+# follows the standard ``{"milestones": [...], "operations": [...]}`` shape
+# that ``core.find_entry`` walks. Empty by default → mock returns None for
+# every pid, which trips the precondition guard intentionally.
+_project_pool: dict[str, dict] = {}
 
 
 def _mock_append_bus_event(project_id: str, data: dict) -> str:
@@ -123,6 +130,49 @@ def _mock_get_user(user_id: str):
     return None
 
 
+def _mock_get_project(project_id: str):
+    """ms-97 / e-2650 — return ``_project_pool[project_id]`` or None.
+
+    The slot-done precondition (= ``check_slot_done_precondition``) calls
+    this via ``db.get_project`` to read the project pool task status.
+    Tests that don't seed ``_project_pool`` get None back, which makes
+    the precondition reject the done transition — the correct default
+    for "the test setup didn't bother to model project pool truth".
+    Tests that need done transitions to succeed populate
+    ``_seed_pool_task(pid, ms_id, entry_id, status='done')``.
+    """
+    data = _project_pool.get(project_id)
+    return copy.deepcopy(data) if data else None
+
+
+def _seed_pool_task(project_id: str, ms_id: str, entry_id: str,
+                    status: str = "done", entry_type: str = "task") -> None:
+    """Pre-populate ``_project_pool`` so the slot-done precondition allows.
+
+    Convenience helper for existing tests that flip Trek slots to done
+    without otherwise caring about project pool state — they call this
+    once to satisfy the e-2650 precondition.
+    """
+    proj = _project_pool.setdefault(
+        project_id, {"milestones": [], "operations": []}
+    )
+    ms = None
+    for existing in proj["milestones"]:
+        if existing.get("id") == ms_id:
+            ms = existing
+            break
+    if ms is None:
+        ms = {"id": ms_id, "entries": []}
+        proj["milestones"].append(ms)
+    for child in ms["entries"]:
+        if child.get("id") == entry_id:
+            child["status"] = status
+            child["type"] = entry_type
+            return
+    ms["entries"].append({"id": entry_id, "type": entry_type,
+                          "status": status})
+
+
 def _rebind_db():
     db_module = app_module.db
     prior = {}
@@ -135,10 +185,12 @@ def _rebind_db():
         ("get_or_create_user", _mock_get_or_create_user),
         ("get_user", _mock_get_user),
         ("append_bus_event", _mock_append_bus_event),
+        ("get_project", _mock_get_project),
     ]:
         prior[name] = getattr(db_module, name, None)
         setattr(db_module, name, mock)
     _bus_events_by_project.clear()
+    _project_pool.clear()
     return prior
 
 
@@ -205,6 +257,7 @@ def reset_store():
         app_module._auth_enabled = prior_auth
         _treks.clear()
         _users_by_email.clear()
+        _project_pool.clear()
         app_module.app.dependency_overrides.clear()
         _restore_db(prior)
 
@@ -951,6 +1004,10 @@ class TestLeaderSelfLoopSuppress:
                 "note": "",
             }
         }
+        # ms-97 / e-2650 — slot-done precondition は project pool の task が
+        # done であることを必須条件にする。 本 test は self-loop suppress の
+        # 検証なので、 precondition を充たすために pool 側を done で seed する。
+        _seed_pool_task("beacon-test", "ms-88", "e-x", status="done")
         # Clear any prior bus events
         for k in list(_bus_events_by_project.keys()):
             _bus_events_by_project[k].clear()
@@ -996,6 +1053,8 @@ class TestLeaderSelfLoopSuppress:
                 "note": "",
             }
         }
+        # ms-97 / e-2650 — slot-done precondition 充足のため pool seed。
+        _seed_pool_task("beacon-test", "ms-88", "e-y", status="done")
         for k in list(_bus_events_by_project.keys()):
             _bus_events_by_project[k].clear()
         _impersonate(MEMBER_UID, MEMBER_EMAIL)
@@ -1089,6 +1148,9 @@ class TestReviewTriggerStatesEmit:
     def test_member_stamp_done_still_emits_review_event(self):
         """control 1: done への遷移は依然 event 発火 (= 既存挙動 regression なし)。"""
         trek_id = self._seed_with_member_working("e-done-control")
+        # ms-97 / e-2650 — slot-done precondition 充足のため pool seed。
+        _seed_pool_task("beacon-test", "ms-97", "e-done-control",
+                        status="done")
         _impersonate(MEMBER_UID, MEMBER_EMAIL)
         r = client.patch(
             f"/api/treks/{trek_id}/task-state",
@@ -1419,3 +1481,388 @@ class TestScopeEntriesEndpoint:
         _impersonate(LEADER_UID, LEADER_EMAIL)
         r = client.get("/api/treks/tk-nope/scope-entries")
         assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# ms-97 / e-2650 — Trek slot done の task pool 真値源 precondition
+# ---------------------------------------------------------------------------
+
+class TestSlotDonePrecondition:
+    """ms-97 / e-2650 — phantom done 構造防御 regression pin。
+
+    Trek slot done への遷移は、 project pool 側の task が done である
+    ことを必須条件とする (= 「view 側だけ done になる経路」 を server で
+    構造的に reject)。 done 以外への遷移 (= todo / working / *_review) は
+    従来通り通る。
+
+    2026-06-28 dogfood で観測された 2 件の病理:
+      (a) e-710 phantom done = PE 側で task が done と記録されているのに、
+          該当 commit / ファイル変更が一切なかった
+      (b) tk-7a3b88b9 = Trek 側 done、 task pool todo が固定化していた
+    どちらも本 check の追加で原理的に消える。
+    """
+
+    def _seed_active_trek_with_scope(self, ms_id: str = "ms-97") -> str:
+        trek_id = _create_seed_trek()
+        _treks[trek_id]["scope"] = [
+            {"project": "beacon-test", "milestone": ms_id}
+        ]
+        _treks[trek_id]["task_states"] = {}
+        return trek_id
+
+    def _seed_member_working(self, trek_id: str, task_id: str) -> None:
+        _treks[trek_id]["task_states"][task_id] = {
+            "state": "working",
+            "updated_by_session_id": "sv-member",
+            "updated_at": "2026-06-28T00:00:00.000000Z",
+            "last_activity_at": "2026-06-28T00:00:00.000000Z",
+            "note": "",
+        }
+        for k in list(_bus_events_by_project.keys()):
+            _bus_events_by_project[k].clear()
+
+    # ----- 1. task ref slot で task pool todo のまま slot done → 4xx -----
+
+    def test_task_ref_slot_done_rejected_when_pool_todo(self):
+        """task ref slot done を試みても project pool で todo なら 4xx。
+
+        e-2650 done-when 1 (task ref) の核心 regression pin。 旧コード
+        では set_task_state が無条件で通り、 phantom done を生んでいた。
+        """
+        trek_id = self._seed_active_trek_with_scope()
+        self._seed_member_working(trek_id, "e-pool-todo")
+        from unittest.mock import patch
+
+        def _fake_get_project(pid: str):
+            if pid == "beacon-test":
+                return {
+                    "milestones": [
+                        {"id": "ms-97", "entries": [
+                            {"id": "e-pool-todo", "type": "task",
+                             "status": "todo"}
+                        ]}
+                    ],
+                    "operations": [],
+                }
+            return None
+
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        with patch.object(app_module.db, "get_project", _fake_get_project):
+            r = client.patch(
+                f"/api/treks/{trek_id}/task-state",
+                json={"task_id": "e-pool-todo", "state": "done",
+                      "note": "executor が done に flip 試行"},
+                headers={"X-Beacon-Session": "sv-member"},
+            )
+        assert r.status_code == 409, r.text
+        body = r.json()
+        # FastAPI HTTPException(detail=dict) は body["detail"] に dict を返す
+        detail = body.get("detail") or {}
+        assert detail.get("code") == "task_pool_not_done", detail
+        assert "task pool" in (detail.get("message") or "")
+        # state transition は適用されていないこと (= 真値源 ordering)
+        assert (
+            _treks[trek_id]["task_states"]["e-pool-todo"]["state"]
+            == "working"
+        )
+
+    # ----- 2. MS ref slot で配下 task 一部 todo のまま slot done → 4xx -----
+
+    def test_ms_ref_slot_done_rejected_when_children_partial_todo(self):
+        """MS slot done を試みても配下 task が 1 件でも todo なら 4xx。
+
+        e-2650 done-when 1 (MS ref) の核心 regression pin。 旧 reconcile
+        flow に頼らず、 ordering を server で構造強制する。
+        """
+        trek_id = self._seed_active_trek_with_scope(ms_id="ms-97")
+        self._seed_member_working(trek_id, "ms-97")
+        from unittest.mock import patch
+
+        def _fake_get_project(pid: str):
+            if pid == "beacon-test":
+                return {
+                    "milestones": [
+                        {"id": "ms-97", "entries": [
+                            {"id": "e-done-1", "type": "task",
+                             "status": "done"},
+                            {"id": "e-still-todo", "type": "task",
+                             "status": "todo"},
+                        ]}
+                    ],
+                    "operations": [],
+                }
+            return None
+
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        with patch.object(app_module.db, "get_project", _fake_get_project):
+            r = client.patch(
+                f"/api/treks/{trek_id}/task-state",
+                json={"task_id": "ms-97", "state": "done",
+                      "note": "MS slot 一括 done flip 試行"},
+                headers={"X-Beacon-Session": "sv-member"},
+            )
+        assert r.status_code == 409, r.text
+        detail = r.json().get("detail") or {}
+        assert detail.get("code") == "ms_children_not_all_done", detail
+        # 1 件残っている旨が message に含まれること (= human-readable guide)
+        assert "e-still-todo" in (detail.get("message") or "")
+
+    # ----- 3. 全 done で slot done 通る (= happy path) -----
+
+    def test_task_ref_slot_done_allowed_when_pool_done(self):
+        """task ref slot: project pool が done なら slot done も通る。"""
+        trek_id = self._seed_active_trek_with_scope()
+        self._seed_member_working(trek_id, "e-pool-done")
+        from unittest.mock import patch
+
+        def _fake_get_project(pid: str):
+            if pid == "beacon-test":
+                return {
+                    "milestones": [
+                        {"id": "ms-97", "entries": [
+                            {"id": "e-pool-done", "type": "task",
+                             "status": "done"}
+                        ]}
+                    ],
+                    "operations": [],
+                }
+            return None
+
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        with patch.object(app_module.db, "get_project", _fake_get_project):
+            r = client.patch(
+                f"/api/treks/{trek_id}/task-state",
+                json={"task_id": "e-pool-done", "state": "done",
+                      "note": "ok"},
+                headers={"X-Beacon-Session": "sv-member"},
+            )
+        assert r.status_code == 200, r.text
+        assert (
+            _treks[trek_id]["task_states"]["e-pool-done"]["state"] == "done"
+        )
+
+    def test_ms_ref_slot_done_allowed_when_all_children_done(self):
+        """MS slot: 配下 task が全 done なら slot done も通る (= happy path)。"""
+        trek_id = self._seed_active_trek_with_scope(ms_id="ms-97")
+        self._seed_member_working(trek_id, "ms-97")
+        from unittest.mock import patch
+
+        def _fake_get_project(pid: str):
+            if pid == "beacon-test":
+                return {
+                    "milestones": [
+                        {"id": "ms-97", "entries": [
+                            {"id": "e-c1", "type": "task", "status": "done"},
+                            {"id": "e-c2", "type": "task", "status": "done"},
+                        ]}
+                    ],
+                    "operations": [],
+                }
+            return None
+
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        with patch.object(app_module.db, "get_project", _fake_get_project):
+            r = client.patch(
+                f"/api/treks/{trek_id}/task-state",
+                json={"task_id": "ms-97", "state": "done",
+                      "note": "全 done のため MS slot done"},
+                headers={"X-Beacon-Session": "sv-member"},
+            )
+        assert r.status_code == 200, r.text
+
+    # ----- 4. non-done 遷移は check 対象外 (= ordering 維持の確認) -----
+
+    def test_non_done_transition_unaffected_by_precondition(self):
+        """working → leader_review (= done 以外) は precondition check skip。
+
+        e-2650 の防御は done 遷移にのみ働く。 他の遷移は従来通り 5-state
+        machine のみで判定する (= overreach 防止 regression pin)。
+        """
+        trek_id = self._seed_active_trek_with_scope()
+        self._seed_member_working(trek_id, "e-still-working")
+        # get_project を呼ばないことを sentinel で確認
+        call_count = {"n": 0}
+        from unittest.mock import patch
+
+        def _fake_get_project(pid: str):
+            call_count["n"] += 1
+            return None
+
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        with patch.object(app_module.db, "get_project", _fake_get_project):
+            r = client.patch(
+                f"/api/treks/{trek_id}/task-state",
+                json={"task_id": "e-still-working",
+                      "state": "leader_review",
+                      "note": "leader 判断要請"},
+                headers={"X-Beacon-Session": "sv-member"},
+            )
+        assert r.status_code == 200, r.text
+        assert call_count["n"] == 0, (
+            "leader_review 遷移で get_project が呼ばれた "
+            "(= check が done 以外にも overreach)"
+        )
+
+    # ----- 5. 未登録 id (= scope 上のどの project pool にも無い) は reject -----
+
+    def test_task_ref_slot_done_rejected_when_id_unknown_to_pool(self):
+        """scope project の task pool に存在しない id を done にしようとして
+        も reject (= 「task 自体が無いのに slot だけ done」 phantom 経路の防御)。"""
+        trek_id = self._seed_active_trek_with_scope()
+        self._seed_member_working(trek_id, "e-ghost")
+        from unittest.mock import patch
+
+        def _fake_get_project(pid: str):
+            if pid == "beacon-test":
+                return {
+                    "milestones": [
+                        {"id": "ms-97", "entries": []}
+                    ],
+                    "operations": [],
+                }
+            return None
+
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        with patch.object(app_module.db, "get_project", _fake_get_project):
+            r = client.patch(
+                f"/api/treks/{trek_id}/task-state",
+                json={"task_id": "e-ghost", "state": "done", "note": ""},
+                headers={"X-Beacon-Session": "sv-member"},
+            )
+        assert r.status_code == 409, r.text
+        detail = r.json().get("detail") or {}
+        assert detail.get("code") == "task_pool_lookup_failed"
+
+
+# ---------------------------------------------------------------------------
+# ms-97 / e-2650 — pure helper unit tests (lib/trek.check_slot_done_precondition)
+# ---------------------------------------------------------------------------
+
+class TestSlotDonePreconditionHelper:
+    """``check_slot_done_precondition`` pure-helper coverage (no HTTP)。
+
+    server endpoint test (= TestSlotDonePrecondition) は HTTP/auth 経路を
+    pin する。 本クラスは helper の代表 branch を直接 verify し、 将来
+    別 caller (= CLI / scheduler) から再利用された時に regression が
+    検出できるようにする。
+    """
+
+    def _make_trek_doc(self, *, project: str = "p-x",
+                       milestone: str = "ms-1") -> dict:
+        return {
+            "trek_id": "tk-helper",
+            "scope": [{"project": project, "milestone": milestone}],
+            "task_states": {},
+        }
+
+    def test_helper_allows_when_task_pool_done(self):
+        import trek as trek_mod
+
+        doc = self._make_trek_doc()
+
+        def _gp(pid: str):
+            return {
+                "milestones": [
+                    {"id": "ms-1", "entries": [
+                        {"id": "e-1", "type": "task", "status": "done"}
+                    ]}
+                ],
+                "operations": [],
+            }
+
+        allowed, code, msg = trek_mod.check_slot_done_precondition(
+            doc, task_id="e-1", get_project=_gp,
+        )
+        assert allowed is True
+        assert code == trek_mod.SLOT_DONE_ALLOWED
+        assert msg == ""
+
+    def test_helper_rejects_when_task_pool_not_done(self):
+        import trek as trek_mod
+
+        doc = self._make_trek_doc()
+
+        def _gp(pid: str):
+            return {
+                "milestones": [
+                    {"id": "ms-1", "entries": [
+                        {"id": "e-1", "type": "task", "status": "working"}
+                    ]}
+                ],
+                "operations": [],
+            }
+
+        allowed, code, msg = trek_mod.check_slot_done_precondition(
+            doc, task_id="e-1", get_project=_gp,
+        )
+        assert allowed is False
+        assert code == trek_mod.SLOT_DONE_REJECT_TASK_POOL_NOT_DONE
+        assert "working" in msg
+
+    def test_helper_rejects_empty_ms(self):
+        import trek as trek_mod
+
+        doc = self._make_trek_doc(milestone="ms-empty")
+
+        def _gp(pid: str):
+            return {
+                "milestones": [{"id": "ms-empty", "entries": []}],
+                "operations": [],
+            }
+
+        allowed, code, _msg = trek_mod.check_slot_done_precondition(
+            doc, task_id="ms-empty", get_project=_gp,
+        )
+        assert allowed is False
+        assert code == trek_mod.SLOT_DONE_REJECT_MS_CHILDREN_NOT_ALL_DONE
+
+    def test_helper_rejects_partial_done_ms(self):
+        import trek as trek_mod
+
+        doc = self._make_trek_doc(milestone="ms-mix")
+
+        def _gp(pid: str):
+            return {
+                "milestones": [{"id": "ms-mix", "entries": [
+                    {"id": "e-a", "type": "task", "status": "done"},
+                    {"id": "e-b", "type": "task", "status": "todo"},
+                ]}],
+                "operations": [],
+            }
+
+        allowed, code, _msg = trek_mod.check_slot_done_precondition(
+            doc, task_id="ms-mix", get_project=_gp,
+        )
+        assert allowed is False
+        assert code == trek_mod.SLOT_DONE_REJECT_MS_CHILDREN_NOT_ALL_DONE
+
+    def test_helper_get_project_exception_does_not_propagate(self):
+        """1 project が backend hiccup でも、 他 scope project で resolve できれば allow。"""
+        import trek as trek_mod
+
+        doc = {
+            "trek_id": "tk-helper",
+            "scope": [
+                {"project": "p-flaky", "milestone": "ms-1"},
+                {"project": "p-ok", "milestone": "ms-1"},
+            ],
+            "task_states": {},
+        }
+
+        def _gp(pid: str):
+            if pid == "p-flaky":
+                raise RuntimeError("transient backend error")
+            if pid == "p-ok":
+                return {
+                    "milestones": [{"id": "ms-1", "entries": [
+                        {"id": "e-x", "type": "task", "status": "done"},
+                    ]}],
+                    "operations": [],
+                }
+            return None
+
+        allowed, code, _msg = trek_mod.check_slot_done_precondition(
+            doc, task_id="e-x", get_project=_gp,
+        )
+        assert allowed is True
+        assert code == trek_mod.SLOT_DONE_ALLOWED
