@@ -4257,18 +4257,42 @@ const dataSource = {
   // endpoint failure degrades to an empty array on that axis so the
   // Trek detail UI still renders something (= the same regress regime
   // as loadTrekDocs).
+  //
+  // ms-95 / e-2640: also fetch the cross-project MS entries body via the
+  // new /scope-entries endpoint and seed ``state.milestoneEntries`` so
+  // ``fetchMilestoneEntries(msId)`` (= the MS-card expand path) finds the
+  // entries in cache for cross-project MS instead of trying to refetch
+  // them through ``/api/projects/${state.projectId}/...`` (= the URL
+  // embeds the *currently selected* project, which is wrong for any MS
+  // that lives in a different project — the bug e-2640 fixes).
   loadTrekScope: async (trekId) => {
     const enc = encodeURIComponent(trekId);
-    const [ms, ops, tasks] = await Promise.all([
+    const [ms, ops, tasks, scopeEntries] = await Promise.all([
       api(`/api/treks/${enc}/milestones`).catch(() => []),
       api(`/api/treks/${enc}/operations`).catch(() => []),
       api(`/api/treks/${enc}/tasks`).catch(() => []),
+      api(`/api/treks/${enc}/scope-entries`).catch(() => null),
     ]);
     state.openTrekScope = {
       milestones: Array.isArray(ms) ? ms : [],
       operations: Array.isArray(ops) ? ops : [],
       tasks: Array.isArray(tasks) ? tasks : [],
     };
+    // Seed milestone entries cache from /scope-entries so cross-project
+    // MS expand paths don't fall back to /api/projects/{state.projectId}/...
+    // (= the URL embeds the wrong project for cross-project Trek MS).
+    if (scopeEntries && Array.isArray(scopeEntries.milestones)) {
+      for (const row of scopeEntries.milestones) {
+        const msId = row && row.milestone_id;
+        if (!msId) continue;
+        const entries = Array.isArray(row.entries) ? row.entries : [];
+        state.milestoneEntries[msId] = entries;
+        // Mirror onto the scope aggregate's MS so renderers that read
+        // ``ms.entries`` directly (e.g. future expansion paths) find them.
+        const aggMs = state.openTrekScope.milestones.find(m => m && m.id === msId);
+        if (aggMs) aggMs.entries = entries;
+      }
+    }
   },
   // ms-69 / e-1664 — reverse lookup for the Related Treks widget on
   // milestone / operation / task detail. ``kind`` ∈ {'milestone','operation','task'}.
@@ -8696,17 +8720,47 @@ function toggleMilestone(msId) {
 // consolidated render once Promise.allSettled resolves (= e-2338 ちらつき修復)。
 // Default false preserves the per-fetch render for user-driven expansions
 // (= toggleMilestone) and WS-driven refreshExpandedMilestoneEntries.
+//
+// ms-95 / e-2640 — Trek detail context route: when ``state.openTrekId`` is
+// set, the MS may live in any project the Trek's scope reaches, NOT
+// necessarily the currently selected ``state.projectId``. We resolve the
+// MS's actual project_id from ``state.openTrekScope.milestones`` (= shipped
+// by /api/treks/{id}/milestones with ``project_id`` stamped on each row)
+// and call the per-project endpoint with the correct pid. If the lookup
+// fails (e.g. scope aggregate not loaded yet) we fall back to
+// ``state.projectId`` so the legacy single-project path keeps working.
+// The /api/treks/{id}/scope-entries endpoint also pre-populates the cache
+// (see loadTrekScope above), so this fetch typically short-circuits at
+// the toggle layer's ``state.milestoneEntries[msId] === undefined`` guard.
 async function fetchMilestoneEntries(msId, opts = {}) {
-  if (!state.projectId) return;
+  // ms-95 / e-2640: Trek detail context resolves the MS's actual project_id
+  // from the trek scope aggregate. Outside Trek detail we keep the legacy
+  // behaviour (= use state.projectId).
+  let pid = state.projectId;
+  if (state.openTrekId
+      && state.openTrekScope
+      && Array.isArray(state.openTrekScope.milestones)) {
+    const aggMs = state.openTrekScope.milestones.find(m => m && m.id === msId);
+    if (aggMs && aggMs.project_id) {
+      pid = aggMs.project_id;
+    }
+  }
+  if (!pid) return;
   if (state.entriesLoading.has(msId)) return;
   state.entriesLoading.add(msId);
   try {
-    const data = await api(`/api/projects/${state.projectId}/milestones/${msId}/entries`);
+    const data = await api(`/api/projects/${encodeURIComponent(pid)}/milestones/${encodeURIComponent(msId)}/entries`);
     const entries = (data && data.entries) || [];
     state.milestoneEntries[msId] = entries;
     if (state.project && Array.isArray(state.project.milestones)) {
       const ms = state.project.milestones.find(m => m.id === msId);
       if (ms) ms.entries = entries;
+    }
+    // ms-95 / e-2640: also mirror onto the Trek scope aggregate so any
+    // renderer that reads ``aggMs.entries`` directly stays in sync.
+    if (state.openTrekScope && Array.isArray(state.openTrekScope.milestones)) {
+      const aggMs = state.openTrekScope.milestones.find(m => m && m.id === msId);
+      if (aggMs) aggMs.entries = entries;
     }
   } catch (e) {
     // Silent on failure — the card still renders with whatever cached entries
