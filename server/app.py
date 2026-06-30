@@ -28,6 +28,7 @@ import core
 import dm_gate as dm_gate_mod  # ms-70 / e-1713: cross-user DM action authorization judge
 import envelope as envelope_mod
 import invitations as invitations_mod  # ms-78 e-1803/e-1804: token-based invites
+import phantom_done_evidence as phantom_done_mod  # ms-95 / e-2726: task done evidence gate
 import store_router as db  # e-1544: BEACON_STORE_BACKEND で firestore / dynamodb を切替
 import operations
 import trek as trek_mod  # ms-69 / e-1656: trek schema + pure mutators
@@ -2081,8 +2082,99 @@ def _mirror_task_done_to_treks(entry_id: str) -> list[str]:
     return touched
 
 
+# ms-95 / e-2726 — phantom-done evidence gate.
+#
+# When ``done_entry`` succeeds, compare the just-done task's keywords
+# against the most-recent N commits. If no commit references the task by
+# id AND keyword overlap is below threshold, emit a phantom-done warning
+# to Cloud Logging (structured json line, severity=WARNING). Done itself
+# is ALLOWED — the gate is a flag, not a filter ("動かしながら考える"
+# philosophy from the e-2726 task spec).
+#
+# Background: 2026-06-28 dogfood observed two phantom dones (= e-710 in
+# the PE project, e-2567 here). The CORE doc ``task-done-judgment-principle``
+# / ms-97 AC10 expects done to be backed by physical evidence, but there
+# was no server-side check. This is the implementation gap closer.
+#
+# Companion to e-2650 (= "Trek slot done requires project task done"):
+#   * e-2650 protects the Trek-view layer (= slot done cannot precede
+#     project task done).
+#   * e-2726 (this) protects the project pool layer (= project task done
+#     should have commit evidence).
+# Stacked, the two close the loop: Trek slot done → project task done
+# (e-2650) → commit evidence flagged when missing (e-2726).
+def _check_phantom_done_evidence(
+    project_id: str,
+    entry_id: str,
+    user: dict,
+    request: Optional[Request] = None,
+) -> Optional[dict]:
+    """Evaluate a freshly-done task for commit evidence; emit warning if missing.
+
+    Returns the assessment dict (or ``None`` on lookup failure / disabled).
+    Failure is silently swallowed — the warning emission is purely
+    observational and must not block the task done response. The returned
+    assessment is folded into the endpoint response so the CLI can surface
+    the warning to the user in the same turn.
+
+    Disabled via env ``BEACON_PHANTOM_DONE_GATE=0`` (escape hatch for
+    Cloud Run rollback without a redeploy). Default = enabled.
+    """
+    if os.environ.get("BEACON_PHANTOM_DONE_GATE", "1") == "0":
+        return None
+    try:
+        data = operations.load_project_consistent(project_id)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    found = core.find_entry(data, entry_id)
+    if not found:
+        return None
+    _, _, entry, _ = found
+    recent_commits = phantom_done_mod.collect_recent_commits(data)
+    assessment = phantom_done_mod.evaluate_done_evidence(entry, recent_commits)
+    if assessment.get("has_evidence"):
+        # All good — task has a matching commit OR has no keywords to
+        # judge against. Do not pollute Cloud Logging with negatives.
+        return assessment
+    # Phantom done detected — emit structured warning.
+    sid = ""
+    if request is not None:
+        try:
+            sid = request.headers.get("X-Beacon-Session", "") or ""
+        except Exception:
+            sid = ""
+    uid = ""
+    if isinstance(user, dict):
+        uid = user.get("sub") or user.get("email") or ""
+    log_record = {
+        "evt": "task.done.phantom_done_warning",
+        "severity": "WARNING",
+        "phantom_done_warning": True,  # flag for Cloud Logging filter
+        "task_id": entry_id,
+        "project_id": project_id,
+        "user_id": uid,
+        "session_id": sid,
+        "task_description": (entry.get("description") or "")[:200],
+        "task_keywords_sample": assessment.get("task_keywords", [])[:20],
+        "commit_window": assessment.get("window", 0),
+        "threshold": assessment.get("threshold"),
+        "match_type": assessment.get("match_type", "none"),
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    try:
+        # severity=WARNING so Cloud Logging splits this from the bulk
+        # INFO-level audit traffic. The json payload is what aggregation
+        # queries key off.
+        _audit_logger.warning(json.dumps(log_record, ensure_ascii=False))
+    except Exception:
+        pass
+    return assessment
+
+
 @app.post("/api/projects/{project_id}/entries/{entry_id}/done")
-def done_entry(project_id: str, entry_id: str,
+def done_entry(project_id: str, entry_id: str, request: Request,
                user: dict = Depends(require_auth)):
     import datetime
     today = datetime.date.today().isoformat()
@@ -2103,6 +2195,36 @@ def done_entry(project_id: str, entry_id: str,
     # Best-effort: failure does not block the task done response.
     try:
         _mirror_task_done_to_treks(entry_id)
+    except Exception:
+        pass
+    # ms-95 / e-2726 — phantom-done evidence gate. Flag only, no reject.
+    # Failure is silently swallowed inside the helper; we surface the
+    # assessment in the response so the CLI can echo the warning to the
+    # operator in the same turn.
+    try:
+        assessment = _check_phantom_done_evidence(
+            project_id, entry_id, user, request=request,
+        )
+        if (
+            isinstance(result, dict)
+            and isinstance(assessment, dict)
+            and not assessment.get("has_evidence", True)
+        ):
+            result = {
+                **result,
+                "phantom_done_warning": {
+                    "task_id": entry_id,
+                    "match_type": assessment.get("match_type", "none"),
+                    "commit_window": assessment.get("window", 0),
+                    "threshold": assessment.get("threshold"),
+                    "message": (
+                        "No commit in the recent window references this "
+                        "task. Done allowed (= flag, not filter), but the "
+                        "lack of physical evidence is logged for audit "
+                        "(ms-95 / e-2726)."
+                    ),
+                },
+            }
     except Exception:
         pass
     return result
