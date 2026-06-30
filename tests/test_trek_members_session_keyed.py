@@ -176,8 +176,13 @@ def test_is_session_id_keyed_phase_A():
     assert trek.is_session_id_keyed(t) is True
 
 
-def test_pre_A_trek_uses_user_id_grain_idempotency():
-    """pre-A trek (= phase 未設定) は従来の user_id grain 挙動を維持する。"""
+def test_pre_A_trek_legacy_user_grain_idempotency_when_no_session_id():
+    """pre-A trek + ``session_id`` 省略 join では従来の user_id grain 挙動を維持する。
+
+    ms-97 / e-2636 — pre-A の auto-migrate は ``session_id`` 引数があった時にのみ
+    起動する。 session_id を渡さない caller (= 旧 CLI / 旧 client) は user_id
+    grain idempotent のまま動き、 phase は pre-A のまま据え置かれる。
+    """
     t = trek.new_trek(
         title="legacy", creator_user_id="u-1", creator_email="a@x",
         creator_session_id="sv-1",
@@ -186,13 +191,82 @@ def test_pre_A_trek_uses_user_id_grain_idempotency():
     trek.add_invitation(
         t, user_id="u-2", email="b@x", invited_by_user_id="u-1",
     )
-    # 同じ user の 2 回 join (異なる session_id) でも entry は増えない
-    trek.accept_invitation(t, user_id="u-2", session_id="sv-2a")
-    trek.accept_invitation(t, user_id="u-2", session_id="sv-2b")
+    # session_id を渡さない 2 回 join は同じ entry の joined_at を冪等に維持。
+    trek.accept_invitation(t, user_id="u-2")
+    trek.accept_invitation(t, user_id="u-2")
     u2_entries = [m for m in t["members"] if m["user_id"] == "u-2"]
-    assert len(u2_entries) == 1  # user_id grain dedup
+    assert len(u2_entries) == 1
     # session_id field は load されない (= pre-A schema 互換)
     assert "session_id" not in u2_entries[0]
+    # phase も pre-A のまま (= auto-migrate は session_id 引数の有無で gate)
+    assert trek.is_session_id_keyed(t) is False
+
+
+def test_pre_A_trek_auto_migrates_on_first_session_grain_join():
+    """ms-97 / e-2636 — pre-A trek + session_id 付き join は inline auto-migrate。
+
+    Done when #1-#3 を pin する:
+    1. members[] に session_id keyed entry が新規追加される (= 既存 user_id
+       entry を上書きせず append)
+    2. exit 0 + success message が実 server state と一致 (= silent no-op を
+       構造的に塞ぐ → ここでは return 値の trek_doc の状態で確認)
+    3. 既存 leader entry は in-place で session_id 補完 + 後続 join entry は
+       別レコードとして追加 (= migration + extend の両立)
+    """
+    t = trek.new_trek(
+        title="legacy", creator_user_id="u-leader", creator_email="leader@x",
+        creator_session_id="sv-leader-orig",
+    )
+    assert trek.is_session_id_keyed(t) is False
+    # Leader entry は pre-A 形 (= session_id field 不在)。
+    leader_pre = next(m for m in t["members"] if m["user_id"] == "u-leader")
+    assert "session_id" not in leader_pre
+
+    trek.add_invitation(
+        t, user_id="u-2", email="b@x", invited_by_user_id="u-leader",
+    )
+    # 同 user の 2 つの session が連続 join する (= dogfood で観測した経路)。
+    trek.accept_invitation(t, user_id="u-2", session_id="sv-2a")
+    trek.accept_invitation(t, user_id="u-2", session_id="sv-2b")
+
+    # #1: members[] が 2 件に増える。
+    u2_entries = [m for m in t["members"] if m["user_id"] == "u-2"]
+    assert len(u2_entries) == 2
+    assert {m["session_id"] for m in u2_entries} == {"sv-2a", "sv-2b"}
+
+    # #3: leader entry に session_id が in-place 補完されている。
+    leader_post = next(m for m in t["members"] if m["user_id"] == "u-leader")
+    assert leader_post["session_id"] == "sv-leader-orig"
+    assert leader_post["role"] == "leader"
+
+    # phase は A に flip し、 backup snapshot も取られている。
+    assert trek.is_session_id_keyed(t) is True
+    assert trek.get_migration_phase(t) == "A"
+    backup = t.get(trek.MEMBERS_LEGACY_BACKUP_KEY) or []
+    assert backup, "auto-migrate must snapshot pre-A members"
+    # backup は pre-A 形 (= leader entry に session_id 不在) を保つ。
+    backup_leader = next(b for b in backup if b.get("user_id") == "u-leader")
+    assert "session_id" not in backup_leader
+
+
+def test_pre_A_trek_auto_migrate_is_idempotent_on_replay():
+    """ms-97 / e-2636 — 同じ session_id から 2 度 join しても entry は増えない。
+
+    AC #1 の「member entry 新規追加」 は同 session の冪等性を壊さない (=
+    1 user 1 session = 1 member entry)。
+    """
+    t = trek.new_trek(
+        title="legacy", creator_user_id="u-1", creator_email="a@x",
+        creator_session_id="sv-1",
+    )
+    trek.add_invitation(
+        t, user_id="u-2", email="b@x", invited_by_user_id="u-1",
+    )
+    trek.accept_invitation(t, user_id="u-2", session_id="sv-2a")
+    trek.accept_invitation(t, user_id="u-2", session_id="sv-2a")
+    u2_entries = [m for m in t["members"] if m["user_id"] == "u-2"]
+    assert len(u2_entries) == 1
+    assert u2_entries[0]["session_id"] == "sv-2a"
 
 
 def test_build_member_with_session_id_writes_field():

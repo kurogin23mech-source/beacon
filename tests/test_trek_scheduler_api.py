@@ -157,11 +157,20 @@ _TREK_LEADER_DIGEST_ORIGIN = "trek-leader-digest"
 
 
 def _is_trek_progress_check_event(e: dict) -> bool:
-    """Return True iff ``e`` is a Trek progress-check dm event (e-2639)."""
+    """Return True iff ``e`` is a Trek progress-check dm event (e-2639).
+
+    ms-97 / e-2637 — welcome tick も同じ origin_channel を使うが、
+    sender_type=trek-welcome で区別される。 既存 AC16 / AC33 tests は
+    regular tick だけを対象にしているので、 welcome 由来は除外する。
+    welcome tick 専用の検査が必要な場合は payload.sender_type を直接
+    フィルタすること。
+    """
     if e.get("channel") != "dm":
         return False
     payload = e.get("payload") or {}
-    return payload.get("origin_channel") == _TREK_PROGRESS_ORIGIN
+    if payload.get("origin_channel") != _TREK_PROGRESS_ORIGIN:
+        return False
+    return payload.get("sender_type") != "trek-welcome"
 
 
 def _is_trek_leader_digest_event(e: dict) -> bool:
@@ -2242,3 +2251,339 @@ def test_executor_with_active_claim_receives_progress_check_even_if_stall_flips_
     # is consistent with the auto_stalled report).
     saved = _treks["tk-snap0001"]
     assert saved["task_states"]["e-373"]["state"] == "leader_review"
+
+
+# ---------------------------------------------------------------------------
+# ms-97 / e-2637 — welcome tick bootstrap (= fresh joiner wake-up event)
+# ---------------------------------------------------------------------------
+
+def _seed_phase_A_member(trek_id: str, *, session_id: str,
+                         user_id: str, email: str = "exec@x") -> None:
+    """Append a session-grain member entry and flip the trek to phase A.
+
+    e-2637 welcome tick is only fired for phase A+ members (= entries
+    that carry a session_id field), so the fixture must seed those
+    fields explicitly. Also stamps ``leader_session_id`` on the trek if
+    not already set, so leader exclusion logic for the regular tick
+    keeps working.
+    """
+    t = _treks[trek_id]
+    t.setdefault("members", []).append({
+        "user_id": user_id,
+        "email": email,
+        "role": "member",
+        "invited_at": "2026-06-18T00:00:00.000000Z",
+        "joined_at": "2026-06-28T00:00:00.000000Z",
+        "invited_by": "uid-leader",
+        "session_id": session_id,
+    })
+    t.setdefault("meta", {})["migration_phase"] = "A"
+
+
+def test_welcome_tick_fires_for_phase_A_member_without_stamp():
+    """ms-97 / e-2637 Done when #1+#2 — server tick fires a welcome tick
+    for any phase A+ member whose ``meta.welcome_tick_fired_at`` stamp
+    is missing. payload carries the AC28 manual doc_id + kickoff hint.
+    """
+    _seed_trek(
+        trek_id="tk-welcome01",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-97"}],
+    )
+    _seed_phase_A_member(
+        "tk-welcome01", session_id="sv-fresh-joiner",
+        user_id="uid-fresh",
+    )
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-fresh",
+        session_ids=["sv-fresh-joiner"],
+    )
+
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-welcome01"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200
+
+    events = _bus_events_by_project.get("beacon-test") or []
+    welcome_events = [
+        e for e in events
+        if (e.get("payload") or {}).get("sender_type") == "trek-welcome"
+    ]
+    assert len(welcome_events) == 1, (
+        f"expected 1 welcome tick, got events={events}"
+    )
+    ev = welcome_events[0]
+    payload = ev["payload"]
+    # Done when #2: payload carries AC28 manual doc_id + hint copy.
+    assert payload["recipient_session_id"] == "sv-fresh-joiner"
+    assert payload["manual_doc_id"] == "yfOufm7d2zkAhcm5QWES"
+    assert "/beacon-trek-execute" in payload["body"]
+    assert "kickoff" in payload["body"].lower()
+    # DM channel + auto-execute delivery = standard wake path.
+    assert ev["channel"] == "dm"
+    assert ev["delivery"] == "auto-execute"
+    # T1-system envelope authorises trek.welcome.
+    assert ev["envelope"]["tier"] == "T1-system"
+    assert "trek.welcome" in ev["envelope"]["actions_authorized"]
+    # Done when #3: stamp recorded.
+    saved = _treks["tk-welcome01"]
+    fired_map = (saved.get("meta") or {}).get("welcome_tick_fired_at") or {}
+    assert fired_map.get("sv-fresh-joiner"), (
+        f"welcome_tick_fired_at must stamp sv-fresh-joiner, got {fired_map}"
+    )
+
+
+def test_welcome_tick_fires_at_most_once_per_session():
+    """ms-97 / e-2637 Done when #3 — idempotent: 2 度目の tick で welcome
+    event は新規に発火しない (= meta.welcome_tick_fired_at が gate)。
+    """
+    _seed_trek(
+        trek_id="tk-welcome02",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-97"}],
+    )
+    _seed_phase_A_member(
+        "tk-welcome02", session_id="sv-once",
+        user_id="uid-once",
+    )
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-once",
+        session_ids=["sv-once"],
+    )
+
+    # First tick fires the welcome.
+    client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-welcome02"]},
+        headers=HEADERS_OK,
+    )
+    events1 = list(_bus_events_by_project.get("beacon-test") or [])
+    first_welcome_count = sum(
+        1 for e in events1
+        if (e.get("payload") or {}).get("sender_type") == "trek-welcome"
+    )
+    assert first_welcome_count == 1
+
+    # Refresh cadence (= clear last_progress_check_at so next tick is due).
+    _treks["tk-welcome02"]["meta"].pop("last_progress_check_at", None)
+
+    # Second tick on the same trek/member: welcome must NOT re-fire.
+    client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-welcome02"]},
+        headers=HEADERS_OK,
+    )
+    events2 = list(_bus_events_by_project.get("beacon-test") or [])
+    welcome_count = sum(
+        1 for e in events2
+        if (e.get("payload") or {}).get("sender_type") == "trek-welcome"
+    )
+    assert welcome_count == 1, (
+        f"welcome tick must fire at most once per session_id, got "
+        f"{welcome_count} events: {events2}"
+    )
+
+
+def test_welcome_tick_independent_of_ac33_lazy_start_gate():
+    """ms-97 / e-2637 Done when #4 — welcome tick fires even when AC33
+    per-executor lazy start gate is closed (= no claim and no unclaim
+    todo). The welcome tick is the path that primes the kickoff ritual
+    BEFORE AC33 has any signal.
+    """
+    _seed_trek(
+        trek_id="tk-welcome03",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-97"}],
+    )
+    _seed_phase_A_member(
+        "tk-welcome03", session_id="sv-idle",
+        user_id="uid-idle",
+    )
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-idle",
+        session_ids=["sv-idle"],
+    )
+    # Deliberately seed NO task_states → has_unclaim_todo = False.
+    _treks["tk-welcome03"]["task_states"] = {}
+
+    client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-welcome03"]},
+        headers=HEADERS_OK,
+    )
+    events = _bus_events_by_project.get("beacon-test") or []
+    welcome_events = [
+        e for e in events
+        if (e.get("payload") or {}).get("sender_type") == "trek-welcome"
+    ]
+    assert len(welcome_events) == 1, (
+        "welcome tick must fire even when AC33 lazy-start gate yields no "
+        f"executor target; got events={events}"
+    )
+
+
+def test_ac33_fresh_joiner_both_sessions_receive_tick_when_unclaim_todo_present():
+    """ms-97 / e-2638 Done when #1+#2 — e-2636 + e-2637 land 後、 同 user
+    別 session を 2 つ join させると両方が AC33 per-executor lazy tick
+    の対象になる (= fanout target に含まれる)。
+
+    実機 dogfood の前提条件を unit 範囲で pin する。 fresh joiner は
+    claim ゼロ だが ``has_unclaim_todo`` が True なら
+    ``should_fire_executor_tick`` は True を返す。
+    """
+    _seed_trek(
+        trek_id="tk-ac33-fresh01",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-97"}],
+    )
+    # 同 user (= uid-exec) の 2 session を phase A member として登録。
+    _seed_phase_A_member(
+        "tk-ac33-fresh01", session_id="sv-exec-a",
+        user_id="uid-exec",
+    )
+    _seed_phase_A_member(
+        "tk-ac33-fresh01", session_id="sv-exec-b",
+        user_id="uid-exec",
+    )
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-exec",
+        session_ids=["sv-exec-a", "sv-exec-b"],
+    )
+    # AC33: unclaim todo 1 件を seed して fresh joiner 経路を開く。
+    _treks["tk-ac33-fresh01"]["task_states"] = {
+        "e-todo-shared": {"state": "todo"},
+    }
+    # 旧 welcome tick が両 session 分配信される前提で 2 度 tick を
+    # 回しても fanout 評価は AC33 に揃って通る。 ここでは tick 1 回で
+    # progress-check 経路に 2 session 揃うことを確認する。
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-ac33-fresh01"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    events = _bus_events_by_project.get("beacon-test", [])
+    # AC33 はあくまで regular tick (= sender_type=trek-scheduler) が対象。
+    # welcome tick (= e-2637 bootstrap) は同じ origin_channel を共有する
+    # ので、 「両 session が AC33 で wake する」 ことを純粋に pin する
+    # ため welcome 由来の event は除外する。
+    ac33_events = [
+        e for e in events
+        if _is_trek_progress_check_event(e)
+        and (e.get("payload") or {}).get("sender_type") == "trek-scheduler"
+    ]
+    recipients = {
+        e["payload"].get("recipient_session_id", "") for e in ac33_events
+    }
+    assert "sv-exec-a" in recipients, (
+        f"AC33 must include sv-exec-a in fanout (= fresh joiner #1), "
+        f"got {recipients}"
+    )
+    assert "sv-exec-b" in recipients, (
+        f"AC33 must include sv-exec-b in fanout (= fresh joiner #2), "
+        f"got {recipients}"
+    )
+
+
+def test_ac33_pure_observer_fresh_joiner_excluded_when_no_todo():
+    """ms-97 / e-2638 Done when #3 (negative test) — fresh joiner whose
+    scope has no todo (= pure observer) does NOT get a regular AC33 tick.
+
+    AC33 の stop 条件「nothing to claim」 が fresh joiner にも適用される
+    ことを pin する。 観察すべきもの: progress-check dm が当該 session
+    宛に届かない (= broadcast fallback は leader 宛のみ)。
+    """
+    _seed_trek(
+        trek_id="tk-ac33-observer",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-97"}],
+    )
+    _seed_phase_A_member(
+        "tk-ac33-observer", session_id="sv-observer",
+        user_id="uid-observer",
+    )
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-observer",
+        session_ids=["sv-observer"],
+    )
+    # No task_states → has_unclaim_todo = False, fresh observer は silent。
+    _treks["tk-ac33-observer"]["task_states"] = {}
+
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-ac33-observer"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    events = _bus_events_by_project.get("beacon-test", [])
+    # Exclude welcome tick (= trek-welcome sender_type) — welcome tick is
+    # e-2637 bootstrap which fires regardless of AC33, here we test only
+    # the AC33 regular-tick path (= sender_type=trek-scheduler).
+    progress_events = [
+        e for e in events
+        if _is_trek_progress_check_event(e)
+        and (e.get("payload") or {}).get("sender_type") != "trek-welcome"
+    ]
+    observer_targeted = [
+        e for e in progress_events
+        if e["payload"].get("recipient_session_id") == "sv-observer"
+    ]
+    assert observer_targeted == [], (
+        "AC33 negative: pure observer (= no todo, no claim) must NOT "
+        "receive a regular tick. broadcast fallback addresses the "
+        f"leader instead. got events={progress_events}"
+    )
+
+
+def test_welcome_tick_skips_pre_A_member_without_session_id():
+    """ms-97 / e-2637 — pre-A members (= no session_id field) are not
+    eligible for welcome tick. Phase A migration is the precondition
+    (= e-2636 supplies the migration path).
+    """
+    _seed_trek(
+        trek_id="tk-welcome04",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-97"}],
+    )
+    # Legacy pre-A member: user_id only, no session_id field.
+    _treks["tk-welcome04"]["members"].append({
+        "user_id": "uid-legacy",
+        "email": "legacy@x",
+        "role": "member",
+        "invited_at": "2026-06-18T00:00:00.000000Z",
+        "joined_at": "2026-06-18T00:00:00.000000Z",
+        "invited_by": "uid-leader",
+    })
+    # No migration_phase stamp → pre-A.
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-legacy",
+        session_ids=["sv-legacy"],
+    )
+
+    client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-welcome04"]},
+        headers=HEADERS_OK,
+    )
+    events = _bus_events_by_project.get("beacon-test") or []
+    welcome_events = [
+        e for e in events
+        if (e.get("payload") or {}).get("sender_type") == "trek-welcome"
+    ]
+    assert welcome_events == [], (
+        f"welcome tick must be skipped for pre-A members, got {welcome_events}"
+    )

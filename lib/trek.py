@@ -785,6 +785,123 @@ def summarize_kickoff_status(trek_doc: dict) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# ms-97 / e-2637 — Welcome tick bootstrap.
+#
+# 観察された病理 (= 2026-06-28 dogfood, LPS が永遠に kickoff ritual を起動
+# しない構造) の真因は AC33 per-executor lazy start が「claim 済 slot を
+# 1 件でも持つ」 or 「未 claim todo を引き受けうる」 を条件にしているが、
+# fresh joiner は claim ゼロ + members[] にすら追加されない (= AC6 gap、
+# e-2636 で構造修正) ため AC16 の members iterate で見えず、 結果 server
+# tick が永久に来ない。
+#
+# 構造対策 = join した瞬間に 1 度だけ「welcome tick」 を fire し、 受信
+# session 側で AI が kickoff ritual を /beacon-trek-execute Skill 経由で
+# 自発起動する経路を作る (= AC33 lazy start の前提条件を満たさない new
+# member への wake-up 経路、 通常の AC33 とは独立に動く)。
+#
+# Idempotency: ``meta.welcome_tick_fired_at`` を session_id keyed dict
+# として持ち、 同 session_id が複数回 join しても 1 回限り fire。
+# ---------------------------------------------------------------------------
+
+WELCOME_TICK_FIRED_AT_META_KEY = "welcome_tick_fired_at"
+WELCOME_TICK_KIND = "trek-progress-check"
+# AC28 manual doc — beacon-trek-execute Skill が自動 show する Trek
+# operating manual (= 974 words の onboarding doc)。 hint body 内で
+# 参照することで receiver Skill 側の「manual を読んでから kickoff」
+# 経路を pin する (= AC28 と AC33 の繋ぎ目)。
+TREK_OPERATING_MANUAL_DOC_ID = "yfOufm7d2zkAhcm5QWES"
+
+
+def get_welcome_tick_fired_at(trek_doc: dict, *, session_id: str) -> str:
+    """Return the ISO timestamp of the welcome tick fired for ``session_id``.
+
+    Empty string when no welcome tick has been fired yet for the session
+    (= it should fire on the next eligible join).
+    """
+    meta = trek_doc.get("meta") or {}
+    fired_map = meta.get(WELCOME_TICK_FIRED_AT_META_KEY) or {}
+    if not isinstance(fired_map, dict):
+        # Defensive: schema drift could land a non-dict here. Treat as empty.
+        return ""
+    return str(fired_map.get(session_id, "") or "")
+
+
+def should_fire_welcome_tick(trek_doc: dict, *, session_id: str) -> bool:
+    """Return True iff a welcome tick is owed for ``session_id``.
+
+    ms-97 / e-2637 — gate condition: ``session_id`` non-empty AND no prior
+    stamp in ``meta.welcome_tick_fired_at[session_id]``. Pure / I/O-free
+    so server / scheduler / tests share the same yes/no answer.
+    """
+    if not session_id:
+        return False
+    return not get_welcome_tick_fired_at(trek_doc, session_id=session_id)
+
+
+def mark_welcome_tick_fired(trek_doc: dict, *, session_id: str,
+                            now: str = "") -> dict:
+    """Stamp ``meta.welcome_tick_fired_at[session_id] = now`` idempotently.
+
+    ms-97 / e-2637 — invoked by the server hook right after the bus event
+    write succeeds. Re-stamping is a no-op on the prior timestamp (= 1
+    stamp per session, dogfood retries safe). Returns the mutated
+    ``trek_doc`` for chaining; caller persists via ``db.save_trek``.
+    """
+    if not session_id:
+        raise ValueError("session_id is required")
+    meta = trek_doc.setdefault("meta", {})
+    fired_map = meta.get(WELCOME_TICK_FIRED_AT_META_KEY)
+    if not isinstance(fired_map, dict):
+        fired_map = {}
+        meta[WELCOME_TICK_FIRED_AT_META_KEY] = fired_map
+    if not fired_map.get(session_id):
+        fired_map[session_id] = now or utcnow_iso()
+        trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
+
+
+def build_welcome_tick_payload(trek_doc: dict, *, session_id: str,
+                               now: str = "") -> dict:
+    """Render the one-shot welcome tick DM payload (ms-97 / e-2637).
+
+    Shape mirrors ``build_progress_check_payload`` (= ``kind`` /
+    ``trek_id`` / ``body`` / ``recipient_session_id`` / ``created_at``)
+    so existing receiver Skills (= beacon-trek-execute) can dispatch on
+    ``channel="dm"`` + ``kind="trek-progress-check"`` without a new
+    branch.
+
+    Body includes:
+      * AC28 manual doc_id (= the trek operating manual receivers should
+        read first via ``beacon doc show <id>``)
+      * Action hint: 「join 直後にやること: kickoff ritual を
+        /beacon-trek-execute Skill で起動」 — so the AI session converts
+        the welcome tick into an autonomous kickoff loop without further
+        scheduler input.
+    """
+    trek_id = trek_doc.get("trek_id", "") or ""
+    body_lines = [
+        f"[Trek welcome] trek_id={trek_id}",
+        "Trek に join しました。 まず operating manual を確認してください:",
+        f"  beacon doc show {TREK_OPERATING_MANUAL_DOC_ID}",
+        "次に kickoff ritual を /beacon-trek-execute Skill で起動して、",
+        "Trek 内で何をするかをこの session の文脈に流し込んでください。",
+        "(= AC28 manual + AC33 lazy start の起動経路、 ms-97 / e-2637)",
+    ]
+    return {
+        "trek_id": trek_id,
+        "kind": WELCOME_TICK_KIND,
+        "body": "\n".join(body_lines),
+        "recipient_session_id": session_id,
+        "manual_doc_id": TREK_OPERATING_MANUAL_DOC_ID,
+        "created_at": now or utcnow_iso(),
+        # AC33 lazy start とは独立に動く welcome path であることを
+        # receiver / observer が判別できるよう sender_type を分ける。
+        "sender_type": "trek-welcome",
+        "origin_channel": WELCOME_TICK_KIND,
+    }
+
+
 def extend_task_ttl(trek_doc: dict, *, task_id: str,
                     minutes: int, reason: str = "") -> dict:
     """Postpone the TTL safety net deadline on a single task (ms-95 / e-2308).
@@ -1863,6 +1980,52 @@ def find_last_accepted_member(trek_doc: dict, *, user_id: str,
     return None
 
 
+def _migrate_to_session_keyed_inline(trek_doc: dict) -> None:
+    """ms-97 / e-2636 — In-place pre-A → A migration on first session-grain join.
+
+    Stamps ``meta.migration_phase = "A"`` so subsequent reads (=
+    ``is_session_id_keyed``) take the session-grain path. Patches the
+    leader entry with ``trek_doc.leader_session_id`` so the leader's
+    own membership is identifiable at session grain. Other members keep
+    their existing ``session_id`` (= empty for plain invitation rows).
+
+    The legacy migration script (= ``migrate_members_to_session_keyed``)
+    snapshots members into ``members_legacy_backup`` before mutating.
+    The inline path here does **not** mutate existing member dicts other
+    than the leader entry's ``session_id`` patch (= no information loss),
+    so the backup snapshot is taken purely as audit evidence ("this trek
+    was migrated inline at first join, here is what the doc looked like
+    before"). If a backup already exists (= rare race with the offline
+    script), we leave it alone — it represents an earlier, more original
+    snapshot.
+
+    Idempotent: re-entry on an already phase-A trek is a no-op (caller
+    checks phase first; this helper also self-guards).
+    """
+    if is_session_id_keyed(trek_doc):
+        return
+    # Snapshot BEFORE any mutation so the backup faithfully captures the
+    # pre-A user_id-keyed shape. Best-effort: skip if a backup already
+    # exists (= prior offline migration run or concurrent writer).
+    if not (trek_doc.get(MEMBERS_LEGACY_BACKUP_KEY) or []):
+        try:
+            backup_legacy_members(trek_doc)
+        except ValueError:
+            # Concurrent writer raced us — leave the prior snapshot.
+            pass
+    members = trek_doc.get("members") or []
+    leader_sid = trek_doc.get("leader_session_id") or ""
+    if leader_sid:
+        for m in members:
+            # Only patch the leader entry that does NOT already have a
+            # session_id (= legacy shape). Members entries already keyed
+            # by session_id stay as-is.
+            if m.get("role") == "leader" and not m.get("session_id"):
+                m["session_id"] = leader_sid
+                break
+    set_migration_phase(trek_doc, "A")
+
+
 def accept_invitation(trek_doc: dict, *, user_id: str,
                       session_id: str = "") -> dict:
     """Mark a member as joined (= sets ``joined_at`` to now).
@@ -1894,6 +2057,20 @@ def accept_invitation(trek_doc: dict, *, user_id: str,
     pre-A trek (= phase pre-A) では従来通り user_id grain idempotent
     で動作 (= 同じ user_id の 2 回目 join は no-op)。
 
+    ms-97 / e-2636 — pre-A trek が ``session_id`` 引数を受けた join に
+    遭遇した時、 **inline auto-migrate** で phase A に flip する (= 旧
+    user_id keyed silent no-op を構造的に塞ぐ)。 観察された bug は
+    「同 user_id 別 session の 2 つ目 join が server 側 silent no-op
+    で members[] に追加されない」 で、 真因は pre-A path の
+    user_id grain idempotency。 ``session_id`` 引数が渡される
+    = caller が session-grain semantics を期待している、 と解釈して
+    一度の join で migration を完了させ、 そのまま phase A 経路で
+    expand する。 既存 leader entry には ``leader_session_id`` を
+    in-place で補完する (= migration + extend の両立、 Done when #3)。
+    既に session_id を持つ member は backup snapshot に含まれず on-disk
+    そのまま (= migration script は session_history が無い場合の
+    expand 経路、 ここは既知 session_id のため直接 stamp で済む)。
+
     ms-97 / Phase 6 (AC15) — 受諾された member entry に対し
     ``meta.leader_candidate_notice_shown_at`` を stamp する (= 既存
     stamp は保持する idempotent 仕様)。 stamp は accident-time leader
@@ -1902,13 +2079,30 @@ def accept_invitation(trek_doc: dict, *, user_id: str,
     members = trek_doc.get("members") or []
     phase_a_plus = is_session_id_keyed(trek_doc)
 
+    # ms-97 / e-2636 — inline auto-migrate. pre-A trek + ``session_id``
+    # 引数が来た時に phase A に flip して silent no-op を塞ぐ。
+    # leader entry の session_id は trek_doc.leader_session_id から
+    # 補完 (= Done when #3 の「既存 leader entry の in-place 補完」)。
+    # backup snapshot は idempotent guard 付きで取る (= 既に backup が
+    # ある場合は二重採取せずスキップ)。
+    if not phase_a_plus and session_id:
+        _migrate_to_session_keyed_inline(trek_doc)
+        phase_a_plus = True
+        members = trek_doc.get("members") or []
+
     if phase_a_plus and session_id:
         # session-grain expand path. Look first for a session-bound entry
-        # (= already joined from this session), then for the invitation
-        # placeholder (= same user_id, empty session_id) to upgrade.
+        # (= already joined from this session AND owned by this user_id),
+        # then for the invitation placeholder (= same user_id, empty
+        # session_id) to upgrade. The user_id match on existing_sb is a
+        # safety belt — without it, a session_id collision with another
+        # user's entry would mis-route this join into a no-op (= ms-97 /
+        # e-2636 regression caught by CLI fixtures whose default
+        # BEACON_SESSION_ID was shared across users).
         existing_sb = next(
             (m for m in members
-             if m.get("session_id") == session_id),
+             if m.get("session_id") == session_id
+             and m.get("user_id") == user_id),
             None,
         )
         if existing_sb is not None:
