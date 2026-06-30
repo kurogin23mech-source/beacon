@@ -134,10 +134,19 @@ HEADERS_OK = {"X-Beacon-Scheduler-Key": "test-scheduler-key"}
 # ---------------------------------------------------------------------------
 
 def _is_progress_check(e: dict) -> bool:
+    """AC16 fanout の judgment — regular trek-scheduler tick のみ。
+
+    ms-97 / e-2637 で welcome tick (= bootstrap event) も origin_channel
+    "trek-progress-check" を共有するようになったが、 sender_type が
+    "trek-welcome" で区別できる。 AC16 の検査は AC33 lazy start fanout
+    のみを対象にするので welcome tick はここで除外する。
+    """
     if e.get("channel") != "dm":
         return False
     payload = e.get("payload") or {}
-    return payload.get("origin_channel") == "trek-progress-check"
+    if payload.get("origin_channel") != "trek-progress-check":
+        return False
+    return payload.get("sender_type") != "trek-welcome"
 
 
 # ---------------------------------------------------------------------------

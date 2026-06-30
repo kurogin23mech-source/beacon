@@ -317,6 +317,69 @@ def test_trek_join_after_invite(trek_env):
     assert b_member["joined_at"]  # now joined
 
 
+def test_trek_join_show_reflects_self_session_id(trek_env):
+    """ms-97 / e-2636 (AC6, Done when #5) — join exit 0 直後の trek show で
+    members[] に caller の self.sid が含まれていること。
+
+    dogfood で観察した 「join は exit 0 / success message を出すのに
+    server side members[] に session が反映されない」 silent no-op を
+    塞ぐ構造証拠。 join 直後の trek show response が caller の
+    session_id を載せた member entry を返すことを CLI 経由で確認する。
+    """
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "invite", tid, "--actor", "b@x.com")
+    env_b = dict(trek_env)
+    env_b.update({
+        "BEACON_USER_ID": "u-b",
+        "BEACON_USER_EMAIL": "b@x.com",
+        "BEACON_SESSION_ID": "sv-b-self",
+    })
+    r_join = _run(env_b, "join", tid, "--no-arm", "--json")
+    assert r_join.returncode == 0, r_join.stderr
+    r_show = _run(env_b, "show", tid, "--json")
+    assert r_show.returncode == 0, r_show.stderr
+    doc = json.loads(r_show.stdout)
+    b_entries = [m for m in doc["members"] if m.get("email") == "b@x.com"]
+    assert b_entries, "post-join trek show must surface b@x.com member"
+    # AC6 expand 経路: self.sid を持つ member entry が必ず 1 件以上ある。
+    sids = {m.get("session_id") for m in b_entries}
+    assert "sv-b-self" in sids, (
+        f"expected sv-b-self in members[].session_id, got {sids}"
+    )
+
+
+def test_trek_join_two_sessions_same_user_yields_two_member_entries(trek_env):
+    """ms-97 / e-2636 (AC6, Done when #1) — 同 user 別 session の連続 join で
+    members[] が 2 件になる (= silent no-op 構造塞ぎ) を CLI 経路で pin。
+
+    dogfood の真因経路 (= 同 user_id keyed 古い dedup が 2 つ目 join を
+    silent drop) を CLI 全層 (= bin/beacon → commands.py → server) で
+    通った状態で再現させ、 修正後は 2 entry になることを確認する。
+    """
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "invite", tid, "--actor", "b@x.com")
+    env_b1 = dict(trek_env)
+    env_b1.update({
+        "BEACON_USER_ID": "u-b",
+        "BEACON_USER_EMAIL": "b@x.com",
+        "BEACON_SESSION_ID": "sv-b-1",
+    })
+    r1 = _run(env_b1, "join", tid, "--no-arm", "--json")
+    assert r1.returncode == 0, r1.stderr
+    env_b2 = dict(env_b1)
+    env_b2["BEACON_SESSION_ID"] = "sv-b-2"
+    r2 = _run(env_b2, "join", tid, "--no-arm", "--json")
+    assert r2.returncode == 0, r2.stderr
+    doc = json.loads(r2.stdout)
+    b_entries = [m for m in doc["members"] if m.get("email") == "b@x.com"]
+    assert len(b_entries) == 2, (
+        f"expected 2 session-grain entries for b@x.com, got {b_entries}"
+    )
+    assert {m.get("session_id") for m in b_entries} == {
+        "sv-b-1", "sv-b-2",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Auto-arm (ms-75 / e-2047): default arms session, --no-arm opts out
 # ---------------------------------------------------------------------------
@@ -673,7 +736,17 @@ def test_trek_leave_removes_member(trek_env):
     tid = _make_trek_and_return_id(trek_env)
     _run(trek_env, "invite", tid, "--actor", "b@x.com")
     env_b = dict(trek_env)
-    env_b.update({"BEACON_USER_ID": "u-b", "BEACON_USER_EMAIL": "b@x.com"})
+    # ms-97 / e-2636 — explicit per-user BEACON_SESSION_ID. 旧 test は
+    # trek_env fixture から sv-test-1 を継承していたが、 AC6 cutover で
+    # session_id collision は member identity の混線を引き起こす (= leader
+    # と member が同じ sv-test-1 を共有していると session-grain leave が
+    # 誤って leader entry にヒット)。 fixture は本来 user 毎に独立 sid を
+    # 設定すべきで、 ここではその修正を明示する。
+    env_b.update({
+        "BEACON_USER_ID": "u-b",
+        "BEACON_USER_EMAIL": "b@x.com",
+        "BEACON_SESSION_ID": "sv-b-leave",
+    })
     _run(env_b, "join", tid)
     r = _run(env_b, "leave", tid, "--json")
     assert r.returncode == 0, r.stderr

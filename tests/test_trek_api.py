@@ -520,6 +520,140 @@ class TestJoin:
         r = client.post(f"/api/treks/{trek_id}/members/join")
         assert r.status_code == 200
 
+    def test_same_user_two_sessions_yield_two_members(self):
+        """ms-97 / e-2636 (AC6, Done when #1+#4) — 同 user 2 session の連続
+        join で members[] が 2 件になる。 旧 silent no-op を構造的に塞ぐ。
+
+        dogfood で観測した 「PE session が join exit 0 / success message を
+        出したのに server side members[] には反映されない」 病理の構造修正。
+        join endpoint が ``X-Beacon-Session`` header で受け取った
+        session_id 引数を accept_invitation に伝える結果、 pre-A trek は
+        自動 phase A flip → session-grain expand に乗る。
+        """
+        trek_id = _create_seed_trek()
+        _impersonate(INVITED_UID, INVITED_EMAIL)
+        r1 = client.post(
+            f"/api/treks/{trek_id}/members/join",
+            headers={"X-Beacon-Session": "sv-invited-a"},
+        )
+        assert r1.status_code == 200, r1.text
+        r2 = client.post(
+            f"/api/treks/{trek_id}/members/join",
+            headers={"X-Beacon-Session": "sv-invited-b"},
+        )
+        assert r2.status_code == 200, r2.text
+        members = r2.json()["members"]
+        invited_entries = [
+            m for m in members if m["user_id"] == INVITED_UID
+        ]
+        assert len(invited_entries) == 2, (
+            f"expected 2 session-grain entries for INVITED_UID, got "
+            f"{invited_entries}"
+        )
+        assert {m["session_id"] for m in invited_entries} == {
+            "sv-invited-a", "sv-invited-b",
+        }
+        # Done when #2: exit 0 + success message は実 server state と一致。
+        # ここでは response の members[] と GET /api/treks/{id} の members[]
+        # が同期していることで確認 (= silent no-op 回避の構造証拠)。
+        r3 = client.get(f"/api/treks/{trek_id}")
+        assert r3.status_code == 200
+        get_members = [
+            m for m in r3.json()["members"] if m["user_id"] == INVITED_UID
+        ]
+        assert {m["session_id"] for m in get_members} == {
+            "sv-invited-a", "sv-invited-b",
+        }
+
+    def _seed_scope_for_welcome_test(self, trek_id: str) -> None:
+        """Add a milestone-narrow scope entry so welcome tick has a target
+        bus to post into (= _fire_welcome_tick early-returns on empty
+        scope). ms-97 / e-2637 helper."""
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        body = {"project": "beacon", "milestone": "ms-97"}
+        r = client.put(f"/api/treks/{trek_id}/scope", json=body)
+        assert r.status_code == 200, r.text
+        pending_id = r.json()["pending_op"]["pending_id"]
+        r2 = client.post(
+            f"/api/treks/{trek_id}/scope/approve/{pending_id}",
+        )
+        assert r2.status_code == 200, r2.text
+
+    def test_join_fires_welcome_tick_into_bus(self):
+        """ms-97 / e-2637 — join endpoint fires welcome tick on first
+        successful join. Done when #1+#2: tick lands in the joiner's
+        bus with the AC28 manual doc_id + kickoff hint.
+        """
+        trek_id = _create_seed_trek()
+        self._seed_scope_for_welcome_test(trek_id)
+        _impersonate(INVITED_UID, INVITED_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/members/join",
+            headers={"X-Beacon-Session": "sv-welcome-1"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # Response surfaces the event id so clients can correlate.
+        assert body.get("_welcome_tick_event_id"), (
+            "join response should include _welcome_tick_event_id when "
+            "the welcome tick fires"
+        )
+        # Trek doc carries the idempotent stamp.
+        r2 = client.get(f"/api/treks/{trek_id}")
+        meta = (r2.json().get("meta") or {})
+        fired_map = meta.get("welcome_tick_fired_at") or {}
+        assert fired_map.get("sv-welcome-1"), (
+            f"join must stamp welcome_tick_fired_at for sv-welcome-1, "
+            f"got {fired_map}"
+        )
+
+    def test_join_welcome_tick_idempotent_on_replay(self):
+        """ms-97 / e-2637 Done when #3 — replaying join from the same
+        session_id does not re-fire welcome tick (= 1 stamp per
+        session_id).
+        """
+        trek_id = _create_seed_trek()
+        self._seed_scope_for_welcome_test(trek_id)
+        _impersonate(INVITED_UID, INVITED_EMAIL)
+        r1 = client.post(
+            f"/api/treks/{trek_id}/members/join",
+            headers={"X-Beacon-Session": "sv-welcome-2"},
+        )
+        assert r1.status_code == 200, r1.text
+        first_event_id = r1.json().get("_welcome_tick_event_id")
+        r2 = client.post(
+            f"/api/treks/{trek_id}/members/join",
+            headers={"X-Beacon-Session": "sv-welcome-2"},
+        )
+        assert r2.status_code == 200
+        # Second join must NOT include a new welcome event id.
+        assert not r2.json().get("_welcome_tick_event_id"), (
+            "welcome tick must fire at most once per session_id; second "
+            "join response should omit _welcome_tick_event_id"
+        )
+        assert first_event_id  # primary path landed
+
+    def test_same_session_repeated_join_remains_idempotent(self):
+        """ms-97 / e-2636 — 同 session_id の 2 度目 join は entry を増やさない。
+
+        AC6 expand 経路の idempotent 保持。 1 user 1 session = 1 entry を
+        維持する (= dogfood retry に強い)。
+        """
+        trek_id = _create_seed_trek()
+        _impersonate(INVITED_UID, INVITED_EMAIL)
+        for _ in range(2):
+            r = client.post(
+                f"/api/treks/{trek_id}/members/join",
+                headers={"X-Beacon-Session": "sv-invited-once"},
+            )
+            assert r.status_code == 200, r.text
+        members = r.json()["members"]
+        invited_entries = [
+            m for m in members if m["user_id"] == INVITED_UID
+        ]
+        assert len(invited_entries) == 1
+        assert invited_entries[0]["session_id"] == "sv-invited-once"
+
 
 class TestLeave:
     def test_member_can_leave(self):

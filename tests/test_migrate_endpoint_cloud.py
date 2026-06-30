@@ -127,7 +127,22 @@ def reset_store():
 
 
 def _seed_pre_a_trek() -> str:
-    """Trek with leader + 1 joined member, default pre-A phase."""
+    """Trek with leader + 1 joined member, default pre-A phase.
+
+    ms-97 / e-2636 — accept_invitation has an inline auto-migrate path
+    that flips a pre-A trek to phase A whenever a join carries an
+    ``X-Beacon-Session`` header (= the dogfood fix for AC6 silent
+    no-op). This script-style test exercises the offline migrate
+    endpoint that handles treks whose members have NOT yet joined via
+    the session-aware path (= legacy production data). To preserve
+    pre-A shape here we deliberately omit the session header on the
+    test join, mirroring an older client that never sent it.
+
+    Production scenario this maps to: an existing trek from before the
+    e-2636 deploy whose members[] still carries user_id-only entries.
+    The migrate endpoint is the explicit migration path for those
+    docs; the inline auto-migrate only triggers on a fresh join.
+    """
     _impersonate(LEADER_UID, LEADER_EMAIL)
     r = client.post("/api/treks", json={
         "title": "migrate endpoint pre-A",
@@ -139,9 +154,21 @@ def _seed_pre_a_trek() -> str:
         f"/api/treks/{trek_id}/members",
         json={"email": MEMBER_EMAIL}).status_code == 200
     _impersonate(MEMBER_UID, MEMBER_EMAIL)
+    # NB: no X-Beacon-Session header → stays in pre-A (= legacy join).
     assert client.post(
         f"/api/treks/{trek_id}/members/join",
-        headers={"X-Beacon-Session": "sv-member"}).status_code == 200
+    ).status_code == 200
+    # Stamp session_history manually so the migrate endpoint has a
+    # session to map the member to (= migrate_members_to_session_keyed
+    # reads session_history to know which sids belong to which user).
+    trek_doc = _treks[trek_id]
+    trek_doc.setdefault("session_history", []).append({
+        "session_id": "sv-member",
+        "user_id": MEMBER_UID,
+        "email": MEMBER_EMAIL,
+        "joined_at": "2026-06-28T00:00:00.000000Z",
+        "role_at_join": "member",
+    })
     _impersonate(LEADER_UID, LEADER_EMAIL)
     return trek_id
 

@@ -4034,6 +4034,23 @@ def join_trek_endpoint(trek_id: str, request: Request,
         # Not invited (no row at all) → 403, not 404. The trek exists; the
         # caller just cannot self-add.
         raise HTTPException(status_code=403, detail=str(e))
+    # ms-97 / e-2637 — welcome tick bootstrap. After a successful join, if
+    # this session has not yet received a welcome tick, fire one into its
+    # home project bus so the fresh joiner (= claim ゼロ, AC33 lazy start
+    # 不該当) gets a wake-up event that primes the kickoff ritual via
+    # /beacon-trek-execute Skill. Idempotent: ``meta.welcome_tick_fired_at``
+    # tracks per-session_id stamps so retries / re-joins do not re-fire.
+    # The stamp + the bus event write share the same save_trek transaction
+    # below so the audit trail is consistent.
+    welcome_event_id = ""
+    if caller_sid and trek_mod.should_fire_welcome_tick(
+        t, session_id=caller_sid,
+    ):
+        welcome_event_id = _fire_welcome_tick(
+            trek_doc=t, trek_id=trek_id, session_id=caller_sid,
+        )
+        if welcome_event_id:
+            trek_mod.mark_welcome_tick_fired(t, session_id=caller_sid)
     db.save_trek(trek_id, t)
     # ms-97 / Phase 6 (AC15) — surface the accident-time leader candidate
     # notice on the join response so clients (= CLI / Skill / future UI) can
@@ -4044,7 +4061,135 @@ def join_trek_endpoint(trek_id: str, request: Request,
     response["leader_candidate_notice"] = (
         trek_mod.build_leader_candidate_notice(t)
     )
+    if welcome_event_id:
+        response["_welcome_tick_event_id"] = welcome_event_id
     return response
+
+
+def _fanout_welcome_ticks_for_pending_members(
+    *, trek_doc: dict, trek_id: str,
+    scope_project_ids: list[str],
+) -> None:
+    """ms-97 / e-2637 — Scheduler-side welcome tick safety net.
+
+    Walks ``trek_doc.members[]`` (phase A+ only) and fires a one-shot
+    welcome tick for every session whose stamp is missing
+    (= ``should_fire_welcome_tick`` True). On success, stamps
+    ``meta.welcome_tick_fired_at[session_id]``.
+
+    The join endpoint fires the welcome tick at join time as the primary
+    path. This scheduler-side sweep is the safety net that catches:
+      * Sessions that joined before this code was deployed.
+      * Sessions whose join-time fire failed (network / DB hiccup).
+      * Sessions whose welcome tick was lost in a bus replay.
+
+    The trek_doc is mutated in place; the surrounding tick loop's
+    save_trek persists the stamps alongside any other mutations made on
+    this tick.
+    """
+    members = trek_doc.get("members") or []
+    if not members:
+        return
+    # ms-97 / e-2637 — Leader session is excluded from welcome tick.
+    # The leader created the trek (= already knows about it); welcome
+    # tick is for fresh joiners who need the AC28 manual + kickoff
+    # primer. Stamping the leader implicitly here would also produce
+    # noise (= leader receives an unnecessary dm on every fresh deploy).
+    leader_sid = trek_doc.get("leader_session_id") or ""
+    for m in members:
+        msid = m.get("session_id") or ""
+        if not msid:
+            continue
+        if leader_sid and msid == leader_sid:
+            # Stamp the leader so future ticks skip immediately, but
+            # do NOT fire a dm to them.
+            trek_mod.mark_welcome_tick_fired(trek_doc, session_id=msid)
+            continue
+        if (m.get("role") or "") == "leader":
+            trek_mod.mark_welcome_tick_fired(trek_doc, session_id=msid)
+            continue
+        if not trek_mod.should_fire_welcome_tick(trek_doc, session_id=msid):
+            continue
+        event_id = _fire_welcome_tick(
+            trek_doc=trek_doc, trek_id=trek_id, session_id=msid,
+            scope_project_ids=scope_project_ids,
+        )
+        if event_id:
+            trek_mod.mark_welcome_tick_fired(trek_doc, session_id=msid)
+
+
+def _fire_welcome_tick(*, trek_doc: dict, trek_id: str,
+                       session_id: str,
+                       scope_project_ids: list[str] | None = None) -> str:
+    """ms-97 / e-2637 — Post a one-shot welcome tick to the joiner's home bus.
+
+    Resolution: walk ``trek_doc.scope`` for the first project whose
+    session registry contains ``session_id`` (= same approach as
+    ``_build_executor_targets_session_grain``). If no scope project
+    surfaces the session, fall back to ``scope[0]`` so the event is
+    still written somewhere observable (= the bridge layer's dm
+    delivery filter keys on ``recipient_session_id``, so as long as
+    the receiver is on this bus the message lands).
+
+    Returns the event_id on success, empty string on failure. Failures
+    must never break the join transaction — the welcome tick is a
+    bootstrap optimisation, not a load-bearing path.
+    """
+    if scope_project_ids is None:
+        try:
+            scope_project_ids = _resolve_trek_scope_project_ids(trek_doc)
+        except Exception:
+            scope_project_ids = []
+    if not scope_project_ids:
+        return ""
+    target_pid = ""
+    for pid in scope_project_ids:
+        try:
+            project_sessions = db.list_sessions(pid)
+        except Exception:
+            project_sessions = []
+        for s in project_sessions:
+            if (s.get("session_id") or "") == session_id:
+                target_pid = pid
+                break
+        if target_pid:
+            break
+    if not target_pid:
+        # Best-effort fallback: deliver to scope[0]. The bridge filters
+        # by recipient_session_id so cross-project posts are safe.
+        target_pid = scope_project_ids[0]
+    payload = trek_mod.build_welcome_tick_payload(
+        trek_doc, session_id=session_id,
+    )
+    try:
+        env = envelope_mod.issue_t1_system_envelope(
+            project_id=target_pid,
+            trek_id=trek_id,
+            actions_authorized=["trek.welcome"],
+            data_class="free",
+            ttl_seconds=3600,
+        )
+    except Exception:
+        env = None
+    bus_data = {
+        "channel": "dm",
+        "sender_session_id": "",
+        "recipient_session_id": session_id,
+        "payload": payload,
+        "envelope": env,
+        "delivery": "auto-execute",
+        "created_at": trek_mod.utcnow_iso(),
+    }
+    try:
+        return db.append_bus_event(target_pid, bus_data)
+    except Exception as exc:
+        print(
+            f"warn[ms-97 e-2637]: welcome tick append failed for trek "
+            f"{trek_id} session {session_id}: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return ""
 
 
 @app.delete("/api/treks/{trek_id}/members/me")
@@ -7021,6 +7166,20 @@ def trek_scheduler_tick_endpoint(
                     f"{member_session_alarm}",
                     file=sys.stderr,
                 )
+        # ms-97 / e-2637 — Welcome tick fanout (= bootstrap path for
+        # fresh joiners that the join-time hook missed, e.g. sessions
+        # that joined before this server code was deployed, or where
+        # the join-time fire failed). Walks members[] (phase A+ only,
+        # because pre-A members have no session_id field) and fires a
+        # one-shot welcome tick to each session whose stamp is missing.
+        # Stamps are recorded on ``meta.welcome_tick_fired_at`` so the
+        # next tick does not re-fire.
+        if trek_mod.is_session_id_keyed(trek_doc):
+            _fanout_welcome_ticks_for_pending_members(
+                trek_doc=trek_doc, trek_id=trek_id,
+                scope_project_ids=scope_project_ids,
+            )
+
         # ms-88 / e-2109 + ms-97 / e-2613 (AC33) — per-executor lazy
         # start. The leader role is structurally excluded from progress-
         # check (= CORE doc trek-leader-stance / e-2166: leader's role
