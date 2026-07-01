@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.52.1] - 2026-07-01
+
+- Merge pull request #312 from kurogin23mech-source/ms-95-fork-705831
+- fix(ms-95): e-2755 — bus.mjs 60s trigger check tick を廃止して orphan leak 経路を根絶
+- docs(release): update README/CHANGELOG for v0.52.0
+- chore(release): bump formula to 0.52.0
+
 ## [v0.52.0] - 2026-07-01
 
 - Merge pull request #311 from kurogin23mech-source/feat/ms-97-e2650-slot-done-precondition
