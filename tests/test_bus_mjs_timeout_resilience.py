@@ -19,9 +19,11 @@ Three defenses are pinned:
   (b) **apiFetch wraps fetch with AbortController** — the helper through
       which apiGet/apiPost/apiPut now flow. No bare `fetch()` calls remain
       in the HTTP helpers.
-  (c) **Loop body wraps pollOnce / scheduler / heartbeat with withWatchdog**
-      — defense-in-depth so any non-fetch await (mcp.notification, future
-      code paths) also has a structural cap.
+  (c) **Loop body wraps pollOnce / heartbeat with withWatchdog** —
+      defense-in-depth so any non-fetch await (mcp.notification, future
+      code paths) also has a structural cap. The runSchedulerTick call
+      was removed in ms-95 / e-2755; only pollOnce and writePollHeartbeat
+      remain as awaited steps in the loop body.
 """
 
 from __future__ import annotations
@@ -136,8 +138,8 @@ class TestIterationWatchdog:
 
     def test_pollonce_wrapped_in_loop(self):
         src = _read()
-        # Find the loop() body and check pollOnce/scheduler/heartbeat all
-        # go through withWatchdog.
+        # Find the loop() body and check pollOnce/heartbeat go through
+        # withWatchdog. runSchedulerTick was removed in ms-95 / e-2755.
         m = re.search(
             r"async function loop\(\)\s*{(.*?)\n  }\n",
             src,
@@ -149,8 +151,13 @@ class TestIterationWatchdog:
             "pollOnce must be watchdog-guarded — it's the most likely hang "
             "site (multiple awaits per call: apiGet, ackReceipt, mcp.notification)."
         )
-        assert "withWatchdog(runSchedulerTick()" in body
         assert "withWatchdog(writePollHeartbeat()" in body, (
             "writePollHeartbeat hangs are the 2026-06-12 incident path — "
             "must be guarded even though apiPut now has timeout."
+        )
+        assert "runSchedulerTick" not in body, (
+            "ms-95 / e-2755: the 60s `beacon trigger check` subprocess was "
+            "removed to stop long-lived bclaudes from leaking orphaned Python "
+            "children (PPID=1). Do not reintroduce it — trigger evaluation "
+            "now runs on demand from session-start and the PostToolUse hook."
         )

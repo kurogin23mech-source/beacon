@@ -38,7 +38,6 @@ import { consumeBusBudgetOne, refuseMessage } from './bus-budget.mjs'
 import { selectTierForBridge } from './bus-envelope.mjs'
 import { buildHeartbeatBody } from './bus-heartbeat.mjs'
 import { createLocalSessionHeartbeat } from './bus-local-heartbeat.mjs'
-import { runCommandWithTimeout } from './managed-process.mjs'
 import {
   buildAutonomousActionContent,
   shouldEmitAutonomousImperative,
@@ -238,11 +237,6 @@ const ALLOWED_CHANNELS = Array.from(new Set([
 // healthy 判定窓 max(30s, 2× poll) は 30s 不変、bus directory の live 判定に regression なし。
 // 即時性が必要な経路は BEACON_BUS_POLL_MS=2000 で従来挙動に opt-back 可能。
 const POLL_INTERVAL = parseInt(process.env.BEACON_BUS_POLL_MS || '5000', 10)
-const SCHEDULER_INTERVAL_MS = parseInt(
-  process.env.BEACON_BRIDGE_SCHEDULE_INTERVAL_MS || '60000', 10)
-const SCHEDULER_MAX_BACKOFF_MS = parseInt(
-  process.env.BEACON_BRIDGE_SCHEDULE_MAX_BACKOFF_MS || '900000', 10)
-const SCHEDULER_DISABLED = process.env.BEACON_BRIDGE_SCHEDULE_DISABLE === '1'
 
 // ms-95 / e-1667 — per-request HTTP timeout for apiGet/apiPost/apiPut.
 // Before this, bare fetch() with no timeout meant any stalled response from
@@ -255,10 +249,10 @@ const SCHEDULER_DISABLED = process.env.BEACON_BRIDGE_SCHEDULE_DISABLE === '1'
 const HTTP_TIMEOUT_MS = parseInt(
   process.env.BEACON_BUS_HTTP_TIMEOUT_MS || '30000', 10)
 // e-1667 defense-in-depth — per-iteration watchdog around pollOnce /
-// runSchedulerTick / writePollHeartbeat. Even if a future await path is
-// added without HTTP timeout, this cap forces the loop to continue. Picked
-// at 2× HTTP_TIMEOUT_MS so a single legitimate stall during pollOnce
-// (multiple awaits) doesn't false-positive.
+// writePollHeartbeat. Even if a future await path is added without HTTP
+// timeout, this cap forces the loop to continue. Picked at 2×
+// HTTP_TIMEOUT_MS so a single legitimate stall during pollOnce (multiple
+// awaits) doesn't false-positive.
 const ITERATION_WATCHDOG_MS = parseInt(
   process.env.BEACON_BUS_ITERATION_WATCHDOG_MS || '60000', 10)
 // ms-95 / e-1490 — periodic refresh of .beacon/bridges/<sid>.json so the claim
@@ -281,7 +275,6 @@ const BRIDGE_CLAIM_REFRESH_MS = parseInt(
 log(`=== beacon-bus channel starting ===`)
 log(`  api=${API_URL} project=${PROJECT_ID} session=${SESSION_ID}`)
 log(`  allow=[${ALLOWED_CHANNELS.join(',')}] poll=${POLL_INTERVAL}ms cwd=${CWD}`)
-log(`  scheduler=${SCHEDULER_DISABLED ? 'OFF' : SCHEDULER_INTERVAL_MS + 'ms'} max_backoff=${SCHEDULER_MAX_BACKOFF_MS}ms`)
 log(`  http_timeout=${HTTP_TIMEOUT_MS}ms iter_watchdog=${ITERATION_WATCHDOG_MS}ms`)
 log(`  bridge_claim_refresh=${BRIDGE_CLAIM_REFRESH_MS}ms`)
 log(`  session.json source=[${session.source || ''}] last_active=[${session.last_active || ''}]`)
@@ -1189,42 +1182,14 @@ if (!PROJECT_ID || !SESSION_ID) {
     }
   }
 
-  // ms-60 / e-1390 Phase 1: bridge-integrated Operation scheduler.
-  // Rate-limited so we don't spam the autofire (idempotent but writes
-  // Firestore once per first-fire-of-the-day). Runs `beacon trigger
-  // check`, which invokes `_auto_fire_operation_triggers()` server-side
-  // and posts a T2-envelope-protected bus event (e-1393). The next
-  // pollOnce() iteration picks the event up via /bus/unread and forwards
-  // to the AI via MCP notification.
-  let lastSchedulerRunAt = 0
-  let schedulerFailureCount = 0
-  async function runSchedulerTick() {
-    if (SCHEDULER_DISABLED) return
-    const now = Date.now()
-    if (now - lastSchedulerRunAt < SCHEDULER_INTERVAL_MS) return
-    lastSchedulerRunAt = now
-    try {
-      const beaconBin = process.env.BEACON_BIN || 'beacon'
-      await runCommandWithTimeout(beaconBin, ['trigger', 'check'], {
-        cwd: CWD,
-        timeout: 15000,
-        env: process.env,
-      })
-      schedulerFailureCount = 0
-      log('scheduler: trigger check completed')
-    } catch (e) {
-      // Non-zero exit / timeout / spawn fail — log but don't kill the loop.
-      // The autofire path is idempotent so a missed tick recovers next round.
-      schedulerFailureCount += 1
-      const backoff = Math.min(
-        SCHEDULER_INTERVAL_MS * (2 ** schedulerFailureCount),
-        SCHEDULER_MAX_BACKOFF_MS,
-      )
-      lastSchedulerRunAt = Date.now() + backoff - SCHEDULER_INTERVAL_MS
-      log(`scheduler: trigger check failed (non-fatal; retry in ${backoff}ms): ${e.message}`)
-    }
-  }
-
+  // ms-95 / e-2755: the 60s `beacon trigger check` subprocess was removed
+  // here. That path spawned a Python subprocess every minute for a Firestore
+  // round-trip, and long-lived bclaudes launched before PR #303 kept leaking
+  // orphaned children (PPID=1) even after the fix landed. Trigger evaluation
+  // now runs on demand — retro-due / release-due / release-marker fire from
+  // session-start and the PostToolUse commit-log hook; there are no active
+  // Operations yet (server-side Operation scheduler is ms-66) so no Operation
+  // notify is lost.
   async function loop() {
     await ensureCursorPrimed()
     await stampColdStartMetadata()
@@ -1237,14 +1202,6 @@ if (!PROJECT_ID || !SESSION_ID) {
         await withWatchdog(pollOnce(), 'pollOnce', ITERATION_WATCHDOG_MS)
       } catch (e) {
         log(`poll error: ${e.message}`)
-      }
-      // ms-60 / e-1390: rate-limited Operation schedule check.
-      // Sits between pollOnce and heartbeat so a failure here can't
-      // prevent the heartbeat from advancing.
-      try {
-        await withWatchdog(runSchedulerTick(), 'runSchedulerTick', ITERATION_WATCHDOG_MS)
-      } catch (e) {
-        log(`scheduler error (non-fatal): ${e.message}`)
       }
       // e-1318: heartbeat is a *byproduct* of the poll loop. Whether
       // pollOnce succeeded, no-op'd, or threw (caught above), we got
