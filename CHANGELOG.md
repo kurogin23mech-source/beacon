@@ -2,6 +2,27 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.52.0] - 2026-07-01
+
+- Merge pull request #311 from kurogin23mech-source/feat/ms-97-e2650-slot-done-precondition
+- Merge pull request #310 from kurogin23mech-source/feat/ms-95-e2726-task-done-forcing-function
+- feat(ms-97): e-2650 — Trek slot done 構造防御 (= project pool 真値源 + AC28 manual 明文化)
+- feat(ms-95): e-2726 — task done evidence gate (#8 phantom done forcing function)
+- Merge pull request #309 from kurogin23mech-source/feat/ms-97-fresh-joiner-chain-e2636-e2637-e2638
+- feat(ms-97): fresh joiner chain e-2636/e-2637/e-2638 — 同 user 別 session 2 件目 join silent no-op 解消 + welcome tick bootstrap
+- Merge pull request #308 from kurogin23mech-source/fix/ms-95-e2723-leader-digest-same-user-collapse
+- fix(ms-95): e-2723 — leader-digest が同 user の executor session に collapse する病理を解消 (#16)
+- Merge pull request #307 from kurogin23mech-source/feat/ms-97-spec-chain-e2711-e2707-e2709
+- Merge pull request #306 from kurogin23mech-source/feat/ms-95-e2640-cross-project-scope-entries
+- feat(ms-97): SPEC chain Step 3-5 — Level 3 imperative + leader-digest aggregate + Skill idempotent (e-2711/e-2707/e-2709)
+- feat(ms-95): e-2640 — cross-project Trek detail scope-entries endpoint (data モデル独立性を API/UI 層まで貫通)
+- Merge pull request #305 from kurogin23mech-source/fix/ms-95-e2710-allowlist-invariants-observability
+- Merge pull request #304 from kurogin23mech-source/fix/ms-97-e2706-review-trigger-states
+- fix(ms-95): e-2710 — bus_auto_execute_channels invariants pin + downgrade diag frame
+- fix(ms-97): e-2706 — REVIEW_TRIGGER_STATES で leader_review notify 復活 (5-state migration drift)
+- docs(release): update README/CHANGELOG for v0.51.5
+- chore(release): bump formula to 0.51.5
+
 ## [v0.51.5] - 2026-06-29
 
 - Merge pull request #303 from kurogin23mech-source/fix/trigger-check-runaway
