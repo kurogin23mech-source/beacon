@@ -2263,6 +2263,179 @@ def parse_scope_arg(arg: str, *, strict: bool = True) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Slot done precondition — task pool 真値源 (ms-97 / e-2650)
+# ---------------------------------------------------------------------------
+#
+# ms-97 / e-2650 (= phantom done 構造防御): Trek slot は概念的に project
+# 側 task の **view** であり、 view 側だけ done になる経路を server で
+# 構造的に reject する。 task done は既に commit 紐付け (= PostToolUse
+# hook + /beacon-log skill) で物理 evidence verify が走っているので、
+# slot done をその信頼チェーンの延長に位置付ければ phantom done と drift
+# の両方を 1 つの構造原則で原理的に防げる。
+#
+# 2026-06-28 dogfood で観測された 2 件の病理:
+#   (a) e-710 phantom done: PE 側で task が done と記録されているのに、
+#       該当 commit / ファイル変更が一切なかった
+#   (b) tk-7a3b88b9: Trek 側 done、 task pool todo が固定化していた
+#
+# どちらも「project pool が真値源、 Trek 側 task_states は derived state
+# (= mirror)」 という ordering を守れば構造的に消える。
+
+SLOT_DONE_ALLOWED = "allowed"
+SLOT_DONE_REJECT_TASK_POOL_NOT_DONE = "task_pool_not_done"
+SLOT_DONE_REJECT_MS_CHILDREN_NOT_ALL_DONE = "ms_children_not_all_done"
+SLOT_DONE_REJECT_TASK_POOL_LOOKUP_FAILED = "task_pool_lookup_failed"
+
+
+def check_slot_done_precondition(
+    trek_doc: dict, *,
+    task_id: str,
+    get_project,
+) -> tuple[bool, str, str]:
+    """Verify that a Trek slot ``done`` transition is backed by project pool truth.
+
+    Pure(-ish) function: side-effectful only via the injected
+    ``get_project(pid) -> dict | None`` callable (= server passes
+    ``db.get_project``, tests inject a fake). Returns
+    ``(allowed, reason_code, human_message)``:
+
+      * ``allowed=True`` → caller may proceed to ``set_task_state``.
+      * ``allowed=False`` → caller must raise 4xx with the human message;
+        the reason code is included for log / CLI surface symmetry.
+
+    Two slot shapes are handled:
+
+      1. **Task ref** (= ``task_id`` is an ``e-XXXX`` entry id) — walk the
+         trek's ``scope[].project`` ids and look up the entry via
+         ``find_entry``. Done iff the entry's ``status == "done"`` in the
+         project pool. Pool absence / lookup failure → reject so we never
+         silently accept "the task pool has no record of this slot".
+
+      2. **MS ref** (= ``task_id`` starts with ``"ms-"``) — find the MS in
+         one of the scope projects, walk its top-level ``entries[]``, and
+         allow only when **every** task-typed child has ``status == "done"``.
+         Empty MS (= no children at all) is rejected because "done with
+         nothing inside" is a phantom done variant.
+
+    Why a 3rd tuple slot for the message: the rejection text guides the
+    AI executor toward the right recovery action (= "先に task pool で
+    done してください") and is the most useful single string for the
+    HTTP detail body / CLI error.
+
+    ms-97 / e-2650 done-when 1 (server side check) + done-when 2
+    (ordering 強制) + done-when 3 (archive 時の task_states sync 問題
+    自動消滅). Spec ref: SPEC tnJnByg8Ymw8T3DgPdJD AC10 / AC30 補強。
+    """
+    if not task_id:
+        return False, SLOT_DONE_REJECT_TASK_POOL_LOOKUP_FAILED, (
+            "task_id is required for slot done precondition check"
+        )
+    scope = trek_doc.get("scope") or []
+    project_ids: list[str] = []
+    seen: set[str] = set()
+    for entry in scope:
+        pid = entry.get("project") if isinstance(entry, dict) else None
+        if not pid or pid in seen:
+            continue
+        seen.add(pid)
+        project_ids.append(pid)
+    # Walk scope projects looking for the entry / MS. The first hit wins
+    # (= same precedence the reconcile endpoint uses).
+    is_ms_ref = task_id.startswith("ms-")
+    for pid in project_ids:
+        try:
+            project_data = get_project(pid)
+        except Exception:
+            # Backend hiccup on one project shouldn't poison the walk —
+            # the slot may yet resolve on a later scope project.
+            continue
+        if not project_data:
+            continue
+        if is_ms_ref:
+            ms = _find_milestone_by_id(project_data, task_id)
+            if ms is None:
+                continue
+            children = ms.get("entries") or []
+            task_children = [
+                c for c in children
+                if isinstance(c, dict)
+                and (c.get("type") or "task") == "task"
+            ]
+            if not task_children:
+                return False, SLOT_DONE_REJECT_MS_CHILDREN_NOT_ALL_DONE, (
+                    f"MS slot {task_id} done を拒否しました: 配下に "
+                    "task が 1 件も存在しません (= 空 MS の slot done は "
+                    "phantom done の一形態として禁止)。 先に MS 配下に "
+                    "task を起票し、 各 task を commit 紐付けで done に "
+                    "してから MS slot を done にしてください。"
+                )
+            not_done = [
+                c.get("id", "") for c in task_children
+                if (c.get("status") or "") != "done"
+            ]
+            if not_done:
+                preview = ", ".join(not_done[:3])
+                more = "" if len(not_done) <= 3 else (
+                    f" 他 {len(not_done) - 3} 件"
+                )
+                return False, SLOT_DONE_REJECT_MS_CHILDREN_NOT_ALL_DONE, (
+                    f"MS slot {task_id} done を拒否しました: 配下 task "
+                    f"のうち {len(not_done)} 件が project pool で done に "
+                    f"なっていません ({preview}{more})。 先に task pool 側 "
+                    "で各 task を done にしてください (= 真値源は project "
+                    "pool、 Trek slot は derived view、 ms-97 / e-2650)。"
+                )
+            return True, SLOT_DONE_ALLOWED, ""
+        # Task ref path
+        from core import find_entry  # lazy import to avoid cycle at module load
+        found = find_entry(project_data, task_id)
+        if not found:
+            continue
+        _, _, entry, _ = found
+        pool_status = (entry or {}).get("status") or ""
+        if pool_status != "done":
+            return False, SLOT_DONE_REJECT_TASK_POOL_NOT_DONE, (
+                f"Trek slot {task_id} done を拒否しました: project pool "
+                f"側の task が status={pool_status or 'todo'} のままです。 "
+                "先に task pool で done してください (= commit 紐付けによる "
+                "物理 evidence verify が走り、 phantom done を構造的に防ぐ "
+                "経路。 真値源は project pool、 Trek slot は derived view、 "
+                "ms-97 / e-2650)。"
+            )
+        return True, SLOT_DONE_ALLOWED, ""
+    # No scope project had a record of this id. Reject — silently allowing
+    # would let "untracked" slot done leak through, which is precisely the
+    # phantom done shape this guard is designed to block.
+    if is_ms_ref:
+        return False, SLOT_DONE_REJECT_TASK_POOL_LOOKUP_FAILED, (
+            f"MS slot {task_id} done を拒否しました: scope project の "
+            "いずれにも該当 MS が見つかりません (= scope の整合性が崩れて "
+            "いる、 または MS 自体が削除済)。 trek scope を確認してください。"
+        )
+    return False, SLOT_DONE_REJECT_TASK_POOL_LOOKUP_FAILED, (
+        f"Trek slot {task_id} done を拒否しました: scope project の "
+        "いずれの task pool にも該当 entry が見つかりません (= task が "
+        "存在しないのに slot だけ done にする経路は phantom done として "
+        "構造的に reject、 ms-97 / e-2650)。"
+    )
+
+
+def _find_milestone_by_id(project_data: dict, ms_id: str) -> dict | None:
+    """Locate a milestone dict in ``project_data.milestones[]`` by id.
+
+    Returns ``None`` if absent. Kept as a private helper because the
+    public ``core.find_entry`` walks **entries** (= task / spec children)
+    and intentionally does not surface MS-level matches.
+    """
+    if not ms_id or not project_data:
+        return None
+    for ms in project_data.get("milestones") or []:
+        if isinstance(ms, dict) and ms.get("id") == ms_id:
+            return ms
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Cross-project task add via Trek scope (ms-92 / e-2141)
 # ---------------------------------------------------------------------------
 

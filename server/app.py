@@ -5264,6 +5264,32 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
         trek_mod.validate_task_state(body.state)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # ms-97 / e-2650 — phantom done 構造防御。 Trek slot を done に flip
+    # する前に、 真値源である project pool の task status が done である
+    # ことを必須条件として check する (= 「view 側だけ done になる経路」 を
+    # server で構造的に reject)。 状態が done 以外なら check skip (= todo
+    # / working / *_review への遷移は従来通り 5-state machine だけで判定、
+    # done だけが evidence-backed terminal なので明示防御の対象)。
+    # 旧コード (= 2026-06-28 以前) ではこの check が無く、 e-710 のような
+    # 「commit ゼロで Trek slot だけ done」 が成立していた。 ms-97 SPEC
+    # AC10 / AC30 補強の構造実装、 詳細は lib/trek.py
+    # ``check_slot_done_precondition`` の docstring を参照。
+    if body.state == "done":
+        allowed, reason_code, message = trek_mod.check_slot_done_precondition(
+            t,
+            task_id=body.task_id,
+            get_project=db.get_project,
+        )
+        if not allowed:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": reason_code,
+                    "message": message,
+                    "trek_id": trek_id,
+                    "task_id": body.task_id,
+                },
+            )
     try:
         trek_mod.set_task_state(
             t,
