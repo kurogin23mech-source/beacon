@@ -216,6 +216,8 @@ done 操作の報告後、Bash ツールで実行:
 beacon trigger check
 ```
 
+タスク done 操作は auto-fire 条件 (retro-day / release-due 等) に影響しないため、 明示的な `tick` は不要 (auto-throttle gate が 5 分に 1 度自動更新する、 ms-98 / e-2764)。 `check` のみで local read。
+
 JSON 配列が返る。空でなければ、各トリガーの `message` をユーザーに提示する:
 ```
 Beacon trigger: [message]

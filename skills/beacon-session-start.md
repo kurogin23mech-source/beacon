@@ -995,8 +995,10 @@ shape / verdict literal の drift は tests で捕まる構造 (= `test_verdict_
 
 Bash ツールで実行:
 ```bash
-beacon trigger check
+beacon trigger tick && beacon trigger check
 ```
+
+`tick` は auto-fire + cleanup を明示的に走らせて trigger state を refresh、 直後の `check` は refresh 済みの `.beacon/triggers/*.json` を local read で表示する (ms-98 / e-2764 の分離、 セッション開始時は fresh state を surface したいので明示 tick する)。
 
 JSON 配列が返る。空でなければ、各トリガーの `message` を出力の末尾に追加:
 ```

@@ -199,8 +199,10 @@ Deploy: [deploy-id] [major/minor] (env)
 
 Bash ツールで実行:
 ```bash
-beacon trigger check
+beacon trigger tick && beacon trigger check
 ```
+
+deploy 直後は Operation の run_record 記録などで trigger 判定が変わっている可能性があるので、 `tick` で refresh してから `check` (ms-98 / e-2764)。
 
 空でなければ各トリガーの `message` を提示する。
 
