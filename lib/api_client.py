@@ -7,9 +7,127 @@ instead of directly accessing Firestore.
 from __future__ import annotations
 
 import json
+import os as _os
+import time as _time
 import urllib.parse
 import urllib.request
 import urllib.error
+
+
+# ---------------------------------------------------------------------------
+# Client-side circuit breaker (ms-98 / e-2777)
+#
+# Rationale: on 2026-07-02 the client kept retrying against a Cloud Run
+# instance pool that was already returning 429 "no available instance",
+# adding to the server's load and amplifying the storm. This breaker
+# short-circuits ``_request`` when the recent 429 rate crosses a
+# threshold. e-2764 (trigger-check split) and e-2769 (session cache)
+# reduce the number of times the client picks up the phone; this closes
+# the fallback path where an already-picked-up call retries into a
+# degraded server.
+#
+# State is module-level so every ``ApiClient`` inside a single Python
+# process shares one view. Cross-process coordination is a future
+# concern (an OS lock file is overkill for a per-invocation CLI). The
+# wall-clock TTL from e-2773 already caps how long any single process
+# can retry.
+# ---------------------------------------------------------------------------
+
+_CIRCUIT_LOCK_ENV = "BEACON_API_CIRCUIT_BREAKER_DISABLE"
+_CIRCUIT_WINDOW_ENV = "BEACON_API_CIRCUIT_WINDOW_SECONDS"
+_CIRCUIT_THRESHOLD_ENV = "BEACON_API_CIRCUIT_THRESHOLD"
+_CIRCUIT_COOLDOWN_ENV = "BEACON_API_CIRCUIT_COOLDOWN_SECONDS"
+
+_DEFAULT_CIRCUIT_WINDOW = 60.0
+_DEFAULT_CIRCUIT_THRESHOLD = 3
+_DEFAULT_CIRCUIT_COOLDOWN = 60.0
+
+_recent_429_timestamps: list[float] = []
+_circuit_open_until: float = 0.0
+
+
+def _circuit_enabled() -> bool:
+    return _os.environ.get(_CIRCUIT_LOCK_ENV, "").strip() != "1"
+
+
+def _circuit_window() -> float:
+    raw = _os.environ.get(_CIRCUIT_WINDOW_ENV, "").strip()
+    if raw:
+        try:
+            v = float(raw)
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    return _DEFAULT_CIRCUIT_WINDOW
+
+
+def _circuit_threshold() -> int:
+    raw = _os.environ.get(_CIRCUIT_THRESHOLD_ENV, "").strip()
+    if raw:
+        try:
+            v = int(raw)
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    return _DEFAULT_CIRCUIT_THRESHOLD
+
+
+def _circuit_cooldown() -> float:
+    raw = _os.environ.get(_CIRCUIT_COOLDOWN_ENV, "").strip()
+    if raw:
+        try:
+            v = float(raw)
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    return _DEFAULT_CIRCUIT_COOLDOWN
+
+
+def _circuit_check_and_raise() -> None:
+    """Raise ``RuntimeError`` if the circuit is currently open.
+
+    Called before the network hop. When the breaker has opened due to a
+    recent 429 streak, this turns "another retry attempt" into
+    "immediate fail with a diagnostic" — the client stops piling
+    requests onto a server that is already refusing them.
+    """
+    if not _circuit_enabled():
+        return
+    now = _time.monotonic()
+    if now < _circuit_open_until:
+        remaining = _circuit_open_until - now
+        raise RuntimeError(
+            "API circuit open (recent 429 storm); cooling down for "
+            f"{remaining:.1f}s. Set "
+            "BEACON_API_CIRCUIT_BREAKER_DISABLE=1 to override."
+        )
+
+
+def _circuit_record_429() -> None:
+    """Track a 429 hit; open the circuit if the recent window is saturated."""
+    if not _circuit_enabled():
+        return
+    global _circuit_open_until
+    now = _time.monotonic()
+    window = _circuit_window()
+    _recent_429_timestamps.append(now)
+    # Prune anything older than the window so ``len`` reflects only the
+    # burst that matters right now.
+    cutoff = now - window
+    while _recent_429_timestamps and _recent_429_timestamps[0] < cutoff:
+        _recent_429_timestamps.pop(0)
+    if len(_recent_429_timestamps) >= _circuit_threshold():
+        _circuit_open_until = now + _circuit_cooldown()
+
+
+def _circuit_reset_for_tests() -> None:
+    """Clear circuit state — hook for tests to isolate cases."""
+    global _circuit_open_until
+    _recent_429_timestamps.clear()
+    _circuit_open_until = 0.0
 
 
 class ApiClient:
@@ -26,6 +144,11 @@ class ApiClient:
         return self._token
 
     def _request(self, method: str, path: str, body: dict | None = None) -> dict:
+        # ms-98 / e-2777: fail fast when a recent 429 storm has opened
+        # the circuit. Kept ahead of URL / body assembly so an already-
+        # tripped breaker never even builds a request object.
+        _circuit_check_and_raise()
+
         url = f"{self._base_url}{path}"
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(url, data=data, method=method)
@@ -74,6 +197,11 @@ class ApiClient:
                 detail = json.loads(error_body).get("detail", error_body)
             except (json.JSONDecodeError, AttributeError):
                 detail = error_body
+            # ms-98 / e-2777: track 429s to feed the circuit breaker.
+            # Recorded AFTER the response body is drained so we don't
+            # leak the socket if the state machine opens here.
+            if e.code == 429:
+                _circuit_record_429()
             raise RuntimeError(f"API error {e.code}: {detail}") from e
         except urllib.error.URLError as e:
             raise ConnectionError(
@@ -217,6 +345,10 @@ class ApiClient:
         Server-side validation gates content-type (image/* only) and size
         (10 MiB cap) — see ``server/doc_images.py``.
         """
+        # ms-98 / e-2777: honor the shared circuit state so image
+        # uploads don't sneak past the fail-fast during a 429 storm.
+        _circuit_check_and_raise()
+
         import os as _os
         import mimetypes as _mt
         import uuid as _uuid
@@ -258,6 +390,10 @@ class ApiClient:
                 detail = json.loads(error_body).get("detail", error_body)
             except (json.JSONDecodeError, AttributeError):
                 detail = error_body
+            # ms-98 / e-2777: image upload path shares the circuit state
+            # with plain _request so a 429 here also opens the breaker.
+            if e.code == 429:
+                _circuit_record_429()
             raise RuntimeError(f"API error {e.code}: {detail}") from e
         except urllib.error.URLError as e:
             raise ConnectionError(
