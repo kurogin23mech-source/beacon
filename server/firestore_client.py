@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import os
 
 from google.cloud import firestore
+
+logger = logging.getLogger(__name__)
 
 _db: firestore.Client | None = None
 
@@ -78,11 +81,24 @@ def list_projects(user_id: str | None = None, include_archived: bool = False) ->
             continue
         if user_id:
             owner = data.get("owner")
-            # Projects without owner are visible to all (migration period)
-            if owner:
-                members = [m.get("user_id") for m in data.get("members", [])]
-                if owner != user_id and user_id not in members:
-                    continue
+            # ms-95 / e-2794 (2026-07-03): 旧来の「owner 未設定 project は全ユーザーに
+            # 見せる」migration-period fallthrough を撤廃。ms-6 マルチユーザー対応の
+            # 初期に、owner を持たない legacy project を延命する一時措置として入って
+            # いたが、そのまま放置され「別 Google ID で login すると他人の project
+            # が全部見える」情報漏洩の原因になっていた (dogfood で観測)。
+            # deny by default: owner が無ければ誰にも見せない。復旧が必要なら
+            # admin が /api/admin/projects/ownerless で対象を洗い出し、owner を
+            # 手動補填する運用に切り替える。
+            if not owner:
+                logger.warning(
+                    "list_projects: skipping ownerless project %s "
+                    "(user %s asked, deny-by-default)",
+                    doc.id, user_id,
+                )
+                continue
+            members = [m.get("user_id") for m in data.get("members", [])]
+            if owner != user_id and user_id not in members:
+                continue
         owner_uid = data.get("owner") or ""
         row = {
             "project_id": doc.id,
