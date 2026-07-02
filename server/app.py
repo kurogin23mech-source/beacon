@@ -454,6 +454,7 @@ def _require_project_role(
     user: dict | None,
     *,
     allowed: tuple[str, ...] = ("owner", "editor", "viewer"),
+    hydrate_milestones: bool = True,
 ) -> tuple[dict, str]:
     """Single source of truth for "can this user read/write this project?".
 
@@ -470,12 +471,33 @@ def _require_project_role(
     "load + role check" pair, and the only knob is ``allowed`` (used by the
     handful of endpoints that need owner-only / editor-only access).
 
+    ``hydrate_milestones`` (cost-reduction knob, added for the
+    ~60% Firestore read reduction on high-frequency polling endpoints):
+
+      * ``True``  (default) — call ``load_project_consistent`` which streams
+        the ``milestones`` subcollection (97 reads for the Beacon project).
+        Every existing caller kept its current behavior.
+      * ``False`` — call ``load_project_meta_only`` which fetches ONLY the
+        project meta doc (1 read) and returns the SAME dict shape with
+        ``milestones=[]``. Use for endpoints whose handler body never
+        reads ``data["milestones"]`` (bus polling, session intent, cursor
+        updates, per-event acks). The auth check runs on the meta doc alone
+        because ``owner`` / ``members`` live at the top level — unaffected
+        by whether milestones are hydrated.
+
+    Keeping this behind one flag on the single auth helper preserves the
+    "authorization rule lives in one place" invariant this function was
+    created to enforce.
+
     For WS handlers: catch ``HTTPException`` from this helper and translate
     ``404 → close 4404`` / ``403 → close 4403 (forbidden)``. REST handlers
     re-raise as-is.
     """
     try:
-        data = operations.load_project_consistent(project_id)
+        if hydrate_milestones:
+            data = operations.load_project_consistent(project_id)
+        else:
+            data = operations.load_project_meta_only(project_id)
     except LookupError:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
     if not _auth_enabled or user is None:
@@ -505,6 +527,44 @@ def _load(project_id: str, user: dict | None = None) -> dict:
         except LookupError:
             raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
     data, _role = _require_project_role(project_id, user)
+    return data
+
+
+def _load_meta_only(project_id: str, user: dict | None = None) -> dict:
+    """Meta-only variant of :func:`_load` — same auth rule, no milestones hydration.
+
+    Every API call passing through ``_load`` triggered
+    ``operations.load_project_consistent`` which streams the entire
+    ``milestones`` subcollection (97 reads for the Beacon project) even when
+    the handler only needed a role check on the project meta doc. For
+    high-frequency polling endpoints (bus/unread, cursor advance, session
+    intent, per-event ack) this multiplied Firestore reads by ~97x — one of
+    the dominant contributors to the GCP bill discovered during the
+    cost-reduction sweep.
+
+    This helper is the drop-in for those handlers:
+
+      * Same 404 / 403 behavior as ``_load`` (the auth check is delegated to
+        ``_require_project_role`` so the rule stays in ONE place).
+      * Returns the same dict shape as ``_load`` EXCEPT
+        ``data["milestones"]`` is guaranteed to be ``[]``. Any accidental
+        ``for ms in data["milestones"]`` is a silent no-op — the caller does
+        not KeyError, and there is no silently truncated milestone list to
+        mislead downstream code.
+      * The ``user is None`` branch mirrors ``_load``'s dev-mode /
+        internal-caller path so behavior is consistent between the two
+        entry points.
+
+    Do NOT switch endpoints that read ``data["milestones"]`` (like
+    ``GET /api/projects/{project_id}`` or milestone / task CRUD) to this
+    helper — they would silently receive an empty list.
+    """
+    if user is None:
+        try:
+            return operations.load_project_meta_only(project_id)
+        except LookupError:
+            raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    data, _role = _require_project_role(project_id, user, hydrate_milestones=False)
     return data
 
 
@@ -8885,7 +8945,11 @@ def list_unread_bus_events(
     AUTONOMOUS ACTION blocks. Empty string ⇒ fall back to the server cursor
     (= legacy behavior, used by /beacon-bus-inbox-hook).
     """
-    _load(project_id, user)
+    # Cost-reduction: this is one of the highest-volume polling endpoints
+    # (bus.mjs hits it every 2-3 seconds per session). The handler body
+    # never reads data["milestones"] — it only needs the meta doc for the
+    # role check. Meta-only load turns 97 Firestore reads into 1.
+    _load_meta_only(project_id, user)
     if not since:
         cursor = db.get_bus_cursor(project_id, recipient_id)
         since = cursor.get("last_seen_at", "")
@@ -8920,7 +8984,10 @@ def advance_bus_cursor(
     response is the cursor state *after* the call, so the client can verify
     its commit landed.
     """
-    _load(project_id, user)
+    # Cost-reduction: cursor advance follows every bus/unread poll (paired
+    # write after read). Handler only needs the meta doc for auth — the
+    # cursor state itself lives in bus_cursors, not data["milestones"].
+    _load_meta_only(project_id, user)
     return db.advance_bus_cursor(project_id, recipient_id, body.last_seen_at)
 
 
@@ -8931,7 +8998,8 @@ def get_bus_cursor(
     user: dict = Depends(require_auth),
 ):
     """Return the current cursor for ``recipient_id`` ({} if unset)."""
-    _load(project_id, user)
+    # Cost-reduction: read-only cursor fetch, no milestones touched.
+    _load_meta_only(project_id, user)
     return db.get_bus_cursor(project_id, recipient_id)
 
 
@@ -8966,11 +9034,13 @@ def upsert_session_intent(
 
     The endpoint does NOT enforce that the calling session_id matches the
     authenticated user — multi-agent dispatch may stamp on behalf of a
-    sub-session. We do require project membership via _load. The
+    sub-session. We do require project membership via _load_meta_only. The
     ``actor.email`` already on the session document is the audit trail for
     who actually owns it.
     """
-    _load(project_id, user)
+    # Cost-reduction: intent stamping writes to the session doc only.
+    # Membership check needs the meta doc; milestones are never read.
+    _load_meta_only(project_id, user)
     payload = body.model_dump(exclude_none=True)
     if not payload:
         return {"status": "noop"}
@@ -9020,7 +9090,9 @@ def ack_bus_event_receipt(
     boundary so a typo on the receiver does not accidentally smuggle a new
     field onto the event document.
     """
-    _load(project_id, user)
+    # Cost-reduction: receipt ack writes to the bus event doc only.
+    # Handler only needs auth via the meta doc; no milestones access.
+    _load_meta_only(project_id, user)
     stage = body.stage
     if stage not in _RECEIPT_STAGES:
         raise HTTPException(
@@ -9296,6 +9368,59 @@ def _enrich_project_slim(data: dict) -> dict:
         slim_ms["total_tasks"] = total
         slim_ms["done_tasks"] = done
         milestones.append(slim_ms)
+    enriched["milestones"] = milestones
+    return enriched
+
+
+def _enrich_project_active_only(
+    data: dict, *, drop_done_entries: bool = True
+) -> dict:
+    """Active-only enrichment — drop done milestones (and optionally done entries).
+
+    Cost / payload reduction sibling of :func:`_enrich_project` and
+    :func:`_enrich_project_slim`. A typical Beacon project accumulates a
+    long tail of ``status="done"`` milestones (and each surviving milestone
+    accumulates a long tail of ``status="done"`` entries). Most polling
+    consumers (dashboard "what's happening now" views, status widgets,
+    Trek executor progress checks) only care about work that is currently
+    in flight. This helper filters both layers so callers that opt in can
+    ship a much smaller payload without touching the storage layer.
+
+    Contract:
+      * Milestones with ``status == "done"`` are dropped entirely.
+      * When ``drop_done_entries=True`` (default), remaining milestones
+        have their ``entries`` list filtered to items whose ``status`` is
+        not ``"done"``. When ``False``, all entries on surviving
+        milestones are preserved.
+      * All other fields on data / milestones / entries are pass-through.
+      * Same computed fields as :func:`_enrich_project`
+        (``total_tasks``, ``done_tasks``, ``entries_to_json``) are added.
+        The counts are computed on the FULL entries list (before the
+        done-drop) so consumers can still see "3 of 5 done" summaries
+        even when the done entries are not returned inline.
+
+    Deliberately NOT wired into any endpoint. Add on an opt-in basis in a
+    follow-up so we can measure impact per caller instead of silently
+    changing behavior of existing consumers.
+    """
+    enriched = {**data}
+    milestones = []
+    for ms in data.get("milestones", []):
+        if ms.get("status") == "done":
+            continue
+        entries = ms.get("entries", []) or []
+        total, done = core.count_task_status(entries)
+        kept_entries = entries
+        if drop_done_entries:
+            kept_entries = [
+                e for e in entries if e.get("status") != "done"
+            ]
+        milestones.append({
+            **ms,
+            "entries": core.entries_to_json(kept_entries),
+            "total_tasks": total,
+            "done_tasks": done,
+        })
     enriched["milestones"] = milestones
     return enriched
 
