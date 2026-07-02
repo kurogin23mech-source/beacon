@@ -919,3 +919,54 @@ def load_project_consistent(project_id: str) -> dict:
     )
     milestones = [s.to_dict() for s in ms_col.stream()]
     return {**meta, "milestones": milestones}
+
+
+def load_project_meta_only(project_id: str) -> dict:
+    """Return the project meta doc only — same shape as :func:`load_project_consistent`
+    but WITHOUT streaming the ``milestones`` subcollection.
+
+    This is the cost-reduction sibling of ``load_project_consistent``. Every
+    call to the latter incurred one Firestore read per milestone (= 97 reads
+    for the Beacon project) because v2 layout stores milestones in a
+    subcollection and the consistent-load path hydrates them unconditionally.
+    On high-frequency polling endpoints (bus/unread, cursor advance, session
+    intent, per-event ack) the milestones payload was never used — the
+    handler only needed the meta doc for the auth role check.
+
+    The returned dict is guaranteed to include ``"milestones": []`` so
+    downstream code that does ``for ms in data["milestones"]`` becomes a
+    silent no-op instead of raising ``KeyError``. Callers that DO need
+    milestones must call ``load_project_consistent`` instead — this helper
+    intentionally does not fall back.
+
+    v1 legacy projects (and DynamoDB backend, which stores project docs
+    whole) already have ``milestones`` inline on the meta doc. We overwrite
+    that field with ``[]`` to keep the contract uniform ("this helper never
+    returns milestones data"), so v1 / DynamoDB callers are equally
+    protected from accidental reliance on hydrated milestones. Callers that
+    know they need the whole doc should call ``load_project_consistent``.
+
+    Backend behavior:
+      * ``local`` — reads the project.json file (single filesystem read; no
+        Firestore cost).
+      * ``dynamodb`` — one ``db.get_project`` call, no subcollection stream
+        (DynamoDB stores the whole doc; we still stub milestones=[]).
+      * Firestore v1 / v2 — one ``db.get_project`` call, never touches the
+        milestones subcollection.
+    """
+    backend = _detect_backend()
+    if backend == "local":
+        path = os.environ.get("BEACON_PROJECT_FILE", ".beacon/project.json")
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        data["milestones"] = []
+        return data
+
+    # ms-64 e-1627 parity with load_project_consistent: honor the store_router
+    # backend switch so DynamoDB deployments benefit from the same "meta only"
+    # contract even though they never hit the subcollection stream anyway.
+    import store_router as db  # type: ignore[import-not-found]
+    meta = db.get_project(project_id)
+    if meta is None:
+        raise LookupError(f"Project '{project_id}' not found")
+    return {**meta, "milestones": []}
