@@ -4317,12 +4317,20 @@ EOF
             check)
                 python3 "$COMMANDS_PY" trigger_check
                 ;;
+            tick)
+                # ms-98 / e-2764: run auto-fire + cleanup pipeline. This is
+                # the server-touching half that used to be baked into
+                # `trigger check`. Call it on a debounced cadence (Skill /
+                # cron) — never in a tight loop or per-hook.
+                python3 "$COMMANDS_PY" trigger_tick
+                ;;
             clear)
                 BEACON_TRIGGER_NAME="${3:-}" python3 "$COMMANDS_PY" trigger_clear
                 ;;
             *)
                 echo "Usage: beacon trigger fire [--trek <trek-id>] <name> [message]"
-                echo "       beacon trigger check"
+                echo "       beacon trigger check                 (local-only read)"
+                echo "       beacon trigger tick                  (refresh via cloud)"
                 echo "       beacon trigger clear <name>"
                 ;;
         esac
