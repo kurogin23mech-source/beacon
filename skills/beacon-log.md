@@ -482,8 +482,10 @@ deploy サイクル中のプロジェクトです。前回 deploy: [last_action_
 
 Step 4〜6 の報告後、Bash ツールで実行:
 ```bash
-cd "$PROJECT_DIR" && beacon trigger check
+cd "$PROJECT_DIR" && beacon trigger tick && beacon trigger check
 ```
+
+コミット直後は release-due / retro-due 等の auto-fire 判定が変わっている可能性があるため、 `tick` で明示的に refresh してから `check` で local 読み取り (ms-98 / e-2764 の分離、 コミット直後は fresh state が欲しいので明示 tick)。
 
 JSON 配列が返る。空でなければ、各トリガーの `message` をユーザーに提示する:
 ```

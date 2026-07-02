@@ -59,8 +59,10 @@ cd "$PROJECT_DIR" 2>/dev/null; beacon-find-root >/dev/null && echo "OK" || echo 
 retro trigger が示す overdue 週数が 2 以上の時、または user が `/beacon-retro catch-up` / 「まとめて消化したい」 と発話した時は、catch-up フローに分岐する。
 
 ```bash
-cd "$PROJECT_DIR" && beacon trigger check 2>&1 | head -20
+cd "$PROJECT_DIR" && beacon trigger tick && beacon trigger check 2>&1 | head -20
 ```
+
+`tick` で retro-due の overdue 週数を fresh 化してから読む (ms-98 / e-2764)。
 
 trigger payload (= `.beacon/triggers/retro.json`) に `overdue_slots` が 2 件以上ある場合は catch-up モードで開始することを提案:
 

@@ -109,13 +109,15 @@ beacon doc show version-rules 2>/dev/null | head -1
 
 Bash ツールで実行:
 ```bash
-beacon trigger check 2>/dev/null | python3 -c "import json,sys
+beacon trigger tick && beacon trigger check 2>/dev/null | python3 -c "import json,sys
 ts = json.load(sys.stdin)
 due = [t for t in ts if t.get('kind') == 'release-due']
 for t in due:
     print(f\"- {t['message']}\")
 "
 ```
+
+push 直後は commit 追加で release-due の判定が変わっている可能性が高いので、 `tick` で明示的に refresh してから release-due kind を抽出する (ms-98 / e-2764)。
 
 release-due トリガー (ms-52 e-958: feat 3+ または fix 5+ で fire) が出ていれば
 「リリースの頃合い」のシグナル。fire していなくても、ユーザー意志での release
@@ -255,8 +257,10 @@ Push: [push-id] [branch] ([N] commits)
 
 Bash ツールで実行:
 ```bash
-beacon trigger check
+beacon trigger tick && beacon trigger check
 ```
+
+push + release 完了後は release-marker / release-due 等の判定が変わっている可能性が高いので、 `tick` で明示 refresh してから `check` で local read (ms-98 / e-2764)。
 
 空でなければ各トリガーの `message` を提示する。
 
