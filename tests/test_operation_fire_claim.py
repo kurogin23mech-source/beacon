@@ -127,6 +127,71 @@ def test_cloud_mode_missing_credentials_returns_true(project_with_open_op,
 
 
 # ---------------------------------------------------------------------------
+# ms-98 / e-2781 — narrowed fail-open scope
+# ---------------------------------------------------------------------------
+
+def test_rate_limited_429_returns_false_and_skips_push(project_with_open_op,
+                                                       monkeypatch):
+    """A RuntimeError whose message mentions 429 must skip the bus push.
+
+    Before e-2781 every exception returned True (fail-open), which
+    amplified the 2026-07-02 storm because parallel bclaude sessions
+    all pushed bus events on top of an already-saturated server. The
+    narrowed policy treats rate-limit errors as "not this tick".
+    """
+    _stub_cloud_config(project_with_open_op)
+
+    def raising_post(*_args, **_kwargs):
+        raise RuntimeError("API error 429: Rate exceeded.")
+
+    _stub_api_client(monkeypatch, post_override=raising_post)
+    assert commands._claim_operation_fire_for_bus_push("op-1") is False
+
+
+def test_circuit_open_returns_false(project_with_open_op, monkeypatch):
+    """When e-2777's circuit breaker is open, the claim path receives a
+    "circuit open" RuntimeError and must also skip the push.
+    """
+    _stub_cloud_config(project_with_open_op)
+
+    def raising_post(*_args, **_kwargs):
+        raise RuntimeError(
+            "API circuit open (recent 429 storm); cooling down for 42.0s."
+        )
+
+    _stub_api_client(monkeypatch, post_override=raising_post)
+    assert commands._claim_operation_fire_for_bus_push("op-1") is False
+
+
+def test_generic_network_failure_still_fails_open(project_with_open_op,
+                                                   monkeypatch):
+    """Non-rate-limit errors keep the original fail-open behaviour so a
+    genuine transient blip does not silently drop the daily fire.
+    """
+    _stub_cloud_config(project_with_open_op)
+
+    def raising_post(*_args, **_kwargs):
+        raise ConnectionError("Cannot connect to API (dns unavailable)")
+
+    _stub_api_client(monkeypatch, post_override=raising_post)
+    assert commands._claim_operation_fire_for_bus_push("op-1") is True
+
+
+def test_malformed_response_still_fails_open(project_with_open_op,
+                                              monkeypatch):
+    """A response that isn't a dict raises AttributeError; that is not a
+    rate-limit signal, so fail-open still applies.
+    """
+    _stub_cloud_config(project_with_open_op)
+
+    def raising_post(*_args, **_kwargs):
+        raise AttributeError("'str' object has no attribute 'get'")
+
+    _stub_api_client(monkeypatch, post_override=raising_post)
+    assert commands._claim_operation_fire_for_bus_push("op-1") is True
+
+
+# ---------------------------------------------------------------------------
 # Integration test against _auto_fire_operation_triggers
 # ---------------------------------------------------------------------------
 

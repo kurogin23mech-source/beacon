@@ -9522,6 +9522,33 @@ def _claim_operation_fire_for_bus_push(op_id: str) -> bool:
         result = client.claim_operation_fire(project_id, op_id, session_id)
         return bool(result.get("claimed", True))
     except Exception as exc:
+        # ms-98 / e-2781: narrow the fail-open policy. The original
+        # rationale for "return True on any error" was to avoid silently
+        # losing a scheduled operation fire during a transient network
+        # blip. But on 2026-07-02 that same policy amplified the 429
+        # storm: every parallel bclaude session that failed the claim
+        # STILL pushed a bus event, adding to the server's load. Two
+        # classes of failure are now split:
+        #
+        #   * Rate-limit family (429 in the exception message, or the
+        #     e-2777 circuit breaker returning "circuit open"). Treat as
+        #     "not this tick" — return False so the caller skips the bus
+        #     push. The scheduler's next tick will retry the claim and
+        #     the fire lands as long as the storm has cleared. This
+        #     stops the client from adding to the storm.
+        #
+        #   * Everything else (auth misconfig, config missing, generic
+        #     network failure, malformed response, etc.) — keep the
+        #     original fail-open so a genuine transient issue still
+        #     doesn't drop a fire.
+        msg = str(exc)
+        rate_limited = "429" in msg or "circuit open" in msg.lower()
+        if rate_limited:
+            sys.stderr.write(
+                f"[beacon] operation fire claim skipped (rate-limited; "
+                f"will retry next tick): {type(exc).__name__}: {exc}\n"
+            )
+            return False
         sys.stderr.write(
             f"[beacon] operation fire claim failed (fail-open, "
             f"may duplicate-fire): {type(exc).__name__}: {exc}\n"
