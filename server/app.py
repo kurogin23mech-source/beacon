@@ -1376,11 +1376,18 @@ def me_list_projects(user: dict = Depends(require_auth)):
                 if m.get("user_id") == uid:
                     role = m.get("role", "member") or "member"
                     break
+            # ms-95 / e-2794 (2026-07-03): 旧「migration-period 対応で無 owner
+            # project を member 扱い」フォールバックを削除。上流の list_projects
+            # が既に ownerless project を deny by default で除外しているため、
+            # ここに到達する時点で role が決まらないケース (= owner でも member
+            # でもない) は認可データの不整合であり、silent に member 化しない。
             if not role:
-                # Migration-period projects without owner are visible to all;
-                # treat that as "member" so the picker doesn't have to handle
-                # an empty role.
-                role = "member"
+                _server_logger.warning(
+                    "me_list_projects: project %s reached me-endpoint without "
+                    "resolvable role for user %s; skipping",
+                    pid, uid,
+                )
+                continue
         result.append({
             "id": pid,
             "name": item.get("name", ""),
@@ -1780,11 +1787,18 @@ def create_project(project_id: str, body: ProjectCreate,
     existing = db.get_project(project_id)
     if existing is not None:
         raise HTTPException(status_code=409, detail=f"Project '{project_id}' already exists")
+    # ms-95 / e-2794 (2026-07-03): owner を必須化。以前は sub 欠落時に空文字
+    # フォールバックで owner="" の project が silent に生まれ、list_projects の
+    # migration-period fallthrough と組み合わさって全ユーザー可視の穴を作って
+    # いた。deny by default 側の fix と両輪で塞ぐ。
+    owner_sub = user.get("sub")
+    if not owner_sub:
+        raise HTTPException(status_code=401, detail="Authenticated user has no sub claim")
     data = {
         "name": body.name,
         "objective": body.objective,
         "milestones": [],
-        "owner": user.get("sub", ""),
+        "owner": owner_sub,
         "members": [],
         # SCHEMA_V2_BETA — see lib/operations.py
         "schema_version": operations.SCHEMA_V2_BETA,
@@ -3440,6 +3454,35 @@ def admin_list_projects(user: dict = Depends(require_auth)):
     """List all projects summary (admin only). No project content exposed."""
     _require_admin(user)
     return db.list_all_projects()
+
+
+@app.get("/api/admin/projects/ownerless")
+def admin_list_ownerless_projects(user: dict = Depends(require_auth)):
+    """Audit endpoint: list projects that have no owner field (ms-95 / e-2794).
+
+    Before the 2026-07-03 fix, ownerless projects leaked into every user's
+    project listing via the ``list_projects`` migration-period fallthrough.
+    That path is now closed (deny by default). This endpoint lets an admin
+    inventory the residue so owners can be backfilled or the projects
+    archived. Returns rows with minimal metadata — no milestones / entries.
+    """
+    _require_admin(user)
+    rows = []
+    for p in db.list_all_projects():
+        if p.get("owner"):
+            continue
+        pid = p.get("project_id", "")
+        full = db.get_project(pid) or {} if pid else {}
+        rows.append({
+            "project_id": pid,
+            "name": p.get("name", "") or full.get("name", ""),
+            "objective": (full.get("objective") or "")[:200],
+            "archived": bool(full.get("archived", False)),
+            "member_count": p.get("member_count", 0),
+            "milestone_count": p.get("milestone_count", 0),
+            "updated_at": p.get("updated_at", ""),
+        })
+    return {"count": len(rows), "projects": rows}
 
 
 @app.delete("/api/admin/projects/{project_id}")
