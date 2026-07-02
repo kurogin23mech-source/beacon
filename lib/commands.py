@@ -9714,12 +9714,124 @@ def _push_trek_trigger_to_bus(trek_id: str, trigger_data: dict) -> None:
         )
 
 
+_TRIGGER_TICK_TTL_SECONDS = 300  # 5 minutes; overridable via BEACON_TRIGGER_TICK_TTL
+
+
+def _trigger_tick_stamp_path() -> str:
+    return os.path.join(_get_triggers_dir(), ".last_tick_at")
+
+
+def _trigger_tick_lock_path() -> str:
+    return os.path.join(_get_triggers_dir(), ".tick.lock")
+
+
+def _trigger_tick_ttl_seconds() -> int:
+    raw = os.environ.get("BEACON_TRIGGER_TICK_TTL", "")
+    if raw.strip():
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return _TRIGGER_TICK_TTL_SECONDS
+
+
+def _maybe_auto_tick(*, verbose: bool = False) -> bool:
+    """Run auto-fire pipeline iff the last tick is older than the TTL and no
+    other process holds the lock.
+
+    Returns True if this call actually ran the tick. Non-blocking — if a
+    peer is already ticking (lock held) or the stamp is fresh, this
+    returns False without doing any server-touching work.
+
+    Silent failure by design: the throttle gate must never block
+    ``beacon trigger check``; the user's local read is the guaranteed
+    contract, freshness is best-effort.
+    """
+    try:
+        triggers_dir = _get_triggers_dir()
+        os.makedirs(triggers_dir, exist_ok=True)
+    except OSError:
+        return False
+
+    ttl = _trigger_tick_ttl_seconds()
+    if ttl <= 0:
+        return False
+
+    stamp = _trigger_tick_stamp_path()
+    now = __import__("time").time()
+    try:
+        if os.path.exists(stamp) and (now - os.path.getmtime(stamp)) < ttl:
+            return False  # fresh enough
+    except OSError:
+        pass  # stamp unreadable — treat as stale and try to tick
+
+    lock = _trigger_tick_lock_path()
+    # Atomic acquire: O_EXCL fails if another process is mid-tick. Never
+    # block on the lock — the peer's tick will refresh the stamp for us.
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except OSError:
+        return False  # peer is ticking; skip
+
+    try:
+        _auto_fire_retro_trigger()
+        _auto_fire_operation_triggers()
+        _auto_fire_release_due_trigger()
+        _auto_fire_release_marker_trigger()
+        _cleanup_stale_triggers()
+        # Touch stamp so subsequent checks within TTL skip the tick.
+        try:
+            with open(stamp, "w", encoding="utf-8") as f:
+                f.write(str(now))
+        except OSError:
+            pass
+        if verbose:
+            sys.stderr.write("[beacon] trigger tick ran (auto)\n")
+        return True
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.remove(lock)
+        except OSError:
+            pass
+
+
 def cmd_trigger_check():
-    _auto_fire_retro_trigger()
-    _auto_fire_operation_triggers()
-    _auto_fire_release_due_trigger()
-    _auto_fire_release_marker_trigger()
-    _cleanup_stale_triggers()
+    """Read ``.beacon/triggers/*.json`` and print as JSON.
+
+    ms-98 / e-2764: previously this command **unconditionally** invoked
+    ``_auto_fire_*`` and ``_cleanup_stale_triggers`` on every call. Both
+    paths reach the cloud (``load_project`` / ``claim_operation_fire`` /
+    bus push). Multiplied by every Skill Step that surfaced trigger
+    state, this created a hidden hot path from ``beacon trigger check``
+    to ``/api/me/heartbeat`` and
+    ``/api/projects/*/operation-fires/*/claim``. Concurrent Skill fires
+    piled up into the 2026-07-02 429 storm + 104-hung-process leak.
+
+    Two structural changes tame the hot path while keeping the observable
+    contract intact:
+
+      1. Auto-fire and cleanup moved to :func:`cmd_trigger_tick`. Callers
+         who explicitly want fresh state can run ``beacon trigger tick``
+         and then ``beacon trigger check``.
+
+      2. This function opportunistically ticks **only when** the local
+         stamp file (``.beacon/triggers/.last_tick_at``) is older than
+         ``BEACON_TRIGGER_TICK_TTL`` seconds (default 300). Concurrent
+         checks are gated by an ``O_EXCL`` lock so at most one process
+         per (project, TTL window) reaches the cloud. Callers who want
+         to opt out entirely set ``BEACON_TRIGGER_TICK_TTL=0``.
+
+    The net effect: default calls stay under a millisecond of local IO,
+    freshness is refreshed at most once every 5 minutes per project, and
+    a caller that wants freshness NOW can force it with an explicit
+    ``beacon trigger tick``.
+    """
+    _maybe_auto_tick()
+
     triggers_dir = _get_triggers_dir()
     if not os.path.isdir(triggers_dir):
         print("[]")
@@ -9727,6 +9839,11 @@ def cmd_trigger_check():
     triggers = []
     for fname in sorted(os.listdir(triggers_dir)):
         if not fname.endswith(".json"):
+            continue
+        if fname.startswith("."):
+            # ms-98 / e-2764: internal stamp / lock files (.last_tick_at,
+            # .tick.lock) live alongside the trigger payloads. Skip them
+            # here so JSON parsing never touches them.
             continue
         fpath = os.path.join(triggers_dir, fname)
         try:
@@ -9743,6 +9860,42 @@ def cmd_trigger_check():
                 f"{os.path.basename(fpath)}: {type(exc).__name__}\n"
             )
     print(json.dumps(triggers, ensure_ascii=False))
+
+
+def cmd_trigger_tick():
+    """Refresh trigger state — run the auto-fire + cleanup pipeline.
+
+    ms-98 / e-2764: split out from ``cmd_trigger_check`` so the expensive
+    server-touching path can be scheduled separately from the cheap local
+    read. This function runs the four auto-fire evaluators (retro,
+    operation, release-due, release-marker) and the stale-trigger cleanup,
+    all of which may touch the cloud (via ``load_project`` /
+    ``claim_operation_fire`` / bus push).
+
+    Intended callers:
+      * Skills that need to surface freshly-computed triggers to the user
+        (session-start, log, push): call ``tick`` first, then ``check``.
+      * Interactive users: ``beacon trigger tick`` on demand, or wire it
+        into their editor / shell hook at a debounced cadence.
+
+    Not intended for high-frequency hook fires. Each tick issues at least
+    one authenticated API call (operation claim) plus a full project load.
+    """
+    _auto_fire_retro_trigger()
+    _auto_fire_operation_triggers()
+    _auto_fire_release_due_trigger()
+    _auto_fire_release_marker_trigger()
+    _cleanup_stale_triggers()
+    # Touch the stamp so subsequent ``check`` calls within the TTL window
+    # skip the auto-tick gate. Mirrors what ``_maybe_auto_tick`` writes on
+    # its own successful path.
+    try:
+        stamp = _trigger_tick_stamp_path()
+        os.makedirs(os.path.dirname(stamp), exist_ok=True)
+        with open(stamp, "w", encoding="utf-8") as f:
+            f.write(str(__import__("time").time()))
+    except OSError:
+        pass
 
 
 def cmd_trigger_clear():
@@ -19327,6 +19480,7 @@ if __name__ == "__main__":
         "retro_default_since": cmd_retro_default_since,
         "trigger_fire": cmd_trigger_fire,
         "trigger_check": cmd_trigger_check,
+        "trigger_tick": cmd_trigger_tick,
         "trigger_clear": cmd_trigger_clear,
         "doc_list": cmd_doc_list,
         "doc_show": cmd_doc_show,
