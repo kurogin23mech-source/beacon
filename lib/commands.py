@@ -19433,11 +19433,70 @@ def cmd_sessions_list():
 
 
 # ---------------------------------------------------------------------------
+# Wall-clock TTL for CLI subcommand execution (ms-98 / e-2773)
+# ---------------------------------------------------------------------------
+
+_DEFAULT_CLI_MAX_SECONDS = 60
+
+
+def _install_wall_clock_timeout(cmd_name: str) -> None:
+    """Install a self-termination timer so a single CLI invocation cannot
+    outlive its budget.
+
+    Rationale (2026-07-02 incident): ``urllib`` timeouts on individual API
+    calls (30-60 s) do not compose. ``cmd_trigger_check`` used to invoke
+    four ``_auto_fire_*`` helpers plus ``_cleanup_stale_triggers``; if any
+    of those hung on a per-call timeout, the process could sit for
+    hundreds of seconds without producing output. Concurrent hook fires
+    then piled up hundreds of these zombie processes.
+
+    A wall-clock ``SIGALRM`` at the top of the CLI dispatch caps every
+    subcommand at a bounded budget regardless of how many API round-trips
+    it stacks. Timeouts are best-effort: on a signal handler platforms
+    (POSIX only — ``signal.SIGALRM`` is not defined on Windows) we skip
+    installation silently so the CLI still runs.
+
+    Configuration:
+      * ``BEACON_CLI_MAX_SECONDS`` env var (int, seconds). Default 60.
+      * ``0`` disables the timer entirely (post-mortem / long-running debug).
+      * Negative or malformed values fall through to the default.
+    """
+    import signal
+    if not hasattr(signal, "SIGALRM"):
+        return  # Windows / other non-POSIX — silent skip.
+
+    raw = os.environ.get("BEACON_CLI_MAX_SECONDS", "").strip()
+    if raw:
+        try:
+            budget = int(raw)
+        except ValueError:
+            budget = _DEFAULT_CLI_MAX_SECONDS
+    else:
+        budget = _DEFAULT_CLI_MAX_SECONDS
+
+    if budget <= 0:
+        return  # explicitly disabled — no timer
+
+    def _timeout(signum, frame):  # noqa: ARG001
+        sys.stderr.write(
+            f"[beacon] wall-clock timeout after {budget}s in {cmd_name or '?'}\n"
+        )
+        # Exit 124 mirrors GNU ``timeout(1)`` — well-known convention that
+        # calling shells can pattern-match on to skip cleanup that assumes
+        # a normal exit.
+        os._exit(124)
+
+    signal.signal(signal.SIGALRM, _timeout)
+    signal.alarm(budget)
+
+
+# ---------------------------------------------------------------------------
 # Main dispatch
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    _install_wall_clock_timeout(cmd)
     commands = {
         "init": cmd_init,
         "milestone_add": cmd_milestone_add,
