@@ -175,6 +175,19 @@ def mint_trek_id() -> str:
     return f"tk-{secrets.token_hex(4)}"
 
 
+def mint_slot_id() -> str:
+    """Generate a fresh Trek slot id (= ``sl-<8 hex>``, ms-99 / e-2828).
+
+    Slots are first-class scope entries under Trek schema v2. The id is
+    minted on new adds; legacy on-disk scope entries without a slot_id
+    read back with an empty string (= backfill deferred to Phase 3's
+    interactive migration UX per director e-2828 decision, so the audit
+    trail records when each slot_id was assigned rather than silently
+    hashing one at read time).
+    """
+    return f"sl-{secrets.token_hex(4)}"
+
+
 def utcnow_iso() -> str:
     """ISO8601 UTC with microseconds + Z suffix (= matches firestore_client)."""
     return datetime.datetime.now(datetime.timezone.utc).strftime(
@@ -1507,9 +1520,48 @@ def backfill_session_history(trek_doc: dict) -> int:
     return added
 
 
+# ms-99 / e-2828: v2 scope entry field set (= slot schema v2). Presence of
+# any of these keys on input flips ``normalize_scope_entry`` into v2 output
+# mode; legacy inputs (project + narrowing key only) still round-trip to
+# legacy output so pre-v2 callers and their tests stay pinned.
+V2_SCOPE_KEYS: tuple = (
+    "slot_id", "target_kind", "target_id",
+    "included_task_ids", "claim_session_id", "claimed_at",
+)
+
+NARROWING_KEYS: tuple = ("milestone", "operation", "task")
+
+
+def _scope_entry_identity_key(entry: dict) -> tuple:
+    """Return the identity tuple of a scope entry (ms-99 / e-2828).
+
+    Identity = ``(project, narrowing_kind, narrowing_id)``. v2 attributes
+    (slot_id / claim_session_id / included_task_ids / claimed_at) describe
+    the *state* of the same slot and are intentionally excluded — a legacy
+    on-disk entry and a fresh v2-shaped entry that both point at the same
+    project + milestone/operation/task are the same slot.
+
+    Director e-2828 decision (= 案 A on the equality question): identity
+    is the narrowing tuple, not full-dict equality. This keeps
+    ``add_scope_entry`` and ``remove_scope_entry`` compatible across the
+    v1 → v2 migration without a data rewrite.
+    """
+    project = entry.get("project") or ""
+    for kind in NARROWING_KEYS:
+        val = entry.get(kind)
+        if val:
+            return (project, kind, val)
+    return (project, "", "")
+
+
+def _scope_entry_identity_matches(a: dict, b: dict) -> bool:
+    """True iff ``a`` and ``b`` refer to the same slot (identity-wise)."""
+    return _scope_entry_identity_key(a) == _scope_entry_identity_key(b)
+
+
 def normalize_scope_entry(
     entry: dict, *, strict: bool = True, resolve: bool = False,
-    db_or_lister=None,
+    db_or_lister=None, mint_slot: bool = False,
 ) -> dict:
     """Normalise a scope item.
 
@@ -1543,6 +1595,19 @@ def normalize_scope_entry(
     suffix'd ids (= ``life-plan-simulator-68c5df``) at the boundary.
     Existing tests default to ``resolve=False`` so the pure normalisation
     shape is unchanged; CLI / server entry points opt in.
+
+    ms-99 / e-2828 (Trek slot schema v2): the output gains the v2 field
+    set (``slot_id`` / ``target_kind`` / ``target_id`` /
+    ``included_task_ids`` / ``claim_session_id`` / ``claimed_at``) only
+    when the input already carries a v2 marker OR when the caller asks
+    for a fresh slot with ``mint_slot=True``. Legacy inputs (project +
+    narrowing key only) still normalise to the legacy shape, so pre-v2
+    on-disk data and its unit tests keep round-tripping unchanged. New
+    slot creation paths (CLI ``beacon trek slot add`` / API
+    ``POST /api/treks/{id}/slots``) pass ``mint_slot=True`` to receive a
+    fresh ``sl-<8 hex>`` id; legacy read paths pass the default False and
+    tolerate ``slot_id=""`` (= Phase 3 interactive backfill per SPEC
+    方針 3).
     """
     if not entry.get("project"):
         raise ValueError("scope entry missing required 'project' field")
@@ -1558,14 +1623,54 @@ def normalize_scope_entry(
             from lib.project_ref import resolve_project_ref as _resolve
         project_ref = _resolve(project_ref, db_or_lister=db_or_lister)
     out: dict = {"project": project_ref}
-    for k in ("milestone", "operation", "task"):
+    for k in NARROWING_KEYS:
         if entry.get(k):
             out[k] = entry[k]
-    if strict and not any(k in out for k in ("milestone", "operation", "task")):
+    if strict and not any(k in out for k in NARROWING_KEYS):
         raise ValueError(
             "scope entry requires narrowing key: milestone | operation | "
             "task (= project-wide scope is no longer accepted; ms-97 AC7)"
         )
+    # ms-99 / e-2828: v2 output branch. Only fires when the input signals
+    # v2 shape or the caller explicitly asks to mint a slot. Legacy inputs
+    # fall through and return the pre-v2 dict verbatim (backward compat).
+    has_v2_marker = any(k in entry for k in V2_SCOPE_KEYS)
+    if has_v2_marker or mint_slot:
+        # slot_id: preserve incoming; else mint on request; else empty
+        # string (= legacy row awaiting Phase 3 interactive backfill).
+        incoming_slot = entry.get("slot_id")
+        if incoming_slot:
+            out["slot_id"] = str(incoming_slot)
+        elif mint_slot:
+            out["slot_id"] = mint_slot_id()
+        else:
+            out["slot_id"] = ""
+        # target_kind / target_id: derived from the narrowing key present
+        # in ``out`` (= post-strict validation). SPEC 方針 1 calls this
+        # "narrowing key と冗長だが正規化のため" — the redundancy lets
+        # materialize_slots (Phase 2) index slots without re-inspecting
+        # the legacy key. Absent when no narrowing key exists (= only
+        # possible when strict=False + legacy project-wide row).
+        for kind in NARROWING_KEYS:
+            if kind in out:
+                out["target_kind"] = kind
+                out["target_id"] = out[kind]
+                break
+        # included_task_ids: preserve if key present; None marks the
+        # legacy "all children auto-include" semantics (SPEC AC4). A
+        # non-None list opts into explicit child selection (SPEC 方針 2).
+        if "included_task_ids" in entry:
+            inc = entry["included_task_ids"]
+            out["included_task_ids"] = None if inc is None else list(inc)
+        # claim_session_id / claimed_at: preserve when present. Stamping
+        # a claim never changes state (SPEC 方針 4) — that split lets
+        # planning-phase "I'll take this next" be observed before any
+        # todo→working transition happens.
+        if "claim_session_id" in entry:
+            out["claim_session_id"] = str(entry["claim_session_id"] or "")
+        if "claimed_at" in entry:
+            claimed_at = entry["claimed_at"]
+            out["claimed_at"] = claimed_at if claimed_at else None
     return out
 
 
@@ -2539,10 +2644,17 @@ def add_scope_entry(trek_doc: dict, *, entry: dict) -> dict:
     so project-wide additions raise ValueError before they can reach
     ``scope[]``. This is the lib-layer enforcement that closes the
     project-wide hole regardless of which caller invoked the helper.
+
+    ms-99 / e-2828: duplicate detection uses
+    ``_scope_entry_identity_matches`` (= project + narrowing tuple) so
+    a legacy on-disk entry and a v2-shaped incoming entry that point at
+    the same slot are recognised as duplicates. Full-dict equality would
+    let v2 fields (slot_id / claim / included_task_ids) mask the
+    duplicate and let two rows land for the same slot.
     """
     norm = normalize_scope_entry(entry, strict=True)
     for existing in trek_doc.get("scope") or []:
-        if existing == norm:
+        if _scope_entry_identity_matches(existing, norm):
             raise ValueError(f"scope entry already exists: {norm}")
     trek_doc.setdefault("scope", []).append(norm)
     trek_doc["updated_at"] = utcnow_iso()
@@ -2556,10 +2668,14 @@ def remove_scope_entry(trek_doc: dict, *, entry: dict) -> dict:
     mode so legacy project-wide entries (= grandfathered on-disk data)
     can still be addressed for removal. Otherwise users could never
     delete the very entries the new strict mode is meant to retire.
+
+    ms-99 / e-2828: match uses ``_scope_entry_identity_matches`` so a
+    remove request phrased in either legacy or v2 shape correctly picks
+    the corresponding slot regardless of how it was persisted.
     """
     norm = normalize_scope_entry(entry, strict=False)
     scope = trek_doc.get("scope") or []
-    new_scope = [s for s in scope if s != norm]
+    new_scope = [s for s in scope if not _scope_entry_identity_matches(s, norm)]
     if len(new_scope) == len(scope):
         raise ValueError(f"scope entry not found: {norm}")
     trek_doc["scope"] = new_scope
@@ -2597,9 +2713,18 @@ def remove_scope_entry(trek_doc: dict, *, entry: dict) -> dict:
 PENDING_SCOPE_OPS_KEY = "pending_scope_ops"
 PENDING_SCOPE_ACTION_ADD = "scope_add"
 PENDING_SCOPE_ACTION_REMOVE = "scope_remove"
+# ms-99 / e-2829: two new pending action verbs for slot-level mutations
+# that keep AC 15 (= all CLI slot operations flow through staging) intact.
+# ``scope_amend`` edits ``included_task_ids`` on an existing MS slot
+# (add/remove children); ``scope_claim`` stamps ``claim_session_id`` +
+# ``claimed_at`` without changing task state (SPEC 方針 4).
+PENDING_SCOPE_ACTION_AMEND = "scope_amend"
+PENDING_SCOPE_ACTION_CLAIM = "scope_claim"
 VALID_PENDING_SCOPE_ACTIONS = (
     PENDING_SCOPE_ACTION_ADD,
     PENDING_SCOPE_ACTION_REMOVE,
+    PENDING_SCOPE_ACTION_AMEND,
+    PENDING_SCOPE_ACTION_CLAIM,
 )
 
 
@@ -2790,6 +2915,7 @@ def add_pending_scope_op(
     action: str,
     entry: dict,
     requested_by_session_id: str = "",
+    mint_slot: bool = False,
 ) -> dict:
     """Record a pending scope op (= awaiting user approval).
 
@@ -2809,23 +2935,38 @@ def add_pending_scope_op(
     pile up as separate pending records, only the first of which would
     eventually apply.
     """
-    if action not in VALID_PENDING_SCOPE_ACTIONS:
+    if action not in (PENDING_SCOPE_ACTION_ADD, PENDING_SCOPE_ACTION_REMOVE):
+        # ms-99 / e-2829: ``add_pending_scope_op`` handles entry-based
+        # (= scope-add / scope-remove) verbs only. Slot-id-based verbs
+        # (= scope_amend / scope_claim) go through the dedicated helpers
+        # ``add_pending_slot_amend_op`` / ``add_pending_slot_claim_op``
+        # because their payloads differ (slot_id + child list / session id
+        # rather than a full scope entry).
         raise ValueError(
-            f"pending scope action {action!r} not in {VALID_PENDING_SCOPE_ACTIONS}"
+            f"pending scope action {action!r} not accepted here — "
+            f"use add_pending_slot_amend_op / add_pending_slot_claim_op "
+            f"for slot-id-based mutations"
         )
     # ms-97 / e-2659 (AC7 / AC8): the strict mode toggle mirrors the apply
     # helpers — ``scope_add`` enforces the narrowing-key requirement (= no
     # new project-wide pending), while ``scope_remove`` must keep working
     # against grandfathered project-wide rows already on disk.
     strict_norm = action == PENDING_SCOPE_ACTION_ADD
-    norm = normalize_scope_entry(entry, strict=strict_norm)
+    # ms-99 / e-2829: ``mint_slot`` is False by default so legacy
+    # ``beacon trek scope-add`` calls preserve the pre-v2 shape and their
+    # existing tests keep passing. New ``beacon trek slot add`` calls
+    # (= cmd_trek_slot_add) pass ``mint_slot=True`` to receive a fresh
+    # ``sl-<8 hex>`` id. Director e-2828 decision: no silent backfill —
+    # slot_id appears only when the caller opts in.
+    norm = normalize_scope_entry(entry, strict=strict_norm, mint_slot=mint_slot)
     if action == PENDING_SCOPE_ACTION_REMOVE:
         scope = trek_doc.get("scope") or []
-        if not any(s == norm for s in scope):
+        # ms-99 / e-2828: identity-based match (see add_scope_entry).
+        if not any(_scope_entry_identity_matches(s, norm) for s in scope):
             raise ValueError(f"scope entry not found: {norm}")
     elif action == PENDING_SCOPE_ACTION_ADD:
         scope = trek_doc.get("scope") or []
-        if any(s == norm for s in scope):
+        if any(_scope_entry_identity_matches(s, norm) for s in scope):
             raise ValueError(f"scope entry already present: {norm}")
     record = {
         "pending_id": mint_pending_scope_op_id(),
@@ -2837,6 +2978,177 @@ def add_pending_scope_op(
     trek_doc.setdefault(PENDING_SCOPE_OPS_KEY, []).append(record)
     trek_doc["updated_at"] = utcnow_iso()
     return record
+
+
+# ---------------------------------------------------------------------------
+# ms-99 / e-2829: slot-id-based pending helpers (amend / claim) + apply
+# ---------------------------------------------------------------------------
+# ``scope_amend`` edits ``included_task_ids`` on an existing MS slot: add
+# a task-id to the opt-in child list or remove one. Non-list (= legacy null
+# = all-include) is materialised to an explicit list on first amend so
+# subsequent reads know the semantics turned explicit.
+#
+# ``scope_claim`` stamps ``claim_session_id`` + ``claimed_at`` without
+# touching task state (SPEC 方針 4). Passing an empty ``session_id``
+# unclaims the slot (= clears the two fields).
+#
+# Both go through the same ``pending_scope_ops`` queue so the AC 15 "all
+# slot CLI ops via staging" contract holds across the four slot verbs.
+
+
+def _find_slot_by_id(trek_doc: dict, slot_id: str) -> dict | None:
+    """Return the scope entry with ``slot_id`` or None. Empty-string safe."""
+    if not slot_id:
+        return None
+    for s in trek_doc.get("scope") or []:
+        if s.get("slot_id") == slot_id:
+            return s
+    return None
+
+
+def add_pending_slot_amend_op(
+    trek_doc: dict,
+    *,
+    slot_id: str,
+    add_children: list[str] | None = None,
+    remove_children: list[str] | None = None,
+    requested_by_session_id: str = "",
+) -> dict:
+    """Stage a slot-amend op (= edit ``included_task_ids`` on a MS slot).
+
+    Raises ``ValueError`` if the slot doesn't exist or if no child
+    add/remove is specified (= no-op amend has no meaning). Duplicate
+    add / removal of an already-absent child is caught at apply time
+    via ``_apply_slot_amend`` so the queue stays legible.
+    """
+    if not slot_id:
+        raise ValueError("slot_id is required")
+    add_list = list(add_children or [])
+    remove_list = list(remove_children or [])
+    if not add_list and not remove_list:
+        raise ValueError(
+            "slot amend requires at least one --add-child or --remove-child"
+        )
+    target = _find_slot_by_id(trek_doc, slot_id)
+    if target is None:
+        raise ValueError(f"slot not found: {slot_id}")
+    record = {
+        "pending_id": mint_pending_scope_op_id(),
+        "action": PENDING_SCOPE_ACTION_AMEND,
+        "slot_id": slot_id,
+        "add_children": add_list,
+        "remove_children": remove_list,
+        "requested_by_session_id": requested_by_session_id or "",
+        "requested_at": utcnow_iso(),
+    }
+    trek_doc.setdefault(PENDING_SCOPE_OPS_KEY, []).append(record)
+    trek_doc["updated_at"] = utcnow_iso()
+    return record
+
+
+def add_pending_slot_claim_op(
+    trek_doc: dict,
+    *,
+    slot_id: str,
+    session_id: str,
+    requested_by_session_id: str = "",
+) -> dict:
+    """Stage a slot-claim op (= stamp ``claim_session_id`` + ``claimed_at``).
+
+    ``session_id=""`` is the unclaim gesture (clears both fields on
+    apply). SPEC 方針 4: claim never changes task state — the split
+    lets planning-phase "I'll take this next" be observed before any
+    todo→working transition happens.
+    """
+    if not slot_id:
+        raise ValueError("slot_id is required")
+    target = _find_slot_by_id(trek_doc, slot_id)
+    if target is None:
+        raise ValueError(f"slot not found: {slot_id}")
+    record = {
+        "pending_id": mint_pending_scope_op_id(),
+        "action": PENDING_SCOPE_ACTION_CLAIM,
+        "slot_id": slot_id,
+        "session_id": session_id or "",
+        "requested_by_session_id": requested_by_session_id or "",
+        "requested_at": utcnow_iso(),
+    }
+    trek_doc.setdefault(PENDING_SCOPE_OPS_KEY, []).append(record)
+    trek_doc["updated_at"] = utcnow_iso()
+    return record
+
+
+def _apply_slot_amend(trek_doc: dict, *, rec: dict) -> None:
+    """Apply a scope_amend pending record to the target slot in place."""
+    slot_id = rec.get("slot_id") or ""
+    target = _find_slot_by_id(trek_doc, slot_id)
+    if target is None:
+        raise ValueError(f"slot not found on apply: {slot_id}")
+    current = target.get("included_task_ids")
+    # Legacy null → materialise to explicit list at first amend so
+    # semantics stop being "all children" and become "these children".
+    if current is None:
+        current = []
+    else:
+        current = list(current)
+    for eid in rec.get("add_children") or []:
+        if not eid:
+            continue
+        if eid not in current:
+            current.append(eid)
+    for eid in rec.get("remove_children") or []:
+        if eid in current:
+            current.remove(eid)
+    target["included_task_ids"] = current
+
+
+def _apply_slot_claim(trek_doc: dict, *, rec: dict) -> None:
+    """Apply a scope_claim pending record to the target slot in place."""
+    slot_id = rec.get("slot_id") or ""
+    target = _find_slot_by_id(trek_doc, slot_id)
+    if target is None:
+        raise ValueError(f"slot not found on apply: {slot_id}")
+    session_id = rec.get("session_id") or ""
+    if session_id:
+        target["claim_session_id"] = session_id
+        target["claimed_at"] = utcnow_iso()
+    else:
+        target["claim_session_id"] = ""
+        target["claimed_at"] = None
+
+
+def materialize_slot_view(trek_doc: dict) -> list[dict]:
+    """Return a slot-oriented view of the trek's scope for CLI ``slot list``.
+
+    Each row surfaces the identity + v2 attributes so the reader can
+    tell legacy null-children slots apart from opt-in children slots
+    and see who currently claims what. Materialising the full
+    include-set (= expanding None to project-pool tasks) is Phase 2's
+    ``materialize_slots`` primitive (e-2832); this Phase 1 view just
+    projects the on-disk fields.
+    """
+    out: list[dict] = []
+    for s in trek_doc.get("scope") or []:
+        row = {
+            "project": s.get("project") or "",
+            "slot_id": s.get("slot_id") or "",
+            "target_kind": s.get("target_kind") or "",
+            "target_id": s.get("target_id") or "",
+        }
+        # Fall back to legacy narrowing keys when target_kind/id are
+        # missing (= grandfathered rows without v2 fields). Callers get
+        # a stable shape whether the source is v2 or pre-v2.
+        if not row["target_kind"]:
+            for k in NARROWING_KEYS:
+                if s.get(k):
+                    row["target_kind"] = k
+                    row["target_id"] = s[k]
+                    break
+        row["included_task_ids"] = s.get("included_task_ids", None)
+        row["claim_session_id"] = s.get("claim_session_id") or ""
+        row["claimed_at"] = s.get("claimed_at") or None
+        out.append(row)
+    return out
 
 
 def find_pending_scope_op(trek_doc: dict, *,
@@ -2883,14 +3195,26 @@ def approve_pending_scope_op(
     _drop_pending_scope_op(trek_doc, pending_id=pending_id)
     if action == PENDING_SCOPE_ACTION_ADD:
         add_scope_entry(trek_doc, entry=entry)
-    elif action == PENDING_SCOPE_ACTION_REMOVE:
+        trek_doc["updated_at"] = utcnow_iso()
+        return entry
+    if action == PENDING_SCOPE_ACTION_REMOVE:
         remove_scope_entry(trek_doc, entry=entry)
-    else:
-        raise ValueError(
-            f"pending scope op {pending_id} has unknown action {action!r}"
-        )
-    trek_doc["updated_at"] = utcnow_iso()
-    return entry
+        trek_doc["updated_at"] = utcnow_iso()
+        return entry
+    # ms-99 / e-2829: slot-id-based verbs. The pending record for these
+    # actions carries ``slot_id`` and per-verb payload keys rather than a
+    # full scope ``entry`` — apply the mutation on the target slot in place.
+    if action == PENDING_SCOPE_ACTION_AMEND:
+        _apply_slot_amend(trek_doc, rec=rec)
+        trek_doc["updated_at"] = utcnow_iso()
+        return rec
+    if action == PENDING_SCOPE_ACTION_CLAIM:
+        _apply_slot_claim(trek_doc, rec=rec)
+        trek_doc["updated_at"] = utcnow_iso()
+        return rec
+    raise ValueError(
+        f"pending scope op {pending_id} has unknown action {action!r}"
+    )
 
 
 def reject_pending_scope_op(
