@@ -5674,6 +5674,17 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # ms-99 / e-2834 — clear quiesce marks when a state transitions OUT
+    # of terminal. This lets the next quiesce lifecycle fire a fresh DM
+    # (= AC "per-quiesce 1 回だけ" is per lifecycle, not per lifetime).
+    # The mark stamping happens in the scheduler tick's quiesce branch;
+    # here we only reset when a resume-like transition lands.
+    if body.state not in trek_mod.TERMINAL_TASK_STATES:
+        meta_after = t.setdefault("meta", {})
+        if meta_after.get("quiesced_at"):
+            meta_after["quiesced_at"] = None
+            meta_after["quiesce_notified_at"] = None
+            meta_after["quiesce_reason"] = None
     db.save_trek(trek_id, t)
     # If the new state is terminal, fan out a review-required notice to
     # the leader. The leader's review Skill (/beacon-trek-review)
@@ -7539,16 +7550,111 @@ def trek_scheduler_tick_endpoint(
         # with no stamped states is NOT terminal — the scheduler still
         # fires obligation DMs to wake an executor that has not yet
         # declared anything (= pre-state-machine compatible).
+        # ms-99 / e-2833 — canonicalise scope BEFORE the terminal check so
+        # ``materialize_slots`` can resolve pool for slug-stored scope.
+        # (Already done above; the call is idempotent so a second call here
+        # would also be safe. We rely on the above canonicalisation.)
         if trek_scheduler_mod.is_trek_task_aggregate_terminal(
             trek_doc, get_project=db.get_project,
         ):
+            # ms-99 / e-2834 — quiesce observability trio.
+            #
+            # (1) Cloud Run stderr emits a diag[ms-99] line so operators
+            #     can grep "who quiesced when" without cross-referencing
+            #     the trek doc. Written unconditionally per tick.
+            # (2) The trek doc's meta stamps ``quiesced_at`` (first-hit
+            #     timestamp, never overwritten) and ``quiesce_reason``
+            #     (may re-stamp as the reason space grows).
+            # (3) The leader session receives one DM per quiesce lifecycle
+            #     (= dedup via ``meta.quiesce_notified_at``). The DM
+            #     carries the reason + trek id so the leader-side Skill
+            #     can render a "your Trek has quiesced" notice without
+            #     polling.
+            #
+            # This closes the CORE doc 5nfTSmCDVUzD4SLzIhI5 "observable
+            # ack" gap: pre-e-2834 quiesce was semantically significant
+            # but structurally silent — dogfood consumers were left to
+            # infer it from the absence of DMs, which the silent-quiesce
+            # dogfood (2026-07-03) proved was unreliable.
+            quiesce_reason = "task_state_aggregate_terminal"
+            meta = trek_doc.setdefault("meta", {})
+            print(
+                f"diag[ms-99 e-2834] trek={trek_id} quiesced "
+                f"reason={quiesce_reason} "
+                f"already_stamped={bool(meta.get('quiesced_at'))} "
+                f"already_notified={bool(meta.get('quiesce_notified_at'))}",
+                file=sys.stderr,
+            )
+            now_iso = trek_mod.utcnow_iso()
+            if not meta.get("quiesced_at"):
+                meta["quiesced_at"] = now_iso
+            meta["quiesce_reason"] = quiesce_reason
+            # Emit the per-quiesce leader DM iff we have not yet done so
+            # for this quiesce lifecycle. The stamp is cleared when the
+            # trek transitions back to non-terminal (= a task moves out
+            # of terminal state) via the same PATCH endpoint that stamped
+            # the terminal state; see ``clear_quiesce_marks_on_resume``.
+            if not meta.get("quiesce_notified_at"):
+                leader_sid = trek_doc.get("leader_session_id") or ""
+                quiesce_scope_pids = _resolve_trek_scope_project_ids(trek_doc)
+                if leader_sid and quiesce_scope_pids:
+                    quiesce_target_pid = quiesce_scope_pids[0]
+                    try:
+                        quiesce_envelope = (
+                            envelope_mod.issue_t1_system_envelope(
+                                project_id=quiesce_target_pid,
+                                trek_id=trek_id,
+                                actions_authorized=["trek.quiesce_notify"],
+                                data_class="free",
+                                ttl_seconds=3600,
+                            )
+                        )
+                        quiesce_payload = {
+                            "kind": "trek-quiesced",
+                            "trek_id": trek_id,
+                            "recipient_session_id": leader_sid,
+                            "sender_type": "trek-scheduler",
+                            "origin_channel": "trek-leader-digest",
+                            "reason": quiesce_reason,
+                            "quiesced_at": meta["quiesced_at"],
+                            "body": (
+                                f"[Trek quiesced] trek_id={trek_id}\n"
+                                "Trek scope 内の全 slot が terminal state "
+                                "(= done / user_review) に到達しました "
+                                "(= AI 自律実行完了)。 leader review "
+                                "(= /beacon-trek-review) で archive 判断、 "
+                                "もしくは scope 追加 task の投入を "
+                                "決めてください。\n"
+                                f"reason: {quiesce_reason}"
+                            ),
+                        }
+                        db.append_bus_event(quiesce_target_pid, {
+                            "channel": "dm",
+                            "sender_session_id": "",
+                            "payload": quiesce_payload,
+                            "envelope": quiesce_envelope,
+                            "delivery": "auto-execute",
+                            "created_at": now_iso,
+                        })
+                        # Only stamp the notified marker on a successful
+                        # append so a transient failure retries next tick.
+                        meta["quiesce_notified_at"] = now_iso
+                    except Exception as exc:  # noqa: BLE001
+                        # Best-effort: log the failure but continue with
+                        # the quiesce flow. Absence of quiesce_notified_at
+                        # means next tick will retry emission.
+                        print(
+                            f"diag[ms-99 e-2834] trek={trek_id} "
+                            f"quiesce_dm_failed: "
+                            f"{type(exc).__name__}: {exc}",
+                            file=sys.stderr,
+                        )
             quiesced.append({
                 "trek_id": trek_id,
-                "reason": "task_state_aggregate_terminal",
+                "reason": quiesce_reason,
             })
             # Still stamp last_progress_check_at so the next cadence
             # window does not re-flag this trek as "never fired".
-            meta = trek_doc.setdefault("meta", {})
             meta["last_progress_check_at"] = now.strftime(
                 "%Y-%m-%dT%H:%M:%S.%fZ"
             )

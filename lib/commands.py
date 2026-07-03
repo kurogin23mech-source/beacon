@@ -5159,9 +5159,23 @@ def cmd_trek_show():
         return
 
     halt_marker = " [HALTED]" if t.get("halt") else ""
-    print(f"Trek {t['trek_id']} — {t['title']}{halt_marker}")
+    # ms-99 / e-2834 — quiesce marker in the header so an operator eyeing
+    # a Trek immediately sees "AI 自律実行完了 (task_state_aggregate_terminal)"
+    # without hunting through meta. The stamp is set by the scheduler
+    # tick's quiesce branch and cleared by ``PATCH .../task-state`` when
+    # a task transitions out of terminal.
+    quiesced_meta = (t.get("meta") or {}).get("quiesced_at") or ""
+    quiesce_marker = f" [QUIESCED @ {quiesced_meta[:19]}]" if quiesced_meta else ""
+    print(f"Trek {t['trek_id']} — {t['title']}{halt_marker}{quiesce_marker}")
     print(f"  type:        {t.get('type')}")
     print(f"  status:      {t.get('status')}")
+    if quiesced_meta:
+        meta = t.get("meta") or {}
+        print(
+            f"  quiesced:    {quiesced_meta[:19]} "
+            f"(reason={meta.get('quiesce_reason', '')}, "
+            f"notified={bool(meta.get('quiesce_notified_at'))})"
+        )
     print(f"  created:     {t.get('created_at', '')[:19]}")
     if t.get("archived_at"):
         print(f"  archived:    {t.get('archived_at', '')[:19]}")

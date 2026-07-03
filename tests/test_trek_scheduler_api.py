@@ -1945,6 +1945,168 @@ def test_lazy_start_executor_silent_with_only_terminal_claims_and_no_todo():
     assert len(body["quiesced"]) == 1
 
 
+# ---------------------------------------------------------------------------
+# ms-99 / e-2834 — Quiesce observability trio (diag log + meta stamp + DM)
+# ---------------------------------------------------------------------------
+
+
+def _is_trek_quiesce_dm(e: dict) -> bool:
+    payload = e.get("payload") or {}
+    return payload.get("kind") == "trek-quiesced"
+
+
+def _seed_quiesced_trek(trek_id: str) -> None:
+    """Shared fixture: a trek whose materialised slots all read terminal."""
+    _seed_trek(
+        trek_id=trek_id,
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-99"}],
+    )
+    _treks[trek_id]["task_states"] = {
+        "e-1": {"state": "done", "updated_by_session_id": "sv-exec"},
+    }
+    _seed_pool_from_task_states(trek_id)
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-leader",
+        session_ids=["sv-leader"],
+    )
+
+
+def test_quiesce_stamps_meta_quiesced_at_and_reason():
+    """e-2834 AC3: quiesce hit で meta.quiesced_at と quiesce_reason が
+    stamp される。 CLI (= beacon trek show --json) から観測できるように
+    trek doc に永続する。"""
+    _seed_quiesced_trek("tk-quiesce-stamp")
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-quiesce-stamp"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200
+    saved = _treks["tk-quiesce-stamp"]
+    meta = saved.get("meta") or {}
+    assert meta.get("quiesced_at"), (
+        "quiesce path must stamp meta.quiesced_at so /beacon-trek-review "
+        "and beacon trek show can render the quiesce transition."
+    )
+    assert meta.get("quiesce_reason") == "task_state_aggregate_terminal"
+
+
+def test_quiesce_emits_leader_dm_once():
+    """e-2834 AC2: quiesce hit で leader session に 1 回だけ DM が届く。
+    payload.kind='trek-quiesced' + recipient_session_id=leader_sid で
+    /beacon-trek-review Skill が完遂遷移を検知できる。"""
+    _seed_quiesced_trek("tk-quiesce-dm")
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-quiesce-dm"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200
+    events = _bus_events_by_project["beacon-test"]
+    quiesce_dms = [e for e in events if _is_trek_quiesce_dm(e)]
+    assert len(quiesce_dms) == 1, (
+        f"expected exactly 1 trek-quiesced DM, got {len(quiesce_dms)}"
+    )
+    dm = quiesce_dms[0]
+    assert dm["channel"] == "dm"
+    assert dm["delivery"] == "auto-execute"
+    payload = dm["payload"]
+    assert payload["kind"] == "trek-quiesced"
+    assert payload["recipient_session_id"] == "sv-leader"
+    assert payload["trek_id"] == "tk-quiesce-dm"
+    assert payload["sender_type"] == "trek-scheduler"
+    assert payload["reason"] == "task_state_aggregate_terminal"
+
+
+def test_quiesce_dm_dedupes_on_second_tick():
+    """e-2834 AC2: 同 quiesce lifecycle 内では 2 回目の tick で DM を
+    再送しない (meta.quiesce_notified_at で dedup)。 leader が同一 quiesce
+    に対して重複通知を受けない forcing function。"""
+    _seed_quiesced_trek("tk-quiesce-dedup")
+    # First tick emits the DM.
+    client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-quiesce-dedup"]},
+        headers=HEADERS_OK,
+    )
+    saved_after_first = _treks["tk-quiesce-dedup"]
+    assert saved_after_first["meta"].get("quiesce_notified_at"), (
+        "first tick must stamp quiesce_notified_at"
+    )
+    # Reset last_progress_check_at so the second tick is due (= cadence
+    # elapsed). Otherwise ``is_trek_due`` short-circuits before we reach
+    # the quiesce branch.
+    saved_after_first["meta"]["last_progress_check_at"] = ""
+    # Second tick: same quiesce state, but quiesce_notified_at already
+    # stamped. No new DM should fire.
+    events_before = list(_bus_events_by_project["beacon-test"])
+    client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-quiesce-dedup"]},
+        headers=HEADERS_OK,
+    )
+    events_after = _bus_events_by_project["beacon-test"]
+    new_quiesce_dms = [
+        e for e in events_after[len(events_before):]
+        if _is_trek_quiesce_dm(e)
+    ]
+    assert new_quiesce_dms == [], (
+        f"second tick must NOT re-emit quiesce DM; got {len(new_quiesce_dms)}"
+    )
+
+
+def test_quiesce_marks_cleared_when_task_transitions_out_of_terminal():
+    """e-2834 AC2 / AC3 補完: task が terminal 外へ遷移すると quiesce
+    marks (= quiesced_at / quiesce_notified_at / quiesce_reason) が
+    クリアされ、 次の quiesce lifecycle で新規 DM が発火可能になる。"""
+    _seed_quiesced_trek("tk-quiesce-reset")
+    trek = _treks["tk-quiesce-reset"]
+    # Align member user_id with the test client's default "dev" identity
+    # so the PATCH endpoint's member check passes.
+    trek["members"][0]["user_id"] = "dev"
+    trek["members"][0]["email"] = "dev@local"
+    trek["creator_actor"]["user_id"] = "dev"
+    trek["meta"]["quiesced_at"] = "2026-07-04T00:00:00.000000Z"
+    trek["meta"]["quiesce_notified_at"] = "2026-07-04T00:00:00.000000Z"
+    trek["meta"]["quiesce_reason"] = "task_state_aggregate_terminal"
+    # Rewind the task to a non-terminal state via the PATCH endpoint.
+    resp = client.patch(
+        "/api/treks/tk-quiesce-reset/task-state",
+        json={"task_id": "e-1", "state": "working"},
+        headers={"X-Beacon-Session": "sv-leader"},
+    )
+    assert resp.status_code == 200, resp.text
+    saved = _treks["tk-quiesce-reset"]
+    meta = saved.get("meta") or {}
+    assert meta.get("quiesced_at") is None, (
+        "task-state PATCH to non-terminal must clear quiesced_at so a "
+        "future quiesce lifecycle fires a fresh DM"
+    )
+    assert meta.get("quiesce_notified_at") is None
+    assert meta.get("quiesce_reason") is None
+
+
+def test_quiesce_emits_diag_log_line_to_stderr(capfd):
+    """e-2834 AC1: quiesce hit で stderr に diag[ms-99 e-2834] プレフィックス
+    の log 行が emit される (Cloud Run stderr → GCP Logs で grep 可能)。"""
+    _seed_quiesced_trek("tk-quiesce-diag")
+    client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-quiesce-diag"]},
+        headers=HEADERS_OK,
+    )
+    _, err = capfd.readouterr()
+    assert "diag[ms-99 e-2834]" in err, (
+        f"expected diag[ms-99 e-2834] prefix in stderr, got: {err[:400]}"
+    )
+    assert "trek=tk-quiesce-diag" in err
+    assert "quiesced" in err
+    assert "reason=task_state_aggregate_terminal" in err
+
+
 def test_resume_clears_halt_and_tick_fires_again():
     """AC32 補完: halt クリア後 (= clear_halt) は次 tick で発火復帰する。
     Resume 後に「再度 trek-progress-check が動く」 ことを確認する。
