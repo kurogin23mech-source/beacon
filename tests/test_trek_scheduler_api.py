@@ -1397,20 +1397,16 @@ def _seed_live_sessions_for_trek(project_id: str, *,
     ]
 
 
-def test_fanout_skips_session_with_only_terminal_claims():
-    """ms-97 / e-2815 (2026-07-03): lazy-start gate 撤廃後の invariant。
+def test_fanout_gate_4rule_per_session():
+    """ms-97 / e-2815 revision (2026-07-03): 4-rule gate 適用後の invariant.
 
-    旧 ms-88 e-2109 は 「terminal-claim session (= done / leader_review /
-    user_review だけを持つ session) は tick を受け取らない」 を pin して
-    いた。 dogfood で 「Trek scope は MS-level bind、 実装は project pool
-    側で走る」 主流ケースで LPS 等の executor が silent-skip されて
-    scheduler → executor 経路が事実上停止する事故が発生 (user 指摘
-    「executor に行かないと意味ないじゃん」)。 fix (e-2815): lazy-start
-    gate を撤廃、 全 non-leader member を無条件 fanout する。
+    revision で 「無駄 tick 排除 + LPS-style silent worker poke」 を両立
+    する 4-rule semantic に整理:
+      (i)  active claim → fire  (sv-active)
+      (iv) all-terminal claim + no orphan → SKIP  (sv-finished、 user 指摘直訳)
+      (iii) no claim + no orphan → fire  (sv-fresh、 LPS-style poke)
 
-    本テストはその新 invariant を pin する: sv-active / sv-finished /
-    sv-fresh の全 3 executor が progress-check を受信する (claim 状態や
-    unclaim todo 有無に関わらず)。
+    orphan slot が無いこの構成では sv-finished だけが Rule (iv) skip 対象。
     """
     _seed_trek(
         trek_id="tk-fan0001",
@@ -1440,24 +1436,28 @@ def test_fanout_skips_session_with_only_terminal_claims():
     recipients = sorted(
         e["payload"].get("recipient_session_id", "") for e in progress_events
     )
-    # e-2815: 全 3 executor が recipient に出現する (= 無条件 fanout)。
+    # Rule (i): active claim → fire.
     assert "sv-active" in recipients, (
-        "e-2815: active-claim executor must receive fire (unchanged)."
+        "Rule (i): active-claim executor must receive fire."
     )
-    assert "sv-finished" in recipients, (
-        "e-2815: terminal-only-claim executor must ALSO receive fire "
-        "(this is the invariant flip vs the pre-e-2815 gate)."
+    # Rule (iv): all-terminal claim + no orphan → SKIP (waste avoidance).
+    assert "sv-finished" not in recipients, (
+        "Rule (iv): terminal-only-claim executor with no orphan must be "
+        "SKIPPED (user 指摘 「レビュー待ちですぐまた止まって、ただの "
+        "トークン無駄遣い」)."
     )
+    # Rule (iii): no claim + no orphan → fire (silent worker poke).
     assert "sv-fresh" in recipients, (
-        "e-2815: fresh (no-claim) executor must ALSO receive fire."
+        "Rule (iii): fresh (no-claim) executor must receive fire "
+        "(LPS-style silent worker poke)."
     )
 
 
 def test_fanout_skips_all_sessions_when_all_have_only_terminal_claims():
-    """ms-97 / e-2815 — 全 executor が terminal claim だけ持つ状態でも
-    無条件 fanout する (旧 「全員 skip → broadcast fallback だけ」 pin を
-    invariant flip)。 broadcast fallback 経路は今も残るが、 executor が
-    home-resolvable + live である限りは executor 経路優先で fire する。
+    """ms-97 / e-2815 revision — Rule (iv): 全 executor が terminal claim
+    だけ + orphan なし → 全員 skip → broadcast fallback だけ残る。 これは
+    user Rule 4 「全てのスロットがリーダーレビューになったのであれば、
+    もう tick は来るべきではない」 の直訳。
     """
     _seed_trek(
         trek_id="tk-fan0002",
@@ -1470,7 +1470,7 @@ def test_fanout_skips_all_sessions_when_all_have_only_terminal_claims():
         user_id="uid-leader",
         session_ids=["sv-a", "sv-b"],
     )
-    # 両 session ともに terminal-only claim
+    # 両 session ともに terminal-only claim, no orphan.
     _treks["tk-fan0002"]["task_states"] = {
         "e-1": {"state": "done", "updated_by_session_id": "sv-a"},
         "e-2": {"state": "leader_review", "updated_by_session_id": "sv-b"},
@@ -1485,12 +1485,16 @@ def test_fanout_skips_all_sessions_when_all_have_only_terminal_claims():
     progress_events = [
         e for e in events if _is_trek_progress_check_event(e)
     ]
-    recipients = sorted(
-        e["payload"].get("recipient_session_id", "") for e in progress_events
+    # Rule (iv) applies to both — no executor fires. Broadcast fallback
+    # posts one leader-directed event (e-2660 recipient stamping).
+    assert len(progress_events) == 1, (
+        "All executors gated out by Rule (iv) → only broadcast fallback "
+        f"remains. got {len(progress_events)} events."
     )
-    # e-2815: 両 executor が recipient に立つ (broadcast fallback は不要)。
-    assert "sv-a" in recipients, "e-2815: sv-a must be targeted."
-    assert "sv-b" in recipients, "e-2815: sv-b must be targeted."
+    assert (
+        progress_events[0]["payload"].get("recipient_session_id", "")
+        == "sv-leader"
+    ), "broadcast fallback must address leader (per e-2660 recipient pin)."
 
 
 def test_fanout_fresh_session_with_no_claims_still_receives_tick():
