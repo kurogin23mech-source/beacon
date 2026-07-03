@@ -662,6 +662,46 @@ def _resolve_canonical_project_id(
     return None
 
 
+def _canonicalise_trek_scope_projects_in_place(trek_doc: dict) -> None:
+    """Rewrite ``trek_doc["scope"][*]["project"]`` to the canonical full
+    project_id when the scope entry carries a slug.
+
+    ms-99 / e-2833 — the Phase 2 scheduler's tick decision predicates
+    read the slot inventory via ``materialize_slots(trek_doc, get_project=...)``,
+    which calls ``get_project`` with each scope entry's ``project``
+    value verbatim. If a CLI stored the slug (= ``profile-extractor``
+    rather than ``profile-extractor-276d28``), ``db.get_project`` returns
+    None and every MS slot resolves to ``("todo", "unstamped")`` —
+    silently misfiring both the leader digest gate and the aggregate-
+    terminal quiesce path. This helper closes the gap by resolving each
+    scope entry against the leader user's project list and rewriting
+    the ``project`` field to the full id in place before the tick's
+    predicates run.
+
+    No-op for scope entries whose project already resolves via the
+    fast path (= ``db.get_project`` returns non-None). Unresolvable
+    slugs are left untouched so downstream code observes the exact
+    graceful-degradation behaviour pre-fix.
+    """
+    scope = trek_doc.get("scope") or []
+    if not scope:
+        return
+    leader_user_id = ""
+    for m in trek_doc.get("members") or []:
+        if (m.get("role") or "") == "leader" and m.get("user_id"):
+            leader_user_id = m.get("user_id") or ""
+            break
+    if not leader_user_id:
+        return
+    for entry in scope:
+        raw = (entry.get("project") or "").strip()
+        if not raw:
+            continue
+        resolved = _resolve_canonical_project_id(raw, user_id=leader_user_id)
+        if resolved and resolved != raw:
+            entry["project"] = resolved
+
+
 def _resolve_trek_scope_project_ids(trek_doc: dict) -> list[str]:
     """Resolve every project in ``trek_doc.scope[]`` to canonical full ids.
 
@@ -7499,7 +7539,9 @@ def trek_scheduler_tick_endpoint(
         # with no stamped states is NOT terminal — the scheduler still
         # fires obligation DMs to wake an executor that has not yet
         # declared anything (= pre-state-machine compatible).
-        if trek_scheduler_mod.is_trek_task_aggregate_terminal(trek_doc):
+        if trek_scheduler_mod.is_trek_task_aggregate_terminal(
+            trek_doc, get_project=db.get_project,
+        ):
             quiesced.append({
                 "trek_id": trek_id,
                 "reason": "task_state_aggregate_terminal",
@@ -7542,6 +7584,14 @@ def trek_scheduler_tick_endpoint(
                 "error": "scope_entry_missing_project",
             })
             continue
+        # ms-99 / e-2833 — canonicalise trek_doc.scope in place so
+        # ``materialize_slots`` (= called via the tick decision predicates
+        # below) looks the project pool up under the full id rather than
+        # the raw slug the CLI may have stored. Without this rewrite,
+        # ``get_project`` sees the slug, returns None, and every MS slot
+        # collapses to ``("todo", "unstamped")`` — the exact false-quiesce
+        # / false-fire pathway that broke tk-29a11d2f dogfood.
+        _canonicalise_trek_scope_projects_in_place(trek_doc)
         # Audit-surface project_id (= back-compat for the dashboard /
         # observability consumers that already key off the legacy
         # single-project field). The dm fanout itself addresses each
@@ -8007,12 +8057,16 @@ def trek_scheduler_tick_endpoint(
         # fanout 成功後に ``meta.completion_notified_at`` を stamp して
         # 二度目の fire を構造的に防ぐ。
         completion_ready_now = (
-            trek_scheduler_mod.is_completion_ready(fanout_trek_doc)
+            trek_scheduler_mod.is_completion_ready(
+                fanout_trek_doc, get_project=db.get_project,
+            )
         )
         leader_should_fire = (
             (not leader_halted_by_summary)
             and (
-                trek_scheduler_mod.should_fire_leader_tick(fanout_trek_doc)
+                trek_scheduler_mod.should_fire_leader_tick(
+                    fanout_trek_doc, get_project=db.get_project,
+                )
                 or completion_ready_now
             )
         )

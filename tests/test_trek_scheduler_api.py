@@ -75,6 +75,65 @@ def _register_project(project_id: str, *, owner: str = "") -> None:
     }
 
 
+def _seed_pool_from_task_states(
+    trek_id: str,
+    *,
+    project_id: str | None = None,
+) -> None:
+    """ms-99 / e-2833 — synthesize a minimal project pool so
+    ``materialize_slots`` can attach each ``task_states`` entry to its MS
+    slot's children. Phase 2 tick decisions read the slot inventory
+    (= scope[] × pool) rather than the ``task_states`` cache alone; tests
+    that only populate ``task_states`` need a pool mirror so the cache
+    signal (state / owner) surfaces on materialize.
+
+    Task-narrowed scope entries are already atomic and read cache-first,
+    so we only seed MS entries. When ``project_id`` is None (default),
+    all unique project_ids in the trek's scope are seeded — this covers
+    cross-project treks whose scope entries fan across multiple pools.
+    """
+    trek = _treks.get(trek_id) or {}
+    scope = trek.get("scope") or []
+    task_states = trek.get("task_states") or {}
+    scoped_task_ids = {s.get("task") for s in scope if s.get("task")}
+    ms_task_entries = [
+        {"id": eid, "type": "task", "status": "todo"}
+        for eid in task_states.keys()
+        if eid not in scoped_task_ids
+    ]
+    if project_id is None:
+        # Default: seed each unique project in scope with only its own
+        # milestones (= cross-project pools stay independent).
+        target_pids = sorted({
+            s.get("project") for s in scope if s.get("project")
+        })
+        for pid in target_pids:
+            milestones = [
+                {"id": s["milestone"], "entries": list(ms_task_entries)}
+                for s in scope
+                if s.get("milestone") and s.get("project") == pid
+            ]
+            existing = _projects.get(pid) or {"name": pid, "owner": ""}
+            existing["milestones"] = milestones
+            existing.setdefault("operations", [])
+            _projects[pid] = existing
+    else:
+        # Explicit override: seed all scope-declared milestones under
+        # this project id (= useful when the tick resolver canonicalises
+        # a slug into a full project id and materialize will look up the
+        # full id).
+        milestones = [
+            {"id": s["milestone"], "entries": list(ms_task_entries)}
+            for s in scope if s.get("milestone")
+        ]
+        existing = _projects.get(project_id) or {
+            "name": project_id, "owner": "",
+        }
+        existing["milestones"] = milestones
+        existing.setdefault("operations", [])
+        _projects[project_id] = existing
+
+
 def _mock_get_trek(trek_id: str):
     data = _treks.get(trek_id)
     return copy.deepcopy(data) if data else None
@@ -333,6 +392,7 @@ def test_due_trek_fires_leader_digest_on_separate_channel():
     _treks["tk-digest01"]["task_states"] = {
         "e-todo1": {"state": "todo"},
     }
+    _seed_pool_from_task_states("tk-digest01")
     resp = client.post(
         "/api/system/trek-scheduler/tick",
         json={"trek_ids": ["tk-digest01"]},
@@ -416,6 +476,7 @@ def test_due_trek_stamps_last_leader_digest_at_when_fired():
     # ms-97 / e-2613 (AC33) — leader-digest now lazy-gated; seed a todo
     # float so the gate opens and the stamp lands.
     _treks["tk-stamp001"]["task_states"] = {"e-todo1": {"state": "todo"}}
+    _seed_pool_from_task_states("tk-stamp001")
     resp = client.post(
         "/api/system/trek-scheduler/tick",
         json={"trek_ids": ["tk-stamp001"]},
@@ -460,6 +521,7 @@ def test_leader_digest_targets_stamped_leader_session_only_when_live():
         scope=[{"project": "beacon-test", "milestone": "ms-95"}],
     )
     _treks["tk-digestfan1"]["task_states"] = {"e-todo1": {"state": "todo"}}
+    _seed_pool_from_task_states("tk-digestfan1")
     # Leader user has 3 live sessions: the original stamped one + 2
     # extras. With e-2645 narrow fanout, only the stamped sid gets the
     # digest because it IS live (= primary path triggers).
@@ -502,6 +564,7 @@ def test_leader_digest_falls_back_to_leader_user_sessions_when_stamped_stale():
         scope=[{"project": "beacon-test", "milestone": "ms-95"}],
     )
     _treks["tk-digestfan2"]["task_states"] = {"e-todo1": {"state": "todo"}}
+    _seed_pool_from_task_states("tk-digestfan2")
     # Stamped is "sv-leader" but only "sv-leader-fork" + "sv-leader-mac"
     # are live → fallback to leader user's live sessions.
     _seed_live_sessions_for_trek(
@@ -548,6 +611,7 @@ def test_leader_digest_delivers_to_live_session_when_stamped_is_stale():
         scope=[{"project": "beacon-test", "milestone": "ms-95"}],
     )
     _treks["tk-stamp-stale"]["task_states"] = {"e-todo1": {"state": "todo"}}
+    _seed_pool_from_task_states("tk-stamp-stale")
     # stamped leader is "sv-leader" but only "sv-leader-reconnect" is
     # live in the session directory.
     _seed_live_sessions_for_trek(
@@ -592,6 +656,7 @@ def test_leader_digest_falls_back_to_stamped_when_no_live_leader_session():
         scope=[{"project": "beacon-test", "milestone": "ms-95"}],
     )
     _treks["tk-leader-away"]["task_states"] = {"e-todo1": {"state": "todo"}}
+    _seed_pool_from_task_states("tk-leader-away")
     # No sessions for the leader user in the directory. The pre-fix
     # path relied on the stamped sid alone, so the fallback must
     # reproduce that.
@@ -631,6 +696,7 @@ def test_leader_digest_ignores_non_leader_live_sessions():
         scope=[{"project": "beacon-test", "milestone": "ms-95"}],
     )
     _treks["tk-nonleader"]["task_states"] = {"e-todo1": {"state": "todo"}}
+    _seed_pool_from_task_states("tk-nonleader")
     _treks["tk-nonleader"]["members"].append({
         "user_id": "uid-executor", "email": "ex@b.com",
         "role": "member", "invited_at": "2026-06-27T00:00:00.000000Z",
@@ -723,6 +789,7 @@ def test_leader_digest_fallback_narrows_to_role_leader_session_same_user():
     _treks["tk-e2723-sameuser"]["task_states"] = {
         "e-todo1": {"state": "todo"},
     }
+    _seed_pool_from_task_states("tk-e2723-sameuser")
     # Phase A+ trek: members[] is session_id keyed AND both roles live
     # under the same user_id (= the dogfood collapse condition).
     _mark_trek_session_id_keyed("tk-e2723-sameuser")
@@ -791,6 +858,7 @@ def test_leader_digest_fallback_excludes_executor_when_cross_user():
     _treks["tk-e2723-crossuser"]["task_states"] = {
         "e-todo1": {"state": "todo"},
     }
+    _seed_pool_from_task_states("tk-e2723-crossuser")
     _mark_trek_session_id_keyed("tk-e2723-crossuser")
     _treks["tk-e2723-crossuser"]["members"] = [
         {
@@ -943,6 +1011,10 @@ def test_slug_stored_scope_resolves_to_canonical_full_project_id():
     )
     # ms-97 / e-2613 (AC33) — seed todo float so leader-digest fires.
     _treks["tk-slug-resolve"]["task_states"] = {"e-todo1": {"state": "todo"}}
+    # ms-99 / e-2833 — seed the pool under the canonicalised full id.
+    # The scheduler's slug resolver rewrites scope in place before the
+    # tick fires, so materialize_slots looks the pool up under full_id.
+    _seed_pool_from_task_states("tk-slug-resolve", project_id=full_id)
     import datetime
     now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
         "%Y-%m-%dT%H:%M:%S.%fZ"
@@ -1131,6 +1203,7 @@ def test_10min_cadence_does_not_refire_immediately():
     # leader-digest fire (= original 2-event expectation preserved). The
     # cadence-decision test is about temporal gating, not lazy-start.
     _treks["tk-cccc3333"]["task_states"] = {"e-todo1": {"state": "todo"}}
+    _seed_pool_from_task_states("tk-cccc3333")
     # First tick — fires.
     r1 = client.post(
         "/api/system/trek-scheduler/tick",
@@ -1777,6 +1850,7 @@ def test_lazy_start_leader_digest_fires_on_leader_review_queue():
         "e-1": {"state": "leader_review",
                 "updated_by_session_id": "sv-exec"},
     }
+    _seed_pool_from_task_states("tk-lazy-lreview")
     _seed_live_sessions_for_trek(
         "beacon-test",
         user_id="uid-leader",
@@ -1852,6 +1926,7 @@ def test_lazy_start_executor_silent_with_only_terminal_claims_and_no_todo():
     _treks["tk-lazy-stop"]["task_states"] = {
         "e-1": {"state": "done", "updated_by_session_id": "sv-exec"},
     }
+    _seed_pool_from_task_states("tk-lazy-stop")
     _seed_live_sessions_for_trek(
         "beacon-test",
         user_id="uid-leader",
@@ -1973,6 +2048,7 @@ def test_cross_project_trek_fans_dm_to_each_member_home_project():
         "e-todo1": {"state": "todo"},
         "e-todo2": {"state": "todo"},
     }
+    _seed_pool_from_task_states("tk-cross3p")
     # Each member lives in a different project's session registry —
     # exactly the cross-project topology that broke pre-e-2639.
     import datetime

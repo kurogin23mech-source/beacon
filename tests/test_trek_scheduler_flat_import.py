@@ -40,10 +40,19 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
 def _trek_with_active_claim(session_id: str) -> dict:
-    """Trek doc with one ``working`` task stamped to ``session_id``."""
+    """Trek doc with one ``working`` task claimed by ``session_id``.
+
+    ms-99 / e-2833 — the tick decision helpers now read slot inventory,
+    so we materialize the claim via ``scope[].claim_session_id`` (=
+    SPEC 方針 4 successor of the legacy per-stamp field). Cache still
+    carries the ``working`` state for resolved_state derivation.
+    """
     return {
         "trek_id": "tk-flat-import-test",
         "status": "active",
+        "scope": [
+            {"project": "p", "task": "e-9999", "claim_session_id": session_id},
+        ],
         "task_states": {
             "e-9999": {
                 "state": "working",
@@ -53,6 +62,11 @@ def _trek_with_active_claim(session_id: str) -> dict:
             },
         },
     }
+
+
+def _empty_gp(pid: str) -> dict:
+    """Empty project pool — cache-authoritative for the atomic slot."""
+    return {}
 
 
 def _flat_layout_import_scheduler():
@@ -131,36 +145,40 @@ def test_should_fire_executor_tick_resolves_under_flat_layout():
     )
     # The fix's load-bearing path: with the helper resolving, the per-
     # executor lazy-start returns True for an active-claim session.
-    assert ts.should_fire_executor_tick(trek_doc, session_id=sid) is True, (
+    assert ts.should_fire_executor_tick(
+        trek_doc, session_id=sid, get_project=_empty_gp,
+    ) is True, (
         "ms-97 / e-2667: should_fire_executor_tick must return True for an "
         "executor with an active claim under flat (Cloud Run) layout. "
         "Regression of the dogfood-observed 'executor skip every tick' bug."
     )
 
 
-def test_should_fire_executor_tick_falls_through_when_no_trek_module():
-    """Genuinely-broken-deploy case: both import paths fail.
+def test_should_fire_executor_tick_ignores_scheduler_local_import_trek_stub():
+    """ms-99 / e-2833 — Phase 2 refactor moved slot resolution out of the
+    scheduler-local ``_import_trek`` fallback and into ``materialize_slots``,
+    which carries its own dual-form ``trek`` import. Even if the scheduler-
+    local ``_import_trek`` returns None (= a legacy payload-builder path
+    can't resolve trek), the tick decisions still work because
+    ``materialize_slots`` resolves state independently.
 
-    Pin that ``should_fire_executor_tick`` falls back to
-    ``has_unclaim_todo`` (= conservative branch) rather than blowing up.
-    Achieved by patching ``_import_trek`` directly to return None — this
-    simulates a deploy where neither layout resolves ``trek``.
+    Pin the invariant so a future refactor that re-couples the decision
+    functions to the scheduler-local ``_import_trek`` immediately fails
+    this test.
     """
-    # Use the in-tree (package) trek_scheduler.
     sys.path.insert(0, REPO_ROOT)
     if "trek_scheduler" not in sys.modules and "lib.trek_scheduler" not in sys.modules:
         from lib import trek_scheduler as _ts  # noqa: F401
     from lib import trek_scheduler as ts
 
-    sid = "sv-broken-deploy-test"
-    # With a stamped active claim BUT _import_trek returning None,
-    # the function cannot detect the claim and falls through to
-    # has_unclaim_todo, which returns False for this trek (no todo float).
+    sid = "sv-scheduler-local-trek-stub"
     trek_doc = _trek_with_active_claim(sid)
     with mock.patch.object(ts, "_import_trek", return_value=None):
-        assert ts.should_fire_executor_tick(trek_doc, session_id=sid) is False, (
-            "When _import_trek returns None, should_fire_executor_tick "
-            "must fall back to has_unclaim_todo (= conservative branch). "
-            "This is the failure mode the original bug exhibited on Cloud "
-            "Run — the regression test above pins the fixed behaviour."
+        assert ts.should_fire_executor_tick(
+            trek_doc, session_id=sid, get_project=_empty_gp,
+        ) is True, (
+            "Post e-2833, should_fire_executor_tick reads slot inventory "
+            "via materialize_slots, which owns its own trek import. The "
+            "scheduler-local _import_trek is only used by the leader "
+            "digest payload builder and does NOT gate tick decisions."
         )
