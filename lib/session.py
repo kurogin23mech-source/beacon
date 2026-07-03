@@ -37,6 +37,7 @@ import os
 import re
 import secrets
 import time
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -262,6 +263,21 @@ def write_session(data: dict) -> None:
 ENV_USE_CLOUD_FIRST = "BEACON_USE_CLOUD_FIRST_SESSION"
 ENV_PARENT_PID = "BEACON_PARENT_PID"
 
+# ms-95 / e-2870 — Guard against api_client → session recursion during
+# cloud-first mint. ``get_or_mint_session_via_server`` calls
+# ``client.me_heartbeat``, which routes through ``api_client._request``,
+# which (since ms-97 / e-2694) stamps an ``X-Beacon-Session`` header by
+# calling ``resolve_active_session_id``. Without this guard the resolver
+# would call back into ``get_or_mint_session`` and start a new mint,
+# looping until the 60s wall-clock watchdog kills the CLI.
+#
+# ContextVar (not a plain module-level bool) so async / threaded callers
+# don't share the flag across contexts. Default False = normal resolver
+# behaviour; set True only for the duration of the server mint call.
+_in_cloud_first_mint: ContextVar[bool] = ContextVar(
+    "_in_cloud_first_mint", default=False,
+)
+
 # ~/.beacon/machine.json — per-user cache of the server-issued machine_id
 # (ms-62 / e-1510). Lives outside the project cwd because machine identity
 # is the same across every Beacon project on this device.
@@ -406,6 +422,26 @@ def get_or_mint_session_via_server() -> dict:
     network error, malformed response). The caller in
     get_or_mint_session() catches and falls back to the legacy mint
     chain so missing server support never breaks the CLI.
+
+    ms-95 / e-2870 — sets ``_in_cloud_first_mint=True`` for the duration
+    of this call so ``resolve_active_session_id`` (called reentrantly via
+    ``api_client._request`` while stamping ``X-Beacon-Session``) returns
+    empty instead of triggering another mint. The token is reset in a
+    ``finally`` so exceptions leaving this frame still clear the guard.
+    """
+    _mint_guard_token = _in_cloud_first_mint.set(True)
+    try:
+        return _get_or_mint_session_via_server_impl()
+    finally:
+        _in_cloud_first_mint.reset(_mint_guard_token)
+
+
+def _get_or_mint_session_via_server_impl() -> dict:
+    """Body of ``get_or_mint_session_via_server`` (ms-95 / e-2870 split).
+
+    Extracted so the public entry point can wrap the whole call with the
+    ``_in_cloud_first_mint`` guard without indenting the entire body by
+    another level. Identical semantics to the pre-e-2870 body.
     """
     cloud_path = Path.cwd() / _CLOUD_JSON_RELATIVE
     if not cloud_path.exists():
@@ -904,7 +940,16 @@ def resolve_active_session_id() -> str:
       2. Fall through to :func:`get_session_id` which applies the
          existing env / mint / session.json precedence (which is itself
          pid-tree-aware as of e-1460).
+
+    ms-95 / e-2870 — when this is called reentrantly during a cloud-first
+    mint (= ``api_client._request`` stamping ``X-Beacon-Session`` while
+    ``get_or_mint_session_via_server`` is in flight), return the empty
+    string instead of triggering another mint. The mint itself will
+    materialise the session_id and store it; there is no in-flight sid
+    to stamp on the ``me_heartbeat`` request that produced the reentry.
     """
+    if _in_cloud_first_mint.get():
+        return ""
     claim = read_bridge_session()
     if claim.get("session_id"):
         return claim["session_id"]
