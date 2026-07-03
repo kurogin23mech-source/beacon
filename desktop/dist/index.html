@@ -6634,6 +6634,13 @@ function _renderTrekDetail(t) {
   const members = t.members || [];
   const scope = t.scope || [];
   const halted = !!t.halt;
+  // ms-99 / e-2834 — quiesce marker on the header so an operator eyeing
+  // the detail page immediately sees "AI 自律実行完了" without expanding
+  // the meta panel. Cleared server-side when a task transitions out of
+  // terminal (= PATCH /api/treks/{id}/task-state).
+  const quiesceMeta = (t.meta || {}).quiesced_at || '';
+  const quiesceReason = (t.meta || {}).quiesce_reason || '';
+  const quiesced = !!quiesceMeta;
   const projectsInScope = new Set(scope.map(s => s.project).filter(Boolean));
   const workItemsInScope = scope.filter(s => s.milestone || s.operation || s.task).length;
   // ms-86 / e-2249 — cross-project aggregate (= MS / Op / Task across
@@ -6731,11 +6738,16 @@ function _renderTrekDetail(t) {
           <span class="trek-title-text">${esc(t.title || '')}</span>
           <span class="trek-id-badge" title="${esc(t.trek_id)}">${esc(t.trek_id)}</span>
           ${halted ? `<span class="trek-badge" style="color:var(--warning,#fbbf24);border-color:var(--warning,#fbbf24);">⚠ halted</span>` : ''}
+          ${quiesced ? `<span class="trek-badge" style="color:#4ade80;border-color:#4ade80;" title="quiesced at ${esc(quiesceMeta)} (reason=${esc(quiesceReason)})">✓ quiesced</span>` : ''}
         </div>
         <div class="trek-stats">
           ${projectsInScope.size} project${projectsInScope.size === 1 ? '' : 's'} · ${workItemsInScope} work item${workItemsInScope === 1 ? '' : 's'} · ${members.length} member${members.length === 1 ? '' : 's'}
         </div>
         ${leaderRowHtml}
+        ${quiesced ? `<div class="trek-quiesce-row" style="margin-top:8px;padding:8px 10px;border-radius:6px;background:rgba(74,222,128,0.08);border:1px solid rgba(74,222,128,0.25);color:#4ade80;font-size:13px;">
+          <strong>QUIESCED</strong> — Trek scope 内の全 slot が terminal state (= done / user_review) に到達しました。
+          <span style="opacity:0.75;">at ${esc(quiesceMeta.slice(0,19))} · reason=${esc(quiesceReason)}</span>
+        </div>` : ''}
       </div>
 
       ${projectWideWarningHtml}
