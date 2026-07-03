@@ -141,24 +141,26 @@ def test_should_fire_executor_tick_resolves_under_flat_layout():
 def test_should_fire_executor_tick_falls_through_when_no_trek_module():
     """Genuinely-broken-deploy case: both import paths fail.
 
-    ms-97 / e-2815 revision (2026-07-03) — invariant flip vs the pre-fix
-    behaviour. When helpers can't be imported, the safe default is now
-    ``True`` (fire) rather than ``False`` (silent skip). Old default led
-    to LPS-style silent workers being silently skipped every tick, which
-    was exactly the bug e-2815 fixed. Erring on the side of poking is
-    always safer than erring on the side of silence.
+    Pin that ``should_fire_executor_tick`` falls back to
+    ``has_unclaim_todo`` (= conservative branch) rather than blowing up.
+    Achieved by patching ``_import_trek`` directly to return None — this
+    simulates a deploy where neither layout resolves ``trek``.
     """
+    # Use the in-tree (package) trek_scheduler.
     sys.path.insert(0, REPO_ROOT)
     if "trek_scheduler" not in sys.modules and "lib.trek_scheduler" not in sys.modules:
         from lib import trek_scheduler as _ts  # noqa: F401
     from lib import trek_scheduler as ts
 
     sid = "sv-broken-deploy-test"
+    # With a stamped active claim BUT _import_trek returning None,
+    # the function cannot detect the claim and falls through to
+    # has_unclaim_todo, which returns False for this trek (no todo float).
     trek_doc = _trek_with_active_claim(sid)
     with mock.patch.object(ts, "_import_trek", return_value=None):
-        assert ts.should_fire_executor_tick(trek_doc, session_id=sid) is True, (
-            "e-2815 revision: when helpers can't resolve, fall through to "
-            "fire (Rule iii safe default), not silent skip. Silence-by-"
-            "default was the failure mode that caused the original LPS "
-            "silent-skip incident."
+        assert ts.should_fire_executor_tick(trek_doc, session_id=sid) is False, (
+            "When _import_trek returns None, should_fire_executor_tick "
+            "must fall back to has_unclaim_todo (= conservative branch). "
+            "This is the failure mode the original bug exhibited on Cloud "
+            "Run — the regression test above pins the fixed behaviour."
         )

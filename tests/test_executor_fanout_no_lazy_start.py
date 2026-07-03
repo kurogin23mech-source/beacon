@@ -1,23 +1,18 @@
-"""ms-97 / e-2815 revision — executor fanout の 4-rule gate 実装 pin.
+"""ms-97 / e-2815 — executor fanout no longer requires lazy-start signal.
 
-2026-07-03 dogfood 経緯:
+2026-07-03 dogfood で観察: Trek scope が MS-level bind のみで、 executor が
+project pool 側で実装している (Trek 内で claim 未実行) ケースが主流。
+旧実装は ``should_fire_executor_tick`` lazy-start gate で当該 executor を
+silent skip し、 scheduler → executor 経路が事実上停止した (LPS session
+が phase 1 実装 done 後も digest に載らず、 user から 「executor に行かな
+いと意味ないじゃん」 指摘)。
 
-1. LPS session が Trek 内で claim せず project pool 側で実装 → 旧 lazy-
-   start gate (has_unclaim_todo) で silent skip される事故 (「executor
-   に行かないと意味ない」 user 指摘)。
-2. 初 fix (無条件 fire) で LPS への tick は復活したが、 PE 側で 「claim
-   全部 terminal (leader_review) なのに tick 来る → token 無駄」 副作用
-   (「レビュー待ちですぐまた止まって、ただのトークン無駄遣いじゃない?」
-   user 追加指摘)。
-3. revision (本ファイルが pin する invariant): ``should_fire_executor_tick``
-   を 4-rule に整理し 「無駄 tick 排除 + LPS-style silent worker poke」
-   を両立する。
-
-4 rules:
-- (i) active claim (working/todo) あり → fire
-- (v) orphan slot (claimed-by=空、 state=todo/working) あり → fire all
-- (iv) all claims terminal + no orphan → skip (waste avoidance)
-- (iii) no claim + no orphan → fire (silent worker poke)
+fix: ``_build_executor_targets_session_grain`` と
+``_build_executor_targets_user_grain`` の両方から lazy-start gate call を
+撤去、 members[] 内の全 non-leader session (+ 前段の live cutoff / home
+resolvable 通過) を無条件に progress-check 対象化する。 Trek philosophy
+上の invariant (= server tick = PM、 executor に周期的な progress-check
+DM) を復元する。
 """
 from __future__ import annotations
 
@@ -200,132 +195,27 @@ class TestSessionGrainExecutorFanoutInvariant:
             "skipped (ghost member protection)."
         )
 
-    def test_source_calls_revised_should_fire_executor_tick(self):
-        """Structural pin (revision): both _build_executor_targets functions
-        must CALL the revised should_fire_executor_tick. The revision brings
-        back the gate call, but the gate now implements the 4-rule semantic
-        (not the old lazy-start with has_unclaim_todo)."""
+    def test_source_no_longer_calls_should_fire_executor_tick(self):
+        """Structural pin: neither _build_executor_targets function may
+        CALL should_fire_executor_tick anymore. Comments/docstrings that
+        mention the historical gate are allowed (they document why the
+        gate was removed); the pin is on the function-call pattern.
+        If some future refactor re-adds the gate call, this test catches
+        it."""
         import inspect
         pattern = "trek_scheduler_mod.should_fire_executor_tick("
         src = inspect.getsource(
             app_module._build_executor_targets_session_grain,
         )
-        assert pattern in src, (
-            "e-2815 revision: session_grain path must call the revised gate."
+        assert pattern not in src, (
+            "e-2815: session_grain path must not call the lazy-start gate."
         )
         src_user = inspect.getsource(
             app_module._build_executor_targets_user_grain,
         )
-        assert pattern in src_user, (
-            "e-2815 revision: user_grain path must call the revised gate."
+        assert pattern not in src_user, (
+            "e-2815: user_grain path must not call the lazy-start gate."
         )
-
-
-class TestRevisedGateSemantics:
-    """4-rule semantic pins for the revised should_fire_executor_tick.
-
-    Directly exercises the pure gate function to enforce the 4 rules
-    without needing the full server stack. The e-2815 revision splits
-    the old lazy-start gate into 4 explicit branches so both LPS-style
-    silent workers (fire) and terminal-only claimants (skip) are handled
-    correctly.
-    """
-
-    @staticmethod
-    def _import_gate():
-        import trek_scheduler
-        return trek_scheduler.should_fire_executor_tick
-
-    def test_rule_i_active_claim_fires(self):
-        """Rule (i): executor with a working / todo claim → fire."""
-        gate = self._import_gate()
-        trek = {
-            "task_states": {
-                "e-1": {"state": "working",
-                        "updated_by_session_id": "sv-x"},
-            },
-        }
-        assert gate(trek, session_id="sv-x") is True
-
-    def test_rule_iv_all_terminal_claims_skip(self):
-        """Rule (iv): executor with only terminal claims + no orphan →
-        skip (waste avoidance)。 これが PE side の user 指摘直訳。"""
-        gate = self._import_gate()
-        trek = {
-            "task_states": {
-                "e-1": {"state": "leader_review",
-                        "updated_by_session_id": "sv-pe"},
-                "e-2": {"state": "done",
-                        "updated_by_session_id": "sv-pe"},
-            },
-        }
-        assert gate(trek, session_id="sv-pe") is False, (
-            "PE session with all-terminal claims (leader_review + done) "
-            "and no orphan must NOT be fired (Rule iv, waste avoidance)."
-        )
-
-    def test_rule_iii_no_claim_no_orphan_fires(self):
-        """Rule (iii): executor with no claims and no orphan → fire.
-        これが LPS side の silent worker poke。"""
-        gate = self._import_gate()
-        trek = {
-            "task_states": {
-                # Other session has a terminal claim; this session has none.
-                "e-1": {"state": "leader_review",
-                        "updated_by_session_id": "sv-other"},
-            },
-        }
-        assert gate(trek, session_id="sv-lps") is True, (
-            "LPS session with no Trek claim must be fired (Rule iii, "
-            "silent worker poke)."
-        )
-
-    def test_rule_v_orphan_slot_fires_all(self):
-        """Rule (v): orphan slot (state=todo/working, no updated_by) →
-        fire ALL executors, even those with all-terminal claims."""
-        gate = self._import_gate()
-        trek = {
-            "task_states": {
-                "e-orphan": {"state": "todo",
-                             "updated_by_session_id": ""},
-                "e-done": {"state": "done",
-                           "updated_by_session_id": "sv-pe"},
-            },
-        }
-        # Even PE (all terminal on their own claim) should fire because
-        # the orphan is Trek-wide.
-        assert gate(trek, session_id="sv-pe") is True, (
-            "PE with terminal claim must still fire when Trek has an "
-            "orphan slot (Rule v)."
-        )
-        # A fresh session (no claims) also fires — same reason.
-        assert gate(trek, session_id="sv-fresh") is True
-
-    def test_rule_v_orphan_only_counts_non_terminal(self):
-        """Rule (v) precision: orphan filter counts only non-terminal
-        unclaimed entries. A terminal entry with no updated_by is not
-        an orphan (it's already resolved)."""
-        gate = self._import_gate()
-        trek = {
-            "task_states": {
-                "e-done-noone": {"state": "done",
-                                 "updated_by_session_id": ""},
-                "e-terminal-pe": {"state": "leader_review",
-                                  "updated_by_session_id": "sv-pe"},
-            },
-        }
-        assert gate(trek, session_id="sv-pe") is False, (
-            "A done entry with no updated_by is not orphan (Rule v "
-            "requires non-terminal state)."
-        )
-
-    def test_empty_task_states_fires_iii(self):
-        """Empty Trek (no task_states at all): Rule (iii) applies to
-        any executor (no claim, no orphan) → fire. Matches LPS the
-        moment they joined."""
-        gate = self._import_gate()
-        trek = {"task_states": {}}
-        assert gate(trek, session_id="sv-anyone") is True
 
 
 class TestUserGrainExecutorFanoutInvariant:

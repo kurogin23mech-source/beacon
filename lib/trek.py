@@ -376,31 +376,6 @@ def session_has_any_claim(trek_doc: dict, *, session_id: str) -> bool:
     return False
 
 
-def has_orphan_slot(trek_doc: dict) -> bool:
-    """Return True iff Trek has at least one task_states entry that is
-    non-terminal AND has no ``updated_by_session_id`` (= orphan slot).
-
-    ms-97 / e-2815 revision (2026-07-03) — Rule (v) helper. An orphan
-    slot is a state entry that got created (via scope-add / task binding)
-    but no session has claimed it yet. Under the 4-rule fanout semantic,
-    orphan slots are Trek-wide alarms: all executors should be poked
-    until someone picks up the orphan. Empty task_states or all-terminal
-    task_states do NOT count as orphan (nothing dangling).
-    """
-    states = trek_doc.get("task_states") or {}
-    for entry in states.values():
-        if not entry:
-            continue
-        if entry.get("updated_by_session_id"):
-            continue  # claimed
-        st = entry.get("state") or DEFAULT_TASK_STATE
-        st = migrate_legacy_task_state(st)
-        if st in ("todo", "working"):
-            # Non-terminal + no claimer → orphan.
-            return True
-    return False
-
-
 def force_stall_session_working_tasks(trek_doc: dict, *,
                                       session_id: str,
                                       reason: str = "ttl-expired") -> list[str]:
