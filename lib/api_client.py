@@ -903,6 +903,54 @@ class ApiClient:
             f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/scope", body,
         )
 
+    # ms-99 / e-2830 — Trek slot schema v2 client methods.
+    def add_trek_slot(self, trek_id: str, *, project: str,
+                      milestone: str = "", operation: str = "",
+                      task: str = "",
+                      included_task_ids: list[str] | None = None) -> dict:
+        """Stage a slot-add with a fresh sl-<8 hex> id. Any joined member."""
+        body: dict = {"project": project}
+        if milestone:
+            body["milestone"] = milestone
+        if operation:
+            body["operation"] = operation
+        if task:
+            body["task"] = task
+        if included_task_ids is not None:
+            body["included_task_ids"] = list(included_task_ids)
+        return self.post(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/slots", body,
+        )
+
+    def amend_trek_slot(self, trek_id: str, slot_id: str, *,
+                        add_children: list[str] | None = None,
+                        remove_children: list[str] | None = None) -> dict:
+        """Stage a slot-amend (edit included_task_ids). Any joined member."""
+        body = {
+            "add_children": list(add_children or []),
+            "remove_children": list(remove_children or []),
+        }
+        return self.patch(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}"
+            f"/slots/{urllib.parse.quote(slot_id, safe='')}",
+            body,
+        )
+
+    def claim_trek_slot(self, trek_id: str, slot_id: str, *,
+                        session_id: str = "") -> dict:
+        """Stage a slot-claim (stamp claim_session_id). Empty = unclaim."""
+        return self.post(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}"
+            f"/slots/{urllib.parse.quote(slot_id, safe='')}/claim",
+            {"session_id": session_id or ""},
+        )
+
+    def list_trek_slots(self, trek_id: str) -> dict:
+        """Return the materialize slot view of the trek."""
+        return self.get(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/slots",
+        )
+
     def set_trek_halt(self, trek_id: str, *, issued_by_session_id: str,
                       reason: str = "") -> dict:
         """Pull the Andon cord. Any joined member may halt an active trek."""

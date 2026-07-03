@@ -3684,6 +3684,27 @@ class TrekScopeOp(BaseModel):
     task: Optional[str] = None
 
 
+# ms-99 / e-2830 — Trek slot schema v2 body models. Slot-specific verbs
+# (add / amend / claim) carry different payloads: add is a scope entry +
+# optional children opt-in; amend edits child list; claim stamps a
+# session id (or clears it via ``session_id=""``).
+class TrekSlotAdd(BaseModel):
+    project: str
+    milestone: Optional[str] = None
+    operation: Optional[str] = None
+    task: Optional[str] = None
+    included_task_ids: Optional[list[str]] = None
+
+
+class TrekSlotAmend(BaseModel):
+    add_children: list[str] = []
+    remove_children: list[str] = []
+
+
+class TrekSlotClaim(BaseModel):
+    session_id: str = ""  # empty string = unclaim gesture (SPEC 方針 4)
+
+
 class TrekTaskStateSet(BaseModel):
     """ms-75 / e-2048 — Trek-internal task state declaration.
 
@@ -4742,6 +4763,216 @@ def reject_trek_scope_op_endpoint(trek_id: str, pending_id: str,
         request=request, entry=dropped.get("entry") or {},
     )
     return t
+
+
+# ---------------------------------------------------------------------------
+# ms-99 / e-2830 — Trek slot schema v2 endpoints (SPEC 方針 6)
+# ---------------------------------------------------------------------------
+# Four endpoints mirror the four CLI verbs. All go through the same
+# ``pending_scope_ops`` queue so AC 15 ("all slot ops via staging")
+# holds server-side too — the actual mutation on ``scope[]`` still
+# lands via ``scope-approve``.
+#
+# Shape validation (AC 14) surfaces as HTTP 400 (bad request) for
+# malformed input distinct from HTTP 404 (slot not found) and HTTP 409
+# (duplicate scope entry). The audit log carries the new
+# ``action="slot_<verb>_pending"`` / ``"slot_<verb>_approved"`` markers
+# so Cloud Logging can filter by verb.
+
+
+@app.post("/api/treks/{trek_id}/slots")
+def add_trek_slot_endpoint(trek_id: str, body: TrekSlotAdd,
+                           request: Request,
+                           user: dict = Depends(require_auth)):
+    """Stage a slot-add pending op with a fresh ``sl-<8 hex>`` id.
+
+    ms-99 / e-2830 (SPEC 方針 6 + AC 14): shape validation runs
+    server-side so malformed calls surface HTTP 400 rather than 409
+    "already present". Successful staging returns the trek doc plus a
+    ``pending_op`` record — same envelope shape as the scope-add
+    endpoint so cross-verb clients can read the id uniformly.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    # Resolve short project names (= "life-plan-simulator") to canonical
+    # suffixed ids at the boundary, matching add_trek_scope_endpoint.
+    requesting_user_id = (user.get("sub") or "").strip()
+    canonical_pid = body.project
+    if requesting_user_id:
+        resolved = _resolve_canonical_project_id(
+            body.project, user_id=requesting_user_id,
+        )
+        if resolved:
+            canonical_pid = resolved
+    entry: dict = {"project": canonical_pid}
+    if body.milestone:
+        entry["milestone"] = body.milestone
+    if body.operation:
+        entry["operation"] = body.operation
+    if body.task:
+        entry["task"] = body.task
+    # Reject empty narrowing at 400 (= same policy as add_trek_scope but
+    # with the v2 slot verb error message). ``included_task_ids`` on a
+    # task/op slot is meaningless — refuse politely.
+    narrowing = [k for k in ("milestone", "operation", "task") if entry.get(k)]
+    if len(narrowing) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "slot add requires one narrowing key: milestone | operation "
+                "| task (= slot must narrow the project, ms-97 AC7)"
+            ),
+        )
+    if len(narrowing) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "slot add accepts exactly one of milestone / operation / task"
+            ),
+        )
+    if body.included_task_ids is not None:
+        if "milestone" not in entry:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "included_task_ids is only valid on milestone slots "
+                    "(SPEC 方針 2: MS slot child opt-in)"
+                ),
+            )
+        entry["included_task_ids"] = list(body.included_task_ids)
+    sid = ""
+    try:
+        sid = request.headers.get("X-Beacon-Session", "") or ""
+    except Exception:
+        sid = ""
+    try:
+        rec = trek_mod.add_pending_scope_op(
+            t,
+            action=trek_mod.PENDING_SCOPE_ACTION_ADD,
+            entry=entry,
+            requested_by_session_id=sid,
+            mint_slot=True,
+        )
+    except ValueError as e:
+        # normalize_scope_entry ValueError = shape violation → 400
+        msg = str(e)
+        if "already present" in msg or "already exists" in msg:
+            raise HTTPException(status_code=409, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
+    db.save_trek(trek_id, t)
+    _log_trek_scope_audit(
+        action="slot_add_pending", trek_id=trek_id, user=user,
+        request=request, entry=entry,
+    )
+    out = dict(t)
+    out["pending_op"] = rec
+    return out
+
+
+@app.patch("/api/treks/{trek_id}/slots/{slot_id}")
+def amend_trek_slot_endpoint(trek_id: str, slot_id: str,
+                             body: TrekSlotAmend, request: Request,
+                             user: dict = Depends(require_auth)):
+    """Stage a slot-amend pending op (edit ``included_task_ids``).
+
+    ms-99 / e-2830: 404 when the slot doesn't exist, 400 when the
+    request would be a no-op (= neither add_children nor
+    remove_children given). Applying the amend materialises legacy
+    null semantics to an explicit list at approve time (SPEC AC 4).
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    if not body.add_children and not body.remove_children:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "slot amend requires at least one add_children or "
+                "remove_children entry"
+            ),
+        )
+    sid = ""
+    try:
+        sid = request.headers.get("X-Beacon-Session", "") or ""
+    except Exception:
+        sid = ""
+    try:
+        rec = trek_mod.add_pending_slot_amend_op(
+            t,
+            slot_id=slot_id,
+            add_children=list(body.add_children),
+            remove_children=list(body.remove_children),
+            requested_by_session_id=sid,
+        )
+    except ValueError as e:
+        msg = str(e)
+        if "slot not found" in msg:
+            raise HTTPException(status_code=404, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
+    db.save_trek(trek_id, t)
+    _log_trek_scope_audit(
+        action="slot_amend_pending", trek_id=trek_id, user=user,
+        request=request, entry={"slot_id": slot_id,
+                                "add": rec.get("add_children") or [],
+                                "remove": rec.get("remove_children") or []},
+    )
+    out = dict(t)
+    out["pending_op"] = rec
+    return out
+
+
+@app.post("/api/treks/{trek_id}/slots/{slot_id}/claim")
+def claim_trek_slot_endpoint(trek_id: str, slot_id: str,
+                             body: TrekSlotClaim, request: Request,
+                             user: dict = Depends(require_auth)):
+    """Stage a slot-claim pending op (stamp ``claim_session_id``).
+
+    ms-99 / e-2830 (SPEC 方針 4): claim never changes task state.
+    ``session_id=""`` is the unclaim gesture — it clears the fields
+    when approved. 404 when the slot doesn't exist.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    requested_by = ""
+    try:
+        requested_by = request.headers.get("X-Beacon-Session", "") or ""
+    except Exception:
+        requested_by = ""
+    try:
+        rec = trek_mod.add_pending_slot_claim_op(
+            t,
+            slot_id=slot_id,
+            session_id=body.session_id or "",
+            requested_by_session_id=requested_by,
+        )
+    except ValueError as e:
+        msg = str(e)
+        if "slot not found" in msg:
+            raise HTTPException(status_code=404, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
+    db.save_trek(trek_id, t)
+    verb = "unclaim" if not body.session_id else "claim"
+    _log_trek_scope_audit(
+        action=f"slot_{verb}_pending", trek_id=trek_id, user=user,
+        request=request, entry={"slot_id": slot_id,
+                                "session_id": body.session_id or ""},
+    )
+    out = dict(t)
+    out["pending_op"] = rec
+    return out
+
+
+@app.get("/api/treks/{trek_id}/slots")
+def list_trek_slots_endpoint(trek_id: str,
+                             user: dict = Depends(require_auth)):
+    """Return the materialize slot view of the trek (Phase 1 projection).
+
+    ms-99 / e-2830: any authed viewer can list; membership isn't
+    required for read since ``GET /api/treks/{id}`` (the parent trek
+    doc) already permits the same audience.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    rows = trek_mod.materialize_slot_view(t)
+    return {"trek_id": trek_id, "slots": rows}
 
 
 @app.put("/api/treks/{trek_id}/halt")

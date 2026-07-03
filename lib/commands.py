@@ -7095,14 +7095,18 @@ def _resolve_local_session_id() -> str:
 # branch surfaces a graceful warning and exits.
 
 
-def _slot_cloud_stub_warn(verb: str) -> None:
-    """Warn when a slot verb is invoked in cloud mode (e-2830 pending)."""
-    print(
-        f"warn: `beacon trek slot {verb}` cloud mode is pending "
-        f"(e-2830 API endpoints). Local mode works today; the cloud copy "
-        f"will sync once the endpoints land.",
-        file=sys.stderr,
-    )
+def _cloud_slot_client():
+    """Return (client, config) for cloud-mode slot operations, or None.
+
+    ms-99 / e-2830: shared bootstrap for the four slot verbs. Falls
+    back to None so callers can degrade gracefully rather than crash
+    (matches the pre-e-2830 stub warning contract).
+    """
+    try:
+        return _get_api_client()
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_trek_slot_add():
@@ -7170,8 +7174,37 @@ def cmd_trek_slot_add():
         entry["included_task_ids"] = children_list
 
     if _is_cloud_mode():
-        _slot_cloud_stub_warn("add")
-        sys.exit(0)
+        client, _config = _cloud_slot_client()
+        try:
+            resp = client.add_trek_slot(
+                trek_id,
+                project=project,
+                milestone=milestone,
+                operation=operation,
+                task=task,
+                included_task_ids=(children_list if milestone else None),
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        pending = resp.get("pending_op") or {}
+        slot_id = (pending.get("entry") or {}).get("slot_id") or ""
+        pending_id = pending.get("pending_id") or ""
+        if json_mode:
+            print(json.dumps({
+                "pending_id": pending_id,
+                "slot_id": slot_id,
+                "entry": pending.get("entry") or {},
+            }, ensure_ascii=False))
+        else:
+            target_ref = milestone or operation or task
+            print(
+                f"Staged slot-add on trek {trek_id}: "
+                f"slot_id={slot_id}, target={project}:{target_ref} "
+                f"(pending_id: {pending_id}). "
+                f"Approve: beacon trek scope-approve {trek_id} {pending_id}"
+            )
+        return
 
     t = trek_store.load_trek(trek_id)
     if t is None:
@@ -7240,8 +7273,28 @@ def cmd_trek_slot_amend():
         sys.exit(1)
 
     if _is_cloud_mode():
-        _slot_cloud_stub_warn("amend")
-        sys.exit(0)
+        client, _config = _cloud_slot_client()
+        try:
+            resp = client.amend_trek_slot(
+                trek_id, slot_id,
+                add_children=add_list,
+                remove_children=rem_list,
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        pending = resp.get("pending_op") or {}
+        pending_id = pending.get("pending_id") or ""
+        if json_mode:
+            print(json.dumps(pending, ensure_ascii=False))
+        else:
+            print(
+                f"Staged slot-amend on trek {trek_id}, slot={slot_id} "
+                f"(pending_id: {pending_id}). "
+                f"add={add_list} remove={rem_list}. "
+                f"Approve: beacon trek scope-approve {trek_id} {pending_id}"
+            )
+        return
 
     t = trek_store.load_trek(trek_id)
     if t is None:
@@ -7307,8 +7360,26 @@ def cmd_trek_slot_claim():
             sys.exit(1)
 
     if _is_cloud_mode():
-        _slot_cloud_stub_warn("claim")
-        sys.exit(0)
+        client, _config = _cloud_slot_client()
+        try:
+            resp = client.claim_trek_slot(
+                trek_id, slot_id, session_id=session_id,
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        pending = resp.get("pending_op") or {}
+        pending_id = pending.get("pending_id") or ""
+        if json_mode:
+            print(json.dumps(pending, ensure_ascii=False))
+        else:
+            verb = "unclaim" if not session_id else f"claim by {session_id}"
+            print(
+                f"Staged slot-{verb} on trek {trek_id}, slot={slot_id} "
+                f"(pending_id: {pending_id}). "
+                f"Approve: beacon trek scope-approve {trek_id} {pending_id}"
+            )
+        return
 
     t = trek_store.load_trek(trek_id)
     if t is None:
@@ -7356,8 +7427,33 @@ def cmd_trek_slot_list():
         sys.exit(1)
 
     if _is_cloud_mode():
-        _slot_cloud_stub_warn("list")
-        sys.exit(0)
+        client, _config = _cloud_slot_client()
+        try:
+            resp = client.list_trek_slots(trek_id)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        rows = resp.get("slots") or []
+        if json_mode:
+            print(json.dumps(rows, ensure_ascii=False))
+            return
+        if not rows:
+            print(f"(no slots on trek {trek_id})")
+            return
+        for r in rows:
+            children = r.get("included_task_ids")
+            if children is None:
+                children_repr = "(legacy: all children)"
+            else:
+                children_repr = f"{len(children)} explicit: {children}"
+            claim = r.get("claim_session_id") or "(unclaimed)"
+            print(
+                f"- slot_id={r.get('slot_id') or '(legacy-no-id)'} "
+                f"{r.get('target_kind', '')}={r.get('target_id', '')} "
+                f"project={r.get('project', '')} "
+                f"children={children_repr} claim={claim}"
+            )
+        return
 
     t = trek_store.load_trek(trek_id)
     if t is None:
