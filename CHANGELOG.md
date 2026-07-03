@@ -2,6 +2,54 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.53.0] - 2026-07-03
+
+- Merge pull request #332 from kurogin23mech-source/fix/ms-95-e2870-cloud-first-recursion
+- fix(ms-95): [Critical] BEACON_USE_CLOUD_FIRST_SESSION recursion guard (e-2870)
+- Merge pull request #331 from kurogin23mech-source/feat/ms-99-e2834-observability
+- Merge pull request #330 from kurogin23mech-source/feat/ms-99-e2833-scheduler-refactor
+- Merge pull request #329 from kurogin23mech-source/feat/ms-99-e2832-materialize-slots
+- feat(ms-99): [Trek slot schema v2] quiesce observability trio (e-2834)
+- feat(ms-99): [Trek slot schema v2] scheduler refactor onto materialize_slots (e-2833)
+- feat(ms-99): [Trek slot schema v2] materialize_slots primitive (e-2832)
+- Merge pull request #328 from kurogin23mech-source/ms-99-trek-slot-schema-v2-inventory-silent
+- Merge pull request #327 from kurogin23mech-source/fix/ms-99-e2828-scope-entry-v2-schema
+- feat(ms-99): [Trek slot schema v2] API endpoints + README bundle (e-2830)
+- test(ms-99): [Silent quiesce regression] test-first pin for Phase 2 (e-2840)
+- feat(ms-99): [Trek slot schema v2] CLI 4 verbs (add / amend / claim / list) via staging (e-2829)
+- test(ms-99): [Trek slot done precondition] gap-pin for 4 missing branches (e-2839)
+- feat(ms-99): [Trek slot schema v2] scope entry v2 shape + identity match (e-2828)
+- Merge pull request #326 from kurogin23mech-source/fix/ms-97-e2815-revert-revision
+- Revert "Merge pull request #325 from kurogin23mech-source/fix/ms-97-e2815-revision-4rule-gate"
+- Merge pull request #325 from kurogin23mech-source/fix/ms-97-e2815-revision-4rule-gate
+- fix(ms-97): [Trek harness] e-2815 revision — 4-rule executor fanout gate
+- Merge pull request #324 from kurogin23mech-source/fix/ms-97-e2815-executor-fanout
+- fix(ms-97): [Trek harness] executor fanout に無条件 fire を復元 (e-2815)
+- Merge pull request #323 from kurogin23mech-source/fix/ms-93-e2788-followup-auth-whoami-typo
+- fix(ms-93): setup prompt の実在しない `beacon auth whoami` を `beacon auth status` に置換 (e-2802)
+- Merge pull request #322 from kurogin23mech-source/fix/ms-93-e2788-followup-install-guide-link
+- fix(ms-93): empty-state install guide のデッドリンクを実 repo に置換 (e-2798)
+- Merge pull request #321 from kurogin23mech-source/fix/ms-95-e2794-list-projects-ownerless-leak
+- fix(ms-95): [SECURITY] close ownerless project visibility leak (e-2794)
+- Merge pull request #320 from kurogin23mech-source/feat/ms-93-e2788-empty-state-setup-prompt
+- feat(ms-93): empty-state に Beacon CLI setup prompt block を追加 (e-2788)
+- Merge pull request #319 from kurogin23mech-source/feat/ms-98-e2766-skill-explicit-tick
+- feat(ms-98): migrate 6 Skills to explicit tick && check pattern
+- Merge pull request #318 from kurogin23mech-source/feat/ms-98-e2775-fail-open-scope-narrowing
+- Merge pull request #317 from kurogin23mech-source/feat/ms-98-e2774-api-client-circuit-breaker
+- Merge pull request #316 from kurogin23mech-source/feat/ms-98-e2770-command-wall-clock-timeout
+- Merge pull request #315 from kurogin23mech-source/feat/ms-98-e2765-session-cache-via-server
+- Merge pull request #314 from kurogin23mech-source/feat/ms-98-e2764-trigger-check-local-only
+- feat(ms-98): narrow operation-fire fail-open scope to skip rate-limit errors
+- feat(ms-98): api_client circuit breaker to stop feeding a 429 storm
+- feat(ms-98): wall-clock TTL on CLI dispatch to bound hung-process leaks
+- feat(ms-98): cache cloud-first session mint to cut heartbeat spam
+- feat(ms-98): split beacon trigger check/tick + auto-throttle to end API spam
+- Merge pull request #313 from kurogin23mech-source/feat/cost-meta-only-load-polling-endpoints
+- feat(cost): meta-only auth path for high-frequency polling endpoints
+- docs(release): update README/CHANGELOG for v0.52.1
+- chore(release): bump formula to 0.52.1
+
 ## [v0.52.1] - 2026-07-01
 
 - Merge pull request #312 from kurogin23mech-source/ms-95-fork-705831
