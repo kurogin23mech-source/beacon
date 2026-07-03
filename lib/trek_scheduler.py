@@ -374,55 +374,46 @@ def should_fire_executor_tick(
     *,
     session_id: str,
 ) -> bool:
-    """Per-executor fanout decision (ms-97 / e-2815 revision, 2026-07-03).
+    """Lazy-start decision for one executor's progress-check tick.
 
-    4-rule semantic (user 明示):
+    ms-97 / e-2613 (AC33) — returns True iff the executor either:
+      * has at least one active claim slot in this trek (= a stamped
+        todo / working entry pointing to this session_id), or
+      * the trek has an unclaim todo waiting to be picked up (= fresh
+        executor with empty claim history, but real work to do).
 
-      (i)  active claim (working/todo) あり → fire。 executor には作業中の
-           slot がある、 state 更新を促す。
+    Returns False when the executor has only terminal claims AND there
+    is no unclaim todo float (= "nothing to do here, stay quiet"). The
+    server-side orchestrator falls back to a single minimal broadcast
+    when EVERY executor returns False, preserving the SPEC's
+    "no complete silence" rule.
 
-      (v)  orphan slot が Trek scope 内にある → fire ALL executors。 誰も
-           掴んでいない slot が残っている限り、 全 executor に「拾える人?」
-           の poke を投げる (user Rule 5)。
-
-      (iv) executor の claim が全部 terminal (leader_review / user_review /
-           done) + orphan なし → skip。 executor は blocked / 完了、 tick
-           は token 無駄 (user Rule 4)。
-
-      (iii) claim ゼロ + orphan なし → fire。 Trek に未 bind の executor が
-            project pool 側で work しているケース (= LPS dogfood 2026-07-03)
-            を silent skip しないため。 poke = 「Trek 側に claim しに来て or
-            現状共有して」 の意味。
-
-    以前の実装 (旧 AC33 lazy-start gate) は (iii) を ``has_unclaim_todo``
-    に gate して silent skip していたが、 実運用では MS-level scope の下で
-    project pool 側で実装する executor (LPS) が構造的にゼロ tick になる
-    dogfood 不着事故を招いていた。 revision で (iii) は無条件 fire、 (iv)
-    は明示 skip の 2 分岐に整理。
-
-    Pure / I/O-free。 lib.trek の helpers (session_has_active_claim /
-    session_has_any_claim / has_orphan_slot) を lazy import で参照する。
+    Pure / I/O-free so unit tests can pin the matrix without standing
+    up an HTTP layer. Wraps ``session_has_active_claim`` from lib.trek
+    + the ``has_unclaim_todo`` helper above.
     """
-    # ms-97 / e-2667 — dual-form lazy import (Cloud Run flat layout 対応).
+    # ms-97 / e-2667 — dual-form lazy import. The pre-fix code only tried
+    # ``from lib.trek import ...`` which silent-failed on Cloud Run (flat
+    # layout: PYTHONPATH=/app/lib:/app/server, ``lib`` is not a package),
+    # so both helpers fell back to None. That made the function always
+    # short-circuit to has_unclaim_todo(trek_doc) only, which returns False
+    # for any trek with no fresh todo entries — and that skipped LPS / PE
+    # from executor_targets every tick (= dogfood 不着 root cause).
     _trek = _import_trek()
     _has_active = getattr(_trek, "session_has_active_claim", None) if _trek else None
     _has_any = getattr(_trek, "session_has_any_claim", None) if _trek else None
-    _has_orphan = getattr(_trek, "has_orphan_slot", None) if _trek else None
-
-    # Rule (i): active claim あり → fire.
     if _has_active is not None and _has_active(trek_doc, session_id=session_id):
         return True
-
-    # Rule (v): orphan slot exists → fire ALL executors.
-    if _has_orphan is not None and _has_orphan(trek_doc):
-        return True
-
-    # Rule (iv): all claims terminal + no orphan → skip (waste avoidance).
+    # A fresh executor with NO claims at all may still pick up an unclaim
+    # todo. If neither condition holds the executor genuinely has nothing
+    # to do; skip.
     if _has_any is not None and _has_any(trek_doc, session_id=session_id):
-        return False
-
-    # Rule (iii): no claim, no orphan → fire (LPS-style silent worker poke).
-    return True
+        # Has claims, but none active → all terminal. Only fire if there
+        # is unclaim todo float to pick up next.
+        return has_unclaim_todo(trek_doc)
+    # No claims yet (= fresh executor). Fire only if there's something to
+    # claim — otherwise they're idle by design.
+    return has_unclaim_todo(trek_doc)
 
 
 def should_fire_leader_tick(trek_doc: dict) -> bool:
