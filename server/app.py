@@ -6906,15 +6906,16 @@ def _build_executor_targets_user_grain(
             # from progress-check (= CORE doc trek-leader-stance /
             # e-2166: leader's role is review, not pickup).
             continue
-        # ms-97 / e-2815 (2026-07-03) — lazy-start gate 撤廃。 以前は
-        # ``should_fire_executor_tick`` で 「Trek 内 claim を持たない
-        # executor は fire しない」 と絞っていたが、 実運用で 「Trek scope
-        # は MS-level bind、 実装は project pool 側 (Trek 未 bind) で走る」
-        # ケースが主流のため、 大多数の executor が silent に skip され
-        # 「Trek scheduler → executor」 経路が事実上死ぬ dogfood 事故に
-        # なった。 Trek 哲学 (= server tick = PM、 executor に周期的に
-        # progress-check を投げる) を invariant として復元するため、
-        # members[] 内の全 non-leader session を無条件に対象化する。
+        # ms-97 / e-2815 revision (2026-07-03) — 4-rule fanout gate。
+        # 旧実装は has_unclaim_todo で silent skip、 中間 revision で無条件
+        # fire にしたが 「全 claim terminal な executor に無駄 tick 送る」
+        # 副作用があった。 revision では should_fire_executor_tick を
+        # 4-rule (active claim / orphan / all-terminal / no-claim) に整理、
+        # 「無駄 tick 排除 + LPS-style silent worker poke」 を両立させる。
+        if not trek_scheduler_mod.should_fire_executor_tick(
+            fanout_trek_doc, session_id=sid,
+        ):
+            continue
         targets.append({
             "session_id": sid,
             "home_project_id": info["home_project_id"],
@@ -7043,13 +7044,21 @@ def _build_executor_targets_session_grain(
                 file=sys.stderr,
             )
             continue
-        # ms-97 / e-2815 (2026-07-03) — lazy-start gate 撤廃 (旧 AC33)。
-        # 「Trek scope 内 task-level bind が無いと should_fire_executor_tick
-        # が False を返し、 fresh executor が silent skip される」 dogfood
-        # 事故 (LPS session が phase 1 実装 done 後も digest 不可視、
-        # scheduler → executor 経路が完全停止) を受けて、 member[] 内の
-        # 全 non-leader session を無条件に progress-check 対象にする。
-        # 詳細: ms-97 e-2815 SPEC + user_grain 側 (line ~6912) 同期修正。
+        # ms-97 / e-2815 revision (2026-07-03) — 4-rule fanout gate re-enabled.
+        # See _build_executor_targets_user_grain (line ~6912) for the same
+        # comment. Revised should_fire_executor_tick は 「無駄 tick 排除
+        # (全 claim terminal で orphan なし)」 と 「LPS-style silent worker
+        # poke (claim ゼロ + orphan なし)」 を両立する 4-rule 実装。
+        if not trek_scheduler_mod.should_fire_executor_tick(
+            fanout_trek_doc, session_id=msid,
+        ):
+            print(
+                f"diag[ms-97 e-2815 AC] trek={trek_id_for_log} "
+                f"sid={msid} skipped: "
+                f"should_fire_executor_tick=False (all-terminal + no orphan)",
+                file=sys.stderr,
+            )
+            continue
         print(
             f"diag[ms-97 e-2815 AC] trek={trek_id_for_log} "
             f"sid={msid} kept: home_pid={resolved_pid}",
