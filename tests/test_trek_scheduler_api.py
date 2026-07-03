@@ -1398,17 +1398,19 @@ def _seed_live_sessions_for_trek(project_id: str, *,
 
 
 def test_fanout_skips_session_with_only_terminal_claims():
-    """ms-88 / e-2109: session whose claims are all in leader_review /
-    user_review / done が tick を受け取らない (= 「work_review 後も scheduler
-    届く」 問題の構造解)。
+    """ms-97 / e-2815 (2026-07-03): lazy-start gate 撤廃後の invariant。
 
-    ms-97 / e-2613 (AC33) — extended: terminal-claim session に対しても
-    unclaim todo float が存在すれば fire する (= 「次の仕事が残ってるなら
-    pick up しに来い」)。 unclaim todo が無い場合のみ silent。
+    旧 ms-88 e-2109 は 「terminal-claim session (= done / leader_review /
+    user_review だけを持つ session) は tick を受け取らない」 を pin して
+    いた。 dogfood で 「Trek scope は MS-level bind、 実装は project pool
+    側で走る」 主流ケースで LPS 等の executor が silent-skip されて
+    scheduler → executor 経路が事実上停止する事故が発生 (user 指摘
+    「executor に行かないと意味ないじゃん」)。 fix (e-2815): lazy-start
+    gate を撤廃、 全 non-leader member を無条件 fanout する。
 
-    本テストは unclaim todo 無し状態を維持して original e-2109 silent
-    semantics を pin する。 sv-fresh は AC33 lazy-start gate に該当
-    しないので broadcast fallback (= recipient="") 経路に degrade する。
+    本テストはその新 invariant を pin する: sv-active / sv-finished /
+    sv-fresh の全 3 executor が progress-check を受信する (claim 状態や
+    unclaim todo 有無に関わらず)。
     """
     _seed_trek(
         trek_id="tk-fan0001",
@@ -1416,14 +1418,11 @@ def test_fanout_skips_session_with_only_terminal_claims():
         cadence=10,
         scope=[{"project": "beacon-test", "milestone": "ms-88"}],
     )
-    # 2 sessions for leader user: 1 active claim + 1 all-terminal
     _seed_live_sessions_for_trek(
         "beacon-test",
         user_id="uid-leader",
         session_ids=["sv-active", "sv-finished", "sv-fresh"],
     )
-    # sv-active が working な claim を持つ、 sv-finished は done のみ。
-    # AC33 silent semantics を保つため unclaim todo は seed しない。
     _treks["tk-fan0001"]["task_states"] = {
         "e-w": {"state": "working", "updated_by_session_id": "sv-active"},
         "e-d": {"state": "done", "updated_by_session_id": "sv-finished"},
@@ -1441,17 +1440,25 @@ def test_fanout_skips_session_with_only_terminal_claims():
     recipients = sorted(
         e["payload"].get("recipient_session_id", "") for e in progress_events
     )
-    # sv-active のみが lazy-start で fire、 sv-finished と sv-fresh は
-    # AC33 silent (= 仕事無し)、 broadcast fallback で空 recipient が
-    # 1 件混ざる場合あり。
-    assert "sv-active" in recipients
-    assert "sv-finished" not in recipients
-    assert "sv-fresh" not in recipients
+    # e-2815: 全 3 executor が recipient に出現する (= 無条件 fanout)。
+    assert "sv-active" in recipients, (
+        "e-2815: active-claim executor must receive fire (unchanged)."
+    )
+    assert "sv-finished" in recipients, (
+        "e-2815: terminal-only-claim executor must ALSO receive fire "
+        "(this is the invariant flip vs the pre-e-2815 gate)."
+    )
+    assert "sv-fresh" in recipients, (
+        "e-2815: fresh (no-claim) executor must ALSO receive fire."
+    )
 
 
 def test_fanout_skips_all_sessions_when_all_have_only_terminal_claims():
-    """全 live session の claim が terminal-ish → fanout は broadcast fallback
-    のみ (= 全 session が黙る方向 = 「誰にも届かない」 状態が emerge)。"""
+    """ms-97 / e-2815 — 全 executor が terminal claim だけ持つ状態でも
+    無条件 fanout する (旧 「全員 skip → broadcast fallback だけ」 pin を
+    invariant flip)。 broadcast fallback 経路は今も残るが、 executor が
+    home-resolvable + live である限りは executor 経路優先で fire する。
+    """
     _seed_trek(
         trek_id="tk-fan0002",
         status="active",
@@ -1463,7 +1470,7 @@ def test_fanout_skips_all_sessions_when_all_have_only_terminal_claims():
         user_id="uid-leader",
         session_ids=["sv-a", "sv-b"],
     )
-    # 両 session ともに done claim のみ
+    # 両 session ともに terminal-only claim
     _treks["tk-fan0002"]["task_states"] = {
         "e-1": {"state": "done", "updated_by_session_id": "sv-a"},
         "e-2": {"state": "leader_review", "updated_by_session_id": "sv-b"},
@@ -1478,14 +1485,12 @@ def test_fanout_skips_all_sessions_when_all_have_only_terminal_claims():
     progress_events = [
         e for e in events if _is_trek_progress_check_event(e)
     ]
-    # ms-97 / e-2660 — broadcast fallback は stamped leader_session_id
-    # を recipient に stamp する (= DM routing filter を通すため、
-    # 旧 "" recipient は _bus_event_addressed_to が drop していた)。
-    assert len(progress_events) == 1
-    assert (
-        progress_events[0]["payload"].get("recipient_session_id", "")
-        == "sv-leader"
+    recipients = sorted(
+        e["payload"].get("recipient_session_id", "") for e in progress_events
     )
+    # e-2815: 両 executor が recipient に立つ (broadcast fallback は不要)。
+    assert "sv-a" in recipients, "e-2815: sv-a must be targeted."
+    assert "sv-b" in recipients, "e-2815: sv-b must be targeted."
 
 
 def test_fanout_fresh_session_with_no_claims_still_receives_tick():
@@ -2495,13 +2500,15 @@ def test_ac33_fresh_joiner_both_sessions_receive_tick_when_unclaim_todo_present(
     )
 
 
-def test_ac33_pure_observer_fresh_joiner_excluded_when_no_todo():
-    """ms-97 / e-2638 Done when #3 (negative test) — fresh joiner whose
-    scope has no todo (= pure observer) does NOT get a regular AC33 tick.
+def test_ac33_pure_observer_fresh_joiner_included_after_e2815():
+    """ms-97 / e-2815 (2026-07-03) — AC33 の旧 「pure observer は silent」
+    仕様 invariant flip 後の pin。 fresh joiner (= no claim, no todo)
+    でも member として join した以上、 regular tick を受け取る。
 
-    AC33 の stop 条件「nothing to claim」 が fresh joiner にも適用される
-    ことを pin する。 観察すべきもの: progress-check dm が当該 session
-    宛に届かない (= broadcast fallback は leader 宛のみ)。
+    以前は AC33 lazy-start gate で pure observer が silent skip されて
+    いたが、 dogfood で「executor に届かない = Trek scheduler の目的
+    そのものが破綻」 と判明したため撤廃 (e-2815)。 本テストは 「observer
+    session は sv-observer 宛 progress-check を必ず受信する」 を pin。
     """
     _seed_trek(
         trek_id="tk-ac33-observer",
@@ -2518,7 +2525,7 @@ def test_ac33_pure_observer_fresh_joiner_excluded_when_no_todo():
         user_id="uid-observer",
         session_ids=["sv-observer"],
     )
-    # No task_states → has_unclaim_todo = False, fresh observer は silent。
+    # No task_states — 以前は silent 経路、 e-2815 後は fire される。
     _treks["tk-ac33-observer"]["task_states"] = {}
 
     resp = client.post(
@@ -2528,9 +2535,8 @@ def test_ac33_pure_observer_fresh_joiner_excluded_when_no_todo():
     )
     assert resp.status_code == 200, resp.text
     events = _bus_events_by_project.get("beacon-test", [])
-    # Exclude welcome tick (= trek-welcome sender_type) — welcome tick is
-    # e-2637 bootstrap which fires regardless of AC33, here we test only
-    # the AC33 regular-tick path (= sender_type=trek-scheduler).
+    # welcome tick は e-2637 bootstrap で無条件 fire するため regular
+    # tick と分離して判定する (= sender_type=trek-scheduler のみ)。
     progress_events = [
         e for e in events
         if _is_trek_progress_check_event(e)
@@ -2540,10 +2546,10 @@ def test_ac33_pure_observer_fresh_joiner_excluded_when_no_todo():
         e for e in progress_events
         if e["payload"].get("recipient_session_id") == "sv-observer"
     ]
-    assert observer_targeted == [], (
-        "AC33 negative: pure observer (= no todo, no claim) must NOT "
-        "receive a regular tick. broadcast fallback addresses the "
-        f"leader instead. got events={progress_events}"
+    assert len(observer_targeted) >= 1, (
+        "e-2815: pure observer (= no todo, no claim) MUST receive a "
+        "regular tick after the lazy-start gate was removed. "
+        f"got events={progress_events}"
     )
 
 
