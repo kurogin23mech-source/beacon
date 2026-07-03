@@ -15,20 +15,12 @@ cache (= stamped 済 slot のみ) を slot inventory の真値源として扱う
 だが、 これを scheduler が読まないため、 「1 件だけ stamped で terminal、
 scope pool にはまだ todo 多数」 の状態を **完遂と誤判定** して quiesce する。
 
-## test-first サイクル
+## test-first サイクル (e-2833 完了時点)
 
-本 file の test 群は **Phase 2 実装 (e-2833 / ``materialize_slots`` 経由書き
-換え) 完了後に pass するべき挙動** を pin する。 現行 code (task_states
-cache だけを見る) では **fail する** ため、 各 test に
-``pytest.mark.xfail(strict=True, raises=(AssertionError, TypeError))`` を
-付与している。
-
-- ``strict=True``: Phase 2 land 後、 test が pass (= xpass) すると失敗判定
-  になり、 「もう xfail marker を外していい」 と test 更新者に signal を送る
-- ``raises=(AssertionError, TypeError)``: 現行 code は AssertionError で fail
-  するが、 Phase 2 で関数 signature が ``(trek_doc, get_project)`` に変わる
-  過渡期に ``TypeError: got unexpected keyword argument 'get_project'`` の
-  可能性も許容する
+本 file の test 群は e-2840 で test-first pin された **Phase 2 実装完了後の
+真実の挙動** を保証する。e-2833 (= scheduler tick 判定 6 関数書き換え) の
+land で xfail marker (= AssertionError / TypeError 期待) は全 6 件削除され、
+regression pin として active に走る。
 
 ## 参照
 
@@ -46,8 +38,6 @@ from __future__ import annotations
 
 import os
 import sys
-
-import pytest
 
 # lib/ を import path に載せる (既存 test files と同じ pattern)。
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
@@ -145,15 +135,6 @@ def _make_project_pool_with_unclaim_todo() -> dict:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=(AssertionError, TypeError),
-    reason=(
-        "e-2833 Phase 2 で materialize_slots 経由の tick 判定へ書き換え、 "
-        "現行は task_states cache のみ見て false-terminal 判定 = "
-        "tk-29a11d2f silent quiesce bug の直接 pin"
-    ),
-)
 def test_aggregate_terminal_false_when_stamped_all_terminal_but_pool_has_unclaim_todo():
     """tk-29a11d2f silent quiesce の直接再現。
 
@@ -193,11 +174,6 @@ def test_aggregate_terminal_false_when_stamped_all_terminal_but_pool_has_unclaim
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=(AssertionError, TypeError),
-    reason="e-2833 Phase 2 で signature が (trek_doc, get_project) 化される予定",
-)
 def test_aggregate_terminal_true_when_stamped_and_pool_both_all_done():
     """完遂 Trek の positive path pin。
 
@@ -241,11 +217,6 @@ def test_aggregate_terminal_true_when_stamped_and_pool_both_all_done():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=(AssertionError, TypeError),
-    reason="e-2833 Phase 2 で has_unclaim_todo も materialize_slots ベースへ",
-)
 def test_has_unclaim_todo_true_when_pool_has_todo_but_task_states_empty():
     """has_unclaim_todo が pool の todo を認識する pin。
 
@@ -289,11 +260,6 @@ def test_has_unclaim_todo_true_when_pool_has_todo_but_task_states_empty():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=(AssertionError, TypeError),
-    reason="e-2833 Phase 2: should_fire_executor_tick も pool 参照へ",
-)
 def test_should_fire_executor_tick_true_for_fresh_executor_with_pool_todo():
     """新規 executor session が scope 内 pool の todo を pick up する経路を pin。
 
@@ -327,11 +293,6 @@ def test_should_fire_executor_tick_true_for_fresh_executor_with_pool_todo():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=(AssertionError, TypeError),
-    reason="e-2833 Phase 2: is_completion_ready も aggregate_terminal 経由で pool 参照",
-)
 def test_is_completion_ready_false_when_pool_has_unclaim_todo():
     """完遂通知の誤発火防御 pin。
 
@@ -357,11 +318,6 @@ def test_is_completion_ready_false_when_pool_has_unclaim_todo():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=(AssertionError, TypeError),
-    reason="e-2833 Phase 2: cross-project pool 参照経路 pin",
-)
 def test_aggregate_terminal_false_when_one_of_multi_scope_projects_has_pool_todo():
     """cross-project Trek (実 tk-29a11d2f と同 shape) の silent quiesce pin。
 

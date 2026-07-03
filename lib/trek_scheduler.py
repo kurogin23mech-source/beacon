@@ -29,7 +29,20 @@ place (= app.py).
 from __future__ import annotations
 
 import datetime
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
+
+# ms-99 / e-2833 — Slot inventory primitive (Phase 2). The six tick decision
+# functions below all delegate slot resolution to ``materialize_slots`` so
+# the source of truth for "what work exists in this Trek" is ``scope[] ×
+# project pool`` rather than the ``task_states`` cache alone. This closes
+# the silent-quiesce loop where a partial-stamp ``task_states`` map made the
+# scheduler read the Trek as complete while pool-side todo remained (see
+# ``tests/test_trek_silent_quiesce_regression.py`` for the tk-29a11d2f
+# reproduction).
+try:
+    from trek_slots import Slot, materialize_slots  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover — flat-layout import fallback
+    from lib.trek_slots import Slot, materialize_slots  # type: ignore[no-redef]
 
 # Cadence × N rule for idle escalation (ms-83 / e-2001). Re-used here as
 # the read-side default so callers don't need to import lib.trek for one
@@ -208,39 +221,36 @@ def select_due_treks(
     )]
 
 
-def is_trek_task_aggregate_terminal(trek_doc: dict) -> bool:
-    """Return True iff every stamped Trek task state is terminal.
+def is_trek_task_aggregate_terminal(
+    trek_doc: dict,
+    *,
+    get_project: Callable[[str], dict],
+) -> bool:
+    """Return True iff every materialized Trek slot is in a terminal state.
 
-    ms-88 / e-2107 — terminal = ``done`` OR ``user_review`` (per the
-    5-state model and CORE doc 5nfTSmCDVUzD4SLzIhI5 § "Trek 完遂判定").
-    ``todo`` / ``working`` / ``leader_review`` keep the scheduler firing
-    because there is still active work or a pending leader judgment.
+    ms-99 / e-2833 — Phase 2 refactor: reads from ``materialize_slots``
+    (= scope[] × project pool) rather than the ``task_states`` cache. This
+    is the fix for the tk-29a11d2f silent-quiesce dogfood (2026-07-03):
+    a partial-stamp cache with one ``user_review`` entry made the old
+    task_states-only path return True while three unclaim todos still
+    lived in the pool, causing the scheduler to quiesce prematurely.
 
-    A trek with **no** stamped states (= empty task_states map) is NOT
-    terminal — it means "no executor has declared anything yet", and the
-    scheduler should keep firing obligation DMs so the executor knows to
-    act and stamp state. This preserves the existing pre-state-machine
-    behaviour when no one is using the new API.
+    Terminal = ``done`` OR ``user_review`` (ms-88 / e-2107; CORE doc
+    5nfTSmCDVUzD4SLzIhI5 § "Trek 完遂判定"). A trek with an empty scope
+    (= materialize_slots returns []) is NOT terminal — the scheduler
+    keeps firing obligation DMs until scope is populated.
 
-    Legacy ``waiting-review`` is migrated transparently via lib.trek
-    (= maps to ``leader_review`` = non-terminal) so old data keeps the
-    scheduler running until the leader makes a call.
+    ``get_project`` is a callable that returns the project pool doc for
+    a given project_id (in production this is ``db.get_project``). It is
+    keyword-only because e-2840's regression pins exercise the keyword
+    signature and the primitive's own contract mirrors it.
     """
-    states = trek_doc.get("task_states") or {}
-    if not states:
+    slots = materialize_slots(trek_doc, get_project=get_project)
+    if not slots:
+        # Empty scope = "nothing to complete yet"; keep firing.
         return False
-    # Lazy import inside the call so the module stays light when imported
-    # by tests that mock lib.trek. ms-97 / e-2667 — dual-form fallback so
-    # Cloud Run's flat layout (PYTHONPATH=/app/lib:/app/server) also resolves.
-    _trek = _import_trek()
-    _get_state = getattr(_trek, "get_task_state", None) if _trek else None
-    for tid, entry in states.items():
-        if _get_state is not None:
-            # Use the canonical getter so legacy tokens migrate.
-            state = _get_state(trek_doc, tid)
-        else:
-            state = (entry or {}).get("state") or DEFAULT_TASK_STATE
-        if state not in TERMINAL_TASK_STATES:
+    for slot in slots:
+        if slot.resolved_state not in TERMINAL_TASK_STATES:
             return False
     return True
 
@@ -290,50 +300,84 @@ def _task_state_of(trek_doc: dict, task_id: str, entry: dict) -> str:
     return (entry or {}).get("state") or DEFAULT_TASK_STATE
 
 
-def has_unclaim_todo(trek_doc: dict) -> bool:
-    """Return True iff at least one ``task_states`` entry is in ``todo``
-    state without a stamped owner (= fresh todo waiting for an executor).
+# ms-99 / e-2833 — "Signal source" invariant: a slot whose
+# ``resolved_state_source == "unstamped"`` is a placeholder — neither the
+# task_states cache nor the project pool has told us anything about it
+# (e.g. an MS slot whose scope entry references a project not currently
+# reachable via ``get_project``, or an atomic task/op slot whose pool
+# entry has been deleted). Such slots participate in
+# ``is_trek_task_aggregate_terminal`` (= they keep the aggregate non-
+# terminal so the scheduler keeps trying, per SPEC 方針 3 fallback), but
+# they must NOT count as "there is work to pick up / show the leader"
+# for the leader-digest / executor-pickup gates. Filtering them out here
+# is the direct fix for the false-fire path exercised by
+# ``test_lazy_start_no_signal_yields_broadcast_fallback_only``.
+_UNSTAMPED_SOURCE = "unstamped"
 
-    ms-97 / e-2613 (AC33) — used by the per-executor lazy-start decision.
-    An executor with no active claim still gets a tick if there's an
-    unclaim todo to pick up; otherwise they stay quiet.
+
+def _signal_slots(slots: list[Slot]) -> list[Slot]:
+    return [s for s in slots if s.resolved_state_source != _UNSTAMPED_SOURCE]
+
+
+def has_unclaim_todo(
+    trek_doc: dict,
+    *,
+    get_project: Callable[[str], dict],
+) -> bool:
+    """Return True iff any materialized slot is unclaimed todo work.
+
+    ms-99 / e-2833 — Phase 2 refactor: reads slot inventory rather than
+    the task_states cache. "Unclaim todo" now means a slot whose
+    ``owner_session_id`` is empty AND whose ``resolved_state`` is
+    ``todo`` AND whose source is not ``unstamped`` (= there is a real
+    cache/pool signal indicating pickup-able work). This surfaces pool-
+    side todo tasks that never got a ``task_states`` stamp — the fresh-
+    executor silent-skip loop from tk-29a11d2f dogfood — without
+    spuriously firing on empty MS slots whose pool is unreachable.
     """
-    states = trek_doc.get("task_states") or {}
-    for tid, entry in states.items():
-        state = _task_state_of(trek_doc, tid, entry or {})
-        if state != DEFAULT_TASK_STATE:
+    for slot in _signal_slots(materialize_slots(trek_doc, get_project=get_project)):
+        if slot.owner_session_id:
             continue
-        owner = (entry or {}).get("updated_by_session_id") or ""
-        if not owner:
+        if slot.resolved_state == DEFAULT_TASK_STATE:
             return True
     return False
 
 
-def has_leader_review_queue(trek_doc: dict) -> bool:
-    """Return True iff at least one task is in ``leader_review`` state.
+def has_leader_review_queue(
+    trek_doc: dict,
+    *,
+    get_project: Callable[[str], dict],
+) -> bool:
+    """Return True iff any materialized slot is in ``leader_review``.
 
-    ms-97 / e-2613 (AC33) — leader-digest condition. ``leader_review`` is
-    the "leader judgment requested" slot; while any exist, the leader's
-    digest must keep firing so they can act.
+    ms-99 / e-2833 — Phase 2 refactor: iterate slots, not task_states.
+    Any slot whose ``resolved_state == "leader_review"`` keeps the
+    leader digest firing until they act. ``leader_review`` can never
+    come from an unstamped source (= it requires an explicit stamp),
+    so no source filter is applied here.
     """
-    states = trek_doc.get("task_states") or {}
-    for tid, entry in states.items():
-        state = _task_state_of(trek_doc, tid, entry or {})
-        if state == "leader_review":
+    slots = materialize_slots(trek_doc, get_project=get_project)
+    for slot in slots:
+        if slot.resolved_state == "leader_review":
             return True
     return False
 
 
-def has_todo_float(trek_doc: dict) -> bool:
-    """Return True iff at least one task is in ``todo`` state (claimed or not).
+def has_todo_float(
+    trek_doc: dict,
+    *,
+    get_project: Callable[[str], dict],
+) -> bool:
+    """Return True iff any materialized slot is in ``todo`` with a real
+    cache/pool signal (= not an unstamped placeholder).
 
-    ms-97 / e-2613 (AC33) — leader-digest condition. While todo float
-    exists, leader visibility is useful (= "what's unclaimed / waiting").
+    ms-99 / e-2833 — unlike ``has_unclaim_todo`` this also counts claimed
+    todo slots (= "todo float exists" for the leader digest regardless
+    of who owns it), but still filters unstamped slots so an empty-scope
+    Trek does not spuriously fire the digest.
     """
-    states = trek_doc.get("task_states") or {}
-    for tid, entry in states.items():
-        state = _task_state_of(trek_doc, tid, entry or {})
-        if state == DEFAULT_TASK_STATE:
+    for slot in _signal_slots(materialize_slots(trek_doc, get_project=get_project)):
+        if slot.resolved_state == DEFAULT_TASK_STATE:
             return True
     return False
 
@@ -341,31 +385,26 @@ def has_todo_float(trek_doc: dict) -> bool:
 def is_completion_imminent(
     trek_doc: dict,
     *,
+    get_project: Callable[[str], dict],
     threshold: int = COMPLETION_IMMINENT_SLOTS,
 ) -> bool:
     """Return True iff the trek is within ``threshold`` non-terminal slots
     of full aggregate-terminal completion.
 
-    ms-97 / e-2613 (AC33) — leader-digest condition. When most slots are
-    done and only a couple remain, the leader benefits from seeing the
-    finish line approach (= "ship soon, decide last few"). For a trek
-    with N=0 non-terminal slots ``is_trek_task_aggregate_terminal``
-    already triggers, so this helper is only meaningful for 1..N case.
-
-    A trek with no stamped states returns False (= "no signal").
+    ms-99 / e-2833 — Phase 2 refactor: counts non-terminal materialized
+    slots. Unstamped placeholder slots are excluded from the count (= they
+    do not represent real remaining work), so an empty-scope Trek returns
+    False (= no imminence).
     """
-    states = trek_doc.get("task_states") or {}
-    if not states:
+    signal = _signal_slots(materialize_slots(trek_doc, get_project=get_project))
+    if not signal:
         return False
     non_terminal = 0
-    for tid, entry in states.items():
-        state = _task_state_of(trek_doc, tid, entry or {})
-        if state not in TERMINAL_TASK_STATES:
+    for slot in signal:
+        if slot.resolved_state not in TERMINAL_TASK_STATES:
             non_terminal += 1
             if non_terminal > threshold:
                 return False
-    # 1..threshold non-terminal slots means imminent. 0 means already
-    # terminal (= caller should use the dedicated terminal predicate).
     return 0 < non_terminal <= threshold
 
 
@@ -373,79 +412,61 @@ def should_fire_executor_tick(
     trek_doc: dict,
     *,
     session_id: str,
+    get_project: Callable[[str], dict],
 ) -> bool:
     """Lazy-start decision for one executor's progress-check tick.
 
-    ms-97 / e-2613 (AC33) — returns True iff the executor either:
-      * has at least one active claim slot in this trek (= a stamped
-        todo / working entry pointing to this session_id), or
-      * the trek has an unclaim todo waiting to be picked up (= fresh
-        executor with empty claim history, but real work to do).
+    ms-99 / e-2833 — Phase 2 refactor: slot-inventory based. Returns True iff:
+      * The executor holds an active claim on a slot (= slot.owner_session_id
+        equals ``session_id`` AND slot.resolved_state is non-terminal;
+        source may be unstamped — the executor explicitly claimed it), OR
+      * The trek has an unclaim todo slot with a real cache/pool signal
+        the executor could pick up.
 
-    Returns False when the executor has only terminal claims AND there
-    is no unclaim todo float (= "nothing to do here, stay quiet"). The
-    server-side orchestrator falls back to a single minimal broadcast
-    when EVERY executor returns False, preserving the SPEC's
-    "no complete silence" rule.
-
-    Pure / I/O-free so unit tests can pin the matrix without standing
-    up an HTTP layer. Wraps ``session_has_active_claim`` from lib.trek
-    + the ``has_unclaim_todo`` helper above.
+    Returns False when the executor's claims are all terminal AND no
+    unclaim todo signal remains (= AC33 stop condition). The server
+    orchestrator falls back to a minimal broadcast if every executor's
+    decision is False so no complete silence occurs.
     """
-    # ms-97 / e-2667 — dual-form lazy import. The pre-fix code only tried
-    # ``from lib.trek import ...`` which silent-failed on Cloud Run (flat
-    # layout: PYTHONPATH=/app/lib:/app/server, ``lib`` is not a package),
-    # so both helpers fell back to None. That made the function always
-    # short-circuit to has_unclaim_todo(trek_doc) only, which returns False
-    # for any trek with no fresh todo entries — and that skipped LPS / PE
-    # from executor_targets every tick (= dogfood 不着 root cause).
-    _trek = _import_trek()
-    _has_active = getattr(_trek, "session_has_active_claim", None) if _trek else None
-    _has_any = getattr(_trek, "session_has_any_claim", None) if _trek else None
-    if _has_active is not None and _has_active(trek_doc, session_id=session_id):
-        return True
-    # A fresh executor with NO claims at all may still pick up an unclaim
-    # todo. If neither condition holds the executor genuinely has nothing
-    # to do; skip.
-    if _has_any is not None and _has_any(trek_doc, session_id=session_id):
-        # Has claims, but none active → all terminal. Only fire if there
-        # is unclaim todo float to pick up next.
-        return has_unclaim_todo(trek_doc)
-    # No claims yet (= fresh executor). Fire only if there's something to
-    # claim — otherwise they're idle by design.
-    return has_unclaim_todo(trek_doc)
+    slots = materialize_slots(trek_doc, get_project=get_project)
+    for slot in slots:
+        if slot.owner_session_id != session_id:
+            continue
+        if slot.resolved_state not in TERMINAL_TASK_STATES:
+            return True
+    # No active claim → fall through to the unclaim-todo pickup check.
+    for slot in _signal_slots(slots):
+        if slot.owner_session_id:
+            continue
+        if slot.resolved_state == DEFAULT_TASK_STATE:
+            return True
+    return False
 
 
-def should_fire_leader_tick(trek_doc: dict) -> bool:
+def should_fire_leader_tick(
+    trek_doc: dict,
+    *,
+    get_project: Callable[[str], dict],
+) -> bool:
     """Lazy-start decision for the leader-digest tick.
 
-    ms-97 / e-2613 (AC33) — fires when any of:
-      * leader_review queue non-empty (= leader has decisions to make)
-      * todo float exists (= unclaimed / queued work to visualise)
-      * completion imminent (= within COMPLETION_IMMINENT_SLOTS of all-
-        terminal, leader benefits from seeing the finish line)
+    ms-99 / e-2833 — Phase 2 refactor: still layered on top of the three
+    primitives (``has_leader_review_queue`` / ``has_todo_float`` /
+    ``is_completion_imminent``) which now all read slot inventory. Each
+    primitive call re-materializes the slot list; that is idempotent
+    (auto-mirror stamps carry the AUTO_MIRROR_SESSION_ID marker and are
+    skipped on repeats) and keeps the composition boundary readable.
 
-    Returns False otherwise. Stop condition (= all slots terminal) is
-    handled by the existing ``is_trek_task_aggregate_terminal`` quiesce
-    path; this helper assumes the caller already filtered out fully-
-    terminal treks.
-
-    A trek with empty task_states returns False — there is no state for
-    the leader to digest yet. The orchestrator's minimal-tick fallback
-    keeps one event per cadence window so the leader can still observe
-    "nothing has happened" through the digest channel.
+    A trek with empty scope returns False — the orchestrator's minimal-
+    tick fallback keeps one event per cadence window so the leader can
+    still observe "nothing has happened" through the digest channel.
     """
-    if has_leader_review_queue(trek_doc):
+    if has_leader_review_queue(trek_doc, get_project=get_project):
         return True
-    if has_todo_float(trek_doc):
+    if has_todo_float(trek_doc, get_project=get_project):
         return True
-    if is_completion_imminent(trek_doc):
+    if is_completion_imminent(trek_doc, get_project=get_project):
         return True
-    # Working-only treks (= all non-terminal slots in `working`) are
-    # currently considered "executor's job, no leader action needed".
-    # The auto-stall safety net (= ms-75 / e-2067, server-side) catches
-    # silent halts by transitioning stuck `working` to `leader_review`,
-    # which re-fires this gate via has_leader_review_queue.
     return False
 
 
@@ -466,31 +487,35 @@ def _has_op_slot(trek_doc: dict) -> bool:
     return False
 
 
-def is_completion_ready(trek_doc: dict) -> bool:
+def is_completion_ready(
+    trek_doc: dict,
+    *,
+    get_project: Callable[[str], dict],
+) -> bool:
     """Return True iff this trek is ready to fire a one-shot completion_ready marker.
 
     ms-97 / Phase 7-A / AC20 — fires ONCE per trek when:
 
-      * every stamped ``task_states`` entry is in a terminal state
-        (= ``done`` or ``user_review`` — same set as
-        ``is_trek_task_aggregate_terminal``), AND
+      * every materialized slot is in a terminal state (= ``done`` or
+        ``user_review`` — same set as ``is_trek_task_aggregate_terminal``),
+        AND
       * the scope contains NO Operation slot (= per AC20 footnote,
         Op-bearing treks defer this signal pending separate SPEC), AND
       * ``meta.completion_notified_at`` is still unstamped (= ``None``
         / absent — i.e. the marker has not already been fanned out).
 
-    Empty ``task_states`` returns False, mirroring
-    ``is_trek_task_aggregate_terminal``.
-
-    Pure / I/O-free. The server endpoint pairs this with the idempotent
-    stamp; the test surface pins the matrix without a server.
+    ms-99 / e-2833 — signature now threads ``get_project`` through to
+    ``is_trek_task_aggregate_terminal`` so completion detection reads
+    the same slot inventory as every other tick predicate. This is the
+    e-2840 xfail contract (= test_is_completion_ready_false_when_pool_
+    has_unclaim_todo pin).
     """
     if _has_op_slot(trek_doc):
         return False
     meta = trek_doc.get("meta") or {}
     if meta.get("completion_notified_at"):
         return False
-    return is_trek_task_aggregate_terminal(trek_doc)
+    return is_trek_task_aggregate_terminal(trek_doc, get_project=get_project)
 
 
 # ---------------------------------------------------------------------------
