@@ -61,6 +61,11 @@ ENTITIES = [
     "session_logs",
     "operation_envelopes",
     "active_claims",
+    # treks/{trek_id}/* subcollections
+    # firestore は treks/{tid}/logs に永続化する (ms-97 e-2603)。dynamodb_client は
+    # ここを in-memory fallback で握っていて再起動で消える既知の穴があるが、MySQL は
+    # 汎用 (pk, sk, data) テーブルで正しく永続化できるので trek_logs を実体化する。
+    "trek_logs",
     # users/{uid}/* subcollections
     "machines",
     "session_lookup",
@@ -1371,7 +1376,6 @@ def delete_trek(trek_id: str) -> bool:
 # Firestore (= subcollection)。`trek_logs` テーブルが入るまでの best-effort。
 # ---------------------------------------------------------------------------
 
-_TREK_LOGS_FALLBACK: dict[str, list[dict]] = {}
 
 
 def _mint_trek_log_id() -> str:
@@ -1380,17 +1384,26 @@ def _mint_trek_log_id() -> str:
 
 
 def append_trek_log(trek_id: str, log_entry: dict) -> str:
+    """treks/{trek_id}/logs に 1 件追記する (= firestore と同じ永続化)。
+
+    dynamodb_client は in-memory fallback だが、MySQL は trek_logs テーブル
+    (pk=trek_id, sk=log_id) に実体化する。log_id / trek_id は未指定なら補完。
+    """
     payload = dict(log_entry or {})
     log_id = payload.get("log_id") or _mint_trek_log_id()
     payload["log_id"] = log_id
     payload["trek_id"] = trek_id
-    _TREK_LOGS_FALLBACK.setdefault(trek_id, []).append(payload)
+    _put("trek_logs", trek_id, payload, sk=log_id)
     return log_id
 
 
 def list_trek_logs(trek_id: str, *, limit: int = 100,
                    since: str = "") -> list[dict]:
-    rows = list(_TREK_LOGS_FALLBACK.get(trek_id) or [])
+    """treks/{trek_id}/logs を created_at 昇順で返す (= firestore と同じ意味論)。
+
+    since: ISO8601 の下限 (= created_at > since のみ)。limit: 返却上限。
+    """
+    rows = _query("trek_logs", trek_id)
     if since:
         rows = [r for r in rows if (r.get("created_at") or "") > since]
     rows.sort(key=lambda r: (r.get("created_at", ""), r.get("log_id", "")))
