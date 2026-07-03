@@ -4,6 +4,7 @@
 
   - `firestore` (default) → `firestore_client` の関数を re-export
   - `dynamodb`            → `dynamodb_client` の関数を re-export
+  - `mysql`               → `mysql_client` の関数を re-export (= ms-96 VPS 経路)
 
 `server/app.py` は `import store as db` するだけで両対応になる (= db.get_project
 等の呼び出しは router が backend に転送する)。
@@ -19,6 +20,93 @@ _BACKEND = os.environ.get("BEACON_STORE_BACKEND", "firestore").lower()
 
 if _BACKEND == "dynamodb":
     from dynamodb_client import (  # noqa: F401
+        # Frontmatter helper (ms-60 / e-2306):
+        # operation_approve calls `db._extract_frontmatter_field(...)`. Without
+        # this re-export the call raises AttributeError, swallowed by the
+        # catch-all exception handler as a generic 500. Both backends ship the
+        # same pure-string helper, so the router exposes it under the same
+        # private name to keep call sites symmetrical.
+        _extract_frontmatter_field,
+        # Projects
+        get_project,
+        save_project,
+        list_projects,
+        list_all_projects,
+        delete_project,
+        # Users
+        get_user,
+        get_or_create_user,
+        list_users,
+        update_user,
+        delete_user,
+        find_user_by_email,
+        # Retros
+        list_retros,
+        get_retro,
+        save_retro,
+        # Documents
+        list_documents,
+        get_document,
+        save_document,
+        list_document_revisions,
+        get_document_revision,
+        delete_document,
+        sweep_trashed_documents,
+        # Changelog
+        append_changelog,
+        list_changelog,
+        # Notes
+        add_note,
+        list_notes,
+        clear_notes,
+        # Bus events / cursors / nonces / audit
+        append_bus_event,
+        get_bus_cursor,
+        advance_bus_cursor,
+        check_and_record_bus_nonce,
+        set_bus_event_receipt,
+        find_bus_event,
+        append_bus_audit,
+        list_bus_audit,
+        list_bus_events,
+        # Bus event approvals sidecar (ms-70 / e-1712, e-1713 dispatcher gate)
+        get_bus_event_approval,
+        put_bus_event_approval,
+        list_pending_approvals,
+        # Sessions
+        upsert_session,
+        stamp_session_actor_email,
+        list_sessions,
+        # Machines + session minting
+        get_or_mint_machine,
+        get_or_mint_session_by_tuple,
+        list_user_machines,
+        # Session logs
+        upsert_session_log,
+        list_session_logs,
+        get_session_log,
+        # Operation envelopes
+        get_active_operation_envelope,
+        issue_operation_envelope,
+        revoke_operation_envelope,
+        list_operation_envelopes,
+        get_operation_envelope,
+        # Treks (ms-69 / e-1652)
+        get_trek,
+        save_trek,
+        list_treks,
+        delete_trek,
+        # Trek structured logs (ms-97 Phase 7-C, AC26 / AC27, e-2603)
+        append_trek_log,
+        list_trek_logs,
+        # Active claims (ms-55 e-1730)
+        list_active_claims,
+        get_active_claim,
+        save_active_claim,
+        delete_active_claim,
+    )
+elif _BACKEND == "mysql":
+    from mysql_client import (  # noqa: F401
         # Frontmatter helper (ms-60 / e-2306):
         # operation_approve calls `db._extract_frontmatter_field(...)`. Without
         # this re-export the call raises AttributeError, swallowed by the
@@ -208,5 +296,5 @@ elif _BACKEND == "firestore":
 else:
     raise RuntimeError(
         f"Unknown BEACON_STORE_BACKEND: {_BACKEND!r} "
-        f"(expected 'firestore' or 'dynamodb')"
+        f"(expected 'firestore', 'dynamodb', or 'mysql')"
     )
