@@ -2,6 +2,14 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.53.1] - 2026-07-04
+
+- Merge pull request #333 from kurogin23mech-source/fix/ms-95-e2875-archived-trek-guards
+- fix(ms-95): [e-2875] inbox-hook で archived Trek 進行 event を silent drop (layer 3-A)
+- fix(ms-95): [e-2875] server 410 Gone guards on archived Trek writes (layer 3-B)
+- docs(release): update README/CHANGELOG for v0.53.0
+- chore(release): bump formula to 0.53.0
+
 ## [v0.53.0] - 2026-07-03
 
 - Merge pull request #332 from kurogin23mech-source/fix/ms-95-e2870-cloud-first-recursion
