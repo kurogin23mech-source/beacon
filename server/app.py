@@ -3885,6 +3885,38 @@ def _load_trek_for_read(
     raise HTTPException(status_code=403, detail="Not a member of this trek")
 
 
+def _reject_if_trek_archived(t: dict) -> None:
+    """Return 410 Gone when the Trek has been archived (ms-95 / e-2875).
+
+    Defense-in-depth guard for write endpoints. After a Trek is archived
+    the server tick stops firing new progress-check events, but events
+    already in the bus (fired shortly before archive) can still reach
+    executor sessions. Without this guard, executors invoke Skills that
+    POST pulse-ack / task-state / task-add to the archived Trek, which
+    then generates peer DM traffic and keeps the executor loop alive for
+    several minutes after the leader has left the room. The
+    client-side inbox-hook drops archived-trek events before Skill
+    invocation on updated bridges; this server guard closes the same
+    hole for pre-fix bridges (= two layers, either alone suffices).
+
+    Applied to state-mutating executor / leader endpoints:
+    pulse-ack, task-state, task-add, kickoff, extend-ttl,
+    session-heartbeat. Read endpoints and the archive transition itself
+    (= mutates status → archived) are exempt.
+
+    Reference: 2026-07-03 tk-29a11d2f archive dogfood, 5-10 minutes of
+    residual peer DM noise after archive; SPEC e-2875 Done when.
+    """
+    if t.get("status") == "archived":
+        raise HTTPException(
+            status_code=410,
+            detail=(
+                f"Trek '{t.get('trek_id') or ''}' is archived; "
+                f"writes rejected (ms-95 / e-2875)"
+            ),
+        )
+
+
 def _trek_member_role(
     t: dict, user_id: str, session_id: str = "",
 ) -> str:
@@ -5313,6 +5345,7 @@ def trek_kickoff_endpoint(trek_id: str, body: TrekKickoff,
     echo "stamped" back to the user.
     """
     t = _load_trek_for_read(trek_id, user)
+    _reject_if_trek_archived(t)
     if _auth_enabled:
         uid = user.get("sub") or ""
         if not trek_mod.find_member(t, user_id=uid):
@@ -5470,6 +5503,7 @@ def trek_pulse_ack_endpoint(trek_id: str, body: TrekPulseAck,
     Skill can echo the recorded state back to the user.
     """
     t = _load_trek_for_read(trek_id, user)
+    _reject_if_trek_archived(t)
     if _auth_enabled:
         uid = user.get("sub") or ""
         if not trek_mod.find_member(t, user_id=uid):
@@ -5555,6 +5589,7 @@ def extend_trek_task_ttl_endpoint(trek_id: str, body: TrekExtendTtl,
     can echo the new ``ttl_extended_until`` back to the user.
     """
     t = _load_trek_for_read(trek_id, user)
+    _reject_if_trek_archived(t)
     if _auth_enabled:
         uid = user.get("sub") or ""
         if not trek_mod.find_member(t, user_id=uid):
@@ -5621,6 +5656,7 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
     on behalf of the work they performed.
     """
     t = _load_trek_for_read(trek_id, user, request)
+    _reject_if_trek_archived(t)
     # Member check. Determine the calling session_id (best-effort —
     # bridges include X-Beacon-Session header; CLI/curl callers may
     # omit it). ms-97 / e-2658 Phase 1 (AC6) — phase A+ trek の時は
@@ -5817,6 +5853,7 @@ def add_trek_task_endpoint(
         enforcement; task-level scope entries don't sprout sideways)
     """
     t = _load_trek_for_read(trek_id, user)
+    _reject_if_trek_archived(t)
     user_id = user.get("sub") or ""
     if _auth_enabled and not trek_mod.find_member(t, user_id=user_id):
         raise HTTPException(
@@ -7116,6 +7153,7 @@ def trek_session_heartbeat(
 ):
     """Stamp the trek's last_session_response_at (ms-83 / e-2001)."""
     t = _load_trek_for_read(trek_id, user)
+    _reject_if_trek_archived(t)
     _require_trek_joined_member(t, user)
     import datetime
     now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
