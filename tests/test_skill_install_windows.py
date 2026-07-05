@@ -575,6 +575,31 @@ def test_dispatch_skill_install_forwards_force_and_settings(monkeypatch):
     assert captured["env"]["BEACON_SETTINGS_PATH"] == "/tmp/x.json"
 
 
+def test_dispatch_skill_converter_forwards_all_flags(monkeypatch):
+    sys.path.insert(0, str(_REPO_ROOT))
+    import beacon_cli.dispatch as dispatch  # type: ignore
+
+    captured = {}
+
+    def fake_call(cmd, env=None):
+        captured["env"] = env
+        return 0
+
+    monkeypatch.setattr(dispatch.subprocess, "call", fake_call)
+    rc = dispatch.dispatch(
+        _REPO_ROOT,
+        ["skill", "install", "--target", "both", "--name", "beacon-init",
+         "--dry-run", "--prune", "--force", "--json"],
+    )
+    assert rc == 0
+    assert captured["env"]["BEACON_SKILL_TARGET"] == "both"
+    assert captured["env"]["BEACON_SKILL_NAME"] == "beacon-init"
+    assert captured["env"]["BEACON_DRY_RUN"] == "1"
+    assert captured["env"]["BEACON_PRUNE"] == "1"
+    assert captured["env"]["BEACON_FORCE"] == "1"
+    assert captured["env"]["BEACON_JSON"] == "1"
+
+
 def test_dispatch_skill_install_respects_settings_path_env(tmp_path, monkeypatch):
     """When ``--settings-path`` is passed via the dispatch CLI, the
     forwarded ``BEACON_SETTINGS_PATH`` must steer ``cmd_skill_install``

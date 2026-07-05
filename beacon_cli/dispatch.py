@@ -941,6 +941,12 @@ def build_parser() -> argparse.ArgumentParser:
     skill_sub = p_skill.add_subparsers(dest="skill_cmd", metavar="<subcmd>")
     p_skill_install = skill_sub.add_parser("install", add_help=False)
     p_skill_install.add_argument("--force", action="store_true")
+    p_skill_install.add_argument("--adopt", action="store_true")
+    p_skill_install.add_argument("--dry-run", action="store_true", dest="dry_run")
+    p_skill_install.add_argument("--prune", action="store_true")
+    p_skill_install.add_argument("--json", action="store_true")
+    p_skill_install.add_argument("--target", choices=("claude", "codex", "both"), default="")
+    p_skill_install.add_argument("--name", default="")
     p_skill_install.add_argument("--settings-path", dest="settings_path", default="")
 
     # ---- session id (ms-54 e-1150 / e-1152 / ms-44 e-1171) ----
@@ -3163,7 +3169,7 @@ def _handle_skill(root: Path, args: argparse.Namespace) -> int:
     path stays env-superset-compatible.
     """
     if args.show_help or args.skill_cmd is None:
-        print("Usage: beacon skill install [--force] [--settings-path PATH]")
+        print("Usage: beacon skill install [--target claude|codex|both --name NAME] [--dry-run] [--prune] [--force|--adopt]")
         return 0 if args.show_help else 2
     if args.skill_cmd != "install":
         print(f"Unknown skill subcommand: {args.skill_cmd}")
@@ -3171,6 +3177,20 @@ def _handle_skill(root: Path, args: argparse.Namespace) -> int:
     env: Dict[str, str] = {}
     if getattr(args, "force", False):
         env["BEACON_FORCE"] = "1"
+    if getattr(args, "adopt", False):
+        env["BEACON_ADOPT"] = "1"
+    if getattr(args, "dry_run", False):
+        env["BEACON_DRY_RUN"] = "1"
+    if getattr(args, "prune", False):
+        env["BEACON_PRUNE"] = "1"
+    if getattr(args, "json", False):
+        env["BEACON_JSON"] = "1"
+    target = getattr(args, "target", "") or ""
+    name = getattr(args, "name", "") or ""
+    if target:
+        env["BEACON_SKILL_TARGET"] = target
+    if name:
+        env["BEACON_SKILL_NAME"] = name
     settings_path = getattr(args, "settings_path", "") or ""
     if settings_path:
         env["BEACON_SETTINGS_PATH"] = settings_path
