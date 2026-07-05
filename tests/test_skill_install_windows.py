@@ -75,7 +75,7 @@ def built_wheel(tmp_path_factory) -> Path:
     if proc.returncode != 0:
         pytest.skip(f"wheel build failed: {proc.stderr[-1500:]}")
 
-    wheels = list(outdir.glob("beacon-*.whl"))
+    wheels = list(outdir.glob("beacon_ai-*.whl"))
     assert wheels, "no wheel produced"
     return wheels[0]
 
