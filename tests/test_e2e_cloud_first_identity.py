@@ -137,6 +137,13 @@ def test_e2e_distinct_terminals_get_distinct_sids(sim, monkeypatch):
 
 def test_e2e_same_terminal_restart_keeps_sid(sim, monkeypatch):
     """Same parent_pid → identical sid even across restarts (= continuity)."""
+    # ms-98 e-2769 added a 300 s session mint cache that short-circuits the
+    # second call to get_or_mint_session() without touching the server. That
+    # preserves the sid identity contract (the cached sid IS the same one),
+    # but it means the server only sees one heartbeat in this in-process
+    # test. Disable the cache so this pin still tests the underlying
+    # "same-tuple → same-sid" server contract rather than the cache layer.
+    monkeypatch.setenv("BEACON_SESSION_CLOUD_MINT_TTL_SECONDS", "0")
     monkeypatch.setenv(session.ENV_PARENT_PID, "333")
     r1 = session.get_or_mint_session()
     sid_first = r1["session_id"]

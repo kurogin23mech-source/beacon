@@ -192,10 +192,16 @@ def test_local_apply_op_called_with_fresh_data(local_project):
 # ---------------------------------------------------------------------------
 
 def test_backend_local_when_firestore_client_not_loaded(monkeypatch):
-    # Sanity: with the explicit override removed and the server module unloaded,
-    # detection falls through to "local".
+    # Sanity: with the explicit override removed and both server modules
+    # unloaded, detection falls through to "local".
+    # ms-64 e-1631: _detect_backend also checks store_router as a cloud signal
+    # (DynamoDB backend imports store_router without firestore_client). If
+    # store_router is left in sys.modules by a prior test (which happens in the
+    # full-suite run), we still get "cloud" here. Delete both to make the test
+    # order-independent.
     monkeypatch.delenv("BEACON_OPERATIONS_BACKEND", raising=False)
     monkeypatch.delitem(sys.modules, "firestore_client", raising=False)
+    monkeypatch.delitem(sys.modules, "store_router", raising=False)
     assert operations._detect_backend() == "local"
 
 
