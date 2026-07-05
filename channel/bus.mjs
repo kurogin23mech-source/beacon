@@ -311,16 +311,23 @@ function interruptibleSleep(ms) {
   })
 }
 
-// `ws` パッケージ (channel/package.json に宣言済) を lazy 解決。解決できなければ
-// null を返し、WS accelerator は無効化される (poll fallback は生きる)。
+// WebSocket 実装を lazy 解決。Node 22+ 内蔵の global WebSocket を最優先 (依存
+// 不要)、無ければ `ws` パッケージ (channel/package.json に宣言済) に fallback。
+// どちらも解決できなければ null を返し WS accelerator は無効化 (poll は生きる)。
+// 両実装とも WHATWG の addEventListener / ev.data / ev.code に対応するので、
+// 呼び出し側は 1 経路で書ける。
 let _WSImpl
 async function _resolveWS() {
   if (_WSImpl !== undefined) return _WSImpl
+  if (typeof globalThis.WebSocket === 'function') {
+    _WSImpl = globalThis.WebSocket
+    return _WSImpl
+  }
   try {
     _WSImpl = (await import('ws')).default
   } catch (e) {
     _WSImpl = null
-    log(`bus WS disabled (ws module unavailable: ${e.message}) — polling only`)
+    log(`bus WS disabled (no global WebSocket & ws module unavailable: ${e.message}) — polling only`)
   }
   return _WSImpl
 }
@@ -360,7 +367,7 @@ async function connectBusWs() {
       scheduleReconnect()
       return
     }
-    ws.on('open', () => {
+    ws.addEventListener('open', () => {
       wsHealthy = true
       backoff = 1000  // reset backoff on a healthy connection
       log('bus WS connected (push-accelerated poll)')
@@ -371,19 +378,21 @@ async function connectBusWs() {
       // Fetch once right away in case events landed during the connect gap.
       wakePoll()
     })
-    ws.on('message', () => {
+    ws.addEventListener('message', () => {
       // Any server frame = "there is activity for this project". We do NOT
       // trust the payload as the source of truth — just wake the poll loop
       // so pollOnce fetches via REST with the existing dedup/cursor logic.
       wakePoll()
     })
-    ws.on('close', (code) => {
+    ws.addEventListener('close', (ev) => {
+      const code = ev && typeof ev.code !== 'undefined' ? ev.code : ''
       log(`bus WS closed (code=${code}) — falling back to ${POLL_INTERVAL}ms poll, reconnecting`)
       scheduleReconnect()
     })
-    ws.on('error', (e) => {
+    ws.addEventListener('error', (ev) => {
       // 'error' is usually followed by 'close'; log and let close reconnect.
-      log(`bus WS error (non-fatal): ${e.message}`)
+      const detail = (ev && (ev.message || ev.error?.message)) || 'error event'
+      log(`bus WS error (non-fatal): ${detail}`)
       try { ws.close() } catch { /* already closing */ }
     })
   }
