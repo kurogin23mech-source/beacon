@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "generated_at": "2026-06-27T05:14:00Z",
+  "generated_at": "2026-07-05T22:20:00Z",
   "generator": "manual + beacon-cli (ms-93 / e-2558)",
   "source_dir": "skills/",
-  "total_skills": 39,
+  "total_skills": 38,
   "spec_reference": "doc_id 6aK8fr1OjsO3hJNHb7hA (= ms-93 §3-B canonical Skill schema)",
   "cohort_summary": {
     "bus-dm": 5,
@@ -14,7 +14,7 @@
     "operation": 3,
     "review-spec": 5,
     "session": 4,
-    "trek": 4
+    "trek": 3
   },
   "skills": [
     {
@@ -714,26 +714,6 @@
       "codex_portability_status": "unported",
       "size_chars": 16479,
       "content_hash": "c12642f20862",
-      "migration_cohort": "trek",
-      "migration_status": "todo"
-    },
-    {
-      "skill_name": "beacon-trek",
-      "current_location": "skills/beacon-trek.md",
-      "frontmatter": {
-        "name": "beacon-trek",
-        "description": "Trek (= 分散協奏のための作業領域) を AI が対話で操作する Skill。create / join / leave / scope-add / scope-remove / member-invite / status / archive の 8 subaction を 1 Skill に統合し、subaction ごとに draft 表示 + ユーザー確認を挟んで beacon trek <verb> を実行する。",
-        "version": "0.1.0",
-        "triggers": ""
-      },
-      "claude_only_fields": [
-        "version",
-        "triggers"
-      ],
-      "has_sub_resources": false,
-      "codex_portability_status": "unported",
-      "size_chars": 14525,
-      "content_hash": "f5c1b656e4e9",
       "migration_cohort": "trek",
       "migration_status": "todo"
     },
