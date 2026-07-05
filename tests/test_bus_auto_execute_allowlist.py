@@ -246,8 +246,8 @@ def _set_allowlist(root: Path, channels: list[str]) -> None:
 
 def _make_event(eid: str, *, channel="ops", delivery="auto-execute",
                 sender="other-sess", payload=None,
-                created_at=None) -> dict:
-    return {
+                created_at=None, envelope=None) -> dict:
+    ev = {
         "event_id": eid,
         "channel": channel,
         "delivery": delivery,
@@ -255,6 +255,16 @@ def _make_event(eid: str, *, channel="ops", delivery="auto-execute",
         "payload": payload or {},
         "created_at": created_at or "2026-06-07T01:30:00.000000Z",
     }
+    # ms-97 P2: provenance-channel events must carry a server-minted T1-system
+    # envelope to keep auto-execute (else the inbox hook downgrades them). Only
+    # attach when a caller opts in, so the non-provenance "ops" cases are
+    # unchanged.
+    if envelope is not None:
+        ev["envelope"] = envelope
+    return ev
+
+
+_T1_SYSTEM_ENV = {"tier": "T1-system", "issuer": "beacon-system"}
 
 
 def _run_hook(hook_module, fake_project, events, monkeypatch, capsys,
@@ -614,9 +624,9 @@ def test_inbox_hook_does_not_downgrade_trek_channels_after_auto_arm(
 
     events = [
         _make_event("ev-progress", channel="trek-progress-check",
-                     delivery="auto-execute"),
+                     delivery="auto-execute", envelope=_T1_SYSTEM_ENV),
         _make_event("ev-digest", channel="trek-leader-digest",
-                     delivery="auto-execute",
+                     delivery="auto-execute", envelope=_T1_SYSTEM_ENV,
                      created_at="2026-06-29T21:44:00.000000Z"),
     ]
     out = _run_hook(hook_module, fake_project, events, monkeypatch, capsys)
