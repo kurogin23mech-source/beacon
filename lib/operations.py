@@ -746,7 +746,11 @@ def apply_operation(
         # transactional apply for the consistency guarantees apply_operation
         # promises (= per-project linearizability of writes).
         store_backend = os.environ.get("BEACON_STORE_BACKEND", "firestore").lower()
-        if store_backend == "dynamodb":
+        if store_backend in ("dynamodb", "mysql"):
+            # ms-96 e-2379: MySQL も 1 MiB 制約が無く v1/v2 subcollection 分離が
+            # 不要なので、DynamoDB と同じ whole-document apply 経路を使う
+            # (= store_router 経由、Firestore 非依存)。else 分岐は firestore_client
+            # を直 import するため mysql backend では ADC 不在で失敗する。
             result = _apply_cloud_dynamodb(project_id, op)
         else:
             import firestore_client as db  # type: ignore[import-not-found]
@@ -829,7 +833,8 @@ def replace_project(
         # DynamoDB ではそれらが存在しないので別経路で処理する。
         store_backend = os.environ.get("BEACON_STORE_BACKEND", "firestore").lower()
 
-        if store_backend == "dynamodb":
+        if store_backend in ("dynamodb", "mysql"):
+            # ms-96 e-2379: MySQL も whole-doc set で安全 (1 MiB cap 無し)。
             # DynamoDB: トランザクションは PK の put_item に集約される
             # (= DynamoDB は単一 PK 内の put_item が atomic)。v2 schema の
             # subcollection 分解は dynamodb_client.save_project が PK のみで
@@ -903,7 +908,10 @@ def load_project_consistent(project_id: str) -> dict:
         raise LookupError(f"Project '{project_id}' not found")
 
     store_backend = os.environ.get("BEACON_STORE_BACKEND", "firestore").lower()
-    if store_backend == "dynamodb":
+    if store_backend in ("dynamodb", "mysql"):
+        # ms-96 e-2379: MySQL も v2 subcollection layout を持たない
+        # (= 新規 project は v1 unified で保存される) ので、schema check +
+        # firestore hydration を skip して whole-doc をそのまま返す。
         return meta
 
     if get_schema_version(meta) == SCHEMA_V1_LEGACY:
