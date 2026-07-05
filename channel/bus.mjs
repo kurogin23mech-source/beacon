@@ -277,6 +277,119 @@ log(`  api=${API_URL} project=${PROJECT_ID} session=${SESSION_ID}`)
 log(`  allow=[${ALLOWED_CHANNELS.join(',')}] poll=${POLL_INTERVAL}ms cwd=${CWD}`)
 log(`  http_timeout=${HTTP_TIMEOUT_MS}ms iter_watchdog=${ITERATION_WATCHDOG_MS}ms`)
 log(`  bridge_claim_refresh=${BRIDGE_CLAIM_REFRESH_MS}ms`)
+
+// --- ms-96 / e-2380 — WebSocket push accelerator --------------------------
+//
+// 従来 bus.mjs は POLL_INTERVAL (5s) の固定ポーリングだけで DM を取りに行って
+// いた。サーバ側は DM 送信時 (post_bus_event) に /ws/projects/{id} へ bus_event
+// を push 済み (app.py `_broadcast_bus_event`) なので、WS を「今すぐ poll しろ」の
+// 合図として使い受信遅延 (最大 5s) を潰す。
+//
+// 設計方針 (SPEC doc U2OTD44j79WJOXRerslh):
+//   - WS は真値源ではない。実データ取得は従来どおり pollOnce (= cursor /
+//     watermark による冪等・重複排除をそのまま再利用)。WS message は
+//     「新着あり」の合図で、割り込み可能 sleep を起こして即 poll させるだけ。
+//   - WS 健全時は poll を backstop 間隔 (WS_BACKSTOP_MS, 既定 30s) に落とし、
+//     WS が push しない送信経路 (fanout / reply 等、broadcast 未フック) も
+//     取りこぼさない。WS 不通時は従来の POLL_INTERVAL (5s) に自動 fallback。
+//   - 切断時は指数 backoff で再接続。`ws` 依存が解決できない環境では WS を
+//     無効化し、従来ポーリングのみで動作する (= 機能低下せず degrade)。
+const WS_ENABLED = process.env.BEACON_BUS_WS !== '0'
+const WS_BACKSTOP_MS = parseInt(process.env.BEACON_BUS_WS_BACKSTOP_MS || '30000', 10)
+let wsHealthy = false
+
+// interruptible sleep: 通常は指定 ms 待つが、wakePoll() で即座に解決できる。
+let _wakeResolve = null
+function wakePoll() {
+  const w = _wakeResolve
+  if (w) { _wakeResolve = null; w() }
+}
+function interruptibleSleep(ms) {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => { _wakeResolve = null; resolve() }, ms)
+    _wakeResolve = () => { clearTimeout(t); resolve() }
+  })
+}
+
+// `ws` パッケージ (channel/package.json に宣言済) を lazy 解決。解決できなければ
+// null を返し、WS accelerator は無効化される (poll fallback は生きる)。
+let _WSImpl
+async function _resolveWS() {
+  if (_WSImpl !== undefined) return _WSImpl
+  try {
+    _WSImpl = (await import('ws')).default
+  } catch (e) {
+    _WSImpl = null
+    log(`bus WS disabled (ws module unavailable: ${e.message}) — polling only`)
+  }
+  return _WSImpl
+}
+
+function _busWsUrl() {
+  // http(s):// → ws(s):// に付け替え、既存の project WS エンドポイントに接続。
+  const base = API_URL.replace(/^http/, 'ws')
+  return `${base}/ws/projects/${encodeURIComponent(PROJECT_ID)}`
+    + `?token=${encodeURIComponent(loadToken())}`
+}
+
+async function connectBusWs() {
+  if (!WS_ENABLED || !PROJECT_ID) return
+  const WS = await _resolveWS()
+  if (!WS) return
+
+  let backoff = 1000
+  const BACKOFF_MAX = 30000
+
+  const openOnce = () => {
+    let ws
+    let pingTimer = null
+    const cleanup = () => {
+      wsHealthy = false
+      if (pingTimer) { clearInterval(pingTimer); pingTimer = null }
+    }
+    const scheduleReconnect = () => {
+      cleanup()
+      const delay = backoff
+      backoff = Math.min(backoff * 2, BACKOFF_MAX)
+      setTimeout(openOnce, delay)
+    }
+    try {
+      ws = new WS(_busWsUrl())
+    } catch (e) {
+      log(`bus WS connect threw: ${e.message}`)
+      scheduleReconnect()
+      return
+    }
+    ws.on('open', () => {
+      wsHealthy = true
+      backoff = 1000  // reset backoff on a healthy connection
+      log('bus WS connected (push-accelerated poll)')
+      // keepalive: server echoes "pong" to "ping" (app.py ws_project).
+      pingTimer = setInterval(() => {
+        try { ws.send('ping') } catch { /* close handler will reconnect */ }
+      }, 30000)
+      // Fetch once right away in case events landed during the connect gap.
+      wakePoll()
+    })
+    ws.on('message', () => {
+      // Any server frame = "there is activity for this project". We do NOT
+      // trust the payload as the source of truth — just wake the poll loop
+      // so pollOnce fetches via REST with the existing dedup/cursor logic.
+      wakePoll()
+    })
+    ws.on('close', (code) => {
+      log(`bus WS closed (code=${code}) — falling back to ${POLL_INTERVAL}ms poll, reconnecting`)
+      scheduleReconnect()
+    })
+    ws.on('error', (e) => {
+      // 'error' is usually followed by 'close'; log and let close reconnect.
+      log(`bus WS error (non-fatal): ${e.message}`)
+      try { ws.close() } catch { /* already closing */ }
+    })
+  }
+
+  openOnce()
+}
 log(`  session.json source=[${session.source || ''}] last_active=[${session.last_active || ''}]`)
 
 // --- Layer 0-3 transparency metadata (ms-54 / e-1369) -----------------------
@@ -1222,7 +1335,10 @@ if (!PROJECT_ID || !SESSION_ID) {
       // No await / no network — refreshBridgeClaim is sync fs.writeFileSync
       // (= local disk only) wrapped in try/catch.
       refreshBridgeClaim()
-      await new Promise((r) => setTimeout(r, POLL_INTERVAL))
+      // ms-96 / e-2380: WS 健全時は backstop 間隔まで待つ (WS が wakePoll() で
+      // 即起こす)。WS 不通時は従来の POLL_INTERVAL でポーリング継続。
+      const idleMs = wsHealthy ? WS_BACKSTOP_MS : POLL_INTERVAL
+      await interruptibleSleep(idleMs)
     }
     log('poll loop exiting')
     // Graceful shutdown signal (e-1318): post one last heartbeat with
@@ -1238,4 +1354,7 @@ if (!PROJECT_ID || !SESSION_ID) {
     clearBridgeClaim()
   }
   setTimeout(loop, 500)
+  // ms-96 / e-2380: start the WS push accelerator alongside the poll loop.
+  // Fire-and-forget: any failure disables WS and leaves polling intact.
+  connectBusWs().catch((e) => log(`bus WS init failed (non-fatal): ${e.message}`))
 }
