@@ -63,6 +63,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -257,6 +258,64 @@ _TREK_SCHEDULER_CHANNELS = {
     "trek-leader-digest",
     "trek-trigger",
 }
+
+
+# ms-97 P2 (= review finding H2): the Level 3 imperative blocks below inject a
+# "You MUST immediately invoke /beacon-… <id>" instruction straight into the AI
+# context. Those instructions are only safe when the triggering event was minted
+# by the Beacon server itself during a scheduler / operation tick (= a
+# T1-system envelope, ``issuer == "beacon-system"``). A project editor can post
+# an ``auto-execute`` event on these channels, but they can NOT forge a valid
+# T1-system envelope: the server verify-on-post (server/app.py post_bus_event)
+# degrades any envelope whose signature/issuer fails to T5, which strips
+# auto-execute before the event is persisted. So requiring T1-system provenance
+# on the *persisted* envelope composes with the server's verify to become a real
+# gate, not mere defense-in-depth. Non-system events on these channels are
+# downgraded to propose-to-ai (same treatment as an allowlist miss) so a forced
+# Skill invoke with an attacker-controlled id is structurally impossible.
+_T1_SYSTEM_TIER = "T1-system"
+_T1_SYSTEM_ISSUER = "beacon-system"
+_SYSTEM_PROVENANCE_CHANNELS = {
+    "operation-trigger",
+    "trek-trigger",
+    "trek-progress-check",
+    "trek-task-review",
+    "trek-leader-digest",
+}
+
+# Payload-derived ids (trek_id / task_id / op_id) are interpolated into the
+# imperative command strings. Even after the provenance gate above, defend the
+# f-string against a malformed id (newline / markdown / shell metacharacter)
+# leaking into the injected instruction by restricting to the id charset Beacon
+# actually mints (``tk-<hex>`` / ``e-<n>`` / ``op-<n>`` / ``ms-<n>``).
+_SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def _sanitize_id(raw: object, *, fallback: str = "?", maxlen: int = 64) -> str:
+    """Strip an id down to ``[A-Za-z0-9_-]`` and cap its length.
+
+    Returns ``fallback`` when nothing survives so the rendered block still
+    reads sensibly (and never emits an empty ``/beacon-… `` command).
+    """
+    cleaned = _SAFE_ID_RE.sub("", str(raw or ""))[:maxlen]
+    return cleaned or fallback
+
+
+def _has_system_provenance(ev: dict) -> bool:
+    """True when the event carries a persisted T1-system envelope.
+
+    The server persists ``body.envelope`` on the event (server/app.py
+    post_bus_event) after verifying its signature, so reading the claimed
+    ``tier`` / ``issuer`` here is sound: a fake T1-system claim would have been
+    degraded to T5 (and stripped of auto-execute) before persist.
+    """
+    env = ev.get("envelope")
+    if not isinstance(env, dict):
+        return False
+    return (
+        env.get("tier") == _T1_SYSTEM_TIER
+        and env.get("issuer") == _T1_SYSTEM_ISSUER
+    )
 
 
 def _is_trek_scheduler_event(ev: dict) -> tuple[bool, str]:
@@ -517,8 +576,8 @@ def _format_autonomous_action_block(events: list[dict]) -> str:
     lines.append("")
     for ev in events:
         payload = ev.get("payload") or {}
-        op_id = payload.get("op_id", "?")
-        spec_doc_id = payload.get("spec_doc_id", "")
+        op_id = _sanitize_id(payload.get("op_id"))
+        spec_doc_id = _sanitize_id(payload.get("spec_doc_id"), fallback="")
         trigger_name = payload.get("trigger_name", "")
         eid = ev.get("event_id", "?")
         lines.append(f"- event_id: {eid}")
@@ -566,7 +625,7 @@ def _format_trek_progress_check_block(events: list[dict]) -> str:
     lines.append("")
     for ev in events:
         payload = ev.get("payload") or {}
-        trek_id = payload.get("trek_id", "?")
+        trek_id = _sanitize_id(payload.get("trek_id"))
         eid = ev.get("event_id", "?")
         lines.append(f"- event_id: {eid}")
         lines.append(f"  - trek_id: {trek_id}")
@@ -609,8 +668,8 @@ def _format_trek_task_review_block(events: list[dict]) -> str:
     lines.append("")
     for ev in events:
         payload = ev.get("payload") or {}
-        trek_id = payload.get("trek_id", "?")
-        task_id = payload.get("task_id", "?")
+        trek_id = _sanitize_id(payload.get("trek_id"))
+        task_id = _sanitize_id(payload.get("task_id"))
         eid = ev.get("event_id", "?")
         lines.append(f"- event_id: {eid}")
         lines.append(f"  - trek_id: {trek_id}")
@@ -659,7 +718,7 @@ def _format_trek_leader_digest_block(events: list[dict]) -> str:
     lines.append("")
     for ev in events:
         payload = ev.get("payload") or {}
-        trek_id = payload.get("trek_id", "?")
+        trek_id = _sanitize_id(payload.get("trek_id"))
         eid = ev.get("event_id", "?")
         agg = payload.get("task_state_aggregate") or {}
         summary = payload.get("summary") or {}
@@ -729,7 +788,7 @@ def _format_trek_action_block(events: list[dict]) -> str:
     lines.append("")
     for ev in events:
         payload = ev.get("payload") or {}
-        trek_id = payload.get("trek_id", "?")
+        trek_id = _sanitize_id(payload.get("trek_id"))
         trigger_name = payload.get("trigger_name", "")
         eid = ev.get("event_id", "?")
         lines.append(f"- event_id: {eid}")
@@ -1079,6 +1138,20 @@ def main() -> None:
                 # cursor-advance step still inspects for created_at.
                 ev = {**ev, "delivery": "propose-to-ai",
                        "_downgraded_from": "auto-execute"}
+                downgraded_count += 1
+                downgraded_audit.append(ev)
+                delivery = "propose-to-ai"
+            elif (channel in _SYSTEM_PROVENANCE_CHANNELS
+                    and not _has_system_provenance(ev)):
+                # ms-97 P2 (H2): the channel is opted-in AND auto-execute, but
+                # the persisted envelope is not a server-minted T1-system one.
+                # Refuse to route it into a Level 3 imperative block — a project
+                # editor could otherwise force a `/beacon-…  <attacker id>`
+                # invoke. Downgrade to propose-to-ai (same as an allowlist miss)
+                # and tag the reason so the audit frame explains the drop.
+                ev = {**ev, "delivery": "propose-to-ai",
+                       "_downgraded_from": "auto-execute",
+                       "_downgrade_reason": "non-system-envelope"}
                 downgraded_count += 1
                 downgraded_audit.append(ev)
                 delivery = "propose-to-ai"
