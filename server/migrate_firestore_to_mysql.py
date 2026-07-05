@@ -91,6 +91,18 @@ _USER_SUBCOL_MAP = {
 _DOC_REVISIONS_SUBCOL = "document_revisions"
 
 
+def _ms_sort_key(ms: dict):
+    """milestone を "ms-<n>" の数値順でソートするキー。
+
+    Firestore の stream() は doc id を辞書順 (ms-1, ms-10, ms-2 …) で返すため、
+    そのまま埋め込むと画面上の並びが崩れる。数値部分で並べ直す。非数値 id は末尾。
+    """
+    import re
+    mid = str(ms.get("id", ""))
+    m = re.match(r"ms-(\d+)$", mid)
+    return (0, int(m.group(1))) if m else (1, mid)
+
+
 def _rows_bucket(dump: dict, entity: str) -> list:
     return dump.setdefault("entities", {}).setdefault(entity, [])
 
@@ -123,10 +135,32 @@ def do_export(outfile: str) -> None:
     proj_count = 0
     for proj in db.collection(fs.COLLECTION).stream():
         pid = proj.id
-        _add(dump, "projects", pid, "", proj.to_dict() or {})
+        pdata = proj.to_dict() or {}
+        subcols = list(proj.reference.collections())
+        subcol_names = {c.id for c in subcols}
+
+        # v2 → v1 collapse (ms-96 e-2379):
+        # v2 スキーマは milestones を projects/{id}/milestones/{ms_id} の
+        # subcollection に分離している (= Firestore 1 ドキュメント 1 MiB 上限を
+        # 避けるための設計)。MySQL に 1 MiB 制限は無いので、milestones を doc へ
+        # 埋め戻し schema_version=1 (legacy) に落として v1 経路で扱えるようにする。
+        # v2 経路は operations.py が db.get_db() 直叩きで Firestore 専用のため、
+        # collapse しないと mysql backend で milestones が空になる。
+        if "milestones" in subcol_names:
+            ms_docs = [d.to_dict() or {} for d in
+                       proj.reference.collection("milestones").stream()]
+            ms_docs.sort(key=_ms_sort_key)
+            pdata["milestones"] = ms_docs
+            pdata["schema_version"] = 1
+            print(f"  ↻ v2→v1 collapse: {pid} — {len(ms_docs)} milestones を "
+                  f"doc へ埋め込み (schema_version=1)", file=sys.stderr)
+
+        _add(dump, "projects", pid, "", pdata)
         proj_count += 1
-        for subcol in proj.reference.collections():
+        for subcol in subcols:
             name = subcol.id
+            if name == "milestones":
+                continue  # 上で collapse 済
             if name == "documents":
                 # documents 本体 + 各 document の revisions を辿る
                 for doc in subcol.stream():
@@ -143,6 +177,11 @@ def do_export(outfile: str) -> None:
                 ent = _PROJECT_SUBCOL_MAP[name]
                 for d in subcol.stream():
                     _add(dump, ent, pid, d.id, d.to_dict() or {})
+            elif name == "session_lookup":
+                # users/{uid}/session_lookup と同名だが project 配下にも stray に
+                # 現れることがある。session-mint (= session_id 採番) の内部キャッシュで
+                # 使用時に再生成されるため移行対象外 (= 意図的に skip)。
+                _skip(f"projects/{pid}", "session_lookup (session-mint cache, 再生成可)")
             else:
                 _skip(f"projects/{pid}", name)
     print(f"[export]   {proj_count} projects", file=sys.stderr)
