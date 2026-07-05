@@ -158,7 +158,7 @@ class TestInitHonorsTrekParam:
     def test_init_reads_trek_param(self):
         src = _read(WEB_INDEX)
         idx = src.index("async function init()")
-        body = src[idx:idx + 2200]
+        body = src[idx:idx + 3000]
         assert "getTrekIdFromUrl()" in body, (
             "init() must read ?trek=<id> so a shared link opens Trek detail"
         )
@@ -166,7 +166,11 @@ class TestInitHonorsTrekParam:
     def test_init_opens_trek_after_project_load(self):
         src = _read(WEB_INDEX)
         idx = src.index("async function init()")
-        body = src[idx:idx + 2200]
+        # init() grew past 2200 chars as more startup steps landed; the
+        # openTrek(urlTrekId) call now sits ~2400 chars in. Widen the slice
+        # so this pin stays anchored to actual behavior rather than to a
+        # stale offset.
+        body = src[idx:idx + 3000]
         assert "openTrek(urlTrekId)" in body
 
 

@@ -70,9 +70,12 @@ class TestWebUI_RelatedTreksWidget:
         assert "loadRelatedTreks('operation'" in self.src
 
     def test_widget_jump_action_handler(self):
-        # Click handler that switches to Treks tab + opens the trek.
+        # Click handler that opens the trek.
+        # ms-97 / e-2606: Trek tab was retired — the widget now navigates
+        # directly to trek detail via openTrek(tid) instead of
+        # switchTab('treks').then(...).
         assert "case 'trek-jump-from-widget':" in self.src
-        assert "switchTab('treks').then" in self.src
+        assert "openTrek(tid)" in self.src
 
 
 class TestDesktopUI_RelatedTreksWidget:

@@ -360,6 +360,11 @@ Treks (= 協奏作業領域) are cross-project, cross-session work areas. While 
 | `beacon trek leave <trek-id>` | Remove self (leader must `transfer-leader` first; last member must `archive` instead) / 離脱 |
 | `beacon trek plan <trek-id> --add-scope <project:ref>` | Add a scope entry (`ms-X` / `op-X` / `e-X` ref, or omit for project-wide) / scope 追加 |
 | `beacon trek plan <trek-id> --remove-scope <project:ref>` | Remove a scope entry / scope 削除 |
+| `beacon trek scope-add <trek-id> --project <pid> [--milestone <ms-id> \| --operation <op-id> \| --task <e-id>]` | Canonical scope-add verb (= flag-style alias of `plan --add-scope`, ms-97 / AC23 e-2626) |
+| `beacon trek scope-approve <trek-id> <pending-id>` | Commit a staged scope op (= apply add or remove, ms-97 / AC25 e-2611) |
+| `beacon trek scope-reject <trek-id> <pending-id>` | Drop a staged scope op (ms-97 / AC25) |
+| `beacon trek blanket-approve <trek-id> --category <cat>` | Pre-approve scope-add for a category (ms-97 / AC24 e-2603). Category: `operation` / `milestone` / `task` / `project:<pid>` / `milestone:<ms-id>` |
+| `beacon trek blanket-revoke <trek-id> --category <cat>` | Drop a blanket pre-approval (ms-97 / AC24) |
 | `beacon trek slot add <trek-id> --project <pid> --milestone\|--task\|--operation <id> [--children e-A,e-B]` | Stage a slot-add with a fresh `sl-<8 hex>` id (ms-99 / e-2829). MS slot は `--children` で子タスクを opt-in (= 個別許可) 指定できる。承認は既存の `scope-approve` を通す (staging path) |
 | `beacon trek slot amend <trek-id> <slot-id> [--add-child <e-id> ...] [--remove-child <e-id> ...]` | Stage a child-list edit on an existing MS slot (ms-99 / e-2829)。legacy null (= 全 include) は承認時に明示 list へ材料化される |
 | `beacon trek slot claim <trek-id> <slot-id> [--session <sid> \| --unclaim]` | Stage a claim stamp (state 変更なし、SPEC 方針 4)。空 `--session` または `--unclaim` で担当解除 (ms-99 / e-2829) |
