@@ -10006,7 +10006,18 @@ async def _broadcast_bus_event(project_id: str, event: dict):
     clients = _ws_connections.get(project_id, set()).copy()
     if not clients:
         return
-    msg = {"type": "bus_event", "data": event}
+    # ms-97 P1 (= review finding H1): signal-only. Broadcasting the full event
+    # over the WS leaked the DM body / sender / envelope to *every* project
+    # subscriber — including bridges (e-2380 WS push) and the Web UI —
+    # regardless of who the DM was addressed to, and even for events the ms-70
+    # gate parked as ``pending``. The frame now carries only a wake hint
+    # (event_id); every receiver re-fetches via the REST inbox, which already
+    # applies the per-recipient ``_bus_event_addressed_to`` filter + DM payload
+    # redaction (ms-93 / e-2275). Same posture the project_changed /
+    # document_change frames took in ms-84 / e-2326. Any field added here in
+    # future MUST stay non-sensitive routing metadata — never payload /
+    # sender_session_id / envelope.
+    msg = {"type": "bus_event", "event_id": event.get("event_id")}
     for ws in clients:
         try:
             await ws.send_json(msg)
