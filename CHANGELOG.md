@@ -2,6 +2,19 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.55.0] - 2026-07-06
+
+- Merge pull request #347 from kurogin23mech-source/feat/ms-54-dm-primitive-split
+- feat(ms-54): DM primitive 2 経路 (session-scoped 即時 wake / user-scoped 次回 catch-up) の使い分けを Skill 側に実装 (e-2972 / e-2973 / e-2974)
+- Merge pull request #346 from kurogin23mech-source/fix/ms-95-dm-visibility-session-user-id-stamp
+- fix(ms-95): DM payload visibility gate stops redacting the intended recipient (e-2960)
+- Merge pull request #345 from kurogin23mech-source/feat/ms-97-c3b-inbox-pending-banner
+- feat(ms-97): [C3] inbox-hook に承認待ち DM の banner を出す (H3 可視性)
+- Merge pull request #344 from kurogin23mech-source/fix/ms-97-p5-leader-review-self-approve
+- fix(ms-97): [P5] leader review の自己承認を server で構造的に塞ぐ
+- docs(release): update README/CHANGELOG for v0.54.0
+- chore(release): bump formula to 0.54.0
+
 ## [v0.54.0] - 2026-07-06
 
 - Merge pull request #343 from kurogin23mech-source/feat/ms-94-e2291-cross-project-defaults
