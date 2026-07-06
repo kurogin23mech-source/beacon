@@ -1735,6 +1735,103 @@ class TestSlotDonePrecondition:
 
 
 # ---------------------------------------------------------------------------
+# ms-97 P5 (review Trek-H3) — leader-review self-approve gate
+# ---------------------------------------------------------------------------
+
+class TestLeaderReviewSelfApproveGate:
+    """A task awaiting the leader's forced review must only be advanced by the
+    leader — not self-approved by the executor, and not auto-mirrored to done
+    by the pool sync."""
+
+    def _seed_trek_with_task_state(self, task_id: str, state: str) -> str:
+        trek_id = _create_seed_trek()
+        _treks[trek_id]["scope"] = [
+            {"project": "beacon-test", "milestone": "ms-97"}
+        ]
+        _treks[trek_id]["task_states"] = {
+            task_id: {
+                "state": state,
+                "updated_by_session_id": "sv-member",
+                "updated_at": "2026-06-28T00:00:00.000000Z",
+                "last_activity_at": "2026-06-28T00:00:00.000000Z",
+                "note": "",
+            }
+        }
+        return trek_id
+
+    def test_executor_cannot_self_approve_leader_review_to_done(self):
+        """The executor (member session) attempting leader_review → done is
+        rejected with 403 — the leader review gate fires before anything
+        else (= not a 409 precondition, an auth refusal)."""
+        trek_id = self._seed_trek_with_task_state("e-lr", "leader_review")
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.patch(
+            f"/api/treks/{trek_id}/task-state",
+            json={"task_id": "e-lr", "state": "done",
+                  "note": "self-approve attempt"},
+            headers={"X-Beacon-Session": "sv-member"},
+        )
+        assert r.status_code == 403, r.text
+        # The stamp must remain leader_review (transition never applied).
+        assert _treks[trek_id]["task_states"]["e-lr"]["state"] == "leader_review"
+
+    def test_executor_cannot_self_approve_user_review_to_done(self):
+        """Same gate for user_review origin (= the User's call)."""
+        trek_id = self._seed_trek_with_task_state("e-ur", "user_review")
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.patch(
+            f"/api/treks/{trek_id}/task-state",
+            json={"task_id": "e-ur", "state": "done"},
+            headers={"X-Beacon-Session": "sv-member"},
+        )
+        assert r.status_code == 403, r.text
+
+    def test_leader_can_advance_leader_review(self):
+        """The leader session CAN move leader_review → working (re-work) —
+        the gate lets the legitimate reviewer through. Uses the working
+        target so the slot-done precondition is not in play."""
+        trek_id = self._seed_trek_with_task_state("e-lr2", "leader_review")
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.patch(
+            f"/api/treks/{trek_id}/task-state",
+            json={"task_id": "e-lr2", "state": "working",
+                  "note": "leader sends back for re-work"},
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r.status_code == 200, r.text
+        assert _treks[trek_id]["task_states"]["e-lr2"]["state"] == "working"
+
+    def test_executor_working_to_terminal_still_open(self):
+        """Executor origins stay open — a member can still stamp the work it
+        performed (working → leader_review), which is NOT a self-approve."""
+        trek_id = self._seed_trek_with_task_state("e-w", "working")
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.patch(
+            f"/api/treks/{trek_id}/task-state",
+            json={"task_id": "e-w", "state": "leader_review",
+                  "note": "executor requests review"},
+            headers={"X-Beacon-Session": "sv-member"},
+        )
+        assert r.status_code == 200, r.text
+
+    def test_mirror_does_not_overwrite_leader_review(self):
+        """The pool-done mirror must skip a leader_review stamp — otherwise a
+        pool task going done would auto-approve past the leader review."""
+        trek_id = self._seed_trek_with_task_state("e-mir", "leader_review")
+        touched = app_module._mirror_task_done_to_treks("e-mir")
+        assert trek_id not in touched
+        assert _treks[trek_id]["task_states"]["e-mir"]["state"] == "leader_review"
+
+    def test_mirror_still_unsticks_working(self):
+        """Sanity: the mirror still does its job for a genuinely-stuck
+        working stamp (= regression guard that the P5 skip is narrow)."""
+        trek_id = self._seed_trek_with_task_state("e-mir2", "working")
+        touched = app_module._mirror_task_done_to_treks("e-mir2")
+        assert trek_id in touched
+        assert _treks[trek_id]["task_states"]["e-mir2"]["state"] == "done"
+
+
+# ---------------------------------------------------------------------------
 # ms-97 / e-2650 — pure helper unit tests (lib/trek.check_slot_done_precondition)
 # ---------------------------------------------------------------------------
 
