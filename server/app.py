@@ -2278,10 +2278,15 @@ def _mirror_task_done_to_treks(entry_id: str) -> list[str]:
     """ms-88 / e-2167 — task pool ↔ Trek stamp 同期 (= mirror sync).
 
     task pool 側で task が ``done`` に成った瞬間に、 active な Trek の
-    ``task_states[<entry_id>]`` が non-terminal で stamp 済 なら自動で
-    ``done`` に mirror する。 「task pool で done だが Trek stamp は
-    waiting-review / leader_review / working で残ってる」 stuck 状態 (=
-    2026-06-19 dogfood の e-2045 14h 放置事例) を構造的に排除する。
+    ``task_states[<entry_id>]`` が ``working`` / ``todo`` で stamp 済 なら
+    自動で ``done`` に mirror する。 「task pool で done だが Trek stamp は
+    working で残ってる」 stuck 状態 (= 2026-06-19 dogfood の e-2045 14h
+    放置事例) を構造的に排除する。
+
+    ms-97 P5 (= review Trek-H3): ``leader_review`` は除外する。 これは
+    executor が忘れた stuck stamp ではなく leader の forced review を待つ
+    意図的な状態なので、 pool done で ``done`` に上書きすると leader review
+    を bypass してしまう (= endpoint 側の P5 gate と同じ穴)。
 
     state transition validation は bypass する (= 直接書き換え)。 これは
     server-forced reconciliation であり、 「executor / leader / user が
@@ -2306,6 +2311,16 @@ def _mirror_task_done_to_treks(entry_id: str) -> list[str]:
         except Exception:
             current_state = (existing or {}).get("state") or ""
         if current_state in trek_mod.TERMINAL_TASK_STATES:
+            continue
+        # ms-97 P5 (= review finding Trek-H3): never auto-mirror a task that
+        # is awaiting the leader's forced review. ``leader_review`` is a
+        # deliberate "human judgment pending" state, not a stuck stamp the
+        # executor forgot to advance — overwriting it to ``done`` on pool sync
+        # bypasses the leader review the same way an executor self-approve
+        # would. The mirror only exists to unstick ``working`` / ``todo``
+        # stamps left behind when the pool moved on; leave the review gate to
+        # the leader (via /beacon-trek-review + the endpoint's P5 gate above).
+        if current_state == "leader_review":
             continue
         # Direct mirror write (= bypass transition validation).
         now_iso = trek_mod.utcnow_iso()
@@ -5807,6 +5822,19 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
         trek_mod.validate_task_state(body.state)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # ms-97 P5 (= review finding Trek-H3): leader-review gate. The state
+    # machine (CORE doc 5nfTSmCDVUzD4SLzIhI5) assigns transitions ORIGINATING
+    # from a review-terminal state to a specific role: ``leader_review → *``
+    # is the Leader's forced 3-choice review, ``user_review → *`` is the
+    # User's call. Without a role gate here, an executor could self-approve
+    # its own task (``leader_review → done``) — bypassing the leader review
+    # entirely. Require the stamped leader session for those origins.
+    # Executor origins (``working → *``) stay open so a member can still
+    # stamp the work it actually performed; ``todo``/``done`` re-open paths
+    # are likewise unrestricted (not a self-approval vector).
+    from_state = trek_mod.get_task_state(t, body.task_id)
+    if from_state in ("leader_review", "user_review"):
+        _require_trek_leader_session(t, user, request)
     # ms-97 / e-2650 — phantom done 構造防御。 Trek slot を done に flip
     # する前に、 真値源である project pool の task status が done である
     # ことを必須条件として check する (= 「view 側だけ done になる経路」 を
