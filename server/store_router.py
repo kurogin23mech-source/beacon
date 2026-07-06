@@ -114,12 +114,23 @@ elif _BACKEND == "mysql":
         # same pure-string helper, so the router exposes it under the same
         # private name to keep call sites symmetrical.
         _extract_frontmatter_field,
-        # Projects
+        # v3 schema constant (ms-96 e-2379、iruca3 提案 entry-level split)。
+        # operations.py が dispatch 側で backend + schema 見て v3 経路に振るために参照。
+        SCHEMA_V3_ENTRY,
+        # Projects (v1 whole-doc)
         get_project,
         save_project,
         list_projects,
         list_all_projects,
         delete_project,
+        # Projects v3 (entry-level split、ms-96 e-2379)。
+        # firestore / dynamodb branch では re-export しない (= backend が
+        # v3 未対応。 operations.py の dispatch が backend + schema を見て
+        # ここを呼ぶかどうか決める。 誤経路呼び出し時は AttributeError で顕在化)。
+        get_project_v3,
+        save_project_v3,
+        apply_project_op_v3,
+        replace_project_v3,
         # Users
         get_user,
         get_or_create_user,

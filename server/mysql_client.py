@@ -61,6 +61,14 @@ ENTITIES = [
     "session_logs",
     "operation_envelopes",
     "active_claims",
+    # ms-96 v3 (entry-level split): milestones と entries をそれぞれ独立行にすることで、
+    #   task_done / commit 追加といった実際の write 単位で 1 行の update に閉じる。
+    #   v1 (whole-doc) だと 3.6 MiB を毎回書き直し、v2 (milestone-level) でも 424 KB
+    #   になっていた書き込み増幅を、深さ 2 のツリーを subtree JSON 内包で表現する
+    #   entry-level 分割で数 KB に圧縮する (= iruca3 提案、2026-07-06 合意)。
+    #   pk=project_id, sk=milestone_id / entries は sk="{ms_id}#{entry_id}" の composite。
+    "milestones",
+    "entries",
     # treks/{trek_id}/* subcollections
     # firestore は treks/{tid}/logs に永続化する (ms-97 e-2603)。dynamodb_client は
     # ここを in-memory fallback で握っていて再起動で消える既知の穴があるが、MySQL は
@@ -91,6 +99,10 @@ _SUBCOLLECTION_SK_NAMES = {
     "session_logs": "session_id",
     "operation_envelopes": "envelope_id",
     "retros": "week",
+    # ms-96 v3: milestones / entries も project 配下 subcollection。
+    # delete_project の cascade を成立させるため必ずこの map に入れる。
+    "milestones": "milestone_id",
+    "entries": "entry_composite_sk",  # sk = "{ms_id}#{entry_id}"
 }
 
 
@@ -374,10 +386,376 @@ def delete_project(project_id: str) -> bool:
         return False
     # Cascade delete: project_id を PK に持つ subcollection の行を全削除する
     # (= dynamodb_client.delete_project と同じ範囲 = _SUBCOLLECTION_SK_NAMES)。
+    # ms-96 v3: milestones / entries も _SUBCOLLECTION_SK_NAMES に登録済なので
+    # このループで一緒に消える (= 追加コード不要)。
     for entity in _SUBCOLLECTION_SK_NAMES:
         _delete_all(entity, project_id)
     _delete("projects", project_id)
     return True
+
+
+# ---------------------------------------------------------------------------
+# v3 schema (entry-level split) — ms-96 e-2379
+#
+# v1 (whole-doc) と v2 (milestone-level subcollection) の中間ではなく、 更に一歩
+# 進めた設計 (= iruca3 提案 / kurogin 合意、 2026-07-06 DM `Yh9JnCBfj4aVjd71gjKc`)。
+#
+# レイアウト:
+#   beacon_prod_projects    pk=project_id, sk=''                data={meta のみ, schema_version=3}
+#   beacon_prod_milestones  pk=project_id, sk=milestone_id      data={ms meta のみ, entries[] は無し}
+#   beacon_prod_entries     pk=project_id, sk="{ms_id}#{entry_id}"   data={entry + 子 entries[] を JSON 内包}
+#
+# 深さ 2 (task -> 子 commit 最大 16 個) のツリーは entries 行の data 内に subtree JSON
+# として内包する (= 子 entry のための追加行を作らない)。 これで task_done / commit
+# 追加といった実 write 単位が entries 行 1 行の update に閉じる (= 数 KB / <10ms 想定)。
+#
+# 経緯: Firestore v2 の milestone-level 分割は 1 doc 1 MiB 上限が動機。 MySQL には
+# その制約が無く、 row-level lock も cheap なので entry-level まで踏み込める。 詳細は
+# CORE / SPEC doc 未起票 (= 実装 land 後に 「MySQL 側 v3 の設計判断」 として書き起こす予定)。
+# ---------------------------------------------------------------------------
+
+# operations.py の SCHEMA_V3_ENTRY と同値。 mysql_client -> operations の import は
+# 循環になるので、 定数はここでも 3 を明示 (= 変更時は両方揃える)。
+SCHEMA_V3_ENTRY = 3
+
+
+def _v3_sig(data: dict) -> str:
+    """Compute a stable content signature for change detection (= v2 apply の
+    _ms_sig と同じ役割)。 JSON stable-dump の md5 で 「変わってないなら書かない」
+    判定に使う。 md5 は暗号強度不要な等値比較なので選定 (= 高速 + 短い)。
+    """
+    import hashlib
+    return hashlib.md5(
+        json.dumps(data, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _v3_entry_sort_key(entry: dict) -> tuple:
+    """Order entries within a milestone by (created_at, id).
+
+    Firestore v2 は milestones/{ms}/entries[] を doc 内配列で order を保持していたが、
+    v3 は entries 行を独立させたので order を明示的に決める必要がある。 created_at
+    がある entry を古い順、 無い entry は末尾。 tie-break は entry_id 文字列比較。
+    """
+    ts = entry.get("created_at", "") or ""
+    eid = entry.get("id", "") or ""
+    # tuple 先頭要素: created_at が空なら "￿" で末尾へ寄せる
+    return (ts or "￿", eid)
+
+
+def _v3_assemble(meta: dict, ms_rows: list[tuple[str, dict]],
+                 entry_rows: list[tuple[str, dict]]) -> dict:
+    """meta + milestone 行 + entry 行 を unified project dict に組み立てる。
+
+    ms_rows:    [(milestone_id, ms_data_without_entries), ...]
+    entry_rows: [(sk="{ms_id}#{entry_id}", entry_data_with_children_inline), ...]
+
+    返り値は v1/v2 の hydrate 済 shape と等価 (= op() や load_project_consistent
+    が同じ形で扱える)。 meta 側に "milestones" key が残っていたら防御的に落とす。
+    """
+    # 防御: meta 側の "milestones" は無視 (= 過去 v1 residue や load 上の noise 対策)。
+    result = {k: v for k, v in (meta or {}).items() if k != "milestones"}
+
+    # milestone_id で entry_rows を group 化。
+    entries_by_ms: dict[str, list[dict]] = {}
+    for sk, entry_data in entry_rows:
+        ms_id, _, _entry_id = sk.partition("#")
+        if not ms_id:
+            continue
+        entries_by_ms.setdefault(ms_id, []).append(entry_data)
+
+    # ms_rows から milestone を組み立て、entries を注入。
+    milestones = []
+    for ms_id, ms_data in ms_rows:
+        ms_dict = dict(ms_data or {})
+        # ms_data 側に "entries" が残っていたら防御的に上書き。
+        ms_dict.pop("entries", None)
+        ms_children = entries_by_ms.get(ms_id, [])
+        ms_children.sort(key=_v3_entry_sort_key)
+        ms_dict["entries"] = ms_children
+        milestones.append(ms_dict)
+
+    # ms-1, ms-2, ... の数値順 (= migrate script の _ms_sort_key と同じ規則)。
+    def _ms_key(ms: dict):
+        import re
+        mid = str(ms.get("id", ""))
+        m = re.match(r"ms-(\d+)$", mid)
+        return (0, int(m.group(1))) if m else (1, mid)
+
+    milestones.sort(key=_ms_key)
+    result["milestones"] = milestones
+    return result
+
+
+def _v3_decompose(data: dict) -> tuple[dict, dict, dict]:
+    """unified project dict を (meta, ms_map, entry_map) に分解する。
+
+    meta:      milestones[] を除いた project meta (schema_version=3 を stamp)。
+    ms_map:    {milestone_id: milestone_dict_without_entries}
+    entry_map: {"{ms_id}#{entry_id}": entry_dict_with_children_inline}
+
+    子 entry (= 深さ 2 の commit 等) は親 entry の "entries" field 内に JSON として
+    残す (= 独立行を作らない、 iruca3 提案の要点)。 これにより write 単位が親 entry 行
+    1 行の update に閉じる。
+    """
+    meta = {k: v for k, v in (data or {}).items() if k != "milestones"}
+    meta["schema_version"] = SCHEMA_V3_ENTRY
+
+    ms_map: dict = {}
+    entry_map: dict = {}
+    for ms in (data or {}).get("milestones", []) or []:
+        ms_id = ms.get("id", "")
+        if not ms_id:
+            continue
+        # milestone 行には entries[] を含めない (= 実 write 単位から切り離す)。
+        ms_meta = {k: v for k, v in ms.items() if k != "entries"}
+        ms_map[ms_id] = ms_meta
+        for entry in ms.get("entries", []) or []:
+            entry_id = entry.get("id", "")
+            if not entry_id:
+                continue
+            sk = f"{ms_id}#{entry_id}"
+            # entry data は子 entries[] を含めたまま (= subtree JSON 内包)。
+            entry_map[sk] = dict(entry)
+    return meta, ms_map, entry_map
+
+
+def get_project_v3(project_id: str) -> dict | None:
+    """v3 project を read して unified dict shape で返す。
+
+    v1/v2 の get_project(pid) と異なり、 milestones + entries を hydrate して
+    「1 project = 1 大きな dict」 の shape に戻す。 apply_operation の read 側や
+    load_project_consistent (= operations.py) から使う。 見つからなければ None。
+    """
+    meta = _get("projects", project_id)
+    if meta is None:
+        return None
+    ms_rows = _query_rows("milestones", project_id)
+    entry_rows = _query_rows("entries", project_id)
+    return _v3_assemble(meta, ms_rows, entry_rows)
+
+
+def save_project_v3(project_id: str, data: dict) -> None:
+    """v3 shape で project 全体を書き込む (= migration script や explicit save 用)。
+
+    replace_project_v3 と違い、 既存行との diff を取らず まっさら書き込みを想定
+    (= migration 中の初回 insert / test fixture 準備等)。 transaction も張らない
+    (= 呼び出し側が保証)。 通常運用の書き込みは apply_project_op_v3 or
+    replace_project_v3 を使うこと。
+    """
+    meta, ms_map, entry_map = _v3_decompose(data)
+    # meta に project_id を必ず入れる (= save_project と同じ contract)。
+    meta_with_pid = {**meta, "project_id": project_id}
+    _put("projects", project_id, meta_with_pid)
+    # milestones 行を全 upsert。
+    for ms_id, ms_data in ms_map.items():
+        _put("milestones", project_id, ms_data, sk=ms_id)
+    # entries 行を全 upsert (composite sk)。
+    for sk, entry_data in entry_map.items():
+        _put("entries", project_id, entry_data, sk=sk)
+
+
+def apply_project_op_v3(project_id: str, op) -> "any":  # type: ignore[valid-type]
+    """v3 project に対して op(data) -> (new_data, result) を atomic に適用。
+
+    Firestore transaction 相当を MySQL row-level lock で実現する:
+      1. autocommit を off にして BEGIN
+      2. projects[pid] 行を SELECT ... FOR UPDATE で pessimistic lock (= meta 行に
+         書き込みを serialize するアンカー)
+      3. milestones / entries を read (= 同じ transaction 内なので snapshot)
+      4. op(hydrated_data) -> (new_data, result)
+      5. 前後の sig で milestone / entry の diff を検出し、 変わった行のみ upsert、
+         消えた ID の行のみ delete
+      6. COMMIT (or 例外時 ROLLBACK)、 autocommit を戻す
+
+    Firestore との差:
+      - Firestore は「read → op → conflict なら 5 回まで retry」 という抽象化 だが、
+        MySQL は 「SELECT ... FOR UPDATE で 他 writer を block」 する pessimistic。
+        op() が pure でなくても呼ばれるのは 1 回のみ (= 副作用のある op でも安全)。
+      - op() の contract (= pure / side-effect free) は v1/v2 と同じ要求で維持する
+        (= 後日 optimistic 化した時に壊れないため)。
+    """
+    conn = _conn()
+    conn.autocommit(False)
+    try:
+        with conn.cursor() as cur:
+            # 1. meta 行を lock (= 存在しない project は LookupError)
+            cur.execute(
+                f"SELECT data FROM `{_table_name('projects')}` "
+                f"WHERE pk=%s AND sk='' FOR UPDATE",
+                (project_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise LookupError(f"Project '{project_id}' not found")
+            meta = json.loads(row["data"])
+
+            # 2. milestones + entries を同 transaction 内で read。
+            cur.execute(
+                f"SELECT sk, data FROM `{_table_name('milestones')}` "
+                f"WHERE pk=%s",
+                (project_id,),
+            )
+            ms_rows = [(r["sk"], json.loads(r["data"])) for r in cur.fetchall()]
+            cur.execute(
+                f"SELECT sk, data FROM `{_table_name('entries')}` WHERE pk=%s",
+                (project_id,),
+            )
+            entry_rows = [(r["sk"], json.loads(r["data"])) for r in cur.fetchall()]
+
+        # 3. hydrate + snapshot signatures。
+        data = _v3_assemble(meta, ms_rows, entry_rows)
+        before_ms_sigs = {ms_id: _v3_sig(ms_data) for ms_id, ms_data in ms_rows}
+        before_entry_sigs = {sk: _v3_sig(entry_data) for sk, entry_data in entry_rows}
+
+        # 4. op を実行 (= v1/v2 と同じ contract)。
+        new_data, result = op(data)
+
+        # 5. validate (= transaction 内で invariant を確認、v1/v2 と同じ)。
+        import core  # noqa: PLC0415
+        core.validate_project(new_data)
+
+        # 6. 分解して targeted writes。
+        new_meta, new_ms_map, new_entry_map = _v3_decompose(new_data)
+        new_meta["project_id"] = project_id
+
+        with conn.cursor() as cur:
+            # meta 行を書き戻し (= entries / milestones を除いた slim shape)。
+            cur.execute(
+                f"INSERT INTO `{_table_name('projects')}` (pk, sk, data) "
+                f"VALUES (%s, %s, %s) "
+                f"ON DUPLICATE KEY UPDATE data=VALUES(data)",
+                (project_id, "", _dumps(new_meta)),
+            )
+
+            # milestone 行の diff & write。
+            new_ms_ids = set(new_ms_map.keys())
+            old_ms_ids = set(before_ms_sigs.keys())
+            for ms_id, ms_data in new_ms_map.items():
+                new_sig = _v3_sig(ms_data)
+                if before_ms_sigs.get(ms_id) != new_sig:
+                    cur.execute(
+                        f"INSERT INTO `{_table_name('milestones')}` "
+                        f"(pk, sk, data) VALUES (%s, %s, %s) "
+                        f"ON DUPLICATE KEY UPDATE data=VALUES(data)",
+                        (project_id, ms_id, _dumps(ms_data)),
+                    )
+            for ms_id in old_ms_ids - new_ms_ids:
+                cur.execute(
+                    f"DELETE FROM `{_table_name('milestones')}` "
+                    f"WHERE pk=%s AND sk=%s",
+                    (project_id, ms_id),
+                )
+
+            # entry 行の diff & write。
+            new_entry_sks = set(new_entry_map.keys())
+            old_entry_sks = set(before_entry_sigs.keys())
+            for sk, entry_data in new_entry_map.items():
+                new_sig = _v3_sig(entry_data)
+                if before_entry_sigs.get(sk) != new_sig:
+                    cur.execute(
+                        f"INSERT INTO `{_table_name('entries')}` "
+                        f"(pk, sk, data) VALUES (%s, %s, %s) "
+                        f"ON DUPLICATE KEY UPDATE data=VALUES(data)",
+                        (project_id, sk, _dumps(entry_data)),
+                    )
+            for sk in old_entry_sks - new_entry_sks:
+                cur.execute(
+                    f"DELETE FROM `{_table_name('entries')}` "
+                    f"WHERE pk=%s AND sk=%s",
+                    (project_id, sk),
+                )
+
+        conn.commit()
+        return result
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.autocommit(True)
+
+
+def replace_project_v3(project_id: str, new_data: dict) -> None:
+    """v3 project を whole-replace する。
+
+    apply_project_op_v3 と違って op() を挟まず、 caller が最終 shape を持っている
+    ケース (= admin write / cloud push / migration) 用。 meta + milestone + entry
+    に分解して upsert + 既存 - 新規 の行を DELETE。 diff sig は取らず全行を書き直す
+    (= caller が「これで置換」意図なので targeted 化のメリットが薄い)。
+
+    Firestore v2 の _replace_cloud_v2 と同じ semantics だが、 transaction 境界と
+    lock は MySQL 流 (= SELECT ... FOR UPDATE + BEGIN/COMMIT)。
+    """
+    conn = _conn()
+    conn.autocommit(False)
+    try:
+        with conn.cursor() as cur:
+            # meta 行を lock (= 存在しなくても新規作成する、 upsert 想定)。
+            cur.execute(
+                f"SELECT sk FROM `{_table_name('projects')}` "
+                f"WHERE pk=%s AND sk='' FOR UPDATE",
+                (project_id,),
+            )
+            _ = cur.fetchone()
+
+            # 既存 milestone / entry の ID を retrieve (= 削除対象を求めるため)。
+            cur.execute(
+                f"SELECT sk FROM `{_table_name('milestones')}` WHERE pk=%s",
+                (project_id,),
+            )
+            existing_ms_ids = {r["sk"] for r in cur.fetchall()}
+            cur.execute(
+                f"SELECT sk FROM `{_table_name('entries')}` WHERE pk=%s",
+                (project_id,),
+            )
+            existing_entry_sks = {r["sk"] for r in cur.fetchall()}
+
+            new_meta, new_ms_map, new_entry_map = _v3_decompose(new_data)
+            new_meta["project_id"] = project_id
+
+            cur.execute(
+                f"INSERT INTO `{_table_name('projects')}` (pk, sk, data) "
+                f"VALUES (%s, %s, %s) "
+                f"ON DUPLICATE KEY UPDATE data=VALUES(data)",
+                (project_id, "", _dumps(new_meta)),
+            )
+
+            new_ms_ids = set(new_ms_map.keys())
+            for ms_id, ms_data in new_ms_map.items():
+                cur.execute(
+                    f"INSERT INTO `{_table_name('milestones')}` "
+                    f"(pk, sk, data) VALUES (%s, %s, %s) "
+                    f"ON DUPLICATE KEY UPDATE data=VALUES(data)",
+                    (project_id, ms_id, _dumps(ms_data)),
+                )
+            for ms_id in existing_ms_ids - new_ms_ids:
+                cur.execute(
+                    f"DELETE FROM `{_table_name('milestones')}` "
+                    f"WHERE pk=%s AND sk=%s",
+                    (project_id, ms_id),
+                )
+
+            new_entry_sks = set(new_entry_map.keys())
+            for sk, entry_data in new_entry_map.items():
+                cur.execute(
+                    f"INSERT INTO `{_table_name('entries')}` "
+                    f"(pk, sk, data) VALUES (%s, %s, %s) "
+                    f"ON DUPLICATE KEY UPDATE data=VALUES(data)",
+                    (project_id, sk, _dumps(entry_data)),
+                )
+            for sk in existing_entry_sks - new_entry_sks:
+                cur.execute(
+                    f"DELETE FROM `{_table_name('entries')}` "
+                    f"WHERE pk=%s AND sk=%s",
+                    (project_id, sk),
+                )
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.autocommit(True)
 
 
 # ---------------------------------------------------------------------------
