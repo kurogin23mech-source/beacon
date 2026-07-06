@@ -107,38 +107,49 @@ UserPromptSubmit hook 経由で DM event が context に inject されている�
 
 ### Step 1-send (send mode のみ)
 
-**v0.33.0 以降 (ms-54 / e-1587)**: サーバ側 cross-project endpoint `/api/me/sessions` を叩いて、自分が owner / member のすべてのプロジェクトの live session を一発で取得する。マシン跨ぎでも見える (= 旧 dm_discover は同マシン限定だった)。
+**ms-94 / e-2291 (2026-07-06 default 反転後)**: `beacon bus directory` の
+default が全 project 横断 (= 自 user が member の全 project) になったので、
+どの CLI 経路を通っても cross-project listing が拾える。 従来の `beacon
+sessions` は alias 相当として存続し挙動同等。 「他 project の receiver
+session が見えない」 「セッションがいません」 の footgun は構造的に解消。
 
-Bash ツールで実行:
+Bash ツールで実行 (どちらでもよい、下の方が cwd 情報も一貫して見えるので推奨):
+```bash
+beacon bus directory --live --healthy --since-min 5 --json
+```
+
+または、下位互換の等価コマンド:
 ```bash
 beacon sessions --live --healthy --since-min 5 --json
 ```
 
-JSON 配列が返る。各 session row は `project_id` + `project_name` field 付き (= 後段で `bus send --project <pid>` に流す)。空 (`[]`) なら fallback へ。
+JSON 配列が返る。各 session row は `project_id` + `project_name` field 付き
+(= 後段で `bus send --project <pid>` に流す)。 空 (`[]`) なら fallback へ。
 
-#### Step 1-send-a: fallback A (新 endpoint 未 deploy)
+#### Step 1-send-a: fallback A (旧マシン内 bridge スキャン、ネット障害用)
 
-`beacon: unknown command "sessions"` 等が返った場合 (= CLI が v0.33.0 未満)、旧 v0.25.0+ 経路の同マシン bridge スキャンにフォールバック:
+新 endpoint が API network 障害等で失敗した場合、 旧 v0.25.0+ 経路の同マシン
+bridge スキャンにフォールバック (= server 不要、 でも同マシン限定):
 ```bash
 PYTHONPATH="$(dirname $(dirname $(realpath $(which beacon))))" python3 -m beacon_cli.skills_helpers.dm_discover
 ```
 
 JSON 配列が返る。各 session row は `project_id` field annotated 付き。
 
-#### Step 1-send-b: fallback B (cwd-scoped 最終手段)
+#### Step 1-send-b: fallback B (cwd 明示限定モード)
 
-新 endpoint も dm_discover も失敗または 0 件なら、cwd の project だけ query する最終 fallback:
+**ms-94 / e-2291**: default が cross-project になったので、 明示的に cwd
+project 限定モードに絞りたい場合 (= 差分 audit / cwd 内 debug 用途) は
+`--cwd-only` を追加:
 
 ```bash
-beacon bus directory --live --healthy --since-min 5 --json
+beacon bus directory --live --healthy --since-min 5 --cwd-only --json
 ```
 
-`--healthy` 未対応 CLI の場合 (stderr に "unrecognized" 等):
-```bash
-beacon bus directory --live --since-min 5 --json
-```
-このフォールバック発生時、ユーザーに 1 行だけ補足:
-「(cross-project listing 不可、cwd の project のみで listing)」
+このモードは 「cwd project の session だけ 見たい」 という明示意図がある時のみ
+使う (= 通常は default の cross-project 経路で足りる)。 filter の意味を Skill
+起動 user に補足:
+「(cwd project のみで listing、 他 project の session は含まれません)」
 
 #### Step 1-send-c: 0 件のときの fallback
 
