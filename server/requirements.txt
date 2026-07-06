@@ -11,3 +11,5 @@ PyJWT[crypto]>=2.8.0
 # ms-96: MySQL backend (BEACON_STORE_BACKEND=mysql, VPS 経路)。pure-Python な
 # ので build 依存なし。他 backend (firestore / dynamodb) 経路では import されない。
 PyMySQL>=1.1.0
+
+redis>=5.0.0
