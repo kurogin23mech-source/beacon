@@ -1840,8 +1840,16 @@ def create_project(project_id: str, body: ProjectCreate,
         "milestones": [],
         "owner": owner_sub,
         "members": [],
-        # SCHEMA_V2_BETA — see lib/operations.py
-        "schema_version": operations.SCHEMA_V2_BETA,
+        # schema_version: v2 (β subcollection layout) は Firestore 専用
+        # (1 MiB / doc cap を避ける設計)。dynamodb / mysql は 1 MiB 制約が無く、
+        # v2 経路が Firestore を直呼び (operations.py / _hydrate_v2_milestones)
+        # するため非 Firestore backend では動かない。よって非 Firestore では
+        # v1 unified で作る (ms-96 e-2379)。
+        "schema_version": (
+            operations.SCHEMA_V2_BETA
+            if os.environ.get("BEACON_STORE_BACKEND", "firestore").lower() == "firestore"
+            else 1
+        ),
     }
     _save(project_id, data)
     return {"status": "created", "project_id": project_id}
@@ -9808,6 +9816,11 @@ def _hydrate_v2_milestones(project_id: str, data: dict) -> dict:
     Fallback: any read failure returns data unchanged. We never want a broadcast
     to be dropped on hydration error — stale-but-present beats empty.
     """
+    # v2 hydration は Firestore 専用 (db.get_db())。dynamodb / mysql backend では
+    # 全 project が v1 unified なので skip する (= store_router に get_db が無く
+    # AttributeError になるのも防ぐ、ms-96 e-2379)。
+    if os.environ.get("BEACON_STORE_BACKEND", "firestore").lower() != "firestore":
+        return data
     if data.get("schema_version") != 2:
         return data
     try:
