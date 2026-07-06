@@ -6745,6 +6745,17 @@ def upsert_session(
     _load(project_id, user)
     payload = {k: v for k, v in body.model_dump().items() if v is not None}
     email = user.get("email", "")
+    uid = user.get("sub", "")
+
+    # ms-95: stamp the authenticated user_id (= JWT ``sub``) on the session
+    # row so ``_apply_dm_payload_visibility`` can resolve sid→uid without a
+    # separate roundtrip. Bridge clients do not (and must not) supply their
+    # own user_id — the auth token is the only authority. Without this
+    # stamp, ``sid_to_uid[recipient_sid] = ""`` and the visibility gate
+    # redacts DM payloads even for the intended recipient (observed 2026-07-06
+    # with Iruka / Windows bridge v0.54.0, DM event Y9kG6O6C2Qz5bp2gQ7cN).
+    if uid:
+        payload["user_id"] = uid
 
     # Mint path: body carried actor. Stamp email in-line so the single
     # db.upsert_session write below lands the complete view atomically.
@@ -9582,6 +9593,44 @@ def _apply_dm_payload_visibility(
         for s in sessions
         if s.get("session_id")
     }
+
+    # ms-95 defense-in-depth: for sessions that mint before ms-95's
+    # user_id-stamp landed (= legacy rows written by older bridge builds),
+    # fall back to actor.email → project.members[].user_id lookup. The
+    # server stamps actor.email from the authenticated JWT on every upsert,
+    # so it is spoof-resistant even for legacy rows. Without this fallback,
+    # a legacy session cannot be resolved to a user_id, and DM payloads
+    # addressed to that session get redacted even from the intended
+    # recipient (= root cause of the 2026-07-06 Iruka observation).
+    empty_sids = [
+        (sid, str((s.get("actor") or {}).get("email") or ""))
+        for s in sessions
+        for sid in (str(s.get("session_id") or ""),)
+        if sid and not sid_to_uid.get(sid) and (s.get("actor") or {}).get("email")
+    ]
+    if empty_sids:
+        try:
+            project_doc = db.get_project(project_id) or {}
+        except Exception:
+            project_doc = {}
+        members = project_doc.get("members") or []
+        email_to_uid: dict[str, str] = {}
+        for m in members:
+            if not isinstance(m, dict):
+                continue
+            m_email = str(m.get("email") or "").strip().lower()
+            m_uid = str(m.get("user_id") or "")
+            if m_email and m_uid:
+                email_to_uid[m_email] = m_uid
+        owner_email = str(project_doc.get("owner_email") or "").strip().lower()
+        owner_uid = str(project_doc.get("owner") or "")
+        if owner_email and owner_uid:
+            email_to_uid.setdefault(owner_email, owner_uid)
+        for sid, actor_email in empty_sids:
+            fallback = email_to_uid.get(actor_email.strip().lower())
+            if fallback:
+                sid_to_uid[sid] = fallback
+
     out: list[dict] = []
     for ev in events:
         channel = ev.get("channel") or ""
