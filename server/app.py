@@ -7240,6 +7240,17 @@ async def post_bus_event(
         data["envelope"] = body.envelope
     if body.requested_action is not None:
         data["requested_action"] = body.requested_action
+    # ms-97 C3 (= review finding H3): stamp a pending-approval marker on the
+    # event itself when the ms-70 gate held it for receiver consent. The
+    # approval *record* lives in the sidecar (below), but the sidecar is not
+    # joined on the receiver's hot inbox read, so the inbox hook had no way to
+    # tell a pending action DM from a normal one — the "[DM-PENDING-APPROVAL]"
+    # banner only surfaced on the CLI/session-start paths, not the main
+    # bridge+hook delivery. Carrying the marker on the event lets the hook
+    # render the banner inline so a human sees "this needs approve/deny" on
+    # the very next turn.
+    if should_gate:
+        data["pending_approval"] = True
 
     event_id = db.append_bus_event(project_id, data)
     audit_record["event_id"] = event_id
