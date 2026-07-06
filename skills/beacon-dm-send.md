@@ -151,10 +151,38 @@ beacon bus directory --live --healthy --since-min 5 --cwd-only --json
 起動 user に補足:
 「(cwd project のみで listing、 他 project の session は含まれません)」
 
-#### Step 1-send-c: 0 件のときの fallback
+#### Step 1-send-c: 0 件のときの user-scoped catch-up 提案 (ms-54 / e-2973)
 
-最終的に sessions 配列が **空** の場合、ユーザーに明示警告:
-「現在 listening 中の受信先がありません。相手側で `beacon bus listen` または MCP 接続が必要です」と伝えて終了。
+最終的に sessions 配列が **空** の場合、以前は「listening 中の受信先がありません」と即終了していたが、SPEC doc `wJZrmxZGmT7d5lRQvWnE` (= 「DM primitive の使い分け原則: session-scoped = 即時 wake / user-scoped = 次回 catch-up」) の 2 経路使い分け原則に基づき、**user-scoped catch-up 経路を提案する**。
+
+##### Step 1-send-c-1: 送信先 user の候補提示
+
+`beacon member list --json` の結果から、自分以外のプロジェクトメンバー一覧を提示:
+
+```
+現在 live なセッションが 1 件もありません。user-scoped で「次回起動時に届く」形で送りますか?
+
+送信先を選んでください:
+1. dolphin.orca@gmail.com (editor)
+2. alice@example.com (viewer)
+3. cancel で中止
+```
+
+##### Step 1-send-c-2: user-scoped mode に切替
+
+選択された user の `user_id` を **`recipient_uid` と呼ぶ** (以下、session-scoped 経路の `recipient_sid` と対称に扱う)。**送信 mode を `user-scoped` に設定** し、Step 2 (live 検証) は user-scoped では意味がないので skip、Step 3 (cross-project) は同様に評価する。
+
+##### Step 1-send-c-3: 経路の意味を user に明示
+
+user-scoped 選択後、1 度だけユーザーに以下を提示 (Skill 進行を止めない、通知のみ):
+
+```
+Note: user-scoped は「時差配信」経路です (SPEC doc wJZrmxZGmT7d5lRQvWnE)。
+  相手 bridge は今すぐこの DM を AI に流しません (= e-1209 filter で drop)。
+  相手が次にセッションを起動すると /beacon-session-start の catch-up step が
+  この DM を拾って AI に inject します。
+  今すぐ届けたい場合は cancel し、相手が live になってから再送してください。
+```
 
 #### Step 1-send-d: メンバー情報の取得 (best-effort cross-reference)
 
@@ -458,6 +486,18 @@ normal な DM (= cross-project でも 外部 user 初回 でも sensitivity high
 
 Bash ツールで上記コマンドを実行する。JSON 出力 (`--json`) を有効化することで stdout に event_id + delivery + envelope + budget 情報が返るので、結果を読む。
 
+### user-scoped mode の argv 差分 (= Step 1-send-c 経由の場合)
+
+Step 1-send-c を通ってきた場合は session-scoped の `--to <recipient_sid>` の代わりに **`--to-user <recipient_uid>`** を使う (SPEC doc `wJZrmxZGmT7d5lRQvWnE` の 2 経路使い分け原則)。他のフラグ (`--payload`, `--in-reply-to` 等) は同一。
+
+例:
+```bash
+beacon bus send --channel dm --to-user 113315684036322209061 \
+  --payload "$(cat /tmp/payload.json)" [--project <id>] --json
+```
+
+user-scoped 送信では Step 8 の receipt 確認は **delivered 止まりが正しい** (opened stamp は次回相手起動時に立つ) ため、Step 8 の解釈ガイドに従い「これは時差配信なので opened ✗ は正常」と report する。
+
 **注意**: `--payload` の値は Python の `json.dumps({"text": "<本文>"}, ensure_ascii=False, separators=(",", ":"))` 相当で組み立てる。`Bash` ツールの引数に渡すとき、シェルに渡る形にしてエスケープに注意 (改行は `\n` に変換される)。実装上は Python heredoc (= 必ず quoted EOF を使う、後述「heredoc 注意」参照) で payload JSON を構築 → 環境変数経由でコマンドに渡すか、シングルクォートで囲んでそのまま渡す。
 
 ### heredoc 注意 (= e-1401 で起票された病理回避)
@@ -525,7 +565,8 @@ receipt (3 段):
 | 状態 | 意味 | 次のアクション |
 |---|---|---|
 | sent ✓ / delivered ✗ / opened ✗ | 受信側 bridge が /unread を fetch していない | 相手の `bridge=True` を directory で確認、`channel install` 漏れの可能性 |
-| sent ✓ / delivered ✓ / opened ✗ | bridge は受け取ったが filter chain で drop or mcp.notification 失敗 | 相手の channel allowlist (`BEACON_CHANNEL_ALLOWLIST`) と DM の channel が一致しているか、受信側 session が allowlist に入っているか確認 |
+| sent ✓ / delivered ✓ / opened ✗ (**session-scoped**) | bridge は受け取ったが filter chain で drop or mcp.notification 失敗 | 相手の channel allowlist (`BEACON_CHANNEL_ALLOWLIST`) と DM の channel が一致しているか、受信側 session が allowlist に入っているか確認 |
+| sent ✓ / delivered ✓ / opened ✗ (**user-scoped**) | **正常挙動** — user-scoped は時差配信、相手 bridge が e-1209 filter で意図的に drop、opened は次回起動時に立つ | 追加アクション不要。SPEC doc `wJZrmxZGmT7d5lRQvWnE` の 2 経路使い分け原則参照 |
 | sent ✓ / delivered ✓ / opened ✓ | 完全到達 | 完了 |
 | sent ✓ / delivered ✗ / opened ✗ かつ 8 秒待っても変化なし | 受信側 bridge が **古い beacon バージョン** で ack 経路を持たない可能性 | 相手の `actor.agent.version` を directory で確認 (v0.26.0 未満は receipt 非対応)、`pipx upgrade beacon-ai` (PyPI 名は beacon-ai、内部 CLI は beacon) または `brew upgrade beacon` を促す |
 
