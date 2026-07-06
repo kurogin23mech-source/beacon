@@ -7632,6 +7632,21 @@ def trek_scheduler_tick_endpoint(
             # trek transitions back to non-terminal (= a task moves out
             # of terminal state) via the same PATCH endpoint that stamped
             # the terminal state; see ``clear_quiesce_marks_on_resume``.
+            # ms-97 P3 (= review finding H1 / C2 decision 2026-07-06):
+            # completion_ready (ms-97 AC20/21) was structurally unreachable —
+            # ``is_completion_ready`` requires aggregate-terminal, but every
+            # aggregate-terminal trek is handled here and ``continue``s below,
+            # so the completion_ready block further down never saw it. Evaluate
+            # it here (same trek_doc the terminal check above used) so the
+            # quiesce DM doubles as the AC20 completion signal and — critically
+            # — ``meta.completion_notified_at`` gets stamped, which is the
+            # missing half of the AC21 stop condition (``summary_sent_at AND
+            # completion_notified_at`` → leader-digest tick halts). The op-slot
+            # exclusion + one-shot ``completion_notified_at`` gate both live
+            # inside ``is_completion_ready``, so no extra guarding is needed.
+            completion_ready_now = trek_scheduler_mod.is_completion_ready(
+                trek_doc, get_project=db.get_project,
+            )
             if not meta.get("quiesce_notified_at"):
                 leader_sid = trek_doc.get("leader_session_id") or ""
                 quiesce_scope_pids = _resolve_trek_scope_project_ids(trek_doc)
@@ -7655,6 +7670,13 @@ def trek_scheduler_tick_endpoint(
                             "origin_channel": "trek-leader-digest",
                             "reason": quiesce_reason,
                             "quiesced_at": meta["quiesced_at"],
+                            # ms-97 AC20 — mark the quiesce DM as the one-shot
+                            # completion signal when the trek is genuinely
+                            # completion-ready (= terminal, no Op slot, not yet
+                            # notified). Leader-side can render "completed"
+                            # instead of a plain quiesce notice.
+                            **({"completion_ready": True}
+                               if completion_ready_now else {}),
                             "body": (
                                 f"[Trek quiesced] trek_id={trek_id}\n"
                                 "Trek scope 内の全 slot が terminal state "
@@ -7677,6 +7699,16 @@ def trek_scheduler_tick_endpoint(
                         # Only stamp the notified marker on a successful
                         # append so a transient failure retries next tick.
                         meta["quiesce_notified_at"] = now_iso
+                        # ms-97 P3 / AC20 — stamp the one-shot completion
+                        # marker on the same successful append. Gated by
+                        # ``completion_ready_now`` (= is_completion_ready,
+                        # which already excludes Op-slot treks and returns
+                        # False once this is stamped) so it fires once per
+                        # trek lifetime and unblocks the AC21 stop condition.
+                        if completion_ready_now and not meta.get(
+                            "completion_notified_at"
+                        ):
+                            meta["completion_notified_at"] = now_iso
                     except Exception as exc:  # noqa: BLE001
                         # Best-effort: log the failure but continue with
                         # the quiesce flow. Absence of quiesce_notified_at
