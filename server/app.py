@@ -834,6 +834,55 @@ def _resolve_trek_scope_project_ids(trek_doc: dict) -> list[str]:
     return out
 
 
+def _resolve_leader_home_project_id(trek_doc: dict) -> str:
+    """Resolve the project whose bus a *leader-addressed* Trek DM must land on.
+
+    ms-97 P4 (= review finding Trek-H2): three leader-bound DMs — the quiesce
+    notice, the ``trek-task-review`` request, and the auto-stall notice — were
+    posted to ``scope[0]['project']``. That silently drops the DM whenever the
+    leader's home project is a *different* scope project (= cross-project Trek),
+    because a leader's bridge only subscribes to its own project's bus. The
+    quiesce path made this worse by stamping ``quiesce_notified_at`` on a send
+    that never reached the leader (= ms-99 AC12 "silent quiesce eliminated"
+    broke; same shape as the 2026-06-28 dogfood e-2706).
+
+    Resolution walks each scope project's session registry and returns the
+    project that holds the stamped ``leader_session_id``. Falls back to the
+    first scope project when the leader session is not found in any registry
+    (= leader home outside scope / planning-era trek with no live leader),
+    which is the same known limitation the leader-digest resolver carries
+    (review M5) and matches the pre-P4 ``scope[0]`` behaviour exactly.
+
+    We walk the *raw* scope project values (no canonicalisation) on purpose:
+    the pre-P4 code used the raw ``scope[0]['project']`` too, so the fallback
+    is byte-for-byte identical, and we avoid adding a ``db.get_project`` slug
+    round-trip to hot paths (= the ``trek-task-review`` PATCH endpoint fires
+    this on every review-trigger transition; the e-2650 slot-done precondition
+    overreach test pins that non-done transitions stay read-light).
+    """
+    seen: set[str] = set()
+    raw_pids: list[str] = []
+    for entry in trek_doc.get("scope") or []:
+        pid = (entry.get("project") or "").strip()
+        if pid and pid not in seen:
+            seen.add(pid)
+            raw_pids.append(pid)
+    leader_sid = trek_doc.get("leader_session_id") or ""
+    if leader_sid:
+        for pid in raw_pids:
+            try:
+                sessions = db.list_sessions(pid)
+            except Exception:
+                # A single project's registry read failing must not abort the
+                # walk — the leader may still be registered in another scope
+                # project. Fall through to the next candidate.
+                continue
+            for s in sessions:
+                if (s.get("session_id") or "") == leader_sid:
+                    return pid
+    return raw_pids[0] if raw_pids else ""
+
+
 def _resolve_author(user: dict) -> dict:
     """Build the ``meta.author`` dict for a write triggered by ``user``.
 
@@ -5837,7 +5886,9 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
         })
         leader_sid = t.get("leader_session_id") or ""
         scope = t.get("scope") or []
-        target_pid = scope[0].get("project") if scope else ""
+        # ms-97 P4 — resolve the leader's home project so a cross-project
+        # leader receives the trek-task-review request (was scope[0] only).
+        target_pid = _resolve_leader_home_project_id(t)
         # ms-88 / e-2168 — self-loop suppress: leader が自分で stamp した
         # transition では、 leader 宛 review event を mint しない。 「自分が判断
         # したものを自分にもう一度 review 依頼する」 ループによる envelope mint +
@@ -7735,7 +7786,13 @@ def trek_scheduler_tick_endpoint(
                 leader_sid = trek_doc.get("leader_session_id") or ""
                 quiesce_scope_pids = _resolve_trek_scope_project_ids(trek_doc)
                 if leader_sid and quiesce_scope_pids:
-                    quiesce_target_pid = quiesce_scope_pids[0]
+                    # ms-97 P4 — route to the leader's home project, not
+                    # scope[0], so a cross-project leader actually receives
+                    # the quiesce notice (before this, quiesce_notified_at
+                    # was stamped on a send that never arrived).
+                    quiesce_target_pid = _resolve_leader_home_project_id(
+                        trek_doc,
+                    )
                     try:
                         quiesce_envelope = (
                             envelope_mod.issue_t1_system_envelope(
@@ -8584,7 +8641,9 @@ def trek_scheduler_tick_endpoint(
         scope = trek_doc.get("scope") or []
         if not scope:
             continue
-        target_pid = scope[0].get("project", "")
+        # ms-97 P4 — route the auto-stall leader_review notice to the
+        # leader's home project instead of scope[0] (cross-project fix).
+        target_pid = _resolve_leader_home_project_id(trek_doc)
         if not target_pid:
             continue
         leader_sid = trek_doc.get("leader_session_id") or ""
