@@ -2021,6 +2021,66 @@ def test_quiesce_emits_leader_dm_once():
     assert payload["reason"] == "task_state_aggregate_terminal"
 
 
+def test_quiesce_stamps_completion_notified_at_and_marks_dm():
+    """ms-97 P3 (review H1 / C2 decision): completion_ready (AC20/21) was
+    structurally unreachable — every aggregate-terminal trek is caught by the
+    quiesce branch and ``continue``s before the completion_ready block. The
+    fix evaluates completion_ready inside the quiesce branch, so a terminal,
+    non-Op trek now (a) stamps ``meta.completion_notified_at`` (the missing
+    half of the AC21 stop condition) and (b) marks the quiesce DM with
+    ``completion_ready=True``. This is the tick-integration pin the pure
+    ``is_completion_ready`` tests could not provide."""
+    _seed_quiesced_trek("tk-p3-completion")
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-p3-completion"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200
+    saved = _treks["tk-p3-completion"]
+    assert saved["meta"].get("completion_notified_at"), (
+        "quiesce branch must stamp completion_notified_at so the AC21 stop "
+        "condition (summary_sent_at AND completion_notified_at) is reachable"
+    )
+    events = _bus_events_by_project["beacon-test"]
+    quiesce_dms = [e for e in events if _is_trek_quiesce_dm(e)]
+    assert len(quiesce_dms) == 1
+    assert quiesce_dms[0]["payload"].get("completion_ready") is True, (
+        "the quiesce DM must carry completion_ready=True so the leader-side "
+        "renders a completion (AC20) rather than a plain quiesce notice"
+    )
+
+
+def test_completion_notified_at_does_not_refire_on_second_quiesce_tick():
+    """ms-97 P3 — one-shot: once completion_notified_at is stamped,
+    ``is_completion_ready`` returns False, so a second due tick in the same
+    terminal state does NOT re-stamp or re-mark. Guards against a
+    completion-signal loop."""
+    _seed_quiesced_trek("tk-p3-oneshot")
+    client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-p3-oneshot"]},
+        headers=HEADERS_OK,
+    )
+    first_stamp = _treks["tk-p3-oneshot"]["meta"].get("completion_notified_at")
+    assert first_stamp
+    # Make the trek due again (cadence elapsed) without leaving terminal.
+    _treks["tk-p3-oneshot"]["meta"]["last_progress_check_at"] = ""
+    client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-p3-oneshot"]},
+        headers=HEADERS_OK,
+    )
+    # Stamp unchanged (idempotent), no second completion-marked DM.
+    assert _treks["tk-p3-oneshot"]["meta"]["completion_notified_at"] == first_stamp
+    events = _bus_events_by_project["beacon-test"]
+    marked = [e for e in events
+              if (e.get("payload") or {}).get("completion_ready") is True]
+    assert len(marked) == 1, (
+        "completion_ready must be marked on exactly one DM across both ticks"
+    )
+
+
 def test_quiesce_dm_dedupes_on_second_tick():
     """e-2834 AC2: 同 quiesce lifecycle 内では 2 回目の tick で DM を
     再送しない (meta.quiesce_notified_at で dedup)。 leader が同一 quiesce
