@@ -2,6 +2,45 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.54.0] - 2026-07-06
+
+- Merge pull request #343 from kurogin23mech-source/feat/ms-94-e2291-cross-project-defaults
+- feat(ms-94): CLI cross-project defaults 全面改修 (e-2291/e-2811)
+- Merge pull request #342 from kurogin23mech-source/fix/ms-97-p4-leader-dm-cross-project
+- fix(ms-97): [P4] leader 宛 DM 3 経路を scope[0] 固定から leader home project 解決に
+- Merge pull request #338 from kurogin23mech-source/fix/ms-97-p3-completion-ready-quiesce
+- Merge pull request #339 from kurogin23mech-source/ms-96-e2381
+- Merge pull request #341 from kurogin23mech-source/feat/ms-96-e2379-v3-entry-level
+- Merge pull request #334 from kurogin23mech-source/ms-96-vps-1
+- Merge pull request #340 from kurogin23mech-source/feat/ms-54-e2934-user-scoped-dm
+- feat(ms-54): DM 送信先を project × user 単位でも指定できるようにする (e-2934)
+- feat(ms-96): migrate script を v2→v3 直行に切替 (e-2379)
+- feat(ms-96): v3 schema (entry-level split) の core 実装 (e-2379 follow-up)
+- chore(ms-96): main を ms-96-vps-1 に取り込む (CI base 追従 + P1/P2 セキュリティ fix 統合)
+- feat(ms-96): app/Redis 固定窓レート制限ミドルウェア (e-2381)
+- fix(ms-97): [P3/C2] quiesce branch で completion_ready を評価し AC21 停止条件を成立させる
+- Merge pull request #336 from kurogin23mech-source/fix/ms-97-p2-inbox-hook-envelope-verify
+- Merge pull request #337 from kurogin23mech-source/fix/ms-97-p1-ws-bus-broadcast-signal-only
+- fix(ms-97): [P1/H1] bus event の WS ブロードキャストを signal-only 化 (DM 本文の漏洩を塞ぐ)
+- fix(ms-97): [P2/H2] inbox-hook で imperative 発火に T1-system provenance を強制 + payload id を sanitize
+- Merge pull request #281 from kurogin23mech-source/feat/ms-93-e2557-skill-converter-mvp
+- chore(ms-93): prune beacon-trek from SKILL_MANIFEST (drift refresh)
+- fix(ms-93): align Skill converter with schema v2
+- feat(ms-93): add canonical Skill converter MVP
+- feat(ms-93): e-2558 add SKILL_MANIFEST.json — enumerated 39 Skill inventory
+- Merge pull request #335 from kurogin23mech-source/fix/ms-95-main-red-pytest-pollution-wheel-glob
+- fix(ms-95): test_beacon_find_root を CI checkout に非依存化 (残 2 red 解消)
+- fix(ms-96): bus WS は Node 内蔵 global WebSocket を優先 (e-2380)
+- fix(ms-95): 残 6 red を全部緑化 — main CI 完全 green (4274 passed)
+- feat(ms-96): bus.mjs を WebSocket push 対応に (e-2380)
+- fix(ms-95): main を green に近づける — pytest cross-file 汚染 + wheel glob 修正
+- fix(ms-96): mysql backend の書き込み経路を whole-doc apply に載せる (e-2379)
+- fix(ms-96): 移行スクリプトに v2→v1 collapse を追加 (e-2379)
+- docs(release): update README/CHANGELOG for v0.53.1
+- chore(release): bump formula to 0.53.1
+- feat(ms-96): Firestore→MySQL 移行スクリプト + trek ログ永続化修正 (e-2379)
+- feat(ms-96): MySQL JSON-blob ストアバックエンド新設 (e-2378)
+
 ## [v0.53.1] - 2026-07-04
 
 - Merge pull request #333 from kurogin23mech-source/fix/ms-95-e2875-archived-trek-guards
