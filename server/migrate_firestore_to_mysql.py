@@ -139,21 +139,51 @@ def do_export(outfile: str) -> None:
         subcols = list(proj.reference.collections())
         subcol_names = {c.id for c in subcols}
 
-        # v2 → v1 collapse (ms-96 e-2379):
-        # v2 スキーマは milestones を projects/{id}/milestones/{ms_id} の
-        # subcollection に分離している (= Firestore 1 ドキュメント 1 MiB 上限を
-        # 避けるための設計)。MySQL に 1 MiB 制限は無いので、milestones を doc へ
-        # 埋め戻し schema_version=1 (legacy) に落として v1 経路で扱えるようにする。
-        # v2 経路は operations.py が db.get_db() 直叩きで Firestore 専用のため、
-        # collapse しないと mysql backend で milestones が空になる。
+        # v2 → v3 direct migration (ms-96 e-2379 更新、iruca3 提案 / kurogin 合意):
+        # 旧設計は「v2 -> v1 collapse」 (milestones を doc に埋め戻し) だったが、
+        # 大 project (= beacon-b95643 3.6 MiB) では 1 タスク完了で doc 全体を書き直す
+        # 書き込み増幅の問題があった。 MySQL には Firestore の 1 MiB 制約が無く、
+        # row-level lock cost も cheap なので、milestone-level 分割どころか entry-level
+        # 分割まで踏み込む v3 schema へ直行させる (= 中間 v1 状態を作らないので逆
+        # collapse を書かずに済む)。
+        #
+        # v3 shape:
+        #   projects 行の data には milestones[] を含めない (schema_version=3 を stamp)。
+        #   milestones 行  pk=project_id, sk=ms_id、data=milestone meta のみ (entries なし)。
+        #   entries 行    pk=project_id, sk="{ms_id}#{entry_id}"、data=entry + 子 entries[] 内包。
+        # 深さ 2 (task → 子 commit ≤16) は各 entry の subtree として親 entry の JSON に
+        # 内包されるので、独立行を作らない (= 実 write 単位が数 KB に閉じる)。
         if "milestones" in subcol_names:
             ms_docs = [d.to_dict() or {} for d in
                        proj.reference.collection("milestones").stream()]
             ms_docs.sort(key=_ms_sort_key)
-            pdata["milestones"] = ms_docs
-            pdata["schema_version"] = 1
-            print(f"  ↻ v2→v1 collapse: {pid} — {len(ms_docs)} milestones を "
-                  f"doc へ埋め込み (schema_version=1)", file=sys.stderr)
+            n_ms = 0
+            n_entries = 0
+            for ms in ms_docs:
+                ms_id = str(ms.get("id", ""))
+                if not ms_id:
+                    print(f"  ⚠ {pid}: milestone に id が無い、skip "
+                          f"(title={(ms.get('title', '') or '')[:40]!r})",
+                          file=sys.stderr)
+                    continue
+                # milestone meta only を milestones entity へ (entries[] は次段で分離)。
+                ms_meta = {k: v for k, v in ms.items() if k != "entries"}
+                _add(dump, "milestones", pid, ms_id, ms_meta)
+                n_ms += 1
+                # 各 top-level entry を entries entity へ、composite sk "{ms_id}#{entry_id}"。
+                # 子 entries[] (= 深さ 2 の commit 群) は entry data 内 JSON にそのまま残す。
+                for entry in ms.get("entries", []) or []:
+                    entry_id = str(entry.get("id", ""))
+                    if not entry_id:
+                        continue
+                    sk = f"{ms_id}#{entry_id}"
+                    _add(dump, "entries", pid, sk, dict(entry))
+                    n_entries += 1
+            # projects 行の data から milestones[] を除去、schema_version=3 を stamp。
+            pdata.pop("milestones", None)
+            pdata["schema_version"] = 3
+            print(f"  ↻ v2→v3 direct: {pid} — {n_ms} milestones + "
+                  f"{n_entries} entries (schema_version=3)", file=sys.stderr)
 
         _add(dump, "projects", pid, "", pdata)
         proj_count += 1

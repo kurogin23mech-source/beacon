@@ -111,6 +111,12 @@ Op = Callable[[dict], Tuple[dict, Any]]
 # のまま動かす".
 SCHEMA_V1_LEGACY = 1
 SCHEMA_V2_BETA = 2
+# ms-96 e-2379 (2026-07-06): MySQL 移行のタイミングで entry-level 分割まで踏み込む
+# 新スキーマ。 milestone は独立行、 entry も独立行、 子 entry (= 深さ 2 の commit
+# 等) は親 entry の JSON 内包で保持。 現状 MySQL backend のみ実装 (= mysql_client)。
+# Firestore backend では v2 のまま (portability 保持、 v3 化は将来 task)。
+# 詳細は DM `Yh9JnCBfj4aVjd71gjKc` (iruca3 <-> kurogin) 参照。
+SCHEMA_V3_ENTRY = 3
 
 
 def get_schema_version(data: dict) -> int:
@@ -120,7 +126,8 @@ def get_schema_version(data: dict) -> int:
     projects working without migration.
     """
     v = data.get("schema_version")
-    if isinstance(v, int) and v in (SCHEMA_V1_LEGACY, SCHEMA_V2_BETA):
+    if isinstance(v, int) and v in (SCHEMA_V1_LEGACY, SCHEMA_V2_BETA,
+                                    SCHEMA_V3_ENTRY):
         return v
     return SCHEMA_V1_LEGACY
 
@@ -746,11 +753,28 @@ def apply_operation(
         # transactional apply for the consistency guarantees apply_operation
         # promises (= per-project linearizability of writes).
         store_backend = os.environ.get("BEACON_STORE_BACKEND", "firestore").lower()
-        if store_backend in ("dynamodb", "mysql"):
-            # ms-96 e-2379: MySQL も 1 MiB 制約が無く v1/v2 subcollection 分離が
-            # 不要なので、DynamoDB と同じ whole-document apply 経路を使う
-            # (= store_router 経由、Firestore 非依存)。else 分岐は firestore_client
-            # を直 import するため mysql backend では ADC 不在で失敗する。
+        if store_backend == "mysql":
+            # ms-96 e-2379: MySQL は 2 段 dispatch。
+            # (a) schema=v3 → entry-level split (mysql_client.apply_project_op_v3)
+            #     行単位 update で書き込み増幅を回避 (= iruca3 提案 / kurogin 合意)。
+            # (b) schema=v1 → whole-doc apply (= 既存の DynamoDB と同じ経路)
+            #     11 project 中 v1 で載っている 10 個はこの経路で当面動く。
+            # meta doc の peek は cheap (1 行 SELECT) なので schema 判定に使う。
+            import store_router as db  # type: ignore[import-not-found]
+            existing_meta = db.get_project(project_id)
+            existing_schema = (
+                get_schema_version(existing_meta) if existing_meta
+                else SCHEMA_V1_LEGACY
+            )
+            if existing_schema == SCHEMA_V3_ENTRY:
+                result = db.apply_project_op_v3(project_id, op)
+            else:
+                # v1 whole-doc (DynamoDB と同じ経路の read-modify-write)。
+                result = _apply_cloud_dynamodb(project_id, op)
+        elif store_backend == "dynamodb":
+            # DynamoDB は v1/v2 subcollection 分離が不要なので whole-document apply。
+            # (単一 PK put_item が atomic、read → op → conditional put の retry で
+            # Firestore transactional apply と同等の per-project linearizability)。
             result = _apply_cloud_dynamodb(project_id, op)
         else:
             import firestore_client as db  # type: ignore[import-not-found]
@@ -833,15 +857,29 @@ def replace_project(
         # DynamoDB ではそれらが存在しないので別経路で処理する。
         store_backend = os.environ.get("BEACON_STORE_BACKEND", "firestore").lower()
 
-        if store_backend in ("dynamodb", "mysql"):
-            # ms-96 e-2379: MySQL も whole-doc set で安全 (1 MiB cap 無し)。
+        if store_backend == "mysql":
+            # ms-96 e-2379: MySQL は 2 段 dispatch (apply_operation と同型)。
+            # 既存 project の schema を peek し、 v3 なら entry-level 経路、
+            # そうでなければ whole-doc replace。 new_data の schema_version は
+            # 「これから書き込む形」なので existing schema (現行 shape) を優先。
+            # 「schema 変更を跨ぐ replace_project」 (= v1 -> v3) は migrate script
+            # の役割で本 API は担わない (= caller が本気で shape を変えたい時は
+            # migration を挟む前提)。
+            import store_router as db  # type: ignore[import-not-found]
+            existing = db.get_project(project_id)
+            existing_schema = (
+                get_schema_version(existing) if existing else
+                get_schema_version(new_data)
+            )
+            if existing_schema == SCHEMA_V3_ENTRY:
+                db.replace_project_v3(project_id, new_data)
+            else:
+                db.save_project(project_id, new_data)
+        elif store_backend == "dynamodb":
             # DynamoDB: トランザクションは PK の put_item に集約される
-            # (= DynamoDB は単一 PK 内の put_item が atomic)。v2 schema の
-            # subcollection 分解は dynamodb_client.save_project が PK のみで
-            # サブコレクションは別テーブルに置く設計なので、whole-doc set で
-            # 安全に動く (= Firestore 版で問題だった 1 MiB cap 制約は
-            # DynamoDB に存在しない、subcollection 元の document は別テーブル
-            # で寿命を独立に持つ)。
+            # (= 単一 PK 内の put_item が atomic)。v2 schema の subcollection 分解は
+            # dynamodb_client.save_project が PK のみでサブコレクションは別テーブルに
+            # 置く設計なので whole-doc set で安全に動く。
             import store_router as db  # type: ignore[import-not-found]
             db.save_project(project_id, new_data)
         else:
@@ -908,10 +946,21 @@ def load_project_consistent(project_id: str) -> dict:
         raise LookupError(f"Project '{project_id}' not found")
 
     store_backend = os.environ.get("BEACON_STORE_BACKEND", "firestore").lower()
-    if store_backend in ("dynamodb", "mysql"):
-        # ms-96 e-2379: MySQL も v2 subcollection layout を持たない
-        # (= 新規 project は v1 unified で保存される) ので、schema check +
-        # firestore hydration を skip して whole-doc をそのまま返す。
+    if store_backend == "mysql":
+        # ms-96 e-2379: MySQL の schema-aware hydration。
+        # v3 (entry-level split) の場合は milestones / entries が独立行なので
+        # get_project_v3 で hydrate してから返す (= caller は unified dict を
+        # 期待している)。 v1 (whole-doc) の場合は既に meta が unified なのでそのまま。
+        # 判定は meta.schema_version、無ければ v1 扱い。
+        if get_schema_version(meta) == SCHEMA_V3_ENTRY:
+            hydrated = db.get_project_v3(project_id)
+            # 論理的には meta が読めた時点で hydrated も存在するはずだが、 read-race
+            # (= 別 tx で削除された) の防御として fallback。
+            return hydrated if hydrated is not None else meta
+        return meta
+    if store_backend == "dynamodb":
+        # DynamoDB も v2 subcollection layout を持たない (= 新規 project は v1
+        # unified で保存される) ので whole-doc をそのまま返す。
         return meta
 
     if get_schema_version(meta) == SCHEMA_V1_LEGACY:
