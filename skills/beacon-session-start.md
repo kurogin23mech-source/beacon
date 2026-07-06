@@ -455,6 +455,93 @@ local mode (= `.beacon/cloud.json` 不在) / 未認証 / endpoint タイムア�
 
 この Step は **読み取り専用**。sidecar の書き換え (= approved / denied 決定) は `/beacon-dm-respond` Skill 経由でのみ行う。
 
+## Step 1n-2: user-scoped DM の catch-up (ms-54 / e-2974)
+
+前回セッション終了以降に **user-scoped で送られた情報 DM (= 直接メッセージ、action 権限なし)** は、受信 bridge (channel/bus.mjs) が e-1209 filter で意図的に drop している (= SPEC doc `wJZrmxZGmT7d5lRQvWnE`「DM primitive の使い分け原則: session-scoped = 即時 wake / user-scoped = 次回 catch-up」に基づく設計)。したがって過去セッションの inbox には出ておらず、AI から見て「留守中に届いた DM」が session-start 時に完全に見落とされる。
+
+本 Step は **server の bus events を直接 query** し、user-scoped で自分宛 (payload.recipient_user_id == 自 user_id) の DM を「catch-up 対象」として拾い、Step 3 の出力に含める。session-scoped で既に届いた DM (bridge 経由で AI が過去に read 済のもの) は対象外 (受信 bridge の inbox 経由で既に見ているはず)。
+
+Bash ツールで実行 (fail-safe、cloud 未設定 / endpoint 不在ならスキップ):
+
+```bash
+PROJECT_ID=$(python3 -c "import json; print(json.load(open('.beacon/cloud.json')).get('project_id',''))" 2>/dev/null)
+USER_ID=$(python3 -c "import json,os; p=os.path.expanduser('~/.beacon/auth.json'); print(json.load(open(p)).get('user_id',''))" 2>/dev/null)
+if [ -n "$PROJECT_ID" ] && [ -n "$USER_ID" ]; then
+  python3 - <<'PY' 2>/dev/null
+import json, os, sys, urllib.request, urllib.parse, subprocess, datetime
+project_id = os.environ.get("PROJECT_ID") or ""
+user_id = os.environ.get("USER_ID") or ""
+base = os.environ.get("BEACON_API_BASE") or "https://beacon-api-prod-2dlj7zlbiq-uc.a.run.app"
+token = ""
+try:
+    with open(".beacon/cloud.json") as f: token = json.load(f).get("id_token","") or ""
+except Exception: pass
+if not token:
+    try:
+        with open(os.path.expanduser("~/.beacon/auth.json")) as f: token = json.load(f).get("id_token","") or ""
+    except Exception: pass
+
+# "since" は前回 session log の created_at、無ければ 7 日前
+since_iso = ""
+try:
+    r = subprocess.run(["beacon", "session", "log", "list", "--json"],
+                       capture_output=True, text=True, timeout=5)
+    logs = json.loads(r.stdout or "[]")
+    if logs:
+        since_iso = str(logs[0].get("created_at","") or "")
+except Exception: pass
+if not since_iso:
+    since_iso = (datetime.datetime.now(datetime.timezone.utc)
+                 - datetime.timedelta(days=7)).isoformat().replace("+00:00","Z")
+
+# server の bus events を取得 (visibility gate 通過分のみ返る)
+q = urllib.parse.urlencode({"channel": "dm", "since": since_iso, "limit": 100})
+url = f"{base}/api/projects/{project_id}/bus?{q}"
+req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"} if token else {})
+try:
+    with urllib.request.urlopen(req, timeout=5) as r:
+        events = json.loads(r.read().decode("utf-8"))
+except Exception as e:
+    print(f"CATCHUP_FETCH_FAIL: {e}", file=sys.stderr); sys.exit(0)
+
+# user-scoped で自分宛 (recipient_user_id 一致 かつ recipient_session_id 空) だけ抽出
+rows = []
+for ev in events or []:
+    p = ev.get("payload") or {}
+    if not isinstance(p, dict): continue
+    r_uid = str(p.get("recipient_user_id") or "")
+    r_sid = str(p.get("recipient_session_id") or "")
+    if r_uid == user_id and not r_sid:
+        rows.append({
+            "event_id": ev.get("event_id",""),
+            "sender_session_id": ev.get("sender_session_id",""),
+            "created_at": ev.get("created_at",""),
+            "text_preview": (p.get("text") or "")[:80],
+            "opened_at": ev.get("opened_at",""),
+        })
+
+if not rows:
+    sys.exit(0)  # ノイズ削減、該当なし
+
+print("留守中に届いた DM (user-scoped catch-up):")
+for r in rows[:5]:
+    opened = " (既読)" if r["opened_at"] else ""
+    print(f'  [{r["event_id"][:12]}] from {r["sender_session_id"][:12]} at {r["created_at"][:19]}{opened}')
+    print(f'    {r["text_preview"]}...')
+if len(rows) > 5:
+    print(f'  … 他 {len(rows)-5} 件 (`beacon bus receive --channel dm --event-id <id>` で全文)')
+PY
+fi
+```
+
+出力が空でなければ Step 3 の出力ヘッダ部 (「保留中 DM action」セクションの直後、Trek 一覧の直前あたり) に **そのまま転記** する。空ならセクションごと省略。
+
+payload.text は preview 80 文字まで、詳細確認は `beacon bus receive --channel dm --event-id <event_id>` を案内。返信したい場合は `/beacon-dm-send` (reply mode) 経由。
+
+local mode (= `.beacon/cloud.json` 不在) / 未認証 / endpoint タイムアウトはすべて silent skip。session-start を中断しない。
+
+この Step は **読み取り専用**。既読フラグの更新 (opened stamp) は AI が payload を read した際にサーバ側で自動記録されるため、Skill 側で明示 ack しない (= 次回同 Step が「既読」表示するのに任せる)。
+
 ## Step 1o: 現在 join 中の Trek 一覧 (ms-75 / e-1813 + e-1854)
 
 Trek (= 缶詰の徹夜作業部屋、 user が join した瞬間に scope 内 action が事前承認スコープになる作業空間) に join 済の場合、 そのリストと goal_state / halt 状態を session-start で必ず可視化する。 ms-70 (= cross-user DM 承認ゲート) は Trek 参加中だけ blanket 自動承認 (= 都度確認なしで配信) になるため、 「自分が今どの Trek の blanket 例外を受けているか」 を session 開始時に user 自身が把握できる必要がある。
@@ -855,6 +942,11 @@ Beacon: [name]
 ⚠ beacon-bus channel が未 install です (この cwd で `beacon channel install` を実行してください)   ← Step 1i / MCP_STATUS が OK/UNKNOWN 以外の場合のみ
   detail: [NO_MCP_JSON / NO_BEACON_BUS_ENTRY / MCP_JSON_MALFORMED]
   影響: 他セッションからの DM (channel/bus.mjs 経由) がこの session に届きません
+
+留守中に届いた DM (user-scoped catch-up):   ← Step 1n-2 の出力があれば転記、なければセクションごと省略
+  [event_id 短縮] from [sender 短縮] at [created_at] [(既読)]
+    [preview 80 chars]...
+  … 他 N 件 (詳細は `beacon bus receive --channel dm --event-id <id>`)
 
 ドキュメント (core=設計原則・常時参照 / spec=仕様・技術詳細 / memo=検討メモ):
   [CORE] [title]: [1行サマリー (ms-43 e-566)]
