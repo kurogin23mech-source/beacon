@@ -1,27 +1,37 @@
-"""Unit tests for `bus send` cross-project pre-flight (ms-60 follow-up).
+"""Unit tests for `bus send` cross-project pre-flight
+(ms-60 follow-up → ms-94 / e-2291 全面改修 2026-07-06).
 
-The 2026-06-09 dogfood surfaced a silent-misroute pattern: the sender's
-cwd-derived project_id and the recipient's polling project_id can differ,
-and the send goes to the wrong bus with no signal beyond a missing
-`delivered` receipt. `_validate_recipient_project` closes that gap by
-looking up the recipient in the cross-project discovery and auto-routing.
+## 経緯
 
-These tests stub out `discover_and_aggregate` so we don't need real
-bridges, then exercise the decision matrix:
+- 2026-06-09 dogfood で silent misroute pattern が判明: sender の cwd 由来
+  project_id と recipient の polling project_id が食い違うと、 event は
+  wrong bus に書かれて配信されない (= delivered receipt の absent という
+  negative signal でしか気付けない)。
+- ms-60 の初期実装は `dm_discover` (= 同マシン bridge scan) 経由で lookup
+  していたが、 remote (別マシン) / bridge 未起動 の recipient には効かず
+  「セッションがいません → 静かに cwd fallback」 の footgun が残っていた。
+- ms-94 / e-2291 は server-side lookup (`list_sessions` / `list_user_sessions`)
+  に置換して remote / bridge 無しの recipient も見つかるようにし、 not-found
+  は **hard error** に昇格 (opt-out env で soft-warn 復活可)。
+
+## テスト対象
 
   * non-dm channel        → no change
   * empty recipient       → no change
-  * skip env set          → no change
-  * found in target proj  → no change
-  * found in other proj   → auto-route (or hard error in strict mode)
-  * not found anywhere    → soft warn, no route change
-  * discovery raises      → no change (defensive bypass)
+  * SKIP_TO_CHECK env     → no change
+  * target project 一致    → no change (target 内 lookup で hit)
+  * caller の他 project 一致 → auto-route (loud warning)
+  * NO_AUTO_ROUTE + 他 project 一致 → hard error (routing 拒否)
+  * どこにも見つからない → hard error (new default)
+  * どこにも見つからない + ALLOW_UNKNOWN=1 → soft warn + no route change (legacy)
+  * lookup 自体が失敗 (network / auth) → soft warn + no route change (defensive)
 """
 
 from __future__ import annotations
 
 import os
 import sys
+from typing import Any, Callable
 
 import pytest
 
@@ -35,23 +45,44 @@ TARGET = "beacon-b95643"
 OTHER = "trailnode-cd652b"
 
 
-def _stub_discover(rows):
-    """Return an object exposing discover_and_aggregate -> rows."""
-    class _M:
-        discover_and_aggregate = staticmethod(lambda **kw: list(rows))
-    return _M
+class _MockClient:
+    """Mock ApiClient with configurable list_sessions / list_user_sessions."""
+
+    def __init__(
+        self,
+        target_sessions: list | Callable | None = None,
+        user_sessions: list | Callable | None = None,
+    ):
+        self._target = target_sessions if target_sessions is not None else []
+        self._user = user_sessions if user_sessions is not None else []
+
+    def list_sessions(self, project_id, *_, **__):
+        if callable(self._target):
+            return self._target(project_id)
+        return self._target
+
+    def list_user_sessions(self, *_, **__):
+        if callable(self._user):
+            return self._user()
+        return self._user
+
+
+def _stub_client(monkeypatch, target=None, user=None):
+    """Patch _get_api_client to return a mock client + empty config."""
+    mock = _MockClient(target, user)
+    monkeypatch.setattr(commands, "_get_api_client", lambda: (mock, {}))
+    return mock
 
 
 @pytest.fixture(autouse=True)
 def reset_env(monkeypatch):
-    # Make sure each test starts from a clean env so the opt-out flags
-    # don't leak.
     monkeypatch.delenv("BEACON_BUS_SKIP_TO_CHECK", raising=False)
     monkeypatch.delenv("BEACON_BUS_NO_AUTO_ROUTE", raising=False)
+    monkeypatch.delenv("BEACON_BUS_ALLOW_UNKNOWN", raising=False)
 
 
 # ---------------------------------------------------------------------------
-# Pass-through cases
+# Pass-through cases (non-DM / empty recipient / skip env)
 # ---------------------------------------------------------------------------
 
 def test_non_dm_channel_skips():
@@ -67,18 +98,21 @@ def test_empty_recipient_skips():
 
 def test_skip_env_bypasses(monkeypatch):
     monkeypatch.setenv("BEACON_BUS_SKIP_TO_CHECK", "1")
-    # Even if discovery would route elsewhere, the env bypass wins.
-    sys.modules["beacon_cli.skills_helpers.dm_discover"] = _stub_discover(
-        [{"session_id": RECIPIENT, "project_id": OTHER}]
-    )
+    # Even without any API stub the bypass wins (no lookup performed).
     assert commands._validate_recipient_project(
         RECIPIENT, TARGET, "dm"
     ) == TARGET
 
 
-def test_recipient_in_target_project_unchanged():
-    sys.modules["beacon_cli.skills_helpers.dm_discover"] = _stub_discover(
-        [{"session_id": RECIPIENT, "project_id": TARGET}]
+# ---------------------------------------------------------------------------
+# Found in target project (no route change)
+# ---------------------------------------------------------------------------
+
+def test_recipient_in_target_project_unchanged(monkeypatch):
+    _stub_client(
+        monkeypatch,
+        target=[{"session_id": RECIPIENT}],
+        user=[],
     )
     assert commands._validate_recipient_project(
         RECIPIENT, TARGET, "dm"
@@ -86,12 +120,14 @@ def test_recipient_in_target_project_unchanged():
 
 
 # ---------------------------------------------------------------------------
-# Auto-route case (= the dogfood bug fix)
+# Auto-route case (recipient in caller's other project)
 # ---------------------------------------------------------------------------
 
 def test_recipient_in_other_project_auto_routes(monkeypatch, capsys):
-    sys.modules["beacon_cli.skills_helpers.dm_discover"] = _stub_discover(
-        [{"session_id": RECIPIENT, "project_id": OTHER}]
+    _stub_client(
+        monkeypatch,
+        target=[],
+        user=[{"session_id": RECIPIENT, "project_id": OTHER}],
     )
     routed = commands._validate_recipient_project(RECIPIENT, TARGET, "dm")
     assert routed == OTHER
@@ -103,8 +139,10 @@ def test_recipient_in_other_project_auto_routes(monkeypatch, capsys):
 
 def test_recipient_in_other_project_strict_mode_errors(monkeypatch, capsys):
     monkeypatch.setenv("BEACON_BUS_NO_AUTO_ROUTE", "1")
-    sys.modules["beacon_cli.skills_helpers.dm_discover"] = _stub_discover(
-        [{"session_id": RECIPIENT, "project_id": OTHER}]
+    _stub_client(
+        monkeypatch,
+        target=[],
+        user=[{"session_id": RECIPIENT, "project_id": OTHER}],
     )
     with pytest.raises(SystemExit) as exc:
         commands._validate_recipient_project(RECIPIENT, TARGET, "dm")
@@ -114,83 +152,87 @@ def test_recipient_in_other_project_strict_mode_errors(monkeypatch, capsys):
     assert OTHER in err
 
 
-def test_prefers_target_match_over_other_match(monkeypatch, capsys):
-    """If the same recipient session id appears in both target and other
-    projects (= aggregator quirk / dual registration), prefer the target."""
-    rows = [
-        {"session_id": RECIPIENT, "project_id": OTHER},
-        {"session_id": RECIPIENT, "project_id": TARGET},
-    ]
-    sys.modules["beacon_cli.skills_helpers.dm_discover"] = _stub_discover(
-        rows
+# ---------------------------------------------------------------------------
+# Not-found case (= e-2291 新挙動、default hard error)
+# ---------------------------------------------------------------------------
+
+def test_recipient_not_found_anywhere_hard_errors_by_default(monkeypatch, capsys):
+    """新 default (e-2291): どこにも見つからない = silent misroute 危険 → refuse。
+
+    従来の soft-warn + cwd fallback は BEACON_BUS_ALLOW_UNKNOWN=1 で復活可 (=
+    後方互換 opt-out)。
+    """
+    _stub_client(monkeypatch, target=[], user=[])
+    with pytest.raises(SystemExit) as exc:
+        commands._validate_recipient_project(RECIPIENT, TARGET, "dm")
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "見つかりません" in err  # 日本語のエラーメッセージ
+    assert "e-2291" in err
+    # ヒント (b): user-scoped 経路 (--to-user) の提案を含むこと。
+    assert "--to-user" in err
+
+
+def test_allow_unknown_env_restores_soft_warn(monkeypatch, capsys):
+    monkeypatch.setenv("BEACON_BUS_ALLOW_UNKNOWN", "1")
+    _stub_client(monkeypatch, target=[], user=[])
+    routed = commands._validate_recipient_project(RECIPIENT, TARGET, "dm")
+    # legacy soft-warn 経路: hard-error にならず、 target project にそのまま送る。
+    assert routed == TARGET
+    err = capsys.readouterr().err
+    assert "not visible" in err
+    assert "BEACON_BUS_ALLOW_UNKNOWN" in err
+
+
+# ---------------------------------------------------------------------------
+# Defensive bypass when API lookup itself fails
+# ---------------------------------------------------------------------------
+
+def test_target_lookup_api_failure_bypasses(monkeypatch, capsys):
+    """target project の list_sessions が network 例外を投げた場合、
+    caller の他 project lookup もスキップし、 defensive に元 target を返す
+    (= 「発信自体を殺す guard」 逆転 footgun を防ぐ)。
+    """
+    def _raise(_pid):
+        raise RuntimeError("simulated network failure")
+
+    _stub_client(monkeypatch, target=_raise, user=[])
+
+    routed = commands._validate_recipient_project(RECIPIENT, TARGET, "dm")
+    assert routed == TARGET
+    err = capsys.readouterr().err
+    assert "API 経由で失敗" in err
+
+
+def test_user_sessions_api_failure_bypasses(monkeypatch, capsys):
+    """target lookup は成功 (recipient 不在) だが list_user_sessions が失敗
+    したケース: defensive fall-through で元 target。 hard error にはしない。
+    """
+    def _raise():
+        raise RuntimeError("simulated failure")
+
+    _stub_client(monkeypatch, target=[], user=_raise)
+
+    routed = commands._validate_recipient_project(RECIPIENT, TARGET, "dm")
+    assert routed == TARGET
+    err = capsys.readouterr().err
+    assert "API 経由で失敗" in err
+
+
+# ---------------------------------------------------------------------------
+# Ordering: target match wins over other-project match
+# ---------------------------------------------------------------------------
+
+def test_target_match_wins_over_user_sessions_match(monkeypatch, capsys):
+    """recipient が target project にも caller の他 project にも居るなら、
+    target 内 match を優先 (= route 変更しない)。 auto-route 通知は出ない。
+    """
+    _stub_client(
+        monkeypatch,
+        target=[{"session_id": RECIPIENT}],
+        user=[{"session_id": RECIPIENT, "project_id": OTHER}],
     )
     routed = commands._validate_recipient_project(RECIPIENT, TARGET, "dm")
     assert routed == TARGET
     err = capsys.readouterr().err
-    # No auto-route notice should fire when the match is in the target.
     assert "Auto-routing" not in err
-
-
-# ---------------------------------------------------------------------------
-# Not-found case
-# ---------------------------------------------------------------------------
-
-def test_recipient_not_found_anywhere_soft_warns(capsys):
-    sys.modules["beacon_cli.skills_helpers.dm_discover"] = _stub_discover(
-        [{"session_id": "other-session", "project_id": OTHER}]
-    )
-    routed = commands._validate_recipient_project(RECIPIENT, TARGET, "dm")
-    # Soft-fail: keep going against the target project; rely on the
-    # receipt check to surface the actual delivery failure.
-    assert routed == TARGET
-    err = capsys.readouterr().err
-    assert "not visible in any locally-running bridge" in err
-
-
-def test_empty_discovery_soft_warns(capsys):
-    """Aggregator returns no live bridges at all — still soft-warn."""
-    sys.modules["beacon_cli.skills_helpers.dm_discover"] = _stub_discover([])
-    routed = commands._validate_recipient_project(RECIPIENT, TARGET, "dm")
-    assert routed == TARGET
-    assert "not visible" in capsys.readouterr().err
-
-
-# ---------------------------------------------------------------------------
-# Defensive bypass when discovery itself blows up
-# ---------------------------------------------------------------------------
-
-def test_discovery_module_missing_bypasses(monkeypatch):
-    """Older install without dm_discover should not break bus send."""
-    # Temporarily hide the real module to simulate an older install.
-    saved = sys.modules.pop("beacon_cli.skills_helpers.dm_discover", None)
-    try:
-        # Use a finder that fails on the import.
-        import importlib
-
-        real_import = importlib.import_module
-
-        def _fake_import(name, *args, **kwargs):
-            if name == "beacon_cli.skills_helpers.dm_discover":
-                raise ImportError("simulated missing module")
-            return real_import(name, *args, **kwargs)
-
-        monkeypatch.setattr(importlib, "import_module", _fake_import)
-        assert commands._validate_recipient_project(
-            RECIPIENT, TARGET, "dm"
-        ) == TARGET
-    finally:
-        if saved is not None:
-            sys.modules["beacon_cli.skills_helpers.dm_discover"] = saved
-
-
-def test_discovery_exception_bypasses(capsys):
-    """psutil missing / network hiccup → don't refuse the send."""
-    class _BoomModule:
-        @staticmethod
-        def discover_and_aggregate(**kw):
-            raise RuntimeError("simulated discovery failure")
-
-    sys.modules["beacon_cli.skills_helpers.dm_discover"] = _BoomModule
-    assert commands._validate_recipient_project(
-        RECIPIENT, TARGET, "dm"
-    ) == TARGET

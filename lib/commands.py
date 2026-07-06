@@ -17394,6 +17394,23 @@ def cmd_bus_send():
 
     client, config = _get_api_client()
     project_id = _resolve_bus_project_id(config)  # e-1151: --project override
+
+    # ms-94 / e-2811 (2026-07-06): sender の真 home project を payload に stamp。
+    # 従来は bridge (channel/bus.mjs) が payload.source_project を fallback で
+    # PROJECT_ID (= receiver bridge の own project_id) に埋めていたため、 event
+    # の from_project は 「送信元」 ではなく 「受信 bridge の cwd project」 に
+    # なっていた (= audit 不能 / cross-project reply が壊れる)。 sender の cwd
+    # project (= cloud.json.project_id、 --project override では変わらない
+    # 「本人のいる project」) を明示 stamp して bridge fallback を使わせない。
+    #
+    # 順序: (1) 既に payload.source_project が set されていればそれを尊重、
+    # (2) cwd cloud.json.project_id (= 本人の home、 --project override 前提)、
+    # (3) 最終 fallback として現在の target project_id (= --project override 後)。
+    if not payload.get("source_project"):
+        cwd_project_id = str((config or {}).get("project_id") or "").strip()
+        source_project = cwd_project_id or project_id
+        if source_project:
+            payload = {**payload, "source_project": source_project}
     # e-1340 follow-up (= structural defense against the 2026-06-09 silent
     # cross-project misroute incident): if --to points at a session that
     # polls a different project than `project_id`, auto-route to that
@@ -18190,21 +18207,26 @@ def _validate_recipient_project(
 ):
     """Cross-project pre-flight for ``beacon bus send --to <recipient>``.
 
-    Today's dogfood (2026-06-09) surfaced a silent-misroute pattern: the
-    sender's CLI posts to its cwd's project bus, but the recipient is
-    polling a different project. The event is stored but never delivered.
-    Without this check, the only signal is the absence of a ``delivered``
-    receipt — a negative signal humans (and AI) routinely miss.
+    2026-06-09 dogfood で発見された silent-misroute パターン: sender の CLI が
+    cwd project に post するが、 recipient は別 project を polling → event
+    は書かれるが配信されない (「届いたか?」の唯一の signal が delivered receipt
+    の absent = negative signal で気付きにくい)。
 
-    Resolution policy:
-      * Non-DM channels skip (broadcast semantics, no fixed recipient).
-      * Empty recipient skips (already warned about elsewhere).
-      * If the recipient is found in the target project's local directory
-        — pass through, no change.
-      * If found in a *different* local project — auto-route to that
-        project. Loud stderr warning so the routing decision is auditable.
-      * If not found in any local project — soft warn (might be a remote
-        bridge we can't see locally) but don't refuse.
+    ms-94 / e-2291 (2026-07-06 全面改修): 従来は local bridge 依存の
+    ``dm_discover`` (= 送信元マシンで走ってる bridge しか見えない) で
+    lookup していたので、 remote / bridge 未起動の recipient が not-found →
+    soft-warn → cwd fallback → silent misroute の失敗経路が残っていた。 サーバー
+    経由 (``list_sessions`` / ``list_user_sessions``) の lookup に置換し、 remote
+    session も見つけられるようにする。 not-found を **hard error に昇格** し
+    ("silent misroute 防止")、 fall-back は明示的な opt-out env でのみ許容。
+
+    Resolution policy (new):
+      1. target project の全 session を server 側 lookup (``list_sessions``)、
+         recipient sid が居れば pass-through。
+      2. 居なければ caller の全 project (``list_user_sessions``) を横断 lookup、
+         別 project で見つかれば auto-route (loud warning、 audit 可能)。
+      3. どこにも居なければ **hard error** (silent misroute を防ぐ、 従来の
+         soft-warn は opt-out env でのみ復活)。
 
     Returns the project_id to actually use. May differ from
     ``target_project_id`` when auto-routing.
@@ -18215,47 +18237,52 @@ def _validate_recipient_project(
       * ``BEACON_BUS_NO_AUTO_ROUTE=1`` — keep the check, but refuse to
         auto-route on mismatch (emits a hard error so the script breaks
         instead of silently switching project).
+      * ``BEACON_BUS_ALLOW_UNKNOWN=1`` — not-found を hard error にしない
+        legacy soft-warn 経路に戻す (= 破壊的変更を吸収したい既存 script 用)。
+        default では unknown recipient は refuse。
     """
     if channel != "dm" or not recipient:
         return target_project_id
     if os.environ.get("BEACON_BUS_SKIP_TO_CHECK", "") == "1":
         return target_project_id
 
-    # Import lazily so a missing dm_discover module (older install) just
-    # bypasses the check rather than breaking `bus send`.
+    # ms-94 / e-2291: server-side lookup で local bridge 依存を切る。 API 失敗
+    # (= network hiccup / auth 未設定 等) は defensive fall-through、 発信自体は
+    # 妨げない (= 「防御 guard が発信を殺す」 逆転 footgun 防止)。
+    client, _config = _get_api_client()
+
+    same_project = False
+    other_pid: Optional[str] = None
+    lookup_failed = False
+
+    # Step 1: target project 直接 lookup。 since_min は 1 日 (= 1440min) にして
+    # bridge 停止直後 の recipient も救う (= e-1402 stale sid 検出とバランス)。
     try:
-        # Ensure beacon_cli is importable; pip / dev-clone layouts vary.
-        import importlib
-        helpers = importlib.import_module(
-            "beacon_cli.skills_helpers.dm_discover"
+        target_sessions = client.list_sessions(
+            target_project_id, since_minutes=1440,
         )
+        for s in target_sessions:
+            if s.get("session_id") == recipient:
+                same_project = True
+                break
     except Exception:
+        lookup_failed = True
+
+    if same_project:
         return target_project_id
 
-    try:
-        rows = helpers.discover_and_aggregate(healthy=False, since_min=10)
-    except Exception:
-        # Discovery itself failed (psutil missing / network hiccup). Fall
-        # back to no-op rather than refusing the send — defensive guard
-        # mustn't become a footgun for unrelated errors.
-        return target_project_id
+    # Step 2: caller の全 project 横断 lookup (= /me/sessions endpoint 経由)。
+    if not lookup_failed:
+        try:
+            my_sessions = client.list_user_sessions(since_minutes=1440)
+            for s in my_sessions:
+                if s.get("session_id") == recipient:
+                    other_pid = s.get("project_id") or None
+                    break
+        except Exception:
+            lookup_failed = True
 
-    same_project: dict | None = None
-    other_project: dict | None = None
-    for row in rows:
-        if row.get("session_id") != recipient:
-            continue
-        if row.get("project_id") == target_project_id:
-            same_project = row
-            break
-        if other_project is None:
-            other_project = row
-
-    if same_project is not None:
-        return target_project_id
-
-    if other_project is not None:
-        other_pid = other_project.get("project_id", "?")
+    if other_pid and other_pid != target_project_id:
         if os.environ.get("BEACON_BUS_NO_AUTO_ROUTE", "") == "1":
             print(
                 f"Error: recipient session {recipient!r} polls project "
@@ -18276,16 +18303,49 @@ def _validate_recipient_project(
         )
         return other_pid
 
-    # Not found in any locally-visible bridge. Could be a remote session
-    # (different machine) — we can't disprove that here. Soft warn only.
+    # Step 3: どこにも見つからない。 lookup 自体が失敗した場合は API/network 問題
+    # を防御的に fall-through (発信は続行、 legacy soft-warn 相当)。 lookup 成功
+    # かつ recipient 見つからなかった場合は e-2291 の new behavior として hard
+    # error に昇格 (opt-out あり)。
+    if lookup_failed:
+        print(
+            f"⚠ recipient session {recipient[:24]}… の project lookup が "
+            f"API 経由で失敗しました。 Send proceeding against project "
+            f"{target_project_id!r} as-is; verify the receipt afterwards "
+            f"with `beacon bus status <event_id>`.",
+            file=sys.stderr,
+        )
+        return target_project_id
+
+    if os.environ.get("BEACON_BUS_ALLOW_UNKNOWN", "") == "1":
+        # Legacy soft-warn: 既存 script との後方互換 opt-out。
+        print(
+            f"⚠ recipient session {recipient[:24]}… is not visible in any "
+            f"of your projects. Send proceeding against project "
+            f"{target_project_id!r} as-is; verify the receipt afterwards "
+            f"with `beacon bus status <event_id>`. (Set via "
+            f"BEACON_BUS_ALLOW_UNKNOWN=1.)",
+            file=sys.stderr,
+        )
+        return target_project_id
+
+    # e-2291 デフォルト新挙動: hard error。 silent misroute (= 誤 project に
+    # event が書かれて配信されない) を構造的に防止。
     print(
-        f"⚠ recipient session {recipient[:24]}… is not visible in any "
-        f"locally-running bridge. Send proceeding against project "
-        f"{target_project_id!r} as-is; verify the receipt afterwards "
-        f"with `beacon bus status <event_id>`.",
+        f"Error: recipient session {recipient[:24]}… は target project "
+        f"{target_project_id!r} にも caller の他 project にも見つかりません。"
+        f" silent misroute (= 誤 project に配信されない event を書く) を防ぐ"
+        f"ため送信を refuse します。 ms-94 / e-2291 (2026-07-06 新挙動)。\n"
+        f"  対処:\n"
+        f"    (a) 相手が実在するなら `beacon bus directory` で live 状態と "
+        f"project を確認、正しい sid を渡してください。\n"
+        f"    (b) 相手が別マシンでオフラインなら user 単位で送る "
+        f"`--to-user <user_id>` に切替 (= ms-54 / e-2934、 sid churn 耐性)。\n"
+        f"    (c) 意図的に 「見つからなくても送りたい」 場合は "
+        f"BEACON_BUS_ALLOW_UNKNOWN=1 で legacy soft-warn 経路に戻せます。",
         file=sys.stderr,
     )
-    return target_project_id
+    sys.exit(1)
 
 
 def _row_owner_identity(row: dict) -> Tuple[str, str]:
@@ -18508,16 +18568,27 @@ def _check_recipient_live_health(recipient: str, channel: str) -> None:
 def cmd_bus_directory():
     """Look up live sessions for DM target selection (ms-54 / e-1134 / e-1151).
 
-    Wraps GET /sessions with the directory-query filters. The output is
-    intentionally human-pickable (one line per session showing session_id +
-    actor identity + last_active) — a sender reads this, picks a session_id,
-    and passes it as the recipient for `bus send`. JSON mode is for scripts
-    that want to auto-route (e.g. "send to every live agent of user X").
+    Wraps GET /sessions (cwd project) or GET /me/sessions (cross-project) with
+    the directory-query filters. The output is intentionally human-pickable
+    (one line per session showing session_id + actor identity + last_active) —
+    a sender reads this, picks a session_id, and passes it as the recipient
+    for `bus send`. JSON mode is for scripts that want to auto-route (e.g.
+    "send to every live agent of user X").
+
+    Default (ms-94 / e-2291, 2026-07-06 reversal): user が member の全 project
+    横断 (= /api/me/sessions endpoint 経由)。 「他 project の live session が
+    見えない」 という cwd 限定 default の footgun (= 「セッションがいません」
+    誤報告の直接原因、 かつての phantom flag --all-projects を silent に
+    skip していた病理) を構造的に解消する。
+
+    ``--cwd-only`` (env ``BEACON_DIR_CWD_ONLY``): opt-in で cwd project 限定
+    モード。 default が cross-project になった逆パターン、 明示的に cwd 内に
+    scope 限定したい (= script / test / 差分 audit 用途) 時のみ指定する。
 
     ``--project <id>`` (env ``BEACON_BUS_PROJECT_ID``) lets the caller list
-    sessions of a different project. The auth + API URL still come from
-    the current project's cloud.json; only the project_id in the API call
-    changes.
+    sessions of a specific different project (implies cwd-only semantics with
+    the target project). The auth + API URL still come from the current
+    project's cloud.json; only the project_id in the API call changes.
 
     ``--healthy`` (env ``BEACON_DIR_HEALTHY``, ms-54 e-1318): only return
     sessions whose bridge poll loop is actively pumping events into the AI
@@ -18526,16 +18597,53 @@ def cmd_bus_directory():
     without --healthy) so scripts can decide their own threshold.
     """
     client, config = _get_api_client()
-    project_id = _resolve_bus_project_id(config)
-    sessions = client.list_sessions(
-        project_id,
-        user_id=os.environ.get("BEACON_DIR_USER", "").strip(),
-        machine=os.environ.get("BEACON_DIR_MACHINE", "").strip(),
-        agent=os.environ.get("BEACON_DIR_AGENT", "").strip(),
-        live_only=os.environ.get("BEACON_DIR_LIVE", "") == "1",
-        since_minutes=int(os.environ.get("BEACON_DIR_SINCE_MIN", "5") or "5"),
-        healthy_only=os.environ.get("BEACON_DIR_HEALTHY", "") == "1",
-    )
+
+    # ms-94 / e-2291: default reversal — cross-project unless caller opted
+    # into cwd 限定 (--cwd-only) or targeted a specific project (--project).
+    cwd_only = os.environ.get("BEACON_DIR_CWD_ONLY", "") == "1"
+    explicit_project = os.environ.get("BEACON_BUS_PROJECT_ID", "").strip()
+
+    user_id = os.environ.get("BEACON_DIR_USER", "").strip()
+    machine = os.environ.get("BEACON_DIR_MACHINE", "").strip()
+    agent = os.environ.get("BEACON_DIR_AGENT", "").strip()
+    live_only = os.environ.get("BEACON_DIR_LIVE", "") == "1"
+    since_minutes = int(os.environ.get("BEACON_DIR_SINCE_MIN", "5") or "5")
+    healthy_only = os.environ.get("BEACON_DIR_HEALTHY", "") == "1"
+
+    if cwd_only or explicit_project:
+        # 従来経路: cwd project 限定 or 明示 --project 指定先の限定 lookup。
+        project_id = _resolve_bus_project_id(config)
+        sessions = client.list_sessions(
+            project_id,
+            user_id=user_id,
+            machine=machine,
+            agent=agent,
+            live_only=live_only,
+            since_minutes=since_minutes,
+            healthy_only=healthy_only,
+        )
+    else:
+        # 新 default (ms-94 / e-2291): user が member の全 project 横断 lookup。
+        # /api/me/sessions endpoint 経由 (= cmd_sessions_list と同じ経路)、 各行
+        # に project_id / project_name が付いて返るので picker で識別可能。
+        sessions = client.list_user_sessions(
+            live_only=live_only,
+            since_minutes=since_minutes,
+            healthy_only=healthy_only,
+            machine=machine,
+            agent=agent,
+        )
+        # user_id filter は list_user_sessions では auth 済 caller の user_id が
+        # 暗黙前提なので、 別 user 指定はできない (= 各 user の scope で分離)。
+        # 明示 user_id filter が必要な場合は --cwd-only + --user で cwd-scope
+        # に絞る fall-back 経路になる。 rare use-case なので stderr で案内。
+        if user_id:
+            print(
+                "Note: --user filter は --cwd-only モード時のみ有効です "
+                "(default 経路は auth caller 本人の全 project scope)。"
+                " --cwd-only を追加してください。",
+                file=sys.stderr,
+            )
     if os.environ.get("BEACON_JSON", "") == "1":
         print(json.dumps(sessions, ensure_ascii=False))
         return
@@ -18568,7 +18676,17 @@ def cmd_bus_directory():
             health_tag = f"  health=stale({age_str})"
         else:
             health_tag = "  health=unknown"
-        print(f"  {sid}  {ident}  last_active={last}{health_tag}")
+
+        # ms-94 / e-2291: cross-project default では 各 row に project_name/id
+        # が入るので human picker に接頭辞として添える (= 「どの project の
+        # session か」 が即分かる、 誤送信防止に直結)。 cwd-only モードでは
+        # project_id は暗黙 (= cwd と同じ) なので prefix 省略。
+        pid = s.get("project_id", "")
+        pname = s.get("project_name", "") or pid
+        if pname and not cwd_only and not explicit_project:
+            print(f"  [{pname}]  {sid}  {ident}  last_active={last}{health_tag}")
+        else:
+            print(f"  {sid}  {ident}  last_active={last}{health_tag}")
 
 
 def cmd_profile_list():

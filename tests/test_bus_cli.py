@@ -266,6 +266,33 @@ def test_bus_send_dm_with_payload_recipient_does_not_warn(monkeypatch, capsys, s
     assert "--to" not in err
 
 
+def test_bus_send_stamps_source_project_by_default(monkeypatch, capsys, stub):
+    """ms-94 / e-2811 (2026-07-06): payload.source_project は sender の cwd
+    project_id で stamp される (= bridge fallback で receiver 側 cwd に
+    上書きされる病理を CLI 側で塞ぐ)。 stub fixture の config は
+    {"project_id": "proj-1"} なので payload に "proj-1" が入るはず。"""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "session-x")
+    commands.cmd_bus_send()
+    assert len(stub.events) == 1
+    payload = stub.events[0]["payload"]
+    assert payload.get("source_project") == "proj-1"
+
+
+def test_bus_send_source_project_pre_stamped_wins(monkeypatch, capsys, stub):
+    """caller が明示的に payload.source_project を stamp した場合、 CLI 側の
+    自動 stamp は override しない (= caller の意図優先)。"""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "x")
+    monkeypatch.setenv(
+        "BEACON_BUS_PAYLOAD",
+        json.dumps({"source_project": "custom-proj", "text": "hi"}),
+    )
+    commands.cmd_bus_send()
+    payload = stub.events[0]["payload"]
+    assert payload.get("source_project") == "custom-proj"
+
+
 def test_bus_send_non_dm_without_to_does_not_warn(monkeypatch, capsys, stub):
     """Non-DM channels keep broadcast semantics; missing --to is normal."""
     _clear_bus_env(monkeypatch)
@@ -458,13 +485,20 @@ def test_bus_ack_rejects_both_event_and_last_seen_at(monkeypatch, capsys, stub):
 # ---------------------------------------------------------------------------
 
 class _StubDirectoryClient(_StubApiClient):
-    """Add list_sessions to the stub so the directory CLI can be exercised
-    independently of the bus event stub above."""
+    """Add list_sessions + list_user_sessions to the stub so the directory
+    CLI can be exercised independently of the bus event stub above.
+
+    ms-94 / e-2291 (2026-07-06 default reversal): cmd_bus_directory は
+    default で list_user_sessions (cross-project) を呼ぶ、 --cwd-only 時のみ
+    list_sessions (cwd-scoped) を呼ぶ。 両方 stub して両 code path を pin。
+    """
 
     def __init__(self):
         super().__init__()
         self.sessions: list[dict] = []
+        self.user_sessions: list[dict] = []
         self.last_query: dict = {}
+        self.last_user_query: dict = {}
 
     def list_sessions(self, project_id, *, user_id="", machine="",
                       agent="", live_only=False, since_minutes=5,
@@ -493,6 +527,29 @@ class _StubDirectoryClient(_StubApiClient):
             out.append(s)
         return out
 
+    def list_user_sessions(self, *, live_only=False, since_minutes=5,
+                           healthy_only=False, machine="", agent=""):
+        """ms-94 / e-2291: cross-project session listing (= /me/sessions)。
+        row に project_id / project_name が付いて返るのが仕様。
+        """
+        self.last_user_query = {
+            "live_only": live_only, "since_minutes": since_minutes,
+            "healthy_only": healthy_only, "machine": machine, "agent": agent,
+        }
+        out = []
+        for s in self.user_sessions:
+            actor = s.get("actor") or {}
+            if machine and actor.get("machine") != machine:
+                continue
+            if agent and actor.get("agent") != agent:
+                continue
+            if healthy_only:
+                ph = s.get("poll_health") or {}
+                if ph.get("healthy") is not True:
+                    continue
+            out.append(s)
+        return out
+
 
 @pytest.fixture
 def dir_stub(monkeypatch):
@@ -505,10 +562,16 @@ def dir_stub(monkeypatch):
 
 
 def _clear_dir_env(monkeypatch):
+    # ms-94 / e-2291 (2026-07-06 default reversal): 既存 test は cwd-scoped
+    # 挙動を pin していたので、 clear と同時に --cwd-only 相当の env を stamp
+    # して従来 code path (= list_sessions) をテストできる状態にする。 新
+    # cross-project default を突く test は明示的に BEACON_DIR_CWD_ONLY を
+    # delenv してから走らせる (= 下方 test_bus_directory_cross_project_default 系)。
     for k in ("BEACON_DIR_USER", "BEACON_DIR_MACHINE", "BEACON_DIR_AGENT",
               "BEACON_DIR_LIVE", "BEACON_DIR_HEALTHY",
-              "BEACON_DIR_SINCE_MIN", "BEACON_JSON"):
+              "BEACON_DIR_SINCE_MIN", "BEACON_JSON", "BEACON_BUS_PROJECT_ID"):
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("BEACON_DIR_CWD_ONLY", "1")
 
 
 def test_bus_directory_no_filter_prints_all_sessions(monkeypatch, capsys, dir_stub):
@@ -671,6 +734,85 @@ def test_bus_directory_human_output_shows_health_tag(
     # Legacy row (no poll_health) → unknown, so the user knows liveness
     # is undecided rather than falsely "ok".
     assert "s-old" in out and "health=unknown" in out
+
+
+# ---------------------------------------------------------------------------
+# ms-94 / e-2291 (2026-07-06): cross-project default reversal のテスト。
+# 新 default (= --cwd-only 未指定 / --project 未指定 時) は list_user_sessions
+# 経由で全 project 横断 lookup、 各行は [project_name] prefix 付きで表示される。
+# ---------------------------------------------------------------------------
+
+def test_bus_directory_default_uses_list_user_sessions(monkeypatch, capsys, dir_stub):
+    """新 default: BEACON_DIR_CWD_ONLY / BEACON_BUS_PROJECT_ID 未指定 なら
+    list_user_sessions が呼ばれる (list_sessions は呼ばれない)。 各行に
+    project_name が prefix 付きで見えることを pin。"""
+    for k in ("BEACON_DIR_USER", "BEACON_DIR_MACHINE", "BEACON_DIR_AGENT",
+              "BEACON_DIR_LIVE", "BEACON_DIR_HEALTHY",
+              "BEACON_DIR_SINCE_MIN", "BEACON_JSON",
+              "BEACON_BUS_PROJECT_ID", "BEACON_DIR_CWD_ONLY"):
+        monkeypatch.delenv(k, raising=False)
+    dir_stub.user_sessions = [
+        {"session_id": "cross-1",
+         "actor": {"email": "u1@x", "machine": "mac", "agent": "claude"},
+         "last_active": "2026-07-06T00:00:01.000000Z",
+         "project_id": "proj-x", "project_name": "ProjectX"},
+        {"session_id": "cross-2",
+         "actor": {"email": "u2@x", "machine": "linux", "agent": "codex"},
+         "last_active": "2026-07-06T00:00:02.000000Z",
+         "project_id": "proj-y", "project_name": "ProjectY"},
+    ]
+    commands.cmd_bus_directory()
+    out = capsys.readouterr().out
+    # list_user_sessions 経路 - list_sessions は空 (cwd 経路呼ばれず)。
+    assert dir_stub.last_query == {}
+    assert dir_stub.last_user_query != {}
+    # 各行に project_name が prefix 付きで表示される (= 誤送信防止の識別情報)。
+    assert "[ProjectX]" in out and "cross-1" in out
+    assert "[ProjectY]" in out and "cross-2" in out
+
+
+def test_bus_directory_cwd_only_uses_list_sessions(monkeypatch, capsys, dir_stub):
+    """--cwd-only 明示指定 (= BEACON_DIR_CWD_ONLY=1) では従来通り
+    list_sessions が呼ばれる、 cross-project は使わない。"""
+    _clear_dir_env(monkeypatch)  # ← auto set BEACON_DIR_CWD_ONLY=1
+    dir_stub.sessions = [
+        {"session_id": "cwd-1",
+         "actor": {"email": "u1@x"},
+         "last_active": "2026-07-06T00:00:01.000000Z"},
+    ]
+    dir_stub.user_sessions = [
+        {"session_id": "should-not-appear",
+         "project_id": "proj-x", "project_name": "ProjectX"},
+    ]
+    commands.cmd_bus_directory()
+    out = capsys.readouterr().out
+    # cwd-only path: list_sessions が呼ばれる、 list_user_sessions は呼ばれない。
+    assert dir_stub.last_query != {}
+    assert dir_stub.last_user_query == {}
+    assert "cwd-1" in out
+    # cross-project 側の row は絶対に出ない。
+    assert "should-not-appear" not in out
+    # cwd-only 時は project prefix なし (= 暗黙で cwd 内なので冗長)。
+    assert "[ProjectX]" not in out
+
+
+def test_bus_directory_explicit_project_uses_list_sessions(monkeypatch, capsys, dir_stub):
+    """--project X 明示指定は cwd-only 相当の限定 lookup で list_sessions 経路。
+    cross-project スキャンは行わない (= caller が明示的に target 決めている)。"""
+    for k in ("BEACON_DIR_USER", "BEACON_DIR_MACHINE", "BEACON_DIR_AGENT",
+              "BEACON_DIR_LIVE", "BEACON_DIR_HEALTHY",
+              "BEACON_DIR_SINCE_MIN", "BEACON_JSON", "BEACON_DIR_CWD_ONLY"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("BEACON_BUS_PROJECT_ID", "explicit-proj")
+    dir_stub.sessions = [
+        {"session_id": "explicit-1", "actor": {"email": "u@x"},
+         "last_active": "2026-07-06T00:00:01.000000Z"},
+    ]
+    commands.cmd_bus_directory()
+    assert dir_stub.last_query != {}
+    assert dir_stub.last_user_query == {}
+    out = capsys.readouterr().out
+    assert "explicit-1" in out
 
 
 # ---------------------------------------------------------------------------
