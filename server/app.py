@@ -31,6 +31,7 @@ import invitations as invitations_mod  # ms-78 e-1803/e-1804: token-based invite
 import phantom_done_evidence as phantom_done_mod  # ms-95 / e-2726: task done evidence gate
 import store_router as db  # e-1544: BEACON_STORE_BACKEND で firestore / dynamodb を切替
 import operations
+import redis_client  # ms-96 / e-2381: rate limit 用の揮発カウンタ (fail-open)
 import trek as trek_mod  # ms-69 / e-1656: trek schema + pure mutators
 import trek_scheduler as trek_scheduler_mod  # ms-83 / e-1997: progress-check cadence logic
 
@@ -199,6 +200,81 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(AuditLogMiddleware)
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting (ms-96 / e-2381)
+# ---------------------------------------------------------------------------
+# app 側 Redis 固定窓レート制限。認証済なら user_id、無ければ client IP をキーに、
+# window_seconds ごとの窓内で上限を超えたら 429 を返す。Redis 不通・未設定時は
+# redis_client が None を返し fail-open (= 制限せず通す、可用性優先)。
+#
+# 数値ポリシー (window / 上限) は env で調整可能。より細かい上限ポリシーは運用側の
+# 設定 (env / 外部供給) で与え、本体は「キー単位で上限を課す汎用機構」に閉じる。
+_RATE_LIMIT_ENABLED = os.environ.get("BEACON_RATE_LIMIT", "1") != "0"
+_RATE_LIMIT_WINDOW = int(os.environ.get("BEACON_RATE_LIMIT_WINDOW_S", "60"))
+# 認証済 user は多セッション (bus poll 5s × N session) を許容する必要があるため
+# IP より高め。既定は「制限が乱用者にだけ効き、正常運用では 429 にならない」水準。
+_RATE_LIMIT_USER = int(os.environ.get("BEACON_RATE_LIMIT_USER_PER_WINDOW", "1200"))
+_RATE_LIMIT_IP = int(os.environ.get("BEACON_RATE_LIMIT_IP_PER_WINDOW", "600"))
+
+# 除外パス: liveness / WS handshake / ヘルスは対象外。bus poll 等の高頻度
+# エンドポイントは除外せず、認証済 user の高め上限 (_RATE_LIMIT_USER) で吸収する。
+_RATE_LIMIT_EXEMPT_PREFIXES = ("/api/version", "/health", "/ws/")
+
+
+def _rate_limit_exempt(path: str) -> bool:
+    return any(path.startswith(p) for p in _RATE_LIMIT_EXEMPT_PREFIXES)
+
+
+def _rate_limit_identity(request: Request) -> tuple[str, str]:
+    """レート制限キーを解決。認証済なら (user_id, "user")、無ければ (ip, "ip")。
+
+    middleware は endpoint auth より前に走るので、Authorization ヘッダを best-effort
+    で検証して user_id を得る。検証失敗 / auth 無効時は IP に fall back。
+    """
+    if _auth_enabled:
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Bearer "):
+            try:
+                claims = _verify_id_token(auth[len("Bearer "):])
+                sub = str(claims.get("sub") or "")
+                if sub:
+                    return sub, "user"
+            except Exception:
+                # 無効トークンは IP scope に倒す (= 401 は endpoint auth が返す)。
+                pass
+    xff = request.headers.get("x-forwarded-for", "")
+    ip = (xff.split(",")[0].strip() if xff
+          else (request.client.host if request.client else "unknown"))
+    return ip, "ip"
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """Fixed-window rate limit keyed by user_id (authed) or client IP.
+
+    Redis 不通時は fail-open (= 通す)。除外パスは無条件で通す。
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        if not _RATE_LIMIT_ENABLED or _rate_limit_exempt(request.url.path):
+            return await call_next(request)
+        ident, scope = _rate_limit_identity(request)
+        limit = _RATE_LIMIT_USER if scope == "user" else _RATE_LIMIT_IP
+        count = redis_client.incr_fixed_window(f"{scope}:{ident}", _RATE_LIMIT_WINDOW)
+        # count is None ⇒ Redis unavailable ⇒ fail-open.
+        if count is not None and count > limit:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too Many Requests"},
+                headers={"Retry-After": str(_RATE_LIMIT_WINDOW)},
+            )
+        return await call_next(request)
+
+
+# Added after AuditLogMiddleware so it wraps it (= runs first on each request),
+# rejecting over-limit callers before audit/auth/handler work happens.
+app.add_middleware(RateLimitMiddleware)
 
 
 # ---------------------------------------------------------------------------
