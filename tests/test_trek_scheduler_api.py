@@ -2416,6 +2416,91 @@ def test_cross_project_trek_executor_in_scope1_receives_dm_in_own_bus():
     )
 
 
+def test_resolve_leader_home_project_id_prefers_leader_registry_over_scope0():
+    """ms-97 P4 (review Trek-H2): the shared resolver must return the scope
+    project whose session registry holds the leader, NOT scope[0]. All three
+    leader-bound DM paths (quiesce / task-review / auto-stall) route through
+    this helper, so pinning it covers the cross-project fix at the source."""
+    scope0 = "proj-not-leader-home"
+    scope1 = "proj-leader-home"
+    _register_project(scope0)
+    _register_project(scope1)
+    trek_doc = {
+        "trek_id": "tk-resolve",
+        "leader_session_id": "sv-leader",
+        "members": [{"user_id": "uid-leader", "role": "leader"}],
+        "scope": [
+            {"project": scope0, "milestone": "ms-97"},
+            {"project": scope1, "milestone": "ms-97"},
+        ],
+    }
+    import datetime
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    # Leader session lives in scope1, not scope0.
+    _sessions_by_project[scope1] = [
+        {"session_id": "sv-leader", "user_id": "uid-leader",
+         "last_active": now_iso},
+    ]
+    assert app_module._resolve_leader_home_project_id(trek_doc) == scope1
+    # Fallback: leader not registered anywhere → scope[0].
+    _sessions_by_project.pop(scope1, None)
+    assert app_module._resolve_leader_home_project_id(trek_doc) == scope0
+
+
+def test_quiesce_dm_routes_to_leader_home_project_cross_project():
+    """ms-97 P4: a cross-project trek whose leader's home is scope[1] must
+    deliver the quiesce notice to scope[1]'s bus — not scope[0]. Pre-fix the
+    DM went to scope[0] and quiesce_notified_at was stamped anyway, so the
+    leader never learned the trek completed (= silent quiesce, ms-99 AC12)."""
+    scope0 = "proj-a-not-leader"
+    scope1 = "proj-b-leader-home"
+    _register_project(scope0)
+    _register_project(scope1)
+    _seed_trek(
+        trek_id="tk-p4-quiesce",
+        status="active",
+        cadence=10,
+        scope=[
+            {"project": scope0, "milestone": "ms-97"},
+            {"project": scope1, "milestone": "ms-97"},
+        ],
+    )
+    # All slots terminal → quiesce. leader_session_id defaults to sv-leader.
+    _treks["tk-p4-quiesce"]["task_states"] = {
+        "e-1": {"state": "done", "updated_by_session_id": "sv-exec"},
+    }
+    _seed_pool_from_task_states("tk-p4-quiesce")
+    import datetime
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    # The leader's live session is registered in scope1 (their home), NOT scope0.
+    _sessions_by_project[scope1] = [
+        {"session_id": "sv-leader", "user_id": "uid-leader",
+         "last_active": now_iso},
+    ]
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-p4-quiesce"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    s1_quiesce = [e for e in _bus_events_by_project.get(scope1, [])
+                  if _is_trek_quiesce_dm(e)]
+    s0_quiesce = [e for e in _bus_events_by_project.get(scope0, [])
+                  if _is_trek_quiesce_dm(e)]
+    assert len(s1_quiesce) == 1, (
+        "quiesce DM must land in the leader's home project (scope1)"
+    )
+    assert s1_quiesce[0]["payload"]["recipient_session_id"] == "sv-leader"
+    assert s0_quiesce == [], (
+        "pre-P4 regression: quiesce DM leaked into scope[0] where the leader "
+        "does not subscribe → silent quiesce"
+    )
+
+
 def test_progress_check_dm_carries_system_sender_marker():
     """e-2639 AC3: sender identity is system-scheduler (= pseudo sid /
     marker) so receivers can filter Trek tick from human DMs without
