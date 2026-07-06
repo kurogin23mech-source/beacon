@@ -17276,16 +17276,48 @@ def cmd_bus_send():
     # so existing scripts that rely on legacy broadcast behavior get loud
     # feedback instead of silent message loss.
     recipient = os.environ.get("BEACON_BUS_RECIPIENT_SESSION", "").strip()
+    # ms-54 / e-2934: user-scoped 宛先 (--to-user)。 session_id churn しても
+    # 同 user の別 session が読める、 時差配信 (= 相手が offline でも次回起動時
+    # に inbox に届く) を成立させる。 現段階では user_id 直指定のみ受け付ける
+    # (= email → user_id 解決は将来 PR で追加、 beacon member list --json で
+    # 事前に user_id を引く運用)。
+    recipient_user = os.environ.get("BEACON_BUS_RECIPIENT_USER", "").strip()
+    if recipient and recipient_user:
+        # bash 側でも弾いているが python 側でも念のため hard error
+        # (= 直接 python3 commands.py bus_send を叩かれても排他を守る)。
+        print(
+            "Error: --to (session-scoped) と --to-user (user-scoped) は相互排他"
+            " です。 どちらか片方のみ指定してください。",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if recipient_user and "@" in recipient_user:
+        # 現段階では email 解決 未実装 (= 別 PR で実装予定)。 user_id を
+        # 使うよう案内する親切エラー。
+        print(
+            "Error: --to-user は現在 user_id のみ受け付けます (email 解決は"
+            " 未実装)。 `beacon member list --json` で受信者の user_id を"
+            " 引いて指定してください。",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if recipient:
         # Caller-supplied --to overrides any payload.recipient_session_id
         # set by --payload; the flag is the unambiguous source of truth.
         payload = {**payload, "recipient_session_id": recipient}
-    elif channel == "dm" and not payload.get("recipient_session_id"):
+    elif recipient_user:
+        # user-scoped 宛先: payload.recipient_user_id を stamp。
+        # session_id 経路とは別 field なので、 server 側 filter (= app.py
+        # _bus_event_addressed_to) で 「recipient_session_id が空 かつ
+        # recipient_user_id が set」 として認識される。
+        payload = {**payload, "recipient_user_id": recipient_user}
+    elif channel == "dm" and not payload.get("recipient_session_id") \
+            and not payload.get("recipient_user_id"):
         print(
-            "Warning: sending to channel 'dm' without --to <session_id>. "
-            "After e-1209 the server drops unaddressed DM events rather than "
-            "broadcasting them — pass --to or use a different channel for "
-            "broadcasts.",
+            "Warning: sending to channel 'dm' without --to <session_id> or "
+            "--to-user <user_id>. After e-1209 the server drops unaddressed "
+            "DM events rather than broadcasting them — pass --to or --to-user "
+            "or use a different channel for broadcasts.",
             file=sys.stderr,
         )
 

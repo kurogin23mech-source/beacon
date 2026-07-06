@@ -9207,12 +9207,23 @@ def list_bus_events(
 _DM_CHANNELS = {"dm"}
 
 
-def _bus_event_addressed_to(event: dict, recipient_id: str) -> bool:
+def _bus_event_addressed_to(event: dict, recipient_id: str,
+                            recipient_user_id: str = "") -> bool:
     """Return True iff ``event`` should be delivered to ``recipient_id``.
 
     See the module-level rationale on _DM_CHANNELS above. This helper is
     the single source of truth for DM routing; both the /unread endpoint
     and any future WS fan-out filter must funnel through it.
+
+    ms-54 / e-2934 (2026-07-06): user-scoped 宛先も判定する。
+    ``recipient_user_id`` は caller (= 実行者 user) の user_id で、event の
+    ``payload.recipient_user_id`` と比較する。session_id churn (= bclaude
+    再起動で sid が変わる) 経由で消える情報 DM を、 user 単位アドレスなら
+    次回起動時に読める形で救済する経路。session-scoped と user-scoped は
+    payload の field で明示的に区別され、混在は無い (= sender が --to か
+    --to-user のどちらかを明示、両者は排他)。優先順位は
+    session-scoped 優先 (= session_id field が set なら user field は無視)、
+    どちらも無ければ従来通り DM channel は drop / それ以外は broadcast。
     """
     sender = str(event.get("sender_session_id") or "")
     if sender and sender == recipient_id:
@@ -9226,9 +9237,16 @@ def _bus_event_addressed_to(event: dict, recipient_id: str) -> bool:
         # Malformed payload (non-dict) cannot encode a recipient — treat as
         # broadcast for non-DM channels and as malformed-drop for DM.
         return channel not in _DM_CHANNELS
-    intended = str(payload.get("recipient_session_id") or "")
-    if intended:
-        return intended == recipient_id
+    intended_sid = str(payload.get("recipient_session_id") or "")
+    if intended_sid:
+        return intended_sid == recipient_id
+    # ms-54 e-2934: user-scoped delivery. payload.recipient_user_id が set
+    # かつ caller の user_id と一致すれば delivery。recipient_user_id 引数が
+    # 空 (= 呼び出し側が user 未解決 or session-only mode) なら user-scoped
+    # は評価せず drop 相当 (= 「DM 宛先不明」 として fall-through)。
+    intended_uid = str(payload.get("recipient_user_id") or "")
+    if intended_uid:
+        return bool(recipient_user_id) and intended_uid == recipient_user_id
     # No recipient stamp: DM channels require explicit unicast, others
     # default to broadcast.
     return channel not in _DM_CHANNELS
@@ -9359,9 +9377,23 @@ def _apply_dm_payload_visibility(
         sender_sid = str(ev.get("sender_session_id") or "")
         payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
         recipient_sid = str(payload.get("recipient_session_id") or "")
+        # ms-54 / e-2934: user-scoped DM は recipient_session_id が空で
+        # recipient_user_id が set。 caller の user_id と直接比較する経路も
+        # 必要 (= session→user 解決を経由しない、payload が持つ uid をそのまま
+        # 権威とする)。
+        recipient_uid_from_payload = str(payload.get("recipient_user_id") or "")
         sender_uid = sid_to_uid.get(sender_sid, "")
         receiver_uid = sid_to_uid.get(recipient_sid, "")
-        if _caller_can_see_dm_payload(ev, caller_uid, sender_uid, receiver_uid):
+        # 通常 (session-scoped) の payload visibility 判定。
+        can_see = _caller_can_see_dm_payload(
+            ev, caller_uid, sender_uid, receiver_uid
+        )
+        # user-scoped の場合、 receiver_uid が payload の recipient_user_id と
+        # 一致すれば caller は intended recipient として payload 可視。
+        if (not can_see and recipient_uid_from_payload
+                and caller_uid == recipient_uid_from_payload):
+            can_see = True
+        if can_see:
             out.append(ev)
         else:
             out.append(_redact_dm_payload(ev))
@@ -9428,7 +9460,16 @@ def list_unread_bus_events(
     raw = db.list_bus_events(
         project_id, since=since, channel=channel, limit=raw_limit,
     )
-    filtered = [e for e in raw if _bus_event_addressed_to(e, recipient_id)]
+    # ms-54 / e-2934: caller の user_id を _bus_event_addressed_to に渡して
+    # user-scoped 宛先 (= payload.recipient_user_id) の DM も配信対象にする。
+    # 認証済 user の user_id は require_auth で解決済 (= _caller_uid)。 caller
+    # が自 session 以外の recipient_id を polling している異常経路 (= admin
+    # tooling 等) では、 その caller の user_id を使って判定するのが安全な既定
+    # (= 自分宛の user-scoped DM は自 poll で必ず届く、 他人宛の user-scoped
+    # DM は他人の polling で拾わせる)。
+    caller_uid = _caller_uid(user)
+    filtered = [e for e in raw
+                if _bus_event_addressed_to(e, recipient_id, caller_uid)]
     if limit:
         filtered = filtered[:limit]
     # ms-93 / e-2275: redact DM payloads the caller isn't a party to. The
