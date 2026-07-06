@@ -75,6 +75,65 @@ def _register_project(project_id: str, *, owner: str = "") -> None:
     }
 
 
+def _seed_pool_from_task_states(
+    trek_id: str,
+    *,
+    project_id: str | None = None,
+) -> None:
+    """ms-99 / e-2833 — synthesize a minimal project pool so
+    ``materialize_slots`` can attach each ``task_states`` entry to its MS
+    slot's children. Phase 2 tick decisions read the slot inventory
+    (= scope[] × pool) rather than the ``task_states`` cache alone; tests
+    that only populate ``task_states`` need a pool mirror so the cache
+    signal (state / owner) surfaces on materialize.
+
+    Task-narrowed scope entries are already atomic and read cache-first,
+    so we only seed MS entries. When ``project_id`` is None (default),
+    all unique project_ids in the trek's scope are seeded — this covers
+    cross-project treks whose scope entries fan across multiple pools.
+    """
+    trek = _treks.get(trek_id) or {}
+    scope = trek.get("scope") or []
+    task_states = trek.get("task_states") or {}
+    scoped_task_ids = {s.get("task") for s in scope if s.get("task")}
+    ms_task_entries = [
+        {"id": eid, "type": "task", "status": "todo"}
+        for eid in task_states.keys()
+        if eid not in scoped_task_ids
+    ]
+    if project_id is None:
+        # Default: seed each unique project in scope with only its own
+        # milestones (= cross-project pools stay independent).
+        target_pids = sorted({
+            s.get("project") for s in scope if s.get("project")
+        })
+        for pid in target_pids:
+            milestones = [
+                {"id": s["milestone"], "entries": list(ms_task_entries)}
+                for s in scope
+                if s.get("milestone") and s.get("project") == pid
+            ]
+            existing = _projects.get(pid) or {"name": pid, "owner": ""}
+            existing["milestones"] = milestones
+            existing.setdefault("operations", [])
+            _projects[pid] = existing
+    else:
+        # Explicit override: seed all scope-declared milestones under
+        # this project id (= useful when the tick resolver canonicalises
+        # a slug into a full project id and materialize will look up the
+        # full id).
+        milestones = [
+            {"id": s["milestone"], "entries": list(ms_task_entries)}
+            for s in scope if s.get("milestone")
+        ]
+        existing = _projects.get(project_id) or {
+            "name": project_id, "owner": "",
+        }
+        existing["milestones"] = milestones
+        existing.setdefault("operations", [])
+        _projects[project_id] = existing
+
+
 def _mock_get_trek(trek_id: str):
     data = _treks.get(trek_id)
     return copy.deepcopy(data) if data else None
@@ -333,6 +392,7 @@ def test_due_trek_fires_leader_digest_on_separate_channel():
     _treks["tk-digest01"]["task_states"] = {
         "e-todo1": {"state": "todo"},
     }
+    _seed_pool_from_task_states("tk-digest01")
     resp = client.post(
         "/api/system/trek-scheduler/tick",
         json={"trek_ids": ["tk-digest01"]},
@@ -416,6 +476,7 @@ def test_due_trek_stamps_last_leader_digest_at_when_fired():
     # ms-97 / e-2613 (AC33) — leader-digest now lazy-gated; seed a todo
     # float so the gate opens and the stamp lands.
     _treks["tk-stamp001"]["task_states"] = {"e-todo1": {"state": "todo"}}
+    _seed_pool_from_task_states("tk-stamp001")
     resp = client.post(
         "/api/system/trek-scheduler/tick",
         json={"trek_ids": ["tk-stamp001"]},
@@ -460,6 +521,7 @@ def test_leader_digest_targets_stamped_leader_session_only_when_live():
         scope=[{"project": "beacon-test", "milestone": "ms-95"}],
     )
     _treks["tk-digestfan1"]["task_states"] = {"e-todo1": {"state": "todo"}}
+    _seed_pool_from_task_states("tk-digestfan1")
     # Leader user has 3 live sessions: the original stamped one + 2
     # extras. With e-2645 narrow fanout, only the stamped sid gets the
     # digest because it IS live (= primary path triggers).
@@ -502,6 +564,7 @@ def test_leader_digest_falls_back_to_leader_user_sessions_when_stamped_stale():
         scope=[{"project": "beacon-test", "milestone": "ms-95"}],
     )
     _treks["tk-digestfan2"]["task_states"] = {"e-todo1": {"state": "todo"}}
+    _seed_pool_from_task_states("tk-digestfan2")
     # Stamped is "sv-leader" but only "sv-leader-fork" + "sv-leader-mac"
     # are live → fallback to leader user's live sessions.
     _seed_live_sessions_for_trek(
@@ -548,6 +611,7 @@ def test_leader_digest_delivers_to_live_session_when_stamped_is_stale():
         scope=[{"project": "beacon-test", "milestone": "ms-95"}],
     )
     _treks["tk-stamp-stale"]["task_states"] = {"e-todo1": {"state": "todo"}}
+    _seed_pool_from_task_states("tk-stamp-stale")
     # stamped leader is "sv-leader" but only "sv-leader-reconnect" is
     # live in the session directory.
     _seed_live_sessions_for_trek(
@@ -592,6 +656,7 @@ def test_leader_digest_falls_back_to_stamped_when_no_live_leader_session():
         scope=[{"project": "beacon-test", "milestone": "ms-95"}],
     )
     _treks["tk-leader-away"]["task_states"] = {"e-todo1": {"state": "todo"}}
+    _seed_pool_from_task_states("tk-leader-away")
     # No sessions for the leader user in the directory. The pre-fix
     # path relied on the stamped sid alone, so the fallback must
     # reproduce that.
@@ -631,6 +696,7 @@ def test_leader_digest_ignores_non_leader_live_sessions():
         scope=[{"project": "beacon-test", "milestone": "ms-95"}],
     )
     _treks["tk-nonleader"]["task_states"] = {"e-todo1": {"state": "todo"}}
+    _seed_pool_from_task_states("tk-nonleader")
     _treks["tk-nonleader"]["members"].append({
         "user_id": "uid-executor", "email": "ex@b.com",
         "role": "member", "invited_at": "2026-06-27T00:00:00.000000Z",
@@ -723,6 +789,7 @@ def test_leader_digest_fallback_narrows_to_role_leader_session_same_user():
     _treks["tk-e2723-sameuser"]["task_states"] = {
         "e-todo1": {"state": "todo"},
     }
+    _seed_pool_from_task_states("tk-e2723-sameuser")
     # Phase A+ trek: members[] is session_id keyed AND both roles live
     # under the same user_id (= the dogfood collapse condition).
     _mark_trek_session_id_keyed("tk-e2723-sameuser")
@@ -791,6 +858,7 @@ def test_leader_digest_fallback_excludes_executor_when_cross_user():
     _treks["tk-e2723-crossuser"]["task_states"] = {
         "e-todo1": {"state": "todo"},
     }
+    _seed_pool_from_task_states("tk-e2723-crossuser")
     _mark_trek_session_id_keyed("tk-e2723-crossuser")
     _treks["tk-e2723-crossuser"]["members"] = [
         {
@@ -943,6 +1011,10 @@ def test_slug_stored_scope_resolves_to_canonical_full_project_id():
     )
     # ms-97 / e-2613 (AC33) — seed todo float so leader-digest fires.
     _treks["tk-slug-resolve"]["task_states"] = {"e-todo1": {"state": "todo"}}
+    # ms-99 / e-2833 — seed the pool under the canonicalised full id.
+    # The scheduler's slug resolver rewrites scope in place before the
+    # tick fires, so materialize_slots looks the pool up under full_id.
+    _seed_pool_from_task_states("tk-slug-resolve", project_id=full_id)
     import datetime
     now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
         "%Y-%m-%dT%H:%M:%S.%fZ"
@@ -1131,6 +1203,7 @@ def test_10min_cadence_does_not_refire_immediately():
     # leader-digest fire (= original 2-event expectation preserved). The
     # cadence-decision test is about temporal gating, not lazy-start.
     _treks["tk-cccc3333"]["task_states"] = {"e-todo1": {"state": "todo"}}
+    _seed_pool_from_task_states("tk-cccc3333")
     # First tick — fires.
     r1 = client.post(
         "/api/system/trek-scheduler/tick",
@@ -1398,17 +1471,19 @@ def _seed_live_sessions_for_trek(project_id: str, *,
 
 
 def test_fanout_skips_session_with_only_terminal_claims():
-    """ms-88 / e-2109: session whose claims are all in leader_review /
-    user_review / done が tick を受け取らない (= 「work_review 後も scheduler
-    届く」 問題の構造解)。
+    """ms-97 / e-2815 (2026-07-03): lazy-start gate 撤廃後の invariant。
 
-    ms-97 / e-2613 (AC33) — extended: terminal-claim session に対しても
-    unclaim todo float が存在すれば fire する (= 「次の仕事が残ってるなら
-    pick up しに来い」)。 unclaim todo が無い場合のみ silent。
+    旧 ms-88 e-2109 は 「terminal-claim session (= done / leader_review /
+    user_review だけを持つ session) は tick を受け取らない」 を pin して
+    いた。 dogfood で 「Trek scope は MS-level bind、 実装は project pool
+    側で走る」 主流ケースで LPS 等の executor が silent-skip されて
+    scheduler → executor 経路が事実上停止する事故が発生 (user 指摘
+    「executor に行かないと意味ないじゃん」)。 fix (e-2815): lazy-start
+    gate を撤廃、 全 non-leader member を無条件 fanout する。
 
-    本テストは unclaim todo 無し状態を維持して original e-2109 silent
-    semantics を pin する。 sv-fresh は AC33 lazy-start gate に該当
-    しないので broadcast fallback (= recipient="") 経路に degrade する。
+    本テストはその新 invariant を pin する: sv-active / sv-finished /
+    sv-fresh の全 3 executor が progress-check を受信する (claim 状態や
+    unclaim todo 有無に関わらず)。
     """
     _seed_trek(
         trek_id="tk-fan0001",
@@ -1416,14 +1491,11 @@ def test_fanout_skips_session_with_only_terminal_claims():
         cadence=10,
         scope=[{"project": "beacon-test", "milestone": "ms-88"}],
     )
-    # 2 sessions for leader user: 1 active claim + 1 all-terminal
     _seed_live_sessions_for_trek(
         "beacon-test",
         user_id="uid-leader",
         session_ids=["sv-active", "sv-finished", "sv-fresh"],
     )
-    # sv-active が working な claim を持つ、 sv-finished は done のみ。
-    # AC33 silent semantics を保つため unclaim todo は seed しない。
     _treks["tk-fan0001"]["task_states"] = {
         "e-w": {"state": "working", "updated_by_session_id": "sv-active"},
         "e-d": {"state": "done", "updated_by_session_id": "sv-finished"},
@@ -1441,17 +1513,25 @@ def test_fanout_skips_session_with_only_terminal_claims():
     recipients = sorted(
         e["payload"].get("recipient_session_id", "") for e in progress_events
     )
-    # sv-active のみが lazy-start で fire、 sv-finished と sv-fresh は
-    # AC33 silent (= 仕事無し)、 broadcast fallback で空 recipient が
-    # 1 件混ざる場合あり。
-    assert "sv-active" in recipients
-    assert "sv-finished" not in recipients
-    assert "sv-fresh" not in recipients
+    # e-2815: 全 3 executor が recipient に出現する (= 無条件 fanout)。
+    assert "sv-active" in recipients, (
+        "e-2815: active-claim executor must receive fire (unchanged)."
+    )
+    assert "sv-finished" in recipients, (
+        "e-2815: terminal-only-claim executor must ALSO receive fire "
+        "(this is the invariant flip vs the pre-e-2815 gate)."
+    )
+    assert "sv-fresh" in recipients, (
+        "e-2815: fresh (no-claim) executor must ALSO receive fire."
+    )
 
 
 def test_fanout_skips_all_sessions_when_all_have_only_terminal_claims():
-    """全 live session の claim が terminal-ish → fanout は broadcast fallback
-    のみ (= 全 session が黙る方向 = 「誰にも届かない」 状態が emerge)。"""
+    """ms-97 / e-2815 — 全 executor が terminal claim だけ持つ状態でも
+    無条件 fanout する (旧 「全員 skip → broadcast fallback だけ」 pin を
+    invariant flip)。 broadcast fallback 経路は今も残るが、 executor が
+    home-resolvable + live である限りは executor 経路優先で fire する。
+    """
     _seed_trek(
         trek_id="tk-fan0002",
         status="active",
@@ -1463,7 +1543,7 @@ def test_fanout_skips_all_sessions_when_all_have_only_terminal_claims():
         user_id="uid-leader",
         session_ids=["sv-a", "sv-b"],
     )
-    # 両 session ともに done claim のみ
+    # 両 session ともに terminal-only claim
     _treks["tk-fan0002"]["task_states"] = {
         "e-1": {"state": "done", "updated_by_session_id": "sv-a"},
         "e-2": {"state": "leader_review", "updated_by_session_id": "sv-b"},
@@ -1478,14 +1558,12 @@ def test_fanout_skips_all_sessions_when_all_have_only_terminal_claims():
     progress_events = [
         e for e in events if _is_trek_progress_check_event(e)
     ]
-    # ms-97 / e-2660 — broadcast fallback は stamped leader_session_id
-    # を recipient に stamp する (= DM routing filter を通すため、
-    # 旧 "" recipient は _bus_event_addressed_to が drop していた)。
-    assert len(progress_events) == 1
-    assert (
-        progress_events[0]["payload"].get("recipient_session_id", "")
-        == "sv-leader"
+    recipients = sorted(
+        e["payload"].get("recipient_session_id", "") for e in progress_events
     )
+    # e-2815: 両 executor が recipient に立つ (broadcast fallback は不要)。
+    assert "sv-a" in recipients, "e-2815: sv-a must be targeted."
+    assert "sv-b" in recipients, "e-2815: sv-b must be targeted."
 
 
 def test_fanout_fresh_session_with_no_claims_still_receives_tick():
@@ -1772,6 +1850,7 @@ def test_lazy_start_leader_digest_fires_on_leader_review_queue():
         "e-1": {"state": "leader_review",
                 "updated_by_session_id": "sv-exec"},
     }
+    _seed_pool_from_task_states("tk-lazy-lreview")
     _seed_live_sessions_for_trek(
         "beacon-test",
         user_id="uid-leader",
@@ -1847,6 +1926,7 @@ def test_lazy_start_executor_silent_with_only_terminal_claims_and_no_todo():
     _treks["tk-lazy-stop"]["task_states"] = {
         "e-1": {"state": "done", "updated_by_session_id": "sv-exec"},
     }
+    _seed_pool_from_task_states("tk-lazy-stop")
     _seed_live_sessions_for_trek(
         "beacon-test",
         user_id="uid-leader",
@@ -1863,6 +1943,168 @@ def test_lazy_start_executor_silent_with_only_terminal_claims_and_no_todo():
     # に分類する。 fired 0 / quiesced 1 を観察する経路。
     assert body["fired"] == []
     assert len(body["quiesced"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# ms-99 / e-2834 — Quiesce observability trio (diag log + meta stamp + DM)
+# ---------------------------------------------------------------------------
+
+
+def _is_trek_quiesce_dm(e: dict) -> bool:
+    payload = e.get("payload") or {}
+    return payload.get("kind") == "trek-quiesced"
+
+
+def _seed_quiesced_trek(trek_id: str) -> None:
+    """Shared fixture: a trek whose materialised slots all read terminal."""
+    _seed_trek(
+        trek_id=trek_id,
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-99"}],
+    )
+    _treks[trek_id]["task_states"] = {
+        "e-1": {"state": "done", "updated_by_session_id": "sv-exec"},
+    }
+    _seed_pool_from_task_states(trek_id)
+    _seed_live_sessions_for_trek(
+        "beacon-test",
+        user_id="uid-leader",
+        session_ids=["sv-leader"],
+    )
+
+
+def test_quiesce_stamps_meta_quiesced_at_and_reason():
+    """e-2834 AC3: quiesce hit で meta.quiesced_at と quiesce_reason が
+    stamp される。 CLI (= beacon trek show --json) から観測できるように
+    trek doc に永続する。"""
+    _seed_quiesced_trek("tk-quiesce-stamp")
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-quiesce-stamp"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200
+    saved = _treks["tk-quiesce-stamp"]
+    meta = saved.get("meta") or {}
+    assert meta.get("quiesced_at"), (
+        "quiesce path must stamp meta.quiesced_at so /beacon-trek-review "
+        "and beacon trek show can render the quiesce transition."
+    )
+    assert meta.get("quiesce_reason") == "task_state_aggregate_terminal"
+
+
+def test_quiesce_emits_leader_dm_once():
+    """e-2834 AC2: quiesce hit で leader session に 1 回だけ DM が届く。
+    payload.kind='trek-quiesced' + recipient_session_id=leader_sid で
+    /beacon-trek-review Skill が完遂遷移を検知できる。"""
+    _seed_quiesced_trek("tk-quiesce-dm")
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-quiesce-dm"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200
+    events = _bus_events_by_project["beacon-test"]
+    quiesce_dms = [e for e in events if _is_trek_quiesce_dm(e)]
+    assert len(quiesce_dms) == 1, (
+        f"expected exactly 1 trek-quiesced DM, got {len(quiesce_dms)}"
+    )
+    dm = quiesce_dms[0]
+    assert dm["channel"] == "dm"
+    assert dm["delivery"] == "auto-execute"
+    payload = dm["payload"]
+    assert payload["kind"] == "trek-quiesced"
+    assert payload["recipient_session_id"] == "sv-leader"
+    assert payload["trek_id"] == "tk-quiesce-dm"
+    assert payload["sender_type"] == "trek-scheduler"
+    assert payload["reason"] == "task_state_aggregate_terminal"
+
+
+def test_quiesce_dm_dedupes_on_second_tick():
+    """e-2834 AC2: 同 quiesce lifecycle 内では 2 回目の tick で DM を
+    再送しない (meta.quiesce_notified_at で dedup)。 leader が同一 quiesce
+    に対して重複通知を受けない forcing function。"""
+    _seed_quiesced_trek("tk-quiesce-dedup")
+    # First tick emits the DM.
+    client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-quiesce-dedup"]},
+        headers=HEADERS_OK,
+    )
+    saved_after_first = _treks["tk-quiesce-dedup"]
+    assert saved_after_first["meta"].get("quiesce_notified_at"), (
+        "first tick must stamp quiesce_notified_at"
+    )
+    # Reset last_progress_check_at so the second tick is due (= cadence
+    # elapsed). Otherwise ``is_trek_due`` short-circuits before we reach
+    # the quiesce branch.
+    saved_after_first["meta"]["last_progress_check_at"] = ""
+    # Second tick: same quiesce state, but quiesce_notified_at already
+    # stamped. No new DM should fire.
+    events_before = list(_bus_events_by_project["beacon-test"])
+    client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-quiesce-dedup"]},
+        headers=HEADERS_OK,
+    )
+    events_after = _bus_events_by_project["beacon-test"]
+    new_quiesce_dms = [
+        e for e in events_after[len(events_before):]
+        if _is_trek_quiesce_dm(e)
+    ]
+    assert new_quiesce_dms == [], (
+        f"second tick must NOT re-emit quiesce DM; got {len(new_quiesce_dms)}"
+    )
+
+
+def test_quiesce_marks_cleared_when_task_transitions_out_of_terminal():
+    """e-2834 AC2 / AC3 補完: task が terminal 外へ遷移すると quiesce
+    marks (= quiesced_at / quiesce_notified_at / quiesce_reason) が
+    クリアされ、 次の quiesce lifecycle で新規 DM が発火可能になる。"""
+    _seed_quiesced_trek("tk-quiesce-reset")
+    trek = _treks["tk-quiesce-reset"]
+    # Align member user_id with the test client's default "dev" identity
+    # so the PATCH endpoint's member check passes.
+    trek["members"][0]["user_id"] = "dev"
+    trek["members"][0]["email"] = "dev@local"
+    trek["creator_actor"]["user_id"] = "dev"
+    trek["meta"]["quiesced_at"] = "2026-07-04T00:00:00.000000Z"
+    trek["meta"]["quiesce_notified_at"] = "2026-07-04T00:00:00.000000Z"
+    trek["meta"]["quiesce_reason"] = "task_state_aggregate_terminal"
+    # Rewind the task to a non-terminal state via the PATCH endpoint.
+    resp = client.patch(
+        "/api/treks/tk-quiesce-reset/task-state",
+        json={"task_id": "e-1", "state": "working"},
+        headers={"X-Beacon-Session": "sv-leader"},
+    )
+    assert resp.status_code == 200, resp.text
+    saved = _treks["tk-quiesce-reset"]
+    meta = saved.get("meta") or {}
+    assert meta.get("quiesced_at") is None, (
+        "task-state PATCH to non-terminal must clear quiesced_at so a "
+        "future quiesce lifecycle fires a fresh DM"
+    )
+    assert meta.get("quiesce_notified_at") is None
+    assert meta.get("quiesce_reason") is None
+
+
+def test_quiesce_emits_diag_log_line_to_stderr(capfd):
+    """e-2834 AC1: quiesce hit で stderr に diag[ms-99 e-2834] プレフィックス
+    の log 行が emit される (Cloud Run stderr → GCP Logs で grep 可能)。"""
+    _seed_quiesced_trek("tk-quiesce-diag")
+    client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-quiesce-diag"]},
+        headers=HEADERS_OK,
+    )
+    _, err = capfd.readouterr()
+    assert "diag[ms-99 e-2834]" in err, (
+        f"expected diag[ms-99 e-2834] prefix in stderr, got: {err[:400]}"
+    )
+    assert "trek=tk-quiesce-diag" in err
+    assert "quiesced" in err
+    assert "reason=task_state_aggregate_terminal" in err
 
 
 def test_resume_clears_halt_and_tick_fires_again():
@@ -1968,6 +2210,7 @@ def test_cross_project_trek_fans_dm_to_each_member_home_project():
         "e-todo1": {"state": "todo"},
         "e-todo2": {"state": "todo"},
     }
+    _seed_pool_from_task_states("tk-cross3p")
     # Each member lives in a different project's session registry —
     # exactly the cross-project topology that broke pre-e-2639.
     import datetime
@@ -2495,13 +2738,15 @@ def test_ac33_fresh_joiner_both_sessions_receive_tick_when_unclaim_todo_present(
     )
 
 
-def test_ac33_pure_observer_fresh_joiner_excluded_when_no_todo():
-    """ms-97 / e-2638 Done when #3 (negative test) — fresh joiner whose
-    scope has no todo (= pure observer) does NOT get a regular AC33 tick.
+def test_ac33_pure_observer_fresh_joiner_included_after_e2815():
+    """ms-97 / e-2815 (2026-07-03) — AC33 の旧 「pure observer は silent」
+    仕様 invariant flip 後の pin。 fresh joiner (= no claim, no todo)
+    でも member として join した以上、 regular tick を受け取る。
 
-    AC33 の stop 条件「nothing to claim」 が fresh joiner にも適用される
-    ことを pin する。 観察すべきもの: progress-check dm が当該 session
-    宛に届かない (= broadcast fallback は leader 宛のみ)。
+    以前は AC33 lazy-start gate で pure observer が silent skip されて
+    いたが、 dogfood で「executor に届かない = Trek scheduler の目的
+    そのものが破綻」 と判明したため撤廃 (e-2815)。 本テストは 「observer
+    session は sv-observer 宛 progress-check を必ず受信する」 を pin。
     """
     _seed_trek(
         trek_id="tk-ac33-observer",
@@ -2518,7 +2763,7 @@ def test_ac33_pure_observer_fresh_joiner_excluded_when_no_todo():
         user_id="uid-observer",
         session_ids=["sv-observer"],
     )
-    # No task_states → has_unclaim_todo = False, fresh observer は silent。
+    # No task_states — 以前は silent 経路、 e-2815 後は fire される。
     _treks["tk-ac33-observer"]["task_states"] = {}
 
     resp = client.post(
@@ -2528,9 +2773,8 @@ def test_ac33_pure_observer_fresh_joiner_excluded_when_no_todo():
     )
     assert resp.status_code == 200, resp.text
     events = _bus_events_by_project.get("beacon-test", [])
-    # Exclude welcome tick (= trek-welcome sender_type) — welcome tick is
-    # e-2637 bootstrap which fires regardless of AC33, here we test only
-    # the AC33 regular-tick path (= sender_type=trek-scheduler).
+    # welcome tick は e-2637 bootstrap で無条件 fire するため regular
+    # tick と分離して判定する (= sender_type=trek-scheduler のみ)。
     progress_events = [
         e for e in events
         if _is_trek_progress_check_event(e)
@@ -2540,10 +2784,10 @@ def test_ac33_pure_observer_fresh_joiner_excluded_when_no_todo():
         e for e in progress_events
         if e["payload"].get("recipient_session_id") == "sv-observer"
     ]
-    assert observer_targeted == [], (
-        "AC33 negative: pure observer (= no todo, no claim) must NOT "
-        "receive a regular tick. broadcast fallback addresses the "
-        f"leader instead. got events={progress_events}"
+    assert len(observer_targeted) >= 1, (
+        "e-2815: pure observer (= no todo, no claim) MUST receive a "
+        "regular tick after the lazy-start gate was removed. "
+        f"got events={progress_events}"
     )
 
 

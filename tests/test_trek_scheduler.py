@@ -379,58 +379,91 @@ def test_payload_unknown_scope_falls_to_all_done():
 # Trek task aggregate terminal (ms-75 / e-2048)
 # ---------------------------------------------------------------------------
 
+def _trek_from_states(states: dict) -> dict:
+    """ms-99 / e-2833 — synthesize scope entries for each task_states key.
+
+    The Phase 2 scheduler reads slot inventory via ``materialize_slots``
+    so the tick decision helpers need a scope[] to have anything to
+    iterate. Task-kind scope entries with an empty project id and no
+    ``claim_session_id`` map cleanly onto the cache-authoritative branch
+    of ``_materialize_atomic_slot``.
+    """
+    return {
+        "scope": [{"project": "p", "task": eid} for eid in states.keys()],
+        "task_states": states,
+    }
+
+
+def _empty_gp(pid: str) -> dict:
+    return {}
+
+
 def test_aggregate_terminal_false_when_no_states_stamped():
-    trek = {"task_states": {}}
-    assert scheduler.is_trek_task_aggregate_terminal(trek) is False
+    trek = _trek_from_states({})
+    assert scheduler.is_trek_task_aggregate_terminal(
+        trek, get_project=_empty_gp,
+    ) is False
 
 
 def test_aggregate_terminal_false_when_any_working():
-    trek = {"task_states": {
+    trek = _trek_from_states({
         "e-1": {"state": "done"},
         "e-2": {"state": "working"},
-    }}
-    assert scheduler.is_trek_task_aggregate_terminal(trek) is False
+    })
+    assert scheduler.is_trek_task_aggregate_terminal(
+        trek, get_project=_empty_gp,
+    ) is False
 
 
 def test_aggregate_terminal_true_when_all_done():
-    trek = {"task_states": {
+    trek = _trek_from_states({
         "e-1": {"state": "done"},
         "e-2": {"state": "done"},
-    }}
-    assert scheduler.is_trek_task_aggregate_terminal(trek) is True
+    })
+    assert scheduler.is_trek_task_aggregate_terminal(
+        trek, get_project=_empty_gp,
+    ) is True
 
 
 def test_aggregate_terminal_false_when_all_leader_review():
     """ms-88 / e-2107: leader_review は NON-terminal (= leader 判断要請、
     scheduler 走り続け)。 legacy `waiting-review` も leader_review に
     migrate するので同じく non-terminal。"""
-    trek = {"task_states": {
+    trek = _trek_from_states({
         "e-1": {"state": "leader_review"},
-    }}
-    assert scheduler.is_trek_task_aggregate_terminal(trek) is False
+    })
+    assert scheduler.is_trek_task_aggregate_terminal(
+        trek, get_project=_empty_gp,
+    ) is False
     # legacy alias も同じ挙動 (migrate されて leader_review 扱い)
-    trek_legacy = {"task_states": {
+    trek_legacy = _trek_from_states({
         "e-1": {"state": "waiting-review"},
-    }}
-    assert scheduler.is_trek_task_aggregate_terminal(trek_legacy) is False
+    })
+    assert scheduler.is_trek_task_aggregate_terminal(
+        trek_legacy, get_project=_empty_gp,
+    ) is False
 
 
 def test_aggregate_terminal_true_when_all_user_review():
     """ms-88 / e-2107: user_review は terminal (= Trek 完遂等価、 leader が
     user に forward 済)。"""
-    trek = {"task_states": {
+    trek = _trek_from_states({
         "e-1": {"state": "user_review"},
-    }}
-    assert scheduler.is_trek_task_aggregate_terminal(trek) is True
+    })
+    assert scheduler.is_trek_task_aggregate_terminal(
+        trek, get_project=_empty_gp,
+    ) is True
 
 
 def test_aggregate_terminal_true_when_mixed_terminal():
     """ms-88 / e-2107: terminal mixed = done + user_review。"""
-    trek = {"task_states": {
+    trek = _trek_from_states({
         "e-1": {"state": "done"},
         "e-2": {"state": "user_review"},
-    }}
-    assert scheduler.is_trek_task_aggregate_terminal(trek) is True
+    })
+    assert scheduler.is_trek_task_aggregate_terminal(
+        trek, get_project=_empty_gp,
+    ) is True
 
 
 # ---------------------------------------------------------------------------

@@ -131,6 +131,7 @@ _FC_ATTRS = (
 # and breaks adjacent test_api requests with 401.
 _APP_ATTRS = (
     "_start_watcher", "_stop_watcher", "_require_project_role",
+    "_resolve_bus_event_user_ids",
 )
 _fc_originals: dict = {}
 _app_originals: dict = {}
@@ -167,6 +168,18 @@ def setup_module(_module):
     # auth-enabled-only anyway).
     app_module._require_project_role = lambda project_id, user, **kw: (
         {"name": "test", "milestones": []}, "owner"
+    )
+    # ms-70 e-1713: the cross-user DM action gate was added after this test
+    # was written. Its resolver would leave sender_uid / receiver_uid empty
+    # for these unregistered sessions, which the gate treats as a
+    # cross-user-with-actions case and downgrades auto-execute →
+    # propose-to-ai (= what test_t1_in_actions_enables_auto_execute regressed
+    # on). Stub the resolver to return a same-user pair so the gate takes
+    # its intended "same-user skip" path and the pre-ms-70 auto-execute
+    # contract still holds. If we ever want cross-user coverage, add a
+    # dedicated test that seeds a real session pair.
+    app_module._resolve_bus_event_user_ids = lambda project_id, sender_session_id, payload: (
+        "uid-test", "uid-test"
     )
 
 

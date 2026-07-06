@@ -35,12 +35,34 @@ import trek_scheduler as trek_scheduler_mod  # noqa: E402
 # ---------------------------------------------------------------------------
 
 def _trek_with_states(states: dict) -> dict:
-    """Build a minimal trek doc carrying the given task_states."""
+    """Build a minimal trek doc carrying the given task_states.
+
+    ms-99 / e-2833 — after the Phase 2 refactor the tick decision helpers
+    read slot inventory via ``materialize_slots(trek_doc, get_project=...)``
+    instead of walking ``task_states`` directly. To keep this test suite's
+    per-task_states matrix meaningful, we synthesize one task-kind scope
+    entry per task_states key and lift the entry's
+    ``updated_by_session_id`` into ``claim_session_id`` (= scope-level
+    ownership, the SPEC 方針 4 successor of the legacy per-stamp field).
+    """
+    scope = []
+    for eid, entry in states.items():
+        s = {"project": "p", "task": eid}
+        owner = (entry or {}).get("updated_by_session_id") or ""
+        if owner:
+            s["claim_session_id"] = owner
+        scope.append(s)
     return {
         "trek_id": "tk-test1234",
         "status": "active",
+        "scope": scope,
         "task_states": states,
     }
+
+
+def _empty_gp(pid: str) -> dict:
+    """Empty project pool — cache-authoritative for task-kind slots."""
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -51,26 +73,26 @@ def test_has_unclaim_todo_true_for_unstamped_todo():
     t = _trek_with_states({
         "e-1": {"state": "todo"},  # no updated_by_session_id
     })
-    assert trek_scheduler_mod.has_unclaim_todo(t) is True
+    assert trek_scheduler_mod.has_unclaim_todo(t, get_project=_empty_gp) is True
 
 
 def test_has_unclaim_todo_false_when_todo_is_claimed():
     t = _trek_with_states({
         "e-1": {"state": "todo", "updated_by_session_id": "sv-exec1"},
     })
-    assert trek_scheduler_mod.has_unclaim_todo(t) is False
+    assert trek_scheduler_mod.has_unclaim_todo(t, get_project=_empty_gp) is False
 
 
 def test_has_unclaim_todo_false_when_no_todo():
     t = _trek_with_states({
         "e-1": {"state": "working", "updated_by_session_id": "sv-exec1"},
     })
-    assert trek_scheduler_mod.has_unclaim_todo(t) is False
+    assert trek_scheduler_mod.has_unclaim_todo(t, get_project=_empty_gp) is False
 
 
 def test_has_unclaim_todo_false_when_no_states():
     t = _trek_with_states({})
-    assert trek_scheduler_mod.has_unclaim_todo(t) is False
+    assert trek_scheduler_mod.has_unclaim_todo(t, get_project=_empty_gp) is False
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +104,7 @@ def test_has_leader_review_queue_true_when_any_leader_review():
         "e-1": {"state": "done"},
         "e-2": {"state": "leader_review"},
     })
-    assert trek_scheduler_mod.has_leader_review_queue(t) is True
+    assert trek_scheduler_mod.has_leader_review_queue(t, get_project=_empty_gp) is True
 
 
 def test_has_leader_review_queue_false_when_none():
@@ -90,7 +112,7 @@ def test_has_leader_review_queue_false_when_none():
         "e-1": {"state": "working"},
         "e-2": {"state": "todo"},
     })
-    assert trek_scheduler_mod.has_leader_review_queue(t) is False
+    assert trek_scheduler_mod.has_leader_review_queue(t, get_project=_empty_gp) is False
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +124,7 @@ def test_has_todo_float_true_for_any_todo():
         "e-1": {"state": "todo"},
         "e-2": {"state": "working"},
     })
-    assert trek_scheduler_mod.has_todo_float(t) is True
+    assert trek_scheduler_mod.has_todo_float(t, get_project=_empty_gp) is True
 
 
 def test_has_todo_float_false_when_all_progressed():
@@ -110,7 +132,7 @@ def test_has_todo_float_false_when_all_progressed():
         "e-1": {"state": "working"},
         "e-2": {"state": "leader_review"},
     })
-    assert trek_scheduler_mod.has_todo_float(t) is False
+    assert trek_scheduler_mod.has_todo_float(t, get_project=_empty_gp) is False
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +146,7 @@ def test_is_completion_imminent_true_when_one_left_of_three():
         "e-2": {"state": "done"},
         "e-3": {"state": "working"},
     })
-    assert trek_scheduler_mod.is_completion_imminent(t) is True
+    assert trek_scheduler_mod.is_completion_imminent(t, get_project=_empty_gp) is True
 
 
 def test_is_completion_imminent_false_when_more_than_threshold_left():
@@ -135,7 +157,7 @@ def test_is_completion_imminent_false_when_more_than_threshold_left():
         "e-3": {"state": "working"},
         "e-4": {"state": "todo"},
     })
-    assert trek_scheduler_mod.is_completion_imminent(t) is False
+    assert trek_scheduler_mod.is_completion_imminent(t, get_project=_empty_gp) is False
 
 
 def test_is_completion_imminent_false_when_already_terminal():
@@ -146,11 +168,13 @@ def test_is_completion_imminent_false_when_already_terminal():
         "e-1": {"state": "done"},
         "e-2": {"state": "user_review"},
     })
-    assert trek_scheduler_mod.is_completion_imminent(t) is False
+    assert trek_scheduler_mod.is_completion_imminent(t, get_project=_empty_gp) is False
 
 
 def test_is_completion_imminent_false_when_empty():
-    assert trek_scheduler_mod.is_completion_imminent(_trek_with_states({})) is False
+    assert trek_scheduler_mod.is_completion_imminent(
+        _trek_with_states({}), get_project=_empty_gp,
+    ) is False
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +187,7 @@ class TestShouldFireExecutorTick:
             "e-1": {"state": "working", "updated_by_session_id": "sv-exec1"},
         })
         assert trek_scheduler_mod.should_fire_executor_tick(
-            t, session_id="sv-exec1",
+            t, session_id="sv-exec1", get_project=_empty_gp,
         ) is True
 
     def test_fires_when_executor_has_todo_claim(self):
@@ -171,7 +195,7 @@ class TestShouldFireExecutorTick:
             "e-1": {"state": "todo", "updated_by_session_id": "sv-exec1"},
         })
         assert trek_scheduler_mod.should_fire_executor_tick(
-            t, session_id="sv-exec1",
+            t, session_id="sv-exec1", get_project=_empty_gp,
         ) is True
 
     def test_fresh_executor_fires_when_unclaim_todo_exists(self):
@@ -180,7 +204,7 @@ class TestShouldFireExecutorTick:
             "e-1": {"state": "todo"},  # unclaim
         })
         assert trek_scheduler_mod.should_fire_executor_tick(
-            t, session_id="sv-fresh",
+            t, session_id="sv-fresh", get_project=_empty_gp,
         ) is True
 
     def test_fresh_executor_silent_when_no_unclaim_todo(self):
@@ -190,7 +214,7 @@ class TestShouldFireExecutorTick:
             "e-1": {"state": "todo", "updated_by_session_id": "sv-other"},
         })
         assert trek_scheduler_mod.should_fire_executor_tick(
-            t, session_id="sv-fresh",
+            t, session_id="sv-fresh", get_project=_empty_gp,
         ) is False
 
     def test_executor_with_only_terminal_claims_silent(self):
@@ -201,7 +225,7 @@ class TestShouldFireExecutorTick:
             "e-2": {"state": "user_review", "updated_by_session_id": "sv-exec1"},
         })
         assert trek_scheduler_mod.should_fire_executor_tick(
-            t, session_id="sv-exec1",
+            t, session_id="sv-exec1", get_project=_empty_gp,
         ) is False
 
     def test_executor_terminal_claims_fires_if_unclaim_todo(self):
@@ -212,7 +236,7 @@ class TestShouldFireExecutorTick:
             "e-2": {"state": "todo"},  # unclaim
         })
         assert trek_scheduler_mod.should_fire_executor_tick(
-            t, session_id="sv-exec1",
+            t, session_id="sv-exec1", get_project=_empty_gp,
         ) is True
 
 
@@ -226,14 +250,14 @@ class TestShouldFireLeaderTick:
             "e-1": {"state": "working"},
             "e-2": {"state": "leader_review"},
         })
-        assert trek_scheduler_mod.should_fire_leader_tick(t) is True
+        assert trek_scheduler_mod.should_fire_leader_tick(t, get_project=_empty_gp) is True
 
     def test_fires_when_todo_float_exists(self):
         t = _trek_with_states({
             "e-1": {"state": "todo"},
             "e-2": {"state": "working"},
         })
-        assert trek_scheduler_mod.should_fire_leader_tick(t) is True
+        assert trek_scheduler_mod.should_fire_leader_tick(t, get_project=_empty_gp) is True
 
     def test_fires_when_completion_imminent(self):
         t = _trek_with_states({
@@ -241,7 +265,7 @@ class TestShouldFireLeaderTick:
             "e-2": {"state": "done"},
             "e-3": {"state": "working"},  # only 1 non-terminal left
         })
-        assert trek_scheduler_mod.should_fire_leader_tick(t) is True
+        assert trek_scheduler_mod.should_fire_leader_tick(t, get_project=_empty_gp) is True
 
     def test_silent_when_only_working_far_from_completion(self):
         """Working-only trek with many slots non-terminal → no leader
@@ -253,10 +277,10 @@ class TestShouldFireLeaderTick:
             "e-3": {"state": "working"},
             "e-4": {"state": "working"},
         })
-        assert trek_scheduler_mod.should_fire_leader_tick(t) is False
+        assert trek_scheduler_mod.should_fire_leader_tick(t, get_project=_empty_gp) is False
 
     def test_silent_when_no_states(self):
         """Empty task_states → no state for the leader to digest yet.
         The orchestrator's minimal-tick fallback covers visibility."""
         t = _trek_with_states({})
-        assert trek_scheduler_mod.should_fire_leader_tick(t) is False
+        assert trek_scheduler_mod.should_fire_leader_tick(t, get_project=_empty_gp) is False

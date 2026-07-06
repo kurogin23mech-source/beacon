@@ -63,6 +63,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -247,6 +248,174 @@ def _ack_cursor(api_url: str, project_id: str, recipient_id: str,
     )
 
 
+# ms-95 / e-2875 layer 3-A — channels emitted by the trek scheduler tick.
+# Events on these channels (whether pre-e-2639 dedicated or post-e-2639
+# dm-transport with ``origin_channel`` hint) are subject to the archived-
+# trek filter below.
+_TREK_SCHEDULER_CHANNELS = {
+    "trek-progress-check",
+    "trek-task-review",
+    "trek-leader-digest",
+    "trek-trigger",
+}
+
+
+# ms-97 P2 (= review finding H2): the Level 3 imperative blocks below inject a
+# "You MUST immediately invoke /beacon-… <id>" instruction straight into the AI
+# context. Those instructions are only safe when the triggering event was minted
+# by the Beacon server itself during a scheduler / operation tick (= a
+# T1-system envelope, ``issuer == "beacon-system"``). A project editor can post
+# an ``auto-execute`` event on these channels, but they can NOT forge a valid
+# T1-system envelope: the server verify-on-post (server/app.py post_bus_event)
+# degrades any envelope whose signature/issuer fails to T5, which strips
+# auto-execute before the event is persisted. So requiring T1-system provenance
+# on the *persisted* envelope composes with the server's verify to become a real
+# gate, not mere defense-in-depth. Non-system events on these channels are
+# downgraded to propose-to-ai (same treatment as an allowlist miss) so a forced
+# Skill invoke with an attacker-controlled id is structurally impossible.
+_T1_SYSTEM_TIER = "T1-system"
+_T1_SYSTEM_ISSUER = "beacon-system"
+_SYSTEM_PROVENANCE_CHANNELS = {
+    "operation-trigger",
+    "trek-trigger",
+    "trek-progress-check",
+    "trek-task-review",
+    "trek-leader-digest",
+}
+
+# Payload-derived ids (trek_id / task_id / op_id) are interpolated into the
+# imperative command strings. Even after the provenance gate above, defend the
+# f-string against a malformed id (newline / markdown / shell metacharacter)
+# leaking into the injected instruction by restricting to the id charset Beacon
+# actually mints (``tk-<hex>`` / ``e-<n>`` / ``op-<n>`` / ``ms-<n>``).
+_SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def _sanitize_id(raw: object, *, fallback: str = "?", maxlen: int = 64) -> str:
+    """Strip an id down to ``[A-Za-z0-9_-]`` and cap its length.
+
+    Returns ``fallback`` when nothing survives so the rendered block still
+    reads sensibly (and never emits an empty ``/beacon-… `` command).
+    """
+    cleaned = _SAFE_ID_RE.sub("", str(raw or ""))[:maxlen]
+    return cleaned or fallback
+
+
+def _has_system_provenance(ev: dict) -> bool:
+    """True when the event carries a persisted T1-system envelope.
+
+    The server persists ``body.envelope`` on the event (server/app.py
+    post_bus_event) after verifying its signature, so reading the claimed
+    ``tier`` / ``issuer`` here is sound: a fake T1-system claim would have been
+    degraded to T5 (and stripped of auto-execute) before persist.
+    """
+    env = ev.get("envelope")
+    if not isinstance(env, dict):
+        return False
+    return (
+        env.get("tier") == _T1_SYSTEM_TIER
+        and env.get("issuer") == _T1_SYSTEM_ISSUER
+    )
+
+
+def _is_trek_scheduler_event(ev: dict) -> tuple[bool, str]:
+    """Return ``(is_trek_scheduler, trek_id)`` for one bus event.
+
+    ms-95 / e-2875 layer 3-A helper. The Trek scheduler tick used to
+    write dedicated channels (``trek-progress-check`` etc.); e-2639
+    migrated it to ``channel="dm"`` with ``payload.origin_channel``
+    carrying the original semantic. We accept either signal here so the
+    archived-trek filter works uniformly across pre- and post-migration
+    events.
+
+    Legitimate peer DMs between trek members (= channel="dm" without an
+    origin_channel hint) are *not* trek-scheduler events; they must
+    still reach the AI even after archive so members can wrap up the
+    conversation.
+    """
+    ch = ev.get("channel") or ""
+    payload = ev.get("payload") or {}
+    origin = str(payload.get("origin_channel") or "")
+    trek_id = str(payload.get("trek_id") or "")
+    if not trek_id:
+        return False, ""
+    if ch in _TREK_SCHEDULER_CHANNELS or origin in _TREK_SCHEDULER_CHANNELS:
+        return True, trek_id
+    return False, ""
+
+
+def _lookup_trek_status(api_url: str, trek_id: str, token: str,
+                        cache: dict) -> "str | None":
+    """Return ``trek.status`` for ``trek_id``, or ``None`` on lookup failure.
+
+    ms-95 / e-2875 layer 3-A. Best-effort: any error (network, 403, 404)
+    returns ``None``, and the caller falls open (= keeps the event).
+    The server-side 410 Gone guard (server/app.py) is the structural
+    boundary — this filter is the noise-reduction layer on top.
+
+    ``cache`` is a per-invocation dict keyed on trek_id. One inbox-hook
+    fire may see multiple events for the same trek (typical during
+    burst-delivery after a session wake); memoizing avoids N round trips.
+    """
+    if trek_id in cache:
+        return cache[trek_id]
+    try:
+        result = _api_get(
+            api_url,
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}",
+            token,
+        )
+        status = None
+        if isinstance(result, dict):
+            raw = result.get("status")
+            if isinstance(raw, str):
+                status = raw
+        cache[trek_id] = status
+        return status
+    except Exception as exc:
+        _log(
+            f"trek status lookup failed: trek_id={trek_id} "
+            f"{exc.__class__.__name__}: {exc}"
+        )
+        cache[trek_id] = None
+        return None
+
+
+def _filter_archived_trek_events(unread: list[dict], api_url: str,
+                                 token: str) -> tuple[list[dict], list[dict]]:
+    """Split ``unread`` into ``(kept, dropped_archived)``.
+
+    ms-95 / e-2875 layer 3-A — for events identified by
+    :func:`_is_trek_scheduler_event`, look up the trek's status via
+    :func:`_lookup_trek_status`. Events whose trek is ``archived`` are
+    diverted to the dropped bucket so the AI never sees them (=
+    ``/beacon-trek-*`` Skills are not invoked, ``pulse-ack`` /
+    ``task-state`` writes are not attempted).
+
+    Non-trek-scheduler events and lookup failures pass through as
+    ``kept`` (fail-open). The server 410 Gone guard blocks the actual
+    write path even when this filter yields a false negative.
+
+    The caller is responsible for cursor advance across the *full* set
+    (both kept and dropped), for auditing dropped events to the inbox
+    log, and for writing a diagnostic frame.
+    """
+    kept: list[dict] = []
+    dropped: list[dict] = []
+    cache: dict = {}
+    for ev in unread:
+        is_trek, trek_id = _is_trek_scheduler_event(ev)
+        if not is_trek:
+            kept.append(ev)
+            continue
+        status = _lookup_trek_status(api_url, trek_id, token, cache)
+        if status == "archived":
+            dropped.append(ev)
+        else:
+            kept.append(ev)
+    return kept, dropped
+
+
 def _ensure_cursor_primed(api_url: str, project_id: str, recipient_id: str,
                           token: str) -> bool:
     """First-run cursor catchup for brand-new sessions.
@@ -407,8 +576,8 @@ def _format_autonomous_action_block(events: list[dict]) -> str:
     lines.append("")
     for ev in events:
         payload = ev.get("payload") or {}
-        op_id = payload.get("op_id", "?")
-        spec_doc_id = payload.get("spec_doc_id", "")
+        op_id = _sanitize_id(payload.get("op_id"))
+        spec_doc_id = _sanitize_id(payload.get("spec_doc_id"), fallback="")
         trigger_name = payload.get("trigger_name", "")
         eid = ev.get("event_id", "?")
         lines.append(f"- event_id: {eid}")
@@ -456,7 +625,7 @@ def _format_trek_progress_check_block(events: list[dict]) -> str:
     lines.append("")
     for ev in events:
         payload = ev.get("payload") or {}
-        trek_id = payload.get("trek_id", "?")
+        trek_id = _sanitize_id(payload.get("trek_id"))
         eid = ev.get("event_id", "?")
         lines.append(f"- event_id: {eid}")
         lines.append(f"  - trek_id: {trek_id}")
@@ -499,8 +668,8 @@ def _format_trek_task_review_block(events: list[dict]) -> str:
     lines.append("")
     for ev in events:
         payload = ev.get("payload") or {}
-        trek_id = payload.get("trek_id", "?")
-        task_id = payload.get("task_id", "?")
+        trek_id = _sanitize_id(payload.get("trek_id"))
+        task_id = _sanitize_id(payload.get("task_id"))
         eid = ev.get("event_id", "?")
         lines.append(f"- event_id: {eid}")
         lines.append(f"  - trek_id: {trek_id}")
@@ -549,7 +718,7 @@ def _format_trek_leader_digest_block(events: list[dict]) -> str:
     lines.append("")
     for ev in events:
         payload = ev.get("payload") or {}
-        trek_id = payload.get("trek_id", "?")
+        trek_id = _sanitize_id(payload.get("trek_id"))
         eid = ev.get("event_id", "?")
         agg = payload.get("task_state_aggregate") or {}
         summary = payload.get("summary") or {}
@@ -619,7 +788,7 @@ def _format_trek_action_block(events: list[dict]) -> str:
     lines.append("")
     for ev in events:
         payload = ev.get("payload") or {}
-        trek_id = payload.get("trek_id", "?")
+        trek_id = _sanitize_id(payload.get("trek_id"))
         trigger_name = payload.get("trigger_name", "")
         eid = ev.get("event_id", "?")
         lines.append(f"- event_id: {eid}")
@@ -860,6 +1029,66 @@ def main() -> None:
     if not isinstance(unread, list) or not unread:
         return
 
+    # ms-95 / e-2875 layer 3-A — silently drop trek-scheduler events
+    # whose trek has been archived. Runs before every downstream stage
+    # (stop-signal / bucketing / inject / audit) so archived-trek events
+    # never invoke ``/beacon-trek-*`` Skills, never surface in the AI
+    # context, and never generate residual pulse-ack + peer DM traffic.
+    # The server 410 Gone guard closes the same hole on the write path;
+    # this layer avoids the round trip entirely on updated bridges.
+    #
+    # Cursor advance below still uses the full ``unread`` list so the
+    # dropped events do not resurface on the next poll.
+    dropped_archived_trek: list[dict] = []
+    try:
+        unread_kept, dropped_archived_trek = _filter_archived_trek_events(
+            unread, api_url, token,
+        )
+    except Exception as exc:
+        _log(
+            f"archived-trek filter failed (fail-open): "
+            f"{exc.__class__.__name__}: {exc}"
+        )
+        unread_kept = unread
+    if dropped_archived_trek:
+        # Audit trail: the dropped events must still be persisted so a
+        # human can review "what did the AI never see" after the fact.
+        _append_to_inbox_log(root, dropped_archived_trek)
+        # Diagnostic frame mirrors the auto_execute_downgrade pattern
+        # (= ms-95 / e-2710) so post-mortems can answer "which trek /
+        # how many events / at what time" without re-deriving.
+        try:
+            diag = {
+                "_diag": "archived_trek_drop",
+                "dropped_count": len(dropped_archived_trek),
+                "dropped_trek_ids": sorted({
+                    str((e.get("payload") or {}).get("trek_id", ""))
+                    for e in dropped_archived_trek
+                    if (e.get("payload") or {}).get("trek_id")
+                }),
+                "dropped_channels": sorted({
+                    str(e.get("channel", "")) for e in dropped_archived_trek
+                }),
+                "session_id": session_id,
+            }
+            _append_to_inbox_log(root, [diag])
+        except Exception as exc:
+            _log(f"archived-trek diag frame write failed: {exc}")
+    # From here on the bucketing / stop-signal / inject stages work on
+    # the filtered list. Cursor advance still uses the original ``unread``.
+    unread_full = unread
+    unread = unread_kept
+    if not unread:
+        # Everything was archived-trek noise; still advance the cursor
+        # past those events so we don't re-poll them next tick.
+        last_seen = unread_full[-1].get("created_at", "")
+        if last_seen:
+            try:
+                _ack_cursor(api_url, project_id, session_id, last_seen, token)
+            except Exception as exc:
+                _log(f"cursor advance (archived-only path) failed: {exc}")
+        return
+
     # ms-55 e-1721: process stop-signal channel events first so the
     # halt-request.json is on disk before the PostToolUse hook fires
     # again. Failures here are non-fatal — the regular event inject
@@ -909,6 +1138,20 @@ def main() -> None:
                 # cursor-advance step still inspects for created_at.
                 ev = {**ev, "delivery": "propose-to-ai",
                        "_downgraded_from": "auto-execute"}
+                downgraded_count += 1
+                downgraded_audit.append(ev)
+                delivery = "propose-to-ai"
+            elif (channel in _SYSTEM_PROVENANCE_CHANNELS
+                    and not _has_system_provenance(ev)):
+                # ms-97 P2 (H2): the channel is opted-in AND auto-execute, but
+                # the persisted envelope is not a server-minted T1-system one.
+                # Refuse to route it into a Level 3 imperative block — a project
+                # editor could otherwise force a `/beacon-…  <attacker id>`
+                # invoke. Downgrade to propose-to-ai (same as an allowlist miss)
+                # and tag the reason so the audit frame explains the drop.
+                ev = {**ev, "delivery": "propose-to-ai",
+                       "_downgraded_from": "auto-execute",
+                       "_downgrade_reason": "non-system-envelope"}
                 downgraded_count += 1
                 downgraded_audit.append(ev)
                 delivery = "propose-to-ai"
@@ -982,7 +1225,11 @@ def main() -> None:
 
     # Always advance the cursor to the last seen event so neither inject nor
     # notify-only events are replayed; the cursor is delivery-agnostic.
-    last_seen = unread[-1].get("created_at", "")
+    # ms-95 / e-2875 layer 3-A — use ``unread_full`` here (= the pre-filter
+    # set) so archived-trek events dropped above still count toward
+    # cursor progress. Otherwise a trailing dropped event would resurface
+    # on the next poll.
+    last_seen = unread_full[-1].get("created_at", "")
     if last_seen:
         try:
             _ack_cursor(api_url, project_id, session_id, last_seen, token)

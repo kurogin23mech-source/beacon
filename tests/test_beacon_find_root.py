@@ -46,18 +46,34 @@ def test_script_is_executable():
     assert os.access(SCRIPT, os.X_OK)
 
 
-def test_finds_root_from_repo_root():
-    code, out = _run(REPO_ROOT)
+def test_finds_root_from_repo_root(tmp_path):
+    # ms-62 e-1512: earlier this test ran against REPO_ROOT directly,
+    # which required the developer's local .beacon/project.json to
+    # exist. .beacon/ is gitignored so the CI checkout has none — the
+    # test then failed with `1 == 0` on every CI run. Build a self-
+    # contained fake project tree so the assertion is about the
+    # script's walk-up behavior, not about the checkout's dev artifacts.
+    project = tmp_path / "myproj"
+    project.mkdir()
+    (project / ".beacon").mkdir()
+    (project / ".beacon" / "project.json").write_text("{}")
+    code, out = _run(project)
     assert code == 0
-    assert Path(out) == _expected_root_from(REPO_ROOT)
+    assert Path(out) == project
 
 
-def test_walks_up_from_subdirectory():
-    sub = REPO_ROOT / "lib"
-    assert sub.is_dir()
+def test_walks_up_from_subdirectory(tmp_path):
+    # Same pattern: build a fake project + sub-dir so the test is
+    # independent of the dev checkout's .beacon/ presence.
+    project = tmp_path / "myproj"
+    project.mkdir()
+    (project / ".beacon").mkdir()
+    (project / ".beacon" / "project.json").write_text("{}")
+    sub = project / "lib"
+    sub.mkdir()
     code, out = _run(sub)
     assert code == 0
-    assert Path(out) == _expected_root_from(sub)
+    assert Path(out) == project
 
 
 def test_walks_up_from_worktree_style_path(tmp_path):

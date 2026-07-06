@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Beacon CLI commands - thin adapter over core.py logic."""
 
-__version__ = "0.52.1"
+__version__ = "0.53.1"
 
 import json
 import os
@@ -5159,9 +5159,23 @@ def cmd_trek_show():
         return
 
     halt_marker = " [HALTED]" if t.get("halt") else ""
-    print(f"Trek {t['trek_id']} — {t['title']}{halt_marker}")
+    # ms-99 / e-2834 — quiesce marker in the header so an operator eyeing
+    # a Trek immediately sees "AI 自律実行完了 (task_state_aggregate_terminal)"
+    # without hunting through meta. The stamp is set by the scheduler
+    # tick's quiesce branch and cleared by ``PATCH .../task-state`` when
+    # a task transitions out of terminal.
+    quiesced_meta = (t.get("meta") or {}).get("quiesced_at") or ""
+    quiesce_marker = f" [QUIESCED @ {quiesced_meta[:19]}]" if quiesced_meta else ""
+    print(f"Trek {t['trek_id']} — {t['title']}{halt_marker}{quiesce_marker}")
     print(f"  type:        {t.get('type')}")
     print(f"  status:      {t.get('status')}")
+    if quiesced_meta:
+        meta = t.get("meta") or {}
+        print(
+            f"  quiesced:    {quiesced_meta[:19]} "
+            f"(reason={meta.get('quiesce_reason', '')}, "
+            f"notified={bool(meta.get('quiesce_notified_at'))})"
+        )
     print(f"  created:     {t.get('created_at', '')[:19]}")
     if t.get("archived_at"):
         print(f"  archived:    {t.get('archived_at', '')[:19]}")
@@ -7084,6 +7098,401 @@ def _resolve_local_session_id() -> str:
         return sid
     sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
     return sid
+
+
+# ---------------------------------------------------------------------------
+# ms-99 / e-2829 — slot verbs (Trek schema v2 CLI, SPEC 方針 6)
+# ---------------------------------------------------------------------------
+# All four (add / amend / claim / list) run through the pending_scope_ops
+# queue so AC 15 ("all slot CLI ops via staging") holds. Cloud-mode
+# parity lands in e-2830 (Phase 1 API endpoints); until then the cloud
+# branch surfaces a graceful warning and exits.
+
+
+def _cloud_slot_client():
+    """Return (client, config) for cloud-mode slot operations, or None.
+
+    ms-99 / e-2830: shared bootstrap for the four slot verbs. Falls
+    back to None so callers can degrade gracefully rather than crash
+    (matches the pre-e-2830 stub warning contract).
+    """
+    try:
+        return _get_api_client()
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_trek_slot_add():
+    """Stage a slot-add pending op with a fresh ``sl-<8 hex>`` id.
+
+    Env:
+      BEACON_TREK_ID          (required)
+      BEACON_SLOT_PROJECT     (required — project_id the slot lives in)
+      BEACON_SLOT_MILESTONE   optional narrowing key (one of the three)
+      BEACON_SLOT_OPERATION
+      BEACON_SLOT_TASK
+      BEACON_SLOT_CHILDREN    optional comma-separated e-ids for MS slots
+      BEACON_JSON             "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    project = os.environ.get("BEACON_SLOT_PROJECT", "").strip()
+    milestone = os.environ.get("BEACON_SLOT_MILESTONE", "").strip()
+    operation = os.environ.get("BEACON_SLOT_OPERATION", "").strip()
+    task = os.environ.get("BEACON_SLOT_TASK", "").strip()
+    children_raw = os.environ.get("BEACON_SLOT_CHILDREN", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+    if not project:
+        print("Error: --project <pid> is required", file=sys.stderr)
+        sys.exit(1)
+    narrowing_count = sum(1 for v in (milestone, operation, task) if v)
+    if narrowing_count == 0:
+        print(
+            "Error: one of --milestone | --operation | --task is required "
+            "(= slot must narrow the project, ms-97 AC7)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if narrowing_count > 1:
+        print(
+            "Error: pass exactly one of --milestone / --operation / --task",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    children_list = [c.strip() for c in children_raw.split(",") if c.strip()]
+    entry: dict = {"project": project}
+    if milestone:
+        entry["milestone"] = milestone
+    elif operation:
+        entry["operation"] = operation
+    elif task:
+        entry["task"] = task
+    # ``--children`` only makes sense for MS slots (SPEC 方針 2). For
+    # task/op slots the child list is meaningless; refuse politely.
+    if children_list and not milestone:
+        print(
+            "Error: --children is only valid with --milestone (MS slot "
+            "child opt-in, SPEC 方針 2)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if children_list:
+        entry["included_task_ids"] = children_list
+
+    if _is_cloud_mode():
+        client, _config = _cloud_slot_client()
+        try:
+            resp = client.add_trek_slot(
+                trek_id,
+                project=project,
+                milestone=milestone,
+                operation=operation,
+                task=task,
+                included_task_ids=(children_list if milestone else None),
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        pending = resp.get("pending_op") or {}
+        slot_id = (pending.get("entry") or {}).get("slot_id") or ""
+        pending_id = pending.get("pending_id") or ""
+        if json_mode:
+            print(json.dumps({
+                "pending_id": pending_id,
+                "slot_id": slot_id,
+                "entry": pending.get("entry") or {},
+            }, ensure_ascii=False))
+        else:
+            target_ref = milestone or operation or task
+            print(
+                f"Staged slot-add on trek {trek_id}: "
+                f"slot_id={slot_id}, target={project}:{target_ref} "
+                f"(pending_id: {pending_id}). "
+                f"Approve: beacon trek scope-approve {trek_id} {pending_id}"
+            )
+        return
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    try:
+        rec = trek.add_pending_scope_op(
+            t,
+            action=trek.PENDING_SCOPE_ACTION_ADD,
+            entry=entry,
+            requested_by_session_id=_resolve_local_session_id(),
+            mint_slot=True,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    trek_store.save_trek(t)
+
+    slot_id = (rec.get("entry") or {}).get("slot_id") or ""
+    pending_id = rec.get("pending_id") or ""
+    if json_mode:
+        print(json.dumps({
+            "pending_id": pending_id,
+            "slot_id": slot_id,
+            "entry": rec.get("entry") or {},
+        }, ensure_ascii=False))
+    else:
+        target_ref = milestone or operation or task
+        print(
+            f"Staged slot-add on trek {trek_id}: "
+            f"slot_id={slot_id}, target={project}:{target_ref} "
+            f"(pending_id: {pending_id}). "
+            f"Approve: beacon trek scope-approve {trek_id} {pending_id}"
+        )
+
+
+def cmd_trek_slot_amend():
+    """Stage a slot-amend pending op (= edit ``included_task_ids``).
+
+    Env:
+      BEACON_TREK_ID              (required)
+      BEACON_SLOT_ID              (required)
+      BEACON_SLOT_ADD_CHILDREN    comma-separated e-ids to add
+      BEACON_SLOT_REMOVE_CHILDREN comma-separated e-ids to remove
+      BEACON_JSON                 "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    slot_id = os.environ.get("BEACON_SLOT_ID", "").strip()
+    add_raw = os.environ.get("BEACON_SLOT_ADD_CHILDREN", "").strip()
+    rem_raw = os.environ.get("BEACON_SLOT_REMOVE_CHILDREN", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id or not slot_id:
+        print("Error: trek_id and slot_id are required", file=sys.stderr)
+        sys.exit(1)
+    add_list = [c.strip() for c in add_raw.split(",") if c.strip()]
+    rem_list = [c.strip() for c in rem_raw.split(",") if c.strip()]
+    if not add_list and not rem_list:
+        print(
+            "Error: at least one --add-child or --remove-child is required",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        client, _config = _cloud_slot_client()
+        try:
+            resp = client.amend_trek_slot(
+                trek_id, slot_id,
+                add_children=add_list,
+                remove_children=rem_list,
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        pending = resp.get("pending_op") or {}
+        pending_id = pending.get("pending_id") or ""
+        if json_mode:
+            print(json.dumps(pending, ensure_ascii=False))
+        else:
+            print(
+                f"Staged slot-amend on trek {trek_id}, slot={slot_id} "
+                f"(pending_id: {pending_id}). "
+                f"add={add_list} remove={rem_list}. "
+                f"Approve: beacon trek scope-approve {trek_id} {pending_id}"
+            )
+        return
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    try:
+        rec = trek.add_pending_slot_amend_op(
+            t,
+            slot_id=slot_id,
+            add_children=add_list,
+            remove_children=rem_list,
+            requested_by_session_id=_resolve_local_session_id(),
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    trek_store.save_trek(t)
+
+    pending_id = rec.get("pending_id") or ""
+    if json_mode:
+        print(json.dumps(rec, ensure_ascii=False))
+    else:
+        print(
+            f"Staged slot-amend on trek {trek_id}, slot={slot_id} "
+            f"(pending_id: {pending_id}). "
+            f"add={add_list} remove={rem_list}. "
+            f"Approve: beacon trek scope-approve {trek_id} {pending_id}"
+        )
+
+
+def cmd_trek_slot_claim():
+    """Stage a slot-claim pending op (= stamp claim_session_id + claimed_at).
+
+    Env:
+      BEACON_TREK_ID       (required)
+      BEACON_SLOT_ID       (required)
+      BEACON_SLOT_SESSION  session_id override (default: current session)
+      BEACON_SLOT_UNCLAIM  "1" → clear the claim (empty session_id)
+      BEACON_JSON          "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    slot_id = os.environ.get("BEACON_SLOT_ID", "").strip()
+    session_override = os.environ.get("BEACON_SLOT_SESSION", "").strip()
+    unclaim = os.environ.get("BEACON_SLOT_UNCLAIM", "") == "1"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id or not slot_id:
+        print("Error: trek_id and slot_id are required", file=sys.stderr)
+        sys.exit(1)
+    if unclaim:
+        session_id = ""
+    else:
+        session_id = session_override or _resolve_local_session_id()
+        if not session_id:
+            print(
+                "Error: no session_id resolved. Pass --session <sid> or "
+                "run inside a bclaude session (= BEACON_SESSION_ID set)",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    if _is_cloud_mode():
+        client, _config = _cloud_slot_client()
+        try:
+            resp = client.claim_trek_slot(
+                trek_id, slot_id, session_id=session_id,
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        pending = resp.get("pending_op") or {}
+        pending_id = pending.get("pending_id") or ""
+        if json_mode:
+            print(json.dumps(pending, ensure_ascii=False))
+        else:
+            verb = "unclaim" if not session_id else f"claim by {session_id}"
+            print(
+                f"Staged slot-{verb} on trek {trek_id}, slot={slot_id} "
+                f"(pending_id: {pending_id}). "
+                f"Approve: beacon trek scope-approve {trek_id} {pending_id}"
+            )
+        return
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    try:
+        rec = trek.add_pending_slot_claim_op(
+            t,
+            slot_id=slot_id,
+            session_id=session_id,
+            requested_by_session_id=_resolve_local_session_id(),
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    trek_store.save_trek(t)
+
+    pending_id = rec.get("pending_id") or ""
+    if json_mode:
+        print(json.dumps(rec, ensure_ascii=False))
+    else:
+        verb = "unclaim" if not session_id else f"claim by {session_id}"
+        print(
+            f"Staged slot-{verb} on trek {trek_id}, slot={slot_id} "
+            f"(pending_id: {pending_id}). "
+            f"Approve: beacon trek scope-approve {trek_id} {pending_id}"
+        )
+
+
+def cmd_trek_slot_list():
+    """List slot rows (materialized shape) for ``beacon trek slot list``.
+
+    Phase 1 view: projects each on-disk scope entry through
+    ``trek.materialize_slot_view`` — v2 attributes + narrowing keys +
+    child opt-in list + claim. Phase 2 (e-2832) adds full expansion of
+    the child set via ``materialize_slots``.
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        client, _config = _cloud_slot_client()
+        try:
+            resp = client.list_trek_slots(trek_id)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        rows = resp.get("slots") or []
+        if json_mode:
+            print(json.dumps(rows, ensure_ascii=False))
+            return
+        if not rows:
+            print(f"(no slots on trek {trek_id})")
+            return
+        for r in rows:
+            children = r.get("included_task_ids")
+            if children is None:
+                children_repr = "(legacy: all children)"
+            else:
+                children_repr = f"{len(children)} explicit: {children}"
+            claim = r.get("claim_session_id") or "(unclaimed)"
+            print(
+                f"- slot_id={r.get('slot_id') or '(legacy-no-id)'} "
+                f"{r.get('target_kind', '')}={r.get('target_id', '')} "
+                f"project={r.get('project', '')} "
+                f"children={children_repr} claim={claim}"
+            )
+        return
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    rows = trek.materialize_slot_view(t)
+    if json_mode:
+        print(json.dumps(rows, ensure_ascii=False))
+    else:
+        if not rows:
+            print(f"(no slots on trek {trek_id})")
+            return
+        for r in rows:
+            children = r.get("included_task_ids")
+            if children is None:
+                children_repr = "(legacy: all children)"
+            else:
+                children_repr = f"{len(children)} explicit: {children}"
+            claim = r.get("claim_session_id") or "(unclaimed)"
+            print(
+                f"- slot_id={r['slot_id'] or '(legacy-no-id)'} "
+                f"{r['target_kind']}={r['target_id']} "
+                f"project={r['project']} "
+                f"children={children_repr} claim={claim}"
+            )
 
 
 def cmd_trek_scope_approve():
@@ -12511,6 +12920,53 @@ def _resolve_hook_command(hook_basename: str) -> str:
 def cmd_skill_install():
     """Install beacon Claude Code Skills into ~/.claude/skills/, update CLAUDE.md, and configure hooks."""
     import shutil
+    from pathlib import Path
+    converter_target = os.environ.get("BEACON_SKILL_TARGET", "").strip()
+    converter_name = os.environ.get("BEACON_SKILL_NAME", "").strip()
+    if converter_target or converter_name:
+        from skill_converter import (
+            SkillConversionError,
+            install_skill,
+            prune_skill,
+            resolve_canonical_root,
+        )
+
+        if not converter_target or not converter_name:
+            print("Error: converter install requires both --target and --name", file=sys.stderr)
+            sys.exit(2)
+        targets = ("claude", "codex") if converter_target == "both" else (converter_target,)
+        try:
+            common = {
+                "targets": targets,
+                "home": Path(_user_home()),
+                "dry_run": os.environ.get("BEACON_DRY_RUN") == "1",
+                "force": os.environ.get("BEACON_FORCE") == "1",
+            }
+            if os.environ.get("BEACON_PRUNE") == "1":
+                if os.environ.get("BEACON_ADOPT") == "1":
+                    raise SkillConversionError("--prune and --adopt are mutually exclusive")
+                results = prune_skill(converter_name, **common)
+            else:
+                results = install_skill(
+                    resolve_canonical_root() / converter_name,
+                    adopt=os.environ.get("BEACON_ADOPT") == "1",
+                    **common,
+                )
+        except SkillConversionError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if os.environ.get("BEACON_JSON") == "1":
+            print(json.dumps(results, ensure_ascii=False))
+        else:
+            for result in results:
+                print(
+                    f"{result['target']}: {result['action']} "
+                    f"{result['destination']}"
+                )
+                for warning in result.get("warnings", []):
+                    print(f"  warning: {warning}")
+        return
+
     _append_claude_md()
 
     skills_src = _resolve_skills_src()
@@ -15667,6 +16123,15 @@ def cmd_help_json():
         {"command": "beacon trek join <trek-id>", "flags": ["--json"], "description": "Accept own invitation"},
         {"command": "beacon trek leave <trek-id>", "flags": ["--json"], "description": "Remove self from the trek (leader must transfer first)"},
         {"command": "beacon trek plan <trek-id>", "flags": ["--add-scope <project:ref>", "--remove-scope <project:ref>", "--goal-state <criterion>", "--json"], "description": "Edit trek scope or goal_state (ms-75/e-1865)"},
+        {"command": "beacon trek scope-add <trek-id>", "flags": ["--project <pid>", "--milestone <ms-id>", "--operation <op-id>", "--task <e-id>", "--json"], "description": "Canonical scope-add verb (= flag-style alias of plan --add-scope, ms-97/AC23 e-2626)"},
+        {"command": "beacon trek scope-approve <trek-id> <pending-id>", "flags": ["--json"], "description": "Commit a staged scope op (= apply add or remove, ms-97/AC25 e-2611)"},
+        {"command": "beacon trek scope-reject <trek-id> <pending-id>", "flags": ["--json"], "description": "Drop a staged scope op (ms-97/AC25)"},
+        {"command": "beacon trek blanket-approve <trek-id> --category <cat>", "flags": ["--json"], "description": "Pre-approve scope-add for a category (ms-97/AC24 e-2603). Category: operation | milestone | task | project:<pid> | milestone:<ms-id>"},
+        {"command": "beacon trek blanket-revoke <trek-id> --category <cat>", "flags": ["--json"], "description": "Drop a blanket pre-approval (ms-97/AC24)"},
+        {"command": "beacon trek slot add <trek-id>", "flags": ["--project <pid>", "--milestone <ms-id>", "--task <e-id>", "--operation <op-id>", "--children e-A,e-B", "--json"], "description": "(ms-99/e-2829) Stage a slot-add with a fresh sl-<8hex> id"},
+        {"command": "beacon trek slot amend <trek-id> <slot-id>", "flags": ["--add-child <e-id>", "--remove-child <e-id>", "--json"], "description": "(ms-99/e-2829) Stage a child-list edit on an existing MS slot"},
+        {"command": "beacon trek slot claim <trek-id> <slot-id>", "flags": ["--session <sid>", "--unclaim", "--json"], "description": "(ms-99/e-2829) Stage a claim stamp (state-free, SPEC 方針 4)"},
+        {"command": "beacon trek slot list <trek-id>", "flags": ["--json"], "description": "(ms-99/e-2829) Materialise slot rows for the trek"},
         {"command": "beacon trek stop <trek-id>", "flags": ["--reason <text>", "--json"], "description": "Pull the Andon cord (= halt signal, sessions pause)"},
         {"command": "beacon trek resume <trek-id>", "flags": ["--json"], "description": "Clear the halt signal"},
         {"command": "beacon trek transfer-leader <trek-id> --to <session-id>", "flags": ["--json"], "description": "Hand off leader_session_id to another session"},
@@ -19723,6 +20188,11 @@ if __name__ == "__main__":
         # ms-97 / e-2611 AC25 — scope mutation approval flow.
         "trek_scope_approve": cmd_trek_scope_approve,
         "trek_scope_reject": cmd_trek_scope_reject,
+        # ms-99 / e-2829 — slot verbs (schema v2).
+        "trek_slot_add": cmd_trek_slot_add,
+        "trek_slot_amend": cmd_trek_slot_amend,
+        "trek_slot_claim": cmd_trek_slot_claim,
+        "trek_slot_list": cmd_trek_slot_list,
         # ms-97 / Phase 7-C / AC24 — blanket pre-approval (e-2603).
         "trek_blanket_approve": cmd_trek_blanket_approve,
         "trek_blanket_revoke": cmd_trek_blanket_revoke,

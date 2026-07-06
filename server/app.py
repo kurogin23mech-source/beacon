@@ -662,6 +662,46 @@ def _resolve_canonical_project_id(
     return None
 
 
+def _canonicalise_trek_scope_projects_in_place(trek_doc: dict) -> None:
+    """Rewrite ``trek_doc["scope"][*]["project"]`` to the canonical full
+    project_id when the scope entry carries a slug.
+
+    ms-99 / e-2833 — the Phase 2 scheduler's tick decision predicates
+    read the slot inventory via ``materialize_slots(trek_doc, get_project=...)``,
+    which calls ``get_project`` with each scope entry's ``project``
+    value verbatim. If a CLI stored the slug (= ``profile-extractor``
+    rather than ``profile-extractor-276d28``), ``db.get_project`` returns
+    None and every MS slot resolves to ``("todo", "unstamped")`` —
+    silently misfiring both the leader digest gate and the aggregate-
+    terminal quiesce path. This helper closes the gap by resolving each
+    scope entry against the leader user's project list and rewriting
+    the ``project`` field to the full id in place before the tick's
+    predicates run.
+
+    No-op for scope entries whose project already resolves via the
+    fast path (= ``db.get_project`` returns non-None). Unresolvable
+    slugs are left untouched so downstream code observes the exact
+    graceful-degradation behaviour pre-fix.
+    """
+    scope = trek_doc.get("scope") or []
+    if not scope:
+        return
+    leader_user_id = ""
+    for m in trek_doc.get("members") or []:
+        if (m.get("role") or "") == "leader" and m.get("user_id"):
+            leader_user_id = m.get("user_id") or ""
+            break
+    if not leader_user_id:
+        return
+    for entry in scope:
+        raw = (entry.get("project") or "").strip()
+        if not raw:
+            continue
+        resolved = _resolve_canonical_project_id(raw, user_id=leader_user_id)
+        if resolved and resolved != raw:
+            entry["project"] = resolved
+
+
 def _resolve_trek_scope_project_ids(trek_doc: dict) -> list[str]:
     """Resolve every project in ``trek_doc.scope[]`` to canonical full ids.
 
@@ -3692,6 +3732,27 @@ class TrekScopeOp(BaseModel):
     task: Optional[str] = None
 
 
+# ms-99 / e-2830 — Trek slot schema v2 body models. Slot-specific verbs
+# (add / amend / claim) carry different payloads: add is a scope entry +
+# optional children opt-in; amend edits child list; claim stamps a
+# session id (or clears it via ``session_id=""``).
+class TrekSlotAdd(BaseModel):
+    project: str
+    milestone: Optional[str] = None
+    operation: Optional[str] = None
+    task: Optional[str] = None
+    included_task_ids: Optional[list[str]] = None
+
+
+class TrekSlotAmend(BaseModel):
+    add_children: list[str] = []
+    remove_children: list[str] = []
+
+
+class TrekSlotClaim(BaseModel):
+    session_id: str = ""  # empty string = unclaim gesture (SPEC 方針 4)
+
+
 class TrekTaskStateSet(BaseModel):
     """ms-75 / e-2048 — Trek-internal task state declaration.
 
@@ -3830,6 +3891,38 @@ def _load_trek_for_read(
     if _trek_find_member_dual(t, user_id=uid, session_id=caller_sid) is not None:
         return t
     raise HTTPException(status_code=403, detail="Not a member of this trek")
+
+
+def _reject_if_trek_archived(t: dict) -> None:
+    """Return 410 Gone when the Trek has been archived (ms-95 / e-2875).
+
+    Defense-in-depth guard for write endpoints. After a Trek is archived
+    the server tick stops firing new progress-check events, but events
+    already in the bus (fired shortly before archive) can still reach
+    executor sessions. Without this guard, executors invoke Skills that
+    POST pulse-ack / task-state / task-add to the archived Trek, which
+    then generates peer DM traffic and keeps the executor loop alive for
+    several minutes after the leader has left the room. The
+    client-side inbox-hook drops archived-trek events before Skill
+    invocation on updated bridges; this server guard closes the same
+    hole for pre-fix bridges (= two layers, either alone suffices).
+
+    Applied to state-mutating executor / leader endpoints:
+    pulse-ack, task-state, task-add, kickoff, extend-ttl,
+    session-heartbeat. Read endpoints and the archive transition itself
+    (= mutates status → archived) are exempt.
+
+    Reference: 2026-07-03 tk-29a11d2f archive dogfood, 5-10 minutes of
+    residual peer DM noise after archive; SPEC e-2875 Done when.
+    """
+    if t.get("status") == "archived":
+        raise HTTPException(
+            status_code=410,
+            detail=(
+                f"Trek '{t.get('trek_id') or ''}' is archived; "
+                f"writes rejected (ms-95 / e-2875)"
+            ),
+        )
 
 
 def _trek_member_role(
@@ -4752,6 +4845,216 @@ def reject_trek_scope_op_endpoint(trek_id: str, pending_id: str,
     return t
 
 
+# ---------------------------------------------------------------------------
+# ms-99 / e-2830 — Trek slot schema v2 endpoints (SPEC 方針 6)
+# ---------------------------------------------------------------------------
+# Four endpoints mirror the four CLI verbs. All go through the same
+# ``pending_scope_ops`` queue so AC 15 ("all slot ops via staging")
+# holds server-side too — the actual mutation on ``scope[]`` still
+# lands via ``scope-approve``.
+#
+# Shape validation (AC 14) surfaces as HTTP 400 (bad request) for
+# malformed input distinct from HTTP 404 (slot not found) and HTTP 409
+# (duplicate scope entry). The audit log carries the new
+# ``action="slot_<verb>_pending"`` / ``"slot_<verb>_approved"`` markers
+# so Cloud Logging can filter by verb.
+
+
+@app.post("/api/treks/{trek_id}/slots")
+def add_trek_slot_endpoint(trek_id: str, body: TrekSlotAdd,
+                           request: Request,
+                           user: dict = Depends(require_auth)):
+    """Stage a slot-add pending op with a fresh ``sl-<8 hex>`` id.
+
+    ms-99 / e-2830 (SPEC 方針 6 + AC 14): shape validation runs
+    server-side so malformed calls surface HTTP 400 rather than 409
+    "already present". Successful staging returns the trek doc plus a
+    ``pending_op`` record — same envelope shape as the scope-add
+    endpoint so cross-verb clients can read the id uniformly.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    # Resolve short project names (= "life-plan-simulator") to canonical
+    # suffixed ids at the boundary, matching add_trek_scope_endpoint.
+    requesting_user_id = (user.get("sub") or "").strip()
+    canonical_pid = body.project
+    if requesting_user_id:
+        resolved = _resolve_canonical_project_id(
+            body.project, user_id=requesting_user_id,
+        )
+        if resolved:
+            canonical_pid = resolved
+    entry: dict = {"project": canonical_pid}
+    if body.milestone:
+        entry["milestone"] = body.milestone
+    if body.operation:
+        entry["operation"] = body.operation
+    if body.task:
+        entry["task"] = body.task
+    # Reject empty narrowing at 400 (= same policy as add_trek_scope but
+    # with the v2 slot verb error message). ``included_task_ids`` on a
+    # task/op slot is meaningless — refuse politely.
+    narrowing = [k for k in ("milestone", "operation", "task") if entry.get(k)]
+    if len(narrowing) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "slot add requires one narrowing key: milestone | operation "
+                "| task (= slot must narrow the project, ms-97 AC7)"
+            ),
+        )
+    if len(narrowing) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "slot add accepts exactly one of milestone / operation / task"
+            ),
+        )
+    if body.included_task_ids is not None:
+        if "milestone" not in entry:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "included_task_ids is only valid on milestone slots "
+                    "(SPEC 方針 2: MS slot child opt-in)"
+                ),
+            )
+        entry["included_task_ids"] = list(body.included_task_ids)
+    sid = ""
+    try:
+        sid = request.headers.get("X-Beacon-Session", "") or ""
+    except Exception:
+        sid = ""
+    try:
+        rec = trek_mod.add_pending_scope_op(
+            t,
+            action=trek_mod.PENDING_SCOPE_ACTION_ADD,
+            entry=entry,
+            requested_by_session_id=sid,
+            mint_slot=True,
+        )
+    except ValueError as e:
+        # normalize_scope_entry ValueError = shape violation → 400
+        msg = str(e)
+        if "already present" in msg or "already exists" in msg:
+            raise HTTPException(status_code=409, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
+    db.save_trek(trek_id, t)
+    _log_trek_scope_audit(
+        action="slot_add_pending", trek_id=trek_id, user=user,
+        request=request, entry=entry,
+    )
+    out = dict(t)
+    out["pending_op"] = rec
+    return out
+
+
+@app.patch("/api/treks/{trek_id}/slots/{slot_id}")
+def amend_trek_slot_endpoint(trek_id: str, slot_id: str,
+                             body: TrekSlotAmend, request: Request,
+                             user: dict = Depends(require_auth)):
+    """Stage a slot-amend pending op (edit ``included_task_ids``).
+
+    ms-99 / e-2830: 404 when the slot doesn't exist, 400 when the
+    request would be a no-op (= neither add_children nor
+    remove_children given). Applying the amend materialises legacy
+    null semantics to an explicit list at approve time (SPEC AC 4).
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    if not body.add_children and not body.remove_children:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "slot amend requires at least one add_children or "
+                "remove_children entry"
+            ),
+        )
+    sid = ""
+    try:
+        sid = request.headers.get("X-Beacon-Session", "") or ""
+    except Exception:
+        sid = ""
+    try:
+        rec = trek_mod.add_pending_slot_amend_op(
+            t,
+            slot_id=slot_id,
+            add_children=list(body.add_children),
+            remove_children=list(body.remove_children),
+            requested_by_session_id=sid,
+        )
+    except ValueError as e:
+        msg = str(e)
+        if "slot not found" in msg:
+            raise HTTPException(status_code=404, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
+    db.save_trek(trek_id, t)
+    _log_trek_scope_audit(
+        action="slot_amend_pending", trek_id=trek_id, user=user,
+        request=request, entry={"slot_id": slot_id,
+                                "add": rec.get("add_children") or [],
+                                "remove": rec.get("remove_children") or []},
+    )
+    out = dict(t)
+    out["pending_op"] = rec
+    return out
+
+
+@app.post("/api/treks/{trek_id}/slots/{slot_id}/claim")
+def claim_trek_slot_endpoint(trek_id: str, slot_id: str,
+                             body: TrekSlotClaim, request: Request,
+                             user: dict = Depends(require_auth)):
+    """Stage a slot-claim pending op (stamp ``claim_session_id``).
+
+    ms-99 / e-2830 (SPEC 方針 4): claim never changes task state.
+    ``session_id=""`` is the unclaim gesture — it clears the fields
+    when approved. 404 when the slot doesn't exist.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    requested_by = ""
+    try:
+        requested_by = request.headers.get("X-Beacon-Session", "") or ""
+    except Exception:
+        requested_by = ""
+    try:
+        rec = trek_mod.add_pending_slot_claim_op(
+            t,
+            slot_id=slot_id,
+            session_id=body.session_id or "",
+            requested_by_session_id=requested_by,
+        )
+    except ValueError as e:
+        msg = str(e)
+        if "slot not found" in msg:
+            raise HTTPException(status_code=404, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
+    db.save_trek(trek_id, t)
+    verb = "unclaim" if not body.session_id else "claim"
+    _log_trek_scope_audit(
+        action=f"slot_{verb}_pending", trek_id=trek_id, user=user,
+        request=request, entry={"slot_id": slot_id,
+                                "session_id": body.session_id or ""},
+    )
+    out = dict(t)
+    out["pending_op"] = rec
+    return out
+
+
+@app.get("/api/treks/{trek_id}/slots")
+def list_trek_slots_endpoint(trek_id: str,
+                             user: dict = Depends(require_auth)):
+    """Return the materialize slot view of the trek (Phase 1 projection).
+
+    ms-99 / e-2830: any authed viewer can list; membership isn't
+    required for read since ``GET /api/treks/{id}`` (the parent trek
+    doc) already permits the same audience.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    rows = trek_mod.materialize_slot_view(t)
+    return {"trek_id": trek_id, "slots": rows}
+
+
 @app.put("/api/treks/{trek_id}/halt")
 def set_trek_halt_endpoint(trek_id: str, body: TrekHaltSet,
                            user: dict = Depends(require_auth)):
@@ -5050,6 +5353,7 @@ def trek_kickoff_endpoint(trek_id: str, body: TrekKickoff,
     echo "stamped" back to the user.
     """
     t = _load_trek_for_read(trek_id, user)
+    _reject_if_trek_archived(t)
     if _auth_enabled:
         uid = user.get("sub") or ""
         if not trek_mod.find_member(t, user_id=uid):
@@ -5207,6 +5511,7 @@ def trek_pulse_ack_endpoint(trek_id: str, body: TrekPulseAck,
     Skill can echo the recorded state back to the user.
     """
     t = _load_trek_for_read(trek_id, user)
+    _reject_if_trek_archived(t)
     if _auth_enabled:
         uid = user.get("sub") or ""
         if not trek_mod.find_member(t, user_id=uid):
@@ -5292,6 +5597,7 @@ def extend_trek_task_ttl_endpoint(trek_id: str, body: TrekExtendTtl,
     can echo the new ``ttl_extended_until`` back to the user.
     """
     t = _load_trek_for_read(trek_id, user)
+    _reject_if_trek_archived(t)
     if _auth_enabled:
         uid = user.get("sub") or ""
         if not trek_mod.find_member(t, user_id=uid):
@@ -5358,6 +5664,7 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
     on behalf of the work they performed.
     """
     t = _load_trek_for_read(trek_id, user, request)
+    _reject_if_trek_archived(t)
     # Member check. Determine the calling session_id (best-effort —
     # bridges include X-Beacon-Session header; CLI/curl callers may
     # omit it). ms-97 / e-2658 Phase 1 (AC6) — phase A+ trek の時は
@@ -5411,6 +5718,17 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # ms-99 / e-2834 — clear quiesce marks when a state transitions OUT
+    # of terminal. This lets the next quiesce lifecycle fire a fresh DM
+    # (= AC "per-quiesce 1 回だけ" is per lifecycle, not per lifetime).
+    # The mark stamping happens in the scheduler tick's quiesce branch;
+    # here we only reset when a resume-like transition lands.
+    if body.state not in trek_mod.TERMINAL_TASK_STATES:
+        meta_after = t.setdefault("meta", {})
+        if meta_after.get("quiesced_at"):
+            meta_after["quiesced_at"] = None
+            meta_after["quiesce_notified_at"] = None
+            meta_after["quiesce_reason"] = None
     db.save_trek(trek_id, t)
     # If the new state is terminal, fan out a review-required notice to
     # the leader. The leader's review Skill (/beacon-trek-review)
@@ -5543,6 +5861,7 @@ def add_trek_task_endpoint(
         enforcement; task-level scope entries don't sprout sideways)
     """
     t = _load_trek_for_read(trek_id, user)
+    _reject_if_trek_archived(t)
     user_id = user.get("sub") or ""
     if _auth_enabled and not trek_mod.find_member(t, user_id=user_id):
         raise HTTPException(
@@ -6842,6 +7161,7 @@ def trek_session_heartbeat(
 ):
     """Stamp the trek's last_session_response_at (ms-83 / e-2001)."""
     t = _load_trek_for_read(trek_id, user)
+    _reject_if_trek_archived(t)
     _require_trek_joined_member(t, user)
     import datetime
     now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
@@ -6914,13 +7234,15 @@ def _build_executor_targets_user_grain(
             # from progress-check (= CORE doc trek-leader-stance /
             # e-2166: leader's role is review, not pickup).
             continue
-        # ms-95 / e-2644 — fanout 評価は **snapshot** ベース
-        # (= 同 tick 内で stall transition が走っても claim を喪失
-        # しない、 dogfood findings § #19 構造的対策)。
-        if not trek_scheduler_mod.should_fire_executor_tick(
-            fanout_trek_doc, session_id=sid,
-        ):
-            continue
+        # ms-97 / e-2815 (2026-07-03) — lazy-start gate 撤廃。 以前は
+        # ``should_fire_executor_tick`` で 「Trek 内 claim を持たない
+        # executor は fire しない」 と絞っていたが、 実運用で 「Trek scope
+        # は MS-level bind、 実装は project pool 側 (Trek 未 bind) で走る」
+        # ケースが主流のため、 大多数の executor が silent に skip され
+        # 「Trek scheduler → executor」 経路が事実上死ぬ dogfood 事故に
+        # なった。 Trek 哲学 (= server tick = PM、 executor に周期的に
+        # progress-check を投げる) を invariant として復元するため、
+        # members[] 内の全 non-leader session を無条件に対象化する。
         targets.append({
             "session_id": sid,
             "home_project_id": info["home_project_id"],
@@ -7049,19 +7371,15 @@ def _build_executor_targets_session_grain(
                 file=sys.stderr,
             )
             continue
-        # Lazy-start gate (= AC33).
-        if not trek_scheduler_mod.should_fire_executor_tick(
-            fanout_trek_doc, session_id=msid,
-        ):
-            print(
-                f"diag[ms-97 e-2660 AC16] trek={trek_id_for_log} "
-                f"sid={msid} skipped: "
-                f"should_fire_executor_tick=False",
-                file=sys.stderr,
-            )
-            continue
+        # ms-97 / e-2815 (2026-07-03) — lazy-start gate 撤廃 (旧 AC33)。
+        # 「Trek scope 内 task-level bind が無いと should_fire_executor_tick
+        # が False を返し、 fresh executor が silent skip される」 dogfood
+        # 事故 (LPS session が phase 1 実装 done 後も digest 不可視、
+        # scheduler → executor 経路が完全停止) を受けて、 member[] 内の
+        # 全 non-leader session を無条件に progress-check 対象にする。
+        # 詳細: ms-97 e-2815 SPEC + user_grain 側 (line ~6912) 同期修正。
         print(
-            f"diag[ms-97 e-2660 AC16] trek={trek_id_for_log} "
+            f"diag[ms-97 e-2815 AC] trek={trek_id_for_log} "
             f"sid={msid} kept: home_pid={resolved_pid}",
             file=sys.stderr,
         )
@@ -7278,14 +7596,111 @@ def trek_scheduler_tick_endpoint(
         # with no stamped states is NOT terminal — the scheduler still
         # fires obligation DMs to wake an executor that has not yet
         # declared anything (= pre-state-machine compatible).
-        if trek_scheduler_mod.is_trek_task_aggregate_terminal(trek_doc):
+        # ms-99 / e-2833 — canonicalise scope BEFORE the terminal check so
+        # ``materialize_slots`` can resolve pool for slug-stored scope.
+        # (Already done above; the call is idempotent so a second call here
+        # would also be safe. We rely on the above canonicalisation.)
+        if trek_scheduler_mod.is_trek_task_aggregate_terminal(
+            trek_doc, get_project=db.get_project,
+        ):
+            # ms-99 / e-2834 — quiesce observability trio.
+            #
+            # (1) Cloud Run stderr emits a diag[ms-99] line so operators
+            #     can grep "who quiesced when" without cross-referencing
+            #     the trek doc. Written unconditionally per tick.
+            # (2) The trek doc's meta stamps ``quiesced_at`` (first-hit
+            #     timestamp, never overwritten) and ``quiesce_reason``
+            #     (may re-stamp as the reason space grows).
+            # (3) The leader session receives one DM per quiesce lifecycle
+            #     (= dedup via ``meta.quiesce_notified_at``). The DM
+            #     carries the reason + trek id so the leader-side Skill
+            #     can render a "your Trek has quiesced" notice without
+            #     polling.
+            #
+            # This closes the CORE doc 5nfTSmCDVUzD4SLzIhI5 "observable
+            # ack" gap: pre-e-2834 quiesce was semantically significant
+            # but structurally silent — dogfood consumers were left to
+            # infer it from the absence of DMs, which the silent-quiesce
+            # dogfood (2026-07-03) proved was unreliable.
+            quiesce_reason = "task_state_aggregate_terminal"
+            meta = trek_doc.setdefault("meta", {})
+            print(
+                f"diag[ms-99 e-2834] trek={trek_id} quiesced "
+                f"reason={quiesce_reason} "
+                f"already_stamped={bool(meta.get('quiesced_at'))} "
+                f"already_notified={bool(meta.get('quiesce_notified_at'))}",
+                file=sys.stderr,
+            )
+            now_iso = trek_mod.utcnow_iso()
+            if not meta.get("quiesced_at"):
+                meta["quiesced_at"] = now_iso
+            meta["quiesce_reason"] = quiesce_reason
+            # Emit the per-quiesce leader DM iff we have not yet done so
+            # for this quiesce lifecycle. The stamp is cleared when the
+            # trek transitions back to non-terminal (= a task moves out
+            # of terminal state) via the same PATCH endpoint that stamped
+            # the terminal state; see ``clear_quiesce_marks_on_resume``.
+            if not meta.get("quiesce_notified_at"):
+                leader_sid = trek_doc.get("leader_session_id") or ""
+                quiesce_scope_pids = _resolve_trek_scope_project_ids(trek_doc)
+                if leader_sid and quiesce_scope_pids:
+                    quiesce_target_pid = quiesce_scope_pids[0]
+                    try:
+                        quiesce_envelope = (
+                            envelope_mod.issue_t1_system_envelope(
+                                project_id=quiesce_target_pid,
+                                trek_id=trek_id,
+                                actions_authorized=["trek.quiesce_notify"],
+                                data_class="free",
+                                ttl_seconds=3600,
+                            )
+                        )
+                        quiesce_payload = {
+                            "kind": "trek-quiesced",
+                            "trek_id": trek_id,
+                            "recipient_session_id": leader_sid,
+                            "sender_type": "trek-scheduler",
+                            "origin_channel": "trek-leader-digest",
+                            "reason": quiesce_reason,
+                            "quiesced_at": meta["quiesced_at"],
+                            "body": (
+                                f"[Trek quiesced] trek_id={trek_id}\n"
+                                "Trek scope 内の全 slot が terminal state "
+                                "(= done / user_review) に到達しました "
+                                "(= AI 自律実行完了)。 leader review "
+                                "(= /beacon-trek-review) で archive 判断、 "
+                                "もしくは scope 追加 task の投入を "
+                                "決めてください。\n"
+                                f"reason: {quiesce_reason}"
+                            ),
+                        }
+                        db.append_bus_event(quiesce_target_pid, {
+                            "channel": "dm",
+                            "sender_session_id": "",
+                            "payload": quiesce_payload,
+                            "envelope": quiesce_envelope,
+                            "delivery": "auto-execute",
+                            "created_at": now_iso,
+                        })
+                        # Only stamp the notified marker on a successful
+                        # append so a transient failure retries next tick.
+                        meta["quiesce_notified_at"] = now_iso
+                    except Exception as exc:  # noqa: BLE001
+                        # Best-effort: log the failure but continue with
+                        # the quiesce flow. Absence of quiesce_notified_at
+                        # means next tick will retry emission.
+                        print(
+                            f"diag[ms-99 e-2834] trek={trek_id} "
+                            f"quiesce_dm_failed: "
+                            f"{type(exc).__name__}: {exc}",
+                            file=sys.stderr,
+                        )
             quiesced.append({
                 "trek_id": trek_id,
-                "reason": "task_state_aggregate_terminal",
+                "reason": quiesce_reason,
             })
             # Still stamp last_progress_check_at so the next cadence
             # window does not re-flag this trek as "never fired".
-            meta = trek_doc.setdefault("meta", {})
             meta["last_progress_check_at"] = now.strftime(
                 "%Y-%m-%dT%H:%M:%S.%fZ"
             )
@@ -7321,6 +7736,14 @@ def trek_scheduler_tick_endpoint(
                 "error": "scope_entry_missing_project",
             })
             continue
+        # ms-99 / e-2833 — canonicalise trek_doc.scope in place so
+        # ``materialize_slots`` (= called via the tick decision predicates
+        # below) looks the project pool up under the full id rather than
+        # the raw slug the CLI may have stored. Without this rewrite,
+        # ``get_project`` sees the slug, returns None, and every MS slot
+        # collapses to ``("todo", "unstamped")`` — the exact false-quiesce
+        # / false-fire pathway that broke tk-29a11d2f dogfood.
+        _canonicalise_trek_scope_projects_in_place(trek_doc)
         # Audit-surface project_id (= back-compat for the dashboard /
         # observability consumers that already key off the legacy
         # single-project field). The dm fanout itself addresses each
@@ -7786,12 +8209,16 @@ def trek_scheduler_tick_endpoint(
         # fanout 成功後に ``meta.completion_notified_at`` を stamp して
         # 二度目の fire を構造的に防ぐ。
         completion_ready_now = (
-            trek_scheduler_mod.is_completion_ready(fanout_trek_doc)
+            trek_scheduler_mod.is_completion_ready(
+                fanout_trek_doc, get_project=db.get_project,
+            )
         )
         leader_should_fire = (
             (not leader_halted_by_summary)
             and (
-                trek_scheduler_mod.should_fire_leader_tick(fanout_trek_doc)
+                trek_scheduler_mod.should_fire_leader_tick(
+                    fanout_trek_doc, get_project=db.get_project,
+                )
                 or completion_ready_now
             )
         )
@@ -9592,7 +10019,18 @@ async def _broadcast_bus_event(project_id: str, event: dict):
     clients = _ws_connections.get(project_id, set()).copy()
     if not clients:
         return
-    msg = {"type": "bus_event", "data": event}
+    # ms-97 P1 (= review finding H1): signal-only. Broadcasting the full event
+    # over the WS leaked the DM body / sender / envelope to *every* project
+    # subscriber — including bridges (e-2380 WS push) and the Web UI —
+    # regardless of who the DM was addressed to, and even for events the ms-70
+    # gate parked as ``pending``. The frame now carries only a wake hint
+    # (event_id); every receiver re-fetches via the REST inbox, which already
+    # applies the per-recipient ``_bus_event_addressed_to`` filter + DM payload
+    # redaction (ms-93 / e-2275). Same posture the project_changed /
+    # document_change frames took in ms-84 / e-2326. Any field added here in
+    # future MUST stay non-sensitive routing metadata — never payload /
+    # sender_session_id / envelope.
+    msg = {"type": "bus_event", "event_id": event.get("event_id")}
     for ws in clients:
         try:
             await ws.send_json(msg)

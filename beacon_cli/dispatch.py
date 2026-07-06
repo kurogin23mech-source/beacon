@@ -879,6 +879,49 @@ def build_parser() -> argparse.ArgumentParser:
     p_trek_extend.add_argument("--reason", default="")
     p_trek_extend.add_argument("--json", action="store_true")
 
+    # ms-99 / e-2829 — slot verbs (nested subcommand). Trek scope entries
+    # become first-class slots under Trek schema v2; the four CLI verbs
+    # (add / amend / claim / list) all flow through the pending_scope_ops
+    # queue so AC 15 (= all slot CLI ops via staging) holds.
+    p_trek_slot = trek_sub.add_parser("slot", add_help=False)
+    slot_sub = p_trek_slot.add_subparsers(dest="slot_cmd", metavar="<subcmd>")
+
+    p_slot_add = slot_sub.add_parser("add", add_help=False)
+    p_slot_add.add_argument("trek_id", nargs="?", default="")
+    p_slot_add.add_argument("--project", dest="slot_project", default="")
+    p_slot_add.add_argument("--milestone", "--ms", dest="slot_milestone",
+                            default="")
+    p_slot_add.add_argument("--operation", "--op", dest="slot_operation",
+                            default="")
+    p_slot_add.add_argument("--task", "--e", dest="slot_task", default="")
+    # ``--children e-A,e-B`` — MS slot opt-in child list. Comma-separated
+    # so scriptable; empty string = legacy null (= all-include).
+    p_slot_add.add_argument("--children", dest="slot_children", default="")
+    p_slot_add.add_argument("--json", action="store_true")
+
+    p_slot_amend = slot_sub.add_parser("amend", add_help=False)
+    p_slot_amend.add_argument("trek_id", nargs="?", default="")
+    p_slot_amend.add_argument("slot_id", nargs="?", default="")
+    p_slot_amend.add_argument("--add-child", dest="slot_add_child",
+                              action="append", default=[])
+    p_slot_amend.add_argument("--remove-child", dest="slot_remove_child",
+                              action="append", default=[])
+    p_slot_amend.add_argument("--json", action="store_true")
+
+    p_slot_claim = slot_sub.add_parser("claim", add_help=False)
+    p_slot_claim.add_argument("trek_id", nargs="?", default="")
+    p_slot_claim.add_argument("slot_id", nargs="?", default="")
+    # ``--session <sid>`` overrides the resolved session; empty string
+    # via ``--unclaim`` clears the claim.
+    p_slot_claim.add_argument("--session", dest="slot_session", default="")
+    p_slot_claim.add_argument("--unclaim", dest="slot_unclaim",
+                              action="store_true")
+    p_slot_claim.add_argument("--json", action="store_true")
+
+    p_slot_list = slot_sub.add_parser("list", add_help=False)
+    p_slot_list.add_argument("trek_id", nargs="?", default="")
+    p_slot_list.add_argument("--json", action="store_true")
+
     # ---- doctor / project / help ----
     sub.add_parser("doctor", add_help=False)
     p_project = sub.add_parser("project", add_help=False)
@@ -898,6 +941,12 @@ def build_parser() -> argparse.ArgumentParser:
     skill_sub = p_skill.add_subparsers(dest="skill_cmd", metavar="<subcmd>")
     p_skill_install = skill_sub.add_parser("install", add_help=False)
     p_skill_install.add_argument("--force", action="store_true")
+    p_skill_install.add_argument("--adopt", action="store_true")
+    p_skill_install.add_argument("--dry-run", action="store_true", dest="dry_run")
+    p_skill_install.add_argument("--prune", action="store_true")
+    p_skill_install.add_argument("--json", action="store_true")
+    p_skill_install.add_argument("--target", choices=("claude", "codex", "both"), default="")
+    p_skill_install.add_argument("--name", default="")
     p_skill_install.add_argument("--settings-path", dest="settings_path", default="")
 
     # ---- session id (ms-54 e-1150 / e-1152 / ms-44 e-1171) ----
@@ -2353,6 +2402,13 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
             "(= commit staged op, ms-97 / AC25)\n"
             "  scope-reject  <trek-id> <pending-id>   "
             "(= drop staged op, ms-97 / AC25)\n"
+            "  slot add   <trek-id> --project <pid> "
+            "--milestone|--task|--operation <id> [--children e-A,e-B]\n"
+            "  slot amend <trek-id> <slot-id> "
+            "[--add-child <e-id> ...] [--remove-child <e-id> ...]\n"
+            "  slot claim <trek-id> <slot-id> [--session <sid> | --unclaim]\n"
+            "  slot list  <trek-id> [--json]   "
+            "(= materialize view, ms-99 / e-2829)\n"
             "  timeline <trek-id> [--limit N] [--json]   "
             "(= chronological view)\n"
             "  stop <trek-id> [--reason \"...\"]    (= Andon cord、halt 信号)\n"
@@ -2601,6 +2657,67 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
                 "BEACON_JSON": json_env,
             },
         )
+    # ms-99 / e-2829 — slot verbs (nested subcommand). All four flow
+    # through commands.py so the same code path serves bash and pipx
+    # front-ends.
+    if cmd == "slot":
+        slot_cmd = getattr(args, "slot_cmd", None) or ""
+        if not slot_cmd:
+            print(
+                "Usage: beacon trek slot <add|amend|claim|list> [args]",
+                file=sys.stderr,
+            )
+            return 2
+        if slot_cmd == "add":
+            return _run_commands_py(
+                root, "trek_slot_add",
+                {
+                    "BEACON_TREK_ID": args.trek_id or "",
+                    "BEACON_SLOT_PROJECT": getattr(args, "slot_project", "") or "",
+                    "BEACON_SLOT_MILESTONE": getattr(args, "slot_milestone", "") or "",
+                    "BEACON_SLOT_OPERATION": getattr(args, "slot_operation", "") or "",
+                    "BEACON_SLOT_TASK": getattr(args, "slot_task", "") or "",
+                    "BEACON_SLOT_CHILDREN": getattr(args, "slot_children", "") or "",
+                    "BEACON_JSON": json_env,
+                },
+            )
+        if slot_cmd == "amend":
+            add_children = getattr(args, "slot_add_child", []) or []
+            remove_children = getattr(args, "slot_remove_child", []) or []
+            return _run_commands_py(
+                root, "trek_slot_amend",
+                {
+                    "BEACON_TREK_ID": args.trek_id or "",
+                    "BEACON_SLOT_ID": getattr(args, "slot_id", "") or "",
+                    "BEACON_SLOT_ADD_CHILDREN": ",".join(add_children),
+                    "BEACON_SLOT_REMOVE_CHILDREN": ",".join(remove_children),
+                    "BEACON_JSON": json_env,
+                },
+            )
+        if slot_cmd == "claim":
+            return _run_commands_py(
+                root, "trek_slot_claim",
+                {
+                    "BEACON_TREK_ID": args.trek_id or "",
+                    "BEACON_SLOT_ID": getattr(args, "slot_id", "") or "",
+                    "BEACON_SLOT_SESSION": getattr(args, "slot_session", "") or "",
+                    "BEACON_SLOT_UNCLAIM": "1" if getattr(args, "slot_unclaim", False) else "",
+                    "BEACON_JSON": json_env,
+                },
+            )
+        if slot_cmd == "list":
+            return _run_commands_py(
+                root, "trek_slot_list",
+                {
+                    "BEACON_TREK_ID": args.trek_id or "",
+                    "BEACON_JSON": json_env,
+                },
+            )
+        print(
+            f"Error: unknown slot subcommand {slot_cmd!r}",
+            file=sys.stderr,
+        )
+        return 2
     return 1
 
 
@@ -3052,7 +3169,7 @@ def _handle_skill(root: Path, args: argparse.Namespace) -> int:
     path stays env-superset-compatible.
     """
     if args.show_help or args.skill_cmd is None:
-        print("Usage: beacon skill install [--force] [--settings-path PATH]")
+        print("Usage: beacon skill install [--target claude|codex|both --name NAME] [--dry-run] [--prune] [--force|--adopt]")
         return 0 if args.show_help else 2
     if args.skill_cmd != "install":
         print(f"Unknown skill subcommand: {args.skill_cmd}")
@@ -3060,6 +3177,20 @@ def _handle_skill(root: Path, args: argparse.Namespace) -> int:
     env: Dict[str, str] = {}
     if getattr(args, "force", False):
         env["BEACON_FORCE"] = "1"
+    if getattr(args, "adopt", False):
+        env["BEACON_ADOPT"] = "1"
+    if getattr(args, "dry_run", False):
+        env["BEACON_DRY_RUN"] = "1"
+    if getattr(args, "prune", False):
+        env["BEACON_PRUNE"] = "1"
+    if getattr(args, "json", False):
+        env["BEACON_JSON"] = "1"
+    target = getattr(args, "target", "") or ""
+    name = getattr(args, "name", "") or ""
+    if target:
+        env["BEACON_SKILL_TARGET"] = target
+    if name:
+        env["BEACON_SKILL_NAME"] = name
     settings_path = getattr(args, "settings_path", "") or ""
     if settings_path:
         env["BEACON_SETTINGS_PATH"] = settings_path

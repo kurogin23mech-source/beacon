@@ -116,6 +116,14 @@ Treks (cross-project / cross-session 協奏作業領域 — ms-69):
   beacon trek scope-approve <trek-id> <pending-id>
                                     Commit a staged scope op (= apply add or remove, ms-97/AC25)
   beacon trek scope-reject <trek-id> <pending-id>
+  beacon trek slot add <trek-id> --project <pid> --milestone|--task|--operation <id> [--children e-A,e-B]
+                                    (ms-99/e-2829) Stage a slot-add with a fresh sl-<8hex> id.
+  beacon trek slot amend <trek-id> <slot-id> [--add-child <e-id> ...] [--remove-child <e-id> ...]
+                                    (ms-99/e-2829) Stage a child-list edit on an existing MS slot.
+  beacon trek slot claim <trek-id> <slot-id> [--session <sid> | --unclaim]
+                                    (ms-99/e-2829) Stage a claim stamp (state-free, SPEC 方針 4).
+  beacon trek slot list  <trek-id> [--json]
+                                    (ms-99/e-2829) Materialise slot rows for the trek.
                                     Drop a staged scope op (ms-97/AC25)
   beacon trek blanket-approve <trek-id> --category <cat>
                                     Pre-approve scope-add for a category (ms-97/AC24).
@@ -233,7 +241,9 @@ Other:
   beacon auth login                 Sign in with Google (use this, not 'cloud login')
   beacon auth logout                Remove cached credentials
   beacon auth status                Show login status
-  beacon skill install              Install Claude Code Skills
+  beacon skill install              Install legacy Claude Code Skills
+  beacon skill install --target claude|codex|both --name <name>
+                                    Install a canonical shared Skill
   beacon monitor context [--dry-run]
                                     Stop hook: context-usage threshold monitor (e-854)
   beacon update [--check] [--skill-only] [--yes]
@@ -2738,6 +2748,109 @@ except ValueError as e:
                 BEACON_TREK_ID="$trek_id" BEACON_PENDING_ID="$pending_id" \
                     python3 "$COMMANDS_PY" trek_scope_reject
                 ;;
+            # ms-99 / e-2829 — slot verbs (Trek schema v2). Nested
+            # subcommand: `beacon trek slot <add|amend|claim|list>`.
+            slot)
+                _slot_sub="${3:-}"
+                case "$_slot_sub" in
+                    add)
+                        shift 3
+                        trek_id="" project="" ms="" op="" task="" children=""
+                        while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                --project) project="${2:-}"; shift 2 ;;
+                                --milestone|--ms) ms="${2:-}"; shift 2 ;;
+                                --operation|--op) op="${2:-}"; shift 2 ;;
+                                --task|--e) task="${2:-}"; shift 2 ;;
+                                --children) children="${2:-}"; shift 2 ;;
+                                --json) export BEACON_JSON=1; shift ;;
+                                *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                            esac
+                        done
+                        BEACON_TREK_ID="$trek_id" \
+                            BEACON_SLOT_PROJECT="$project" \
+                            BEACON_SLOT_MILESTONE="$ms" \
+                            BEACON_SLOT_OPERATION="$op" \
+                            BEACON_SLOT_TASK="$task" \
+                            BEACON_SLOT_CHILDREN="$children" \
+                            python3 "$COMMANDS_PY" trek_slot_add
+                        ;;
+                    amend)
+                        shift 3
+                        trek_id="" slot_id="" add_children="" rem_children=""
+                        while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                --add-child)
+                                    if [[ -z "$add_children" ]]; then
+                                        add_children="${2:-}"
+                                    else
+                                        add_children="$add_children,${2:-}"
+                                    fi
+                                    shift 2 ;;
+                                --remove-child)
+                                    if [[ -z "$rem_children" ]]; then
+                                        rem_children="${2:-}"
+                                    else
+                                        rem_children="$rem_children,${2:-}"
+                                    fi
+                                    shift 2 ;;
+                                --json) export BEACON_JSON=1; shift ;;
+                                *)
+                                    if [[ -z "$trek_id" ]]; then
+                                        trek_id="$1"
+                                    elif [[ -z "$slot_id" ]]; then
+                                        slot_id="$1"
+                                    fi
+                                    shift ;;
+                            esac
+                        done
+                        BEACON_TREK_ID="$trek_id" \
+                            BEACON_SLOT_ID="$slot_id" \
+                            BEACON_SLOT_ADD_CHILDREN="$add_children" \
+                            BEACON_SLOT_REMOVE_CHILDREN="$rem_children" \
+                            python3 "$COMMANDS_PY" trek_slot_amend
+                        ;;
+                    claim)
+                        shift 3
+                        trek_id="" slot_id="" session_="" unclaim=""
+                        while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                --session) session_="${2:-}"; shift 2 ;;
+                                --unclaim) unclaim="1"; shift ;;
+                                --json) export BEACON_JSON=1; shift ;;
+                                *)
+                                    if [[ -z "$trek_id" ]]; then
+                                        trek_id="$1"
+                                    elif [[ -z "$slot_id" ]]; then
+                                        slot_id="$1"
+                                    fi
+                                    shift ;;
+                            esac
+                        done
+                        BEACON_TREK_ID="$trek_id" \
+                            BEACON_SLOT_ID="$slot_id" \
+                            BEACON_SLOT_SESSION="$session_" \
+                            BEACON_SLOT_UNCLAIM="$unclaim" \
+                            python3 "$COMMANDS_PY" trek_slot_claim
+                        ;;
+                    list)
+                        shift 3
+                        trek_id=""
+                        while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                --json) export BEACON_JSON=1; shift ;;
+                                *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                            esac
+                        done
+                        BEACON_TREK_ID="$trek_id" \
+                            python3 "$COMMANDS_PY" trek_slot_list
+                        ;;
+                    *)
+                        echo "Usage: beacon trek slot <add|amend|claim|list> [args]" >&2
+                        exit 2
+                        ;;
+                esac
+                ;;
             # ms-97 / Phase 7-C / AC24 — blanket pre-approval (e-2603).
             blanket-approve|blanket-revoke)
                 _bk_sub="$2"
@@ -4489,7 +4602,28 @@ EOF
         ;;
     skill)
         case "${2:-}" in
-            install) python3 "$COMMANDS_PY" skill_install ;;
+            install)
+                shift 2
+                _skill_target=""; _skill_name=""; _skill_force=""
+                _skill_adopt=""; _skill_dry_run=""; _skill_prune=""; _skill_json=""
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        --target)  _skill_target="${2:-}"; shift 2 ;;
+                        --name)    _skill_name="${2:-}"; shift 2 ;;
+                        --force)   _skill_force="1"; shift ;;
+                        --adopt)   _skill_adopt="1"; shift ;;
+                        --dry-run) _skill_dry_run="1"; shift ;;
+                        --prune)   _skill_prune="1"; shift ;;
+                        --json)    _skill_json="1"; shift ;;
+                        *) echo "Usage: beacon skill install [--target claude|codex|both --name <name>] [--dry-run] [--prune] [--force|--adopt] [--json]"; exit 2 ;;
+                    esac
+                done
+                BEACON_SKILL_TARGET="$_skill_target" BEACON_SKILL_NAME="$_skill_name" \
+                BEACON_FORCE="$_skill_force" BEACON_ADOPT="$_skill_adopt" \
+                BEACON_DRY_RUN="$_skill_dry_run" BEACON_PRUNE="$_skill_prune" \
+                BEACON_JSON="$_skill_json" \
+                    python3 "$COMMANDS_PY" skill_install
+                ;;
             *)       echo "Usage: beacon skill install" ;;
         esac
         ;;

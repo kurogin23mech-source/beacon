@@ -54,6 +54,38 @@ def _build_trek(*,
     }
 
 
+def _pool_from_task_states(scope: list[dict], task_states: dict) -> dict:
+    """Synthesize a project pool that mirrors ``task_states`` for MS-scoped
+    slots so ``materialize_slots`` can expand the MS slot's children.
+
+    ms-99 / e-2833 — the Phase 2 scheduler reads slot inventory from
+    ``scope[] × project pool``. Tests that pin ``is_completion_ready``
+    matrices with only ``task_states`` populated need a pool that lists
+    those same task ids under the scoped milestone, so materialize can
+    map cache states onto the MS children. Cache still wins over pool
+    for state resolution (= status field left as "todo" is fine).
+    """
+    scoped_ms_ids = {s.get("milestone") for s in scope if s.get("milestone")}
+    scoped_task_ids = {s.get("task") for s in scope if s.get("task")}
+    ms_entries = [
+        {"id": eid, "type": "task", "status": "todo"}
+        for eid in task_states.keys()
+        if eid not in scoped_task_ids
+    ]
+    milestones = [
+        {"id": ms_id, "entries": ms_entries}
+        for ms_id in scoped_ms_ids
+    ]
+    return {"milestones": milestones, "operations": []}
+
+
+def _make_gp(scope: list[dict], task_states: dict):
+    pool = _pool_from_task_states(scope, task_states)
+    def _gp(pid: str) -> dict:
+        return pool
+    return _gp
+
+
 # ---------------------------------------------------------------------------
 # G6 — new_trek seeds the completion-flow tracking fields
 # ---------------------------------------------------------------------------
@@ -95,73 +127,79 @@ def test_new_trek_cadence_minutes_coexists_with_completion_meta():
 
 def test_is_completion_ready_true_when_all_terminal_no_op_slot():
     """AC20 positive — all states terminal + no Op slot + unstamped."""
-    trek = _build_trek(
-        scope=[{"project": "p-1", "milestone": "ms-1"}],
-        task_states={
-            "e-1": {"state": "done"},
-            "e-2": {"state": "user_review"},
-        },
-    )
-    assert scheduler.is_completion_ready(trek) is True
+    scope = [{"project": "p-1", "milestone": "ms-1"}]
+    task_states = {
+        "e-1": {"state": "done"},
+        "e-2": {"state": "user_review"},
+    }
+    trek = _build_trek(scope=scope, task_states=task_states)
+    assert scheduler.is_completion_ready(
+        trek, get_project=_make_gp(scope, task_states),
+    ) is True
 
 
 def test_is_completion_ready_false_when_any_non_terminal():
     """Any non-terminal slot (= todo / working / leader_review) blocks fire."""
-    trek = _build_trek(
-        scope=[{"project": "p-1", "milestone": "ms-1"}],
-        task_states={
-            "e-1": {"state": "done"},
-            "e-2": {"state": "working"},
-        },
-    )
-    assert scheduler.is_completion_ready(trek) is False
+    scope = [{"project": "p-1", "milestone": "ms-1"}]
+    task_states = {
+        "e-1": {"state": "done"},
+        "e-2": {"state": "working"},
+    }
+    trek = _build_trek(scope=scope, task_states=task_states)
+    assert scheduler.is_completion_ready(
+        trek, get_project=_make_gp(scope, task_states),
+    ) is False
 
-    trek_lr = _build_trek(
-        scope=[{"project": "p-1", "milestone": "ms-1"}],
-        task_states={
-            "e-1": {"state": "done"},
-            "e-2": {"state": "leader_review"},
-        },
-    )
-    assert scheduler.is_completion_ready(trek_lr) is False
+    task_states_lr = {
+        "e-1": {"state": "done"},
+        "e-2": {"state": "leader_review"},
+    }
+    trek_lr = _build_trek(scope=scope, task_states=task_states_lr)
+    assert scheduler.is_completion_ready(
+        trek_lr, get_project=_make_gp(scope, task_states_lr),
+    ) is False
 
 
 def test_is_completion_ready_false_when_op_slot_present():
     """AC20 explicit suppression — Op slot 入り trek は terminal でも fire しない。"""
-    trek = _build_trek(
-        scope=[
-            {"project": "p-1", "milestone": "ms-1"},
-            {"project": "p-1", "operation": "op-7"},
-        ],
-        task_states={
-            "e-1": {"state": "done"},
-            "e-2": {"state": "user_review"},
-        },
-    )
-    assert scheduler.is_completion_ready(trek) is False
+    scope = [
+        {"project": "p-1", "milestone": "ms-1"},
+        {"project": "p-1", "operation": "op-7"},
+    ]
+    task_states = {
+        "e-1": {"state": "done"},
+        "e-2": {"state": "user_review"},
+    }
+    trek = _build_trek(scope=scope, task_states=task_states)
+    assert scheduler.is_completion_ready(
+        trek, get_project=_make_gp(scope, task_states),
+    ) is False
 
 
 def test_is_completion_ready_false_after_completion_notified_at_stamp():
     """Idempotent — once ``meta.completion_notified_at`` is stamped the
     helper returns False so the leader-digest never re-fires."""
+    scope = [{"project": "p-1", "milestone": "ms-1"}]
+    task_states = {"e-1": {"state": "done"}}
     trek = _build_trek(
-        scope=[{"project": "p-1", "milestone": "ms-1"}],
-        task_states={
-            "e-1": {"state": "done"},
-        },
+        scope=scope,
+        task_states=task_states,
         completion_notified_at="2026-06-28T12:00:00.000000Z",
     )
-    assert scheduler.is_completion_ready(trek) is False
+    assert scheduler.is_completion_ready(
+        trek, get_project=_make_gp(scope, task_states),
+    ) is False
 
 
 def test_is_completion_ready_false_when_no_task_states_stamped():
     """An empty ``task_states`` is not completion (= mirrors
     ``is_trek_task_aggregate_terminal``)."""
-    trek = _build_trek(
-        scope=[{"project": "p-1", "milestone": "ms-1"}],
-        task_states={},
-    )
-    assert scheduler.is_completion_ready(trek) is False
+    scope = [{"project": "p-1", "milestone": "ms-1"}]
+    task_states: dict = {}
+    trek = _build_trek(scope=scope, task_states=task_states)
+    assert scheduler.is_completion_ready(
+        trek, get_project=_make_gp(scope, task_states),
+    ) is False
 
 
 def test_is_completion_ready_pre_g6_trek_reads_meta_get_silently():
@@ -169,25 +207,27 @@ def test_is_completion_ready_pre_g6_trek_reads_meta_get_silently():
     as ``meta.get(...)`` = None, so the helper still returns True if the
     other conditions hold. No migration required."""
     # Strip the seeded fields to simulate a pre-G6 doc.
-    trek = _build_trek(
-        scope=[{"project": "p-1", "milestone": "ms-1"}],
-        task_states={"e-1": {"state": "done"}},
-    )
+    scope = [{"project": "p-1", "milestone": "ms-1"}]
+    task_states = {"e-1": {"state": "done"}}
+    trek = _build_trek(scope=scope, task_states=task_states)
     trek["meta"] = {}  # No completion_notified_at at all.
-    assert scheduler.is_completion_ready(trek) is True
+    assert scheduler.is_completion_ready(
+        trek, get_project=_make_gp(scope, task_states),
+    ) is True
 
 
 def test_is_completion_ready_all_done_no_op_slot_with_user_review_mix():
     """Mixed terminal (= done + user_review) still fires when no Op slot."""
-    trek = _build_trek(
-        scope=[
-            {"project": "p-1", "milestone": "ms-1"},
-            {"project": "p-2", "task": "e-2"},
-        ],
-        task_states={
-            "e-1": {"state": "done"},
-            "e-2": {"state": "user_review"},
-            "e-3": {"state": "done"},
-        },
-    )
-    assert scheduler.is_completion_ready(trek) is True
+    scope = [
+        {"project": "p-1", "milestone": "ms-1"},
+        {"project": "p-2", "task": "e-2"},
+    ]
+    task_states = {
+        "e-1": {"state": "done"},
+        "e-2": {"state": "user_review"},
+        "e-3": {"state": "done"},
+    }
+    trek = _build_trek(scope=scope, task_states=task_states)
+    assert scheduler.is_completion_ready(
+        trek, get_project=_make_gp(scope, task_states),
+    ) is True
