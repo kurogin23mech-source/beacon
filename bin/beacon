@@ -4002,6 +4002,12 @@ EOF
         # --json | jq`. send subcommand fans out per-recipient.
         _bus_to_list=""
         _bus_to_trek=""
+        # ms-54 / e-2934: --to-user for user-scoped (project × user) 宛先。
+        # session_id churn (= bclaude 再起動で sid が変わる) しても、受信者側で
+        # 新 session が起動すれば inbox に届く。email or user_id 受け付ける
+        # (email はサーバー側で user_id に解決)。--to (session-scoped) との
+        # 併用は禁止 (= cmd_bus_send で hard error)、どちらか一方のみ。
+        _bus_to_user=""
         _bus_action=""          # e-1290: comma-joined actions_authorized for T1 envelope
         _bus_no_envelope=""     # e-1290: opt-out of envelope path (debug legacy)
         while [[ $# -gt 0 ]]; do
@@ -4012,6 +4018,7 @@ EOF
                 --recipient)      _bus_recipient="${2:-}"; shift 2 ;;
                 --to)             _bus_to="${2:-}"; _bus_to_list="${_bus_to_list}${2:-}"$'\n'; shift 2 ;;
                 --to-trek)        _bus_to_trek="${2:-}"; shift 2 ;;
+                --to-user)        _bus_to_user="${2:-}"; shift 2 ;;
                 --delivery)       _bus_delivery="${2:-}"; shift 2 ;;
                 --interval)       _bus_interval="${2:-}"; shift 2 ;;
                 --timeout)        _bus_timeout="${2:-}"; shift 2 ;;
@@ -4069,6 +4076,13 @@ print(m.group(1) if m else "")' || true)
                         fi
                     fi
                 fi
+                # ms-54 / e-2934: --to と --to-user は相互排他 (どちらか片方のみ)。
+                # 両方 or どちらも無し (channel=dm 時) はここでは通し、 python 側
+                # (cmd_bus_send) が最終判定して親切エラーを出す。
+                if [[ -n "$_bus_to_user" ]] && [[ -n "$_bus_to_list" || -n "$_bus_to" ]]; then
+                    echo "Error: --to と --to-user は相互排他です (どちらか片方のみ指定してください)。" >&2
+                    exit 2
+                fi
                 # Dedupe and fan out one send per recipient. The legacy
                 # behavior (single --to) collapses to a single subprocess.
                 if [[ -z "$_bus_to_list" ]]; then
@@ -4076,6 +4090,7 @@ print(m.group(1) if m else "")' || true)
                         BEACON_BUS_PAYLOAD="$_bus_payload" \
                         BEACON_BUS_SENDER="$_bus_sender" \
                         BEACON_BUS_RECIPIENT_SESSION="$_bus_to" \
+                        BEACON_BUS_RECIPIENT_USER="$_bus_to_user" \
                         BEACON_BUS_DELIVERY="$_bus_delivery" \
                         BEACON_BUS_IN_REPLY_TO="$_bus_in_reply_to" \
                         BEACON_BUS_PROJECT_ID="$_bus_project_id" \
