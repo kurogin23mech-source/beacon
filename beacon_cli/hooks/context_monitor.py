@@ -572,7 +572,17 @@ def _main_impl() -> int:
             "additionalContext": instruction,
         }
     }
-    sys.stdout.buffer.write(json.dumps(output, ensure_ascii=False).encode("utf-8"))
+    # Windows の既定 cp932 で非 ASCII が化ける / UnicodeEncodeError になるのを避ける
+    # ため utf-8 で出す。ただし buffer への直接書き込みは pytest の capsys が捕捉
+    # できず dry-run テストが空出力 → JSONDecodeError になる。stdout を utf-8 に
+    # 付け替えてから text で書くことで、実 Windows の cp932 対策とテスト互換を両立する
+    # (capsys の stream は reconfigure 非対応でも try/except で無害に skip され、
+    # text write は捕捉される)。
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+    sys.stdout.write(json.dumps(output, ensure_ascii=False))
     return 0
 
 
