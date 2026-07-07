@@ -4422,6 +4422,24 @@ def cmd_channel_status():
     print(f"    → {prediction}")
     print()
 
+    # ---- 5. Receive capability (send/receive asymmetry) -------------------
+    # ms-93 recipient-stability follow-up: `bus send` is a CLI push and works
+    # without a bridge, so a cwd with no `.mcp.json` (e.g. a hand-`cd`'d git
+    # worktree) silently falls into a send-only state — outgoing DMs work,
+    # incoming ones never live-wake. Make that asymmetry loud here rather than
+    # letting the user infer "connected" from a working send.
+    print("[5] Receive capability (受信は送信と非対称):")
+    if mcp_has_entry:
+        print("    ✓ 受信 bridge 経路あり — この cwd で起動した session は "
+              "他セッションからの DM を live-wake で受信できます")
+    else:
+        print("    ⚠ 送信専用の恐れ — この cwd に beacon-bus MCP entry が無い")
+        print("      送信 (`bus send`) は CLI push なので効きますが、他セッション"
+              "からの DM は live-wake せず、次回 prompt の catch-up でのみ届きます。")
+        print("      (git worktree に手で cd した等で起動 cwd と別 .beacon "
+              "session になっている場合に起きがち)")
+    print()
+
     # Action hints based on current state.
     if status["any"]:
         print("To re-enable DM: beacon channel opt-in [--project|--global] "
