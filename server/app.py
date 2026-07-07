@@ -1613,8 +1613,7 @@ def me_list_sessions(
         for s in sessions:
             s["project_id"] = pid
             s["project_name"] = pname
-            s["poll_health"] = _compute_poll_health(s, now_dt)
-            s["bridge"] = bool(s.get("last_poll_at"))
+            _stamp_session_liveness(s, pid, now_dt)
         all_sessions.extend(sessions)
 
     def _matches(s: dict) -> bool:
@@ -1636,10 +1635,9 @@ def me_list_sessions(
         ]
 
     if healthy_only:
-        filtered = [
-            s for s in filtered
-            if s.get("poll_health", {}).get("healthy") is True
-        ]
+        # ms-101 / e-3010 — per-project endpoint と同じ union 判定。接続ベースの
+        # ws_live か poll_healthy のどちらかで live なら healthy 受信者とみなす。
+        filtered = [s for s in filtered if s.get("live") is True]
 
     filtered.sort(key=lambda s: s.get("last_active", ""), reverse=True)
     return filtered
@@ -6859,6 +6857,40 @@ def _compute_poll_health(session: dict, now_dt) -> dict:
     }
 
 
+def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
+    """Stamp poll_health / bridge / ws_live / live onto a session row in place
+    (ms-101 / e-3010).
+
+    従来 directory の「この session は今 DM を受け取れるか」の signal は
+    ``poll_health.healthy`` だった。これは ``last_poll_at`` (= 最後にポーリング
+    した時刻) から導く遅れる指標で、接続直後や切断直後を捉えられず「live 0 人
+    なのに DM は届く」ズレを生んだ (ms-96 = バックエンドの VPS 移行 の直後に観測)。
+
+    ms-101 は「今つながっている WebSocket 接続の集合」を liveness の真値源に
+    する。ここでは接続台帳 (redis_client.ws_session_live) の signal を ``ws_live``
+    として stamp し、poll heartbeat と OR で束ねた ``live`` を出す (= 段階移行。
+    どちらか一方でも生きていれば live と見なす):
+
+      ws_live : True  — 接続台帳に期限内の WS 接続がある
+                False — 接続台帳に無い
+                None  — Redis 不通で判定不能 (= poll 判定に委ねる、fail-open)
+      live    : (ws_live is True) or (poll_health.healthy is True)
+
+    ``live`` を union にするのは移行期の保険。session_id を WS に付けない旧版
+    bridge (= e-3009 以前) は接続台帳に載らず ws_live=False になるが、polling が
+    健全なら live に残す。「切断で即 not-live」(= ws_live=False が poll_healthy を
+    上書きする完全 cutover) は poll 取得を止める e-3013 で行う。ここでは union に
+    留め、既存挙動を壊さない (Redis 不通時は live == poll_healthy と一致)。
+    """
+    session["poll_health"] = _compute_poll_health(session, now_dt)
+    session["bridge"] = bool(session.get("last_poll_at"))
+    sid = session.get("session_id") or ""
+    ws_live = redis_client.ws_session_live(project_id, sid) if sid else None
+    session["ws_live"] = ws_live
+    poll_healthy = session["poll_health"].get("healthy") is True
+    session["live"] = (ws_live is True) or poll_healthy
+
+
 @app.get("/api/projects/{project_id}/sessions")
 def list_sessions(
     project_id: str,
@@ -6931,8 +6963,7 @@ def list_sessions(
     # default view) can filter on this without re-implementing the
     # last_poll_at presence check.
     for s in sessions:
-        s["poll_health"] = _compute_poll_health(s, now_dt)
-        s["bridge"] = bool(s.get("last_poll_at"))
+        _stamp_session_liveness(s, project_id, now_dt)
 
     if not (user_id or machine or agent or live_only or healthy_only):
         return sessions
@@ -6962,12 +6993,14 @@ def list_sessions(
         filtered = [s for s in filtered if _is_live(s)]
 
     if healthy_only:
-        # Only sessions whose bridge poll loop has stamped a recent
-        # last_poll_at AND is not in graceful shutdown. ``healthy=None``
-        # (unknown — older bridge, no last_poll_at field) is treated as
-        # NOT healthy: the contract is "I am polling right now", and
-        # silence does not satisfy that contract.
-        filtered = [s for s in filtered if s.get("poll_health", {}).get("healthy") is True]
+        # ms-101 / e-3010 — 接続ベースの liveness を優先する union 判定に切替。
+        # 従来は poll_health.healthy (= last_poll_at 由来) のみを見ていたため、
+        # WS では接続中なのに last_poll_at が遅れて healthy=False になる session
+        # を取りこぼした (= 「live 0 なのに届く」ズレ)。``live`` は ws_live=True
+        # (接続台帳に接続あり) か poll_healthy のどちらかで True になるので、
+        # 接続直後の session を即 healthy 受信者として拾える。Redis 不通時は
+        # ws_live=None で live == poll_healthy に一致し、従来挙動を保つ。
+        filtered = [s for s in filtered if s.get("live") is True]
 
     return filtered
 
