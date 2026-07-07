@@ -86,11 +86,25 @@ client = TestClient(app_module.app)
 
 @pytest.fixture(autouse=True)
 def reset_store():
-    firestore_client.list_sessions = _mock_list_sessions
-    firestore_client.list_projects = _mock_list_projects
-    firestore_client.get_project = lambda pid: _projects_store.get(pid) or {
+    _get_project = lambda pid: _projects_store.get(pid) or {  # noqa: E731
         "name": "test", "milestones": []
     }
+    # e-3010 introduced ``store_router`` as the ``db`` indirection the app
+    # calls, and it binds ``firestore_client.list_*`` into its own namespace at
+    # import time. Patching only ``firestore_client`` leaves ``store_router.*``
+    # pointing at the real backend, so if another test module (e.g.
+    # test_ws_live_directory) imported store_router first, our endpoints hit
+    # live Firestore and 403. Bind the mock on both modules, best-effort.
+    _mods = [firestore_client]
+    try:
+        import store_router  # noqa: WPS433
+        _mods.append(store_router)
+    except Exception:
+        pass
+    for _mod in _mods:
+        _mod.list_sessions = _mock_list_sessions
+        _mod.list_projects = _mock_list_projects
+        _mod.get_project = _get_project
     _sessions_store.clear()
     _projects_store.clear()
     yield
