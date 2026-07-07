@@ -51,12 +51,10 @@ def _mock_list_projects(user_id=None, include_archived=False):
     return out
 
 
-firestore_client.list_sessions = _mock_list_sessions
-firestore_client.list_projects = _mock_list_projects
-firestore_client.get_project = lambda pid: _projects_store.get(pid) or {
-    "name": "test", "milestones": [], "owner": "dev", "members": []
-}
-firestore_client.save_project = lambda pid, data: None
+# NOTE: firestore_client / store_router の関数差し替えは module import 時ではなく
+# reset_and_patch フィクスチャ内で monkeypatch する (= テストごとに自動復元し、
+# 先に import した / 後から import する他テストモジュールを汚染しない)。store_router
+# が import 時に firestore_client の list_* を束ねる件への対処もそこで行う。
 
 from fastapi.testclient import TestClient  # noqa: E402
 import app as app_module  # noqa: E402
@@ -73,16 +71,29 @@ DEV_UID = "dev"
 _ws_live_map: dict[str, object] = {}
 
 
-@pytest.fixture(autouse=True)
-def reset_and_patch(monkeypatch):
-    firestore_client.list_sessions = _mock_list_sessions
-    firestore_client.list_projects = _mock_list_projects
-    firestore_client.get_project = lambda pid: _projects_store.get(pid) or {
+def _mock_get_project(pid):
+    return _projects_store.get(pid) or {
         "name": "test", "milestones": [], "owner": "dev", "members": []
     }
+
+
+@pytest.fixture(autouse=True)
+def reset_and_patch(monkeypatch):
+    import store_router
+
     _sessions_store.clear()
     _projects_store.clear()
     _ws_live_map.clear()
+    # store_router (= app が使う ``db``) は import 時に firestore_client の
+    # list_sessions/list_projects/get_project を自分の名前空間へ束ねる。よって
+    # firestore_client 側だけ差し替えても db.* には反映されず、先に import した
+    # 別テストモジュールの mock を掴んだままになる。ここでは db (store_router) を
+    # 直接 monkeypatch して確実に自分の in-memory store へ向ける (monkeypatch は
+    # テストごとに自動復元されるので他モジュールを汚染しない)。
+    for mod in (firestore_client, store_router):
+        monkeypatch.setattr(mod, "list_sessions", _mock_list_sessions, raising=False)
+        monkeypatch.setattr(mod, "list_projects", _mock_list_projects, raising=False)
+        monkeypatch.setattr(mod, "get_project", _mock_get_project, raising=False)
     # 接続台帳の signal をマップ差し替え。未登録 session_id は None (= Redis に
     # 情報が無い / 不通 とみなす)。
     monkeypatch.setattr(

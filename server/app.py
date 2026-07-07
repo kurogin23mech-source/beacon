@@ -7327,12 +7327,13 @@ async def post_bus_event(
             )
 
     event = {"event_id": event_id, **data}
-    # e-997: push to all WS subscribers of this project. Multi-replica delivery
-    # (events posted on another Cloud Run instance) is out of scope here —
-    # Firestore on_snapshot or a pub/sub layer would solve it but adds cost;
-    # the single-replica path covers UC1/UC2 dogfood.
-    if _ws_connections.get(project_id):
-        await _broadcast_bus_event(project_id, event)
+    # ms-101 / e-3011 — 新着 bus event の wake hint を全プロセスの受信者へ届ける。
+    # 旧 e-997 は「同一プロセスに接続がある場合のみ」push しており (= 下の
+    # _ws_connections ローカル判定)、受信者の bridge が別プロセス (uvicorn 別
+    # ワーカー) につながっていると素通りして届かなかった。_fanout_bus_event は
+    # Redis pub/sub で全プロセスへ中継し、接続を持つプロセスがローカル配信する
+    # (Redis 不通時は同プロセスのローカル配信に fallback)。
+    await _fanout_bus_event(project_id, event)
     return event
 
 
@@ -10344,6 +10345,28 @@ def _broadcast_project_after_write(project_id: str) -> None:
         return
 
 
+async def _deliver_bus_signal_local(project_id: str, event_id):
+    """このプロセスにローカル接続している WS クライアントへ bus event の wake hint
+    を送る (ms-101 / e-3011 で _broadcast_bus_event から切り出し)。
+
+    signal-only: frame は wake hint (event_id) のみ。DM 本文 / 送信者 / envelope は
+    載せない (ms-97 P1 = review finding H1)。全 WS 購読者 (= bridge / Web UI) が
+    宛先に関係なく frame を受け取るため、本文を載せると宛先でない receiver にまで
+    漏れる。受信側は event_id を合図に REST inbox を引き直し、そこで per-recipient
+    の ``_bus_event_addressed_to`` filter + DM payload redaction (ms-93 / e-2275) が
+    効く。ここに追加してよいのは非機微な routing metadata のみ。
+    """
+    clients = _ws_connections.get(project_id, set()).copy()
+    if not clients:
+        return
+    msg = {"type": "bus_event", "event_id": event_id}
+    for ws in clients:
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            _ws_connections.get(project_id, set()).discard(ws)
+
+
 async def _broadcast_bus_event(project_id: str, event: dict):
     """Push a single bus event to all WS clients subscribed to this project.
 
@@ -10351,27 +10374,99 @@ async def _broadcast_bus_event(project_id: str, event: dict):
     side at this slice — every connected client sees every event for the
     project and decides what to do with it. Server-side filtering arrives
     with e-1134 (directory query) + §9 subscribe filter.
+
+    ms-101 / e-3011 以降は同プロセス内のローカル配信の薄い wrapper。cross-process
+    配信は ``_fanout_bus_event`` (Redis pub/sub) が担う。
     """
-    clients = _ws_connections.get(project_id, set()).copy()
-    if not clients:
+    await _deliver_bus_signal_local(project_id, event.get("event_id"))
+
+
+async def _fanout_bus_event(project_id: str, event: dict):
+    """新着 bus event の wake hint を全プロセスの受信者へ届ける (ms-101 / e-3011)。
+
+    従来 (e-997 / e-2380) は post_bus_event を処理したプロセスの WS 接続にしか
+    push できなかった。受信者の bridge が別プロセス (= uvicorn の別ワーカー) に
+    つながっていると届かず、その受信者は次の poll (= 定期問い合わせ) まで DM に
+    気づけなかった。
+
+    ここでは Redis pub/sub で wake hint を全プロセスへ中継する。各プロセスの
+    subscriber (``_run_ws_push_subscriber``) が受け取り、自分がローカルに持つ
+    WS 接続へ配信する。発行元プロセスも subscriber を持つので自プロセス宛ての
+    配信も同じ経路で届く (= 二重配信を避けるため、ここでは直接ローカル配信しない)。
+
+    fail-open: Redis 不通で publish できないとき (publish_ws_push が False) は、
+    従来どおり同プロセスのローカル配信に fallback する (= 単一プロセス構成では
+    これで十分、e-2380 挙動を保つ)。
+    """
+    event_id = event.get("event_id")
+    published = redis_client.publish_ws_push(project_id, event_id)
+    if not published:
+        await _deliver_bus_signal_local(project_id, event_id)
+
+
+def _run_ws_push_subscriber():
+    """Background thread: Redis の push チャンネルを購読し、受け取った wake hint を
+    このプロセスのローカル WS 接続へ配信する (ms-101 / e-3011)。
+
+    redis-py の pubsub は同期 API (listen() が blocking) なので専用スレッドで
+    回し、message 受信時に ``asyncio.run_coroutine_threadsafe`` で event loop 上の
+    ローカル配信コルーチンに乗せる (= 旧 Firestore watcher と同じ thread→loop 橋渡し)。
+
+    fail-open: 起動時に Redis が使えなければ subscriber を立てず return する
+    (= そのプロセスは cross-process push 無しの poll-only で動く。redis_client の
+    fail-open latch により、一度 Redis 不通と判定された process は以後 poll-only)。
+    listen 中の transient なエラーでも thread を終わらせ、process は poll-only で
+    継続する (= push が最悪 poll backstop に degrade するだけで DM は取りこぼさない)。
+    """
+    pubsub = redis_client.ws_push_subscription()
+    if pubsub is None:
+        _server_logger.info(
+            "ws push subscriber not started (Redis unavailable) — "
+            "cross-process DM push disabled, poll backstop covers delivery"
+        )
         return
-    # ms-97 P1 (= review finding H1): signal-only. Broadcasting the full event
-    # over the WS leaked the DM body / sender / envelope to *every* project
-    # subscriber — including bridges (e-2380 WS push) and the Web UI —
-    # regardless of who the DM was addressed to, and even for events the ms-70
-    # gate parked as ``pending``. The frame now carries only a wake hint
-    # (event_id); every receiver re-fetches via the REST inbox, which already
-    # applies the per-recipient ``_bus_event_addressed_to`` filter + DM payload
-    # redaction (ms-93 / e-2275). Same posture the project_changed /
-    # document_change frames took in ms-84 / e-2326. Any field added here in
-    # future MUST stay non-sensitive routing metadata — never payload /
-    # sender_session_id / envelope.
-    msg = {"type": "bus_event", "event_id": event.get("event_id")}
-    for ws in clients:
-        try:
-            await ws.send_json(msg)
-        except Exception:
-            _ws_connections.get(project_id, set()).discard(ws)
+    _server_logger.info("ws push subscriber started")
+    try:
+        for message in pubsub.listen():
+            if message.get("type") != "message":
+                continue
+            try:
+                data = json.loads(message.get("data") or "{}")
+            except Exception:
+                continue
+            pid = data.get("project_id")
+            event_id = data.get("event_id")
+            if not pid:
+                continue
+            # このプロセスに該当 project の接続が無ければ配ることは無い (= 速攻 skip)。
+            if _event_loop is not None and _ws_connections.get(pid):
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        _deliver_bus_signal_local(pid, event_id), _event_loop
+                    )
+                except Exception:
+                    # event loop が閉じている等の race。fire-and-forget で skip。
+                    pass
+    except Exception as exc:
+        _server_logger.warning(
+            "ws push subscriber loop ended (%s) — process continues poll-only", exc
+        )
+
+
+@app.on_event("startup")
+async def _start_ws_push_subscriber():
+    """起動時に ws push subscriber スレッドを立てる (ms-101 / e-3011)。
+
+    daemon スレッドなので process 終了を妨げない。Redis 不通なら subscriber は
+    即 return し、poll backstop が配信を担保する (fail-open)。
+    """
+    import threading
+
+    threading.Thread(
+        target=_run_ws_push_subscriber,
+        name="ws-push-subscriber",
+        daemon=True,
+    ).start()
 
 
 def _build_document_change_payload(project_id: str, doc_id: str, op: str,
