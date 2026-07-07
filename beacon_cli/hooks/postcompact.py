@@ -45,8 +45,26 @@ def _find_beacon_root(start: Path) -> Optional[Path]:
 
 
 def _which_beacon() -> Optional[str]:
-    """Return path to the beacon CLI or None."""
-    return shutil.which("beacon")
+    """Return path to the beacon CLI or None.
+
+    Falls back to known Windows user-install paths when beacon is not on PATH
+    (e.g. installed via ``pip install --user`` into a Scripts dir that isn't
+    in $PATH).
+    """
+    found = shutil.which("beacon")
+    if found:
+        return found
+    # Windows: pip --user installs to AppData/Roaming/PythonXYZ/Scripts/
+    import glob as _glob
+    patterns = [
+        os.path.expandvars(r"%APPDATA%\Python\Python*\Scripts\beacon.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python*\Scripts\beacon.exe"),
+    ]
+    for pat in patterns:
+        matches = _glob.glob(pat)
+        if matches:
+            return sorted(matches)[-1]  # pick highest version
+    return None
 
 
 def _run_beacon(beacon: str, args: List[str], cwd: Path) -> str:
@@ -56,6 +74,7 @@ def _run_beacon(beacon: str, args: List[str], cwd: Path) -> str:
             [beacon, *args],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=str(cwd),
             timeout=15,
         )
@@ -191,7 +210,9 @@ def main(argv: Optional[list] = None) -> int:
         context_text = _format_context(status_raw, notes_raw or "[]")
         message = _build_message(context_text)
 
-        sys.stdout.write(json.dumps({"systemMessage": message}, ensure_ascii=False))
+        out = json.dumps({"systemMessage": message}, ensure_ascii=False)
+        # Windows stdout may default to cp932; write as UTF-8 bytes directly.
+        sys.stdout.buffer.write(out.encode("utf-8"))
         return 0
     except Exception:
         # Defensive: never block compaction on hook bugs.

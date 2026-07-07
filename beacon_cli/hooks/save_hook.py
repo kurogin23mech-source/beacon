@@ -90,7 +90,7 @@ def _active_milestone_id(project_path: Path) -> Optional[str]:
 
 
 def _resolve_beacon_cli() -> Optional[str]:
-    """``beacon`` on PATH, else sibling ``beacon`` in this script's directory."""
+    """``beacon`` on PATH, sibling lookup, then Windows user-install fallback."""
     found = shutil.which("beacon")
     if found:
         return found
@@ -100,6 +100,16 @@ def _resolve_beacon_cli() -> Optional[str]:
     candidate = here / "beacon"
     if candidate.is_file() and os.access(candidate, os.X_OK):
         return str(candidate)
+    # Windows: pip --user installs to AppData/Roaming/PythonXYZ/Scripts/
+    import glob as _glob
+    patterns = [
+        os.path.expandvars(r"%APPDATA%\Python\Python*\Scripts\beacon.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python*\Scripts\beacon.exe"),
+    ]
+    for pat in patterns:
+        matches = _glob.glob(pat)
+        if matches:
+            return sorted(matches)[-1]
     return None
 
 

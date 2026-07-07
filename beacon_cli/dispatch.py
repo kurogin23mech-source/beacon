@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import os
 import subprocess
 import sys
@@ -1646,13 +1647,13 @@ def _handle_log(root: Path, args: argparse.Namespace) -> int:
     target_ref = args.explicit_hash or "HEAD"
     try:
         commit_hash = subprocess.check_output(
-            git_C + ["rev-parse", "--short", target_ref], text=True
+            git_C + ["rev-parse", "--short", target_ref], text=True, encoding="utf-8"
         ).strip()
         commit_msg = subprocess.check_output(
-            git_C + ["log", "-1", "--pretty=%s", target_ref], text=True
+            git_C + ["log", "-1", "--pretty=%s", target_ref], text=True, encoding="utf-8"
         ).strip()
         commit_date = subprocess.check_output(
-            git_C + ["log", "-1", "--pretty=%ci", target_ref], text=True
+            git_C + ["log", "-1", "--pretty=%ci", target_ref], text=True, encoding="utf-8"
         ).strip().split(" ", 1)[0]
     except subprocess.CalledProcessError as exc:
         _eprint(f"Error: git lookup for {target_ref} failed: {exc}")
@@ -1666,6 +1667,7 @@ def _handle_log(root: Path, args: argparse.Namespace) -> int:
             changed = subprocess.check_output(
                 git_C + ["diff-tree", "--no-commit-id", "--name-only", "-r", target_ref],
                 text=True,
+                encoding="utf-8",
             ).strip().splitlines()
         except subprocess.CalledProcessError:
             changed = []
@@ -2789,17 +2791,17 @@ def _handle_pr(root: Path, args: argparse.Namespace) -> int:
             },
         )
     if cmd == "create":
-        # gh_args is a REMAINDER list — bash forwards via printf %q. We
-        # join with shell-safe quoting; commands.py:cmd_pr_create reads
-        # BEACON_GH_ARGS as a pre-quoted single string.
-        import shlex
-        gh_args = " ".join(shlex.quote(a) for a in (args.gh_args or []))
+        # gh_args is a REMAINDER list. Forward it as a JSON array, not a
+        # shell-quoted string: shell quoting cannot round-trip non-ASCII
+        # (Japanese PR titles) cleanly across the env-var hop into
+        # commands.py:cmd_pr_create, which reads BEACON_GH_ARGS_JSON.
+        gh_args_json = json.dumps(args.gh_args or [], ensure_ascii=False)
         return _run_commands_py(
             root, "pr_create",
             {
                 "BEACON_MS_ID": args.ms_id or "",
                 "BEACON_INTENT": args.intent or "",
-                "BEACON_GH_ARGS": gh_args,
+                "BEACON_GH_ARGS_JSON": gh_args_json,
             },
         )
     if cmd == "request-review":

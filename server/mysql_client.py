@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 
 # PyMySQL は pure-Python (build 依存なし)。BEACON_STORE_BACKEND != "mysql" 環境
 # では import されないよう、boto3 と同じく import 失敗を握りつぶす。実際に関数を
@@ -118,7 +119,15 @@ def _table_name(entity: str) -> str:
 # ---------------------------------------------------------------------------
 # module-level に 1 本張って使い回す。PyMySQL はアイドルで切れることがあるので
 # _conn() で毎回 ping(reconnect=True) して live を保証する。落ちていたら張り直す。
-_CONN = None
+#
+# ★ 並行性 (ms-96 cutover 後の本番インシデント): PyMySQL の Connection は
+#   スレッド安全でない。uvicorn は sync エンドポイントを anyio のスレッドプール
+#   (デフォルト上限 40) で並行実行するため、1 本のグローバル接続を共有すると、
+#   あるスレッドがソケットを読んでいる最中に別スレッドが操作して socket が None に
+#   なり `'NoneType' object has no attribute 'settimeout'` でハング/500 する。
+#   → 接続を **thread-local** にして各スレッド専用の Connection を持たせる。
+#   スレッドは使い回されるので接続数はプール上限 (≒40) に収まり、毎回張り直さない。
+_LOCAL = threading.local()
 
 
 def _env(*names: str, default: str | None = None) -> str | None:
@@ -151,18 +160,25 @@ def _connect():
 
 
 def _conn():
-    global _CONN
     if pymysql is None:
         raise RuntimeError("pymysql is not installed (= MySQL backend cannot be used)")
-    if _CONN is None:
-        _CONN = _connect()
-        return _CONN
+    conn = getattr(_LOCAL, "conn", None)
+    if conn is None:
+        conn = _connect()
+        _LOCAL.conn = conn
+        return conn
     try:
-        _CONN.ping(reconnect=True)
+        conn.ping(reconnect=True)
     except Exception:
         # ping ごと死んでいたら張り直す (= server 再起動 / 長時間アイドル対策)。
-        _CONN = _connect()
-    return _CONN
+        # 壊れた接続は捨てて、このスレッド専用に新しく張り直す。
+        try:
+            conn.close()
+        except Exception:
+            pass
+        conn = _connect()
+        _LOCAL.conn = conn
+    return conn
 
 
 # ---------------------------------------------------------------------------
@@ -873,9 +889,15 @@ def _generate_doc_id() -> str:
 
 
 def list_documents(project_id: str) -> list[dict]:
-    items = _query("documents", project_id)
+    # _query_rows で (sk, data) を取る。sk が doc_id の真値。Firestore→MySQL 移行
+    # (ms-96) で入った古い doc は payload (data JSON) に doc_id フィールドを持たず、
+    # doc_id は sk 列にしか無い。以前は _query (SELECT data のみ、sk を返さない) を
+    # 使い data.get("doc_id","") で拾っていたため、移行済み doc 全ての doc_id が空に
+    # なり `beacon doc show` が効かなくなっていた (= 過去ドキュメントが読めない)。
+    # sk を doc_id の fallback にすることで全 doc が再び addressable になる。
+    rows = _query_rows("documents", project_id)
     result = []
-    for data in items:
+    for sk, data in rows:
         if data.get("deleted"):
             continue
         milestone = data.get("milestone") or _extract_frontmatter_field(
@@ -885,7 +907,7 @@ def list_documents(project_id: str) -> list[dict]:
             data.get("content", ""), "operation"
         )
         entry = {
-            "doc_id": data.get("doc_id", ""),
+            "doc_id": data.get("doc_id") or sk,
             "title": data.get("title", ""),
             "scope": data.get("scope", "memo"),
             "updated_at": data.get("updated_at", ""),

@@ -2,6 +2,38 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.56.0] - 2026-07-07
+
+- Merge pull request #355 from kurogin23mech-source/rescue-pr-utf8-title
+- fix(pr): 日本語 PR タイトルの文字化けを構造的に解消 (BEACON_GH_ARGS_JSON)
+- Merge pull request #354 from kurogin23mech-source/hotfix-mysql-threadlocal
+- fix(mysql): use sk as doc_id in list_documents so migrated docs are readable
+- fix(ms-96): mysql_client の DB 接続を thread-local 化し並行アクセス破損を解消
+- Merge pull request #353 from kurogin23mech-source/ms-102-vps-deploy-ci
+- ci(ms-102): pull-based VPS auto-deploy (VPS polls main, no GitHub secrets)
+- Merge pull request #352 from kurogin23mech-source/ms-101-dm-live-bus-websocket-push
+- fix(hooks): keep context_monitor Stop-hook output capsys-compatible (utf-8 via reconfigure)
+- fix(ms-101): address self-review findings — WS-drop heartbeat stall, delivery robustness, Redis self-heal (e-3008〜3013)
+- feat(ms-101): drop regular event-poll to backstop, decouple heartbeat (e-3013)
+- Merge pull request #350 from kurogin23mech-source/ms-93-fork-8645e7
+- feat(ms-101): make bridge push-receive explicit for cutover telemetry (e-3012)
+- feat(ms-101): push new DM over WS directly, cross-process via Redis pub/sub (e-3011)
+- feat(ms-101): switch directory live判定 to connection-registry union (e-3010)
+- feat(ms-101): wire WS connect/disconnect into liveness registry + keepalive (e-3009)
+- feat(ms-101): Redis WS connection registry + push pub/sub foundation (e-3008)
+- feat(ms-93): bcodex DM-wake watcher を堅牢化 — pull-only 先行起動 + retry + liveness 検証 (e-2534, e-2535)
+- Merge branch 'main' of github.com:kurogin23mech-source/beacon
+- fix(ms-93): raise app-server WebSocket max_size so grown Codex threads wake (e-2997)
+- feat(ms-93): bcodex --armed auto-grants reply budget (穴①, e-2992)
+- docs(release): update README/CHANGELOG for v0.55.0
+- chore(release): bump formula to 0.55.0
+- Merge branch 'main' of github.com:kurogin23mech-source/beacon
+- Merge branch 'main' of github.com:kurogin23mech-source/beacon
+- Merge branch 'main' of github.com:kurogin23mech-source/beacon
+- Merge branch 'main' of github.com:kurogin23mech-source/beacon
+- fix(hooks): Windows cp932 対策 — beacon PATH フォールバックと stdout/subprocess encoding=utf-8 を追加
+- fix: Windows cp932 でのコミットログ取得に encoding=utf-8 を指定
+
 ## [v0.55.0] - 2026-07-06
 
 - Merge pull request #347 from kurogin23mech-source/feat/ms-54-dm-primitive-split
