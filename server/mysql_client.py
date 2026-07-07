@@ -889,9 +889,15 @@ def _generate_doc_id() -> str:
 
 
 def list_documents(project_id: str) -> list[dict]:
-    items = _query("documents", project_id)
+    # _query_rows で (sk, data) を取る。sk が doc_id の真値。Firestore→MySQL 移行
+    # (ms-96) で入った古い doc は payload (data JSON) に doc_id フィールドを持たず、
+    # doc_id は sk 列にしか無い。以前は _query (SELECT data のみ、sk を返さない) を
+    # 使い data.get("doc_id","") で拾っていたため、移行済み doc 全ての doc_id が空に
+    # なり `beacon doc show` が効かなくなっていた (= 過去ドキュメントが読めない)。
+    # sk を doc_id の fallback にすることで全 doc が再び addressable になる。
+    rows = _query_rows("documents", project_id)
     result = []
-    for data in items:
+    for sk, data in rows:
         if data.get("deleted"):
             continue
         milestone = data.get("milestone") or _extract_frontmatter_field(
@@ -901,7 +907,7 @@ def list_documents(project_id: str) -> list[dict]:
             data.get("content", ""), "operation"
         )
         entry = {
-            "doc_id": data.get("doc_id", ""),
+            "doc_id": data.get("doc_id") or sk,
             "title": data.get("title", ""),
             "scope": data.get("scope", "memo"),
             "updated_at": data.get("updated_at", ""),
