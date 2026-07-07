@@ -295,7 +295,19 @@ log(`  bridge_claim_refresh=${BRIDGE_CLAIM_REFRESH_MS}ms`)
 //   - 切断時は指数 backoff で再接続。`ws` 依存が解決できない環境では WS を
 //     無効化し、従来ポーリングのみで動作する (= 機能低下せず degrade)。
 const WS_ENABLED = process.env.BEACON_BUS_WS !== '0'
-const WS_BACKSTOP_MS = parseInt(process.env.BEACON_BUS_WS_BACKSTOP_MS || '30000', 10)
+// ms-101 / e-3013 — WS 主経路化に伴い、WS 健全時の event-poll (/bus/unread) を
+// backstop まで大幅に落とす (30s → 120s)。DM の即時性は server 側 push (e-3011) が
+// 担い、backstop poll は「push が届かない送信経路 (fanout / reply 等)」の取りこぼし
+// 防止の安全網に徹する。WS 不通時は下の POLL_INTERVAL (5s) に自動 fallback。
+// 従来の 30s に戻すには BEACON_BUS_WS_BACKSTOP_MS=30000。
+const WS_BACKSTOP_MS = parseInt(process.env.BEACON_BUS_WS_BACKSTOP_MS || '120000', 10)
+// ms-101 / e-3013 — heartbeat (last_active / last_poll_at の更新) を event-poll の
+// 周期から切り離す専用タイマー間隔。event-poll を backstop まで延ばすと、poll ループ
+// に相乗りしていた heartbeat も遅くなり last_active が古くなって directory の
+// live_only (= 直近 N 分の活動で絞る) 判定が壊れる。そこで WS 健全時はこの短い間隔で
+// heartbeat だけ独立して打ち、liveness 指標の鮮度を保つ。
+const HEARTBEAT_INTERVAL_MS = parseInt(
+  process.env.BEACON_BUS_HEARTBEAT_MS || '15000', 10)
 let wsHealthy = false
 // ms-101 / e-3012 — push 駆動で受け取った bus_event (= DM の wake hint) の累計。
 // server 側 push (e-3011) が届いているかを bridge ログから確認でき、e-3013 の
@@ -1386,6 +1398,35 @@ if (!PROJECT_ID || !SESSION_ID) {
     clearBridgeClaim()
   }
   setTimeout(loop, 500)
+
+  // ms-101 / e-3013 — event-poll から分離した heartbeat 専用タイマー。
+  // WS 健全時は event-poll (pollOnce) を backstop (120s) まで落とすため、poll
+  // ループ相乗りの heartbeat だけでは last_active / last_poll_at が古くなる。
+  // ここで短い間隔 (HEARTBEAT_INTERVAL_MS = 15s) で writePollHeartbeat を独立して
+  // 打ち、directory の live_only / poll_health の鮮度を保つ。
+  //
+  // WS 不通時 (= wsHealthy false) はこのタイマーは発火しない: その場合ループ自身が
+  // POLL_INTERVAL (5s) で pollOnce + writePollHeartbeat を回すので heartbeat は
+  // ループ側で十分に新鮮で、二重書き込みを避ける。overlap 防止に _hbBusy で guard。
+  let _hbBusy = false
+  const heartbeatTimer = setInterval(async () => {
+    if (stopping || _hbBusy || !wsHealthy) return
+    _hbBusy = true
+    try {
+      await withWatchdog(writePollHeartbeat(), 'heartbeatTimer', ITERATION_WATCHDOG_MS)
+    } catch (e) {
+      log(`heartbeat timer non-fatal: ${e.message}`)
+    } finally {
+      _hbBusy = false
+    }
+  }, HEARTBEAT_INTERVAL_MS)
+  // プロセス終了を妨げないよう unref。SIGINT/SIGTERM で stopping=true になれば
+  // 上のガードで発火が止まり、下で clearInterval する。
+  if (heartbeatTimer.unref) heartbeatTimer.unref()
+  const _clearHeartbeatTimer = () => clearInterval(heartbeatTimer)
+  process.on('SIGINT', _clearHeartbeatTimer)
+  process.on('SIGTERM', _clearHeartbeatTimer)
+
   // ms-96 / e-2380: start the WS push accelerator alongside the poll loop.
   // Fire-and-forget: any failure disables WS and leaves polling intact.
   connectBusWs().catch((e) => log(`bus WS init failed (non-fatal): ${e.message}`))
