@@ -6864,6 +6864,8 @@ def list_sessions(
     user_id: str = "",
     machine: str = "",
     agent: str = "",
+    cwd: str = "",
+    agent_kind: str = "",
     live_only: bool = False,
     since_minutes: int = 5,
     healthy_only: bool = False,
@@ -6883,6 +6885,15 @@ def list_sessions(
                             email field per session.py's mint convention).
       * ``machine``       — match ``actor.machine`` exactly.
       * ``agent``         — match ``actor.agent`` exactly.
+      * ``cwd``           — match the session's ``cwd`` exactly (e-2520 stable
+                            recipient identity: part of the coarse key that
+                            survives sid re-mint).
+      * ``agent_kind``    — match ``agent.kind`` exactly (claude-code / codex).
+                            This is the structural agent type, distinct from
+                            ``actor.agent`` (a machine label). Together with
+                            ``cwd`` + ``machine`` this forms the sid-independent
+                            identity a sender can resolve to the current live
+                            session.
       * ``live_only``     — drop sessions whose ``last_active`` is older than
                             ``since_minutes`` ago. Heartbeat-based liveness, so
                             a session that crashed without session-end is
@@ -6933,7 +6944,7 @@ def list_sessions(
         s["poll_health"] = _compute_poll_health(s, now_dt)
         s["bridge"] = bool(s.get("last_poll_at"))
 
-    if not (user_id or machine or agent or live_only or healthy_only):
+    if not (user_id or machine or agent or cwd or agent_kind or live_only or healthy_only):
         return sessions
 
     def _matches(s: dict) -> bool:
@@ -6943,6 +6954,17 @@ def list_sessions(
         if machine and actor.get("machine", "") != machine:
             return False
         if agent and actor.get("agent", "") != agent:
+            return False
+        # e-2520: stable-recipient-identity resolve. cwd + agent_kind are the
+        # coarse identity key that survives sid re-mint (bridge restart /
+        # daemon churn), so a sender can target "the codex in /path on this
+        # machine" instead of a raw ephemeral sid. agent_kind matches the
+        # structural agent.kind (claude-code / codex), NOT actor.agent (which
+        # is just the machine label). Combined with healthy_only + client-side
+        # sort by last_poll_at, this yields the current live sid for a tuple.
+        if cwd and (s.get("cwd") or "") != cwd:
+            return False
+        if agent_kind and ((s.get("agent") or {}).get("kind") or "") != agent_kind:
             return False
         return True
 

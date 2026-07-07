@@ -115,7 +115,8 @@ def _seed_project(pid: str, name: str, *, owner: str = "dev",
 def _seed_session(pid: str, sid: str, *, last_active: str,
                   machine: str = "", agent: str = "",
                   email: str = "", last_poll_at: str = "",
-                  poll_interval_ms: int = 2000, shutdown: bool = False) -> None:
+                  poll_interval_ms: int = 2000, shutdown: bool = False,
+                  cwd: str = "", agent_kind: str = "") -> None:
     sess = {
         "session_id": sid,
         "actor": {"email": email, "machine": machine, "agent": agent},
@@ -125,6 +126,11 @@ def _seed_session(pid: str, sid: str, *, last_active: str,
     }
     if last_poll_at:
         sess["last_poll_at"] = last_poll_at
+    # e-2520 stable identity fields: cwd + the structural agent.kind.
+    if cwd:
+        sess["cwd"] = cwd
+    if agent_kind:
+        sess["agent"] = {"kind": agent_kind}
     _sessions_store.setdefault(pid, []).append(sess)
 
 
@@ -262,3 +268,59 @@ def test_poll_health_is_attached_to_every_row():
     row = client.get("/api/me/sessions").json()[0]
     assert "poll_health" in row
     assert "bridge" in row
+
+
+# ---------------------------------------------------------------------------
+# e-2520 stable recipient identity resolve (cwd + agent_kind coarse key)
+# ---------------------------------------------------------------------------
+
+def test_cwd_and_agent_kind_filter_resolve_stable_identity():
+    """(machine, cwd, agent_kind) is the sid-independent identity key.
+
+    A sender targets "the codex in /work/beacon on mac1" and gets the live
+    session(s) for that tuple regardless of the ephemeral sid, so a bridge
+    restart / daemon re-mint no longer strands the sender on a dead sid.
+    """
+    _seed_project("p-id", "IdProj", owner=DEV_UID)
+    _seed_session("p-id", "codex-A1", machine="mac1", cwd="/work/beacon",
+                  agent_kind="codex", last_active="2026-07-07T00:00:01.000000Z")
+    _seed_session("p-id", "codex-A2-remint", machine="mac1", cwd="/work/beacon",
+                  agent_kind="codex", last_active="2026-07-07T00:00:09.000000Z")
+    _seed_session("p-id", "claude-B", machine="mac1", cwd="/work/beacon",
+                  agent_kind="claude-code", last_active="2026-07-07T00:00:05.000000Z")
+    _seed_session("p-id", "codex-C-other-cwd", machine="mac1", cwd="/other",
+                  agent_kind="codex", last_active="2026-07-07T00:00:03.000000Z")
+
+    rows = client.get(
+        "/api/projects/p-id/sessions?cwd=/work/beacon&agent_kind=codex"
+    ).json()
+    sids = {r["session_id"] for r in rows}
+    # only the two codex sessions in /work/beacon — not the claude in the same
+    # cwd (different agent_kind), not the codex in a different cwd.
+    assert sids == {"codex-A1", "codex-A2-remint"}
+
+
+def test_cwd_filter_alone_spans_agent_kinds_in_that_dir():
+    _seed_project("p-id", "IdProj", owner=DEV_UID)
+    _seed_session("p-id", "codex-A1", machine="mac1", cwd="/work/beacon",
+                  agent_kind="codex", last_active="2026-07-07T00:00:01.000000Z")
+    _seed_session("p-id", "claude-B", machine="mac1", cwd="/work/beacon",
+                  agent_kind="claude-code", last_active="2026-07-07T00:00:05.000000Z")
+    _seed_session("p-id", "codex-C-other", machine="mac1", cwd="/other",
+                  agent_kind="codex", last_active="2026-07-07T00:00:03.000000Z")
+
+    rows = client.get("/api/projects/p-id/sessions?cwd=/work/beacon").json()
+    assert {r["session_id"] for r in rows} == {"codex-A1", "claude-B"}
+
+
+def test_no_identity_filters_still_returns_everything():
+    """Backward compat: the coarse-key params are opt-in; the no-arg call is
+    unchanged (ms-57 rescue / Web UI 'who is active')."""
+    _seed_project("p-id", "IdProj", owner=DEV_UID)
+    _seed_session("p-id", "codex-A1", machine="mac1", cwd="/work/beacon",
+                  agent_kind="codex", last_active="2026-07-07T00:00:01.000000Z")
+    _seed_session("p-id", "codex-C", machine="mac1", cwd="/other",
+                  agent_kind="codex", last_active="2026-07-07T00:00:03.000000Z")
+
+    rows = client.get("/api/projects/p-id/sessions").json()
+    assert {r["session_id"] for r in rows} == {"codex-A1", "codex-C"}
